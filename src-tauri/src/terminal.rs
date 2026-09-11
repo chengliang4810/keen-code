@@ -45,6 +45,13 @@ struct TerminalSession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
 }
 
+/// kill 后收割子进程，避免 Unix 留僵尸进程 / Windows 漏句柄。
+/// wait 可能短暂阻塞，调用方不得在持有 sessions 锁时执行。
+fn reap_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 #[derive(Default)]
 pub struct TerminalManager {
     sessions: Mutex<HashMap<String, TerminalSession>>,
@@ -192,6 +199,8 @@ pub fn terminal_create(
     if !cwd_path.is_dir() {
         return Err("终端工作目录不存在或不是目录".to_owned());
     }
+    // 先做一次轻量预检，真正的存在性判定在插入时原子完成，
+    // 避免并发创建时后者静默覆盖前者并泄漏 PTY 子进程。
     if manager.sessions.lock().contains_key(&id) {
         return Err("终端已经存在".to_owned());
     }
@@ -221,14 +230,21 @@ pub fn terminal_create(
         .try_clone_reader()
         .map_err(|error| format!("打开终端输出失败：{error}"))?;
 
-    manager.sessions.lock().insert(
-        id.clone(),
-        TerminalSession {
+    // entry API 原子判定存在性：并发创建同一 id 时后来者报错，
+    // 其已启动的 PTY 子进程必须就地收割，不能随局部变量泄漏。
+    if let std::collections::hash_map::Entry::Vacant(entry) =
+        manager.sessions.lock().entry(id.clone())
+    {
+        entry.insert(TerminalSession {
             writer,
             master: pair.master,
             child,
-        },
-    );
+        });
+    } else {
+        let mut child = child;
+        reap_child(&mut child);
+        return Err("终端已经存在".to_owned());
+    }
 
     let output_id = id.clone();
     let output_app = app.clone();
@@ -285,20 +301,27 @@ pub fn terminal_create(
 }
 
 #[tauri::command]
-pub fn terminal_write(
+pub async fn terminal_write(
     id: String,
     data: Vec<u8>,
     manager: State<'_, Arc<TerminalManager>>,
 ) -> Result<(), String> {
-    let mut sessions = manager.sessions.lock();
-    let session = sessions
-        .get_mut(&id)
-        .ok_or_else(|| "终端不存在或已经退出".to_owned())?;
-    session
-        .writer
-        .write_all(&data)
-        .and_then(|_| session.writer.flush())
-        .map_err(|error| format!("写入终端失败：{error}"))
+    // PTY 输入是独占写入器，无法克隆：把阻塞写搬到 blocking 线程池，
+    // 输入缓冲满（子进程停读）时只拖慢本次写入，不冻结 UI 与其他终端。
+    let manager = manager.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut sessions = manager.sessions.lock();
+        let session = sessions
+            .get_mut(&id)
+            .ok_or_else(|| "终端不存在或已经退出".to_owned())?;
+        session
+            .writer
+            .write_all(&data)
+            .and_then(|_| session.writer.flush())
+            .map_err(|error| format!("写入终端失败：{error}"))
+    })
+    .await
+    .map_err(|error| format!("终端写入后台任务失败：{error}"))?
 }
 
 #[tauri::command]
@@ -325,11 +348,10 @@ pub fn terminal_resize(
 
 #[tauri::command]
 pub fn terminal_close(id: String, manager: State<'_, Arc<TerminalManager>>) -> Result<(), String> {
+    // 先移出注册表再收割：wait 可能短暂阻塞，不能在持锁时执行；
+    // 收割失败只记录不报错，关闭语义以"会话已移除"为准。
     if let Some(mut session) = manager.sessions.lock().remove(&id) {
-        session
-            .child
-            .kill()
-            .map_err(|error| format!("关闭终端失败：{error}"))?;
+        reap_child(&mut session.child);
     }
     Ok(())
 }
@@ -337,7 +359,7 @@ pub fn terminal_close(id: String, manager: State<'_, Arc<TerminalManager>>) -> R
 impl Drop for TerminalManager {
     fn drop(&mut self) {
         for (_, mut session) in self.sessions.get_mut().drain() {
-            let _ = session.child.kill();
+            reap_child(&mut session.child);
         }
     }
 }
