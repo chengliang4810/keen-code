@@ -1233,6 +1233,7 @@ impl AgentRunner {
             compactions: Vec::new(),
             forced_context_retry_used: false,
             empty_response_retry_used: false,
+            disable_configured_max_output: false,
             next_model_call_attempt: 1,
             hook_context_bytes: 0,
             stop_hook_rounds: 0,
@@ -1420,9 +1421,15 @@ impl AgentRunner {
             model_request.messages = active.messages.clone();
             // 请求级输出覆盖始终最高优先；此处只为未指定的主请求补齐
             // 设置值或窗口派生的默认输出上限，压缩预算据此跟随实际发送值。
-            model_request.max_output_tokens = model_request
-                .max_output_tokens
-                .or_else(|| main_turn_max_output_tokens(&provider_capabilities));
+            // 配置上限已被厂商判定超限的 Turn 内记忆降级：本 Turn 后续所有
+            // 轮次强制不携带输出上限，否则每轮都要先吃一次同一 400。
+            model_request.max_output_tokens = if active.disable_configured_max_output {
+                None
+            } else {
+                model_request
+                    .max_output_tokens
+                    .or_else(|| main_turn_max_output_tokens(&provider_capabilities))
+            };
             model_request.tools = if summary_only {
                 Vec::new()
             } else {
@@ -1489,67 +1496,93 @@ impl AgentRunner {
                 }
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             }
-            let model_call_attempt = active.next_model_call_attempt()?;
-            let mut completed_round = match self
-                .request_model(
-                    request,
-                    model_request.clone(),
-                    model_call_attempt,
-                    &mut active.state,
-                )
-                .await
-            {
-                Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. }))
-                    if !active.forced_context_retry_used =>
+            // 三个一次性恢复预算互不挤占：上下文超限强制压缩、空响应重试与
+            // 输出上限降级各按自身触发条件独立生效。循环重新进入 match 的顺序
+            // 保证强制压缩臂继续优先于输出上限降级处理后续错误。
+            let mut completed_round = loop {
+                let model_call_attempt = active.next_model_call_attempt()?;
+                match self
+                    .request_model(
+                        request,
+                        model_request.clone(),
+                        model_call_attempt,
+                        &mut active.state,
+                    )
+                    .await
                 {
-                    active.forced_context_retry_used = true;
-                    active.state.transition_to(TurnPhase::Compacting)?;
-                    let target_tokens = self
-                        .context
-                        .forced_target(&model_request, &provider_capabilities);
-                    let outcome = self
-                        .compact_context(
-                            request,
-                            &model_request,
-                            &provider_capabilities,
-                            active.state.round_count(),
-                            ContextCompressionTrigger::ProviderOverflow,
-                            target_tokens,
-                        )
-                        .await
-                        .map_err(|error| {
-                            prefer_limit_summary_error(active.limit_summary.as_ref(), error)
-                        })?;
-                    active.messages = outcome.messages;
-                    model_request.messages = active.messages.clone();
-                    active.compactions.push(outcome.record);
-                    active.state.transition_to(TurnPhase::RequestingModel)?;
-                    let retry_call_attempt = active.next_model_call_attempt()?;
-                    match self
-                        .request_model(
-                            request,
-                            model_request.clone(),
-                            retry_call_attempt,
-                            &mut active.state,
-                        )
-                        .await
+                    Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. }))
+                        if !active.forced_context_retry_used =>
                     {
-                        Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
-                            active.state.transition_to(TurnPhase::Compacting)?;
-                            Err(AgentRunError::Context(ContextError::StillExceeded {
-                                estimated_tokens: self.context.estimate_request(&model_request),
-                            }))
+                        active.forced_context_retry_used = true;
+                        active.state.transition_to(TurnPhase::Compacting)?;
+                        let target_tokens = self
+                            .context
+                            .forced_target(&model_request, &provider_capabilities);
+                        let outcome = self
+                            .compact_context(
+                                request,
+                                &model_request,
+                                &provider_capabilities,
+                                active.state.round_count(),
+                                ContextCompressionTrigger::ProviderOverflow,
+                                target_tokens,
+                            )
+                            .await
+                            .map_err(|error| {
+                                prefer_limit_summary_error(active.limit_summary.as_ref(), error)
+                            })?;
+                        active.messages = outcome.messages;
+                        model_request.messages = active.messages.clone();
+                        active.compactions.push(outcome.record);
+                        active.state.transition_to(TurnPhase::RequestingModel)?;
+                        let retry_call_attempt = active.next_model_call_attempt()?;
+                        match self
+                            .request_model(
+                                request,
+                                model_request.clone(),
+                                retry_call_attempt,
+                                &mut active.state,
+                            )
+                            .await
+                        {
+                            Err(AgentRunError::Model(ModelError::ContextLengthExceeded {
+                                ..
+                            })) => {
+                                active.state.transition_to(TurnPhase::Compacting)?;
+                                break Err(AgentRunError::Context(ContextError::StillExceeded {
+                                    estimated_tokens: self.context.estimate_request(&model_request),
+                                }));
+                            }
+                            result => break result,
                         }
-                        result => result,
                     }
+                    Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
+                        active.state.transition_to(TurnPhase::Compacting)?;
+                        break Err(AgentRunError::Context(ContextError::StillExceeded {
+                            estimated_tokens: self.context.estimate_request(&model_request),
+                        }));
+                    }
+                    Err(AgentRunError::Model(ModelError::InvalidRequest { message }))
+                        if !active.disable_configured_max_output
+                            && model_request.max_output_tokens.is_some()
+                            && message.to_ascii_lowercase().contains("max_tokens") =>
+                    {
+                        // 厂商真实输出上限小于设置值时，携带超大 max_tokens 的请求
+                        // 会被 400 拒绝并归一为不可重试的 InvalidRequest，Turn 原本
+                        // 每轮复现同一失败且唯一出路是用户改设置。这里对厂商报错
+                        // 文案做启发式匹配（大小写不敏感，CCB 同款做法）：文案不含
+                        // "max_tokens" 时退化为既有终态行为。请求本就不携带输出
+                        // 上限时不匹配本臂，防止无限降级；本 Turn 只降级一次。
+                        active.disable_configured_max_output = true;
+                        model_request.max_output_tokens = None;
+                        // 与空响应重试一致：先经 Compacting 回到 RequestingModel，
+                        // 取消恰好落在降级窗口时由重试 request_model 起点的取消
+                        // 竞态判为 Cancelled（取消优先是全局语义）。
+                        active.state.transition_to(TurnPhase::Compacting)?;
+                        active.state.transition_to(TurnPhase::RequestingModel)?;
+                    }
+                    result => break result,
                 }
-                Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
-                    active.state.transition_to(TurnPhase::Compacting)?;
-                    Err(AgentRunError::Context(ContextError::StillExceeded {
-                        estimated_tokens: self.context.estimate_request(&model_request),
-                    }))
-                }
-                result => result,
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
             let (mut response, tool_calls) = loop {
@@ -3264,6 +3297,11 @@ struct ActiveTurn {
     forced_context_retry_used: bool,
     /// 空响应的一次有界重试机会是否已在当前 Turn 消耗。
     empty_response_retry_used: bool,
+    /// 配置输出上限被厂商 400 判定超限后，本 Turn 是否已降级为不携带输出上限。
+    ///
+    /// 每个 Turn 只降级一次；置位后本轮及后续轮次的请求一律强制
+    /// `max_output_tokens: None`，避免每轮重新命中同一 400 InvalidRequest。
+    disable_configured_max_output: bool,
     /// 当前 Turn 下一次 Provider 模型调用使用的单调尝试序号。
     next_model_call_attempt: u32,
     /// 当前 Turn 已实际注入模型消息的 Hook 上下文字节数。

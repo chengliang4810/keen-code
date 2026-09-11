@@ -5,7 +5,7 @@ use keencode_model::{
     ContentBlock, Message, MessageRole, ModelError, ModelStreamEvent, ProviderCapabilities,
     ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputCapability,
     StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage,
-    ToolChoice, ToolDefinition,
+    ToolCall, ToolChoice, ToolDefinition, ToolResult,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1515,6 +1515,302 @@ async fn empty_response_retry_resends_byte_identical_request() {
     let first = serde_json::to_vec(&requests[0]).expect("首次请求应可序列化");
     let retry = serde_json::to_vec(&requests[1]).expect("重试请求应可序列化");
     assert_eq!(first, retry);
+}
+
+/// 创建模型流直接返回 400 InvalidRequest 错误的脚本响应，等价于
+/// Provider 层把 "max_tokens must be between 1 and N" 类 400 归一后的形态。
+fn invalid_request_error_reply(message: &str) -> ScriptedReply {
+    ScriptedReply::new(vec![Err(ModelError::InvalidRequest {
+        message: message.to_owned(),
+    })])
+}
+
+/// 创建模型流直接返回上下文超限错误的脚本响应。
+fn context_overflow_error_reply() -> ScriptedReply {
+    ScriptedReply::new(vec![Err(ModelError::ContextLengthExceeded {
+        message: "重试请求上下文超限".to_owned(),
+    })])
+}
+
+/// 创建可被强制压缩的带工具交换历史。
+fn compactable_tool_history() -> Vec<Message> {
+    vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::text(MessageRole::Developer, "developer 必须原样保留"),
+        Message::text(MessageRole::User, "旧问题".repeat(200)),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::text("准备读取文件"),
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall::new("call-1", "read", json!({ "path": "a.rs" })),
+                },
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text("call-1", "文件内容".repeat(200), false),
+            }],
+        ),
+        Message::text(MessageRole::User, "近期问题"),
+        Message::text(MessageRole::Assistant, "近期回答"),
+    ]
+}
+
+/// 创建携带自定义历史的最小用户 Turn 请求。
+fn turn_request_with_messages(messages: Vec<Message>) -> TurnRequest {
+    TurnRequest::new(
+        session_id("session-runner"),
+        turn_id("turn-runner"),
+        agent_id("agent-runner"),
+        "test-model",
+        messages,
+        PlanGuard::inactive(),
+    )
+}
+
+/// 配置输出上限被厂商 400 判定超限后，Turn 以不携带输出上限的降级请求重试
+/// 一次并完成；匹配大小写不敏感，降级请求不再携带任何输出上限。
+#[tokio::test]
+async fn max_tokens_invalid_request_degrades_to_none_and_completes_turn() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            // 大写形态同时钉住启发式匹配的大小写不敏感语义。
+            invalid_request_error_reply("MAX_TOKENS must be between 1 and 8192"),
+            text_reply("恢复成功"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert_eq!(requests[1].max_output_tokens, None);
+    assert_eq!(result.state.round_count(), 1);
+}
+
+/// Turn 内记忆降级：置位后第二轮请求直接不携带输出上限，不再先吃一次 400。
+#[tokio::test]
+async fn max_tokens_degradation_wires_none_for_subsequent_rounds() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            tool_reply(&[("call-round-1", "record", json!({ "value": "work" }))]),
+            text_reply("完成"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let result = runner(provider.clone(), registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert_eq!(requests[1].max_output_tokens, None);
+    assert_eq!(requests[2].max_output_tokens, None);
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.state.step_count(), 1);
+    assert_eq!(tool.call_count(), 1);
+}
+
+/// 400 消息不含 "max_tokens" 时不触发降级：保持既有 InvalidRequest 终态、无重试。
+#[tokio::test]
+async fn invalid_request_without_max_tokens_message_keeps_terminal_semantics() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            invalid_request_error_reply("请求包含不允许的参数"),
+            text_reply("不应被消费"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::InvalidRequest { .. }))
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(provider.remaining_replies(), Ok(1));
+}
+
+/// 请求本就不携带输出上限时，含 "max_tokens" 的 400 也不匹配降级臂：
+/// 保持既有终态并防止无限降级。
+#[tokio::test]
+async fn max_tokens_invalid_request_without_wired_limit_keeps_terminal_semantics() {
+    // 能力快照无设置值、无窗口：接线结果本身就是 None。
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            text_reply("不应被消费"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::InvalidRequest { .. }))
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_output_tokens, None);
+    assert_eq!(provider.remaining_replies(), Ok(1));
+}
+
+/// 降级重试再遇上下文超限时按臂顺序进入既有强制压缩臂：
+/// 先降级一次、再压缩一次，恢复请求仍不携带输出上限。
+#[tokio::test]
+async fn degraded_retry_context_overflow_walks_forced_compaction_arm() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            context_overflow_error_reply(),
+            text_reply("强制摘要"),
+            text_reply("恢复成功"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request_with_messages(compactable_tool_history()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert_eq!(requests[1].max_output_tokens, None);
+    // 第三个请求是强制压缩摘要请求：无工具且 tool_choice 为 None。
+    assert!(requests[2].tools.is_empty());
+    assert_eq!(requests[2].tool_choice, ToolChoice::None);
+    // 恢复请求仍保持降级状态，不重新携带输出上限。
+    assert_eq!(requests[3].max_output_tokens, None);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].trigger,
+        ContextCompressionTrigger::ProviderOverflow
+    );
+}
+
+/// 降级重试被取消时按取消优先语义以 Cancelled 终态结束，且重试请求已真实发起。
+#[tokio::test]
+async fn degraded_retry_cancelled_inside_retry_request_model() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            text_reply("取消后不应被归约成完整响应"),
+        ],
+    ));
+    let cancellation = TurnCancellation::new();
+    // 首次 400 是纯错误流（0 个模型事件）；降级重试的第一个 MessageStart 触发取消。
+    let cancel_sink = Arc::new(CancelOnNthModelEventSink {
+        cancellation: cancellation.clone(),
+        remaining_before_cancel: AtomicUsize::new(1),
+    });
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation);
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_event_sink(cancel_sink)
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    // 降级重试已经真实发起：取消是在重试 request_model 内部被观察的。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    // 两次失败调用都没有明确 Usage 事实，不伪造已消耗用量。
+    assert!(usage_sink.usages().is_empty());
+}
+
+/// 每个 Turn 只降级一次：第二轮在已置位后再次出现含 "max_tokens" 的 400
+/// 直接按既有终态结束，不允许第二次降级重试。
+#[tokio::test]
+async fn max_tokens_invalid_request_degrades_only_once_per_turn() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            tool_reply(&[("call-round-1", "record", json!({ "value": "work" }))]),
+            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            text_reply("不应被消费"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let result = runner(provider.clone(), registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::InvalidRequest { .. }))
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(requests[0].max_output_tokens, Some(8_192));
+    assert_eq!(requests[1].max_output_tokens, None);
+    assert_eq!(requests[2].max_output_tokens, None);
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.state.step_count(), 1);
+    assert_eq!(provider.remaining_replies(), Ok(1));
 }
 
 /// Provider 原生结构化输出必须在提交 Transcript 前完成 JSON Schema 校验。
