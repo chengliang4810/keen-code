@@ -531,17 +531,61 @@ fn precompression_threshold_and_output_reserve_are_exact() {
     );
 }
 
-/// 硬预算不能忽略默认输出预留、窗口未知或减法下溢，也不能把软阈值当作上限。
+/// 有效输出预留取策略默认与实际输出上限的较大者，并按窗口一半钳制输入预算。
+#[test]
+fn effective_output_reserve_follows_actual_output_and_clamps_to_half_window() {
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 142_800,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let mut request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+
+    // 未指定输出时保持策略默认预留 4_096：输入预算 195_904，触发阈值 166_518 未达到。
+    let large_window = ProviderCapabilities {
+        max_context_tokens: Some(200_000),
+        ..ProviderCapabilities::default()
+    };
+    assert_eq!(manager.precompression_target(&request, &large_window), None);
+
+    // 派生默认 32_000 抬高有效预留：输入预算缩到 168_000，阈值 142_800 恰好触发。
+    request.max_output_tokens = Some(32_000);
+    assert_eq!(
+        manager.precompression_target(&request, &large_window),
+        Some(100_800)
+    );
+
+    // 设置值超过窗口一半时钳到窗口一半：输入预算 4_000 仍为正，压缩相应更早介入。
+    request.max_output_tokens = Some(96_000);
+    assert_eq!(
+        manager.precompression_target(
+            &request,
+            &ProviderCapabilities {
+                max_context_tokens: Some(8_000),
+                ..ProviderCapabilities::default()
+            }
+        ),
+        Some(2_400)
+    );
+}
+
+/// 硬预算跟随有效输出预留：策略默认与实际输出上限取大并钳到窗口一半，窗口未知时不伪造可行。
 #[test]
 fn precompression_fallback_requires_complete_request_to_fit_known_window() {
     for (input, output, window, fits) in [
-        (5_333, Some(2_048), Some(8_192), true),
-        (5_333, Some(2_048), Some(7_381), true),
-        (5_333, Some(2_048), Some(7_380), false),
+        (4_096, Some(2_048), Some(8_192), true),
+        (4_097, Some(2_048), Some(8_192), false),
+        (4_096, Some(2_048), Some(8_191), true),
+        (4_097, Some(2_048), Some(8_191), false),
+        (4_096, None, Some(8_192), true),
         (5_333, None, Some(8_192), false),
-        (1, None, Some(4_097), true),
-        (0, Some(2_049), Some(2_048), false),
         (1, Some(2_048), None, false),
+        (4_096, Some(96_000), Some(8_192), true),
+        (4_097, Some(96_000), Some(8_192), false),
     ] {
         let manager = ContextManager::new(
             ContextPolicy::default(),
@@ -1177,6 +1221,41 @@ async fn runner_precompresses_before_model_round() {
     )));
 }
 
+/// 派生输出默认随主请求发送，摘要请求仍然使用策略的独立输出覆盖。
+#[tokio::test]
+async fn runner_derived_max_output_keeps_summary_request_override_intact() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(200_000),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("最终回答")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("已压缩历史"));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认上下文策略应有效");
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context);
+    let result = runner
+        .run_turn(turn_request(many_old_messages(700, 800)))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 1);
+    // 主请求携带窗口派生并封顶后的 32_000 输出上限。
+    assert_eq!(requests[0].max_output_tokens, Some(32_000));
+    // 摘要请求仍使用策略级 1_024 输出覆盖，不被派生默认替换。
+    let summary_requests = compressor.requests();
+    assert_eq!(summary_requests.len(), 1);
+    assert_eq!(summary_requests[0].max_output_tokens, 1_024);
+}
+
 /// 空摘要不应阻断仍能装下的原请求；保留历史、失败事件和摘要用量。
 #[tokio::test]
 async fn runner_precompression_failure_keeps_original_transcript() {
@@ -1243,8 +1322,12 @@ async fn runner_uncompressible_precompression_obeys_hard_budget() {
             [text_reply("正常回答")],
         ));
         let compressor = Arc::new(RecordingCompressor::new("不应调用"));
+        // 策略默认预留调小，让请求显式的 2_048 输出预留决定硬预算边界。
         let context = ContextManager::new(
-            ContextPolicy::default(),
+            ContextPolicy {
+                reserved_output_tokens: 16,
+                ..ContextPolicy::default()
+            },
             Arc::new(FixedEstimator {
                 request_tokens: 5_333,
                 message_tokens: 1,
@@ -1425,8 +1508,12 @@ async fn runner_soft_precompression_fallback_does_not_hide_real_overflow() {
         [context_overflow_reply(), text_reply("不能反复重试")],
     ));
     let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    // 策略默认预留调小，让请求显式的 2_048 输出预留决定硬预算边界。
     let context = ContextManager::new(
-        ContextPolicy::default(),
+        ContextPolicy {
+            reserved_output_tokens: 16,
+            ..ContextPolicy::default()
+        },
         Arc::new(FixedEstimator {
             request_tokens: 5_333,
             message_tokens: 1,

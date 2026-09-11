@@ -582,16 +582,13 @@ impl ContextManager {
         self.estimator.estimate_request(request)
     }
 
-    /// 只有已知窗口能容纳完整请求及输出预留时，才允许提前压缩失败后继续。
+    /// 只有已知窗口能容纳完整请求及有效输出预留时，才允许提前压缩失败后继续。
     pub(crate) fn request_fits_context_window(
         &self,
         request: &ModelRequest,
         capabilities: &ProviderCapabilities,
     ) -> bool {
-        let output = request
-            .max_output_tokens
-            .map(u64::from)
-            .unwrap_or(self.policy.reserved_output_tokens);
+        let output = self.effective_reserved_output(request, capabilities);
         capabilities
             .max_context_tokens
             .and_then(|window| window.checked_sub(output))
@@ -686,12 +683,8 @@ impl ContextManager {
             let minimum_tokens = self.estimate_request(&minimum_request);
             if minimum_tokens > max_input_tokens {
                 return Err(ContextError::CompressionRequestTooLarge {
-                    estimated_tokens: minimum_tokens.saturating_add(
-                        request
-                            .max_output_tokens
-                            .map(u64::from)
-                            .unwrap_or(self.policy.reserved_output_tokens),
-                    ),
+                    estimated_tokens: minimum_tokens
+                        .saturating_add(self.effective_reserved_output(request, capabilities)),
                     max_context_tokens: capabilities.max_context_tokens.unwrap_or(u64::MAX),
                 });
             }
@@ -732,12 +725,8 @@ impl ContextManager {
         {
             return Err(attach_summary_usage(
                 ContextError::CompressionRequestTooLarge {
-                    estimated_tokens: after.saturating_add(
-                        request
-                            .max_output_tokens
-                            .map(u64::from)
-                            .unwrap_or(self.policy.reserved_output_tokens),
-                    ),
+                    estimated_tokens: after
+                        .saturating_add(self.effective_reserved_output(request, capabilities)),
                     max_context_tokens: capabilities.max_context_tokens.unwrap_or(u64::MAX),
                 },
                 usage.usage,
@@ -961,32 +950,45 @@ impl ContextManager {
         Ok(summaries)
     }
 
-    /// 返回显式或有效默认输出保留量对应的主模型输入预算；不可能的旧模板不伪造可用预算。
+    /// 返回主请求的有效输出预留：取策略默认预留与实际将发送输出上限的较大者。
+    ///
+    /// 策略默认预留是下限；请求显式或由能力派生的输出上限更大时以实际值预留，
+    /// 保证压缩预算跟随实际发送值。已知窗口时预留钳制到窗口一半，
+    /// 使总输入预算恒为正；超钳后以窗口一半为预留，压缩相应更早介入。
+    /// 窗口未知时不钳制，保持策略默认或请求显式值。
+    fn effective_reserved_output(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> u64 {
+        let requested = request.max_output_tokens.map_or(0, u64::from);
+        let reserved = requested.max(self.policy.reserved_output_tokens);
+        match capabilities.max_context_tokens {
+            Some(window) => reserved.min(window / 2),
+            None => reserved,
+        }
+    }
+
+    /// 返回扣除有效输出预留后的主模型输入预算；不可能的旧模板不伪造可用预算。
     fn strict_main_input_budget(
         &self,
         request: &ModelRequest,
         capabilities: &ProviderCapabilities,
     ) -> Option<u64> {
         let context = capabilities.max_context_tokens?;
-        let output = request
-            .max_output_tokens
-            .map(u64::from)
-            .unwrap_or(self.policy.reserved_output_tokens);
-        Some(context.saturating_sub(output))
+        let reserved = self.effective_reserved_output(request, capabilities);
+        Some(context.saturating_sub(reserved))
     }
 
-    /// 从模型窗口减去显式或默认输出保留量，得到输入侧预算。
+    /// 从模型窗口扣除有效输出预留，得到输入侧预算。
     fn input_budget(
         &self,
         request: &ModelRequest,
         capabilities: &ProviderCapabilities,
     ) -> Option<u64> {
         let context = capabilities.max_context_tokens?;
-        let requested_output = request
-            .max_output_tokens
-            .map(u64::from)
-            .unwrap_or(self.policy.reserved_output_tokens);
-        Some(context.saturating_sub(requested_output).max(1))
+        let reserved = self.effective_reserved_output(request, capabilities);
+        Some(context.saturating_sub(reserved).max(1))
     }
 
     /// 选择受保护边界之间最早能达到目标的区间，否则选择预计减量最大的安全区间。

@@ -310,6 +310,23 @@ impl TurnRequest {
     }
 }
 
+/// 主 Turn 请求按上下文窗口派生输出上限时的封顶 Token 数。
+const DERIVED_MAX_OUTPUT_TOKENS_CAP: u64 = 32_000;
+
+/// 为调用方未显式指定输出上限的主 Turn 请求派生最大输出 Token。
+///
+/// 优先使用 Provider 能力快照中的设置值；没有设置值但已知上下文窗口时，
+/// 按窗口四分之一派生并封顶到 [`DERIVED_MAX_OUTPUT_TOKENS_CAP`]；
+/// 窗口未知时保持 `None`，由 Adapter 按各协议兜底。
+/// 摘要等自带输出上限的辅助请求有自己的请求级覆盖，不经过本函数。
+fn main_turn_max_output_tokens(capabilities: &ProviderCapabilities) -> Option<u32> {
+    if let Some(configured) = capabilities.max_output_tokens {
+        return Some(u32::try_from(configured).unwrap_or(u32::MAX));
+    }
+    let derived = (capabilities.max_context_tokens? / 4).min(DERIVED_MAX_OUTPUT_TOKENS_CAP);
+    u32::try_from(derived).ok().filter(|tokens| *tokens > 0)
+}
+
 /// 动态消息 claim 或确认失败时返回的安全错误。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentDynamicInputError {
@@ -1403,6 +1420,11 @@ impl AgentRunner {
 
             let mut model_request = request.model_request.clone();
             model_request.messages = active.messages.clone();
+            // 请求级输出覆盖始终最高优先；此处只为未指定的主请求补齐
+            // 设置值或窗口派生的默认输出上限，压缩预算据此跟随实际发送值。
+            model_request.max_output_tokens = model_request
+                .max_output_tokens
+                .or_else(|| main_turn_max_output_tokens(&provider_capabilities));
             model_request.tools = if summary_only {
                 Vec::new()
             } else {

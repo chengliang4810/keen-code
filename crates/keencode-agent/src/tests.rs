@@ -629,6 +629,90 @@ async fn runner_completes_text_turn() {
     assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
 }
 
+/// 主 Turn 请求按能力快照接线输出上限：设置值优先于窗口派生。
+#[tokio::test]
+async fn main_turn_request_wires_configured_max_output_tokens() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(200_000),
+            max_output_tokens: Some(96_000),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("完成")],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success());
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_output_tokens, Some(96_000));
+}
+
+/// 没有设置值时按已知窗口派生默认输出上限：窗口四分之一并封顶到 32_000。
+#[tokio::test]
+async fn main_turn_request_derives_max_output_tokens_from_known_window() {
+    for (window, expected) in [
+        (200_000_u64, Some(32_000_u32)),
+        (8_000, Some(2_000)),
+        (u64::MAX, Some(32_000)),
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                max_context_tokens: Some(window),
+                ..ProviderCapabilities::default()
+            },
+            [text_reply("完成")],
+        ));
+        let result = runner(provider.clone(), ToolRegistry::new())
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+
+        assert!(result.is_success(), "window={window}: {:?}", result.error);
+        let requests = provider.requests().expect("请求快照应可读取");
+        assert_eq!(requests.len(), 1, "window={window}");
+        assert_eq!(requests[0].max_output_tokens, expected, "window={window}");
+    }
+}
+
+/// 设置值超过 u32 范围时饱和到 u32::MAX，请求仍然有效。
+#[tokio::test]
+async fn main_turn_request_saturates_configured_max_output_tokens_to_u32() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_output_tokens: Some(u64::MAX),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("完成")],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success());
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_output_tokens, Some(u32::MAX));
+}
+
+/// 设置值和窗口都未知时保持 None，由 Adapter 按各协议兜底。
+#[tokio::test]
+async fn main_turn_request_keeps_max_output_tokens_unset_without_capabilities() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply("完成")],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success());
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].max_output_tokens, None);
+}
+
 /// 普通文本区分模型终止原因与协议错误，并保留截断或拒答已确认的文本。
 #[tokio::test]
 async fn ordinary_text_classifies_model_stop_reasons_and_protocol_errors() {
