@@ -404,7 +404,8 @@ describe("App 编辑重发契约", () => {
       "rewind: sessionRewind",
     );
     expect(editSource).toContain("api.rewind");
-    expect(editSource).toContain("targetMessageId: message.id");
+    expect(editSource).toContain("const targetMessageId = message.id;");
+    expect(editSource).toContain("targetMessageId,");
     expect(editSource).toContain("revertFiles: false");
     expect(editSource).toContain(
       "updateSessionPreference(prepared.archivedSessionId, { archived: true })",
