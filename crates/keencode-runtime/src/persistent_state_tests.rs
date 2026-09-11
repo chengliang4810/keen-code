@@ -644,7 +644,7 @@ fn concurrent_root_plan_writes_keep_authority_and_document_aligned() {
             .expect("并发根计划写入应成功");
     }
 
-    let plan_store = PlanFileStore::open(&storage_root.path().join(resource_session_id.as_str()))
+    let plan_store = PlanFileStore::open(storage_root.path().join(resource_session_id.as_str()))
         .expect("Plan Store 应打开");
     let document = plan_store
         .read(&project_scope, &resource_session_id, &resource_root)

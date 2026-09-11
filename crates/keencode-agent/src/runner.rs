@@ -15,7 +15,6 @@ use keencode_model::{
     StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice, ToolResult,
     collect_model_stream,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -89,8 +88,7 @@ const MAX_EVENT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 const MAX_COMMIT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 
 /// 可选的单 Turn 总量限制，以及必须保留的取消和故障边界。
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RunLimits {
     /// 正常模型 Round 上限；None 不限制，耗尽后的唯一总结请求不计入上限。
     pub max_rounds: Option<u32>,
@@ -1600,6 +1598,13 @@ impl AgentRunner {
                 }
                 active.empty_response_retry_used = true;
                 // 与上下文超限强制重试一致：同一 Round 内换新调用尝试重新发起采样。
+                // 取消恰好落在"尝试 1 空响应已返回、重试尚未发起"的窗口时，终态由
+                // 重试 request_model 起点的取消竞态判为 Cancelled（取消优先是全局
+                // 语义），而非改前的 InvalidResponse。
+                // 已知不对称：该重试 request_model 若报 ContextLengthExceeded，会经
+                // `?` 直接以 Failed(Model) 终态传播，不走上方强制压缩 match——重试
+                // 请求与刚被接受的请求逐字节相同，此时超限属 Provider 异常；也避免
+                // 把压缩记录纠缠进已提交 attempt-1 用量的半提交 Round。
                 active.state.transition_to(TurnPhase::Compacting)?;
                 active.state.transition_to(TurnPhase::RequestingModel)?;
                 let retry_call_attempt = active.next_model_call_attempt()?;
@@ -3272,6 +3277,9 @@ struct ActiveTurn {
     /// 最近相同失败指纹真正连续出现的次数。
     repeated_tool_failure_count: u32,
     /// 本连续失败段内已注入运行时提醒的指纹；成功或指纹变化会一并重置。
+    ///
+    /// 崩溃恢复（Indeterminate 提交后重建 ActiveTurn）会把计数与该标记归零，可能对
+    /// 同一指纹再次提醒；这是恢复语义的既定行为，不视为重复提醒缺陷。
     tool_failure_reminder_fingerprint: Option<ToolFailureFingerprint>,
     /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
     limit_summary: Option<AgentRunError>,
@@ -3300,7 +3308,7 @@ impl ActiveTurn {
         Ok(attempt)
     }
 
-    /// 按模型原始调用顺序更新真实工具失败计数，并返回一次性提醒与熔断反馈。
+    /// 按观察顺序（并行批次为完成顺序）更新真实工具失败计数，并返回一次性提醒与熔断反馈。
     ///
     /// 成功或不同指纹都会重置连续段，已提醒标记一并重置；终止阈值优先于提醒阈值。
     fn observe_execution(

@@ -4,8 +4,8 @@ use super::*;
 use keencode_model::{
     ContentBlock, Message, MessageRole, ModelError, ModelStreamEvent, ProviderCapabilities,
     ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputCapability,
-    StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, ToolChoice,
-    ToolDefinition,
+    StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage,
+    ToolChoice, ToolDefinition,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -1032,7 +1032,16 @@ async fn consecutive_empty_responses_fail_with_invalid_response_after_one_retry(
             empty_reply_with_stop(StopReason::Completed),
         ],
     ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
     let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
         .run_turn(turn_request(PlanGuard::inactive()))
         .await;
 
@@ -1047,6 +1056,15 @@ async fn consecutive_empty_responses_fail_with_invalid_response_after_one_retry(
     assert_eq!(result.state.round_count(), 1);
     assert_eq!(result.state.step_count(), 0);
     assert_eq!(result.messages.len(), 1);
+    // 两次采样的用量都按同一 Round 的独立调用尝试提交。
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[1].completion().stop_reason, StopReason::Completed);
 }
 
 /// 空响应有界重试同样适用于原生结构化输出：连续两次空响应以 MissingOutput 终态结束。
@@ -1062,6 +1080,14 @@ async fn structured_native_empty_responses_fail_with_missing_output_after_one_re
             empty_reply_with_stop(StopReason::Completed),
         ],
     ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
     let mut request = turn_request(PlanGuard::inactive());
     request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
         "answer",
@@ -1074,6 +1100,7 @@ async fn structured_native_empty_responses_fail_with_missing_output_after_one_re
     ));
 
     let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
         .run_turn(request)
         .await;
 
@@ -1089,6 +1116,13 @@ async fn structured_native_empty_responses_fail_with_missing_output_after_one_re
     assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
     assert_eq!(result.messages.len(), 1);
     assert!(result.structured_output.is_none());
+    // 两次采样的用量都按同一 Round 的独立调用尝试提交。
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
 }
 
 /// 空响应有界重试同样适用于工具模拟结构化输出：重试后收到合法保留结果调用即成功。
@@ -1119,8 +1153,17 @@ async fn tool_emulated_empty_response_retries_then_accepts_result_tool() {
             "additionalProperties": false
         }),
     ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
 
     let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
         .run_turn(request)
         .await;
 
@@ -1129,6 +1172,15 @@ async fn tool_emulated_empty_response_retries_then_accepts_result_tool() {
     assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
     assert_eq!(result.state.round_count(), 1);
     assert_eq!(result.state.step_count(), 0);
+    // 两次采样的用量都按同一 Round 的独立调用尝试提交。
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[1].completion().stop_reason, StopReason::ToolUse);
 }
 
 /// 显式上限的摘要轮是 ToolChoice::None 的特殊轮：空响应直接返回已确定的限流终态，不消耗重试。
@@ -1212,6 +1264,257 @@ async fn empty_response_retry_then_max_output_tokens_keeps_terminal_semantics() 
         usages[1].completion().stop_reason,
         StopReason::MaxOutputTokens
     );
+}
+
+/// 在确认到指定序号的模型流事件时触发 Turn 取消的实时 Sink。
+struct CancelOnNthModelEventSink {
+    /// 在事件确认期间触发的取消令牌。
+    cancellation: TurnCancellation,
+    /// 触发取消前仍允许正常确认的模型流事件计数。
+    remaining_before_cancel: AtomicUsize,
+}
+
+impl AgentEventSink for CancelOnNthModelEventSink {
+    /// 确认模型事件并在计数归零时取消 Turn；失败边界与运行时事件不计数。
+    fn send<'a>(&'a self, event: &'a AgentStreamEvent) -> AgentEventFuture<'a> {
+        Box::pin(async move {
+            if matches!(event.kind(), AgentStreamEventKind::ModelEvent { .. })
+                && self.remaining_before_cancel.fetch_sub(1, Ordering::SeqCst) == 1
+            {
+                self.cancellation.cancel();
+            }
+            Ok(())
+        })
+    }
+}
+
+/// 取消发生在重试的 request_model 内部时，Turn 以 Cancelled 终态结束且不产生 InvalidResponse。
+#[tokio::test]
+async fn empty_response_retry_cancelled_inside_retry_request_model() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            text_reply("取消后不应被归约成完整响应"),
+        ],
+    ));
+    let cancellation = TurnCancellation::new();
+    // 尝试 1 的空响应产生两个模型事件；第 3 个事件是重试请求的 MessageStart。
+    let cancel_sink = Arc::new(CancelOnNthModelEventSink {
+        cancellation: cancellation.clone(),
+        remaining_before_cancel: AtomicUsize::new(3),
+    });
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation);
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_event_sink(cancel_sink)
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    // 重试请求已经真实发起：取消是在重试 request_model 内部被观察的。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(result.messages.len(), 1);
+    // 半提交语义：尝试 1 的用量在重试发起前已独立提交，重试失败不回滚。
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+}
+
+/// 空响应重试的已知不对称：重试的 request_model 报 ContextLengthExceeded 时直接以
+/// Failed(Model) 终态传播，不走强制压缩 match（重试请求与刚被接受的请求逐字节相同）。
+#[tokio::test]
+async fn empty_response_retry_context_overflow_propagates_model_failure_without_compression() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            ScriptedReply::new(vec![
+                Ok(ModelStreamEvent::MessageStart {
+                    metadata: ResponseMetadata::default(),
+                }),
+                Ok(ModelStreamEvent::Usage {
+                    usage: TokenUsage {
+                        input_tokens: Some(11),
+                        output_tokens: Some(2),
+                        total_tokens: Some(13),
+                        ..TokenUsage::unknown()
+                    },
+                }),
+                Err(ModelError::ContextLengthExceeded {
+                    message: "重试请求上下文超限".to_owned(),
+                }),
+            ]),
+        ],
+    ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    // 若未来把该错误误路由进强制压缩 match，终态会变成 ContextBlocked/StillExceeded。
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(
+            ModelError::ContextLengthExceeded { .. }
+        ))
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.state.round_count(), 1);
+    assert!(result.compactions.is_empty());
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    // 半提交 Round：尝试 1 的成功用量与重试失败的用量都已独立提交。
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(
+        usages[1].completion().stop_reason,
+        StopReason::Other {
+            reason: "model_error".to_owned(),
+        }
+    );
+}
+
+/// 交叉 Round 预算：空响应重试机会不跨 Round 保留，Round 2 的首次空响应直接 InvalidResponse 终态。
+#[tokio::test]
+async fn empty_response_retry_budget_does_not_carry_across_rounds() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            tool_reply(&[("call-round-1", "record", json!({"value": "work"}))]),
+            empty_reply_with_stop(StopReason::Completed),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let result = runner(provider.clone(), registry)
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::InvalidResponse {
+            message: "模型响应没有任何内容块".to_owned(),
+        })
+    );
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    // Round 1 消耗了唯一重试；Round 2 的空响应没有再获得第三次重试请求。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 3);
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.state.step_count(), 1);
+    assert_eq!(tool.call_count(), 1);
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 3);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[1].model_round(), 1);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[2].model_round(), 2);
+    assert_eq!(usages[2].call_attempt(), 3);
+}
+
+/// 空响应重试成功后仍要经过 loop 后交叉校验：stop_reason 为 tool_use 但没有工具调用块时
+/// 按 InvalidResponse 终态结束，重试不放宽响应完整性约束。
+#[tokio::test]
+async fn empty_response_retry_success_still_cross_checks_stop_reason() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            text_reply_with_stop("有文本但以 tool_use 结束", StopReason::ToolUse),
+        ],
+    ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::InvalidResponse {
+            message: "模型以工具调用结束但没有返回工具调用内容块".to_owned(),
+        })
+    );
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(result.messages.len(), 1);
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[1].completion().stop_reason, StopReason::ToolUse);
+}
+
+/// 空响应重试必须逐字节复用同一请求：Provider 记录的两次请求序列化后完全相等。
+#[tokio::test]
+async fn empty_response_retry_resends_byte_identical_request() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            text_reply("第二次响应"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    let first = serde_json::to_vec(&requests[0]).expect("首次请求应可序列化");
+    let retry = serde_json::to_vec(&requests[1]).expect("重试请求应可序列化");
+    assert_eq!(first, retry);
 }
 
 /// Provider 原生结构化输出必须在提交 Transcript 前完成 JSON Schema 校验。

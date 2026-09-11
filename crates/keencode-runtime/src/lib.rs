@@ -2713,6 +2713,8 @@ fn tool_round_persistence_budget(
     let unknown_copy_bytes = round_json_bytes
         .checked_add(mapped_expansion_bytes)
         .ok_or(RuntimeError::RecoveryRequired)?;
+    // 工具失败提醒与 post-hook 上下文字节未单列预检预留：两者各 ≤64KiB、合计远在
+    // 固定 1MiB wire slack 内；一旦超限，最终由 CommitSink 提交时的单事件容量拒绝兜底。
     let unknown_event_reserve_bytes = unknown_copy_bytes
         .checked_add(TOOL_ROUND_FIXED_WIRE_SLACK_BYTES)
         .ok_or(RuntimeError::RecoveryRequired)?;
