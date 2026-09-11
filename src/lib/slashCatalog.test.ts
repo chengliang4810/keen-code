@@ -63,7 +63,7 @@ describe("skillsToSlashItems", () => {
   it("插件 command 命名空间展示末段短名，调用名保持完整", () => {
     const items = skillsToSlashItems([
       {
-        name: "plugin:claude-plugins-official:code-review:code-review",
+        name: "plugin:example-market:code-review:code-review",
         description: "Code review a pull request",
         source: "plugin",
         userInvocable: true,
@@ -76,8 +76,8 @@ describe("skillsToSlashItems", () => {
       },
     ]);
     expect(items[0]).toMatchObject({
-      id: "skill:plugin:claude-plugins-official:code-review:code-review",
-      name: "plugin:claude-plugins-official:code-review:code-review",
+      id: "skill:plugin:example-market:code-review:code-review",
+      name: "plugin:example-market:code-review:code-review",
       displayTitle: "code-review",
       displayDescription: "Code review a pull request",
     });

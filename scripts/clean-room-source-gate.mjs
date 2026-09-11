@@ -393,7 +393,7 @@ const EXACT_ALLOWLIST = new Map([
   ["src-tauri/prompts/agents/explore.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ["src-tauri/prompts/agents/general-purpose.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ["src-tauri/prompts/agents/verification.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
-  ...["src-tauri/prompts/agents/SOURCE.md", "src-tauri/prompts/agents/UPSTREAM-LICENSE.txt"].map(path => [path, { ruleIds: LEGAL_ATTRIBUTION_RULE_IDS, purpose: "保留用户指定上游的来源和完整版权许可声明" }]),
+  ...["src-tauri/prompts/agents/SOURCE.md", "src-tauri/prompts/agents/UPSTREAM-LICENSE.txt"].map(path => [path, { ruleIds: new Set([...LEGAL_ATTRIBUTION_RULE_IDS, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "保留用户指定上游的来源和完整版权许可声明" }]),
   [
     ".gitignore",
     {
