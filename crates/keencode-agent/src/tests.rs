@@ -714,10 +714,11 @@ async fn main_turn_request_keeps_max_output_tokens_unset_without_capabilities() 
 }
 
 /// 普通文本区分模型终止原因与协议错误，并保留截断或拒答已确认的文本。
+/// MaxOutputTokens 纯文本截断改由输出上限有界恢复处理（见
+/// `max_output_truncation_recovers_with_instruction_and_completes`），不再产生终态。
 #[tokio::test]
 async fn ordinary_text_classifies_model_stop_reasons_and_protocol_errors() {
     for stop_reason in [
-        StopReason::MaxOutputTokens,
         StopReason::ContentFilter,
         StopReason::Cancelled,
         StopReason::Other {
@@ -733,11 +734,6 @@ async fn ordinary_text_classifies_model_stop_reasons_and_protocol_errors() {
             .await;
 
         let (terminal_reason, error, message_count) = match stop_reason {
-            StopReason::MaxOutputTokens => (
-                TerminalReason::ModelOutputLimit,
-                AgentRunError::ModelOutputLimit,
-                2,
-            ),
             StopReason::ContentFilter => {
                 (TerminalReason::ModelRefusal, AgentRunError::ModelRefusal, 2)
             }
@@ -749,7 +745,9 @@ async fn ordinary_text_classifies_model_stop_reasons_and_protocol_errors() {
                 },
                 1,
             ),
-            StopReason::Completed | StopReason::ToolUse => unreachable!(),
+            StopReason::MaxOutputTokens | StopReason::Completed | StopReason::ToolUse => {
+                unreachable!()
+            }
         };
         assert_eq!(result.state.terminal_reason(), Some(terminal_reason));
         if matches!(error, AgentRunError::InvalidResponse { .. }) {
@@ -1227,14 +1225,17 @@ async fn limit_summary_empty_response_keeps_limit_error_without_retry() {
     assert_eq!(tool.call_count(), 1);
 }
 
-/// 空响应重试后的非空响应仍要经过终止原因检查：MaxOutputTokens 终态语义不因重试改变。
+/// 空响应重试后的非空响应仍要经过终止原因检查：纯文本截断不因发生过空响应
+/// 重试而绕过检查，改按输出上限有界恢复注入续跑指令继续下一 Round；
+/// 空响应重试预算与恢复预算互不挤占。
 #[tokio::test]
-async fn empty_response_retry_then_max_output_tokens_keeps_terminal_semantics() {
+async fn empty_response_retry_then_max_output_tokens_recovers_without_terminal() {
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
         [
             empty_reply_with_stop(StopReason::Completed),
             text_reply_with_stop("partial", StopReason::MaxOutputTokens),
+            text_reply("续跑完成"),
         ],
     ));
     let sink = Arc::new(ModelRoundUsageProbeSink::new(
@@ -1250,20 +1251,29 @@ async fn empty_response_retry_then_max_output_tokens_keeps_terminal_semantics() 
         .run_turn(turn_request(PlanGuard::inactive()))
         .await;
 
-    assert_eq!(result.error, Some(AgentRunError::ModelOutputLimit));
+    assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(
         result.state.terminal_reason(),
-        Some(TerminalReason::ModelOutputLimit)
+        Some(TerminalReason::Completed)
     );
-    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
-    assert_eq!(result.messages.len(), 2);
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 3);
+    assert_eq!(result.messages.len(), 4);
+    assert!(result.messages[2].is_meta);
     let usages = sink.usages();
-    assert_eq!(usages.len(), 2);
+    assert_eq!(usages.len(), 3);
+    // 空响应与其重试同属 Round 1 的两次调用尝试；截断部分响应照常记账。
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(usages[0].completion().stop_reason, StopReason::Completed);
+    assert_eq!(usages[1].model_round(), 1);
     assert_eq!(usages[1].call_attempt(), 2);
     assert_eq!(
         usages[1].completion().stop_reason,
         StopReason::MaxOutputTokens
     );
+    assert_eq!(usages[2].model_round(), 2);
+    assert_eq!(usages[2].call_attempt(), 3);
+    assert_eq!(usages[2].completion().stop_reason, StopReason::Completed);
 }
 
 /// 在确认到指定序号的模型流事件时触发 Turn 取消的实时 Sink。
@@ -1851,7 +1861,8 @@ async fn runner_validates_native_structured_output_before_commit() {
     );
 }
 
-/// 原生结构化输出的截断也必须先按模型终止原因结束，并保留已经确认的文本。
+/// 原生结构化输出的截断先按模型终止原因处理、不提前做 Schema 校验：
+/// 纯文本截断注入续跑指令后，由下一轮完整响应完成结构化输出。
 #[tokio::test]
 async fn runner_classifies_native_structured_output_limit_before_schema_validation() {
     let provider = Arc::new(ScriptedProvider::new(
@@ -1859,10 +1870,10 @@ async fn runner_classifies_native_structured_output_limit_before_schema_validati
             structured_output: StructuredOutputCapability::Native,
             ..ProviderCapabilities::default()
         },
-        [text_reply_with_stop(
-            "{\"answer\":",
-            StopReason::MaxOutputTokens,
-        )],
+        [
+            text_reply_with_stop("{\"answer\":", StopReason::MaxOutputTokens),
+            text_reply("{\"answer\":42}"),
+        ],
     ));
     let mut request = turn_request(PlanGuard::inactive());
     request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
@@ -1875,17 +1886,23 @@ async fn runner_classifies_native_structured_output_limit_before_schema_validati
         }),
     ));
 
-    let result = runner(provider, ToolRegistry::new())
+    let result = runner(provider.clone(), ToolRegistry::new())
         .run_turn(request)
         .await;
 
-    assert_eq!(result.error, Some(AgentRunError::ModelOutputLimit));
+    // 截断响应未被 Schema 校验失败终结，而是走输出上限有界恢复。
+    assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(
         result.state.terminal_reason(),
-        Some(TerminalReason::ModelOutputLimit)
+        Some(TerminalReason::Completed)
     );
-    assert_eq!(result.structured_output, None);
-    assert_eq!(result.messages.len(), 2);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    assert_eq!(result.messages.len(), 4);
+    assert!(result.messages[2].is_meta);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].structured_output.is_some());
+    assert!(requests[1].structured_output.is_some());
 }
 
 /// 原生 Provider 忽略 Schema 时必须以原生约束失败分类结束且不提交坏响应。
@@ -3303,4 +3320,368 @@ async fn pre_cancelled_turn_never_calls_model() {
     );
     assert_eq!(result.error, Some(AgentRunError::Cancelled));
     assert!(provider.requests().expect("请求快照应可读取").is_empty());
+}
+
+/// 同时记录模型 Round 用量与权威提交事件的输出上限恢复路径探针。
+struct MaxOutputRecoveryProbe {
+    /// 按提交顺序捕获的用量事实。
+    usages: Mutex<Vec<ModelRoundUsage>>,
+    /// 按提交顺序保存完整权威事件。
+    events: Mutex<Vec<AgentCommitEvent>>,
+}
+
+impl MaxOutputRecoveryProbe {
+    /// 创建一个没有历史记录的恢复路径探针。
+    fn new() -> Self {
+        Self {
+            usages: Mutex::new(Vec::new()),
+            events: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 返回按实际调用顺序捕获的用量事实。
+    fn usages(&self) -> Vec<ModelRoundUsage> {
+        self.usages.lock().expect("恢复探针用量锁不应损坏").clone()
+    }
+
+    /// 返回按提交顺序捕获的权威事件快照。
+    fn events(&self) -> Vec<AgentCommitEvent> {
+        self.events.lock().expect("恢复探针事件锁不应损坏").clone()
+    }
+}
+
+impl AgentCommitSink for MaxOutputRecoveryProbe {
+    /// 记录完整用量事实并直接确认。
+    fn commit_model_round_usage(
+        &self,
+        usage: &ModelRoundUsage,
+    ) -> Result<(), AgentCommitSinkError> {
+        self.usages
+            .lock()
+            .expect("恢复探针用量锁不应损坏")
+            .push(usage.clone());
+        Ok(())
+    }
+
+    /// 委托默认无状态预检，恢复测试不包含实际工具 Round 预检分支。
+    fn preflight_tool_round(
+        &self,
+        round: &AgentToolRoundPreflight,
+    ) -> Result<Box<dyn AgentToolRoundReservation>, AgentToolRoundPreflightError> {
+        NoopAgentCommitSink.preflight_tool_round(round)
+    }
+
+    /// 记录全部权威事件并直接确认。
+    fn commit(&self, event: &AgentCommitEvent) -> Result<(), AgentCommitSinkError> {
+        self.events
+            .lock()
+            .expect("恢复探针事件锁不应损坏")
+            .push(event.clone());
+        Ok(())
+    }
+}
+
+/// 断言消息列表中没有续跑指令形态的 User is_meta 消息。
+fn assert_no_recovery_instruction(messages: &[Message]) {
+    assert!(
+        messages
+            .iter()
+            .all(|message| !(message.is_meta && matches!(message.role, MessageRole::User))),
+        "不应注入输出上限续跑指令消息"
+    );
+}
+
+/// 第一次截断（纯文本、stop_reason=max_tokens）注入续跑指令后第二次正常完成：
+/// 部分响应照常提交，指令消息夹在截断 assistant 消息与最终 assistant 消息之间，
+/// 两次采样按独立 Round 的 call_attempt 1/2 记账，Turn 以 Completed 终态结束。
+#[tokio::test]
+async fn max_output_truncation_recovers_with_instruction_and_completes() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("半截输出", StopReason::MaxOutputTokens),
+            text_reply("从中断处继续的完整内容"),
+        ],
+    ));
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(result.state.round_count(), 2);
+    // Transcript 形态：初始 user → 截断 assistant → 续跑指令（user is_meta）→ 最终 assistant。
+    assert_eq!(result.messages.len(), 4);
+    assert!(matches!(result.messages[1].role, MessageRole::Assistant));
+    assert!(matches!(
+        result.messages[1].content[0],
+        ContentBlock::Text { .. }
+    ));
+    let instruction = &result.messages[2];
+    assert!(instruction.is_meta);
+    assert!(matches!(instruction.role, MessageRole::User));
+    let ContentBlock::Text { text } = &instruction.content[0] else {
+        panic!("续跑指令应为纯文本消息");
+    };
+    assert!(text.contains("上一条回复因达到输出上限被截断"));
+    assert!(text.contains("请从中断处直接继续，不要重复已有内容，不要道歉。"));
+    assert!(matches!(result.messages[3].role, MessageRole::Assistant));
+    // 两次真实采样按独立 Round 记账：Round 1 截断、Round 2 完成。
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 2);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(
+        usages[0].completion().stop_reason,
+        StopReason::MaxOutputTokens
+    );
+    assert_eq!(usages[1].model_round(), 2);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[1].completion().stop_reason, StopReason::Completed);
+    // Round 1 依次提交带截断完成事实的部分响应与续跑指令消息段。
+    let events = sink.events();
+    let round_1_commits: Vec<_> = events
+        .iter()
+        .filter(|event| event.model_round() == 1)
+        .collect();
+    assert_eq!(round_1_commits.len(), 2);
+    let AgentCommitEventKind::ModelRoundCommitted {
+        completion,
+        messages: partial,
+        ..
+    } = round_1_commits[0].kind()
+    else {
+        panic!("截断部分响应应作为模型完成事实提交");
+    };
+    assert_eq!(completion.stop_reason, StopReason::MaxOutputTokens);
+    assert_eq!(partial, &result.messages[1..2]);
+    let AgentCommitEventKind::RoundCommitted { messages, .. } = round_1_commits[1].kind() else {
+        panic!("续跑指令应作为普通 Round 消息段提交");
+    };
+    assert_eq!(messages, &result.messages[2..3]);
+}
+
+/// 连续 3 次纯文本截断：前 2 次各注入一条续跑指令，第 3 次预算耗尽后
+/// 保持既有 ModelOutputLimit 终态，截断部分响应仍照常提交。
+#[tokio::test]
+async fn max_output_truncation_recovers_at_most_twice_then_terminal() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("第一段", StopReason::MaxOutputTokens),
+            text_reply_with_stop("第二段", StopReason::MaxOutputTokens),
+            text_reply_with_stop("第三段", StopReason::MaxOutputTokens),
+        ],
+    ));
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::ModelOutputLimit));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ModelOutputLimit)
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 3);
+    // 初始 user → 三段截断 assistant，中间各夹一条续跑指令。
+    assert_eq!(result.messages.len(), 6);
+    assert!(matches!(result.messages[2].role, MessageRole::User));
+    assert!(result.messages[2].is_meta);
+    assert!(matches!(result.messages[4].role, MessageRole::User));
+    assert!(result.messages[4].is_meta);
+    assert!(matches!(result.messages[5].role, MessageRole::Assistant));
+    // 三个 Round 各自独立记账。
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 3);
+    for (index, usage) in usages.iter().enumerate() {
+        assert_eq!(usage.model_round(), (index + 1) as u32);
+        assert_eq!(usage.call_attempt(), (index + 1) as u32);
+        assert_eq!(usage.completion().stop_reason, StopReason::MaxOutputTokens);
+    }
+}
+
+/// 截断响应包含工具调用块时不恢复：工具参数可能已被截断，续跑不安全，
+/// 保持既有 ModelOutputLimit 终态且工具不执行。
+#[tokio::test]
+async fn max_output_truncation_with_tool_call_block_stays_terminal() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply_with_stop(
+            &[("call-truncated", "record", json!({"value": "x"}))],
+            StopReason::MaxOutputTokens,
+        )],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let result = runner(provider.clone(), registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::ModelOutputLimit));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ModelOutputLimit)
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
+    assert_eq!(tool.call_count(), 0);
+    assert_no_recovery_instruction(&result.messages);
+}
+
+/// ContentFilter 终止原因不属于输出上限恢复范围：保持既有 ModelRefusal 终态。
+#[tokio::test]
+async fn content_filter_stop_reason_does_not_recover() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("拒答前文", StopReason::ContentFilter),
+            text_reply("不应被请求的续跑响应"),
+        ],
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::ModelRefusal));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ModelRefusal)
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
+    assert_no_recovery_instruction(&result.messages);
+}
+
+/// 显式上限的总结 Round 中发生截断时不恢复：直接按既有 ModelOutputLimit 终态结束。
+#[tokio::test]
+async fn limit_summary_pending_max_output_truncation_stays_terminal() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "record", json!({"value": "work"}))]),
+            text_reply_with_stop("总结也被截断", StopReason::MaxOutputTokens),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let result = AgentRunner::new(
+        provider.clone(),
+        registry,
+        RunLimits {
+            max_rounds: Some(1),
+            ..RunLimits::default()
+        },
+    )
+    .run_turn(turn_request(PlanGuard::inactive()))
+    .await;
+
+    assert_eq!(result.error, Some(AgentRunError::ModelOutputLimit));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ModelOutputLimit)
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(tool.call_count(), 1);
+    // 总结 Round 的截断不注入续跑指令。
+    assert_no_recovery_instruction(&result.messages);
+}
+
+/// 续跑指令提交后、下一轮采样期间取消：Turn 以 Cancelled 终态结束，
+/// 已提交的部分响应与指令消息保留，不回滚半提交状态。
+#[tokio::test]
+async fn max_output_recovery_cancelled_inside_next_round_request() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("半截输出", StopReason::MaxOutputTokens),
+            text_reply("取消后不应被消费"),
+        ],
+    ));
+    let cancellation = TurnCancellation::new();
+    // Round 1 截断响应产生 3 个模型事件；第 4 个事件是续跑 Round 的 MessageStart。
+    let cancel_sink = Arc::new(CancelOnNthModelEventSink {
+        cancellation: cancellation.clone(),
+        remaining_before_cancel: AtomicUsize::new(4),
+    });
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation);
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_event_sink(cancel_sink)
+        .with_commit_sink(sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    // 续跑请求已经真实发起：取消是在续跑 request_model 内部被观察的。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(result.messages.len(), 3);
+    assert!(result.messages[2].is_meta);
+    // 半提交语义：Round 1 的用量在续跑发起前已独立提交，续跑失败不回滚。
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+}
+
+/// 恢复轮的响应为空：空响应重试预算独立可用，与输出上限续跑预算互不吃挤。
+#[tokio::test]
+async fn max_output_recovery_then_empty_response_keeps_independent_retry_budget() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            text_reply_with_stop("半截输出", StopReason::MaxOutputTokens),
+            empty_reply_with_stop(StopReason::Completed),
+            text_reply("重试后的完整内容"),
+        ],
+    ));
+    let sink = Arc::new(MaxOutputRecoveryProbe::new());
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    // 三个真实请求：截断采样、恢复轮空响应、同一 Round 的空响应重试。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 3);
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.messages.len(), 4);
+    assert!(result.messages[2].is_meta);
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 3);
+    assert_eq!(usages[0].model_round(), 1);
+    assert_eq!(usages[0].call_attempt(), 1);
+    assert_eq!(
+        usages[0].completion().stop_reason,
+        StopReason::MaxOutputTokens
+    );
+    assert_eq!(usages[1].model_round(), 2);
+    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages[2].model_round(), 2);
+    assert_eq!(usages[2].call_attempt(), 3);
+    assert_eq!(usages[2].completion().stop_reason, StopReason::Completed);
 }

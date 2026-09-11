@@ -69,6 +69,12 @@ const TOOL_FAILURE_REMINDER_PREFIX: &str = "以下内容由 KeenCode Runtime 自
 /// 工具重复失败提醒允许的最大 UTF-8 字节数，与 Hook 上下文预算同量级。
 const MAX_TOOL_FAILURE_REMINDER_BYTES: usize = 64 * 1_024;
 
+/// 单个 Turn 内 MaxOutputTokens 截断后允许的最大有界续跑次数。
+///
+/// 第 3 次截断不再续跑，按既有 ModelOutputLimit 终态结束；该预算与上下文
+/// 超限强制压缩、空响应重试和配置输出上限降级三个一次性预算互相独立。
+const MAX_OUTPUT_TOKEN_RECOVERY_LIMIT: u32 = 2;
+
 /// 每个权威事件同步提交时允许的总尝试次数；所有重投复用同一事件对象和稳定身份。
 const AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS: usize = 2;
 
@@ -1234,6 +1240,7 @@ impl AgentRunner {
             forced_context_retry_used: false,
             empty_response_retry_used: false,
             disable_configured_max_output: false,
+            max_output_recovery_count: 0,
             next_model_call_attempt: 1,
             hook_context_bytes: 0,
             stop_hook_rounds: 0,
@@ -1335,7 +1342,7 @@ impl AgentRunner {
             self.structured_output_mode(&request.model_request, &provider_capabilities)?;
         active.state.transition_to(TurnPhase::PreparingContext)?;
 
-        loop {
+        'model_round: loop {
             ensure_not_cancelled(&request.cancellation)?;
             let bind_new_goal = active.goal_id.is_none();
             let goal = if active.limit_summary.is_none() {
@@ -1595,6 +1602,47 @@ impl AgentRunner {
                 )?;
                 let response = completed_round.response;
                 if let Some(error) = model_terminal_error(&response.stop_reason) {
+                    // MaxOutputTokens 的唯一安全恢复窗口：截断响应不含工具调用块
+                    // （工具参数可能已被截断，续跑不安全）、limit_summary 未挂起
+                    // （总结 Round 只允许无工具收尾），且本 Turn 的有界续跑预算
+                    // 未耗尽。ContentFilter 等其余终止原因一律不恢复。
+                    let truncated_without_tool_calls =
+                        matches!(error, AgentRunError::ModelOutputLimit)
+                            && !response
+                                .content
+                                .iter()
+                                .any(|block| matches!(block, ContentBlock::ToolCall { .. }));
+                    if truncated_without_tool_calls
+                        && active.limit_summary.is_none()
+                        && active.max_output_recovery_count < MAX_OUTPUT_TOKEN_RECOVERY_LIMIT
+                    {
+                        // 截断尝试照常记账并提交部分响应（现状语义），随后提交一条
+                        // User is_meta 续跑指令，使截断 assistant 消息与下一轮响应
+                        // 之间形成两条 assistant 消息隔一条 user 消息的合法序；
+                        // 只读判定在此处直接扫描内容块，不触碰 extract_tool_calls
+                        // 与 seen_tool_call_ids 的既有去重顺序。
+                        active.state.transition_to(TurnPhase::CommittingRound)?;
+                        self.commit_round_messages(
+                            request,
+                            active,
+                            Some(ModelRoundCompletion::from_response(&response)),
+                            partial_model_response_messages(&response),
+                        )?;
+                        self.commit_round_messages(
+                            request,
+                            active,
+                            None,
+                            vec![max_output_recovery_message()],
+                        )?;
+                        active.max_output_recovery_count =
+                            active.max_output_recovery_count.saturating_add(1);
+                        // 与工具 Round 收尾一致回到 PreparingContext，由外层 Round
+                        // 循环重新执行取消检查、显式上限与动态输入边界后开始下一
+                        // Round；续跑请求经 model_request.messages 自然携带全部
+                        // 已提交消息。
+                        active.state.transition_to(TurnPhase::PreparingContext)?;
+                        continue 'model_round;
+                    }
                     let committed = partial_model_response_messages(&response);
                     active.state.transition_to(TurnPhase::CommittingRound)?;
                     self.commit_round_messages(
@@ -3302,6 +3350,11 @@ struct ActiveTurn {
     /// 每个 Turn 只降级一次；置位后本轮及后续轮次的请求一律强制
     /// `max_output_tokens: None`，避免每轮重新命中同一 400 InvalidRequest。
     disable_configured_max_output: bool,
+    /// MaxOutputTokens 截断后本 Turn 已执行的有界续跑次数，跨 Round 共享。
+    ///
+    /// 崩溃恢复（Indeterminate 提交后重建 ActiveTurn）会把计数归零，可能对
+    /// 同一段截断输出再次续跑；这与空响应重试计数的恢复语义一致，不视为缺陷。
+    max_output_recovery_count: u32,
     /// 当前 Turn 下一次 Provider 模型调用使用的单调尝试序号。
     next_model_call_attempt: u32,
     /// 当前 Turn 已实际注入模型消息的 Hook 上下文字节数。
@@ -3442,6 +3495,24 @@ fn tool_failure_reminder_message(tool_name: &str, failures: u32) -> Message {
         MAX_TOOL_FAILURE_REMINDER_BYTES,
     );
     let mut message = Message::text(MessageRole::User, text);
+    message.is_meta = true;
+    message
+}
+
+/// 构造 MaxOutputTokens 截断后要求模型从中断处继续的一次性有界续跑指令。
+///
+/// 文案保持 Hook 上下文一致的信任边界前缀风格，以 User 角色配合 is_meta
+/// 注入，不作为用户发言展示，也不扩大模型授权。
+fn max_output_recovery_message() -> Message {
+    let mut message = Message::text(
+        MessageRole::User,
+        format!(
+            "{TOOL_FAILURE_REMINDER_PREFIX}\n\
+             来源：KeenCode Agent Runtime / MaxOutputTokens\n\n\
+             上一条回复因达到输出上限被截断。\
+             请从中断处直接继续，不要重复已有内容，不要道歉。"
+        ),
+    );
     message.is_meta = true;
     message
 }
