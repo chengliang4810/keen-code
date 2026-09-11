@@ -1,5 +1,7 @@
+import { parseHistoryPage, prependHistoryPage, type HistoryPage } from "@/lib/acp/historyPages";
 import { useCallback, useEffect, useRef } from "react";
 import {
+  diagnosticsRecord,
   sessionConnect,
   sessionLoad,
   sessionSnapshotFromResult,
@@ -97,6 +99,8 @@ export function useAcpRuntimeHistory({
   const deliveryWaitersRef = useRef(new Map<string, DeliveryWaiter>());
   /** 卸载使旧异步恢复失效，迟到响应不能回写新的页面生命周期。 */
   const lifecycleEpochRef = useRef(0);
+  const backfillBySessionRef = useRef(new Map<string, { cursor: string; view: object; running: boolean }>());
+
 
   useEffect(() => () => {
     lifecycleEpochRef.current += 1;
@@ -105,6 +109,7 @@ export function useAcpRuntimeHistory({
     }
     deliveryWaitersRef.current.clear();
     recoveryBySessionRef.current.clear();
+    backfillBySessionRef.current.clear();
     recoveryFocusBySessionRef.current.clear();
   }, []);
 
@@ -142,6 +147,44 @@ export function useAcpRuntimeHistory({
     });
   }, []);
 
+  const startBackfill = useCallback((sessionId: string, first: HistoryPage, publish: () => void) => {
+    if (!first.nextCursor) return;
+    const view = acpWorkspaceRef.current.sessions[sessionId];
+    const job = { cursor: first.nextCursor, view, running: true };
+    backfillBySessionRef.current.set(sessionId, job);
+    const epoch = lifecycleEpochRef.current;
+    const valid = () => epoch === lifecycleEpochRef.current &&
+      backfillBySessionRef.current.get(sessionId) === job &&
+      acpWorkspaceRef.current.sessions[sessionId] === view && !view.delivery.frozen;
+    void (async () => {
+      try {
+        while (valid()) {
+          // 给首屏和每批渲染留出事件循环，不用 Promise 微任务连续占住主线程。
+          await new Promise<void>((resolve) => setTimeout(resolve, 16));
+          if (!valid()) return;
+          const loaded = await sessionLoad(sessionId, { limit: 10, cursor: job.cursor });
+          if (!valid()) return;
+          const page = parseHistoryPage(loaded._meta, sessionId);
+          if (page.nextCursor === job.cursor) throw new Error("历史分页游标未推进");
+          prependHistoryPage(view, page);
+          publish();
+          if (!page.nextCursor) {
+            backfillBySessionRef.current.delete(sessionId);
+            return;
+          }
+          job.cursor = page.nextCursor;
+        }
+      } catch (error) {
+        if (valid()) {
+          // 首屏和实时流保持可用；保留游标，重新进入此对话可重试。
+          job.running = false;
+          view.last_error = { code: "history_load_failed", message: error instanceof Error ? error.message : String(error) };
+          publish();
+        }
+      }
+    })();
+  }, []);
+
   const recoverSession = useCallback(
     (sessionId: string, originView?: ViewFocus): Promise<void> => {
       const existing = recoveryBySessionRef.current.get(sessionId);
@@ -174,12 +217,16 @@ export function useAcpRuntimeHistory({
           }));
         }
         pendingVisibleTurnBySessionRef.current.delete(sessionId);
+        backfillBySessionRef.current.delete(sessionId);
         beginSessionRecovery(view);
         publish();
         try {
-          const loaded = await sessionLoad(sessionId);
+          const started = performance.now();
+          const loaded = await sessionLoad(sessionId, { limit: 2 });
+          const hostCompleted = performance.now();
           if (lifecycleEpoch !== lifecycleEpochRef.current) throw new Error("Session 历史恢复已取消");
           const replay = completedLoadReplay(loaded._meta, sessionId);
+          const page = parseHistoryPage(loaded._meta, sessionId);
           const snapshot = sessionSnapshotFromResult(loaded);
           if (snapshot.sessionId !== sessionId) throw new Error("Session 恢复快照标识不一致");
           const mode = loaded.modes?.currentModeId;
@@ -199,13 +246,22 @@ export function useAcpRuntimeHistory({
           }
           const current = acpWorkspaceRef.current.sessions[sessionId];
           if (!current) throw new Error("Session 恢复完成前投影已移除");
-          // load 是完整历史的唯一所有者，禁止再次从零 replay 重置投递世代。
+          // 首页 load 建立投递世代，旧页独立归约，不再从零 replay。
           reduceReplayResult(current, replay);
           await awaitDelivery(sessionId, replay.throughDeliverySequence);
+          const deliveryCompleted = performance.now();
           if (lifecycleEpoch !== lifecycleEpochRef.current) throw new Error("Session 历史恢复已取消");
           if (acpWorkspaceRef.current.sessions[sessionId] !== current) throw new Error("Session 恢复期间投影已替换");
           completeSessionRecovery(current);
+          current.replay.hasMore = page.hasMore;
           publish();
+          startBackfill(sessionId, page, publish);
+          void diagnosticsRecord("session_load", JSON.stringify({
+            sessionId,
+            requestMs: Math.round(hostCompleted - started),
+            deliveryWaitMs: Math.round(deliveryCompleted - hostCompleted),
+            projectionMs: Math.round(performance.now() - deliveryCompleted),
+          })).catch(() => {});
           // 缓存属于所有会话；迟到的后台恢复不得改写前台或新草稿菜单。
           if (mayProjectView()) {
             const model = modelBySessionRef.current.get(sessionId);
@@ -251,6 +307,7 @@ export function useAcpRuntimeHistory({
       modelBySessionRef,
       setModelId,
       awaitDelivery,
+      startBackfill,
     ],
   );
 
@@ -267,6 +324,12 @@ export function useAcpRuntimeHistory({
         return;
       }
       if (view?.replay.loaded) {
+        const job = backfillBySessionRef.current.get(sessionId);
+        if (job && !job.running) {
+          // 上次页可能已在 Host 提交；重新建立首页，避免盲重试过期游标。
+          await recoverSession(sessionId, originView);
+          return;
+        }
         // 已由后台恢复的 Session 不会再次触发 load；切回时仍需把持久模式
         // 投影回 Composer。当前会话的本地未提交模式不受后台恢复影响。
         const focus = currentViewFocus();
@@ -282,7 +345,7 @@ export function useAcpRuntimeHistory({
       }
       await recoverSession(sessionId, originView);
     },
-    [currentViewFocus, recoverSession, setPlanModeSessionKey],
+    [currentViewFocus, recoverSession, setPlanModeSessionKey, startBackfill, commitWorkspace],
   );
 
   /** 既有会话仅由恢复 Hook 加载一次；新会话没有历史，不再二次 load 重置世代。 */

@@ -31,6 +31,7 @@ import {
   goalTransition,
   goalUpsert,
   sessionConnect,
+  sessionLoad,
   sessionDelete,
   sessionFork,
   sessionGenerateTitle,
@@ -70,10 +71,12 @@ function sessionResult(sessionId = "session-1", snapshotId = sessionId) {
 }
 
 /** 为每个用例恢复默认 ACP 请求响应，避免用例间共享 mock 行为。 */
-beforeEach(() => {
+beforeEach(async () => {
   vi.resetAllMocks();
   clientMocks.acpInitialize.mockResolvedValue({ protocolVersion: 1 });
-  clientMocks.acpRequest.mockResolvedValue({});
+  clientMocks.acpRequest.mockResolvedValue({ sessions: [] });
+  await sessionsList();
+  clientMocks.acpRequest.mockReset().mockResolvedValue({});
   clientMocks.acpNotify.mockResolvedValue(undefined);
   clientMocks.acpRespond.mockResolvedValue(undefined);
   promptMocks.startSessionPrompt.mockReturnValue({
@@ -180,6 +183,16 @@ describe("ACP Session 标准 API 映射", () => {
         mcpServers: [],
       },
     );
+  });
+
+  it("打开已列出的对话直接 load，不重复扫描列表", async () => {
+    clientMocks.acpRequest.mockResolvedValueOnce({ sessions: [{ sessionId: "cached", cwd: "D:/cached" }] });
+    await sessionsList();
+    clientMocks.acpRequest.mockClear().mockResolvedValueOnce(sessionResult("cached"));
+    await sessionConnect({ sessionId: "cached", operationId: "load-cached" });
+    expect(clientMocks.acpRequest).toHaveBeenCalledExactlyOnceWith("session/load", {
+      sessionId: "cached", cwd: "D:/cached", mcpServers: [],
+    });
   });
 
   it("拒绝 new 响应中不一致的 Session ID 和旧快照字段别名", async () => {
@@ -559,4 +572,20 @@ describe("ACP 辅助构造", () => {
       result: { action: "cancel" },
     });
   });
+});
+
+
+it("session/load 分页参数进入命名空间元数据，无参数保留标准请求", async () => {
+  clientMocks.acpRequest.mockResolvedValueOnce({ sessions: [{ sessionId: "paged-api", cwd: "D:/paged" }] });
+  await sessionsList();
+  clientMocks.acpRequest.mockClear().mockResolvedValue({});
+  await sessionLoad("paged-api", { limit: 2 });
+  expect(clientMocks.acpRequest).toHaveBeenLastCalledWith("session/load", {
+    sessionId: "paged-api", cwd: "D:/paged", mcpServers: [], _meta: { "keencode/history": { limit: 2 } },
+  });
+  await sessionLoad("paged-api", { limit: -1, cursor: "next" });
+  expect(clientMocks.acpRequest).toHaveBeenLastCalledWith("session/load", {
+    sessionId: "paged-api", cwd: "D:/paged", mcpServers: [], _meta: { "keencode/history": { limit: -1, cursor: "next" } },
+  });
+  for (const limit of [0, -2, 101, 1.5]) await expect(sessionLoad("paged-api", { limit })).rejects.toThrow();
 });

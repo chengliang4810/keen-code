@@ -141,6 +141,7 @@ function loaded(through: number, delivered = through): SessionLoadResult {
     configOptions: [],
     modes: { currentModeId: "default", availableModes: [] },
     _meta: {
+      "keencode/history": { sessionId: "session-1", deliveries: [], hasMore: false, nextCursor: null },
       "keencode/snapshot": { sessionId: "session-1", state: "ready", activeTurnId: null, backend: "acp", projectPath: "D:/fixture", title: "历史会话", lastError: null },
       "keencode/replay": {
       sessionId: "session-1", startAfter: 0, nextAfter: through,

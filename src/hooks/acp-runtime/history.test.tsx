@@ -24,7 +24,8 @@ const apiMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/acp/api", async (original) => ({
-  ...await original<typeof import("@/lib/acp/api")>(), ...apiMocks,
+  ...await original<typeof import("@/lib/acp/api")>(),
+  diagnosticsRecord: vi.fn().mockResolvedValue(undefined), ...apiMocks,
 }));
 
 /** 可由测试显式控制完成顺序的 Promise。 */
@@ -65,6 +66,7 @@ function loadResult(
     configOptions: [],
     _meta: {
       "keencode/replay": replay,
+      "keencode/history": { sessionId: replay.sessionId, nextCursor: null, hasMore: false, deliveries: [] },
       "keencode/snapshot": { sessionId, state: "ready", activeTurnId: null, backend: "acp", projectPath: "D:/fixture", title: "历史会话", lastError: null },
     },
   };

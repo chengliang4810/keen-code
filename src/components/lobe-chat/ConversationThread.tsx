@@ -738,6 +738,8 @@ export function ConversationThread({
     [transcriptMessages],
   );
 
+  const getMessageKey = useCallback((index: number) => transcriptMessages[index]?.id ?? `message-${index}`, [transcriptMessages]);
+
   const {
     virtualized,
     start: virtualStart,
@@ -747,7 +749,7 @@ export function ConversationThread({
     measureRef,
   } = useChatMessageVirtualizer({
     itemCount: transcriptMessages.length,
-    getKey: (index) => transcriptMessages[index]?.id ?? `message-${index}`,
+    getKey: getMessageKey,
     getEstimateHeight,
     viewportRef: scrollRef,
     isPinnedRef,

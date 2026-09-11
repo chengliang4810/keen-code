@@ -712,3 +712,13 @@ historical result: passed; current release: not reverified
 - 浏览器对比：macOS、Playwright Chromium、浅色、1268×300、deviceScaleFactor=1，同一正文与视口；`before.png`、`after.png`、`diff.png` 均位于 `output/playwright/link-alignment/`。差异范围 `(330,40)–(481,57)`，1611 个变化像素，仅位于链接及图标区域，周围文字位置不变。
 - 复现：`pnpm exec vite --host 127.0.0.1 --port 14321`，访问 `/output/playwright/link-alignment/index.html`；前后源码分别加载后截图。既有开发服务占用 HMR 1422，验证使用整页刷新。
 - `pnpm run lint:css`、`pnpm run typecheck` 通过。原生 UI 控制 API 禁用，本次浏览器组件验证不等同于原生 WebView 验收。
+
+
+# 2026-09-11 历史分页前插与滚动位置
+
+- 基线 Git：0a8654ae7765736b6e0d56a9289895dfe5e0ab95；对应虚拟列表 hook 保存为 output/playwright/history-pagination-20260911/before-virtualizer.ts。前后均复用当前真实 ConversationThread、CSS 与合成数据，仅基线替换 hook；本次无 DOM/CSS 样式修改。
+- 环境：macOS、HeadlessChrome 153.0.0.0，1100×900、deviceScaleFactor 1。产物目录 output/playwright/history-pagination-20260911/ 包含 fixture.tsx、vite.config.ts、check.js、results.json 和截图。
+- 复现基线：KEENCODE_QA_BASELINE=1 pnpm exec vite --config output/playwright/history-pagination-20260911/vite.config.ts --port 14351；修改版去掉环境变量并使用 14352。通过 Playwright CLI 的 run-code 执行 check.js。
+- 场景：100 条长列表和 12 条短列表，非吸底阅读时前插 10 条。基线锚点分别从 y=38/44 移至 868/874，修改版分别保持 y=38/44，偏移均从 830 px 降至 0。
+- 相同初始状态截图：before/after-{large,small}-initial.png，两组均 0/990000 像素不同（RGB 任一通道不同即计数，无 mask）；前插截图为 before/after-{large,small}-prepended.png，差异图为 diff-{large,small}-initial.png。
+- 类型检查及 146 项相关前端测试通过。浏览器日志仅 favicon 404 与开发提示，无业务错误。未取得同状态原生 macOS WebView 前后截图，也未量化真实点击耗时；浏览器坐标与像素验证不能替代原生验收。

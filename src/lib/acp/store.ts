@@ -119,7 +119,7 @@ export interface AcpSubagentInfo {
 }
 
 export interface AcpReplayProjection {
-  /** 完整历史是否已由前端消费；空历史也必须能区分于尚未加载。 */
+  /** 首屏是否已由前端消费；hasMore 区分后台历史是否全部补齐。 */
   loaded: boolean;
   /** 控制响应已确认的历史投递终点；null 表示本次 Host 尚未返回水位。 */
   throughDeliverySequence: number | null;

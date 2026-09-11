@@ -138,6 +138,7 @@ export function sessionSnapshotFromResult(result: { _meta?: Record<string, unkno
     !(value.title === null || typeof value.title === "string") ||
     !(value.lastError === null || typeof value.lastError === "string")
   ) throw new Error("ACP Session 快照字段无效");
+  if (typeof value.projectPath === "string" && value.projectPath) sessionCwds.set(value.sessionId, value.projectPath);
   return value as unknown as SessionSnapshot;
 }
 
@@ -311,6 +312,7 @@ export async function sessionDelete(args: {
   operationId: string;
 }): Promise<void> {
   await acpRequest("session/delete", { sessionId: args.id }, args.operationId);
+  sessionCwds.delete(args.id);
 }
 
 export function sessionDisconnect(): Promise<SessionSnapshot> {
@@ -373,8 +375,11 @@ export interface GoalGetResult {
   goal?: GoalRecordDto;
 }
 
+/** 仅复用 Host 已返回的 cwd；后端始终重新校验项目绑定。 */
+const sessionCwds = new Map<string, string>();
+
 /** 返回当前 Session 列表。 */
-export async function sessionsList(): Promise<SessionListItem[]> {
+export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
   const sessions: SessionListItem[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
@@ -382,7 +387,7 @@ export async function sessionsList(): Promise<SessionListItem[]> {
     const page = await acpRequest<{
       sessions: Array<{ sessionId: string; cwd: string; title?: string; updatedAt?: string }>;
       nextCursor?: string;
-    }>("session/list", cursor === undefined ? {} : { cursor });
+    }>("session/list", { ...(cwd === undefined ? {} : { cwd }), ...(cursor === undefined ? {} : { cursor }) });
     if (!Array.isArray(page.sessions)) throw new Error("ACP Session 列表无效");
     for (const item of page.sessions) {
       if (typeof item.sessionId !== "string" || typeof item.cwd !== "string") {
@@ -398,11 +403,15 @@ export async function sessionsList(): Promise<SessionListItem[]> {
       cursors.add(cursor);
     }
   } while (cursor !== undefined);
+  if (cwd === undefined) sessionCwds.clear();
+  for (const session of sessions) sessionCwds.set(session.id, session.cwd);
   return sessions;
 }
 
-/** 从标准 Session 列表取得权威 cwd，不添加旧路径回退或另一套本地映射。 */
+/** 优先使用已经获取的列表路径；未知 ID 才刷新列表，后端负责授权。 */
 async function sessionCwd(sessionId: string): Promise<string> {
+  const known = sessionCwds.get(sessionId);
+  if (known) return known;
   const session = (await sessionsList()).find((item) => item.id === sessionId);
   if (!session) throw new Error("ACP Session 不存在或不在当前项目范围内");
   return session.cwd;
@@ -531,9 +540,17 @@ export interface SessionLoadResult {
 }
 
 /** 通过标准 ACP `session/load` 请求恢复 Session。 */
-export async function sessionLoad(sessionId: string): Promise<SessionLoadResult> {
+export async function sessionLoad(
+  sessionId: string,
+  history?: { limit: number; cursor?: string },
+): Promise<SessionLoadResult> {
+  if (history && (!Number.isInteger(history.limit) ||
+    (history.limit !== -1 && (history.limit < 1 || history.limit > 100)))) {
+    throw new Error("history limit 必须为 -1 或 1..100");
+  }
   return acpRequest<SessionLoadResult>("session/load", {
     sessionId, cwd: await sessionCwd(sessionId), mcpServers: [],
+    ...(history ? { _meta: { "keencode/history": history } } : {}),
   });
 }
 

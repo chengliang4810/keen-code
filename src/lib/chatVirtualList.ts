@@ -385,3 +385,11 @@ export function shouldCommitRowHeight(
   }
   return true;
 }
+
+/** 仅识别在既有列表前插入历史；替换列表或切换会话不能补偿滚动。 */
+export function prependedChatRowCount(previous: readonly string[], next: readonly string[]): number {
+  if (!previous.length || next.length <= previous.length) return 0;
+  const offset = next.indexOf(previous[0]!);
+  if (offset <= 0 || offset + previous.length > next.length) return 0;
+  return previous.every((key, index) => next[offset + index] === key) ? offset : 0;
+}

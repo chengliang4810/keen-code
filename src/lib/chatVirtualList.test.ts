@@ -395,3 +395,14 @@ describe("long transcript window scale", () => {
     expect(w.start).toBeGreaterThan(count - 80);
   });
 });
+
+
+describe("历史前插识别", () => {
+  it("仅为完整保留既有顺序的前插返回偏移", async () => {
+    const { prependedChatRowCount } = await import("./chatVirtualList");
+    expect(prependedChatRowCount(["b", "c"], ["a", "b", "c"])).toBe(1);
+    expect(prependedChatRowCount(["b", "c"], ["b", "c", "d"])).toBe(0);
+    expect(prependedChatRowCount(["b", "c"], ["a", "b", "d"])).toBe(0);
+    expect(prependedChatRowCount([], ["a"])).toBe(0);
+  });
+});

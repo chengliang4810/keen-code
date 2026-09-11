@@ -43,6 +43,7 @@ vi.mock("react", async (original) => ({
 
 vi.mock("@/lib/acp/api", async (original) => ({
   ...await original<typeof import("@/lib/acp/api")>(),
+  diagnosticsRecord: vi.fn().mockResolvedValue(undefined),
   sessionLoad: ports.sessionLoad,
   sessionConnect: ports.sessionConnect,
 }));
@@ -101,6 +102,7 @@ function loadResult(
     configOptions: [],
     _meta: {
       "keencode/replay": replay,
+      "keencode/history": { sessionId: replay.sessionId, nextCursor: null, hasMore: false, deliveries: [] },
       "keencode/snapshot": {
         sessionId,
         state: "ready",
@@ -618,5 +620,70 @@ describe("useAcpRuntimeHistory 的 Session delivery barrier", () => {
     expect(view.delivery.frozen).toBe(true);
     expect(view.replay.loaded).toBe(false);
     expect(view.last_error?.code).toBe("session_recovery_failed");
+  });
+});
+
+describe("session/load 自动补齐历史", () => {
+  function paged(sessionId: string, cursor: string | null) {
+    const result = loadResult(sessionId);
+    result._meta!["keencode/history"] = { sessionId, nextCursor: cursor, hasMore: cursor !== null, deliveries: [] };
+    return result;
+  }
+
+  it("首页先可用，随后自动逐页加载，实时水位保持不变", async () => {
+    vi.useFakeTimers();
+    const id = "session-background";
+    const harness = createHistoryHarness({ sessionId: id, epoch: 1 });
+    ports.sessionLoad.mockResolvedValueOnce(paged(id, "cursor-1"))
+      .mockResolvedValueOnce(paged(id, "cursor-2"))
+      .mockResolvedValueOnce(paged(id, null));
+    await harness.history.replayHistory(id, { sessionId: id, epoch: 1 });
+    const view = harness.workspaceRef.current.sessions[id]!;
+    expect(view.replay.loaded).toBe(true);
+    expect(view.replay.hasMore).toBe(true);
+    expect(ports.sessionLoad).toHaveBeenCalledTimes(1);
+    expect(deliver(harness, id, 1).status).toBe("applied");
+    const segments = view.live_segments;
+    await vi.advanceTimersByTimeAsync(16);
+    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 10, cursor: "cursor-1" });
+    await vi.advanceTimersByTimeAsync(16);
+    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 10, cursor: "cursor-2" });
+    expect(view.replay.hasMore).toBe(false);
+    expect(view.delivery.lastSequence).toBe(1);
+    expect(view.live_segments).toBe(segments);
+  });
+
+  it("后台失败不冻结首页，再次进入重新建立分页快照", async () => {
+    vi.useFakeTimers();
+    const id = "session-background-error";
+    const harness = createHistoryHarness({ sessionId: id, epoch: 1 });
+    ports.sessionLoad.mockResolvedValueOnce(paged(id, "cursor-1"))
+      .mockRejectedValueOnce(new Error("disk failure"))
+      .mockResolvedValueOnce(paged(id, null));
+    await harness.history.replayHistory(id);
+    await vi.advanceTimersByTimeAsync(16);
+    const view = harness.workspaceRef.current.sessions[id]!;
+    expect(view.replay.loaded).toBe(true);
+    expect(view.delivery.frozen).toBe(false);
+    expect(view.last_error?.code).toBe("history_load_failed");
+    await harness.history.replayHistory(id);
+    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 2 });
+    expect(view.replay.hasMore).toBe(false);
+  });
+
+  it("卸载后丢弃迟到页面，不发布或继续请求", async () => {
+    vi.useFakeTimers();
+    const id = "session-background-disposed";
+    const harness = createHistoryHarness({ sessionId: id, epoch: 1 });
+    const pending = deferred<SessionLoadResult>();
+    ports.sessionLoad.mockResolvedValueOnce(paged(id, "cursor-1")).mockReturnValueOnce(pending.promise);
+    await harness.history.replayHistory(id);
+    await vi.advanceTimersByTimeAsync(16);
+    harness.dispose();
+    const commits = harness.commitWorkspace.mock.calls.length;
+    pending.resolve(paged(id, "cursor-2"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(harness.commitWorkspace).toHaveBeenCalledTimes(commits);
+    expect(ports.sessionLoad).toHaveBeenCalledTimes(2);
   });
 });

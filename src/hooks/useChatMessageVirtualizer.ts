@@ -21,6 +21,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -30,6 +31,7 @@ import {
   CHAT_VIRTUALIZE_THRESHOLD,
   computeChatVirtualWindow,
   cumulativeOffsets,
+  prependedChatRowCount,
   resolveChatOverscanPx,
   scrollTopAfterHeightChange,
   shouldCommitRowHeight,
@@ -128,6 +130,12 @@ export function useChatMessageVirtualizer(
     /** 已计算的累计偏移。 */
     offsets: number[];
   } | null>(null);
+
+  const previousRowsRef = useRef<{ conversationKey: typeof conversationKey; keys: string[]; scrollHeight: number } | null>(null);
+  const keys = useMemo(() => Array.from({ length: itemCount }, (_, index) => getKey(index)), [itemCount, getKey]);
+  const previousRows = previousRowsRef.current;
+  const prepended = previousRows?.conversationKey === conversationKey
+    ? prependedChatRowCount(previousRows.keys, keys) : 0;
 
   const [win, setWin] = useState<ChatVirtualWindow>(() => full(itemCount));
 
@@ -278,6 +286,21 @@ export function useChatMessageVirtualizer(
     };
   }, [virtualized, itemCount, viewportRef, recompute, recomputeNow, conversationKey]);
 
+  // 历史头插与行高重测分别处理；绘制前补偿，保持用户阅读的位置。
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current;
+    if (viewport && prepended && !isPinnedRef.current) {
+      const delta = virtualized
+        ? getOffsets()[prepended] ?? 0
+        : viewport.scrollHeight - (previousRows?.scrollHeight ?? viewport.scrollHeight);
+      const top = viewport.scrollTop + delta;
+      markProgrammaticStickScroll(viewport, top);
+      viewport.scrollTop = top;
+      recomputeNow();
+    }
+    previousRowsRef.current = { conversationKey, keys, scrollHeight: viewport?.scrollHeight ?? 0 };
+  });
+
   // 已挂载消息流式增长或强制索引变化时立即重算。
   useLayoutEffect(() => {
     if (!virtualized) return;
@@ -396,9 +419,9 @@ export function useChatMessageVirtualizer(
 
   return {
     virtualized: true,
-    start: win.start,
-    end: win.end,
-    paddingTop: win.paddingTop,
+    start: Math.min(itemCount, win.start + prepended),
+    end: Math.min(itemCount, win.end + prepended),
+    paddingTop: win.paddingTop + (prepended ? getOffsets()[prepended] ?? 0 : 0),
     paddingBottom: win.paddingBottom,
     measureRef,
     onViewportScroll: recomputeNow,
