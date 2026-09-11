@@ -68,6 +68,7 @@ import {
   LiveToolText,
 } from "./AgentActivity";
 import { isToolStepMessage, pickRunningTurnTool } from "@/lib/session";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { EndOfTurnChip } from "./EndOfTurnChip";
 import {
   TimelineToolRow,
@@ -780,6 +781,7 @@ export function ConversationThread({
   }, [transcriptMessages]);
 
   return (
+    <ErrorBoundary scope="会话时间线" key={sessionKey}>
     <div ref={chatRootRef} className="lobe-chat" data-slot="lobe-chat">
       <div
         ref={scrollRef}
@@ -1354,5 +1356,6 @@ export function ConversationThread({
         onClick={() => scrollToBottom("smooth")}
       />
     </div>
+    </ErrorBoundary>
   );
 }

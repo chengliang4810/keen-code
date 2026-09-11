@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/tokens.css";
 import "./styles/skins.css";
 import "./styles/tailwind.css";
@@ -61,7 +62,9 @@ createRoot(document.getElementById("root")!, {
   },
 }).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary scope="应用">
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );
 

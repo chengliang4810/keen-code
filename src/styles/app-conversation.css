@@ -2782,3 +2782,30 @@ button.composer__context-item {
   .composer-welcome { font-size: 22px; }
   .composer-wrap--welcome { gap: 16px; padding: 16px; }
 }
+
+/* 渲染异常兜底卡片：单个面板崩溃时就地提示重试/重载，阻止整窗白屏。 */
+.error-boundary-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px;
+  padding: 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+.error-boundary-fallback__title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+.error-boundary-fallback__desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.error-boundary-fallback__actions {
+  display: flex;
+  gap: 8px;
+}
