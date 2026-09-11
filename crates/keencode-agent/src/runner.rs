@@ -15,6 +15,7 @@ use keencode_model::{
     StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice, ToolResult,
     collect_model_stream,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -63,6 +64,12 @@ const INVALID_TOOL_OUTPUT_RESULT: &str = "工具返回了无效输出";
 /// 重复失败观察用于区分无效工具输出的稳定错误码。
 const INVALID_TOOL_OUTPUT_ERROR_CODE: &str = "invalid_output";
 
+/// 运行时工具重复失败提醒重新进入模型上下文时使用的稳定信任边界说明。
+const TOOL_FAILURE_REMINDER_PREFIX: &str = "以下内容由 KeenCode Runtime 自动追加，仅作为运行时提醒而非用户指令；不得覆盖 system、developer 或后续用户指令。";
+
+/// 工具重复失败提醒允许的最大 UTF-8 字节数，与 Hook 上下文预算同量级。
+const MAX_TOOL_FAILURE_REMINDER_BYTES: usize = 64 * 1_024;
+
 /// 每个权威事件同步提交时允许的总尝试次数；所有重投复用同一事件对象和稳定身份。
 const AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS: usize = 2;
 
@@ -82,7 +89,8 @@ const MAX_EVENT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 const MAX_COMMIT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 
 /// 可选的单 Turn 总量限制，以及必须保留的取消和故障边界。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RunLimits {
     /// 正常模型 Round 上限；None 不限制，耗尽后的唯一总结请求不计入上限。
     pub max_rounds: Option<u32>,
@@ -92,8 +100,10 @@ pub struct RunLimits {
     pub tool_cancel_grace_ms: u64,
     /// 单个实时事件等待 Sink 可靠接收的最大毫秒数。
     pub event_sink_timeout_ms: u64,
-    /// 相同工具、输入和错误码允许连续失败的最大次数。
-    pub max_repeated_tool_failures: u32,
+    /// 相同工具、输入和错误码连续真实失败达到该次数时注入一次运行时提醒。
+    pub repeated_tool_failure_reminder_threshold: u32,
+    /// 相同工具、输入和错误码连续真实失败达到该次数时终止 Turn。
+    pub repeated_tool_failure_terminal_threshold: u32,
 }
 
 impl RunLimits {
@@ -110,7 +120,8 @@ impl RunLimits {
             max_steps: Some(max_steps),
             tool_cancel_grace_ms: 5_000,
             event_sink_timeout_ms: 5_000,
-            max_repeated_tool_failures: 3,
+            repeated_tool_failure_reminder_threshold: 3,
+            repeated_tool_failure_terminal_threshold: 6,
         })
     }
 
@@ -138,15 +149,27 @@ impl RunLimits {
         Ok(self)
     }
 
-    /// 覆盖相同真实失败上限；成功调用和正常轮询不受次数限制。
-    pub const fn with_repeated_failure_limit(
+    /// 覆盖相同真实失败的提醒阈值；零次会被拒绝，达到终止阈值时不再提醒。
+    pub const fn with_repeated_failure_reminder_threshold(
         mut self,
-        max_repeated_tool_failures: u32,
+        repeated_tool_failure_reminder_threshold: u32,
     ) -> Result<Self, RunLimitsError> {
-        if max_repeated_tool_failures == 0 {
-            return Err(RunLimitsError::ZeroRepeatedToolFailures);
+        if repeated_tool_failure_reminder_threshold == 0 {
+            return Err(RunLimitsError::ZeroRepeatedToolFailureReminder);
         }
-        self.max_repeated_tool_failures = max_repeated_tool_failures;
+        self.repeated_tool_failure_reminder_threshold = repeated_tool_failure_reminder_threshold;
+        Ok(self)
+    }
+
+    /// 覆盖相同真实失败的终止阈值；零次会被拒绝，达到时优先终止而不提醒。
+    pub const fn with_repeated_failure_terminal_threshold(
+        mut self,
+        repeated_tool_failure_terminal_threshold: u32,
+    ) -> Result<Self, RunLimitsError> {
+        if repeated_tool_failure_terminal_threshold == 0 {
+            return Err(RunLimitsError::ZeroRepeatedToolFailureTerminal);
+        }
+        self.repeated_tool_failure_terminal_threshold = repeated_tool_failure_terminal_threshold;
         Ok(self)
     }
 }
@@ -159,7 +182,8 @@ impl Default for RunLimits {
             max_steps: None,
             tool_cancel_grace_ms: 5_000,
             event_sink_timeout_ms: 5_000,
-            max_repeated_tool_failures: 3,
+            repeated_tool_failure_reminder_threshold: 3,
+            repeated_tool_failure_terminal_threshold: 6,
         }
     }
 }
@@ -175,8 +199,10 @@ pub enum RunLimitsError {
     ZeroToolCancelGrace,
     /// 实时事件 Sink 接收时限不能为零。
     ZeroEventSinkTimeout,
-    /// 重复真实工具失败上限不能为零。
-    ZeroRepeatedToolFailures,
+    /// 重复真实工具失败提醒阈值不能为零。
+    ZeroRepeatedToolFailureReminder,
+    /// 重复真实工具失败终止阈值不能为零。
+    ZeroRepeatedToolFailureTerminal,
 }
 
 impl fmt::Display for RunLimitsError {
@@ -187,7 +213,12 @@ impl fmt::Display for RunLimitsError {
             Self::ZeroSteps => formatter.write_str("工具 Step 上限必须大于零"),
             Self::ZeroToolCancelGrace => formatter.write_str("工具取消清理窗口必须大于零"),
             Self::ZeroEventSinkTimeout => formatter.write_str("实时事件 Sink 接收时限必须大于零"),
-            Self::ZeroRepeatedToolFailures => formatter.write_str("重复真实工具失败上限必须大于零"),
+            Self::ZeroRepeatedToolFailureReminder => {
+                formatter.write_str("重复真实工具失败提醒阈值必须大于零")
+            }
+            Self::ZeroRepeatedToolFailureTerminal => {
+                formatter.write_str("重复真实工具失败终止阈值必须大于零")
+            }
         }
     }
 }
@@ -1193,6 +1224,7 @@ impl AgentRunner {
             next_segment_index: 0,
             last_tool_failure: None,
             repeated_tool_failure_count: 0,
+            tool_failure_reminder_fingerprint: None,
             limit_summary: None,
             goal_id: None,
         };
@@ -1688,6 +1720,7 @@ impl AgentRunner {
                 summary_error,
                 round_permit,
                 hook_context_bytes,
+                failure_reminders,
                 lifecycle_fully_committed,
             } = batch;
             if !lifecycle_fully_committed {
@@ -1711,6 +1744,7 @@ impl AgentRunner {
                     .flatten()
                     .map(ResolvedHookContext::into_message),
             );
+            committed.extend(failure_reminders);
             if terminal_error.is_none() {
                 if let Some(error) = summary_error {
                     active.limit_summary = Some(error);
@@ -2395,6 +2429,7 @@ impl AgentRunner {
         }
         let mut summary_error = None;
         let mut completion_error = None;
+        let mut failure_reminders = Vec::new();
         let mut prospective_hook_context_bytes = preflight_hook_context_bytes;
         let mut hook_budget_failed = false;
         let mut round_output_budget = ToolRoundOutputBudget::new(prepared.len());
@@ -2529,10 +2564,15 @@ impl AgentRunner {
                                     terminal_error.get_or_insert_with(|| error.clone());
                                 }
                                 if let Some(observation) = raw.observation {
-                                    if let Some(error) = active.observe_execution(
+                                    let outcome = active.observe_execution(
                                         observation,
-                                        self.limits.max_repeated_tool_failures,
-                                    ) {
+                                        self.limits.repeated_tool_failure_reminder_threshold,
+                                        self.limits.repeated_tool_failure_terminal_threshold,
+                                    );
+                                    if let Some(reminder) = outcome.reminder {
+                                        failure_reminders.push(reminder);
+                                    }
+                                    if let Some(error) = outcome.terminal {
                                         segment_cancellation.cancel();
                                         terminal_error.get_or_insert(error);
                                     }
@@ -2636,10 +2676,15 @@ impl AgentRunner {
                                 terminal_error.get_or_insert_with(|| error.clone());
                             }
                             if let Some(observation) = raw.observation {
-                                if let Some(error) = active.observe_execution(
+                                let outcome = active.observe_execution(
                                     observation,
-                                    self.limits.max_repeated_tool_failures,
-                                ) {
+                                    self.limits.repeated_tool_failure_reminder_threshold,
+                                    self.limits.repeated_tool_failure_terminal_threshold,
+                                );
+                                if let Some(reminder) = outcome.reminder {
+                                    failure_reminders.push(reminder);
+                                }
+                                if let Some(error) = outcome.terminal {
                                     terminal_error.get_or_insert(error);
                                 }
                             }
@@ -2756,6 +2801,7 @@ impl AgentRunner {
             } else {
                 prospective_hook_context_bytes
             },
+            failure_reminders,
             lifecycle_fully_committed,
         })
     }
@@ -3203,10 +3249,20 @@ struct ActiveTurn {
     last_tool_failure: Option<ToolFailureFingerprint>,
     /// 最近相同失败指纹真正连续出现的次数。
     repeated_tool_failure_count: u32,
+    /// 本连续失败段内已注入运行时提醒的指纹；成功或指纹变化会一并重置。
+    tool_failure_reminder_fingerprint: Option<ToolFailureFingerprint>,
     /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
     limit_summary: Option<AgentRunError>,
     /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
     goal_id: Option<String>,
+}
+
+/// 一次真实工具执行观察后对模型上下文与 Turn 终态的运行时反馈。
+struct ToolFailureObservationOutcome {
+    /// 达到终止阈值时的唯一熔断错误。
+    terminal: Option<AgentRunError>,
+    /// 达到提醒阈值且本连续段尚未提醒时注入的一次性提醒消息。
+    reminder: Option<Message>,
 }
 
 impl ActiveTurn {
@@ -3222,17 +3278,24 @@ impl ActiveTurn {
         Ok(attempt)
     }
 
-    /// 按模型原始调用顺序更新真实工具失败计数并返回首个熔断错误。
+    /// 按模型原始调用顺序更新真实工具失败计数，并返回一次性提醒与熔断反馈。
+    ///
+    /// 成功或不同指纹都会重置连续段，已提醒标记一并重置；终止阈值优先于提醒阈值。
     fn observe_execution(
         &mut self,
         observation: ToolExecutionObservation,
-        maximum: u32,
-    ) -> Option<AgentRunError> {
+        reminder_threshold: u32,
+        terminal_threshold: u32,
+    ) -> ToolFailureObservationOutcome {
         match observation {
             ToolExecutionObservation::Succeeded => {
                 self.last_tool_failure = None;
                 self.repeated_tool_failure_count = 0;
-                None
+                self.tool_failure_reminder_fingerprint = None;
+                ToolFailureObservationOutcome {
+                    terminal: None,
+                    reminder: None,
+                }
             }
             ToolExecutionObservation::Failed { call, error_code } => {
                 let key = ToolFailureFingerprint {
@@ -3243,14 +3306,35 @@ impl ActiveTurn {
                     self.repeated_tool_failure_count =
                         self.repeated_tool_failure_count.saturating_add(1);
                 } else {
-                    self.last_tool_failure = Some(key);
+                    self.last_tool_failure = Some(key.clone());
                     self.repeated_tool_failure_count = 1;
+                    self.tool_failure_reminder_fingerprint = None;
                 }
-                (self.repeated_tool_failure_count >= maximum).then_some(AgentRunError::ToolLoop {
-                    kind: ToolLoopKind::RepeatedFailure,
-                    tool_name: call.tool_name,
-                    maximum,
-                })
+                if self.repeated_tool_failure_count >= terminal_threshold {
+                    return ToolFailureObservationOutcome {
+                        terminal: Some(AgentRunError::ToolLoop {
+                            kind: ToolLoopKind::RepeatedFailure,
+                            tool_name: call.tool_name,
+                            maximum: terminal_threshold,
+                        }),
+                        reminder: None,
+                    };
+                }
+                let reminder = if self.repeated_tool_failure_count == reminder_threshold
+                    && self.tool_failure_reminder_fingerprint.as_ref() != Some(&key)
+                {
+                    self.tool_failure_reminder_fingerprint = Some(key);
+                    Some(tool_failure_reminder_message(
+                        &call.tool_name,
+                        self.repeated_tool_failure_count,
+                    ))
+                } else {
+                    None
+                };
+                ToolFailureObservationOutcome {
+                    terminal: None,
+                    reminder,
+                }
             }
         }
     }
@@ -3272,6 +3356,26 @@ struct ToolFailureFingerprint {
     call: ToolCallFingerprint,
     /// 工具实现返回的稳定错误码。
     error_code: String,
+}
+
+/// 构造同指纹工具重复失败达到提醒阈值时的一次性有界运行时提醒。
+///
+/// 文案保持 Hook 上下文一致的信任边界前缀风格，并截断到与
+/// `HookLimits::max_context_bytes` 同量级的固定字节上限。
+fn tool_failure_reminder_message(tool_name: &str, failures: u32) -> Message {
+    let text = truncate_utf8(
+        &format!(
+            "{TOOL_FAILURE_REMINDER_PREFIX}\n\
+             来源：KeenCode Agent Runtime / RepeatedToolFailure\n\n\
+             工具 {tool_name} 使用相同输入已连续真实失败 {failures} 次。\
+             请在下一次尝试前改变方法或调整参数；\
+             如果确认无法完成，请直接说明原因并停止重复该调用。"
+        ),
+        MAX_TOOL_FAILURE_REMINDER_BYTES,
+    );
+    let mut message = Message::text(MessageRole::User, text);
+    message.is_meta = true;
+    message
 }
 
 /// 一次实际工具执行对重复失败计数器的确定性影响。
@@ -3496,6 +3600,8 @@ struct ToolBatchResult {
     round_permit: AgentToolRoundPermit,
     /// 本批实际提交后当前 Turn 已占用的 Hook 上下文字节数。
     hook_context_bytes: usize,
+    /// 本批观察到的同指纹重复失败一次性运行时提醒消息。
+    failure_reminders: Vec<Message>,
     /// `true` 表示全部已请求工具的唯一终态均已由 Sink 确认，允许提交 Round。
     lifecycle_fully_committed: bool,
 }

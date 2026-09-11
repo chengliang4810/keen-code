@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use keencode_model::{
-    ContentBlock, Message, MessageRole, ModelError, ModelStreamEvent, ProviderCapabilities,
-    ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, ToolDefinition, ToolResult,
-    ToolResultContent,
+    ContentBlock, Message, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
+    ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason,
+    ToolDefinition, ToolResult, ToolResultContent,
 };
 use serde_json::{Value, json};
 use tokio::sync::Notify;
@@ -1497,7 +1497,7 @@ async fn 重复真实工具失败达到上限后熔断() {
     let mut hooks = HookRegistry::new();
     hooks.register(hook).expect("失败循环 Hook 应成功注册");
     let limits = RunLimits::default()
-        .with_repeated_failure_limit(3)
+        .with_repeated_failure_terminal_threshold(3)
         .expect("循环上限应有效");
     let result = AgentRunner::new(
         Arc::new(ScriptedProvider::new(
@@ -1528,6 +1528,284 @@ async fn 重复真实工具失败达到上限后熔断() {
     assert!(tool_results(&result).iter().all(|item| item.is_error));
 }
 
+/// 提取一个模型请求中包含重复失败提醒标记的全部消息。
+fn repeated_failure_reminder_messages(request: &ModelRequest) -> Vec<&Message> {
+    request
+        .messages
+        .iter()
+        .filter(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("连续真实失败"))
+            })
+        })
+        .collect()
+}
+
+/// 返回测试提醒消息的唯一文本内容。
+fn reminder_text(message: &Message) -> &str {
+    match message.content.as_slice() {
+        [ContentBlock::Text { text }] => text,
+        _ => panic!("测试提醒消息必须只包含一个文本块"),
+    }
+}
+
+/// 返回每个模型请求中包含重复失败提醒标记的消息数量。
+fn reminder_counts_per_request(requests: &[ModelRequest]) -> Vec<usize> {
+    requests
+        .iter()
+        .map(|request| repeated_failure_reminder_messages(request).len())
+        .collect()
+}
+
+/// 第三次相同真实失败必须注入恰好一条一次性运行时提醒并让循环继续。
+#[tokio::test]
+async fn 重复失败达到提醒阈值注入一次提醒并继续循环() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(ProbeHook::new(events.clone()));
+    let tool = Arc::new(ProbeTool::new(events.clone(), true));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(tool.clone())
+        .expect("失败循环工具应成功注册");
+    let mut hooks = HookRegistry::new();
+    hooks.register(hook).expect("失败循环 Hook 应成功注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("remind-1", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("remind-2", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("remind-3", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("remind-4", "probe", json!({"value": "read"}))]),
+            text_reply("已改变方法完成"),
+        ],
+    ));
+    let result = AgentRunner::new(provider.clone(), tools, RunLimits::default())
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 4);
+    assert_eq!(tool.calls().len(), 4);
+    let requests = provider.requests().expect("模型请求快照可读取");
+    assert_eq!(requests.len(), 5);
+    // 提醒消息会随 Transcript 累计出现在后续请求中；数量不增长即只注入了一次。
+    assert_eq!(reminder_counts_per_request(&requests), vec![0, 0, 0, 1, 1]);
+    let reminders = repeated_failure_reminder_messages(&requests[3]);
+    let reminder = reminders[0];
+    assert_eq!(reminder.role, MessageRole::User);
+    assert!(reminder.is_meta);
+    let text = reminder_text(reminder);
+    assert!(text.contains("工具 probe 使用相同输入已连续真实失败 3 次"));
+    assert!(text.contains("改变方法或调整参数"));
+}
+
+/// 第六次相同真实失败必须终止 Turn，且全程只注入一次运行时提醒。
+#[tokio::test]
+async fn 重复失败达到终止阈值终止且全程只提醒一次() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(ProbeHook::new(events.clone()));
+    let tool = Arc::new(ProbeTool::new(events.clone(), true));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(tool.clone())
+        .expect("失败循环工具应成功注册");
+    let mut hooks = HookRegistry::new();
+    hooks.register(hook).expect("失败循环 Hook 应成功注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("terminal-1", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("terminal-2", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("terminal-3", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("terminal-4", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("terminal-5", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("terminal-6", "probe", json!({"value": "read"}))]),
+        ],
+    ));
+    let result = AgentRunner::new(provider.clone(), tools, RunLimits::default())
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::ToolLoop {
+            kind: ToolLoopKind::RepeatedFailure,
+            tool_name: "probe".to_owned(),
+            maximum: 6,
+        })
+    );
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::LimitReached)
+    );
+    assert_eq!(tool.calls().len(), 6);
+    let requests = provider.requests().expect("模型请求快照可读取");
+    assert_eq!(requests.len(), 6);
+    // 最终请求中提醒数量仍为 1，证明第 4-6 次失败没有再次注入。
+    assert_eq!(
+        reminder_counts_per_request(&requests),
+        vec![0, 0, 0, 1, 1, 1]
+    );
+}
+
+/// 成功重置连续段后，相同指纹再次连续失败必须再次获得运行时提醒。
+#[tokio::test]
+async fn 成功重置后相同指纹再次连续失败再次提醒() {
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(SequencedTool {
+            outcomes: Mutex::new(VecDeque::from([
+                false, false, false, true, false, false, false,
+            ])),
+        }))
+        .expect("序列工具应成功注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("re-remind-1", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-2", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-3", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-4", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-5", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-6", "sequence_probe", json!({"value": "same"}))]),
+            tool_reply(&[("re-remind-7", "sequence_probe", json!({"value": "same"}))]),
+            text_reply("done"),
+        ],
+    ));
+    let result = AgentRunner::new(provider.clone(), tools, RunLimits::default())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.step_count(), 7);
+    let requests = provider.requests().expect("模型请求快照可读取");
+    assert_eq!(requests.len(), 8);
+    // 两段连续失败各自注入一条提醒；成功重置后计数从零重新累计。
+    assert_eq!(
+        reminder_counts_per_request(&requests),
+        vec![0, 0, 0, 1, 1, 1, 1, 2]
+    );
+}
+
+/// 交替不同失败指纹必须持续重置连续段，既不提醒也不终止。
+#[tokio::test]
+async fn 交替不同失败指纹不提醒也不终止() {
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(CodedSequencedTool {
+            outcomes: Mutex::new(VecDeque::from([
+                CodedSequenceOutcome::Failure("failure-a"),
+                CodedSequenceOutcome::Failure("failure-b"),
+                CodedSequenceOutcome::Failure("failure-a"),
+                CodedSequenceOutcome::Failure("failure-b"),
+                CodedSequenceOutcome::Failure("failure-a"),
+                CodedSequenceOutcome::Failure("failure-b"),
+            ])),
+        }))
+        .expect("错误码序列工具应成功注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[(
+                "alternate-1",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            tool_reply(&[(
+                "alternate-2",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            tool_reply(&[(
+                "alternate-3",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            tool_reply(&[(
+                "alternate-4",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            tool_reply(&[(
+                "alternate-5",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            tool_reply(&[(
+                "alternate-6",
+                "coded_sequence_probe",
+                json!({"value": "same"}),
+            )]),
+            text_reply("done"),
+        ],
+    ));
+    let result = AgentRunner::new(provider.clone(), tools, RunLimits::default())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.step_count(), 6);
+    let requests = provider.requests().expect("模型请求快照可读取");
+    assert!(
+        reminder_counts_per_request(&requests)
+            .iter()
+            .all(|count| *count == 0)
+    );
+}
+
+/// 运行时提醒必须保持 Hook 上下文一致的信任边界前缀与元消息语义。
+#[tokio::test]
+async fn 运行时提醒消息保持信任边界与元标记() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(ProbeHook::new(events.clone()));
+    let tool = Arc::new(ProbeTool::new(events.clone(), true));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(tool.clone())
+        .expect("失败循环工具应成功注册");
+    let mut hooks = HookRegistry::new();
+    hooks.register(hook).expect("失败循环 Hook 应成功注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("boundary-1", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("boundary-2", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("boundary-3", "probe", json!({"value": "read"}))]),
+            text_reply("已放弃并说明原因"),
+        ],
+    ));
+    let result = AgentRunner::new(provider, tools, RunLimits::default())
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let reminders = result
+        .messages
+        .iter()
+        .filter(|message| {
+            message.content.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.contains("连续真实失败"))
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reminders.len(), 1);
+    let reminder = reminders[0];
+    assert_eq!(reminder.role, MessageRole::User);
+    assert!(reminder.is_meta);
+    let text = reminder_text(reminder);
+    assert!(text.starts_with("以下内容由 KeenCode Runtime 自动追加"));
+    assert!(text.contains("而非用户指令"));
+    assert!(text.contains("来源：KeenCode Agent Runtime / RepeatedToolFailure"));
+    assert!(text.len() <= 64 * 1_024);
+}
+
 /// 顺序调用达到重复失败阈值后必须立即阻止同批后续副作用工具。
 #[tokio::test]
 async fn 重复失败熔断不会执行同批后续副作用() {
@@ -1546,7 +1824,17 @@ async fn 重复失败熔断不会执行同批后续副作用() {
         ],
     ));
 
-    let result = runner(provider, tool.clone(), hook, HookLimits::default())
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(tool.clone())
+        .expect("失败循环工具应成功注册");
+    let mut hooks = HookRegistry::new();
+    hooks.register(hook).expect("失败循环 Hook 应成功注册");
+    let limits = RunLimits::default()
+        .with_repeated_failure_terminal_threshold(3)
+        .expect("循环上限应有效");
+    let result = AgentRunner::new(provider, tools, limits)
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
         .run_turn(turn_request(PlanGuard::inactive()))
         .await;
 
@@ -1583,7 +1871,7 @@ async fn 工具成功重置对应重复失败计数() {
         }))
         .expect("序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_repeated_failure_limit(3)
+        .with_repeated_failure_terminal_threshold(3)
         .expect("循环上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
@@ -1620,7 +1908,7 @@ async fn 不同失败指纹重置连续失败计数() {
         }))
         .expect("错误码序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_repeated_failure_limit(3)
+        .with_repeated_failure_terminal_threshold(3)
         .expect("连续失败上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
@@ -1672,7 +1960,7 @@ async fn 不同调用成功重置全部连续失败计数() {
         }))
         .expect("成功重置序列工具应成功注册");
     let limits = RunLimits::default()
-        .with_repeated_failure_limit(3)
+        .with_repeated_failure_terminal_threshold(3)
         .expect("连续失败上限应有效");
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
