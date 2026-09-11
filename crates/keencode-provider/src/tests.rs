@@ -5531,8 +5531,8 @@ async fn watchdog_零事件停滞在空闲超时后切断并静默重试成功()
         .expect("第一次尝试应记录失败");
     assert_eq!(
         failed.error_kind,
-        Some(crate::RequestErrorKind::StreamInterrupted),
-        "切断错误应保持流中断语义"
+        Some(crate::RequestErrorKind::Timeout),
+        "看门狗切断应按超时分类，与真实 EOF 截断的流中断分类可区分"
     );
     // 上界 700ms 远小于 1 秒停滞窗口，为测试进程的调度延迟留出余量。
     let started_at = observations
@@ -5574,6 +5574,10 @@ async fn watchdog_可见输出后停滞不再重试并保留中断语义() {
     assert!(
         matches!(error, ModelError::StreamInterrupted { .. }),
         "已转发事件后的切断应保持中断语义：{error:?}"
+    );
+    assert!(
+        error.message().contains("未收到任何事件"),
+        "切断文案应钉死看门狗空闲到期来源，区别于真实 EOF 截断：{error:?}"
     );
     assert_eq!(server.join().unwrap().unwrap().len(), 1, "不应发起重试");
 }
@@ -5624,8 +5628,10 @@ async fn watchdog_超时配置为零时禁用切断由读取超时兜底() {
     assert_eq!(server.join().unwrap().unwrap().len(), 1, "不应发起重试");
 }
 
-/// 看门狗计时按事件重置：每 30ms 一事件、超时 100ms 的慢速但活跃流
-/// 不被切断并完整完成；若误按总时长计时，流会在 100ms 处被错误切断。
+/// 看门狗计时按事件重置：每 30ms 一事件、超时 200ms 的慢速但活跃流
+/// 不被切断并完整完成；若误按总时长计时，流会在 200ms 处被错误切断
+/// （事件总时长 8×30=240ms 仍大于超时，保留该回归保护）。空闲窗口与
+/// 事件间隔的裕度约为 6.7 倍，为测试进程调度延迟留出空间。
 #[tokio::test(flavor = "multi_thread")]
 async fn watchdog_计时按事件重置慢速活跃流不切断() {
     let created = json!({
@@ -5643,7 +5649,7 @@ async fn watchdog_计时按事件重置慢速活跃流不切断() {
     }
     chunks.push(format!("data: {completed}\n\n"));
     let (base_url, server) = spawn_slow_sse_server(chunks, Duration::from_millis(30));
-    let client = watchdog_retry_client(&base_url, quick_retry_policy(3), 100);
+    let client = watchdog_retry_client(&base_url, quick_retry_policy(3), 200);
     let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
         .await
         .expect("慢速但活跃的流不应被看门狗切断");

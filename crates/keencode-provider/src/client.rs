@@ -1094,13 +1094,23 @@ impl Stream for IdleWatchdogStream {
                     Poll::Ready(()) => {
                         // 到期，或计时线程注册失败（之后没有唤醒源能再唤醒
                         // 本任务）：看门狗的失败退化方向与退避相反，必须
-                        // 立即切断而不是放行，否则挂起流会永久等待。
+                        // 立即切断而不是放行，否则挂起流会永久等待。注册
+                        // 失败分支的 deadline 由本次轮询刚创建、必然尚未
+                        // 到达，据此区分两种来源并使用如实的切断文案。
                         this.finished = true;
-                        Poll::Ready(Some(Err(ModelError::StreamInterrupted {
-                            message: format!(
+                        let message = if Instant::now() >= timer.deadline {
+                            format!(
                                 "模型事件流超过 {} ms 未收到任何事件",
                                 this.idle_timeout.as_millis()
-                            ),
+                            )
+                        } else {
+                            // 计时线程创建失败：没有任何等待发生，「超过
+                            // X ms 未收到事件」的描述会失真，改用保守切断
+                            // 文案；错误变体与重试语义保持不变。
+                            "看门狗计时线程创建失败，按超时保守切断".to_owned()
+                        };
+                        Poll::Ready(Some(Err(ModelError::StreamInterrupted {
+                            message,
                             retryable: true,
                         })))
                     }
@@ -1154,10 +1164,31 @@ fn bounded_text(value: &str) -> String {
     value.chars().take(MAX_OBSERVATION_TEXT_CHARS).collect()
 }
 
+/// 看门狗切断错误说明的稳定特征；两个特征分别对应空闲到期切断与计时
+/// 线程注册失败的保守切断。特征与消息构造同在 [`IdleWatchdogStream`] 中
+/// 维护，`idle_watchdog_tests` 钉死两侧契约；看门狗切断据此在观测分类上
+/// 与真实 EOF 截断（「模型事件流在协议终态前关闭」）区分开。
+const WATCHDOG_CUT_MESSAGE_MARKERS: [&str; 2] = ["未收到任何事件", "按超时保守切断"];
+
+/// 判断流中断错误说明是否来自流空闲看门狗切断而非真实流截断。
+fn is_watchdog_idle_cut(message: &str) -> bool {
+    WATCHDOG_CUT_MESSAGE_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
+}
+
 /// 把 Provider 中立错误映射为稳定请求记录分类。
+///
+/// 看门狗切断沿用 `ModelError::StreamInterrupted` 变体以保持既有重试判定
+/// 语义，但观测分类按「请求超过明确超时」归入 [`RequestErrorKind::Timeout`]，
+/// 使看门狗切断与真实 EOF 截断在线上记录中可区分；[`ModelError`] 变体与
+/// 重试拍板均不受该分类影响。
 fn classify_request_error(error: &ModelError) -> RequestErrorKind {
     match error {
         ModelError::Transport { .. } => RequestErrorKind::Transport,
+        ModelError::StreamInterrupted { message, .. } if is_watchdog_idle_cut(message) => {
+            RequestErrorKind::Timeout
+        }
         ModelError::StreamInterrupted { .. } => RequestErrorKind::StreamInterrupted,
         ModelError::Protocol { .. } | ModelError::ProtocolUnsupported { .. } => {
             RequestErrorKind::Protocol
@@ -1906,6 +1937,38 @@ mod idle_watchdog_tests {
                 timer.cancelled.as_ref().expect("重复挂起应保留同一标志")
             ),
             "重复轮询不得重新注册新的计时线程"
+        );
+    }
+
+    /// 看门狗切断与真实 EOF 截断共用 `StreamInterrupted` 变体，但观测分类
+    /// 必须可区分：看门狗两种切断文案（空闲到期、计时线程注册失败）归类为
+    /// 超时，真实截断与其他流中断保持流中断分类。此测试钉死消息特征与
+    /// [`classify_request_error`] 之间的契约。
+    #[test]
+    fn watchdog_cut_classifies_as_timeout_distinct_from_real_eof() {
+        let interrupted = |message: &str| ModelError::StreamInterrupted {
+            message: message.to_owned(),
+            retryable: true,
+        };
+        assert_eq!(
+            classify_request_error(&interrupted("模型事件流超过 90000 ms 未收到任何事件")),
+            RequestErrorKind::Timeout,
+            "空闲到期切断应按超时分类"
+        );
+        assert_eq!(
+            classify_request_error(&interrupted("看门狗计时线程创建失败，按超时保守切断")),
+            RequestErrorKind::Timeout,
+            "计时线程注册失败的保守切断应按超时分类"
+        );
+        assert_eq!(
+            classify_request_error(&interrupted("模型事件流在协议终态前关闭")),
+            RequestErrorKind::StreamInterrupted,
+            "真实 EOF 截断应保持流中断分类"
+        );
+        assert_eq!(
+            classify_request_error(&interrupted("SSE 连接被对端重置")),
+            RequestErrorKind::StreamInterrupted,
+            "其他流中断不得被误判为看门狗切断"
         );
     }
 }
