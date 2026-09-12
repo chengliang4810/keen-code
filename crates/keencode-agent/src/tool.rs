@@ -868,8 +868,16 @@ pub trait ToolOutputArtifactSink: Send + Sync {
     fn save_output(&self, label: &str, content: &str) -> io::Result<String>;
 }
 
-/// 截断标记两侧各保留的文本字节数；与命令输出预览粒度保持一致。
+/// 收缩重选阈值与预览保留预算的基准字节数；与命令输出预览粒度保持一致。
 pub(crate) const TRUNCATED_TEXT_KEEP_BYTES: usize = 8 * 1_024;
+
+/// 截断标记两侧各保留的预览字节数。
+///
+/// 在 [`TRUNCATED_TEXT_KEEP_BYTES`] 基础上扣除标记自身占用，使收缩后的
+/// 块总长不超过重选阈值 `2 × TRUNCATED_TEXT_KEEP_BYTES`；否则收缩结果
+/// 会被再次选中且长度不再变化，截断循环永远无法终止。
+pub(crate) const TRUNCATION_PREVIEW_KEEP_BYTES: usize =
+    TRUNCATED_TEXT_KEEP_BYTES - TRUNCATION_MARKER.len();
 
 /// 文本块中部省略时嵌入的稳定标记。
 pub(crate) const TRUNCATION_MARKER: &str = "\n...[中间输出已截断]...\n";
@@ -889,8 +897,9 @@ pub(crate) struct TruncatedOutputArtifact {
 /// 把超限成功输出保存到工件并按给定容量截断。
 ///
 /// 容量三元组依次为内容块数、模型可见字节数与 JSON 编码字节数。返回
-/// 截断后的输出与工件事实；图片来源自身无法通过校验、落盘失败或容量
-/// 小到连截断说明都无法容纳时返回 `None`，调用方回退既有固定拒绝语义。
+/// 截断后的输出与工件事实；图片来源自身无法通过校验、完整正文序列化
+/// 失败、落盘失败或容量小到连截断说明都无法容纳时返回 `None`，调用方
+/// 回退既有固定拒绝语义。
 pub(crate) fn truncate_tool_output_with_artifact(
     tool_call_id: &str,
     output: ToolOutput,
@@ -898,7 +907,7 @@ pub(crate) fn truncate_tool_output_with_artifact(
     sink: &dyn ToolOutputArtifactSink,
     capacity: (usize, usize, usize),
 ) -> Option<(ToolOutput, TruncatedOutputArtifact)> {
-    let body = tool_output_artifact_body(&output);
+    let body = tool_output_artifact_body(&output)?;
     let path = sink.save_output(label, &body).ok()?;
     let artifact = TruncatedOutputArtifact {
         path,
@@ -939,8 +948,9 @@ pub(crate) fn truncate_tool_output_to_capacity(
             break;
         }
         if !shrink_largest_text_block(&mut result.content) {
-            // 文本收缩已到下限仍放不下（例如大量合法图片占满 JSON 预算）：
-            // 整体收缩为仅剩截断说明；连说明都容纳不下时回退固定拒绝。
+            // 文本收缩已到下限或不再产生长度进展仍放不下（例如大量合法
+            // 图片占满 JSON 预算）：整体收缩为仅剩截断说明；连说明都容纳
+            // 不下时回退固定拒绝。
             result.content = vec![ToolResultContent::Text {
                 text: truncation_sentinel(artifact),
             }];
@@ -969,8 +979,12 @@ fn truncated_result_fits(result: &ToolResult, capacity: (usize, usize, usize)) -
     }
 }
 
-/// 把最大的文本块收缩为首尾各保留 [`TRUNCATED_TEXT_KEEP_BYTES`] 字节的
-/// 有界预览；返回是否发生了收缩。
+/// 把最大的文本块收缩为首尾各保留 [`TRUNCATION_PREVIEW_KEEP_BYTES`] 字节
+/// 的有界预览；返回是否发生了使长度严格变小的收缩。
+///
+/// 收缩后的块总长低于重选阈值，不会在后续迭代中被再次选中；若保留参数
+/// 与重选阈值的组合无法让长度严格变小（例如未来调整阈值后出现的不动
+/// 点），返回 `false` 让调用方进入整体塌缩分支而不是空转。
 fn shrink_largest_text_block(content: &mut [ToolResultContent]) -> bool {
     let shrink_threshold = TRUNCATED_TEXT_KEEP_BYTES.saturating_mul(2);
     let mut largest = None;
@@ -989,15 +1003,20 @@ fn shrink_largest_text_block(content: &mut [ToolResultContent]) -> bool {
     let Some(ToolResultContent::Text { text }) = content.get_mut(index) else {
         return false;
     };
-    let mut head_end = TRUNCATED_TEXT_KEEP_BYTES;
+    let mut head_end = TRUNCATION_PREVIEW_KEEP_BYTES;
     while !text.is_char_boundary(head_end) {
         head_end -= 1;
     }
-    let mut tail_start = text.len().saturating_sub(TRUNCATED_TEXT_KEEP_BYTES);
+    let mut tail_start = text.len().saturating_sub(TRUNCATION_PREVIEW_KEEP_BYTES);
     while !text.is_char_boundary(tail_start) {
         tail_start += 1;
     }
     let tail = text[tail_start..].to_owned();
+    // 护栏：收缩无法让块长度严格变小时报告无进展，避免同一不动点被
+    // 反复选中导致循环永不终止。
+    if head_end + TRUNCATION_MARKER.len() + tail.len() >= text.len() {
+        return false;
+    }
     text.truncate(head_end);
     text.push_str(TRUNCATION_MARKER);
     text.push_str(&tail);
@@ -1014,11 +1033,20 @@ fn truncation_sentinel(artifact: &TruncatedOutputArtifact) -> String {
 }
 
 /// 返回写入工件的完整输出正文；单文本块按原文保存，其余序列化为 JSON。
-fn tool_output_artifact_body(output: &ToolOutput) -> String {
+///
+/// 序列化失败时返回 `None`，调用方回退既有固定拒绝语义；不得静默写入
+/// 空工件，否则模型会据空文件误判已取回完整输出。
+fn tool_output_artifact_body(output: &ToolOutput) -> Option<String> {
     if let [ToolResultContent::Text { text }] = &output.content[..] {
-        return text.clone();
+        return Some(text.clone());
     }
-    serde_json::to_string(&output.content).unwrap_or_default()
+    let serialized = serde_json::to_string(&output.content);
+    debug_assert!(
+        serialized.is_ok(),
+        "工具结果内容块序列化为 JSON 不应失败：{:?}",
+        serialized.as_ref().err()
+    );
+    serialized.ok()
 }
 
 /// Agent Runtime 可注册的一个 Provider 中立工具。
@@ -1640,5 +1668,88 @@ mod output_guard_tests {
         };
         assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
         assert!(text.contains("完整输出共 100000 字节"));
+    }
+
+    /// 模型可见容量低于收缩下限时必须塌缩为仅剩说明块并快速终止。
+    ///
+    /// 这是收缩不动点回归：保留预算一旦使收缩结果仍高于重选阈值且长度
+    /// 不再变化，修复前的实现会在收缩循环中永久空转挂死整个 Turn。
+    #[test]
+    fn capacity_below_shrink_floor_collapses_instead_of_looping() {
+        let output = ToolOutput::text("x".repeat(300 * 1_024));
+        let artifact = TruncatedOutputArtifact {
+            path: "/tmp/keencode-full.log".to_owned(),
+            total_bytes: 300 * 1_024,
+        };
+        let truncated = truncate_tool_output_to_capacity(
+            "call-shrink-floor",
+            output,
+            &artifact,
+            (10, 8_192, usize::MAX),
+        )
+        .expect("截断说明自身应能容纳在模型可见容量内");
+        let [ToolResultContent::Text { text }] = &truncated.content[..] else {
+            panic!("容量低于收缩下限时应整体塌缩为仅剩截断说明");
+        };
+        assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    }
+
+    /// 容量连截断说明都无法容纳时返回 `None` 交由调用方回退固定拒绝。
+    #[test]
+    fn capacity_below_sentinel_returns_none_quickly() {
+        let output = ToolOutput::text("x".repeat(300 * 1_024));
+        let artifact = TruncatedOutputArtifact {
+            path: "/tmp/keencode-full.log".to_owned(),
+            total_bytes: 300 * 1_024,
+        };
+        assert_eq!(
+            truncate_tool_output_to_capacity(
+                "call-below-sentinel",
+                output,
+                &artifact,
+                (10, 64, usize::MAX),
+            ),
+            None
+        );
+    }
+
+    /// 两张合法图片占满 JSON 预算时文本收缩无法修复，必须经塌缩快速终止。
+    #[test]
+    fn legal_images_exhausting_json_budget_terminate_via_collapse() {
+        // 每张图片 Base64 数据 6 MiB：本身合法，但两图的 JSON 编码已超出
+        // 单结果 JSON 硬上限，文本收缩无法触及该下界。
+        let data = format!("{}==", "A".repeat(6_291_454));
+        let output = ToolOutput {
+            content: vec![
+                ToolResultContent::Image {
+                    image: ImageContent::from_base64("image/png", data.clone()),
+                },
+                ToolResultContent::Image {
+                    image: ImageContent::from_base64("image/png", data),
+                },
+                ToolResultContent::Text {
+                    text: "x".repeat(300 * 1_024),
+                },
+            ],
+        };
+        let artifact = TruncatedOutputArtifact {
+            path: "/tmp/keencode-full.log".to_owned(),
+            total_bytes: 2 * 6_291_456 + 300 * 1_024,
+        };
+        let truncated = truncate_tool_output_to_capacity(
+            "call-images",
+            output,
+            &artifact,
+            (
+                TOOL_OUTPUT_LIMITS.max_content_blocks,
+                usize::MAX,
+                TOOL_OUTPUT_LIMITS.max_result_json_bytes,
+            ),
+        )
+        .expect("塌缩为仅剩说明块后应能容纳在 JSON 容量内");
+        let [ToolResultContent::Text { text }] = &truncated.content[..] else {
+            panic!("图片占满 JSON 预算时应整体塌缩为仅剩截断说明");
+        };
+        assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
     }
 }

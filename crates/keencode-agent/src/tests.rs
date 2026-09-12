@@ -2,14 +2,15 @@
 
 use super::*;
 use crate::tool::{
-    SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, TRUNCATED_TEXT_KEEP_BYTES,
-    TRUNCATION_MARKER, TRUNCATION_SENTINEL_PREFIX,
+    SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, TRUNCATION_MARKER,
+    TRUNCATION_PREVIEW_KEEP_BYTES, TRUNCATION_SENTINEL_PREFIX,
 };
 use keencode_model::{
-    ContentBlock, Message, MessageRole, ModelError, ModelStreamEvent, ProviderCapabilities,
-    ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputCapability,
-    StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage,
-    ToolCall, ToolChoice, ToolDefinition, ToolResult, ToolResultContent,
+    ContentBlock, ImageContent, Message, MessageRole, ModelError, ModelStreamEvent,
+    ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason,
+    StructuredOutputCapability, StructuredOutputConfig, StructuredOutputEnforcement,
+    StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice, ToolDefinition, ToolResult,
+    ToolResultContent,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4236,7 +4237,7 @@ impl ToolOutputArtifactSink for TestArtifactSink {
     }
 }
 
-/// 返回预设 ToolOutput 并接入测试工件目录的合成工具。
+/// 返回预设 ToolOutput 并可选接入测试工件目录的合成工具。
 struct ArtifactOutputTool {
     /// 提供给模型的精确工具名称。
     name: &'static str,
@@ -4244,8 +4245,8 @@ struct ArtifactOutputTool {
     effect: ToolEffect,
     /// 每次调用返回的预设输出。
     output: ToolOutput,
-    /// 注入的输出落盘通道。
-    sink: Arc<TestArtifactSink>,
+    /// 注入的输出落盘通道；`None` 覆盖未接入工件目录的工具形态。
+    sink: Option<Arc<TestArtifactSink>>,
 }
 
 impl ArtifactOutputTool {
@@ -4261,7 +4262,17 @@ impl ArtifactOutputTool {
             name,
             effect,
             output,
-            sink: Arc::new(TestArtifactSink { directory, fail }),
+            sink: Some(Arc::new(TestArtifactSink { directory, fail })),
+        }
+    }
+
+    /// 创建不提供输出落盘通道的合成工具，覆盖 sink 缺失的回退路径。
+    fn new_without_sink(name: &'static str, effect: ToolEffect, output: ToolOutput) -> Self {
+        Self {
+            name,
+            effect,
+            output,
+            sink: None,
         }
     }
 }
@@ -4291,9 +4302,10 @@ impl AgentTool for ArtifactOutputTool {
         ToolConcurrency::Exclusive
     }
 
-    /// 接入测试工件目录的落盘通道。
+    /// 接入测试工件目录的落盘通道；未接入时保持默认 `None` 语义。
     fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
-        Some(self.sink.clone())
+        let sink: Arc<dyn ToolOutputArtifactSink> = self.sink.clone()?;
+        Some(sink)
     }
 
     /// 返回预设输出。
@@ -4356,10 +4368,10 @@ async fn read_only_over_limit_output_is_truncated_with_artifact_and_turn_continu
     let (text, sentinel) = expect_truncated_text_with_sentinel(results[0]);
     assert_eq!(
         text.len(),
-        TRUNCATED_TEXT_KEEP_BYTES * 2 + TRUNCATION_MARKER.len()
+        TRUNCATION_PREVIEW_KEEP_BYTES * 2 + TRUNCATION_MARKER.len()
     );
-    assert!(text.starts_with(&"a".repeat(TRUNCATED_TEXT_KEEP_BYTES)));
-    assert!(text.ends_with(&"a".repeat(TRUNCATED_TEXT_KEEP_BYTES)));
+    assert!(text.starts_with(&"a".repeat(TRUNCATION_PREVIEW_KEEP_BYTES)));
+    assert!(text.ends_with(&"a".repeat(TRUNCATION_PREVIEW_KEEP_BYTES)));
     assert!(text.contains(TRUNCATION_MARKER));
     assert!(sentinel.starts_with(TRUNCATION_SENTINEL_PREFIX));
     assert!(sentinel.contains(&format!("完整输出共 {} 字节", body.len())));
@@ -4409,8 +4421,10 @@ async fn side_effect_over_limit_output_is_truncated_and_turn_continues() {
     assert!(body.starts_with(&text[..marker_position]));
     let tail = &text[marker_position + TRUNCATION_MARKER.len()..];
     assert!(body.ends_with(tail));
-    assert!(marker_position <= TRUNCATED_TEXT_KEEP_BYTES);
-    assert!(text.len() - marker_position - TRUNCATION_MARKER.len() <= TRUNCATED_TEXT_KEEP_BYTES);
+    assert!(marker_position <= TRUNCATION_PREVIEW_KEEP_BYTES);
+    assert!(
+        text.len() - marker_position - TRUNCATION_MARKER.len() <= TRUNCATION_PREVIEW_KEEP_BYTES
+    );
     assert!(sentinel.contains("keencode-big_write-test.log"));
     let saved = std::fs::read_to_string(directory.join("keencode-big_write-test.log"))
         .expect("工件文件应已写出");
@@ -4702,4 +4716,477 @@ async fn within_budget_output_is_byte_identical_without_artifact() {
         std::fs::read_dir(&directory).is_err(),
         "预算内结果不应创建任何工件文件"
     );
+}
+
+/// 返回工件目录中已保存的文件名列表；目录不存在时测试断言失败。
+fn artifact_file_names(directory: &std::path::Path) -> Vec<String> {
+    let mut names = std::fs::read_dir(directory)
+        .expect("工件目录应已创建")
+        .map(|entry| {
+            entry
+                .expect("工件目录项应可读")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+/// 合法图片与长文本块挤满单结果 JSON 预算时，截断循环必须经塌缩快速终止。
+///
+/// 这是收缩不动点的运行时回归：图片的 JSON 占用是文本收缩无法触及的
+/// 下界，修复前的收缩循环会因不动点永久空转并挂死整个 Turn。
+#[tokio::test]
+async fn images_with_long_text_over_json_limit_collapse_to_sentinel_and_turn_continues() {
+    let directory = artifact_test_directory("images-json-collapse");
+    let data = format!("{}==", "A".repeat(6_291_454));
+    let output = ToolOutput {
+        content: vec![
+            ToolResultContent::Image {
+                image: ImageContent::from_base64("image/png", data.clone()),
+            },
+            ToolResultContent::Image {
+                image: ImageContent::from_base64("image/png", data),
+            },
+            ToolResultContent::Text {
+                text: "x".repeat(300 * 1_024),
+            },
+        ],
+    };
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "image_tool",
+        ToolEffect::ReadOnly,
+        output,
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "image_tool", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    let [ToolResultContent::Text { text }] = &results[0].content[..] else {
+        panic!("图片占满 JSON 预算时应塌缩为仅剩截断说明块");
+    };
+    assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    assert!(text.contains("keencode-image_tool-test.log"));
+    // 完整正文已落盘：多块内容保存为内容块 JSON 全文，图片不丢失。
+    let saved = std::fs::read_to_string(directory.join("keencode-image_tool-test.log"))
+        .expect("工件文件应已写出");
+    let parsed: Vec<ToolResultContent> =
+        serde_json::from_str(&saved).expect("多块工件应为内容块 JSON 全文");
+    assert_eq!(parsed.len(), 3);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Round 聚合超限且无工件通道时，只读结果回退固定拒绝文本，Turn 继续。
+#[tokio::test]
+async fn read_only_round_aggregate_over_limit_without_sink_falls_back_to_fixed_rejection() {
+    let directory = artifact_test_directory("round-aggregate-no-sink-read-only");
+    // 首个结果 63 块恰好占满 Round 块预算并保留一个待生成失败槽位；
+    // 第二个结果自身合规但聚合后再无 2 个块容量。
+    let first = ToolOutput {
+        content: (0..TOOL_OUTPUT_LIMITS.max_round_content_blocks - 1)
+            .map(|index| ToolResultContent::Text {
+                text: format!("块{index}"),
+            })
+            .collect(),
+    };
+    let second = ToolOutput {
+        content: vec![
+            ToolResultContent::Text {
+                text: "尾块一".to_owned(),
+            },
+            ToolResultContent::Text {
+                text: "尾块二".to_owned(),
+            },
+        ],
+    };
+    let first_tool = Arc::new(ArtifactOutputTool::new_without_sink(
+        "aggregate_first",
+        ToolEffect::ReadOnly,
+        first,
+    ));
+    let second_tool = Arc::new(ArtifactOutputTool::new_without_sink(
+        "aggregate_second",
+        ToolEffect::ReadOnly,
+        second,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(first_tool).expect("首个工具应可注册");
+    registry.register(second_tool).expect("第二个工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-1", "aggregate_first", json!({"value": "1"})),
+                ("call-2", "aggregate_second", json!({"value": "2"})),
+            ]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    // 首个结果在聚合预算内逐字节保持不变。
+    assert!(!results[0].is_error);
+    assert_eq!(
+        results[0].content.len(),
+        TOOL_OUTPUT_LIMITS.max_round_content_blocks - 1
+    );
+    // 第二个结果被整体替换为固定超限拒绝文本。
+    assert!(results[1].is_error);
+    assert_eq!(turn_tool_result_text(results[1]), TOOL_OUTPUT_LIMIT_RESULT);
+    assert!(
+        std::fs::read_dir(&directory).is_err(),
+        "无工件通道时不应创建任何工件文件"
+    );
+}
+
+/// Round 聚合超限且无工件通道时，副作用结果回退 ToolOutputLimit 终态。
+#[tokio::test]
+async fn side_effect_round_aggregate_over_limit_without_sink_is_terminal() {
+    let directory = artifact_test_directory("round-aggregate-no-sink-side-effect");
+    let first = ToolOutput {
+        content: (0..TOOL_OUTPUT_LIMITS.max_round_content_blocks - 1)
+            .map(|index| ToolResultContent::Text {
+                text: format!("块{index}"),
+            })
+            .collect(),
+    };
+    let second = ToolOutput {
+        content: vec![
+            ToolResultContent::Text {
+                text: "尾块一".to_owned(),
+            },
+            ToolResultContent::Text {
+                text: "尾块二".to_owned(),
+            },
+        ],
+    };
+    let first_tool = Arc::new(ArtifactOutputTool::new_without_sink(
+        "aggregate_side_first",
+        ToolEffect::ChangesState,
+        first,
+    ));
+    let second_tool = Arc::new(ArtifactOutputTool::new_without_sink(
+        "aggregate_side_second",
+        ToolEffect::ChangesState,
+        second,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(first_tool).expect("首个工具应可注册");
+    registry.register(second_tool).expect("第二个工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&[
+            ("call-1", "aggregate_side_first", json!({"value": "1"})),
+            ("call-2", "aggregate_side_second", json!({"value": "2"})),
+        ])],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::ToolOutputLimit {
+            code: ToolOutputErrorCode::SideEffectLimitExceeded,
+            completion_commit_error: None,
+        })
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    assert!(!results[0].is_error);
+    assert_eq!(
+        results[0].content.len(),
+        TOOL_OUTPUT_LIMITS.max_round_content_blocks - 1
+    );
+    assert!(results[1].is_error);
+    assert_eq!(
+        turn_tool_result_text(results[1]),
+        SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT
+    );
+    assert!(
+        std::fs::read_dir(&directory).is_err(),
+        "无工件通道时不应创建任何工件文件"
+    );
+}
+
+/// 单结果截断落盘后再遇 Round 聚合超限时复用同一工件指针，只保存一个文件。
+#[tokio::test]
+async fn round_aggregate_shrink_reuses_saved_artifact_without_new_file() {
+    let directory = artifact_test_directory("round-aggregate-artifact-reuse");
+    // 首个结果 23 × 512KiB 合规且占据大部分 Round 模型可见预算。
+    let first_block = "a".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes);
+    let first = ToolOutput {
+        content: (0..23)
+            .map(|_| ToolResultContent::Text {
+                text: first_block.clone(),
+            })
+            .collect(),
+    };
+    // 第二个结果 24 × 512KiB 超出单结果 JSON 上限：先在单结果阶段截断
+    // 落盘，随后聚合超限继续复用该工件收缩其余文本块。
+    let second_block = "b".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes);
+    let second = ToolOutput {
+        content: (0..24)
+            .map(|_| ToolResultContent::Text {
+                text: second_block.clone(),
+            })
+            .collect(),
+    };
+    let first_tool = Arc::new(ArtifactOutputTool::new_without_sink(
+        "reuse_first",
+        ToolEffect::ReadOnly,
+        first,
+    ));
+    let second_tool = Arc::new(ArtifactOutputTool::new(
+        "reuse_second",
+        ToolEffect::ChangesState,
+        second,
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(first_tool).expect("首个工具应可注册");
+    registry.register(second_tool).expect("第二个工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-1", "reuse_first", json!({"value": "1"})),
+                ("call-2", "reuse_second", json!({"value": "2"})),
+            ]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    // 首个结果在聚合预算内逐字节保持不变。
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].content.len(), 23);
+    for block in &results[0].content {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: first_block.clone()
+            }
+        );
+    }
+    // 第二个结果保持成功分类：聚合收缩把全部原始文本块收缩为有界预览，
+    // 并在单结果与聚合两次截断中各附加一个指向同一工件的说明块。
+    // 第二个结果保持成功分类：单结果截断收缩 1 块，聚合复用收缩再收缩
+    // 15 块后恰好回到可保留容量（首结果占 12058624 字节，剩余
+    // 4718592 字节），其余 8 块逐字节保留，并各附加一个同指针说明块。
+    assert!(!results[1].is_error);
+    assert_eq!(results[1].content.len(), 26);
+    let mut previews = 0_usize;
+    let mut fulls = 0_usize;
+    for block in &results[1].content[..24] {
+        let ToolResultContent::Text { text } = block else {
+            panic!("收缩结果应为文本块");
+        };
+        if text.len() == TRUNCATION_PREVIEW_KEEP_BYTES * 2 + TRUNCATION_MARKER.len() {
+            previews += 1;
+            assert!(text.contains(TRUNCATION_MARKER));
+            assert!(text.starts_with(&"b".repeat(TRUNCATION_PREVIEW_KEEP_BYTES)));
+        } else {
+            assert_eq!(text, &second_block, "未收缩块必须逐字节保留原输出");
+            fulls += 1;
+        }
+    }
+    assert_eq!(previews, 16, "单结果与聚合两次截断合计应收缩 16 块");
+    assert_eq!(fulls, 8, "聚合收缩恰可容纳后剩余完整块应原样保留");
+    let [
+        ToolResultContent::Text {
+            text: first_sentinel,
+        },
+        ToolResultContent::Text {
+            text: last_sentinel,
+        },
+    ] = &results[1].content[24..]
+    else {
+        panic!("尾部两块应为文本截断说明");
+    };
+    // 两次截断说明指向同一工件指针，文本完全一致。
+    assert_eq!(first_sentinel, last_sentinel);
+    assert!(last_sentinel.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    assert!(last_sentinel.contains("keencode-reuse_second-test.log"));
+    // 只有一个工件文件：聚合收缩复用同一指针，完整正文保持原始 24 块。
+    assert_eq!(
+        artifact_file_names(&directory),
+        ["keencode-reuse_second-test.log"]
+    );
+    let saved = std::fs::read_to_string(directory.join("keencode-reuse_second-test.log"))
+        .expect("工件文件应已写出");
+    let parsed: Vec<ToolResultContent> =
+        serde_json::from_str(&saved).expect("多块工件应为内容块 JSON 全文");
+    assert_eq!(parsed.len(), 24);
+    for block in &parsed {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: second_block.clone()
+            }
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 记录成功与失败 PostHook 观察并注入超出 PostHook 模型可见预算的上下文。
+struct OversizedPostContextHook {
+    /// 按进入顺序保存成功 PostHook 看到的截断成功结果。
+    post_results: Arc<Mutex<Vec<ToolResult>>>,
+    /// 按进入顺序保存容量失败后失败 Hook 看到的最终固定结果。
+    failure_contexts: Arc<Mutex<Vec<PostToolUseFailureContext>>>,
+}
+
+impl AgentHook for OversizedPostContextHook {
+    /// 返回截断与 PostHook 容量组合回归使用的稳定名称。
+    fn name(&self) -> &str {
+        "oversized-post-context-hook"
+    }
+
+    /// 记录截断成功结果，并返回必然超过 PostHook 模型可见预算的上下文。
+    fn post_tool_use(
+        &self,
+        context: PostToolUseContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        self.post_results
+            .lock()
+            .expect("成功 PostHook 结果锁不应损坏")
+            .push(context.result.clone());
+        let text = "x".repeat(TOOL_OUTPUT_LIMITS.max_post_hook_model_visible_bytes + 1);
+        Box::pin(async move {
+            Ok(ToolHookOutput {
+                context: vec![HookContextAddition::new(text)],
+            })
+        })
+    }
+
+    /// 记录容量替换后唯一固定失败结果，不再追加任何上下文。
+    fn post_tool_use_failure(
+        &self,
+        context: PostToolUseFailureContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        self.failure_contexts
+            .lock()
+            .expect("失败 PostHook 上下文锁不应损坏")
+            .push(context);
+        Box::pin(async { Ok(ToolHookOutput::default()) })
+    }
+}
+
+/// 截断落盘成功后 PostHook 容量失败：结果原子替换为固定超限失败且双 Hook 各一次。
+#[tokio::test]
+async fn truncated_success_post_hook_capacity_failure_falls_back_to_fixed_rejection() {
+    let directory = artifact_test_directory("truncated-post-hook-capacity");
+    let body = "x".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes + 75_712);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "hook_trunc",
+        ToolEffect::ReadOnly,
+        ToolOutput::text(body.clone()),
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let post_results = Arc::new(Mutex::new(Vec::new()));
+    let failure_contexts = Arc::new(Mutex::new(Vec::new()));
+    let mut hooks = HookRegistry::new();
+    hooks
+        .register(Arc::new(OversizedPostContextHook {
+            post_results: post_results.clone(),
+            failure_contexts: failure_contexts.clone(),
+        }))
+        .expect("PostHook 容量组合记录器应注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "hook_trunc", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    // PostHook 容量失败属于 Hook 硬上限，Turn 以 Hook 错误终止。
+    assert!(
+        matches!(
+            result.error,
+            Some(AgentRunError::Hook(
+                HookError::PostOutputModelVisibleBytesExceeded { maximum, .. }
+            )) if maximum == TOOL_OUTPUT_LIMITS.max_post_hook_model_visible_bytes
+        ),
+        "{:?}",
+        result.error
+    );
+    // 最终结果已同步替换为固定超限失败。
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    assert_eq!(turn_tool_result_text(results[0]), TOOL_OUTPUT_LIMIT_RESULT);
+    // 成功 PostHook 恰好一次，看到的是截断落盘后的成功结果。
+    let post_results = post_results.lock().expect("成功 PostHook 结果锁不应损坏");
+    assert_eq!(post_results.len(), 1);
+    assert!(!post_results[0].is_error);
+    assert_eq!(post_results[0].content.len(), 2);
+    let [
+        ToolResultContent::Text { text: preview },
+        ToolResultContent::Text { text: sentinel },
+    ] = &post_results[0].content[..]
+    else {
+        panic!("截断成功结果应为预览块加截断说明两个文本块");
+    };
+    assert_eq!(
+        preview.len(),
+        TRUNCATION_PREVIEW_KEEP_BYTES * 2 + TRUNCATION_MARKER.len()
+    );
+    assert!(sentinel.contains("keencode-hook_trunc-test.log"));
+    drop(post_results);
+    // 失败 PostHook 恰好一次，看到固定超限失败分类与最终结果。
+    let failure_contexts = failure_contexts
+        .lock()
+        .expect("失败 PostHook 上下文锁不应损坏");
+    assert_eq!(failure_contexts.len(), 1);
+    assert_eq!(
+        failure_contexts[0].failure,
+        ToolHookFailureKind::OutputLimitExceeded
+    );
+    assert_eq!(failure_contexts[0].result, results[0].clone());
+    drop(failure_contexts);
+    // 截断先于 PostHook 发生：完整正文工件已写出。
+    let saved = std::fs::read_to_string(directory.join("keencode-hook_trunc-test.log"))
+        .expect("工件文件应已写出");
+    assert_eq!(saved, body);
+    let _ = std::fs::remove_dir_all(&directory);
 }
