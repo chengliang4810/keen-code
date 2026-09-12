@@ -129,8 +129,10 @@ const ROUND_PENDING_RESULT_JSON_RESERVE_BYTES: usize = 8 * 1_024;
 /// 工具在同一模型 Round 内允许采用的执行方式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ToolConcurrency {
-    /// 只读且实现保证线程安全时可以与相邻同类调用并行。
+    /// 只读且实现保证线程安全时可以与相邻安全调用并行；自身失败不波及兄弟。
     ParallelReadOnly,
+    /// 副作用但实现声明批内并发安全时可以并行；自身失败 abort 同批排队兄弟。
+    ParallelSafe,
     /// 必须作为顺序屏障独占执行。
     Exclusive,
 }
@@ -1057,7 +1059,9 @@ pub trait AgentTool: Send + Sync {
     /// 按规范化输入判断本次调用是否可能产生外部副作用。
     fn effect(&self, input: &Value) -> Result<ToolEffect, ToolError>;
 
-    /// 返回本工具在只读调用时允许的并发方式。
+    /// 返回本工具允许的并发方式：只读工具常用 `ParallelReadOnly`；
+    /// 副作用工具默认 `Exclusive`，确信批内并发安全时可声明 `ParallelSafe`
+    ///（自身失败会 abort 同批排队兄弟）。
     fn concurrency(&self) -> ToolConcurrency;
 
     /// 返回单次执行的外层墙钟上限；`None` 表示工具自管超时或有界用户交互。

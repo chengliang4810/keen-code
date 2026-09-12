@@ -88,6 +88,13 @@ const MAX_OUTPUT_TOKEN_RECOVERY_LIMIT: u32 = 2;
 /// 每个权威事件同步提交时允许的总尝试次数；所有重投复用同一事件对象和稳定身份。
 const AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS: usize = 2;
 
+/// 同一并行段内允许的连续并发安全工具调用数量上限。
+///
+/// 与 CCB"连续安全工具成批并发上限 10"对齐：同一段内前 10 个安全调用组成
+/// 一批并发执行，超出的排队到下一批——第一批全部启动后（无论完成）才开始
+/// 启动第二批。副作用失败仅 abort 同一批排队兄弟，不波及后续批次。
+const MAX_PARALLEL_SEGMENT_WIDTH: usize = 10;
+
 /// 多个摘要物理请求聚合成一个逻辑用途时使用的保留调用尝试序号。
 const AGGREGATED_CONTEXT_CALL_ATTEMPT: u32 = 0;
 
@@ -2904,7 +2911,8 @@ impl AgentRunner {
         Ok(batch)
     }
 
-    /// 执行相邻并发安全只读段，并让其他调用形成顺序屏障。
+    /// 执行连续并发安全调用段（只读并行 + 声明并发安全的副作用工具），
+    /// 宽度上限内同批并发、超宽分批；其他调用形成独占顺序屏障。
     async fn execute_prepared(
         &self,
         request: &TurnRequest,
@@ -2960,13 +2968,9 @@ impl AgentRunner {
                         break;
                     }
                 }
-                PreparedDisposition::Execute {
-                    effect: ToolEffect::ReadOnly,
-                    concurrency: ToolConcurrency::ParallelReadOnly,
-                    ..
-                } => {
+                PreparedDisposition::Execute { .. } if prepared[cursor].is_parallel_batchable() => {
                     let start = cursor;
-                    while cursor < prepared.len() && prepared[cursor].is_parallel_read_only() {
+                    while cursor < prepared.len() && prepared[cursor].is_parallel_batchable() {
                         cursor += 1;
                     }
                     let end = cursor;
@@ -2978,143 +2982,217 @@ impl AgentRunner {
                         break;
                     }
                     let cancel_grace = Duration::from_millis(self.limits.tool_cancel_grace_ms);
-                    // 段取消只承载用户取消与终态基础设施失败；工具真实失败（含超时、
-                    // 输出超限固定结果、重复失败熔断终态）只记录结果与 terminal_error，
-                    // 不中断仍在运行的只读兄弟，各自结果按完成顺序回流。
+                    // 段取消只承载用户取消与终态基础设施失败；批取消承载副作用
+                    // 失败 abort：批内副作用工具以失败收尾时取消同批排队兄弟，
+                    // 兄弟合成取消结果但不终止 Turn；只读失败（含超时、输出超限
+                    // 固定结果、重复失败熔断终态）只记录结果，各自回流（#28）。
                     let segment_cancellation = request.cancellation.child_token();
-                    let mut futures = FuturesUnordered::new();
-                    for (index, prepared_call) in
-                        prepared.iter_mut().enumerate().take(end).skip(start)
-                    {
-                        if let Err(error) =
-                            ensure_step_capacity(&active.state, self.limits.max_steps, 1)
+                    let mut chunk_start = start;
+                    while chunk_start < end {
+                        if completion_error.is_some() || terminal_error.is_some() {
+                            break;
+                        }
+                        let chunk_end = (chunk_start + MAX_PARALLEL_SEGMENT_WIDTH).min(end);
+                        let batch_cancellation = segment_cancellation.child_token();
+                        // 首个失败副作用工具的名称，用于合成排队兄弟的取消结果。
+                        let mut batch_abort_name: Option<String> = None;
+                        let mut futures = FuturesUnordered::new();
+                        for (index, prepared_call) in prepared
+                            .iter_mut()
+                            .enumerate()
+                            .take(chunk_end)
+                            .skip(chunk_start)
                         {
-                            segment_cancellation.cancel();
-                            terminal_error.get_or_insert(error);
-                            break;
+                            if let Err(error) =
+                                ensure_step_capacity(&active.state, self.limits.max_steps, 1)
+                            {
+                                segment_cancellation.cancel();
+                                terminal_error.get_or_insert(error);
+                                break;
+                            }
+                            if let Err(error) = self.emit_tool_execution_started(
+                                request,
+                                active.state.round_count(),
+                                &mut round_permit,
+                                prepared_call,
+                            ) {
+                                segment_cancellation.cancel();
+                                terminal_error.get_or_insert(error);
+                                break;
+                            }
+                            if let Err(error) =
+                                record_started_steps(&mut active.state, self.limits.max_steps, 1)
+                            {
+                                segment_cancellation.cancel();
+                                terminal_error.get_or_insert(error);
+                                break;
+                            }
+                            let call = prepared_call.clone();
+                            let call_cancellation = batch_cancellation.clone();
+                            futures.push(async move {
+                                (
+                                    index,
+                                    execute_one_raw(request, call, call_cancellation, cancel_grace)
+                                        .await,
+                                )
+                            });
                         }
-                        if let Err(error) = self.emit_tool_execution_started(
-                            request,
-                            active.state.round_count(),
-                            &mut round_permit,
-                            prepared_call,
-                        ) {
-                            segment_cancellation.cancel();
-                            terminal_error.get_or_insert(error);
-                            break;
-                        }
-                        if let Err(error) =
-                            record_started_steps(&mut active.state, self.limits.max_steps, 1)
-                        {
-                            segment_cancellation.cancel();
-                            terminal_error.get_or_insert(error);
-                            break;
-                        }
-                        let call = prepared_call.clone();
-                        let call_cancellation = segment_cancellation.clone();
-                        futures.push(async move {
-                            (
-                                index,
-                                execute_one_raw(request, call, call_cancellation, cancel_grace)
-                                    .await,
-                            )
-                        });
-                    }
-                    while let Some((index, outcome)) = futures.next().await {
-                        match outcome {
-                            Ok(mut raw) => {
-                                let post = if completion_error.is_none()
-                                    && terminal_error.is_none()
-                                    && !round_permit.recovery_retained()
-                                {
-                                    finalize_tool_before_completion(
-                                        request,
-                                        &prepared[index],
-                                        &mut raw,
-                                        &self.hooks,
-                                        ToolEffect::ReadOnly,
-                                        ToolFinalizationBudgets {
-                                            hook_context_bytes: &mut prospective_hook_context_bytes,
-                                            post_hook_output: &mut post_hook_output_budget,
-                                            round_output: &mut round_output_budget,
-                                            hook_budget_failed: &mut hook_budget_failed,
-                                        },
-                                    )
-                                    .await?
-                                } else {
-                                    raw.enforce_round_budget(
-                                        ToolEffect::ReadOnly,
+                        while let Some((index, outcome)) = futures.next().await {
+                            match outcome {
+                                Ok(mut raw) => {
+                                    let effect =
+                                        prepared[index].execution_effect().ok_or_else(|| {
+                                            AgentRunError::Internal {
+                                                message: "已执行工具缺少冻结副作用分类".to_owned(),
+                                            }
+                                        })?;
+                                    // 批 abort 归因：请求未取消、批内已有副作用失败、
+                                    // 且本调用以取消收尾时，视为被 abort 的排队兄弟。
+                                    let batch_aborted = batch_abort_name.is_some()
+                                        && matches!(raw.status, ToolCompletionStatus::Cancelled)
+                                        && !request.cancellation.is_cancelled()
+                                        && completion_error.is_none();
+                                    if batch_aborted {
+                                        let failed_name = batch_abort_name
+                                            .clone()
+                                            .expect("批 abort 归因时失败工具名不应缺失");
+                                        let tool_call_id = prepared[index]
+                                            .execution_call()
+                                            .map(|call| call.id.clone())
+                                            .ok_or_else(|| AgentRunError::Internal {
+                                                message: "已执行工具缺少冻结调用信息".to_owned(),
+                                            })?;
+                                        raw.status = ToolCompletionStatus::Failed;
+                                        raw.failure = None;
+                                        raw.terminal_error = None;
+                                        raw.observation = None;
+                                        raw.result = ToolResult::text(
+                                            tool_call_id,
+                                            format!(
+                                                "并行工具调用 {failed_name} 失败，已取消排队等待"
+                                            ),
+                                            true,
+                                        );
+                                        raw.footprint =
+                                            measure_tool_result(&raw.result).map_err(|_| {
+                                                AgentRunError::Internal {
+                                                message:
+                                                    "Runtime 生成了无效或超过内部硬上限的工具结果"
+                                                        .to_owned(),
+                                            }
+                                            })?;
+                                    }
+                                    // 副作用失败触发批 abort：取消同批排队兄弟，
+                                    // 不波及后续批次；只读失败不取消兄弟（#28）。
+                                    if !batch_aborted
+                                        && matches!(raw.status, ToolCompletionStatus::Failed)
+                                        && effect == ToolEffect::ChangesState
+                                        && !request.cancellation.is_cancelled()
+                                    {
+                                        if batch_abort_name.is_none() {
+                                            batch_abort_name = Some(
+                                                prepared[index]
+                                                    .execution_call()
+                                                    .map(|call| call.name.clone())
+                                                    .unwrap_or_else(|| "未知工具".to_owned()),
+                                            );
+                                        }
+                                        batch_cancellation.cancel();
+                                    }
+                                    let post = if !batch_aborted
+                                        && completion_error.is_none()
+                                        && terminal_error.is_none()
+                                        && !round_permit.recovery_retained()
+                                    {
+                                        finalize_tool_before_completion(
+                                            request,
+                                            &prepared[index],
+                                            &mut raw,
+                                            &self.hooks,
+                                            effect,
+                                            ToolFinalizationBudgets {
+                                                hook_context_bytes:
+                                                    &mut prospective_hook_context_bytes,
+                                                post_hook_output: &mut post_hook_output_budget,
+                                                round_output: &mut round_output_budget,
+                                                hook_budget_failed: &mut hook_budget_failed,
+                                            },
+                                        )
+                                        .await?
+                                    } else {
+                                        raw.enforce_round_budget(effect, &mut round_output_budget)?;
+                                        Vec::new()
+                                    };
+                                    results[index] = Some(raw.result.clone());
+                                    result_budget_charged[index] = true;
+                                    if !round_permit.recovery_retained() {
+                                        if let Err(error) = self.emit_tool_completed(
+                                            request,
+                                            active.state.round_count(),
+                                            &mut round_permit,
+                                            &mut prepared[index],
+                                            raw.status,
+                                            &raw.result,
+                                        ) {
+                                            segment_cancellation.cancel();
+                                            completion_error.get_or_insert(error);
+                                        }
+                                    }
+                                    post_context[index] = Some(post);
+                                    // 非取消终态错误不再取消段内兄弟；terminal_error 仍在
+                                    // 排空后阻止后续段启动（见段尾 break）。终态来源含
+                                    // PostHook 失败合并（除 Cancelled 外均只记录不取消）。
+                                    // 被 abort 的排队兄弟已清掉终态，不会误触发 Turn 取消。
+                                    if let Some(error) = &raw.terminal_error {
+                                        if matches!(error, AgentRunError::Cancelled) {
+                                            segment_cancellation.cancel();
+                                        }
+                                        terminal_error.get_or_insert_with(|| error.clone());
+                                    }
+                                    if let Some(observation) = raw.observation {
+                                        let outcome = active.observe_execution(
+                                            observation,
+                                            self.limits.repeated_tool_failure_reminder_threshold,
+                                            self.limits.repeated_tool_failure_terminal_threshold,
+                                        );
+                                        if let Some(reminder) = outcome.reminder {
+                                            failure_reminders.push(reminder);
+                                        }
+                                        // 熔断终态终止 Turn，但不再取消仍在运行的只读兄弟；
+                                        // 各自分支的失败指纹计数照常（不同失败各自重置）。
+                                        if let Some(error) = outcome.terminal {
+                                            terminal_error.get_or_insert(error);
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    // 执行器自身返回 Err 只可能是内部错误（取消已编码为
+                                    // Ok(raw)+terminal_error），属于基础设施失败，仍取消
+                                    // 段内兄弟并终止 Turn。
+                                    segment_cancellation.cancel();
+                                    let result = normalize_immediate_round_result(
+                                        interrupted_tool_result(&prepared[index], &error),
                                         &mut round_output_budget,
                                     )?;
-                                    Vec::new()
-                                };
-                                results[index] = Some(raw.result.clone());
-                                result_budget_charged[index] = true;
-                                if !round_permit.recovery_retained() {
-                                    if let Err(error) = self.emit_tool_completed(
-                                        request,
-                                        active.state.round_count(),
-                                        &mut round_permit,
-                                        &mut prepared[index],
-                                        raw.status,
-                                        &raw.result,
-                                    ) {
-                                        segment_cancellation.cancel();
-                                        completion_error.get_or_insert(error);
+                                    results[index] = Some(result.clone());
+                                    result_budget_charged[index] = true;
+                                    if !round_permit.recovery_retained() {
+                                        if let Err(delivery_error) = self.emit_tool_completed(
+                                            request,
+                                            active.state.round_count(),
+                                            &mut round_permit,
+                                            &mut prepared[index],
+                                            completion_status_for_run_error(&error),
+                                            &result,
+                                        ) {
+                                            completion_error.get_or_insert(delivery_error);
+                                        }
                                     }
+                                    terminal_error.get_or_insert(error);
                                 }
-                                post_context[index] = Some(post);
-                                // 非取消终态错误不再取消段内兄弟；terminal_error 仍在
-                                // 排空后阻止后续段启动（见段尾 break）。终态来源含
-                                // PostHook 失败合并（除 Cancelled 外均只记录不取消）。
-                                if let Some(error) = &raw.terminal_error {
-                                    if matches!(error, AgentRunError::Cancelled) {
-                                        segment_cancellation.cancel();
-                                    }
-                                    terminal_error.get_or_insert_with(|| error.clone());
-                                }
-                                if let Some(observation) = raw.observation {
-                                    let outcome = active.observe_execution(
-                                        observation,
-                                        self.limits.repeated_tool_failure_reminder_threshold,
-                                        self.limits.repeated_tool_failure_terminal_threshold,
-                                    );
-                                    if let Some(reminder) = outcome.reminder {
-                                        failure_reminders.push(reminder);
-                                    }
-                                    // 熔断终态终止 Turn，但不再取消仍在运行的只读兄弟；
-                                    // 各自分支的失败指纹计数照常（不同失败各自重置）。
-                                    if let Some(error) = outcome.terminal {
-                                        terminal_error.get_or_insert(error);
-                                    }
-                                }
-                            }
-                            Err(error) => {
-                                // 执行器自身返回 Err 只可能是内部错误（取消已编码为
-                                // Ok(raw)+terminal_error），属于基础设施失败，仍取消
-                                // 段内兄弟并终止 Turn。
-                                segment_cancellation.cancel();
-                                let result = normalize_immediate_round_result(
-                                    interrupted_tool_result(&prepared[index], &error),
-                                    &mut round_output_budget,
-                                )?;
-                                results[index] = Some(result.clone());
-                                result_budget_charged[index] = true;
-                                if !round_permit.recovery_retained() {
-                                    if let Err(delivery_error) = self.emit_tool_completed(
-                                        request,
-                                        active.state.round_count(),
-                                        &mut round_permit,
-                                        &mut prepared[index],
-                                        completion_status_for_run_error(&error),
-                                        &result,
-                                    ) {
-                                        completion_error.get_or_insert(delivery_error);
-                                    }
-                                }
-                                terminal_error.get_or_insert(error);
                             }
                         }
+                        chunk_start = chunk_end;
                     }
                     if completion_error.is_some() || terminal_error.is_some() {
                         break;
@@ -4349,16 +4427,23 @@ impl PreparedCall {
         }
     }
 
-    /// 判断当前调用能否加入相邻只读并发段。
-    fn is_parallel_read_only(&self) -> bool {
-        matches!(
-            self.disposition,
+    /// 判断当前调用能否加入连续安全并发段：只读并行工具与声明并发
+    /// 安全的副作用工具（`ParallelSafe`）均可同批并发。
+    fn is_parallel_batchable(&self) -> bool {
+        match &self.disposition {
             PreparedDisposition::Execute {
                 effect: ToolEffect::ReadOnly,
                 concurrency: ToolConcurrency::ParallelReadOnly,
                 ..
-            }
-        )
+            } => true,
+            PreparedDisposition::Execute {
+                effect: ToolEffect::ChangesState,
+                concurrency: ToolConcurrency::ParallelSafe,
+                ..
+            } => true,
+            PreparedDisposition::Execute { .. } => false,
+            PreparedDisposition::Immediate(_) => false,
+        }
     }
 
     /// 返回 PreToolUse 已生成的上下文，用于在任何副作用前预检全局字节预算。
@@ -4450,7 +4535,7 @@ enum PreparedDisposition {
         tool: Arc<dyn AgentTool>,
         /// 本次规范化输入的副作用分类。
         effect: ToolEffect,
-        /// 工具声明的只读并发方式。
+        /// 工具声明的并发方式（受副作用分类约束）。
         concurrency: ToolConcurrency,
         /// 工具名称和最终输入的循环保护摘要。
         fingerprint: ToolCallFingerprint,

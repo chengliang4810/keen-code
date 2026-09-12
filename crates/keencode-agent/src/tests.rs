@@ -4240,6 +4240,712 @@ async fn parallel_segment_sibling_failures_count_toward_own_fingerprints() {
     }
 }
 
+/// #26：连续只读 + 声明并发安全的副作用工具同批并发启动。
+///
+/// 混合段用 Barrier/Notify 证明启动重叠：只读探针等待副作用探针的进入
+/// 信号，副作用探针等待只读探针的进入信号；若任一顺序执行则测试超时。
+#[tokio::test]
+async fn parallel_safe_batch_runs_mixed_read_only_and_side_effect_concurrently() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-r", "mixed_read", json!({})),
+                ("call-w", "mixed_safe_write", json!({})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct MixedReadTool {
+        entered: Arc<Notify>,
+        peer_entered: Arc<Notify>,
+    }
+    impl AgentTool for MixedReadTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "mixed_read".to_owned(),
+                "验证混合批只读并发",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            let peer = self.peer_entered.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                peer.notified().await;
+                Ok(ToolOutput::text("mixed-read-ok"))
+            })
+        }
+    }
+    struct MixedSafeWriteTool {
+        entered: Arc<Notify>,
+        peer_entered: Arc<Notify>,
+    }
+    impl AgentTool for MixedSafeWriteTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "mixed_safe_write".to_owned(),
+                "验证混合批副作用并发",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelSafe
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            let peer = self.peer_entered.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                peer.notified().await;
+                Ok(ToolOutput::text("mixed-write-ok"))
+            })
+        }
+    }
+    let read_entered = Arc::new(Notify::new());
+    let write_entered = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(MixedReadTool {
+            entered: read_entered.clone(),
+            peer_entered: write_entered.clone(),
+        }))
+        .expect("混合批只读工具应可注册");
+    registry
+        .register(Arc::new(MixedSafeWriteTool {
+            entered: write_entered.clone(),
+            peer_entered: read_entered.clone(),
+        }))
+        .expect("混合批副作用工具应可注册");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        runner(provider, registry).run_turn(turn_request(PlanGuard::inactive())),
+    )
+    .await
+    .expect("混合安全批应并发启动，不得超时");
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    assert!(!results[0].is_error);
+    assert_eq!(turn_tool_result_text(results[0]), "mixed-read-ok");
+    assert!(!results[1].is_error);
+    assert_eq!(turn_tool_result_text(results[1]), "mixed-write-ok");
+}
+
+/// #26：批内副作用工具失败时 abort 排队兄弟。
+///
+/// 失败工具等慢兄弟进入执行后即时失败；慢兄弟在批取消后收到取消固定结果，
+/// 调度层把其归因为被 abort，重写为失败结果"并行工具调用 {name} 失败，
+/// 已取消排队等待"，含失败工具名；失败工具自身保留真实错误，Turn 不终止。
+#[tokio::test]
+async fn parallel_safe_side_effect_failure_aborts_queued_sibling() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-fail", "abort_fail", json!({})),
+                ("call-slow", "abort_slow", json!({})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct AbortFailTool {
+        sibling_entered: Arc<Notify>,
+    }
+    impl AgentTool for AbortFailTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "abort_fail".to_owned(),
+                "验证副作用失败 abort 兄弟",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelSafe
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let signal = self.sibling_entered.clone();
+            Box::pin(async move {
+                signal.notified().await;
+                Err(ToolError::permanent(
+                    "abort-boom",
+                    "副作用失败 abort 固定错误",
+                ))
+            })
+        }
+    }
+    struct AbortSlowTool {
+        entered: Arc<Notify>,
+    }
+    impl AgentTool for AbortSlowTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "abort_slow".to_owned(),
+                "验证被 abort 的排队兄弟",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelSafe
+        }
+        fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                context.cancellation.cancelled().await;
+                std::future::pending().await
+            })
+        }
+    }
+    let sibling_entered = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(AbortFailTool {
+            sibling_entered: sibling_entered.clone(),
+        }))
+        .expect("abort 失败工具应可注册");
+    registry
+        .register(Arc::new(AbortSlowTool {
+            entered: sibling_entered.clone(),
+        }))
+        .expect("abort 慢兄弟工具应可注册");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        runner(provider, registry).run_turn(turn_request(PlanGuard::inactive())),
+    )
+    .await
+    .expect("abort 排队兄弟不应挂起");
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert!(result.is_error, "失败与被 abort 位都应为错误结果");
+        let text = turn_tool_result_text(result);
+        if result.tool_call_id == "call-fail" {
+            assert!(text.contains("abort-boom"), "失败位保留真实错误：{text}");
+        } else {
+            assert_eq!(result.tool_call_id, "call-slow");
+            assert!(
+                text.contains("并行工具调用 abort_fail 失败，已取消排队等待"),
+                "被 abort 位应含失败工具名：{text}"
+            );
+        }
+    }
+}
+
+/// #26 回归：只读失败不触发批 abort，慢兄弟正常完成（#28 语义保持）。
+#[tokio::test]
+async fn parallel_safe_read_only_failure_keeps_sibling_unaffected() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-fail", "mixed_ro_fail", json!({})),
+                ("call-slow", "mixed_ro_slow", json!({})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct MixedReadOnlyFailTool {
+        sibling_entered: Arc<Notify>,
+    }
+    impl AgentTool for MixedReadOnlyFailTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "mixed_ro_fail".to_owned(),
+                "验证混合批只读失败不 abort",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let signal = self.sibling_entered.clone();
+            Box::pin(async move {
+                signal.notified().await;
+                Err(ToolError::permanent("ro-boom", "混合批只读固定失败"))
+            })
+        }
+    }
+    struct MixedReadOnlySlowTool {
+        entered: Arc<Notify>,
+    }
+    impl AgentTool for MixedReadOnlySlowTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "mixed_ro_slow".to_owned(),
+                "验证只读失败后慢兄弟仍完成",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            Box::pin(async move {
+                entered.notify_one();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(ToolOutput::text("ro-slow-ok"))
+            })
+        }
+    }
+    let sibling_entered = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(MixedReadOnlyFailTool {
+            sibling_entered: sibling_entered.clone(),
+        }))
+        .expect("混合批只读失败工具应可注册");
+    registry
+        .register(Arc::new(MixedReadOnlySlowTool {
+            entered: sibling_entered.clone(),
+        }))
+        .expect("混合批只读慢兄弟应可注册");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        runner(provider, registry).run_turn(turn_request(PlanGuard::inactive())),
+    )
+    .await
+    .expect("只读失败不得阻塞兄弟");
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        let text = turn_tool_result_text(result);
+        if result.tool_call_id == "call-fail" {
+            assert!(result.is_error);
+            assert!(text.contains("ro-boom"), "失败位保留真实错误：{text}");
+        } else {
+            assert_eq!(result.tool_call_id, "call-slow");
+            assert!(!result.is_error);
+            assert_eq!(text, "ro-slow-ok");
+        }
+    }
+}
+
+/// #26：Exclusive 工具独占串行——前后 safe 调用分属不同批。
+///
+/// 前/后只读探针都等待 Exclusive 工具的进入/完成围栏；若被同批并发则
+/// 围栏顺序被破坏或测试超时。
+#[tokio::test]
+async fn parallel_safe_exclusive_tool_splits_batches_serially() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-before", "split_read", json!({})),
+                ("call-mid", "split_exclusive", json!({})),
+                ("call-after", "split_safe", json!({})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct SplitReadTool {
+        started: Arc<Notify>,
+        finished: Arc<Notify>,
+    }
+    impl AgentTool for SplitReadTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "split_read".to_owned(),
+                "验证 Exclusive 前批只读",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let started = self.started.clone();
+            let finished = self.finished.clone();
+            Box::pin(async move {
+                started.notify_one();
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                finished.notify_one();
+                Ok(ToolOutput::text("split-read-ok"))
+            })
+        }
+    }
+    struct SplitExclusiveTool {
+        barrier_entered: Arc<AtomicBool>,
+        read_finished: Arc<Notify>,
+        done: Arc<Notify>,
+    }
+    impl AgentTool for SplitExclusiveTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "split_exclusive".to_owned(),
+                "验证独占屏障",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::Exclusive
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let barrier_entered = self.barrier_entered.clone();
+            let read_finished = self.read_finished.clone();
+            let done = self.done.clone();
+            Box::pin(async move {
+                barrier_entered.store(true, Ordering::SeqCst);
+                read_finished.notified().await;
+                done.notify_one();
+                Ok(ToolOutput::text("split-exclusive-ok"))
+            })
+        }
+    }
+    struct SplitSafeAfterTool {
+        barrier_entered: Arc<AtomicBool>,
+        exclusive_done: Arc<Notify>,
+    }
+    impl AgentTool for SplitSafeAfterTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "split_safe".to_owned(),
+                "验证 Exclusive 后批 safe",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelSafe
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let barrier_entered = self.barrier_entered.clone();
+            let exclusive_done = self.exclusive_done.clone();
+            Box::pin(async move {
+                // 后批工具必须在 Exclusive 启动之后才进入执行。
+                assert!(
+                    barrier_entered.load(Ordering::SeqCst),
+                    "后批 safe 工具必须在 Exclusive 启动后才执行"
+                );
+                exclusive_done.notified().await;
+                Ok(ToolOutput::text("split-safe-ok"))
+            })
+        }
+    }
+    let read_started = Arc::new(Notify::new());
+    let read_finished = Arc::new(Notify::new());
+    let barrier_entered = Arc::new(AtomicBool::new(false));
+    let exclusive_done = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(SplitReadTool {
+            started: read_started.clone(),
+            finished: read_finished.clone(),
+        }))
+        .expect("前批只读工具应可注册");
+    registry
+        .register(Arc::new(SplitExclusiveTool {
+            barrier_entered: barrier_entered.clone(),
+            read_finished: read_finished.clone(),
+            done: exclusive_done.clone(),
+        }))
+        .expect("独占工具应可注册");
+    registry
+        .register(Arc::new(SplitSafeAfterTool {
+            barrier_entered: barrier_entered.clone(),
+            exclusive_done: exclusive_done.clone(),
+        }))
+        .expect("后批 safe 工具应可注册");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        runner(provider, registry).run_turn(turn_request(PlanGuard::inactive())),
+    )
+    .await
+    .expect("Exclusive 分批串行不得超时");
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.step_count(), 3);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 3);
+    assert_eq!(turn_tool_result_text(results[0]), "split-read-ok");
+    assert_eq!(turn_tool_result_text(results[1]), "split-exclusive-ok");
+    assert_eq!(turn_tool_result_text(results[2]), "split-safe-ok");
+}
+
+/// #26：11 个 safe 工具按上限 10 分两批——第二批在第一批完成后才启动。
+#[tokio::test]
+async fn parallel_safe_batch_width_caps_at_ten() {
+    let calls: Vec<(String, String, Value)> = (0..11)
+        .map(|i| (format!("call-{i}"), "width_probe".to_owned(), json!({})))
+        .collect();
+    let call_refs: Vec<(&str, &str, Value)> = calls
+        .iter()
+        .map(|(id, name, args)| (id.as_str(), name.as_str(), args.clone()))
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&call_refs), text_reply("done")],
+    ));
+    struct WidthBatchTool {
+        entered: Arc<Mutex<Vec<String>>>,
+        first_batch_barrier: Arc<Barrier>,
+    }
+    impl AgentTool for WidthBatchTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "width_probe".to_owned(),
+                "验证并行宽度上限",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            let barrier = self.first_batch_barrier.clone();
+            let id = context.tool_call_id.to_string();
+            Box::pin(async move {
+                entered.lock().expect("宽度测试锁不应损坏").push(id.clone());
+                if id == "call-10" {
+                    // 第 11 个调用排队到第二批：进入时前 10 个必须都已进入。
+                    // 若实现把 11 个同批并发，第 11 个会早于部分前批进入。
+                    assert_eq!(
+                        entered.lock().expect("宽度测试锁不应损坏").len(),
+                        11,
+                        "第 11 个调用必须最后进入执行（分批排队）"
+                    );
+                } else {
+                    // 前 10 个在屏障互相等待：仅当 10 个真正并发执行才能通过，
+                    // 证明同批重叠；通过后短暂保持执行态，确保第 11 个排队。
+                    barrier.wait().await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                Ok(ToolOutput::text("width-ok"))
+            })
+        }
+    }
+    let entered = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(WidthBatchTool {
+            entered: entered.clone(),
+            first_batch_barrier: Arc::new(Barrier::new(10)),
+        }))
+        .expect("宽度探针工具应可注册");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        runner(provider, registry).run_turn(turn_request(PlanGuard::inactive())),
+    )
+    .await
+    .expect("宽度上限分批不得超时");
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.step_count(), 11);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 11);
+    assert!(results.iter().all(|r| !r.is_error));
+    let entered = entered.lock().expect("宽度测试锁不应损坏").clone();
+    assert_eq!(entered.len(), 11);
+    assert_eq!(
+        entered[10], "call-10",
+        "第 11 个调用必须最后进入执行（分批排队）：{entered:?}"
+    );
+}
+
+/// #26：入参校验失败的工具视为非安全——独占串行，不与前后 safe 同批。
+///
+/// 模型第二项调用传非法输入（缺必填 `value`），RecordingTool 的 definition
+/// 要求必填，被冻结为 Immediate 结果；前后 safe 调用各成一批串行执行，
+/// 启动顺序严格为 before → after。
+#[tokio::test]
+async fn parallel_safe_invalid_input_tool_is_not_batched() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-before", "invalid_order", json!({"value": "a"})),
+                ("call-bad", "invalid_order", json!({})),
+                ("call-after", "invalid_order", json!({"value": "b"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct OrderProbeTool {
+        entered: Arc<Mutex<Vec<String>>>,
+    }
+    impl AgentTool for OrderProbeTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "invalid_order".to_owned(),
+                "验证校验失败独占串行",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "required": ["value"],
+                    "additionalProperties": false
+                }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ChangesState)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelSafe
+        }
+        fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let entered = self.entered.clone();
+            let id = context.tool_call_id.to_string();
+            Box::pin(async move {
+                entered.lock().expect("顺序测试锁不应损坏").push(id);
+                Ok(ToolOutput::text("order-ok"))
+            })
+        }
+    }
+    let entered = Arc::new(Mutex::new(Vec::<String>::new()));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(OrderProbeTool {
+            entered: entered.clone(),
+        }))
+        .expect("顺序探针工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        entered.lock().expect("顺序测试锁不应损坏").clone(),
+        vec!["call-before".to_owned(), "call-after".to_owned()],
+        "仅合法调用应真实执行且按序串行"
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 3);
+    assert!(!results[0].is_error);
+    assert!(results[1].is_error);
+    assert!(
+        turn_tool_result_text(results[1]).contains("工具输入无效"),
+        "校验失败位应为输入无效固定结果：{}",
+        turn_tool_result_text(results[1])
+    );
+    assert!(!results[2].is_error);
+}
+
+/// #26：用户取消 mid-batch 整批取消——混合批兄弟均为取消固定结果。
+#[tokio::test]
+async fn parallel_safe_batch_user_cancellation_cancels_whole_batch() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&[
+            ("call-a", "mixed_cancel_probe", json!({})),
+            ("call-b", "mixed_cancel_probe", json!({})),
+        ])],
+    ));
+    struct MixedCancelProbeTool {
+        started: Arc<Notify>,
+    }
+    impl AgentTool for MixedCancelProbeTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "mixed_cancel_probe".to_owned(),
+                "验证混合批用户取消整批",
+                json!({ "type": "object", "additionalProperties": true }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                // 挂起等待取消：取消恒走执行竞速 select 的左臂（Ok(raw) +
+                // terminal_error=Cancelled），工具返回的 Err 在此路径不可达。
+                context.cancellation.cancelled().await;
+                std::future::pending().await
+            })
+        }
+    }
+    let started = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(MixedCancelProbeTool {
+            started: started.clone(),
+        }))
+        .expect("混合取消探针工具应可注册");
+    let cancellation = TurnCancellation::new();
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation.clone());
+    let cancel_task = tokio::spawn(async move {
+        started.notified().await;
+        // 等首个兄弟进入执行后再取消，确保取消发生在批执行中途。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancellation.cancel();
+    });
+
+    let result = runner(provider, registry).run_turn(request).await;
+    cancel_task.await.expect("取消任务不应异常");
+
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert!(result.is_error);
+        assert!(
+            turn_tool_result_text(result).contains("Turn 取消而中止"),
+            "用户取消后兄弟应为取消固定结果：{}",
+            turn_tool_result_text(result)
+        );
+    }
+}
+
 /// 熔断终态 tripwire：同指纹在段内达到终态阈值时，旧语义会取消运行中的
 /// 慢兄弟（切断为"中止"），新语义下慢兄弟必须正常完成且 Turn 以 ToolLoop 终态结束。
 #[tokio::test]
