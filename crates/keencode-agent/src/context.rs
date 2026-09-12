@@ -435,6 +435,12 @@ pub struct ContextPolicy {
     /// 压缩时至少完整保留的最近消息原子单元数量。
     pub minimum_recent_units: usize,
     /// 摘要模型可生成的最大输出 Token。
+    ///
+    /// 长会话摘要必须容纳关键决策、文件路径与未完成事项清单，输出预算过小会把
+    /// 恢复工作所需的细节在生成阶段截断。默认 16_000 对齐 peri 的
+    /// `summary_max_tokens`；CCB 按摘要输出 p99.99=17_387 的实测预留 20_000，
+    /// 本值仍低于该实测上界。已知窗口时该值还会被 Provider 最大输出与
+    /// 窗口容量（`largest_fitting_summary_output`）进一步钳制。
     pub summary_max_output_tokens: u32,
 }
 
@@ -485,7 +491,7 @@ impl Default for ContextPolicy {
             reserved_output_tokens: 4_096,
             forced_target_percent: 50,
             minimum_recent_units: 2,
-            summary_max_output_tokens: 1_024,
+            summary_max_output_tokens: 16_000,
         }
     }
 }

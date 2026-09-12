@@ -1843,8 +1843,9 @@ async fn degraded_retry_context_overflow_walks_forced_compaction_arm() {
     // 第三个请求是强制压缩摘要请求：无工具且 tool_choice 为 None。
     assert!(requests[2].tools.is_empty());
     assert_eq!(requests[2].tool_choice, ToolChoice::None);
-    // 摘要请求不受主请求降级影响：输出上限按摘要预算独立接线。
-    assert_eq!(requests[2].max_output_tokens, Some(1024));
+    // 摘要请求不受主请求降级影响：按策略默认 16_000 发起，接线时被
+    // Provider 能力 8_192 钳制，仍与主请求降级后的 None 无关。
+    assert_eq!(requests[2].max_output_tokens, Some(8_192));
     // 恢复请求仍保持降级状态，不重新携带输出上限。
     assert_eq!(requests[3].max_output_tokens, None);
     assert_eq!(result.state.round_count(), 1);

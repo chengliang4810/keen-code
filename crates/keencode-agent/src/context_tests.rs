@@ -573,6 +573,62 @@ fn effective_output_reserve_follows_actual_output_and_clamps_to_half_window() {
     );
 }
 
+/// 摘要输出预算属于独立摘要请求：调整它不得改变主请求的输出预留、
+/// 预压缩阈值、压缩目标或硬预算。
+#[test]
+fn summary_output_budget_does_not_participate_in_main_input_budget() {
+    let large_window = ProviderCapabilities {
+        max_context_tokens: Some(200_000),
+        ..ProviderCapabilities::default()
+    };
+    for summary_max_output_tokens in [1_u32, 16_000, u32::MAX] {
+        let policy = ContextPolicy {
+            summary_max_output_tokens,
+            ..ContextPolicy::default()
+        };
+        let manager = ContextManager::new(
+            policy,
+            Arc::new(FixedEstimator {
+                request_tokens: 142_800,
+                message_tokens: 0,
+            }),
+            Arc::new(RecordingCompressor::new("unused")),
+        )
+        .expect("策略应有效");
+        let request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+
+        // 未指定输出时保持策略默认预留 4_096：输入预算 195_904，阈值 166_518 未达到。
+        assert_eq!(
+            manager.precompression_target(&request, &large_window),
+            None,
+            "summary_max_output_tokens={summary_max_output_tokens}"
+        );
+        assert_eq!(
+            manager.forced_target(&request, &large_window),
+            117_542,
+            "summary_max_output_tokens={summary_max_output_tokens}"
+        );
+
+        // 输出预留只跟随主请求 32_000：阈值 142_800 恰好触发，摘要预算不参与。
+        let mut with_output = request.clone();
+        with_output.max_output_tokens = Some(32_000);
+        assert_eq!(
+            manager.precompression_target(&with_output, &large_window),
+            Some(100_800),
+            "summary_max_output_tokens={summary_max_output_tokens}"
+        );
+        assert_eq!(
+            manager.forced_target(&with_output, &large_window),
+            100_800,
+            "summary_max_output_tokens={summary_max_output_tokens}"
+        );
+        assert!(
+            manager.request_fits_context_window(&with_output, &large_window),
+            "summary_max_output_tokens={summary_max_output_tokens}"
+        );
+    }
+}
+
 /// 硬预算跟随有效输出预留：策略默认与实际输出上限取大并钳到窗口一半，窗口未知时不伪造可行。
 #[test]
 fn precompression_fallback_requires_complete_request_to_fit_known_window() {
@@ -1250,10 +1306,10 @@ async fn runner_derived_max_output_keeps_summary_request_override_intact() {
     assert_eq!(requests.len(), 1);
     // 主请求携带窗口派生并封顶后的 32_000 输出上限。
     assert_eq!(requests[0].max_output_tokens, Some(32_000));
-    // 摘要请求仍使用策略级 1_024 输出覆盖，不被派生默认替换。
+    // 摘要请求仍使用策略级 16_000 输出覆盖，不被派生默认替换。
     let summary_requests = compressor.requests();
     assert_eq!(summary_requests.len(), 1);
-    assert_eq!(summary_requests[0].max_output_tokens, 1_024);
+    assert_eq!(summary_requests[0].max_output_tokens, 16_000);
 }
 
 /// 空摘要不应阻断仍能装下的原请求；保留历史、失败事件和摘要用量。
