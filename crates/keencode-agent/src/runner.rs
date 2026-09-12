@@ -1598,6 +1598,11 @@ impl AgentRunner {
                     &completed_round.response,
                     completed_round.elapsed,
                 )?;
+                // 权威用量提交成功后把上下文估算锚定到本轮请求的真实输入规模：
+                // model_request 即产生该用量的确切请求，其后追加的消息按逐块
+                // 规则增量估算（失败轮用量不在此处提交，不形成锚点）。
+                self.context
+                    .note_model_round_usage(&model_request, &completed_round.response.usage);
                 let response = completed_round.response;
                 // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
                 // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空

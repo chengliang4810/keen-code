@@ -5,11 +5,12 @@ use std::sync::{Arc, Mutex};
 
 use futures_util::{StreamExt, stream};
 use keencode_model::{
-    ContentBlock, Message, MessageRole, ModelError, ModelFuture, ModelProvider, ModelRequest,
-    ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider,
-    ScriptedReply, StopReason, TokenUsage, ToolCall, ToolChoice, ToolResult,
+    ContentBlock, ImageContent, Message, MessageRole, ModelError, ModelFuture, ModelProvider,
+    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata,
+    ScriptedProvider, ScriptedReply, StopReason, TokenUsage, ToolCall, ToolChoice, ToolDefinition,
+    ToolResult, ToolResultContent,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
@@ -2096,4 +2097,483 @@ fn is_runtime_summary(message: &Message) -> bool {
             | ContentBlock::ToolCall { .. }
             | ContentBlock::ToolResult { .. } => false,
         })
+}
+
+/// 返回固定文本结果的合成只读工具，用于驱动锚定测试的两轮模型调用。
+struct AnchorTestTool;
+
+impl AgentTool for AnchorTestTool {
+    /// 返回要求字符串 `value` 的合成 Schema。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "anchor_probe",
+            "返回固定结果的合成工具",
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    /// 返回只读副作用分类。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 返回独占并发方式。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    /// 返回确定性文本结果。
+    fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        Box::pin(async { Ok(ToolOutput::text("synthetic-result")) })
+    }
+}
+
+/// 创建先报告真实输入用量再发起一次工具调用的模型响应。
+fn usage_tool_reply() -> ScriptedReply {
+    ScriptedReply::events([
+        ModelStreamEvent::MessageStart {
+            metadata: ResponseMetadata::default(),
+        },
+        ModelStreamEvent::Usage {
+            usage: TokenUsage {
+                input_tokens: Some(170_000),
+                output_tokens: Some(100),
+                ..TokenUsage::unknown()
+            },
+        },
+        ModelStreamEvent::ToolCallStart {
+            index: 0,
+            id: "anchor-call".to_owned(),
+            name: "anchor_probe".to_owned(),
+        },
+        ModelStreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            id: "anchor-call".to_owned(),
+            delta: r#"{"value":"v"}"#.to_owned(),
+        },
+        ModelStreamEvent::ToolCallEnd {
+            index: 0,
+            id: "anchor-call".to_owned(),
+        },
+        ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+        },
+    ])
+}
+
+/// 逐块估算：纯文本按 UTF-8 字节每 4 字节一个 Token 向上取整，并保留每消息开销。
+#[test]
+fn per_block_estimator_counts_plain_text_by_utf8_bytes() {
+    let messages = vec![Message::text(MessageRole::User, "a".repeat(40))];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 10
+    );
+}
+
+/// 逐块估算：多字节文本按 UTF-8 字节数而非字符数计算。
+#[test]
+fn per_block_estimator_multibyte_text_uses_utf8_bytes() {
+    let messages = vec![Message::text(MessageRole::User, "旧".repeat(30))];
+    // 30 个汉字 = 90 字节 -> ceil(90 / 4) = 23。
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 23
+    );
+}
+
+/// 核心：Base64 图片按固定 2_000 Token 估算，不再随序列化字节量虚估。
+#[test]
+fn base64_image_estimates_fixed_tokens_not_serialized_bytes() {
+    let messages = vec![Message::new(
+        MessageRole::User,
+        vec![ContentBlock::Image {
+            image: ImageContent::from_base64("image/png", "A".repeat(1_400_000)),
+        }],
+    )];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 2_000
+    );
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_request(&ModelRequest::new("context-model", messages)),
+        2_000 + 4 + 16
+    );
+}
+
+/// Url 图片按引用地址字节估算（通常很小），不按图片来源大小计。
+#[test]
+fn url_image_estimates_by_url_bytes() {
+    let messages = vec![Message::new(
+        MessageRole::User,
+        vec![ContentBlock::Image {
+            image: ImageContent::from_url("https://example.com/".repeat(2)),
+        }],
+    )];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 10
+    );
+}
+
+/// 工具调用按名称加序列化参数计，调用 id 与包装字段不计入。
+#[test]
+fn tool_call_estimates_name_and_arguments_without_call_id() {
+    let messages = vec![Message::new(
+        MessageRole::Assistant,
+        vec![ContentBlock::ToolCall {
+            tool_call: ToolCall::new(
+                "call-id-0123456789-0123456789",
+                "read",
+                json!({"path": "cdef"}),
+            ),
+        }],
+    )];
+    // name "read" -> 1；参数 `{"path":"cdef"}` 15 字节 -> 4；id 29 字节不计。
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 1 + 4
+    );
+}
+
+/// 工具结果按文本与图片内容分别累加。
+#[test]
+fn tool_result_text_and_image_contents_accumulate() {
+    let text_only = vec![Message::new(
+        MessageRole::Tool,
+        vec![ContentBlock::ToolResult {
+            tool_result: ToolResult::text("call-1", "x".repeat(8), false),
+        }],
+    )];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&text_only),
+        4 + 2
+    );
+    let with_image = vec![Message::new(
+        MessageRole::Tool,
+        vec![ContentBlock::ToolResult {
+            tool_result: ToolResult::new(
+                "call-1",
+                vec![
+                    ToolResultContent::Text {
+                        text: "x".repeat(8),
+                    },
+                    ToolResultContent::Image {
+                        image: ImageContent::from_base64("image/png", "A".repeat(800)),
+                    },
+                ],
+                false,
+            ),
+        }],
+    )];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&with_image),
+        4 + 2 + 2_000
+    );
+}
+
+/// 推理块按已归一化推理文本字节估算。
+#[test]
+fn reasoning_block_estimates_by_text_bytes() {
+    let messages = vec![Message::new(
+        MessageRole::Assistant,
+        vec![ContentBlock::Reasoning {
+            reasoning: keencode_model::ReasoningContent::new("r".repeat(40)),
+        }],
+    )];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 10
+    );
+}
+
+/// 控制字符密集或转义膨胀的内容估算有界且不 panic。
+#[test]
+fn control_character_content_estimates_bounded_without_panic() {
+    let messages = vec![Message::text(MessageRole::User, "\u{1}".repeat(1_000_000))];
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&messages),
+        4 + 250_000
+    );
+    let arguments = json!({ "v": "\u{1}".repeat(10) });
+    let serialized_bytes = u64::try_from(serde_json::to_vec(&arguments).unwrap().len()).unwrap();
+    let tool_calls = vec![Message::new(
+        MessageRole::Assistant,
+        vec![ContentBlock::ToolCall {
+            tool_call: ToolCall::new("id", "ab", arguments),
+        }],
+    )];
+    // 序列化转义后的 JSON 字节按每 4 字节一个 Token 计，转义不会触发无界放大。
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_messages(&tool_calls),
+        4 + 1 + serialized_bytes.saturating_add(3) / 4
+    );
+}
+
+/// 锚定估算 = 锚点轮真实输入 + 其后新增消息的逐块估算，output 不双算。
+#[test]
+fn anchored_estimate_equals_last_input_plus_incremental_messages() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("测试策略应有效");
+    let base = vec![Message::text(MessageRole::User, "a".repeat(40))];
+    let base_request = ModelRequest::new("context-model", base.clone());
+    manager.note_model_round_usage(
+        &base_request,
+        &TokenUsage {
+            input_tokens: Some(50_000),
+            output_tokens: Some(1_200),
+            ..TokenUsage::unknown()
+        },
+    );
+    let mut next = base;
+    next.push(Message::text(MessageRole::Assistant, "c".repeat(40)));
+    next.push(Message::text(MessageRole::User, "d".repeat(40)));
+    let next_request = ModelRequest::new("context-model", next);
+    // 增量两条 40 字节消息 = (4 + 10) × 2 = 28；output 1_200 不参与总量。
+    assert_eq!(manager.estimate_request(&next_request), 50_028);
+    // 全量逐块估算为 14 × 3 + 16 = 58，与锚定口径显著不同。
+    assert_eq!(
+        JsonContextTokenEstimator.estimate_request(&next_request),
+        58
+    );
+}
+
+/// 无锚点（首轮）时估算回退为全量逐块加请求级开销。
+#[test]
+fn missing_anchor_falls_back_to_full_per_block_estimate() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("测试策略应有效");
+    let request = ModelRequest::new(
+        "context-model",
+        vec![Message::text(MessageRole::User, "a".repeat(40))],
+    );
+    assert_eq!(manager.estimate_request(&request), 10 + 4 + 16);
+}
+
+/// Provider 只报告输出而未报告输入（或输入为零）时不形成有效锚点。
+#[test]
+fn usage_without_input_tokens_does_not_form_anchor() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("测试策略应有效");
+    let request = ModelRequest::new(
+        "context-model",
+        vec![Message::text(MessageRole::User, "a".repeat(40))],
+    );
+    manager.note_model_round_usage(
+        &request,
+        &TokenUsage {
+            output_tokens: Some(5),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert_eq!(manager.estimate_request(&request), 10 + 4 + 16);
+    manager.note_model_round_usage(
+        &request,
+        &TokenUsage {
+            input_tokens: Some(0),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert_eq!(manager.estimate_request(&request), 10 + 4 + 16);
+}
+
+/// 当前请求消息数少于锚点消息数时不套用锚点，回退全量逐块估算。
+#[test]
+fn request_shorter_than_anchor_falls_back_to_full_estimate() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("测试策略应有效");
+    let anchored = ModelRequest::new(
+        "context-model",
+        vec![
+            Message::text(MessageRole::User, "一"),
+            Message::text(MessageRole::Assistant, "二"),
+            Message::text(MessageRole::User, "三"),
+        ],
+    );
+    manager.note_model_round_usage(
+        &anchored,
+        &TokenUsage {
+            input_tokens: Some(80_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    let shorter = ModelRequest::new(
+        "context-model",
+        vec![Message::text(MessageRole::User, "a".repeat(40))],
+    );
+    assert_eq!(manager.estimate_request(&shorter), 10 + 4 + 16);
+}
+
+/// 成功压缩替换消息区间后锚点失效，估算回退全量逐块直到下一轮重新锚定。
+#[tokio::test]
+async fn successful_compaction_clears_usage_anchor() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("历史摘要")),
+    )
+    .expect("测试策略应有效");
+    let request = ModelRequest::new(
+        "context-model",
+        vec![
+            Message::text(MessageRole::System, "系统约束"),
+            Message::text(MessageRole::User, "旧".repeat(200)),
+            Message::text(MessageRole::User, "近期一"),
+            Message::text(MessageRole::User, "近期二"),
+        ],
+    );
+    manager.note_model_round_usage(
+        &request,
+        &TokenUsage {
+            input_tokens: Some(50_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert_eq!(manager.estimate_request(&request), 50_000);
+
+    manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            1,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("旧历史应能安全压缩");
+    assert_eq!(
+        manager.estimate_request(&request),
+        JsonContextTokenEstimator.estimate_request(&request)
+    );
+}
+
+/// 固定内容超阈值场景：逐块估算口径下预压缩仍然触发（口径变化回归）。
+#[test]
+fn precompression_still_triggers_when_fixed_content_exceeds_threshold() {
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("默认上下文策略应有效");
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(10_000),
+        ..ProviderCapabilities::default()
+    };
+    let request = ModelRequest::new(
+        "context-model",
+        vec![Message::text(MessageRole::User, "e".repeat(21_000))],
+    );
+    // 21_000 字节 -> 5_250 + 4 + 16 = 5_270，不低于 85% 触发线（预算 5_904 的 5_018）。
+    assert_eq!(JsonContextTokenEstimator.estimate_request(&request), 5_270);
+    assert_eq!(
+        manager.precompression_target(&request, &capabilities),
+        Some(3_542)
+    );
+}
+
+/// 锚定的真实输入远超逐块估算时，预压缩必须按真实用量触发而不是被低估掩盖。
+#[test]
+fn anchored_usage_drives_precompression_when_per_block_undercounts() {
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("未使用")),
+    )
+    .expect("默认上下文策略应有效");
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(10_000),
+        ..ProviderCapabilities::default()
+    };
+    let request = ModelRequest::new(
+        "context-model",
+        vec![Message::new(
+            MessageRole::User,
+            vec![ContentBlock::Image {
+                image: ImageContent::from_base64("image/png", "A".repeat(1_400_000)),
+            }],
+        )],
+    );
+    manager.note_model_round_usage(
+        &request,
+        &TokenUsage {
+            input_tokens: Some(9_000),
+            output_tokens: Some(50),
+            ..TokenUsage::unknown()
+        },
+    );
+    // 逐块全量估算仅 2_020，不会触及 5_018 触发线；锚定后的 9_000 必须触发。
+    assert_eq!(JsonContextTokenEstimator.estimate_request(&request), 2_020);
+    assert_eq!(
+        manager.precompression_target(&request, &capabilities),
+        Some(3_542)
+    );
+}
+
+/// Agent Round 用量提交后，下一轮预压缩按锚定真实用量触发预算压缩。
+#[tokio::test]
+async fn runner_round_usage_anchors_next_round_precompression() {
+    // 窗口 200_000，输入预算 195_904，85% 触发线 166_518。首轮逐块全量估算约
+    // 1_589 Token 不会触发；首轮真实输入 170_000 提交后，第二轮的锚定估算
+    // （170_000 + 少量增量）远超触发线，必须在第二次采样前完成压缩；没有
+    // 锚定时同场景不会触发压缩。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(200_000),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [usage_tool_reply(), text_reply("最终回答")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("历史摘要"));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认上下文策略应有效");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(AnchorTestTool))
+        .expect("合成工具应能注册");
+    let runner = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+        .with_context_manager(context);
+    let result = runner
+        .run_turn(turn_request(vec![
+            Message::text(MessageRole::User, "旧".repeat(2_000)),
+            Message::text(MessageRole::User, "当前任务"),
+        ]))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].trigger,
+        ContextCompressionTrigger::Budget
+    );
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 2);
+    // 第二轮请求前已注入重摘要消息，证明压缩发生在第二次采样之前。
+    assert!(requests[1].messages.iter().any(is_runtime_summary));
+    assert_eq!(compressor.requests().len(), 1);
 }

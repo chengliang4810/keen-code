@@ -10,9 +10,9 @@ use std::time::Instant;
 use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
 use keencode_model::{
-    ContentBlock, Message, MessageRole, ModelError, ModelProvider, ModelRequest, ModelStream,
-    ModelStreamEvent, ProviderCapabilities, ResponseMetadata, StopReason, TokenUsage, ToolChoice,
-    collect_model_stream,
+    ContentBlock, ImageSource, Message, MessageRole, ModelError, ModelProvider, ModelRequest,
+    ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata, StopReason, TokenUsage,
+    ToolChoice, ToolResultContent, collect_model_stream,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -398,23 +398,48 @@ pub trait ContextTokenEstimator: Send + Sync {
     fn estimate_messages(&self, messages: &[Message]) -> u64;
 }
 
-/// 按规范 JSON UTF-8 字节数提供确定性近似估算的默认实现。
+/// Base64 图片的固定输入 Token 估算值。
+///
+/// 视觉模型把图片 token 化后的输入开销主要由分辨率决定，与图片字节量基本无关；
+/// 若按序列化 JSON 字节÷4 估算，1MiB 图片（base64 约 1.37MiB 文本）会虚估约
+/// 26 万 Token。CCB 对同类问题（1MiB PDF base64 走 JSON.stringify 虚估 325k）
+/// 的修复口径是 image/document 按固定 2_000 Token 计，这里保持一致。
+const BASE64_IMAGE_ESTIMATED_TOKENS: u64 = 2_000;
+
+/// 每条消息的固定结构开销（role、内容块包装等信封字段的近似）。
+const PER_MESSAGE_OVERHEAD_TOKENS: u64 = 4;
+
+/// 每个请求的固定结构开销（模型名、采样选项等请求信封字段的近似）。
+const PER_REQUEST_OVERHEAD_TOKENS: u64 = 16;
+
+/// 按内容块规则提供确定性近似估算的默认实现。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct JsonContextTokenEstimator;
 
 impl ContextTokenEstimator for JsonContextTokenEstimator {
-    /// 使用每四个 JSON 字节一个 Token并加入固定请求开销进行估算。
+    /// 按内容块累加消息估算，并计入工具定义、结构化输出模式与请求级固定开销。
+    ///
+    /// 工具定义和结构化输出模式随每个请求重复发送且常达数千 Token，逐块消息
+    /// 估算必须补上这部分输入，否则无锚点回退（首轮）会系统性低估。
     fn estimate_request(&self, request: &ModelRequest) -> u64 {
-        estimate_serialized(request).saturating_add(16)
+        let tools = request.tools.iter().fold(0_u64, |sum, tool| {
+            sum.saturating_add(utf8_text_tokens(&tool.name))
+                .saturating_add(utf8_text_tokens(&tool.description))
+                .saturating_add(serialized_json_tokens(&tool.input_schema))
+        });
+        let structured_output = request
+            .structured_output
+            .as_ref()
+            .map_or(0, serialized_json_tokens);
+        estimate_message_tokens(&request.messages)
+            .saturating_add(tools)
+            .saturating_add(structured_output)
+            .saturating_add(PER_REQUEST_OVERHEAD_TOKENS)
     }
 
-    /// 使用每四个 JSON 字节一个 Token并加入逐消息固定开销进行估算。
+    /// 按内容块逐条累加消息估算，并保留每消息固定开销。
     fn estimate_messages(&self, messages: &[Message]) -> u64 {
-        estimate_serialized(messages).saturating_add(
-            u64::try_from(messages.len())
-                .unwrap_or(u64::MAX)
-                .saturating_mul(4),
-        )
+        estimate_message_tokens(messages)
     }
 }
 
@@ -496,6 +521,16 @@ impl Default for ContextPolicy {
     }
 }
 
+/// 一轮已确认模型用量形成的估算锚点。
+#[derive(Clone, Copy, Debug)]
+struct RoundUsageAnchor {
+    /// 该轮请求由 Provider 归一化报告的输入 Token（已含缓存读写与请求期注入内容），
+    /// 即“截至该轮请求时点”的真实上下文输入规模。
+    input_tokens: u64,
+    /// 产生该用量的请求包含的消息数量；其后追加的消息按逐块规则增量估算。
+    message_count: usize,
+}
+
 /// 组合预算、估算器和摘要器的上下文管理核心。
 #[derive(Clone)]
 pub struct ContextManager {
@@ -505,6 +540,8 @@ pub struct ContextManager {
     estimator: Arc<dyn ContextTokenEstimator>,
     /// 只接收统一消息且返回纯文本的摘要器。
     compressor: Arc<dyn ContextCompressor>,
+    /// 最近一轮已确认用量的锚点；缺失时估算回退为全量逐块规则。
+    usage_anchor: Arc<Mutex<Option<RoundUsageAnchor>>>,
 }
 
 /// 分块摘要时对每次模型调用实施的输入和输出预算。
@@ -565,6 +602,7 @@ impl ContextManager {
             policy,
             estimator,
             compressor,
+            usage_anchor: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -584,7 +622,53 @@ impl ContextManager {
     }
 
     /// 返回完整请求的 Provider 中立估算 Token 数。
+    ///
+    /// 存在已确认用量锚点且当前消息数不少于锚点消息数时，估算等于锚点轮真实
+    /// 输入加上其后新增消息的逐块估算：锚点轮请求的前缀（指令、工具定义与
+    /// 历史）已由 Provider 报告的真实输入完整覆盖，不重算，避免与真实
+    /// tokenizer 的系统性偏差随会话长度累积。锚点缺失（首轮或 Provider 未报告
+    /// 输入用量）或消息前缀已被压缩替换（压缩成功会清除锚点）时，回退为全量
+    /// 逐块估算。
+    ///
+    /// 口径推演：锚点是上一轮请求时点的 `usage.input_tokens`（已含缓存部分）。
+    /// 其后新增的消息是该轮响应的 assistant 输出、工具结果与可能的 steer 注入
+    /// ——上一轮 output 将作为本轮输入进入上下文，因此必须计入增量估算；不能
+    /// 把 usage.output_tokens 直接加到总量上，否则 output 会在“增量 assistant
+    /// 消息”与“输出用量”中被双算（peri 同款警告）。
     pub fn estimate_request(&self, request: &ModelRequest) -> u64 {
+        let anchor = *self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
+        match anchor {
+            Some(anchor) if request.messages.len() >= anchor.message_count => {
+                anchor.input_tokens.saturating_add(
+                    self.estimator
+                        .estimate_messages(&request.messages[anchor.message_count..]),
+                )
+            }
+            _ => self.estimator.estimate_request(request),
+        }
+    }
+
+    /// 记录一轮已确认模型用量，把后续估算锚定到该轮请求的真实输入规模上。
+    ///
+    /// Runner 在每轮 AgentRound 用量权威提交成功后调用；Provider 只报告输出而
+    /// 未报告输入（或输入为零）时不形成有效锚点，估算保持全量逐块回退。
+    pub fn note_model_round_usage(&self, request: &ModelRequest, usage: &TokenUsage) {
+        let Some(input_tokens) = usage.input_tokens.filter(|input| *input > 0) else {
+            return;
+        };
+        let mut anchor = self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
+        *anchor = Some(RoundUsageAnchor {
+            input_tokens,
+            message_count: request.messages.len(),
+        });
+    }
+
+    /// 返回完整请求的全量逐块估算，不使用已确认用量锚点。
+    ///
+    /// 压缩事务内部的缩减判断（替换前/替换后、窗口预算检查）必须在同一估算
+    /// 口径下比较；锚点口径与逐块增量口径混合会导致“压缩未缩减”误判，因此
+    /// 压缩内部统一使用全量逐块估算。
+    fn estimate_request_unanchored(&self, request: &ModelRequest) -> u64 {
         self.estimator.estimate_request(request)
     }
 
@@ -674,7 +758,7 @@ impl ContextManager {
         cancellation: &TurnCancellation,
     ) -> Result<ContextCompressionOutcome, ContextError> {
         ensure_not_cancelled(cancellation)?;
-        let before = self.estimate_request(request);
+        let before = self.estimate_request_unanchored(request);
         let units = transcript_units(&request.messages);
         let plan = self.plan_replacement(request, &units, before, target_tokens)?;
         let source_messages = request.messages[plan.start..plan.end].to_vec();
@@ -686,7 +770,7 @@ impl ContextManager {
             let minimum_messages = build_compressed_messages(request, plan, "");
             let mut minimum_request = request.clone();
             minimum_request.messages = minimum_messages;
-            let minimum_tokens = self.estimate_request(&minimum_request);
+            let minimum_tokens = self.estimate_request_unanchored(&minimum_request);
             if minimum_tokens > max_input_tokens {
                 return Err(ContextError::CompressionRequestTooLarge {
                     estimated_tokens: minimum_tokens
@@ -724,7 +808,7 @@ impl ContextManager {
 
         let mut compressed_request = request.clone();
         compressed_request.messages = messages.clone();
-        let after = self.estimate_request(&compressed_request);
+        let after = self.estimate_request_unanchored(&compressed_request);
         if let Some(capabilities) = capabilities
             && let Some(max_input_tokens) = self.strict_main_input_budget(request, capabilities)
             && after > max_input_tokens
@@ -747,6 +831,10 @@ impl ContextManager {
                 usage.usage,
             ));
         }
+        // 压缩已替换消息区间，锚点轮请求的前缀不再对应当前消息列表；
+        // 清除锚点后估算回退全量逐块，直到下一轮真实用量重新锚定。
+        // 失败路径不改写调用方消息，锚点对原前缀仍然有效，保持不清除。
+        *self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏") = None;
         Ok(ContextCompressionOutcome {
             record: ContextCompressionRecord {
                 trigger,
@@ -855,7 +943,9 @@ impl ContextManager {
                             ..ProviderCapabilities::default()
                         },
                     )
-                    .is_none_or(|limit| self.estimate_request(&candidate_request) <= limit)
+                    .is_none_or(|limit| {
+                        self.estimate_request_unanchored(&candidate_request) <= limit
+                    })
                 {
                     return Ok(candidate.to_owned());
                 }
@@ -1707,12 +1797,63 @@ fn percent_of(value: u64, percent: u8) -> u64 {
         .unwrap_or(0)
 }
 
-/// 把规范 JSON 字节数转换为至少一个 Token 的确定性估算。
-fn estimate_serialized<T: Serialize + ?Sized>(value: &T) -> u64 {
+/// 按 UTF-8 字节数以每四个字节一个 Token 向上取整估算纯文本；空文本不计。
+fn utf8_text_tokens(text: &str) -> u64 {
+    u64::try_from(text.len())
+        .unwrap_or(u64::MAX)
+        .saturating_add(3)
+        / 4
+}
+
+/// 按规范 JSON 字节数以每四个字节一个 Token 向上取整估算可序列化值。
+///
+/// 序列化失败或字节数溢出时按有界上限兜底，保证估算不 panic 且保持确定性。
+fn serialized_json_tokens<T: Serialize + ?Sized>(value: &T) -> u64 {
     let bytes = serde_json::to_vec(value)
         .map(|encoded| u64::try_from(encoded.len()).unwrap_or(u64::MAX))
         .unwrap_or(u64::MAX);
-    bytes.saturating_add(3).checked_div(4).unwrap_or(1).max(1)
+    bytes.saturating_add(3) / 4
+}
+
+/// 按图片来源估算图片输入 Token。
+fn estimate_image_tokens(source: &ImageSource) -> u64 {
+    match source {
+        // 引用地址随请求逐字发送，按其字节估算（通常很小）。
+        ImageSource::Url { url } => utf8_text_tokens(url),
+        // Base64 图片按视觉 token 化后的固定开销估算，与字节量无关。
+        ImageSource::Base64 { .. } => BASE64_IMAGE_ESTIMATED_TOKENS,
+    }
+}
+
+/// 估算一段统一消息的输入 Token：逐内容块累加并保留每消息固定开销。
+fn estimate_message_tokens(messages: &[Message]) -> u64 {
+    let mut total = u64::try_from(messages.len())
+        .unwrap_or(u64::MAX)
+        .saturating_mul(PER_MESSAGE_OVERHEAD_TOKENS);
+    for message in messages {
+        for block in &message.content {
+            total = total.saturating_add(match block {
+                ContentBlock::Text { text } => utf8_text_tokens(text),
+                ContentBlock::Reasoning { reasoning } => utf8_text_tokens(&reasoning.text),
+                ContentBlock::Image { image } => estimate_image_tokens(&image.source),
+                // 工具调用按名称加序列化参数计；调用 id 与包装字段不参与
+                // 模型输入语义，与 CCB 的逐块口径保持一致。
+                ContentBlock::ToolCall { tool_call } => utf8_text_tokens(&tool_call.name)
+                    .saturating_add(serialized_json_tokens(&tool_call.arguments)),
+                ContentBlock::ToolResult { tool_result } => {
+                    tool_result.content.iter().fold(0_u64, |sum, item| {
+                        sum.saturating_add(match item {
+                            ToolResultContent::Text { text } => utf8_text_tokens(text),
+                            ToolResultContent::Image { image } => {
+                                estimate_image_tokens(&image.source)
+                            }
+                        })
+                    })
+                }
+            });
+        }
+    }
+    total
 }
 
 /// 计算被替换消息的稳定 SHA-256 十六进制摘要。
