@@ -1341,6 +1341,14 @@ impl ModelProvider for ProviderClient {
             }
             let mut adapter = Adapter::new(client.config.protocol);
             adapter.configure_chat_output_tokens(client.config.chat_output_token_field);
+            // 提示缓存断点跟随模型能力快照（与 ModelProvider::capabilities 同源）；
+            // 只有 Messages Adapter 消费该开关，其他协议保持标准线格式。
+            adapter.configure_prompt_caching(
+                client
+                    .config
+                    .capabilities_for(&request.model)
+                    .prompt_caching,
+            );
             let body = match adapter
                 .encode_request(&request, client.config.response_mode.is_streaming())
             {

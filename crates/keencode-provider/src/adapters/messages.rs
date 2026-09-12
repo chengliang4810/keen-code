@@ -38,6 +38,8 @@ pub(crate) struct MessagesAdapter {
     saw_text_block: bool,
     /// 本次 SSE 响应是否已经产生至少一个有意义的内容事件。
     saw_meaningful_content: bool,
+    /// 是否在线上追加 Anthropic ephemeral 提示缓存断点。
+    pub(super) prompt_caching: bool,
 }
 
 impl MessagesAdapter {
@@ -52,7 +54,22 @@ impl MessagesAdapter {
             thinking_signatures: BTreeMap::new(),
             saw_text_block: false,
             saw_meaningful_content: false,
+            prompt_caching: false,
         }
+    }
+
+    /// 启用后按 Anthropic 提示缓存语义在线上追加 ephemeral 缓存断点。
+    ///
+    /// 仅当 Provider 能力快照声明 `prompt_caching` 时由 Client 打开；
+    /// cache_control 语义只在 Anthropic Messages 协议上有效，其他协议
+    /// Adapter 不消费该开关。
+    ///
+    /// 前提：当前请求链不跨 Turn 回传 thinking（会话级冻结链路已通过
+    /// `clear_historical_reasoning_state` 清除历史续传态），因此无需为无
+    /// thinking 块的 assistant 消息补空 thinking 占位；若未来开启跨 Turn
+    /// thinking 回传，需在打标前补齐该占位再启用断点。
+    pub fn configure_prompt_caching(&mut self, enabled: bool) {
+        self.prompt_caching = enabled;
     }
 
     /// 把 Provider 中立请求编码为 Messages API 请求正文。
@@ -111,6 +128,13 @@ impl MessagesAdapter {
             ));
         }
 
+        // Anthropic 提示缓存阶梯依赖会话级冻结前缀：请求 = [冻结 System 段…]
+        // + [transcript 历史…] + [末尾动态 is_meta user 消息]，配合工具数组的
+        // 稳定排序，跨轮前缀逐字节一致，断点才能命中。
+        if self.prompt_caching {
+            apply_user_message_cache_ladder(&mut messages);
+        }
+
         let mut body = Map::new();
         body.insert("model".to_owned(), Value::String(request.model.clone()));
         body.insert("messages".to_owned(), Value::Array(messages));
@@ -120,25 +144,34 @@ impl MessagesAdapter {
             Value::from(request.max_output_tokens.unwrap_or(4096)),
         );
         if !system.is_empty() {
+            if self.prompt_caching {
+                // system 是最稳定的前缀，断点固定打在最后一个内容块上。
+                if let Some(last) = system.last_mut() {
+                    add_ephemeral_cache_control(last);
+                }
+            }
             body.insert("system".to_owned(), Value::Array(system));
         }
         if !request.tools.is_empty() {
-            body.insert(
-                "tools".to_owned(),
-                Value::Array(
-                    request
-                        .tools
-                        .iter()
-                        .map(|tool| {
-                            json!({
-                                "name": tool.name,
-                                "description": tool.description,
-                                "input_schema": tool.input_schema,
-                            })
-                        })
-                        .collect(),
-                ),
-            );
+            let mut tools = request
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if self.prompt_caching {
+                // 工具数组按稳定顺序编码，断点打在最后一个工具上，
+                // 连同其后的 system 前缀一并纳入缓存。
+                if let Some(last) = tools.last_mut() {
+                    add_ephemeral_cache_control(last);
+                }
+            }
+            body.insert("tools".to_owned(), Value::Array(tools));
             body.insert(
                 "tool_choice".to_owned(),
                 encode_tool_choice(&request.tool_choice, request.parallel_tool_calls),
@@ -602,6 +635,85 @@ fn append_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {
         }
     }
     messages.push(json!({ "role": role, "content": content }));
+}
+
+/// 给一个线格式内容块或工具对象追加 Anthropic ephemeral 缓存断点。
+fn add_ephemeral_cache_control(block: &mut Value) {
+    if let Some(object) = block.as_object_mut() {
+        object.insert("cache_control".to_owned(), json!({ "type": "ephemeral" }));
+    }
+}
+
+/// 判断一个 user 线格式内容块能否作为缓存断点载体。
+///
+/// 只有非空 text 与 tool_result 块承载断点；空文本与图片块不参与。
+fn is_cacheable_user_block(block: &Value) -> bool {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Some("tool_result") => true,
+        _ => false,
+    }
+}
+
+/// 按提示缓存阶梯给 wire user 消息追加 ephemeral 断点。
+///
+/// targets 取首条、末条 user 消息，user ≥ 3 条时再加倒数第二条；target 自身
+/// 存在可缓存块（非空 text 或 tool_result）时打在最后一个可缓存块上，否则
+/// 向前回退到最近一条含可缓存块且尚未打标的 user 消息。回退遇到已打标的
+/// 消息立即停止，保证同一消息块至多携带一个断点。纯字符串 content 在本
+/// 编码器中总是先转为单 text 块，再参与打标。
+///
+/// 末尾动态 is_meta 消息在线上与普通 user 消息无异（无法也不必区分），作为
+/// "末条 user"参与打标：它的缓存后缀下一轮必然变化、永不命中，但该消息
+/// 本身体积很小，每轮多写的缓存成本可忽略。
+fn apply_user_message_cache_ladder(messages: &mut [Value]) {
+    let user_positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(position, _)| position)
+        .collect();
+    let Some(&last_user) = user_positions.last() else {
+        return;
+    };
+    let mut targets = vec![user_positions[0]];
+    if user_positions.len() >= 3 {
+        targets.push(user_positions[user_positions.len() - 2]);
+    }
+    targets.push(last_user);
+    // 单条 user 时首末重合，去重避免同一消息被处理两次。
+    targets.dedup();
+    for target in targets {
+        let Some(rank) = user_positions
+            .iter()
+            .position(|&position| position == target)
+        else {
+            continue;
+        };
+        // 从 target 向前回退：跳过无可缓存块的 user 消息，遇到已打标消息即停。
+        for &position in user_positions[..=rank].iter().rev() {
+            let Some(content) = messages[position]
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            if content
+                .iter()
+                .any(|block| block.get("cache_control").is_some())
+            {
+                break;
+            }
+            let Some(index) = content.iter().rposition(is_cacheable_user_block) else {
+                continue;
+            };
+            add_ephemeral_cache_control(&mut content[index]);
+            break;
+        }
+    }
 }
 
 /// 编码 Messages 用户输入内容块。

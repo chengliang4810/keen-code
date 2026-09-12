@@ -30,6 +30,12 @@ impl Adapter {
             adapter.output_token_field = field;
         }
     }
+    /// 提示缓存断点策略由 Messages Adapter 消费，其他协议维持标准线格式。
+    pub fn configure_prompt_caching(&mut self, enabled: bool) {
+        if let Self::Messages(adapter) = self {
+            adapter.configure_prompt_caching(enabled);
+        }
+    }
     /// 为指定协议创建没有跨请求共享状态的 Adapter。
     pub fn new(protocol: ProviderProtocol) -> Self {
         match protocol {

@@ -270,9 +270,14 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
     validate_read_timeout_seconds(provider.read_timeout_seconds)?;
     config.read_timeout = Duration::from_secs(provider.read_timeout_seconds);
     config.chat_output_token_field = provider.chat_output_token_field;
+    // Anthropic Messages 是 cache_control 提示缓存语义唯一有效的协议：该协议
+    // 后端自动启用 prompt_caching（与 per-model 能力快照同源下发），其他后端
+    // 维持关闭；per-provider 开关 UI 留待后续。
+    let prompt_caching = matches!(protocol, ProviderProtocol::Messages);
     config.default_capabilities = ProviderCapabilities {
         streaming: true,
         tool_calling: true,
+        prompt_caching,
         ..ProviderCapabilities::default()
     };
     for model in &provider.models {
@@ -286,6 +291,7 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
             ProviderCapabilities {
                 streaming: true,
                 tool_calling: true,
+                prompt_caching,
                 image_input: provider
                     .supports_vision
                     .get(model)
@@ -1470,6 +1476,37 @@ mod provider_registry_tests {
             assert!(capabilities.tool_calling);
             assert!(capabilities.image_input);
             assert_eq!(capabilities.max_context_tokens, Some(64_000));
+        }
+    }
+
+    /// Anthropic Messages 后端自动启用提示缓存能力，其他协议维持关闭。
+    ///
+    /// cache_control 断点语义只在 Messages 协议上有效，能力快照据此自动装配；
+    /// 默认快照与已登记模型的 per-model 快照取值一致。
+    #[test]
+    fn prompt_caching_capability_follows_messages_protocol() {
+        for (backend, endpoint, expected) in [
+            ("messages", "messages", true),
+            ("chat_completions", "chat/completions", false),
+            ("responses", "responses", false),
+        ] {
+            let provider = provider(
+                backend,
+                &format!("https://models.example/v2/{endpoint}#"),
+                backend,
+                Some("test-key"),
+                "test-model",
+            );
+            let config = runtime_provider_config(&provider).expect("协议配置应映射");
+            assert_eq!(
+                config.default_capabilities.prompt_caching, expected,
+                "{backend} 默认能力快照"
+            );
+            assert_eq!(
+                config.capabilities_for("test-model").prompt_caching,
+                expected,
+                "{backend} 模型能力快照"
+            );
         }
     }
 

@@ -3924,6 +3924,379 @@ fn buffered_request_disables_stream_specific_fields() {
     assert_eq!(responses["stream"], false);
 }
 
+/// 递归判断 JSON 值中是否出现任何 `cache_control` 字段。
+fn json_has_cache_control(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key("cache_control") || map.values().any(json_has_cache_control)
+        }
+        Value::Array(items) => items.iter().any(json_has_cache_control),
+        _ => false,
+    }
+}
+
+/// 统计 JSON 值中 `cache_control` 字段出现的总次数。
+fn count_cache_control(value: &Value) -> usize {
+    match value {
+        Value::Object(map) => {
+            map.contains_key("cache_control") as usize
+                + map.values().map(count_cache_control).sum::<usize>()
+        }
+        Value::Array(items) => items.iter().map(count_cache_control).sum(),
+        _ => 0,
+    }
+}
+
+/// 收集 wire messages 中携带 `cache_control` 的 (消息下标， 块下标) 位置。
+fn message_cache_control_positions(body: &Value) -> Vec<(usize, usize)> {
+    let mut positions = Vec::new();
+    for (message_index, message) in body["messages"]
+        .as_array()
+        .expect("Messages 请求应包含 messages 数组")
+        .iter()
+        .enumerate()
+    {
+        for (block_index, block) in message["content"]
+            .as_array()
+            .expect("Messages 消息内容应是块数组")
+            .iter()
+            .enumerate()
+        {
+            if block.get("cache_control").is_some() {
+                positions.push((message_index, block_index));
+            }
+        }
+    }
+    positions
+}
+
+/// 用启用提示缓存的 Messages Adapter 编码请求。
+fn encode_messages_with_prompt_caching(request: &ModelRequest) -> Value {
+    let mut adapter = Adapter::new(ProviderProtocol::Messages);
+    adapter.configure_prompt_caching(true);
+    adapter
+        .encode_request(request, true)
+        .expect("Messages 提示缓存编码应当成功")
+}
+
+/// 创建带两段冻结 System、三轮 user 对话和两个工具的稳定前缀请求。
+fn frozen_prefix_request() -> ModelRequest {
+    let mut request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::new(
+                MessageRole::System,
+                vec![
+                    ContentBlock::text("冻结系统段一"),
+                    ContentBlock::text("冻结系统段二"),
+                ],
+            ),
+            Message::text(MessageRole::User, "第一轮"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            Message::text(MessageRole::User, "第二轮"),
+            Message::text(MessageRole::Assistant, "回复二"),
+            Message::text(MessageRole::User, "第三轮"),
+        ],
+    );
+    for name in ["weather", "clock"] {
+        request.tools.push(ToolDefinition::new(
+            name,
+            "读取合成测试数据",
+            json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"],
+                "additionalProperties": false
+            }),
+        ));
+    }
+    request
+}
+
+/// 创建仅含一张网络图片的 user 消息：合法最小「无可缓存块」形态。
+///
+/// Provider 中立校验拒绝空文本块，图片块因此是不含非空 text 或
+/// tool_result 的 user 消息的最小合法构造。
+fn image_only_user_message() -> Message {
+    Message::new(
+        MessageRole::User,
+        vec![ContentBlock::Image {
+            image: ImageContent::from_url("https://example.com/prompt-cache-probe.png"),
+        }],
+    )
+}
+
+/// 提示缓存关闭（默认）时 wire 上不出现任何 cache_control，其他协议即使
+/// 误开开关也不受影响。
+#[test]
+fn prompt_caching_disabled_keeps_wire_without_cache_control() {
+    let request = frozen_prefix_request();
+    let default_body = Adapter::new(ProviderProtocol::Messages)
+        .encode_request(&request, true)
+        .expect("默认 Messages 编码应当成功");
+    assert!(!json_has_cache_control(&default_body));
+    let mut disabled = Adapter::new(ProviderProtocol::Messages);
+    disabled.configure_prompt_caching(false);
+    assert_eq!(
+        disabled.encode_request(&request, true).unwrap(),
+        default_body,
+        "显式关闭必须与默认编码逐字节一致"
+    );
+    for protocol in [
+        ProviderProtocol::ChatCompletions,
+        ProviderProtocol::Responses,
+    ] {
+        let mut adapter = Adapter::new(protocol);
+        adapter.configure_prompt_caching(true);
+        let body = adapter.encode_request(&request, true).unwrap();
+        assert!(
+            !json_has_cache_control(&body),
+            "{protocol:?} 线格式不得出现 cache_control"
+        );
+    }
+}
+
+/// 开启后 system 末块与最后一个工具携带 ephemeral 断点，前序块与工具不标。
+#[test]
+fn prompt_caching_marks_last_system_block_and_last_tool() {
+    let body = encode_messages_with_prompt_caching(&frozen_prefix_request());
+    let system = body["system"].as_array().expect("system 应是块数组");
+    assert_eq!(system.len(), 2);
+    assert!(system[0].get("cache_control").is_none());
+    assert_eq!(system[1]["cache_control"], json!({ "type": "ephemeral" }));
+    let tools = body["tools"].as_array().expect("tools 应是数组");
+    assert_eq!(tools.len(), 2);
+    assert!(tools[0].get("cache_control").is_none());
+    assert_eq!(tools[1]["cache_control"], json!({ "type": "ephemeral" }));
+}
+
+/// 阶梯：≥3 条 user 时首条、倒数第二条、末条各打一个断点且位置正确。
+#[test]
+fn prompt_caching_ladder_marks_first_second_to_last_and_last_users() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "u1"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            Message::text(MessageRole::User, "u2"),
+            Message::text(MessageRole::Assistant, "回复二"),
+            Message::text(MessageRole::User, "u3"),
+            Message::text(MessageRole::Assistant, "回复三"),
+            Message::text(MessageRole::User, "u4"),
+            Message::text(MessageRole::Assistant, "回复四"),
+            Message::text(MessageRole::User, "u5"),
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&request);
+    // wire 中 user 位于 0/2/4/6/8，targets = 首(0)、倒数第二(6)、末(8)。
+    assert_eq!(
+        message_cache_control_positions(&body),
+        [(0, 0), (6, 0), (8, 0)]
+    );
+    assert_eq!(
+        body["messages"][6]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    assert_eq!(
+        body["messages"][8]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+}
+
+/// 阶梯：恰 2 条 user 时打首条与末条；1 条 user 时只打该条一次。
+#[test]
+fn prompt_caching_ladder_with_two_or_fewer_users() {
+    let two_users = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "u1"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            Message::text(MessageRole::User, "u2"),
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&two_users);
+    assert_eq!(message_cache_control_positions(&body), [(0, 0), (2, 0)]);
+
+    let single_user = minimal_request();
+    let body = encode_messages_with_prompt_caching(&single_user);
+    assert_eq!(message_cache_control_positions(&body), [(0, 0)]);
+    assert_eq!(
+        count_cache_control(&body),
+        1,
+        "无 system/tools 时全 body 仅一个断点"
+    );
+}
+
+/// 回退链：末条与倒数第二条 user 均无可缓存块时，回退到最近的
+/// 尚未打标且含可缓存块的 user 消息。
+#[test]
+fn prompt_caching_falls_back_to_previous_user_without_cacheable_blocks() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "u1"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            Message::text(MessageRole::User, "u2"),
+            Message::text(MessageRole::Assistant, "回复二"),
+            Message::text(MessageRole::User, "u3"),
+            Message::text(MessageRole::Assistant, "回复三"),
+            image_only_user_message(),
+            Message::text(MessageRole::Assistant, "回复四"),
+            image_only_user_message(),
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&request);
+    // wire user 位于 0/2/4/6/8：targets = 首(0)、倒数第二(6)、末(8)。
+    // 6 与 8 都只有图片块，8 向前回退时跳过 6（无可缓存）并停在 4（已打标）。
+    assert_eq!(message_cache_control_positions(&body), [(0, 0), (4, 0)]);
+}
+
+/// 全部 user 消息都无可缓存块时只剩 system 与 tools 两处断点。
+#[test]
+fn prompt_caching_marks_only_system_and_tools_when_no_user_cacheable() {
+    let request = frozen_prefix_request_with_image_users();
+    let body = encode_messages_with_prompt_caching(&request);
+    assert!(
+        message_cache_control_positions(&body).is_empty(),
+        "无任何可缓存 user 块时消息阶梯不得打标"
+    );
+    assert_eq!(
+        count_cache_control(&body),
+        2,
+        "仅 system 末块与末工具两处断点"
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(
+        tools.last().unwrap()["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+    let system = body["system"].as_array().unwrap();
+    assert_eq!(
+        system.last().unwrap()["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+}
+
+/// 构造 system、工具齐全但 user 全部只有图片块的请求。
+fn frozen_prefix_request_with_image_users() -> ModelRequest {
+    let mut request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::new(
+                MessageRole::System,
+                vec![
+                    ContentBlock::text("冻结系统段一"),
+                    ContentBlock::text("冻结系统段二"),
+                ],
+            ),
+            image_only_user_message(),
+            Message::text(MessageRole::Assistant, "回复一"),
+            image_only_user_message(),
+        ],
+    );
+    request.tools.push(ToolDefinition::new(
+        "weather",
+        "读取合成测试数据",
+        json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+            "additionalProperties": false
+        }),
+    ));
+    request
+}
+
+/// 打标不重复：2 条 user 且末条无可缓存块时，回退落在已打标的首条上
+/// 即停，同一消息至多一个断点。
+#[test]
+fn prompt_caching_never_marks_same_message_twice() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "u1"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            image_only_user_message(),
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&request);
+    assert_eq!(message_cache_control_positions(&body), [(0, 0)]);
+    let first = &body["messages"][0];
+    assert_eq!(
+        count_cache_control(first),
+        1,
+        "首条 user 同时是 targets 首末重叠的落点，只允许一个断点"
+    );
+}
+
+/// 末尾动态 is_meta user 消息在线上与普通 user 无异，作为末条 user 打标。
+///
+/// 已知取舍：该断点的缓存后缀下一轮必然变化、永不命中，但消息体积很小，
+/// 每轮多写的缓存成本可忽略。
+#[test]
+fn prompt_caching_marks_trailing_dynamic_is_meta_user() {
+    let mut trailing = Message::text(MessageRole::User, "动态任务指令");
+    trailing.is_meta = true;
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "第一轮"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            trailing,
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&request);
+    assert_eq!(message_cache_control_positions(&body), [(0, 0), (2, 0)]);
+}
+
+/// 多块 user 消息打在最后一个可缓存块：文本与图片混排打在 text 块，
+/// 工具结果消息打在 tool_result 块。
+#[test]
+fn prompt_caching_marks_last_cacheable_block_in_user_message() {
+    let mixed = ModelRequest::new(
+        "test-model",
+        vec![Message::new(
+            MessageRole::User,
+            vec![
+                ContentBlock::text("带图问题"),
+                ContentBlock::Image {
+                    image: ImageContent::from_url("https://example.com/prompt-cache-probe.png"),
+                },
+            ],
+        )],
+    );
+    let body = encode_messages_with_prompt_caching(&mixed);
+    assert_eq!(message_cache_control_positions(&body), [(0, 0)]);
+    assert_eq!(body["messages"][0]["content"][0]["type"], "text");
+
+    let tool_turn = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "查询天气"),
+            Message::new(
+                MessageRole::Assistant,
+                vec![ContentBlock::ToolCall {
+                    tool_call: ToolCall::new("call-1", "weather", json!({ "city": "杭州" })),
+                }],
+            ),
+            Message::new(
+                MessageRole::Tool,
+                vec![ContentBlock::ToolResult {
+                    tool_result: ToolResult::text("call-1", "晴", false),
+                }],
+            ),
+        ],
+    );
+    let body = encode_messages_with_prompt_caching(&tool_turn);
+    // Tool 消息在线上并入 user 角色，成为末条 user；断点打在 tool_result 块。
+    assert_eq!(message_cache_control_positions(&body), [(0, 0), (2, 0)]);
+    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+    assert_eq!(
+        body["messages"][2]["content"][0]["cache_control"],
+        json!({ "type": "ephemeral" })
+    );
+}
+
 /// 验证后续分页的可重试服务错误不会抹掉此前成功解析的目录事实。
 #[tokio::test(flavor = "multi_thread")]
 async fn list_models_with_partial_第二页服务失败时保留首分页() {
