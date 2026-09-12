@@ -143,7 +143,10 @@ impl MessagesAdapter {
             "max_tokens".to_owned(),
             Value::from(request.max_output_tokens.unwrap_or(4096)),
         );
-        if !system.is_empty() {
+        // 缓存前缀顺序为 tools → system → messages：system 非空时末块断点
+        // 的缓存前缀已包含整个 tools 数组，tools 断点只是其严格子集。
+        let system_present = !system.is_empty();
+        if system_present {
             if self.prompt_caching {
                 // system 是最稳定的前缀，断点固定打在最后一个内容块上。
                 if let Some(last) = system.last_mut() {
@@ -164,9 +167,12 @@ impl MessagesAdapter {
                     })
                 })
                 .collect::<Vec<_>>();
-            if self.prompt_caching {
-                // 工具数组按稳定顺序编码，断点打在最后一个工具上，
-                // 连同其后的 system 前缀一并纳入缓存。
+            if self.prompt_caching && !system_present {
+                // 仅 system 为空时 tools 末位才作为缓存前缀兜底断点；
+                // system 非空时必须跳过，否则 system 1 + tools 1 + user
+                // 阶梯最多 3 = 5 个断点，超出 Anthropic 硬上限 4（超限
+                // 直接 400）。跳过不改变缓存前缀语义：system 断点已覆盖
+                // tools + system。
                 if let Some(last) = tools.last_mut() {
                     add_ephemeral_cache_control(last);
                 }

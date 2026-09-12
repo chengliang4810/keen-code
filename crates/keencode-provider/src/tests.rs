@@ -4013,6 +4013,20 @@ fn frozen_prefix_request() -> ModelRequest {
     request
 }
 
+/// 给请求追加一个稳定 schema 的合成工具，用于构造带工具的断点形态。
+fn push_probe_tool(request: &mut ModelRequest, name: &str) {
+    request.tools.push(ToolDefinition::new(
+        name,
+        "读取合成测试数据",
+        json!({
+            "type": "object",
+            "properties": { "city": { "type": "string" } },
+            "required": ["city"],
+            "additionalProperties": false
+        }),
+    ));
+}
+
 /// 创建仅含一张网络图片的 user 消息：合法最小「无可缓存块」形态。
 ///
 /// Provider 中立校验拒绝空文本块，图片块因此是不含非空 text 或
@@ -4038,8 +4052,8 @@ fn prompt_caching_disabled_keeps_wire_without_cache_control() {
     let mut disabled = Adapter::new(ProviderProtocol::Messages);
     disabled.configure_prompt_caching(false);
     assert_eq!(
-        disabled.encode_request(&request, true).unwrap(),
-        default_body,
+        disabled.encode_request(&request, true).unwrap().to_string(),
+        default_body.to_string(),
         "显式关闭必须与默认编码逐字节一致"
     );
     for protocol in [
@@ -4056,9 +4070,12 @@ fn prompt_caching_disabled_keeps_wire_without_cache_control() {
     }
 }
 
-/// 开启后 system 末块与最后一个工具携带 ephemeral 断点，前序块与工具不标。
+/// system 非空时只有 system 末块携带 ephemeral 断点，tools 不打标：
+/// 缓存前缀顺序 tools → system → messages，system 末块断点的前缀已
+/// 覆盖整个 tools 数组，tools 断点只是其严格子集，重复打标只会额外
+/// 消耗 Anthropic 断点上限。
 #[test]
-fn prompt_caching_marks_last_system_block_and_last_tool() {
+fn prompt_caching_marks_last_system_block_and_skips_tools() {
     let body = encode_messages_with_prompt_caching(&frozen_prefix_request());
     let system = body["system"].as_array().expect("system 应是块数组");
     assert_eq!(system.len(), 2);
@@ -4066,8 +4083,69 @@ fn prompt_caching_marks_last_system_block_and_last_tool() {
     assert_eq!(system[1]["cache_control"], json!({ "type": "ephemeral" }));
     let tools = body["tools"].as_array().expect("tools 应是数组");
     assert_eq!(tools.len(), 2);
+    assert!(
+        tools.iter().all(|tool| tool.get("cache_control").is_none()),
+        "system 非空时 tools 不得打标"
+    );
+}
+
+/// system 为空（无 system 消息的合法最小请求）时回退到 tools 末位打标，
+/// 前序工具不打标，并与 user 阶梯断点并存。
+#[test]
+fn prompt_caching_marks_last_tool_when_system_empty() {
+    let mut request = ModelRequest::new(
+        "test-model",
+        vec![Message::text(MessageRole::User, "第一轮")],
+    );
+    push_probe_tool(&mut request, "weather");
+    push_probe_tool(&mut request, "clock");
+    let body = encode_messages_with_prompt_caching(&request);
+    assert!(
+        body.get("system").is_none(),
+        "无 system 消息时 wire 不应有 system 字段"
+    );
+    let tools = body["tools"].as_array().expect("tools 应是数组");
+    assert_eq!(tools.len(), 2);
     assert!(tools[0].get("cache_control").is_none());
     assert_eq!(tools[1]["cache_control"], json!({ "type": "ephemeral" }));
+    // 单条 user 首末重合仍打标一次，与 tools 断点并存，合计 2 个。
+    assert_eq!(message_cache_control_positions(&body), [(0, 0)]);
+    assert_eq!(count_cache_control(&body), 2, "tools 1 + user 1 = 2");
+}
+
+/// 断点总数红线：system 非空时跳过 tools 断点后，全 body 断点总数必须
+/// 不超过 Anthropic 硬上限 4。完整冻结前缀形态（system + tools + 3 条
+/// user）恰为 4；2 条 user 压线形态恰为 3（system 1 + user 阶梯 2，
+/// tools 不打标）。
+#[test]
+fn prompt_caching_breakpoint_total_stays_within_anthropic_limit() {
+    let full = encode_messages_with_prompt_caching(&frozen_prefix_request());
+    let full_total = count_cache_control(&full);
+    assert!(
+        full_total <= 4,
+        "断点总数 {full_total} 不得超过 Anthropic 硬上限 4"
+    );
+    assert_eq!(
+        full_total, 4,
+        "满额形态应恰好用满 system 1 + user 阶梯 3 = 4 个断点"
+    );
+
+    let mut two_users = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::new(MessageRole::System, vec![ContentBlock::text("冻结系统段")]),
+            Message::text(MessageRole::User, "第一轮"),
+            Message::text(MessageRole::Assistant, "回复一"),
+            Message::text(MessageRole::User, "第二轮"),
+        ],
+    );
+    push_probe_tool(&mut two_users, "weather");
+    let borderline = encode_messages_with_prompt_caching(&two_users);
+    assert_eq!(
+        count_cache_control(&borderline),
+        3,
+        "压线形态应恰为 system 1 + user 2 = 3（tools 不打标）"
+    );
 }
 
 /// 阶梯：≥3 条 user 时首条、倒数第二条、末条各打一个断点且位置正确。
@@ -4151,9 +4229,9 @@ fn prompt_caching_falls_back_to_previous_user_without_cacheable_blocks() {
     assert_eq!(message_cache_control_positions(&body), [(0, 0), (4, 0)]);
 }
 
-/// 全部 user 消息都无可缓存块时只剩 system 与 tools 两处断点。
+/// 全部 user 消息都无可缓存块时只剩 system 末块一个断点，tools 不打标。
 #[test]
-fn prompt_caching_marks_only_system_and_tools_when_no_user_cacheable() {
+fn prompt_caching_marks_only_system_when_no_user_cacheable() {
     let request = frozen_prefix_request_with_image_users();
     let body = encode_messages_with_prompt_caching(&request);
     assert!(
@@ -4162,13 +4240,13 @@ fn prompt_caching_marks_only_system_and_tools_when_no_user_cacheable() {
     );
     assert_eq!(
         count_cache_control(&body),
-        2,
-        "仅 system 末块与末工具两处断点"
+        1,
+        "仅 system 末块一个断点（system 非空时 tools 不打标）"
     );
     let tools = body["tools"].as_array().unwrap();
-    assert_eq!(
-        tools.last().unwrap()["cache_control"],
-        json!({ "type": "ephemeral" })
+    assert!(
+        tools.iter().all(|tool| tool.get("cache_control").is_none()),
+        "system 非空时 tools 不得打标"
     );
     let system = body["system"].as_array().unwrap();
     assert_eq!(
