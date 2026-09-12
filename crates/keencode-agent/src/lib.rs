@@ -41,11 +41,12 @@ pub use collaboration::{
     root_turn_prompt_digest,
 };
 pub use context::{
-    ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger,
-    ContextCompressor, ContextError, ContextFuture, ContextManager, ContextPolicy,
-    ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,
-    ContextSummaryRequest, ContextTokenEstimator, JsonContextTokenEstimator,
-    ProviderContextCompressor,
+    ContextCompactionKind, ContextCompactionOutcomeKind, ContextCompressionOutcome,
+    ContextCompressionRecord, ContextCompressionTrigger, ContextCompressor, ContextError,
+    ContextFuture, ContextManager, ContextPolicy, ContextSummaryCallResult,
+    ContextSummaryModelUsage, ContextSummaryOutcome, ContextSummaryRequest, ContextTokenEstimator,
+    JsonContextTokenEstimator, MICRO_COMPACT_POLICY_VERSION, MicroAppliedThenFullFailure,
+    ProviderContextCompressor, ToolResultProjection,
 };
 pub use event::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,

@@ -28,6 +28,32 @@ const SUMMARIZER_INSTRUCTION: &str = "You are a context summarizer. Compress the
 /// 递归摘要允许的最大层数，确保恶意或不收敛的摘要器不会无限调用模型。
 pub(crate) const MAX_SUMMARY_RECURSION_DEPTH: usize = 8;
 
+/// Micro Compact 投影规则的当前版本；投影规则演进时递增并写入每条记录。
+pub const MICRO_COMPACT_POLICY_VERSION: u32 = 1;
+
+/// Micro 投影保留的 head 字符数（peri micro-compact 实测值）。
+const MICRO_PROJECTION_HEAD_CHARS: usize = 350;
+
+/// Micro 投影保留的 tail 字符数（peri micro-compact 实测值）。
+const MICRO_PROJECTION_TAIL_CHARS: usize = 100;
+
+/// Micro 投影的最小候选长度（字符）；更短的结果不值得截断。
+const MICRO_PROJECTION_MIN_CHARS: usize = 500;
+
+/// Micro 投影的 stale 保护轮数：最近 N 轮内的消息一律不动（对齐 peri
+/// `micro_compact_stale_steps = 3`）。"轮"按内存 transcript 的轮次归属判定：
+/// 每个模型 Round 恰好提交一个 assistant 消息（截断续跑等罕见情况会多提交
+/// assistant 消息，只会把保护窗口向更新的方向收紧），从尾部向前数第 N 个
+/// Assistant 消息起直到列表末尾全部受保护。
+const MICRO_COMPACT_STALE_ROUNDS: usize = 3;
+
+/// Micro 投影文本中固定不变的 sentinel 片段；携带该片段的文本视为已投影。
+const MICRO_COMPACT_SENTINEL: &str = "…[已压缩，省略 ";
+
+/// Micro 投影注入的完整中文省略标记模板；`{omitted}` 为被省略的字符数。
+const MICRO_COMPACT_MARKER_TEMPLATE: &str =
+    "…[已压缩，省略 {omitted} 字符；完整内容可从原始来源重新获取]…";
+
 /// 上下文压缩异步边界使用的对象安全 Future。
 pub type ContextFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -45,11 +71,19 @@ pub enum ContextCompressionTrigger {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCompressionRecord {
+    /// 本记录的压缩形态；决定 [`ContextCompressionRecord::apply`] 的重放语义。
+    pub kind: ContextCompactionKind,
     /// 本次压缩的稳定触发原因。
     pub trigger: ContextCompressionTrigger,
     /// 压缩前完整请求的 Provider 中立估算 Token 数。
+    ///
+    /// 无锚全量逐块口径（与压缩事务内部的比较口径一致）；`ContextCompactionStarted`
+    /// 事件报告的是锚定口径，两者刻度不同——存在真实用量锚点的工具轮场景下，
+    /// 锚定值可能比这里的无锚全量估算高出一个数量级，消费方不得跨刻度比较。
     pub estimated_tokens_before: u64,
     /// 压缩后完整请求的 Provider 中立估算 Token 数。
+    ///
+    /// 与 [`ContextCompressionRecord::estimated_tokens_before`] 同为无锚全量口径。
     pub estimated_tokens_after: u64,
     /// 被摘要替换的第一条消息下标。
     pub replaced_start_index: usize,
@@ -60,9 +94,45 @@ pub struct ContextCompressionRecord {
     /// 压缩后仍保留的消息数量，包含新摘要消息。
     pub retained_message_count: usize,
     /// 被替换消息规范 JSON 的 SHA-256，用于持久层核对来源而不重复保存全文。
+    ///
+    /// Summary 形态覆盖被替换区间；Micro 投影形态覆盖压缩事务输入时的完整
+    /// 消息列表（投影按绝对消息下标定位，必须核对整个前缀未被改动）。
     pub source_digest_sha256: String,
-    /// 重新注入模型上下文的完整摘要正文。
+    /// 重新注入模型上下文的完整摘要正文；Micro 投影形态恒为空。
     pub summary: String,
+    /// Micro 投影形态的逐条 ToolResult 文本投影；Summary 形态恒为空列表。
+    pub projections: Vec<ToolResultProjection>,
+    /// 生成该记录时的压缩规则版本，初版为 1。
+    ///
+    /// 未来 Micro 投影规则演进（head/tail 保留长度、stale 窗口、sentinel 文本、
+    /// 最小长度阈值等）时递增：重放方据此识别旧记录按旧规则解释，或拒绝以
+    /// 当前规则重算收益；同一版本内投影必须逐字节确定，保证冷恢复重放一致。
+    pub policy_version: u32,
+}
+
+/// 一条压缩记录的稳定形态；决定重放语义与字段有效性。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextCompactionKind {
+    /// 既有 LLM 摘要形态：把替换区间整体替换为一条带信任边界的摘要消息。
+    Summary,
+    /// Micro Compact 零 LLM 投影形态：原位截断旧 ToolResult 文本为
+    /// head/tail 投影，不增删消息，工具调用与结果的配对天然保持完整。
+    MicroProjection,
+}
+
+/// Micro Compact 对单个 ToolResult 文本内容的一次确定性投影。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResultProjection {
+    /// 投影目标消息在压缩事务输入消息列表中的下标。
+    pub message_index: usize,
+    /// 投影目标 ToolResult 内容块在消息内容块列表中的下标。
+    pub block_index: usize,
+    /// 投影目标 Text 内容在 ToolResult 内容列表中的下标。
+    pub content_index: usize,
+    /// 投影后的完整替换文本（head + 中文省略标记 + tail）。
+    pub projected_text: String,
 }
 
 impl ContextCompressionRecord {
@@ -71,8 +141,29 @@ impl ContextCompressionRecord {
         build_summary_message(&self.summary)
     }
 
-    /// 校验来源范围和摘要后，把持久化记录重新应用到同一版有效 Transcript。
+    /// 校验来源范围和内容后，把持久化记录重新应用到同一版有效 Transcript。
+    ///
+    /// Summary 形态重放"区间替换为摘要"；Micro 投影形态重放"原位文本投影"。
+    /// 两种形态都必须通过与资源层 `validate_compaction_source` 等价的边界校验：
+    /// 不替换 system/developer 指令、不拆散工具调用与结果的配对——Summary 形态
+    /// 由 `validate_replacement_range` 强制；Micro 形态不增删消息（配对天然
+    /// 完整），并额外强制每个投影目标都是 Tool 角色消息内的 ToolResult 文本。
     pub fn apply(&self, messages: &[Message]) -> Result<Vec<Message>, ContextError> {
+        if self.estimated_tokens_before == 0
+            || self.estimated_tokens_after >= self.estimated_tokens_before
+        {
+            return Err(ContextError::RecordMismatch {
+                message: "持久化 Token 估算没有形成有效缩减".to_owned(),
+            });
+        }
+        match self.kind {
+            ContextCompactionKind::Summary => self.apply_summary(messages),
+            ContextCompactionKind::MicroProjection => self.apply_micro_projection(messages),
+        }
+    }
+
+    /// 按摘要替换语义重放 Summary 形态记录。
+    fn apply_summary(&self, messages: &[Message]) -> Result<Vec<Message>, ContextError> {
         if self.replaced_start_index >= self.replaced_end_index_exclusive
             || self.replaced_end_index_exclusive > messages.len()
             || self.replaced_message_count
@@ -89,11 +180,9 @@ impl ContextCompressionRecord {
                 message: "持久化摘要为空".to_owned(),
             });
         }
-        if self.estimated_tokens_before == 0
-            || self.estimated_tokens_after >= self.estimated_tokens_before
-        {
+        if !self.projections.is_empty() {
             return Err(ContextError::RecordMismatch {
-                message: "持久化 Token 估算没有形成有效缩减".to_owned(),
+                message: "摘要形态记录不应携带 Micro 投影".to_owned(),
             });
         }
         let range = self.replaced_start_index..self.replaced_end_index_exclusive;
@@ -120,17 +209,120 @@ impl ContextCompressionRecord {
         }
         Ok(rebuilt)
     }
+
+    /// 按原位文本投影语义重放 Micro 形态记录，重复应用安全且结果不变。
+    ///
+    /// 所有投影目标都已等于投影文本时视为已经应用过，原样返回输入（幂等）；
+    /// 否则先核对完整消息列表摘要，再逐条校验目标结构后执行替换。
+    fn apply_micro_projection(&self, messages: &[Message]) -> Result<Vec<Message>, ContextError> {
+        if !self.summary.is_empty() {
+            return Err(ContextError::RecordMismatch {
+                message: "Micro 投影记录不应携带摘要正文".to_owned(),
+            });
+        }
+        if self.projections.is_empty() {
+            return Err(ContextError::RecordMismatch {
+                message: "Micro 投影记录至少需要一条投影".to_owned(),
+            });
+        }
+        if self.replaced_start_index != 0
+            || self.replaced_end_index_exclusive != 0
+            || self.replaced_message_count != 0
+            || self.retained_message_count != messages.len()
+        {
+            return Err(ContextError::RecordMismatch {
+                message: "Micro 投影记录不应替换任何消息".to_owned(),
+            });
+        }
+        if projections_already_applied(messages, &self.projections) {
+            return Ok(messages.to_vec());
+        }
+        if digest_messages(messages)? != self.source_digest_sha256 {
+            return Err(ContextError::RecordMismatch {
+                message: "持久化记录与当前 Transcript 来源摘要不一致".to_owned(),
+            });
+        }
+        let mut rebuilt = messages.to_vec();
+        for projection in &self.projections {
+            let Some(message) = rebuilt.get_mut(projection.message_index) else {
+                return Err(ContextError::RecordMismatch {
+                    message: "Micro 投影目标消息下标越界".to_owned(),
+                });
+            };
+            // 投影只改写 Tool 结果文本：不触碰 system/developer（它们不可能出现在
+            // Tool 角色内），不增删消息，因此工具调用与结果的配对在重放后保持完整。
+            if message.role != MessageRole::Tool {
+                return Err(ContextError::RecordMismatch {
+                    message: "Micro 投影目标必须是工具结果消息".to_owned(),
+                });
+            }
+            let Some(ContentBlock::ToolResult { tool_result }) =
+                message.content.get_mut(projection.block_index)
+            else {
+                return Err(ContextError::RecordMismatch {
+                    message: "Micro 投影目标内容块必须是工具结果".to_owned(),
+                });
+            };
+            let Some(ToolResultContent::Text { text }) =
+                tool_result.content.get_mut(projection.content_index)
+            else {
+                return Err(ContextError::RecordMismatch {
+                    message: "Micro 投影目标必须是工具结果文本内容".to_owned(),
+                });
+            };
+            *text = projection.projected_text.clone();
+        }
+        Ok(rebuilt)
+    }
+}
+
+/// 判断一段消息列表中的全部 Micro 投影目标是否已经等于投影文本。
+fn projections_already_applied(messages: &[Message], projections: &[ToolResultProjection]) -> bool {
+    projections.iter().all(|projection| {
+        messages
+            .get(projection.message_index)
+            .and_then(|message| message.content.get(projection.block_index))
+            .and_then(|block| match block {
+                ContentBlock::ToolResult { tool_result } => {
+                    tool_result.content.get(projection.content_index)
+                }
+                _ => None,
+            })
+            .is_some_and(|part| match part {
+                ToolResultContent::Text { text } => *text == projection.projected_text,
+                _ => false,
+            })
+    })
 }
 
 /// 一次成功压缩产生的新消息和持久化记录。
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContextCompressionOutcome {
+    /// 本次压缩的结果形态；随压缩事件通道对外区分零 LLM 与摘要路径。
+    pub kind: ContextCompactionOutcomeKind,
     /// 保留指令和近期原子单元后的新模型消息。
     pub messages: Vec<Message>,
-    /// 描述本次替换范围、估算用量和摘要的记录。
+    /// 描述本次替换范围、估算用量和内容的记录。
+    ///
+    /// `MicroThenFull` 形态下这是在已投影历史上执行的摘要记录；
+    /// `MicroOnly` 形态下这是 Micro 投影记录本身。
     pub record: ContextCompressionRecord,
-    /// 摘要模型成功调用时实际报告的用量与墙钟耗时。
+    /// `MicroThenFull` 形态下先于摘要应用并保留收益的 Micro 投影记录；
+    /// 其余形态恒为 `None`。
+    pub pre_applied_micro: Option<ContextCompressionRecord>,
+    /// 摘要模型成功调用时实际报告的用量与墙钟耗时；Micro 形态没有模型调用。
     pub summary_model_usage: Option<ContextSummaryModelUsage>,
+}
+
+/// 一次成功压缩的结果形态。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextCompactionOutcomeKind {
+    /// 仅执行既有 LLM 摘要，与未引入 Micro Compact 前的路径一致。
+    FullOnly,
+    /// 仅执行零 LLM Micro 投影即达到目标，没有发生任何摘要模型调用。
+    MicroOnly,
+    /// 先应用零 LLM Micro 投影，再在缩水后的历史上执行 LLM 摘要。
+    MicroThenFull,
 }
 
 /// 交给摘要实现的 Provider 中立输入。
@@ -543,6 +735,14 @@ pub struct ContextManager {
     /// 只接收统一消息且返回纯文本的摘要器。
     compressor: Arc<dyn ContextCompressor>,
     /// 最近一轮已确认用量的锚点；缺失时估算回退为全量逐块规则。
+    ///
+    /// 锚点只对"与产生该轮请求完全相同的 transcript 前缀"有效：锚点记录的是
+    /// 请求前 `message_count` 条消息的真实输入规模，一旦前缀内容被替换（压缩
+    /// 成功会清锚）或换成了另一段对话，锚定估算即失真。Runner 在每个 Turn
+    /// 开始处调用 [`ContextManager::clear_usage_anchor`]，保证跨 Turn 复用同一
+    /// `ContextManager` 实例（例如同一 Runner 先后服务不同前缀的对话或不同
+    /// Agent）时不会携带上一 Turn 的锚点；没有这条清锚规则时，嵌入方跨不同
+    /// 前缀的 Turn 复用实例必须自行先清锚。
     usage_anchor: Arc<Mutex<Option<RoundUsageAnchor>>>,
 }
 
@@ -637,6 +837,11 @@ impl ContextManager {
     /// ——上一轮 output 将作为本轮输入进入上下文，因此必须计入增量估算；不能
     /// 把 usage.output_tokens 直接加到总量上，否则 output 会在“增量 assistant
     /// 消息”与“输出用量”中被双算（peri 同款警告）。
+    ///
+    /// 已知低估：锚定分支不计量间非消息 request_context（Memory/Plan 等请求级
+    /// 注入）的轮间增量——锚点轮的真实输入已包含当轮注入，但下一轮若注入内容
+    /// 增长，锚定值不会随之修正。偏差方向为低估，且该注入在下一轮用量提交后
+    /// 被新锚点覆盖，一轮后自愈；压缩事务内部不受影响（统一使用无锚全量口径）。
     pub fn estimate_request(&self, request: &ModelRequest) -> u64 {
         let anchor = *self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
         match anchor {
@@ -663,6 +868,15 @@ impl ContextManager {
             input_tokens,
             message_count: request.messages.len(),
         });
+    }
+
+    /// 清除当前用量锚点，使后续估算立即回退为全量逐块规则。
+    ///
+    /// Runner 在每个 Turn 开始处调用：锚点只在同一 transcript 前缀下有效，而
+    /// 同一 `ContextManager` 实例可能被跨 Turn 复用到不同前缀的对话上，Turn
+    /// 边界统一清锚比要求每个嵌入方自行判断前缀是否延续更干净。
+    pub fn clear_usage_anchor(&self) {
+        *self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏") = None;
     }
 
     /// 返回完整请求的全量逐块估算，不使用已确认用量锚点。
@@ -751,7 +965,129 @@ impl ContextManager {
     }
 
     /// 执行一次尚未修改有效 Transcript 的上下文压缩事务。
+    ///
+    /// 先尝试零 LLM 的 Micro Compact：纯计算 planner 把旧 ToolResult 文本投影为
+    /// head/tail 截断。投影收益覆盖期望减量时直接返回 `MicroOnly`（不发生任何
+    /// 摘要模型调用）；有收益但不足时先应用投影，再在缩水历史上执行既有 LLM
+    /// 摘要（`MicroThenFull`，摘要失败时已回收的投影收益仍随记录保留）；无可
+    /// 投影内容时走既有 LLM 摘要路径，与未引入 Micro Compact 前完全同路径。
     async fn compact_internal(
+        &self,
+        request: &ModelRequest,
+        trigger: ContextCompressionTrigger,
+        target_tokens: u64,
+        capabilities: Option<&ProviderCapabilities>,
+        cancellation: &TurnCancellation,
+    ) -> Result<ContextCompressionOutcome, ContextError> {
+        ensure_not_cancelled(cancellation)?;
+        let before = self.estimate_request_unanchored(request);
+        // 先算出钳后的摘要输出上限：期望减量按“实际可能插入的摘要规模”预留
+        // 余量，小窗口下跟随钳后值，不按策略原始值虚高。
+        let summary_output_ceiling = capabilities
+            .map(|item| self.summary_output_ceiling(item))
+            .unwrap_or(self.policy.summary_max_output_tokens);
+        // 期望减量沿用 plan_replacement 的口径：降到目标之外再覆盖摘要规模。
+        let desired_reduction = desired_reduction(before, target_tokens, summary_output_ceiling);
+        if let Some(micro_plan) = plan_micro_compaction(&request.messages) {
+            if micro_plan.saved_tokens >= desired_reduction {
+                return self.apply_micro_compaction(request, trigger, &micro_plan, before);
+            }
+            let micro_record = self.build_micro_record(request, trigger, &micro_plan, before)?;
+            let projected_messages = apply_micro_projections(&request.messages, &micro_plan);
+            // 前缀内容已变，锚点轮请求不再对应当前消息列表；清除锚点后估算
+            // 回退全量逐块，直到下一轮真实用量重新锚定。失败路径同样清除：
+            // 投影后的消息由 Runner 采纳，原前缀锚点不再有效。
+            self.clear_usage_anchor();
+            let mut projected_request = request.clone();
+            projected_request.messages = projected_messages.clone();
+            return match self
+                .compact_full_internal(
+                    &projected_request,
+                    trigger,
+                    target_tokens,
+                    capabilities,
+                    cancellation,
+                )
+                .await
+            {
+                Ok(mut outcome) => {
+                    outcome.kind = ContextCompactionOutcomeKind::MicroThenFull;
+                    outcome.pre_applied_micro = Some(micro_record);
+                    Ok(outcome)
+                }
+                Err(error) => Err(ContextError::MicroAppliedThenFullFailed(Box::new(
+                    MicroAppliedThenFullFailure {
+                        micro_record,
+                        messages: projected_messages,
+                        error: Box::new(error),
+                    },
+                ))),
+            };
+        }
+        self.compact_full_internal(request, trigger, target_tokens, capabilities, cancellation)
+            .await
+    }
+
+    /// 仅执行零 LLM Micro 投影并返回 `MicroOnly` 结果；不发生任何模型调用。
+    fn apply_micro_compaction(
+        &self,
+        request: &ModelRequest,
+        trigger: ContextCompressionTrigger,
+        micro_plan: &MicroCompactionPlan,
+        before: u64,
+    ) -> Result<ContextCompressionOutcome, ContextError> {
+        let record = self.build_micro_record(request, trigger, micro_plan, before)?;
+        let messages = apply_micro_projections(&request.messages, micro_plan);
+        // 投影已改写消息前缀内容，锚点轮请求不再对应当前消息列表；清除锚点
+        // 后估算回退全量逐块，直到下一轮真实用量重新锚定。
+        self.clear_usage_anchor();
+        Ok(ContextCompressionOutcome {
+            kind: ContextCompactionOutcomeKind::MicroOnly,
+            messages,
+            record,
+            pre_applied_micro: None,
+            summary_model_usage: None,
+        })
+    }
+
+    /// 为一次 Micro 投影构造可持久化记录；防御性要求估算形成有效缩减。
+    fn build_micro_record(
+        &self,
+        request: &ModelRequest,
+        trigger: ContextCompressionTrigger,
+        micro_plan: &MicroCompactionPlan,
+        before: u64,
+    ) -> Result<ContextCompressionRecord, ContextError> {
+        let projected_messages = apply_micro_projections(&request.messages, micro_plan);
+        let mut compressed_request = request.clone();
+        compressed_request.messages = projected_messages;
+        let after = self.estimate_request_unanchored(&compressed_request);
+        if after >= before {
+            // 投影逐字节缩短文本且逐块估算对字节单调，理论上不可达；保持
+            // “记录必须形成有效缩减”的既有不变式而非伪造记录。
+            return Err(ContextError::CompressionDidNotReduce {
+                estimated_tokens_before: before,
+                estimated_tokens_after: after,
+            });
+        }
+        Ok(ContextCompressionRecord {
+            kind: ContextCompactionKind::MicroProjection,
+            trigger,
+            estimated_tokens_before: before,
+            estimated_tokens_after: after,
+            replaced_start_index: 0,
+            replaced_end_index_exclusive: 0,
+            replaced_message_count: 0,
+            retained_message_count: request.messages.len(),
+            source_digest_sha256: digest_messages(&request.messages)?,
+            summary: String::new(),
+            projections: micro_plan.projections.clone(),
+            policy_version: MICRO_COMPACT_POLICY_VERSION,
+        })
+    }
+
+    /// 执行既有 LLM 摘要压缩事务；Micro 投影收益不足或不存在时的原样路径。
+    async fn compact_full_internal(
         &self,
         request: &ModelRequest,
         trigger: ContextCompressionTrigger,
@@ -849,7 +1185,9 @@ impl ContextManager {
         // 失败路径不改写调用方消息，锚点对原前缀仍然有效，保持不清除。
         *self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏") = None;
         Ok(ContextCompressionOutcome {
+            kind: ContextCompactionOutcomeKind::FullOnly,
             record: ContextCompressionRecord {
+                kind: ContextCompactionKind::Summary,
                 trigger,
                 estimated_tokens_before: before,
                 estimated_tokens_after: after,
@@ -859,8 +1197,11 @@ impl ContextManager {
                 retained_message_count: messages.len(),
                 source_digest_sha256: digest,
                 summary,
+                projections: Vec::new(),
+                policy_version: MICRO_COMPACT_POLICY_VERSION,
             },
             messages,
+            pre_applied_micro: None,
             summary_model_usage: usage.usage,
         })
     }
@@ -1126,10 +1467,7 @@ impl ContextManager {
         summary_output_ceiling: u32,
     ) -> Result<ReplacementPlan, ContextError> {
         let tail_start = units.len().saturating_sub(self.policy.minimum_recent_units);
-        let desired_reduction = before
-            .saturating_sub(target_tokens)
-            .saturating_add(u64::from(summary_output_ceiling))
-            .max(1);
+        let desired_reduction = desired_reduction(before, target_tokens, summary_output_ceiling);
         let mut best_run: Option<(usize, usize, u64)> = None;
         let mut cursor = 0;
         while cursor < tail_start {
@@ -1533,6 +1871,8 @@ fn attach_summary_usage(
             error: Box::new(error),
             model_usage: Box::new(usage),
         },
+        // Micro 失败载荷在内层错误上已经附加过用量，不再二次包装。
+        ContextError::MicroAppliedThenFullFailed(_) => error,
         ContextError::NothingCompressible
         | ContextError::RecordMismatch { .. }
         | ContextError::StillExceeded { .. }
@@ -1549,6 +1889,9 @@ pub(crate) fn context_error_is_cancelled(error: &ContextError) -> bool {
     match error {
         ContextError::Cancelled => true,
         ContextError::SummaryCallFailed { error, .. } => context_error_is_cancelled(error),
+        ContextError::MicroAppliedThenFullFailed(failure) => {
+            context_error_is_cancelled(&failure.error)
+        }
         ContextError::InvalidPolicy { .. }
         | ContextError::NothingCompressible
         | ContextError::CompressionFailed { .. }
@@ -1566,6 +1909,9 @@ pub(crate) fn context_error_is_cancelled(error: &ContextError) -> bool {
 pub(crate) fn context_error_model_usage(error: &ContextError) -> Option<&ContextSummaryModelUsage> {
     match error {
         ContextError::SummaryCallFailed { model_usage, .. } => Some(model_usage.as_ref()),
+        ContextError::MicroAppliedThenFullFailed(failure) => {
+            context_error_model_usage(&failure.error)
+        }
         ContextError::InvalidPolicy { .. }
         | ContextError::NothingCompressible
         | ContextError::CompressionFailed { .. }
@@ -1586,12 +1932,19 @@ pub(crate) fn context_error_without_summary_usage(error: ContextError) -> Contex
         ContextError::SummaryCallFailed { error, .. } => {
             context_error_without_summary_usage(*error)
         }
+        ContextError::MicroAppliedThenFullFailed(mut failure) => {
+            failure.error = Box::new(context_error_without_summary_usage(*failure.error));
+            ContextError::MicroAppliedThenFullFailed(failure)
+        }
         error => error,
     }
 }
 
 /// 上下文压缩的稳定、可匹配错误分类。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+///
+/// 不派生 `Eq`：`MicroAppliedThenFullFailed` 携带完整消息列表，而
+/// [`Message`] 只实现 `PartialEq`；相等比较（测试断言等）不受影响。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ContextError {
     /// 上下文策略字段不满足范围约束。
@@ -1633,6 +1986,12 @@ pub enum ContextError {
         /// 压缩后估算 Token。
         estimated_tokens_after: u64,
     },
+    /// Micro 投影已应用且收益保留，但后续 LLM 摘要失败。
+    ///
+    /// Runner 据此保留已回收的投影记录与投影后的消息，再按内层错误的既有
+    /// 分类决定容忍继续或终止 Turn；取消优先语义由取消判定函数穿透内层。
+    /// 载荷整体装箱，保持 `ContextError` 及包装它的 `AgentRunError` 的小体积。
+    MicroAppliedThenFullFailed(Box<MicroAppliedThenFullFailure>),
     /// 持久化记录不能安全应用到当前有效 Transcript。
     RecordMismatch {
         /// 不包含原始消息正文的稳定校验说明。
@@ -1645,6 +2004,17 @@ pub enum ContextError {
     },
     /// Turn 在压缩计划、摘要请求或结果提交前被取消。
     Cancelled,
+}
+
+/// Micro 投影已应用但后续摘要失败时保留的收益载荷。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct MicroAppliedThenFullFailure {
+    /// 已成功应用且必须保留的零 LLM 投影记录。
+    pub micro_record: ContextCompressionRecord,
+    /// 应用投影后的完整消息列表。
+    pub messages: Vec<Message>,
+    /// 后续摘要失败的原始分类。
+    pub error: Box<ContextError>,
 }
 
 impl fmt::Display for ContextError {
@@ -1676,6 +2046,13 @@ impl fmt::Display for ContextError {
                 formatter,
                 "上下文压缩没有降低估算用量：{estimated_tokens_before} -> {estimated_tokens_after}"
             ),
+            Self::MicroAppliedThenFullFailed(failure) => {
+                write!(
+                    formatter,
+                    "零 LLM 投影已应用并保留，但后续上下文摘要失败：{}",
+                    failure.error
+                )
+            }
             Self::RecordMismatch { message } => {
                 write!(formatter, "上下文压缩记录不匹配：{message}")
             }
@@ -1708,6 +2085,128 @@ struct ReplacementPlan {
     start: usize,
     /// 原始消息范围的排他结束下标。
     end: usize,
+}
+
+/// 按既有口径计算压缩期望减量：降到目标之外，再覆盖插入摘要自身的规模。
+///
+/// [`ContextManager::plan_replacement`] 与 Micro Compact 决策共用同一口径，
+/// 保证“投影收益是否足够”与“摘要区间是否足够”在相同刻度下比较。
+fn desired_reduction(before: u64, target_tokens: u64, summary_output_ceiling: u32) -> u64 {
+    before
+        .saturating_sub(target_tokens)
+        .saturating_add(u64::from(summary_output_ceiling))
+        .max(1)
+}
+
+/// 一次零 LLM Micro 投影的完整计划与按字节÷4 口径估算的收益。
+struct MicroCompactionPlan {
+    /// 逐条 ToolResult 文本投影，按消息顺序排列。
+    projections: Vec<ToolResultProjection>,
+    /// 全部投影按 Σ(原字节 − 投影后字节)÷4 估算的收益 Token。
+    saved_tokens: u64,
+}
+
+/// 纯计算扫描 transcript 并规划旧 ToolResult 文本的 head/tail 投影。
+///
+/// 只读且绝不调用副作用 API 或摘要模型。跳过规则（v1）：
+/// - stale 保护：最近 [`MICRO_COMPACT_STALE_ROUNDS`] 轮内的消息一律不动；
+///   总轮数不足 stale 轮数时整段列表都视为近期内容，不做任何投影；
+/// - 受保护单元：system/developer 指令与 assistant 一侧永不动——本函数只
+///   选中 Tool 角色消息内的 ToolResult 文本，且投影不增删消息，assistant +
+///   tool_result 原子对的配对保持完整；
+/// - 非文本内容：ToolResult 内的 Image 等内容跳过，不参与投影（v1 范围）；
+/// - 已投影文本：携带 sentinel 标记的文本跳过，保证二次规划幂等；
+/// - 短文本：不超过 [`MICRO_PROJECTION_MIN_CHARS`] 字符的结果不值得截断。
+fn plan_micro_compaction(messages: &[Message]) -> Option<MicroCompactionPlan> {
+    let protected_from = micro_stale_window_start(messages)?;
+    let mut projections = Vec::new();
+    let mut saved_bytes = 0_u64;
+    for (message_index, message) in messages.iter().enumerate().take(protected_from) {
+        if message.role != MessageRole::Tool {
+            continue;
+        }
+        for (block_index, block) in message.content.iter().enumerate() {
+            let ContentBlock::ToolResult { tool_result } = block else {
+                continue;
+            };
+            for (content_index, part) in tool_result.content.iter().enumerate() {
+                let ToolResultContent::Text { text } = part else {
+                    continue;
+                };
+                if text.chars().count() <= MICRO_PROJECTION_MIN_CHARS
+                    || text.contains(MICRO_COMPACT_SENTINEL)
+                {
+                    continue;
+                }
+                let (projected_text, saved) = project_tool_result_text(text);
+                saved_bytes = saved_bytes.saturating_add(saved);
+                projections.push(ToolResultProjection {
+                    message_index,
+                    block_index,
+                    content_index,
+                    projected_text,
+                });
+            }
+        }
+    }
+    if projections.is_empty() {
+        return None;
+    }
+    Some(MicroCompactionPlan {
+        saved_tokens: saved_bytes / 4,
+        projections,
+    })
+}
+
+/// 返回 stale 保护窗口的起始消息下标；总轮数不足 stale 轮数时返回 `None`，
+/// 表示从尾部向前数不足 [`MICRO_COMPACT_STALE_ROUNDS`] 个 Assistant 消息，
+/// 全部消息都属于最近轮次而受到保护。
+fn micro_stale_window_start(messages: &[Message]) -> Option<usize> {
+    let mut remaining = MICRO_COMPACT_STALE_ROUNDS;
+    for index in (0..messages.len()).rev() {
+        if messages[index].role == MessageRole::Assistant {
+            remaining -= 1;
+            if remaining == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+/// 把一段工具结果文本投影为 head + 中文省略标记 + tail。
+///
+/// 按字符切分保证 UTF-8 边界安全；返回投影文本与按字节计的节省量。
+fn project_tool_result_text(text: &str) -> (String, u64) {
+    let total_chars = text.chars().count();
+    let omitted = total_chars - MICRO_PROJECTION_HEAD_CHARS - MICRO_PROJECTION_TAIL_CHARS;
+    let marker = MICRO_COMPACT_MARKER_TEMPLATE.replace("{omitted}", &omitted.to_string());
+    let head: String = text.chars().take(MICRO_PROJECTION_HEAD_CHARS).collect();
+    let tail: String = text
+        .chars()
+        .skip(total_chars - MICRO_PROJECTION_TAIL_CHARS)
+        .collect();
+    let projected = format!("{head}{marker}{tail}");
+    let saved = u64::try_from(text.len().saturating_sub(projected.len())).unwrap_or(u64::MAX);
+    (projected, saved)
+}
+
+/// 把 Micro 投影计划原位应用到消息副本上；计划内的下标由 planner 保证有效。
+fn apply_micro_projections(messages: &[Message], plan: &MicroCompactionPlan) -> Vec<Message> {
+    let mut messages = messages.to_vec();
+    for projection in &plan.projections {
+        let Some(message) = messages.get_mut(projection.message_index) else {
+            continue;
+        };
+        if let Some(ContentBlock::ToolResult { tool_result }) =
+            message.content.get_mut(projection.block_index)
+            && let Some(ToolResultContent::Text { text }) =
+                tool_result.content.get_mut(projection.content_index)
+        {
+            *text = projection.projected_text.clone();
+        }
+    }
+    messages
 }
 
 /// 把 assistant 工具调用及其连续完整结果绑定为不可拆分单元。
@@ -1828,6 +2327,13 @@ fn percent_of(value: u64, percent: u8) -> u64 {
 }
 
 /// 按 UTF-8 字节数以每四个字节一个 Token 向上取整估算纯文本；空文本不计。
+///
+/// 已知低估：控制字符密集的文本（连续换行、缩进、制表符等）在真实 tokenizer
+/// 下往往多个字符合并为一个 Token 的比例远低于 4:1，本口径会低估约 4 倍。
+/// （JSON 序列化时代的引号/转义膨胀按 6:1 计的旧口径已不存在——现在消息按
+/// 内容块直接估算，不再经过 JSON.stringify 整体打包。）该偏差只在不走压缩
+/// 事务的无锚窗口暴露：压缩比较、Micro 投影决策与记录审计全部使用同一
+/// 字节÷4 口径做相对比较，系统性偏差在差值中抵消。
 fn utf8_text_tokens(text: &str) -> u64 {
     u64::try_from(text.len())
         .unwrap_or(u64::MAX)

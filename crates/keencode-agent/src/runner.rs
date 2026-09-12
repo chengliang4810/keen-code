@@ -35,9 +35,10 @@ use crate::{
     AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent, AgentStreamEventKind,
     AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
     AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind,
-    ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger, ContextError,
-    ContextManager, CounterKind, GoalController, GoalRecord, GoalStatus, HookError,
-    HookInvocationContext, HookRuntime, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
+    ContextCompactionKind, ContextCompressionOutcome, ContextCompressionRecord,
+    ContextCompressionTrigger, ContextError, ContextManager, CounterKind, GoalController,
+    GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
+    MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
     NoopAgentCommitSink, NoopAgentEventSink, PlanGuard, PlanGuardError, PostHookOutputBudget,
     PostToolUseContext, PostToolUseFailureContext, PreToolUseContext, ResolvedHookContext,
     ResolvedStopHook, SessionId, StopHookContext, TerminalReason, ToolCompletionStatus,
@@ -967,6 +968,15 @@ impl AgentRunner {
             }
         };
 
+        // Micro 投影记录不进入权威 CompactionApplied 通道：资源层 CompactionRecord
+        // 只能表达“区间整体替换为一条摘要”（reducer 强制非空区间、非空摘要并整体
+        // splice），无法表达原位文本投影。该记录随 TurnResult.compactions 交给
+        // Session 层按 kind 逐条持久化，冷恢复由 record.apply() 的投影重放契约保证；
+        // 摘要形态记录（含 MicroThenFull 中的摘要记录）仍照常提交。
+        if outcome.record.kind == ContextCompactionKind::MicroProjection {
+            return Ok(outcome);
+        }
+
         if let Some(usage) = &outcome.summary_model_usage
             && let Err(error) = self.commit_model_call_usage(
                 request,
@@ -1012,6 +1022,32 @@ impl AgentRunner {
             return Err(error);
         }
         Ok(outcome)
+    }
+
+    /// 采纳 Micro 投影失败载荷：把已应用的投影记录与消息并入当前 Turn。
+    ///
+    /// 非 Micro 失败载荷原样返回；Micro 载荷拆出内层错误继续按既有语义处理，
+    /// 已回收的投影收益不因后续摘要失败而丢失（预压缩臂容忍继续、forced 臂
+    /// 终止，但两种场景下 TurnResult 都保留投影记录与投影后消息）。
+    fn adopt_micro_applied_failure(
+        &self,
+        active: &mut ActiveTurn,
+        model_request: &mut ModelRequest,
+        error: AgentRunError,
+    ) -> AgentRunError {
+        let AgentRunError::Context(ContextError::MicroAppliedThenFullFailed(failure)) = error
+        else {
+            return error;
+        };
+        let MicroAppliedThenFullFailure {
+            micro_record,
+            messages,
+            error: inner,
+        } = *failure;
+        active.compactions.push(micro_record);
+        active.messages = messages;
+        model_request.messages = active.messages.clone();
+        AgentRunError::Context(*inner)
     }
 
     /// 提交工具生命周期事件，并在最终结果不确定时立即冻结当前 Round 预留供恢复。
@@ -1243,6 +1279,10 @@ impl AgentRunner {
 
     /// 执行一个 Turn，并在所有路径上返回恰好一个终态。
     pub async fn run_turn(&self, request: TurnRequest) -> TurnResult {
+        // 用量锚点只在同一 transcript 前缀下有效；同一 ContextManager 实例可能
+        // 被跨 Turn 复用到不同前缀的对话上，Turn 边界统一清锚后首轮按全量
+        // 逐块规则估算，随首轮真实用量重新锚定。
+        self.context.clear_usage_anchor();
         let mut active = ActiveTurn {
             state: TurnState::new(request.turn_id.clone(), request.source_agent_id.clone()),
             messages: request.model_request.messages.clone(),
@@ -1491,25 +1531,41 @@ impl AgentRunner {
                     .await;
                 match outcome {
                     Ok(outcome) => {
+                        // MicroThenFull 的投影记录先于摘要记录入列，持久化重放
+                        // 顺序与应用顺序一致；MicroOnly 时 record 即投影记录。
+                        if let Some(micro) = outcome.pre_applied_micro {
+                            active.compactions.push(micro);
+                        }
                         active.messages = outcome.messages;
                         model_request.messages = active.messages.clone();
                         active.compactions.push(outcome.record);
                     }
-                    Err(AgentRunError::Context(
-                        ContextError::NothingCompressible
-                        | ContextError::EmptySummary
-                        | ContextError::CompressionDidNotReduce { .. },
-                    )) if self
-                        .context
-                        .request_fits_context_window(&model_request, &provider_capabilities) =>
-                    {
-                        // 摘要失败事件及已发生用量已处理；原历史不变，不伪造压缩提交。
-                    }
                     Err(error) => {
-                        return Err(prefer_limit_summary_error(
-                            active.limit_summary.as_ref(),
-                            error,
-                        ));
+                        // Micro 投影已应用但摘要失败：先采纳已回收的投影记录与
+                        // 投影后消息（预压缩场景 micro 收益保留），再按内层错误
+                        // 的既有分类决定容忍或终止；非 Micro 载荷原样透传。
+                        let error =
+                            self.adopt_micro_applied_failure(active, &mut model_request, error);
+                        match error {
+                            AgentRunError::Context(
+                                ContextError::NothingCompressible
+                                | ContextError::EmptySummary
+                                | ContextError::CompressionDidNotReduce { .. },
+                            ) if self.context.request_fits_context_window(
+                                &model_request,
+                                &provider_capabilities,
+                            ) =>
+                            {
+                                // 摘要失败事件及已发生用量已处理；采纳投影后的
+                                // 缩水历史装得下，不伪造压缩提交。
+                            }
+                            error => {
+                                return Err(prefer_limit_summary_error(
+                                    active.limit_summary.as_ref(),
+                                    error,
+                                ));
+                            }
+                        }
                     }
                 }
                 active.state.transition_to(TurnPhase::RequestingModel)?;
@@ -1538,7 +1594,7 @@ impl AgentRunner {
                         let target_tokens = self
                             .context
                             .forced_target(&model_request, &provider_capabilities);
-                        let outcome = self
+                        let outcome = match self
                             .compact_context(
                                 request,
                                 &model_request,
@@ -1548,9 +1604,26 @@ impl AgentRunner {
                                 target_tokens,
                             )
                             .await
-                            .map_err(|error| {
-                                prefer_limit_summary_error(active.limit_summary.as_ref(), error)
-                            })?;
+                        {
+                            Ok(outcome) => outcome,
+                            Err(error) => {
+                                // forced 场景摘要失败即按现状终止，但已回收的
+                                // Micro 投影不能丢：先采纳投影记录与消息，再
+                                // 传播内层错误的既有分类。
+                                let error = self.adopt_micro_applied_failure(
+                                    active,
+                                    &mut model_request,
+                                    error,
+                                );
+                                return Err(prefer_limit_summary_error(
+                                    active.limit_summary.as_ref(),
+                                    error,
+                                ));
+                            }
+                        };
+                        if let Some(micro) = outcome.pre_applied_micro {
+                            active.compactions.push(micro);
+                        }
                         active.messages = outcome.messages;
                         model_request.messages = active.messages.clone();
                         active.compactions.push(outcome.record);
@@ -4732,6 +4805,10 @@ fn context_compaction_failure_kind(error: &ContextError) -> ContextCompactionFai
     match error {
         ContextError::CompressionFailed { .. } => ContextCompactionFailureKind::Model,
         ContextError::SummaryCallFailed { error, .. } => context_compaction_failure_kind(error),
+        // Micro 投影本身不会失败；失败分类跟随内层摘要错误的既有映射。
+        ContextError::MicroAppliedThenFullFailed(failure) => {
+            context_compaction_failure_kind(&failure.error)
+        }
         ContextError::NothingCompressible
         | ContextError::CompressionRequestTooLarge { .. }
         | ContextError::SummaryRecursionLimit

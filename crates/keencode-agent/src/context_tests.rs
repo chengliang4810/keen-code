@@ -972,6 +972,7 @@ async fn compression_record_is_json_persistable() {
 async fn persisted_record_revalidates_instruction_and_tool_boundaries() {
     let messages = atomic_tool_history();
     let system_only = ContextCompressionRecord {
+        kind: ContextCompactionKind::Summary,
         trigger: ContextCompressionTrigger::Budget,
         estimated_tokens_before: 100,
         estimated_tokens_after: 50,
@@ -981,6 +982,8 @@ async fn persisted_record_revalidates_instruction_and_tool_boundaries() {
         retained_message_count: messages.len(),
         source_digest_sha256: test_message_digest(&messages[0..1]),
         summary: "伪造指令摘要".to_owned(),
+        projections: Vec::new(),
+        policy_version: MICRO_COMPACT_POLICY_VERSION,
     };
     assert!(matches!(
         system_only.apply(&messages),
@@ -988,6 +991,7 @@ async fn persisted_record_revalidates_instruction_and_tool_boundaries() {
     ));
 
     let split_tool = ContextCompressionRecord {
+        kind: ContextCompactionKind::Summary,
         trigger: ContextCompressionTrigger::ProviderOverflow,
         estimated_tokens_before: 100,
         estimated_tokens_after: 50,
@@ -997,6 +1001,8 @@ async fn persisted_record_revalidates_instruction_and_tool_boundaries() {
         retained_message_count: messages.len() - 1,
         source_digest_sha256: test_message_digest(&messages[2..4]),
         summary: "伪造工具摘要".to_owned(),
+        projections: Vec::new(),
+        policy_version: MICRO_COMPACT_POLICY_VERSION,
     };
     assert!(matches!(
         split_tool.apply(&messages),
@@ -2731,4 +2737,536 @@ async fn runner_round_usage_anchors_next_round_precompression() {
     // 第二轮请求前已注入重摘要消息，证明压缩发生在第二次采样之前。
     assert!(requests[1].messages.iter().any(is_runtime_summary));
     assert_eq!(compressor.requests().len(), 1);
+}
+
+/// 断言消息列表中的工具调用与结果一一配对且顺序完整。
+fn assert_tool_pairs_intact(messages: &[Message]) {
+    let mut calls = Vec::new();
+    let mut results = Vec::new();
+    for message in messages {
+        for block in &message.content {
+            match block {
+                ContentBlock::ToolCall { tool_call } => calls.push(tool_call.id.clone()),
+                ContentBlock::ToolResult { tool_result } => {
+                    results.push(tool_result.tool_call_id.clone())
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!(calls, results, "工具调用与结果必须一一配对");
+}
+
+/// 构造一条工具交换轮：assistant 发起调用，随后提交指定文本结果。
+fn tool_exchange_round(call_id: &str, result_text: String) -> Vec<Message> {
+    vec![
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::text("调用工具"),
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall::new(call_id, "read", json!({ "path": "a.rs" })),
+                },
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text(call_id, result_text, false),
+            }],
+        ),
+    ]
+}
+
+/// Micro 投影只选中 stale 窗口之外的旧 ToolResult 文本：近 3 轮、短文本、
+/// 非文本内容一律不动，system/developer 与 assistant 消息逐字节保持不变。
+#[tokio::test]
+async fn micro_compact_is_selective_across_rounds_and_content_kinds() {
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::text(MessageRole::Developer, "developer 必须原样保留"),
+        Message::text(MessageRole::User, "旧问题"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(300)));
+    messages.push(Message::new(
+        MessageRole::Assistant,
+        vec![
+            ContentBlock::text("读取图片"),
+            ContentBlock::ToolCall {
+                tool_call: ToolCall::new("call-3", "read", json!({ "path": "i.png" })),
+            },
+        ],
+    ));
+    messages.push(Message::new(
+        MessageRole::Tool,
+        vec![ContentBlock::ToolResult {
+            tool_result: ToolResult::new(
+                "call-3",
+                vec![ToolResultContent::Image {
+                    image: ImageContent::from_url("https://example.com/i.png"),
+                }],
+                false,
+            ),
+        }],
+    ));
+    messages.extend(tool_exchange_round("call-4", "z".repeat(800)));
+    messages.extend(tool_exchange_round("call-5", "w".repeat(800)));
+    messages.push(Message::text(MessageRole::Assistant, "近期结论"));
+    let original = messages.clone();
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(100),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("旧工具结果足够回收时应仅执行 Micro 投影");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::MicroOnly);
+    assert!(
+        compressor.requests().is_empty(),
+        "Micro 投影不得调用摘要模型"
+    );
+    assert_eq!(outcome.record.kind, ContextCompactionKind::MicroProjection);
+    assert_eq!(outcome.record.policy_version, MICRO_COMPACT_POLICY_VERSION);
+    assert_eq!(outcome.messages.len(), original.len(), "投影不得增删消息");
+    assert_eq!(outcome.record.retained_message_count, original.len());
+    assert_eq!(outcome.record.projections.len(), 1);
+    let projection = &outcome.record.projections[0];
+    let t1_index = 3 + 1;
+    assert_eq!(projection.message_index, t1_index);
+    assert_eq!(projection.block_index, 0);
+    assert_eq!(projection.content_index, 0);
+    let original_text = "x".repeat(2_000);
+    let projected = match &outcome.messages[t1_index].content[0] {
+        ContentBlock::ToolResult { tool_result } => match &tool_result.content[0] {
+            ToolResultContent::Text { text } => text.clone(),
+            _ => panic!("投影目标必须是文本"),
+        },
+        _ => panic!("投影目标必须是工具结果"),
+    };
+    assert!(projected.contains("已压缩，省略"));
+    assert!(projected.starts_with(&original_text[..350]));
+    assert!(projected.ends_with(&original_text[original_text.len() - 100..]));
+    // 短文本、图片结果、受保护近轮与指令消息全部逐字节保持不变。
+    assert_eq!(outcome.messages[..3], original[..3]);
+    assert_eq!(outcome.messages[t1_index + 1..], original[t1_index + 1..]);
+    assert_tool_pairs_intact(&outcome.messages);
+}
+
+/// 超 85% 触发且旧工具结果足以覆盖期望减量时，Runner 只执行零 LLM 投影：
+/// 没有摘要请求、没有压缩摘要用量、没有权威摘要提交，记录随 TurnResult 落盘。
+#[tokio::test]
+async fn runner_micro_only_compaction_completes_without_summary_model() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(1_000_000),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("最终回答")],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_commit_sink(commit_sink.clone())
+        .with_event_sink(event_sink.clone());
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(512 * 1024)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+    let original = messages.clone();
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    let record = &result.compactions[0];
+    assert!(record.estimated_tokens_before > record.estimated_tokens_after);
+    assert_eq!(record.projections.len(), 1);
+    assert_eq!(record.projections[0].message_index, 3);
+    // 零摘要调用：唯一 Provider 请求是正常主 Round（非 ToolChoice::None 摘要请求）。
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].tool_choice, ToolChoice::Auto);
+    assert_eq!(
+        requests[0].messages,
+        result.messages[..result.messages.len() - 1]
+    );
+    // 摘要调用为零时不得产生压缩用量记账。
+    let usages = commit_sink.usages();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].purpose(), ModelCallPurpose::AgentRound);
+    // Micro 投影记录不进入权威 CompactionApplied 通道（资源层摘要替换无法表达）。
+    let committed = commit_sink.events();
+    assert!(matches!(
+        committed.as_slice(),
+        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
+    ));
+    let events = event_sink.events();
+    assert!(matches!(
+        events.first().map(AgentStreamEvent::kind),
+        Some(AgentStreamEventKind::ContextCompactionStarted { .. })
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event.kind(),
+        AgentStreamEventKind::ContextCompactionFailed { .. }
+    )));
+    // 投影后的历史已发送给模型，且配对完整、指令原样保留。
+    assert_eq!(&result.messages[..2], &original[..2]);
+    assert_tool_pairs_intact(&result.messages);
+    // 记录可无损 JSON 落盘。
+    let encoded = serde_json::to_vec(record).expect("投影记录应可序列化");
+    let decoded: ContextCompressionRecord =
+        serde_json::from_slice(&encoded).expect("投影记录应可反序列化");
+    assert_eq!(decoded, result.compactions[0]);
+}
+
+/// 投影收益不足时先应用投影再摘要：摘要输入是缩水后的历史，两条记录按
+/// 应用顺序进入 TurnResult，摘要记录照常通过权威通道提交。
+#[tokio::test]
+async fn runner_micro_then_full_summarizes_projected_history() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("历史摘要"), text_reply("最终回答")],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_commit_sink(commit_sink.clone());
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 2);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    assert_eq!(result.compactions[1].kind, ContextCompactionKind::Summary);
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 2);
+    // 摘要请求先于主请求，且输入是已投影的缩水历史。
+    assert_eq!(requests[0].tool_choice, ToolChoice::None);
+    let ContentBlock::Text { text: transcript } = &requests[0].messages[1].content[0] else {
+        panic!("摘要输入必须是 user 文本");
+    };
+    assert!(transcript.contains("已压缩，省略"));
+    assert_eq!(requests[1].tool_choice, ToolChoice::Auto);
+    // 摘要记录照常进入权威提交通道；Micro 记录不经过该通道。
+    let committed = commit_sink.events();
+    assert!(matches!(
+        committed.first().map(AgentCommitEvent::kind),
+        Some(AgentCommitEventKind::ContextCompactionApplied { record })
+            if record.kind == ContextCompactionKind::Summary
+    ));
+    let usages = commit_sink.usages();
+    assert_eq!(
+        usages[0].purpose(),
+        ModelCallPurpose::ContextCompactionBudget
+    );
+    assert_eq!(usages[1].purpose(), ModelCallPurpose::AgentRound);
+    assert_tool_pairs_intact(&result.messages);
+}
+
+/// 摘要返回空文本时预压缩臂按现状容忍继续：投影收益保留、缩水历史继续使用。
+#[tokio::test]
+async fn runner_micro_gains_survive_tolerated_summary_failure() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("   "), text_reply("继续回答")],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_commit_sink(commit_sink.clone())
+        .with_event_sink(event_sink.clone());
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    // 投影记录保留，失败的摘要没有产生记录。
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    // 后续模型请求使用已投影的缩水历史。
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 2);
+    let projected_tool_text = match &requests[1].messages[3].content[0] {
+        ContentBlock::ToolResult { tool_result } => match &tool_result.content[0] {
+            ToolResultContent::Text { text } => text.clone(),
+            _ => panic!("旧工具结果必须是文本"),
+        },
+        _ => panic!("旧工具结果必须是工具结果消息"),
+    };
+    assert!(projected_tool_text.contains("已压缩，省略"));
+    // 失败事件按现状分类，原历史之外的摘要提交没有发生。
+    let events = event_sink.events();
+    assert!(matches!(
+        events[1].kind(),
+        AgentStreamEventKind::ContextCompactionFailed {
+            failure_kind: ContextCompactionFailureKind::InvalidResult
+        }
+    ));
+    assert!(matches!(
+        commit_sink.events().as_slice(),
+        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
+    ));
+}
+
+/// 摘要模型传输失败时预压缩臂按现状终止 Turn，但已回收的投影收益不丢。
+#[tokio::test]
+async fn runner_micro_gains_survive_fatal_summary_failure() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [failed_summary_reply(), text_reply("不得到达")],
+    ));
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()));
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(!result.is_success());
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Context(
+            ContextError::CompressionFailed { .. }
+        ))
+    ));
+    // 投影记录保留且消息已采纳投影后的缩水历史。
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    let projected_tool_text = match &result.messages[3].content[0] {
+        ContentBlock::ToolResult { tool_result } => match &tool_result.content[0] {
+            ToolResultContent::Text { text } => text.clone(),
+            _ => panic!("旧工具结果必须是文本"),
+        },
+        _ => panic!("旧工具结果必须是工具结果消息"),
+    };
+    assert!(projected_tool_text.contains("已压缩，省略"));
+    // 只有失败的摘要请求发生，主 Round 不再发起。
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
+}
+
+/// Micro 投影记录必须可无损 JSON 往返、冷恢复重放一致，且重复应用幂等。
+#[tokio::test]
+async fn micro_projection_record_replays_cold_recovery_and_is_idempotent() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("不得调用")),
+    )
+    .expect("测试策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    let original = messages.clone();
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(100),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("应仅执行 Micro 投影");
+
+    let encoded = serde_json::to_vec(&outcome.record).expect("记录应可序列化");
+    let decoded: ContextCompressionRecord =
+        serde_json::from_slice(&encoded).expect("记录应可反序列化");
+    assert_eq!(decoded, outcome.record);
+    // 冷恢复：重放一次得到与在线压缩一致的 effective transcript。
+    let replayed = decoded
+        .apply(&original)
+        .expect("持久化记录应能重建有效 Transcript");
+    assert_eq!(replayed, outcome.messages);
+    // 幂等：对已投影的 transcript 再次应用，结果不再变化。
+    let twice = decoded.apply(&replayed).expect("重复应用必须安全");
+    assert_eq!(twice, replayed);
+    // 来源被篡改时拒绝应用。
+    let mut tampered = original.clone();
+    tampered[2] = Message::text(MessageRole::User, "被篡改");
+    assert!(matches!(
+        decoded.apply(&tampered),
+        Err(ContextError::RecordMismatch { .. })
+    ));
+}
+
+/// #25 截断后的 512KiB 巨型工具结果经 head/tail 投影可获得巨大收益。
+#[tokio::test]
+async fn micro_compact_recovers_huge_truncated_tool_result() {
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(512 * 1024)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(10_000),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("巨型结果应足以覆盖期望减量");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::MicroOnly);
+    assert!(compressor.requests().is_empty());
+    assert_eq!(outcome.record.projections.len(), 1);
+    let projected = &outcome.record.projections[0].projected_text;
+    let projected_chars = projected.chars().count();
+    assert!(
+        (450..=600).contains(&projected_chars),
+        "投影文本应收敛到 head+标记+tail 附近：{projected_chars}"
+    );
+    assert_eq!(
+        outcome.record.estimated_tokens_before - outcome.record.estimated_tokens_after,
+        before
+            - manager.estimate_request(&ModelRequest::new(
+                "context-model",
+                outcome.messages.clone()
+            ))
+    );
+    assert!(
+        outcome.record.estimated_tokens_before - outcome.record.estimated_tokens_after > 100_000
+    );
+}
+
+/// 红线：无可投影内容（不足 stale 轮数或没有旧工具结果）时与既有 LLM 摘要
+/// 路径完全一致，结果形态显式为 FullOnly。
+#[tokio::test]
+async fn compaction_without_projectable_tool_results_keeps_legacy_summary_path() {
+    let compressor = Arc::new(RecordingCompressor::new("既有路径摘要"));
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    // 不足 3 个 assistant 轮：即使存在超长工具结果也全部受 stale 保护。
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(2_000)));
+    messages.push(Message::text(MessageRole::Assistant, "近期结论"));
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(100),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("既有摘要路径应成功");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::FullOnly);
+    assert_eq!(outcome.record.kind, ContextCompactionKind::Summary);
+    assert_eq!(outcome.record.projections, Vec::new());
+    assert_eq!(compressor.requests().len(), 1);
+    assert!(
+        outcome
+            .messages
+            .iter()
+            .any(|message| message.content.iter().any(|block| matches!(
+                block,
+                ContentBlock::Text { text } if text.contains("既有路径摘要")
+            )))
+    );
 }
