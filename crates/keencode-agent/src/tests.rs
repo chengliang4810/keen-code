@@ -3887,8 +3887,10 @@ async fn parallel_segment_failure_does_not_cancel_sibling_read_only_call() {
             ToolConcurrency::ParallelReadOnly
         }
         fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
-            // 慢兄弟执行时长远超失败兄弟的即时失败：旧语义下失败会通过段取消
-            // 将其切断为"中止"固定结果；新语义下它必须正常完成。
+            // 慢兄弟执行时长远超失败兄弟的即时失败：单次普通失败在新旧
+            // 语义下都不取消兄弟（旧代码只在熔断终态/终态错误时取消段），
+            // 本用例锁定各归其位的基本语义；真正的行为增量由下面的熔断
+            // tripwire 用例覆盖。
             Box::pin(async move {
                 tokio::time::sleep(Duration::from_millis(150)).await;
                 Ok(ToolOutput::text("sibling-ok"))
@@ -4065,8 +4067,10 @@ async fn parallel_segment_user_cancellation_still_cancels_whole_segment() {
             let started = self.started.clone();
             Box::pin(async move {
                 started.notify_one();
+                // 挂起等待取消：取消恒走执行竞速 select 的左臂（Ok(raw) +
+                // terminal_error=Cancelled），工具返回的 Err 在此路径不可达。
                 context.cancellation.cancelled().await;
-                Err(ToolError::permanent("cancelled", "已观察用户取消"))
+                std::future::pending().await
             })
         }
     }
@@ -4232,6 +4236,122 @@ async fn parallel_segment_sibling_failures_count_toward_own_fingerprints() {
             assert!(text.contains("err-a"), "A 失败应计入自己的指纹：{text}");
         } else {
             assert!(text.contains("err-b"), "B 失败应计入自己的指纹：{text}");
+        }
+    }
+}
+
+/// 熔断终态 tripwire：同指纹在段内达到终态阈值时，旧语义会取消运行中的
+/// 慢兄弟（切断为"中止"），新语义下慢兄弟必须正常完成且 Turn 以 ToolLoop 终态结束。
+#[tokio::test]
+async fn parallel_segment_terminal_does_not_cancel_running_sibling() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-f1", "trip_fail", json!({})),
+                ("call-f2", "trip_fail", json!({})),
+                ("call-slow", "trip_slow", json!({"value": "x"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct TripFailTool {
+        started: Arc<Notify>,
+    }
+    impl AgentTool for TripFailTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "trip_fail".to_owned(),
+                "验证熔断终态不取消慢兄弟",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                Err(ToolError::permanent("trip-boom", "熔断 tripwire 固定错误"))
+            })
+        }
+    }
+    struct TripSlowTool {
+        fail_started: Arc<Notify>,
+    }
+    impl AgentTool for TripSlowTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "trip_slow".to_owned(),
+                "验证熔断时慢兄弟仍完成",
+                json!({ "type": "object", "properties": { "value": { "type": "string" } } }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let fail_started = self.fail_started.clone();
+            Box::pin(async move {
+                // 等两次失败都已回流（熔断已触发）后再返回成功：旧语义下本
+                // 调用会被段取消切断，新语义下必须正常完成。
+                fail_started.notified().await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                Ok(ToolOutput::text("trip-slow-ok"))
+            })
+        }
+    }
+    let fail_started = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(TripFailTool {
+            started: fail_started.clone(),
+        }))
+        .expect("熔断测试工具应可注册");
+    registry
+        .register(Arc::new(TripSlowTool {
+            fail_started: fail_started.clone(),
+        }))
+        .expect("慢兄弟测试工具应可注册");
+    // 终态阈值 2：同指纹（同名同输入）失败两次即熔断。
+    let limits = RunLimits::default()
+        .with_repeated_failure_terminal_threshold(2)
+        .expect("重复失败上限应有效");
+    let result = AgentRunner::new(provider, registry, limits)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::LimitReached)
+    );
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::ToolLoop {
+            kind: ToolLoopKind::RepeatedFailure,
+            ..
+        })
+    ));
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 3);
+    for result in results {
+        if result.tool_call_id == "call-slow" {
+            assert!(!result.is_error);
+            assert_eq!(turn_tool_result_text(result), "trip-slow-ok");
+        } else {
+            assert!(result.is_error);
+            assert!(turn_tool_result_text(result).contains("trip-boom"));
         }
     }
 }

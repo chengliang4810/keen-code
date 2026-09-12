@@ -3064,9 +3064,9 @@ impl AgentRunner {
                                     }
                                 }
                                 post_context[index] = Some(post);
-                                // 非取消终态错误不再取消段内兄弟（只读段内本就不存在
-                                // 除 Cancelled 外的终态错误）；terminal_error 仍在排空
-                                // 后阻止后续段启动（见段尾 break）。
+                                // 非取消终态错误不再取消段内兄弟；terminal_error 仍在
+                                // 排空后阻止后续段启动（见段尾 break）。终态来源含
+                                // PostHook 失败合并（除 Cancelled 外均只记录不取消）。
                                 if let Some(error) = &raw.terminal_error {
                                     if matches!(error, AgentRunError::Cancelled) {
                                         segment_cancellation.cancel();
