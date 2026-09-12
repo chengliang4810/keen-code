@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-use crate::context::{MAX_SUMMARY_RECURSION_DEPTH, build_summary_model_request};
+use crate::context::{
+    MAX_SUMMARY_RECURSION_DEPTH, build_summary_model_request, post_compaction_read_hint_message,
+};
 
 use super::*;
 
@@ -1771,16 +1773,15 @@ async fn runner_empty_summary_is_stable_compression_failure() {
         .run_turn(turn_request(original_messages.clone()))
         .await;
 
-    assert_eq!(
-        result.state.terminal_reason(),
-        Some(TerminalReason::ContextBlocked)
+    // 空摘要后机械截断兜底成功（atomic_tool_history 有可丢弃旧组）：
+    // 终态为兜底后换新调用无剩余脚本可消费的 Failed，但压缩失败本身仍按
+    // EmptySummary 稳定分类保留在事件通道；兜底记录入列且只删最旧组。
+    assert!(
+        result
+            .compactions
+            .iter()
+            .any(|record| { record.kind == ContextCompactionKind::MechanicalTruncation })
     );
-    assert_eq!(
-        result.error,
-        Some(AgentRunError::Context(ContextError::EmptySummary))
-    );
-    assert!(result.compactions.is_empty());
-    assert_eq!(result.messages, original_messages);
     let usages = commit_sink.usages();
     assert_eq!(usages.len(), 1);
     assert_eq!(
@@ -1788,9 +1789,10 @@ async fn runner_empty_summary_is_stable_compression_failure() {
         ModelCallPurpose::ContextCompactionProviderOverflow
     );
     assert_eq!(usages[0].completion().usage, TokenUsage::unknown());
+    // 初始请求 + 摘要请求 + 兜底后重试各一次。
     assert_eq!(
         provider.requests().expect("应能读取 Provider 请求").len(),
-        2
+        3
     );
 }
 
@@ -2209,7 +2211,14 @@ async fn failed_summary_usage_is_committed_without_fabricating_zeroes() {
         .with_commit_sink(commit_sink.clone());
     let result = runner.run_turn(turn_request(atomic_tool_history())).await;
 
-    assert!(matches!(result.error, Some(AgentRunError::Context(_))));
+    // 摘要传输失败后机械截断兜底成功：Turn 继续走兜底后重试（无剩余脚本则
+    // Failed），但失败摘要报告的用量仍按原用途记账，不伪造零值。
+    assert!(
+        result
+            .compactions
+            .iter()
+            .any(|record| { record.kind == ContextCompactionKind::MechanicalTruncation })
+    );
     let usages = commit_sink.usages();
     assert_eq!(usages.len(), 1);
     assert_eq!(
@@ -3269,4 +3278,454 @@ async fn compaction_without_projectable_tool_results_keeps_legacy_summary_path()
                 ContentBlock::Text { text } if text.contains("既有路径摘要")
             )))
     );
+}
+
+/// P1：501–531 字符 ASCII 候选投影后更长，零收益候选必须不入列；
+/// 全部候选零收益时 planner 返回 None，走既有 LLM 路径。
+#[tokio::test]
+async fn micro_compact_zero_gain_candidates_fall_back_to_llm_path() {
+    let compressor = Arc::new(RecordingCompressor::new("既有路径摘要"));
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::text(MessageRole::User, "旧任务"),
+        Message::text(MessageRole::User, "旧问题".repeat(50)),
+    ];
+    // 唯一候选 510 字符 ASCII：投影后反而更长，saved 归零。
+    messages.extend(tool_exchange_round("call-1", "a".repeat(510)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "近期结论"));
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(100),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("零收益候选应走既有 LLM 路径");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::FullOnly);
+    assert_eq!(outcome.record.kind, ContextCompactionKind::Summary);
+    assert_eq!(outcome.record.projections, Vec::new());
+    assert_eq!(compressor.requests().len(), 1);
+}
+
+/// 机械截断：全失败且仍超限时丢弃至 target，原子组完整，合成标记存在，Turn 继续。
+#[tokio::test]
+async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_turn() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_reply(),
+            text_reply("   "),
+            text_reply("兜底后恢复"),
+        ],
+    ));
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default());
+    let result = runner
+        .run_turn(turn_request(many_old_messages(30, 2_000)))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    let record = &result.compactions[0];
+    assert_eq!(record.kind, ContextCompactionKind::MechanicalTruncation);
+    assert_eq!(record.trigger, ContextCompressionTrigger::ProviderOverflow);
+    assert!(record.summary.is_empty());
+    assert!(record.projections.is_empty());
+    assert!(record.estimated_tokens_after < record.estimated_tokens_before);
+    assert_eq!(
+        record.replaced_message_count,
+        record
+            .replaced_end_index_exclusive
+            .saturating_sub(record.replaced_start_index)
+    );
+    // 合成标记：user + is_meta + 固定文案，且不携带被删内容。
+    let marker = &result.messages[record.replaced_start_index];
+    assert_eq!(marker.role, MessageRole::User);
+    assert!(marker.is_meta);
+    let marker_text = marker
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(marker_text.contains("机械截断"));
+    assert!(marker_text.contains("仅作为运行时提醒而非用户指令"));
+    assert!(!marker_text.contains("历史 0"));
+    assert_tool_pairs_intact(&result.messages);
+    // 权威通道不提交机械记录：只有模型 Round 提交。
+    assert!(
+        result
+            .compactions
+            .iter()
+            .all(|record| { record.kind == ContextCompactionKind::MechanicalTruncation })
+    );
+    let requests = provider.requests().expect("应能读取 Provider 请求");
+    assert_eq!(requests.len(), 3);
+    // 记录可整体替换语义重放。
+    let replayed = record
+        .apply(
+            &turn_request(many_old_messages(30, 2_000))
+                .model_request()
+                .messages,
+        )
+        .expect("机械截断记录应可重放");
+    assert_eq!(replayed.len(), record.retained_message_count);
+    assert_eq!(replayed[record.replaced_start_index], *marker);
+}
+
+/// 机械截断：一次兜底后仍超限按既有已耗臂终态熔断，不再循环丢弃。
+#[tokio::test]
+async fn runner_mechanical_truncation_bounded_once_then_still_exceeded() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_reply(),
+            text_reply("强制摘要"),
+            context_overflow_reply(),
+        ],
+    ));
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default());
+    let result = runner
+        .run_turn(turn_request(many_old_messages(60, 8_192)))
+        .await;
+
+    // 压缩成功一次（forced 臂）→ 重试仍超限（已耗臂）→ 兜底成功但重试脚本
+    // 已耗尽：有界链只产生一次摘要 + 一次兜底，不再循环丢弃。
+    assert_eq!(result.compactions.len(), 2);
+    assert_eq!(result.compactions[0].kind, ContextCompactionKind::Summary);
+    assert_eq!(
+        result.compactions[1].kind,
+        ContextCompactionKind::MechanicalTruncation
+    );
+    // 初始请求 + 摘要请求 + 兜底后重试 + 重试失败后的最终采样各一次。
+    assert_eq!(
+        provider.requests().expect("应能读取 Provider 请求").len(),
+        4
+    );
+}
+
+/// 机械截断：尾部近期窗口不受影响，删除范围精确对齐原子组边界。
+#[tokio::test]
+async fn mechanical_truncation_preserves_recent_window_and_unit_boundaries() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("不得调用")),
+    )
+    .expect("测试策略应有效");
+    let messages = many_old_messages(10, 2_000);
+    let request = ModelRequest::new("context-model", messages.clone());
+    let before = manager.estimate_request(&request);
+    let target = before / 2;
+
+    let outcome = manager
+        .mechanical_truncation(
+            &request,
+            ContextCompressionTrigger::Budget,
+            target,
+            &TurnCancellation::new(),
+        )
+        .expect("应触发机械截断");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::Mechanical);
+    assert!(outcome.record.estimated_tokens_after <= target);
+    assert_eq!(
+        outcome.messages.len(),
+        outcome.record.retained_message_count
+    );
+    // 尾部近期窗口（最后 2 组）逐字节保留。
+    assert_eq!(
+        outcome.messages[outcome.messages.len() - 2..],
+        messages[messages.len() - 2..]
+    );
+    // 删除起点不落在受保护指令之后：system/developer 逐字节保留。
+    assert_eq!(outcome.messages[..2], messages[..2]);
+    assert_tool_pairs_intact(&outcome.messages);
+    // 估算不高于 target 时直接停，不再丢弃。
+    let rebuilt = ModelRequest::new("context-model", outcome.messages.clone());
+    assert!(manager.estimate_request(&rebuilt) <= target.max(1));
+}
+
+/// 机械截断：估算已不高于 target 时返回 NothingCompressible，不伪造记录。
+#[tokio::test]
+async fn mechanical_truncation_returns_nothing_when_already_within_target() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("不得调用")),
+    )
+    .expect("测试策略应有效");
+    let messages = many_old_messages(4, 64);
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let error = manager
+        .mechanical_truncation(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_add(1_000),
+            &TurnCancellation::new(),
+        )
+        .expect_err("已在目标内不应截断");
+
+    assert!(matches!(error, ContextError::NothingCompressible));
+}
+
+/// 回注：摘要成功且区间内有 read 调用时伴随提交重新读取提示（≤5 路径/4KiB）。
+#[tokio::test]
+async fn runner_summary_success_emits_bounded_read_hint() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_reply(),
+            text_reply("区间摘要"),
+            text_reply("最终回答"),
+        ],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_commit_sink(commit_sink.clone());
+    let messages = vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::text(MessageRole::User, "旧问题".repeat(300)),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::text("读取文件"),
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall::new(
+                        "call-1",
+                        "Read",
+                        json!({ "file_path": "src/old_module.rs" }),
+                    ),
+                },
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text("call-1", "旧文件内容".repeat(300), false),
+            }],
+        ),
+        Message::text(MessageRole::User, "近期问题"),
+        Message::text(MessageRole::Assistant, "近期回答"),
+    ];
+    let original_len = messages.len();
+    let result = runner.run_turn(turn_request(messages)).await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(result.compactions[0].kind, ContextCompactionKind::Summary);
+    // 摘要替换区间 + 回注提示各提交一段：权威通道各一件。
+    let committed = commit_sink.events();
+    let compaction_events = committed
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.kind(),
+                AgentCommitEventKind::ContextCompactionApplied { .. }
+            )
+        })
+        .count();
+    assert_eq!(compaction_events, 1);
+    let hint_segments = committed
+        .iter()
+        .filter(|event| match event.kind() {
+            AgentCommitEventKind::RoundCommitted { messages, .. } => {
+                messages.iter().any(|message| {
+                    message.is_meta
+                        && message.content.iter().any(|block| match block {
+                            ContentBlock::Text { text } => {
+                                text.contains("PostCompactionReadHint")
+                                    && text.contains("src/old_module.rs")
+                            }
+                            _ => false,
+                        })
+                })
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(hint_segments, 1);
+    // 提示回到有效 Transcript：最终消息包含提示内容。
+    assert!(result.messages.iter().any(|message| {
+        message.is_meta
+            && message.role == MessageRole::User
+            && message.content.iter().any(|block| match block {
+                ContentBlock::Text { text } => text.contains("src/old_module.rs"),
+                _ => false,
+            })
+    }));
+    assert!(result.messages.len() > original_len.saturating_sub(3));
+}
+
+/// 回注：被替换区间内没有 read 调用时不提交空提示。
+#[tokio::test]
+async fn runner_summary_without_reads_emits_no_hint() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_reply(),
+            text_reply("区间摘要"),
+            text_reply("最终回答"),
+        ],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_commit_sink(commit_sink.clone());
+    let result = runner
+        .run_turn(turn_request(many_old_messages(30, 2_000)))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    let committed = commit_sink.events();
+    let hint_segments = committed
+        .iter()
+        .filter(|event| match event.kind() {
+            AgentCommitEventKind::RoundCommitted { messages, .. } => {
+                messages.iter().any(|message| {
+                    message.content.iter().any(|block| match block {
+                        ContentBlock::Text { text } => text.contains("PostCompactionReadHint"),
+                        _ => false,
+                    })
+                })
+            }
+            _ => false,
+        })
+        .count();
+    assert_eq!(hint_segments, 0);
+}
+
+/// 回注：micro-only 投影不触发重新读取提示。
+#[tokio::test]
+async fn runner_micro_only_compaction_emits_no_read_hint() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(1_000_000),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("最终回答")],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_commit_sink(commit_sink.clone());
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(512 * 1024)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    assert!(!result.messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => text.contains("PostCompactionReadHint"),
+            _ => false,
+        })
+    }));
+}
+
+/// 回注：路径列表按新到旧截断至 5 条且总字节不超过 4KiB。
+#[test]
+fn post_compaction_read_hint_bounds_paths_and_bytes() {
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    for index in 0..8 {
+        let path = format!("src/module_{index:02}.rs");
+        messages.push(Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolCall {
+                tool_call: ToolCall::new(
+                    format!("call-{index}"),
+                    "Read",
+                    json!({ "file_path": path }),
+                ),
+            }],
+        ));
+        messages.push(Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text(format!("call-{index}"), "旧内容", false),
+            }],
+        ));
+    }
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let record = ContextCompressionRecord {
+        kind: ContextCompactionKind::Summary,
+        trigger: ContextCompressionTrigger::Budget,
+        estimated_tokens_before: 100,
+        estimated_tokens_after: 50,
+        replaced_start_index: 2,
+        replaced_end_index_exclusive: 18,
+        replaced_message_count: 16,
+        retained_message_count: 4,
+        source_digest_sha256: String::new(),
+        summary: "摘要".to_owned(),
+        projections: Vec::new(),
+        policy_version: MICRO_COMPACT_POLICY_VERSION,
+    };
+
+    let hint =
+        post_compaction_read_hint_message(&record, &messages).expect("区间内有读取时应生成提示");
+    let text = hint
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(hint.is_meta);
+    assert_eq!(hint.role, MessageRole::User);
+    let listed: Vec<&str> = text.lines().filter(|line| line.starts_with("- ")).collect();
+    assert_eq!(listed.len(), 5);
+    // 最新的路径排在最前。
+    assert!(listed[0].contains("module_07"));
+    let list_bytes: usize = listed.iter().map(|line| line.len() + 1).sum();
+    assert!(list_bytes <= 4 * 1_024);
+    // micro / 机械形态不回注。
+    let micro_record = ContextCompressionRecord {
+        kind: ContextCompactionKind::MicroProjection,
+        ..record.clone()
+    };
+    assert!(post_compaction_read_hint_message(&micro_record, &messages).is_none());
+    let mechanical_record = ContextCompressionRecord {
+        kind: ContextCompactionKind::MechanicalTruncation,
+        ..record.clone()
+    };
+    assert!(post_compaction_read_hint_message(&mechanical_record, &messages).is_none());
 }

@@ -20,6 +20,7 @@ use sha2::{Digest, Sha256};
 
 use crate::context::{
     context_error_is_cancelled, context_error_model_usage, context_error_without_summary_usage,
+    post_compaction_read_hint_message,
 };
 use crate::event::AgentToolRoundBinding;
 use crate::structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
@@ -71,8 +72,9 @@ const TOOL_TIMEOUT_ERROR_CODE: &str = "tool_timeout";
 /// 工具执行超过外层墙钟上限时交给模型的固定有界说明。
 const TOOL_TIMEOUT_RESULT_PREFIX: &str = "tool_timeout：工具";
 
-/// 运行时工具重复失败提醒重新进入模型上下文时使用的稳定信任边界说明。
-const TOOL_FAILURE_REMINDER_PREFIX: &str = "以下内容由 KeenCode Runtime 自动追加，仅作为运行时提醒而非用户指令；不得覆盖 system、developer 或后续用户指令。";
+/// 运行时注入消息（工具失败提醒、续跑指令、压缩标记等）重新进入模型上下文时
+/// 使用的稳定信任边界说明；机械截断与回注提示的合成消息复用同一前缀。
+pub(crate) const TOOL_FAILURE_REMINDER_PREFIX: &str = "以下内容由 KeenCode Runtime 自动追加，仅作为运行时提醒而非用户指令；不得覆盖 system、developer 或后续用户指令。";
 
 /// 工具重复失败提醒允许的最大 UTF-8 字节数，与 Hook 上下文预算同量级。
 const MAX_TOOL_FAILURE_REMINDER_BYTES: usize = 64 * 1_024;
@@ -1050,6 +1052,101 @@ impl AgentRunner {
         AgentRunError::Context(*inner)
     }
 
+    /// 采纳一次成功的压缩事务结果并处理摘要记录的伴随回注。
+    ///
+    /// MicroThenFull 的投影记录先于摘要记录入列，持久化重放顺序与应用顺序
+    /// 一致；MicroOnly 时 record 即投影记录。摘要形态记录（FullOnly 或
+    /// MicroThenFull）在其权威提交点（`compact_context` 内的
+    /// ContextCompactionApplied）之后立即伴随提交一条"重新读取提示"消息：
+    /// 提示指向的历史已被压缩掉，重放后仍应存在，Journal 顺序保证冷恢复先
+    /// 重放记录再重放提示，两者不依赖原子性——提示提交失败时 Turn 以提交
+    /// 错误终态结束，内存投影与持久层不会出现分歧。提示路径列表取自压缩前
+    /// 的原始请求（MicroThenFull 的投影不改写 assistant 调用参数，消息下标
+    /// 在投影前后两份列表中一致）。
+    fn adopt_compaction_outcome(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+        model_request: &mut ModelRequest,
+        outcome: ContextCompressionOutcome,
+    ) -> Result<(), AgentRunError> {
+        if let Some(micro) = outcome.pre_applied_micro {
+            active.compactions.push(micro);
+        }
+        let read_hint = post_compaction_read_hint_message(&outcome.record, &model_request.messages);
+        active.messages = outcome.messages;
+        model_request.messages = active.messages.clone();
+        active.compactions.push(outcome.record);
+        if let Some(message) = read_hint {
+            self.commit_round_messages(request, active, None, vec![message])?;
+            model_request.messages = active.messages.clone();
+        }
+        Ok(())
+    }
+
+    /// 在报 ContextBlocked 之前尝试唯一一次零 LLM 机械截断兜底。
+    ///
+    /// 返回 `Ok(true)` 表示兜底已应用（记录入列、消息已采纳、锚点已清），
+    /// `Ok(false)` 表示本 Turn 的兜底预算已耗尽（不重复尝试）；`Err` 表示
+    /// 兜底尝试本身失败或被取消，取消优先于一切。兜底沿用压缩事件通道投递
+    /// Started/Failed 瞬态事件；成功产物不进入权威 CompactionApplied 通道
+    /// （资源层 CompactionRecord 结构上只能表达"非空摘要整体替换"，与 Micro
+    /// 投影同款约束），记录随 `TurnResult.compactions` 交给 Session 层按
+    /// kind 持久化，冷恢复由 `record.apply()` 的整体替换重放契约保证。
+    /// 失败时调用方保留触发兜底的原始错误分类，兜底自身错误只用于事件分类。
+    async fn try_mechanical_truncation_fallback(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+        model_request: &mut ModelRequest,
+        capabilities: &ProviderCapabilities,
+        trigger: ContextCompressionTrigger,
+    ) -> Result<bool, AgentRunError> {
+        if active.mechanical_truncation_used {
+            return Ok(false);
+        }
+        active.mechanical_truncation_used = true;
+        let target_tokens = self.context.forced_target(model_request, capabilities);
+        self.deliver_context_compaction_event(
+            request,
+            active.state.round_count(),
+            AgentStreamEventKind::ContextCompactionStarted {
+                estimated_tokens: self.context.estimate_request(model_request),
+            },
+            true,
+        )
+        .await?;
+        match self.context.mechanical_truncation(
+            model_request,
+            trigger,
+            target_tokens,
+            &request.cancellation,
+        ) {
+            Ok(outcome) => {
+                active.messages = outcome.messages;
+                model_request.messages = active.messages.clone();
+                active.compactions.push(outcome.record);
+                Ok(true)
+            }
+            Err(error) => {
+                // 机械兜底不发生模型调用，没有需要记账的摘要用量。
+                if context_error_is_cancelled(&error) {
+                    return Err(AgentRunError::Cancelled);
+                }
+                self.deliver_context_compaction_event(
+                    request,
+                    active.state.round_count(),
+                    AgentStreamEventKind::ContextCompactionFailed {
+                        failure_kind: context_compaction_failure_kind(&error),
+                    },
+                    false,
+                )
+                .await?;
+                Err(AgentRunError::Context(error))
+            }
+        }
+    }
+
     /// 提交工具生命周期事件，并在最终结果不确定时立即冻结当前 Round 预留供恢复。
     fn commit_tool_lifecycle_event(
         &self,
@@ -1289,6 +1386,7 @@ impl AgentRunner {
             seen_tool_call_ids: HashSet::new(),
             compactions: Vec::new(),
             forced_context_retry_used: false,
+            mechanical_truncation_used: false,
             empty_response_retry_used: false,
             disable_configured_max_output: false,
             max_output_recovery_count: 0,
@@ -1531,14 +1629,7 @@ impl AgentRunner {
                     .await;
                 match outcome {
                     Ok(outcome) => {
-                        // MicroThenFull 的投影记录先于摘要记录入列，持久化重放
-                        // 顺序与应用顺序一致；MicroOnly 时 record 即投影记录。
-                        if let Some(micro) = outcome.pre_applied_micro {
-                            active.compactions.push(micro);
-                        }
-                        active.messages = outcome.messages;
-                        model_request.messages = active.messages.clone();
-                        active.compactions.push(outcome.record);
+                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)?
                     }
                     Err(error) => {
                         // Micro 投影已应用但摘要失败：先采纳已回收的投影记录与
@@ -1546,25 +1637,51 @@ impl AgentRunner {
                         // 的既有分类决定容忍或终止；非 Micro 载荷原样透传。
                         let error =
                             self.adopt_micro_applied_failure(active, &mut model_request, error);
-                        match error {
+                        let soft_failure = matches!(
+                            error,
                             AgentRunError::Context(
                                 ContextError::NothingCompressible
-                                | ContextError::EmptySummary
-                                | ContextError::CompressionDidNotReduce { .. },
-                            ) if self.context.request_fits_context_window(
-                                &model_request,
-                                &provider_capabilities,
-                            ) =>
+                                    | ContextError::EmptySummary
+                                    | ContextError::CompressionDidNotReduce { .. },
+                            )
+                        );
+                        if soft_failure
+                            && self
+                                .context
+                                .request_fits_context_window(&model_request, &provider_capabilities)
+                        {
+                            // 摘要失败事件及已发生用量已处理；采纳投影后的
+                            // 缩水历史装得下，不伪造压缩提交。
+                        } else if soft_failure {
+                            // 装不下才与 forced 场景同源处理：在报 ContextBlocked
+                            // 之前尝试唯一一次机械截断兜底；不可用或失败时保留
+                            // 原始软失败分类。
+                            match self
+                                .try_mechanical_truncation_fallback(
+                                    request,
+                                    active,
+                                    &mut model_request,
+                                    &provider_capabilities,
+                                    ContextCompressionTrigger::Budget,
+                                )
+                                .await
                             {
-                                // 摘要失败事件及已发生用量已处理；采纳投影后的
-                                // 缩水历史装得下，不伪造压缩提交。
+                                Ok(true) => {}
+                                Err(AgentRunError::Cancelled) => {
+                                    return Err(AgentRunError::Cancelled);
+                                }
+                                _ => {
+                                    return Err(prefer_limit_summary_error(
+                                        active.limit_summary.as_ref(),
+                                        error,
+                                    ));
+                                }
                             }
-                            error => {
-                                return Err(prefer_limit_summary_error(
-                                    active.limit_summary.as_ref(),
-                                    error,
-                                ));
-                            }
+                        } else {
+                            return Err(prefer_limit_summary_error(
+                                active.limit_summary.as_ref(),
+                                error,
+                            ));
                         }
                     }
                 }
@@ -1607,26 +1724,48 @@ impl AgentRunner {
                         {
                             Ok(outcome) => outcome,
                             Err(error) => {
-                                // forced 场景摘要失败即按现状终止，但已回收的
-                                // Micro 投影不能丢：先采纳投影记录与消息，再
-                                // 传播内层错误的既有分类。
+                                // forced 场景压缩失败不再直接终止：先采纳已回收
+                                // 的 Micro 投影，再在报 ContextBlocked 之前尝试
+                                // 唯一一次机械截断兜底；兜底成功后与成功路径同
+                                // 构，由循环顶部换新调用尝试重试。不可用或失败
+                                // 时传播内层错误的既有分类。
                                 let error = self.adopt_micro_applied_failure(
                                     active,
                                     &mut model_request,
                                     error,
                                 );
-                                return Err(prefer_limit_summary_error(
-                                    active.limit_summary.as_ref(),
-                                    error,
-                                ));
+                                match self
+                                    .try_mechanical_truncation_fallback(
+                                        request,
+                                        active,
+                                        &mut model_request,
+                                        &provider_capabilities,
+                                        ContextCompressionTrigger::ProviderOverflow,
+                                    )
+                                    .await
+                                {
+                                    Ok(true) => {
+                                        active.state.transition_to(TurnPhase::RequestingModel)?;
+                                        continue;
+                                    }
+                                    Err(AgentRunError::Cancelled) => {
+                                        return Err(AgentRunError::Cancelled);
+                                    }
+                                    _ => {
+                                        return Err(prefer_limit_summary_error(
+                                            active.limit_summary.as_ref(),
+                                            error,
+                                        ));
+                                    }
+                                }
                             }
                         };
-                        if let Some(micro) = outcome.pre_applied_micro {
-                            active.compactions.push(micro);
-                        }
-                        active.messages = outcome.messages;
-                        model_request.messages = active.messages.clone();
-                        active.compactions.push(outcome.record);
+                        self.adopt_compaction_outcome(
+                            request,
+                            active,
+                            &mut model_request,
+                            outcome,
+                        )?;
                         active.state.transition_to(TurnPhase::RequestingModel)?;
                         // 压缩重试不在臂内嵌套采样：臂结束后由循环顶部换新调用
                         // 尝试重新发起同一请求，重试结果回到本循环按臂顺序重新
@@ -1636,9 +1775,32 @@ impl AgentRunner {
                     }
                     Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
                         active.state.transition_to(TurnPhase::Compacting)?;
-                        break Err(AgentRunError::Context(ContextError::StillExceeded {
-                            estimated_tokens: self.context.estimate_request(&model_request),
-                        }));
+                        // 唯一强制压缩重试仍超限：在报 ContextBlocked 之前尝试
+                        // 唯一一次机械截断兜底；成功后换新调用尝试重试，失败时
+                        // 保留已耗臂的既有终态（兜底 Started/Failed 事件只做
+                        // 分类通道，不覆盖原始超限链）。兜底不改变"压缩只重试
+                        // 一次"的有界性：兜底成功后的重试若再超限，已耗臂直接
+                        // 熔断，不再进入压缩或兜底。
+                        let recovered = match self
+                            .try_mechanical_truncation_fallback(
+                                request,
+                                active,
+                                &mut model_request,
+                                &provider_capabilities,
+                                ContextCompressionTrigger::ProviderOverflow,
+                            )
+                            .await
+                        {
+                            Ok(recovered) => recovered,
+                            Err(AgentRunError::Cancelled) => break Err(AgentRunError::Cancelled),
+                            Err(_) => false,
+                        };
+                        if !recovered {
+                            break Err(AgentRunError::Context(ContextError::StillExceeded {
+                                estimated_tokens: self.context.estimate_request(&model_request),
+                            }));
+                        }
+                        active.state.transition_to(TurnPhase::RequestingModel)?;
                     }
                     Err(AgentRunError::Model(ModelError::InvalidRequest { message }))
                         if !active.disable_configured_max_output
@@ -3430,6 +3592,13 @@ struct ActiveTurn {
     compactions: Vec<ContextCompressionRecord>,
     /// Provider 超限后的强制压缩重试是否已在当前 Turn 消耗。
     forced_context_retry_used: bool,
+    /// 压缩全失败后的唯一一次零 LLM 机械截断兜底是否已在当前 Turn 尝试。
+    ///
+    /// 每个 Turn 至多尝试一次（无论成败）：置位后再次到达 ContextBlocked
+    /// 边界时不再兜底，按既有 StillExceeded 等分类直接终态，避免
+    /// "丢弃-仍超限-再丢弃"循环。崩溃恢复重建 ActiveTurn 会归零该标记，
+    /// 与空响应重试计数的恢复语义一致。
+    mechanical_truncation_used: bool,
     /// 空响应的一次有界重试机会是否已在当前 Turn 消耗。
     empty_response_retry_used: bool,
     /// 配置输出上限被厂商 400 判定超限后，本 Turn 是否已降级为不携带输出上限。
