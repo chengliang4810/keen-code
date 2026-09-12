@@ -7,6 +7,7 @@ use keencode_model::{
     ModelError, ModelFuture, ModelProvider, ModelRequest, ModelStream, ProviderCapabilities,
     ProviderProtocol,
 };
+use reqwest::Url;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -146,6 +147,11 @@ impl ResolvedProvider {
     /// 返回同时绑定传输配置和凭据修订的稳定配置身份。
     pub fn config_identity(&self) -> &str {
         &self.config_identity
+    }
+
+    /// 返回当前绑定客户端实际使用的协议基础地址；不含凭据。
+    pub fn base_url(&self) -> &Url {
+        self.client.config().base_url()
     }
 }
 

@@ -8,6 +8,12 @@ pub const REQUEST_METADATA_TURN_ID: &str = "keencode.turn_id";
 pub const REQUEST_METADATA_AGENT_ID: &str = "keencode.agent_id";
 /// `ModelRequest.metadata` 中由 Runtime 写入的调用用途键。
 pub const REQUEST_METADATA_PURPOSE: &str = "keencode.purpose";
+/// `ModelRequest.metadata` 中由 Runtime 写入的会话稳定缓存路由键。
+///
+/// 值形如 `keencode:<session>`；只有确认端点接受 Chat Completions
+/// `prompt_cache_key` 时才会由 Runtime 写入，且只有 Chat Adapter 把它
+/// 透传进线格式，其余协议保持标准线格式。
+pub const REQUEST_METADATA_PROMPT_CACHE_KEY: &str = "keencode.prompt_cache_key";
 
 /// 一条模型请求观测属于完整逻辑请求还是一次实际 HTTP 尝试。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

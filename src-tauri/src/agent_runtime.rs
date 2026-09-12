@@ -16,6 +16,7 @@ use crate::{
 };
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
+use url::Url;
 use keencode_acp::{
     AcpClientRequestFrame, AgentLifecycleStatus, BackgroundTaskInfo, BackgroundTaskKind,
     BackgroundTaskTerminalStatus, CompactionFailureKind, KeenCodeEvent, KeenCodeEventEnvelope,
@@ -48,8 +49,8 @@ use keencode_model::{
 };
 use keencode_provider::{
     ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
-    REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID, REQUEST_METADATA_TURN_ID,
-    ResolvedProvider,
+    REQUEST_METADATA_PROMPT_CACHE_KEY, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
+    REQUEST_METADATA_TURN_ID, ResolvedProvider,
 };
 use keencode_resources::{
     AgentId as ResourceAgentId, COMPACTION_SUMMARY_PREFIX,
@@ -5159,6 +5160,9 @@ impl AgentRuntime {
         environment_message.is_meta = true;
         request_context.push(environment_message);
         request_context.extend(turn_context);
+        // 会话稳定缓存路由键只在端点 allowlist 内装配；键值随 Session 而非 Turn 漂移。
+        let prompt_cache_key =
+            prompt_cache_key_for_endpoint(resolved.base_url(), &execution.session_id);
         let provider = Arc::new(
             TurnBoundProvider::new(
                 Arc::new(resolved.clone()),
@@ -5166,16 +5170,20 @@ impl AgentRuntime {
                 launch.turn_id.as_str(),
                 launch.agent.agent_id.as_str(),
             )
+            .with_prompt_cache_key(prompt_cache_key.clone())
             .with_stable_prefix(frozen.stable_prefix())
             .with_request_context(request_context),
         );
         // 压缩摘要不能看到只服务于当前模型请求的动态上下文，避免把它间接写入摘要 Transcript。
-        let compressor_provider: Arc<dyn ModelProvider> = Arc::new(TurnBoundProvider::new(
-            Arc::new(resolved.clone()),
-            &execution.session_id,
-            launch.turn_id.as_str(),
-            launch.agent.agent_id.as_str(),
-        ));
+        let compressor_provider: Arc<dyn ModelProvider> = Arc::new(
+            TurnBoundProvider::new(
+                Arc::new(resolved.clone()),
+                &execution.session_id,
+                launch.turn_id.as_str(),
+                launch.agent.agent_id.as_str(),
+            )
+            .with_prompt_cache_key(prompt_cache_key),
+        );
         let context = ContextManager::new(
             ContextPolicy::default(),
             provider.clone(),
@@ -6819,6 +6827,8 @@ struct TurnBoundProvider {
     turn_id: String,
     /// 发起请求的根 Agent 或单层子 Agent。
     agent_id: String,
+    /// 端点在 allowlist 内时的会话稳定缓存路由键；其余端点为 `None` 不发送。
+    prompt_cache_key: Option<String>,
     /// 会话冻结的稳定前缀（System 规则、能力说明、指令与目录）；不参与 Runtime Journal。
     stable_prefix: Vec<Message>,
     /// 仅本轮动态上下文（环境与 Memory/Plan/Ultra），追加到请求末尾；不参与 Runtime Journal。
@@ -6833,9 +6843,16 @@ impl TurnBoundProvider {
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
             agent_id: agent_id.to_owned(),
+            prompt_cache_key: None,
             stable_prefix: Vec::new(),
             request_context: Vec::new(),
         }
+    }
+
+    /// 设置会话稳定缓存路由键；仅端点在 allowlist 内时由装配方提供。
+    fn with_prompt_cache_key(mut self, prompt_cache_key: Option<String>) -> Self {
+        self.prompt_cache_key = prompt_cache_key;
+        self
     }
 
     /// 设置会话冻结的稳定前缀；前缀跨 Turn 字节稳定，压缩与独立生成不启用。
@@ -6909,8 +6926,30 @@ impl ModelProvider for TurnBoundProvider {
         request
             .metadata
             .insert(REQUEST_METADATA_PURPOSE.to_owned(), "agent".to_owned());
+        // 会话稳定缓存路由键只随 Session 漂移；压缩请求共用同一 Session 键。
+        if let Some(prompt_cache_key) = self.prompt_cache_key.as_deref() {
+            request.metadata.insert(
+                REQUEST_METADATA_PROMPT_CACHE_KEY.to_owned(),
+                prompt_cache_key.to_owned(),
+            );
+        }
         self.inner.stream(request)
     }
+}
+
+/// 已知接受 Chat Completions `prompt_cache_key` 的端点主机 allowlist。
+///
+/// OpenAI 官方端点定义了该字段，DeepSeek 前缀缓存按它路由同一会话的请求；
+/// 第三方 OpenAI 兼容网关可能严格拒绝未知字段导致 400，因此默认只对以下
+/// 官方主机写入，其余端点保持原线格式。后续实测可在常量中扩展。
+const PROMPT_CACHE_KEY_HOSTS: &[&str] = &["api.openai.com", "api.deepseek.com"];
+
+/// 端点主机在 allowlist 内时返回会话稳定的缓存路由键，否则不发送该字段。
+fn prompt_cache_key_for_endpoint(base_url: &Url, session_id: &str) -> Option<String> {
+    let host = base_url.host_str()?;
+    PROMPT_CACHE_KEY_HOSTS
+        .contains(&host)
+        .then(|| format!("keencode:{session_id}"))
 }
 
 /// 等待同一 Session 的权威 TurnStarted；Lag 或通道关闭都要求调用方恢复。
@@ -9372,8 +9411,8 @@ mod tests {
         complete_runtime_turn, coordinator_has_pending_dynamic_input_claim,
         dynamic_input_receipt_matches_claim, extension_diagnostic_message,
         is_retryable_runtime_turn_completion_error, map_authoritative_record, materialize_delivery,
-        parse_reasoning_effort, provider_snapshot, recovered_authoritative_turn_outcomes,
-        release_runtime_turn_state, root_task_terminal_notice,
+        parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
+        recovered_authoritative_turn_outcomes, release_runtime_turn_state, root_task_terminal_notice,
         root_turn_summary, runtime_tool_snapshot, should_retry_runtime_turn_completion,
         split_child_agent_model_override, validate_generated_title,
         validate_recovered_mailbox_claim, wait_for_turn_started,
@@ -9408,9 +9447,10 @@ mod tests {
     };
     use keencode_provider::{
         ProviderConfig, ProviderModelPolicy, ProviderRegistration, REQUEST_METADATA_AGENT_ID,
-        REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID, REQUEST_METADATA_TURN_ID,
-        WireResponseMode,
+        REQUEST_METADATA_PROMPT_CACHE_KEY, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
+        REQUEST_METADATA_TURN_ID, WireResponseMode,
     };
+    use url::Url;
     use keencode_resources::{
         AgentId as ResourceAgentId, DynamicInputKind, DynamicInputReceipt,
         MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
@@ -13270,6 +13310,97 @@ mod tests {
                 Some(&"agent".to_owned())
             );
         }
+    }
+
+    /// 缓存路由键只对 allowlist 内端点装配，且同一会话跨 Turn 值不漂移。
+    #[test]
+    fn prompt_cache_key_follows_endpoint_allowlist_and_stays_session_stable() {
+        let openai = Url::parse("https://api.openai.com/v1").expect("官方端点应可解析");
+        let deepseek = Url::parse("https://api.deepseek.com").expect("官方端点应可解析");
+        assert_eq!(
+            prompt_cache_key_for_endpoint(&openai, "session-a").as_deref(),
+            Some("keencode:session-a")
+        );
+        assert_eq!(
+            prompt_cache_key_for_endpoint(&deepseek, "session-a").as_deref(),
+            Some("keencode:session-a")
+        );
+        // 其他主机（第三方网关、本地服务）与非法地址一律不发送该字段。
+        assert_eq!(
+            prompt_cache_key_for_endpoint(
+                &Url::parse("https://api.example.com/v1").expect("第三方端点应可解析"),
+                "session-a"
+            ),
+            None
+        );
+        assert_eq!(
+            prompt_cache_key_for_endpoint(
+                &Url::parse("http://127.0.0.1:1234/v1").expect("本地端点应可解析"),
+                "session-a"
+            ),
+            None
+        );
+        // 键值只随 Session 漂移：同会话重复装配得到相同值。
+        assert_eq!(
+            prompt_cache_key_for_endpoint(&openai, "session-a"),
+            prompt_cache_key_for_endpoint(&openai, "session-a")
+        );
+        assert_eq!(
+            prompt_cache_key_for_endpoint(&openai, "session-b").as_deref(),
+            Some("keencode:session-b")
+        );
+    }
+
+    /// 装配点写入的缓存键随请求到达内层 Provider；未装配端点的请求不含该键。
+    #[tokio::test]
+    async fn turn_bound_provider_propagates_session_prompt_cache_key_only_when_assembled() {
+        let scripted = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                completed_reply("第一轮"),
+                completed_reply("第二轮"),
+                completed_reply("未装配请求"),
+            ],
+        ));
+        let openai = Url::parse("https://api.openai.com/v1").expect("官方端点应可解析");
+        // 模拟同一 Session 的两个 Turn：turn_id 不同，缓存键保持会话稳定。
+        for turn_id in ["turn-1", "turn-2"] {
+            let inner: Arc<dyn ModelProvider> = scripted.clone();
+            let bound = TurnBoundProvider::new(inner, "session-cache", turn_id, "agent-trusted")
+                .with_prompt_cache_key(prompt_cache_key_for_endpoint(&openai, "session-cache"));
+            let stream = bound
+                .stream(ModelRequest::new(
+                    "test-model",
+                    vec![ModelMessage::text(MessageRole::User, "会话请求")],
+                ))
+                .await
+                .expect("会话请求应进入脚本 Provider");
+            drop(stream);
+        }
+        let inner: Arc<dyn ModelProvider> = scripted.clone();
+        let unbound = TurnBoundProvider::new(inner, "session-plain", "turn-3", "agent-trusted");
+        let stream = unbound
+            .stream(ModelRequest::new(
+                "test-model",
+                vec![ModelMessage::text(MessageRole::User, "未装配请求")],
+            ))
+            .await
+            .expect("未装配请求应进入脚本 Provider");
+        drop(stream);
+
+        let requests = scripted.requests().expect("应读取脚本请求");
+        assert_eq!(requests.len(), 3);
+        for request in &requests[..2] {
+            assert_eq!(
+                request.metadata.get(REQUEST_METADATA_PROMPT_CACHE_KEY),
+                Some(&"keencode:session-cache".to_owned()),
+                "allowlist 内端点的每个 Turn 都携带同一会话缓存键"
+            );
+        }
+        assert!(
+            !requests[2].metadata.contains_key(REQUEST_METADATA_PROMPT_CACHE_KEY),
+            "allowlist 外端点的请求不得携带缓存键"
+        );
     }
 
     /// 同一原始请求的重复发送只注入一份规则；动态上下文只追加在末尾，压缩保持独立。

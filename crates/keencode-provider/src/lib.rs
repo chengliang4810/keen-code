@@ -25,9 +25,9 @@ pub use config::{
     RetryConfig, WireResponseMode,
 };
 pub use observation::{
-    REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
-    REQUEST_METADATA_TURN_ID, RequestErrorKind, RequestMode, RequestObservation,
-    RequestObservationScope, RequestObservationState, RequestObserver,
+    REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PROMPT_CACHE_KEY, REQUEST_METADATA_PURPOSE,
+    REQUEST_METADATA_SESSION_ID, REQUEST_METADATA_TURN_ID, RequestErrorKind, RequestMode,
+    RequestObservation, RequestObservationScope, RequestObservationState, RequestObserver,
 };
 pub use registry::{
     ProviderModelPolicy, ProviderRegistration, ProviderRegistrationSummary, ProviderRegistry,

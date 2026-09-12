@@ -6,7 +6,9 @@ use keencode_model::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::{http::classify_in_band_provider_error, sse::SseFrame};
+use crate::{
+    REQUEST_METADATA_PROMPT_CACHE_KEY, http::classify_in_band_provider_error, sse::SseFrame,
+};
 
 /// Chat Completions 流中一个正在拼接的工具调用。
 #[derive(Debug)]
@@ -166,6 +168,14 @@ impl ChatCompletionsAdapter {
                         "strict": structured.strict,
                     }
                 }),
+            );
+        }
+        // 会话稳定缓存路由键：Runtime 侧确认端点接受该字段后才写入 metadata，
+        // 这里只做透传；空值防御性丢弃，避免把无效字段发往严格网关。
+        if let Some(prompt_cache_key) = prompt_cache_key(&request.metadata) {
+            body.insert(
+                "prompt_cache_key".to_owned(),
+                Value::String(prompt_cache_key.to_owned()),
             );
         }
         Ok(Value::Object(body))
@@ -891,6 +901,14 @@ fn required_u32(value: &Map<String, Value>, field: &str) -> Result<u32, ModelErr
         .and_then(Value::as_u64)
         .ok_or_else(|| protocol_error(format!("Chat 字段 {field} 必须是非负整数")))?;
     u32::try_from(number).map_err(|_| protocol_error(format!("Chat 字段 {field} 超过 u32 范围")))
+}
+
+/// 读取 Runtime 写入且非空的会话稳定缓存路由键；未写入或为空时不进线格式。
+fn prompt_cache_key(metadata: &BTreeMap<String, String>) -> Option<&str> {
+    metadata
+        .get(REQUEST_METADATA_PROMPT_CACHE_KEY)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
 }
 
 /// 创建统一请求校验错误。

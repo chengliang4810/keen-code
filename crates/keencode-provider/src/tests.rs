@@ -3906,6 +3906,76 @@ fn internal_message_metadata_does_not_change_provider_input() {
 }
 
 #[test]
+fn chat_prompt_cache_key_metadata_reaches_wire_body_and_otherwise_body_is_unchanged() {
+    let baseline = Adapter::new(ProviderProtocol::ChatCompletions)
+        .encode_request(&minimal_request(), true)
+        .expect("无缓存键请求应当可编码");
+    assert!(
+        baseline.get("prompt_cache_key").is_none(),
+        "改前线格式不得出现 prompt_cache_key 字段"
+    );
+
+    let mut request = minimal_request();
+    request.metadata.insert(
+        crate::REQUEST_METADATA_PROMPT_CACHE_KEY.to_owned(),
+        "keencode:session-cache".to_owned(),
+    );
+    let body = Adapter::new(ProviderProtocol::ChatCompletions)
+        .encode_request(&request, true)
+        .expect("带缓存键请求应当可编码");
+    let mut expected = baseline;
+    expected["prompt_cache_key"] = json!("keencode:session-cache");
+    assert_eq!(
+        body, expected,
+        "缓存键必须是线格式唯一差异，其余字段与改前逐字节一致"
+    );
+}
+
+#[test]
+fn chat_blank_prompt_cache_key_metadata_is_dropped_from_wire_body() {
+    for value in ["", "   "] {
+        let mut request = minimal_request();
+        request.metadata.insert(
+            crate::REQUEST_METADATA_PROMPT_CACHE_KEY.to_owned(),
+            value.to_owned(),
+        );
+        let body = Adapter::new(ProviderProtocol::ChatCompletions)
+            .encode_request(&request, true)
+            .expect("空缓存键请求应当可编码");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "空值缓存键不得进入线格式"
+        );
+    }
+}
+
+#[test]
+fn prompt_cache_key_metadata_does_not_change_messages_or_responses_wire() {
+    let mut request = minimal_request();
+    request.metadata.insert(
+        crate::REQUEST_METADATA_PROMPT_CACHE_KEY.to_owned(),
+        "keencode:session-cache".to_owned(),
+    );
+    for protocol in [ProviderProtocol::Messages, ProviderProtocol::Responses] {
+        let adapter = Adapter::new(protocol);
+        let body = adapter
+            .encode_request(&request, true)
+            .expect("带缓存键请求应当可编码");
+        assert!(
+            body.get("prompt_cache_key").is_none(),
+            "仅 Chat Adapter 消费缓存键，其余协议必须保持标准线格式"
+        );
+        assert_eq!(
+            body,
+            adapter
+                .encode_request(&minimal_request(), true)
+                .expect("无缓存键请求应当可编码"),
+            "缓存键不得改变其他协议线格式"
+        );
+    }
+}
+
+#[test]
 fn buffered_request_disables_stream_specific_fields() {
     let request = minimal_request();
     let messages = Adapter::new(ProviderProtocol::Messages)
