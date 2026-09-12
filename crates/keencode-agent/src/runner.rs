@@ -779,11 +779,14 @@ impl AgentRunner {
             elapsed_millis,
         )
         .with_purpose(purpose);
-        log_model_cache_usage(&usage);
         let mut last_error = None;
         for _ in 0..AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS {
             match self.commit_sink.commit_model_round_usage(&usage) {
-                Ok(()) => return Ok(()),
+                // 观测日志只在权威提交成功后输出，避免重试全部失败时仍声称“已提交”。
+                Ok(()) => {
+                    log_model_cache_usage(&usage);
+                    return Ok(());
+                }
                 Err(error) => last_error = Some(error),
             }
         }

@@ -153,7 +153,8 @@ pub struct ModelRequest {
     pub temperature: Option<f32>,
     /// 模型遇到其中任意文本时应停止继续生成。
     pub stop_sequences: Vec<String>,
-    /// 仅用于追踪调用且不得改变模型语义的字符串元数据。
+    /// 调用元数据；协议 Adapter 只消费显式声明的 `keencode.*` 键（如
+    /// `keencode.prompt_cache_key` → Chat Completions wire 字段），其余仅用于追踪。
     pub metadata: BTreeMap<String, String>,
 }
 

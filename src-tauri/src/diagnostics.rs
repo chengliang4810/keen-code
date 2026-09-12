@@ -100,7 +100,13 @@ impl Diagnostics {
                 bytes: Vec::new(),
             });
         let filter = tracing_subscriber::filter::filter_fn(|metadata| {
-            *metadata.level() <= tracing::Level::WARN || metadata.target() == "keencode_diagnostics"
+            *metadata.level() <= tracing::Level::WARN
+                || metadata.target() == "keencode_diagnostics"
+                // 运行时观测白名单：keencode-agent 运行时（如每轮提示词缓存
+                // 用量的 debug 观测日志）对问题定位有产品价值，按 target
+                // 放行到 DEBUG 级；其他组件的 debug 噪音仍被过滤。
+                || (metadata.target().starts_with("keencode_agent")
+                    && *metadata.level() <= tracing::Level::DEBUG)
         });
         tracing_subscriber::registry().with(filter).with(layer)
     }
@@ -404,6 +410,24 @@ mod tests {
         assert!(text.contains("request started"));
         assert!(!text.contains("private-key") && !text.contains("invisible noisy event"));
         assert_eq!(text.lines().count(), 2);
+    }
+
+    /// 运行时观测白名单只放行 `keencode_agent` target 的 DEBUG 及以上事件。
+    #[test]
+    fn filter_passes_keencode_agent_runtime_debug_events_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("diagnostics.log");
+        let sink = test_sink(&path);
+        tracing::subscriber::with_default(sink.subscriber(), || {
+            tracing::debug!(target: "keencode_agent::runner", "模型轮次提示词缓存用量已提交");
+            tracing::debug!(target: "hyper::client", "third-party noisy debug");
+            tracing::trace!(target: "keencode_agent::runner", "trace stays out");
+        });
+        let text = std::fs::read_to_string(path).unwrap();
+        assert!(text.contains("keencode_agent::runner") && text.contains("缓存用量已提交"));
+        assert!(!text.contains("third-party noisy debug"));
+        assert!(!text.contains("trace stays out"));
+        assert_eq!(text.lines().count(), 1);
     }
 
     #[test]

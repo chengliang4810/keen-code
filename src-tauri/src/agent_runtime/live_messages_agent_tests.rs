@@ -293,17 +293,16 @@ async fn live_messages_agent_scenarios() {
             if name == "tool_failure_recovery" {
                 tools.register(intermittent.clone()).unwrap();
             }
-            let bound = TurnBoundProvider::new(
-                resolved.clone(),
-                "messages-agent-validation",
-                name,
-                "root",
-            );
+            let bound =
+                TurnBoundProvider::new(resolved.clone(), "messages-agent-validation", name, "root");
             let mut prefix = Vec::new();
             if let Some(old) = &old_prompt {
                 prefix.push(Message::text(MessageRole::System, old.clone()));
             } else {
-                prefix.push(Message::text(MessageRole::System, crate::agent_prompt::core()));
+                prefix.push(Message::text(
+                    MessageRole::System,
+                    crate::agent_prompt::core(),
+                ));
             }
             if name == "skill_loading" {
                 let directory = root.path().join(".agents/skills/synthetic-review");

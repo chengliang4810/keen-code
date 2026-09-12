@@ -242,7 +242,11 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T23:30:00-04:00").unwrap();
         let snapshot = EnvironmentSnapshot::freeze(Path::new("."), &now);
         let before_midnight = snapshot.render(false);
-        assert!(before_midnight.lines().any(|line| line == "Current date: 2026-09-06"));
+        assert!(
+            before_midnight
+                .lines()
+                .any(|line| line == "Current date: 2026-09-06")
+        );
         assert!(before_midnight.contains("Current mode: Normal"));
         // 同一快照在跨午夜后的下一轮渲染：日期仍是冻结值，只有 mode 允许变化。
         assert_eq!(

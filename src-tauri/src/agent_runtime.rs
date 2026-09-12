@@ -16,7 +16,6 @@ use crate::{
 };
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
-use url::Url;
 use keencode_acp::{
     AcpClientRequestFrame, AgentLifecycleStatus, BackgroundTaskInfo, BackgroundTaskKind,
     BackgroundTaskTerminalStatus, CompactionFailureKind, KeenCodeEvent, KeenCodeEventEnvelope,
@@ -89,6 +88,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use url::Url;
 
 /// 桌面端接收全部 ACP 投递的唯一 Tauri 事件名称。
 pub const ACP_DELIVERY_EVENT: &str = "acp://delivery";
@@ -1784,12 +1784,7 @@ impl FrozenAgentPrompt {
     ///
     /// 会话内安装 MCP、启用技能或扩展热重载属于低频事件，被接受为合法的
     /// prompt cache 失效；重建时记录诊断而不静默漂移。
-    fn refreshed(
-        frozen: &Self,
-        can_spawn: bool,
-        has_skill: bool,
-        catalog: &str,
-    ) -> Arc<Self> {
+    fn refreshed(frozen: &Self, can_spawn: bool, has_skill: bool, catalog: &str) -> Arc<Self> {
         Arc::new(Self {
             environment: frozen.environment.clone(),
             custom_instructions: frozen.custom_instructions.clone(),
@@ -5322,7 +5317,9 @@ impl AgentRuntime {
                 "agent capability context changed; rebuilding frozen prompt capability section"
             );
             let rebuilt = FrozenAgentPrompt::refreshed(frozen, can_spawn, has_skill, catalog);
-            state.frozen_prompts.insert(agent_id.clone(), Arc::clone(&rebuilt));
+            state
+                .frozen_prompts
+                .insert(agent_id.clone(), Arc::clone(&rebuilt));
             return Ok(rebuilt);
         }
         let (mut custom_instructions, project_instructions) =
@@ -5356,7 +5353,9 @@ impl AgentRuntime {
             running_agent_ids.into_iter(),
             agent_id,
         );
-        state.frozen_prompts.insert(agent_id.clone(), Arc::clone(&frozen));
+        state
+            .frozen_prompts
+            .insert(agent_id.clone(), Arc::clone(&frozen));
         Ok(frozen)
     }
 
@@ -6907,7 +6906,7 @@ impl ModelProvider for TurnBoundProvider {
         self.inner.capabilities(model)
     }
 
-    /// 在唯一 Provider 边界覆盖四个保留 metadata，普通重试和压缩都不能绕过。
+    /// 在唯一 Provider 边界覆盖四个保留键 + 条件性 prompt_cache_key，普通重试和压缩都不能绕过。
     fn stream(
         &self,
         mut request: ModelRequest,
@@ -6939,10 +6938,12 @@ impl ModelProvider for TurnBoundProvider {
 
 /// 已知接受 Chat Completions `prompt_cache_key` 的端点主机 allowlist。
 ///
-/// OpenAI 官方端点定义了该字段，DeepSeek 前缀缓存按它路由同一会话的请求；
-/// 第三方 OpenAI 兼容网关可能严格拒绝未知字段导致 400，因此默认只对以下
-/// 官方主机写入，其余端点保持原线格式。后续实测可在常量中扩展。
-const PROMPT_CACHE_KEY_HOSTS: &[&str] = &["api.openai.com", "api.deepseek.com"];
+/// OpenAI 官方支持 `prompt_cache_key` 作为缓存路由提示；DeepSeek 官方文档
+/// 明确其上下文缓存为自动前缀匹配、chat completions 不支持该参数（会被
+/// 忽略或报错），故不入 allowlist。第三方 OpenAI 兼容网关可能严格拒绝未知
+/// 字段导致 400，因此默认只对以下官方主机写入，其余端点保持原线格式；
+/// 新增条目须以实测确认为前提。
+const PROMPT_CACHE_KEY_HOSTS: &[&str] = &["api.openai.com"];
 
 /// 端点主机在 allowlist 内时返回会话稳定的缓存路由键，否则不发送该字段。
 fn prompt_cache_key_for_endpoint(base_url: &Url, session_id: &str) -> Option<String> {
@@ -9402,20 +9403,20 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed,
-        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
-        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
-        RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
-        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
-        TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
+        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed, RootTaskTerminalNotice,
+        RootTurnOptions, RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate,
+        RuntimeAgentTemplateContext, RuntimeExtensionCandidate, RuntimeExtensionContributor,
+        RuntimeExtensionDiagnostic, RuntimeGoalUsageSink, RuntimeToolContext,
+        SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
+        authoritative_recovered_turn_outcome, background_task_completion_event,
         complete_runtime_turn, coordinator_has_pending_dynamic_input_claim,
         dynamic_input_receipt_matches_claim, extension_diagnostic_message,
         is_retryable_runtime_turn_completion_error, map_authoritative_record, materialize_delivery,
         parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
-        recovered_authoritative_turn_outcomes, release_runtime_turn_state, root_task_terminal_notice,
-        root_turn_summary, runtime_tool_snapshot, should_retry_runtime_turn_completion,
-        split_child_agent_model_override, validate_generated_title,
-        validate_recovered_mailbox_claim, wait_for_turn_started,
+        recovered_authoritative_turn_outcomes, release_runtime_turn_state,
+        root_task_terminal_notice, root_turn_summary, runtime_tool_snapshot,
+        should_retry_runtime_turn_completion, split_child_agent_model_override,
+        validate_generated_title, validate_recovered_mailbox_claim, wait_for_turn_started,
     };
     use keencode_acp::schema::{
         ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
@@ -9450,7 +9451,6 @@ mod tests {
         REQUEST_METADATA_PROMPT_CACHE_KEY, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
         REQUEST_METADATA_TURN_ID, WireResponseMode,
     };
-    use url::Url;
     use keencode_resources::{
         AgentId as ResourceAgentId, DynamicInputKind, DynamicInputReceipt,
         MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
@@ -9479,6 +9479,7 @@ mod tests {
     };
     use std::thread::{self, JoinHandle};
     use std::time::{Duration, Instant};
+    use url::Url;
 
     /// 扩展诊断送达 ACP 前必须保留稳定分类、清理控制字符并限制正文大小。
     #[test]
@@ -13321,11 +13322,12 @@ mod tests {
             prompt_cache_key_for_endpoint(&openai, "session-a").as_deref(),
             Some("keencode:session-a")
         );
+        // DeepSeek 官方不支持 chat completions 的 prompt_cache_key 参数，不入 allowlist。
         assert_eq!(
             prompt_cache_key_for_endpoint(&deepseek, "session-a").as_deref(),
-            Some("keencode:session-a")
+            None
         );
-        // 其他主机（第三方网关、本地服务）与非法地址一律不发送该字段。
+        // 其他主机（第三方网关、本地服务）不发送该字段。
         assert_eq!(
             prompt_cache_key_for_endpoint(
                 &Url::parse("https://api.example.com/v1").expect("第三方端点应可解析"),
@@ -13398,7 +13400,9 @@ mod tests {
             );
         }
         assert!(
-            !requests[2].metadata.contains_key(REQUEST_METADATA_PROMPT_CACHE_KEY),
+            !requests[2]
+                .metadata
+                .contains_key(REQUEST_METADATA_PROMPT_CACHE_KEY),
             "allowlist 外端点的请求不得携带缓存键"
         );
     }
@@ -13556,14 +13560,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.record.apply(&original).unwrap(), outcome.messages);
-        assert!(!outcome
-            .record
-            .summary
-            .contains("RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS"));
-        assert!(!outcome
-            .record
-            .summary
-            .contains("REQUEST_ONLY_DYNAMIC_CONTEXT"));
+        assert!(
+            !outcome
+                .record
+                .summary
+                .contains("RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS")
+        );
+        assert!(
+            !outcome
+                .record
+                .summary
+                .contains("REQUEST_ONLY_DYNAMIC_CONTEXT")
+        );
         request.messages = outcome.messages;
         assert_eq!(
             outcome.record.estimated_tokens_after,
@@ -13719,7 +13727,9 @@ mod tests {
         assert!(position("项目指令测试标记") < position("<env>"));
         assert!(position("<env>") < position(dynamic_context));
         assert_eq!(
-            input.last().and_then(|message| message["content"][0]["text"].as_str()),
+            input
+                .last()
+                .and_then(|message| message["content"][0]["text"].as_str()),
             Some(dynamic_context),
             "本轮动态上下文必须是请求的最后一个输入项"
         );
@@ -13973,10 +13983,12 @@ mod tests {
         let third = input(&requests[2]);
         // 每轮末尾的动态消息：环境始终存在，第二轮多一条 Memory/Plan/Ultra。
         assert!(env_text(first).contains("Current mode: Normal"));
-        assert!(second
-            .last()
-            .and_then(|message| message["content"][0]["text"].as_str())
-            .is_some_and(|text| text == "本轮动态记忆标记"));
+        assert!(
+            second
+                .last()
+                .and_then(|message| message["content"][0]["text"].as_str())
+                .is_some_and(|text| text == "本轮动态记忆标记")
+        );
         // 前缀逐字节稳定：后一轮的输入开头等于前一轮去掉末尾动态消息的完整输入。
         let first_stable = &first[..first.len() - 1];
         assert_eq!(
@@ -14299,9 +14311,8 @@ mod tests {
                 catalog: String::new(),
             })
         };
-        let agent_id = |value: &str| {
-            RunnerAgentId::new(value.to_owned()).expect("测试 Agent 标识应有效")
-        };
+        let agent_id =
+            |value: &str| RunnerAgentId::new(value.to_owned()).expect("测试 Agent 标识应有效");
         let root_id = agent_id(keencode_resources::ROOT_AGENT_ID);
         let live_child = agent_id("child-live");
         let stale_child = agent_id("child-stale");

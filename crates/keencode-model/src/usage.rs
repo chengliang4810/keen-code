@@ -64,6 +64,8 @@ fn update_if_some(target: &mut Option<u64>, newer: Option<u64>) {
 ///
 /// 缓存读取或输入总量未报告（`None`）、或输入总量为零时返回 `None`，
 /// 不把“未报告”臆造为零；远端显式报告 `cache_read = 0` 时得到 `Some(0.0)`。
+/// 结果大于 1 表示 provider 报告自相矛盾（cache_read 超过总输入），
+/// 消费方应视为异常数据而非钳制。
 pub fn cache_hit_rate(usage: &TokenUsage) -> Option<f64> {
     let cache_read = usage.cache_read_tokens? as f64;
     let input = usage.input_tokens?;
