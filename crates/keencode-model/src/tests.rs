@@ -6,7 +6,7 @@ use crate::{
     OpaqueReasoningState, ProviderCapabilities, ProviderProtocol, ReasoningContent,
     ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputConfig,
     StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, ToolResult,
+    ToolDefinition, ToolResult, cache_hit_rate,
 };
 
 fn user_request() -> ModelRequest {
@@ -111,6 +111,101 @@ fn partial_usage_snapshots_preserve_previous_reported_values() {
     assert_eq!(usage.input_tokens, Some(12));
     assert_eq!(usage.output_tokens, Some(7));
     assert_eq!(usage.cache_read_tokens, Some(0));
+}
+
+#[test]
+fn cache_hit_rate_is_none_when_participating_fields_are_missing() {
+    // 全部未报告 → None。
+    assert_eq!(cache_hit_rate(&TokenUsage::unknown()), None);
+    // 缓存读取未报告 → None，不臆造 0。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            input_tokens: Some(1_000),
+            cache_write_tokens: Some(200),
+            ..TokenUsage::unknown()
+        }),
+        None
+    );
+    // 输入总量未报告 → None。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            cache_read_tokens: Some(800),
+            ..TokenUsage::unknown()
+        }),
+        None
+    );
+}
+
+#[test]
+fn cache_hit_rate_is_none_when_input_is_explicit_zero() {
+    // 分母为零无法构成命中率；即使缓存字段显式为零也不臆造 0.0。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            input_tokens: Some(0),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            ..TokenUsage::unknown()
+        }),
+        None
+    );
+}
+
+#[test]
+fn cache_hit_rate_is_zero_for_explicit_zero_read_and_write() {
+    // 远端明确报告缓存读写均为零：命中率为显式 0.0。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            input_tokens: Some(1_000),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(0),
+            ..TokenUsage::unknown()
+        }),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn cache_hit_rate_is_zero_when_only_cache_write_is_reported() {
+    // 只有缓存写入非零、读取显式为零：本次没有命中。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            input_tokens: Some(1_200),
+            cache_read_tokens: Some(0),
+            cache_write_tokens: Some(200),
+            ..TokenUsage::unknown()
+        }),
+        Some(0.0)
+    );
+}
+
+#[test]
+fn cache_hit_rate_divides_read_by_total_input() {
+    // input 已含缓存部分：read 800 / write 200 / input 1000 → 0.8。
+    assert_eq!(
+        cache_hit_rate(&TokenUsage {
+            input_tokens: Some(1_000),
+            cache_read_tokens: Some(800),
+            cache_write_tokens: Some(200),
+            ..TokenUsage::unknown()
+        }),
+        Some(0.8)
+    );
+}
+
+#[test]
+fn usage_cache_fields_round_trip_with_camel_case_keys() {
+    let usage = TokenUsage {
+        input_tokens: Some(1_000),
+        output_tokens: Some(20),
+        cache_read_tokens: Some(800),
+        cache_write_tokens: Some(200),
+        ..TokenUsage::unknown()
+    };
+    let value = serde_json::to_value(&usage).unwrap();
+    assert_eq!(value["inputTokens"], json!(1_000));
+    assert_eq!(value["cacheReadTokens"], json!(800));
+    assert_eq!(value["cacheWriteTokens"], json!(200));
+    assert_eq!(serde_json::from_value::<TokenUsage>(value).unwrap(), usage);
 }
 
 #[test]

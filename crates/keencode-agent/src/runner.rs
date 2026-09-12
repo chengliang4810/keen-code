@@ -779,6 +779,7 @@ impl AgentRunner {
             elapsed_millis,
         )
         .with_purpose(purpose);
+        log_model_cache_usage(&usage);
         let mut last_error = None;
         for _ in 0..AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS {
             match self.commit_sink.commit_model_round_usage(&usage) {
@@ -4993,4 +4994,26 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
         end = end.saturating_sub(1);
     }
     value[..end].to_owned()
+}
+
+/// 每轮用量提交时输出提示词缓存命中观测日志。
+///
+/// 只在缓存读取或写入任一明确非零时输出，避免纯文本轮的日志噪音；
+/// 未报告字段保持 `None` 展示，不臆造为零。
+fn log_model_cache_usage(usage: &ModelRoundUsage) {
+    let reported = &usage.completion().usage;
+    if !reported.cache_read_tokens.is_some_and(|count| count > 0)
+        && !reported.cache_write_tokens.is_some_and(|count| count > 0)
+    {
+        return;
+    }
+    tracing::debug!(
+        model = usage.model(),
+        round = usage.model_round(),
+        input = ?reported.input_tokens,
+        cache_read = ?reported.cache_read_tokens,
+        cache_write = ?reported.cache_write_tokens,
+        hit_rate = ?usage.cache_hit_rate(),
+        "模型轮次提示词缓存用量已提交",
+    );
 }

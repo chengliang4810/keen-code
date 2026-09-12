@@ -32,7 +32,7 @@ pub use request::{
 pub use scripted::{ScriptedProvider, ScriptedReply};
 pub use stream::{ModelStreamEvent, collect_model_stream};
 pub use tool::{MAX_TOOL_NAME_BYTES, ToolCall, ToolDefinition, ToolResult, ToolResultContent};
-pub use usage::{StopReason, TokenUsage};
+pub use usage::{StopReason, TokenUsage, cache_hit_rate};
 
 #[cfg(test)]
 mod tests;

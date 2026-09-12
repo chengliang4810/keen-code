@@ -2421,6 +2421,91 @@ async fn model_round_usage_retries_stably_before_any_tool_execution() {
     assert_eq!(usages[2].completion().stop_reason, StopReason::Completed);
 }
 
+/// ScriptedProvider 返回带缓存字段的用量时，命中率按“缓存读取 / 含缓存总输入”
+/// 随用量事实一起提交，且提交事件携带的用量 JSON 含 camelCase 缓存字段
+/// （Session Journal 的 ModelRoundCompleted 持久化同一 TokenUsage 结构）。
+#[tokio::test]
+async fn model_round_usage_carries_cache_hit_rate_from_reported_usage() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            ModelStreamEvent::MessageStart {
+                metadata: ResponseMetadata::default(),
+            },
+            ModelStreamEvent::TextDelta {
+                index: 0,
+                delta: "缓存观测响应".to_owned(),
+            },
+            ModelStreamEvent::Usage {
+                usage: TokenUsage {
+                    input_tokens: Some(1_000),
+                    output_tokens: Some(20),
+                    cache_read_tokens: Some(800),
+                    cache_write_tokens: Some(200),
+                    ..TokenUsage::unknown()
+                },
+            },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            },
+        ])],
+    ));
+    let sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+
+    let result = runner(provider, ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].completion().usage.cache_read_tokens, Some(800));
+    assert_eq!(usages[0].completion().usage.cache_write_tokens, Some(200));
+    assert_eq!(usages[0].cache_hit_rate(), Some(0.8));
+    // 权威事件与 Journal 持久化的是同一 TokenUsage：缓存字段以 camelCase 落盘。
+    let persisted = serde_json::to_value(&usages[0].completion().usage).unwrap();
+    assert_eq!(persisted["inputTokens"], json!(1_000));
+    assert_eq!(persisted["cacheReadTokens"], json!(800));
+    assert_eq!(persisted["cacheWriteTokens"], json!(200));
+}
+
+/// 无缓存字段（未报告缓存读取与写入）的普通响应：命中率保持 `None`，不臆造为零。
+#[tokio::test]
+async fn model_round_usage_without_cache_fields_has_no_hit_rate() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply("纯文本响应")],
+    ));
+    let sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+
+    let result = runner(provider, ToolRegistry::new())
+        .with_commit_sink(sink.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let usages = sink.usages();
+    assert_eq!(usages.len(), 1);
+    assert_eq!(usages[0].completion().usage.cache_read_tokens, None);
+    assert_eq!(usages[0].completion().usage.cache_write_tokens, None);
+    assert_eq!(usages[0].cache_hit_rate(), None);
+}
+
 /// 模型用量在全部同步重试后仍失败时，Runner 必须阻止响应中的工具副作用。
 #[tokio::test]
 async fn model_round_usage_failure_blocks_tool_execution() {

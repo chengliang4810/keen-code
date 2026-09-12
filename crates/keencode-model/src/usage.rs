@@ -53,6 +53,26 @@ fn update_if_some(target: &mut Option<u64>, newer: Option<u64>) {
     }
 }
 
+/// 计算一次模型调用的提示词缓存命中率：`cache_read / input`。
+///
+/// 口径依据（以各 Adapter 的归一化行为为准）：三个协议归一化后的
+/// `input_tokens` 都已经包含缓存部分——Anthropic Messages 在解码用量时把
+/// `cache_read_input_tokens` 与 `cache_creation_input_tokens` 显式加进输入总量；
+/// OpenAI Chat Completions 与 Responses 的 `prompt_tokens`/`input_tokens` 本身
+/// 就是总输入，`cached_tokens` 只是其中的明细子集。因此分母直接取
+/// `input_tokens`，不再叠加 `cache_write_tokens`。
+///
+/// 缓存读取或输入总量未报告（`None`）、或输入总量为零时返回 `None`，
+/// 不把“未报告”臆造为零；远端显式报告 `cache_read = 0` 时得到 `Some(0.0)`。
+pub fn cache_hit_rate(usage: &TokenUsage) -> Option<f64> {
+    let cache_read = usage.cache_read_tokens? as f64;
+    let input = usage.input_tokens?;
+    if input == 0 {
+        return None;
+    }
+    Some(cache_read / input as f64)
+}
+
 /// 模型结束当前响应的统一原因。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

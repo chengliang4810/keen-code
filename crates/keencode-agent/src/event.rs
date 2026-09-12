@@ -7,7 +7,7 @@ use std::pin::Pin;
 
 use keencode_model::{
     Message, ModelError, ModelStreamEvent, ResponseMetadata, StopReason, TokenUsage, ToolCall,
-    ToolResult,
+    ToolResult, cache_hit_rate,
 };
 
 use crate::{
@@ -799,7 +799,11 @@ impl ModelCallPurpose {
 /// [`AgentCommitSink`]。它不是 Session Journal 事件，不分配 [`AgentEventId`]；持久实现
 /// 必须把 Session、Turn、Agent、Round、调用尝试与调用用途共同纳入可跨重启复用的
 /// operation ID。
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// 缓存命中观测基线：上下文压缩（compact）后的首轮调用命中率天然大幅下降，
+/// 因为压缩重建了大部分提示词并需要重新写入远端缓存；消费方必须结合压缩记录
+/// 分段解读命中率，不得把压缩首轮廓入同一线性趋势比较。
+#[derive(Clone, Debug, PartialEq)]
 pub struct ModelRoundUsage {
     /// 模型调用所属根 Session。
     session_id: SessionId,
@@ -819,6 +823,8 @@ pub struct ModelRoundUsage {
     completion: ModelRoundCompletion,
     /// 从发起 Provider 请求到完整响应归约结束的单调时钟毫秒数。
     elapsed_millis: u64,
+    /// 由本次用量推导的提示词缓存命中率；任何参与字段未报告时为 `None`。
+    cache_hit_rate: Option<f64>,
 }
 
 impl ModelRoundUsage {
@@ -835,6 +841,7 @@ impl ModelRoundUsage {
         completion: ModelRoundCompletion,
         elapsed_millis: u64,
     ) -> Self {
+        let cache_hit_rate = cache_hit_rate(&completion.usage);
         Self {
             session_id,
             turn_id,
@@ -845,6 +852,7 @@ impl ModelRoundUsage {
             purpose: ModelCallPurpose::AgentRound,
             completion,
             elapsed_millis,
+            cache_hit_rate,
         }
     }
 
@@ -897,6 +905,14 @@ impl ModelRoundUsage {
     /// 返回单调时钟测得的实际调用毫秒数。
     pub const fn elapsed_millis(&self) -> u64 {
         self.elapsed_millis
+    }
+
+    /// 返回本次调用的提示词缓存命中率；缓存或输入字段未报告时为 `None`。
+    ///
+    /// 口径为 `cache_read / input`（输入总量已含缓存部分，见
+    /// [`keencode_model::cache_hit_rate`]）；压缩基线注意事项见结构体文档。
+    pub const fn cache_hit_rate(&self) -> Option<f64> {
+        self.cache_hit_rate
     }
 }
 

@@ -33,6 +33,8 @@ tokio-util = { version = "0.7.16", features = ["rt"] }
 tokio = { version = "1.47.1", features = ["rt", "sync", "time"] }
 # 为持久 Goal 生成按时间排序且跨进程唯一的标识。
 uuid = { version = "1.18.1", features = ["v7"] }
+# 在模型轮次用量提交时输出缓存命中率等结构化观测日志，由桌面层订阅器落盘。
+tracing = "0.1"
 
 [dev-dependencies]
 # 运行异步 Agent Loop，并用暂停时钟确定性验证等待超时。
