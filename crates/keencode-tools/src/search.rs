@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
@@ -16,7 +17,9 @@ use regex::{Regex, RegexBuilder};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::environment::{ToolEnvironment, display_path, invalid_input};
+use crate::environment::{
+    READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path, invalid_input,
+};
 
 /// 没有显式指定时单次搜索默认最多返回的结果数量。
 const DEFAULT_SEARCH_RESULTS: usize = 1_000;
@@ -63,6 +66,11 @@ impl AgentTool for GlobTool {
     /// 不同目录遍历可以与其他只读工具并发。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::ParallelReadOnly
+    }
+
+    /// 声明 15 秒墙钟，防止挂起的目录遍历把整个 Turn 挂死到用户取消。
+    fn timeout(&self) -> Option<Duration> {
+        Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
     }
 
     /// 在阻塞线程中执行忽略感知遍历并观察取消令牌。
@@ -133,6 +141,11 @@ impl AgentTool for GrepTool {
     /// 不同正则搜索可以与其他只读工具并发。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::ParallelReadOnly
+    }
+
+    /// 声明 15 秒墙钟，防止挂起的文件搜索把整个 Turn 挂死到用户取消。
+    fn timeout(&self) -> Option<Duration> {
+        Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
     }
 
     /// 在阻塞线程中搜索文件并在文件边界观察取消令牌。

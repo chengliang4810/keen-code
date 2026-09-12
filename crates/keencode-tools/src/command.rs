@@ -84,6 +84,12 @@ impl AgentTool for BashTool {
         ToolConcurrency::Exclusive
     }
 
+    /// 命令超时由工具内部 `command_timeout` 完整管理（默认 120 秒、可配置到 1 小时），
+    /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// 在独立监督任务中运行 Bash，外层 Future 被取消时监督任务仍会清理进程树。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         let environment = self.environment.clone();
@@ -172,6 +178,12 @@ impl AgentTool for PowerShellTool {
     /// PowerShell 命令必须形成顺序副作用屏障。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Exclusive
+    }
+
+    /// 命令超时由工具内部 `command_timeout` 完整管理（默认 120 秒、可配置到 1 小时），
+    /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
+    fn timeout(&self) -> Option<Duration> {
+        None
     }
 
     /// 在独立监督任务中运行 PowerShell，外层 Future 被取消时仍会清理进程树。
@@ -266,6 +278,12 @@ impl AgentTool for GitTool {
     /// 只读 Git 子命令可并发；Agent Runner 会对变更命令强制顺序屏障。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::ParallelReadOnly
+    }
+
+    /// 命令超时由工具内部 `command_timeout` 完整管理（默认 120 秒、可配置到 1 小时），
+    /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
+    fn timeout(&self) -> Option<Duration> {
+        None
     }
 
     /// 在独立监督任务中直接运行 Git 参数数组。

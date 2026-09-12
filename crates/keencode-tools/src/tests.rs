@@ -1733,3 +1733,56 @@ async fn bounded_command_preserves_early_exit_without_reading_stdin() {
     assert_eq!(output.stdout, b"out");
     assert_eq!(output.stderr, b"err");
 }
+
+/// 内置工具必须按契约声明外层墙钟：搜索与读取 15 秒，自管超时工具为 None。
+#[test]
+fn builtin_tools_declare_contracted_outer_wall_clock_timeouts() {
+    let directory = tempdir().unwrap();
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+
+    assert_eq!(
+        AgentTool::timeout(&GlobTool::new(environment.clone())),
+        Some(Duration::from_secs(15))
+    );
+    assert_eq!(
+        AgentTool::timeout(&GrepTool::new(environment.clone())),
+        Some(Duration::from_secs(15))
+    );
+    assert_eq!(
+        AgentTool::timeout(&ReadTool::new(environment.clone())),
+        Some(Duration::from_secs(15))
+    );
+    // 大文件写入（64MiB 上限）可能合法耗时，写入与编辑保持默认 120 秒。
+    assert_eq!(
+        AgentTool::timeout(&EditTool::new(environment.clone())),
+        Some(Duration::from_secs(120))
+    );
+    assert_eq!(
+        AgentTool::timeout(&WriteTool::new(environment)),
+        Some(Duration::from_secs(120))
+    );
+}
+
+/// 命令类工具自管超时（可配置到 1 小时），必须声明为 None 以免被外层墙钟截断。
+#[test]
+fn command_tools_declare_self_managed_timeout() {
+    let directory = tempdir().unwrap();
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+
+    #[cfg(not(windows))]
+    {
+        assert_eq!(
+            AgentTool::timeout(&BashTool::new(environment.clone())),
+            None
+        );
+        assert_eq!(AgentTool::timeout(&GitTool::new(environment)), None);
+    }
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            AgentTool::timeout(&PowerShellTool::new(environment.clone())),
+            None
+        );
+        assert_eq!(AgentTool::timeout(&GitTool::new(environment)), None);
+    }
+}

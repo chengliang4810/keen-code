@@ -2104,3 +2104,13 @@ async fn ended_parent_turn_rejects_all_new_collaboration_commands() {
         assert!(error.message.len() < 256, "安全错误必须保持有界");
     }
 }
+
+/// WaitAgent 的等待时长由输入 timeout_ms（上限 300 秒）自管，必须声明为 None。
+#[test]
+fn wait_agent_tool_declares_self_managed_timeout() {
+    let fixture = fixture(2, 2);
+    assert_eq!(
+        RuntimeAgentTool::timeout(&WaitAgentTool::new(fixture.coordinator.clone())),
+        None
+    );
+}

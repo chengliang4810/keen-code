@@ -4,6 +4,7 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -15,7 +16,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
-use crate::environment::{ToolEnvironment, display_path, invalid_input};
+use crate::environment::{
+    READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path, invalid_input,
+};
 
 /// 未指定 `limit` 时单次读取的默认行数。
 const DEFAULT_READ_LINES: usize = 300;
@@ -71,6 +74,11 @@ impl AgentTool for ReadTool {
     /// 不同文件读取可以与其他只读工具并发。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::ParallelReadOnly
+    }
+
+    /// 声明 15 秒墙钟，防止挂起的文件读取把整个 Turn 挂死到用户取消。
+    fn timeout(&self) -> Option<Duration> {
+        Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
     }
 
     /// 在阻塞线程中读取文件并持续观察 Turn 取消令牌。

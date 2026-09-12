@@ -872,6 +872,12 @@ impl AgentTool for TaskOutputTool {
         ToolConcurrency::ParallelReadOnly
     }
 
+    /// 阻塞等待由工具内部按 `timeout_ms`（上限 600 秒）自管，
+    /// 不施加 Runtime 外层墙钟，避免截断对慢输出的合法等待。
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// 读取并原子推进此任务的模型消费游标。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         Box::pin(async move {

@@ -726,3 +726,10 @@ async fn manager_cancel_reports_exact_idempotent_outcomes() {
         .expect_err("终态任务取消必须明确失败");
     assert_eq!(terminal.code, "background_task_not_running");
 }
+
+/// TaskOutput 自管阻塞等待（上限 600 秒），必须声明为 None 以免被外层墙钟截断。
+#[test]
+fn task_output_tool_declares_self_managed_timeout() {
+    let (_directory, _environment, manager) = background_fixture();
+    assert_eq!(AgentTool::timeout(&TaskOutputTool::new(manager)), None);
+}

@@ -2,8 +2,15 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use keencode_agent::{ToolContext, ToolError};
+
+/// 只读搜索与文件读取工具声明的外层墙钟上限。
+///
+/// 挂起的文件系统遍历或读取不能把整个 Turn 挂死到用户取消；这些工具
+/// 只有大小限制没有内部时间上限，因此声明一个显著大于正常开销的墙钟。
+pub(crate) const READ_ONLY_WALL_CLOCK_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// 在文件原子替换前为运行时准备一条可提交的文件变更记录。
 pub trait FileMutationRecorder: std::fmt::Debug + Send + Sync {

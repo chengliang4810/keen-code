@@ -511,6 +511,13 @@ impl AgentTool for LspTool {
         ToolConcurrency::ParallelReadOnly
     }
 
+    /// 所有内部等待（请求 30 秒、可配置启动 ≤600 秒、诊断 1.5 秒）都由 LSP
+    /// 运行时自管并有界，不施加 Runtime 外层墙钟，避免截断配置了慢启动
+    /// Language Server 的合法初始化。
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// 读取当前文件快照，通过已启动进程查询并返回有界 JSON 结果。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         let runtime = Arc::clone(&self.runtime);

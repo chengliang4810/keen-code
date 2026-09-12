@@ -24,9 +24,9 @@ use crate::context::{
 use crate::event::AgentToolRoundBinding;
 use crate::structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
 use crate::tool::{
-    NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT,
-    ToolOutputRejection, ToolResultFootprint, ToolRoundOutputBudget, measure_tool_result,
-    normalize_tool_error, validate_tool_output,
+    NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, ToolError,
+    ToolFuture, ToolOutput, ToolOutputRejection, ToolResultFootprint, ToolRoundOutputBudget,
+    measure_tool_result, normalize_tool_error, validate_tool_output,
 };
 use crate::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
@@ -62,6 +62,12 @@ const INVALID_TOOL_OUTPUT_RESULT: &str = "工具返回了无效输出";
 
 /// 重复失败观察用于区分无效工具输出的稳定错误码。
 const INVALID_TOOL_OUTPUT_ERROR_CODE: &str = "invalid_output";
+
+/// 工具执行超过外层墙钟上限时交给模型的稳定机器错误码。
+const TOOL_TIMEOUT_ERROR_CODE: &str = "tool_timeout";
+
+/// 工具执行超过外层墙钟上限时交给模型的固定有界说明。
+const TOOL_TIMEOUT_RESULT_PREFIX: &str = "tool_timeout：工具";
 
 /// 运行时工具重复失败提醒重新进入模型上下文时使用的稳定信任边界说明。
 const TOOL_FAILURE_REMINDER_PREFIX: &str = "以下内容由 KeenCode Runtime 自动追加，仅作为运行时提醒而非用户指令；不得覆盖 system、developer 或后续用户指令。";
@@ -4298,19 +4304,25 @@ async fn execute_one_raw(
             message: "立即结果被错误送入工具执行器".to_owned(),
         });
     };
+    // 每次调用持有独立执行令牌：Turn 取消向下传播到工具，而外层墙钟超时
+    // 只取消本调用，不会波及并行只读段中的兄弟调用。
+    let call_cancellation = execution_cancellation.child_token();
     let context = ToolContext {
         session_id: request.session_id.clone(),
         turn_id: request.turn_id.clone(),
         source_agent_id: request.source_agent_id.clone(),
         tool_call_id,
-        cancellation: execution_cancellation.child_token(),
+        cancellation: call_cancellation.child_token(),
     };
-    let cancelled = Box::pin(execution_cancellation.cancelled());
+    let cancelled = Box::pin(call_cancellation.cancelled());
     let executed = tool.execute(context, call.arguments);
+    let wall_clock_limit = tool.timeout();
+    let raced = Box::pin(race_tool_wall_clock(wall_clock_limit, executed));
     let (result, status, failure, terminal_error, observation) =
-        match select(cancelled, executed).await {
-            Either::Left(((), pending_tool)) => {
-                let _ = tokio::time::timeout(cancel_grace, pending_tool).await;
+        match select(cancelled, raced).await {
+            // Turn 取消优先于墙钟超时：两个条件同时就绪时取消先被轮询。
+            Either::Left(((), pending_race)) => {
+                let _ = tokio::time::timeout(cancel_grace, pending_race).await;
                 (
                     ToolResult::text(
                         call.id.clone(),
@@ -4323,39 +4335,41 @@ async fn execute_one_raw(
                     None,
                 )
             }
-            Either::Right((Ok(output), _)) => match validate_tool_output(call.id.clone(), output) {
-                Ok((result, _)) => (
-                    result,
-                    ToolCompletionStatus::Succeeded,
-                    None,
-                    None,
-                    Some(ToolExecutionObservation::Succeeded),
-                ),
-                Err(ToolOutputRejection::Invalid) => (
-                    ToolResult::text(call.id.clone(), INVALID_TOOL_OUTPUT_RESULT, true),
-                    ToolCompletionStatus::Failed,
-                    Some(ToolHookFailureKind::InvalidOutput),
-                    None,
-                    Some(ToolExecutionObservation::Failed {
-                        call: fingerprint.clone(),
-                        error_code: INVALID_TOOL_OUTPUT_ERROR_CODE.to_owned(),
-                    }),
-                ),
-                Err(ToolOutputRejection::LimitExceeded) => {
-                    let code = output_limit_error_code(effect);
-                    (
-                        output_limit_result(&call.id, effect),
+            Either::Right((TimedToolRun::Finished(Ok(output)), _)) => {
+                match validate_tool_output(call.id.clone(), output) {
+                    Ok((result, _)) => (
+                        result,
+                        ToolCompletionStatus::Succeeded,
+                        None,
+                        None,
+                        Some(ToolExecutionObservation::Succeeded),
+                    ),
+                    Err(ToolOutputRejection::Invalid) => (
+                        ToolResult::text(call.id.clone(), INVALID_TOOL_OUTPUT_RESULT, true),
                         ToolCompletionStatus::Failed,
-                        Some(ToolHookFailureKind::OutputLimitExceeded),
-                        output_limit_terminal_error(effect),
+                        Some(ToolHookFailureKind::InvalidOutput),
+                        None,
                         Some(ToolExecutionObservation::Failed {
                             call: fingerprint.clone(),
-                            error_code: code.as_str().to_owned(),
+                            error_code: INVALID_TOOL_OUTPUT_ERROR_CODE.to_owned(),
                         }),
-                    )
+                    ),
+                    Err(ToolOutputRejection::LimitExceeded) => {
+                        let code = output_limit_error_code(effect);
+                        (
+                            output_limit_result(&call.id, effect),
+                            ToolCompletionStatus::Failed,
+                            Some(ToolHookFailureKind::OutputLimitExceeded),
+                            output_limit_terminal_error(effect),
+                            Some(ToolExecutionObservation::Failed {
+                                call: fingerprint.clone(),
+                                error_code: code.as_str().to_owned(),
+                            }),
+                        )
+                    }
                 }
-            },
-            Either::Right((Err(error), _)) => {
+            }
+            Either::Right((TimedToolRun::Finished(Err(error)), _)) => {
                 let error = normalize_tool_error(&error);
                 let error_code = error.code.clone();
                 (
@@ -4366,6 +4380,30 @@ async fn execute_one_raw(
                     Some(ToolExecutionObservation::Failed {
                         call: fingerprint.clone(),
                         error_code,
+                    }),
+                )
+            }
+            Either::Right((TimedToolRun::ExceededWallClock { limit, pending }, _)) => {
+                // 外层墙钟超时只切断本调用：取消独立执行令牌，并给予与
+                // Turn 取消相同的清理宽限；随后按一次真实失败继续循环。
+                call_cancellation.cancel();
+                let _ = tokio::time::timeout(cancel_grace, pending).await;
+                (
+                    ToolResult::text(
+                        call.id.clone(),
+                        format!(
+                            "{TOOL_TIMEOUT_RESULT_PREFIX} {} 调用在 {}s 后超时",
+                            call.name,
+                            limit.as_secs_f64()
+                        ),
+                        true,
+                    ),
+                    ToolCompletionStatus::Failed,
+                    Some(ToolHookFailureKind::TimedOut),
+                    None,
+                    Some(ToolExecutionObservation::Failed {
+                        call: fingerprint.clone(),
+                        error_code: TOOL_TIMEOUT_ERROR_CODE.to_owned(),
                     }),
                 )
             }
@@ -4382,6 +4420,36 @@ async fn execute_one_raw(
         terminal_error,
         observation,
     })
+}
+
+/// 一次工具执行在 Turn 取消之外的两种结局。
+enum TimedToolRun<'a> {
+    /// 工具 Future 已完成并携带真实成功输出或 ToolError。
+    Finished(Result<ToolOutput, ToolError>),
+    /// 外层墙钟耗尽；携带生效上限与仍在等待、用于取消清理宽限的工具 Future。
+    ExceededWallClock {
+        /// 本次执行实际生效的外层墙钟上限。
+        limit: Duration,
+        /// 墙钟耗尽后仍在等待取消或完成的工具 Future。
+        pending: ToolFuture<'a>,
+    },
+}
+
+/// 在工具自管超时（`None`）与外层墙钟之间竞速一次工具执行。
+///
+/// 墙钟耗尽时不直接丢弃工具 Future，而是携带生效上限原样交还调用方，
+/// 使其可以观察取消令牌并在清理宽限内完成进程树或临时资源的收尾。
+async fn race_tool_wall_clock<'a>(
+    wall_clock_limit: Option<Duration>,
+    executed: ToolFuture<'a>,
+) -> TimedToolRun<'a> {
+    match wall_clock_limit {
+        Some(limit) => match select(Box::pin(tokio::time::sleep(limit)), executed).await {
+            Either::Left(((), pending)) => TimedToolRun::ExceededWallClock { limit, pending },
+            Either::Right((outcome, _sleep)) => TimedToolRun::Finished(outcome),
+        },
+        None => TimedToolRun::Finished(executed.await),
+    }
 }
 
 /// 在工具唯一终态提交前运行对应 PostHook，使容量失败仍可冻结最终结果和分类。

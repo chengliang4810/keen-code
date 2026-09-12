@@ -128,6 +128,8 @@ pub enum ToolHookFailureKind {
     InvalidOutput,
     /// 工具成功返回，但统一结果或 Round 聚合容量超过硬上限。
     OutputLimitExceeded,
+    /// 工具执行超过声明的墙钟上限，被 Runtime 外层切断。
+    TimedOut,
     /// 父 Turn 在工具完成前被取消。
     Cancelled,
 }

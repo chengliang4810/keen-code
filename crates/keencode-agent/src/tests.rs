@@ -572,6 +572,119 @@ impl AgentTool for StubbornTool {
     }
 }
 
+/// 观察取消令牌后立即返回错误的挂起测试工具，用于外层墙钟超时切断。
+struct HungTimeoutTool {
+    /// 工具声明的外层墙钟上限。
+    timeout: Option<Duration>,
+    /// 工具声明的并发方式。
+    concurrency: ToolConcurrency,
+    /// 工具 Future 首次被轮询时发出的通知。
+    started: Arc<Notify>,
+    /// 工具是否真实观察到取消令牌。
+    observed_cancellation: Arc<AtomicBool>,
+}
+
+impl AgentTool for HungTimeoutTool {
+    /// 返回挂起测试工具定义。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "hung_timeout",
+            "验证外层墙钟超时切断挂起工具",
+            json!({ "type": "object", "additionalProperties": false }),
+        )
+    }
+
+    /// 测试调用本身不产生外部副作用。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 返回测试预设的并发方式。
+    fn concurrency(&self) -> ToolConcurrency {
+        self.concurrency
+    }
+
+    /// 返回测试预设的外层墙钟上限。
+    fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// 发出已启动通知后永久挂起，直到取消令牌触发才返回错误。
+    fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        let started = self.started.clone();
+        let observed = self.observed_cancellation.clone();
+        Box::pin(async move {
+            started.notify_one();
+            context.cancellation.cancelled().await;
+            observed.store(true, Ordering::SeqCst);
+            Err(ToolError::permanent("cancelled", "挂起工具已观察取消"))
+        })
+    }
+}
+
+/// 声明自管超时并短暂休眠后成功的测试工具，覆盖无外层墙钟的执行分支。
+struct SelfManagedTool {
+    /// 工具 Future 首次被轮询时发出的通知。
+    started: Arc<Notify>,
+}
+
+impl AgentTool for SelfManagedTool {
+    /// 返回自管超时测试工具定义。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "self_managed",
+            "验证自管超时工具不受外层墙钟影响",
+            json!({ "type": "object", "additionalProperties": false }),
+        )
+    }
+
+    /// 测试调用本身不产生外部副作用。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 自管超时测试必须独占执行。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    /// 自管超时：不施加外层墙钟。
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    /// 发出已启动通知后短暂休眠并成功返回。
+    fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        let started = self.started.clone();
+        Box::pin(async move {
+            started.notify_one();
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            Ok(ToolOutput::text("self-managed-ok"))
+        })
+    }
+}
+
+/// 提取一个 Turn 结果中按出现顺序排列的全部工具结果。
+fn turn_tool_results(result: &TurnResult) -> Vec<&ToolResult> {
+    result
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_result } => Some(tool_result),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 返回测试工具结果的唯一文本内容。
+fn turn_tool_result_text(result: &ToolResult) -> &str {
+    match result.content.as_slice() {
+        [keencode_model::ToolResultContent::Text { text }] => text,
+        _ => panic!("测试工具结果必须只包含一个文本块"),
+    }
+}
+
 impl AgentTool for ExclusiveProbeTool {
     /// 返回副作用屏障测试工具定义。
     fn definition(&self) -> ToolDefinition {
@@ -3362,6 +3475,241 @@ async fn pre_cancelled_turn_never_calls_model() {
     );
     assert_eq!(result.error, Some(AgentRunError::Cancelled));
     assert!(provider.requests().expect("请求快照应可读取").is_empty());
+}
+
+/// 未覆盖 timeout() 的工具默认获得有界外层墙钟上限。
+#[test]
+fn agent_tool_default_wall_clock_timeout_is_bounded() {
+    let tool = RecordingTool::new(
+        "bare_default",
+        ToolEffect::ReadOnly,
+        ToolConcurrency::Exclusive,
+    );
+    assert_eq!(AgentTool::timeout(&tool), Some(Duration::from_secs(120)));
+    assert_eq!(DEFAULT_TOOL_TIMEOUT, Duration::from_secs(120));
+}
+
+/// 挂起工具必须在外层墙钟超时后被切断，产出超时错误结果且 Turn 继续收敛。
+#[tokio::test]
+async fn outer_wall_clock_cuts_off_hung_tool_and_turn_continues() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-hung", "hung_timeout", json!({}))]),
+            text_reply("done"),
+        ],
+    ));
+    let observed = Arc::new(AtomicBool::new(false));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(HungTimeoutTool {
+            timeout: Some(Duration::from_millis(80)),
+            concurrency: ToolConcurrency::Exclusive,
+            started: Arc::new(Notify::new()),
+            observed_cancellation: observed.clone(),
+        }))
+        .expect("挂起测试工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 1);
+    // 超时必须取消本调用的执行令牌，让工具在清理宽限内观察到取消。
+    assert!(observed.load(Ordering::SeqCst));
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    let text = turn_tool_result_text(results[0]);
+    assert!(
+        text.starts_with("tool_timeout：")
+            && text.contains("hung_timeout")
+            && text.contains("后超时"),
+        "超时结果文本不符合契约：{text}"
+    );
+    // 超时后循环继续：第二轮模型请求收敛为正常文本终态。
+    assert_eq!(result.state.round_count(), 2);
+    let final_text = &result.messages[result.messages.len() - 1];
+    assert!(
+        final_text.content.iter().any(|block| matches!(
+            block,
+            ContentBlock::Text { text } if text == "done"
+        )),
+        "超时后 Turn 必须以最终文本收敛：{:?}",
+        final_text.content
+    );
+}
+
+/// 同一挂起工具反复外层墙钟超时必须计入重复失败指纹并触发既有熔断。
+#[tokio::test]
+async fn repeated_tool_timeouts_count_toward_failure_loop_terminal() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("timeouts-1", "hung_timeout", json!({}))]),
+            tool_reply(&[("timeouts-2", "hung_timeout", json!({}))]),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(HungTimeoutTool {
+            timeout: Some(Duration::from_millis(60)),
+            concurrency: ToolConcurrency::Exclusive,
+            started: Arc::new(Notify::new()),
+            observed_cancellation: Arc::new(AtomicBool::new(false)),
+        }))
+        .expect("挂起测试工具应可注册");
+    let limits = RunLimits::default()
+        .with_repeated_failure_terminal_threshold(2)
+        .expect("重复失败上限应有效");
+
+    let result = AgentRunner::new(provider, registry, limits)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::ToolLoop {
+            kind: ToolLoopKind::RepeatedFailure,
+            tool_name: "hung_timeout".to_owned(),
+            maximum: 2,
+        })
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    assert!(results.iter().all(|item| item.is_error));
+}
+
+/// Turn 取消与外层墙钟超时竞争时必须保留取消文案、取消终态与取消错误。
+#[tokio::test]
+async fn turn_cancellation_takes_priority_over_tool_timeout() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&[("call-hung", "hung_timeout", json!({}))])],
+    ));
+    let started = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(HungTimeoutTool {
+            timeout: Some(Duration::from_millis(500)),
+            concurrency: ToolConcurrency::Exclusive,
+            started: started.clone(),
+            observed_cancellation: Arc::new(AtomicBool::new(false)),
+        }))
+        .expect("挂起测试工具应可注册");
+    let cancellation = TurnCancellation::new();
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation.clone());
+    let cancel_task = tokio::spawn(async move {
+        started.notified().await;
+        cancellation.cancel();
+    });
+
+    let result = runner(provider, registry).run_turn(request).await;
+    cancel_task.await.expect("取消任务不应异常");
+
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    let text = turn_tool_result_text(results[0]);
+    assert!(text.contains("Turn 取消而中止"), "应保留取消文案：{text}");
+    assert!(!text.contains("超时"), "不得回退为超时文案：{text}");
+}
+
+/// 自管超时（None）工具不施加外层墙钟，短暂休眠后完整返回成功结果。
+#[tokio::test]
+async fn self_managed_timeout_tool_finishes_without_outer_wall_clock() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-self", "self_managed", json!({}))]),
+            text_reply("done"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(SelfManagedTool {
+            started: Arc::new(Notify::new()),
+        }))
+        .expect("自管超时测试工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(!results[0].is_error);
+    assert_eq!(turn_tool_result_text(results[0]), "self-managed-ok");
+}
+
+/// 并行只读段中的单个超时只切断自身并按失败继续，不波及兄弟只读调用。
+#[tokio::test]
+async fn parallel_segment_timeout_does_not_cancel_sibling_read_only_calls() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-hung", "hung_timeout", json!({})),
+                ("call-ok", "recorder", json!({"value": "x"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(HungTimeoutTool {
+            timeout: Some(Duration::from_millis(80)),
+            concurrency: ToolConcurrency::ParallelReadOnly,
+            started: Arc::new(Notify::new()),
+            observed_cancellation: Arc::new(AtomicBool::new(false)),
+        }))
+        .expect("挂起测试工具应可注册");
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "recorder",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::ParallelReadOnly,
+        )))
+        .expect("记录测试工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        if result.tool_call_id == "call-hung" {
+            assert!(result.is_error);
+            assert!(turn_tool_result_text(result).contains("后超时"));
+        } else {
+            assert_eq!(result.tool_call_id, "call-ok");
+            assert!(!result.is_error);
+            assert_eq!(turn_tool_result_text(result), "synthetic-result");
+        }
+    }
 }
 
 /// 同时记录模型 Round 用量与权威提交事件的输出上限恢复路径探针。

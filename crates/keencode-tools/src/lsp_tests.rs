@@ -586,3 +586,12 @@ fn extract_id(body: &str) -> Option<u64> {
     );
     executable
 }
+
+/// LSP 所有内部等待自管且有界，必须声明为 None 以免外层墙钟截断慢启动 Server。
+#[test]
+fn lsp_tool_declares_self_managed_timeout() {
+    let directory = tempdir().expect("创建 LSP 测试目录");
+    let config = server_config(directory.path(), "missing-lsp-command");
+    let runtime = LspRuntime::new(directory.path(), vec![config]).expect("配置应有效");
+    assert_eq!(AgentTool::timeout(&LspTool::new(Arc::new(runtime))), None);
+}

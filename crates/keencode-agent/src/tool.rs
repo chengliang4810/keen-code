@@ -7,6 +7,7 @@ use std::future::Future;
 use std::io::{self, Write};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use keencode_model::{ImageSource, ToolDefinition, ToolResult, ToolResultContent};
 use serde_json::Value;
@@ -791,6 +792,9 @@ impl Error for ToolError {}
 /// 对象安全的异步工具执行返回值。
 pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput, ToolError>> + Send + 'a>>;
 
+/// Runtime 对未声明自管超时工具施加的默认外层墙钟上限。
+pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Agent Runtime 可注册的一个 Provider 中立工具。
 pub trait AgentTool: Send + Sync {
     /// 返回提供给模型的名称、说明和 JSON Schema。
@@ -801,6 +805,15 @@ pub trait AgentTool: Send + Sync {
 
     /// 返回本工具在只读调用时允许的并发方式。
     fn concurrency(&self) -> ToolConcurrency;
+
+    /// 返回单次执行的外层墙钟上限；`None` 表示工具自管超时或有界用户交互。
+    ///
+    /// 默认 120 秒兜底防止挂起的本地操作挂死整个 Turn。内部已完整管理
+    /// 超时（如命令执行）或等待外部确认（如用户问答）的工具应覆盖为
+    /// `None`，避免外层上限截断合法的长执行。
+    fn timeout(&self) -> Option<Duration> {
+        Some(DEFAULT_TOOL_TIMEOUT)
+    }
 
     /// 校验并执行一次工具调用。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_>;

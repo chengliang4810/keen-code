@@ -366,6 +366,12 @@ impl RuntimeAgentTool for WaitAgentTool {
         ToolConcurrency::Exclusive
     }
 
+    /// 等待时长由输入 `timeout_ms`（Schema 上限 300 秒）自管并有界，
+    /// 不施加 Runtime 外层墙钟，避免截断模型显式请求的合法长等待。
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
     /// 使用可信 ToolContext 等待，并让 Turn 取消优先终止长等待。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         let coordinator = self.coordinator.clone();

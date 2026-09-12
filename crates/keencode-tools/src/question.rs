@@ -6,6 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use futures_util::future::{Either, select};
 use keencode_agent::{
@@ -196,6 +197,12 @@ impl AgentTool for AskUserTool {
     /// 同一 Agent 的可见问答必须按模型调用顺序逐个展示。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Exclusive
+    }
+
+    /// 等待用户作答没有墙钟上限；问题的取消由 Turn 取消或用户关闭交互驱动，
+    /// 外层墙钟会把等待中的用户问答错误切断。
+    fn timeout(&self) -> Option<Duration> {
+        None
     }
 
     /// 严格校验问题，等待桌面回答并返回按请求顺序规范化的 JSON。

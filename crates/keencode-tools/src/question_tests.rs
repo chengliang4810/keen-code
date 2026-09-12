@@ -171,3 +171,12 @@ async fn ask_user_observes_turn_cancellation() {
     let error = future.await.unwrap_err();
     assert_eq!(error.code, "ask_user_cancelled");
 }
+
+/// 等待用户作答没有墙钟上限，必须声明为 None 以免外层超时切断用户交互。
+#[test]
+fn ask_user_tool_declares_unbounded_user_wait() {
+    assert_eq!(
+        AgentTool::timeout(&AskUserTool::new(Arc::new(PendingQuestionHandler))),
+        None
+    );
+}
