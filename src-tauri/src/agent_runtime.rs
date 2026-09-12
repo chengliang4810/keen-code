@@ -260,7 +260,7 @@ struct DefaultProviderBinding {
 /// 启动根 Turn 时由命令层显式传入、只在模型请求期装配的行为上下文。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RootTurnOptions {
-    /// Memory、Plan 或 Ultra 等本轮动态开发者上下文；不会写入 Session Transcript。
+    /// Memory、Plan 或 Ultra 等本轮动态开发者上下文；以 is_meta 用户消息追加到请求末尾，不写入 Session Transcript。
     pub developer_context: Option<String>,
     /// 本轮开始前必须原子写入 Session 快照的 Plan 模式状态。
     pub plan_enabled: bool,
@@ -1685,7 +1685,7 @@ struct PreparedRootTurn {
     reasoning_effort: Option<ReasoningEffortSnapshot>,
     /// 本根 Turn 新增且必须进入权威 Transcript 的消息，例如用户输入。
     input_messages: Vec<Message>,
-    /// Memory、Plan 或 Ultra 等只在 Provider 请求期装配的消息；不得进入权威 Transcript。
+    /// Memory、Plan 或 Ultra 等只在 Provider 请求末尾追加的 is_meta 消息；不得进入权威 Transcript。
     request_context: Vec<Message>,
     /// Runtime TurnStarted 使用的稳定用户输入摘要。
     summary: String,
@@ -1749,6 +1749,70 @@ struct RuntimeGoalUsageSink {
     owner: Weak<AgentRuntime>,
 }
 
+/// 会话首次 Turn 前按 Agent 冻结的稳定提示词事实。
+///
+/// 这是上下文冻结（#13）的核心取舍：指令正文、日期、时区、cwd 派生值和
+/// capability/catalog 段在冻结时点计算一次，会话内复用快照，使模型请求的
+/// System 段跨 Turn 字节稳定，为 prompt cache 断点（#12）打基础。
+///
+/// 敏感面盘点：下列变化会破坏稳定前缀，均按低频事件接受并显式记录。
+/// - AGENTS.md / CLAUDE.md / CLAUDE.local.md 外部修改：本会话不生效（日期
+///   跨午夜同理，快照不随时钟漂移），只有新会话取新值。
+/// - `spawn_agent` / `Skill` 能力启停或扩展目录内容变化：触发本结构体的
+///   低频重建（`refreshed`），只重算能力段与目录，环境与指令仍保持冻结值。
+/// - MCP 工具表变化：工具定义数组随请求变化属于合法缓存失效；能力指纹
+///   不变时稳定前缀本身不受影响。
+struct FrozenAgentPrompt {
+    /// 冻结的环境事实快照；mode 按本轮 Plan 守卫逐轮渲染。
+    environment: crate::agent_prompt::EnvironmentSnapshot,
+    /// 冻结的全局与项目自定义指令正文。
+    custom_instructions: String,
+    /// 冻结时点渲染的能力说明段。
+    capabilities: String,
+    /// 冻结时点的能力指纹；变化时触发低频重建。
+    capability_fingerprint: (bool, bool),
+    /// 冻结的扩展目录文本；空表示无目录。
+    catalog: String,
+}
+
+impl FrozenAgentPrompt {
+    /// 能力指纹或目录变化时重建能力说明与目录，环境与指令保持首次冻结值。
+    ///
+    /// 会话内安装 MCP、启用技能或扩展热重载属于低频事件，被接受为合法的
+    /// prompt cache 失效；重建时记录诊断而不静默漂移。
+    fn refreshed(
+        frozen: &Self,
+        can_spawn: bool,
+        has_skill: bool,
+        catalog: &str,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            environment: frozen.environment.clone(),
+            custom_instructions: frozen.custom_instructions.clone(),
+            capabilities: crate::agent_prompt::capabilities(can_spawn, has_skill),
+            capability_fingerprint: (can_spawn, has_skill),
+            catalog: catalog.to_owned(),
+        })
+    }
+
+    /// 组装跨 Turn 字节稳定的请求前缀：System 规则、能力说明加冻结指令、目录殿后。
+    fn stable_prefix(&self) -> Vec<Message> {
+        let mut capabilities = self.capabilities.clone();
+        if !self.custom_instructions.is_empty() {
+            capabilities.push_str("\n\n");
+            capabilities.push_str(&self.custom_instructions);
+        }
+        let mut prefix = vec![
+            Message::text(MessageRole::System, crate::agent_prompt::core()),
+            Message::text(MessageRole::System, capabilities),
+        ];
+        if !self.catalog.is_empty() {
+            prefix.push(Message::text(MessageRole::Developer, self.catalog.clone()));
+        }
+        prefix
+    }
+}
+
 /// `RuntimeAgentExecution` 内全部需要同步线性化的易失状态。
 #[derive(Default)]
 struct RuntimeAgentExecutionState {
@@ -1762,6 +1826,8 @@ struct RuntimeAgentExecutionState {
     quiesced_roots: HashSet<RunnerAgentId>,
     /// 最近一次已经向当前 Session 发送过诊断的扩展候选代次。
     extension_diagnostics_generation: Option<u64>,
+    /// 各 Agent 在自身首次 Turn 前冻结的稳定提示词事实。
+    frozen_prompts: HashMap<RunnerAgentId, Arc<FrozenAgentPrompt>>,
 }
 
 /// Session 级 V2 执行端：真正创建 Runner 任务并管理取消、静止与系统清理。
@@ -4981,19 +5047,6 @@ impl AgentRuntime {
             (resolved, reasoning, input_messages, Vec::new(), summary)
         };
 
-        // 每次主/子 Agent Turn 都从当前隔离数据根和自身工作目录加载指令。
-        // 它们只进入 Provider 请求，因此冷恢复和后续 Turn 不会叠加旧指令正文。
-        let mut request_context = Vec::new();
-        let (mut custom_instructions, project_instructions) =
-            crate::personalization::prompt_context(&self.storage_root, &launch.agent.profile.cwd)
-                .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?;
-        if let Some(instructions) = project_instructions {
-            if !custom_instructions.is_empty() {
-                custom_instructions.push_str("\n\n");
-            }
-            custom_instructions.push_str(&instructions);
-        }
-
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
                 .map_err(|error| runtime_operation_failed(error))?;
@@ -5051,19 +5104,31 @@ impl AgentRuntime {
         let tools = registry
             .select_exact(&tool_snapshot)
             .map_err(|error| runtime_operation_failed(error))?;
-        if !catalog.is_empty() {
-            request_context.push(Message::text(MessageRole::Developer, catalog));
-        }
-        // 稳定项目规则和目录在前，系统本地时间及偏移在本轮准备时冻结。
-        // Memory/Plan 等本轮上下文随后加入，不能为缓存而保留上一轮的旧状态。
-        request_context.push(Message::text(
-            MessageRole::Developer,
-            crate::agent_prompt::environment(
-                &launch.agent.profile.cwd,
-                &chrono::Local::now().fixed_offset(),
-                launch.plan_guard == PlanGuard::read_only(),
-            ),
-        ));
+        let can_spawn = tools
+            .definitions()
+            .iter()
+            .any(|tool| tool.name == "spawn_agent");
+        let has_skill = tools.definitions().iter().any(|tool| tool.name == "Skill");
+        // 会话首次 Turn 前按 Agent 冻结稳定前缀事实；后续 Turn 一律复用冻结值。
+        let frozen = self.frozen_agent_prompt(
+            execution,
+            &launch.agent.agent_id,
+            &launch.agent.profile.cwd,
+            can_spawn,
+            has_skill,
+            &catalog,
+        )?;
+        // Memory/Plan/Ultra 等每轮会变的动态上下文与本轮环境一起追加到请求末尾，
+        // 不再插在 System 段之后；前缀（冻结 System 段 + 历史）跨 Turn 字节稳定。
+        let mut request_context = Vec::new();
+        let mut environment_message = Message::text(
+            MessageRole::User,
+            frozen
+                .environment
+                .render(launch.plan_guard == PlanGuard::read_only()),
+        );
+        environment_message.is_meta = true;
+        request_context.push(environment_message);
         request_context.extend(turn_context);
         let provider = Arc::new(
             TurnBoundProvider::new(
@@ -5072,9 +5137,8 @@ impl AgentRuntime {
                 launch.turn_id.as_str(),
                 launch.agent.agent_id.as_str(),
             )
-            .with_request_context(request_context)
-            .with_custom_instructions(custom_instructions)
-            .with_agent_prompt(),
+            .with_stable_prefix(frozen.stable_prefix())
+            .with_request_context(request_context),
         );
         // 压缩摘要不能看到只服务于当前模型请求的动态上下文，避免把它间接写入摘要 Transcript。
         let compressor_provider: Arc<dyn ModelProvider> = Arc::new(TurnBoundProvider::new(
@@ -5186,6 +5250,65 @@ impl AgentRuntime {
             }
         };
         Ok((runner, runtime_request, summary))
+    }
+
+    /// 返回该 Agent 在本会话内冻结的稳定提示词事实；首次 Turn 前计算一次。
+    ///
+    /// 冻结语义是显式的产品取舍：AGENTS.md、CLAUDE.local.md、日期、时区与
+    /// cwd 派生值只在冻结时点读取，会话中途的外部修改不再即时生效，只有新
+    /// 会话（或子 Agent 的首次 Turn）取新值，以此换取模型请求 System 段跨
+    /// Turn 的字节稳定性。can_spawn/has_skill 或扩展目录变化属于工具表变化
+    /// 时的合法缓存失效（低频）：此时只重建能力说明与目录并记录诊断，环境
+    /// 快照与指令正文仍保持首次冻结值。
+    fn frozen_agent_prompt(
+        &self,
+        execution: &RuntimeAgentExecution,
+        agent_id: &RunnerAgentId,
+        cwd: &Path,
+        can_spawn: bool,
+        has_skill: bool,
+        catalog: &str,
+    ) -> Result<Arc<FrozenAgentPrompt>, AgentRuntimeError> {
+        let mut state = execution
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if let Some(frozen) = state.frozen_prompts.get(agent_id) {
+            if frozen.capability_fingerprint == (can_spawn, has_skill) && frozen.catalog == catalog
+            {
+                return Ok(Arc::clone(frozen));
+            }
+            tracing::info!(
+                target: "keencode_diagnostics",
+                session_id = %execution.session_id,
+                agent_id = %agent_id,
+                "agent capability context changed; rebuilding frozen prompt capability section"
+            );
+            let rebuilt = FrozenAgentPrompt::refreshed(frozen, can_spawn, has_skill, catalog);
+            state.frozen_prompts.insert(agent_id.clone(), Arc::clone(&rebuilt));
+            return Ok(rebuilt);
+        }
+        let (mut custom_instructions, project_instructions) =
+            crate::personalization::prompt_context(&self.storage_root, cwd)
+                .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?;
+        if let Some(instructions) = project_instructions {
+            if !custom_instructions.is_empty() {
+                custom_instructions.push_str("\n\n");
+            }
+            custom_instructions.push_str(&instructions);
+        }
+        let frozen = Arc::new(FrozenAgentPrompt {
+            environment: crate::agent_prompt::EnvironmentSnapshot::freeze(
+                cwd,
+                &chrono::Local::now().fixed_offset(),
+            ),
+            custom_instructions,
+            capabilities: crate::agent_prompt::capabilities(can_spawn, has_skill),
+            capability_fingerprint: (can_spawn, has_skill),
+            catalog: catalog.to_owned(),
+        });
+        state.frozen_prompts.insert(agent_id.clone(), Arc::clone(&frozen));
+        Ok(frozen)
     }
 
     /// 每个 Session/候选代次只记录一次非致命扩展诊断，不投递界面消息。
@@ -5506,7 +5629,11 @@ impl AgentRuntime {
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
         if let Some(context) = normalized_developer_context {
-            request_context.push(Message::text(MessageRole::Developer, context));
+            // Memory/Plan/Ultra 每轮会变，追加到请求末尾而不是插在 System 段之后；
+            // is_meta 用户消息不进入权威 Transcript，与既有 request-only 语义一致。
+            let mut message = Message::text(MessageRole::User, context);
+            message.is_meta = true;
+            request_context.push(message);
         }
         input_messages.push(Message::text(MessageRole::User, text));
         self.ensure_session_delivery(session_id)?;
@@ -6643,11 +6770,10 @@ struct TurnBoundProvider {
     turn_id: String,
     /// 发起请求的根 Agent 或单层子 Agent。
     agent_id: String,
-    /// 仅在真正发给模型前插入的环境、指令、目录与 Memory/Plan/Ultra；不参与 Runtime Journal。
+    /// 会话冻结的稳定前缀（System 规则、能力说明、指令与目录）；不参与 Runtime Journal。
+    stable_prefix: Vec<Message>,
+    /// 仅本轮动态上下文（环境与 Memory/Plan/Ultra），追加到请求末尾；不参与 Runtime Journal。
     request_context: Vec<Message>,
-    /// 仅编码 Agent 请求注入通用规则，压缩及独立生成不启用。
-    agent_prompt: bool,
-    custom_instructions: String,
 }
 
 impl TurnBoundProvider {
@@ -6658,61 +6784,33 @@ impl TurnBoundProvider {
             session_id: session_id.to_owned(),
             turn_id: turn_id.to_owned(),
             agent_id: agent_id.to_owned(),
+            stable_prefix: Vec::new(),
             request_context: Vec::new(),
-            agent_prompt: false,
-            custom_instructions: String::new(),
         }
     }
 
-    /// 设置当前 Agent 请求期动态上下文；调用方输入和 Runtime Transcript 保持不变。
+    /// 设置会话冻结的稳定前缀；前缀跨 Turn 字节稳定，压缩与独立生成不启用。
+    fn with_stable_prefix(mut self, prefix: Vec<Message>) -> Self {
+        self.stable_prefix = prefix;
+        self
+    }
+
+    /// 设置本轮追加到请求末尾的动态上下文；调用方输入和 Runtime Transcript 保持不变。
     fn with_request_context(mut self, request_context: Vec<Message>) -> Self {
         self.request_context = request_context;
         self
     }
 
-    fn with_custom_instructions(mut self, instructions: String) -> Self {
-        self.custom_instructions = instructions;
-        self
-    }
-
-    /// 在实际发送边界统一注入，主/子 Agent、续聊和恢复均不依赖历史提示词副本。
-    fn with_agent_prompt(mut self) -> Self {
-        self.agent_prompt = true;
-        self
-    }
-
     /// 发送和预算共用同一装配规则；预算只需构造新增消息，不复制完整历史。
-    fn inject_context(
-        &self,
-        messages: &mut Vec<Message>,
-        tools: &[keencode_model::ToolDefinition],
-    ) {
-        if self.agent_prompt {
-            let can_spawn = tools.iter().any(|tool| tool.name == "spawn_agent");
-            let has_skill = tools.iter().any(|tool| tool.name == "Skill");
-            let mut capabilities = crate::agent_prompt::capabilities(can_spawn, has_skill);
-            if !self.custom_instructions.is_empty() {
-                capabilities.push_str("\n\n");
-                capabilities.push_str(&self.custom_instructions);
-            }
-            messages.splice(
-                0..0,
-                [
-                    Message::text(MessageRole::System, crate::agent_prompt::core()),
-                    Message::text(MessageRole::System, capabilities),
-                ],
-            );
+    ///
+    /// 稳定前缀拼接在头部，动态上下文追加在末尾：请求因此形如
+    /// `[冻结 System 段…] + [transcript 历史…] + [本轮动态上下文]`，
+    /// 前两项跨 Turn 字节稳定，末尾消息以 is_meta 用户身份注入。
+    fn inject_context(&self, messages: &mut Vec<Message>) {
+        if !self.stable_prefix.is_empty() {
+            messages.splice(0..0, self.stable_prefix.iter().cloned());
         }
-        if !self.request_context.is_empty() {
-            let system_count = messages
-                .iter()
-                .take_while(|message| message.role == MessageRole::System)
-                .count();
-            messages.splice(
-                system_count..system_count,
-                self.request_context.iter().cloned(),
-            );
-        }
+        messages.extend(self.request_context.iter().cloned());
     }
 }
 
@@ -6720,7 +6818,7 @@ impl ContextTokenEstimator for TurnBoundProvider {
     /// 将未持久化的规则、环境和目录计入主请求；额外消息开销采用保守近似。
     fn estimate_request(&self, request: &ModelRequest) -> u64 {
         let mut additions = Vec::new();
-        self.inject_context(&mut additions, &request.tools);
+        self.inject_context(&mut additions);
         let overhead = if additions.is_empty() {
             0
         } else {
@@ -6748,7 +6846,7 @@ impl ModelProvider for TurnBoundProvider {
         &self,
         mut request: ModelRequest,
     ) -> ModelFuture<'_, Result<ModelStream, keencode_model::ModelError>> {
-        self.inject_context(&mut request.messages, &request.tools);
+        self.inject_context(&mut request.messages);
         request.metadata.insert(
             REQUEST_METADATA_SESSION_ID.to_owned(),
             self.session_id.clone(),
@@ -9533,6 +9631,23 @@ mod tests {
                 stop_reason: StopReason::Completed,
             },
         ])
+    }
+
+    /// 按生产装配规则构造会话冻结的稳定前缀：System 规则、能力说明与指令拼接。
+    fn stable_agent_prefix(
+        can_spawn: bool,
+        has_skill: bool,
+        instructions: &str,
+    ) -> Vec<ModelMessage> {
+        let mut capabilities = crate::agent_prompt::capabilities(can_spawn, has_skill);
+        if !instructions.is_empty() {
+            capabilities.push_str("\n\n");
+            capabilities.push_str(instructions);
+        }
+        vec![
+            ModelMessage::text(MessageRole::System, crate::agent_prompt::core()),
+            ModelMessage::text(MessageRole::System, capabilities),
+        ]
     }
 
     /// 创建包含明确 Token 用量的固定模型响应，供 replay Provider 快照测试使用。
@@ -13059,7 +13174,7 @@ mod tests {
         }
     }
 
-    /// 同一原始请求的重复发送只注入一份规则；子 Agent 按工具表裁剪，压缩保持独立。
+    /// 同一原始请求的重复发送只注入一份规则；动态上下文只追加在末尾，压缩保持独立。
     #[tokio::test]
     async fn agent_prompt_provider_boundary_is_complete_and_request_only() {
         let scripted = Arc::new(ScriptedProvider::new(
@@ -13071,9 +13186,11 @@ mod tests {
                 completed_reply("summary"),
             ],
         ));
+        let mut dynamic = ModelMessage::text(MessageRole::User, "dynamic");
+        dynamic.is_meta = true;
         let bound = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
-            .with_request_context(vec![ModelMessage::text(MessageRole::Developer, "dynamic")])
-            .with_agent_prompt();
+            .with_stable_prefix(stable_agent_prefix(true, true, ""))
+            .with_request_context(vec![dynamic.clone()]);
         let mut request = ModelRequest::new(
             "test-model",
             vec![ModelMessage::text(MessageRole::User, "task")],
@@ -13093,7 +13210,7 @@ mod tests {
         }
         assert_eq!(request.messages.len(), 1);
         let child = TurnBoundProvider::new(scripted.clone(), "session", "child-turn", "child")
-            .with_agent_prompt();
+            .with_stable_prefix(stable_agent_prefix(false, false, ""));
         request.tools.clear();
         drop(child.stream(request.clone()).await.unwrap());
         let compressor = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root");
@@ -13121,10 +13238,16 @@ mod tests {
                 crate::agent_prompt::capabilities(true, true)
             )
         );
+        // 动态上下文位于请求末尾而不是 System 段之后，前缀保持字节稳定。
+        let expected_root_prefix = stable_agent_prefix(true, true, "");
         assert_eq!(
-            requests[0].messages[2],
-            ModelMessage::text(MessageRole::Developer, "dynamic")
+            &requests[0].messages[..expected_root_prefix.len() + 1],
+            &expected_root_prefix
+                .into_iter()
+                .chain([ModelMessage::text(MessageRole::User, "task")])
+                .collect::<Vec<_>>()[..]
         );
+        assert_eq!(requests[0].messages.last(), Some(&dynamic));
         assert_eq!(
             requests[2].messages[1],
             ModelMessage::text(
@@ -13148,13 +13271,13 @@ mod tests {
                 completed_reply("done"),
             ],
         ));
+        let instructions = "  RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS\n".repeat(100);
         let bound = Arc::new(
             TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
-                .with_agent_prompt()
-                .with_custom_instructions("  RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS\n".repeat(100))
+                .with_stable_prefix(stable_agent_prefix(false, false, &instructions))
                 .with_request_context(vec![ModelMessage::text(
-                    MessageRole::Developer,
-                    "REQUEST_ONLY_CATALOG ".repeat(600),
+                    MessageRole::User,
+                    "REQUEST_ONLY_DYNAMIC_CONTEXT ".repeat(600),
                 )]),
         );
         let mut request = ModelRequest::new("test-model", Vec::new());
@@ -13204,7 +13327,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(outcome.record.apply(&original).unwrap(), outcome.messages);
-        assert!(!outcome.record.summary.contains("REQUEST_ONLY_CATALOG"));
+        assert!(!outcome
+            .record
+            .summary
+            .contains("RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS"));
+        assert!(!outcome
+            .record
+            .summary
+            .contains("REQUEST_ONLY_DYNAMIC_CONTEXT"));
         request.messages = outcome.messages;
         assert_eq!(
             outcome.record.estimated_tokens_after,
@@ -13215,7 +13345,12 @@ mod tests {
         assert!(
             !serde_json::to_string(&requests[0])
                 .unwrap()
-                .contains("REQUEST_ONLY_CATALOG")
+                .contains("RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS")
+        );
+        assert!(
+            !serde_json::to_string(&requests[0])
+                .unwrap()
+                .contains("REQUEST_ONLY_DYNAMIC_CONTEXT")
         );
         let mut sent = requests[1].clone();
         // 观测 metadata 不属于模型输入；比较相同 JSON 估算口径下的完整消息和工具。
@@ -13224,21 +13359,26 @@ mod tests {
             outcome.record.estimated_tokens_after
                 >= JsonContextTokenEstimator.estimate_request(&sent)
         );
-        assert!(
-            serde_json::to_string(&sent)
-                .unwrap()
-                .contains("REQUEST_ONLY_CATALOG")
-        );
+        let sent_json = serde_json::to_string(&sent).unwrap();
+        assert!(sent_json.contains("RAW_GLOBAL_AND_PROJECT_INSTRUCTIONS"));
+        assert!(sent_json.contains("REQUEST_ONLY_DYNAMIC_CONTEXT"));
     }
 
-    /// 能力变化和仅有工具 Schema 的请求也必须使用同一预算口径，不修改原消息。
+    /// 能力指纹与稳定前缀一致时，预算口径和实际装配保持同一规则，不修改原消息。
     #[test]
     fn agent_prompt_budget_follows_tools_and_preserves_raw_request() {
         let scripted = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
-        let bound =
-            TurnBoundProvider::new(scripted.clone(), "session", "turn", "root").with_agent_prompt();
-        let empty_bound = TurnBoundProvider::new(scripted, "session", "turn", "summary");
+        let empty_bound = TurnBoundProvider::new(
+            scripted.clone() as Arc<dyn keencode_model::ModelProvider>,
+            "session",
+            "turn",
+            "summary",
+        );
         for names in [vec![], vec!["Skill"], vec!["spawn_agent", "Skill"]] {
+            let can_spawn = names.contains(&"spawn_agent");
+            let has_skill = names.contains(&"Skill");
+            let bound = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
+                .with_stable_prefix(stable_agent_prefix(can_spawn, has_skill, ""));
             let mut request = ModelRequest::new(
                 "test-model",
                 vec![ModelMessage::text(MessageRole::User, "task")],
@@ -13254,7 +13394,7 @@ mod tests {
                 })
                 .collect();
             let mut injected = request.clone();
-            bound.inject_context(&mut injected.messages, &injected.tools);
+            bound.inject_context(&mut injected.messages);
             let estimate = bound.estimate_request(&request);
             let assembled = JsonContextTokenEstimator.estimate_request(&injected);
             assert!(estimate >= assembled && estimate < assembled + 32);
@@ -13306,8 +13446,9 @@ mod tests {
             .expect("Responses 请求应包含 input 数组");
         assert_eq!(input[0]["role"], "developer");
         assert_eq!(input[0]["content"][0]["text"], crate::agent_prompt::core());
+        // Memory/Plan/Ultra 挪位后以 is_meta 用户消息追加到请求末尾。
         assert!(input.iter().any(|message| {
-            message["role"] == "developer" && message["content"][0]["text"] == dynamic_context
+            message["role"] == "user" && message["content"][0]["text"] == dynamic_context
         }));
         assert_eq!(
             input
@@ -13348,6 +13489,11 @@ mod tests {
         };
         assert!(position("项目指令测试标记") < position("<env>"));
         assert!(position("<env>") < position(dynamic_context));
+        assert_eq!(
+            input.last().and_then(|message| message["content"][0]["text"].as_str()),
+            Some(dynamic_context),
+            "本轮动态上下文必须是请求的最后一个输入项"
+        );
         let environment = input[position("<env>")]["content"][0]["text"]
             .as_str()
             .unwrap();
@@ -13392,9 +13538,9 @@ mod tests {
             .expect("动态上下文测试投递应关闭");
     }
 
-    /// 同一 Session 的连续根 Turn 必须重新读取最新 AGENTS.md，且新旧正文均不得进入 Transcript。
+    /// 指令在会话首次 Turn 前冻结：中途修改 AGENTS.md 不影响本会话，新会话才取新值。
     #[tokio::test(flavor = "multi_thread")]
-    async fn root_turn_reloads_current_instructions_between_turns() {
+    async fn root_turn_freezes_instructions_until_new_session() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
         std::fs::write(storage.path().join("AGENTS.md"), "旧全局指令标记")
@@ -13402,11 +13548,11 @@ mod tests {
         std::fs::write(project.path().join("AGENTS.md"), "旧项目指令标记")
             .expect("旧项目指令应写入");
         let (base_url, server) =
-            spawn_buffered_responses_server_for_requests("两轮上下文测试完成", 2);
+            spawn_buffered_responses_server_for_requests("两轮上下文测试完成", 3);
         let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
         let session = runtime
-            .open_or_create_session(project.path(), None, "reload-instructions-operation")
-            .expect("指令刷新测试 Session 应创建");
+            .open_or_create_session(project.path(), None, "frozen-instructions-first")
+            .expect("指令冻结测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
 
         assert_eq!(
@@ -13430,8 +13576,8 @@ mod tests {
             runtime
                 .start_root_turn(
                     &session_id,
-                    "turn-instructions-new",
-                    "第二轮读取新指令",
+                    "turn-instructions-frozen",
+                    "第二轮沿用冻结指令",
                     RootTurnOptions::default(),
                 )
                 .await
@@ -13440,11 +13586,31 @@ mod tests {
         );
         wait_for_session_idle(&runtime, &session_id).await;
 
+        // 新会话在首次 Turn 前重新冻结，取得修改后的全局指令与已删除的项目指令。
+        let next_session = runtime
+            .open_or_create_session(project.path(), None, "frozen-instructions-second")
+            .expect("指令冻结测试新 Session 应创建");
+        let next_session_id = next_session.session_id().as_str().to_owned();
+        assert_ne!(session_id, next_session_id);
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &next_session_id,
+                    "turn-instructions-refreshed",
+                    "新会话读取新指令",
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("新会话根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &next_session_id).await;
+
         let requests = server
             .join()
             .expect("本地模型服务线程不应 panic")
             .expect("本地模型服务应成功");
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         let developer_context = |request: &Value| {
             request["input"]
                 .as_array()
@@ -13462,10 +13628,13 @@ mod tests {
         assert!(first_context.contains("旧全局指令标记"));
         assert!(first_context.contains("旧项目指令标记"));
         assert!(!first_context.contains("新全局指令标记"));
+        // 冻结语义：同一会话的第二轮仍使用首轮冻结的指令正文。
         let second_context = developer_context(&requests[1]);
-        assert!(second_context.contains("新全局指令标记"));
-        assert!(!second_context.contains("旧全局指令标记"));
-        assert!(!second_context.contains("旧项目指令标记"));
+        assert_eq!(first_context, second_context);
+        let third_context = developer_context(&requests[2]);
+        assert!(third_context.contains("新全局指令标记"));
+        assert!(!third_context.contains("旧全局指令标记"));
+        assert!(!third_context.contains("旧项目指令标记"));
 
         let transcript_json = serde_json::to_string(
             &runtime
@@ -13477,11 +13646,269 @@ mod tests {
             assert!(!transcript_json.contains(marker));
         }
         assert!(transcript_json.contains("第一轮读取旧指令"));
-        assert!(transcript_json.contains("第二轮读取新指令"));
+        assert!(transcript_json.contains("第二轮沿用冻结指令"));
         runtime
             .close_session_delivery(&session_id)
             .await
             .expect("两轮指令测试投递应关闭");
+        runtime
+            .close_session_delivery(&next_session_id)
+            .await
+            .expect("新会话指令测试投递应关闭");
+    }
+
+    /// 同一 Session 连续三轮：冻结 System 段与历史前缀逐字节稳定，动态上下文只出现在末尾。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_prefix_is_byte_stable_across_turns() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let (base_url, server) =
+            spawn_buffered_responses_server_for_requests("前缀稳定测试完成", 3);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "prefix-stable-operation")
+            .expect("前缀稳定测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "turn-prefix-stable-first",
+                    "前缀稳定第一轮",
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("第一轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &session_id).await;
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "turn-prefix-stable-second",
+                    "前缀稳定第二轮",
+                    RootTurnOptions {
+                        // 模拟 Memory/Plan 在两轮之间变化：只允许影响末尾动态消息。
+                        developer_context: Some("本轮动态记忆标记".to_owned()),
+                        plan_enabled: false,
+                    },
+                )
+                .await
+                .expect("第二轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &session_id).await;
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "turn-prefix-stable-third",
+                    "前缀稳定第三轮",
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("第三轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &session_id).await;
+
+        let requests = server
+            .join()
+            .expect("本地模型服务线程不应 panic")
+            .expect("本地模型服务应成功");
+        assert_eq!(requests.len(), 3);
+        fn input(request: &Value) -> &Vec<Value> {
+            request["input"]
+                .as_array()
+                .expect("Responses 请求应包含 input 数组")
+        }
+        let items_json = |items: &[Value]| {
+            items
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("输入项应可序列化")
+        };
+        let env_text = |items: &[Value]| {
+            items
+                .iter()
+                .filter_map(|message| message["content"][0]["text"].as_str())
+                .find(|text| text.contains("<env>"))
+                .expect("请求应包含 <env> 环境消息")
+                .to_owned()
+        };
+        let first = input(&requests[0]);
+        let second = input(&requests[1]);
+        let third = input(&requests[2]);
+        // 每轮末尾的动态消息：环境始终存在，第二轮多一条 Memory/Plan/Ultra。
+        assert!(env_text(first).contains("Current mode: Normal"));
+        assert!(second
+            .last()
+            .and_then(|message| message["content"][0]["text"].as_str())
+            .is_some_and(|text| text == "本轮动态记忆标记"));
+        // 前缀逐字节稳定：后一轮的输入开头等于前一轮去掉末尾动态消息的完整输入。
+        let first_stable = &first[..first.len() - 1];
+        assert_eq!(
+            items_json(&second[..first_stable.len()]),
+            items_json(first_stable)
+        );
+        let second_stable = &second[..second.len() - 2];
+        assert_eq!(
+            items_json(&third[..second_stable.len()]),
+            items_json(second_stable)
+        );
+        // 环境消息来自会话冻结快照：三轮正文逐字节相同，跨轮不重取时钟。
+        assert_eq!(env_text(first), env_text(second));
+        assert_eq!(env_text(second), env_text(third));
+        // 动态上下文不入 Transcript：第三轮请求历史中不得再出现第二轮记忆正文。
+        assert!(!items_json(third).join("\n").contains("本轮动态记忆标记"));
+        runtime
+            .close_session_delivery(&session_id)
+            .await
+            .expect("前缀稳定测试投递应关闭");
+    }
+
+    /// 子 Agent 在自身首次 Turn 前用自己的 cwd 冻结环境；根与子的环境互不串扰。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_agent_freezes_environment_with_own_cwd() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let child_cwd = tempfile::tempdir().expect("应创建子 Agent 工作目录");
+        let (base_url, gate, server) = spawn_gated_buffered_responses_server(
+            "子 Agent 环境测试完成",
+            2,
+            "保持根 Turn 活跃以启动子 Agent",
+        );
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "child-env-operation")
+            .expect("子 Agent 环境测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .start_root_turn(
+                &session_id,
+                "turn-child-env-root",
+                "保持根 Turn 活跃以启动子 Agent",
+                RootTurnOptions::default(),
+            )
+            .await
+            .expect("根 Turn 应启动");
+        let collaboration = runtime
+            .ensure_collaboration_runtime(
+                &session,
+                RootAgentSeed {
+                    model: "test-model".to_owned(),
+                    reasoning_effort: None,
+                    plan_guard: PlanGuard::inactive(),
+                },
+            )
+            .expect("生产 Collaboration Runtime 应可复用");
+        let root_turn =
+            keencode_agent::TurnId::new("turn-child-env-root").expect("根 Turn 标识应有效");
+        let child_result = collaboration.coordinator.spawn_agent(
+            &collaboration.root_agent_id,
+            &root_turn,
+            &ToolCallId::new("spawn-child-env").expect("子 Agent 工具调用标识应有效"),
+            test_spawn_request("child_env", child_cwd.path()),
+        );
+        gate.release();
+        child_result.expect("子 Agent 应经真实 execution port 启动");
+        let requests = server
+            .join()
+            .expect("本地模型服务线程不应 panic")
+            .expect("本地模型服务应成功");
+        assert_eq!(requests.len(), 2);
+        let env_text = |request: &Value| {
+            request["input"]
+                .as_array()
+                .expect("Responses 请求应包含 input 数组")
+                .iter()
+                .filter_map(|message| message["content"][0]["text"].as_str())
+                .find(|text| text.contains("<env>"))
+                .expect("请求应包含 <env> 环境消息")
+                .to_owned()
+        };
+        let root_request = requests
+            .iter()
+            .find(|request| request_contains_user_text(request, "保持根 Turn 活跃以启动子 Agent"))
+            .expect("应捕获根 Agent 请求");
+        let child_request = requests
+            .iter()
+            .find(|request| request_contains_user_text(request, "执行 child_env 测试任务"))
+            .expect("应捕获子 Agent 请求");
+        let root_environment = env_text(root_request);
+        let child_environment = env_text(child_request);
+        // 根 cwd 经 canonical_project_root 规范化（macOS 带 /private 前缀）；
+        // 子 Agent cwd 保持 spawn 传入的原样路径，二者都必须出现在各自环境中。
+        let project_canonical = project.path().canonicalize().expect("项目路径应可规范化");
+        assert!(root_environment.contains(&format!(
+            "Primary working directory: {:?}",
+            project_canonical
+        )));
+        assert!(!root_environment.contains(child_cwd.path().to_string_lossy().as_ref()));
+        assert!(child_environment.contains(&format!(
+            "Primary working directory: {:?}",
+            child_cwd.path()
+        )));
+        assert!(!child_environment.contains(project_canonical.to_string_lossy().as_ref()));
+        wait_for_session_idle(&runtime, &session_id).await;
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("子 Agent 环境测试 Session 应关闭");
+    }
+
+    /// 能力指纹变化重建能力段与目录，环境快照与冻结指令保持不变。
+    #[test]
+    fn frozen_prompt_refresh_rebuilds_capabilities_only() {
+        let now =
+            chrono::DateTime::parse_from_rfc3339("2026-09-12T08:00:00+08:00").expect("时间应有效");
+        let frozen = super::FrozenAgentPrompt {
+            environment: crate::agent_prompt::EnvironmentSnapshot::freeze(Path::new("/tmp"), &now),
+            custom_instructions: "冻结指令".to_owned(),
+            capabilities: crate::agent_prompt::capabilities(true, true),
+            capability_fingerprint: (true, true),
+            catalog: "旧目录".to_owned(),
+        };
+        let prefix = frozen.stable_prefix();
+        assert_eq!(prefix.len(), 3);
+        assert_eq!(
+            prefix[0],
+            ModelMessage::text(MessageRole::System, crate::agent_prompt::core())
+        );
+        assert_eq!(
+            prefix[1],
+            ModelMessage::text(
+                MessageRole::System,
+                format!(
+                    "{}\n\n冻结指令",
+                    crate::agent_prompt::capabilities(true, true)
+                )
+            )
+        );
+        assert_eq!(
+            prefix[2],
+            ModelMessage::text(MessageRole::Developer, "旧目录")
+        );
+
+        let rebuilt = super::FrozenAgentPrompt::refreshed(&frozen, false, true, "新目录");
+        assert_eq!(rebuilt.capability_fingerprint, (false, true));
+        assert_eq!(
+            rebuilt.capabilities,
+            crate::agent_prompt::capabilities(false, true)
+        );
+        assert_eq!(rebuilt.catalog, "新目录");
+        assert_eq!(rebuilt.custom_instructions, "冻结指令");
+        assert_eq!(rebuilt.environment, frozen.environment);
+        // 目录为空时稳定前缀不含目录消息。
+        assert_eq!(
+            super::FrozenAgentPrompt::refreshed(&frozen, false, true, "")
+                .stable_prefix()
+                .len(),
+            2
+        );
     }
 
     /// 执行前永久拒绝必须建立失败的子 Agent 身份，不能留下根 mailbox 的悬空引用。

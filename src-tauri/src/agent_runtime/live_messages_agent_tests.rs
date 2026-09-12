@@ -293,7 +293,18 @@ async fn live_messages_agent_scenarios() {
             if name == "tool_failure_recovery" {
                 tools.register(intermittent.clone()).unwrap();
             }
-            let mut context = Vec::new();
+            let bound = TurnBoundProvider::new(
+                resolved.clone(),
+                "messages-agent-validation",
+                name,
+                "root",
+            );
+            let mut prefix = Vec::new();
+            if let Some(old) = &old_prompt {
+                prefix.push(Message::text(MessageRole::System, old.clone()));
+            } else {
+                prefix.push(Message::text(MessageRole::System, crate::agent_prompt::core()));
+            }
             if name == "skill_loading" {
                 let directory = root.path().join(".agents/skills/synthetic-review");
                 std::fs::create_dir_all(&directory).unwrap();
@@ -305,7 +316,7 @@ async fn live_messages_agent_scenarios() {
                 tools
                     .register(Arc::new(SkillTool::new(Arc::new(catalog))))
                     .unwrap();
-                context.push(Message::text(
+                prefix.push(Message::text(
                     MessageRole::Developer,
                     crate::agent_prompt::catalog(
                         "Skill",
@@ -313,22 +324,32 @@ async fn live_messages_agent_scenarios() {
                     ),
                 ));
             }
-            context.push(Message::text(
-                MessageRole::Developer,
-                crate::agent_prompt::environment(
+            if old_prompt.is_none() {
+                let definitions = tools.definitions();
+                let can_spawn = definitions.iter().any(|tool| tool.name == "spawn_agent");
+                let has_skill = definitions.iter().any(|tool| tool.name == "Skill");
+                prefix.insert(
+                    1,
+                    Message::text(
+                        MessageRole::System,
+                        crate::agent_prompt::capabilities(can_spawn, has_skill),
+                    ),
+                );
+            }
+            let mut environment_message = Message::text(
+                MessageRole::User,
+                crate::agent_prompt::EnvironmentSnapshot::freeze(
                     root.path(),
                     &chrono::DateTime::parse_from_rfc3339("2026-09-09T12:00:00+08:00").unwrap(),
-                    false,
-                ),
-            ));
-            let mut bound =
-                TurnBoundProvider::new(resolved.clone(), "messages-agent-validation", name, "root");
-            if let Some(old) = &old_prompt {
-                context.insert(0, Message::text(MessageRole::System, old.clone()));
-            } else {
-                bound = bound.with_agent_prompt();
-            }
-            let bound = Arc::new(bound.with_request_context(context));
+                )
+                .render(false),
+            );
+            environment_message.is_meta = true;
+            let bound = Arc::new(
+                bound
+                    .with_stable_prefix(prefix)
+                    .with_request_context(vec![environment_message]),
+            );
             let manager = ContextManager::new(
                 ContextPolicy::default(),
                 bound.clone(),

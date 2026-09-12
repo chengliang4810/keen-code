@@ -2962,8 +2962,8 @@ mod tests {
         });
         assert_eq!(record.path_ok, None);
         assert!(!missing.exists());
-        assert_eq!(inspect_project_directory(&missing).unwrap(), false);
-        assert_eq!(inspect_project_directory(root.path()).unwrap(), true);
+        assert!(!inspect_project_directory(&missing).unwrap());
+        assert!(inspect_project_directory(root.path()).unwrap());
         let file = root.path().join("file");
         fs::write(&file, b"file").unwrap();
         assert!(inspect_project_directory(&file).is_err());

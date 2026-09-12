@@ -56,38 +56,60 @@ pub(crate) fn catalog<'a>(
     text
 }
 
-/// 冻结当前 Turn 环境；不启动 shell 或操作系统查询进程，未探测的版本明确标注。
-pub(crate) fn environment(
-    cwd: &Path,
-    now: &chrono::DateTime<chrono::FixedOffset>,
-    read_only: bool,
-) -> String {
-    let date = now.format("%Y-%m-%d").to_string();
-    let timezone = iana_time_zone::get_timezone()
-        .unwrap_or_else(|_| "unknown; query the operating system if needed".to_string());
-    let cwd_text = format!("{:?}", cwd.to_string_lossy());
-    // 同时识别普通仓库和 .git 文件形式的工作树；不读取仓库配置或启动 Git。
-    let git = cwd.ancestors().any(|path| path.join(".git").exists());
-    let values = [
-        ("cwd", cwd_text.as_str()),
-        ("is_git_repo", if git { "true" } else { "false" }),
-        ("platform", std::env::consts::OS),
-        (
-            "os_version",
-            "not probed; query the operating system if needed",
-        ),
-        ("date", date.as_str()),
-        ("timezone", timezone.as_str()),
-        (
-            "mode",
-            if read_only {
-                "Plan (read-only)"
-            } else {
-                "Normal"
-            },
-        ),
-    ];
-    render_environment(include_str!("../prompts/sections/07_env.md"), &values)
+/// 会话冻结的环境事实；日期、时区、cwd 派生值只在冻结时点计算一次。
+///
+/// 这是有意的产品取舍：会话进行中跨午夜或修改仓库布局都不改变这些值，
+/// 模型请求的稳定前缀不因环境时钟漂移而失效；需要当前时间时由模型主动查询。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EnvironmentSnapshot {
+    /// 冻结时点渲染的工作目录文本。
+    cwd_text: String,
+    /// 冻结时点探测的仓库标记；同时识别普通仓库和 `.git` 文件形式的工作树。
+    is_git_repo: bool,
+    /// 冻结时点的本地日期快照，跨午夜不漂移。
+    date: String,
+    /// 冻结时点的时区标识。
+    timezone: String,
+}
+
+impl EnvironmentSnapshot {
+    /// 冻结当前环境事实；不启动 shell 或操作系统查询进程，未探测的版本明确标注。
+    pub(crate) fn freeze(cwd: &Path, now: &chrono::DateTime<chrono::FixedOffset>) -> Self {
+        Self {
+            cwd_text: format!("{:?}", cwd.to_string_lossy()),
+            is_git_repo: cwd.ancestors().any(|path| path.join(".git").exists()),
+            date: now.format("%Y-%m-%d").to_string(),
+            timezone: iana_time_zone::get_timezone()
+                .unwrap_or_else(|_| "unknown; query the operating system if needed".to_string()),
+        }
+    }
+
+    /// 用冻结事实渲染本轮环境文本；mode 按本轮 Plan 守卫逐轮计算。
+    pub(crate) fn render(&self, read_only: bool) -> String {
+        let values = [
+            ("cwd", self.cwd_text.as_str()),
+            (
+                "is_git_repo",
+                if self.is_git_repo { "true" } else { "false" },
+            ),
+            ("platform", std::env::consts::OS),
+            (
+                "os_version",
+                "not probed; query the operating system if needed",
+            ),
+            ("date", self.date.as_str()),
+            ("timezone", self.timezone.as_str()),
+            (
+                "mode",
+                if read_only {
+                    "Plan (read-only)"
+                } else {
+                    "Normal"
+                },
+            ),
+        ];
+        render_environment(include_str!("../prompts/sections/07_env.md"), &values)
+    }
 }
 
 /// 只解析模板原文中的占位符，不把路径等插入值再次当模板解析。
@@ -162,7 +184,7 @@ mod tests {
             "{{date}} / today"
         );
         let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T01:30:00+08:00").unwrap();
-        let text = environment(Path::new("."), &now, true);
+        let text = EnvironmentSnapshot::freeze(Path::new("."), &now).render(true);
         assert!(text.contains("Plan (read-only)"));
         assert!(text.contains("2026-09-07"));
         assert!(text.lines().any(|line| line == "Current date: 2026-09-07"));
@@ -172,15 +194,23 @@ mod tests {
                 .any(|line| line == format!("Time zone: {timezone}"))
         );
         let later = now + chrono::Duration::hours(12);
-        assert_eq!(text, environment(Path::new("."), &later, true));
+        assert_eq!(
+            text,
+            EnvironmentSnapshot::freeze(Path::new("."), &later).render(true)
+        );
         assert!(!text.contains("{{"));
-        assert!(environment(Path::new("."), &now, false).contains("Current mode: Normal"));
+        assert!(
+            EnvironmentSnapshot::freeze(Path::new("."), &now)
+                .render(false)
+                .contains("Current mode: Normal")
+        );
         let west = chrono::DateTime::parse_from_rfc3339("2026-09-06T23:30:00-04:00").unwrap();
-        let text = environment(Path::new("."), &west, false);
+        let text = EnvironmentSnapshot::freeze(Path::new("."), &west).render(false);
         assert!(text.lines().any(|line| line == "Current date: 2026-09-06"));
         let tomorrow = west + chrono::Duration::hours(1);
         assert!(
-            environment(Path::new("."), &tomorrow, false)
+            EnvironmentSnapshot::freeze(Path::new("."), &tomorrow)
+                .render(false)
                 .lines()
                 .any(|line| line == "Current date: 2026-09-07")
         );
@@ -204,5 +234,28 @@ mod tests {
         assert!(text.contains("1 entries omitted"));
         assert!(text.contains("last"));
         assert!(!text.contains("\"huge\""));
+    }
+
+    /// 环境快照在冻结时点固定日期与时区：跨午夜重渲染不漂移，mode 仍逐轮计算。
+    #[test]
+    fn environment_snapshot_freezes_date_and_renders_mode_per_turn() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-06T23:30:00-04:00").unwrap();
+        let snapshot = EnvironmentSnapshot::freeze(Path::new("."), &now);
+        let before_midnight = snapshot.render(false);
+        assert!(before_midnight.lines().any(|line| line == "Current date: 2026-09-06"));
+        assert!(before_midnight.contains("Current mode: Normal"));
+        // 同一快照在跨午夜后的下一轮渲染：日期仍是冻结值，只有 mode 允许变化。
+        assert_eq!(
+            snapshot.render(true),
+            before_midnight.replace("Current mode: Normal", "Current mode: Plan (read-only)")
+        );
+        // 新的冻结时点才会取得新日期；这正是会话级快照与逐轮时钟的差别。
+        let later = now + chrono::Duration::hours(1);
+        assert!(
+            EnvironmentSnapshot::freeze(Path::new("."), &later)
+                .render(false)
+                .lines()
+                .any(|line| line == "Current date: 2026-09-07")
+        );
     }
 }

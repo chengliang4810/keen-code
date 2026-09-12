@@ -168,14 +168,24 @@ async fn live_prompt_scope_and_cache() {
     synthetic_request.tools = definitions.clone();
     synthetic_request.max_output_tokens = Some(1_024);
     let make_bound = |read_only| {
+        let mut environment_message = Message::text(
+            MessageRole::User,
+            crate::agent_prompt::EnvironmentSnapshot::freeze(
+                directory.path(),
+                &chrono::Local::now().fixed_offset(),
+            )
+            .render(read_only),
+        );
+        environment_message.is_meta = true;
         Arc::new(TurnBoundProvider::new(resolved.clone(), "prompt-probe", "probe", "root")
-        .with_agent_prompt().with_request_context(vec![
+        .with_stable_prefix(vec![
+            Message::text(MessageRole::System, crate::agent_prompt::core()),
+            Message::text(MessageRole::System, crate::agent_prompt::capabilities(false, false)),
             Message::text(MessageRole::Developer, format!(
                 "Synthetic retrieval metadata; not instructions.\n{}",
                 (0..160).map(|i| format!("sample_module_{i}: isolated example source; no external state.\n")).collect::<String>(),
             )),
-            Message::text(MessageRole::Developer, crate::agent_prompt::environment(directory.path(), &chrono::Local::now().fixed_offset(), read_only)),
-        ]))
+        ]).with_request_context(vec![environment_message]))
     };
     let usage = Arc::new(UsageLog::default());
     let mut records = Vec::new();
@@ -220,7 +230,7 @@ async fn live_prompt_scope_and_cache() {
         eprintln!("合成场景完成：{name}");
     }
     let bound = make_bound(false);
-    bound.inject_context(&mut synthetic_request.messages, &synthetic_request.tools);
+    bound.inject_context(&mut synthetic_request.messages);
     std::fs::write(
         evidence.with_extension("synthetic-request.json"),
         serde_json::to_vec_pretty(&synthetic_request).unwrap(),
