@@ -1902,6 +1902,161 @@ async fn compaction_recursively_merges_multiple_summary_layers() {
     assert!(compressor.requests().len() >= 3, "应至少经历两层摘要合并");
 }
 
+/// 小窗口下摘要输出预算必须被窗口份额钳制到窗口一半，摘要请求保留一半窗口
+/// 给源材料输入：默认策略（16_000）加 window=8_000/max_output=8_192 时，
+/// output_ceiling 若只按 Provider 最大输出与策略值取小会得到 ~7.7k 的输出
+/// 上限，输入空间只剩模板开销，任何非空原子单元都放不下，压缩必然以
+/// `CompressionRequestTooLarge` 失败。钳制后压缩必须成功且每次摘要调用
+/// 携带钳后的输出预算。
+#[tokio::test]
+async fn small_window_shrinks_summary_budget_and_preserves_source_input_space() {
+    let compressor = Arc::new(RecordingCompressor::new("摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 必须保留"),
+        Message::text(MessageRole::Developer, "developer 必须保留"),
+    ];
+    messages.extend((0..20).map(|_| Message::text(MessageRole::User, "x".repeat(1_200))));
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let request = ModelRequest::new("context-model", messages);
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(8_000),
+        max_output_tokens: Some(8_192),
+        ..ProviderCapabilities::default()
+    };
+
+    let outcome = manager
+        .compact_with_capabilities(
+            &request,
+            ContextCompressionTrigger::Budget,
+            2_400,
+            &capabilities,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("窗口份额钳制后小窗口压缩必须可行");
+
+    let requests = compressor.requests();
+    assert!(requests.len() >= 2, "超长历史必须产生多个摘要请求");
+    for summary_request in requests {
+        assert_eq!(
+            summary_request.max_output_tokens, 4_000,
+            "摘要输出必须被钳到窗口一半，而不是 min(8192, 16_000)"
+        );
+        let provider_request = build_summary_model_request(
+            summary_request.model,
+            &summary_request.messages,
+            summary_request.max_output_tokens,
+        )
+        .expect("摘要请求应可构造");
+        let estimated_input = JsonContextTokenEstimator.estimate_request(&provider_request);
+        assert!(
+            estimated_input + u64::from(summary_request.max_output_tokens) <= 8_000,
+            "摘要请求必须落在已知窗口内"
+        );
+        assert!(
+            estimated_input <= 8_000 - u64::from(summary_request.max_output_tokens),
+            "输入预算必须保留源材料空间，不得被模板开销占满"
+        );
+    }
+    assert_eq!(
+        outcome.record.replaced_message_count, 20,
+        "期望减量按钳后上限预留，全部旧消息都应被替换"
+    );
+}
+
+/// 大窗口下窗口份额约束不生效：默认策略（16_000）加 200k 窗口时摘要输出
+/// 预算保持策略原值，不因新增钳制改变既有行为。
+#[tokio::test]
+async fn large_window_keeps_policy_summary_output_budget() {
+    let compressor = Arc::new(RecordingCompressor::new("摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 必须保留"),
+        Message::text(MessageRole::Developer, "developer 必须保留"),
+    ];
+    messages.extend((0..4).map(|_| Message::text(MessageRole::User, "x".repeat(4_000))));
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let request = ModelRequest::new("context-model", messages);
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(200_000),
+        ..ProviderCapabilities::default()
+    };
+
+    let outcome = manager
+        .compact_with_capabilities(
+            &request,
+            ContextCompressionTrigger::Budget,
+            2_400,
+            &capabilities,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("大窗口压缩必须保持可行");
+
+    let requests = compressor.requests();
+    assert_eq!(requests.len(), 1, "小规模历史应单块完成摘要");
+    assert_eq!(
+        requests[0].max_output_tokens, 16_000,
+        "大窗口下摘要输出预算必须保持策略原值"
+    );
+    assert_eq!(outcome.record.replaced_message_count, 4);
+}
+
+/// 期望减量必须跟随钳后的摘要输出上限：window=24_000 时上限被钳到 12_000，
+/// 目标接近当前估算时期望减量为“降幅 + 12_000”，最早满足区间在 16 条消息处
+/// 命中；若仍按策略原始 16_000 预留，则会过量移除全部 20 条旧消息。
+#[tokio::test]
+async fn plan_replacement_desired_reduction_follows_clamped_summary_budget() {
+    let compressor = Arc::new(RecordingCompressor::new("摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认策略应有效");
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 必须保留"),
+        Message::text(MessageRole::Developer, "developer 必须保留"),
+    ];
+    messages.extend((0..20).map(|_| Message::text(MessageRole::User, "x".repeat(4_000))));
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let request = ModelRequest::new("context-model", messages);
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(24_000),
+        ..ProviderCapabilities::default()
+    };
+
+    let outcome = manager
+        .compact_with_capabilities(
+            &request,
+            ContextCompressionTrigger::Budget,
+            16_121,
+            &capabilities,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("部分替换后的请求必须仍在窗口内");
+
+    assert_eq!(
+        outcome.record.replaced_message_count, 16,
+        "期望减量必须按钳后上限 12_000 计算，而不是策略原始 16_000"
+    );
+}
+
 /// 完整但不可拆分的超大工具交换必须失败关闭，不能只发送孤立调用或结果。
 #[tokio::test]
 async fn oversized_atomic_tool_exchange_fails_closed_before_model_call() {

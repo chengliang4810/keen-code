@@ -464,8 +464,10 @@ pub struct ContextPolicy {
     /// 长会话摘要必须容纳关键决策、文件路径与未完成事项清单，输出预算过小会把
     /// 恢复工作所需的细节在生成阶段截断。默认 16_000 对齐 peri 的
     /// `summary_max_tokens`；CCB 按摘要输出 p99.99=17_387 的实测预留 20_000，
-    /// 本值仍低于该实测上界。已知窗口时该值还会被 Provider 最大输出与
-    /// 窗口容量（`largest_fitting_summary_output`）进一步钳制。
+    /// 本值仍低于该实测上界。已知窗口时实际生效值还会被 Provider 最大输出、
+    /// 窗口容量（`largest_fitting_summary_output`）与窗口份额（不超过窗口
+    /// 一半，见 `summary_output_ceiling`）进一步钳制；摘要预算被窗口钳小是
+    /// 正确行为——小窗口下摘要请求必须保留一半窗口给源材料输入。
     pub summary_max_output_tokens: u32,
 }
 
@@ -760,7 +762,18 @@ impl ContextManager {
         ensure_not_cancelled(cancellation)?;
         let before = self.estimate_request_unanchored(request);
         let units = transcript_units(&request.messages);
-        let plan = self.plan_replacement(request, &units, before, target_tokens)?;
+        // 先算出钳后的摘要输出上限：plan_replacement 的期望减量按“实际可能插入
+        // 的摘要规模”预留余量，小窗口下跟随钳后值，不按策略原始值虚高。
+        let summary_output_ceiling = capabilities
+            .map(|item| self.summary_output_ceiling(item))
+            .unwrap_or(self.policy.summary_max_output_tokens);
+        let plan = self.plan_replacement(
+            request,
+            &units,
+            before,
+            target_tokens,
+            summary_output_ceiling,
+        )?;
         let source_messages = request.messages[plan.start..plan.end].to_vec();
         let digest = digest_messages(&source_messages)?;
         let summary_budget = self.summary_budget(request, capabilities)?;
@@ -852,6 +865,24 @@ impl ContextManager {
         })
     }
 
+    /// 计算摘要输出的有效上限：策略值、Provider 最大输出与窗口份额的最小值。
+    ///
+    /// 已知窗口时窗口份额把摘要输出钳制到窗口一半，与主请求输出预留的窗口一半
+    /// 钳制保持同一不变式：任何单一输出主张都不得占据超过一半窗口。摘要预算被
+    /// 窗口钳小是正确行为——小窗口本来就装不下大摘要；钳制保证摘要输入预算
+    /// （窗口减去实际输出上限）至少保留一半窗口给源材料，使压缩退化为“预算内
+    /// 小摘要”而非因输入空间被模板占满必然失败。窗口未知时窗口份额不生效。
+    fn summary_output_ceiling(&self, capabilities: &ProviderCapabilities) -> u32 {
+        let mut ceiling = self.policy.summary_max_output_tokens;
+        if let Some(value) = capabilities.max_output_tokens {
+            ceiling = ceiling.min(value.min(u64::from(u32::MAX)) as u32);
+        }
+        if let Some(window) = capabilities.max_context_tokens {
+            ceiling = ceiling.min((window / 2).min(u64::from(u32::MAX)) as u32);
+        }
+        ceiling.max(1)
+    }
+
     /// 计算摘要调用在已知 Provider 窗口中的有效输入和输出预算。
     fn summary_budget(
         &self,
@@ -864,12 +895,7 @@ impl ContextManager {
         let Some(max_context_tokens) = capabilities.max_context_tokens else {
             return Ok(None);
         };
-        let output_ceiling = capabilities
-            .max_output_tokens
-            .map(|value| value.min(u64::from(u32::MAX)) as u32)
-            .map(|value| value.min(self.policy.summary_max_output_tokens))
-            .unwrap_or(self.policy.summary_max_output_tokens)
-            .max(1);
+        let output_ceiling = self.summary_output_ceiling(capabilities);
         let max_output_tokens =
             largest_fitting_summary_output(&request.model, output_ceiling, max_context_tokens)
                 .ok_or(ContextError::CompressionRequestTooLarge {
@@ -1088,17 +1114,21 @@ impl ContextManager {
     }
 
     /// 选择受保护边界之间最早能达到目标的区间，否则选择预计减量最大的安全区间。
+    ///
+    /// 期望减量按钳后的摘要输出上限预留插入余量：压缩后区间内会插入一个不超过
+    /// 该上限的摘要，减量目标必须覆盖“降到 target 之外再加上摘要自身规模”。
     fn plan_replacement(
         &self,
         request: &ModelRequest,
         units: &[TranscriptUnit],
         before: u64,
         target_tokens: u64,
+        summary_output_ceiling: u32,
     ) -> Result<ReplacementPlan, ContextError> {
         let tail_start = units.len().saturating_sub(self.policy.minimum_recent_units);
         let desired_reduction = before
             .saturating_sub(target_tokens)
-            .saturating_add(u64::from(self.policy.summary_max_output_tokens))
+            .saturating_add(u64::from(summary_output_ceiling))
             .max(1);
         let mut best_run: Option<(usize, usize, u64)> = None;
         let mut cursor = 0;
