@@ -10,7 +10,7 @@ use globset::{GlobBuilder, GlobMatcher};
 use ignore::WalkBuilder;
 use keencode_agent::{
     AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
-    TurnCancellation,
+    ToolOutputArtifactSink, TurnCancellation,
 };
 use keencode_model::ToolDefinition;
 use regex::{Regex, RegexBuilder};
@@ -18,7 +18,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::environment::{
-    READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path, invalid_input,
+    EnvironmentArtifactSink, READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path,
+    invalid_input,
 };
 
 /// 没有显式指定时单次搜索默认最多返回的结果数量。
@@ -71,6 +72,11 @@ impl AgentTool for GlobTool {
     /// 声明 15 秒墙钟，防止挂起的目录遍历把整个 Turn 挂死到用户取消。
     fn timeout(&self) -> Option<Duration> {
         Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在阻塞线程中执行忽略感知遍历并观察取消令牌。
@@ -146,6 +152,11 @@ impl AgentTool for GrepTool {
     /// 声明 15 秒墙钟，防止挂起的文件搜索把整个 Turn 挂死到用户取消。
     fn timeout(&self) -> Option<Duration> {
         Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在阻塞线程中搜索文件并在文件边界观察取消令牌。

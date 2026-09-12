@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use keencode_agent::{
     AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
+    ToolOutputArtifactSink,
 };
 use keencode_model::{ImageContent, ToolDefinition, ToolResultContent};
 use serde::Deserialize;
@@ -17,7 +18,8 @@ use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
 use crate::environment::{
-    READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path, invalid_input,
+    EnvironmentArtifactSink, READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path,
+    invalid_input,
 };
 
 /// 未指定 `limit` 时单次读取的默认行数。
@@ -81,6 +83,11 @@ impl AgentTool for ReadTool {
         Some(READ_ONLY_WALL_CLOCK_TIMEOUT)
     }
 
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
+    }
+
     /// 在阻塞线程中读取文件并持续观察 Turn 取消令牌。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         let environment = self.environment.clone();
@@ -138,6 +145,11 @@ impl AgentTool for EditTool {
         ToolConcurrency::Exclusive
     }
 
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
+    }
+
     /// 在阻塞线程中完成精确匹配和原子替换。
     fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
         let environment = self.environment.clone();
@@ -190,6 +202,11 @@ impl AgentTool for WriteTool {
     /// 文件写入必须作为顺序副作用屏障执行。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Exclusive
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在阻塞线程中创建父目录并原子持久化完整内容。

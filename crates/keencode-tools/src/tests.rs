@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use keencode_agent::{
-    AgentId, AgentTool, SessionId, ToolCallId, ToolContext, ToolEffect, ToolError, ToolRegistry,
-    TurnCancellation, TurnId,
+    AgentId, AgentTool, SessionId, ToolCallId, ToolContext, ToolEffect, ToolError,
+    ToolOutputArtifactSink, ToolRegistry, TurnCancellation, TurnId,
 };
 use keencode_model::ToolResultContent;
 use serde_json::json;
@@ -1785,4 +1785,42 @@ fn command_tools_declare_self_managed_timeout() {
         );
         assert_eq!(AgentTool::timeout(&GitTool::new(environment)), None);
     }
+}
+
+/// 工件落盘通道保存完整正文并净化工具名前缀；目录不可写时回传错误。
+#[test]
+fn environment_artifact_sink_saves_full_output_with_sanitized_prefix() {
+    let directory = tempdir().expect("应创建临时目录");
+    let environment = ToolEnvironment::new(directory.path())
+        .expect("工具环境应有效")
+        .with_artifact_directory(directory.path().join("artifacts"))
+        .expect("输出目录应有效");
+    let sink = crate::environment::EnvironmentArtifactSink::new(&environment);
+
+    let path = sink
+        .save_output("Read/工具:01", "完整输出正文")
+        .expect("工件应保存成功");
+    let file_name = Path::new(&path)
+        .file_name()
+        .expect("路径应包含文件名")
+        .to_string_lossy()
+        .into_owned();
+    // 非文件名安全字符整体剔除，避免拼接出异常路径。
+    assert!(file_name.starts_with("keencode-Read01-"), "{file_name}");
+    assert!(file_name.ends_with(".log"));
+    let saved = fs::read_to_string(directory.path().join("artifacts").join(&file_name))
+        .expect("应读回工件");
+    assert_eq!(saved, "完整输出正文");
+
+    // 工件目录被一个已存在的文件挡住时，保存失败必须以 Err 回传。
+    fs::write(directory.path().join("blocker"), "占位").expect("应写入占位文件");
+    let blocked = ToolEnvironment::new(directory.path())
+        .expect("工具环境应有效")
+        .with_artifact_directory(directory.path().join("blocker").join("artifacts"))
+        .expect("输出目录应有效");
+    let blocked_sink = crate::environment::EnvironmentArtifactSink::new(&blocked);
+    assert!(
+        blocked_sink.save_output("Read", "内容").is_err(),
+        "不可写目录应回传错误"
+    );
 }

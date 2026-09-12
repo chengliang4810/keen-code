@@ -101,10 +101,16 @@ impl fmt::Display for ToolOutputErrorCode {
 }
 
 /// 固定且不包含原工具输出的只读工具超限结果。
+///
+/// 仅在截断落盘通道不可用（未接入工件目录或保存失败，证据无法保全）时
+/// 作为保守回退使用；正常路径下超限输出会被截断并落盘后回流。
 pub(crate) const TOOL_OUTPUT_LIMIT_RESULT: &str =
     "tool_output_limit_exceeded：工具输出超过安全上限；不可自动重试";
 
 /// 固定且不包含原工具输出的副作用工具超限结果。
+///
+/// 仅在截断落盘通道不可用（未接入工件目录或保存失败，证据无法保全）时
+/// 作为保守回退使用；正常路径下超限输出会被截断并落盘后回流，Turn 继续。
 pub(crate) const SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT: &str =
     "tool_output_limit_exceeded_side_effect：工具输出超过安全上限；副作用可能已发生；禁止自动重试";
 
@@ -280,6 +286,33 @@ impl ToolRoundOutputBudget {
         true
     }
 
+    /// 返回下一个结果在为剩余固定失败结果预留容量后可占用的上限三元组
+    /// （内容块数、模型可见字节数、JSON 编码字节数）。
+    ///
+    /// 该结果自身仍占用一个待生成结果的固定失败预留，因此预留按
+    /// `pending_results - 1` 计算；三个维度与
+    /// [`ToolRoundOutputBudget::try_charge_result`] 的判定完全对齐，按此
+    /// 上限截断后的结果必定能被接纳。
+    pub(crate) fn next_result_capacity(&self) -> (usize, usize, usize) {
+        let remaining_pending = self.pending_results.saturating_sub(1);
+        let remaining_blocks = self.content_blocks.saturating_add(remaining_pending);
+        let model_reserve =
+            remaining_pending.saturating_mul(ROUND_PENDING_RESULT_MODEL_RESERVE_BYTES);
+        let json_reserve =
+            remaining_pending.saturating_mul(ROUND_PENDING_RESULT_JSON_RESERVE_BYTES);
+        (
+            TOOL_OUTPUT_LIMITS
+                .max_round_content_blocks
+                .saturating_sub(remaining_blocks),
+            TOOL_OUTPUT_LIMITS
+                .max_round_model_visible_bytes
+                .saturating_sub(self.model_visible_bytes.saturating_add(model_reserve)),
+            TOOL_OUTPUT_LIMITS
+                .max_round_json_bytes
+                .saturating_sub(self.json_bytes.saturating_add(json_reserve)),
+        )
+    }
+
     /// 检查新增容量和所有待生成固定结果能否同时留在 Round 硬上限内。
     fn fits_with_pending_reserve(
         &self,
@@ -323,16 +356,41 @@ impl ToolRoundOutputBudget {
     }
 }
 
+/// 工具成功输出未能通过统一归一边界的稳定分类；超限时交还原完整输出。
+#[derive(Debug, PartialEq)]
+pub(crate) enum ToolOutputValidation {
+    /// 输出不满足 Provider 中立图片或 Base64 结构约束。
+    Invalid,
+    /// 输出任一容量维度超过固定硬上限；携带原始完整输出供截断落盘复用。
+    LimitExceeded { output: ToolOutput },
+}
+
 /// 先验证完整成功输出，再计算后续所有消费者复用的唯一结果容量。
 pub(crate) fn validate_tool_output(
     tool_call_id: String,
     output: ToolOutput,
-) -> Result<(ToolResult, ToolResultFootprint), ToolOutputRejection> {
+) -> Result<(ToolResult, ToolResultFootprint), ToolOutputValidation> {
     if output.content.len() > TOOL_OUTPUT_LIMITS.max_content_blocks {
-        return Err(ToolOutputRejection::LimitExceeded);
+        return Err(ToolOutputValidation::LimitExceeded { output });
     }
     let result = ToolResult::new(tool_call_id, output.content, false);
-    measure_tool_result(&result).map(|footprint| (result, footprint))
+    match measure_tool_result(&result) {
+        Ok(footprint) => Ok((result, footprint)),
+        Err(ToolOutputRejection::Invalid) => Err(ToolOutputValidation::Invalid),
+        Err(ToolOutputRejection::LimitExceeded) => Err(ToolOutputValidation::LimitExceeded {
+            output: ToolOutput {
+                content: result.content,
+            },
+        }),
+    }
+}
+
+/// 判断一个图片来源是否无法通过图片硬上限校验。
+///
+/// 图片或 data URL 自身超限不属于文本截断的修复范围，落盘图片不在
+/// 输出截断机制的范围内，此时维持既有拒绝语义。
+pub(crate) fn image_source_over_limit(source: &ImageSource) -> bool {
+    measure_image_source(source).is_err()
 }
 
 /// 验证完整 ToolResult 并返回模型可见与 JSON 编码容量；不会保留任何前缀副本。
@@ -795,6 +853,174 @@ pub type ToolFuture<'a> = Pin<Box<dyn Future<Output = Result<ToolOutput, ToolErr
 /// Runtime 对未声明自管超时工具施加的默认外层墙钟上限。
 pub const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// 把超出模型预算的完整工具输出保存到本机的同步落盘通道。
+///
+/// 实现必须复用命令输出先例的工件目录与命名约定（`keencode-{label}-`
+/// 前缀的随机临时文件），返回的路径文本会嵌入截断标记，模型可据此用
+/// Read 类方式取回完整输出。实现必须是可在任意线程安全调用的纯阻塞
+/// 文件操作，不得访问异步运行时资源；运行时在工具完成后的归一阶段
+/// 同步调用。
+pub trait ToolOutputArtifactSink: Send + Sync {
+    /// 同步保存完整 UTF-8 正文，返回模型可读取的稳定路径文本。
+    ///
+    /// `label` 是来源工具名，实现方负责将其净化为安全的文件名前缀；
+    /// 返回 `Err` 表示落盘失败，运行时会回退到既有固定拒绝语义。
+    fn save_output(&self, label: &str, content: &str) -> io::Result<String>;
+}
+
+/// 截断标记两侧各保留的文本字节数；与命令输出预览粒度保持一致。
+pub(crate) const TRUNCATED_TEXT_KEEP_BYTES: usize = 8 * 1_024;
+
+/// 文本块中部省略时嵌入的稳定标记。
+pub(crate) const TRUNCATION_MARKER: &str = "\n...[中间输出已截断]...\n";
+
+/// 截断说明文本的稳定前缀，模型据此识别工具输出的截断指针。
+pub(crate) const TRUNCATION_SENTINEL_PREFIX: &str = "工具输出超过模型上下文安全上限";
+
+/// 完整输出工件在运行时内传递的最小事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct TruncatedOutputArtifact {
+    /// 工件的模型可读路径文本，已嵌入截断说明。
+    pub(crate) path: String,
+    /// 完整输出正文的 UTF-8 字节数。
+    pub(crate) total_bytes: usize,
+}
+
+/// 把超限成功输出保存到工件并按给定容量截断。
+///
+/// 容量三元组依次为内容块数、模型可见字节数与 JSON 编码字节数。返回
+/// 截断后的输出与工件事实；图片来源自身无法通过校验、落盘失败或容量
+/// 小到连截断说明都无法容纳时返回 `None`，调用方回退既有固定拒绝语义。
+pub(crate) fn truncate_tool_output_with_artifact(
+    tool_call_id: &str,
+    output: ToolOutput,
+    label: &str,
+    sink: &dyn ToolOutputArtifactSink,
+    capacity: (usize, usize, usize),
+) -> Option<(ToolOutput, TruncatedOutputArtifact)> {
+    let body = tool_output_artifact_body(&output);
+    let path = sink.save_output(label, &body).ok()?;
+    let artifact = TruncatedOutputArtifact {
+        path,
+        total_bytes: body.len(),
+    };
+    let truncated = truncate_tool_output_to_capacity(tool_call_id, output, &artifact, capacity)?;
+    Some((truncated, artifact))
+}
+
+/// 按给定容量截断一个完整输出已保全在工件中的超限结果。
+pub(crate) fn truncate_tool_output_to_capacity(
+    tool_call_id: &str,
+    output: ToolOutput,
+    artifact: &TruncatedOutputArtifact,
+    capacity: (usize, usize, usize),
+) -> Option<ToolOutput> {
+    // 图片或 data URL 自身超限（或结构无效）不属于文本截断的修复范围，
+    // 落盘图片也不在输出截断机制范围内，此时维持既有拒绝语义。
+    if output
+        .content
+        .iter()
+        .any(|block| matches!(block, ToolResultContent::Image { image } if image_source_over_limit(&image.source)))
+    {
+        return None;
+    }
+    let kept_blocks = capacity.0.checked_sub(1)?;
+    let mut content = output.content;
+    // 为截断说明块预留一个槽位；被丢弃的尾部块已在工件中完整保全。
+    while content.len() > kept_blocks {
+        content.pop();
+    }
+    content.push(ToolResultContent::Text {
+        text: truncation_sentinel(artifact),
+    });
+    let mut result = ToolResult::new(tool_call_id.to_owned(), content, false);
+    loop {
+        if truncated_result_fits(&result, capacity) {
+            break;
+        }
+        if !shrink_largest_text_block(&mut result.content) {
+            // 文本收缩已到下限仍放不下（例如大量合法图片占满 JSON 预算）：
+            // 整体收缩为仅剩截断说明；连说明都容纳不下时回退固定拒绝。
+            result.content = vec![ToolResultContent::Text {
+                text: truncation_sentinel(artifact),
+            }];
+            if !truncated_result_fits(&result, capacity) {
+                return None;
+            }
+            break;
+        }
+    }
+    Some(ToolOutput {
+        content: result.content,
+    })
+}
+
+/// 判断截断候选结果是否同时满足单结果硬上限与给定容量三元组。
+fn truncated_result_fits(result: &ToolResult, capacity: (usize, usize, usize)) -> bool {
+    match measure_tool_result(result) {
+        Ok(footprint) => {
+            footprint.content_blocks <= capacity.0
+                && footprint.model_visible_bytes <= capacity.1
+                && footprint.json_bytes <= capacity.2
+        }
+        // 图片已预检；此处失败只可能是单块文本越界或 JSON 越界，
+        // 均属于继续收缩可修复的状态。
+        Err(_) => false,
+    }
+}
+
+/// 把最大的文本块收缩为首尾各保留 [`TRUNCATED_TEXT_KEEP_BYTES`] 字节的
+/// 有界预览；返回是否发生了收缩。
+fn shrink_largest_text_block(content: &mut [ToolResultContent]) -> bool {
+    let shrink_threshold = TRUNCATED_TEXT_KEEP_BYTES.saturating_mul(2);
+    let mut largest = None;
+    let mut largest_bytes = shrink_threshold;
+    for (index, block) in content.iter().enumerate() {
+        if let ToolResultContent::Text { text } = block
+            && text.len() > largest_bytes
+        {
+            largest = Some(index);
+            largest_bytes = text.len();
+        }
+    }
+    let Some(index) = largest else {
+        return false;
+    };
+    let Some(ToolResultContent::Text { text }) = content.get_mut(index) else {
+        return false;
+    };
+    let mut head_end = TRUNCATED_TEXT_KEEP_BYTES;
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len().saturating_sub(TRUNCATED_TEXT_KEEP_BYTES);
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    let tail = text[tail_start..].to_owned();
+    text.truncate(head_end);
+    text.push_str(TRUNCATION_MARKER);
+    text.push_str(&tail);
+    true
+}
+
+/// 构造指向完整输出工件的稳定截断说明；呈现方式与命令输出的
+/// 工件路径字段保持同构，模型可据此用 Read 取回完整内容。
+fn truncation_sentinel(artifact: &TruncatedOutputArtifact) -> String {
+    format!(
+        "{TRUNCATION_SENTINEL_PREFIX}，已省略部分内容；完整输出共 {} 字节，已保存到：{}；可用 Read 工具读取完整内容。",
+        artifact.total_bytes, artifact.path
+    )
+}
+
+/// 返回写入工件的完整输出正文；单文本块按原文保存，其余序列化为 JSON。
+fn tool_output_artifact_body(output: &ToolOutput) -> String {
+    if let [ToolResultContent::Text { text }] = &output.content[..] {
+        return text.clone();
+    }
+    serde_json::to_string(&output.content).unwrap_or_default()
+}
+
 /// Agent Runtime 可注册的一个 Provider 中立工具。
 pub trait AgentTool: Send + Sync {
     /// 返回提供给模型的名称、说明和 JSON Schema。
@@ -813,6 +1039,16 @@ pub trait AgentTool: Send + Sync {
     /// `None`，避免外层上限截断合法的长执行。
     fn timeout(&self) -> Option<Duration> {
         Some(DEFAULT_TOOL_TIMEOUT)
+    }
+
+    /// 返回把超出模型预算的完整输出保存到本机工件的落盘通道。
+    ///
+    /// 默认 `None`：未接入 Session 工件目录的工具（MCP 桥接、LSP、
+    /// Skill、状态与协作工具）无法提供完整输出副本，输出超限时维持
+    /// 既有固定拒绝语义。持有共享环境的内置工具应覆盖为本环境提供的
+    /// 通道，使超限输出被截断并落盘后回流。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        None
     }
 
     /// 校验并执行一次工具调用。
@@ -966,8 +1202,10 @@ mod output_guard_tests {
 
         let oversized = format!("{}界", "a".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes - 1));
         assert_eq!(
-            validate_tool_output("call-over".to_owned(), text_output(oversized)),
-            Err(ToolOutputRejection::LimitExceeded)
+            validate_tool_output("call-over".to_owned(), text_output(oversized.clone())),
+            Err(ToolOutputValidation::LimitExceeded {
+                output: text_output(oversized)
+            })
         );
     }
 
@@ -990,8 +1228,8 @@ mod output_guard_tests {
                 .collect(),
         };
         assert_eq!(
-            validate_tool_output("call-over".to_owned(), oversized),
-            Err(ToolOutputRejection::LimitExceeded)
+            validate_tool_output("call-over".to_owned(), oversized.clone()),
+            Err(ToolOutputValidation::LimitExceeded { output: oversized })
         );
     }
 
@@ -1042,8 +1280,8 @@ mod output_guard_tests {
             }],
         };
         assert_eq!(
-            validate_tool_output("call-media".to_owned(), output),
-            Err(ToolOutputRejection::LimitExceeded)
+            validate_tool_output("call-media".to_owned(), output.clone()),
+            Err(ToolOutputValidation::LimitExceeded { output })
         );
 
         for media_type in [
@@ -1072,7 +1310,7 @@ mod output_guard_tests {
             };
             assert_eq!(
                 validate_tool_output("call-media-invalid".to_owned(), output),
-                Err(ToolOutputRejection::Invalid),
+                Err(ToolOutputValidation::Invalid),
                 "{media_type:?} 不得作为图片媒体类型"
             );
         }
@@ -1113,7 +1351,7 @@ mod output_guard_tests {
             };
             assert_eq!(
                 validate_tool_output("call-data-invalid".to_owned(), output),
-                Err(ToolOutputRejection::Invalid),
+                Err(ToolOutputValidation::Invalid),
                 "{url:?} 不得被接受"
             );
         }
@@ -1200,14 +1438,21 @@ mod output_guard_tests {
     /// JSON 编码预算按转义后的实际字节计数，而不是只看原始文本长度。
     #[test]
     fn result_json_limit_counts_escaped_bytes_without_copying_output() {
-        let content = (0..5)
+        let content: Vec<ToolResultContent> = (0..5)
             .map(|_| ToolResultContent::Text {
                 text: "\0".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes),
             })
             .collect();
         assert_eq!(
-            validate_tool_output("call-json".to_owned(), ToolOutput { content }),
-            Err(ToolOutputRejection::LimitExceeded)
+            validate_tool_output(
+                "call-json".to_owned(),
+                ToolOutput {
+                    content: content.clone()
+                }
+            ),
+            Err(ToolOutputValidation::LimitExceeded {
+                output: ToolOutput { content }
+            })
         );
     }
 
@@ -1312,5 +1557,88 @@ mod output_guard_tests {
                 retryable: false,
             }
         );
+    }
+
+    /// next_result_capacity 的三个维度与 try_charge_result 判定完全对齐，
+    /// 按容量上限构造的结果必定能被 Round 预算接纳。
+    #[test]
+    fn next_result_capacity_matches_charge_success() {
+        let mut budget = ToolRoundOutputBudget::new(3);
+        assert!(budget.try_charge_result(ToolResultFootprint {
+            content_blocks: 61,
+            model_visible_bytes: 0,
+            json_bytes: 0,
+        }));
+        let (blocks, model, json) = budget.next_result_capacity();
+        // 已占用 61 块且仍有一个后续待生成结果需要预留一个固定失败块。
+        assert_eq!(blocks, TOOL_OUTPUT_LIMITS.max_round_content_blocks - 61 - 1);
+        assert!(budget.try_charge_result(ToolResultFootprint {
+            content_blocks: blocks,
+            model_visible_bytes: model,
+            json_bytes: json,
+        }));
+
+        let mut budget = ToolRoundOutputBudget::new(2);
+        assert!(budget.try_charge_result(ToolResultFootprint {
+            content_blocks: 1,
+            model_visible_bytes: TOOL_OUTPUT_LIMITS.max_round_model_visible_bytes
+                - ROUND_PENDING_RESULT_MODEL_RESERVE_BYTES,
+            json_bytes: 0,
+        }));
+        let (_, model, _) = budget.next_result_capacity();
+        assert_eq!(model, ROUND_PENDING_RESULT_MODEL_RESERVE_BYTES);
+    }
+
+    /// 图片来源自身无法通过校验时不能进入文本截断，维持既有拒绝语义。
+    #[test]
+    fn image_source_over_limit_output_cannot_be_truncated() {
+        let oversized_url = format!(
+            "https://example.test/{}",
+            "a".repeat(TOOL_OUTPUT_LIMITS.max_remote_url_bytes + 1)
+        );
+        let output = ToolOutput {
+            content: vec![ToolResultContent::Image {
+                image: ImageContent::from_url(oversized_url),
+            }],
+        };
+        let artifact = TruncatedOutputArtifact {
+            path: "/tmp/keencode-full.log".to_owned(),
+            total_bytes: 1,
+        };
+        assert_eq!(
+            truncate_tool_output_to_capacity(
+                "call-image",
+                output,
+                &artifact,
+                (
+                    TOOL_OUTPUT_LIMITS.max_content_blocks,
+                    usize::MAX,
+                    TOOL_OUTPUT_LIMITS.max_result_json_bytes
+                )
+            ),
+            None
+        );
+    }
+
+    /// 容量小到只够截断说明时整体收缩为仅剩说明块，保证结果可接纳。
+    #[test]
+    fn tiny_capacity_collapses_to_sentinel_only() {
+        let output = ToolOutput::text("x".repeat(100_000));
+        let artifact = TruncatedOutputArtifact {
+            path: "/tmp/keencode-full.log".to_owned(),
+            total_bytes: 100_000,
+        };
+        let truncated = truncate_tool_output_to_capacity(
+            "call-tiny",
+            output,
+            &artifact,
+            (1, usize::MAX, TOOL_OUTPUT_LIMITS.max_result_json_bytes),
+        )
+        .expect("单块截断说明容量必定可接纳");
+        let [ToolResultContent::Text { text }] = &truncated.content[..] else {
+            panic!("收缩结果应只包含一个截断说明块");
+        };
+        assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
+        assert!(text.contains("完整输出共 100000 字节"));
     }
 }

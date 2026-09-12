@@ -25,8 +25,9 @@ use crate::event::AgentToolRoundBinding;
 use crate::structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
 use crate::tool::{
     NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, ToolError,
-    ToolFuture, ToolOutput, ToolOutputRejection, ToolResultFootprint, ToolRoundOutputBudget,
-    measure_tool_result, normalize_tool_error, validate_tool_output,
+    ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputValidation, ToolResultFootprint,
+    ToolRoundOutputBudget, TruncatedOutputArtifact, measure_tool_result, normalize_tool_error,
+    truncate_tool_output_to_capacity, truncate_tool_output_with_artifact, validate_tool_output,
 };
 use crate::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
@@ -4317,8 +4318,10 @@ async fn execute_one_raw(
     let cancelled = Box::pin(call_cancellation.cancelled());
     let executed = tool.execute(context, call.arguments);
     let wall_clock_limit = tool.timeout();
+    // 工件通道在归一阶段使用：单结果超限截断与 Round 聚合截断共用。
+    let artifact_sink = tool.output_artifact_sink();
     let raced = Box::pin(race_tool_wall_clock(wall_clock_limit, executed));
-    let (result, status, failure, terminal_error, observation) =
+    let (result, status, failure, terminal_error, observation, artifact) =
         match select(cancelled, raced).await {
             // Turn 取消优先于墙钟超时：两个条件同时就绪时取消先被轮询。
             Either::Left(((), pending_race)) => {
@@ -4333,6 +4336,7 @@ async fn execute_one_raw(
                     Some(ToolHookFailureKind::Cancelled),
                     Some(AgentRunError::Cancelled),
                     None,
+                    None,
                 )
             }
             Either::Right((TimedToolRun::Finished(Ok(output)), _)) => {
@@ -4343,8 +4347,9 @@ async fn execute_one_raw(
                         None,
                         None,
                         Some(ToolExecutionObservation::Succeeded),
+                        None,
                     ),
-                    Err(ToolOutputRejection::Invalid) => (
+                    Err(ToolOutputValidation::Invalid) => (
                         ToolResult::text(call.id.clone(), INVALID_TOOL_OUTPUT_RESULT, true),
                         ToolCompletionStatus::Failed,
                         Some(ToolHookFailureKind::InvalidOutput),
@@ -4353,19 +4358,38 @@ async fn execute_one_raw(
                             call: fingerprint.clone(),
                             error_code: INVALID_TOOL_OUTPUT_ERROR_CODE.to_owned(),
                         }),
+                        None,
                     ),
-                    Err(ToolOutputRejection::LimitExceeded) => {
-                        let code = output_limit_error_code(effect);
-                        (
-                            output_limit_result(&call.id, effect),
-                            ToolCompletionStatus::Failed,
-                            Some(ToolHookFailureKind::OutputLimitExceeded),
-                            output_limit_terminal_error(effect),
-                            Some(ToolExecutionObservation::Failed {
-                                call: fingerprint.clone(),
-                                error_code: code.as_str().to_owned(),
-                            }),
-                        )
+                    Err(ToolOutputValidation::LimitExceeded { output }) => {
+                        match truncate_over_limit_output(
+                            &call.id,
+                            output,
+                            &call.name,
+                            artifact_sink.as_deref(),
+                        ) {
+                            Some((result, artifact)) => (
+                                result,
+                                ToolCompletionStatus::Succeeded,
+                                None,
+                                None,
+                                Some(ToolExecutionObservation::Succeeded),
+                                Some(artifact),
+                            ),
+                            None => {
+                                let code = output_limit_error_code(effect);
+                                (
+                                    output_limit_result(&call.id, effect),
+                                    ToolCompletionStatus::Failed,
+                                    Some(ToolHookFailureKind::OutputLimitExceeded),
+                                    output_limit_terminal_error(effect),
+                                    Some(ToolExecutionObservation::Failed {
+                                        call: fingerprint.clone(),
+                                        error_code: code.as_str().to_owned(),
+                                    }),
+                                    None,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -4381,6 +4405,7 @@ async fn execute_one_raw(
                         call: fingerprint.clone(),
                         error_code,
                     }),
+                    None,
                 )
             }
             Either::Right((TimedToolRun::ExceededWallClock { limit, pending }, _)) => {
@@ -4405,6 +4430,7 @@ async fn execute_one_raw(
                         call: fingerprint.clone(),
                         error_code: TOOL_TIMEOUT_ERROR_CODE.to_owned(),
                     }),
+                    None,
                 )
             }
         };
@@ -4419,7 +4445,37 @@ async fn execute_one_raw(
         failure,
         terminal_error,
         observation,
+        artifact,
+        artifact_sink,
     })
+}
+
+/// 把超限成功输出截断落盘为可回流的成功结果；工件通道不可用时返回 `None`。
+///
+/// 截断按单结果硬上限执行：文本块收缩为首尾各有界预览并附加指向完整
+/// 工件的截断说明，副作用工具因此不再因输出超限进入 Turn 终态。
+fn truncate_over_limit_output(
+    call_id: &str,
+    output: ToolOutput,
+    label: &str,
+    sink: Option<&dyn ToolOutputArtifactSink>,
+) -> Option<(ToolResult, TruncatedOutputArtifact)> {
+    let sink = sink?;
+    let (output, artifact) = truncate_tool_output_with_artifact(
+        call_id,
+        output,
+        label,
+        sink,
+        (
+            crate::TOOL_OUTPUT_LIMITS.max_content_blocks,
+            usize::MAX,
+            crate::TOOL_OUTPUT_LIMITS.max_result_json_bytes,
+        ),
+    )?;
+    let result = ToolResult::new(call_id, output.content, false);
+    // 截断结果必须能通过自身硬上限；否则回退既有固定拒绝语义。
+    measure_tool_result(&result).ok()?;
+    Some((result, artifact))
 }
 
 /// 一次工具执行在 Turn 取消之外的两种结局。
@@ -4529,16 +4585,27 @@ struct RawExecutedTool {
     terminal_error: Option<AgentRunError>,
     /// 仅由真实成功或 ToolError 更新重复失败计数。
     observation: Option<ToolExecutionObservation>,
+    /// 超限完整输出已保存的工件；Round 聚合再次截断时复用同一指针。
+    artifact: Option<TruncatedOutputArtifact>,
+    /// 工具提供的输出落盘通道；Round 聚合首次截断时按需保存完整正文。
+    artifact_sink: Option<Arc<dyn ToolOutputArtifactSink>>,
 }
 
 impl RawExecutedTool {
-    /// 在任何生命周期事件和 PostHook 前原子接纳结果，超限时整体替换为固定失败。
+    /// 在任何生命周期事件和 PostHook 前原子接纳结果，超限时优先截断落盘。
     fn enforce_round_budget(
         &mut self,
         effect: ToolEffect,
         budget: &mut ToolRoundOutputBudget,
     ) -> Result<(), AgentRunError> {
         if budget.try_charge_result(self.footprint) {
+            return Ok(());
+        }
+        // 成功结果的 Round 聚合超限属于容量适配：保存完整工件并把结果
+        // 收缩到当前可保留容量，保证整轮提交总能通过且 Turn 不终态。
+        if self.truncate_to_round_capacity(budget.next_result_capacity())
+            && budget.try_charge_result(self.footprint)
+        {
             return Ok(());
         }
         self.replace_with_output_limit(effect)?;
@@ -4548,6 +4615,55 @@ impl RawExecutedTool {
             });
         }
         Ok(())
+    }
+
+    /// 尝试把超出 Round 聚合容量的成功结果截断落盘后回流。
+    ///
+    /// 返回 `true` 表示结果已替换为可接纳的截断版本并保持成功分类；
+    /// 失败结果、无工件通道或截断仍无法容纳时返回 `false`，由调用方
+    /// 回退既有固定超限语义。
+    fn truncate_to_round_capacity(&mut self, capacity: (usize, usize, usize)) -> bool {
+        if self.result.is_error {
+            return false;
+        }
+        let Some(sink) = self.artifact_sink.as_deref() else {
+            return false;
+        };
+        let call_id = self.result.tool_call_id.clone();
+        let output = ToolOutput {
+            content: self.result.content.clone(),
+        };
+        // 完整输出已落盘时复用工件指针仅收缩当前内容；首次聚合超限
+        // 先把当前完整正文保存到工件再截断。
+        let attempt = match &self.artifact {
+            Some(artifact) => {
+                truncate_tool_output_to_capacity(&call_id, output, artifact, capacity)
+                    .map(|truncated| (truncated, artifact.clone()))
+            }
+            None => truncate_tool_output_with_artifact(
+                &call_id,
+                output,
+                &self.fingerprint.tool_name,
+                sink,
+                capacity,
+            ),
+        };
+        let Some((output, artifact)) = attempt else {
+            return false;
+        };
+        let result = ToolResult::new(call_id, output.content, false);
+        let Ok(footprint) = measure_tool_result(&result) else {
+            return false;
+        };
+        self.result = result;
+        self.footprint = footprint;
+        self.artifact = Some(artifact);
+        // 截断是成功结果的容量适配：不改变成功分类，也不进入重复失败计数。
+        self.status = ToolCompletionStatus::Succeeded;
+        self.failure = None;
+        self.observation = Some(ToolExecutionObservation::Succeeded);
+        self.terminal_error = None;
+        true
     }
 
     /// 把当前结果原子替换为不含原正文的固定超限失败，并同步所有下游分类。

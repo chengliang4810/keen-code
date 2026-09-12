@@ -1,11 +1,15 @@
 //! 第一阶段领域状态机的单元测试。
 
 use super::*;
+use crate::tool::{
+    SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, TRUNCATED_TEXT_KEEP_BYTES,
+    TRUNCATION_MARKER, TRUNCATION_SENTINEL_PREFIX,
+};
 use keencode_model::{
     ContentBlock, Message, MessageRole, ModelError, ModelStreamEvent, ProviderCapabilities,
     ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputCapability,
     StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage,
-    ToolCall, ToolChoice, ToolDefinition, ToolResult,
+    ToolCall, ToolChoice, ToolDefinition, ToolResult, ToolResultContent,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -4209,4 +4213,493 @@ async fn recovery_round_context_overflow_walks_forced_compaction_and_keeps_recov
     assert_eq!(usages[4].call_attempt(), 5);
     assert_eq!(usages[4].purpose(), ModelCallPurpose::AgentRound);
     assert_eq!(usages[4].completion().stop_reason, StopReason::Completed);
+}
+
+/// 输出预设内容并把完整正文写入测试工件目录的同步落盘通道。
+struct TestArtifactSink {
+    /// 工件保存目录。
+    directory: std::path::PathBuf,
+    /// 注入保存失败。
+    fail: bool,
+}
+
+impl ToolOutputArtifactSink for TestArtifactSink {
+    /// 保存失败时返回错误，驱动运行时回退既有固定拒绝语义。
+    fn save_output(&self, label: &str, content: &str) -> std::io::Result<String> {
+        if self.fail {
+            return Err(std::io::Error::other("测试注入的工件保存失败"));
+        }
+        std::fs::create_dir_all(&self.directory)?;
+        let path = self.directory.join(format!("keencode-{label}-test.log"));
+        std::fs::write(&path, content)?;
+        Ok(path.to_string_lossy().into_owned())
+    }
+}
+
+/// 返回预设 ToolOutput 并接入测试工件目录的合成工具。
+struct ArtifactOutputTool {
+    /// 提供给模型的精确工具名称。
+    name: &'static str,
+    /// 每次调用采用的副作用分类。
+    effect: ToolEffect,
+    /// 每次调用返回的预设输出。
+    output: ToolOutput,
+    /// 注入的输出落盘通道。
+    sink: Arc<TestArtifactSink>,
+}
+
+impl ArtifactOutputTool {
+    /// 创建绑定临时工件目录的合成工具。
+    fn new(
+        name: &'static str,
+        effect: ToolEffect,
+        output: ToolOutput,
+        directory: std::path::PathBuf,
+        fail: bool,
+    ) -> Self {
+        Self {
+            name,
+            effect,
+            output,
+            sink: Arc::new(TestArtifactSink { directory, fail }),
+        }
+    }
+}
+
+impl AgentTool for ArtifactOutputTool {
+    /// 返回要求字符串 `value` 的合成 Schema。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name,
+            "输出预设内容的合成工具",
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    /// 返回测试预设的副作用分类。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(self.effect)
+    }
+
+    /// 副作用工具按顺序屏障执行，保证 Round 聚合判定顺序确定。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    /// 接入测试工件目录的落盘通道。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(self.sink.clone())
+    }
+
+    /// 返回预设输出。
+    fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        let output = self.output.clone();
+        Box::pin(async move { Ok(output) })
+    }
+}
+
+/// 在系统临时目录创建本次测试专用的工件目录。
+fn artifact_test_directory(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("keencode-agent-tests")
+        .join(format!("{label}-{}", uuid::Uuid::now_v7().simple()))
+}
+
+/// 断言结果为一个文本预览块加一个截断说明块，并返回两段文本。
+fn expect_truncated_text_with_sentinel(result: &ToolResult) -> (&str, &str) {
+    assert!(!result.is_error, "截断回流不算失败：{:?}", result.content);
+    let [
+        ToolResultContent::Text { text: preview },
+        ToolResultContent::Text { text: sentinel },
+    ] = &result.content[..]
+    else {
+        panic!("截断结果应为预览块加截断说明两个文本块");
+    };
+    (preview.as_str(), sentinel.as_str())
+}
+
+/// 只读工具输出超过单结果文本上限时截断为首尾预览并落盘完整工件，Turn 继续。
+#[tokio::test]
+async fn read_only_over_limit_output_is_truncated_with_artifact_and_turn_continues() {
+    let directory = artifact_test_directory("read-only-truncated");
+    let body = "a".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes + 1_024);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "big_read",
+        ToolEffect::ReadOnly,
+        ToolOutput::text(body.clone()),
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "big_read", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    // 工具 Round 之后模型继续发起了下一 Round，Turn 未因输出超限终止。
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    let (text, sentinel) = expect_truncated_text_with_sentinel(results[0]);
+    assert_eq!(
+        text.len(),
+        TRUNCATED_TEXT_KEEP_BYTES * 2 + TRUNCATION_MARKER.len()
+    );
+    assert!(text.starts_with(&"a".repeat(TRUNCATED_TEXT_KEEP_BYTES)));
+    assert!(text.ends_with(&"a".repeat(TRUNCATED_TEXT_KEEP_BYTES)));
+    assert!(text.contains(TRUNCATION_MARKER));
+    assert!(sentinel.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    assert!(sentinel.contains(&format!("完整输出共 {} 字节", body.len())));
+    assert!(sentinel.contains("keencode-big_read-test.log"));
+    let saved = std::fs::read_to_string(directory.join("keencode-big_read-test.log"))
+        .expect("工件文件应已写出");
+    assert_eq!(saved, body);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 副作用工具输出超限同样截断落盘回流，不再进入 Turn 终态。
+#[tokio::test]
+async fn side_effect_over_limit_output_is_truncated_and_turn_continues() {
+    let directory = artifact_test_directory("side-effect-truncated");
+    let body = "改".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes + 1_024);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "big_write",
+        ToolEffect::ChangesState,
+        ToolOutput::text(body.clone()),
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "big_write", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    let (text, sentinel) = expect_truncated_text_with_sentinel(results[0]);
+    // 多字节字符边界会向内收拢，因此按"原输出前缀 + 标记 + 原输出后缀"断言。
+    let marker_position = text.find(TRUNCATION_MARKER).expect("预览块应包含截断标记");
+    assert!(body.starts_with(&text[..marker_position]));
+    let tail = &text[marker_position + TRUNCATION_MARKER.len()..];
+    assert!(body.ends_with(tail));
+    assert!(marker_position <= TRUNCATED_TEXT_KEEP_BYTES);
+    assert!(text.len() - marker_position - TRUNCATION_MARKER.len() <= TRUNCATED_TEXT_KEEP_BYTES);
+    assert!(sentinel.contains("keencode-big_write-test.log"));
+    let saved = std::fs::read_to_string(directory.join("keencode-big_write-test.log"))
+        .expect("工件文件应已写出");
+    assert_eq!(saved, body);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 工件保存失败时只读工具回退既有固定拒绝语义，Turn 继续。
+#[tokio::test]
+async fn read_only_over_limit_output_falls_back_to_fixed_rejection_when_sink_fails() {
+    let directory = artifact_test_directory("read-only-sink-failed");
+    let body = "a".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes + 1_024);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "big_read",
+        ToolEffect::ReadOnly,
+        ToolOutput::text(body),
+        directory.clone(),
+        true,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "big_read", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    assert_eq!(turn_tool_result_text(results[0]), TOOL_OUTPUT_LIMIT_RESULT);
+    assert!(!directory.join("keencode-big_read-test.log").exists());
+}
+
+/// 工件保存失败时副作用工具回退既有终态语义，不自动重试。
+#[tokio::test]
+async fn side_effect_over_limit_output_falls_back_to_terminal_when_sink_fails() {
+    let directory = artifact_test_directory("side-effect-sink-failed");
+    let body = "a".repeat(TOOL_OUTPUT_LIMITS.max_text_bytes + 1_024);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "big_write",
+        ToolEffect::ChangesState,
+        ToolOutput::text(body),
+        directory,
+        true,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&[(
+            "call-1",
+            "big_write",
+            json!({"value": "x"}),
+        )])],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(
+        matches!(result.error, Some(AgentRunError::ToolOutputLimit { .. })),
+        "{:?}",
+        result.error
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].is_error);
+    assert_eq!(
+        turn_tool_result_text(results[0]),
+        SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT
+    );
+}
+
+/// 内容块数超过单结果上限时保留靠前块并附加截断说明，工件保存 JSON 全文。
+#[tokio::test]
+async fn block_count_over_limit_keeps_leading_blocks_with_sentinel() {
+    let directory = artifact_test_directory("block-count-truncated");
+    let output = ToolOutput {
+        content: (0..=TOOL_OUTPUT_LIMITS.max_content_blocks)
+            .map(|index| ToolResultContent::Text {
+                text: format!("块{index}"),
+            })
+            .collect(),
+    };
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "block_tool",
+        ToolEffect::ReadOnly,
+        output,
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "block_tool", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    let truncated_result = results[0];
+    assert!(!truncated_result.is_error);
+    assert_eq!(
+        truncated_result.content.len(),
+        TOOL_OUTPUT_LIMITS.max_content_blocks
+    );
+    for (index, block) in truncated_result.content[..TOOL_OUTPUT_LIMITS.max_content_blocks - 1]
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: format!("块{index}")
+            }
+        );
+    }
+    let ToolResultContent::Text { text } = truncated_result.content.last().expect("结果非空")
+    else {
+        panic!("最后一块应为文本截断说明");
+    };
+    assert!(text.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    let saved = std::fs::read_to_string(directory.join("keencode-block_tool-test.log"))
+        .expect("工件文件应已写出");
+    let parsed: Vec<ToolResultContent> =
+        serde_json::from_str(&saved).expect("多块工件应为内容块 JSON 全文");
+    assert_eq!(parsed.len(), TOOL_OUTPUT_LIMITS.max_content_blocks + 1);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 单结果合规但 Round 聚合超限时，后到结果截断落盘后整轮提交通过。
+#[tokio::test]
+async fn round_aggregate_over_limit_truncates_second_result_and_commits_round() {
+    let directory = artifact_test_directory("round-aggregate-truncated");
+    // 31 块 × 270KiB ≈ 8.2MiB：单结果全部合规；两个结果聚合刚超过 Round
+    // 模型可见字节上限，且恰好需要收缩两个块即可重新容纳。
+    let block_text = "x".repeat(270 * 1_024);
+    let output = ToolOutput {
+        content: (0..31)
+            .map(|_| ToolResultContent::Text {
+                text: block_text.clone(),
+            })
+            .collect(),
+    };
+    let first = Arc::new(ArtifactOutputTool::new(
+        "round_first",
+        ToolEffect::ReadOnly,
+        output.clone(),
+        directory.clone(),
+        false,
+    ));
+    let second = Arc::new(ArtifactOutputTool::new(
+        "round_second",
+        ToolEffect::ReadOnly,
+        output,
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(first).expect("首个工具应可注册");
+    registry.register(second).expect("第二个工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-1", "round_first", json!({"value": "1"})),
+                ("call-2", "round_second", json!({"value": "2"})),
+            ]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    // 首个结果在聚合预算内，逐字节保持不变。
+    assert!(!results[0].is_error);
+    assert_eq!(results[0].content.len(), 31);
+    for block in &results[0].content {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: block_text.clone()
+            }
+        );
+    }
+    // 第二个结果收缩了恰好两个块以回到可保留容量内，并附加截断说明。
+    assert!(!results[1].is_error);
+    assert_eq!(results[1].content.len(), 32);
+    for block in &results[1].content[..2] {
+        let ToolResultContent::Text { text } = block else {
+            panic!("收缩结果应为文本块");
+        };
+        assert!(text.contains(TRUNCATION_MARKER));
+    }
+    for block in &results[1].content[2..31] {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: block_text.clone()
+            }
+        );
+    }
+    let ToolResultContent::Text { text: sentinel } = results[1].content.last().expect("结果非空")
+    else {
+        panic!("最后一块应为文本截断说明");
+    };
+    assert!(sentinel.starts_with(TRUNCATION_SENTINEL_PREFIX));
+    // 整轮聚合模型可见字节回到硬上限内，提交总能通过。
+    let round_model_visible: usize = results
+        .iter()
+        .flat_map(|result| &result.content)
+        .map(|block| match block {
+            ToolResultContent::Text { text } => text.len(),
+            ToolResultContent::Image { .. } => 0,
+        })
+        .sum();
+    assert!(round_model_visible <= TOOL_OUTPUT_LIMITS.max_round_model_visible_bytes);
+    // 第二个调用的完整正文已落盘为 JSON 工件。
+    let saved = std::fs::read_to_string(directory.join("keencode-round_second-test.log"))
+        .expect("工件文件应已写出");
+    let parsed: Vec<ToolResultContent> =
+        serde_json::from_str(&saved).expect("多块工件应为内容块 JSON 全文");
+    assert_eq!(parsed.len(), 31);
+    for block in &parsed {
+        assert_eq!(
+            block,
+            &ToolResultContent::Text {
+                text: block_text.clone()
+            }
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// 预算内结果逐字节保持不变且不产生任何工件文件。
+#[tokio::test]
+async fn within_budget_output_is_byte_identical_without_artifact() {
+    let directory = artifact_test_directory("within-budget");
+    let body = "正常输出内容".repeat(100);
+    let tool = Arc::new(ArtifactOutputTool::new(
+        "small_tool",
+        ToolEffect::ReadOnly,
+        ToolOutput::text(body.clone()),
+        directory.clone(),
+        false,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).expect("测试工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "small_tool", json!({"value": "x"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].content,
+        vec![ToolResultContent::Text { text: body }]
+    );
+    assert!(!results[0].is_error);
+    assert!(
+        std::fs::read_dir(&directory).is_err(),
+        "预算内结果不应创建任何工件文件"
+    );
 }

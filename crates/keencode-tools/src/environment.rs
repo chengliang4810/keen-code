@@ -1,10 +1,11 @@
 //! 内置工具共享的工作目录、资源上限与路径解析。
 
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use keencode_agent::{ToolContext, ToolError};
+use keencode_agent::{ToolContext, ToolError, ToolOutputArtifactSink};
 
 /// 只读搜索与文件读取工具声明的外层墙钟上限。
 ///
@@ -223,4 +224,44 @@ pub(crate) fn display_path(path: &Path) -> String {
 /// 把严格 JSON 输入解析错误归一为工具错误。
 pub(crate) fn invalid_input(error: impl std::fmt::Display) -> ToolError {
     ToolError::permanent("invalid_input", format!("工具输入无效：{error}"))
+}
+
+/// 把超出模型预算的完整工具输出保存到 Session 工件目录的落盘通道。
+///
+/// 复用命令输出工件的目录与命名约定（`keencode-{label}-` 前缀随机文件、
+/// `.log` 后缀，参见 `command.rs` 的 `create_artifact`），返回的路径文本
+/// 会嵌入截断说明，模型可据此用 Read 取回完整输出。
+pub(crate) struct EnvironmentArtifactSink {
+    /// Session 共享环境中的输出工件目录。
+    artifact_directory: PathBuf,
+}
+
+impl EnvironmentArtifactSink {
+    /// 绑定指定 Session 环境的工件目录。
+    pub(crate) fn new(environment: &ToolEnvironment) -> Self {
+        Self {
+            artifact_directory: environment.artifact_directory().to_path_buf(),
+        }
+    }
+}
+
+impl ToolOutputArtifactSink for EnvironmentArtifactSink {
+    /// 同步保存完整 UTF-8 正文并返回模型可读取的稳定路径文本。
+    fn save_output(&self, label: &str, content: &str) -> std::io::Result<String> {
+        std::fs::create_dir_all(&self.artifact_directory)?;
+        // 工具名只保留文件名安全字符并限制长度，避免拼接出异常路径。
+        let prefix: String = label
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .take(32)
+            .collect();
+        let named = tempfile::Builder::new()
+            .prefix(&format!("keencode-{prefix}-"))
+            .suffix(".log")
+            .tempfile_in(&self.artifact_directory)?;
+        let (mut file, path) = named.keep().map_err(|error| error.error)?;
+        file.write_all(content.as_bytes())?;
+        file.flush()?;
+        Ok(display_path(&path))
+    }
 }

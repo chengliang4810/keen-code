@@ -82,8 +82,8 @@ pub use state::{
 pub use structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
 pub use tool::{
     AgentTool, DEFAULT_TOOL_TIMEOUT, TOOL_OUTPUT_LIMITS, ToolConcurrency, ToolContext, ToolError,
-    ToolFuture, ToolOutput, ToolOutputErrorCode, ToolOutputLimits, ToolRegistry, ToolRegistryError,
-    is_canonical_image_media_type, is_canonical_remote_image_url,
+    ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputErrorCode, ToolOutputLimits,
+    ToolRegistry, ToolRegistryError, is_canonical_image_media_type, is_canonical_remote_image_url,
 };
 pub use turn::{CounterKind, TerminalReason, TurnPhase, TurnState, TurnTransitionError};
 

@@ -13,7 +13,7 @@ use std::time::Duration;
 use command_group::{AsyncCommandGroup, AsyncGroupChild};
 use keencode_agent::{
     AgentTool, TOOL_OUTPUT_LIMITS, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture,
-    ToolOutput, TurnCancellation,
+    ToolOutput, ToolOutputArtifactSink, TurnCancellation,
 };
 use keencode_model::ToolDefinition;
 use serde::Deserialize;
@@ -24,7 +24,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::background::BackgroundTaskManager;
-use crate::environment::{ToolEnvironment, display_path, invalid_input};
+use crate::environment::{EnvironmentArtifactSink, ToolEnvironment, display_path, invalid_input};
 
 /// 进程退出状态轮询间隔。
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -88,6 +88,11 @@ impl AgentTool for BashTool {
     /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
     fn timeout(&self) -> Option<Duration> {
         None
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在独立监督任务中运行 Bash，外层 Future 被取消时监督任务仍会清理进程树。
@@ -184,6 +189,11 @@ impl AgentTool for PowerShellTool {
     /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
     fn timeout(&self) -> Option<Duration> {
         None
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在独立监督任务中运行 PowerShell，外层 Future 被取消时仍会清理进程树。
@@ -284,6 +294,11 @@ impl AgentTool for GitTool {
     /// 不施加 Runtime 外层墙钟，避免截断用户显式允许的长命令。
     fn timeout(&self) -> Option<Duration> {
         None
+    }
+
+    /// 把超限完整输出保存到 Session 工件目录，供截断后回流完整内容。
+    fn output_artifact_sink(&self) -> Option<Arc<dyn ToolOutputArtifactSink>> {
+        Some(Arc::new(EnvironmentArtifactSink::new(&self.environment)))
     }
 
     /// 在独立监督任务中直接运行 Git 参数数组。
