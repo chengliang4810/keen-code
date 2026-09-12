@@ -742,6 +742,33 @@ describe("ACP event semantics", () => {
     }, false)).toBe(false);
   });
 
+  it("水位事件是 Turn 级 transient 通知，越界百分比和缺失身份直接拒绝", () => {
+    const event: KeenCodeEvent = {
+      type: "context_water_level",
+      waterLevelPercent: 72,
+      thresholdPercent: 70,
+    };
+    expect(isAuthoritativeKeenCodeEvent(event)).toBe(false);
+    expect(isSessionScopedKeenCodeEvent(event)).toBe(false);
+    expect(parseKeenCodeEventEnvelope({
+      ...sessionEventEnvelope(event),
+      turnId: "turn-1",
+      sourceAgentId: "root",
+    })).not.toBeNull();
+    expect(parseKeenCodeEventEnvelope(sessionEventEnvelope(event))).toBeNull();
+    for (const bad of [
+      { ...event, waterLevelPercent: 101 },
+      { ...event, thresholdPercent: -1 },
+      { ...event, waterLevelPercent: 72.5 },
+    ]) {
+      expect(parseKeenCodeEventEnvelope({
+        ...sessionEventEnvelope(bad as KeenCodeEvent),
+        turnId: "turn-1",
+        sourceAgentId: "root",
+      })).toBeNull();
+    }
+  });
+
   it("系统通知允许 Session 级或 Turn 级身份，但拒绝部分身份", () => {
     const event: KeenCodeEvent = {
       type: "system_notification",

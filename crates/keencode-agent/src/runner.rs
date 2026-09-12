@@ -2966,6 +2966,9 @@ impl AgentRunner {
                         break;
                     }
                     let cancel_grace = Duration::from_millis(self.limits.tool_cancel_grace_ms);
+                    // 段取消只承载用户取消与终态基础设施失败；工具真实失败（含超时、
+                    // 输出超限固定结果、重复失败熔断终态）只记录结果与 terminal_error，
+                    // 不中断仍在运行的只读兄弟，各自结果按完成顺序回流。
                     let segment_cancellation = request.cancellation.child_token();
                     let mut futures = FuturesUnordered::new();
                     for (index, prepared_call) in
@@ -3049,8 +3052,13 @@ impl AgentRunner {
                                     }
                                 }
                                 post_context[index] = Some(post);
+                                // 非取消终态错误不再取消段内兄弟（只读段内本就不存在
+                                // 除 Cancelled 外的终态错误）；terminal_error 仍在排空
+                                // 后阻止后续段启动（见段尾 break）。
                                 if let Some(error) = &raw.terminal_error {
-                                    segment_cancellation.cancel();
+                                    if matches!(error, AgentRunError::Cancelled) {
+                                        segment_cancellation.cancel();
+                                    }
                                     terminal_error.get_or_insert_with(|| error.clone());
                                 }
                                 if let Some(observation) = raw.observation {
@@ -3062,13 +3070,17 @@ impl AgentRunner {
                                     if let Some(reminder) = outcome.reminder {
                                         failure_reminders.push(reminder);
                                     }
+                                    // 熔断终态终止 Turn，但不再取消仍在运行的只读兄弟；
+                                    // 各自分支的失败指纹计数照常（不同失败各自重置）。
                                     if let Some(error) = outcome.terminal {
-                                        segment_cancellation.cancel();
                                         terminal_error.get_or_insert(error);
                                     }
                                 }
                             }
                             Err(error) => {
+                                // 执行器自身返回 Err 只可能是内部错误（取消已编码为
+                                // Ok(raw)+terminal_error），属于基础设施失败，仍取消
+                                // 段内兄弟并终止 Turn。
                                 segment_cancellation.cancel();
                                 let result = normalize_immediate_round_result(
                                     interrupted_tool_result(&prepared[index], &error),

@@ -173,6 +173,24 @@ describe("Acp delivery sequence", () => {
     },
   );
 
+  it("水位事件写入淡色提示行，不改压缩状态与有序分段", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }, { journalSequence: 1 }));
+    apply(view, eventDelivery(2, {
+      type: "context_water_level", waterLevelPercent: 72, thresholdPercent: 70,
+    }));
+    expect(view.compacting).toBe(false);
+    expect(view.live_segments).toEqual([]);
+    expect(view.history).toHaveLength(1);
+    expect(view.history[0]).toMatchObject({
+      role: "tool",
+      marker: "context_water_level",
+      content: "context_water_level|72|70",
+    });
+    const projected = projectAcpConversation([], view).at(-1)!;
+    expect(projected.marker).toBe("context_water_level");
+  });
+
   it("子 Agent 压缩只写入自己的时间线，不清除主任务的压缩状态", () => {
     const view = emptySession("session-1");
     apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }));

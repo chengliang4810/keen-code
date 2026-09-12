@@ -20,6 +20,7 @@ import {
   isSessionBusy,
   isSessionLiveStreaming,
   parseCompactContent,
+  parseWaterLevelContent,
   parseToolStepContent,
   toolStepDisplayTitle,
   presentErrorBanner,
@@ -701,6 +702,17 @@ describe("session projection", () => {
     expect(err.content).not.toMatch(/Connection refused|stderr|rpc timeout/i);
   });
 
+});
+
+describe("context water level markers", () => {
+  it("parseWaterLevelContent reads transient water level rows", () => {
+    expect(parseWaterLevelContent("context_water_level|72|70")).toEqual({
+      level: 72,
+      threshold: 70,
+    });
+    expect(parseWaterLevelContent("context_water_level|101|70")).toBeNull();
+    expect(parseWaterLevelContent("context_compact|auto")).toBeNull();
+  });
 });
 
 describe("context compact markers", () => {

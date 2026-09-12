@@ -8154,6 +8154,21 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
                 },
             }];
         }
+        AgentStreamEventKind::ContextWaterLevel {
+            water_level_percent,
+            threshold_percent,
+        } => {
+            return vec![DeliveryDraft::KeenCodeEvent {
+                turn_id: Some(event.turn_id().as_str().to_owned()),
+                source_agent_id: Some(event.source_agent_id().as_str().to_owned()),
+                journal_sequence: None,
+                occurred_at_ms,
+                event: KeenCodeEvent::ContextWaterLevel {
+                    water_level_percent: *water_level_percent,
+                    threshold_percent: *threshold_percent,
+                },
+            }];
+        }
         AgentStreamEventKind::ContextCompactionFailed { failure_kind } => {
             tracing::error!(session_id = %event.session_id(), turn_id = %event.turn_id(), agent_id = %event.source_agent_id(), ?failure_kind, "context compaction failed");
             return vec![DeliveryDraft::KeenCodeEvent {
@@ -13121,6 +13136,31 @@ mod tests {
         assert!(values[1].get("envelope").is_some());
         assert_eq!(values[2]["type"], "client_request");
         assert_eq!(values[2]["request"]["jsonrpc"], "2.0");
+    }
+
+    /// 水位 transient 草稿经 materialize 后为无 Journal 序号的 Turn 级投递。
+    #[test]
+    fn water_level_draft_materializes_as_transient_turn_delivery() {
+        let draft = DeliveryDraft::KeenCodeEvent {
+            turn_id: Some("turn-a".to_owned()),
+            source_agent_id: Some("agent-root".to_owned()),
+            journal_sequence: None,
+            occurred_at_ms: 3,
+            event: KeenCodeEvent::ContextWaterLevel {
+                water_level_percent: 72,
+                threshold_percent: 70,
+            },
+        };
+        let delivery = materialize_delivery("session-a", 4, draft)
+            .expect("水位草稿应可投递");
+        let value = serde_json::to_value(&delivery).expect("水位投递应序列化");
+        assert_eq!(value["type"], "keencode_event");
+        assert_eq!(value["envelope"]["event"]["type"], "context_water_level");
+        assert_eq!(value["envelope"]["event"]["waterLevelPercent"], 72);
+        assert_eq!(value["envelope"]["event"]["thresholdPercent"], 70);
+        assert_eq!(value["envelope"]["turnId"], "turn-a");
+        assert_eq!(value["envelope"]["sourceAgentId"], "agent-root");
+        assert!(value["envelope"].get("journalSequence").is_none());
     }
 
     /// 不同 Session 必须各自从一开始分配投递序号。

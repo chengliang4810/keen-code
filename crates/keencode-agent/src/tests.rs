@@ -3749,6 +3749,57 @@ async fn self_managed_timeout_tool_finishes_without_outer_wall_clock() {
     assert_eq!(turn_tool_result_text(results[0]), "self-managed-ok");
 }
 
+/// 并行段失败收窄所需的固定失败测试工具：等待兄弟启动信号后返回真实 ToolError。
+struct FailingSiblingTool {
+    /// 提供给模型的精确工具名称。
+    name: String,
+    /// 本调用执行前等待的兄弟启动信号；`None` 表示不等直接失败。
+    wait_for: Option<Arc<Notify>>,
+    /// 本调用被执行时发出的启动信号。
+    started: Arc<Notify>,
+    /// 返回给模型的固定错误码。
+    error_code: String,
+}
+
+impl AgentTool for FailingSiblingTool {
+    /// 返回要求可选字符串 `value` 的合成 Schema。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name.clone(),
+            "验证并行失败不再取消兄弟",
+            json!({
+                "type": "object",
+                "properties": { "value": { "type": "string" } },
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    /// 把全部调用标记为只读。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 允许与相邻只读调用并发。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::ParallelReadOnly
+    }
+
+    /// 等待兄弟进入执行阶段后返回固定真实错误，避免失败先于兄弟执行。
+    fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        let wait_for = self.wait_for.clone();
+        let started = self.started.clone();
+        let code = self.error_code.clone();
+        Box::pin(async move {
+            started.notify_one();
+            if let Some(signal) = wait_for {
+                signal.notified().await;
+            }
+            Err(ToolError::permanent(code, "并行失败收窄测试固定错误"))
+        })
+    }
+}
+
 /// 并行只读段中的单个超时只切断自身并按失败继续，不波及兄弟只读调用。
 #[tokio::test]
 async fn parallel_segment_timeout_does_not_cancel_sibling_read_only_calls() {
@@ -3799,6 +3850,388 @@ async fn parallel_segment_timeout_does_not_cancel_sibling_read_only_calls() {
             assert_eq!(result.tool_call_id, "call-ok");
             assert!(!result.is_error);
             assert_eq!(turn_tool_result_text(result), "synthetic-result");
+        }
+    }
+}
+
+/// 并行只读段中一个工具真实失败时兄弟必须正常完成：失败结果与成功结果各归其位。
+#[tokio::test]
+async fn parallel_segment_failure_does_not_cancel_sibling_read_only_call() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-fail", "parallel_fail", json!({})),
+                ("call-slow", "parallel_slow", json!({"value": "x"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct SlowSiblingTool;
+    impl AgentTool for SlowSiblingTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "parallel_slow".to_owned(),
+                "验证慢兄弟在失败判定后仍正常完成",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            // 慢兄弟执行时长远超失败兄弟的即时失败：旧语义下失败会通过段取消
+            // 将其切断为"中止"固定结果；新语义下它必须正常完成。
+            Box::pin(async move {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(ToolOutput::text("sibling-ok"))
+            })
+        }
+    }
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(FailingSiblingTool {
+            name: "parallel_fail".to_owned(),
+            wait_for: None,
+            started: Arc::new(Notify::new()),
+            error_code: "boom".to_owned(),
+        }))
+        .expect("失败测试工具应可注册");
+    registry
+        .register(Arc::new(SlowSiblingTool))
+        .expect("慢兄弟测试工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        if result.tool_call_id == "call-fail" {
+            assert!(result.is_error);
+            let text = turn_tool_result_text(result);
+            assert!(text.contains("boom"), "失败结果应回流真实错误码：{text}");
+            assert!(!text.contains("中止"), "失败兄弟不得被段取消切断：{text}");
+        } else {
+            assert_eq!(result.tool_call_id, "call-slow");
+            assert!(!result.is_error);
+            assert_eq!(turn_tool_result_text(result), "sibling-ok");
+        }
+    }
+}
+
+/// 同段三工具一失败一超时一成功时三个结果各归其位，无一被"中止"波及。
+#[tokio::test]
+async fn parallel_segment_failure_timeout_and_success_each_keep_own_result() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-ok", "tri_ok", json!({"value": "x"})),
+                ("call-fail", "tri_fail", json!({})),
+                ("call-hung", "hung_timeout", json!({})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    let ok_started = Arc::new(Notify::new());
+    struct TriOkTool {
+        started: Arc<Notify>,
+    }
+    impl AgentTool for TriOkTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "tri_ok".to_owned(),
+                "验证三兄弟各自结果",
+                json!({
+                    "type": "object",
+                    "properties": { "value": { "type": "string" } },
+                    "additionalProperties": false
+                }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                Ok(ToolOutput::text("tri-ok"))
+            })
+        }
+    }
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(TriOkTool {
+            started: ok_started.clone(),
+        }))
+        .expect("三兄弟成功工具应可注册");
+    registry
+        .register(Arc::new(FailingSiblingTool {
+            name: "tri_fail".to_owned(),
+            wait_for: Some(ok_started.clone()),
+            started: Arc::new(Notify::new()),
+            error_code: "tri-boom".to_owned(),
+        }))
+        .expect("三兄弟失败工具应可注册");
+    registry
+        .register(Arc::new(HungTimeoutTool {
+            timeout: Some(Duration::from_millis(60)),
+            concurrency: ToolConcurrency::ParallelReadOnly,
+            started: Arc::new(Notify::new()),
+            observed_cancellation: Arc::new(AtomicBool::new(false)),
+        }))
+        .expect("三兄弟挂起工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 3);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 3);
+    for result in results {
+        match result.tool_call_id.as_str() {
+            "call-fail" => {
+                assert!(result.is_error);
+                let text = turn_tool_result_text(result);
+                assert!(text.contains("tri-boom"), "失败位应回流真实错误：{text}");
+            }
+            "call-hung" => {
+                assert!(result.is_error);
+                assert!(turn_tool_result_text(result).contains("后超时"));
+            }
+            "call-ok" => {
+                assert!(!result.is_error);
+                assert_eq!(turn_tool_result_text(result), "tri-ok");
+            }
+            other => panic!("三兄弟段不应出现多余结果：{other}"),
+        }
+    }
+}
+
+/// 用户取消 mid-segment 时整段取消：并行兄弟收到取消终态，Turn 进入 Cancelled。
+#[tokio::test]
+async fn parallel_segment_user_cancellation_still_cancels_whole_segment() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply(&[
+            ("call-a", "cancel_probe", json!({"value": "a"})),
+            ("call-b", "cancel_probe", json!({"value": "b"})),
+        ])],
+    ));
+    struct CancelProbeTool {
+        started: Arc<Notify>,
+    }
+    impl AgentTool for CancelProbeTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "cancel_probe".to_owned(),
+                "验证用户取消仍取消整段",
+                json!({ "type": "object", "additionalProperties": true }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            let started = self.started.clone();
+            Box::pin(async move {
+                started.notify_one();
+                context.cancellation.cancelled().await;
+                Err(ToolError::permanent("cancelled", "已观察用户取消"))
+            })
+        }
+    }
+    let started = Arc::new(Notify::new());
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(CancelProbeTool {
+            started: started.clone(),
+        }))
+        .expect("取消探针工具应可注册");
+    let cancellation = TurnCancellation::new();
+    let mut request = turn_request(PlanGuard::inactive());
+    request.set_cancellation(cancellation.clone());
+    let cancel_task = tokio::spawn(async move {
+        started.notified().await;
+        // 等首个兄弟进入执行后再取消，确保取消发生在段执行中途。
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancellation.cancel();
+    });
+
+    let result = runner(provider, registry).run_turn(request).await;
+    cancel_task.await.expect("取消任务不应异常");
+
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Cancelled)
+    );
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert!(result.is_error);
+        assert!(
+            turn_tool_result_text(result).contains("Turn 取消而中止"),
+            "用户取消后兄弟应为取消固定结果：{}",
+            turn_tool_result_text(result)
+        );
+    }
+}
+
+/// 只读工具输出超限固定结果（无落盘通道）按普通失败回流，不取消兄弟且不终止 Turn。
+#[tokio::test]
+async fn parallel_segment_read_only_output_limit_result_does_not_cancel_sibling() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-big", "oversized", json!({})),
+                ("call-ok", "limit_sibling", json!({"value": "x"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    struct OversizedTool;
+    impl AgentTool for OversizedTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::new(
+                "oversized".to_owned(),
+                "验证只读超限固定结果",
+                json!({ "type": "object", "additionalProperties": false }),
+            )
+        }
+        fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+            Ok(ToolEffect::ReadOnly)
+        }
+        fn concurrency(&self) -> ToolConcurrency {
+            ToolConcurrency::ParallelReadOnly
+        }
+        fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+            Box::pin(async {
+                Ok(ToolOutput::text("y".repeat(
+                    crate::tool::TOOL_OUTPUT_LIMITS.max_text_bytes + 1,
+                )))
+            })
+        }
+    }
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(OversizedTool))
+        .expect("超限测试工具应可注册");
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "limit_sibling",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::ParallelReadOnly,
+        )))
+        .expect("超限兄弟测试工具应可注册");
+
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        if result.tool_call_id == "call-big" {
+            assert!(result.is_error);
+            assert_eq!(turn_tool_result_text(result), TOOL_OUTPUT_LIMIT_RESULT);
+        } else {
+            assert_eq!(result.tool_call_id, "call-ok");
+            assert!(!result.is_error);
+            assert_eq!(turn_tool_result_text(result), "synthetic-result");
+        }
+    }
+}
+
+/// 并行兄弟失败各自计入自己的熔断指纹：不同工具交替失败不触发重复失败终态。
+#[tokio::test]
+async fn parallel_segment_sibling_failures_count_toward_own_fingerprints() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                ("call-a1", "fp_a", json!({"value": "a"})),
+                ("call-b1", "fp_b", json!({"value": "b"})),
+            ]),
+            text_reply("done"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(FailingSiblingTool {
+            name: "fp_a".to_owned(),
+            wait_for: None,
+            started: Arc::new(Notify::new()),
+            error_code: "err-a".to_owned(),
+        }))
+        .expect("指纹工具 A 应可注册");
+    registry
+        .register(Arc::new(FailingSiblingTool {
+            name: "fp_b".to_owned(),
+            wait_for: None,
+            started: Arc::new(Notify::new()),
+            error_code: "err-b".to_owned(),
+        }))
+        .expect("指纹工具 B 应可注册");
+    // 终态阈值为 2：若兄弟失败互相污染计数，两个不同指纹失败将误触发熔断。
+    let limits = RunLimits::default()
+        .with_repeated_failure_terminal_threshold(2)
+        .expect("重复失败上限应有效");
+
+    let result = AgentRunner::new(provider, registry, limits)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
+    assert_eq!(result.state.step_count(), 2);
+    let results = turn_tool_results(&result);
+    assert_eq!(results.len(), 2);
+    for result in results {
+        assert!(result.is_error);
+        let text = turn_tool_result_text(result);
+        if result.tool_call_id == "call-a1" {
+            assert!(text.contains("err-a"), "A 失败应计入自己的指纹：{text}");
+        } else {
+            assert!(text.contains("err-b"), "B 失败应计入自己的指纹：{text}");
         }
     }
 }

@@ -79,6 +79,24 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain('class="lobe-chat-compact"');
   });
 
+  it("水位行以淡色提示渲染用量与阈值，复用通知行形态", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "assistant-water", role: "tool", content: "context_water_level|72|70",
+          marker: "context_water_level",
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(html).toContain('data-testid="context-water-level"');
+    expect(html).toContain("上下文用量 72%");
+    expect(html).toContain("70%");
+    expect(html).toContain('class="lobe-chat-compact"');
+  });
+
   it("相邻的已查看图片共用可折叠工具行，保留缩略图和键盘入口", () => {
     const html = renderToString(<ConversationThread locale="zh" sessionState="ready" attachLabels={attachLabels}
       messages={[{ id: "images", role: "assistant", content: "", segments: [1, 2].map((n) => ({

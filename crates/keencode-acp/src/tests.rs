@@ -2714,3 +2714,72 @@ fn model_usage_reported_is_authoritative_and_strict() {
         assert!(serde_json::from_value::<KeenCodeEvent>(bad).is_err());
     }
 }
+
+/// 水位事件是 transient 通知：只允许 Turn 身份、无 Journal 序号，且 JSON 严格往返。
+#[test]
+fn context_water_level_is_transient_turn_notification_with_strict_wire_shape() {
+    let event = KeenCodeEvent::ContextWaterLevel {
+        water_level_percent: 72,
+        threshold_percent: 70,
+    };
+    assert!(event.is_transient());
+    assert!(!event.is_authoritative());
+    let value = serde_json::to_value(&event).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "type": "context_water_level",
+            "waterLevelPercent": 72,
+            "thresholdPercent": 70,
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<KeenCodeEvent>(value.clone()).unwrap(),
+        event
+    );
+    assert!(
+        KeenCodeEventEnvelope::new_transient(KeenCodeEventEnvelopeParams::for_turn(
+            "session-a",
+            "turn-a",
+            "agent-a",
+            1,
+            1_700_000_000_000,
+            event,
+        ))
+        .is_ok()
+    );
+    for bad in [
+        KeenCodeEvent::ContextWaterLevel {
+            water_level_percent: 101,
+            threshold_percent: 70,
+        },
+        KeenCodeEvent::ContextWaterLevel {
+            water_level_percent: 72,
+            threshold_percent: 101,
+        },
+    ] {
+        assert!(bad.validate().is_err(), "水位百分比越界必须拒绝");
+        assert!(
+            serde_json::from_value::<KeenCodeEvent>(serde_json::to_value(&bad).unwrap()).is_err(),
+            "越界水位经严格反序列化也必须拒绝"
+        );
+    }
+    assert!(
+        KeenCodeEventEnvelope::new_authoritative(
+            2,
+            KeenCodeEventEnvelopeParams::for_turn(
+                "session-a",
+                "turn-a",
+                "agent-a",
+                1,
+                1_700_000_000_000,
+                KeenCodeEvent::ContextWaterLevel {
+                    water_level_percent: 72,
+                    threshold_percent: 70,
+                },
+            ),
+        )
+        .is_err(),
+        "水位事件不得进入权威 Journal"
+    );
+}
