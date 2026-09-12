@@ -1762,6 +1762,9 @@ struct RuntimeGoalUsageSink {
 ///   低频重建（`refreshed`），只重算能力段与目录，环境与指令仍保持冻结值。
 /// - MCP 工具表变化：工具定义数组随请求变化属于合法缓存失效；能力指纹
 ///   不变时稳定前缀本身不受影响。
+/// - 进程重启（执行端 `RuntimeAgentExecution` 重建）后，同一逻辑 Session 的
+///   各 Agent 会在自身首次 Turn 前重新冻结（新时钟、新指令快照），与跨午夜
+///   快照语义一致：冻结值属于当前进程内的执行端实例，不跨进程迁移。
 struct FrozenAgentPrompt {
     /// 冻结的环境事实快照；mode 按本轮 Plan 守卫逐轮渲染。
     environment: crate::agent_prompt::EnvironmentSnapshot,
@@ -1828,6 +1831,32 @@ struct RuntimeAgentExecutionState {
     extension_diagnostics_generation: Option<u64>,
     /// 各 Agent 在自身首次 Turn 前冻结的稳定提示词事实。
     frozen_prompts: HashMap<RunnerAgentId, Arc<FrozenAgentPrompt>>,
+}
+
+/// `frozen_prompts` 的软上限；超过后在下次冻结插入前惰性收缩一次。
+///
+/// 执行端口没有子 Agent 终态注销回调：`quiesce_tree`/`close_tree` 只在 Session
+/// 关闭时触发（此时整个执行端状态随之回收），Coordinator 的空闲 Agent 驱逐
+/// 不回调执行端口，而逐 Turn 释放会让 root 的跨 Turn 稳定前缀失效。因此选择
+/// 软上限收缩作为最小替代：单会话内冻结条目数始终有界；被收缩后再次活跃的
+/// 子 Agent 会按当前事实重新冻结，属于与能力段重建同级的合法一次性缓存失效。
+const FROZEN_PROMPT_SOFT_LIMIT: usize = 256;
+
+/// 超过软上限时只保留 root、当前托管 Turn 涉及的 Agent 与即将插入的 Agent。
+fn retain_live_frozen_prompts(
+    frozen_prompts: &mut HashMap<RunnerAgentId, Arc<FrozenAgentPrompt>>,
+    running_agent_ids: impl Iterator<Item = RunnerAgentId>,
+    incoming_agent_id: &RunnerAgentId,
+) {
+    if frozen_prompts.len() < FROZEN_PROMPT_SOFT_LIMIT {
+        return;
+    }
+    let running: HashSet<RunnerAgentId> = running_agent_ids.collect();
+    frozen_prompts.retain(|agent_id, _| {
+        agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
+            || agent_id == incoming_agent_id
+            || running.contains(agent_id)
+    });
 }
 
 /// Session 级 V2 执行端：真正创建 Runner 任务并管理取消、静止与系统清理。
@@ -5307,6 +5336,18 @@ impl AgentRuntime {
             capability_fingerprint: (can_spawn, has_skill),
             catalog: catalog.to_owned(),
         });
+        // root 条目跨整个 Session 保留；越过软上限时先按 root 与活跃 Agent 收缩，
+        // 保证单会话内冻结条目数有界（详见 FROZEN_PROMPT_SOFT_LIMIT 的取舍说明）。
+        let running_agent_ids = state
+            .running_turns
+            .values()
+            .map(|turn| turn.agent_id.clone())
+            .collect::<Vec<_>>();
+        retain_live_frozen_prompts(
+            &mut state.frozen_prompts,
+            running_agent_ids.into_iter(),
+            agent_id,
+        );
         state.frozen_prompts.insert(agent_id.clone(), Arc::clone(&frozen));
         Ok(frozen)
     }
@@ -6747,6 +6788,14 @@ impl AgentRuntime {
 }
 
 /// 保留历史可读推理，去除仅对原模型有效的协议续传状态。
+///
+/// 已知两端线上形态差异（2026-09-12 实测，见
+/// `session_prefix_is_byte_stable_across_tool_turns` 复现器）：轮内工具 Round
+/// 请求使用 active.messages 中的原始推理块（带续传状态），Responses adapter
+/// 会回放完整 reasoning item；跨 Turn 请求经本函数清除续传后，同 adapter 对
+/// 无续传的推理块不输出任何 item，summary 正文亦不随请求发送。轮内与跨 Turn
+/// 对推理历史的处理因此不对称，属有意取舍而非回归：续传状态绑定产生它的
+/// 响应链，跨 Turn 后按原样回放的正确性与兼容性不再有保证。
 fn clear_historical_reasoning_state(messages: &mut Vec<Message>) {
     for message in messages.iter_mut() {
         message.content.retain_mut(|block| {
@@ -9314,17 +9363,18 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed, RootTaskTerminalNotice,
-        RootTurnOptions, RootTurnStartOutcome, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
-        RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
+        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed,
+        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
+        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
+        RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
         RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
         TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
         complete_runtime_turn, coordinator_has_pending_dynamic_input_claim,
         dynamic_input_receipt_matches_claim, extension_diagnostic_message,
         is_retryable_runtime_turn_completion_error, map_authoritative_record, materialize_delivery,
         parse_reasoning_effort, provider_snapshot, recovered_authoritative_turn_outcomes,
-        release_runtime_turn_state, root_task_terminal_notice, root_turn_summary,
-        runtime_tool_snapshot, should_retry_runtime_turn_completion,
+        release_runtime_turn_state, root_task_terminal_notice,
+        root_turn_summary, runtime_tool_snapshot, should_retry_runtime_turn_completion,
         split_child_agent_model_override, validate_generated_title,
         validate_recovered_mailbox_claim, wait_for_turn_started,
     };
@@ -9379,6 +9429,7 @@ mod tests {
     };
     use parking_lot::Mutex;
     use serde_json::{Value, json};
+    use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
@@ -9838,6 +9889,53 @@ mod tests {
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
                     body
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .and_then(|_| stream.flush())
+                    .map_err(|error| format!("写入本地模型响应失败：{error}"))?;
+                requests.push(request);
+            }
+            Ok(requests)
+        });
+        (format!("http://{address}/v1"), server)
+    }
+
+    /// 依序返回预置响应体的本地 Responses 服务；第 n 个请求返回第 n 个响应体。
+    fn spawn_buffered_responses_sequence(
+        bodies: Vec<Value>,
+    ) -> (String, JoinHandle<Result<Vec<Value>, String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("本地模型端口应绑定");
+        listener
+            .set_nonblocking(true)
+            .expect("本地模型监听器应设为非阻塞");
+        let address = listener.local_addr().expect("本地模型地址应读取");
+        let server = thread::spawn(move || {
+            // 完整测试集并行执行时本地线程可能短暂饥饿，测试服务必须给每轮连接留出稳定窗口。
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = Vec::with_capacity(bodies.len());
+            for body in bodies {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return Err("等待本地模型请求超时".to_owned());
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(format!("接受本地模型请求失败：{error}")),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("恢复本地模型连接阻塞模式失败：{error}"))?;
+                let request = read_json_request(&mut stream)?;
+                let body_text = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body_text.len(),
+                    body_text
                 );
                 stream
                     .write_all(response.as_bytes())
@@ -13770,6 +13868,148 @@ mod tests {
             .expect("前缀稳定测试投递应关闭");
     }
 
+    /// 工具轮与跨 Turn 的历史前缀逐字节稳定：第 1 轮带 reasoning 与工具调用、
+    /// 第 2 轮纯文本。验证 `clear_historical_reasoning_state` 两端（轮内工具
+    /// Round 请求与跨 Turn 历史请求）对 reasoning 历史的线上形态一致。
+    ///
+    /// 【2026-09-12 实测发现：该断言当前不成立，故暂时 ignore 保留复现器。】
+    /// 轮内工具 Round 请求（active.messages）回放完整 reasoning item（含
+    /// 不透明续传状态）；跨 Turn 请求经 `clear_historical_reasoning_state`
+    /// 清除续传后，Responses adapter 对无续传的推理块不输出任何 item——
+    /// 连同可移植的 summary 正文一起从线上消失。第 2 轮请求前缀因此在
+    /// reasoning item 位置与第 1 轮 Round 2 请求分叉，共享前缀止于首条
+    /// user 消息，工具 Round 的缓存条目无法跨 Turn 复用。修复决策（轮内
+    /// 同步清除、或跨 Turn 保留可移植摘要）需在协议安全与缓存收益间取舍，
+    /// 不在本次 P2 加固范围内擅自改动；修复后移除 `#[ignore]` 即为验收。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "跨 Turn reasoning item 线上形态两端不一致（见文档注释），保留复现器待修复决策"]
+    async fn session_prefix_is_byte_stable_across_tool_turns() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let note_path = project.path().join("note.txt");
+        std::fs::write(&note_path, "工具轮读取正文").expect("应写入测试文件");
+        let tool_arguments = json!({"file_path": note_path.to_string_lossy()}).to_string();
+        let (base_url, server) = spawn_buffered_responses_sequence(vec![
+            // 第 1 轮 Round 1：reasoning item 加 Read 工具调用，模型以 tool_use 收束。
+            json!({
+                "id": "response-tool-prefix-round", "object": "response", "model": "test-model",
+                "status": "completed",
+                "output": [
+                    {"type": "reasoning", "id": "rs-tool-prefix",
+                     "summary": [{"type": "summary_text", "text": "工具轮思考"}]},
+                    {"type": "function_call", "id": "fc-tool-prefix", "call_id": "call-tool-prefix",
+                     "name": "Read", "arguments": tool_arguments, "status": "completed"}
+                ],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+            }),
+            // 第 1 轮 Round 2：工具结果回流后输出最终文本，Turn 正常完成。
+            json!({
+                "id": "response-tool-prefix-final", "object": "response", "model": "test-model",
+                "status": "completed",
+                "output": [{"id": "message-tool-prefix", "type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "第一轮工具轮完成"}]}],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+            }),
+            // 第 2 轮：纯文本 Turn。
+            json!({
+                "id": "response-tool-prefix-second", "object": "response", "model": "test-model",
+                "status": "completed",
+                "output": [{"id": "message-tool-prefix-second", "type": "message", "role": "assistant",
+                            "content": [{"type": "output_text", "text": "第二轮纯文本完成"}]}],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+            }),
+        ]);
+        let runtime = runtime_with_responses_capabilities(
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities {
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            }),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "prefix-stable-tool-operation")
+            .expect("前缀稳定工具测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "turn-prefix-tool-first",
+                    "前缀稳定工具第一轮",
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("第一轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &session_id).await;
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "turn-prefix-tool-second",
+                    "前缀稳定工具第二轮",
+                    RootTurnOptions {
+                        developer_context: Some("本轮工具轮动态记忆标记".to_owned()),
+                        plan_enabled: false,
+                    },
+                )
+                .await
+                .expect("第二轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&runtime, &session_id).await;
+
+        let requests = server
+            .join()
+            .expect("本地模型服务线程不应 panic")
+            .expect("本地模型服务应成功");
+        assert_eq!(requests.len(), 3);
+        fn input(request: &Value) -> &Vec<Value> {
+            request
+                .get("input")
+                .and_then(Value::as_array)
+                .expect("Responses 请求应包含 input 数组")
+        }
+        let items_json = |items: &[Value]| {
+            items
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("输入项应可序列化")
+        };
+        // 前置事实：第 1 轮 Round 2（工具结果回流请求）线上携带完整 reasoning item。
+        let tool_round_input = input(&requests[1]);
+        assert!(
+            items_json(tool_round_input)
+                .join("\n")
+                .contains("rs-tool-prefix"),
+            "轮内工具 Round 请求应回放 reasoning item"
+        );
+        // 前缀逐字节稳定：第 2 轮请求去掉末尾动态消息后，开头必须与第 1 轮
+        // 工具 Round 请求去掉末尾动态消息的部分逐字节一致（第 1 轮最终 assistant
+        // 消息作为新增历史恰好落在对齐窗口之后）。
+        let tool_round_stable_len = tool_round_input.len() - 1;
+        let second_input = input(&requests[2]);
+        assert_eq!(
+            items_json(&second_input[..tool_round_stable_len]),
+            items_json(&tool_round_input[..tool_round_stable_len]),
+        );
+        assert!(
+            items_json(second_input)
+                .join("\n")
+                .contains("第一轮工具轮完成"),
+            "第 2 轮请求历史应包含第 1 轮最终 assistant 消息"
+        );
+        runtime
+            .close_session_delivery(&session_id)
+            .await
+            .expect("前缀稳定工具测试投递应关闭");
+    }
+
     /// 子 Agent 在自身首次 Turn 前用自己的 cwd 冻结环境；根与子的环境互不串扰。
     #[tokio::test(flavor = "multi_thread")]
     async fn child_agent_freezes_environment_with_own_cwd() {
@@ -13909,6 +14149,65 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// frozen_prompts 软上限收缩：root、活跃 Agent 与即将插入的 Agent 保留，
+    /// 其余子 Agent 条目清除；未越过上限时不做任何收缩。
+    #[test]
+    fn frozen_prompt_retain_keeps_root_and_live_agents_only() {
+        let make_frozen = || {
+            Arc::new(super::FrozenAgentPrompt {
+                environment: crate::agent_prompt::EnvironmentSnapshot::freeze(
+                    Path::new("/tmp"),
+                    &chrono::DateTime::parse_from_rfc3339("2026-09-12T08:00:00+08:00")
+                        .expect("时间应有效"),
+                ),
+                custom_instructions: String::new(),
+                capabilities: String::new(),
+                capability_fingerprint: (false, false),
+                catalog: String::new(),
+            })
+        };
+        let agent_id = |value: &str| {
+            RunnerAgentId::new(value.to_owned()).expect("测试 Agent 标识应有效")
+        };
+        let root_id = agent_id(keencode_resources::ROOT_AGENT_ID);
+        let live_child = agent_id("child-live");
+        let stale_child = agent_id("child-stale");
+        let incoming_child = agent_id("child-incoming");
+        let mut frozen_prompts: HashMap<RunnerAgentId, Arc<super::FrozenAgentPrompt>> = [
+            (root_id.clone(), make_frozen()),
+            (live_child.clone(), make_frozen()),
+            (stale_child.clone(), make_frozen()),
+        ]
+        .into_iter()
+        .collect();
+        // 未超过软上限：即使存在陈旧子 Agent 条目也不收缩。
+        super::retain_live_frozen_prompts(
+            &mut frozen_prompts,
+            [live_child.clone()].into_iter(),
+            &incoming_child,
+        );
+        assert_eq!(frozen_prompts.len(), 3);
+        assert!(frozen_prompts.contains_key(&stale_child));
+
+        // 人为越过软上限：收缩后只剩 root、活跃 Agent 与即将插入的 Agent。
+        for index in 0..super::FROZEN_PROMPT_SOFT_LIMIT {
+            frozen_prompts.insert(agent_id(&format!("child-fill-{index}")), make_frozen());
+        }
+        // 以已存在条目形式验证"即将插入的 Agent"保留子句（真实调用点随后插入）。
+        frozen_prompts.insert(incoming_child.clone(), make_frozen());
+        super::retain_live_frozen_prompts(
+            &mut frozen_prompts,
+            [live_child.clone()].into_iter(),
+            &incoming_child,
+        );
+        assert_eq!(frozen_prompts.len(), 3);
+        assert!(frozen_prompts.contains_key(&root_id));
+        assert!(frozen_prompts.contains_key(&live_child));
+        assert!(frozen_prompts.contains_key(&incoming_child));
+        assert!(!frozen_prompts.contains_key(&stale_child));
+        assert!(!frozen_prompts.contains_key(&agent_id("child-fill-0")));
     }
 
     /// 执行前永久拒绝必须建立失败的子 Agent 身份，不能留下根 mailbox 的悬空引用。
