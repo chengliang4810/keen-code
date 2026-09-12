@@ -3923,7 +3923,7 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
 
 /// Runner 集成（#23）：水位跨越 70% 时发一条 transient 水位事件，不入权威 journal。
 #[tokio::test]
-async fn runner_emits_water_level_event_once_below_compaction_line() {
+async fn runner_predictive_compaction_round_sends_no_water_level_event() {
     // 窗口 10_000，输入预算 5_904，85% 线 5_018。估算 ~4_200（71%）：
     // 跨过 70% 但不触发压缩。
     let capabilities = ProviderCapabilities {
@@ -3934,15 +3934,46 @@ async fn runner_emits_water_level_event_once_below_compaction_line() {
         capabilities,
         [text_reply("最终回答")],
     ));
+    // 预测命中轮不发水位：4 旧轮历史。窗口 10_000、预算 5_904；
+    // 显式输出 2_048 下预测公式必超预算（无锚即无跳过），压缩真实发生
+    //（micro 截断 + LLM 摘要共 2 条记录），按新语义不得另发水位事件。
+    // 4 个旧 user + 2 个近期 user：历史共 6 user，前 3 个 user 进入可压缩区。
+    let old_content = "旧工具输出".repeat(1_020);
+    let mut history = Vec::new();
+    for round in 0..4 {
+        history.push(Message::text(
+            MessageRole::User,
+            format!("旧问题{round}：{}", "背景".repeat(200)),
+        ));
+        history.push(Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::text("准备读取文件"),
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall::new(
+                        format!("call-{round}"),
+                        "read",
+                        json!({ "path": "a.rs" }),
+                    ),
+                },
+            ],
+        ));
+        history.push(Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text(format!("call-{round}"), old_content.clone(), false),
+            }],
+        ));
+    }
+    history.push(Message::text(MessageRole::User, "近期问题一"));
+    history.push(Message::text(MessageRole::User, "水位测试"));
     let context = ContextManager::new(
         ContextPolicy::default(),
-        Arc::new(FixedEstimator {
-            request_tokens: 4_200,
-            message_tokens: 0,
-        }),
-        Arc::new(RecordingCompressor::new("unused")),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("已压缩历史")),
     )
     .expect("默认策略应有效");
+
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
     let runner = AgentRunner::new(provider, ToolRegistry::new(), RunLimits::default())
@@ -3950,14 +3981,13 @@ async fn runner_emits_water_level_event_once_below_compaction_line() {
         .with_commit_sink(commit_sink.clone())
         .with_event_sink(event_sink.clone());
     let result = runner
-        .run_turn(turn_request(vec![Message::text(
-            MessageRole::User,
-            "水位测试",
-        )]))
+        .run_turn(turn_request_with_output(history, 2_048))
         .await;
 
     assert!(result.is_success(), "{:?}", result.error);
-    assert!(result.compactions.is_empty());
+    // 预测臂命中：压缩真实发生（micro 截断了旧结果故本次 LLM 摘要 1 次，
+    // 加首次采样的 micro-only 尝试共 2 条记录），转入预测压缩路径。
+    assert_eq!(result.compactions.len(), 2);
     let events = event_sink.events();
     let water_levels: Vec<_> = events
         .iter()
@@ -3969,15 +3999,15 @@ async fn runner_emits_water_level_event_once_below_compaction_line() {
             _ => None,
         })
         .collect();
-    assert_eq!(water_levels.len(), 1, "应恰好发送一条水位事件");
-    assert_eq!(water_levels[0].1, 70);
-    assert!((70..=100).contains(&water_levels[0].0));
-    // 红线：水位事件不入权威 journal（只有唯一的模型 Round 提交）。
+    assert!(water_levels.is_empty(), "预测压缩轮不应另发水位事件");
+    // 红线：水位事件不入权威 journal。本轮有 2 条压缩记录（micro+摘要，
+    // 使 commit 侧出现压缩应用提交），断言 commit 侧无任何水位提交形态
+    //（水位事件只走 transient 实时通道）且至少有一次模型 Round 提交。
     let committed = commit_sink.events();
-    assert!(matches!(
-        committed.as_slice(),
-        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
-    ));
+    assert!(committed.iter().any(|event| matches!(
+        event.kind(),
+        AgentCommitEventKind::ModelRoundCommitted { .. }
+    )));
 }
 
 /// Runner 集成（#23）：69% 水位不发送水位事件。

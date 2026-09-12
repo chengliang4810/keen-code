@@ -890,11 +890,23 @@ impl AgentRunner {
         if active.water_level_notified {
             return;
         }
-        // ≥85% 触发线时压缩臂会执行并只发压缩事件（防重复），这里不另发。
+        // 任何压缩臂会执行时都不另发水位（防重复：只发压缩事件）。既有 85%
+        // 触发线与预测性触发线任一命中即压缩，任一命中即抑制水位；已发标记
+        // 不置位，压缩后水位重置。
         if self
             .context
             .precompression_target(model_request, capabilities)
             .is_some()
+        {
+            return;
+        }
+        if !self
+            .context
+            .predictive_precompression_skipped_by_cache(model_request, capabilities)
+            && self
+                .context
+                .predictive_precompression_target(model_request, capabilities)
+                .is_some()
         {
             return;
         }
