@@ -3729,3 +3729,562 @@ fn post_compaction_read_hint_bounds_paths_and_bytes() {
     };
     assert!(post_compaction_read_hint_message(&mechanical_record, &messages).is_none());
 }
+
+/// 预测性触发（#17）：估算 60% 但预期增长超预算时提前压缩，复用 Budget 形态。
+#[test]
+fn predictive_trigger_fires_when_expected_growth_exceeds_budget() {
+    // 窗口 100_000，无输出上限时预留策略默认 4_096：输入预算 95_904，
+    // 85% 触发线 81_518。估算 60%（57_542）不触发既有线。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(100_000),
+        ..ProviderCapabilities::default()
+    };
+    let estimated = 57_542_u64;
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: estimated,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+
+    assert_eq!(manager.precompression_target(&request, &capabilities), None);
+    // 预期增长 = 4_096（reserved 缺省） + 15_000 = 19_096；
+    // 57_542 + 19_096 = 76_638 < 95_904，不触发——先确认公式下界。
+    assert_eq!(
+        manager.predictive_precompression_target(&request, &capabilities),
+        None
+    );
+
+    // 估算抬到 80_000（仍低于 85% 线 81_518）：80_000 + 19_096 = 99_096 ≥ 预算。
+    let hot = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 80_000,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    assert_eq!(hot.precompression_target(&request, &capabilities), None);
+    // 预测目标与既有目标同口径：预算 60% = 57_542。
+    assert_eq!(
+        hot.predictive_precompression_target(&request, &capabilities),
+        Some(57_542)
+    );
+}
+
+/// 预测性触发缺省输出时按 reserved 口径预留；显式大输出抬高预期增长。
+#[test]
+fn predictive_trigger_uses_actual_max_output_when_present() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(100_000),
+        ..ProviderCapabilities::default()
+    };
+    // 显式 max_output 32_000：输入预算 68_000（100_000 − 32_000），85% 线 57_800。
+    // 估算 40_000 不触发既有线；预期增长 32_000 + 15_000 = 47_000，
+    // 40_000 + 47_000 = 87_000 ≥ 68_000，预测触发，目标 40_800。
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 40_000,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let mut request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+    request.max_output_tokens = Some(32_000);
+    assert_eq!(manager.precompression_target(&request, &capabilities), None);
+    assert_eq!(
+        manager.predictive_precompression_target(&request, &capabilities),
+        Some(40_800)
+    );
+}
+
+/// 水位口径（#23）：69% 不发、70% 发 info、降阈值以下后再次跨越再发。
+#[test]
+fn water_level_percent_follows_estimate_over_input_budget() {
+    // 窗口 10_000，无输出上限时输入预算 5_904（4_096 预留）。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(10_000),
+        ..ProviderCapabilities::default()
+    };
+    let at = |estimated: u64| {
+        ContextManager::new(
+            ContextPolicy::default(),
+            Arc::new(FixedEstimator {
+                request_tokens: estimated,
+                message_tokens: 0,
+            }),
+            Arc::new(RecordingCompressor::new("unused")),
+        )
+        .expect("默认策略应有效")
+    };
+    let request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+    // 预算 5_904：整数截断下 4_074 → 69%，4_133 → 70%，4_073 → 68%。
+    assert_eq!(
+        at(4_074).context_water_level_percent(&request, &capabilities),
+        Some(69)
+    );
+    assert_eq!(
+        at(4_133).context_water_level_percent(&request, &capabilities),
+        Some(70)
+    );
+    assert_eq!(
+        at(4_073).context_water_level_percent(&request, &capabilities),
+        Some(68)
+    );
+    // 窗口未知时无水位。
+    assert_eq!(
+        at(4_133).context_water_level_percent(&request, &ProviderCapabilities::default()),
+        None
+    );
+}
+
+/// 缓存感知跳过（#17 联动 #14）：hit_rate=0.9 且头部空间 >0.2 时跳过预测压缩；
+/// 命中率缺失或头部不足时不跳过。
+#[test]
+fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(100_000),
+        ..ProviderCapabilities::default()
+    };
+    let messages = vec![Message::text(MessageRole::User, "请求")];
+    let request = ModelRequest::new("model", messages.clone());
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 60_000,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+
+    // 命中率缺失（无缓存字段）→ 不跳过。
+    manager.note_model_round_usage(
+        &ModelRequest::new("model", messages.clone()),
+        &TokenUsage {
+            input_tokens: Some(60_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert!(!manager.predictive_precompression_skipped_by_cache(&request, &capabilities));
+
+    // hit_rate = 0.9（54_000 / 60_000），头部空间 (95_904 − 60_000) / 95_904 ≈ 0.374 > 0.2 → 跳过。
+    manager.note_model_round_usage(
+        &ModelRequest::new("model", messages.clone()),
+        &TokenUsage {
+            input_tokens: Some(60_000),
+            cache_read_tokens: Some(54_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert!(manager.predictive_precompression_skipped_by_cache(&request, &capabilities));
+
+    // 同一命中率但历史增量把估算推高到逼近预算、头部不足 → 不跳过。
+    // FixedEstimator 忽略切片长度：锚点按 1 条消息记录后，message_tokens
+    // 即“锚点之后的新增估算”，30_000 把总量推到 90_000，
+    // 头部 (95_904 − 90_000)/95_904 ≈ 0.06 < 0.2。
+    let crowded = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 0,
+            message_tokens: 30_000,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    crowded.note_model_round_usage(
+        &ModelRequest::new("model", messages.clone()),
+        &TokenUsage {
+            input_tokens: Some(60_000),
+            cache_read_tokens: Some(54_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert!(!crowded.predictive_precompression_skipped_by_cache(&request, &capabilities));
+
+    // 低命中率（0.5）即使头部充足 → 不跳过。
+    manager.note_model_round_usage(
+        &ModelRequest::new("model", messages.clone()),
+        &TokenUsage {
+            input_tokens: Some(60_000),
+            cache_read_tokens: Some(30_000),
+            ..TokenUsage::unknown()
+        },
+    );
+    assert!(!manager.predictive_precompression_skipped_by_cache(&request, &capabilities));
+}
+
+/// Runner 集成（#23）：水位跨越 70% 时发一条 transient 水位事件，不入权威 journal。
+#[tokio::test]
+async fn runner_emits_water_level_event_once_below_compaction_line() {
+    // 窗口 10_000，输入预算 5_904，85% 线 5_018。估算 ~4_200（71%）：
+    // 跨过 70% 但不触发压缩。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(10_000),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("最终回答")],
+    ));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 4_200,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider, ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_commit_sink(commit_sink.clone())
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request(vec![Message::text(
+            MessageRole::User,
+            "水位测试",
+        )]))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(result.compactions.is_empty());
+    let events = event_sink.events();
+    let water_levels: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event.kind() {
+            AgentStreamEventKind::ContextWaterLevel {
+                water_level_percent,
+                threshold_percent,
+            } => Some((*water_level_percent, *threshold_percent)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(water_levels.len(), 1, "应恰好发送一条水位事件");
+    assert_eq!(water_levels[0].1, 70);
+    assert!((70..=100).contains(&water_levels[0].0));
+    // 红线：水位事件不入权威 journal（只有唯一的模型 Round 提交）。
+    let committed = commit_sink.events();
+    assert!(matches!(
+        committed.as_slice(),
+        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
+    ));
+}
+
+/// Runner 集成（#23）：69% 水位不发送水位事件。
+#[tokio::test]
+async fn runner_sends_no_water_level_event_below_threshold() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(10_000),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("最终回答")],
+    ));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 4_000,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider, ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request(vec![Message::text(
+            MessageRole::User,
+            "水位测试",
+        )]))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(
+        !event_sink
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextWaterLevel { .. }))
+    );
+}
+
+/// Runner 集成（#23）：压缩轮只发压缩事件，不另发水位事件（防重复）。
+#[tokio::test]
+async fn runner_compaction_round_sends_no_duplicate_water_level() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(2_048),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("预算摘要"), text_reply("最终回答")],
+    ));
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_commit_sink(commit_sink.clone())
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request_with_output(atomic_tool_history(), 16))
+        .await;
+
+    assert!(result.is_success());
+    assert_eq!(result.compactions.len(), 1);
+    let events = event_sink.events();
+    assert!(
+        events.iter().any(|event| matches!(
+            event.kind(),
+            AgentStreamEventKind::ContextCompactionStarted { .. }
+        )),
+        "压缩轮应有压缩事件"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextWaterLevel { .. })),
+        "压缩轮不应另发水位事件"
+    );
+}
+
+/// Runner 集成（#17）：估算低于 85% 线但预期增长超预算时提前压缩，走 Budget 形态。
+#[tokio::test]
+async fn runner_predictive_compaction_fires_before_budget_line() {
+    // 小窗口 + 小摘要上限：窗口 2_048，Turn 输出上限 16 → 输入预算 2_032，
+    // 85% 线 1_727。atomic_tool_history 的真实估算约 1.1k（~54%，不触发
+    // 既有线）；预期增长 16 + 15_000 = 15_016，远超预算，预测触发。
+    // 摘要上限取 64（期望减量小），压缩走固定短摘要路径成功。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(2_048),
+        ..ProviderCapabilities::default()
+    };
+    let policy = ContextPolicy {
+        reserved_output_tokens: 16,
+        summary_max_output_tokens: 64,
+        ..ContextPolicy::default()
+    };
+    let context = ContextManager::new(
+        policy,
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("预测压缩摘要")),
+    )
+    .expect("测试策略应有效");
+    // 直接断言本场景处于“既有线不触发、预测线触发”的夹缝。
+    let probe = ModelRequest::new("model", atomic_tool_history());
+    let mut probe = probe;
+    probe.max_output_tokens = Some(16);
+    assert_eq!(context.precompression_target(&probe, &capabilities), None);
+    assert!(
+        context
+            .predictive_precompression_target(&probe, &capabilities)
+            .is_some()
+    );
+    assert!(!context.predictive_precompression_skipped_by_cache(&probe, &capabilities));
+
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [text_reply("最终回答")],
+    ));
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request_with_output(atomic_tool_history(), 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.compactions.len(), 1);
+    // 预测性触发复用 Budget 形态，不新增变体。
+    assert_eq!(
+        result.compactions[0].trigger,
+        ContextCompressionTrigger::Budget
+    );
+    // 压缩只走固定摘要器，不经过 Provider：主模型只被调用一次。
+    assert_eq!(
+        provider.requests().expect("应能读取 Provider 请求").len(),
+        1
+    );
+    // 压缩轮不另发水位事件（防重复）。
+    assert!(
+        !event_sink
+            .events()
+            .iter()
+            .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextWaterLevel { .. }))
+    );
+}
+
+/// 返回带明确输入用量与缓存读取的工具调用 Round，用于锚定测试的多轮调用。
+fn cache_tool_reply(input_tokens: u64, cache_read_tokens: u64, call_id: &str) -> ScriptedReply {
+    ScriptedReply::events([
+        ModelStreamEvent::MessageStart {
+            metadata: ResponseMetadata::default(),
+        },
+        ModelStreamEvent::Usage {
+            usage: TokenUsage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(100),
+                cache_read_tokens: Some(cache_read_tokens),
+                ..TokenUsage::unknown()
+            },
+        },
+        ModelStreamEvent::ToolCallStart {
+            index: 0,
+            id: call_id.to_owned(),
+            name: "anchor_probe".to_owned(),
+        },
+        ModelStreamEvent::ToolCallArgumentsDelta {
+            index: 0,
+            id: call_id.to_owned(),
+            delta: r#"{"value":"v"}"#.to_owned(),
+        },
+        ModelStreamEvent::ToolCallEnd {
+            index: 0,
+            id: call_id.to_owned(),
+        },
+        ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+        },
+    ])
+}
+
+/// Runner 集成（#17 联动 #14）：高命中率 + 充足头部空间时跳过预测性压缩。
+#[tokio::test]
+async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
+    // 窗口 94_096、输出上限 16 → 输入预算 90_000，85% 线 76_500。
+    // 首轮工具 Round 锚定 input 60_000、cache_read 56_000（hit_rate ≈ 0.93）；
+    // 次轮估算 = 60_000 + 11_500 = 71_500（79%，不触发既有线）；
+    // 预测 71_500 + 19_096 = 90_596 ≥ 90_000 本应触发，但头部空间
+    // (90_000 − 71_500) / 90_000 ≈ 0.206 > 0.2 → 跳过。
+    // 次轮水位 79% ≥ 70% 且无压缩 → 照常发送一条水位事件。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(94_096),
+        max_output_tokens: Some(16),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [
+            cache_tool_reply(60_000, 56_000, "skip-call"),
+            text_reply("最终回答"),
+        ],
+    ));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 1_000,
+            message_tokens: 11_500,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(AnchorTestTool))
+        .expect("合成工具应能注册");
+    let commit_sink = Arc::new(RecordingCommitSink::default());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider, registry, RunLimits::default())
+        .with_context_manager(context)
+        .with_commit_sink(commit_sink.clone())
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request(vec![
+            Message::text(MessageRole::User, "旧".repeat(2_000)),
+            Message::text(MessageRole::User, "当前任务"),
+        ]))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(
+        result.compactions.is_empty(),
+        "热缓存 + 充足头部应跳过预测压缩"
+    );
+    assert!(!commit_sink.events().iter().any(|event| matches!(
+        event.kind(),
+        AgentCommitEventKind::ContextCompactionApplied { .. }
+    )));
+    let water_levels: Vec<_> = event_sink
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind() {
+            AgentStreamEventKind::ContextWaterLevel {
+                water_level_percent,
+                threshold_percent,
+            } => Some((*water_level_percent, *threshold_percent)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(water_levels, [(79, 70)]);
+}
+
+/// Runner 集成（#23）：水位回落到阈值以下后再次跨越时重新发送水位事件。
+#[tokio::test]
+async fn runner_water_level_event_resends_after_dipping_below_threshold() {
+    // 同一预算 90_000：R1 估算 65_000（72%，发送）；R2 锚定 input 1_000 +
+    // 增量 1_000 = 2_000（2%，重置去重标记）；R3 锚定 input 63_000 +
+    // 增量 1_000 = 64_000（71%，再次发送）。三轮预测值均未超预算，无压缩。
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(94_096),
+        max_output_tokens: Some(16),
+        ..ProviderCapabilities::default()
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        capabilities,
+        [
+            cache_tool_reply(1_000, 0, "cross-call-1"),
+            cache_tool_reply(63_000, 0, "cross-call-2"),
+            text_reply("最终回答"),
+        ],
+    ));
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 65_000,
+            message_tokens: 1_000,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(AnchorTestTool))
+        .expect("合成工具应能注册");
+    let event_sink = Arc::new(RecordingContextEventSink::default());
+    let runner = AgentRunner::new(provider, registry, RunLimits::default())
+        .with_context_manager(context)
+        .with_event_sink(event_sink.clone());
+    let result = runner
+        .run_turn(turn_request(vec![
+            Message::text(MessageRole::User, "旧".repeat(2_000)),
+            Message::text(MessageRole::User, "当前任务"),
+        ]))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(result.compactions.is_empty());
+    let water_levels: Vec<_> = event_sink
+        .events()
+        .iter()
+        .filter_map(|event| match event.kind() {
+            AgentStreamEventKind::ContextWaterLevel {
+                water_level_percent,
+                threshold_percent,
+            } => Some((*water_level_percent, *threshold_percent)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(water_levels, [(72, 70), (71, 70)]);
+}

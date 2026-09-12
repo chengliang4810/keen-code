@@ -35,10 +35,10 @@ use crate::{
     AgentCommitSinkErrorKind, AgentDynamicInputBoundary, AgentDynamicInputReceipt,
     AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent, AgentStreamEventKind,
     AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
-    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind,
-    ContextCompactionKind, ContextCompressionOutcome, ContextCompressionRecord,
-    ContextCompressionTrigger, ContextError, ContextManager, CounterKind, GoalController,
-    GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
+    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, CONTEXT_WATER_LEVEL_INFO_PERCENT,
+    ContextCompactionFailureKind, ContextCompactionKind, ContextCompressionOutcome,
+    ContextCompressionRecord, ContextCompressionTrigger, ContextError, ContextManager, CounterKind,
+    GoalController, GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
     MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
     NoopAgentCommitSink, NoopAgentEventSink, PlanGuard, PlanGuardError, PostHookOutputBudget,
     PostToolUseContext, PostToolUseFailureContext, PreToolUseContext, ResolvedHookContext,
@@ -863,7 +863,53 @@ impl AgentRunner {
         .map_err(commit_sink_run_error)
     }
 
-    /// 投递一个带当前 Turn 身份的上下文压缩临时事件。
+    /// 上下文水位达到 info 告警阈值（#23）时尽力投递一条 transient 水位事件。
+    ///
+    /// 压缩触发判断之前调用：水位达到阈值且本轮尚未发送过时发送，
+    /// 含水位百分比与阈值，不入权威 journal；水位回落到阈值以下时重置
+    /// 去重标记，下次跨越可再次发送；窗口未知时静默跳过。投递失败只记录
+    /// 调试日志，不阻断主流程（观测通道的尽力语义）。
+    async fn maybe_notify_context_water_level(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+        model_request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) {
+        let Some(level) = self
+            .context
+            .context_water_level_percent(model_request, capabilities)
+        else {
+            return;
+        };
+        // 水位回落到阈值以下即重置，允许下一次跨越时再次提醒。
+        if level < CONTEXT_WATER_LEVEL_INFO_PERCENT {
+            active.water_level_notified = false;
+            return;
+        }
+        if active.water_level_notified {
+            return;
+        }
+        // ≥85% 触发线时压缩臂会执行并只发压缩事件（防重复），这里不另发。
+        if self
+            .context
+            .precompression_target(model_request, capabilities)
+            .is_some()
+        {
+            return;
+        }
+        active.water_level_notified = true;
+        let identity = ModelEventIdentity::for_turn(request, active.state.round_count());
+        let event = identity.envelope(AgentStreamEventKind::ContextWaterLevel {
+            water_level_percent: level,
+            threshold_percent: CONTEXT_WATER_LEVEL_INFO_PERCENT,
+        });
+        let timeout = Duration::from_millis(self.limits.event_sink_timeout_ms);
+        if let Err(error) = deliver_event_bounded(&self.event_sink, &event, timeout).await {
+            tracing::debug!("上下文水位事件投递失败（尽力投递，不阻断）：{error}");
+        }
+    }
+
     async fn deliver_context_compaction_event(
         &self,
         request: &TurnRequest,
@@ -896,6 +942,10 @@ impl AgentRunner {
     }
 
     /// 发送 Started/Failed 边界并在权威提交成功前保持原 Transcript 不变。
+    ///
+    /// 压缩实际执行的轮次只发压缩事件：调用点在压缩臂之前先发的 transient
+    /// 水位事件（#23）不再重复发送，由
+    /// [`AgentRunner::maybe_notify_context_water_level`] 的去重标记保证。
     async fn compact_context(
         &self,
         request: &TurnRequest,
@@ -1398,6 +1448,7 @@ impl AgentRunner {
             repeated_tool_failure_count: 0,
             tool_failure_reminder_fingerprint: None,
             limit_summary: None,
+            water_level_notified: false,
             goal_id: None,
         };
         let outcome = self.run_active(&request, &mut active).await;
@@ -1612,6 +1663,17 @@ impl AgentRunner {
                     ) && provider_capabilities.parallel_tool_calls,
                 )
             };
+            // 水位告警（#23）先于压缩触发判断：跨越 info 阈值且本轮尚未发送
+            // 过时发一条 transient 水位事件；含水位百分比与阈值，不入权威
+            // journal。压缩实际执行的轮次只发压缩事件（防重复）。水位事件丢失
+            // 不阻断主流程（尽力投递）。
+            self.maybe_notify_context_water_level(
+                request,
+                active,
+                &model_request,
+                &provider_capabilities,
+            )
+            .await;
             if let Some(target_tokens) = self
                 .context
                 .precompression_target(&model_request, &provider_capabilities)
@@ -1656,6 +1718,77 @@ impl AgentRunner {
                             // 装不下才与 forced 场景同源处理：在报 ContextBlocked
                             // 之前尝试唯一一次机械截断兜底；不可用或失败时保留
                             // 原始软失败分类。
+                            match self
+                                .try_mechanical_truncation_fallback(
+                                    request,
+                                    active,
+                                    &mut model_request,
+                                    &provider_capabilities,
+                                    ContextCompressionTrigger::Budget,
+                                )
+                                .await
+                            {
+                                Ok(true) => {}
+                                Err(AgentRunError::Cancelled) => {
+                                    return Err(AgentRunError::Cancelled);
+                                }
+                                _ => {
+                                    return Err(prefer_limit_summary_error(
+                                        active.limit_summary.as_ref(),
+                                        error,
+                                    ));
+                                }
+                            }
+                        } else {
+                            return Err(prefer_limit_summary_error(
+                                active.limit_summary.as_ref(),
+                                error,
+                            ));
+                        }
+                    }
+                }
+                active.state.transition_to(TurnPhase::RequestingModel)?;
+            } else if !self
+                .context
+                .predictive_precompression_skipped_by_cache(&model_request, &provider_capabilities)
+                && let Some(target_tokens) = self
+                    .context
+                    .predictive_precompression_target(&model_request, &provider_capabilities)
+            {
+                // 预测性触发（#17）：与既有触发线走完全相同的压缩臂（同上），
+                // 复用 Budget 触发形态；缓存感知跳过在进入前已判定。
+                active.state.transition_to(TurnPhase::Compacting)?;
+                let outcome = self
+                    .compact_context(
+                        request,
+                        &model_request,
+                        &provider_capabilities,
+                        active.state.round_count(),
+                        ContextCompressionTrigger::Budget,
+                        target_tokens,
+                    )
+                    .await;
+                match outcome {
+                    Ok(outcome) => {
+                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)?
+                    }
+                    Err(error) => {
+                        let error =
+                            self.adopt_micro_applied_failure(active, &mut model_request, error);
+                        let soft_failure = matches!(
+                            error,
+                            AgentRunError::Context(
+                                ContextError::NothingCompressible
+                                    | ContextError::EmptySummary
+                                    | ContextError::CompressionDidNotReduce { .. },
+                            )
+                        );
+                        if soft_failure
+                            && self
+                                .context
+                                .request_fits_context_window(&model_request, &provider_capabilities)
+                        {
+                        } else if soft_failure {
                             match self
                                 .try_mechanical_truncation_fallback(
                                     request,
@@ -3632,6 +3765,13 @@ struct ActiveTurn {
     tool_failure_reminder_fingerprint: Option<ToolFailureFingerprint>,
     /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
     limit_summary: Option<AgentRunError>,
+    /// 当前 Turn 内已发送过上下文水位 info 告警（#23）。
+    ///
+    /// 按当前活跃历史只保留一个标记：水位回落到阈值以下时（动态输入注入等
+    /// 场景也会消费该消息）重置，下次跨越阈值可再次发送；压缩实际执行的
+    /// 轮次直接走压缩事件，不置位本标记也不发送水位事件（防重复）。
+    /// 崩溃恢复重建 ActiveTurn 会归零该标记，与空响应重试计数的恢复语义一致。
+    water_level_notified: bool,
     /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
     goal_id: Option<String>,
 }

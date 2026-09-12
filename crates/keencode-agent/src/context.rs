@@ -13,7 +13,7 @@ use futures_util::{StreamExt, stream};
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelError, ModelProvider, ModelRequest,
     ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata, StopReason, TokenUsage,
-    ToolChoice, ToolResultContent, collect_model_stream,
+    ToolChoice, ToolResultContent, cache_hit_rate, collect_model_stream,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,6 +56,27 @@ const MICRO_COMPACT_SENTINEL: &str = "…[已压缩，省略 ";
 /// Micro 投影注入的完整中文省略标记模板；`{omitted}` 为被省略的字符数。
 const MICRO_COMPACT_MARKER_TEMPLATE: &str =
     "…[已压缩，省略 {omitted} 字符；完整内容可从原始来源重新获取]…";
+
+/// 预测性压缩触发（#17）预留的单轮工具结果增长估算（Token）。
+///
+/// 对齐 CCB 的 `TOOL_RESULT_GROWTH_ESTIMATE`：请求发送前按本轮可能新增的
+/// 工具结果规模预留固定增长量；当前估算加本轮预期增长达到输入预算时，
+/// 提前走既有压缩路径，避免把超限推迟到 Provider 报错。
+pub const PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS: u64 = 15_000;
+
+/// 预测性压缩的缓存感知跳过门限（#17 收尾联动，对齐 peri cache-aware 策略）：
+/// 最新缓存命中率高于该值且头部空间充足时跳过预测性压缩。仅限预测性触发
+/// 这条新路径，不改变既有 85% 触发线。
+pub const PREDICTIVE_CACHE_SKIP_HIT_RATE: f64 = 0.7;
+
+/// 配合 [`PREDICTIVE_CACHE_SKIP_HIT_RATE`] 的最小头部空间比例
+///（头部空间 = 输入预算 − 当前估算，占输入预算）。
+pub const PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO: f64 = 0.2;
+
+/// 上下文水位（#23）info 告警阈值：水位（估算占输入预算百分比）达到该值且
+/// 本轮尚未发送过时，发一条 transient 水位事件给 UI；水位达到压缩触发线
+/// 时压缩在执行，只发压缩事件不再另发（防重复）。
+pub const CONTEXT_WATER_LEVEL_INFO_PERCENT: u8 = 70;
 
 /// 上下文压缩异步边界使用的对象安全 Future。
 pub type ContextFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -787,6 +808,10 @@ struct RoundUsageAnchor {
     input_tokens: u64,
     /// 产生该用量的请求包含的消息数量；其后追加的消息按逐块规则增量估算。
     message_count: usize,
+    /// 该轮用量的提示词缓存命中率（`cache_read / input`）；Provider 未报告
+    /// 缓存或输入字段时为 `None`，预测性触发的缓存感知跳过不生效。
+    /// 压缩成功清锚时一并清除，不携带跨压缩的旧命中率。
+    cache_hit_rate: Option<f64>,
 }
 
 /// 组合预算、估算器和摘要器的上下文管理核心。
@@ -931,6 +956,7 @@ impl ContextManager {
         *anchor = Some(RoundUsageAnchor {
             input_tokens,
             message_count: request.messages.len(),
+            cache_hit_rate: cache_hit_rate(usage),
         });
     }
 
@@ -966,6 +992,10 @@ impl ContextManager {
     }
 
     /// 当请求超过已知模型窗口的预压缩阈值时返回目标总 Token，否则返回 `None`。
+    ///
+    /// 既有 85% 触发线（`trigger_percent`）保持不变；预测性触发（#17）由
+    /// [`ContextManager::predictive_precompression_target`] 单独判断并同样
+    /// 复用 `Budget` 触发形态。
     pub fn precompression_target(
         &self,
         request: &ModelRequest,
@@ -978,6 +1008,90 @@ impl ContextManager {
         let trigger = percent_of(input_budget, self.policy.trigger_percent);
         (self.estimate_request(request) >= trigger)
             .then(|| percent_of(input_budget, self.policy.target_percent).max(1))
+    }
+
+    /// 返回请求发送前的上下文水位百分比（估算占输入预算），窗口未知时为 `None`。
+    ///
+    /// 水位告警（#23）的唯一口径来源；压缩路径不受影响。
+    pub fn context_water_level_percent(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> Option<u8> {
+        let input_budget = self.input_budget(request, capabilities)?;
+        if input_budget == 0 {
+            return Some(100);
+        }
+        let estimated = self.estimate_request(request);
+        let percent = estimated
+            .saturating_mul(100)
+            .checked_div(input_budget)
+            .unwrap_or(100);
+        Some(u8::try_from(percent.min(100)).unwrap_or(100))
+    }
+
+    /// 预测性触发（#17）：当前估算尚未达到既有触发线，但本轮预期增长会
+    /// 把上下文推过输入预算时，返回与 [`ContextManager::precompression_target`]
+    /// 相同的压缩目标（复用 `Budget` 触发形态，不新增变体：穷举匹配点横跨
+    /// agent/resources/runtime 三个 crate，新增变体改动远大于收益）。
+    ///
+    /// 预期增长 = 本轮实际发送的 `max_output_tokens`（缺省时退回
+    /// `reserved_output_tokens`，与 [`ContextManager::input_budget`] 的预留口径
+    /// 一致）+ [`PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS`]；命中率守卫见
+    /// [`ContextManager::predictive_precompression_skipped_by_cache`]。
+    pub fn predictive_precompression_target(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> Option<u64> {
+        if !self.policy.precompress_enabled {
+            return None;
+        }
+        let input_budget = self.input_budget(request, capabilities)?;
+        if self.estimate_request(request) >= percent_of(input_budget, self.policy.trigger_percent) {
+            // 已达到既有触发线时交给 precompression_target，不走预测路径。
+            return None;
+        }
+        let expected_growth = u64::from(request.max_output_tokens.unwrap_or(0))
+            .max(self.policy.reserved_output_tokens)
+            .saturating_add(PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS);
+        (self
+            .estimate_request(request)
+            .saturating_add(expected_growth)
+            >= input_budget)
+            .then(|| percent_of(input_budget, self.policy.target_percent).max(1))
+    }
+
+    /// 预测性触发前的缓存感知跳过（#17 与 #14 的收尾联动，对齐 peri
+    /// cache-aware 策略）：最新缓存命中率高于
+    /// [`PREDICTIVE_CACHE_SKIP_HIT_RATE`] 且头部空间（输入预算 − 当前估算）
+    /// 占比超过 [`PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO`] 时返回 `true`。
+    /// 命中率缺失（Provider 未报告缓存字段）时返回 `false`，不跳过。
+    pub fn predictive_precompression_skipped_by_cache(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> bool {
+        let Some(hit_rate) = self
+            .usage_anchor
+            .lock()
+            .expect("上下文用量锚点锁不应损坏")
+            .and_then(|anchor| anchor.cache_hit_rate)
+        else {
+            return false;
+        };
+        if hit_rate <= PREDICTIVE_CACHE_SKIP_HIT_RATE {
+            return false;
+        }
+        let Some(input_budget) = self.input_budget(request, capabilities) else {
+            return false;
+        };
+        if input_budget == 0 {
+            return false;
+        }
+        let estimated = self.estimate_request(request);
+        let headroom = input_budget.saturating_sub(estimated);
+        (headroom as f64) / (input_budget as f64) > PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO
     }
 
     /// 返回 Provider 超限后唯一一次强制压缩使用的目标总 Token。
