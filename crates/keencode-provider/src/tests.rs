@@ -2738,6 +2738,53 @@ fn responses_json_decodes_text_reasoning_state_and_usage() {
     assert_eq!(response.content.last(), Some(&ContentBlock::text("KC_OK")));
 }
 
+/// Responses 的明确终态优先于工具内容，避免截断、过滤或取消响应误执行工具。
+#[test]
+fn responses_terminal_status_wins_over_function_call_content() {
+    let cases = [
+        (
+            "incomplete",
+            Some("max_output_tokens"),
+            StopReason::MaxOutputTokens,
+        ),
+        (
+            "incomplete",
+            Some("content_filter"),
+            StopReason::ContentFilter,
+        ),
+        ("cancelled", None, StopReason::Cancelled),
+    ];
+    for (status, detail, expected) in cases {
+        let mut response = json!({
+            "id": "resp-terminal-tool",
+            "model": "test-model",
+            "status": status,
+            "output": [{
+                "id": "call-terminal",
+                "call_id": "call-terminal",
+                "type": "function_call",
+                "name": "synthetic_tool",
+                "arguments": "{}"
+            }]
+        });
+        if let Some(detail) = detail {
+            response["incomplete_details"] = json!({"reason": detail});
+        }
+        let events = Adapter::new(ProviderProtocol::Responses)
+            .decode_json(response)
+            .expect("Responses 终态工具内容应先完成协议归约");
+        let response = collect_events(events);
+
+        assert_eq!(response.stop_reason, expected);
+        assert!(
+            response
+                .content
+                .iter()
+                .any(|block| matches!(block, ContentBlock::ToolCall { .. }))
+        );
+    }
+}
+
 /// 验证缓冲 Responses reasoning output item 经统一历史回放后仍保留完整协议字段。
 #[test]
 fn responses_buffered_reasoning_item_round_trips_through_history() {

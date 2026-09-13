@@ -1081,24 +1081,31 @@ fn response_stop_reason(
     saw_tool_call: bool,
     saw_refusal: bool,
 ) -> StopReason {
-    if saw_tool_call {
-        return StopReason::ToolUse;
-    }
-    if saw_refusal {
-        return StopReason::ContentFilter;
-    }
     let status = response.get("status").and_then(Value::as_str);
     let detail = response
         .get("incomplete_details")
         .and_then(|details| details.get("reason"))
         .and_then(Value::as_str);
+    // 明确的取消、输出上限和内容过滤必须优先于工具内容；否则一个带有
+    // function_call 的 Responses 截断响应会被误标为 ToolUse，进入真实工具调度。
+    if status == Some("cancelled") {
+        return StopReason::Cancelled;
+    }
+    match detail {
+        Some("max_output_tokens" | "max_completion_tokens") => {
+            return StopReason::MaxOutputTokens;
+        }
+        Some("content_filter") => return StopReason::ContentFilter,
+        _ => {}
+    }
+    if saw_refusal {
+        return StopReason::ContentFilter;
+    }
+    if saw_tool_call {
+        return StopReason::ToolUse;
+    }
     match (status, detail) {
         (Some("completed"), _) => StopReason::Completed,
-        (Some("cancelled"), _) => StopReason::Cancelled,
-        (Some("incomplete"), Some("max_output_tokens" | "max_completion_tokens")) => {
-            StopReason::MaxOutputTokens
-        }
-        (Some("incomplete"), Some("content_filter")) => StopReason::ContentFilter,
         (_, Some(reason)) => StopReason::Other {
             reason: reason.to_owned(),
         },
