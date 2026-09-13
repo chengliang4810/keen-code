@@ -281,6 +281,56 @@ fn structured_text_reply_with_telemetry(
     ])
 }
 
+/// 创建包含推理、保留结果工具调用和可选遥测的工具模拟结构化候选。
+fn structured_result_reply(
+    reasoning: &str,
+    id: &str,
+    value: Value,
+    input_tokens: u64,
+    duration_ms: Option<u64>,
+) -> ScriptedReply {
+    let mut events = vec![ModelStreamEvent::MessageStart {
+        metadata: ResponseMetadata::default(),
+    }];
+    if !reasoning.is_empty() {
+        events.push(ModelStreamEvent::ReasoningDelta {
+            index: 0,
+            delta: reasoning.to_owned(),
+        });
+    }
+    events.extend([
+        ModelStreamEvent::ToolCallStart {
+            index: 1,
+            id: id.to_owned(),
+            name: STRUCTURED_RESULT_TOOL.to_owned(),
+        },
+        ModelStreamEvent::ToolCallArgumentsDelta {
+            index: 1,
+            id: id.to_owned(),
+            delta: json!({"value": value}).to_string(),
+        },
+        ModelStreamEvent::ToolCallEnd {
+            index: 1,
+            id: id.to_owned(),
+        },
+        ModelStreamEvent::Usage {
+            usage: TokenUsage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(2),
+                total_tokens: Some(input_tokens.saturating_add(2)),
+                ..TokenUsage::unknown()
+            },
+        },
+    ]);
+    if let Some(duration_ms) = duration_ms {
+        events.push(ModelStreamEvent::DecodeTiming { duration_ms });
+    }
+    events.push(ModelStreamEvent::MessageEnd {
+        stop_reason: StopReason::ToolUse,
+    });
+    ScriptedReply::events(events)
+}
+
 /// 创建最小用户 Turn 请求。
 fn turn_request(plan_guard: PlanGuard) -> TurnRequest {
     TurnRequest::new(
@@ -449,74 +499,6 @@ impl AgentEventSink for RecordingModelEventSink {
             .lock()
             .expect("结构化实时事件测试锁不应损坏")
             .push(event.clone());
-        Box::pin(async { Ok(()) })
-    }
-}
-
-/// 在第二次模型响应开始时取消 Turn，并保留已确认的实时事件。
-struct CancelSecondModelStartSink {
-    /// 触发当前 Turn 取消的令牌。
-    cancellation: TurnCancellation,
-    /// 已确认的模型开始事件数量。
-    starts: AtomicUsize,
-    /// 按确认顺序保存实时事件。
-    events: Mutex<Vec<AgentStreamEvent>>,
-}
-
-impl CancelSecondModelStartSink {
-    /// 返回实时事件快照。
-    fn events(&self) -> Vec<AgentStreamEvent> {
-        self.events
-            .lock()
-            .expect("取消实时事件测试锁不应损坏")
-            .clone()
-    }
-
-    /// 返回取消前已经确认的文本增量。
-    fn text(&self) -> String {
-        self.events()
-            .iter()
-            .filter_map(|event| match event.kind() {
-                AgentStreamEventKind::ModelEvent {
-                    event: ModelStreamEvent::TextDelta { delta, .. },
-                } => Some(delta.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// 返回取消前已经确认的推理增量。
-    fn reasoning(&self) -> String {
-        self.events()
-            .iter()
-            .filter_map(|event| match event.kind() {
-                AgentStreamEventKind::ModelEvent {
-                    event:
-                        ModelStreamEvent::ReasoningDelta { delta, .. }
-                        | ModelStreamEvent::ReasoningSummaryDelta { delta, .. },
-                } => Some(delta.as_str()),
-                _ => None,
-            })
-            .collect()
-    }
-}
-
-impl AgentEventSink for CancelSecondModelStartSink {
-    /// 确认事件后在第二次响应开始边界触发取消。
-    fn send<'a>(&'a self, event: &'a AgentStreamEvent) -> AgentEventFuture<'a> {
-        self.events
-            .lock()
-            .expect("取消实时事件测试锁不应损坏")
-            .push(event.clone());
-        if matches!(
-            event.kind(),
-            AgentStreamEventKind::ModelEvent {
-                event: ModelStreamEvent::MessageStart { .. }
-            }
-        ) && self.starts.fetch_add(1, Ordering::SeqCst) == 1
-        {
-            self.cancellation.cancel();
-        }
         Box::pin(async { Ok(()) })
     }
 }
@@ -2792,6 +2774,93 @@ async fn structured_native_live_sink_preserves_order_for_replay() {
     assert_eq!(replayed.metadata.decode_duration_ms, Some(23));
 }
 
+/// 工具模拟结构化候选通过校验后，推理、工具调用和遥测按原始顺序重放。
+#[tokio::test]
+async fn structured_emulated_live_sink_preserves_tool_event_order_for_replay() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [structured_result_reply(
+            "先推理",
+            "result-1",
+            json!({"answer": 42}),
+            17,
+            None,
+        )],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let events = event_sink.events();
+    assert!(events.iter().all(|event| event.model_round() == 1));
+    let model_events = events
+        .into_iter()
+        .filter_map(|event| match event.into_kind() {
+            AgentStreamEventKind::ModelEvent { event } => Some(event),
+            AgentStreamEventKind::ModelFailure { .. }
+            | AgentStreamEventKind::ContextCompactionStarted { .. }
+            | AgentStreamEventKind::ContextCompactionFailed { .. }
+            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        model_events.as_slice(),
+        [
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::ReasoningDelta { delta: reasoning, .. },
+            ModelStreamEvent::ToolCallStart {
+                index: 1,
+                id: start_id,
+                name,
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 1,
+                id: arguments_id,
+                delta: arguments,
+            },
+            ModelStreamEvent::ToolCallEnd {
+                index: 1,
+                id: end_id,
+            },
+            ModelStreamEvent::Usage { usage },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+            },
+        ] if reasoning == "先推理"
+            && start_id == "result-1"
+            && name == STRUCTURED_RESULT_TOOL
+            && arguments_id == "result-1"
+            && arguments == &json!({"value": {"answer": 42}}).to_string()
+            && end_id == "result-1"
+            && usage.input_tokens == Some(17)
+            && usage.output_tokens == Some(2)
+            && usage.total_tokens == Some(19)
+    ));
+
+    let replayed = collect_model_stream(Box::pin(stream::iter(
+        model_events.into_iter().map(Ok::<_, ModelError>),
+    )))
+    .await
+    .expect("实时 Sink 已确认事件应当可以完整重放");
+    assert_eq!(replayed.stop_reason, StopReason::ToolUse);
+    assert!(replayed.content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::ToolCall { tool_call }
+                if tool_call.id == "result-1"
+                    && tool_call.name == STRUCTURED_RESULT_TOOL
+        )
+    }));
+    assert_eq!(replayed.usage.input_tokens, Some(17));
+}
+
 /// 原生结构化候选先坏后好时，实时 Sink 与冷恢复权威消息都只包含最终候选。
 #[tokio::test]
 async fn structured_native_live_sink_drops_invalid_candidate_before_correction() {
@@ -2823,6 +2892,36 @@ async fn structured_native_live_sink_drops_invalid_candidate_before_correction()
             matches!(block, ContentBlock::Text { text } if text == "{\"answer\":0}")
         })
     );
+
+    let events = event_sink.events();
+    assert!(events.iter().all(|event| event.model_round() == 1));
+    let model_events = events
+        .into_iter()
+        .filter_map(|event| match event.into_kind() {
+            AgentStreamEventKind::ModelEvent { event } => Some(event),
+            AgentStreamEventKind::ModelFailure { .. }
+            | AgentStreamEventKind::ContextCompactionStarted { .. }
+            | AgentStreamEventKind::ContextCompactionFailed { .. }
+            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        model_events.as_slice(),
+        [
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::ReasoningDelta { delta: reasoning, .. },
+            ModelStreamEvent::TextDelta { delta: text, .. },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            },
+        ] if reasoning == "好推理" && text == "{\"answer\":42}"
+    ));
+    let replayed = collect_model_stream(Box::pin(stream::iter(
+        model_events.into_iter().map(Ok::<_, ModelError>),
+    )))
+    .await
+    .expect("有效候选的实时事件应当可以完整重放");
+    assert_eq!(replayed.content, result.messages[1].content);
 }
 
 /// 无效原生候选的用量、计时和结束事件都不能残留在实时出口。
@@ -2859,7 +2958,6 @@ async fn structured_native_live_sink_drops_invalid_candidate_telemetry() {
     assert!(matches!(
         model_events.as_slice(),
         [
-            ModelStreamEvent::MessageStart { .. },
             ModelStreamEvent::MessageStart { .. },
             ModelStreamEvent::TextDelta { delta, .. },
             ModelStreamEvent::Usage { usage },
@@ -2948,6 +3046,87 @@ async fn structured_emulated_live_sink_hides_invalid_text_candidate() {
     }));
 }
 
+/// 工具模拟中无效保留结果调用的完整生命周期不能泄漏到实时出口。
+#[tokio::test]
+async fn structured_emulated_live_sink_hides_invalid_result_tool_call() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_result_reply("坏推理", "bad-result", json!({"answer": 0}), 101, Some(11)),
+            structured_result_reply(
+                "好推理",
+                "good-result",
+                json!({"answer": 42}),
+                202,
+                Some(22),
+            ),
+        ],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(event_sink.reasoning(), "好推理");
+    let events = event_sink.events();
+    assert!(events.iter().all(|event| event.model_round() == 1));
+    let model_events = events
+        .into_iter()
+        .filter_map(|event| match event.into_kind() {
+            AgentStreamEventKind::ModelEvent { event } => Some(event),
+            AgentStreamEventKind::ModelFailure { .. }
+            | AgentStreamEventKind::ContextCompactionStarted { .. }
+            | AgentStreamEventKind::ContextCompactionFailed { .. }
+            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        model_events.as_slice(),
+        [
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::ReasoningDelta { delta: reasoning, .. },
+            ModelStreamEvent::ToolCallStart {
+                index: 1,
+                id: start_id,
+                name,
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 1,
+                id: arguments_id,
+                delta: arguments,
+            },
+            ModelStreamEvent::ToolCallEnd {
+                index: 1,
+                id: end_id,
+            },
+            ModelStreamEvent::Usage { usage },
+            ModelStreamEvent::DecodeTiming { duration_ms: 22 },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::ToolUse,
+            },
+        ] if reasoning == "好推理"
+            && start_id == "good-result"
+            && name == STRUCTURED_RESULT_TOOL
+            && arguments_id == "good-result"
+            && arguments == &json!({"value": {"answer": 42}}).to_string()
+            && end_id == "good-result"
+            && usage.input_tokens == Some(202)
+    ));
+    assert!(!model_events.iter().any(|event| {
+        matches!(event, ModelStreamEvent::ToolCallStart { id, .. } if id == "bad-result")
+            || matches!(event, ModelStreamEvent::ToolCallArgumentsDelta { id, .. } if id == "bad-result")
+            || matches!(event, ModelStreamEvent::ToolCallEnd { id, .. } if id == "bad-result")
+            || matches!(event, ModelStreamEvent::Usage { usage } if usage.input_tokens == Some(101))
+            || matches!(event, ModelStreamEvent::DecodeTiming { duration_ms: 11 })
+    }));
+}
+
 /// 纠正请求遭遇 Provider 错误时保留错误边界，但不泄漏之前的坏候选。
 #[tokio::test]
 async fn structured_live_sink_keeps_provider_failure_without_bad_candidate() {
@@ -2987,10 +3166,9 @@ async fn structured_live_sink_keeps_provider_failure_without_bad_candidate() {
     assert_eq!(result.messages.len(), 1);
 }
 
-/// 纠正请求期间取消时只保留取消边界，实时出口与冷恢复均不包含坏候选。
+/// 纠正请求被 Provider 取消时只保留取消边界，实时出口与冷恢复均不包含坏候选。
 #[tokio::test]
 async fn structured_live_sink_keeps_cancellation_without_bad_candidate() {
-    let cancellation = TurnCancellation::new();
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             structured_output: StructuredOutputCapability::Native,
@@ -2998,16 +3176,13 @@ async fn structured_live_sink_keeps_cancellation_without_bad_candidate() {
         },
         [
             structured_text_reply("坏推理", "bad-result"),
-            structured_text_reply("不可达", "{\"answer\":42}"),
+            ScriptedReply::new(vec![Err(ModelError::Cancelled {
+                message: "provider cancelled correction".to_owned(),
+            })]),
         ],
     ));
-    let event_sink = Arc::new(CancelSecondModelStartSink {
-        cancellation: cancellation.clone(),
-        starts: AtomicUsize::new(0),
-        events: Mutex::new(Vec::new()),
-    });
-    let mut request = native_structured_turn_request();
-    request.set_cancellation(cancellation);
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let request = native_structured_turn_request();
     let result = runner(provider, ToolRegistry::new())
         .with_event_sink(event_sink.clone())
         .run_turn(request)

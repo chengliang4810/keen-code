@@ -2899,7 +2899,7 @@ impl AgentRunner {
         }
     }
 
-    /// 在结构化候选通过本地校验后发布此前暂存的正文/推理事件。
+    /// 在结构化候选通过本地校验后发布此前暂存的完整模型事件。
     async fn publish_buffered_model_events(
         &self,
         turn_request: &TurnRequest,
@@ -3838,7 +3838,7 @@ impl ModelEventIdentity {
 enum ModelStreamDelivery {
     /// 普通模型请求逐事件投递。
     Live,
-    /// 暂存正文/推理增量，待候选通过校验后由 Runner 显式冲刷。
+    /// 暂存整个模型响应，待候选通过校验后由 Runner 显式冲刷。
     BufferCandidateContent,
 }
 
@@ -3875,7 +3875,7 @@ struct ModelStreamTapStatus {
     usage: TokenUsage,
     /// 已由实时 Sink 确认接收的结束原因。
     stop_reason: Option<StopReason>,
-    /// 尚未发布、等待结构化候选校验结果的模型事件（MessageStart 除外）。
+    /// 尚未发布、等待结构化候选校验结果的全部模型事件。
     buffered_events: Vec<AgentStreamEvent>,
 }
 
@@ -4031,23 +4031,12 @@ fn observe_tap_model_event(
     }
 }
 
-/// 结构化候选校验期间需要保持原序的模型事件。
+/// 结构化候选校验期间需要保持原序的全部模型事件。
 ///
-/// `MessageStart` 仍实时投递，用于建立一次模型调用的生命周期并保留取消语义；
-/// 其余事件全部暂存，待候选通过校验后一次性按 Provider 到达顺序冲刷。
+/// 候选只有通过本地校验后才会一次性按 Provider 到达顺序冲刷；无效候选的完整
+/// 生命周期（包括起止、正文、推理、工具调用和遥测）直接丢弃。
 fn is_buffered_model_event(kind: &AgentStreamEventKind) -> bool {
-    matches!(
-        kind,
-        AgentStreamEventKind::ModelEvent {
-            event: keencode_model::ModelStreamEvent::TextDelta { .. }
-                | keencode_model::ModelStreamEvent::ReasoningDelta { .. }
-                | keencode_model::ModelStreamEvent::ReasoningSummaryDelta { .. }
-                | keencode_model::ModelStreamEvent::ReasoningContinuation { .. }
-                | keencode_model::ModelStreamEvent::Usage { .. }
-                | keencode_model::ModelStreamEvent::DecodeTiming { .. }
-                | keencode_model::ModelStreamEvent::MessageEnd { .. }
-        }
-    )
+    matches!(kind, AgentStreamEventKind::ModelEvent { .. })
 }
 
 /// 暂存未通过结构化校验的模型事件，不触发实时出口。
