@@ -3,6 +3,8 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
+const UNKNOWN_OS_VERSION: &str = "unknown; query the operating system if needed";
+
 /// 通用行为规则按职责分段并固定顺序；只编译嵌入文本，不依赖外部模板引擎。
 const CORE: [&str; 6] = [
     include_str!("../prompts/sections/01_intro.md"),
@@ -70,10 +72,12 @@ pub(crate) struct EnvironmentSnapshot {
     date: String,
     /// 冻结时点的时区标识。
     timezone: String,
+    /// 冻结时点的操作系统版本；进程内只探测一次，不轮询。
+    os_version: String,
 }
 
 impl EnvironmentSnapshot {
-    /// 冻结当前环境事实；不启动 shell 或操作系统查询进程，未探测的版本明确标注。
+    /// 冻结当前环境事实；操作系统版本按进程探测一次，未取得时明确标注。
     pub(crate) fn freeze(cwd: &Path, now: &chrono::DateTime<chrono::FixedOffset>) -> Self {
         Self {
             cwd_text: format!("{:?}", cwd.to_string_lossy()),
@@ -81,6 +85,7 @@ impl EnvironmentSnapshot {
             date: now.format("%Y-%m-%d").to_string(),
             timezone: iana_time_zone::get_timezone()
                 .unwrap_or_else(|_| "unknown; query the operating system if needed".to_string()),
+            os_version: detected_os_version().to_owned(),
         }
     }
 
@@ -93,10 +98,7 @@ impl EnvironmentSnapshot {
                 if self.is_git_repo { "true" } else { "false" },
             ),
             ("platform", std::env::consts::OS),
-            (
-                "os_version",
-                "not probed; query the operating system if needed",
-            ),
+            ("os_version", self.os_version.as_str()),
             ("date", self.date.as_str()),
             ("timezone", self.timezone.as_str()),
             (
@@ -110,6 +112,71 @@ impl EnvironmentSnapshot {
         ];
         render_environment(include_str!("../prompts/sections/07_env.md"), &values)
     }
+}
+
+/// 返回进程级不可变的操作系统版本。系统升级需要重启应用才能进入新的会话快照。
+fn detected_os_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION.get_or_init(probe_os_version).as_str()
+}
+
+#[cfg(target_os = "macos")]
+fn probe_os_version() -> String {
+    std::process::Command::new("/usr/bin/sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| normalize_os_version(&output.stdout))
+        .unwrap_or_else(|| UNKNOWN_OS_VERSION.to_owned())
+}
+
+#[cfg(target_os = "windows")]
+fn probe_os_version() -> String {
+    use winreg::RegKey;
+    use winreg::enums::{HKEY_LOCAL_MACHINE, KEY_READ, KEY_WOW64_64KEY};
+
+    let Ok(key) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey_with_flags(
+        r"SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+        KEY_READ | KEY_WOW64_64KEY,
+    ) else {
+        return UNKNOWN_OS_VERSION.to_owned();
+    };
+    let release = key
+        .get_value::<String, _>("DisplayVersion")
+        .or_else(|_| key.get_value::<String, _>("ReleaseId"))
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let build = key
+        .get_value::<String, _>("CurrentBuildNumber")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let revision = key.get_value::<u32, _>("UBR").ok();
+
+    match (release, build, revision) {
+        (Some(release), Some(build), Some(revision)) => {
+            format!("{} (build {}.{revision})", release.trim(), build.trim())
+        }
+        (Some(release), Some(build), None) => {
+            format!("{} (build {})", release.trim(), build.trim())
+        }
+        (None, Some(build), Some(revision)) => format!("build {}.{revision}", build.trim()),
+        (None, Some(build), None) => format!("build {}", build.trim()),
+        (Some(release), None, _) => release.trim().to_owned(),
+        (None, None, _) => UNKNOWN_OS_VERSION.to_owned(),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn probe_os_version() -> String {
+    UNKNOWN_OS_VERSION.to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn normalize_os_version(output: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(output).ok()?.trim();
+    (!value.is_empty() && value.len() <= 128 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
 }
 
 /// 只解析模板原文中的占位符，不把路径等插入值再次当模板解析。
@@ -261,5 +328,15 @@ mod tests {
                 .lines()
                 .any(|line| line == "Current date: 2026-09-07")
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_version_probe_accepts_only_bounded_single_line_text() {
+        assert_eq!(normalize_os_version(b"14.6.1\n"), Some("14.6.1".to_owned()));
+        assert_eq!(normalize_os_version(b"\n"), None);
+        assert_eq!(normalize_os_version(b"14.6\nforged"), None);
+        assert_eq!(normalize_os_version(&[b'1'; 129]), None);
+        assert_eq!(normalize_os_version(&[0xff]), None);
     }
 }
