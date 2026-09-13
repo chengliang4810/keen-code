@@ -4602,17 +4602,15 @@ impl AgentRuntime {
         request
             .metadata
             .insert(REQUEST_METADATA_PURPOSE.to_owned(), purpose.to_owned());
-        let response = tokio::time::timeout(
+        let (response, structured_output) = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            provider.complete(request),
+            structured_mode.complete_isolated(&provider, request),
         )
         .await
-        .map_err(|_| anyhow!("隔离模型调用超时"))??;
+        .map_err(|_| anyhow!("隔离模型调用超时"))?
+        .context("隔离模型响应不符合结构化输出约定")?;
         // HTTP 200 不代表内容符合契约；结果工具终态由共用解析器校验，绝不实际执行。
-        if let Some(value) = structured_mode
-            .parse_response(&response)
-            .context("隔离记忆模型响应不符合结构化输出约定")?
-        {
+        if let Some(value) = structured_output {
             return Ok(value.to_string());
         }
         // 标题即使已产生非空文本，截断、拒答、取消或未知终态也不能写入持久缓存。
@@ -16814,7 +16812,18 @@ mod tests {
             (r##"{"memoryMd":"# 记忆","extra":true}"##, false),
         ] {
             let storage = tempfile::tempdir().expect("应创建记忆测试存储目录");
-            let (base_url, server) = spawn_buffered_responses_server(text);
+            let body = json!({
+                "id": "response-runtime-test", "object": "response", "model": "test-model",
+                "status": "completed",
+                "output": [{
+                    "id": "message-runtime-test", "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]
+                }],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+            });
+            let expected_requests = if accepted { 1 } else { 6 };
+            let (base_url, server) =
+                spawn_buffered_responses_sequence(vec![body; expected_requests]);
             let runtime = runtime_with_responses_capabilities(
                 storage.path(),
                 &base_url,
@@ -16839,12 +16848,85 @@ mod tests {
                     json!({"memoryMd": "# 已验证合成记忆"}),
                 );
             }
-            let request = finish_responses_server(server);
+            let requests = server
+                .join()
+                .expect("本地模型服务线程不应 panic")
+                .expect("本地模型服务应成功");
+            assert_eq!(requests.len(), expected_requests);
+            let request = &requests[0];
             assert_eq!(request["tool_choice"], "none");
             assert_eq!(request["text"]["format"]["type"], "json_schema");
             assert_eq!(request["text"]["format"]["strict"], true);
             assert_eq!(request["text"]["format"]["schema"], schema);
         }
+    }
+
+    /// 隔离记忆必须在同一总超时内复用共用纠正通道，并把坏候选留在私有请求中。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn isolated_memory_generation_corrects_invalid_native_response() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"memoryMd": {"type": "string"}},
+            "required": ["memoryMd"],
+            "additionalProperties": false
+        });
+        let response_body = |id: &str, text: &str| {
+            json!({
+                "id": id, "object": "response", "model": "test-model",
+                "status": "completed",
+                "output": [{
+                    "id": format!("message-{id}"), "type": "message", "role": "assistant",
+                    "content": [{"type": "output_text", "text": text}]
+                }],
+                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+            })
+        };
+        let (base_url, server) = spawn_buffered_responses_sequence(vec![
+            response_body("invalid-memory", r#"{"memoryMd":42}"#),
+            response_body("valid-memory", r##"{"memoryMd":"# 已纠正记忆"}"##),
+        ]);
+        let storage = tempfile::tempdir().expect("应创建记忆测试存储目录");
+        let runtime = runtime_with_responses_capabilities(
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities {
+                structured_output: keencode_model::StructuredOutputCapability::Native,
+                ..ProviderCapabilities::default()
+            }),
+        );
+
+        let result = runtime
+            .generate_isolated(
+                "只返回约定的合成记忆 JSON",
+                "合成数据",
+                10,
+                keencode_model::StructuredOutputConfig::new("test_memory", schema.clone()),
+            )
+            .await
+            .expect("第一次纠正应成功");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&result).unwrap(),
+            json!({"memoryMd": "# 已纠正记忆"})
+        );
+        let requests = server
+            .join()
+            .expect("本地模型服务线程不应 panic")
+            .expect("本地模型服务应成功");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1]["tool_choice"], "none");
+        assert_eq!(requests[1]["text"]["format"]["schema"], schema);
+        let input = requests[1]["input"].as_array().expect("应编码纠正上下文");
+        assert_eq!(input.len(), 4);
+        assert_eq!(input[2]["role"], "assistant");
+        assert_eq!(input[2]["content"][0]["text"], r#"{"memoryMd":42}"#);
+        assert_eq!(input[3]["role"], "user");
+        let correction = input[3]["content"][0]["text"]
+            .as_str()
+            .expect("纠正说明应编码为文本");
+        assert!(correction.contains("\"failure\":\"schema_violation\""));
+        assert!(correction.contains(&schema.to_string()));
     }
 
     /// 非原生记忆复用结果工具；唯一结果必须严格验证，不把模型工具调用交给执行器。
@@ -16927,11 +17009,20 @@ mod tests {
             if let Some(extra) = extra {
                 output.push(extra);
             }
-            let (base_url, server) = spawn_buffered_responses_body(json!({
+            let body = json!({
                 "id": "response-runtime-test", "object": "response", "model": "test-model",
                 "status": "completed", "output": output,
                 "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
-            }));
+            });
+            // 非对象工具参数在模型归约层直接形成 Protocol 错误；其余完整结构错误
+            // 会真实消耗五次私有纠正后返回最后一次原始诊断。
+            let expected_requests = if accepted || case == "non_object" {
+                1
+            } else {
+                6
+            };
+            let (base_url, server) =
+                spawn_buffered_responses_sequence(vec![body; expected_requests]);
             let runtime = runtime_with_responses_capabilities(
                 storage.path(),
                 &base_url,
@@ -16956,7 +17047,12 @@ mod tests {
                     arguments["value"]
                 );
             }
-            let request = finish_responses_server(server);
+            let requests = server
+                .join()
+                .expect("本地模型服务线程不应 panic")
+                .expect("本地模型服务应成功");
+            assert_eq!(requests.len(), expected_requests, "{case}");
+            let request = &requests[0];
             assert_eq!(request["tool_choice"], "required");
             assert_eq!(request["parallel_tool_calls"], false);
             let input = request["input"].as_array().expect("应编码输入消息");

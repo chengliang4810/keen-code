@@ -11,9 +11,8 @@ use futures_util::stream::FuturesUnordered;
 use futures_util::{StreamExt, stream};
 use keencode_model::{
     ContentBlock, Message, MessageRole, ModelError, ModelMessages, ModelProvider, ModelRequest,
-    ModelResponse, ModelStream, ProviderCapabilities, ResponseMetadata, StopReason,
-    StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice,
-    ToolResult, collect_model_stream,
+    ModelResponse, ModelStream, ProviderCapabilities, ResponseMetadata, StopReason, TokenUsage,
+    ToolCall, ToolChoice, ToolResult, collect_model_stream,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -23,7 +22,9 @@ use crate::context::{
     post_compaction_read_hint_message,
 };
 use crate::event::AgentToolRoundBinding;
-use crate::structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
+use crate::structured_output::{
+    STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputCorrectionBudget, StructuredOutputMode,
+};
 use crate::tool::{
     NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, ToolError,
     ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputValidation, ToolResultFootprint,
@@ -43,9 +44,9 @@ use crate::{
     NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
     PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
     PreCompactHookContext, PreToolUseContext, ResolvedHookContext, ResolvedStopHook, SessionId,
-    StopHookContext, TerminalReason, ToolCompletionStatus, ToolConcurrency, ToolContext, ToolEffect,
-    ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId,
-    TurnPhase, TurnState, TurnTransitionError,
+    StopHookContext, TerminalReason, ToolCompletionStatus, ToolConcurrency, ToolContext,
+    ToolEffect, ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry,
+    TurnCancellation, TurnId, TurnPhase, TurnState, TurnTransitionError,
 };
 
 /// 显式运行上限耗尽后只允许一次无工具总结，不注入剩余次数倒计时。
@@ -565,18 +566,14 @@ impl Error for AgentToolCatalogUpdateError {}
 /// 在模型采样前的安全 Reason 边界原子应用并读取延迟工具目录变化。
 pub trait AgentToolCatalogUpdateSource: Send + Sync {
     /// 返回该 Runner 自上次观察以来的唯一变化；没有变化时返回 `None`。
-    fn take_update(
-        &self,
-    ) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError>;
+    fn take_update(&self) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError>;
 }
 
 /// 默认没有可变延迟工具目录的更新端口。
 struct NoopAgentToolCatalogUpdateSource;
 
 impl AgentToolCatalogUpdateSource for NoopAgentToolCatalogUpdateSource {
-    fn take_update(
-        &self,
-    ) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError> {
+    fn take_update(&self) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError> {
         Ok(None)
     }
 }
@@ -1136,9 +1133,7 @@ impl AgentRunner {
         self.deliver_context_compaction_event(
             request,
             model_round,
-            AgentStreamEventKind::ContextCompactionStarted {
-                estimated_tokens,
-            },
+            AgentStreamEventKind::ContextCompactionStarted { estimated_tokens },
             true,
         )
         .await?;
@@ -1653,6 +1648,7 @@ impl AgentRunner {
             empty_response_retry_used: false,
             disable_configured_max_output: false,
             max_output_recovery_count: 0,
+            structured_output_correction_budget: StructuredOutputCorrectionBudget::new(),
             next_model_call_attempt: 1,
             hook_context_bytes: 0,
             stop_hook_rounds: 0,
@@ -1937,12 +1933,7 @@ impl AgentRunner {
                         // 投影后消息（预压缩场景 micro 收益保留），再按内层错误
                         // 的既有分类决定容忍或终止；非 Micro 载荷原样透传。
                         let error = self
-                            .adopt_micro_applied_failure(
-                                request,
-                                active,
-                                &mut model_request,
-                                error,
-                            )
+                            .adopt_micro_applied_failure(request, active, &mut model_request, error)
                             .await?;
                         let soft_failure = matches!(
                             error,
@@ -2020,12 +2011,7 @@ impl AgentRunner {
                     }
                     Err(error) => {
                         let error = self
-                            .adopt_micro_applied_failure(
-                                request,
-                                active,
-                                &mut model_request,
-                                error,
-                            )
+                            .adopt_micro_applied_failure(request, active, &mut model_request, error)
                             .await?;
                         let soft_failure = matches!(
                             error,
@@ -2169,13 +2155,8 @@ impl AgentRunner {
                                 }
                             }
                         };
-                        self.adopt_compaction_outcome(
-                            request,
-                            active,
-                            &mut model_request,
-                            outcome,
-                        )
-                        .await?;
+                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)
+                            .await?;
                         active.state.transition_to(TurnPhase::RequestingModel)?;
                         // 压缩重试不在臂内嵌套采样：臂结束后由循环顶部换新调用
                         // 尝试重新发起同一请求，重试结果回到本循环按臂顺序重新
@@ -2235,7 +2216,10 @@ impl AgentRunner {
                 }
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
-            let (mut response, tool_calls) = loop {
+            let structured_base_request =
+                request_with_transient_message(&model_request, tool_catalog_update.as_ref());
+            let mut correction_in_flight = false;
+            let (mut response, tool_calls) = 'response_attempt: loop {
                 self.commit_model_round_usage(
                     request,
                     active.state.round_count(),
@@ -2249,16 +2233,28 @@ impl AgentRunner {
                 // 第一条新持久消息。通知 token 的保守高估在下次用量后自愈。
                 self.context
                     .note_model_round_usage(&model_request, &completed_round.response.usage);
+                if correction_in_flight {
+                    // 纠正请求的候选和诊断只存在于私有请求副本中；它不是权威
+                    // Transcript 前缀，不能留下会污染后续 Round 估算的用量锚点。
+                    self.context.clear_usage_anchor();
+                }
                 let response = completed_round.response;
                 // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
                 // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空
-                // 响应重试重采样（不注入续跑指令、不提交空段）；其余终止原因维持
-                // 既有终态语义。
+                // 响应重试重采样（不注入续跑指令、不提交空段）。结构化请求改由
+                // 明确的纠正分类处理，因此 max_tokens 空响应保持原终态，不误计
+                // 为可纠正 MissingOutput；其余终止原因维持既有终态语义。
                 let terminal_error = model_terminal_error(&response.stop_reason).filter(|error| {
-                    !(matches!(error, AgentRunError::ModelOutputLimit)
+                    !(matches!(&structured_mode, StructuredOutputMode::None)
+                        && matches!(error, AgentRunError::ModelOutputLimit)
                         && response.content.is_empty())
                 });
                 if let Some(error) = terminal_error {
+                    if correction_in_flight {
+                        // 私有纠正响应既不提交部分正文，也不进入输出截断续跑；取消、
+                        // 过滤和 max_tokens 保留自身终态，且不会继续消耗纠正预算。
+                        return Err(error);
+                    }
                     // MaxOutputTokens 的唯一安全恢复窗口：截断响应不含工具调用块
                     // （工具参数可能已被截断，续跑不安全）、内容非空（空响应由下方
                     // 空响应重试统一处理）、limit_summary 未挂起（总结 Round 只允许
@@ -2312,92 +2308,168 @@ impl AgentRunner {
                     )?;
                     return Err(error);
                 }
-                let tool_calls = extract_tool_calls(&response, &mut active.seen_tool_call_ids)
-                    .map_err(|error| {
-                        prefer_limit_summary_error(active.limit_summary.as_ref(), error)
-                    })?;
-                if !response.content.is_empty() {
-                    break (response, tool_calls);
+                if response.content.is_empty() && active.limit_summary.is_some() {
+                    return Err(active
+                        .limit_summary
+                        .take()
+                        .expect("已判定摘要上限错误应仍然存在"));
                 }
-                // 空响应发生时没有任何工具执行或部分消息提交，重新采样没有副作用；
-                // 每个 Turn 只重试一次，摘要轮与已消耗重试后的空响应仍按原语义终态。
-                if active.limit_summary.is_some() || active.empty_response_retry_used {
-                    if let Some(error) = active.limit_summary.take() {
-                        return Err(error);
-                    }
-                    return Err(match structured_mode.enforcement() {
-                        Some(enforcement) => structured_run_error(
-                            enforcement,
-                            StructuredOutputFailureKind::MissingOutput,
-                            "模型响应没有任何内容块",
-                        ),
-                        None => AgentRunError::InvalidResponse {
+                if response.content.is_empty()
+                    && matches!(&structured_mode, StructuredOutputMode::None)
+                {
+                    // 普通空响应没有任何工具执行或部分消息提交，每个 Turn 只重试
+                    // 一次；结构化空响应由五次纠正预算独立处理，不共享本标记。
+                    if active.empty_response_retry_used {
+                        return Err(AgentRunError::InvalidResponse {
                             message: "模型响应没有任何内容块".to_owned(),
-                        },
+                        });
+                    }
+                    active.empty_response_retry_used = true;
+                    active.state.transition_to(TurnPhase::Compacting)?;
+                    active.state.transition_to(TurnPhase::RequestingModel)?;
+                    let retry_call_attempt = active.next_model_call_attempt()?;
+                    completed_round = self
+                        .request_model(
+                            request,
+                            request_with_transient_message(
+                                &model_request,
+                                tool_catalog_update.as_ref(),
+                            ),
+                            retry_call_attempt,
+                            &mut active.state,
+                        )
+                        .await?;
+                    continue 'response_attempt;
+                }
+
+                // 先在临时集合中校验调用 ID；结构化候选失败时不得污染当前 Turn
+                // 已提交调用集合，真正进入业务工具路径后才采纳该集合。
+                let mut candidate_seen_tool_call_ids = active.seen_tool_call_ids.clone();
+                let tool_calls = extract_tool_calls(&response, &mut candidate_seen_tool_call_ids)
+                    .map_err(|error| {
+                    prefer_limit_summary_error(active.limit_summary.as_ref(), error)
+                })?;
+
+                if let Some(error) = active.limit_summary.take() {
+                    let mut committed = vec![Message::new(
+                        MessageRole::Assistant,
+                        response.content.clone(),
+                    )];
+                    if !tool_calls.is_empty() {
+                        committed.push(Message::new(
+                            MessageRole::Tool,
+                            tool_calls
+                                .into_iter()
+                                .map(|call| ContentBlock::ToolResult {
+                                    tool_result: ToolResult::text(
+                                        call.id,
+                                        "显式上限耗尽后的最终总结 Round 禁止调用工具",
+                                        true,
+                                    ),
+                                })
+                                .collect(),
+                        ));
+                    }
+                    active.state.transition_to(TurnPhase::CommittingRound)?;
+                    self.commit_round_messages(
+                        request,
+                        active,
+                        Some(ModelRoundCompletion::from_response(&response)),
+                        committed,
+                    )?;
+                    return Err(error);
+                }
+
+                if tool_calls.is_empty() && response.stop_reason == StopReason::ToolUse {
+                    return Err(AgentRunError::InvalidResponse {
+                        message: "模型以工具调用结束但没有返回工具调用内容块".to_owned(),
                     });
                 }
-                active.empty_response_retry_used = true;
-                // 与上下文超限强制重试一致：同一 Round 内换新调用尝试重新发起采样。
-                // 取消恰好落在"尝试 1 空响应已返回、重试尚未发起"的窗口时，终态由
-                // 重试 request_model 起点的取消竞态判为 Cancelled（取消优先是全局
-                // 语义），而非改前的 InvalidResponse。
-                // 已知不对称：该重试 request_model 若报 ContextLengthExceeded，会经
-                // `?` 直接以 Failed(Model) 终态传播，不走上方强制压缩 match——重试
-                // 请求与刚被接受的请求逐字节相同，此时超限属 Provider 异常；也避免
-                // 把压缩记录纠缠进已提交 attempt-1 用量的半提交 Round。降级臂同理
-                // 不可达，理由相同（同请求刚被接受过，再遇 400 属厂商异常）。
-                active.state.transition_to(TurnPhase::Compacting)?;
-                active.state.transition_to(TurnPhase::RequestingModel)?;
-                let retry_call_attempt = active.next_model_call_attempt()?;
-                completed_round = self
-                    .request_model(
-                        request,
-                        request_with_transient_message(
-                            &model_request,
-                            tool_catalog_update.as_ref(),
-                        ),
-                        retry_call_attempt,
-                        &mut active.state,
-                    )
-                    .await?;
-            };
 
-            if let Some(error) = active.limit_summary.take() {
-                let mut committed = vec![Message::new(
-                    MessageRole::Assistant,
-                    response.content.clone(),
-                )];
-                if !tool_calls.is_empty() {
-                    committed.push(Message::new(
-                        MessageRole::Tool,
-                        tool_calls
-                            .into_iter()
-                            .map(|call| ContentBlock::ToolResult {
-                                tool_result: ToolResult::text(
-                                    call.id,
-                                    "显式上限耗尽后的最终总结 Round 禁止调用工具",
-                                    true,
-                                ),
-                            })
-                            .collect(),
-                    ));
+                let is_structured_candidate = correction_in_flight
+                    || match &structured_mode {
+                        StructuredOutputMode::None => false,
+                        StructuredOutputMode::Native(_) => tool_calls.is_empty(),
+                        StructuredOutputMode::ToolEmulated(_) => {
+                            tool_calls.is_empty()
+                                || tool_calls
+                                    .iter()
+                                    .any(|call| call.name == STRUCTURED_OUTPUT_TOOL_NAME)
+                        }
+                    };
+                if is_structured_candidate {
+                    match complete_structured_output(&structured_mode, response.clone()) {
+                        Ok(completion) => {
+                            let committed = vec![Message::new(
+                                MessageRole::Assistant,
+                                completion.response.content.clone(),
+                            )];
+                            active.state.transition_to(TurnPhase::CommittingRound)?;
+                            self.commit_round_messages(
+                                request,
+                                active,
+                                Some(ModelRoundCompletion::from_response(&completion.response)),
+                                committed,
+                            )?;
+                            if self
+                                .should_complete_after_stop_hooks(
+                                    request,
+                                    active,
+                                    &completion.response,
+                                )
+                                .await?
+                            {
+                                return Ok(completion);
+                            }
+                            continue 'model_round;
+                        }
+                        Err(error) => {
+                            let next_request = match &error {
+                                AgentRunError::Model(model_error) => {
+                                    active.structured_output_correction_budget.next_request(
+                                        &structured_mode,
+                                        &structured_base_request,
+                                        &response,
+                                        model_error,
+                                    )
+                                }
+                                _ => None,
+                            };
+                            let Some(next_request) = next_request else {
+                                return Err(error);
+                            };
+                            // 纠正是同一逻辑 Round 内的私有重采样：不提交坏候选和
+                            // 纠正消息，不递增 Round/Step，也不进入任何工具执行路径。
+                            active.state.transition_to(TurnPhase::Compacting)?;
+                            active.state.transition_to(TurnPhase::RequestingModel)?;
+                            let retry_call_attempt = active.next_model_call_attempt()?;
+                            correction_in_flight = true;
+                            completed_round = self
+                                .request_model(
+                                    request,
+                                    next_request,
+                                    retry_call_attempt,
+                                    &mut active.state,
+                                )
+                                .await?;
+                            continue 'response_attempt;
+                        }
+                    }
                 }
-                active.state.transition_to(TurnPhase::CommittingRound)?;
-                self.commit_round_messages(
-                    request,
-                    active,
-                    Some(ModelRoundCompletion::from_response(&response)),
-                    committed,
-                )?;
-                return Err(error);
-            }
 
-            if let StructuredOutputMode::ToolEmulated(_) = &structured_mode {
-                if tool_calls
-                    .iter()
-                    .any(|call| call.name == STRUCTURED_OUTPUT_TOOL_NAME)
-                {
-                    let completion = complete_emulated_output(&structured_mode, response)?;
+                if tool_calls.is_empty() {
+                    if response.stop_reason != StopReason::Completed {
+                        return Err(AgentRunError::InvalidResponse {
+                            message: format!(
+                                "普通文本响应必须以 completed 结束，实际为 {:?}",
+                                response.stop_reason
+                            ),
+                        });
+                    }
+                    let completion = CompletedTurn {
+                        response,
+                        structured_output: None,
+                    };
                     let committed = vec![Message::new(
                         MessageRole::Assistant,
                         completion.response.content.clone(),
@@ -2415,62 +2487,12 @@ impl AgentRunner {
                     {
                         return Ok(completion);
                     }
-                    continue;
+                    continue 'model_round;
                 }
-            }
 
-            if tool_calls.is_empty() {
-                if response.stop_reason == StopReason::ToolUse {
-                    return Err(AgentRunError::InvalidResponse {
-                        message: "模型以工具调用结束但没有返回工具调用内容块".to_owned(),
-                    });
-                }
-                if matches!(&structured_mode, StructuredOutputMode::None)
-                    && response.stop_reason != StopReason::Completed
-                {
-                    return Err(AgentRunError::InvalidResponse {
-                        message: format!(
-                            "普通文本响应必须以 completed 结束，实际为 {:?}",
-                            response.stop_reason
-                        ),
-                    });
-                }
-                let structured_output = match &structured_mode {
-                    StructuredOutputMode::None => None,
-                    StructuredOutputMode::Native(config) => Some(
-                        config.parse_response(&response, StructuredOutputEnforcement::Native)?,
-                    ),
-                    StructuredOutputMode::ToolEmulated(_) => {
-                        return Err(structured_run_error(
-                            StructuredOutputEnforcement::ToolEmulated,
-                            StructuredOutputFailureKind::MissingOutput,
-                            "模型没有调用保留结果工具",
-                        ));
-                    }
-                };
-                let committed = vec![Message::new(
-                    MessageRole::Assistant,
-                    response.content.clone(),
-                )];
-                active.state.transition_to(TurnPhase::CommittingRound)?;
-                self.commit_round_messages(
-                    request,
-                    active,
-                    Some(ModelRoundCompletion::from_response(&response)),
-                    committed,
-                )?;
-                let completion = CompletedTurn {
-                    response,
-                    structured_output,
-                };
-                if self
-                    .should_complete_after_stop_hooks(request, active, &completion.response)
-                    .await?
-                {
-                    return Ok(completion);
-                }
-                continue;
-            }
+                active.seen_tool_call_ids = candidate_seen_tool_call_ids;
+                break 'response_attempt (response, tool_calls);
+            };
 
             if response.stop_reason != StopReason::ToolUse {
                 return Err(AgentRunError::InvalidResponse {
@@ -4126,6 +4148,8 @@ struct ActiveTurn {
     /// 崩溃恢复（Indeterminate 提交后重建 ActiveTurn）会把计数归零，可能对
     /// 同一段截断输出再次续跑；这与空响应重试计数的恢复语义一致，不视为缺陷。
     max_output_recovery_count: u32,
+    /// 当前 Turn 已实际发起的结构化输出纠正请求；普通请求永远保持零。
+    structured_output_correction_budget: StructuredOutputCorrectionBudget,
     /// 当前 Turn 下一次 Provider 模型调用使用的单调尝试序号。
     next_model_call_attempt: u32,
     /// 当前 Turn 已实际注入模型消息的 Hook 上下文字节数。
@@ -4523,6 +4547,30 @@ struct ToolBatchResult {
     lifecycle_fully_committed: bool,
 }
 
+/// 校验结构化终态；工具模拟额外转换为仅含最终 JSON 文本的统一响应。
+fn complete_structured_output(
+    mode: &StructuredOutputMode,
+    response: ModelResponse,
+) -> Result<CompletedTurn, AgentRunError> {
+    match mode {
+        StructuredOutputMode::None => Err(AgentRunError::Internal {
+            message: "普通输出不应进入结构化终态校验".to_owned(),
+        }),
+        StructuredOutputMode::Native(_) => {
+            let structured_output =
+                mode.parse_response(&response)?
+                    .ok_or_else(|| AgentRunError::Internal {
+                        message: "原生结构化输出必须产生校验结果".to_owned(),
+                    })?;
+            Ok(CompletedTurn {
+                response,
+                structured_output: Some(structured_output),
+            })
+        }
+        StructuredOutputMode::ToolEmulated(_) => complete_emulated_output(mode, response),
+    }
+}
+
 /// 校验保留结果工具调用并转换为统一最终文本响应。
 fn complete_emulated_output(
     mode: &StructuredOutputMode,
@@ -4550,19 +4598,6 @@ fn complete_emulated_output(
             StopReason::Completed,
         ),
         structured_output: Some(value),
-    })
-}
-
-/// 创建能保留结构化失败分类的 Agent 运行错误。
-fn structured_run_error(
-    enforcement: StructuredOutputEnforcement,
-    failure: StructuredOutputFailureKind,
-    message: impl Into<String>,
-) -> AgentRunError {
-    AgentRunError::Model(ModelError::StructuredOutput {
-        enforcement,
-        failure,
-        message: message.into(),
     })
 }
 

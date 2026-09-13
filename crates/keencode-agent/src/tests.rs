@@ -1017,6 +1017,30 @@ async fn runner_completes_text_turn() {
     assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
 }
 
+/// 未请求结构化输出时，JSON 外观及其合法性都不能改变普通文本完成语义。
+#[tokio::test]
+async fn ordinary_turn_keeps_invalid_json_like_text_as_text() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply("{not valid json")],
+    ));
+
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert!(result.structured_output.is_none());
+    assert_eq!(
+        result
+            .final_response
+            .as_ref()
+            .map(|response| &response.content),
+        Some(&vec![ContentBlock::text("{not valid json")])
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
+}
+
 /// 主 Turn 请求按能力快照接线输出上限：设置值优先于窗口派生。
 #[tokio::test]
 async fn main_turn_request_wires_configured_max_output_tokens() {
@@ -1453,18 +1477,15 @@ async fn consecutive_empty_responses_fail_with_invalid_response_after_one_retry(
     assert_eq!(usages[1].completion().stop_reason, StopReason::Completed);
 }
 
-/// 空响应有界重试同样适用于原生结构化输出：连续两次空响应以 MissingOutput 终态结束。
+/// 原生结构化输出在五次纠正均失败后，以第六个响应的 MissingOutput 诊断结束。
 #[tokio::test]
-async fn structured_native_empty_responses_fail_with_missing_output_after_one_retry() {
+async fn structured_native_empty_responses_fail_after_five_corrections() {
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             structured_output: StructuredOutputCapability::Native,
             ..ProviderCapabilities::default()
         },
-        [
-            empty_reply_with_stop(StopReason::Completed),
-            empty_reply_with_stop(StopReason::Completed),
-        ],
+        (0..6).map(|_| empty_reply_with_stop(StopReason::Completed)),
     ));
     let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
         Arc::new(RecordingTool::new(
@@ -1499,16 +1520,16 @@ async fn structured_native_empty_responses_fail_with_missing_output_after_one_re
         }))
     ));
     assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
-    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 6);
     assert_eq!(result.messages.len(), 1);
     assert!(result.structured_output.is_none());
-    // 两次采样的用量都按同一 Round 的独立调用尝试提交。
+    // 六次采样的用量都按同一 Round 的独立调用尝试提交。
     let usages = usage_sink.usages();
-    assert_eq!(usages.len(), 2);
-    assert_eq!(usages[0].model_round(), 1);
-    assert_eq!(usages[0].call_attempt(), 1);
-    assert_eq!(usages[1].model_round(), 1);
-    assert_eq!(usages[1].call_attempt(), 2);
+    assert_eq!(usages.len(), 6);
+    for (index, usage) in usages.iter().enumerate() {
+        assert_eq!(usage.model_round(), 1);
+        assert_eq!(usage.call_attempt(), u32::try_from(index + 1).unwrap());
+    }
 }
 
 /// 空响应有界重试同样适用于工具模拟结构化输出：重试后收到合法保留结果调用即成功。
@@ -2292,6 +2313,44 @@ async fn runner_validates_native_structured_output_before_commit() {
     );
 }
 
+/// 原生结构化输出首次 Schema 失败后，在同一 Round 的第一次私有纠正中成功。
+#[tokio::test]
+async fn runner_corrects_first_invalid_native_structured_response() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("{\"answer\":0}"), text_reply("{\"answer\":42}")],
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 1}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(request)
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    assert_eq!(result.messages.len(), 2);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].tool_choice, ToolChoice::None);
+    assert!(requests[1].tools.is_empty());
+    assert!(requests[1].structured_output.is_some());
+    assert_eq!(requests[1].messages.len(), 3);
+    assert!(requests[1].messages[2].is_meta);
+}
+
 /// 原生结构化输出的截断先经终止检查并按输出上限有界续跑，不提前做 Schema 校验：
 /// 纯文本截断注入续跑指令后，由下一轮完整响应交付结构化输出并通过 Schema 校验。
 #[tokio::test]
@@ -2339,12 +2398,17 @@ async fn runner_recovers_truncated_native_structured_output_before_schema_valida
 /// 原生 Provider 忽略 Schema 时必须以原生约束失败分类结束且不提交坏响应。
 #[tokio::test]
 async fn runner_classifies_native_schema_violation_without_committing_output() {
+    let mut replies = (0..5)
+        .map(|_| text_reply("{\"answer\":0}"))
+        .collect::<Vec<_>>();
+    replies.push(text_reply("{\"answer\":\"last-invalid\"}"));
+    replies.push(text_reply("{\"answer\":42}"));
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             structured_output: StructuredOutputCapability::Native,
             ..ProviderCapabilities::default()
         },
-        [text_reply("{\"answer\":0}")],
+        replies,
     ));
     let mut request = turn_request(PlanGuard::inactive());
     request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
@@ -2357,21 +2421,23 @@ async fn runner_classifies_native_schema_violation_without_committing_output() {
         }),
     ));
 
-    let result = runner(provider, ToolRegistry::new())
+    let result = runner(provider.clone(), ToolRegistry::new())
         .run_turn(request)
         .await;
 
     assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
     assert!(matches!(
-        result.error,
+        result.error.as_ref(),
         Some(AgentRunError::Model(ModelError::StructuredOutput {
             enforcement: StructuredOutputEnforcement::Native,
             failure: StructuredOutputFailureKind::SchemaViolation,
-            ..
-        }))
+            message,
+        })) if message.contains("string")
     ));
     assert_eq!(result.messages.len(), 1);
     assert!(result.structured_output.is_none());
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 6);
+    assert_eq!(provider.remaining_replies(), Ok(1));
 }
 
 /// 不支持结构化输出的 Provider 必须在第一次网络调用前失败。
@@ -2446,16 +2512,34 @@ async fn runner_classifies_emulated_output_model_stop_reasons_before_protocol_ch
         StopReason::ContentFilter,
         StopReason::Cancelled,
         StopReason::Completed,
+        StopReason::Other {
+            reason: "provider_specific".to_owned(),
+        },
     ] {
+        let is_completed = stop_reason == StopReason::Completed;
+        let invalid_reply = || {
+            tool_reply_with_stop(
+                &[("call-result", STRUCTURED_RESULT_TOOL, json!({"value": 42}))],
+                stop_reason.clone(),
+            )
+        };
+        let mut replies = if is_completed {
+            (0..6).map(|_| invalid_reply()).collect::<Vec<_>>()
+        } else {
+            vec![invalid_reply()]
+        };
+        // 非完整终态必须留下该响应；Completed 协议错误也只能消费五次纠正。
+        replies.push(tool_reply(&[(
+            "unused-valid",
+            STRUCTURED_RESULT_TOOL,
+            json!({"value": 42}),
+        )]));
         let provider = Arc::new(ScriptedProvider::new(
             ProviderCapabilities {
                 tool_calling: true,
                 ..ProviderCapabilities::default()
             },
-            [tool_reply_with_stop(
-                &[("call-result", STRUCTURED_RESULT_TOOL, json!({"value": 42}))],
-                stop_reason.clone(),
-            )],
+            replies,
         ));
         let mut request = turn_request(PlanGuard::inactive());
         request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
@@ -2463,7 +2547,7 @@ async fn runner_classifies_emulated_output_model_stop_reasons_before_protocol_ch
             json!({"type": "integer"}),
         ));
 
-        let result = runner(provider, ToolRegistry::new())
+        let result = runner(provider.clone(), ToolRegistry::new())
             .run_turn(request)
             .await;
 
@@ -2497,11 +2581,60 @@ async fn runner_classifies_emulated_output_model_stop_reasons_before_protocol_ch
                     ..
                 }))
             )),
-            StopReason::ToolUse | StopReason::Other { .. } => unreachable!(),
+            StopReason::Other { .. } => assert!(matches!(
+                result.error,
+                Some(AgentRunError::Model(ModelError::StructuredOutput {
+                    enforcement: StructuredOutputEnforcement::ToolEmulated,
+                    failure: StructuredOutputFailureKind::Incomplete,
+                    ..
+                }))
+            )),
+            StopReason::ToolUse => unreachable!(),
         }
         assert_eq!(result.messages.len(), 1);
         assert!(result.structured_output.is_none());
+        let expected_requests = if is_completed { 6 } else { 1 };
+        assert_eq!(
+            provider.requests().expect("请求快照应可读取").len(),
+            expected_requests
+        );
+        assert_eq!(provider.remaining_replies(), Ok(1));
     }
+}
+
+/// ToolUse 终态缺少任何调用块属于普通响应不变量错误，不能冒充结构化纠正候选。
+#[tokio::test]
+async fn structured_tool_use_without_calls_remains_invalid_response() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [
+            empty_reply_with_stop(StopReason::ToolUse),
+            tool_reply(&[("unused-valid", STRUCTURED_RESULT_TOOL, json!({"value": 42}))]),
+        ],
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({"type": "integer"}),
+    ));
+
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(request)
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::InvalidResponse {
+            message: "模型以工具调用结束但没有返回工具调用内容块".to_owned(),
+        })
+    );
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 1);
+    assert_eq!(provider.remaining_replies(), Ok(1));
+    assert_eq!(result.messages.len(), 1);
 }
 
 /// 工具模拟必须注入保留工具、执行普通工具后再以零 Step 提交结构化结果。
@@ -2569,19 +2702,69 @@ async fn runner_emulates_structured_output_after_regular_tool_loop() {
     }
 }
 
-/// 保留结果工具与普通工具混合返回时不得执行任何一个调用。
+/// 未注册业务工具仍形成普通工具错误 Round，不能被结构化纠正逻辑吞掉。
 #[tokio::test]
-async fn runner_rejects_mixed_emulated_result_and_regular_tool_calls() {
+async fn runner_keeps_unknown_business_tool_in_regular_tool_loop() {
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             tool_calling: true,
             structured_output: StructuredOutputCapability::ToolEmulated,
             ..ProviderCapabilities::default()
         },
-        [tool_reply(&[
-            ("call-result", STRUCTURED_RESULT_TOOL, json!({"value": 1})),
-            ("call-write", "record", json!({"value": "side-effect"})),
-        ])],
+        [
+            tool_reply(&[("unknown-call", "unknown_tool", json!({}))]),
+            tool_reply(&[(
+                "result-call",
+                STRUCTURED_RESULT_TOOL,
+                json!({"value": {"answer": 42}}),
+            )]),
+        ],
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .run_turn(request)
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    let tool_results = turn_tool_results(&result);
+    assert_eq!(tool_results.len(), 1);
+    assert_eq!(tool_results[0].tool_call_id, "unknown-call");
+    assert!(tool_results[0].is_error);
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+}
+
+/// 保留结果工具与普通工具混合返回时不得执行调用，而应私有配对后纠正。
+#[tokio::test]
+async fn runner_corrects_mixed_emulated_result_and_regular_tool_calls() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [
+            tool_reply(&[
+                ("call-result", STRUCTURED_RESULT_TOOL, json!({"value": 1})),
+                ("call-write", "record", json!({"value": "side-effect"})),
+            ]),
+            tool_reply(&[(
+                "corrected-result",
+                STRUCTURED_RESULT_TOOL,
+                json!({"value": 42}),
+            )]),
+        ],
     ));
     let tool = Arc::new(RecordingTool::new(
         "record",
@@ -2596,19 +2779,307 @@ async fn runner_rejects_mixed_emulated_result_and_regular_tool_calls() {
         json!({"type": "integer"}),
     ));
 
-    let result = runner(provider, registry).run_turn(request).await;
+    let result = runner(provider.clone(), registry).run_turn(request).await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.structured_output, Some(json!(42)));
+    assert_eq!(tool.call_count(), 0);
+    assert_eq!(result.state.step_count(), 0);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.messages.len(), 2);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[1].tools.len(), 1);
+    assert_eq!(requests[1].tools[0].name, STRUCTURED_RESULT_TOOL);
+    assert_eq!(requests[1].messages.len(), 3);
+    let correction_results = requests[1].messages[2]
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_result } => Some(tool_result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(correction_results.len(), 2);
+    assert!(correction_results.iter().all(|result| result.is_error));
+    assert_eq!(correction_results[0].tool_call_id, "call-result");
+    assert_eq!(correction_results[1].tool_call_id, "call-write");
+}
+
+/// 第五次结构化纠正仍属于首个逻辑 Round，并按真实调用顺序分别提交用量。
+#[tokio::test]
+async fn runner_accepts_emulated_output_on_fifth_correction() {
+    let mut replies = (0..5)
+        .map(|index| {
+            let id = format!("invalid-{index}");
+            tool_reply(&[(&id, STRUCTURED_RESULT_TOOL, json!({"value": {"answer": 0}}))])
+        })
+        .collect::<Vec<_>>();
+    replies.push(tool_reply(&[(
+        "valid-5",
+        STRUCTURED_RESULT_TOOL,
+        json!({"value": {"answer": 42}}),
+    )]));
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        replies,
+    ));
+    let usage_sink = Arc::new(ModelRoundUsageProbeSink::new(
+        Arc::new(RecordingTool::new(
+            "unused",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )),
+        0,
+    ));
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 1}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_commit_sink(usage_sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.state.step_count(), 0);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    // 私有坏候选和纠正结果都不能进入权威 Transcript。
+    assert_eq!(result.messages.len(), 2);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 6);
+    for request in &requests[1..] {
+        assert_eq!(request.tools.len(), 1);
+        assert_eq!(request.tools[0].name, STRUCTURED_RESULT_TOOL);
+        assert_eq!(request.tool_choice, ToolChoice::Required);
+        assert_eq!(request.messages.len(), 3);
+    }
+    let usages = usage_sink.usages();
+    assert_eq!(usages.len(), 6);
+    for (index, usage) in usages.iter().enumerate() {
+        assert_eq!(usage.model_round(), 1);
+        assert_eq!(usage.call_attempt(), u32::try_from(index + 1).unwrap());
+    }
+}
+
+/// 结构化纠正预算属于单个 Turn；复用同一 Runner 开始下一 Turn 时必须重新获得五次。
+#[tokio::test]
+async fn structured_correction_budget_resets_for_each_turn() {
+    let mut replies = Vec::new();
+    for turn in 0..2 {
+        for correction in 0..5 {
+            replies.push(text_reply(&format!("invalid-{turn}-{correction}")));
+        }
+        replies.push(text_reply(&format!("{{\"answer\":{}}}", turn + 1)));
+    }
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        replies,
+    ));
+    let runner = runner(provider.clone(), ToolRegistry::new());
+
+    for expected in [1, 2] {
+        let mut request = turn_request(PlanGuard::inactive());
+        request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+            "answer",
+            json!({
+                "type": "object",
+                "properties": {"answer": {"type": "integer", "minimum": 1}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+        ));
+        let result = runner.run_turn(request).await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(result.structured_output, Some(json!({"answer": expected})));
+    }
+
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 12);
+    assert_eq!(provider.remaining_replies(), Ok(0));
+}
+
+/// 私有纠正调用中的取消、Provider 错误与上下文溢出必须立即终止当前 Turn。
+#[tokio::test]
+async fn runner_propagates_structured_correction_call_errors_immediately() {
+    for expected in [
+        ModelError::Cancelled {
+            message: "cancelled".to_owned(),
+        },
+        ModelError::ProviderUnavailable {
+            message: "offline".to_owned(),
+            status_code: None,
+            retryable: true,
+        },
+        ModelError::ContextLengthExceeded {
+            message: "correction too large".to_owned(),
+        },
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                structured_output: StructuredOutputCapability::Native,
+                ..ProviderCapabilities::default()
+            },
+            [
+                text_reply("not-json"),
+                ScriptedReply::new(vec![Err(expected.clone())]),
+                text_reply("{\"answer\":42}"),
+            ],
+        ));
+        let mut request = turn_request(PlanGuard::inactive());
+        request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+            "answer",
+            json!({
+                "type": "object",
+                "properties": {"answer": {"type": "integer"}},
+                "required": ["answer"],
+                "additionalProperties": false
+            }),
+        ));
+
+        let result = runner(provider.clone(), ToolRegistry::new())
+            .run_turn(request)
+            .await;
+
+        match &expected {
+            ModelError::Cancelled { .. } => {
+                assert_eq!(result.error, Some(AgentRunError::Cancelled));
+                assert_eq!(
+                    result.state.terminal_reason(),
+                    Some(TerminalReason::Cancelled)
+                );
+            }
+            _ => {
+                assert_eq!(result.error, Some(AgentRunError::Model(expected.clone())));
+                assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+            }
+        }
+        assert_eq!(result.messages.len(), 1);
+        assert!(result.structured_output.is_none());
+        assert_eq!(provider.requests().expect("请求快照应可读取").len(), 2);
+        assert_eq!(provider.remaining_replies(), Ok(1));
+    }
+}
+
+/// 原生纠正请求已明确禁用工具；Provider 违规返回的调用不得进入业务执行器。
+#[tokio::test]
+async fn native_correction_never_executes_provider_tool_calls() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [
+            text_reply("not-json"),
+            tool_reply(&[("forbidden-call", "record", json!({"value": "write"}))]),
+            text_reply("{\"answer\":42}"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+
+    let result = runner(provider.clone(), registry).run_turn(request).await;
 
     assert!(matches!(
         result.error,
         Some(AgentRunError::Model(ModelError::StructuredOutput {
-            enforcement: StructuredOutputEnforcement::ToolEmulated,
-            failure: StructuredOutputFailureKind::EmulationProtocol,
+            enforcement: StructuredOutputEnforcement::Native,
+            failure: StructuredOutputFailureKind::Incomplete,
             ..
         }))
     ));
     assert_eq!(tool.call_count(), 0);
     assert_eq!(result.state.step_count(), 0);
     assert_eq!(result.messages.len(), 1);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert!(requests[1].tools.is_empty());
+    assert_eq!(requests[1].tool_choice, ToolChoice::None);
+    assert_eq!(provider.remaining_replies(), Ok(1));
+}
+
+/// 工具模拟纠正只接受保留结果工具；违规业务调用必须继续私有纠正而非执行。
+#[tokio::test]
+async fn emulated_correction_never_executes_provider_business_tools() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [
+            text_reply("bad-result"),
+            tool_reply(&[("forbidden-call", "record", json!({"value": "write"}))]),
+            tool_reply(&[(
+                "corrected-result",
+                STRUCTURED_RESULT_TOOL,
+                json!({"value": {"answer": 42}}),
+            )]),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool.clone()).expect("测试工具应可注册");
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+
+    let result = runner(provider.clone(), registry).run_turn(request).await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    assert_eq!(tool.call_count(), 0);
+    assert_eq!(result.state.step_count(), 0);
+    assert_eq!(result.state.round_count(), 1);
+    assert_eq!(result.messages.len(), 2);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 3);
+    for correction in &requests[1..] {
+        assert_eq!(correction.tools.len(), 1);
+        assert_eq!(correction.tools[0].name, STRUCTURED_RESULT_TOOL);
+        assert_eq!(correction.tool_choice, ToolChoice::Required);
+    }
 }
 
 /// 完整 Tool Loop 必须把调用和结果配对后再发起第二轮模型请求。
