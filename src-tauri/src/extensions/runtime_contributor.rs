@@ -8,17 +8,18 @@ use crate::agent_runtime::{
     RuntimeToolContext,
 };
 use keencode_agent::{
-    AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
-    HookLimits, HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard,
-    PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
-    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
-    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
+    AgentHook, AgentRunError, HookCallbackError, HookContextAddition, HookFuture, HookLimits,
+    HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard, PostCompactHookContext,
+    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreToolUseAction,
+    PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
+    ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext, agent_run_error_category,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
-    BoundedCommandError, BoundedCommandRequest, DeferredToolCatalog, LspDiagnostic, LspRuntime,
-    LspServerConfig, McpDiagnosticCode, McpToolBuildReport, McpToolDiagnostic, SkillTool,
-    prepare_mcp_server_tools, register_lsp_tool, run_bounded_command,
+    BoundedCommandError, BoundedCommandOutput, BoundedCommandRequest, DeferredToolCatalog,
+    LspDiagnostic, LspRuntime, LspServerConfig, McpDiagnosticCode, McpToolBuildReport,
+    McpToolDiagnostic, SkillTool, prepare_mcp_server_tools, register_deferred_tools,
+    register_lsp_tool, run_bounded_command,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1774,7 +1775,21 @@ async fn run_observer_command_hook(
         .map_err(|_| HookCallbackError::new("hook_plan_denied", "计划模式禁止执行命令 Hook"))?;
     let started = std::time::Instant::now();
     tracing::info!(hook = %spec.name, phase = %spec.phase, session_id = ?payload.get("session_id").and_then(|value| value.as_str()), prompt_id = ?payload.get("prompt_id").and_then(|value| value.as_str()), "插件观察 Hook 开始");
-    let result = execute_hook_command(spec, payload).await.map(|_| ());
+    let result = execute_hook_command_process(spec, payload)
+        .await
+        .and_then(|output| {
+            // 观察 Hook 的 stdout 只属于外部进程自身；退出码 2 是 Claude
+            // 兼容的“阻止/停止”决策，观察阶段必须丢弃，成功输出也不要求
+            // 是 UTF-8，更不能把它解析成会影响 Turn 的上下文。
+            if output.status.code() == Some(2) || output.status.success() {
+                Ok(())
+            } else {
+                Err(HookCallbackError::new(
+                    "hook_command_failed",
+                    "观察 Hook 命令以失败状态退出",
+                ))
+            }
+        });
     match &result {
         Ok(()) => {
             tracing::info!(hook = %spec.name, phase = %spec.phase, elapsed_ms = started.elapsed().as_millis() as u64, "插件观察 Hook 完成")
@@ -1788,47 +1803,7 @@ async fn run_observer_command_hook(
 
 /// 将 Provider 中立运行错误归一为 Claude StopFailure `error` 与 matcher 使用的稳定分类。
 fn hook_error_category(error: &AgentRunError) -> &'static str {
-    match error {
-        AgentRunError::Model(error) => match error {
-            keencode_model::ModelError::Authentication { .. }
-            | keencode_model::ModelError::Authorization { .. } => "authentication_failed",
-            keencode_model::ModelError::QuotaExceeded { .. } => "billing_error",
-            keencode_model::ModelError::ModelNotFound { .. } => "model_not_found",
-            keencode_model::ModelError::RateLimited { .. } => "rate_limit",
-            keencode_model::ModelError::ProviderUnavailable {
-                status_code: Some(529),
-                ..
-            } => "overloaded",
-            keencode_model::ModelError::ProtocolUnsupported { .. }
-            | keencode_model::ModelError::ContextLengthExceeded { .. }
-            | keencode_model::ModelError::InvalidRequest { .. }
-            | keencode_model::ModelError::UnsupportedCapability { .. }
-            | keencode_model::ModelError::StructuredOutput { .. } => "invalid_request",
-            keencode_model::ModelError::ProviderUnavailable { .. }
-            | keencode_model::ModelError::Transport { .. }
-            | keencode_model::ModelError::StreamInterrupted { .. }
-            | keencode_model::ModelError::Protocol { .. } => "server_error",
-            keencode_model::ModelError::Cancelled { .. } => "unknown",
-        },
-        AgentRunError::ModelOutputLimit => "max_output_tokens",
-        AgentRunError::Context(_) => "invalid_request",
-        AgentRunError::Cancelled
-        | AgentRunError::Hook(_)
-        | AgentRunError::EventSink(_)
-        | AgentRunError::CommitSink(_)
-        | AgentRunError::ToolRoundPreflight(_)
-        | AgentRunError::State(_)
-        | AgentRunError::DynamicInput { .. }
-        | AgentRunError::DynamicInputAcknowledgement { .. }
-        | AgentRunError::DuplicateToolCallId { .. }
-        | AgentRunError::ModelRefusal
-        | AgentRunError::InvalidResponse { .. }
-        | AgentRunError::LimitReached { .. }
-        | AgentRunError::GoalBudgetReached { .. }
-        | AgentRunError::ToolLoop { .. }
-        | AgentRunError::ToolOutputLimit { .. }
-        | AgentRunError::Internal { .. } => "unknown",
-    }
+    agent_run_error_category(error)
 }
 
 /// 执行一个有界、可超时并在 Future 丢弃时终止的系统 shell 命令。
@@ -1846,45 +1821,8 @@ async fn execute_hook_command_with_limits(
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<String, HookCallbackError> {
-    let payload = serde_json::to_vec(payload)
-        .map_err(|_| HookCallbackError::new("hook_payload_invalid", "Hook 输入无法编码"))?;
-    let mut environment = spec.environment.clone();
-    environment.insert(
-        "CLAUDE_PLUGIN_ROOT".to_owned(),
-        path_to_frontend(&spec.plugin_root),
-    );
-    environment.insert(
-        "CLAUDE_PROJECT_DIR".to_owned(),
-        path_to_frontend(&spec.current_dir),
-    );
-    environment.insert("KEENCODE_HOOK_NAME".to_owned(), spec.name.clone());
-    environment.insert(
-        "KEENCODE_HOOK_PHASE".to_owned(),
-        hook_phase_name(spec.phase).to_owned(),
-    );
-    let request = if let Some(args) = &spec.args {
-        BoundedCommandRequest::new(&spec.command, &spec.current_dir, timeout, max_output_bytes)
-            .with_args(args.iter().map(OsString::from).collect())
-    } else {
-        BoundedCommandRequest::plugin_shell(
-            spec.shell.as_deref(),
-            &spec.command,
-            &spec.current_dir,
-            timeout,
-            max_output_bytes,
-        )
-        .map_err(map_hook_command_error)?
-    }
-    .with_stdin(payload)
-    .with_environment(
-        environment
-            .into_iter()
-            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
-            .collect(),
-    );
-    let output = run_bounded_command(request)
-        .await
-        .map_err(map_hook_command_error)?;
+    let output =
+        execute_hook_command_process_with_limits(spec, payload, timeout, max_output_bytes).await?;
     if output.status.code() == Some(2) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let decision: Value = serde_json::from_slice(&output.stdout).unwrap_or(Value::Null);
@@ -1938,6 +1876,66 @@ async fn execute_hook_command_with_limits(
     }
     String::from_utf8(output.stdout)
         .map_err(|_| HookCallbackError::new("hook_output_invalid", "Hook 输出不是有效 UTF-8"))
+}
+
+/// 构造并运行 Hook 命令，但不把 stdout 解码为字符串。
+///
+/// 观察型 Hook 的输出不是协议输入；保留原始字节只用于有界进程监督，避免
+/// 非 UTF-8 日志或二进制输出被误判为 Hook 失败。
+async fn execute_hook_command_process(
+    spec: &CommandHookSpec,
+    payload: &Value,
+) -> Result<BoundedCommandOutput, HookCallbackError> {
+    execute_hook_command_process_with_limits(spec, payload, spec.timeout, MAX_HOOK_OUTPUT_BYTES)
+        .await
+}
+
+/// 使用明确资源边界运行 Hook 命令并返回原始进程输出。
+async fn execute_hook_command_process_with_limits(
+    spec: &CommandHookSpec,
+    payload: &Value,
+    timeout: Duration,
+    max_output_bytes: usize,
+) -> Result<BoundedCommandOutput, HookCallbackError> {
+    let payload = serde_json::to_vec(payload)
+        .map_err(|_| HookCallbackError::new("hook_payload_invalid", "Hook 输入无法编码"))?;
+    let mut environment = spec.environment.clone();
+    environment.insert(
+        "CLAUDE_PLUGIN_ROOT".to_owned(),
+        path_to_frontend(&spec.plugin_root),
+    );
+    environment.insert(
+        "CLAUDE_PROJECT_DIR".to_owned(),
+        path_to_frontend(&spec.current_dir),
+    );
+    environment.insert("KEENCODE_HOOK_NAME".to_owned(), spec.name.clone());
+    environment.insert(
+        "KEENCODE_HOOK_PHASE".to_owned(),
+        hook_phase_name(spec.phase).to_owned(),
+    );
+    let request = if let Some(args) = &spec.args {
+        BoundedCommandRequest::new(&spec.command, &spec.current_dir, timeout, max_output_bytes)
+            .with_args(args.iter().map(OsString::from).collect())
+    } else {
+        BoundedCommandRequest::plugin_shell(
+            spec.shell.as_deref(),
+            &spec.command,
+            &spec.current_dir,
+            timeout,
+            max_output_bytes,
+        )
+        .map_err(map_hook_command_error)?
+    }
+    .with_stdin(payload)
+    .with_environment(
+        environment
+            .into_iter()
+            .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+            .collect(),
+    );
+    run_bounded_command(request)
+        .await
+        .map_err(map_hook_command_error)
 }
 
 /// 将系统能力层的细分错误归一到既有 Hook 稳定错误码。

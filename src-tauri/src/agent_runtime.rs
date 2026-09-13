@@ -9137,6 +9137,8 @@ fn map_authoritative_event(
             *provider = Some(next.clone());
             Vec::new()
         }
+        SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. } => Vec::new(),
         SessionEvent::TitleGenerated { .. }
         | SessionEvent::MailboxMessageDelivered { .. }
         | SessionEvent::WorktreeAssigned { .. }
