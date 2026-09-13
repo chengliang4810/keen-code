@@ -61,7 +61,7 @@ pub use event::{
     NoopAgentCommitSink, NoopAgentEventSink, ToolCompletionStatus,
 };
 pub use hook::{
-    AgentHook, HookCallbackError, HookContextAddition, HookError, HookFuture,
+    AgentHook, HookCallbackError, HookCircuitStore, HookContextAddition, HookError, HookFuture,
     HookInvocationContext, HookLimits, HookLimitsError, HookPhase, HookRegistrationError,
     HookRegistry, HookRuntime, OnErrorHookContext, PostCompactHookContext, PostToolUseContext,
     PostToolUseFailureContext, PreCompactHookContext, PreToolUseAction, PreToolUseContext,

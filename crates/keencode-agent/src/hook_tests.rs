@@ -466,6 +466,8 @@ enum IsolationHookMode {
     TokioTimer,
     /// 在隔离工作线程中主动 panic，验证 Join 失败熔断。
     WorkerPanic,
+    /// 仅第一次进入时 panic，后续调用用于验证有界自动恢复。
+    WorkerPanicOnce,
 }
 
 /// 记录进入次数并按指定模式运行的 Hook 隔离测试实现。
@@ -489,7 +491,7 @@ impl AgentHook for IsolationProbeHook {
         &self,
         _context: PreToolUseContext,
     ) -> HookFuture<'_, Result<PreToolUseOutput, HookCallbackError>> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
         match self.mode {
             IsolationHookMode::SynchronousBlock => {
                 std::thread::sleep(Duration::from_millis(self.delay_ms));
@@ -512,6 +514,10 @@ impl AgentHook for IsolationProbeHook {
             IsolationHookMode::WorkerPanic => {
                 panic!("合成 Hook 工作线程 panic");
             }
+            IsolationHookMode::WorkerPanicOnce if call == 0 => {
+                panic!("合成 Hook 工作线程首次 panic");
+            }
+            IsolationHookMode::WorkerPanicOnce => Box::pin(async { Ok(PreToolUseOutput::allow()) }),
         }
     }
 }
@@ -2329,6 +2335,216 @@ async fn 并发post_hook最多残留一个隔离线程() {
     )));
 }
 
+/// 同一扩展候选为不同 Turn 构建 Registry 时仍必须共用单入口与熔断状态。
+#[tokio::test]
+async fn 候选级store跨registry共享单入口() {
+    let circuits = HookCircuitStore::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut first_registry = HookRegistry::with_circuit_store(circuits.clone());
+    first_registry
+        .register(Arc::new(PendingPhaseHook {
+            phase: HookPhase::PostToolUse,
+            calls: calls.clone(),
+            started: None,
+        }))
+        .expect("首个候选 Hook 应成功注册");
+    let mut second_registry = HookRegistry::with_circuit_store(circuits);
+    second_registry
+        .register(Arc::new(PendingPhaseHook {
+            phase: HookPhase::PostToolUse,
+            calls: calls.clone(),
+            started: None,
+        }))
+        .expect("第二个候选 Hook 应成功注册");
+    let limits = HookLimits {
+        max_stop_hook_rounds: 1,
+        max_context_bytes: 1_024,
+        max_callback_ms: 20,
+    };
+    let first_runtime = HookRuntime::new(first_registry, limits).expect("Hook 配置应有效");
+    let second_runtime = HookRuntime::new(second_registry, limits).expect("Hook 配置应有效");
+    let context = PostToolUseContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("shared-gate-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("shared-gate-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("shared-gate-agent").expect("Agent 标识应有效"),
+        },
+        tool_call_id: "shared-gate-call".to_owned(),
+        tool_name: "probe".to_owned(),
+        input: json!({"value": "read"}),
+        result: ToolResult::text("shared-gate-call", "ok", false),
+    };
+    let cancellation = TurnCancellation::new();
+
+    let (first, second) = tokio::join!(
+        first_runtime.run_post_tool_use(context.clone(), &cancellation),
+        second_runtime.run_post_tool_use(context, &cancellation),
+    );
+    let errors = [
+        first.err().expect("首个跨 Registry Hook 应超时"),
+        second.err().expect("第二个跨 Registry Hook 应被熔断拒绝"),
+    ];
+
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        HookError::TimedOut {
+            phase: HookPhase::PostToolUse,
+            maximum_ms: 20,
+            ..
+        }
+    )));
+    assert!(errors.iter().any(|error| matches!(
+        error,
+        HookError::CircuitOpen {
+            phase: HookPhase::PostToolUse,
+            ..
+        }
+    )));
+}
+
+/// 已确认退出的 panic worker 只能由同候选后续 Registry 串行恢复一次。
+#[tokio::test]
+async fn 候选级store跨registry共享恢复状态() {
+    let circuits = HookCircuitStore::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook = Arc::new(IsolationProbeHook {
+        mode: IsolationHookMode::WorkerPanicOnce,
+        calls: calls.clone(),
+        delay_ms: 0,
+    });
+    let mut first_registry = HookRegistry::with_circuit_store(circuits.clone());
+    first_registry
+        .register(hook.clone())
+        .expect("首个候选 Hook 应成功注册");
+    let mut second_registry = HookRegistry::with_circuit_store(circuits);
+    second_registry
+        .register(hook)
+        .expect("第二个候选 Hook 应成功注册");
+    let first_runtime =
+        HookRuntime::new(first_registry, HookLimits::default()).expect("Hook 配置应有效");
+    let second_runtime =
+        HookRuntime::new(second_registry, HookLimits::default()).expect("Hook 配置应有效");
+    let context = PreToolUseContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("shared-recovery-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("shared-recovery-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("shared-recovery-agent").expect("Agent 标识应有效"),
+        },
+        tool_call_id: "shared-recovery-call".to_owned(),
+        tool_name: "probe".to_owned(),
+        input: json!({"value": "read"}),
+    };
+    let cancellation = TurnCancellation::new();
+
+    let first = first_runtime
+        .run_pre_tool_use(context.clone(), &cancellation)
+        .await;
+    assert!(matches!(
+        first,
+        Err(HookError::WorkerFailed {
+            phase: HookPhase::PreToolUse,
+            ..
+        })
+    ));
+    let during_backoff = second_runtime
+        .run_pre_tool_use(context.clone(), &cancellation)
+        .await;
+    assert!(matches!(
+        during_backoff,
+        Err(HookError::CircuitOpen {
+            phase: HookPhase::PreToolUse,
+            ..
+        })
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+    tokio::time::sleep(crate::hook::HOOK_WORKER_RECOVERY_BACKOFF + Duration::from_millis(20)).await;
+    second_runtime
+        .run_pre_tool_use(context, &cancellation)
+        .await
+        .expect("退避后同候选后续 Registry 应完成唯一恢复");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+/// 显式发布全新扩展候选时必须丢弃旧代次的永久熔断状态。
+#[tokio::test]
+async fn 全新候选store重置永久熔断() {
+    let old_circuits = HookCircuitStore::new();
+    let old_calls = Arc::new(AtomicUsize::new(0));
+    let old_hook = Arc::new(IsolationProbeHook {
+        mode: IsolationHookMode::WorkerPanic,
+        calls: old_calls.clone(),
+        delay_ms: 0,
+    });
+    let mut first_registry = HookRegistry::with_circuit_store(old_circuits.clone());
+    first_registry
+        .register(old_hook.clone())
+        .expect("旧候选首个 Hook 应成功注册");
+    let mut recovery_registry = HookRegistry::with_circuit_store(old_circuits.clone());
+    recovery_registry
+        .register(old_hook.clone())
+        .expect("旧候选恢复 Hook 应成功注册");
+    let mut rejected_registry = HookRegistry::with_circuit_store(old_circuits);
+    rejected_registry
+        .register(old_hook)
+        .expect("旧候选拒绝 Hook 应成功注册");
+    let first_runtime =
+        HookRuntime::new(first_registry, HookLimits::default()).expect("Hook 配置应有效");
+    let recovery_runtime =
+        HookRuntime::new(recovery_registry, HookLimits::default()).expect("Hook 配置应有效");
+    let rejected_runtime =
+        HookRuntime::new(rejected_registry, HookLimits::default()).expect("Hook 配置应有效");
+    let context = PreToolUseContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("reload-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("reload-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("reload-agent").expect("Agent 标识应有效"),
+        },
+        tool_call_id: "reload-call".to_owned(),
+        tool_name: "probe".to_owned(),
+        input: json!({"value": "read"}),
+    };
+    let cancellation = TurnCancellation::new();
+
+    assert!(matches!(
+        first_runtime
+            .run_pre_tool_use(context.clone(), &cancellation)
+            .await,
+        Err(HookError::WorkerFailed { .. })
+    ));
+    tokio::time::sleep(crate::hook::HOOK_WORKER_RECOVERY_BACKOFF + Duration::from_millis(20)).await;
+    assert!(matches!(
+        recovery_runtime
+            .run_pre_tool_use(context.clone(), &cancellation)
+            .await,
+        Err(HookError::WorkerFailed { .. })
+    ));
+    assert!(matches!(
+        rejected_runtime
+            .run_pre_tool_use(context.clone(), &cancellation)
+            .await,
+        Err(HookError::CircuitOpen { .. })
+    ));
+    assert_eq!(old_calls.load(Ordering::SeqCst), 2);
+
+    let new_calls = Arc::new(AtomicUsize::new(0));
+    let mut reloaded_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    reloaded_registry
+        .register(Arc::new(IsolationProbeHook {
+            mode: IsolationHookMode::TokioTimer,
+            calls: new_calls.clone(),
+            delay_ms: 1,
+        }))
+        .expect("新候选 Hook 应成功注册");
+    HookRuntime::new(reloaded_registry, HookLimits::default())
+        .expect("新候选 Hook 配置应有效")
+        .run_pre_tool_use(context, &cancellation)
+        .await
+        .expect("全新候选应重置旧代次永久熔断");
+    assert_eq!(new_calls.load(Ordering::SeqCst), 1);
+}
+
 /// 已取消工具的 Failure Hook 不观察 Turn 取消，正常完成后不得误开熔断。
 #[tokio::test]
 async fn 已取消工具的failure_hook正常完成后不熔断() {
@@ -2509,12 +2725,12 @@ async fn 隔离hook保持tokio_timer能力() {
     assert_eq!(tool.calls().len(), 1);
 }
 
-/// Hook 工作线程 panic 必须稳定分类并熔断，后续 Turn 不能再次 spawn 同一 Hook。
+/// Hook 工作线程 panic 的当前调用稳定失败，退避前拒绝，安全边界后恢复一次。
 #[tokio::test]
-async fn hook工作线程失败后熔断且不再进入() {
+async fn hook工作线程失败后按需退避恢复() {
     let calls = Arc::new(AtomicUsize::new(0));
     let hook = Arc::new(IsolationProbeHook {
-        mode: IsolationHookMode::WorkerPanic,
+        mode: IsolationHookMode::WorkerPanicOnce,
         calls: calls.clone(),
         delay_ms: 0,
     });
@@ -2525,6 +2741,8 @@ async fn hook工作线程失败后熔断且不再进入() {
         [
             tool_reply(&[("call-panic-1", "probe", json!({"value": "read"}))]),
             tool_reply(&[("call-panic-2", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("call-panic-3", "probe", json!({"value": "read"}))]),
+            text_reply("recovered"),
         ],
     ));
     let runner = runner(
@@ -2555,6 +2773,62 @@ async fn hook工作线程失败后熔断且不再进入() {
         }))
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    tokio::time::sleep(crate::hook::HOOK_WORKER_RECOVERY_BACKOFF + Duration::from_millis(20)).await;
+
+    let recovered = runner.run_turn(turn_request(PlanGuard::inactive())).await;
+    assert!(recovered.is_success(), "{:#?}", recovered.error);
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(tool.calls().len(), 1);
+}
+
+/// 唯一恢复 worker 再次 panic 后永久熔断，后续调用不形成后台重启循环。
+#[tokio::test]
+async fn hook工作线程连续失败耗尽唯一恢复机会() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let hook = Arc::new(IsolationProbeHook {
+        mode: IsolationHookMode::WorkerPanic,
+        calls: calls.clone(),
+        delay_ms: 0,
+    });
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let tool = Arc::new(ProbeTool::new(events, false));
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-repeat-panic-1", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("call-repeat-panic-2", "probe", json!({"value": "read"}))]),
+            tool_reply(&[("call-repeat-panic-3", "probe", json!({"value": "read"}))]),
+        ],
+    ));
+    let runner = runner(
+        provider,
+        tool.clone(),
+        hook,
+        HookLimits {
+            max_stop_hook_rounds: 2,
+            max_context_bytes: 1_024,
+            max_callback_ms: 200,
+        },
+    );
+
+    let first = runner.run_turn(turn_request(PlanGuard::inactive())).await;
+    assert!(matches!(
+        first.error,
+        Some(AgentRunError::Hook(HookError::WorkerFailed { .. }))
+    ));
+    tokio::time::sleep(crate::hook::HOOK_WORKER_RECOVERY_BACKOFF + Duration::from_millis(20)).await;
+    let recovery = runner.run_turn(turn_request(PlanGuard::inactive())).await;
+    assert!(matches!(
+        recovery.error,
+        Some(AgentRunError::Hook(HookError::WorkerFailed { .. }))
+    ));
+    tokio::time::sleep(crate::hook::HOOK_WORKER_RECOVERY_BACKOFF + Duration::from_millis(20)).await;
+    let permanently_open = runner.run_turn(turn_request(PlanGuard::inactive())).await;
+    assert!(matches!(
+        permanently_open.error,
+        Some(AgentRunError::Hook(HookError::CircuitOpen { .. }))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
     assert!(tool.calls().is_empty());
 }
 

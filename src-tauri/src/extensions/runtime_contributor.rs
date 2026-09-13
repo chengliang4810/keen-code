@@ -8,11 +8,11 @@ use crate::agent_runtime::{
     RuntimeToolContext,
 };
 use keencode_agent::{
-    AgentHook, AgentRunError, HookCallbackError, HookContextAddition, HookFuture, HookLimits,
-    HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard, PostCompactHookContext,
-    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreToolUseAction,
-    PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
-    ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
+    AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
+    HookLimits, HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard,
+    PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
+    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
+    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
@@ -85,6 +85,8 @@ struct NativeExtensionContributor {
     mcp_servers: Vec<RuntimeMcpServerSnapshot>,
     /// 每个 Turn 重新实例化的 Hook 规范。
     hooks: Vec<HookSpec>,
+    /// 同一候选代次内跨 Turn 共享的 Hook 熔断与单入口状态。
+    hook_circuits: HookCircuitStore,
     /// 已冻结的 Agent 模板目录。
     agents: AgentCatalog,
     /// 已冻结的插件 Slash command 目录。
@@ -313,7 +315,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
     fn build_hook_runtime(&self, context: &RuntimeToolContext) -> Result<HookRuntime, String> {
         self.validate_project(context)?;
         let plan = context.plan_guard();
-        let mut registry = HookRegistry::new();
+        let mut registry = HookRegistry::with_circuit_store(self.hook_circuits.clone());
         let mut lifecycle = Vec::new();
         for spec in &self.hooks {
             let mut spec = spec.clone();
@@ -678,6 +680,7 @@ async fn build_contributor(
         deferred_tools,
         mcp_servers,
         hooks: inputs.hooks,
+        hook_circuits: HookCircuitStore::new(),
         agents: inputs.agents,
         commands: inputs.commands,
         lsp_runtime,
@@ -2642,6 +2645,7 @@ mod tests {
                 deferred_tools: Some(Arc::clone(&catalog)),
                 mcp_servers: Vec::new(),
                 hooks: Vec::new(),
+                hook_circuits: HookCircuitStore::new(),
                 agents: AgentCatalog::default(),
                 commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
                 lsp_runtime: None,
@@ -3123,6 +3127,7 @@ mod tests {
             deferred_tools: None,
             mcp_servers: Vec::new(),
             hooks: Vec::new(),
+            hook_circuits: HookCircuitStore::new(),
             agents,
             commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
             lsp_runtime: None,
