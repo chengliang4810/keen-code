@@ -117,7 +117,8 @@ codegen-units = 16
 lto = "thin"
 # 以体积优化作为首版发布默认值。
 opt-level = "s"
-# 发生 panic 时直接终止，减少展开代码。
-panic = "abort"
+# Hook Runtime 在隔离工作线程中用 catch_unwind 把回调 panic 归一为可恢复错误；
+# 发布构建必须保留展开语义，否则 panic 会直接终止整个桌面进程。
+panic = "unwind"
 # 去除发布二进制符号。
 strip = true
