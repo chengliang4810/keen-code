@@ -591,35 +591,6 @@ impl RuntimeTurnExecution {
     }
 }
 
-/// 在 Closing 阶段全部活动 Turn 与 OnError outbox 收尾后推进 Closed，并告知调用方关闭 Publisher。
-fn finalize_runtime_close_if_idle(inner: &RuntimeSessionInner, control: &mut ControlState) -> bool {
-    if control.lifecycle != RuntimeSessionLifecycle::Closing
-        || control
-            .turn_executions
-            .values()
-            .any(RuntimeTurnExecution::is_active)
-        || inner
-            .journal
-            .read_state(|state| !state.on_error_hook_outbox.is_empty())
-            .unwrap_or(true)
-    {
-        return false;
-    }
-    control.lifecycle = RuntimeSessionLifecycle::Closed;
-    true
-}
-
-/// 在控制态进入 Closed 的同一临界区发送 Publisher 最终关闭信号。
-fn close_runtime_publisher_if_idle(
-    inner: &RuntimeSessionInner,
-    control: &mut ControlState,
-) -> Result<(), RuntimeError> {
-    if finalize_runtime_close_if_idle(inner, control) {
-        inner.publisher.close()?;
-    }
-    Ok(())
-}
-
 /// 已确认起点后在 Future Drop 时冻结热路径的同步 RAII 栅栏。
 struct RuntimeTurnGuard {
     /// 不延长 Session 生命周期的共享控制面弱引用。
@@ -694,9 +665,6 @@ impl Drop for RuntimeTurnGuard {
             );
             control.hard_recovery_required = true;
             refresh_recovery_required(&mut control);
-            if finalize_runtime_close_if_idle(&inner, &mut control) {
-                let _ = inner.publisher.close();
-            }
         }
     }
 }
@@ -1788,7 +1756,11 @@ impl RuntimeSession {
         self.inner.journal.state().map_err(RuntimeError::from)
     }
 
-    /// 原子关闭共享 Session，并触发所有正在运行 Turn 的 Runtime 权威取消令牌。
+    /// 请求关闭共享 Session，并触发所有正在运行 Turn 的 Runtime 权威取消令牌。
+    ///
+    /// 有未决 Turn 时返回错误并保留 Manager 注册项；调用方必须在取消终态完成后
+    /// 重试。只有执行账本清空、OnError outbox 排空且最终 durability barrier
+    /// 成功后才进入 Closed。
     fn close_runtime(&self) -> Result<(), RuntimeError> {
         let mut control = self
             .inner
@@ -1810,10 +1782,50 @@ impl RuntimeSession {
                 cancellation.cancel();
             }
         }
-        // Manager 丢弃其句柄前必须把当前批量窗口变成持久化前缀；失败时
-        // 生命周期保持 Closing，注册项由 Manager 保留并允许同句柄重试。
+        // TerminalPending 已冻结唯一事件身份与正文，close 重试可以直接完成
+        // 对账而无需重跑 Provider。每条只有在 Journal 明确确认后才移除。
+        let pending_terminals = control
+            .turn_executions
+            .iter()
+            .filter_map(|(turn_id, execution)| match execution {
+                RuntimeTurnExecution::TerminalPending {
+                    event_id, event, ..
+                } => Some((turn_id.clone(), event_id.clone(), (**event).clone())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (turn_id, event_id, event) in pending_terminals {
+            commit_runtime_lifecycle_event(&self.inner, &mut control, event_id, event, false)?;
+            if control.hard_recovery_required {
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            control.turn_executions.remove(&turn_id);
+        }
+        if !control.turn_executions.is_empty() {
+            return if control
+                .turn_executions
+                .values()
+                .any(|execution| matches!(execution, RuntimeTurnExecution::Abandoned { .. }))
+            {
+                Err(RuntimeError::RecoveryRequired)
+            } else {
+                Err(RuntimeError::SessionBusy)
+            };
+        }
+        // OnError 必须先完成 receipt；关闭不能丢失仍待执行的观察调用。
+        if self
+            .inner
+            .journal
+            .read_state(|state| !state.on_error_hook_outbox.is_empty())?
+        {
+            return Err(RuntimeError::SessionBusy);
+        }
+        // Manager 丢弃其句柄前必须把包含取消终态和 receipt 的最终批量窗口变成
+        // 持久化前缀。flush 或 Publisher 关闭失败时生命周期保持 Closing，注册项
+        // 由 Manager 保留并允许同句柄重试。
         self.inner.journal.flush()?;
-        close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+        self.inner.publisher.close()?;
+        control.lifecycle = RuntimeSessionLifecycle::Closed;
         Ok(())
     }
 
@@ -2136,7 +2148,6 @@ impl RuntimeAgentRunner {
                 return Err(RuntimeError::RecoveryRequired);
             }
             control.turn_executions.remove(turn_id.as_str());
-            close_runtime_publisher_if_idle(&self.inner, &mut control)?;
             return Ok(result);
         }
 
@@ -2424,7 +2435,6 @@ impl RuntimeAgentRunner {
                             )
                     });
             if !running_matches {
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(RuntimeError::RecoveryRequired);
             }
@@ -2435,7 +2445,6 @@ impl RuntimeAgentRunner {
                 );
                 control.hard_recovery_required = true;
                 refresh_recovery_required(&mut control);
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(RuntimeError::RecoveryRequired);
             }
@@ -2453,7 +2462,6 @@ impl RuntimeAgentRunner {
                 );
                 control.hard_recovery_required = true;
                 refresh_recovery_required(&mut control);
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(RuntimeError::RecoveryRequired);
             }
@@ -2476,12 +2484,10 @@ impl RuntimeAgentRunner {
             );
             if let Err(error) = terminal_commit {
                 mark_event_indeterminate(&mut control, terminal_event_id.as_str());
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(error);
             }
             if control.hard_recovery_required {
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(RuntimeError::RecoveryRequired);
             }
@@ -2508,12 +2514,10 @@ impl RuntimeAgentRunner {
             })? {
                 control.hard_recovery_required = true;
                 refresh_recovery_required(&mut control);
-                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
                 guard.disarm();
                 return Err(RuntimeError::RecoveryRequired);
             }
             control.turn_executions.remove(turn_id.as_str());
-            close_runtime_publisher_if_idle(&self.inner, &mut control)?;
             guard.disarm();
             return Ok(result);
         }
@@ -2523,7 +2527,6 @@ impl RuntimeAgentRunner {
             .lock()
             .map_err(|_| RuntimeError::StateUnavailable)?;
         control.turn_executions.remove(turn_id.as_str());
-        close_runtime_publisher_if_idle(&self.inner, &mut control)?;
         guard.disarm();
         Ok(result)
     }
