@@ -252,6 +252,35 @@ fn structured_text_reply(reasoning: &str, text: &str) -> ScriptedReply {
     ScriptedReply::events(events)
 }
 
+/// 创建按正文、用量、计时和结束事件顺序排列的原生结构化候选。
+fn structured_text_reply_with_telemetry(
+    text: &str,
+    input_tokens: u64,
+    duration_ms: u64,
+) -> ScriptedReply {
+    ScriptedReply::events([
+        ModelStreamEvent::MessageStart {
+            metadata: ResponseMetadata::default(),
+        },
+        ModelStreamEvent::TextDelta {
+            index: 0,
+            delta: text.to_owned(),
+        },
+        ModelStreamEvent::Usage {
+            usage: TokenUsage {
+                input_tokens: Some(input_tokens),
+                output_tokens: Some(1),
+                total_tokens: Some(input_tokens.saturating_add(1)),
+                ..TokenUsage::unknown()
+            },
+        },
+        ModelStreamEvent::DecodeTiming { duration_ms },
+        ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::Completed,
+        },
+    ])
+}
+
 /// 创建最小用户 Turn 请求。
 fn turn_request(plan_guard: PlanGuard) -> TurnRequest {
     TurnRequest::new(
@@ -2710,7 +2739,11 @@ async fn structured_native_live_sink_preserves_order_for_replay() {
             structured_output: StructuredOutputCapability::Native,
             ..ProviderCapabilities::default()
         },
-        [structured_text_reply("顺序推理", "{\"answer\":42}")],
+        [structured_text_reply_with_telemetry(
+            "{\"answer\":42}",
+            17,
+            23,
+        )],
     ));
     let event_sink = Arc::new(RecordingModelEventSink::default());
     let result = runner(provider, ToolRegistry::new())
@@ -2734,12 +2767,16 @@ async fn structured_native_live_sink_preserves_order_for_replay() {
         model_events.as_slice(),
         [
             ModelStreamEvent::MessageStart { .. },
-            ModelStreamEvent::ReasoningDelta { delta, .. },
             ModelStreamEvent::TextDelta { delta: text, .. },
+            ModelStreamEvent::Usage { usage },
+            ModelStreamEvent::DecodeTiming { duration_ms: 23 },
             ModelStreamEvent::MessageEnd {
                 stop_reason: StopReason::Completed,
             },
-        ] if delta == "顺序推理" && text == "{\"answer\":42}"
+        ] if text == "{\"answer\":42}"
+            && usage.input_tokens == Some(17)
+            && usage.output_tokens == Some(1)
+            && usage.total_tokens == Some(18)
     ));
 
     let replayed = collect_model_stream(Box::pin(stream::iter(
@@ -2751,6 +2788,8 @@ async fn structured_native_live_sink_preserves_order_for_replay() {
         replayed.content, result.messages[1].content,
         "实时事件重放结果必须与权威 Assistant 内容一致"
     );
+    assert_eq!(replayed.usage.input_tokens, Some(17));
+    assert_eq!(replayed.metadata.decode_duration_ms, Some(23));
 }
 
 /// 原生结构化候选先坏后好时，实时 Sink 与冷恢复权威消息都只包含最终候选。
@@ -2784,6 +2823,58 @@ async fn structured_native_live_sink_drops_invalid_candidate_before_correction()
             matches!(block, ContentBlock::Text { text } if text == "{\"answer\":0}")
         })
     );
+}
+
+/// 无效原生候选的用量、计时和结束事件都不能残留在实时出口。
+#[tokio::test]
+async fn structured_native_live_sink_drops_invalid_candidate_telemetry() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_text_reply_with_telemetry("{\"answer\":0}", 101, 11),
+            structured_text_reply_with_telemetry("{\"answer\":42}", 202, 22),
+        ],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let model_events = event_sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.into_kind() {
+            AgentStreamEventKind::ModelEvent { event } => Some(event),
+            AgentStreamEventKind::ModelFailure { .. }
+            | AgentStreamEventKind::ContextCompactionStarted { .. }
+            | AgentStreamEventKind::ContextCompactionFailed { .. }
+            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        model_events.as_slice(),
+        [
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::TextDelta { delta, .. },
+            ModelStreamEvent::Usage { usage },
+            ModelStreamEvent::DecodeTiming { duration_ms: 22 },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            },
+        ] if delta == "{\"answer\":42}" && usage.input_tokens == Some(202)
+    ));
+    assert!(!model_events.iter().any(|event| {
+        matches!(
+            event,
+            ModelStreamEvent::Usage { usage } if usage.input_tokens == Some(101)
+        ) || matches!(event, ModelStreamEvent::DecodeTiming { duration_ms: 11 })
+    }));
 }
 
 /// 连续六个原生坏候选耗尽纠正预算时，实时出口不泄漏任何候选正文。

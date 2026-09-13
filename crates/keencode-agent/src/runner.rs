@@ -3875,7 +3875,7 @@ struct ModelStreamTapStatus {
     usage: TokenUsage,
     /// 已由实时 Sink 确认接收的结束原因。
     stop_reason: Option<StopReason>,
-    /// 尚未发布、等待结构化候选校验结果的正文/推理事件。
+    /// 尚未发布、等待结构化候选校验结果的模型事件（MessageStart 除外）。
     buffered_events: Vec<AgentStreamEvent>,
 }
 
@@ -3937,9 +3937,8 @@ async fn tap_model_stream_event(
                 };
                 let event = event.clone();
                 record_tap_buffered_event(&tapped.status, envelope);
-                // 事件虽未进入 Sink，仍交给严格归约器；Provider 流的完整性和
-                // 用量语义不能因为候选暂存而改变。
-                observe_tap_model_event(&tapped.status, &event);
+                // 事件虽未进入 Sink，仍交给严格归约器；但只有 Sink 已确认的
+                // 事件才能进入失败用量快照，避免无效候选的暂存 Usage 被记账。
                 tapped.done = matches!(event, keencode_model::ModelStreamEvent::MessageEnd { .. });
                 return Some((Ok(event), tapped));
             }
@@ -4032,7 +4031,10 @@ fn observe_tap_model_event(
     }
 }
 
-/// 结构化候选中会直接映射为用户可见正文的模型事件。
+/// 结构化候选校验期间需要保持原序的模型事件。
+///
+/// `MessageStart` 仍实时投递，用于建立一次模型调用的生命周期并保留取消语义；
+/// 其余事件全部暂存，待候选通过校验后一次性按 Provider 到达顺序冲刷。
 fn is_buffered_model_event(kind: &AgentStreamEventKind) -> bool {
     matches!(
         kind,
@@ -4041,12 +4043,14 @@ fn is_buffered_model_event(kind: &AgentStreamEventKind) -> bool {
                 | keencode_model::ModelStreamEvent::ReasoningDelta { .. }
                 | keencode_model::ModelStreamEvent::ReasoningSummaryDelta { .. }
                 | keencode_model::ModelStreamEvent::ReasoningContinuation { .. }
+                | keencode_model::ModelStreamEvent::Usage { .. }
+                | keencode_model::ModelStreamEvent::DecodeTiming { .. }
                 | keencode_model::ModelStreamEvent::MessageEnd { .. }
         }
     )
 }
 
-/// 暂存未通过结构化校验的正文事件，不触发实时出口。
+/// 暂存未通过结构化校验的模型事件，不触发实时出口。
 fn record_tap_buffered_event(status: &Arc<Mutex<ModelStreamTapStatus>>, event: AgentStreamEvent) {
     status
         .lock()
@@ -4055,7 +4059,7 @@ fn record_tap_buffered_event(status: &Arc<Mutex<ModelStreamTapStatus>>, event: A
         .push(event);
 }
 
-/// 取出一次完整 Provider 调用暂存的正文事件；失败路径直接丢弃该集合。
+/// 取出一次完整 Provider 调用暂存的模型事件；失败路径直接丢弃该集合。
 fn take_tap_buffered_events(status: &Arc<Mutex<ModelStreamTapStatus>>) -> Vec<AgentStreamEvent> {
     std::mem::take(
         &mut status
@@ -4515,7 +4519,7 @@ struct CompletedModelRound {
     elapsed: Duration,
     /// 当前 Turn 内对应的稳定模型调用尝试序号。
     call_attempt: u32,
-    /// 结构化候选在本地校验成功前暂存的正文/推理事件；普通调用为空。
+    /// 结构化候选在本地校验成功前暂存的模型事件；普通调用为空。
     buffered_events: Vec<AgentStreamEvent>,
 }
 
