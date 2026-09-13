@@ -3879,7 +3879,7 @@ fn runtime_turn_outcome(
                 | TerminalReason::ModelRefusal,
             )
             | None => AgentTurnOutcome::Failed {
-                message: bounded_collaboration_failure(
+                message: redacted_collaboration_failure(
                     result
                         .error
                         .as_ref()
@@ -3890,7 +3890,7 @@ fn runtime_turn_outcome(
             },
         },
         Err(error) => AgentTurnOutcome::Failed {
-            message: bounded_collaboration_failure(&error.to_string()),
+            message: redacted_collaboration_failure(&error.to_string()),
         },
     }
 }
@@ -3921,6 +3921,12 @@ fn bounded_collaboration_failure(value: &str) -> String {
         boundary -= 1;
     }
     format!("{}{suffix}", &value[..boundary])
+}
+
+/// 失败正文先限制输入，再统一脱敏并再次约束输出；正常完成文本不经过该入口。
+fn redacted_collaboration_failure(value: &str) -> String {
+    let bounded = bounded_collaboration_failure(value);
+    bounded_collaboration_failure(&keencode_model::redact_error_secrets(&bounded))
 }
 
 /// 将扩展诊断格式化为有界日志正文。
@@ -12339,6 +12345,226 @@ mod tests {
                     && event.source_agent_id == child.agent.agent_id
             )
         }));
+    }
+
+    /// Runner 失败正文在进入协作领域前必须脱敏，且事件、checkpoint、mailbox 与冷恢复都不得还原秘密。
+    #[tokio::test]
+    async fn collaboration_failure_redaction_survives_persistence_and_cold_recovery() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "failure-redaction-persistence")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let collaboration = install_test_collaboration_runtime(&runtime, &session, project.path());
+        let root_turn =
+            keencode_agent::TurnId::new("turn-failure-redaction-root").expect("根 Turn 标识应有效");
+
+        collaboration
+            .coordinator
+            .begin_root_turn_with_id(
+                &collaboration.root_agent_id,
+                root_turn.clone(),
+                "验证失败正文持久脱敏",
+                PlanGuard::inactive(),
+            )
+            .expect("根 Turn 应启动");
+        let child = collaboration
+            .coordinator
+            .spawn_agent(
+                &collaboration.root_agent_id,
+                &root_turn,
+                &ToolCallId::new("spawn-failure-redaction").expect("工具调用标识应有效"),
+                test_spawn_request("failure_redaction", project.path()),
+            )
+            .expect("子 Agent 应创建");
+
+        let secret = "kc-collaboration-persistence-secret";
+        let request_id = "req-collaboration-redaction";
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [ScriptedReply::new(vec![Err(
+                ModelError::ProviderUnavailable {
+                    message: format!("上游故障 api_key={secret} request_id={request_id}"),
+                    status_code: Some(503),
+                    retryable: false,
+                },
+            )])],
+        ));
+        let input = ModelMessage::text(MessageRole::User, "触发子 Agent Provider 失败");
+        let result = AgentRunner::new(provider, ToolRegistry::new(), RunLimits::default())
+            .run_turn(TurnRequest::new(
+                child.agent.session_id.clone(),
+                child.initial_turn_id.clone(),
+                child.agent.agent_id.clone(),
+                "test-model",
+                vec![input],
+                PlanGuard::inactive(),
+            ))
+            .await;
+        assert!(matches!(
+            &result.error,
+            Some(keencode_agent::AgentRunError::Model(
+                ModelError::ProviderUnavailable { .. }
+            ))
+        ));
+        let outcome = super::runtime_turn_outcome(Ok(result));
+        let assert_redacted = |value: &str| {
+            assert!(
+                !value.contains(secret),
+                "失败持久状态仍包含原始秘密: {value}"
+            );
+            assert!(
+                value.contains(keencode_model::REDACTED_SECRET),
+                "失败持久状态缺少脱敏占位符: {value}"
+            );
+            assert!(value.contains(request_id), "失败诊断上下文丢失: {value}");
+        };
+        let AgentTurnOutcome::Failed { message } = &outcome else {
+            panic!("Provider 失败必须映射为协作失败终态");
+        };
+        assert_redacted(message);
+
+        collaboration
+            .coordinator
+            .complete_turn(&child.agent.agent_id, &child.initial_turn_id, outcome)
+            .expect("子 Agent 失败终态应提交");
+        let CollaborationAgentStatus::Failed { message, .. } = collaboration
+            .coordinator
+            .agent_status(&child.agent.agent_id)
+            .expect("子 Agent 失败状态应读取")
+        else {
+            panic!("子 Agent 必须处于失败状态");
+        };
+        assert_redacted(&message);
+
+        let live_checkpoint = collaboration
+            .coordinator
+            .checkpoint_coordinator()
+            .expect("live checkpoint 应读取");
+        let checkpoint_child =
+            super::recovered_agent_for_id(&live_checkpoint, &child.agent.agent_id)
+                .expect("checkpoint 应包含子 Agent");
+        let CollaborationAgentStatus::Failed { message, .. } = &checkpoint_child.status else {
+            panic!("checkpoint 子 Agent 必须处于失败状态");
+        };
+        assert_redacted(message);
+        let AgentTurnOutcome::Failed { message } = &checkpoint_child
+            .last_turn
+            .as_ref()
+            .expect("checkpoint 应保留子 Turn")
+            .outcome
+        else {
+            panic!("checkpoint 子 Turn 必须保留失败终态");
+        };
+        assert_redacted(message);
+        let checkpoint_root =
+            super::recovered_agent_for_id(&live_checkpoint, &collaboration.root_agent_id)
+                .expect("checkpoint 应包含根 Agent");
+        let live_mailbox = checkpoint_root
+            .mailbox
+            .iter()
+            .find(|entry| entry.message.related_turn_id.as_ref() == Some(&child.initial_turn_id))
+            .expect("根 Agent mailbox 应包含子 Turn 完成通知");
+        assert_redacted(&live_mailbox.message.content);
+        let keencode_agent::MailboxMessageKind::ChildTurnFinished {
+            outcome: AgentTurnOutcome::Failed { message },
+        } = &live_mailbox.message.kind
+        else {
+            panic!("根 Agent mailbox 必须保存子 Turn 失败终态");
+        };
+        assert_redacted(message);
+
+        let persisted = collaboration
+            .store
+            .load_transition_snapshot()
+            .expect("生产 Store 快照应读取")
+            .expect("生产 Store 快照应存在");
+        let event_message = persisted
+            .commit
+            .batch
+            .events
+            .iter()
+            .find_map(|event| match &event.kind {
+                CollaborationEventKind::AgentTurnFailed { message }
+                    if event.agent_id == child.agent.agent_id =>
+                {
+                    Some(message)
+                }
+                _ => None,
+            })
+            .expect("终态批次应包含 AgentTurnFailed 事件");
+        assert_redacted(event_message);
+        let persisted_json = std::fs::read_to_string(&collaboration.store.transition_path)
+            .expect("collaboration-v2.json 应读取");
+        assert!(!persisted_json.contains(secret));
+        assert!(persisted_json.contains(keencode_model::REDACTED_SECRET));
+
+        runtime
+            .collaboration_sessions
+            .lock()
+            .expect("测试 Collaboration 表应可写")
+            .remove(&session_id);
+        drop(collaboration);
+
+        let recovered_store = Arc::new(
+            SessionCollaborationStore::new(storage.path(), &session_id)
+                .expect("冷恢复 Store 应创建"),
+        );
+        recovered_store
+            .bind_runtime_session(&session)
+            .expect("冷恢复 Store 应绑定 Session");
+        let persisted_checkpoint = recovered_store
+            .load_coordinator_checkpoint()
+            .expect("冷恢复 checkpoint 应读取")
+            .expect("冷恢复 checkpoint 应存在");
+        let recovered_coordinator = CollaborationCoordinator::new(
+            CollaborationLimits::new(2).expect("测试容量应有效"),
+            recovered_store,
+            Arc::new(NoopCollaborationExecution),
+            Arc::new(UuidCollaborationIdGenerator),
+        );
+        recovered_coordinator
+            .restore_coordinator(persisted_checkpoint)
+            .expect("新 Coordinator 应从磁盘 checkpoint 恢复");
+        let CollaborationAgentStatus::Failed { message, .. } = recovered_coordinator
+            .agent_status(&child.agent.agent_id)
+            .expect("冷恢复子 Agent 状态应读取")
+        else {
+            panic!("冷恢复子 Agent 必须处于失败状态");
+        };
+        assert_redacted(&message);
+        let recovered_checkpoint = recovered_coordinator
+            .checkpoint_coordinator()
+            .expect("冷恢复后的 checkpoint 应读取");
+        let recovered_root = super::recovered_agent_for_id(
+            &recovered_checkpoint,
+            &keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效"),
+        )
+        .expect("冷恢复 checkpoint 应包含根 Agent");
+        let recovered_mailbox = recovered_root
+            .mailbox
+            .iter()
+            .find(|entry| entry.message.related_turn_id.as_ref() == Some(&child.initial_turn_id))
+            .expect("冷恢复根 Agent mailbox 应包含子 Turn 完成通知");
+        assert_redacted(&recovered_mailbox.message.content);
+        let keencode_agent::MailboxMessageKind::ChildTurnFinished {
+            outcome: AgentTurnOutcome::Failed { message },
+        } = &recovered_mailbox.message.kind
+        else {
+            panic!("冷恢复 mailbox 必须保留子 Turn 失败终态");
+        };
+        assert_redacted(message);
+
+        drop(recovered_coordinator);
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("测试 Session 应关闭");
     }
 
     /// 成功根 Turn 的最终文本必须从权威 Transcript 恢复，不能因 Runtime 重启而触发恢复栅栏。
