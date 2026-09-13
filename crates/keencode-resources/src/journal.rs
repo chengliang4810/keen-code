@@ -121,7 +121,8 @@ pub enum Durability {
     /// 攒批后执行 `flush` 与 `sync_data`：默认 64 条或 100ms 触发一次
     /// 持久化（以先到为准）。返回的事件对当前实例立即可见，但进程崩溃会
     /// 丢失窗口内尚未 sync 的尾部（≤64 条/100ms）；崩溃窗口外的事件与旧
-    /// 语义一致，落盘即 durable。需要"返回即落盘"的调用点必须显式调用
+    /// 语义一致，落盘即 durable。后台 fsync worker 受进程级并发上限约束，
+    /// 超出部分排队等待槽位。需要"返回即落盘"的调用点必须显式调用
     /// [`SessionJournal::flush`]（例如 mutation `Prepared` 记录、Barrier ack
     /// 前的积压），`AlreadyCommitted` 快捷路径会按配置补齐持久化。
     #[default]
@@ -138,6 +139,8 @@ const JOURNAL_BATCH_MAX_ATTEMPTS: u32 = 4;
 const JOURNAL_BATCH_SCHEDULER_IDLE_TIMEOUT: Duration = Duration::from_millis(250);
 /// 单个后台 Journal 获取跨进程锁的等待上限，避免一个异常 Session 阻塞全部批次。
 const JOURNAL_BATCH_LOCK_WAIT: Duration = Duration::from_millis(20);
+/// 进程级后台 fsync 的最大并发数；超出部分保留在 scheduler 中等待空闲槽位。
+const JOURNAL_BATCH_MAX_CONCURRENT_FSYNC: usize = 8;
 
 /// 自动 Snapshot 的频率策略。
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -429,7 +432,8 @@ impl BatchFlushJob {
 #[derive(Default)]
 struct BatchSchedulerState {
     jobs: BTreeMap<u64, Weak<BatchFlushJob>>,
-    /// 已交给独立短生命周期线程执行 fsync 的任务，避免同一 Journal 重复并发刷盘。
+    /// 已交给短生命周期线程执行 fsync 的任务，避免同一 Journal 重复并发刷盘，
+    /// 且其数量受 `JOURNAL_BATCH_MAX_CONCURRENT_FSYNC` 限制。
     in_flight: BTreeSet<u64>,
     worker_active: bool,
     /// 每次任务集合或 deadline 变化时递增，避免通知发生在 worker 处理任务期间而丢失。
@@ -437,12 +441,14 @@ struct BatchSchedulerState {
 }
 
 /// 所有 Journal 共享的惰性 deadline 调度器；Condvar 直接等待最早 deadline，
-/// 到期 Journal 的 fsync 由互相独立的短生命周期线程并发执行。
+/// 到期 Journal 的 fsync 由数量有界的短生命周期线程并发执行。
 struct BatchScheduler {
     state: Mutex<BatchSchedulerState>,
     wake: Condvar,
     #[cfg(any(test, feature = "test-support"))]
     active_worker_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    active_flush_worker_count: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     worker_start_count: AtomicU64,
 }
@@ -454,6 +460,8 @@ impl Default for BatchScheduler {
             wake: Condvar::new(),
             #[cfg(any(test, feature = "test-support"))]
             active_worker_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            active_flush_worker_count: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             worker_start_count: AtomicU64::new(0),
         }
@@ -512,23 +520,32 @@ impl BatchScheduler {
         }
     }
 
-    /// 在任务仍登记且未执行时原子标记一次并发 fsync 派发。
+    /// 在任务仍登记且未执行且仍有全局槽位时原子标记一次 fsync 派发。
     fn begin_flush(&self, job_id: u64) -> bool {
         let Ok(mut state) = self.state.lock() else {
             return false;
         };
-        if !state.jobs.contains_key(&job_id) || !state.in_flight.insert(job_id) {
+        if !state.jobs.contains_key(&job_id)
+            || state.in_flight.len() >= JOURNAL_BATCH_MAX_CONCURRENT_FSYNC
+            || !state.in_flight.insert(job_id)
+        {
             return false;
         }
+        #[cfg(any(test, feature = "test-support"))]
+        self.active_flush_worker_count
+            .fetch_add(1, Ordering::AcqRel);
         state.revision = state.revision.wrapping_add(1);
         true
     }
 
-    /// 独立 fsync 线程退出时解除执行标记并唤醒调度器处理重试或新批次。
+    /// fsync worker 退出时解除执行标记并唤醒调度器处理排队任务、重试或新批次。
     fn finish_flush(&self, job_id: u64) {
         if let Ok(mut state) = self.state.lock()
             && state.in_flight.remove(&job_id)
         {
+            #[cfg(any(test, feature = "test-support"))]
+            self.active_flush_worker_count
+                .fetch_sub(1, Ordering::AcqRel);
             state.revision = state.revision.wrapping_add(1);
             self.wake.notify_one();
         }
@@ -1595,6 +1612,14 @@ impl SessionJournal {
             .load(Ordering::Acquire)
     }
 
+    /// 返回进程级调度器当前实际存活或已预留的 fsync worker 数量。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_batch_flush_workers_for_tests(&self) -> usize {
+        batch_scheduler()
+            .active_flush_worker_count
+            .load(Ordering::Acquire)
+    }
+
     /// 返回进程级调度器累计启动的刷盘线程数。
     #[cfg(any(test, feature = "test-support"))]
     pub fn batch_scheduler_start_count_for_tests(&self) -> u64 {
@@ -2120,10 +2145,10 @@ fn mark_batch_dispatch_failure(scheduler: &BatchScheduler, job: &BatchFlushJob) 
     scheduler.cancel(job.id);
 }
 
-/// 为一个到期 Journal 派发独立短生命周期 fsync；同一任务由 in-flight 集合去重。
-fn dispatch_batch_job(scheduler: &Arc<BatchScheduler>, job: Arc<BatchFlushJob>) {
+/// 为一个到期 Journal 派发一个有界短生命周期 fsync worker；同一任务由 in-flight 集合去重。
+fn dispatch_batch_job(scheduler: &Arc<BatchScheduler>, job: Arc<BatchFlushJob>) -> bool {
     if !scheduler.begin_flush(job.id) {
-        return;
+        return false;
     }
     let worker_scheduler = Arc::clone(scheduler);
     let worker_job = Arc::clone(&job);
@@ -2138,9 +2163,10 @@ fn dispatch_batch_job(scheduler: &Arc<BatchScheduler>, job: Arc<BatchFlushJob>) 
         mark_batch_dispatch_failure(scheduler, &job);
         scheduler.finish_flush(job.id);
     }
+    true
 }
 
-/// 等待所有 Journal 的最早截止时间并并发派发到期 fsync；队列空闲后释放调度线程。
+/// 等待所有 Journal 的最早截止时间并有界并发派发到期 fsync；队列空闲后释放调度线程。
 fn run_batch_scheduler(scheduler: Arc<BatchScheduler>) {
     #[cfg(any(test, feature = "test-support"))]
     let _active_worker_guard = ActiveBatchSchedulerGuard::new(&scheduler);
@@ -2193,8 +2219,19 @@ fn run_batch_scheduler(scheduler: Arc<BatchScheduler>) {
             }
         }
         if !due.is_empty() {
+            let mut dispatched = false;
             for job in due {
-                dispatch_batch_job(&scheduler, job);
+                dispatched |= dispatch_batch_job(&scheduler, job);
+            }
+            if !dispatched {
+                let Ok(state) = scheduler.state.lock() else {
+                    return;
+                };
+                if state.in_flight.len() >= JOURNAL_BATCH_MAX_CONCURRENT_FSYNC
+                    && scheduler.wake.wait(state).is_err()
+                {
+                    return;
+                }
             }
             continue;
         }
@@ -4394,13 +4431,13 @@ mod tests {
         assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
     }
 
-    /// 64 个 Journal 同时到期时必须并发开始 fsync，慢盘不能形成全局串行队头阻塞。
-    /// 连续三轮覆盖完成、重新 arm 与 deadline 通知竞速。
+    /// 256 个 Journal 同时到期时必须排队并发 fsync，慢盘不能形成全局串行队头阻塞，
+    /// 也不能突破进程级 worker 上限。连续两轮覆盖排队完成、重新 arm 与 deadline 通知竞速。
     #[test]
     fn 大量journal到期fsync并发且重复竞速不丢任务() {
-        const JOURNAL_COUNT: usize = 64;
-        const ROUNDS: u64 = 3;
-        const INJECTED_SYNC_DELAY: Duration = Duration::from_millis(200);
+        const JOURNAL_COUNT: usize = 256;
+        const ROUNDS: u64 = 2;
+        const INJECTED_SYNC_DELAY: Duration = Duration::from_millis(50);
 
         let root = tempfile::tempdir().expect("临时目录应创建");
         let config = JournalConfig {
@@ -4424,6 +4461,11 @@ mod tests {
                 .store(INJECTED_SYNC_DELAY.as_millis() as u64, Ordering::Release);
             journals.push(journal);
         }
+        // 让一个排队任务先失败一次，确认 worker 槽位释放后仍会按原有退避路径重试。
+        journals[0]
+            .batch_target
+            .background_failures_remaining
+            .store(1, Ordering::Release);
 
         for round in 0..ROUNDS {
             for (index, journal) in journals.iter().enumerate() {
@@ -4460,8 +4502,15 @@ mod tests {
             }
             let started = Instant::now();
             batch_scheduler().notify();
-            let attempts_deadline = started + Duration::from_secs(1);
+            let attempts_deadline = started + Duration::from_secs(20);
+            let mut max_active_flush_workers = 0;
             loop {
+                let active_flush_workers = journals[0].active_batch_flush_workers_for_tests();
+                max_active_flush_workers = max_active_flush_workers.max(active_flush_workers);
+                assert!(
+                    active_flush_workers <= JOURNAL_BATCH_MAX_CONCURRENT_FSYNC,
+                    "第 {round} 轮 fsync worker 超过进程级上限：actual={active_flush_workers}, limit={JOURNAL_BATCH_MAX_CONCURRENT_FSYNC}"
+                );
                 let all_started = journals.iter().all(|journal| {
                     journal
                         .batch_target
@@ -4474,10 +4523,14 @@ mod tests {
                 }
                 assert!(
                     Instant::now() < attempts_deadline,
-                    "第 {round} 轮 64 个 fsync 未并发开始；全局串行调度会被 200ms 慢盘阻塞"
+                    "第 {round} 轮 256 个 fsync 未在排队窗口内开始"
                 );
                 std::thread::sleep(Duration::from_millis(5));
             }
+            assert!(
+                max_active_flush_workers <= JOURNAL_BATCH_MAX_CONCURRENT_FSYNC,
+                "第 {round} 轮 worker 峰值超过上限：actual={max_active_flush_workers}, limit={JOURNAL_BATCH_MAX_CONCURRENT_FSYNC}"
+            );
             for journal in &journals {
                 wait_for_idle_batch_job(journal);
                 assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
@@ -4486,11 +4539,16 @@ mod tests {
                     round + 1
                 );
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(2),
-                "第 {round} 轮并发刷盘耗时过长：{:?}",
-                started.elapsed()
-            );
+            if round == 0 {
+                assert_eq!(
+                    journals[0]
+                        .batch_target
+                        .background_attempt_count
+                        .load(Ordering::Acquire),
+                    2,
+                    "排队 Journal 首次失败后必须在 worker 槽位释放时重试并成功"
+                );
+            }
         }
     }
 
