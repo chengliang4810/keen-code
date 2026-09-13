@@ -1483,7 +1483,7 @@ fn extract_id(body: &str) -> Option<&str> {
                 .expect("目录更新应可读取")
                 .expect("每个 Runner 都应收到同一代次");
             assert_eq!(delta.generation(), 2);
-            assert_eq!(delta.added(), &[expected_name.clone()]);
+            assert_eq!(delta.added(), std::slice::from_ref(&expected_name));
             assert!(delta.removed().is_empty());
         }
         assert!(first_runner.take_update().unwrap().is_none());
@@ -1496,13 +1496,12 @@ fn extract_id(body: &str) -> Option<&str> {
 
         let unloaded = runtime.unload("unload-1", "local").await.unwrap();
         assert!(unloaded.changed);
-        assert_eq!(
+        assert!(
             runtime
                 .unload("unload-1", "local")
                 .await
                 .unwrap()
-                .deduplicated,
-            true
+                .deduplicated
         );
         for source in [&first_runner, &second_runner] {
             let delta = source
@@ -1511,7 +1510,7 @@ fn extract_id(body: &str) -> Option<&str> {
                 .expect("每个 Runner 都应收到撤销代次");
             assert_eq!(delta.generation(), 3);
             assert!(delta.added().is_empty());
-            assert_eq!(delta.removed(), &[expected_name.clone()]);
+            assert_eq!(delta.removed(), std::slice::from_ref(&expected_name));
         }
         wait_for_file_lines(&closed, 1).await;
         runtime.close().await;
