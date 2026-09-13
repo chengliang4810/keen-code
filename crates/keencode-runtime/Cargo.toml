@@ -37,6 +37,8 @@ tokio = { version = "1.47.1", features = ["sync"] }
 uuid = { version = "1.18.1", features = ["v7"] }
 
 [dev-dependencies]
+# 仅在 Runtime 测试中固定 Journal 批量截止时间，避免用墙钟竞争断言读取路径语义。
+keencode-resources = { path = "../keencode-resources", features = ["test-support"] }
 # 创建隔离的 Session 存储目录。
 tempfile = "3.21.0"
 # 驱动真实 Agent 生命周期、取消竞态和实时订阅的异步回归测试。

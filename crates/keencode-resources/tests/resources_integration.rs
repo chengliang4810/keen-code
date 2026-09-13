@@ -14,11 +14,11 @@ use keencode_resources::{
     MAX_REPLAY_PAGE_RECORDS, MailboxMessage, MailboxMessageId, MailboxState, MemoryDocument,
     MemoryEntry, MemoryFileStore, MessagePart, MessageRole, PersistedToolResult, PlanState,
     ProviderProtocolSnapshot, ProviderSnapshot, ReasoningEffortSnapshot, RequestId, ResourceError,
-    ScopeId, SessionEvent, SessionEventRecord, SessionId, SessionJournal, SessionMessage,
-    SessionOpen, SessionState, SessionStatus, SnapshotPolicy, SubAgentState, SubAgentStatus,
-    TerminalId, TerminalRecord, TodoItem, ToolCompletionStatus, ToolEffect, ToolOutcome,
-    ToolRequest, ToolResultPart, TranscriptSegment, TurnId, TurnStopReason, WorktreeRecord,
-    filesystem_capabilities, project_scope_id,
+    ScopeId, SessionEvent, SessionEventId, SessionEventRecord, SessionId, SessionJournal,
+    SessionMessage, SessionOpen, SessionState, SessionStatus, SnapshotPolicy, SubAgentState,
+    SubAgentStatus, TerminalId, TerminalRecord, TodoItem, ToolCompletionStatus, ToolEffect,
+    ToolOutcome, ToolRequest, ToolResultPart, TranscriptSegment, TurnId, TurnStopReason,
+    WorktreeRecord, filesystem_capabilities, project_scope_id,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -1030,6 +1030,49 @@ fn concurrent_append_across_instances_refreshes_external_changes() {
     let state = reopened.state().expect("状态应读取");
     assert_eq!(state.last_sequence, 25);
     assert_eq!(state.raw_transcript_messages().len(), 24);
+}
+
+/// 验证本实例有待刷批次时，外部追加发生在 flush 前后都不会掩盖权威 sequence。
+#[test]
+fn cross_instance_flush_refreshes_before_and_after_external_append() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let first = ready(root.path(), "flush-instances", SnapshotPolicy::Disabled);
+    create_session(&first);
+    first.flush().expect("创建事件应先落盘");
+    let second = ready(root.path(), "flush-instances", SnapshotPolicy::Disabled);
+
+    let append_rename = |journal: &SessionJournal, id: &str, title: &str| {
+        let expected = journal.state().expect("权威 sequence 应读取").last_sequence;
+        assert!(matches!(
+            journal
+                .append_idempotent(
+                    SessionEventId::new(id).expect("事件 ID 应有效"),
+                    expected,
+                    SessionEvent::SessionRenamed {
+                        title: title.to_owned(),
+                    },
+                )
+                .expect("跨实例事件应追加"),
+            keencode_resources::IdempotentAppendOutcome::Appended(_)
+        ));
+    };
+
+    append_rename(&first, "first-before-flush", "first-before");
+    append_rename(&second, "second-before-first-flush", "second-before");
+    first.flush().expect("第一实例应刷新外部事件后刷盘");
+    assert_eq!(first.state().expect("刷新后状态应读取").last_sequence, 3);
+
+    append_rename(&second, "second-after-first-flush", "second-after");
+    append_rename(&first, "first-after-external", "first-after");
+    first.flush().expect("第一实例最终批次应刷盘");
+    second.flush().expect("第二实例最终批次应刷盘");
+    drop(first);
+    drop(second);
+
+    let reopened = ready(root.path(), "flush-instances", SnapshotPolicy::Disabled);
+    let state = reopened.state().expect("最终状态应读取");
+    assert_eq!(state.last_sequence, 5);
+    assert_eq!(state.title, "first-after");
 }
 
 /// 验证一个 Journal 的只读状态查询也会立即观察另一个实例已经提交的事件。

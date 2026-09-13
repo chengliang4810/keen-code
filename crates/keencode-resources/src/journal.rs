@@ -5,8 +5,8 @@ use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -116,10 +116,20 @@ pub enum Durability {
     Buffered,
     /// 每次追加后执行 `flush`。
     Flush,
-    /// 每次追加执行 `flush` 与 `sync_data`。
+    /// 攒批后执行 `flush` 与 `sync_data`：默认 64 条或 100ms 触发一次
+    /// 持久化（以先到为准）。返回的事件对当前实例立即可见，但进程崩溃会
+    /// 丢失窗口内尚未 sync 的尾部（≤64 条/100ms）；崩溃窗口外的事件与旧
+    /// 语义一致，落盘即 durable。需要"返回即落盘"的调用点必须显式调用
+    /// [`SessionJournal::flush`]（例如 mutation `Prepared` 记录、Barrier ack
+    /// 前的积压），`AlreadyCommitted` 快捷路径会按配置补齐持久化。
     #[default]
     FlushAndSync,
 }
+
+/// 批量刷盘的触发阈值：攒满该条数即执行一次 flush+sync_data。
+pub const JOURNAL_BATCH_MAX_RECORDS: usize = 64;
+/// 批量刷盘的超时阈值：自本批首条记录完成写入起计时，即使未满批。
+pub const JOURNAL_BATCH_MAX_DELAY: Duration = Duration::from_millis(100);
 
 /// 自动 Snapshot 的频率策略。
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
@@ -313,19 +323,23 @@ pub struct SessionJournal {
     /// 事件提交前使用的可选 Artifact 实体校验器。
     artifact_validator: Option<Arc<dyn ArtifactValidator>>,
     /// 同一实例内的状态与 sequence 互斥边界。
-    inner: Mutex<JournalInner>,
+    inner: Arc<Mutex<JournalInner>>,
+    /// 批量刷盘线程使用的常量大小文件上下文。
+    batch_target: Arc<BatchFlushTarget>,
+    /// 唤醒按需批量刷盘线程；线程只在非空批次期间存在，不轮询。
+    batch_wake: Arc<Condvar>,
 }
 
 /// SessionJournal 的可变状态。
 struct JournalInner {
     history_index: SessionHistoryIndex,
-    /// 当前完整归约状态。
+    /// 当前完整归约状态（含尚未 sync 的批量窗口事件）。
     state: SessionState,
-    /// 从健康权威日志重放得到的幂等事件索引。
+    /// 从健康权威日志重放得到的幂等事件索引（含尚未 sync 的批量窗口事件）。
     event_index: BTreeMap<SessionEventId, EventIndexEntry>,
-    /// 每条物理 JSONL 记录包含换行符后的排他结束字节偏移。
+    /// 每条物理 JSONL 记录包含换行符后的排他结束字节偏移（含尚未 sync 的批量窗口事件）。
     record_end_offsets: Vec<u64>,
-    /// 上次加载或追加后的日志字节数。
+    /// 上次加载或追加后的日志字节数（含尚未 sync 的批量窗口事件）。
     log_len: u64,
     /// 上次加载或追加后观察到的文件系统变化戳。
     log_stamp: LogStamp,
@@ -333,6 +347,93 @@ struct JournalInner {
     read_only: bool,
     /// 当前实例是否仍需为 events.jsonl 的目录项确认一次父目录同步。
     directory_sync_required: bool,
+    /// 尚未 sync 的批量窗口事件数。
+    pending_records: usize,
+    /// 当前实例最近一次成功 sync 时已经归约到的 sequence 下界。
+    synced_through_sequence: u64,
+    /// 当前批次第一条事件完成写入的单调时间。
+    pending_since: Option<Instant>,
+    /// 当前非空批次是否已经有一个等待截止时间的按需线程。
+    batch_worker_active: bool,
+    /// Journal 正在关闭，后台线程应在完成当前唤醒后退出。
+    batch_worker_stop: bool,
+}
+
+impl JournalInner {
+    /// 当前批量窗口是否已经超过第一条事件起算的超时阈值。
+    fn batch_delay_expired(&self) -> bool {
+        self.pending_since
+            .is_some_and(|started| started.elapsed() >= JOURNAL_BATCH_MAX_DELAY)
+    }
+
+    /// 把自本实例最近一次 sync 后观察到的权威物理记录纳入批次计数。
+    /// 外部实例事件也计入，从而交错追加仍会在全局 64 条附近触发刷盘；
+    /// 无法证明对方是否已经 sync 时宁可保守地提前重复 sync。
+    fn observe_unsynced_through(&mut self, sequence: u64) {
+        let records = usize::try_from(sequence.saturating_sub(self.synced_through_sequence))
+            .unwrap_or(usize::MAX);
+        if records == 0 {
+            return;
+        }
+        self.pending_records = self.pending_records.max(records);
+        self.pending_since.get_or_insert_with(Instant::now);
+    }
+}
+
+/// 后台刷盘只保留路径与测试计数，不复制 Journal 正文或归约状态。
+struct BatchFlushTarget {
+    log_path: PathBuf,
+    session_dir: PathBuf,
+    lock_path: PathBuf,
+    #[cfg(any(test, feature = "test-support"))]
+    sync_count: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    active_worker_count: std::sync::atomic::AtomicUsize,
+    #[cfg(any(test, feature = "test-support"))]
+    worker_start_count: std::sync::atomic::AtomicU64,
+}
+
+/// 测试用实际 worker 生命周期计数守卫，确保所有退出路径都可观测。
+#[cfg(any(test, feature = "test-support"))]
+struct ActiveBatchWorkerGuard<'a> {
+    target: &'a BatchFlushTarget,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl<'a> ActiveBatchWorkerGuard<'a> {
+    fn new(target: &'a BatchFlushTarget) -> Self {
+        target
+            .active_worker_count
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        target
+            .worker_start_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Self { target }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for ActiveBatchWorkerGuard<'_> {
+    fn drop(&mut self) {
+        self.target
+            .active_worker_count
+            .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+/// 测试可观测的 sync_data 计数器：每次真实 sync 累加一次。
+#[cfg(any(test, feature = "test-support"))]
+static SYNC_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 记录一次真实 sync_data，供测试统计 fsync 合并效果。
+fn count_sync_for_tests(_target: &BatchFlushTarget) {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        _target
+            .sync_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        SYNC_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// 写入已经开始后进行权威日志对账所需的不可变上下文。
@@ -499,6 +600,15 @@ impl SessionJournal {
             }));
         }
         if loaded.snapshot_needs_rebuild {
+            if config.durability == Durability::FlushAndSync && log_path.exists() {
+                let file = OpenOptions::new()
+                    .write(true)
+                    .open(&log_path)
+                    .map_err(|error| ResourceError::io("open_event_log_for_snapshot", error))?;
+                file.sync_data()
+                    .map_err(|error| ResourceError::io("sync_event_log_for_snapshot", error))?;
+                sync_directory(&session_dir, true)?;
+            }
             if let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes) {
                 let _ = write_snapshot_file(
                     &snapshot_path,
@@ -509,15 +619,16 @@ impl SessionJournal {
                 );
             }
         }
+        let loaded_sequence = loaded.state.last_sequence;
         Ok(SessionOpen::Ready(Self {
             session_id,
-            session_dir,
-            log_path,
+            session_dir: session_dir.clone(),
+            log_path: log_path.clone(),
             snapshot_path,
-            lock_path,
+            lock_path: lock_path.clone(),
             config,
             artifact_validator,
-            inner: Mutex::new(JournalInner {
+            inner: Arc::new(Mutex::new(JournalInner {
                 state: loaded.state,
                 history_index: loaded.history_index,
                 event_index: loaded.event_index,
@@ -526,7 +637,24 @@ impl SessionJournal {
                 log_stamp: loaded.log_stamp,
                 read_only: false,
                 directory_sync_required: config.durability == Durability::FlushAndSync,
+                pending_records: 0,
+                synced_through_sequence: loaded_sequence,
+                pending_since: None,
+                batch_worker_active: false,
+                batch_worker_stop: false,
+            })),
+            batch_target: Arc::new(BatchFlushTarget {
+                log_path,
+                session_dir,
+                lock_path,
+                #[cfg(any(test, feature = "test-support"))]
+                sync_count: std::sync::atomic::AtomicU64::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                active_worker_count: std::sync::atomic::AtomicUsize::new(0),
+                #[cfg(any(test, feature = "test-support"))]
+                worker_start_count: std::sync::atomic::AtomicU64::new(0),
             }),
+            batch_wake: Arc::new(Condvar::new()),
         }))
     }
 
@@ -633,16 +761,17 @@ impl SessionJournal {
             }
         }
         let preserved_bytes = tail.len() as u64;
+        let recovered_sequence = recovered.state.last_sequence;
         Ok(TruncatedTailRecovery {
             journal: Self {
                 session_id,
-                session_dir,
-                log_path,
+                session_dir: session_dir.clone(),
+                log_path: log_path.clone(),
                 snapshot_path,
-                lock_path,
+                lock_path: lock_path.clone(),
                 config,
                 artifact_validator,
-                inner: Mutex::new(JournalInner {
+                inner: Arc::new(Mutex::new(JournalInner {
                     state: recovered.state,
                     history_index: recovered.history_index,
                     event_index: recovered.event_index,
@@ -651,7 +780,24 @@ impl SessionJournal {
                     log_stamp: recovered.log_stamp,
                     read_only: false,
                     directory_sync_required: config.durability == Durability::FlushAndSync,
+                    pending_records: 0,
+                    synced_through_sequence: recovered_sequence,
+                    pending_since: None,
+                    batch_worker_active: false,
+                    batch_worker_stop: false,
+                })),
+                batch_target: Arc::new(BatchFlushTarget {
+                    log_path,
+                    session_dir,
+                    lock_path,
+                    #[cfg(any(test, feature = "test-support"))]
+                    sync_count: std::sync::atomic::AtomicU64::new(0),
+                    #[cfg(any(test, feature = "test-support"))]
+                    active_worker_count: std::sync::atomic::AtomicUsize::new(0),
+                    #[cfg(any(test, feature = "test-support"))]
+                    worker_start_count: std::sync::atomic::AtomicU64::new(0),
                 }),
+                batch_wake: Arc::new(Condvar::new()),
             },
             evidence_path,
             preserved_bytes,
@@ -659,6 +805,8 @@ impl SessionJournal {
     }
 
     /// 返回当前内存中与完整日志重放一致的状态快照。
+    ///
+    /// 注意：该快照包含批量窗口内已写但尚未 sync 的事件（同实例读写一致）。
     pub fn state(&self) -> Result<SessionState, ResourceError> {
         self.read_state(Clone::clone)
     }
@@ -668,6 +816,8 @@ impl SessionJournal {
     /// 高频轮询（后台任务列表、活动状态检查、Session 列表）必须走此入口：
     /// 这些调用持有跨进程追加锁执行，若每次克隆 MB 级状态，并发轮询会退化成
     /// 持锁排队列车并饿死其余等待者。
+    /// 读取只刷新已经完整写入的 JSONL，不承担 durability barrier；因此
+    /// Runtime 在每次正式追加前读取 sequence 时不会把批量 fsync 退化为逐条。
     pub fn read_state<T>(
         &self,
         project: impl FnOnce(&SessionState) -> T,
@@ -890,10 +1040,15 @@ impl SessionJournal {
 
     /// 判断稳定事件标识是否已经提交到当前独占 Session 的权威日志。
     pub fn contains_event_id(&self, event_id: &SessionEventId) -> Result<bool, ResourceError> {
-        let inner = self
+        let mut inner = self
             .inner
             .lock()
             .map_err(|_| ResourceError::CorruptReadOnly)?;
+        if inner.read_only {
+            return Err(ResourceError::CorruptReadOnly);
+        }
+        let _file_lock = exclusive_lock(&self.lock_path)?;
+        self.refresh_if_changed(&mut inner)?;
         Ok(inner.event_index.contains_key(event_id))
     }
 
@@ -1010,6 +1165,21 @@ impl SessionJournal {
             inner.directory_sync_required = true;
         }
         let original_log_len = inner.log_len;
+        // FlushAndSync 走批量路径：整条 JSONL 行先写文件（crash 后恰好是
+        // 旧 `recover_truncated_tail` 能处理的“完整行/坏尾”二态），内存投影
+        // 立刻推进保证同实例读写一致，sync 按 64 条/100ms 合并。
+        if self.config.durability == Durability::FlushAndSync {
+            return self.append_batched(
+                &mut inner,
+                event_id,
+                sequence,
+                record,
+                candidate,
+                event_sha256,
+                line,
+                next_log_len,
+            );
+        }
         let started_write = StartedWriteContext {
             event_id: &event_id,
             event: &event,
@@ -1150,6 +1320,9 @@ impl SessionJournal {
     }
 
     /// 立即为当前完整状态写入一个原子 Snapshot。
+    ///
+    /// `FlushAndSync` 下先把 Snapshot 将要引用的日志前缀同步，再写原子
+    /// Snapshot，禁止 durable Snapshot 锚定尚未 durable 的日志。
     pub fn write_snapshot(&self) -> Result<(), ResourceError> {
         let mut inner = self
             .inner
@@ -1160,6 +1333,9 @@ impl SessionJournal {
         }
         let _file_lock = exclusive_lock(&self.lock_path)?;
         self.refresh_if_changed(&mut inner)?;
+        if self.config.durability == Durability::FlushAndSync {
+            self.flush_pending_locked(&mut inner, true)?;
+        }
         let anchor = complete_log_anchor(&self.log_path, self.config.max_log_bytes)?;
         write_snapshot_file(
             &self.snapshot_path,
@@ -1170,11 +1346,273 @@ impl SessionJournal {
         )
     }
 
-    /// 多实例写入改变文件长度时，在持有 OS 文件锁期间重新加载状态。
+    /// 把批量窗口内已写但尚未 sync 的事件一次性持久化（Barrier 语义）。
+    ///
+    /// `ack` 之后返回即表示当前锁内观察到的完整日志已经达到配置要求。
+    /// mutation `Prepared` 记录等崩溃恢复锚点必须显式调用本方法。
+    pub fn flush(&self) -> Result<(), ResourceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ResourceError::CorruptReadOnly)?;
+        if inner.read_only {
+            return Err(ResourceError::CorruptReadOnly);
+        }
+        let _file_lock = exclusive_lock(&self.lock_path)?;
+        self.refresh_if_changed(&mut inner)?;
+        match self.config.durability {
+            Durability::Buffered => Ok(()),
+            Durability::Flush => {
+                ensure_regular_file_or_absent(&self.log_path)?;
+                if !self.log_path.exists() {
+                    return Ok(());
+                }
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .open(&self.log_path)
+                    .map_err(|error| ResourceError::io("open_event_log_for_flush", error))?;
+                apply_durability(&mut file, Durability::Flush)
+            }
+            Durability::FlushAndSync => self.flush_pending_locked(&mut inner, true),
+        }
+    }
+
+    /// 返回批量窗口内尚未 sync 的事件数，便于测试断言攒批行为。
+    pub fn pending_flush_records(&self) -> Result<usize, ResourceError> {
+        let inner = self
+            .inner
+            .lock()
+            .map_err(|_| ResourceError::CorruptReadOnly)?;
+        Ok(inner.pending_records)
+    }
+
+    /// 返回当前 Journal 实例实际执行的 `sync_data` 次数。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sync_count_for_tests(&self) -> u64 {
+        self.batch_target
+            .sync_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 返回当前 Journal 实例仍实际存活的批量刷盘线程数。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn active_batch_workers_for_tests(&self) -> usize {
+        self.batch_target
+            .active_worker_count
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 返回当前 Journal 实例累计启动的批量刷盘线程数。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn batch_worker_start_count_for_tests(&self) -> u64 {
+        self.batch_target
+            .worker_start_count
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 把当前或下一批的超时截止点推迟，供跨 crate 测试隔离 64 条计数阈值。
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn defer_batch_timeout_for_tests(&self) -> Result<(), ResourceError> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| ResourceError::CorruptReadOnly)?;
+        inner.pending_since = Some(Instant::now() + Duration::from_secs(60));
+        if inner.batch_worker_active {
+            self.batch_wake.notify_one();
+        }
+        Ok(())
+    }
+
+    /// 在持有实例锁与跨进程追加锁期间同步当前批次。
+    fn flush_pending_locked(
+        &self,
+        inner: &mut JournalInner,
+        force: bool,
+    ) -> Result<(), ResourceError> {
+        sync_pending_batch(&self.batch_target, &self.batch_wake, inner, force, true)
+    }
+
+    /// 首条待刷事件至多启动一个等待线程；同一非空批次内复用该线程，
+    /// 批次清空后退出。下一批由 append 在同一把锁内重新启动，无丢唤醒窗口。
+    fn arm_batch_worker(&self, inner: &mut JournalInner) -> bool {
+        if inner.pending_records == 0 {
+            return true;
+        }
+        if inner.batch_worker_active {
+            self.batch_wake.notify_one();
+            return true;
+        }
+        inner.batch_worker_active = true;
+        let shared_inner = Arc::clone(&self.inner);
+        let target = Arc::clone(&self.batch_target);
+        let wake = Arc::clone(&self.batch_wake);
+        match std::thread::Builder::new()
+            .name("keencode-journal-fsync".to_owned())
+            .spawn(move || run_batch_worker(shared_inner, target, wake))
+        {
+            Ok(_) => true,
+            Err(_) => {
+                inner.batch_worker_active = false;
+                false
+            }
+        }
+    }
+
+    /// 批量路径：整行先写文件、内存投影立刻推进，sync 按 64 条/100ms 合并。
+    #[allow(clippy::too_many_arguments)]
+    fn append_batched(
+        &self,
+        inner: &mut JournalInner,
+        event_id: SessionEventId,
+        sequence: u64,
+        record: SessionEventRecord,
+        candidate: SessionState,
+        event_sha256: String,
+        line: Vec<u8>,
+        next_log_len: u64,
+    ) -> Result<IdempotentAppendOutcome, ResourceError> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+            .map_err(|error| ResourceError::io("open_event_log", error))?;
+        #[cfg(any(test, feature = "test-support"))]
+        if take_append_fault(AppendFault::ZeroWrite) {
+            drop(file);
+            return self
+                .reconcile_batched_write(inner, injected_io_error("append_event_zero_write"));
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        if take_append_fault(AppendFault::PartialWrite) {
+            let partial_len = (line.len() / 2).max(1);
+            if let Err(error) = file.write_all(&line[..partial_len]) {
+                drop(file);
+                return self
+                    .reconcile_batched_write(inner, ResourceError::io("append_event", error));
+            }
+            drop(file);
+            return self.reconcile_batched_write(inner, injected_io_error("append_event_partial"));
+        }
+        if let Err(error) = file.write_all(&line) {
+            drop(file);
+            return self.reconcile_batched_write(inner, ResourceError::io("append_event", error));
+        }
+        if let Err(error) = file.flush() {
+            drop(file);
+            return self
+                .reconcile_batched_write(inner, ResourceError::io("flush_event_log", error));
+        }
+        // 整行字节已进入文件（OS 缓存）；先推进内存投影保证同实例读写
+        // 一致，sync 延迟到刷盘阈值。注意：`flush` 让其他实例的
+        // `read` 立即可见本行，避免"长度已变但内容不可读"窗口；这不
+        // 改变 crash 语义（sync 仍按 64 条/100ms 合并）。
+        drop(file);
+        let next_log_stamp = match log_stamp(&self.log_path) {
+            Ok(stamp) => stamp,
+            Err(error) => return self.reconcile_batched_write(inner, error),
+        };
+        inner.state = candidate;
+        inner.event_index.insert(
+            event_id,
+            EventIndexEntry {
+                sequence,
+                time_unix_ms: record.time_unix_ms,
+                event_sha256,
+            },
+        );
+        inner.history_index.observe(sequence, &record.event);
+        inner.record_end_offsets.push(next_log_len);
+        inner.log_len = next_log_len;
+        inner.log_stamp = next_log_stamp;
+        inner.observe_unsynced_through(sequence);
+        write_metadata_index(&self.session_dir, &inner.state, &inner.log_stamp, false);
+        let snapshot_due = snapshot_due(self.config.snapshot_policy, sequence);
+        let due = inner.pending_records >= JOURNAL_BATCH_MAX_RECORDS
+            || inner.batch_delay_expired()
+            || snapshot_due
+            // 让线程局部故障在发起 append 的线程内确定性生效，避免后台
+            // worker（看不到该 thread_local）先完成同步而掩盖测试故障。
+            || append_fault_pending();
+        if due {
+            // 满批/超时刷盘失败走旧语义：内存投影已含本条但落库未证明，
+            // 只能返回不确定，调用方按幂等重试对账。
+            if let Err(error) = self.flush_pending_locked(inner, false) {
+                return Ok(IdempotentAppendOutcome::Indeterminate { error });
+            }
+        } else if !self.arm_batch_worker(inner)
+            && let Err(error) = self.flush_pending_locked(inner, false)
+        {
+            // 无法创建一次性等待线程时退化为当前调用内刷盘，不能留下没有
+            // 超时唤醒来源的无限窗口。
+            return Ok(IdempotentAppendOutcome::Indeterminate { error });
+        }
+        let snapshot = if snapshot_due {
+            match self.snapshot_for_current_prefix(inner) {
+                Ok(()) => SnapshotStatus::Written,
+                Err(error) => SnapshotStatus::Failed {
+                    message: error.to_string(),
+                },
+            }
+        } else {
+            SnapshotStatus::NotDue
+        };
+        Ok(IdempotentAppendOutcome::Appended(AppendReceipt {
+            record,
+            snapshot,
+        }))
+    }
+
+    /// 批量写行失败后从磁盘重建：先尝试回滚本次追加产生的截断尾，
+    /// 再按旧逐条路径对账，保证内存投影不超前、单条部分行不残留。
+    fn reconcile_batched_write(
+        &self,
+        inner: &mut JournalInner,
+        error: ResourceError,
+    ) -> Result<IdempotentAppendOutcome, ResourceError> {
+        // 部分行失败与旧 PartialWrite 语义一致：本次追加前的日志长度是
+        // 截断尾的精确起点，先回滚再重建，避免 load 直接判 Corrupt。
+        if rollback_partial_append(
+            &self.log_path,
+            &self.session_dir,
+            inner.log_len,
+            false,
+            Durability::Buffered,
+        )
+        .is_ok()
+            && self.reload_from_disk(inner).is_ok()
+        {
+            return Ok(IdempotentAppendOutcome::Indeterminate { error });
+        }
+        inner.read_only = true;
+        Ok(IdempotentAppendOutcome::Indeterminate { error })
+    }
+
+    /// 为已经完成 durability barrier 的当前前缀写 Snapshot。
+    fn snapshot_for_current_prefix(&self, inner: &JournalInner) -> Result<(), ResourceError> {
+        let anchor = complete_log_anchor(&self.log_path, self.config.max_log_bytes)?;
+        write_snapshot_file(
+            &self.snapshot_path,
+            &inner.state,
+            anchor,
+            true,
+            self.config.max_log_bytes,
+        )
+    }
+
+    /// 多实例写入改变文件时，在持有 OS 文件锁期间重新加载状态。
+    ///
+    /// 刷盘本身不得更新 `log_stamp`：sync 不改变日志内容，若把外部实例
+    /// 的新长度写进本实例 stamp 却不刷新 state，会掩盖变化并产生重复
+    /// sequence。这里持有 append.lock，读取期间不存在合法并发追加。
     fn refresh_if_changed(&self, inner: &mut JournalInner) -> Result<(), ResourceError> {
         let current_stamp = log_stamp(&self.log_path)?;
         if current_stamp == inner.log_stamp {
             return Ok(());
+        }
+        if current_stamp.len < inner.log_len {
+            inner.read_only = true;
+            return Err(ResourceError::ReplayLogChanged);
         }
         self.reload_from_disk(inner)
     }
@@ -1191,7 +1629,11 @@ impl SessionJournal {
             inner.read_only = true;
             return Err(ResourceError::CorruptReadOnly);
         }
+        let sequence = loaded.state.last_sequence;
         install_loaded_session(inner, loaded);
+        if self.config.durability == Durability::FlushAndSync {
+            inner.observe_unsynced_through(sequence);
+        }
         Ok(())
     }
 
@@ -1200,22 +1642,18 @@ impl SessionJournal {
         if self.config.durability == Durability::Buffered {
             return Ok(());
         }
-        ensure_regular_file_or_absent(&self.log_path)?;
-        let mut file = OpenOptions::new()
-            .write(true)
-            .open(&self.log_path)
-            .map_err(|error| ResourceError::io("open_event_log_for_durability", error))?;
-        apply_durability(&mut file, self.config.durability)?;
-        drop(file);
-        if self.config.durability == Durability::FlushAndSync && inner.directory_sync_required {
-            #[cfg(any(test, feature = "test-support"))]
-            if take_append_fault(AppendFault::DirectorySync) {
-                return Err(injected_io_error("sync_event_log_directory"));
-            }
-            sync_directory(&self.session_dir, true)?;
-            inner.directory_sync_required = false;
+        if self.config.durability == Durability::Flush {
+            ensure_regular_file_or_absent(&self.log_path)?;
+            let mut file = OpenOptions::new()
+                .write(true)
+                .open(&self.log_path)
+                .map_err(|error| ResourceError::io("open_event_log_for_durability", error))?;
+            apply_durability(&mut file, self.config.durability)?;
+            return Ok(());
         }
-        Ok(())
+        // 幂等确认是显式 durability barrier；即使本实例没有待刷计数，
+        // 也同步当前锁内观察到的完整文件，覆盖跨实例/跨进程已可见事件。
+        self.flush_pending_locked(inner, true)
     }
 
     /// 写入开始后的失败通过权威日志重读对账，避免把已提交事件误报为普通错误。
@@ -1286,6 +1724,145 @@ impl SessionJournal {
         // 即使当前文件内容可见，失败的 flush/fsync/目录同步或提交后元数据读取
         // 仍无法证明调用方要求的持久化等级已经满足，因此只能返回不确定结果。
         Ok(IdempotentAppendOutcome::Indeterminate { error })
+    }
+}
+
+/// 在 append.lock 内把当前完整 JSONL 文件同步到稳定存储。
+///
+/// `pending_records` 只记录需要 barrier 的数量，不保存正文；正文已经由
+/// `File::write_all` 写入文件。失败时保留计数与起始时间，后续 append、显式
+/// barrier 或 Drop 会再次尝试，不能把未证明 durable 的批次误标为已同步。
+fn sync_pending_batch(
+    target: &BatchFlushTarget,
+    wake: &Condvar,
+    inner: &mut JournalInner,
+    force: bool,
+    _inject_faults: bool,
+) -> Result<(), ResourceError> {
+    if inner.pending_records == 0 && !force {
+        return Ok(());
+    }
+    ensure_regular_file_or_absent(&target.log_path)?;
+    if !target.log_path.exists() {
+        return if inner.pending_records == 0 {
+            Ok(())
+        } else {
+            Err(ResourceError::io(
+                "open_event_log_for_flush",
+                std::io::Error::new(std::io::ErrorKind::NotFound, "待刷事件日志不存在"),
+            ))
+        };
+    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(&target.log_path)
+        .map_err(|error| ResourceError::io("open_event_log_for_flush", error))?;
+    #[cfg(any(test, feature = "test-support"))]
+    if _inject_faults && take_append_fault(AppendFault::Flush) {
+        return Err(injected_io_error("flush_event_log"));
+    }
+    file.flush()
+        .map_err(|error| ResourceError::io("flush_event_log", error))?;
+    #[cfg(any(test, feature = "test-support"))]
+    if _inject_faults && take_append_fault(AppendFault::Sync) {
+        return Err(injected_io_error("sync_event_log"));
+    }
+    file.sync_data()
+        .map_err(|error| ResourceError::io("sync_event_log", error))?;
+    count_sync_for_tests(target);
+    drop(file);
+    if inner.directory_sync_required {
+        #[cfg(any(test, feature = "test-support"))]
+        if _inject_faults && take_append_fault(AppendFault::DirectorySync) {
+            return Err(injected_io_error("sync_event_log_directory"));
+        }
+        sync_directory(&target.session_dir, true)?;
+        inner.directory_sync_required = false;
+    }
+    #[cfg(any(test, feature = "test-support"))]
+    if _inject_faults && take_append_fault(AppendFault::PostWriteMetadata) {
+        return Err(injected_io_error("stat_event_log"));
+    }
+    inner.synced_through_sequence = inner.state.last_sequence;
+    inner.pending_records = 0;
+    inner.pending_since = None;
+    wake.notify_all();
+    Ok(())
+}
+
+/// 等待当前批次第一条事件的截止时间并执行一次刷盘；批次清空即退出。
+fn run_batch_worker(
+    shared_inner: Arc<Mutex<JournalInner>>,
+    target: Arc<BatchFlushTarget>,
+    wake: Arc<Condvar>,
+) {
+    #[cfg(any(test, feature = "test-support"))]
+    let _active_worker_guard = ActiveBatchWorkerGuard::new(&target);
+    let Ok(mut inner) = shared_inner.lock() else {
+        return;
+    };
+    loop {
+        if inner.batch_worker_stop {
+            inner.batch_worker_active = false;
+            return;
+        }
+        let Some(started) = inner.pending_since else {
+            // 必须在持有实例锁时撤销 active：append 只能在此之后观察到
+            // false 并启动下一批 worker，因此退出与重新 arm 之间无丢唤醒。
+            inner.batch_worker_active = false;
+            return;
+        };
+        let deadline = started + JOURNAL_BATCH_MAX_DELAY;
+        let now = Instant::now();
+        if now < deadline {
+            let Ok((next, _)) = wake.wait_timeout(inner, deadline.duration_since(now)) else {
+                return;
+            };
+            inner = next;
+            continue;
+        }
+        let Ok(_file_lock) = exclusive_lock(&target.lock_path) else {
+            // 锁或 IO 失败时保留 pending；下一次 append/barrier/Drop 会重试。
+            inner.batch_worker_active = false;
+            return;
+        };
+        if sync_pending_batch(&target, &wake, &mut inner, false, false).is_err() {
+            inner.batch_worker_active = false;
+            return;
+        }
+    }
+}
+
+impl Drop for SessionJournal {
+    /// 关闭前尽力完成当前批次；Drop 无法报告 IO 错误，因此失败时仍保留
+    /// 文件中的完整 JSONL 行，并由截尾/重放恢复语义处理。
+    fn drop(&mut self) {
+        if self.config.durability != Durability::FlushAndSync {
+            return;
+        }
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        inner.batch_worker_stop = true;
+        if inner.pending_records == 0 {
+            self.batch_wake.notify_all();
+            return;
+        }
+        let _file_lock = match exclusive_lock(&self.lock_path) {
+            Ok(lock) => lock,
+            Err(_) => {
+                self.batch_wake.notify_all();
+                return;
+            }
+        };
+        let _ = sync_pending_batch(
+            &self.batch_target,
+            &self.batch_wake,
+            &mut inner,
+            false,
+            true,
+        );
+        self.batch_wake.notify_all();
     }
 }
 
@@ -2381,6 +2958,18 @@ fn take_append_fault(fault: AppendFault) -> bool {
     })
 }
 
+/// 当前线程是否仍有一个待消费的追加/持久化故障。
+fn append_fault_pending() -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    {
+        APPEND_FAULT.with(|current| current.borrow().is_some())
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    {
+        false
+    }
+}
+
 /// 构造不依赖平台的测试 IO 故障。
 #[cfg(any(test, feature = "test-support"))]
 fn injected_io_error(operation: &'static str) -> ResourceError {
@@ -2406,6 +2995,16 @@ pub mod test_support {
         super::APPEND_FAULT.with(|current| {
             current.replace(None);
         });
+    }
+
+    /// 重置进程的 sync_data 计数器并返回重置前的值。
+    pub fn take_sync_count() -> u64 {
+        super::SYNC_COUNT.swap(0, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// 返回进程累计的 sync_data 次数，不重置。
+    pub fn sync_count() -> u64 {
+        super::SYNC_COUNT.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2473,6 +3072,43 @@ fn digest_hex(digest: impl AsRef<[u8]>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_idle_batch_worker(journal: &SessionJournal) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let (pending_records, worker_active) = {
+                let inner = journal.inner.lock().expect("Journal 锁应可用");
+                (inner.pending_records, inner.batch_worker_active)
+            };
+            let active_workers = journal.active_batch_workers_for_tests();
+            if pending_records == 0 && !worker_active && active_workers == 0 {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "批次 worker 未按时退出：pending={pending_records}, active_flag={worker_active}, actual_workers={active_workers}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn wait_for_active_batch_workers(journals: &[SessionJournal], expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let actual = journals
+                .iter()
+                .map(SessionJournal::active_batch_workers_for_tests)
+                .sum::<usize>();
+            if actual == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "批次 worker 数量未按时达到预期：expected={expected}, actual={actual}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     #[test]
     fn metadata_index_is_rebuilt_and_does_not_wait_for_append_lock() {
@@ -2570,6 +3206,12 @@ mod tests {
     }
 
     /// 验证可见事件在补齐持久化失败时保持不确定，成功确认后才报告已提交。
+    ///
+    /// 批量语义下满足"返回即落盘"的仍是显式 `flush`：`Flush`/`Sync`/
+    /// `DirectorySync`/`PostWriteMetadata` 四类故障注入在批量路径的满批自动
+    /// 刷盘与显式刷盘都会被消费——前者经 `append` 转为 `Indeterminate`，
+    /// 后者（幂等重试的 `AlreadyCommitted` 确认）透传错误。`PartialWrite`
+    /// 仍走写行失败路径（回滚截断尾后重建）。
     #[test]
     fn append故障重试保持单一记录() {
         for (index, fault) in [
@@ -2604,9 +3246,27 @@ mod tests {
             let first = journal
                 .append_idempotent(event_id.clone(), 0, event.clone())
                 .expect("故障应返回结构化结果");
+            // 测试故障会让本次 append 在调用线程内立即进入刷盘路径；若
+            // 后续实现选择保留窗口，显式 flush 分支仍验证相同 barrier。
+            let first = if matches!(first, IdempotentAppendOutcome::Appended(_)) {
+                let flush_error = journal
+                    .flush()
+                    .expect_err("注入的持久化故障应在显式刷盘时暴露");
+                let retry = journal
+                    .append_idempotent(event_id.clone(), 0, event.clone())
+                    .expect("刷盘失败后重试应返回结构化结果");
+                assert!(
+                    matches!(retry, IdempotentAppendOutcome::AlreadyCommitted { .. }),
+                    "刷盘失败 {flush_error:?} 后重试应已确认落盘"
+                );
+                retry
+            } else {
+                first
+            };
             assert!(matches!(
                 first,
-                IdempotentAppendOutcome::Indeterminate { .. }
+                IdempotentAppendOutcome::AlreadyCommitted { .. }
+                    | IdempotentAppendOutcome::Indeterminate { .. }
             ));
 
             drop(journal);
@@ -2665,6 +3325,49 @@ mod tests {
         }
     }
 
+    /// sync 失败不能清除常量大小 pending 状态；下一次 barrier 可安全补齐。
+    #[test]
+    fn sync故障保留批次并允许barrier重试() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-sync-retry").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        set_append_fault(AppendFault::Sync);
+        assert!(matches!(
+            journal
+                .append_idempotent(
+                    SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                    0,
+                    SessionEvent::SessionCreated {
+                        title: "sync retry".to_owned(),
+                        project_root: "D:/workspace".to_owned(),
+                    },
+                )
+                .expect("故障应转为结构化结果"),
+            IdempotentAppendOutcome::Indeterminate { .. }
+        ));
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 1);
+        journal.flush().expect("第二次 barrier 应补齐持久化");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        drop(journal);
+        let reopened = match SessionJournal::open(root.path(), session_id, config)
+            .expect("重试后 Session 应重开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("补齐后的事件不应损坏"),
+        };
+        assert_eq!(reopened.state().expect("状态应恢复").last_sequence, 1);
+    }
+
     /// 验证零字节写入故障留下的空日志跨重启后仍必须补齐首次目录同步。
     #[test]
     fn 零字节首次写入跨重启仍补齐目录持久化() {
@@ -2709,11 +3412,25 @@ mod tests {
             SessionOpen::Corrupt(_) => panic!("零字节故障不应损坏 Session"),
         };
         set_append_fault(AppendFault::DirectorySync);
-        assert!(matches!(
+        let created = journal
+            .append_idempotent(event_id.clone(), 0, event.clone())
+            .expect("首次目录同步故障应返回结构化结果");
+        // 批量窗口攒批时首条追加未触发自动刷盘，目录同步故障尚未被消费：
+        // 显式 flush 兑现故障，重试后幂等确认路径补齐同步并返回已提交。
+        let created = if matches!(created, IdempotentAppendOutcome::Appended(_)) {
+            journal
+                .flush()
+                .expect_err("注入的目录同步故障应在显式刷盘时暴露");
             journal
                 .append_idempotent(event_id.clone(), 0, event.clone())
-                .expect("首次目录同步故障应返回结构化结果"),
-            IdempotentAppendOutcome::Indeterminate { .. }
+                .expect("刷盘失败后重试应返回结构化结果")
+        } else {
+            created
+        };
+        assert!(matches!(
+            created,
+            IdempotentAppendOutcome::AlreadyCommitted { .. }
+                | IdempotentAppendOutcome::Indeterminate { .. }
         ));
         assert_eq!(
             fs::read_to_string(journal.log_path())
@@ -2833,5 +3550,621 @@ mod tests {
             SessionOpen::Corrupt(_) => panic!("重开不应损坏"),
         };
         assert_eq!(reopened.history_index().unwrap().root_starts, [130]);
+    }
+
+    /// 第 64 条待刷记录必须在 append 返回前完成一次 sync。
+    #[test]
+    fn 第64条记录触发满批刷盘() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-full").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "满批".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("创建事件应先落盘");
+        let baseline = journal.sync_count_for_tests();
+        // 只隔离 64 条阈值；真实 100ms 由独立空闲超时测试覆盖。
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now() + Duration::from_secs(60));
+
+        for index in 1..=JOURNAL_BATCH_MAX_RECORDS {
+            journal
+                .append_idempotent(
+                    SessionEventId::new(format!("event-rename-{index}")).expect("事件 ID 应有效"),
+                    index as u64,
+                    SessionEvent::SessionRenamed {
+                        title: format!("标题-{index}"),
+                    },
+                )
+                .expect("重命名事件应追加");
+        }
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        assert_eq!(journal.sync_count_for_tests(), baseline + 1);
+    }
+
+    /// 第 64 条与 100ms 同时到达时只能按锁内先后形成一批或两批，不能丢记录。
+    #[test]
+    fn 满批与超时竞速保持完整sequence() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-deadline-race").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = Arc::new(
+            match SessionJournal::open(root.path(), session_id, config).expect("Session 应打开")
+            {
+                SessionOpen::Ready(journal) => journal,
+                SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+            },
+        );
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "阈值竞速".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("创建事件应先落盘");
+        let baseline = journal.sync_count_for_tests();
+        // 先隔离计数阈值，构造 63 条后再把 deadline 推到当前时刻。
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now() + Duration::from_secs(60));
+        for index in 1..JOURNAL_BATCH_MAX_RECORDS {
+            journal
+                .append_idempotent(
+                    SessionEventId::new(format!("race-event-{index}")).expect("事件 ID 应有效"),
+                    index as u64,
+                    SessionEvent::SessionRenamed {
+                        title: format!("竞速-{index}"),
+                    },
+                )
+                .expect("竞速前缀应追加");
+        }
+        {
+            let mut inner = journal.inner.lock().expect("Journal 锁应可用");
+            inner.pending_since = Some(Instant::now() - JOURNAL_BATCH_MAX_DELAY);
+        }
+        journal.batch_wake.notify_one();
+        let appending = Arc::clone(&journal);
+        std::thread::spawn(move || {
+            appending
+                .append_idempotent(
+                    SessionEventId::new("race-event-64").expect("事件 ID 应有效"),
+                    JOURNAL_BATCH_MAX_RECORDS as u64,
+                    SessionEvent::SessionRenamed {
+                        title: "竞速-64".to_owned(),
+                    },
+                )
+                .expect("第 64 条应追加")
+        })
+        .join()
+        .expect("追加线程应完成");
+        std::thread::sleep(JOURNAL_BATCH_MAX_DELAY + Duration::from_millis(80));
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        assert_eq!(
+            journal.state().expect("状态应读取").last_sequence,
+            1 + JOURNAL_BATCH_MAX_RECORDS as u64
+        );
+        let syncs = journal.sync_count_for_tests().saturating_sub(baseline);
+        assert!(
+            (1..=2).contains(&syncs),
+            "锁内先后只允许一次满批 sync，或超时后新开一批共两次，实际 {syncs}"
+        );
+    }
+
+    /// 批量语义：连续 640 条正式物理记录的 sync 次数远小于逐条语义。
+    #[test]
+    fn 批量攒批合并fsync次数远小于逐条() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-coalesce").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "批量合并".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("创建事件应先落盘");
+        let baseline = journal.sync_count_for_tests();
+        // 640 条放大正式写入路径；每轮推迟超时，只隔离验证 64 条满批
+        // 阈值。真实 100ms 路径由独立超时与竞速测试覆盖。
+        const BATCH_ROUNDS: u64 = 10;
+        for round in 0..BATCH_ROUNDS {
+            journal
+                .defer_batch_timeout_for_tests()
+                .expect("测试 deadline 应推迟");
+            for index in 1..=JOURNAL_BATCH_MAX_RECORDS as u64 {
+                let sequence = 1 + round * JOURNAL_BATCH_MAX_RECORDS as u64 + index - 1;
+                journal
+                    .append_idempotent(
+                        SessionEventId::new(format!("event-rename-{round}-{index}"))
+                            .expect("事件 ID 应有效"),
+                        sequence,
+                        SessionEvent::SessionRenamed {
+                            title: format!("标题-{round}-{index}"),
+                        },
+                    )
+                    .expect("重命名事件应追加");
+            }
+        }
+        let syncs = journal.sync_count_for_tests().saturating_sub(baseline);
+        let appended = BATCH_ROUNDS * JOURNAL_BATCH_MAX_RECORDS as u64;
+        assert_eq!(syncs, BATCH_ROUNDS, "每 64 条应合并为一次 sync");
+        journal.flush().expect("显式刷盘应成功");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        assert_eq!(
+            journal.state().expect("状态应读取").last_sequence,
+            1 + appended
+        );
+    }
+
+    /// 批量语义：最后一次 append 后即使没有任何读写，也会在 100ms 到期刷盘。
+    #[test]
+    fn 批量超时刷盘无需攒满() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-timeout").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "超时刷盘".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("首条应先落盘");
+        let baseline = journal.sync_count_for_tests();
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now() + Duration::from_secs(60));
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-rename-1").expect("事件 ID 应有效"),
+                1,
+                SessionEvent::SessionRenamed {
+                    title: "待刷".to_owned(),
+                },
+            )
+            .expect("待刷事件应追加");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 1);
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now());
+        journal.batch_wake.notify_one();
+        // 期间不调用 append/read/flush；唯一唤醒来源必须是 Condvar 超时。
+        std::thread::sleep(JOURNAL_BATCH_MAX_DELAY + Duration::from_millis(80));
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        assert_eq!(journal.sync_count_for_tests(), baseline + 1);
+    }
+
+    /// worker 在一次超时批次完成后必须释放线程；下一次 append 在同一把
+    /// 实例锁内重新 arm，不能因旧 worker 退出而丢失超时唤醒。
+    #[test]
+    fn 超时刷盘后worker退出且后续append重新arm() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-worker-rearm").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "worker rearm".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("创建事件应先落盘");
+        wait_for_idle_batch_worker(&journal);
+        let baseline_starts = journal.batch_worker_start_count_for_tests();
+        let mut expected_sequence = 1_u64;
+
+        for cycle in 1_u64..=2 {
+            // 先固定未来 deadline，确保测试能观察到实际存活的 worker，
+            // 再把 deadline 推到当前时刻触发它自己的超时刷盘路径。
+            journal
+                .inner
+                .lock()
+                .expect("Journal 锁应可用")
+                .pending_since = Some(Instant::now() + Duration::from_secs(60));
+            journal
+                .append_idempotent(
+                    SessionEventId::new(format!("event-rearm-{cycle}-first"))
+                        .expect("事件 ID 应有效"),
+                    expected_sequence,
+                    SessionEvent::SessionRenamed {
+                        title: format!("rearm-{cycle}-first"),
+                    },
+                )
+                .expect("重新 arm 后事件应追加");
+            expected_sequence += 1;
+            wait_for_active_batch_workers(std::slice::from_ref(&journal), 1);
+            assert!(
+                journal
+                    .inner
+                    .lock()
+                    .expect("Journal 锁应可用")
+                    .batch_worker_active
+            );
+            assert_eq!(
+                journal.batch_worker_start_count_for_tests(),
+                baseline_starts + cycle
+            );
+            journal
+                .append_idempotent(
+                    SessionEventId::new(format!("event-rearm-{cycle}-second"))
+                        .expect("事件 ID 应有效"),
+                    expected_sequence,
+                    SessionEvent::SessionRenamed {
+                        title: format!("rearm-{cycle}-second"),
+                    },
+                )
+                .expect("同一批次后续事件应追加");
+            expected_sequence += 1;
+            assert_eq!(
+                journal.batch_worker_start_count_for_tests(),
+                baseline_starts + cycle,
+                "同一非空批次内必须复用唯一 worker"
+            );
+            assert_eq!(journal.active_batch_workers_for_tests(), 1);
+
+            journal
+                .inner
+                .lock()
+                .expect("Journal 锁应可用")
+                .pending_since = Some(Instant::now() - JOURNAL_BATCH_MAX_DELAY);
+            journal.batch_wake.notify_one();
+            wait_for_idle_batch_worker(&journal);
+        }
+
+        assert_eq!(
+            journal.state().expect("最终状态应读取").last_sequence,
+            expected_sequence
+        );
+        assert_eq!(journal.active_batch_workers_for_tests(), 0);
+    }
+
+    /// 大量 Session 同时完成批次后，不得各自留下一个常驻 OS 线程/栈。
+    #[test]
+    fn 大量空闲journal不保留批量worker线程() {
+        const JOURNAL_COUNT: usize = 64;
+
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let mut journals = Vec::with_capacity(JOURNAL_COUNT);
+        for index in 0..JOURNAL_COUNT {
+            let session_id =
+                SessionId::new(format!("idle-worker-{index}")).expect("Session ID 应有效");
+            let journal = match SessionJournal::open(root.path(), session_id, config)
+                .expect("Session 应打开")
+            {
+                SessionOpen::Ready(journal) => journal,
+                SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+            };
+            // 暂时固定未来 deadline，先证明 64 个 Journal 确实各启动了
+            // 独立 worker，再统一放行并验证线程全部退出。
+            journal
+                .inner
+                .lock()
+                .expect("Journal 锁应可用")
+                .pending_since = Some(Instant::now() + Duration::from_secs(60));
+            journal
+                .append_idempotent(
+                    SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                    0,
+                    SessionEvent::SessionCreated {
+                        title: format!("idle worker {index}"),
+                        project_root: "D:/workspace".to_owned(),
+                    },
+                )
+                .expect("创建事件应追加");
+            journals.push(journal);
+        }
+
+        wait_for_active_batch_workers(&journals, JOURNAL_COUNT);
+        for journal in &journals {
+            journal
+                .inner
+                .lock()
+                .expect("Journal 锁应可用")
+                .pending_since = Some(Instant::now() - JOURNAL_BATCH_MAX_DELAY);
+            journal.batch_wake.notify_one();
+        }
+        for journal in &journals {
+            wait_for_idle_batch_worker(journal);
+            assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+            assert_eq!(journal.batch_worker_start_count_for_tests(), 1);
+        }
+        assert_eq!(
+            journals
+                .iter()
+                .map(SessionJournal::active_batch_workers_for_tests)
+                .sum::<usize>(),
+            0
+        );
+    }
+
+    /// Barrier 语义：显式 flush 后返回即落盘，同实例窗口清空。
+    ///
+    /// 攒批中的事件对同实例立即可见（`state` 含窗口事件），显式 `flush`
+    /// 后窗口清空；跨重启重开仍能读到全部事件，证明"ack 后必落盘"。
+    #[test]
+    fn 显式flush保证返回即落盘() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-barrier").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now() + Duration::from_secs(60));
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "屏障语义".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 1);
+        // 普通状态读取不构成 durability barrier，但必须看见同实例事件。
+        assert_eq!(journal.state().expect("状态应读取").last_sequence, 1);
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 1);
+        journal.flush().expect("显式刷盘应成功");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        drop(journal);
+        let reopened = match SessionJournal::open(root.path(), session_id, config)
+            .expect("刷盘后 Session 应重开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("已刷盘事件不应损坏 Session"),
+        };
+        assert_eq!(
+            reopened.state().expect("状态应读取").last_sequence,
+            1,
+            "flush 后跨重启必须读到事件"
+        );
+    }
+
+    /// Drop/关闭会唤醒 worker，并在返回前尽力同步未满批窗口。
+    #[test]
+    fn drop同步未满批窗口() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-drop").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        let target = Arc::clone(&journal.batch_target);
+        journal
+            .inner
+            .lock()
+            .expect("Journal 锁应可用")
+            .pending_since = Some(Instant::now() + Duration::from_secs(60));
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "Drop 刷盘".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 1);
+        drop(journal);
+        assert_eq!(
+            target.sync_count.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "Drop 应恰好同步一次未满批窗口"
+        );
+        let reopened = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Drop 后 Session 应重开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("Drop 刷盘后不应损坏"),
+        };
+        assert_eq!(reopened.state().expect("状态应恢复").last_sequence, 1);
+    }
+
+    /// 自动 Snapshot 必须在写入前同步其锚定的日志前缀。
+    #[test]
+    fn snapshot锚点先于snapshot持久化() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-snapshot-anchor").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Every { events: 2 },
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "Snapshot 锚点".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        let receipt = journal
+            .append_idempotent(
+                SessionEventId::new("event-rename").expect("事件 ID 应有效"),
+                1,
+                SessionEvent::SessionRenamed {
+                    title: "已锚定".to_owned(),
+                },
+            )
+            .expect("Snapshot 边界事件应追加");
+        assert!(matches!(
+            receipt,
+            IdempotentAppendOutcome::Appended(AppendReceipt {
+                snapshot: SnapshotStatus::Written,
+                ..
+            })
+        ));
+        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        let snapshot: SessionSnapshot =
+            serde_json::from_slice(&fs::read(journal.snapshot_path()).expect("Snapshot 应读取"))
+                .expect("Snapshot 应解码");
+        assert_eq!(snapshot.through_sequence, 2);
+        drop(journal);
+        let reopened = match SessionJournal::open(root.path(), session_id, config)
+            .expect("Snapshot Session 应重开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("Snapshot 锚点不应损坏"),
+        };
+        assert_eq!(reopened.state().expect("状态应恢复").last_sequence, 2);
+    }
+
+    /// 截尾恢复：批量窗口内丢失的尾部仍走 `recover_truncated_tail`。
+    ///
+    /// 未 sync 窗口的字节已是文件中的完整行/坏尾二态；模拟崩溃时损坏尾部
+    /// 写入后显式恢复应保留证据、截断坏尾并允许 sequence 连续追加。
+    #[test]
+    fn 批量窗口截尾仍可显式恢复() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("batch-tail-recovery").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "截尾恢复".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        journal.flush().expect("创建事件应落盘");
+        let log_path = journal.log_path().to_owned();
+        drop(journal);
+        let damaged_tail = b"{\"schema\":\"partial";
+        OpenOptions::new()
+            .append(true)
+            .open(&log_path)
+            .expect("日志应打开")
+            .write_all(damaged_tail)
+            .expect("坏尾部应写入");
+        let recovery = SessionJournal::recover_truncated_tail(root.path(), session_id, config)
+            .expect("单一截断尾部应显式恢复");
+        assert_eq!(recovery.preserved_bytes, damaged_tail.len() as u64);
+        assert_eq!(
+            fs::read(&recovery.evidence_path).expect("证据应读取"),
+            damaged_tail
+        );
+        assert_eq!(
+            recovery.journal.state().expect("状态应读取").last_sequence,
+            1,
+            "恢复后有效前缀应保留"
+        );
     }
 }

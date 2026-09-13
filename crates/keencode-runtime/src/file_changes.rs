@@ -1010,6 +1010,13 @@ fn append_file_change_event(
                     mark_event_indeterminate(control, &event_key);
                     return Err(RuntimeError::RecoveryRequired);
                 }
+                // mutation `Prepared` 记录是崩溃恢复的锚点：返回前必须显式
+                // 刷盘，保证"返回即落盘"不受批量窗口（64 条/100ms）影响；
+                // 刷盘失败按不确定处理，调用方幂等重试对账。
+                if matches!(phase, FileChangePhase::Prepared) && inner.journal.flush().is_err() {
+                    mark_event_indeterminate(control, &event_key);
+                    return Err(RuntimeError::RecoveryRequired);
+                }
                 if charge_file_change_event(
                     control,
                     request_id,
@@ -1216,6 +1223,94 @@ mod tests {
             },
         );
         request_id
+    }
+
+    /// Runtime 正式 append 路径每次都会先读取 state；这些读取不得逐条触发 fsync。
+    #[test]
+    fn runtime_resource_append_path_accumulates_one_batch() {
+        let root = TempDir::new().expect("临时目录应创建");
+        let session = create(&root, "runtime-journal-batch");
+        session.inner.journal.flush().expect("创建事件应先落盘");
+        session
+            .inner
+            .journal
+            .defer_batch_timeout_for_tests()
+            .expect("测试 deadline 应推迟");
+        let mut max_pending = 0;
+        for index in 0..32 {
+            append(
+                &session,
+                &format!("runtime-batch-{index}"),
+                SessionEvent::SessionRenamed {
+                    title: format!("批量标题-{index}"),
+                },
+            );
+            max_pending = max_pending.max(
+                session
+                    .inner
+                    .journal
+                    .pending_flush_records()
+                    .expect("待刷记录数应读取"),
+            );
+        }
+        assert!(
+            max_pending > 1,
+            "正式 Runtime 路径必须让至少两条事件共享一次 sync 窗口"
+        );
+        session.inner.journal.flush().expect("最终 barrier 应成功");
+        assert_eq!(
+            session
+                .inner
+                .journal
+                .pending_flush_records()
+                .expect("待刷记录数应读取"),
+            0
+        );
+    }
+
+    /// 文件写入前的 Prepared 证据仍是显式 durability barrier。
+    #[test]
+    fn prepared_file_change_clears_pending_journal_batch() {
+        let root = TempDir::new().expect("临时目录应创建");
+        let session = create(&root, "prepared-journal-barrier");
+        session
+            .inner
+            .journal
+            .defer_batch_timeout_for_tests()
+            .expect("测试 deadline 应推迟");
+        let request_id = start_tool(&session, "prepared-journal-barrier-turn");
+        append(
+            &session,
+            "prepared-barrier-marker",
+            SessionEvent::SessionRenamed {
+                title: "Prepared barrier marker".to_owned(),
+            },
+        );
+        assert!(
+            session
+                .inner
+                .journal
+                .pending_flush_records()
+                .expect("准备前待刷记录数应读取")
+                > 0
+        );
+        let path = root
+            .path()
+            .join("prepared-barrier.txt")
+            .display()
+            .to_string();
+        session
+            .prepare_file_change(&request_id, path, None, b"durable-before-write")
+            .expect("Prepared 应提交并完成 barrier");
+        assert_eq!(
+            session
+                .inner
+                .journal
+                .pending_flush_records()
+                .expect("Prepared 后待刷记录数应读取"),
+            0,
+            "Prepared 成功返回前必须清空 Journal 批次"
+        );
     }
 
     /// 失败预检不得追加 Journal、写入 Artifact 或建立文件变更 reservation。
