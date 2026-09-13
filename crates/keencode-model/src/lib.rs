@@ -28,7 +28,7 @@ pub use provider::{
 };
 pub use redaction::{REDACTED_SECRET, redact_error_secrets};
 pub use request::{
-    ModelRequest, ModelResponse, ReasoningConfig, ReasoningEffort, ResponseMetadata,
+    ModelMessages, ModelRequest, ModelResponse, ReasoningConfig, ReasoningEffort, ResponseMetadata,
     StructuredOutputConfig, ToolChoice,
 };
 pub use scripted::{ScriptedProvider, ScriptedReply};

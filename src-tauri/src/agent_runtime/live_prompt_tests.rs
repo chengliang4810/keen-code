@@ -230,7 +230,7 @@ async fn live_prompt_scope_and_cache() {
         eprintln!("合成场景完成：{name}");
     }
     let bound = make_bound(false);
-    bound.inject_context(&mut synthetic_request.messages);
+    bound.inject_context(&mut synthetic_request);
     std::fs::write(
         evidence.with_extension("synthetic-request.json"),
         serde_json::to_vec_pretty(&synthetic_request).unwrap(),

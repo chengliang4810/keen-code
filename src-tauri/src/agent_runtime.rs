@@ -42,9 +42,9 @@ use keencode_agent::{
     UuidCollaborationIdGenerator, root_turn_prompt_digest,
 };
 use keencode_model::{
-    ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelProvider, ModelRequest,
-    ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol, ReasoningConfig,
-    ReasoningEffort, StructuredOutputConfig, ToolChoice,
+    ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
+    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
+    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice,
 };
 use keencode_provider::{
     ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
@@ -4563,7 +4563,7 @@ impl AgentRuntime {
             request.tool_choice = ToolChoice::Required;
             request.parallel_tool_calls = Some(false);
             // 一个系统角色消息同时表达业务约束和结果通道，避免指令被拆散。
-            request.messages[0] = Message::text(
+            request.messages_mut()[0] = Message::text(
                 MessageRole::System,
                 format!(
                     "{system_prompt}\n\nSubmit the JSON object through the value field of the sole result tool; do not emit visible prose. This tool only submits data and does not perform file, command, or network operations."
@@ -6829,9 +6829,9 @@ struct TurnBoundProvider {
     /// 端点在 allowlist 内时的会话稳定缓存路由键；其余端点为 `None` 不发送。
     prompt_cache_key: Option<String>,
     /// 会话冻结的稳定前缀（System 规则、能力说明、指令与目录）；不参与 Runtime Journal。
-    stable_prefix: Vec<Message>,
+    stable_prefix: Arc<Vec<Message>>,
     /// 仅本轮动态上下文（环境与 Memory/Plan/Ultra），追加到请求末尾；不参与 Runtime Journal。
-    request_context: Vec<Message>,
+    request_context: Arc<Vec<Message>>,
 }
 
 impl TurnBoundProvider {
@@ -6843,8 +6843,8 @@ impl TurnBoundProvider {
             turn_id: turn_id.to_owned(),
             agent_id: agent_id.to_owned(),
             prompt_cache_key: None,
-            stable_prefix: Vec::new(),
-            request_context: Vec::new(),
+            stable_prefix: Arc::new(Vec::new()),
+            request_context: Arc::new(Vec::new()),
         }
     }
 
@@ -6856,13 +6856,13 @@ impl TurnBoundProvider {
 
     /// 设置会话冻结的稳定前缀；前缀跨 Turn 字节稳定，压缩与独立生成不启用。
     fn with_stable_prefix(mut self, prefix: Vec<Message>) -> Self {
-        self.stable_prefix = prefix;
+        self.stable_prefix = Arc::new(prefix);
         self
     }
 
     /// 设置本轮追加到请求末尾的动态上下文；调用方输入和 Runtime Transcript 保持不变。
     fn with_request_context(mut self, request_context: Vec<Message>) -> Self {
-        self.request_context = request_context;
+        self.request_context = Arc::new(request_context);
         self
     }
 
@@ -6871,24 +6871,22 @@ impl TurnBoundProvider {
     /// 稳定前缀拼接在头部，动态上下文追加在末尾：请求因此形如
     /// `[冻结 System 段…] + [transcript 历史…] + [本轮动态上下文]`，
     /// 前两项跨 Turn 字节稳定，末尾消息以 is_meta 用户身份注入。
-    fn inject_context(&self, messages: &mut Vec<Message>) {
-        if !self.stable_prefix.is_empty() {
-            messages.splice(0..0, self.stable_prefix.iter().cloned());
-        }
-        messages.extend(self.request_context.iter().cloned());
+    fn inject_context(&self, request: &mut ModelRequest) {
+        request.set_request_message_context(
+            Arc::clone(&self.stable_prefix),
+            Arc::clone(&self.request_context),
+        );
     }
 }
 
 impl ContextTokenEstimator for TurnBoundProvider {
     /// 将未持久化的规则、环境和目录计入主请求；额外消息开销采用保守近似。
     fn estimate_request(&self, request: &ModelRequest) -> u64 {
-        let mut additions = Vec::new();
-        self.inject_context(&mut additions);
-        let overhead = if additions.is_empty() {
-            0
-        } else {
-            JsonContextTokenEstimator.estimate_messages(&additions)
-        };
+        let overhead = JsonContextTokenEstimator
+            .estimate_messages(self.stable_prefix.as_slice())
+            .saturating_add(
+                JsonContextTokenEstimator.estimate_messages(self.request_context.as_slice()),
+            );
         JsonContextTokenEstimator
             .estimate_request(request)
             .saturating_add(overhead)
@@ -6897,6 +6895,10 @@ impl ContextTokenEstimator for TurnBoundProvider {
     /// 压缩区间只估算历史消息，不能将请求期规则送去摘要或重复计入每个区间。
     fn estimate_messages(&self, messages: &[Message]) -> u64 {
         JsonContextTokenEstimator.estimate_messages(messages)
+    }
+
+    fn estimate_messages_from(&self, messages: &ModelMessages, start: usize) -> u64 {
+        JsonContextTokenEstimator.estimate_messages_from(messages, start)
     }
 }
 
@@ -6911,7 +6913,7 @@ impl ModelProvider for TurnBoundProvider {
         &self,
         mut request: ModelRequest,
     ) -> ModelFuture<'_, Result<ModelStream, keencode_model::ModelError>> {
-        self.inject_context(&mut request.messages);
+        self.inject_context(&mut request);
         request.metadata.insert(
             REQUEST_METADATA_SESSION_ID.to_owned(),
             self.session_id.clone(),
@@ -13530,9 +13532,68 @@ mod tests {
             )
         );
         assert_eq!(
-            requests[3].messages,
-            vec![ModelMessage::text(MessageRole::User, "task")]
+            requests[3].messages.as_slice(),
+            &[ModelMessage::text(MessageRole::User, "task")]
         );
+    }
+
+    /// #24 桌面真实装配边界：前后缀注入与跨 Round 追加都不得深拷贝历史正文。
+    #[tokio::test]
+    async fn turn_bound_provider_preserves_history_allocations_across_rounds() {
+        let history = (0..100)
+            .map(|index| {
+                ModelMessage::text(
+                    MessageRole::User,
+                    format!("桌面历史-{index}-{}", "历".repeat(1024)),
+                )
+            })
+            .collect::<Vec<_>>();
+        let history_pointers = history
+            .iter()
+            .map(|message| {
+                let keencode_model::ContentBlock::Text { text } = &message.content[0] else {
+                    panic!("历史测试消息必须为文本");
+                };
+                text.as_ptr()
+            })
+            .collect::<Vec<_>>();
+        let scripted = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [completed_reply("first"), completed_reply("second")],
+        ));
+        let stable_prefix = stable_agent_prefix(true, true, "");
+        let prefix_len = stable_prefix.len();
+        let mut dynamic = ModelMessage::text(MessageRole::User, "dynamic");
+        dynamic.is_meta = true;
+        let bound = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
+            .with_stable_prefix(stable_prefix)
+            .with_request_context(vec![dynamic]);
+        let mut request = ModelRequest::new("test-model", history);
+
+        drop(bound.stream(request.clone()).await.unwrap());
+        request.append_messages(vec![
+            ModelMessage::text(MessageRole::Assistant, "round-one"),
+            ModelMessage::text(MessageRole::User, "continue"),
+        ]);
+        drop(bound.stream(request).await.unwrap());
+
+        let requests = scripted.requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].messages.len(), requests[0].messages.len() + 2);
+        for (index, expected) in history_pointers.into_iter().enumerate() {
+            for request in &requests {
+                let keencode_model::ContentBlock::Text { text } =
+                    &request.messages[prefix_len + index].content[0]
+                else {
+                    panic!("Provider 历史消息必须为文本");
+                };
+                assert_eq!(
+                    text.as_ptr(),
+                    expected,
+                    "桌面第 {index} 条历史发生了深拷贝"
+                );
+            }
+        }
     }
 
     /// 请求期的大目录必须触发预压缩，但不能进入摘要正文或持久化替换范围。
@@ -13556,17 +13617,17 @@ mod tests {
         );
         let mut request = ModelRequest::new("test-model", Vec::new());
         for _ in 0..12 {
-            request.messages.push(ModelMessage::text(
+            request.messages_mut().push(ModelMessage::text(
                 MessageRole::User,
                 "historical fact ".repeat(80),
             ));
-            request.messages.push(ModelMessage::text(
+            request.messages_mut().push(ModelMessage::text(
                 MessageRole::Assistant,
                 "historical result ".repeat(80),
             ));
         }
         request
-            .messages
+            .messages_mut()
             .push(ModelMessage::text(MessageRole::User, "Continue the task."));
         request.max_output_tokens = Some(128);
         let original = request.messages.clone();
@@ -13613,7 +13674,7 @@ mod tests {
                 .summary
                 .contains("REQUEST_ONLY_DYNAMIC_CONTEXT")
         );
-        request.messages = outcome.messages;
+        request.messages = outcome.messages.into();
         assert_eq!(
             outcome.record.estimated_tokens_after,
             context.estimate_request(&request)
@@ -13672,7 +13733,7 @@ mod tests {
                 })
                 .collect();
             let mut injected = request.clone();
-            bound.inject_context(&mut injected.messages);
+            bound.inject_context(&mut injected);
             let estimate = bound.estimate_request(&request);
             let assembled = JsonContextTokenEstimator.estimate_request(&injected);
             assert!(estimate >= assembled && estimate < assembled + 32);

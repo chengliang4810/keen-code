@@ -15889,10 +15889,11 @@ mod tests {
                 format!("请原样复述字符串 {wrong}，只输出该字符串本身。"),
             ] {
                 let mut request = text_model_request(expected);
-                request.messages = std::sync::Arc::new(vec![keencode_model::Message::text(
+                request.messages = vec![keencode_model::Message::text(
                     keencode_model::MessageRole::User,
                     prompt,
-                )]);
+                )]
+                .into();
                 let request_body = encode_wire_request(protocol, &request, false)
                     .expect("测试提示词应可由目标 Adapter 编码");
                 let mut record = probe("text", "buffered", "failed");

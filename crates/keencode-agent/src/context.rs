@@ -11,9 +11,9 @@ use std::time::Instant;
 use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
 use keencode_model::{
-    ContentBlock, ImageSource, Message, MessageRole, ModelError, ModelProvider, ModelRequest,
-    ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata, StopReason, TokenUsage,
-    ToolChoice, ToolResultContent, cache_hit_rate, collect_model_stream,
+    ContentBlock, ImageSource, Message, MessageRole, ModelError, ModelMessages, ModelProvider,
+    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ResponseMetadata,
+    StopReason, TokenUsage, ToolChoice, ToolResultContent, cache_hit_rate, collect_model_stream,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -673,6 +673,14 @@ pub trait ContextTokenEstimator: Send + Sync {
 
     /// 估算一段统一消息占用的输入 Token 数。
     fn estimate_messages(&self, messages: &[Message]) -> u64;
+
+    /// 估算持久分段消息序列从指定位置开始的后缀。
+    ///
+    /// 自定义估算器默认按需取得连续切片；内置估算器覆盖此方法并直接迭代分段，
+    /// 避免正常工具 Round 为增量用量锚点物化完整历史。
+    fn estimate_messages_from(&self, messages: &ModelMessages, start: usize) -> u64 {
+        self.estimate_messages(&messages.as_slice()[start.min(messages.len())..])
+    }
 }
 
 /// Base64 图片的固定输入 Token 估算值。
@@ -708,7 +716,7 @@ impl ContextTokenEstimator for JsonContextTokenEstimator {
             .structured_output
             .as_ref()
             .map_or(0, serialized_json_tokens);
-        estimate_message_tokens(&request.messages)
+        estimate_message_tokens(request.messages.iter())
             .saturating_add(tools)
             .saturating_add(structured_output)
             .saturating_add(PER_REQUEST_OVERHEAD_TOKENS)
@@ -717,6 +725,10 @@ impl ContextTokenEstimator for JsonContextTokenEstimator {
     /// 按内容块逐条累加消息估算，并保留每消息固定开销。
     fn estimate_messages(&self, messages: &[Message]) -> u64 {
         estimate_message_tokens(messages)
+    }
+
+    fn estimate_messages_from(&self, messages: &ModelMessages, start: usize) -> u64 {
+        estimate_message_tokens(messages.iter().skip(start))
     }
 }
 
@@ -937,7 +949,7 @@ impl ContextManager {
             Some(anchor) if request.messages.len() >= anchor.message_count => {
                 anchor.input_tokens.saturating_add(
                     self.estimator
-                        .estimate_messages(&request.messages[anchor.message_count..]),
+                        .estimate_messages_from(&request.messages, anchor.message_count),
                 )
             }
             _ => self.estimator.estimate_request(request),
@@ -1177,7 +1189,7 @@ impl ContextManager {
             // 投影后的消息由 Runner 采纳，原前缀锚点不再有效。
             self.clear_usage_anchor();
             let mut projected_request = request.clone();
-            projected_request.messages = Arc::new(projected_messages.clone());
+            projected_request.messages = projected_messages.clone().into();
             return match self
                 .compact_full_internal(
                     &projected_request,
@@ -1238,7 +1250,7 @@ impl ContextManager {
     ) -> Result<ContextCompressionRecord, ContextError> {
         let projected_messages = apply_micro_projections(&request.messages, micro_plan);
         let mut compressed_request = request.clone();
-        compressed_request.messages = Arc::new(projected_messages);
+        compressed_request.messages = projected_messages.into();
         let after = self.estimate_request_unanchored(&compressed_request);
         if after >= before {
             // 投影逐字节缩短文本且逐块估算对字节单调，理论上不可达；保持
@@ -1334,7 +1346,7 @@ impl ContextManager {
         let messages = build_compressed_messages(request, plan, &summary);
 
         let mut compressed_request = request.clone();
-        compressed_request.messages = Arc::new(messages.clone());
+        compressed_request.messages = messages.clone().into();
         let after = self.estimate_request_unanchored(&compressed_request);
         if let Some(capabilities) = capabilities
             && let Some(max_input_tokens) = self.strict_main_input_budget(request, capabilities)
@@ -1467,7 +1479,7 @@ impl ContextManager {
         messages.push(mechanical_truncation_marker_message());
         messages.extend_from_slice(&request.messages[drop_end..]);
         let mut compressed_request = request.clone();
-        compressed_request.messages = Arc::new(messages.clone());
+        compressed_request.messages = messages.clone().into();
         let after = self.estimate_request_unanchored(&compressed_request);
         if after >= before {
             // 删除与标记插入对逐块估算的影响理论上必然净缩减；保持“记录必须
@@ -1597,7 +1609,7 @@ impl ContextManager {
                 let candidate = summaries[0].trim();
                 let candidate_messages = build_compressed_messages(request, plan, candidate);
                 let mut candidate_request = request.clone();
-                candidate_request.messages = Arc::new(candidate_messages);
+                candidate_request.messages = candidate_messages.into();
                 if self
                     .strict_main_input_budget(
                         request,
@@ -2668,11 +2680,10 @@ fn estimate_image_tokens(source: &ImageSource) -> u64 {
 }
 
 /// 估算一段统一消息的输入 Token：逐内容块累加并保留每消息固定开销。
-fn estimate_message_tokens(messages: &[Message]) -> u64 {
-    let mut total = u64::try_from(messages.len())
-        .unwrap_or(u64::MAX)
-        .saturating_mul(PER_MESSAGE_OVERHEAD_TOKENS);
+fn estimate_message_tokens<'a>(messages: impl IntoIterator<Item = &'a Message>) -> u64 {
+    let mut total = 0_u64;
     for message in messages {
+        total = total.saturating_add(PER_MESSAGE_OVERHEAD_TOKENS);
         for block in &message.content {
             total = total.saturating_add(match block {
                 ContentBlock::Text { text } => utf8_text_tokens(text),

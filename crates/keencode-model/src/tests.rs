@@ -1073,12 +1073,12 @@ fn collector_preserves_decode_timing_and_rejects_duplicates() {
     ));
 }
 
-/// #24 主路径零拷贝：`ModelRequest::clone` 只递增 `Arc` 引用计数。
+/// #24 主路径零拷贝：请求克隆与分段追加都复用既有消息正文分配。
 ///
-/// 构造 100 条大文本消息的历史，克隆请求模拟“下一轮复用同一快照”；
-/// `Arc::ptr_eq` 断言两快照共享同一分配（深拷贝则指针不同）。
+/// 构造 100 条大文本消息的历史，克隆请求并追加下一轮消息；逐条正文指针必须
+/// 保持相同，不能用“内容仍相等”掩盖完整历史复制。
 #[test]
-fn model_request_clone_shares_messages_snapshot() {
+fn model_request_clone_and_append_preserve_history_allocations() {
     let history: Vec<Message> = (0..100)
         .map(|index| {
             Message::text(
@@ -1087,13 +1087,16 @@ fn model_request_clone_shares_messages_snapshot() {
             )
         })
         .collect();
+    let text_pointers = history.iter().map(message_text_pointer).collect::<Vec<_>>();
     let request = ModelRequest::new("test-model", history);
-    let next_round = request.clone();
-    assert!(
-        std::sync::Arc::ptr_eq(&request.messages, &next_round.messages),
-        "下一轮请求必须复用同一消息快照，不做全量深拷贝"
-    );
-    assert_eq!(next_round.messages.len(), 100);
+    let mut next_round = request.clone();
+    next_round.append_messages(vec![Message::text(MessageRole::Assistant, "模型回复")]);
+    assert_eq!(request.messages.len(), 100);
+    assert_eq!(next_round.messages.len(), 101);
+    for (index, expected) in text_pointers.into_iter().enumerate() {
+        assert_eq!(message_text_pointer(&request.messages[index]), expected);
+        assert_eq!(message_text_pointer(&next_round.messages[index]), expected);
+    }
 }
 
 /// #24 写时复制：`messages_mut` 追加后旧快照不变、新请求可见新消息。
@@ -1128,8 +1131,58 @@ fn model_request_set_messages_replaces_snapshot_without_pollution() {
     compressed.set_messages(vec![Message::text(MessageRole::User, "压缩摘要")]);
     assert_eq!(old_snapshot.messages.len(), 2);
     assert_eq!(compressed.messages.len(), 1);
-    assert!(!std::sync::Arc::ptr_eq(
-        &old_snapshot.messages,
-        &compressed.messages
-    ));
+    assert_ne!(old_snapshot.messages, compressed.messages);
+}
+
+/// 分段历史和请求期上下文在线上仍序列化为一个按原顺序排列的消息数组。
+#[test]
+fn segmented_messages_serialize_as_single_messages_array() {
+    let mut request =
+        ModelRequest::new("test-model", vec![Message::text(MessageRole::User, "历史")]);
+    request.append_messages(vec![Message::text(MessageRole::Assistant, "追加")]);
+    request.set_request_message_context(
+        std::sync::Arc::new(vec![Message::text(MessageRole::System, "前缀")]),
+        std::sync::Arc::new(vec![Message::text(MessageRole::User, "后缀")]),
+    );
+
+    let encoded = serde_json::to_value(&request).unwrap();
+    let messages = encoded["messages"].as_array().expect("messages 必须为数组");
+    assert_eq!(messages.len(), 4);
+    assert_eq!(messages[0]["content"][0]["text"], "前缀");
+    assert_eq!(messages[1]["content"][0]["text"], "历史");
+    assert_eq!(messages[2]["content"][0]["text"], "追加");
+    assert_eq!(messages[3]["content"][0]["text"], "后缀");
+    assert!(encoded.get("requestPrefix").is_none());
+    assert!(encoded.get("requestSuffix").is_none());
+
+    let expected_messages = messages.clone();
+    let decoded: ModelRequest = serde_json::from_value(encoded).unwrap();
+    assert_eq!(decoded.messages.len(), 4);
+    assert_eq!(
+        serde_json::to_value(decoded).unwrap()["messages"],
+        Value::Array(expected_messages)
+    );
+}
+
+/// 唯一持有的分段历史在 Turn 结束收敛时移动消息，不重新分配正文。
+#[test]
+fn segmented_messages_into_arc_moves_existing_payloads() {
+    let initial = Message::text(MessageRole::User, "首段".repeat(1024));
+    let appended = Message::text(MessageRole::Assistant, "追加段".repeat(1024));
+    let initial_pointer = message_text_pointer(&initial);
+    let appended_pointer = message_text_pointer(&appended);
+    let mut messages = crate::ModelMessages::from(vec![initial]);
+    messages.append(vec![appended]);
+
+    let contiguous = messages.into_arc();
+    assert_eq!(message_text_pointer(&contiguous[0]), initial_pointer);
+    assert_eq!(message_text_pointer(&contiguous[1]), appended_pointer);
+}
+
+/// 返回单文本消息正文的稳定堆分配地址，供零深拷贝断言使用。
+fn message_text_pointer(message: &Message) -> *const u8 {
+    let ContentBlock::Text { text } = &message.content[0] else {
+        panic!("测试消息必须是单文本消息");
+    };
+    text.as_ptr()
 }

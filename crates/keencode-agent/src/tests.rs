@@ -6536,10 +6536,10 @@ async fn truncated_success_post_hook_capacity_failure_falls_back_to_fixed_reject
     let _ = std::fs::remove_dir_all(&directory);
 }
 
-/// #24 主路径零拷贝：两轮 Turn 的 Provider 请求复用同一消息 `Arc`。
+/// #24 主路径零拷贝：两轮 Turn 的 Provider 请求复用既有消息正文分配。
 ///
-/// 100 条大文本历史 + 一轮工具往返后，第二轮请求与第一轮共享同一快照
-/// （`Arc::ptr_eq`）；旧实现每轮 `messages.clone()` 深拷贝，此处必须零拷贝。
+/// 100 条大文本历史 + 一轮工具往返后，第二轮请求的全部历史正文地址必须与
+/// 第一轮相同；不能用指针相等或内容相等的宽松分支掩盖逐轮深拷贝。
 #[tokio::test]
 async fn consecutive_model_rounds_share_messages_snapshot() {
     let history: Vec<Message> = (0..100)
@@ -6550,6 +6550,15 @@ async fn consecutive_model_rounds_share_messages_snapshot() {
             )
         })
         .collect();
+    let history_text_pointers = history
+        .iter()
+        .map(|message| {
+            let ContentBlock::Text { text } = &message.content[0] else {
+                panic!("历史测试消息必须为文本");
+            };
+            text.as_ptr()
+        })
+        .collect::<Vec<_>>();
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
         [
@@ -6579,15 +6588,18 @@ async fn consecutive_model_rounds_share_messages_snapshot() {
     assert!(result.is_success(), "{:?}", result.error);
     let requests = provider.requests().unwrap();
     assert_eq!(requests.len(), 2);
-    assert!(
-        Arc::ptr_eq(&requests[0].messages, &requests[1].messages)
-            || requests[1].messages.len() > requests[0].messages.len()
-                && requests[1].messages[..requests[0].messages.len()] == *requests[0].messages,
-        "第二轮请求必须以前缀共享方式复用首轮快照"
-    );
+    assert!(requests[1].messages.len() > requests[0].messages.len());
+    for (index, expected) in history_text_pointers.into_iter().enumerate() {
+        for request in &requests {
+            let ContentBlock::Text { text } = &request.messages[index].content[0] else {
+                panic!("Provider 历史消息必须为文本");
+            };
+            assert_eq!(text.as_ptr(), expected, "第 {index} 条历史发生了深拷贝");
+        }
+    }
 }
 
-/// #24 写时复制正确性：跨轮 `commit` 追加动态段后，首轮请求快照不变。
+/// #24 持久分段隔离：跨轮 `commit` 追加动态段后，首轮请求快照不变。
 ///
 /// 首轮请求被 Provider 记录后，后续追加的工具结果只出现在第二轮请求与
 /// 最终 Transcript 中，不回写首轮快照。
