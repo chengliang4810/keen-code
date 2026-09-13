@@ -98,6 +98,10 @@ keepawake = "0.6.0"
 # 将插件敏感 userConfig 保存到系统密钥库（Keychain、Credential Manager 或 Secret Service）。
 keyring = "=4.1.6"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# 通过 Foundation 的进程内系统信息 API 读取 macOS 版本，避免启动外部进程。
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["alloc", "NSProcessInfo"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 # 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。
 winreg = "0.55"
