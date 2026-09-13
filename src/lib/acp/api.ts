@@ -8,6 +8,11 @@ import type {
 import { invoke } from "../tauri";
 import { acpInitialize, acpNotify, acpRequest, acpRespond } from "./client";
 import { startSessionPrompt } from "./prompt";
+import type {
+  AcpMcpServerConfig,
+  SessionMcpMutationResult,
+  SessionMcpStatusResult,
+} from "./types";
 
 /** KeenCode 当前只通过一个串行 Tauri 事件向界面投递 ACP 数据。 */
 export interface AcpEventPayloads {
@@ -103,10 +108,16 @@ export function diagnosticsRecord(component: string, message: string): Promise<v
 export async function sessionConnect(args: {
   projectPath?: string;
   sessionId?: string | null;
+  /** 新 Session 启动时应连接的完整 MCP 配置。 */
+  mcpServers?: AcpMcpServerConfig[];
   /** 新建 Session 时用于确定性对账，调用重试必须复用。 */
   operationId: string;
 }): Promise<SessionSnapshot> {
-  if (args.sessionId) return sessionSnapshotFromResult(await sessionLoad(args.sessionId));
+  if (args.sessionId) {
+    return sessionSnapshotFromResult(
+      await sessionLoad(args.sessionId, undefined, args.mcpServers ?? []),
+    );
+  }
   const initialization = await acpInitialize();
   const cwd = args.projectPath ?? initialization._meta?.["keencode/defaultCwd"];
   if (typeof cwd !== "string" || !cwd.trim()) {
@@ -114,7 +125,11 @@ export async function sessionConnect(args: {
   }
   const result = await acpRequest<{ sessionId: string; _meta?: Record<string, unknown> }>(
     "session/new",
-    { cwd, mcpServers: [], _meta: { "keencode/operationId": args.operationId } },
+    {
+      cwd,
+      mcpServers: args.mcpServers ?? [],
+      _meta: { "keencode/operationId": args.operationId },
+    },
     args.operationId,
   );
   const snapshot = sessionSnapshotFromResult(result);
@@ -172,6 +187,39 @@ export async function sessionSteer(args: {
   });
 }
 
+/** 连接并原子排队一批 Session 独立 MCP Server。 */
+export function sessionMcpLoad(args: {
+  sessionId: string;
+  mcpServers: AcpMcpServerConfig[];
+  /** 调用重试期间必须复用的业务幂等标识。 */
+  operationId: string;
+}): Promise<SessionMcpMutationResult> {
+  return acpRequest<SessionMcpMutationResult>("keencode/session/mcp/load", {
+    sessionId: args.sessionId,
+    mcpServers: args.mcpServers,
+    _meta: { "keencode/operationId": args.operationId },
+  }, args.operationId);
+}
+
+/** 读取 Session MCP 已发布与待发布目录状态。 */
+export function sessionMcpStatus(sessionId: string): Promise<SessionMcpStatusResult> {
+  return acpRequest<SessionMcpStatusResult>("keencode/session/mcp/status", { sessionId });
+}
+
+/** 排队撤销单个 Session MCP Server。 */
+export function sessionMcpUnload(args: {
+  sessionId: string;
+  serverName: string;
+  /** 调用重试期间必须复用的业务幂等标识。 */
+  operationId: string;
+}): Promise<SessionMcpMutationResult> {
+  return acpRequest<SessionMcpMutationResult>("keencode/session/mcp/unload", {
+    sessionId: args.sessionId,
+    serverName: args.serverName,
+    _meta: { "keencode/operationId": args.operationId },
+  }, args.operationId);
+}
+
 export function sessionStop(
   sessionId: string,
   requestId: string,
@@ -184,12 +232,14 @@ export function sessionStop(
 export async function sessionFork(args: {
   sourceId: string;
   title?: string | null;
+  /** 新 Fork Session 的完整 MCP 配置。 */
+  mcpServers?: AcpMcpServerConfig[];
   /** 目标 Session 的确定性派生标识。 */
   operationId: string;
 }): Promise<{ id: string }> {
   const cwd = await sessionCwd(args.sourceId);
   const result = await acpRequest<{ sessionId: string }>("session/fork", {
-    sessionId: args.sourceId, cwd, mcpServers: [],
+    sessionId: args.sourceId, cwd, mcpServers: args.mcpServers ?? [],
     _meta: {
       "keencode/operationId": args.operationId,
       ...(args.title == null ? {} : { "keencode/title": args.title }),
@@ -544,13 +594,14 @@ export interface SessionLoadResult {
 export async function sessionLoad(
   sessionId: string,
   history?: { limit: number; cursor?: string },
+  mcpServers: AcpMcpServerConfig[] = [],
 ): Promise<SessionLoadResult> {
   if (history && (!Number.isInteger(history.limit) ||
     (history.limit !== -1 && (history.limit < 1 || history.limit > 100)))) {
     throw new Error("history limit 必须为 -1 或 1..100");
   }
   return acpRequest<SessionLoadResult>("session/load", {
-    sessionId, cwd: await sessionCwd(sessionId), mcpServers: [],
+    sessionId, cwd: await sessionCwd(sessionId), mcpServers,
     ...(history ? { _meta: { "keencode/history": history } } : {}),
   });
 }

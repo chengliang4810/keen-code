@@ -108,12 +108,25 @@ pub struct McpToolBuildReport {
     tools: Vec<Arc<dyn AgentTool>>,
     /// 不影响其他可用工具的 Server 或工具级失败。
     diagnostics: Vec<McpToolDiagnostic>,
+    /// 成功连接且至少保留一个可调用入口时持有的精确客户端生命周期。
+    client: Option<McpClient>,
 }
 
 impl McpToolBuildReport {
     /// 消费报告并取得全部可用工具实现。
     pub fn into_tools(self) -> Vec<Arc<dyn AgentTool>> {
         self.tools
+    }
+
+    /// 消费报告并同时取得工具、诊断与需要由上层显式关闭的连接。
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<Arc<dyn AgentTool>>,
+        Vec<McpToolDiagnostic>,
+        Option<McpClient>,
+    ) {
+        (self.tools, self.diagnostics, self.client)
     }
 
     /// 返回可用工具的只读快照。
@@ -124,6 +137,11 @@ impl McpToolBuildReport {
     /// 返回按处理顺序记录的安全诊断。
     pub fn diagnostics(&self) -> &[McpToolDiagnostic] {
         &self.diagnostics
+    }
+
+    /// 返回本报告持有的精确 MCP 连接；只有存在可调用入口时才为 `Some`。
+    pub fn client(&self) -> Option<&McpClient> {
+        self.client.as_ref()
     }
 
     /// 返回本次构建是否有条目被降级跳过。
@@ -140,6 +158,7 @@ impl McpToolBuildReport {
     pub fn append(&mut self, mut other: Self) {
         self.tools.append(&mut other.tools);
         self.diagnostics.append(&mut other.diagnostics);
+        debug_assert!(other.client.is_none(), "嵌套 MCP 构建报告不得携带连接");
     }
 
     /// 向当前报告追加一条内部构造的诊断。
@@ -287,6 +306,8 @@ pub async fn prepare_mcp_server_tools(
         // 所有工具均被安全策略跳过时，报告不再持有 Client；此处也必须
         // 显式关闭，以覆盖 HTTP 传输无法通过 Drop 发送 DELETE 的情况。
         let _ = client.close().await;
+    } else {
+        report.client = Some(client);
     }
     report
 }

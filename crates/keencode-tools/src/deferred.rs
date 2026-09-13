@@ -147,6 +147,15 @@ impl DeferredToolCatalog {
         )
     }
 
+    /// 返回按名称排序的冻结工具实现快照，供 Session 目录合成而不共享可变目录。
+    pub fn implementations(&self) -> Vec<Arc<dyn RuntimeAgentTool>> {
+        self.read_state()
+            .entries
+            .values()
+            .map(|entry| Arc::clone(&entry.implementation))
+            .collect()
+    }
+
     /// 返回当前目录包含的工具数量。
     pub fn len(&self) -> usize {
         self.read_state().entries.len()

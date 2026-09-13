@@ -4,7 +4,7 @@
 //! 成功值仍通过父 Host 的封闭响应编码器输出。它不为尚未存在 Runtime 业务
 //! 实现的能力制造“已接受”或“已完成”状态。
 
-use super::{AcpHost, HostFailure, internal_failure, map_runtime_failure};
+use super::{AcpHost, HostFailure, internal_failure, map_runtime_failure, map_session_mcp_failure};
 use crate::agent_runtime::{BackgroundTaskCancellationOutcome, RuntimeMcpServerSnapshot};
 use crate::session_commands::{
     authorized_metadata, close_session_for_mutation, open_authorized_session,
@@ -16,7 +16,8 @@ use keencode_acp::{
     GoalMutationResponse, McpConnectionStatus, McpListResponse, McpOAuthCallbackRequest,
     McpOAuthStatus, McpRuntimePhase, McpServerStatus, McpTransportKind, RenameSessionResponse,
     ReplaySessionResponse, RewindCandidate, RewindCandidatesResponse, RewindSessionResponse,
-    SteerSessionResponse, ValidateAcpParams,
+    SessionMcpLoadRequest, SessionMcpStatusRequest, SessionMcpUnloadRequest, SteerSessionResponse,
+    ValidateAcpParams,
 };
 use keencode_resources::{
     GoalDocument, GoalFileStore, GoalRecord as ResourceGoalRecord,
@@ -91,6 +92,13 @@ pub(super) async fn dispatch(
 ) -> Result<Value, HostFailure> {
     match request {
         AcpRequest::SteerSession(request) => dispatch_steer(host, id, request),
+        AcpRequest::SessionMcpLoad(request) => dispatch_session_mcp_load(host, id, request).await,
+        AcpRequest::SessionMcpStatus(request) => {
+            dispatch_session_mcp_status(host, id, request).await
+        }
+        AcpRequest::SessionMcpUnload(request) => {
+            dispatch_session_mcp_unload(host, id, request).await
+        }
         AcpRequest::RenameSession(request) => dispatch_rename(host, id, request).await,
         AcpRequest::GenerateSessionTitle(request) => {
             dispatch_generate_title(host, id, request).await
@@ -112,6 +120,69 @@ pub(super) async fn dispatch(
         AcpRequest::McpOAuthCancel(request) => dispatch_mcp_oauth_cancel(host, id, request).await,
         _ => Err(HostFailure::MethodNotFound),
     }
+}
+
+/// 原子准备动态 MCP 批次；成功连接后仅排队，下一 Reason 边界才发布目录。
+async fn dispatch_session_mcp_load(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: SessionMcpLoadRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
+    let operation_id = request_operation_id(request.meta.as_ref())?;
+    let (_, project_root) = authorized_metadata(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    host.ensure_extensions(&project_root).await?;
+    let response = host
+        .runtime
+        .load_session_mcp(&session_id, &operation_id, request.mcp_servers)
+        .await
+        .map_err(map_session_mcp_failure)?;
+    host.result_value(id, &response)
+}
+
+/// 只读取 Session MCP 已发布与待发布状态，不连接或刷新任何 Server。
+async fn dispatch_session_mcp_status(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: SessionMcpStatusRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let session_id = request.session_id;
+    // status 在已关闭的持久 Session 上也会重新打开 Runtime 并
+    // 创建空 MCP 侧车，因此必须与 fork/rewind 的临时摘除窗口串行。
+    let _control = host.lock_session_control(&session_id).await?;
+    let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    let response = host
+        .runtime
+        .session_mcp_status(&session_id)
+        .map_err(map_session_mcp_failure)?;
+    host.result_value(id, &response)
+}
+
+/// 排队撤销一个 Session MCP Server；旧目录绑定在在途调用释放前继续持有连接。
+async fn dispatch_session_mcp_unload(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: SessionMcpUnloadRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
+    let operation_id = request_operation_id(request.meta.as_ref())?;
+    let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    let response = host
+        .runtime
+        .unload_session_mcp(&session_id, &operation_id, &request.server_name)
+        .await
+        .map_err(map_session_mcp_failure)?;
+    host.result_value(id, &response)
 }
 
 /// 接通用户 steer；只有 Runtime 实际写入动态输入后才返回 `accepted=true`。

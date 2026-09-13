@@ -18,7 +18,7 @@ use keencode_mcp::McpClientOptions;
 use keencode_tools::{
     BoundedCommandError, BoundedCommandRequest, DeferredToolCatalog, LspDiagnostic, LspRuntime,
     LspServerConfig, McpDiagnosticCode, McpToolBuildReport, McpToolDiagnostic, SkillTool,
-    prepare_mcp_server_tools, register_deferred_tools, register_lsp_tool, run_bounded_command,
+    prepare_mcp_server_tools, register_lsp_tool, run_bounded_command,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -283,7 +283,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
         text
     }
 
-    /// 注册 Skill 入口与预连接 MCP 的延迟搜索/执行入口。
+    /// 注册 Skill、插件命令与 LSP；MCP 由 Session 独立合成目录统一注册。
     fn register_tools(
         &self,
         registry: &mut ToolRegistry,
@@ -301,10 +301,6 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                     Arc::clone(&self.commands),
                 )))
                 .map_err(|error| format!("注册插件 command 工具失败：{error}"))?;
-        }
-        if let Some(catalog) = &self.deferred_tools {
-            register_deferred_tools(registry, Arc::clone(catalog))
-                .map_err(|error| format!("注册 MCP 延迟工具失败：{error}"))?;
         }
         if let Some(runtime) = &self.lsp_runtime {
             register_lsp_tool(registry, Arc::clone(runtime))
@@ -396,6 +392,22 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
     /// 返回候选构建时已经完成连接和工具发现的 MCP 运行态。
     fn mcp_runtime_snapshot(&self) -> Vec<RuntimeMcpServerSnapshot> {
         self.mcp_servers.clone()
+    }
+
+    /// 复制项目候选当前冻结实现，供每个 Session 建立独立的合成目录。
+    fn mcp_tool_implementations(&self) -> Vec<Arc<dyn keencode_agent::AgentTool>> {
+        self.deferred_tools
+            .as_ref()
+            .map(|catalog| catalog.implementations())
+            .unwrap_or_default()
+    }
+
+    /// 项目级 Server 名称同样属于 Session 动态加载的冲突边界。
+    fn mcp_server_names(&self) -> Vec<String> {
+        self.mcp_servers
+            .iter()
+            .map(|server| server.name.clone())
+            .collect()
     }
 
     /// 清空当前候选共享的延迟 MCP 目录，使已经开始的 Turn 也无法再解析旧工具。

@@ -24,9 +24,10 @@ use crate::{
     McpOAuthStartResponse, McpOAuthStatus, McpRuntimePhase, McpServerStatus, McpTransportKind,
     RecoveryState, RenameSessionResponse, ReplaySessionResponse, RewindCandidate,
     RewindCandidatesResponse, RewindSessionResponse, SESSION_UPDATE_DELIVERY_SCHEMA_VERSION,
-    SessionDeleteCapabilities, SessionSequence, SessionUpdateDeliveryEnvelope,
-    SessionUpdateDeliveryLimits, SetSessionModeResponse, SteerSessionResponse,
-    SystemNotificationLevel, validate_set_session_mode_request,
+    SessionDeleteCapabilities, SessionMcpMutationResponse, SessionMcpServerPhase,
+    SessionMcpServerStatus, SessionMcpStatusResponse, SessionSequence,
+    SessionUpdateDeliveryEnvelope, SessionUpdateDeliveryLimits, SetSessionModeResponse,
+    SteerSessionResponse, SystemNotificationLevel, validate_set_session_mode_request,
 };
 
 /// 构造一条只包含文本的标准 Agent 消息更新。
@@ -1174,6 +1175,217 @@ fn mcp_list_response_rejects_unsorted_duplicate_and_inconsistent_states() {
     let mut stdio_oauth = connected;
     stdio_oauth.transport = McpTransportKind::Stdio;
     assert!(encode(vec![stdio_oauth], McpRuntimePhase::Ready, None).is_err());
+}
+
+#[test]
+fn session_mcp_requests_use_exact_namespaced_shapes() {
+    let decoder = AcpRequestDecoder::new();
+    let load = decoder
+        .decode_request(
+            "keencode/session/mcp/load",
+            json!({
+                "sessionId": "session-a",
+                "mcpServers": [
+                    {
+                        "name": "local",
+                        "command": "mcp-server",
+                        "args": ["--stdio"],
+                        "env": [{ "name": "MODE", "value": "test" }]
+                    },
+                    {
+                        "type": "http",
+                        "name": "remote",
+                        "url": "https://example.test/mcp",
+                        "headers": [{ "name": "Authorization", "value": "Bearer secret" }]
+                    }
+                ],
+                "_meta": { "keencode/operationId": "mcp-load-a" }
+            }),
+        )
+        .expect("Session MCP load 应严格解码");
+    assert!(matches!(
+        load,
+        AcpRequest::SessionMcpLoad(request)
+            if request.session_id == "session-a" && request.mcp_servers.len() == 2
+    ));
+
+    assert!(matches!(
+        decoder
+            .decode_request(
+                "keencode/session/mcp/status",
+                json!({ "sessionId": "session-a" }),
+            )
+            .expect("Session MCP status 应严格解码"),
+        AcpRequest::SessionMcpStatus(request) if request.session_id == "session-a"
+    ));
+    assert!(matches!(
+        decoder
+            .decode_request(
+                "keencode/session/mcp/unload",
+                json!({
+                    "sessionId": "session-a",
+                    "serverName": "local",
+                    "_meta": { "keencode/operationId": "mcp-unload-a" }
+                }),
+            )
+            .expect("Session MCP unload 应严格解码"),
+        AcpRequest::SessionMcpUnload(request)
+            if request.session_id == "session-a" && request.server_name == "local"
+    ));
+}
+
+#[test]
+fn session_mcp_request_decoder_rejects_empty_duplicate_and_legacy_shapes() {
+    let decoder = AcpRequestDecoder::new();
+    for params in [
+        json!({ "sessionId": "session-a", "mcpServers": [] }),
+        json!({
+            "sessionId": "session-a",
+            "mcpServers": [
+                { "name": "same", "command": "one", "args": [], "env": [] },
+                { "name": "same", "command": "two", "args": [], "env": [] }
+            ]
+        }),
+        json!({
+            "sessionId": "session-a",
+            "servers": [{ "name": "legacy", "command": "old", "args": [], "env": [] }]
+        }),
+        json!({
+            "sessionId": "session-a",
+            "mcpServers": [{ "name": "bad\nname", "command": "server", "args": [], "env": [] }]
+        }),
+    ] {
+        assert!(matches!(
+            decoder.decode_request("keencode/session/mcp/load", params),
+            Err(AcpBoundaryError::InvalidParams)
+                | Err(AcpBoundaryError::InvalidIdentifier)
+                | Err(AcpBoundaryError::InvalidSemanticValue)
+        ));
+    }
+    assert!(matches!(
+        decoder.decode_request(
+            "keencode/session/mcp/status",
+            json!({ "sessionId": "session-a", "refresh": true }),
+        ),
+        Err(AcpBoundaryError::InvalidParams)
+    ));
+    assert!(matches!(
+        decoder.decode_request(
+            "keencode/session/mcp/unload",
+            json!({ "sessionId": "session-a", "server": "legacy" }),
+        ),
+        Err(AcpBoundaryError::InvalidParams)
+    ));
+    for method in [
+        "session/mcp/load",
+        "session/mcp/status",
+        "session/mcp/unload",
+        "keencode/session/mcp-load",
+    ] {
+        assert!(matches!(
+            decoder.decode_request(method, json!({})),
+            Err(AcpBoundaryError::UnknownMethod)
+        ));
+    }
+}
+
+#[test]
+fn session_mcp_responses_are_strict_sorted_and_configuration_free() {
+    let servers = vec![
+        SessionMcpServerStatus {
+            name: "local".to_owned(),
+            transport: McpTransportKind::Stdio,
+            status: SessionMcpServerPhase::Ready,
+            tools_count: 2,
+            error: None,
+        },
+        SessionMcpServerStatus {
+            name: "remote".to_owned(),
+            transport: McpTransportKind::StreamableHttp,
+            status: SessionMcpServerPhase::Failed,
+            tools_count: 0,
+            error: Some("MCP Server 连接或工具发现失败".to_owned()),
+        },
+    ];
+    let status = SessionMcpStatusResponse {
+        session_id: "session-a".to_owned(),
+        catalog_generation: 3,
+        servers: servers.clone(),
+    };
+    let (status_raw, status_value) = encode_typed_result(&status);
+    assert_eq!(
+        status_value["result"],
+        json!({
+            "sessionId": "session-a",
+            "catalogGeneration": 3,
+            "servers": [
+                {
+                    "name": "local",
+                    "transport": "stdio",
+                    "status": "ready",
+                    "toolsCount": 2
+                },
+                {
+                    "name": "remote",
+                    "transport": "streamable_http",
+                    "status": "failed",
+                    "toolsCount": 0,
+                    "error": "MCP Server 连接或工具发现失败"
+                }
+            ]
+        })
+    );
+    assert_eq!(
+        AcpResponseDecoder::new()
+            .decode_result::<SessionMcpStatusResponse>(&status_raw)
+            .expect("Session MCP status 应严格恢复")
+            .result(),
+        &status
+    );
+
+    let mutation = SessionMcpMutationResponse {
+        session_id: "session-a".to_owned(),
+        catalog_generation: 3,
+        servers,
+        changed: true,
+        deduplicated: false,
+    };
+    let (mutation_raw, mutation_value) = encode_typed_result(&mutation);
+    assert_eq!(mutation_value["result"]["changed"], true);
+    assert_eq!(mutation_value["result"]["deduplicated"], false);
+    assert_eq!(
+        AcpResponseDecoder::new()
+            .decode_result::<SessionMcpMutationResponse>(&mutation_raw)
+            .expect("Session MCP mutation 应严格恢复")
+            .result(),
+        &mutation
+    );
+    let encoded = mutation_value["result"].to_string();
+    for sensitive in [
+        "url",
+        "command",
+        "headers",
+        "env",
+        "Authorization",
+        "secret",
+    ] {
+        assert!(!encoded.contains(sensitive));
+    }
+
+    let mut unsorted = status.clone();
+    unsorted.servers.reverse();
+    assert!(
+        AcpResponseEncoder::new()
+            .encode_result(RequestId::Number(1), &unsorted)
+            .is_err()
+    );
+    let mut inconsistent = status;
+    inconsistent.servers[0].error = Some("不应存在".to_owned());
+    assert!(
+        AcpResponseEncoder::new()
+            .encode_result(RequestId::Number(1), &inconsistent)
+            .is_err()
+    );
 }
 
 #[test]

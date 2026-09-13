@@ -59,7 +59,10 @@ pub use protocol::{
     McpRuntimePhase, McpServerStatus, McpTransportKind, RenameSessionRequest,
     RenameSessionResponse, ReplaySessionRequest, ReplaySessionResponse, RewindCandidate,
     RewindCandidatesRequest, RewindCandidatesResponse, RewindSessionRequest, RewindSessionResponse,
-    SessionConfigUpdateNotification, SteerSessionRequest, SteerSessionResponse, ValidateAcpParams,
+    SessionConfigUpdateNotification, SessionMcpLoadRequest, SessionMcpMutationResponse,
+    SessionMcpServerPhase, SessionMcpServerStatus, SessionMcpStatusRequest,
+    SessionMcpStatusResponse, SessionMcpUnloadRequest, SteerSessionRequest, SteerSessionResponse,
+    ValidateAcpParams,
 };
 pub use sequence::SessionSequence;
 

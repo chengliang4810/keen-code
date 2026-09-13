@@ -18,12 +18,11 @@ impl DeliveryEmitter for LiveEmitter {
 struct LiveExtensions(Arc<keencode_tools::DeferredToolCatalog>);
 
 impl RuntimeExtensionContributor for LiveExtensions {
-    fn register_tools(
-        &self,
-        registry: &mut ToolRegistry,
-        _: &RuntimeToolContext,
-    ) -> Result<(), String> {
-        keencode_tools::register_deferred_tools(registry, self.0.clone()).map_err(|e| e.to_string())
+    fn register_tools(&self, _: &mut ToolRegistry, _: &RuntimeToolContext) -> Result<(), String> {
+        Ok(())
+    }
+    fn mcp_tool_implementations(&self) -> Vec<Arc<dyn AgentTool>> {
+        self.0.implementations()
     }
     fn build_hook_runtime(&self, _: &RuntimeToolContext) -> Result<HookRuntime, String> {
         Ok(HookRuntime::default())

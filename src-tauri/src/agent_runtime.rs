@@ -1,6 +1,8 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
 mod history_load;
 pub(crate) use history_load::HistoryLoadRequest;
+mod session_mcp;
+pub(crate) use session_mcp::{SessionMcpError, SuspendedSessionMcp};
 
 #[cfg(feature = "benchmark")]
 pub mod benchmark;
@@ -27,7 +29,7 @@ use keencode_agent::{
     AgentDynamicInputBatch, AgentDynamicInputBoundary, AgentDynamicInputError,
     AgentDynamicInputKind, AgentDynamicInputReceipt, AgentDynamicInputSource, AgentExecutionPort,
     AgentId as RunnerAgentId, AgentProfile, AgentRunError, AgentRunner, AgentStreamEvent,
-    AgentStreamEventKind, AgentTemplateSnapshot, AgentTreeQuiesceResult, AgentTurnCause,
+    AgentStreamEventKind, AgentTemplateSnapshot, AgentTool, AgentTreeQuiesceResult, AgentTurnCause,
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
     CollaborationCoordinator, CollaborationEvent, CollaborationEventKind, CollaborationLimits,
@@ -72,8 +74,9 @@ use keencode_tools::{
     CompletedTurnContext, GitWorktreeLeaseManager, ResolvedSpawnAgentTemplate,
     SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver,
     ToolEnvironment, WebServiceConfig, register_collaboration_tools,
-    register_collaboration_tools_with_template_resolver, register_local_tools_with_background,
-    register_state_tools, register_web_tools, retain_child_agent_tool_snapshot,
+    register_collaboration_tools_with_template_resolver, register_deferred_tools,
+    register_local_tools_with_background, register_state_tools, register_web_tools,
+    retain_child_agent_tool_snapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -424,6 +427,21 @@ pub trait RuntimeExtensionContributor: Send + Sync {
     /// 重试远端请求或读取新的配置。
     fn mcp_runtime_snapshot(&self) -> Vec<RuntimeMcpServerSnapshot> {
         Vec::new()
+    }
+
+    /// 返回项目候选中已经冻结的 MCP 工具实现快照。
+    ///
+    /// Session 必须把该快照复制进自己的合成目录，不得共享贡献器的可变目录。
+    fn mcp_tool_implementations(&self) -> Vec<Arc<dyn AgentTool>> {
+        Vec::new()
+    }
+
+    /// 返回当前项目候选占用的 MCP Server 名称，用于拒绝 Session 同名覆盖。
+    fn mcp_server_names(&self) -> Vec<String> {
+        self.mcp_runtime_snapshot()
+            .into_iter()
+            .map(|server| server.name)
+            .collect()
     }
 
     /// 立即撤销当前贡献器已经注册的 MCP 工具；非 MCP 扩展保持不变。
@@ -3966,6 +3984,8 @@ pub struct AgentRuntime {
     title_generation_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 按规范项目根隔离、仅在完整构建成功后原子发布的扩展候选。
     extension_candidates: RwLock<HashMap<PathBuf, Arc<RuntimeExtensionCandidate>>>,
+    /// 每个已打开 Session 独立持有的合成 MCP 目录与动态连接生命周期。
+    session_mcp: Mutex<HashMap<String, Arc<session_mcp::SessionMcpRuntime>>>,
     /// Tauri 或测试环境提供的同步可靠投递边界。
     emitter: Arc<dyn DeliveryEmitter>,
     /// 当前 Runtime 创建的投递世代使用的时间边界；生产装配固定使用有界生产配置。
@@ -4004,6 +4024,14 @@ impl AgentRuntime {
         emitter: Arc<dyn DeliveryEmitter>,
     ) -> Result<Self, AgentRuntimeError> {
         Self::new_with_registry(storage_root, emitter, ProviderRegistry::new())
+    }
+
+    /// 创建不向桌面发送事件的控制面测试 Runtime。
+    #[cfg(test)]
+    pub(crate) fn new_for_control_test(
+        storage_root: impl Into<std::path::PathBuf>,
+    ) -> Result<Arc<Self>, AgentRuntimeError> {
+        Self::new(storage_root, Arc::new(ControlTestDeliveryEmitter)).map(Arc::new)
     }
 
     /// 使用明确 Provider 注册表创建测试或生产装配根。
@@ -4071,6 +4099,7 @@ impl AgentRuntime {
             turn_start_gates: Mutex::new(HashMap::new()),
             title_generation_gates: Mutex::new(HashMap::new()),
             extension_candidates: RwLock::new(HashMap::new()),
+            session_mcp: Mutex::new(HashMap::new()),
             emitter,
             delivery_timeouts,
             closed: AtomicBool::new(false),
@@ -4698,7 +4727,10 @@ impl AgentRuntime {
         {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
-        current.insert(project_root, Arc::new(candidate));
+        let candidate = Arc::new(candidate);
+        current.insert(project_root.clone(), Arc::clone(&candidate));
+        drop(current);
+        self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, false);
         Ok(generation)
     }
 
@@ -4708,15 +4740,16 @@ impl AgentRuntime {
             .extension_candidates
             .read()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .values()
-            .cloned()
+            .iter()
+            .map(|(project_root, candidate)| (project_root.clone(), Arc::clone(candidate)))
             .collect::<Vec<_>>();
-        for candidate in candidates {
+        for (project_root, candidate) in candidates {
             candidate
                 .contributor
                 .revoke_mcp_tools()
                 .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
+            self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, true);
         }
         Ok(())
     }
@@ -4739,6 +4772,7 @@ impl AgentRuntime {
                 .revoke_mcp_tools()
                 .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
+            self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, true);
         }
         Ok(())
     }
@@ -5215,6 +5249,8 @@ impl AgentRuntime {
         {
             limits.max_rounds = Some(max_turns);
         }
+        let (_, tool_catalog_updates) =
+            self.session_mcp_bindings(&execution.session_id, &execution.project_root)?;
         let mut runner = AgentRunner::new(provider, tools, limits)
             .with_context_manager(context)
             .with_hook_runtime(hooks)
@@ -5223,7 +5259,8 @@ impl AgentRuntime {
                 session_id: execution.session_id.clone(),
                 coordinator,
                 session: execution.session.clone(),
-            }));
+            }))
+            .with_tool_catalog_update_source(tool_catalog_updates);
         if is_root {
             runner = runner.with_goal_controller(execution.persistent_state.clone());
         }
@@ -5501,6 +5538,10 @@ impl AgentRuntime {
         } else {
             HookRuntime::empty()
         };
+        let (deferred_catalog, _) =
+            self.session_mcp_bindings(&execution.session_id, &project_root)?;
+        register_deferred_tools(&mut tools, deferred_catalog)
+            .map_err(|error| runtime_operation_failed(error))?;
         let context_source: Arc<dyn SpawnAgentContextSource> =
             Arc::new(RuntimeSpawnAgentContextSource {
                 session: execution.session.clone(),
@@ -5602,6 +5643,9 @@ impl AgentRuntime {
         } else {
             HookRuntime::empty()
         };
+        let (deferred_catalog, _) = self.session_mcp_bindings(session_id, &project_root)?;
+        register_deferred_tools(&mut tools, deferred_catalog)
+            .map_err(|error| runtime_operation_failed(error))?;
         Ok((tools, hooks))
     }
 
@@ -6145,6 +6189,7 @@ impl AgentRuntime {
             }
             drop(collaboration);
         }
+        self.close_session_mcp(session_id).await;
         if let Err(error) = self.close_session_delivery(session_id).await {
             close_error.get_or_insert(error);
         }
@@ -6223,6 +6268,7 @@ impl AgentRuntime {
             }
             drop(collaboration);
         }
+        self.close_session_mcp(session_id).await;
         if let Err(error) = self.close_session_delivery(session_id).await {
             shutdown_error.get_or_insert(error);
         }
@@ -6732,6 +6778,13 @@ impl AgentRuntime {
             );
             session_ids.extend(
                 self.deliveries
+                    .lock()
+                    .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                    .keys()
+                    .cloned(),
+            );
+            session_ids.extend(
+                self.session_mcp
                     .lock()
                     .map_err(|_| AgentRuntimeError::StateUnavailable)?
                     .keys()
@@ -7598,6 +7651,17 @@ trait DeliveryEmitter: Send + Sync {
         _task_title: Option<&str>,
         _stop_reason: Option<TurnStopReason>,
     ) {
+    }
+}
+
+/// Host 控制面单元测试不需要建立桌面事件接收端。
+#[cfg(test)]
+struct ControlTestDeliveryEmitter;
+
+#[cfg(test)]
+impl DeliveryEmitter for ControlTestDeliveryEmitter {
+    fn emit(&self, _delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
+        Ok(())
     }
 }
 

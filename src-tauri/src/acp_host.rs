@@ -389,14 +389,19 @@ impl AcpHost {
         request: schema::NewSessionRequest,
     ) -> Result<schema::NewSessionResponse, HostFailure> {
         let _control = self.control_gate.lock().await;
-        reject_mcp_servers(&request.mcp_servers)?;
+        let mcp_servers = request.mcp_servers.clone();
         let project_root = self.authorized_cwd(&request.cwd)?;
+        if !mcp_servers.is_empty() {
+            self.ensure_extensions(&project_root).await?;
+        }
         let operation_id = operation_id(request.meta.as_ref())?;
         let session = self
             .runtime
             .open_or_create_session(&project_root, None, &operation_id)
             .map_err(map_runtime_failure)?;
         let session_id = session.session_id().as_str().to_owned();
+        initialize_unpublished_session_mcp(&self.runtime, &session_id, &project_root, mcp_servers)
+            .await?;
         self.runtime
             .focus_session(&session_id)
             .map_err(map_runtime_failure)?;
@@ -420,7 +425,7 @@ impl AcpHost {
         &self,
         request: schema::LoadSessionRequest,
     ) -> Result<schema::LoadSessionResponse, HostFailure> {
-        reject_mcp_servers(&request.mcp_servers)?;
+        let mcp_servers = request.mcp_servers.clone();
         let session_id = request.session_id.0.as_ref().to_owned();
         let _control = self.lock_session_control(&session_id).await?;
         let started = std::time::Instant::now();
@@ -441,6 +446,9 @@ impl AcpHost {
             .as_ref()
             .is_some_and(|request| request.cursor.is_some())
         {
+            if !mcp_servers.is_empty() {
+                return Err(HostFailure::InvalidParams);
+            }
             // 后续页只校验绑定并读取窗口，不能重新 open 或重置实时投递。
             let (_, stored_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
                 .map_err(|_| HostFailure::ResourceNotFound)?;
@@ -459,6 +467,7 @@ impl AcpHost {
             );
             return Ok(schema::LoadSessionResponse::new().meta(Some(meta)));
         }
+        let mcp_project_root = requested_root.clone();
         let runtime = Arc::clone(&self.runtime);
         let app = self.app.clone();
         let id = session_id.clone();
@@ -478,6 +487,13 @@ impl AcpHost {
             Ok::<_, HostFailure>(session)
         }).await.map_err(internal_failure)??;
         tracing::info!(target: "keencode_diagnostics", phase = "session_restore", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+        if !mcp_servers.is_empty() {
+            self.ensure_extensions(&mcp_project_root).await?;
+        }
+        self.runtime
+            .replace_session_mcp_servers(&session_id, &mcp_project_root, mcp_servers)
+            .await
+            .map_err(map_session_mcp_failure)?;
         self.runtime
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
@@ -959,7 +975,7 @@ impl AcpHost {
         &self,
         request: schema::ForkSessionRequest,
     ) -> Result<schema::ForkSessionResponse, HostFailure> {
-        reject_mcp_servers(&request.mcp_servers)?;
+        let mcp_servers = request.mcp_servers.clone();
         let source_id = request.session_id.0.as_ref().to_owned();
         let _control = self.lock_session_control(&source_id).await?;
         let requested_root = self.authorized_cwd(&request.cwd)?;
@@ -967,6 +983,9 @@ impl AcpHost {
             .map_err(|_| HostFailure::ResourceNotFound)?;
         if requested_root != source_root {
             return Err(HostFailure::ResourceNotFound);
+        }
+        if !mcp_servers.is_empty() {
+            self.ensure_extensions(&source_root).await?;
         }
         let operation_id = operation_id(request.meta.as_ref())?;
         let title = meta_text(request.meta.as_ref(), META_TITLE, 512)?;
@@ -1006,6 +1025,13 @@ impl AcpHost {
             .runtime
             .open_or_create_session(&context.project_root, Some(&target_id), "acp-fork-open")
             .map_err(map_runtime_failure)?;
+        initialize_unpublished_session_mcp(
+            &self.runtime,
+            &target_id,
+            &context.project_root,
+            mcp_servers,
+        )
+        .await?;
         self.runtime
             .ensure_session_delivery(&target_id)
             .map_err(map_runtime_failure)?;
@@ -1262,7 +1288,7 @@ fn initialize_response(default_cwd: String) -> keencode_acp::InitializeResponseD
     let capabilities = keencode_acp::InitializeAgentCapabilitiesDto::new()
         .load_session(true)
         .prompt_capabilities(schema::PromptCapabilities::default())
-        .mcp_capabilities(schema::McpCapabilities::default())
+        .mcp_capabilities(schema::McpCapabilities::default().http(true))
         .session_capabilities(session_capabilities);
     let mut meta = Map::new();
     meta.insert(META_DEFAULT_CWD.to_owned(), Value::String(default_cwd));
@@ -1314,13 +1340,43 @@ fn map_runtime_failure(error: AgentRuntimeError) -> HostFailure {
     }
 }
 
-/// 标准 New/Load/Fork 不接受 ACP 请求携带的 MCP Server 配置。
-fn reject_mcp_servers(servers: &[schema::McpServer]) -> Result<(), HostFailure> {
-    if servers.is_empty() {
-        Ok(())
-    } else {
-        Err(HostFailure::InvalidParams)
+/// 将 Session MCP 控制错误映射为不泄露连接配置的公开 ACP 分类。
+fn map_session_mcp_failure(error: crate::agent_runtime::SessionMcpError) -> HostFailure {
+    use crate::agent_runtime::SessionMcpError;
+    tracing::error!(%error, "Session MCP operation failed");
+    match error {
+        SessionMcpError::InvalidConfiguration
+        | SessionMcpError::OperationConflict
+        | SessionMcpError::CatalogConflict => HostFailure::InvalidParams,
+        SessionMcpError::SessionUnavailable | SessionMcpError::ProjectMismatch => {
+            HostFailure::ResourceNotFound
+        }
+        SessionMcpError::StateUnavailable | SessionMcpError::Closed => HostFailure::Internal,
     }
+}
+
+/// 为尚未向客户端公开的 new/fork 目标初始化完整 MCP 配置。
+///
+/// 初始化失败时只关闭进程内 Session 和连接，保留确定性持久目标供相同
+/// operationId 重试；不能让客户端尚未知晓的 Session 继续占用运行时资源。
+async fn initialize_unpublished_session_mcp(
+    runtime: &Arc<AgentRuntime>,
+    session_id: &str,
+    project_root: &Path,
+    mcp_servers: Vec<schema::McpServer>,
+) -> Result<(), HostFailure> {
+    let failure = match runtime
+        .replace_session_mcp_servers(session_id, project_root, mcp_servers)
+        .await
+    {
+        Ok(()) => return Ok(()),
+        Err(error) => map_session_mcp_failure(error),
+    };
+    runtime
+        .close_session(session_id)
+        .await
+        .map_err(map_runtime_failure)?;
+    Err(failure)
 }
 
 /// 把 ACP Prompt 中的文本块按顺序合并；未声明能力的内容必须显式拒绝。

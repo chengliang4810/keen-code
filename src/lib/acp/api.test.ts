@@ -35,6 +35,9 @@ import {
   sessionDelete,
   sessionFork,
   sessionGenerateTitle,
+  sessionMcpLoad,
+  sessionMcpStatus,
+  sessionMcpUnload,
   sessionRename,
   sessionRewind,
   sessionSend,
@@ -182,6 +185,61 @@ describe("ACP Session 标准 API 映射", () => {
         cwd: "D:/authoritative-project",
         mcpServers: [],
       },
+    );
+  });
+
+  it("标准 new、load 和 fork 原样传递 Session MCP 完整配置", async () => {
+    const mcpServers = [{
+      name: "local",
+      command: "mcp-server",
+      args: ["--stdio"],
+      env: [{ name: "MODE", value: "test" }],
+    }];
+    clientMocks.acpInitialize.mockResolvedValue({
+      protocolVersion: 1,
+      _meta: { "keencode/defaultCwd": "D:/default" },
+    });
+    clientMocks.acpRequest.mockResolvedValueOnce(sessionResult("session-new"));
+    await sessionConnect({ operationId: "new-mcp", mcpServers });
+    expect(clientMocks.acpRequest).toHaveBeenLastCalledWith(
+      "session/new",
+      {
+        cwd: "D:/default",
+        mcpServers,
+        _meta: { "keencode/operationId": "new-mcp" },
+      },
+      "new-mcp",
+    );
+
+    clientMocks.acpRequest
+      .mockResolvedValueOnce({ sessions: [{ sessionId: "existing", cwd: "D:/existing" }] });
+    await sessionsList();
+    clientMocks.acpRequest.mockClear().mockResolvedValueOnce({
+      sessionId: "existing",
+      _meta: {
+        "keencode/snapshot": sessionSnapshot("existing", {
+          projectPath: "D:/existing",
+        }),
+      },
+    });
+    await sessionConnect({ sessionId: "existing", operationId: "load-mcp", mcpServers });
+    expect(clientMocks.acpRequest).toHaveBeenCalledExactlyOnceWith("session/load", {
+      sessionId: "existing",
+      cwd: "D:/existing",
+      mcpServers,
+    });
+
+    clientMocks.acpRequest.mockReset().mockResolvedValueOnce({ sessionId: "forked" });
+    await sessionFork({ sourceId: "existing", operationId: "fork-mcp", mcpServers });
+    expect(clientMocks.acpRequest).toHaveBeenCalledExactlyOnceWith(
+      "session/fork",
+      {
+        sessionId: "existing",
+        cwd: "D:/existing",
+        mcpServers,
+        _meta: { "keencode/operationId": "fork-mcp" },
+      },
+      "fork-mcp",
     );
   });
 
@@ -352,6 +410,69 @@ describe("ACP Session 标准 API 映射", () => {
 });
 
 describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
+  it("映射 Session MCP load、status 和 unload 的唯一扩展方法", async () => {
+    const mcpServers = [{
+      type: "http" as const,
+      name: "remote",
+      url: "https://example.test/mcp",
+      headers: [{ name: "Authorization", value: "Bearer secret" }],
+    }];
+    clientMocks.acpRequest
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        catalogGeneration: 1,
+        servers: [],
+        changed: true,
+        deduplicated: false,
+      })
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        catalogGeneration: 2,
+        servers: [],
+      })
+      .mockResolvedValueOnce({
+        sessionId: "session-1",
+        catalogGeneration: 2,
+        servers: [],
+        changed: true,
+        deduplicated: false,
+      });
+
+    await sessionMcpLoad({ sessionId: "session-1", mcpServers, operationId: "load-mcp" });
+    await sessionMcpStatus("session-1");
+    await sessionMcpUnload({
+      sessionId: "session-1",
+      serverName: "remote",
+      operationId: "unload-mcp",
+    });
+
+    expect(clientMocks.acpRequest).toHaveBeenNthCalledWith(
+      1,
+      "keencode/session/mcp/load",
+      {
+        sessionId: "session-1",
+        mcpServers,
+        _meta: { "keencode/operationId": "load-mcp" },
+      },
+      "load-mcp",
+    );
+    expect(clientMocks.acpRequest).toHaveBeenNthCalledWith(
+      2,
+      "keencode/session/mcp/status",
+      { sessionId: "session-1" },
+    );
+    expect(clientMocks.acpRequest).toHaveBeenNthCalledWith(
+      3,
+      "keencode/session/mcp/unload",
+      {
+        sessionId: "session-1",
+        serverName: "remote",
+        _meta: { "keencode/operationId": "unload-mcp" },
+      },
+      "unload-mcp",
+    );
+  });
+
   it("通过 keencode/session/steer 发送引导文本，并把业务操作 ID 放入元数据", async () => {
     await sessionSteer({
       text: "继续检查",

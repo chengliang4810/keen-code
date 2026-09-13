@@ -136,6 +136,8 @@ pub(crate) struct ClosedSessionMutationContext {
     pub(crate) project_root: PathBuf,
     /// 变更前 Session 是否是桌面当前焦点。
     was_focused: bool,
+    /// 临时关闭期间保留且不得重连或从磁盘猜测的 Session MCP 运行态。
+    session_mcp: crate::agent_runtime::SuspendedSessionMcp,
 }
 
 /// 投递泵取消后等待最后一个共享句柄释放时允许的最大调度重试次数。
@@ -181,7 +183,11 @@ pub(crate) async fn close_session_for_mutation(
         .as_deref()
         == Some(session_id);
     drop(session);
+    let session_mcp = runtime
+        .suspend_session_mcp(session_id)
+        .map_err(runtime_error)?;
     if let Err(error) = runtime.close_session(session_id).await {
+        let _ = runtime.restore_session_mcp(session_id, &project_root, &session_mcp);
         let restore = runtime
             .ensure_session_delivery(session_id)
             .map(|_| ())
@@ -202,6 +208,7 @@ pub(crate) async fn close_session_for_mutation(
     Ok(ClosedSessionMutationContext {
         project_root,
         was_focused,
+        session_mcp,
     })
 }
 
@@ -220,6 +227,9 @@ pub(crate) fn restore_session_after_mutation(
         .map_err(runtime_error)?;
     runtime
         .ensure_session_delivery(session_id)
+        .map_err(runtime_error)?;
+    runtime
+        .restore_session_mcp(session_id, &context.project_root, &context.session_mcp)
         .map_err(runtime_error)?;
     if context.was_focused {
         runtime.focus_session(session_id).map_err(runtime_error)?;

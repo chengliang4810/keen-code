@@ -794,6 +794,115 @@ pub struct McpListResponse {
     pub error: Option<String>,
 }
 
+/// Session 级 MCP Server 相对当前已发布工具目录的状态。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMcpServerPhase {
+    /// 已连接并排队等待下一个安全 Reason 边界发布。
+    Pending,
+    /// 已进入当前 Session 的可调用延迟工具目录。
+    Ready,
+    /// 已排队等待下一个安全 Reason 边界撤销。
+    PendingUnload,
+    /// 最近一次加载整体失败，当前已发布目录保持不变。
+    Failed,
+}
+
+/// Session 级 MCP Server 的安全运行态，不包含 URL、命令、Header 或环境变量。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpServerStatus {
+    /// Session 内唯一的 MCP Server 名称。
+    pub name: String,
+    /// 当前 Server 的传输类型。
+    pub transport: McpTransportKind,
+    /// 相对已发布目录的生命周期状态。
+    pub status: SessionMcpServerPhase,
+    /// 该 Server 已发现的可调用工具及资源入口数量。
+    pub tools_count: u32,
+    /// 失败状态下唯一允许出现的有界安全摘要。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl SessionMcpServerStatus {
+    /// 校验名称、状态、计数与错误字段的一致性。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.name, MAX_IDENTIFIER_BYTES)?;
+        if let Some(error) = &self.error {
+            validate_text(error, MAX_USER_TEXT_BYTES)?;
+        }
+        if (self.status == SessionMcpServerPhase::Failed) != self.error.is_some()
+            || (self.status == SessionMcpServerPhase::Failed && self.tools_count != 0)
+        {
+            return Err(AcpBoundaryError::InvalidSemanticValue);
+        }
+        Ok(())
+    }
+}
+
+/// `keencode/session/mcp/status` 返回的 Session 独立目录快照。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpStatusResponse {
+    /// 目标 Session 标识。
+    pub session_id: String,
+    /// 当前已经发布并可供延迟执行入口使用的目录代次。
+    pub catalog_generation: u64,
+    /// 按 Server 名称稳定排序的 Session 级 Server 状态。
+    pub servers: Vec<SessionMcpServerStatus>,
+}
+
+impl SessionMcpStatusResponse {
+    /// 校验 Session 作用域、数量、排序、唯一性和全部 Server 状态。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_session_mcp_status(&self.session_id, &self.servers)
+    }
+}
+
+/// Session 级 MCP load/unload 返回的幂等变更结果。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpMutationResponse {
+    /// 目标 Session 标识。
+    pub session_id: String,
+    /// 当前已经发布的目录代次；排队成功不提前增加该值。
+    pub catalog_generation: u64,
+    /// 按 Server 名称稳定排序的 Session 级 Server 状态。
+    pub servers: Vec<SessionMcpServerStatus>,
+    /// 本次调用是否改变了待发布目标状态。
+    pub changed: bool,
+    /// 本次结果是否来自相同 operationId 和相同载荷的进程内幂等收据。
+    pub deduplicated: bool,
+}
+
+impl SessionMcpMutationResponse {
+    /// 校验 Session 作用域、数量、排序、唯一性和全部 Server 状态。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_session_mcp_status(&self.session_id, &self.servers)
+    }
+}
+
+/// 复用 Session MCP 状态列表的不变量校验。
+fn validate_session_mcp_status(
+    session_id: &str,
+    servers: &[SessionMcpServerStatus],
+) -> Result<(), AcpBoundaryError> {
+    validate_identifier(session_id, MAX_IDENTIFIER_BYTES)?;
+    if servers.len() > MAX_MCP_SERVERS {
+        return Err(AcpBoundaryError::InvalidSemanticValue);
+    }
+    let mut previous_name: Option<&str> = None;
+    for server in servers {
+        server.validate()?;
+        if previous_name.is_some_and(|previous| previous >= server.name.as_str()) {
+            return Err(AcpBoundaryError::InvalidSemanticValue);
+        }
+        previous_name = Some(server.name.as_str());
+    }
+    Ok(())
+}
+
 impl McpListResponse {
     /// 校验初始化阶段、Server 数量、排序、唯一性和全部运行态。
     pub fn validate(&self) -> Result<(), AcpBoundaryError> {
@@ -1148,6 +1257,8 @@ impl_validated_response_payload!(
     GoalMutationResponse,
     GoalClearResponse,
     McpListResponse,
+    SessionMcpStatusResponse,
+    SessionMcpMutationResponse,
     ReadFileChangeResponse,
 );
 
@@ -1175,6 +1286,12 @@ pub enum AcpRequest {
     ForkSession(ForkSessionRequest),
     /// 向正在运行的 Turn 安全注入下一条用户引导。
     SteerSession(SteerSessionRequest),
+    /// 为 Session 排队加载一批 MCP Server。
+    SessionMcpLoad(SessionMcpLoadRequest),
+    /// 查询 Session MCP 当前和待发布状态。
+    SessionMcpStatus(SessionMcpStatusRequest),
+    /// 为 Session 排队撤销一个 MCP Server。
+    SessionMcpUnload(SessionMcpUnloadRequest),
     /// 修改 Session 用户可见标题。
     RenameSession(RenameSessionRequest),
     /// 使用当前 Session 的 Provider 生成短标题候选。
@@ -1224,6 +1341,9 @@ impl AcpRequest {
             Self::ListSessions(_) => "session/list",
             Self::ForkSession(_) => "session/fork",
             Self::SteerSession(_) => "keencode/session/steer",
+            Self::SessionMcpLoad(_) => "keencode/session/mcp/load",
+            Self::SessionMcpStatus(_) => "keencode/session/mcp/status",
+            Self::SessionMcpUnload(_) => "keencode/session/mcp/unload",
             Self::RenameSession(_) => "keencode/session/rename",
             Self::GenerateSessionTitle(_) => "keencode/session/title",
             Self::RewindCandidates(_) => "keencode/session/rewind_candidates",
@@ -1434,6 +1554,15 @@ impl AcpRequestDecoder {
             "session/list" => self.decode(params).map(AcpRequest::ListSessions),
             "session/fork" => self.decode(params).map(AcpRequest::ForkSession),
             "keencode/session/steer" => self.decode_extension(params).map(AcpRequest::SteerSession),
+            "keencode/session/mcp/load" => self
+                .decode_extension(params)
+                .map(AcpRequest::SessionMcpLoad),
+            "keencode/session/mcp/status" => self
+                .decode_extension(params)
+                .map(AcpRequest::SessionMcpStatus),
+            "keencode/session/mcp/unload" => self
+                .decode_extension(params)
+                .map(AcpRequest::SessionMcpUnload),
             "keencode/session/rename" => {
                 self.decode_extension(params).map(AcpRequest::RenameSession)
             }
@@ -1875,6 +2004,40 @@ pub struct SteerSessionRequest {
     pub meta: Option<Meta>,
 }
 
+/// 为一个已存在 Session 原子准备一批 MCP Server，并排队等待安全 Reason 边界发布。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpLoadRequest {
+    /// 目标 Session 标识。
+    pub session_id: String,
+    /// 要加入该 Session 独立目录的标准 ACP MCP Server 配置。
+    pub mcp_servers: Vec<agent_client_protocol_schema::McpServer>,
+    /// ACP 保留元数据；KeenCode 从中读取稳定 operationId。
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
+/// 查询一个 Session 当前及待发布 MCP 目录状态。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpStatusRequest {
+    /// 目标 Session 标识。
+    pub session_id: String,
+}
+
+/// 从一个 Session 排队撤销单个 MCP Server。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionMcpUnloadRequest {
+    /// 目标 Session 标识。
+    pub session_id: String,
+    /// 要撤销的 Session 级 MCP Server 名称。
+    pub server_name: String,
+    /// ACP 保留元数据；KeenCode 从中读取稳定 operationId。
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
 /// 修改 Session 用户可见标题。
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2120,6 +2283,45 @@ impl ValidateAcpParams for SteerSessionRequest {
     fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_text(&self.text, MAX_USER_TEXT_BYTES)
+    }
+}
+
+impl ValidateAcpParams for SessionMcpLoadRequest {
+    /// 校验 Session、非空 Server 批次、Server 名称及批内唯一性。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        if self.mcp_servers.is_empty() || self.mcp_servers.len() > MAX_MCP_SERVERS {
+            return Err(AcpBoundaryError::InvalidSemanticValue);
+        }
+        let mut names = HashSet::with_capacity(self.mcp_servers.len());
+        for server in &self.mcp_servers {
+            let name = match server {
+                agent_client_protocol_schema::McpServer::Http(server) => &server.name,
+                agent_client_protocol_schema::McpServer::Sse(server) => &server.name,
+                agent_client_protocol_schema::McpServer::Stdio(server) => &server.name,
+                _ => return Err(AcpBoundaryError::InvalidSemanticValue),
+            };
+            validate_identifier(name, MAX_IDENTIFIER_BYTES)?;
+            if !names.insert(name.as_str()) {
+                return Err(AcpBoundaryError::InvalidSemanticValue);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl ValidateAcpParams for SessionMcpStatusRequest {
+    /// 校验显式 Session 作用域。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)
+    }
+}
+
+impl ValidateAcpParams for SessionMcpUnloadRequest {
+    /// 校验显式 Session 与 Server 标识。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        validate_identifier(&self.server_name, MAX_IDENTIFIER_BYTES)
     }
 }
 
