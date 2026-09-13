@@ -1715,13 +1715,19 @@ impl RuntimeSession {
                 control.lifecycle = RuntimeSessionLifecycle::Closing;
             }
             RuntimeSessionLifecycle::Closing => {}
-            RuntimeSessionLifecycle::Closed => return self.inner.publisher.close(),
+            RuntimeSessionLifecycle::Closed => {
+                self.inner.journal.flush()?;
+                return self.inner.publisher.close();
+            }
         }
         for execution in control.turn_executions.values() {
             if let RuntimeTurnExecution::Running { cancellation, .. } = execution {
                 cancellation.cancel();
             }
         }
+        // Manager 丢弃其句柄前必须把当前批量窗口变成持久化前缀；失败时
+        // 生命周期保持 Closing，注册项由 Manager 保留并允许同句柄重试。
+        self.inner.journal.flush()?;
         close_runtime_publisher_if_idle(&self.inner, &mut control)?;
         Ok(())
     }
@@ -2878,6 +2884,13 @@ fn commit_agent_event(
     if canonical_sha256(&mapped).map_err(|_| commit_rejected())? != mapped_sha256 {
         return Err(commit_rejected());
     }
+    let state_change_execution_started = match &mapped {
+        SessionEvent::ToolExecutionStarted { request_id } => state
+            .tools
+            .get(request_id)
+            .is_some_and(|tool| tool.request.effect == ToolEffect::ChangesState),
+        _ => false,
+    };
     control
         .mappings
         .entry(event_key.clone())
@@ -2927,6 +2940,13 @@ fn commit_agent_event(
                 return Err(commit_rejected());
             }
         };
+    if state_change_execution_started && appended_record.is_some() && inner.journal.flush().is_err()
+    {
+        // ToolExecutionStarted 已写入但尚不能证明 durable。冻结相同事件供
+        // 幂等对账，绝不能向 Runner 返回成功并放行真实状态变更工具。
+        mark_event_indeterminate(&mut control, &event_key);
+        return Err(commit_indeterminate());
+    }
     if charge_confirmed_reservation_event(
         &mut control,
         reservation_key.as_ref(),

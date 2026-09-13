@@ -20,6 +20,7 @@ use keencode_model::{
     ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply,
     StopReason, TokenUsage, ToolCall, ToolDefinition, ToolResult,
 };
+use keencode_resources::test_support::{AppendFault, clear_append_fault, set_append_fault};
 use keencode_resources::{
     AgentId, ArtifactMaterialization, ArtifactStore, MailboxMessage, MailboxMessageId,
     MailboxState, MessageImageSource, MessagePart, PlanState, SessionEvent, SessionEventId,
@@ -144,23 +145,28 @@ fn assistant_with_tool_calls(count: usize) -> Message {
 
 /// 创建只包含一个状态变更工具调用的脚本化模型响应。
 fn state_changing_tool_reply() -> ScriptedReply {
+    state_changing_tool_reply_for("RuntimeWrite", "call-runtime-write")
+}
+
+/// 创建调用指定状态变更工具的脚本化模型响应。
+fn state_changing_tool_reply_for(tool_name: &str, tool_call_id: &str) -> ScriptedReply {
     ScriptedReply::events([
         ModelStreamEvent::MessageStart {
             metadata: ResponseMetadata::default(),
         },
         ModelStreamEvent::ToolCallStart {
             index: 0,
-            id: "call-runtime-write".to_owned(),
-            name: "RuntimeWrite".to_owned(),
+            id: tool_call_id.to_owned(),
+            name: tool_name.to_owned(),
         },
         ModelStreamEvent::ToolCallArgumentsDelta {
             index: 0,
-            id: "call-runtime-write".to_owned(),
+            id: tool_call_id.to_owned(),
             delta: serde_json::json!({"path": "x"}).to_string(),
         },
         ModelStreamEvent::ToolCallEnd {
             index: 0,
-            id: "call-runtime-write".to_owned(),
+            id: tool_call_id.to_owned(),
         },
         ModelStreamEvent::MessageEnd {
             stop_reason: StopReason::ToolUse,
@@ -912,6 +918,82 @@ impl AgentTool for RuntimeWriteTool {
     }
 }
 
+/// 在真实执行入口观察对应 ToolExecutionStarted 是否已经越过 durability barrier。
+struct RuntimeDurabilityProbeTool {
+    /// 用于覆盖 Command、Git、MCP 等不同非文件状态变更工具名称。
+    name: &'static str,
+    /// 读取与提交出口相同的 Session Journal 批量窗口。
+    session: RuntimeSession,
+    /// 标记工具实现是否确实被调用。
+    executed: Arc<AtomicBool>,
+    /// 记录执行入口观察到的 Journal 是否已经没有待刷记录。
+    execution_started_durable: Arc<AtomicBool>,
+}
+
+impl AgentTool for RuntimeDurabilityProbeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            self.name,
+            "验证状态变更工具执行前的 Journal durability barrier",
+            serde_json::json!({
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn effect(&self, _input: &serde_json::Value) -> Result<AgentToolEffect, ToolError> {
+        Ok(AgentToolEffect::ChangesState)
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    fn execute(&self, _context: ToolContext, _input: serde_json::Value) -> ToolFuture<'_> {
+        let durable = self
+            .session
+            .inner
+            .journal
+            .pending_flush_records()
+            .is_ok_and(|pending| pending == 0);
+        self.execution_started_durable
+            .store(durable, Ordering::SeqCst);
+        self.executed.store(true, Ordering::SeqCst);
+        Box::pin(async { Ok(ToolOutput::text("状态变更执行完成")) })
+    }
+}
+
+/// 在每次 ToolExecutionStarted 提交前注入只由显式 barrier 消费的 sync 故障。
+struct StateChangeBarrierFaultSink {
+    /// 真实 Runtime 提交控制面。
+    inner: Arc<super::RuntimeSessionInner>,
+    /// Agent 对不确定提交执行的有界尝试次数。
+    start_attempts: AtomicUsize,
+}
+
+impl AgentCommitSink for StateChangeBarrierFaultSink {
+    fn preflight_tool_round(
+        &self,
+        round: &AgentToolRoundPreflight,
+    ) -> Result<Box<dyn AgentToolRoundReservation>, AgentToolRoundPreflightError> {
+        preflight_round(&self.inner, round)
+    }
+
+    fn commit(&self, event: &AgentCommitEvent) -> Result<(), AgentCommitSinkError> {
+        if matches!(
+            event.kind(),
+            AgentCommitEventKind::ToolExecutionStarted { .. }
+        ) {
+            self.start_attempts.fetch_add(1, Ordering::SeqCst);
+            set_append_fault(AppendFault::BarrierSync);
+        }
+        commit_agent_event(&self.inner, event)
+    }
+}
+
 /// 生命周期事件委托真实 Runtime，仅对最终 Round 持续返回明确拒绝。
 struct RejectFinalRoundSink {
     /// 真实 Session、Journal、Artifact 与 reservation 控制面。
@@ -1353,6 +1435,133 @@ async fn bound_agent_runner_propagates_usage_failure_and_blocks_tool_execution()
             )
             .map(|turn| turn.status.clone()),
         Some(TurnStatus::Failed)
+    );
+}
+
+/// Command、Git、MCP 等非文件状态变更工具都必须在执行前持久化 execution-started。
+#[tokio::test]
+async fn state_changing_tool_execution_starts_only_after_durability_barrier() {
+    for (index, tool_name) in ["Command", "Git", "MCP"].into_iter().enumerate() {
+        let root = TempDir::new().expect("临时目录应创建");
+        let session_id = format!("runtime-{tool_name}-durability").to_lowercase();
+        let turn_id = format!("turn-{tool_name}-durability").to_lowercase();
+        let tool_call_id = format!("call-{tool_name}-{index}").to_lowercase();
+        let session = create(&root, &session_id);
+        session.inner.journal.flush().expect("测试基线应先落盘");
+        session
+            .inner
+            .journal
+            .defer_batch_timeout_for_tests()
+            .expect("测试批次 deadline 应推迟");
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                streaming: true,
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            },
+            [
+                state_changing_tool_reply_for(tool_name, &tool_call_id),
+                completed_text_reply("状态变更工具已完成"),
+            ],
+        ));
+        let executed = Arc::new(AtomicBool::new(false));
+        let execution_started_durable = Arc::new(AtomicBool::new(false));
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(RuntimeDurabilityProbeTool {
+                name: tool_name,
+                session: session.clone(),
+                executed: executed.clone(),
+                execution_started_durable: execution_started_durable.clone(),
+            }))
+            .expect("状态变更探针工具应注册");
+        let runner =
+            session.bind_agent_runner(AgentRunner::new(provider, tools, RunLimits::default()));
+
+        let result = runner
+            .run_turn(root_runtime_turn(
+                &session,
+                &turn_id,
+                "验证状态变更工具持久化栅栏",
+            ))
+            .await
+            .expect("持久化栅栏成功时 Turn 应执行");
+
+        assert!(result.is_success(), "{tool_name} Turn 应成功");
+        assert!(executed.load(Ordering::SeqCst), "{tool_name} 应实际执行");
+        assert!(
+            execution_started_durable.load(Ordering::SeqCst),
+            "{tool_name} 执行入口不得观察到待刷的 ToolExecutionStarted"
+        );
+    }
+}
+
+/// execution-started 的显式 sync 持续失败时不得放行真实状态变更工具。
+#[tokio::test]
+async fn state_changing_tool_barrier_failure_is_indeterminate_and_blocks_execution() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session = create(&root, "runtime-tool-barrier-failure");
+    let key = start_turn(&session, "turn-tool-barrier-failure", 0);
+    session.inner.journal.flush().expect("测试基线应先落盘");
+    session
+        .inner
+        .journal
+        .defer_batch_timeout_for_tests()
+        .expect("测试批次 deadline 应推迟");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            tool_calling: true,
+            ..ProviderCapabilities::default()
+        },
+        [state_changing_tool_reply()],
+    ));
+    let executed = Arc::new(AtomicBool::new(false));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(RuntimeWriteTool {
+            executed: executed.clone(),
+        }))
+        .expect("Runtime 状态变更工具应注册");
+    let sink = Arc::new(StateChangeBarrierFaultSink {
+        inner: session.inner.clone(),
+        start_attempts: AtomicUsize::new(0),
+    });
+
+    let result = AgentRunner::new(provider, tools, RunLimits::default())
+        .with_commit_sink(sink.clone())
+        .run_turn(TurnRequest::new(
+            keencode_agent::SessionId::new(session.session_id().as_str())
+                .expect("Agent Session ID 应有效"),
+            keencode_agent::TurnId::new(key.turn_id.clone()).expect("Agent Turn ID 应有效"),
+            keencode_agent::AgentId::new("root").expect("Agent 根身份应有效"),
+            key.model,
+            vec![Message::text(ModelMessageRole::User, "执行状态变更工具")],
+            PlanGuard::inactive(),
+        ))
+        .await;
+    clear_append_fault();
+
+    assert!(!result.is_success());
+    assert_eq!(sink.start_attempts.load(Ordering::SeqCst), 2);
+    assert!(!executed.load(Ordering::SeqCst));
+    let snapshot = session.snapshot().expect("不确定状态应可读取");
+    assert!(snapshot.recovery_required);
+    assert_eq!(snapshot.state.tools.len(), 1);
+    assert!(
+        snapshot
+            .state
+            .tools
+            .values()
+            .all(|tool| tool.execution_started)
+    );
+    assert!(
+        session
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("待刷窗口应可读取")
+            > 0
     );
 }
 
@@ -5266,6 +5475,118 @@ fn runtime_manager_close_all_is_idempotent_after_partial_close() {
     assert!(session_a.snapshot().expect("Session A 快照应可读").closed);
     assert!(session_b.snapshot().expect("Session B 快照应可读").closed);
     manager.close_all().expect("重复 close_all 应保持幂等");
+}
+
+/// Manager close 返回前必须刷空当前批次，即使调用方仍保留 RuntimeSession 句柄。
+#[test]
+fn runtime_manager_close_flushes_pending_records_before_unregistering() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let manager = RuntimeManager::new(config(&root)).expect("RuntimeManager 应创建");
+    let session = manager
+        .create(manager_create_request(&root, "manager-close-flush"))
+        .expect("Manager 应创建 Session");
+    session.inner.journal.flush().expect("测试基线应先落盘");
+    session
+        .inner
+        .journal
+        .defer_batch_timeout_for_tests()
+        .expect("测试批次 deadline 应推迟");
+    append(
+        &session,
+        "event-manager-close-pending",
+        SessionEvent::SessionRenamed {
+            title: "关闭前待刷".to_owned(),
+        },
+    );
+    assert_eq!(
+        session
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("待刷窗口应可读取"),
+        1
+    );
+
+    manager
+        .close("manager-close-flush")
+        .expect("Manager close 应完成 durability barrier");
+
+    assert_eq!(
+        session
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("关闭后窗口应可读取"),
+        0
+    );
+    assert!(session.snapshot().expect("旧句柄快照应可读取").closed);
+    assert!(
+        manager
+            .registered_session_ids()
+            .expect("注册表应可读取")
+            .is_empty()
+    );
+}
+
+/// close barrier 失败时保留 Manager 注册项，清除故障后可在同一句柄上重试。
+#[test]
+fn runtime_manager_close_flush_failure_keeps_registration_for_retry() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let manager = RuntimeManager::new(config(&root)).expect("RuntimeManager 应创建");
+    let session = manager
+        .create(manager_create_request(&root, "manager-close-flush-retry"))
+        .expect("Manager 应创建 Session");
+    session.inner.journal.flush().expect("测试基线应先落盘");
+    session
+        .inner
+        .journal
+        .defer_batch_timeout_for_tests()
+        .expect("测试批次 deadline 应推迟");
+    append(
+        &session,
+        "event-manager-close-retry-pending",
+        SessionEvent::SessionRenamed {
+            title: "关闭重试待刷".to_owned(),
+        },
+    );
+    set_append_fault(AppendFault::Sync);
+
+    assert!(manager.close("manager-close-flush-retry").is_err());
+    clear_append_fault();
+    assert_eq!(
+        manager
+            .registered_session_ids()
+            .expect("失败后注册表应可读取"),
+        vec![session.session_id().clone()]
+    );
+    assert!(
+        session
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("失败后待刷窗口应保留")
+            > 0
+    );
+
+    manager
+        .close("manager-close-flush-retry")
+        .expect("清除故障后 close 应完成对账");
+
+    assert_eq!(
+        session
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("重试后窗口应可读取"),
+        0
+    );
+    assert!(session.snapshot().expect("重试后快照应可读取").closed);
+    assert!(
+        manager
+            .registered_session_ids()
+            .expect("成功后注册表应可读取")
+            .is_empty()
+    );
 }
 
 /// 验证两个线程同时创建相同 Session 时只有一个完成进程内注册。
