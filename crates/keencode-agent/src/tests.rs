@@ -729,6 +729,165 @@ fn runner(provider: Arc<ScriptedProvider>, registry: ToolRegistry) -> AgentRunne
     AgentRunner::new(provider, registry, RunLimits::default())
 }
 
+/// 向单个 Runner 只发布一次目录变化，并记录实际读取边界。
+struct OneShotToolCatalogUpdate {
+    update: Mutex<Option<AgentToolCatalogDelta>>,
+    calls: AtomicUsize,
+}
+
+impl OneShotToolCatalogUpdate {
+    fn new(update: AgentToolCatalogDelta) -> Self {
+        Self {
+            update: Mutex::new(Some(update)),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+impl AgentToolCatalogUpdateSource for OneShotToolCatalogUpdate {
+    fn take_update(&self) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Ok(self.update.lock().expect("目录变化测试锁不应损坏").take())
+    }
+}
+
+/// 判断一条消息是否为 Runtime 私有的延迟工具目录通知。
+fn is_tool_catalog_update_message(message: &Message) -> bool {
+    message.role == MessageRole::Developer
+        && message.is_meta
+        && message.content.iter().any(|content| {
+            matches!(
+                content,
+                ContentBlock::Text { text }
+                    if text.contains("KeenCode Runtime 已在当前 Reason 边界原子更新延迟工具目录")
+                        && text.contains("\"catalogGeneration\"")
+            )
+        })
+}
+
+fn tool_catalog_update_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| is_tool_catalog_update_message(message))
+        .count()
+}
+
+#[test]
+fn tool_catalog_delta_accepts_definition_only_generation_changes() {
+    let delta = AgentToolCatalogDelta::new(7, Vec::new(), Vec::new())
+        .expect("实现或配置换代可以保持工具名称集合不变");
+    assert_eq!(delta.generation(), 7);
+    assert!(delta.added().is_empty());
+    assert!(delta.removed().is_empty());
+}
+
+/// 同一逻辑 Round 的空响应重试必须继续携带同一通知，但通知不能进入权威 Transcript。
+#[tokio::test]
+async fn tool_catalog_update_is_transient_and_reused_by_same_round_retry() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            empty_reply_with_stop(StopReason::Completed),
+            text_reply("重试完成"),
+        ],
+    ));
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(
+            2,
+            vec!["mcp__new__tool".to_owned()],
+            vec!["mcp__old__tool".to_owned()],
+        )
+        .unwrap(),
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_tool_catalog_update_source(updates.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(updates.calls(), 1, "同一逻辑 Round 的重试不得重复读取目录");
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
+    assert_eq!(tool_catalog_update_count(&requests[1].messages), 1);
+    assert_eq!(
+        serde_json::to_vec(&requests[0]).unwrap(),
+        serde_json::to_vec(&requests[1]).unwrap(),
+        "空响应重试应逐字节复用包含目录通知的请求"
+    );
+    assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
+/// 目录通知只属于观察到换代的模型 Round，后续 Round 不得再次注入。
+#[tokio::test]
+async fn tool_catalog_update_is_delivered_once_per_runner_generation() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("catalog-call", "record", json!({"value": "work"}))]),
+            text_reply("完成"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ReadOnly,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).unwrap();
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(3, vec!["mcp__new__tool".to_owned()], Vec::new()).unwrap(),
+    ));
+    let result = runner(provider.clone(), registry)
+        .with_tool_catalog_update_source(updates.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(updates.calls(), 2);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
+    assert_eq!(tool_catalog_update_count(&requests[1].messages), 0);
+    assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
+/// Provider 超限触发的摘要输入不能看到瞬时目录通知；恢复采样仍复用原通知。
+#[tokio::test]
+async fn tool_catalog_update_is_excluded_from_compaction_input() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_error_reply(),
+            text_reply("强制摘要"),
+            text_reply("压缩后完成"),
+        ],
+    ));
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(4, Vec::new(), Vec::new()).unwrap(),
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_tool_catalog_update_source(updates.clone())
+        .run_turn(turn_request_with_messages(compactable_tool_history()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(updates.calls(), 1);
+    assert_eq!(result.compactions.len(), 1);
+    let requests = provider.requests().expect("请求快照应可读取");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
+    assert_eq!(requests[1].tool_choice, ToolChoice::None);
+    assert!(requests[1].tools.is_empty());
+    assert_eq!(tool_catalog_update_count(&requests[1].messages), 0);
+    assert_eq!(tool_catalog_update_count(&requests[2].messages), 1);
+    assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
 /// 文本 Turn 必须形成单一完成终态并提交 assistant 消息。
 #[tokio::test]
 async fn runner_completes_text_turn() {

@@ -104,6 +104,12 @@ const MAX_DYNAMIC_INPUT_MESSAGES_PER_BOUNDARY: usize = 256;
 /// 动态消息已提交后确认持久 claim 的最大尝试次数。
 const DYNAMIC_INPUT_ACKNOWLEDGEMENT_ATTEMPTS: usize = 2;
 
+/// 单次目录变化通知允许列出的新增或移除工具总数。
+const MAX_TOOL_CATALOG_DELTA_NAMES: usize = 512;
+
+/// 单个目录变化工具名称允许占用的最大 UTF-8 字节数。
+const MAX_TOOL_CATALOG_DELTA_NAME_BYTES: usize = 256;
+
 /// 实时事件 Sink 错误进入 Turn 终态前允许使用的最大 UTF-8 字节数。
 const MAX_EVENT_SINK_ERROR_MESSAGE_BYTES: usize = 1_024;
 
@@ -450,6 +456,131 @@ pub trait AgentDynamicInputSource: Send + Sync {
     ) -> Result<AgentDynamicInputBatch, AgentDynamicInputError>;
 }
 
+/// 延迟工具目录在一个安全 Reason 边界可见的原子变化摘要。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentToolCatalogDelta {
+    /// 已发布目录的严格递增代次。
+    generation: u64,
+    /// 相对该 Runner 上次观察快照新增的工具名称。
+    added: Vec<String>,
+    /// 相对该 Runner 上次观察快照移除的工具名称。
+    removed: Vec<String>,
+}
+
+impl AgentToolCatalogDelta {
+    /// 创建一个经过数量、名称与唯一性校验的变化摘要。
+    ///
+    /// 工具实现或配置换代可能保持名称集合不变，因此只要代次有效，新增和
+    /// 移除列表都为空仍是合法变化。
+    pub fn new(
+        generation: u64,
+        added: Vec<String>,
+        removed: Vec<String>,
+    ) -> Result<Self, AgentToolCatalogUpdateError> {
+        if generation == 0
+            || added.len().saturating_add(removed.len()) > MAX_TOOL_CATALOG_DELTA_NAMES
+        {
+            return Err(AgentToolCatalogUpdateError::new("工具目录变化摘要无效"));
+        }
+        let mut names = HashSet::with_capacity(added.len().saturating_add(removed.len()));
+        for name in added.iter().chain(removed.iter()) {
+            if name.is_empty()
+                || name.trim() != name
+                || name.len() > MAX_TOOL_CATALOG_DELTA_NAME_BYTES
+                || !names.insert(name.as_str())
+            {
+                return Err(AgentToolCatalogUpdateError::new("工具目录变化名称无效"));
+            }
+        }
+        Ok(Self {
+            generation,
+            added,
+            removed,
+        })
+    }
+
+    /// 返回本次已发布目录代次。
+    pub const fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// 返回按稳定顺序排列的新增工具名称。
+    pub fn added(&self) -> &[String] {
+        &self.added
+    }
+
+    /// 返回按稳定顺序排列的移除工具名称。
+    pub fn removed(&self) -> &[String] {
+        &self.removed
+    }
+
+    /// 构造只属于当前模型请求快照、不得提交 Transcript 的开发者消息。
+    fn into_message(self) -> Result<Message, AgentToolCatalogUpdateError> {
+        let payload = serde_json::to_string(&serde_json::json!({
+            "catalogGeneration": self.generation,
+            "added": self.added,
+            "removed": self.removed,
+        }))
+        .map_err(|_| AgentToolCatalogUpdateError::new("工具目录变化摘要编码失败"))?;
+        let mut message = Message::text(
+            MessageRole::Developer,
+            format!(
+                "KeenCode Runtime 已在当前 Reason 边界原子更新延迟工具目录。受影响工具在调用前应重新使用 SearchExtraTools 获取当前定义。目录变化：{payload}"
+            ),
+        );
+        message.is_meta = true;
+        Ok(message)
+    }
+}
+
+/// 读取或发布延迟工具目录变化失败时使用的安全错误。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AgentToolCatalogUpdateError {
+    /// 不包含工具 Schema、连接配置或凭据的稳定说明。
+    message: String,
+}
+
+impl AgentToolCatalogUpdateError {
+    /// 创建一条安全错误。
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// 返回可进入 Runtime 终态的安全说明。
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for AgentToolCatalogUpdateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl Error for AgentToolCatalogUpdateError {}
+
+/// 在模型采样前的安全 Reason 边界原子应用并读取延迟工具目录变化。
+pub trait AgentToolCatalogUpdateSource: Send + Sync {
+    /// 返回该 Runner 自上次观察以来的唯一变化；没有变化时返回 `None`。
+    fn take_update(
+        &self,
+    ) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError>;
+}
+
+/// 默认没有可变延迟工具目录的更新端口。
+struct NoopAgentToolCatalogUpdateSource;
+
+impl AgentToolCatalogUpdateSource for NoopAgentToolCatalogUpdateSource {
+    fn take_update(
+        &self,
+    ) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError> {
+        Ok(None)
+    }
+}
+
 /// 默认不注入动态消息的输入端口。
 struct NoopAgentDynamicInputSource;
 
@@ -686,6 +817,8 @@ pub struct AgentRunner {
     hooks: HookRuntime,
     /// 每次模型采样前 claim mailbox 与用户 Steer 的持久输入端口。
     dynamic_input: Arc<dyn AgentDynamicInputSource>,
+    /// 每个普通模型 Round轮次在压缩后读取一次的瞬时工具目录变化端口。
+    tool_catalog_updates: Arc<dyn AgentToolCatalogUpdateSource>,
     /// 仅根任务注入；子 Agent 和普通独立 Runner 不承担项目 Goal 续跑。
     goal_controller: Option<Arc<dyn GoalController>>,
     /// 按 Provider 到达顺序接收可信实时事件且默认不产生副作用的出口。
@@ -705,6 +838,7 @@ impl AgentRunner {
             context,
             hooks: HookRuntime::empty(),
             dynamic_input: Arc::new(NoopAgentDynamicInputSource),
+            tool_catalog_updates: Arc::new(NoopAgentToolCatalogUpdateSource),
             goal_controller: None,
             event_sink: Arc::new(NoopAgentEventSink),
             commit_sink: Arc::new(NoopAgentCommitSink),
@@ -739,6 +873,15 @@ impl AgentRunner {
         dynamic_input: Arc<dyn AgentDynamicInputSource>,
     ) -> Self {
         self.dynamic_input = dynamic_input;
+        self
+    }
+
+    /// 注入仅在安全 Reason 边界读取、且不会写入 Transcript 的工具目录变化端口。
+    pub fn with_tool_catalog_update_source(
+        mut self,
+        source: Arc<dyn AgentToolCatalogUpdateSource>,
+    ) -> Self {
+        self.tool_catalog_updates = source;
         self
     }
 
@@ -1854,6 +1997,24 @@ impl AgentRunner {
                 }
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             }
+            // 目录换代只发生在压缩已经结束、真正采样尚未开始的安全 Reason
+            // 边界。消息仅附加到本逻辑轮次的请求副本：它不会进入
+            // active.messages、权威提交或压缩输入；同一 Round 的 Provider 重试
+            // 仍复用该通知，下一 Round 则由 source 的观察水位保证不重复。
+            let tool_catalog_update = if summary_only {
+                None
+            } else {
+                self.tool_catalog_updates
+                    .take_update()
+                    .map_err(|error| AgentRunError::Internal {
+                        message: format!("工具目录更新失败：{}", error.message()),
+                    })?
+                    .map(AgentToolCatalogDelta::into_message)
+                    .transpose()
+                    .map_err(|error| AgentRunError::Internal {
+                        message: format!("工具目录通知构造失败：{}", error.message()),
+                    })?
+            };
             // 三个一次性恢复预算互不挤占：上下文超限强制压缩、空响应重试与
             // 输出上限降级各按自身触发条件独立生效。循环重新进入 match 的顺序
             // 保证强制压缩臂继续优先于输出上限降级处理后续错误；强制压缩后
@@ -1864,7 +2025,10 @@ impl AgentRunner {
                 match self
                     .request_model(
                         request,
-                        model_request.clone(),
+                        request_with_transient_message(
+                            &model_request,
+                            tool_catalog_update.as_ref(),
+                        ),
                         model_call_attempt,
                         &mut active.state,
                     )
@@ -1992,6 +2156,8 @@ impl AgentRunner {
                 }
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
+            let sampled_request =
+                request_with_transient_message(&model_request, tool_catalog_update.as_ref());
             let (mut response, tool_calls) = loop {
                 self.commit_model_round_usage(
                     request,
@@ -2001,10 +2167,10 @@ impl AgentRunner {
                     completed_round.elapsed,
                 )?;
                 // 权威用量提交成功后把上下文估算锚定到本轮请求的真实输入规模：
-                // model_request 即产生该用量的确切请求，其后追加的消息按逐块
+                // sampled_request 即产生该用量的确切请求，其后追加的消息按逐块
                 // 规则增量估算（失败轮用量不在此处提交，不形成锚点）。
                 self.context
-                    .note_model_round_usage(&model_request, &completed_round.response.usage);
+                    .note_model_round_usage(&sampled_request, &completed_round.response.usage);
                 let response = completed_round.response;
                 // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
                 // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空
@@ -2108,7 +2274,10 @@ impl AgentRunner {
                 completed_round = self
                     .request_model(
                         request,
-                        model_request.clone(),
+                        request_with_transient_message(
+                            &model_request,
+                            tool_catalog_update.as_ref(),
+                        ),
                         retry_call_attempt,
                         &mut active.state,
                     )
@@ -3828,6 +3997,18 @@ fn duplicate_tool_call_id_from_protocol_message(message: &str) -> Option<String>
     crate::ToolCallId::new(id.to_owned())
         .ok()
         .map(|id| id.into_inner())
+}
+
+/// 给一次实际模型调用的私有快照追加瞬时消息，不改变后续压缩或 Transcript 使用的基线。
+fn request_with_transient_message(
+    request: &ModelRequest,
+    message: Option<&Message>,
+) -> ModelRequest {
+    let mut snapshot = request.clone();
+    if let Some(message) = message {
+        snapshot.append_messages(vec![message.clone()]);
+    }
+    snapshot
 }
 
 /// 一个正在运行且尚未归档的 Turn 内部状态。

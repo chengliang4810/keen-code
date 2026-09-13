@@ -134,6 +134,19 @@ impl DeferredToolCatalog {
             .collect()
     }
 
+    /// 返回当前目录代次与按名称排序的定义，二者来自同一个读锁快照。
+    pub fn generation_and_definitions(&self) -> (u64, Vec<ToolDefinition>) {
+        let state = self.read_state();
+        (
+            state.generation,
+            state
+                .entries
+                .values()
+                .map(|entry| entry.definition.clone())
+                .collect(),
+        )
+    }
+
     /// 返回当前目录包含的工具数量。
     pub fn len(&self) -> usize {
         self.read_state().entries.len()

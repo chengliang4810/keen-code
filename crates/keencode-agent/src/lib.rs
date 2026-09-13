@@ -74,8 +74,9 @@ pub use ids::{
 pub use plan_guard::{PlanGuard, PlanGuardError, PlanGuardState, ToolEffect, ToolInputHash};
 pub use runner::{
     AgentDynamicInputAcknowledgement, AgentDynamicInputBatch, AgentDynamicInputError,
-    AgentDynamicInputSource, AgentRunError, AgentRunner, RunLimits, RunLimitsError, ToolLoopKind,
-    TurnRequest, TurnResult,
+    AgentDynamicInputSource, AgentRunError, AgentRunner, AgentToolCatalogDelta,
+    AgentToolCatalogUpdateError, AgentToolCatalogUpdateSource, RunLimits, RunLimitsError,
+    ToolLoopKind, TurnRequest, TurnResult,
 };
 pub use state::{
     GoalChange, GoalChangeKind, GoalController, GoalDraft, GoalPatch, GoalRecord, GoalSnapshot,
