@@ -1081,11 +1081,15 @@ fn response_stop_reason(
     saw_tool_call: bool,
     saw_refusal: bool,
 ) -> StopReason {
-    let status = response.get("status").and_then(Value::as_str);
+    let status = response
+        .get("status")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
     let detail = response
         .get("incomplete_details")
         .and_then(|details| details.get("reason"))
-        .and_then(Value::as_str);
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
     // 明确的取消、输出上限和内容过滤必须优先于工具内容；否则一个带有
     // function_call 的 Responses 截断响应会被误标为 ToolUse，进入真实工具调度。
     if status == Some("cancelled") {

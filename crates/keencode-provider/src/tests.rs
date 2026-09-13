@@ -2850,6 +2850,82 @@ fn three_protocols_preserve_missing_stop_reason_sentinels_with_complete_tool_cal
                 reason: "missing_status".to_owned(),
             },
         ),
+        (
+            ProviderProtocol::Responses,
+            json!({
+                "id": "resp-empty-status",
+                "object": "response",
+                "model": "test-model",
+                "status": "",
+                "output": [{
+                    "id": "fc-empty-status",
+                    "call_id": "call-empty-status",
+                    "type": "function_call",
+                    "name": "record",
+                    "arguments": "{\"value\":1}"
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_status".to_owned(),
+            },
+        ),
+        (
+            ProviderProtocol::Responses,
+            json!({
+                "id": "resp-blank-status",
+                "object": "response",
+                "model": "test-model",
+                "status": "   ",
+                "output": [{
+                    "id": "fc-blank-status",
+                    "call_id": "call-blank-status",
+                    "type": "function_call",
+                    "name": "record",
+                    "arguments": "{\"value\":1}"
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_status".to_owned(),
+            },
+        ),
+        (
+            ProviderProtocol::Responses,
+            json!({
+                "id": "resp-empty-detail",
+                "object": "response",
+                "model": "test-model",
+                "incomplete_details": {"reason": ""},
+                "output": [{
+                    "id": "fc-empty-detail",
+                    "call_id": "call-empty-detail",
+                    "type": "function_call",
+                    "name": "record",
+                    "arguments": "{\"value\":1}"
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_status".to_owned(),
+            },
+        ),
+        (
+            ProviderProtocol::Responses,
+            json!({
+                "id": "resp-blank-detail",
+                "object": "response",
+                "model": "test-model",
+                "incomplete_details": {"reason": "   "},
+                "output": [{
+                    "id": "fc-blank-detail",
+                    "call_id": "call-blank-detail",
+                    "type": "function_call",
+                    "name": "record",
+                    "arguments": "{\"value\":1}"
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_status".to_owned(),
+            },
+        ),
     ];
 
     for (protocol, value, expected_stop_reason) in cases {

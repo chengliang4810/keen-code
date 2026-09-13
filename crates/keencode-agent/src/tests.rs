@@ -1407,11 +1407,13 @@ async fn ordinary_tool_calls_follow_complete_content_before_stop_reason() {
 #[tokio::test]
 async fn ordinary_tool_calls_reject_missing_other_stop_reasons_before_execution() {
     for reason in [
+        "",
+        "   ",
+        "\t\n",
         "missing_finish_reason",
         "missing_stop_reason",
         "missing_status",
         "missing",
-        "  ",
     ] {
         let provider = Arc::new(ScriptedProvider::new(
             ProviderCapabilities::default(),
