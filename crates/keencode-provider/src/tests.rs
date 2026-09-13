@@ -263,7 +263,10 @@ async fn http_error_redacts_embedded_credentials_without_losing_status() {
             "message": concat!(
                 "请求过于频繁 request_id=req-http ",
                 "Authorization: Bearer http-secret ",
-                "details={\"apiKey\":\"nested-http-secret\"}"
+                "details={\"apiKey\":\"nested-http-secret\"} ",
+                "path=https://path.invalid/%61pi_key=encoded-path-http-secret ",
+                "redirect=https://outer.invalid/?next=https%253A%252F%252Fuser%253Aencoded-nested-http-secret%2540inner.invalid%252F ",
+                "fragment=https://fragment.invalid/#%61pi_key%3Dencoded-fragment-http-secret"
             )
         }
     })
@@ -290,6 +293,9 @@ async fn http_error_redacts_embedded_credentials_without_losing_status() {
     assert!(error.message().contains("Authorization: Bearer [REDACTED]"));
     assert!(!error.message().contains("http-secret"));
     assert!(!error.message().contains("nested-http-secret"));
+    assert!(!error.message().contains("encoded-path-http-secret"));
+    assert!(!error.message().contains("encoded-nested-http-secret"));
+    assert!(!error.message().contains("encoded-fragment-http-secret"));
     server.join().unwrap().unwrap();
 }
 

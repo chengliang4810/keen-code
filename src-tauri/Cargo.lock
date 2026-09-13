@@ -2342,6 +2342,7 @@ name = "keencode-model"
 version = "0.1.0"
 dependencies = [
  "futures-core",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.19",

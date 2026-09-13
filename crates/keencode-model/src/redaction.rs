@@ -1,6 +1,7 @@
 //! 跨 Provider、工具、持久化与桌面投影共享的错误秘密脱敏。
 
-use url::{Url, form_urlencoded};
+use percent_encoding::percent_decode_str;
+use url::Url;
 
 /// 错误文本中秘密值使用的唯一固定占位符。
 pub const REDACTED_SECRET: &str = "[REDACTED]";
@@ -46,6 +47,157 @@ fn redact_error_secrets_at_depth(input: &str, url_depth: usize) -> String {
 struct Redaction {
     end: usize,
     replacement: String,
+}
+
+/// URL 组件在当前或更深编码层的检查结果。
+enum UrlComponentRedaction {
+    /// 所有可达编码层都不包含明确秘密语义，调用方应保留原组件。
+    Unchanged,
+    /// 至少一层包含秘密，返回已经清理的解码表示。
+    Redacted(String),
+    /// 组件畸形、超限或超深，调用方必须删除整个 URL 候选。
+    Unsafe,
+}
+
+/// 当前文本中的百分号编码形态。
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PercentEncodingState {
+    None,
+    Valid,
+    InvalidOnly,
+    MixedInvalid,
+}
+
+/// 在同一字节与深度预算内逐层检查百分号编码组件。
+///
+/// 每层先扫描当前表示，再解码一层继续扫描；因此同一组件中同时存在明文秘密和
+/// 更深编码秘密时不会因第一次替换而提前停止。只有全部层都未修改时才保留原表示。
+fn redact_percent_encoded_component(
+    value: &str,
+    url_depth: usize,
+    decoded_layers: usize,
+    scanner: fn(&str, usize) -> UrlComponentRedaction,
+) -> UrlComponentRedaction {
+    if value.len() > MAX_URL_CANDIDATE_BYTES {
+        return UrlComponentRedaction::Unsafe;
+    }
+    let encoding = percent_encoding_state(value);
+    match encoding {
+        PercentEncodingState::MixedInvalid => return UrlComponentRedaction::Unsafe,
+        PercentEncodingState::InvalidOnly if decoded_layers == 0 => {
+            return UrlComponentRedaction::Unsafe;
+        }
+        PercentEncodingState::Valid if url_depth >= MAX_NESTED_URL_DEPTH => {
+            return UrlComponentRedaction::Unsafe;
+        }
+        PercentEncodingState::None
+        | PercentEncodingState::Valid
+        | PercentEncodingState::InvalidOnly => {}
+    }
+
+    let scanned = scanner(value, url_depth);
+    let (scanned, changed) = match scanned {
+        UrlComponentRedaction::Unchanged => (value.to_owned(), false),
+        UrlComponentRedaction::Redacted(scanned) => {
+            if scanned.len() > MAX_URL_CANDIDATE_BYTES {
+                return UrlComponentRedaction::Unsafe;
+            }
+            (scanned, true)
+        }
+        UrlComponentRedaction::Unsafe => return UrlComponentRedaction::Unsafe,
+    };
+    if encoding != PercentEncodingState::Valid {
+        return if changed {
+            UrlComponentRedaction::Redacted(scanned)
+        } else {
+            UrlComponentRedaction::Unchanged
+        };
+    }
+
+    let decoded = match percent_decode_str(&scanned).decode_utf8() {
+        Ok(decoded) if decoded.len() <= MAX_URL_CANDIDATE_BYTES => decoded,
+        Ok(_) | Err(_) => return UrlComponentRedaction::Unsafe,
+    };
+    match redact_percent_encoded_component(
+        decoded.as_ref(),
+        url_depth + 1,
+        decoded_layers + 1,
+        scanner,
+    ) {
+        UrlComponentRedaction::Unchanged if changed => UrlComponentRedaction::Redacted(scanned),
+        nested => nested,
+    }
+}
+
+/// 区分完整编码、原始畸形编码，以及上一层合法解码得到的终止字面 `%`。
+fn percent_encoding_state(value: &str) -> PercentEncodingState {
+    let bytes = value.as_bytes();
+    let mut cursor = 0;
+    let mut valid = false;
+    let mut invalid = false;
+    while cursor < bytes.len() {
+        if bytes[cursor] != b'%' {
+            cursor += 1;
+            continue;
+        }
+        if bytes
+            .get(cursor + 1..cursor + 3)
+            .is_some_and(|digits| digits.iter().all(u8::is_ascii_hexdigit))
+        {
+            valid = true;
+            cursor += 3;
+        } else {
+            invalid = true;
+            cursor += 1;
+        }
+    }
+    match (valid, invalid) {
+        (false, false) => PercentEncodingState::None,
+        (true, false) => PercentEncodingState::Valid,
+        (false, true) => PercentEncodingState::InvalidOnly,
+        (true, true) => PercentEncodingState::MixedInvalid,
+    }
+}
+
+/// 扫描 path 或 form value 的普通错误语义。
+fn scan_url_component(value: &str, url_depth: usize) -> UrlComponentRedaction {
+    let redacted = redact_error_secrets_at_depth(value, url_depth);
+    if redacted == value {
+        UrlComponentRedaction::Unchanged
+    } else {
+        UrlComponentRedaction::Redacted(redacted)
+    }
+}
+
+/// 扫描 query/fragment 的完整 form 表示，并额外覆盖 `session`、`csrf` 等 URL 字段。
+fn scan_url_form_component(value: &str, url_depth: usize) -> UrlComponentRedaction {
+    let generic = match scan_url_component(value, url_depth) {
+        UrlComponentRedaction::Unchanged => value.to_owned(),
+        UrlComponentRedaction::Redacted(redacted) => redacted,
+        UrlComponentRedaction::Unsafe => return UrlComponentRedaction::Unsafe,
+    };
+    let mut form = String::with_capacity(generic.len());
+    for (index, pair) in generic.split('&').enumerate() {
+        if index > 0 {
+            form.push('&');
+        }
+        let Some((name, field_value)) = pair.split_once('=') else {
+            form.push_str(pair);
+            continue;
+        };
+        form.push_str(name);
+        form.push('=');
+        if is_sensitive_query_name(name) {
+            form.push_str(REDACTED_SECRET);
+        } else {
+            form.push_str(field_value);
+        }
+    }
+    if form == value {
+        UrlComponentRedaction::Unchanged
+    } else {
+        UrlComponentRedaction::Redacted(form)
+    }
 }
 
 /// 在当前字符处识别 HTTP(S) URL，并一次性消费整个候选，避免从候选内部重复扫描。
@@ -137,66 +289,50 @@ fn redact_url_at(input: &str, start: usize, url_depth: usize) -> Option<Redactio
     }
 
     let path = url.path().to_owned();
-    let redacted_path = redact_error_secrets_at_depth(&path, url_depth + 1);
-    if redacted_path != path {
-        url.set_path(&redacted_path);
-        changed = true;
-    }
-
-    if url.query().is_some() {
-        let mut pairs = Vec::new();
-        let mut query_changed = false;
-        for (name, value) in url.query_pairs() {
-            if is_sensitive_query_name(&name) {
-                pairs.push((name.into_owned(), REDACTED_SECRET.to_owned()));
-                query_changed = true;
-            } else {
-                let name = name.into_owned();
-                let value = value.into_owned();
-                let redacted_value = redact_error_secrets_at_depth(&value, url_depth + 1);
-                query_changed |= redacted_value != value;
-                pairs.push((name, redacted_value));
-            }
-        }
-        if query_changed {
-            url.set_query(None);
-            let mut query = url.query_pairs_mut();
-            for (name, value) in pairs {
-                query.append_pair(&name, &value);
-            }
+    match redact_percent_encoded_component(&path, url_depth + 1, 0, scan_url_component) {
+        UrlComponentRedaction::Unchanged => {}
+        UrlComponentRedaction::Redacted(redacted_path) => {
+            url.set_path(&redacted_path);
             changed = true;
+        }
+        UrlComponentRedaction::Unsafe => {
+            return Some(Redaction {
+                end,
+                replacement: format!("{REDACTED_SECRET}{trailing}"),
+            });
         }
     }
 
-    if let Some(fragment) = url.fragment().map(str::to_owned)
-        && fragment.contains('=')
-    {
-        let mut pairs = Vec::new();
-        let mut fragment_changed = false;
-        for (name, value) in form_urlencoded::parse(fragment.as_bytes()) {
-            if is_sensitive_query_name(&name) {
-                pairs.push((name.into_owned(), REDACTED_SECRET.to_owned()));
-                fragment_changed = true;
-            } else {
-                let name = name.into_owned();
-                let value = value.into_owned();
-                let redacted_value = redact_error_secrets_at_depth(&value, url_depth + 1);
-                fragment_changed |= redacted_value != value;
-                pairs.push((name, redacted_value));
+    if let Some(query) = url.query().map(str::to_owned) {
+        match redact_percent_encoded_component(&query, url_depth + 1, 0, scan_url_form_component) {
+            UrlComponentRedaction::Unchanged => {}
+            UrlComponentRedaction::Redacted(redacted_query) => {
+                url.set_query(Some(&redacted_query));
+                changed = true;
+            }
+            UrlComponentRedaction::Unsafe => {
+                return Some(Redaction {
+                    end,
+                    replacement: format!("{REDACTED_SECRET}{trailing}"),
+                });
             }
         }
-        if fragment_changed {
-            let encoded = form_urlencoded::Serializer::new(String::new())
-                .extend_pairs(pairs)
-                .finish();
-            url.set_fragment(Some(&encoded));
-            changed = true;
-        }
-    } else if let Some(fragment) = url.fragment().map(str::to_owned) {
-        let redacted_fragment = redact_error_secrets_at_depth(&fragment, url_depth + 1);
-        if redacted_fragment != fragment {
-            url.set_fragment(Some(&redacted_fragment));
-            changed = true;
+    }
+
+    if let Some(fragment) = url.fragment().map(str::to_owned) {
+        match redact_percent_encoded_component(&fragment, url_depth + 1, 0, scan_url_form_component)
+        {
+            UrlComponentRedaction::Unchanged => {}
+            UrlComponentRedaction::Redacted(redacted_fragment) => {
+                url.set_fragment(Some(&redacted_fragment));
+                changed = true;
+            }
+            UrlComponentRedaction::Unsafe => {
+                return Some(Redaction {
+                    end,
+                    replacement: format!("{REDACTED_SECRET}{trailing}"),
+                });
+            }
         }
     }
 
@@ -996,7 +1132,7 @@ fn starts_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{REDACTED_SECRET, redact_error_secrets};
+    use super::{MAX_NESTED_URL_DEPTH, REDACTED_SECRET, redact_error_secrets};
 
     #[test]
     fn redacts_case_variants_separators_and_header_dump() {
@@ -1135,6 +1271,85 @@ mod tests {
         }
         let nested_userinfo = redact_error_secrets(cases[2].0);
         assert!(!nested_userinfo.contains("inner-user"));
+    }
+
+    #[test]
+    fn redacts_iteratively_percent_encoded_url_components() {
+        let cases = [
+            (
+                "https://example.invalid/%61pi_key=path-percent-secret request_id=req-path-percent",
+                "path-percent-secret",
+                "example.invalid",
+            ),
+            (
+                "https://outer.invalid/callback?redirect=https%253A%252F%252Finner-user%253Ainner-password%2540inner.invalid%252Fv1 request_id=req-double-url",
+                "inner-password",
+                "inner.invalid",
+            ),
+            (
+                "https://fragment.invalid/#%61pi_key%3Dfragment-percent-secret request_id=req-fragment-percent",
+                "fragment-percent-secret",
+                "fragment.invalid",
+            ),
+        ];
+        for (raw, secret, safe_context) in cases {
+            let safe = redact_error_secrets(raw);
+            assert!(
+                !safe.contains(secret),
+                "编码 URL 仍包含秘密 {secret}: {safe}"
+            );
+            assert!(
+                safe.contains(safe_context),
+                "编码 URL 丢失安全上下文: {safe}"
+            );
+            assert_ne!(safe, raw, "编码 URL 未触发任何脱敏: {safe}");
+            assert_eq!(redact_error_secrets(&safe), safe);
+        }
+        let nested = redact_error_secrets(cases[1].0);
+        assert!(!nested.contains("inner-user"));
+    }
+
+    #[test]
+    fn percent_encoding_depth_and_malformed_components_are_conservative() {
+        let mut within_budget = "%61pi_key=within-depth-secret".to_owned();
+        for _ in 0..MAX_NESTED_URL_DEPTH.saturating_sub(2) {
+            within_budget = within_budget.replace('%', "%25");
+        }
+        let within_budget = redact_error_secrets(&format!(
+            "https://example.invalid/{within_budget} request_id=req-within-depth"
+        ));
+        assert!(!within_budget.contains("within-depth-secret"));
+        assert!(within_budget.contains("example.invalid"));
+
+        let mut over_depth = "%61pi_key=over-depth-secret".to_owned();
+        for _ in 0..MAX_NESTED_URL_DEPTH {
+            over_depth = over_depth.replace('%', "%25");
+        }
+        assert_eq!(
+            redact_error_secrets(&format!(
+                "https://example.invalid/{over_depth} request_id=req-over-depth"
+            )),
+            "[REDACTED] request_id=req-over-depth"
+        );
+
+        let malformed = [
+            "https://example.invalid/%6Gpi_key=malformed-path-secret request_id=req-malformed-path",
+            "https://example.invalid/?redirect=https%2 request_id=req-malformed-query",
+            "https://example.invalid/#api_key%3Dmixed-secret%ZZ request_id=req-malformed-fragment",
+            "https://example.invalid/%FF request_id=req-invalid-utf8",
+        ];
+        for raw in malformed {
+            let safe = redact_error_secrets(raw);
+            assert!(
+                safe.starts_with("[REDACTED] request_id="),
+                "畸形编码 URL 未整段脱敏: {safe}"
+            );
+            assert!(!safe.contains("example.invalid"));
+        }
+
+        let literal_percent =
+            "https://example.invalid/progress%25?value=100%25&request_id=req-percent";
+        assert_eq!(redact_error_secrets(literal_percent), literal_percent);
     }
 
     #[test]

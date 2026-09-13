@@ -12385,13 +12385,26 @@ mod tests {
             )
             .expect("子 Agent 应创建");
 
-        let secret = "kc-collaboration-persistence-secret";
+        let secrets = [
+            "kc-collaboration-path-secret",
+            "kc-collaboration-nested-secret",
+            "kc-collaboration-fragment-secret",
+        ];
         let request_id = "req-collaboration-redaction";
         let provider = Arc::new(ScriptedProvider::new(
             ProviderCapabilities::default(),
             [ScriptedReply::new(vec![Err(
                 ModelError::ProviderUnavailable {
-                    message: format!("上游故障 api_key={secret} request_id={request_id}"),
+                    message: format!(
+                        concat!(
+                            "上游故障 ",
+                            "path=https://path.invalid/%61pi_key={} ",
+                            "nested=https://outer.invalid/?redirect=https%253A%252F%252Fuser%253A{}%2540inner.invalid%252Fv1 ",
+                            "fragment=https://fragment.invalid/#%61pi_key%3D{} ",
+                            "request_id={}"
+                        ),
+                        secrets[0], secrets[1], secrets[2], request_id
+                    ),
                     status_code: Some(503),
                     retryable: false,
                 },
@@ -12416,10 +12429,12 @@ mod tests {
         ));
         let outcome = super::runtime_turn_outcome(Ok(result));
         let assert_redacted = |value: &str| {
-            assert!(
-                !value.contains(secret),
-                "失败持久状态仍包含原始秘密: {value}"
-            );
+            for secret in secrets {
+                assert!(
+                    !value.contains(secret),
+                    "失败持久状态仍包含原始秘密 {secret}: {value}"
+                );
+            }
             assert!(
                 value.contains(keencode_model::REDACTED_SECRET),
                 "失败持久状态缺少脱敏占位符: {value}"
@@ -12503,7 +12518,9 @@ mod tests {
         assert_redacted(event_message);
         let persisted_json = std::fs::read_to_string(&collaboration.store.transition_path)
             .expect("collaboration-v2.json 应读取");
-        assert!(!persisted_json.contains(secret));
+        for secret in secrets {
+            assert!(!persisted_json.contains(secret));
+        }
         assert!(persisted_json.contains(keencode_model::REDACTED_SECRET));
 
         runtime

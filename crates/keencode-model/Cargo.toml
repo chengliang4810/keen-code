@@ -11,7 +11,8 @@ futures-core = "0.3.31"
 serde = { version = "1.0.219", features = ["derive", "rc"] }
 serde_json = "1.0.143"
 thiserror = "2.0.16"
-# 使用依赖图已有的标准 URL 解析器，只在错误文本中精确移除 userinfo 与敏感查询值。
+# 使用依赖图已有的标准百分号解码器与 URL 解析器，避免自行实现编码语义。
+percent-encoding = "2.3.2"
 url = "2.5.7"
 
 [dev-dependencies]
