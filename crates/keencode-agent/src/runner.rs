@@ -37,9 +37,9 @@ use crate::{
     AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent, AgentStreamEventKind,
     AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
     AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, CONTEXT_WATER_LEVEL_INFO_PERCENT,
-    ContextCompactionFailureKind, ContextCompactionKind, ContextCompressionOutcome,
-    ContextCompressionRecord, ContextCompressionTrigger, ContextError, ContextManager, CounterKind,
-    GoalController, GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
+    ContextCompactionFailureKind, ContextCompressionOutcome, ContextCompressionRecord,
+    ContextCompressionTrigger, ContextError, ContextManager, CounterKind, GoalController,
+    GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
     MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
     NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
     PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
@@ -769,6 +769,55 @@ impl fmt::Display for AgentRunError {
 
 impl Error for AgentRunError {}
 
+/// 将 Agent 运行错误归一为插件 OnError matcher 使用的稳定分类。
+///
+/// 该分类只保留控制面需要的有限集合；错误正文必须由调用方另行脱敏和截断，
+/// 不能通过分类函数传播外部文本。
+pub fn agent_run_error_category(error: &AgentRunError) -> &'static str {
+    match error {
+        AgentRunError::Model(error) => match error {
+            ModelError::Authentication { .. } | ModelError::Authorization { .. } => {
+                "authentication_failed"
+            }
+            ModelError::QuotaExceeded { .. } => "billing_error",
+            ModelError::ModelNotFound { .. } => "model_not_found",
+            ModelError::RateLimited { .. } => "rate_limit",
+            ModelError::ProviderUnavailable {
+                status_code: Some(529),
+                ..
+            } => "overloaded",
+            ModelError::ProtocolUnsupported { .. }
+            | ModelError::ContextLengthExceeded { .. }
+            | ModelError::InvalidRequest { .. }
+            | ModelError::UnsupportedCapability { .. }
+            | ModelError::StructuredOutput { .. } => "invalid_request",
+            ModelError::ProviderUnavailable { .. }
+            | ModelError::Transport { .. }
+            | ModelError::StreamInterrupted { .. }
+            | ModelError::Protocol { .. } => "server_error",
+            ModelError::Cancelled { .. } => "unknown",
+        },
+        AgentRunError::ModelOutputLimit => "max_output_tokens",
+        AgentRunError::Context(_) => "invalid_request",
+        AgentRunError::Cancelled
+        | AgentRunError::Hook(_)
+        | AgentRunError::EventSink(_)
+        | AgentRunError::CommitSink(_)
+        | AgentRunError::ToolRoundPreflight(_)
+        | AgentRunError::State(_)
+        | AgentRunError::DynamicInput { .. }
+        | AgentRunError::DynamicInputAcknowledgement { .. }
+        | AgentRunError::DuplicateToolCallId { .. }
+        | AgentRunError::ModelRefusal
+        | AgentRunError::InvalidResponse { .. }
+        | AgentRunError::LimitReached { .. }
+        | AgentRunError::GoalBudgetReached { .. }
+        | AgentRunError::ToolLoop { .. }
+        | AgentRunError::ToolOutputLimit { .. }
+        | AgentRunError::Internal { .. } => "unknown",
+    }
+}
+
 impl From<ModelError> for AgentRunError {
     /// 把 Provider 中立错误包装为 Agent 运行错误。
     fn from(error: ModelError) -> Self {
@@ -826,6 +875,11 @@ pub struct AgentRunner {
     event_sink: Arc<dyn AgentEventSink>,
     /// 在返回前同步确认工具、压缩与 Transcript 权威事实的提交出口。
     commit_sink: Arc<dyn AgentCommitSink>,
+    /// 独立 Agent Runner 是否在返回前自动执行非取消失败的 OnError Hook。
+    ///
+    /// Runtime 组合层关闭该路径，改由持久化 outbox 在 Turn 终态提交后驱动；
+    /// 独立嵌入调用保留默认开启行为。
+    auto_notify_on_error: bool,
 }
 
 impl AgentRunner {
@@ -843,6 +897,7 @@ impl AgentRunner {
             goal_controller: None,
             event_sink: Arc::new(NoopAgentEventSink),
             commit_sink: Arc::new(NoopAgentCommitSink),
+            auto_notify_on_error: true,
         }
     }
 
@@ -912,6 +967,25 @@ impl AgentRunner {
     /// 返回当前 Runner 使用的同步权威提交 Sink。
     pub fn commit_sink(&self) -> &Arc<dyn AgentCommitSink> {
         &self.commit_sink
+    }
+
+    /// 关闭独立 Agent Runner 的自动 OnError 派发，由 Runtime 持久化 outbox 接管。
+    pub fn without_automatic_on_error(mut self) -> Self {
+        self.auto_notify_on_error = false;
+        self
+    }
+
+    /// 在 Runtime 已确认 Turn 终态后执行 OnError 观察 Hook。
+    ///
+    /// OnError 不属于 Agent Loop 的终态归约：调用方必须先把权威终态提交到
+    /// Session Journal，再调用本入口。观察 Hook 的失败只返回诊断，不能改写已
+    /// 提交的 Turn 结果。
+    pub async fn notify_on_error(
+        &self,
+        context: OnErrorHookContext,
+        cancellation: &TurnCancellation,
+    ) -> Result<(), HookError> {
+        self.hooks.run_on_error(context, cancellation).await
     }
 
     /// 同步、幂等提交一次具有稳定用途的模型调用用量与实际耗时。
@@ -1155,6 +1229,12 @@ impl AgentRunner {
         {
             Ok(outcome) => outcome,
             Err(error) => {
+                let micro_record = match &error {
+                    ContextError::MicroAppliedThenFullFailed(failure) => {
+                        Some(failure.micro_record.clone())
+                    }
+                    _ => None,
+                };
                 if let Some(usage) = context_error_model_usage(&error)
                     && let Err(commit_error) = self.commit_model_call_usage(
                         request,
@@ -1181,6 +1261,24 @@ impl AgentRunner {
                     return Err(commit_error);
                 }
                 let error = context_error_without_summary_usage(error);
+                if let Some(record) = micro_record
+                    && let Err(commit_error) = self.commit_event(
+                        request,
+                        model_round,
+                        AgentCommitEventKind::ContextCompactionApplied { record },
+                    )
+                {
+                    self.deliver_context_compaction_event(
+                        request,
+                        model_round,
+                        AgentStreamEventKind::ContextCompactionFailed {
+                            failure_kind: ContextCompactionFailureKind::Storage,
+                        },
+                        false,
+                    )
+                    .await?;
+                    return Err(commit_error);
+                }
                 if context_error_is_cancelled(&error) {
                     return Err(AgentRunError::Cancelled);
                 }
@@ -1196,15 +1294,6 @@ impl AgentRunner {
                 return Err(AgentRunError::Context(error));
             }
         };
-
-        // Micro 投影记录不进入权威 CompactionApplied 通道：资源层 CompactionRecord
-        // 只能表达“区间整体替换为一条摘要”（reducer 强制非空区间、非空摘要并整体
-        // splice），无法表达原位文本投影。该记录随 TurnResult.compactions 交给
-        // Session 层按 kind 逐条持久化，冷恢复由 record.apply() 的投影重放契约保证；
-        // 摘要形态记录（含 MicroThenFull 中的摘要记录）仍照常提交。
-        if outcome.record.kind == ContextCompactionKind::MicroProjection {
-            return Ok(outcome);
-        }
 
         if let Some(usage) = &outcome.summary_model_usage
             && let Err(error) = self.commit_model_call_usage(
@@ -1230,6 +1319,27 @@ impl AgentRunner {
             )
             .await?;
             return Err(error);
+        }
+
+        if let Some(record) = &outcome.pre_applied_micro {
+            if let Err(error) = self.commit_event(
+                request,
+                model_round,
+                AgentCommitEventKind::ContextCompactionApplied {
+                    record: record.clone(),
+                },
+            ) {
+                self.deliver_context_compaction_event(
+                    request,
+                    model_round,
+                    AgentStreamEventKind::ContextCompactionFailed {
+                        failure_kind: ContextCompactionFailureKind::Storage,
+                    },
+                    false,
+                )
+                .await?;
+                return Err(error);
+            }
         }
 
         if let Err(error) = self.commit_event(
@@ -1286,8 +1396,7 @@ impl AgentRunner {
                 },
                 &request.cancellation,
             )
-            .await
-            .map_err(AgentRunError::from)?;
+            .await;
         Ok(AgentRunError::Context(*inner))
     }
 
@@ -1330,8 +1439,7 @@ impl AgentRunner {
                 },
                 &request.cancellation,
             )
-            .await
-            .map_err(AgentRunError::from)?;
+            .await;
         if let Some(message) = read_hint {
             self.commit_round_messages(request, active, None, vec![message])?;
             model_request.messages = active.messages.clone();
@@ -1726,12 +1834,13 @@ impl AgentRunner {
                 message: "Agent Loop 返回时 Turn 尚未进入终态".to_owned(),
             });
         }
-        if let (Some(error), Some(terminal_reason)) = (&error, active.state.terminal_reason())
+        if self.auto_notify_on_error
+            && let (Some(error), Some(terminal_reason)) = (&error, active.state.terminal_reason())
             && terminal_reason != TerminalReason::Cancelled
             && terminal_reason != TerminalReason::Completed
-            && let Err(hook_error) = self
-                .hooks
-                .run_on_error(
+        {
+            if let Err(hook_error) = self
+                .notify_on_error(
                     OnErrorHookContext {
                         invocation: hook_invocation_context(&request),
                         error: error.clone(),
@@ -1740,14 +1849,15 @@ impl AgentRunner {
                     &request.cancellation,
                 )
                 .await
-        {
-            tracing::error!(
-                session_id = %request.session_id,
-                turn_id = %request.turn_id,
-                source_agent_id = %request.source_agent_id,
-                error = %hook_error,
-                "OnError Hook 失败，保留原始 Turn 错误"
-            );
+            {
+                tracing::error!(
+                    session_id = %request.session_id,
+                    turn_id = %request.turn_id,
+                    source_agent_id = %request.source_agent_id,
+                    error = %hook_error,
+                    "OnError Hook 失败，保留原始 Turn 错误"
+                );
+            }
         }
         TurnResult {
             state: active.state,

@@ -1,13 +1,12 @@
 //! Provider 中立的工具 Hook、停止 Hook 与防循环预算。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as SyncMutex};
-use std::time::Instant;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures_util::future::{Either, select};
 use keencode_model::{Message, MessageRole, ModelResponse, ToolResult};
@@ -33,9 +32,6 @@ const MAX_HOOK_ERROR_CODE_BYTES: usize = 128;
 
 /// Hook 主动错误说明进入 Runtime 错误前允许使用的最大 UTF-8 字节数。
 const MAX_HOOK_ERROR_MESSAGE_BYTES: usize = 4 * 1_024;
-
-/// 工作线程异常退出后，下一次调用可发起唯一恢复尝试前的固定退避。
-pub(crate) const HOOK_WORKER_RECOVERY_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Hook 异步回调使用的对象安全 Future。
 pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -449,169 +445,10 @@ struct RegisteredHook {
     name: String,
     /// 实际执行各生命周期回调的 Hook 实现。
     hook: Arc<dyn AgentHook>,
-    /// 区分可恢复 worker 崩溃与可能残留线程的永久熔断状态。
-    circuit: Arc<HookCircuit>,
-}
-
-/// Hook 隔离线程的熔断状态；只有已确认退出的 worker 才允许一次自动恢复。
-#[derive(Default)]
-struct HookCircuit {
-    state: SyncMutex<HookCircuitState>,
-    /// 保证共享同一候选代次的 Hook 任意时刻最多只有一个隔离线程正在执行。
+    /// 回调取消、超时或工作线程异常后永久阻止当前进程再次进入同一 Hook。
+    circuit_open: AtomicBool,
+    /// 保证同一注册 Hook 任意时刻最多只有一个隔离工作线程正在执行。
     entrance: AsyncMutex<()>,
-}
-
-/// 受同步锁保护的短状态，不跨越任何等待或 Hook 回调。
-enum HookCircuitState {
-    /// 正常接收调用。
-    Closed { generation: u64 },
-    /// worker 已确认退出；到达退避截止点后允许一次串行恢复。
-    Recoverable { retry_at: Instant, generation: u64 },
-    /// 当前隔离 worker 拥有的代次；完成转换必须匹配该所有权。
-    Running {
-        generation: u64,
-        recovery_attempt: bool,
-    },
-    /// 取消、超时、恢复再次失败等场景可能仍有残留 worker，不再自动重开。
-    PermanentlyOpen,
-}
-
-impl Default for HookCircuitState {
-    /// 创建从第一代 worker 开始的关闭状态。
-    fn default() -> Self {
-        Self::Closed { generation: 0 }
-    }
-}
-
-/// 一次隔离 worker 对 Hook 熔断状态的代次所有权。
-#[derive(Clone, Copy)]
-struct HookWorkerOwnership {
-    /// 用于拒绝旧 worker 迟到完成的单调代次。
-    generation: u64,
-    /// 当前 worker 是否已经是唯一一次恢复尝试。
-    recovery_attempt: bool,
-}
-
-impl HookCircuit {
-    /// 在等待单入口前快速拒绝仍处退避或永久熔断的调用。
-    fn may_enter(&self) -> bool {
-        match &*self.state() {
-            HookCircuitState::Closed { .. } | HookCircuitState::Running { .. } => true,
-            HookCircuitState::Recoverable { retry_at, .. } => Instant::now() >= *retry_at,
-            HookCircuitState::PermanentlyOpen => false,
-        }
-    }
-
-    /// 在取得单入口后原子声明普通调用或唯一恢复尝试。
-    fn begin_entry(&self) -> Option<HookWorkerOwnership> {
-        let mut state = self.state();
-        let (previous_generation, recovery_attempt) = match &*state {
-            HookCircuitState::Closed { generation } => (*generation, false),
-            HookCircuitState::Recoverable {
-                retry_at,
-                generation,
-            } if Instant::now() >= *retry_at => (*generation, true),
-            HookCircuitState::Recoverable { .. }
-            | HookCircuitState::Running { .. }
-            | HookCircuitState::PermanentlyOpen => return None,
-        };
-        let Some(generation) = previous_generation.checked_add(1) else {
-            // 代次溢出意味着无法再证明 worker 所有权，必须继续 fail-closed。
-            *state = HookCircuitState::PermanentlyOpen;
-            return None;
-        };
-        *state = HookCircuitState::Running {
-            generation,
-            recovery_attempt,
-        };
-        Some(HookWorkerOwnership {
-            generation,
-            recovery_attempt,
-        })
-    }
-
-    /// 首次 worker 异常只安排一次按需恢复；恢复 worker 再失败则永久熔断。
-    /// 只有当前 Running 代次的所有者可以写入非永久状态。
-    fn worker_failed(&self, ownership: HookWorkerOwnership) {
-        let mut state = self.state();
-        if !matches!(
-            &*state,
-            HookCircuitState::Running {
-                generation,
-                recovery_attempt,
-            } if *generation == ownership.generation
-                && *recovery_attempt == ownership.recovery_attempt
-        ) {
-            return;
-        }
-        *state = if ownership.recovery_attempt {
-            HookCircuitState::PermanentlyOpen
-        } else {
-            HookCircuitState::Recoverable {
-                retry_at: Instant::now() + HOOK_WORKER_RECOVERY_BACKOFF,
-                generation: ownership.generation,
-            }
-        };
-    }
-
-    /// worker 正常交付结果后清除之前的恢复历史。
-    /// 已经永久熔断时，迟到的旧 worker 结果不得回退状态。
-    fn worker_succeeded(&self, ownership: HookWorkerOwnership) {
-        let mut state = self.state();
-        if matches!(
-            &*state,
-            HookCircuitState::Running {
-                generation,
-                recovery_attempt,
-            } if *generation == ownership.generation
-                && *recovery_attempt == ownership.recovery_attempt
-        ) {
-            *state = HookCircuitState::Closed {
-                generation: ownership.generation,
-            };
-        }
-    }
-
-    /// 可能存在仍运行的隔离线程时永久阻止自动恢复。
-    fn open_permanently(&self) {
-        *self.state() = HookCircuitState::PermanentlyOpen;
-    }
-
-    /// 即使发生无关 panic 导致锁中毒，也以锁内最后状态继续 fail-closed 管理。
-    fn state(&self) -> std::sync::MutexGuard<'_, HookCircuitState> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-}
-
-/// 在同一扩展候选代次构建的多个 Turn 之间共享 Hook 熔断与单入口状态。
-///
-/// 新建扩展候选时创建新实例即构成显式重载边界；同一候选内按冻结 Hook 名称
-/// 复用状态，避免每个 Turn 重新构建 [`HookRuntime`] 时绕过熔断或并发入口。
-#[derive(Clone, Default)]
-pub struct HookCircuitStore {
-    circuits: Arc<SyncMutex<HashMap<String, Arc<HookCircuit>>>>,
-}
-
-impl HookCircuitStore {
-    /// 创建一套不包含历史熔断状态的候选级 Store。
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// 返回同名 Hook 的候选级共享状态。
-    fn circuit(&self, name: &str) -> Arc<HookCircuit> {
-        let mut circuits = self
-            .circuits
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        Arc::clone(
-            circuits
-                .entry(name.to_owned())
-                .or_insert_with(|| Arc::new(HookCircuit::default())),
-        )
-    }
 }
 
 /// 按注册顺序执行且名称唯一的 Hook 集合。
@@ -621,23 +458,12 @@ pub struct HookRegistry {
     hooks: Vec<RegisteredHook>,
     /// 用于拒绝重复名称的稳定索引。
     names: HashSet<String>,
-    /// 当前扩展候选代次内按冻结名称共享的熔断与单入口状态。
-    circuits: HookCircuitStore,
 }
 
 impl HookRegistry {
     /// 创建不包含任何 Hook 的 Registry。
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// 使用候选级共享状态创建 Registry，供每个 Turn 构建独立 Hook 实现快照。
-    pub fn with_circuit_store(circuits: HookCircuitStore) -> Self {
-        Self {
-            hooks: Vec::new(),
-            names: HashSet::new(),
-            circuits,
-        }
     }
 
     /// 按调用顺序注册一个名称唯一的 Hook。
@@ -663,11 +489,11 @@ impl HookRegistry {
                 name: name.to_owned(),
             });
         }
-        let circuit = self.circuits.circuit(name);
         self.hooks.push(RegisteredHook {
             name: name.to_owned(),
             hook,
-            circuit,
+            circuit_open: AtomicBool::new(false),
+            entrance: AsyncMutex::new(()),
         });
         Ok(())
     }
@@ -992,17 +818,20 @@ impl HookRuntime {
         Ok(())
     }
 
-    /// 在结果采纳后按注册顺序执行全部 PostCompact Hook；已发生的取消不抹去通知。
+    /// 在压缩结果采纳后按注册顺序执行全部 PostCompact Hook。
+    ///
+    /// 这是纯观察阶段：单个 Hook 失败、超时或熔断只写入有界诊断，不改变已采纳
+    /// 的压缩结果，也不会阻止后续观察者收到通知。
     pub(crate) async fn run_post_compact(
         &self,
         context: PostCompactHookContext,
         cancellation: &TurnCancellation,
-    ) -> Result<(), HookError> {
+    ) {
         for registered in &self.registry.hooks {
             let name = registered.name.clone();
             let hook = registered.hook.clone();
             let callback_context = context.clone();
-            await_hook(
+            if let Err(error) = await_hook(
                 move |runtime| runtime.block_on(hook.post_compact(callback_context)),
                 cancellation,
                 HookPhase::PostCompact,
@@ -1011,9 +840,16 @@ impl HookRuntime {
                 false,
                 self.limits.max_callback_ms,
             )
-            .await?;
+            .await
+            {
+                tracing::warn!(
+                    hook = %name,
+                    phase = %HookPhase::PostCompact,
+                    diagnostic = %bounded_hook_diagnostic(&error),
+                    "PostCompact 观察 Hook 失败，继续通知后续观察者"
+                );
+            }
         }
-        Ok(())
     }
 
     /// 执行全部 Stop Hook；任一 Hook 要求继续时返回按注册顺序合并的上下文。
@@ -1422,14 +1258,6 @@ pub(crate) enum ResolvedStopHook {
     Continue(Vec<ResolvedHookContext>),
 }
 
-/// 隔离线程在 Hook 栈已经完全退出后交付的基础设施结果。
-enum HookWorkerResult<T> {
-    /// Hook Future 正常返回，内部仍可携带受控 callback 错误。
-    Completed(Result<T, HookCallbackError>),
-    /// Hook 栈已完成 panic 展开，不再有回调代码运行。
-    Panicked,
-}
-
 /// 在隔离工作线程中构造并驱动 Hook，绑定可信身份、熔断、取消与硬超时。
 async fn await_hook<T, F>(
     callback: F,
@@ -1444,7 +1272,7 @@ where
     T: Send + 'static,
     F: FnOnce(tokio::runtime::Handle) -> Result<T, HookCallbackError> + Send + 'static,
 {
-    if !registered.circuit.may_enter() {
+    if registered.circuit_open.load(Ordering::Acquire) {
         return Err(HookError::CircuitOpen {
             phase,
             hook_name: hook_name.to_owned(),
@@ -1452,10 +1280,10 @@ where
     }
     let entrance_guard = if observe_cancellation {
         let cancelled = Box::pin(cancellation.cancelled());
-        let waiting = Box::pin(registered.circuit.entrance.lock());
+        let waiting = Box::pin(registered.entrance.lock());
         match select(cancelled, waiting).await {
             Either::Left(((), _)) => {
-                registered.circuit.open_permanently();
+                registered.circuit_open.store(true, Ordering::Release);
                 return Err(HookError::Cancelled {
                     phase,
                     hook_name: hook_name.to_owned(),
@@ -1464,19 +1292,19 @@ where
             Either::Right((guard, _)) => guard,
         }
     } else {
-        registered.circuit.entrance.lock().await
+        registered.entrance.lock().await
     };
-    let Some(ownership) = registered.circuit.begin_entry() else {
+    if registered.circuit_open.load(Ordering::Acquire) {
         drop(entrance_guard);
         return Err(HookError::CircuitOpen {
             phase,
             hook_name: hook_name.to_owned(),
         });
-    };
+    }
     let runtime = match tokio::runtime::Handle::try_current() {
         Ok(runtime) => runtime,
         Err(_) => {
-            registered.circuit.worker_failed(ownership);
+            registered.circuit_open.store(true, Ordering::Release);
             return Err(HookError::WorkerFailed {
                 phase,
                 hook_name: hook_name.to_owned(),
@@ -1488,27 +1316,24 @@ where
     let worker = std::thread::Builder::new()
         .name("keencode-hook".to_owned())
         .spawn(move || {
-            let result = match catch_unwind(AssertUnwindSafe(|| callback(worker_runtime))) {
-                Ok(result) => HookWorkerResult::Completed(result),
-                Err(_) => HookWorkerResult::Panicked,
-            };
+            let result = callback(worker_runtime);
             let _ = sender.send(result);
         });
     if worker.is_err() {
-        registered.circuit.worker_failed(ownership);
+        registered.circuit_open.store(true, Ordering::Release);
         return Err(HookError::WorkerFailed {
             phase,
             hook_name: hook_name.to_owned(),
         });
     }
-    let mut worker_lease = HookWorkerLease::started(&registered.circuit);
+    let mut worker_lease = HookWorkerLease::started(&registered.circuit_open);
     let timed = timeout(Duration::from_millis(maximum_ms), receiver);
     let result = if observe_cancellation {
         let cancelled = Box::pin(cancellation.cancelled());
         let timed = Box::pin(timed);
         match select(cancelled, timed).await {
             Either::Left(((), _)) => {
-                registered.circuit.open_permanently();
+                registered.circuit_open.store(true, Ordering::Release);
                 return Err(HookError::Cancelled {
                     phase,
                     hook_name: hook_name.to_owned(),
@@ -1522,7 +1347,7 @@ where
     let result = match result {
         Ok(result) => result,
         Err(_) => {
-            registered.circuit.open_permanently();
+            registered.circuit_open.store(true, Ordering::Release);
             return Err(HookError::TimedOut {
                 phase,
                 hook_name: hook_name.to_owned(),
@@ -1531,30 +1356,16 @@ where
         }
     };
     let result = match result {
-        Ok(HookWorkerResult::Completed(result)) => {
-            worker_lease.mark_completed();
-            registered.circuit.worker_succeeded(ownership);
-            result
-        }
-        Ok(HookWorkerResult::Panicked) => {
-            // panic 栈已经在 worker 内完成展开；没有 Hook 回调代码残留，允许
-            // 一次由后续调用触发的串行退避恢复。
-            worker_lease.mark_completed();
-            registered.circuit.worker_failed(ownership);
-            return Err(HookError::WorkerFailed {
-                phase,
-                hook_name: hook_name.to_owned(),
-            });
-        }
+        Ok(result) => result,
         Err(_) => {
-            // worker 未能交付任何完成信号，不能证明回调栈已经安全退出。
-            registered.circuit.open_permanently();
+            registered.circuit_open.store(true, Ordering::Release);
             return Err(HookError::WorkerFailed {
                 phase,
                 hook_name: hook_name.to_owned(),
             });
         }
     };
+    worker_lease.mark_completed();
     result.map_err(|error| HookError::Callback {
         phase,
         hook_name: hook_name.to_owned(),
@@ -1569,17 +1380,17 @@ where
 
 /// 在 Hook 回调 Future 被取消或异常丢弃时先熔断，再释放单并发入口。
 struct HookWorkerLease<'a> {
-    /// 当前注册 Hook 的熔断状态。
-    circuit: &'a HookCircuit,
+    /// 当前注册 Hook 的永久熔断标记。
+    circuit_open: &'a AtomicBool,
     /// 工作线程是否已经完整返回并把结果交给 Runtime。
     completed: bool,
 }
 
 impl<'a> HookWorkerLease<'a> {
     /// 标记隔离工作线程已经启动，后续异常丢弃必须永久熔断。
-    const fn started(circuit: &'a HookCircuit) -> Self {
+    const fn started(circuit_open: &'a AtomicBool) -> Self {
         Self {
-            circuit,
+            circuit_open,
             completed: false,
         }
     }
@@ -1594,7 +1405,7 @@ impl Drop for HookWorkerLease<'_> {
     /// 未完整收到工作线程结果时永久熔断，阻止后续等待者创建新线程。
     fn drop(&mut self) {
         if !self.completed {
-            self.circuit.open_permanently();
+            self.circuit_open.store(true, Ordering::Release);
         }
     }
 }
@@ -1651,90 +1462,7 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
     value[..end].to_owned()
 }
 
-#[cfg(test)]
-mod circuit_tests {
-    use std::sync::{Arc, Barrier};
-
-    use super::*;
-
-    /// 并发取消先写入永久熔断后，旧 worker 的迟到成功不得把状态回退为 Closed。
-    #[test]
-    fn 取消与旧worker成功竞态保持永久熔断() {
-        let circuit = Arc::new(HookCircuit::default());
-        let ownership = circuit.begin_entry().expect("测试 worker 应取得代次所有权");
-        let ready = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let worker_circuit = Arc::clone(&circuit);
-        let worker_ready = Arc::clone(&ready);
-        let worker_release = Arc::clone(&release);
-        let worker = std::thread::spawn(move || {
-            worker_ready.wait();
-            worker_release.wait();
-            worker_circuit.worker_succeeded(ownership);
-        });
-
-        ready.wait();
-        circuit.open_permanently();
-        release.wait();
-        worker.join().expect("旧 worker 状态转换线程不应 panic");
-
-        assert!(matches!(
-            &*circuit.state(),
-            HookCircuitState::PermanentlyOpen
-        ));
-    }
-
-    /// 并发取消先写入永久熔断后，旧 worker 的迟到 panic 不得把状态回退为 Recoverable。
-    #[test]
-    fn 取消与旧worker失败竞态保持永久熔断() {
-        let circuit = Arc::new(HookCircuit::default());
-        let ownership = circuit.begin_entry().expect("测试 worker 应取得代次所有权");
-        let ready = Arc::new(Barrier::new(2));
-        let release = Arc::new(Barrier::new(2));
-        let worker_circuit = Arc::clone(&circuit);
-        let worker_ready = Arc::clone(&ready);
-        let worker_release = Arc::clone(&release);
-        let worker = std::thread::spawn(move || {
-            worker_ready.wait();
-            worker_release.wait();
-            worker_circuit.worker_failed(ownership);
-        });
-
-        ready.wait();
-        circuit.open_permanently();
-        release.wait();
-        worker.join().expect("旧 worker 状态转换线程不应 panic");
-
-        assert!(matches!(
-            &*circuit.state(),
-            HookCircuitState::PermanentlyOpen
-        ));
-    }
-
-    /// 旧代次的完成或失败不能改写新代次正在运行的 worker 状态。
-    #[test]
-    fn 旧代次worker不能覆盖新代次状态() {
-        let circuit = HookCircuit::default();
-        let first = circuit.begin_entry().expect("首个 worker 应取得代次所有权");
-        circuit.worker_succeeded(first);
-        let second = circuit
-            .begin_entry()
-            .expect("第二个 worker 应取得新代次所有权");
-
-        circuit.worker_succeeded(first);
-        circuit.worker_failed(first);
-        assert!(matches!(
-            &*circuit.state(),
-            HookCircuitState::Running {
-                generation,
-                recovery_attempt: false,
-            } if *generation == second.generation
-        ));
-
-        circuit.worker_succeeded(second);
-        assert!(matches!(
-            &*circuit.state(),
-            HookCircuitState::Closed { generation } if *generation == second.generation
-        ));
-    }
+/// 把观察 Hook 诊断限制在固定大小内，避免失败日志重新携带无限外部文本。
+fn bounded_hook_diagnostic(error: &HookError) -> String {
+    truncate_utf8(&error.to_string(), MAX_HOOK_ERROR_MESSAGE_BYTES)
 }

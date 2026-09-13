@@ -1900,7 +1900,7 @@ async fn runner_pre_compact_failure_skips_compressor_and_post_hook() {
     assert!(result.compactions.is_empty());
 }
 
-/// PostCompact 失败发生在采纳边界之后：记录保留，但 Turn 不能报告成功。
+/// PostCompact 失败发生在采纳边界之后：记录保留，观察失败不能阻止 Turn 成功。
 #[tokio::test]
 async fn runner_post_compact_failure_keeps_adopted_record() {
     let original = atomic_tool_history();
@@ -1925,24 +1925,19 @@ async fn runner_post_compact_failure_keeps_adopted_record() {
         .run_turn(turn_request_with_output(original.clone(), 16))
         .await;
 
-    assert!(matches!(
-        result.error,
-        Some(AgentRunError::Hook(HookError::Callback {
-            phase: HookPhase::PostCompact,
-            ref hook_name,
-            ref code,
-            ..
-        })) if hook_name == "compaction-probe" && code == "post_compact_failed"
-    ));
-    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
     assert_eq!(result.compactions.len(), 1);
     assert_ne!(result.messages.as_slice(), original.as_slice());
     assert_eq!(hook.pre_contexts().len(), 1);
     let post = hook.post_contexts();
     assert_eq!(post.len(), 1);
     assert_eq!(post[0].record, result.compactions[0]);
-    assert_eq!(hook.error_contexts().len(), 1);
-    assert!(provider.requests().expect("应能读取请求").is_empty());
+    assert!(hook.error_contexts().is_empty());
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
 }
 
 /// 唯一恢复请求仍超限时必须返回稳定 ContextBlocked，不能再次摘要或递增 Round。
@@ -3194,11 +3189,16 @@ async fn runner_micro_only_compaction_completes_without_summary_model() {
     let usages = commit_sink.usages();
     assert_eq!(usages.len(), 1);
     assert_eq!(usages[0].purpose(), ModelCallPurpose::AgentRound);
-    // Micro 投影记录不进入权威 CompactionApplied 通道（资源层摘要替换无法表达）。
+    // Micro 投影记录也通过权威通道提交，资源层按投影字段在冷恢复时原位重放。
     let committed = commit_sink.events();
     assert!(matches!(
         committed.as_slice(),
-        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
+        [compaction, round]
+            if matches!(
+                compaction.kind(),
+                AgentCommitEventKind::ContextCompactionApplied { record }
+                    if record.kind == ContextCompactionKind::MicroProjection
+            ) && matches!(round.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
     ));
     let events = event_sink.events();
     assert!(matches!(
@@ -3270,12 +3270,22 @@ async fn runner_micro_then_full_summarizes_projected_history() {
     };
     assert!(transcript.contains("已压缩，省略"));
     assert_eq!(requests[1].tool_choice, ToolChoice::Auto);
-    // 摘要记录照常进入权威提交通道；Micro 记录不经过该通道。
+    // Micro 投影先于摘要记录进入权威通道，顺序与冷恢复应用顺序一致。
     let committed = commit_sink.events();
     assert!(matches!(
-        committed.first().map(AgentCommitEvent::kind),
-        Some(AgentCommitEventKind::ContextCompactionApplied { record })
-            if record.kind == ContextCompactionKind::Summary
+        committed.as_slice(),
+        [micro, summary, round]
+            if matches!(
+                micro.kind(),
+                AgentCommitEventKind::ContextCompactionApplied { record }
+                    if record.kind == ContextCompactionKind::MicroProjection
+            )
+            && matches!(
+                summary.kind(),
+                AgentCommitEventKind::ContextCompactionApplied { record }
+                    if record.kind == ContextCompactionKind::Summary
+            )
+            && matches!(round.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
     ));
     let usages = commit_sink.usages();
     assert_eq!(
@@ -3340,7 +3350,7 @@ async fn runner_micro_gains_survive_tolerated_summary_failure() {
         _ => panic!("旧工具结果必须是工具结果消息"),
     };
     assert!(projected_tool_text.contains("已压缩，省略"));
-    // 失败事件按现状分类，原历史之外的摘要提交没有发生。
+    // 失败事件按现状分类；已采纳的 Micro 投影仍通过权威通道提交。
     let events = event_sink.events();
     assert!(matches!(
         events[1].kind(),
@@ -3350,7 +3360,12 @@ async fn runner_micro_gains_survive_tolerated_summary_failure() {
     ));
     assert!(matches!(
         commit_sink.events().as_slice(),
-        [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
+        [compaction, round]
+            if matches!(
+                compaction.kind(),
+                AgentCommitEventKind::ContextCompactionApplied { record }
+                    if record.kind == ContextCompactionKind::MicroProjection
+            ) && matches!(round.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
     ));
     assert_eq!(hook.pre_contexts().len(), 1);
     let post = hook.post_contexts();
@@ -3359,10 +3374,10 @@ async fn runner_micro_gains_survive_tolerated_summary_failure() {
     assert!(hook.error_contexts().is_empty());
 }
 
-/// Full 摘要软失败后虽然已采纳 Micro，但 PostCompact 失败必须终止 Turn，
-/// 不能被“原请求仍装得下”的软容忍分支吞掉。
+/// Full 摘要软失败后虽然已采纳 Micro，PostCompact 观察失败也不能终止 Turn，
+/// 仍应继续使用投影后的历史完成主模型请求。
 #[tokio::test]
-async fn runner_micro_adoption_post_hook_failure_overrides_soft_summary_failure() {
+async fn runner_micro_adoption_post_hook_failure_does_not_block_soft_summary_fallback() {
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             max_context_tokens: Some(2_048),
@@ -3388,34 +3403,20 @@ async fn runner_micro_adoption_post_hook_failure_overrides_soft_summary_failure(
         .run_turn(turn_request_with_output(messages, 16))
         .await;
 
-    assert!(matches!(
-        result.error,
-        Some(AgentRunError::Hook(HookError::Callback {
-            phase: HookPhase::PostCompact,
-            ref hook_name,
-            ref code,
-            ..
-        })) if hook_name == "compaction-probe" && code == "post_compact_failed"
-    ));
-    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert!(result.is_success(), "{result:?}");
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::Completed)
+    );
     assert_eq!(result.compactions.len(), 1);
     assert_eq!(
         result.compactions[0].kind,
         ContextCompactionKind::MicroProjection
     );
-    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 2);
     assert_eq!(hook.pre_contexts().len(), 1);
     assert_eq!(hook.post_contexts().len(), 1);
-    let errors = hook.error_contexts();
-    assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].terminal_reason, TerminalReason::Failed);
-    assert!(matches!(
-        &errors[0].error,
-        AgentRunError::Hook(HookError::Callback {
-            phase: HookPhase::PostCompact,
-            ..
-        })
-    ));
+    assert!(hook.error_contexts().is_empty());
 }
 
 /// 摘要模型传输失败时预压缩臂按现状终止 Turn，但已回收的投影收益不丢。
