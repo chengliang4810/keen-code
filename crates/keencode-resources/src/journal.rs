@@ -1,6 +1,6 @@
 #[cfg(test)]
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
@@ -403,6 +403,8 @@ struct BatchFlushTarget {
     background_failures_remaining: std::sync::atomic::AtomicUsize,
     #[cfg(any(test, feature = "test-support"))]
     background_attempt_count: std::sync::atomic::AtomicU64,
+    #[cfg(any(test, feature = "test-support"))]
+    background_sync_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 /// 一个 Journal 在进程级调度器中的常量大小弱引用任务，不延长 Journal 生命周期。
@@ -427,12 +429,15 @@ impl BatchFlushJob {
 #[derive(Default)]
 struct BatchSchedulerState {
     jobs: BTreeMap<u64, Weak<BatchFlushJob>>,
+    /// 已交给独立短生命周期线程执行 fsync 的任务，避免同一 Journal 重复并发刷盘。
+    in_flight: BTreeSet<u64>,
     worker_active: bool,
     /// 每次任务集合或 deadline 变化时递增，避免通知发生在 worker 处理任务期间而丢失。
     revision: u64,
 }
 
-/// 所有 Journal 共享的单线程惰性调度器；Condvar 直接等待最早 deadline，不轮询。
+/// 所有 Journal 共享的惰性 deadline 调度器；Condvar 直接等待最早 deadline，
+/// 到期 Journal 的 fsync 由互相独立的短生命周期线程并发执行。
 struct BatchScheduler {
     state: Mutex<BatchSchedulerState>,
     wake: Condvar,
@@ -462,7 +467,7 @@ fn batch_scheduler() -> &'static Arc<BatchScheduler> {
 }
 
 impl BatchScheduler {
-    /// 登记或唤醒一个 Journal 任务；进程内任意时刻至多存在一个调度线程。
+    /// 登记或唤醒一个 Journal 任务；进程内任意时刻至多存在一个 deadline 调度线程。
     fn schedule(self: &Arc<Self>, job: &Arc<BatchFlushJob>) -> bool {
         let mut state = match self.state.lock() {
             Ok(state) => state,
@@ -477,7 +482,7 @@ impl BatchScheduler {
         state.worker_active = true;
         let scheduler = Arc::clone(self);
         match std::thread::Builder::new()
-            .name("keencode-journal-fsync".to_owned())
+            .name("keencode-journal-timer".to_owned())
             .spawn(move || run_batch_scheduler(scheduler))
         {
             Ok(_) => true,
@@ -506,6 +511,28 @@ impl BatchScheduler {
             self.wake.notify_one();
         }
     }
+
+    /// 在任务仍登记且未执行时原子标记一次并发 fsync 派发。
+    fn begin_flush(&self, job_id: u64) -> bool {
+        let Ok(mut state) = self.state.lock() else {
+            return false;
+        };
+        if !state.jobs.contains_key(&job_id) || !state.in_flight.insert(job_id) {
+            return false;
+        }
+        state.revision = state.revision.wrapping_add(1);
+        true
+    }
+
+    /// 独立 fsync 线程退出时解除执行标记并唤醒调度器处理重试或新批次。
+    fn finish_flush(&self, job_id: u64) {
+        if let Ok(mut state) = self.state.lock()
+            && state.in_flight.remove(&job_id)
+        {
+            state.revision = state.revision.wrapping_add(1);
+            self.wake.notify_one();
+        }
+    }
 }
 
 /// 测试用进程级调度线程生命周期计数守卫。
@@ -529,6 +556,24 @@ impl Drop for ActiveBatchSchedulerGuard<'_> {
         self.scheduler
             .active_worker_count
             .fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// 确保独立 fsync 线程即使 panic 也解除调度器中的 in-flight 标记。
+struct BatchFlushCompletionGuard {
+    scheduler: Arc<BatchScheduler>,
+    job_id: u64,
+}
+
+impl BatchFlushCompletionGuard {
+    fn new(scheduler: Arc<BatchScheduler>, job_id: u64) -> Self {
+        Self { scheduler, job_id }
+    }
+}
+
+impl Drop for BatchFlushCompletionGuard {
+    fn drop(&mut self) {
+        self.scheduler.finish_flush(self.job_id);
     }
 }
 
@@ -710,16 +755,29 @@ impl SessionJournal {
                 log_path,
             }));
         }
-        if loaded.snapshot_needs_rebuild {
-            if config.durability == Durability::FlushAndSync && log_path.exists() {
-                let file = OpenOptions::new()
-                    .write(true)
-                    .open(&log_path)
-                    .map_err(|error| ResourceError::io("open_event_log_for_snapshot", error))?;
-                file.sync_data()
-                    .map_err(|error| ResourceError::io("sync_event_log_for_snapshot", error))?;
-                sync_directory(&session_dir, true)?;
+        // 冷打开不能仅因日志能够重放就把既有 sequence 当作 durable。另一个
+        // 进程可能刚把完整 JSONL 行写入页缓存后退出；必须先在 append.lock 内
+        // 同步文件与目录，再建立 synced_through_sequence 基线。
+        let existing_log_synced =
+            config.durability == Durability::FlushAndSync && log_path.exists();
+        if existing_log_synced {
+            let file = OpenOptions::new()
+                .write(true)
+                .open(&log_path)
+                .map_err(|error| ResourceError::io("open_event_log_on_open", error))?;
+            #[cfg(any(test, feature = "test-support"))]
+            if take_append_fault(AppendFault::Sync) {
+                return Err(injected_io_error("sync_event_log_on_open"));
             }
+            file.sync_data()
+                .map_err(|error| ResourceError::io("sync_event_log_on_open", error))?;
+            #[cfg(any(test, feature = "test-support"))]
+            if take_append_fault(AppendFault::DirectorySync) {
+                return Err(injected_io_error("sync_event_log_directory_on_open"));
+            }
+            sync_directory(&session_dir, true)?;
+        }
+        if loaded.snapshot_needs_rebuild {
             if let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes) {
                 let _ = write_snapshot_file(
                     &snapshot_path,
@@ -739,7 +797,8 @@ impl SessionJournal {
             log_len: loaded.log_len,
             log_stamp: loaded.log_stamp,
             read_only: false,
-            directory_sync_required: config.durability == Durability::FlushAndSync,
+            directory_sync_required: config.durability == Durability::FlushAndSync
+                && !existing_log_synced,
             pending_records: 0,
             synced_through_sequence: loaded_sequence,
             pending_since: None,
@@ -758,6 +817,8 @@ impl SessionJournal {
             background_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             background_attempt_count: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            background_sync_delay_ms: AtomicU64::new(0),
         });
         let batch_job = Arc::new(BatchFlushJob::new(&inner, &batch_target));
         Ok(SessionOpen::Ready(Self {
@@ -905,6 +966,8 @@ impl SessionJournal {
             background_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(any(test, feature = "test-support"))]
             background_attempt_count: AtomicU64::new(0),
+            #[cfg(any(test, feature = "test-support"))]
+            background_sync_delay_ms: AtomicU64::new(0),
         });
         let batch_job = Arc::new(BatchFlushJob::new(&inner, &batch_target));
         Ok(TruncatedTailRecovery {
@@ -1569,7 +1632,7 @@ impl SessionJournal {
         result
     }
 
-    /// 首条待刷事件至多登记一次；所有 Journal 共用进程级单线程调度器。
+    /// 首条待刷事件至多登记一次；所有 Journal 共用进程级 deadline 调度器。
     fn arm_batch_worker(&self, inner: &mut JournalInner) -> bool {
         if inner.pending_records == 0 {
             return true;
@@ -1760,6 +1823,11 @@ impl SessionJournal {
         install_loaded_session(inner, loaded);
         if self.config.durability == Durability::FlushAndSync {
             inner.observe_unsynced_through(sequence);
+            if !self.arm_batch_worker(inner) {
+                // 调度线程创建失败时在当前 append.lock 临界区直接完成同步，
+                // 不能让一次只读 reload 留下没有超时唤醒来源的窗口。
+                self.flush_pending_locked(inner, false)?;
+            }
         }
         Ok(())
     }
@@ -1909,6 +1977,10 @@ fn sync_pending_batch(
         {
             return Err(injected_io_error("background_sync_event_log"));
         }
+        let delay_ms = target.background_sync_delay_ms.load(Ordering::Acquire);
+        if delay_ms > 0 {
+            std::thread::sleep(Duration::from_millis(delay_ms));
+        }
     }
     #[cfg(not(any(test, feature = "test-support")))]
     let _ = inject_faults;
@@ -1941,6 +2013,36 @@ fn sync_pending_batch(
 fn batch_retry_delay(attempts: u32) -> Duration {
     let shift = attempts.saturating_sub(1).min(3);
     Duration::from_millis(5_u64 << shift)
+}
+
+/// 只读取一个未执行 Journal 的下一截止时间；调度线程不得在这里执行 fsync。
+fn batch_job_deadline(scheduler: &BatchScheduler, job: &BatchFlushJob) -> Option<Instant> {
+    let Some(shared_inner) = job.inner.upgrade() else {
+        scheduler.cancel(job.id);
+        return None;
+    };
+    let Ok(mut inner) = shared_inner.lock() else {
+        scheduler.cancel(job.id);
+        return None;
+    };
+    if inner.pending_records == 0 || inner.batch_flush_failure.is_some() {
+        inner.batch_worker_active = false;
+        scheduler.cancel(job.id);
+        return None;
+    }
+    inner
+        .batch_retry_at
+        .or_else(|| {
+            inner
+                .pending_since
+                .map(|started| started + JOURNAL_BATCH_MAX_DELAY)
+        })
+        .or_else(|| {
+            inner.batch_flush_failure = Some("待刷批次缺少超时起点".to_owned());
+            inner.batch_worker_active = false;
+            scheduler.cancel(job.id);
+            None
+        })
 }
 
 /// 执行一个到期 Journal；成功/耗尽时在同一 Journal 锁内取消登记，避免丢失重新 arm。
@@ -2001,7 +2103,44 @@ fn process_batch_job(scheduler: &BatchScheduler, job: &BatchFlushJob) -> Option<
     }
 }
 
-/// 等待所有 Journal 的最早截止时间并串行刷盘；队列空闲后释放唯一 OS 线程。
+/// 线程创建失败时形成可观察 sticky 栅栏，下一次显式 barrier 可继续对账。
+fn mark_batch_dispatch_failure(scheduler: &BatchScheduler, job: &BatchFlushJob) {
+    let Some(shared_inner) = job.inner.upgrade() else {
+        scheduler.cancel(job.id);
+        return;
+    };
+    let Ok(mut inner) = shared_inner.lock() else {
+        scheduler.cancel(job.id);
+        return;
+    };
+    if inner.pending_records > 0 {
+        inner.batch_flush_failure = Some("无法创建 Journal fsync 线程".to_owned());
+    }
+    inner.batch_worker_active = false;
+    scheduler.cancel(job.id);
+}
+
+/// 为一个到期 Journal 派发独立短生命周期 fsync；同一任务由 in-flight 集合去重。
+fn dispatch_batch_job(scheduler: &Arc<BatchScheduler>, job: Arc<BatchFlushJob>) {
+    if !scheduler.begin_flush(job.id) {
+        return;
+    }
+    let worker_scheduler = Arc::clone(scheduler);
+    let worker_job = Arc::clone(&job);
+    let spawned = std::thread::Builder::new()
+        .name(format!("keencode-journal-fsync-{}", job.id))
+        .spawn(move || {
+            let _completion =
+                BatchFlushCompletionGuard::new(Arc::clone(&worker_scheduler), worker_job.id);
+            let _ = process_batch_job(&worker_scheduler, &worker_job);
+        });
+    if spawned.is_err() {
+        mark_batch_dispatch_failure(scheduler, &job);
+        scheduler.finish_flush(job.id);
+    }
+}
+
+/// 等待所有 Journal 的最早截止时间并并发派发到期 fsync；队列空闲后释放调度线程。
 fn run_batch_scheduler(scheduler: Arc<BatchScheduler>) {
     #[cfg(any(test, feature = "test-support"))]
     let _active_worker_guard = ActiveBatchSchedulerGuard::new(&scheduler);
@@ -2025,17 +2164,39 @@ fn run_batch_scheduler(scheduler: Arc<BatchScheduler>) {
                 }
                 continue;
             }
-            (
-                state.jobs.values().cloned().collect::<Vec<_>>(),
-                state.revision,
-            )
+            let jobs = state
+                .jobs
+                .iter()
+                .filter(|(id, _)| !state.in_flight.contains(id))
+                .map(|(_, job)| job.clone())
+                .collect::<Vec<_>>();
+            if jobs.is_empty() {
+                if scheduler.wake.wait(state).is_err() {
+                    return;
+                }
+                continue;
+            }
+            (jobs, state.revision)
         };
         let mut next_deadline = None;
+        let mut due = Vec::new();
+        let now = Instant::now();
         for job in jobs.into_iter().filter_map(|job| job.upgrade()) {
-            if let Some(deadline) = process_batch_job(&scheduler, &job) {
-                next_deadline =
-                    Some(next_deadline.map_or(deadline, |current: Instant| current.min(deadline)));
+            if let Some(deadline) = batch_job_deadline(&scheduler, &job) {
+                if deadline <= now {
+                    due.push(job);
+                } else {
+                    next_deadline = Some(
+                        next_deadline.map_or(deadline, |current: Instant| current.min(deadline)),
+                    );
+                }
             }
+        }
+        if !due.is_empty() {
+            for job in due {
+                dispatch_batch_job(&scheduler, job);
+            }
+            continue;
         }
         let Some(deadline) = next_deadline else {
             continue;
@@ -3524,7 +3685,8 @@ mod tests {
                     AppendFault::Flush => AppendFault::Flush,
                     AppendFault::Sync | AppendFault::PostWriteMetadata => AppendFault::Sync,
                     AppendFault::BarrierSync => AppendFault::BarrierSync,
-                    AppendFault::DirectorySync => AppendFault::DirectorySync,
+                    // 冷打开已经同步既有目录项；幂等 barrier 仍必须补齐文件 sync。
+                    AppendFault::DirectorySync => AppendFault::Sync,
                     AppendFault::ZeroWrite | AppendFault::PartialWrite => {
                         unreachable!("零字节与截断写入已经单独排除")
                     }
@@ -3648,33 +3810,25 @@ mod tests {
         );
         drop(journal);
 
+        set_append_fault(AppendFault::DirectorySync);
+        assert!(matches!(
+            SessionJournal::open(root.path(), session_id.clone(), config),
+            Err(ResourceError::Io {
+                operation: "sync_event_log_directory_on_open",
+                ..
+            })
+        ));
         let journal = match SessionJournal::open(root.path(), session_id.clone(), config)
-            .expect("空日志 Session 应重开")
+            .expect("目录同步成功后空日志 Session 应重开")
         {
             SessionOpen::Ready(journal) => journal,
             SessionOpen::Corrupt(_) => panic!("零字节故障不应损坏 Session"),
         };
-        set_append_fault(AppendFault::DirectorySync);
         let created = journal
             .append_idempotent(event_id.clone(), 0, event.clone())
-            .expect("首次目录同步故障应返回结构化结果");
-        // 批量窗口攒批时首条追加未触发自动刷盘，目录同步故障尚未被消费：
-        // 显式 flush 兑现故障，重试后幂等确认路径补齐同步并返回已提交。
-        let created = if matches!(created, IdempotentAppendOutcome::Appended(_)) {
-            journal
-                .flush()
-                .expect_err("注入的目录同步故障应在显式刷盘时暴露");
-            journal
-                .append_idempotent(event_id.clone(), 0, event.clone())
-                .expect("刷盘失败后重试应返回结构化结果")
-        } else {
-            created
-        };
-        assert!(matches!(
-            created,
-            IdempotentAppendOutcome::AlreadyCommitted { .. }
-                | IdempotentAppendOutcome::Indeterminate { .. }
-        ));
+            .expect("目录项已确认后首次事件应追加");
+        assert!(matches!(created, IdempotentAppendOutcome::Appended(_)));
+        journal.flush().expect("事件文件内容应完成最终同步");
         assert_eq!(
             fs::read_to_string(journal.log_path())
                 .expect("事件日志应读取")
@@ -3690,11 +3844,11 @@ mod tests {
             SessionOpen::Ready(journal) => journal,
             SessionOpen::Corrupt(_) => panic!("完整事件不应损坏 Session"),
         };
-        set_append_fault(AppendFault::DirectorySync);
+        set_append_fault(AppendFault::Sync);
         assert!(matches!(
             journal
                 .append_idempotent(event_id.clone(), 0, event.clone())
-                .expect("幂等补同步故障应返回结构化结果"),
+                .expect("幂等文件同步故障应返回结构化结果"),
             IdempotentAppendOutcome::Indeterminate { .. }
         ));
         assert!(matches!(
@@ -4037,7 +4191,124 @@ mod tests {
         assert_eq!(journal.sync_count_for_tests(), baseline + 1);
     }
 
-    /// 一个 Journal 的任务完成后可重新登记；相邻批次复用同一进程级线程。
+    /// FlushAndSync 冷打开必须先同步既有日志，不能把仅可重放的页缓存内容标成 durable。
+    #[test]
+    fn 冷打开先同步既有日志再建立durable水位() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("cold-open-sync").expect("Session ID 应有效");
+        let buffered = JournalConfig {
+            durability: Durability::Buffered,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let journal = match SessionJournal::open(root.path(), session_id.clone(), buffered)
+            .expect("Buffered Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        journal
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "冷打开同步".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("Buffered 事件应追加");
+        drop(journal);
+
+        let durable = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        set_append_fault(AppendFault::Sync);
+        let failed = SessionJournal::open(root.path(), session_id.clone(), durable);
+        assert!(matches!(
+            failed,
+            Err(ResourceError::Io {
+                operation: "sync_event_log_on_open",
+                ..
+            })
+        ));
+
+        let reopened = match SessionJournal::open(root.path(), session_id, durable)
+            .expect("清除同步故障后应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("完整既有日志不应损坏"),
+        };
+        let inner = reopened.inner.lock().expect("Journal 锁应可用");
+        assert_eq!(inner.synced_through_sequence, 1);
+        assert_eq!(inner.pending_records, 0);
+        assert!(!inner.directory_sync_required);
+    }
+
+    /// 只读 refresh 发现外部完整新增后也必须自动登记 100ms flush，不能依赖后续 append。
+    #[test]
+    fn reload外部新增会自动arm超时刷盘() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("reload-arms-flush").expect("Session ID 应有效");
+        let config = JournalConfig {
+            durability: Durability::FlushAndSync,
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let writer = match SessionJournal::open(root.path(), session_id.clone(), config)
+            .expect("写实例应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
+        };
+        writer
+            .append_idempotent(
+                SessionEventId::new("event-create").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "外部 reload".to_owned(),
+                    project_root: "D:/workspace".to_owned(),
+                },
+            )
+            .expect("创建事件应追加");
+        writer.flush().expect("创建事件应先落盘");
+        let observer = match SessionJournal::open(root.path(), session_id, config)
+            .expect("观察实例应冷打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("健康 Session 不应损坏"),
+        };
+        let baseline = observer.sync_count_for_tests();
+
+        writer
+            .defer_batch_timeout_for_tests()
+            .expect("写实例 deadline 应推迟");
+        writer
+            .append_idempotent(
+                SessionEventId::new("event-external").expect("事件 ID 应有效"),
+                1,
+                SessionEvent::SessionRenamed {
+                    title: "外部新增".to_owned(),
+                },
+            )
+            .expect("外部事件应追加");
+        assert_eq!(
+            observer.state().expect("观察实例应 reload").last_sequence,
+            2
+        );
+        {
+            let inner = observer.inner.lock().expect("Journal 锁应可用");
+            assert_eq!(inner.pending_records, 1);
+            assert!(inner.batch_worker_active);
+        }
+
+        wait_for_idle_batch_job(&observer);
+        assert_eq!(observer.sync_count_for_tests(), baseline + 1);
+        assert_eq!(observer.pending_flush_records().expect("窗口应读取"), 0);
+    }
+
+    /// 一个 Journal 的任务完成后可重新登记；相邻批次复用同一进程级调度器。
     #[test]
     fn 超时刷盘后journal任务可重新登记() {
         let root = tempfile::tempdir().expect("临时目录应创建");
@@ -4123,10 +4394,13 @@ mod tests {
         assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
     }
 
-    /// 大量 Session 同时等待截止时间时只登记常量任务，共享唯一 OS 线程/栈。
+    /// 64 个 Journal 同时到期时必须并发开始 fsync，慢盘不能形成全局串行队头阻塞。
+    /// 连续三轮覆盖完成、重新 arm 与 deadline 通知竞速。
     #[test]
-    fn 大量journal共享唯一批量调度线程() {
+    fn 大量journal到期fsync并发且重复竞速不丢任务() {
         const JOURNAL_COUNT: usize = 64;
+        const ROUNDS: u64 = 3;
+        const INJECTED_SYNC_DELAY: Duration = Duration::from_millis(200);
 
         let root = tempfile::tempdir().expect("临时目录应创建");
         let config = JournalConfig {
@@ -4144,59 +4418,80 @@ mod tests {
                 SessionOpen::Ready(journal) => journal,
                 SessionOpen::Corrupt(_) => panic!("全新 Session 不应损坏"),
             };
-            // 暂时固定未来 deadline，先让 64 个 Journal 同时进入待刷状态，
-            // 再验证它们只是共享调度器中的弱引用任务。
             journal
-                .inner
-                .lock()
-                .expect("Journal 锁应可用")
-                .pending_since = Some(Instant::now() + Duration::from_secs(60));
-            journal
-                .append_idempotent(
-                    SessionEventId::new("event-create").expect("事件 ID 应有效"),
-                    0,
-                    SessionEvent::SessionCreated {
-                        title: format!("idle worker {index}"),
-                        project_root: "D:/workspace".to_owned(),
-                    },
-                )
-                .expect("创建事件应追加");
+                .batch_target
+                .background_sync_delay_ms
+                .store(INJECTED_SYNC_DELAY.as_millis() as u64, Ordering::Release);
             journals.push(journal);
         }
 
-        wait_for_active_batch_scheduler();
-        assert_eq!(
-            journals[0].active_batch_scheduler_workers_for_tests(),
-            1,
-            "64 个 Journal 不得线性创建 OS 线程"
-        );
-        {
-            let state = batch_scheduler().state.lock().expect("调度器锁应可用");
+        for round in 0..ROUNDS {
+            for (index, journal) in journals.iter().enumerate() {
+                journal
+                    .defer_batch_timeout_for_tests()
+                    .expect("测试 deadline 应推迟");
+                let event = if round == 0 {
+                    SessionEvent::SessionCreated {
+                        title: format!("并发 Journal {index}"),
+                        project_root: "D:/workspace".to_owned(),
+                    }
+                } else {
+                    SessionEvent::SessionRenamed {
+                        title: format!("并发 Journal {index} round {round}"),
+                    }
+                };
+                journal
+                    .append_idempotent(
+                        SessionEventId::new(format!("event-{index}-{round}"))
+                            .expect("事件 ID 应有效"),
+                        round,
+                        event,
+                    )
+                    .expect("并发批次事件应追加");
+            }
+
+            wait_for_active_batch_scheduler();
+            for journal in &journals {
+                journal
+                    .inner
+                    .lock()
+                    .expect("Journal 锁应可用")
+                    .pending_since = Some(Instant::now() - JOURNAL_BATCH_MAX_DELAY);
+            }
+            let started = Instant::now();
+            batch_scheduler().notify();
+            let attempts_deadline = started + Duration::from_secs(1);
+            loop {
+                let all_started = journals.iter().all(|journal| {
+                    journal
+                        .batch_target
+                        .background_attempt_count
+                        .load(Ordering::Acquire)
+                        > round
+                });
+                if all_started {
+                    break;
+                }
+                assert!(
+                    Instant::now() < attempts_deadline,
+                    "第 {round} 轮 64 个 fsync 未并发开始；全局串行调度会被 200ms 慢盘阻塞"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            for journal in &journals {
+                wait_for_idle_batch_job(journal);
+                assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+                assert_eq!(
+                    journal.state().expect("状态应读取").last_sequence,
+                    round + 1
+                );
+            }
             assert!(
-                journals
-                    .iter()
-                    .all(|journal| state.jobs.contains_key(&journal.batch_job.id)),
-                "每个待刷 Journal 都应只登记一个常量大小任务"
+                started.elapsed() < Duration::from_secs(2),
+                "第 {round} 轮并发刷盘耗时过长：{:?}",
+                started.elapsed()
             );
         }
-        for journal in &journals {
-            journal
-                .inner
-                .lock()
-                .expect("Journal 锁应可用")
-                .pending_since = Some(Instant::now() - JOURNAL_BATCH_MAX_DELAY);
-        }
-        batch_scheduler().notify();
-        for journal in &journals {
-            wait_for_idle_batch_job(journal);
-            assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
-        }
-        let state = batch_scheduler().state.lock().expect("调度器锁应可用");
-        assert!(
-            journals
-                .iter()
-                .all(|journal| !state.jobs.contains_key(&journal.batch_job.id))
-        );
     }
 
     /// 暂时 IO 失败必须由进程级调度器按有界退避重试，不能静默留下无限窗口。
