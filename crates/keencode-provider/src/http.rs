@@ -15,6 +15,11 @@ use crate::sse::SseDecoder;
 #[cfg(feature = "live-test-trace")]
 use crate::trace::WireTraceSink;
 
+/// 进入错误分类与结构化脱敏前允许保留的原始 UTF-8 字节数。
+const MAX_ERROR_INPUT_BYTES: usize = 64 * 1024;
+/// 最终错误展示允许保留的 Unicode 字符数。
+const MAX_ERROR_MESSAGE_CHARS: usize = 1_000;
+
 /// 把成功 HTTP 响应按媒体类型转换为真实增量或缓冲事件流。
 pub(crate) async fn decode_success_response(
     response: Response,
@@ -85,21 +90,32 @@ pub(crate) async fn decode_error_response(
         Err(error) => return error,
     };
     let (message, code) = provider_error_fields(&body);
-    let message = safe_error_message(api_key, &message);
-    classify_http_error(status, retry_after_ms, message, code.as_deref())
+    classify_http_error_with_api_key(status, retry_after_ms, message, code.as_deref(), api_key)
 }
 
-/// 按状态、公开错误码和脱敏文本构造 Provider 中立错误。
+/// 按状态、公开错误码和原始受限文本构造 Provider 中立错误。
 pub(crate) fn classify_http_error(
     status: u16,
     retry_after_ms: Option<u64>,
     message: String,
     code: Option<&str>,
 ) -> ModelError {
-    let classifier = format!("{} {}", code.unwrap_or_default(), message).to_ascii_lowercase();
-    // 分类使用原始服务语义，向上返回的正文统一移除字段化秘密；公开错误码和
-    // HTTP 状态仍保留在类型字段中，不因脱敏而改变归因。
-    let message = redact_error_secrets(&message);
+    classify_http_error_with_api_key(status, retry_after_ms, message, code, None)
+}
+
+/// 分类只读取原始错误的有界前缀，构造错误前再对展示正文执行凭据脱敏。
+fn classify_http_error_with_api_key(
+    status: u16,
+    retry_after_ms: Option<u64>,
+    message: String,
+    code: Option<&str>,
+    api_key: Option<&ApiKey>,
+) -> ModelError {
+    let classifier_message = bounded_utf8_prefix(&message, MAX_ERROR_INPUT_BYTES);
+    let classifier_code = bounded_utf8_prefix(code.unwrap_or_default(), MAX_ERROR_INPUT_BYTES);
+    let classifier = format!("{classifier_code} {classifier_message}").to_ascii_lowercase();
+    // 公开错误码和 HTTP 状态仍保留在类型字段中，展示文本的结构化脱敏不参与归因。
+    let message = safe_error_message(api_key, &message);
 
     if classifier.contains("context_length")
         || classifier.contains("context length")
@@ -632,6 +648,7 @@ fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
 
 /// 移除凭据、控制字符并限制错误文本长度。
 fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
+    let message = bounded_utf8_prefix(message, MAX_ERROR_INPUT_BYTES);
     let redacted = api_key.map_or_else(|| message.to_owned(), |api_key| api_key.redact(message));
     let mut safe = redact_error_secrets(&redacted)
         .chars()
@@ -642,10 +659,22 @@ fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
                 character
             }
         })
-        .take(1000)
+        .take(MAX_ERROR_MESSAGE_CHARS)
         .collect::<String>();
     if safe.trim().is_empty() {
         safe = "模型服务返回空错误".to_owned();
     }
     safe
+}
+
+/// 按 UTF-8 边界借用不可信文本的有界前缀，避免先为超大错误分配副本。
+fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
+    if value.len() <= maximum_bytes {
+        return value;
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
 }

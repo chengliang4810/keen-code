@@ -293,6 +293,101 @@ async fn http_error_redacts_embedded_credentials_without_losing_status() {
     server.join().unwrap().unwrap();
 }
 
+/// 非成功 HTTP 路径不得在识别 `invalid_api_key` 前先删掉其字段值。
+#[tokio::test]
+async fn http_error_response_classifies_raw_message_before_redaction() {
+    let body = json!({
+        "error": {
+            "code": "invalid_request_error",
+            "message": "token=invalid_api_key request_id=req-auth-http"
+        }
+    })
+    .to_string();
+    let (base_url, server) = spawn_catalog_server(vec![("400 Bad Request", body)]);
+    let mut config =
+        ProviderConfig::new_unauthenticated("gateway", ProviderProtocol::Responses, base_url)
+            .unwrap();
+    config.retry.max_attempts = 1;
+    let client = crate::ProviderClient::new(config).unwrap();
+    let error = match client.stream(minimal_request()).await {
+        Err(error) => error,
+        Ok(_) => panic!("字段化 invalid_api_key 应归一为认证错误"),
+    };
+
+    assert!(matches!(
+        error,
+        ModelError::Authentication {
+            status_code: Some(400),
+            ..
+        }
+    ));
+    assert_eq!(error.message(), "token=[REDACTED] request_id=req-auth-http");
+    server.join().unwrap().unwrap();
+}
+
+/// 分类必须读取脱敏前的受限语义，而持久化消息只保留安全正文。
+#[test]
+fn http_error_classification_precedes_display_redaction() {
+    let authentication = classify_http_error(
+        400,
+        None,
+        "token=invalid_api_key request_id=req-auth".to_owned(),
+        Some("invalid_request_error"),
+    );
+    assert!(matches!(authentication, ModelError::Authentication { .. }));
+    assert_eq!(
+        authentication.message(),
+        "token=[REDACTED] request_id=req-auth"
+    );
+
+    let rate_limit = classify_http_error(
+        400,
+        Some(3_000),
+        "Cookie: sid=rate_limit; refresh=refresh-secret request_id=req-rate".to_owned(),
+        Some("invalid_request_error"),
+    );
+    assert!(matches!(
+        rate_limit,
+        ModelError::RateLimited {
+            retry_after_ms: Some(3_000),
+            ..
+        }
+    ));
+    assert_eq!(
+        rate_limit.message(),
+        "Cookie: [REDACTED] request_id=req-rate"
+    );
+
+    let invalid_request = classify_http_error(
+        400,
+        None,
+        "Authorization: Digest username=alice, response=digest-secret, nonce=nonce-secret request_id=req-invalid"
+            .to_owned(),
+        Some("invalid_request_error"),
+    );
+    assert!(matches!(invalid_request, ModelError::InvalidRequest { .. }));
+    assert_eq!(
+        invalid_request.message(),
+        "Authorization: Digest [REDACTED] request_id=req-invalid"
+    );
+}
+
+/// 16 MiB 级上游错误在分类和结构脱敏前先收敛到固定输入上限。
+#[test]
+fn oversized_http_error_has_bounded_classification_and_display_cost() {
+    let message = format!(
+        "invalid_api_key request_id=req-large Authorization: Digest {}",
+        "https://".repeat(2 * 1024 * 1024)
+    );
+    assert!(message.len() > 16 * 1024 * 1024);
+
+    let error = classify_http_error(400, None, message, Some("invalid_request_error"));
+    assert!(matches!(error, ModelError::Authentication { .. }));
+    assert!(error.message().contains("request_id=req-large"));
+    assert!(error.message().contains("Authorization: Digest [REDACTED]"));
+    assert!(error.message().chars().count() <= 1_000);
+}
+
 /// 持续有响应数据可以超过读取超时的总时长，停滞则保留 timeout 原因链。
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_read_timeout_is_idle_not_total() {
