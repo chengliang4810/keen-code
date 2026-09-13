@@ -4,6 +4,8 @@ use url::{Url, form_urlencoded};
 
 /// 错误文本中秘密值使用的唯一固定占位符。
 pub const REDACTED_SECRET: &str = "[REDACTED]";
+/// 交给 URL 解析器的单个候选字节上限；超限候选整段保守脱敏。
+const MAX_URL_CANDIDATE_BYTES: usize = 64 * 1024;
 
 /// 从错误文本中移除常见认证 Header、敏感字段和 URL 凭据。
 ///
@@ -37,27 +39,33 @@ struct Redaction {
     replacement: String,
 }
 
-/// 在当前字符处识别 HTTP(S) URL，并只在确有敏感部分时返回替代文本。
+/// 在当前字符处识别 HTTP(S) URL，并一次性消费整个候选，避免从候选内部重复扫描。
 fn redact_url_at(input: &str, start: usize) -> Option<Redaction> {
     if start > 0 && input.as_bytes()[start - 1].is_ascii_alphanumeric() {
         return None;
     }
-    let rest = &input[start..];
-    if !starts_ascii_case_insensitive(rest, "http://")
-        && !starts_ascii_case_insensitive(rest, "https://")
-    {
-        return None;
-    }
+    let slash_style = url_slash_style(&input[start..])?;
 
     let mut end = start;
-    for (offset, character) in input[start..].char_indices() {
+    while end < input.len() {
+        if slash_style == UrlSlashStyle::JsonEscaped
+            && input.as_bytes()[end] == b'\\'
+            && input.as_bytes().get(end + 1) == Some(&b'/')
+        {
+            end += 2;
+            continue;
+        }
+        let character = input[end..]
+            .chars()
+            .next()
+            .expect("URL 候选游标始终位于非空 UTF-8 后缀");
         if character.is_whitespace()
             || character.is_control()
             || matches!(character, '"' | '\'' | '<' | '>' | '\\')
         {
             break;
         }
-        end = start + offset + character.len_utf8();
+        end += character.len_utf8();
     }
     if end == start {
         return None;
@@ -69,7 +77,12 @@ fn redact_url_at(input: &str, start: usize) -> Option<Redaction> {
         && input[..parsed_end]
             .chars()
             .next_back()
-            .is_some_and(|character| matches!(character, ',' | ';' | ')' | ']' | '}'))
+            .is_some_and(|character| {
+                matches!(
+                    character,
+                    ',' | ';' | ':' | '!' | '?' | '.' | ')' | ']' | '}'
+                )
+            })
     {
         let character = input[..parsed_end]
             .chars()
@@ -77,8 +90,25 @@ fn redact_url_at(input: &str, start: usize) -> Option<Redaction> {
             .expect("非空 URL 候选应有末字符");
         parsed_end -= character.len_utf8();
     }
-    let candidate = &input[start..parsed_end];
-    let mut url = Url::parse(candidate).ok()?;
+    let trailing = &input[parsed_end..end];
+    if parsed_end.saturating_sub(start) > MAX_URL_CANDIDATE_BYTES {
+        return Some(Redaction {
+            end,
+            replacement: format!("{REDACTED_SECRET}{trailing}"),
+        });
+    }
+
+    let candidate = match slash_style {
+        UrlSlashStyle::Plain => input[start..parsed_end].to_owned(),
+        UrlSlashStyle::JsonEscaped => input[start..parsed_end].replace("\\/", "/"),
+    };
+    let Ok(mut url) = Url::parse(&candidate) else {
+        // 已有明确 URL scheme 但语法畸形时无法安全区分路径与凭据，整段删除。
+        return Some(Redaction {
+            end,
+            replacement: format!("{REDACTED_SECRET}{trailing}"),
+        });
+    };
     if !matches!(url.scheme(), "http" | "https") {
         return None;
     }
@@ -134,12 +164,40 @@ fn redact_url_at(input: &str, start: usize) -> Option<Redaction> {
     }
 
     if !changed {
-        return None;
+        return Some(Redaction {
+            end,
+            replacement: input[start..end].to_owned(),
+        });
     }
     // `url` 会把占位符方括号编码；错误展示统一恢复为同一个可见占位符。
     let mut replacement = url.to_string().replace("%5BREDACTED%5D", REDACTED_SECRET);
-    replacement.push_str(&input[parsed_end..end]);
+    if slash_style == UrlSlashStyle::JsonEscaped {
+        replacement = replacement.replace('/', "\\/");
+    }
+    replacement.push_str(trailing);
     Some(Redaction { end, replacement })
+}
+
+/// URL 在原错误文本中的斜杠表示形式。
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum UrlSlashStyle {
+    Plain,
+    JsonEscaped,
+}
+
+/// 同时识别普通 URL 与 JSON 字符串常见的 `https:\/\/` 表示。
+fn url_slash_style(value: &str) -> Option<UrlSlashStyle> {
+    if starts_ascii_case_insensitive(value, "http://")
+        || starts_ascii_case_insensitive(value, "https://")
+    {
+        return Some(UrlSlashStyle::Plain);
+    }
+    if starts_ascii_case_insensitive(value, r"http:\/\/")
+        || starts_ascii_case_insensitive(value, r"https:\/\/")
+    {
+        return Some(UrlSlashStyle::JsonEscaped);
+    }
+    None
 }
 
 /// 在当前字符处识别 `Bearer <credential>`，不误删普通 `bearer` 单词。
@@ -162,7 +220,7 @@ fn redact_bearer_at(input: &str, start: usize) -> Option<Redaction> {
     if value_start == input.len() || starts_with_redaction_placeholder(&input[value_start..]) {
         return None;
     }
-    let (end, replacement_value) = redact_value(input, value_start, true)?;
+    let (end, replacement_value) = redact_value(input, value_start, false)?;
     Some(Redaction {
         end,
         replacement: format!(
@@ -256,11 +314,19 @@ fn redact_sensitive_assignment_at(input: &str, start: usize) -> Option<Redaction
         normalized_name.as_str(),
         "authorization" | "proxyauthorization"
     );
-    let cookie_header = separator == b':'
-        && matches!(normalized_name.as_str(), "cookie" | "setcookie")
-        && opening_quote_at(input, cursor).is_none();
-    let (end, replacement_value) = if cookie_header {
-        (line_end(input, cursor), REDACTED_SECRET.to_owned())
+    let cookie_header = matches!(normalized_name.as_str(), "cookie" | "setcookie");
+    let structured_header = (authorization || cookie_header)
+        && opening_quote_at(input, cursor).is_none()
+        && !matches!(bytes.get(cursor), Some(b'{' | b'[' | b'('));
+    let (end, replacement_value) = if structured_header {
+        let end = structured_header_value_end(input, cursor);
+        let value = &input[cursor..end];
+        let replacement = if authorization {
+            redact_auth_scheme(value, true)
+        } else {
+            REDACTED_SECRET.to_owned()
+        };
+        (end, replacement)
     } else {
         redact_value(input, cursor, authorization)?
     };
@@ -268,6 +334,118 @@ fn redact_sensitive_assignment_at(input: &str, start: usize) -> Option<Redaction
         end,
         replacement: format!("{}{}", &input[start..cursor], replacement_value),
     })
+}
+
+/// 找到未加引号的认证或 Cookie Header 终点，完整覆盖结构参数并保留独立诊断字段。
+fn structured_header_value_end(input: &str, start: usize) -> usize {
+    let bytes = input.as_bytes();
+    let mut quote = None;
+    let mut cursor = start;
+    while cursor < input.len() {
+        let byte = bytes[cursor];
+        if let Some(active_quote) = quote {
+            match byte {
+                b'\\' => cursor = (cursor + 2).min(input.len()),
+                byte if byte == active_quote => {
+                    quote = None;
+                    cursor += 1;
+                }
+                b'\n' | b'\r' => return cursor,
+                _ => cursor += 1,
+            }
+            continue;
+        }
+        match byte {
+            b'"' | b'\'' => {
+                quote = Some(byte);
+                cursor += 1;
+            }
+            b'\n' | b'\r' => return cursor,
+            b'\\' if matches!(bytes.get(cursor + 1), Some(b'n' | b'r')) => return cursor,
+            byte if is_horizontal_whitespace(byte) => {
+                let mut diagnostic_start = cursor;
+                while diagnostic_start < input.len()
+                    && is_horizontal_whitespace(bytes[diagnostic_start])
+                {
+                    diagnostic_start += 1;
+                }
+                if is_independent_diagnostic_at(input, diagnostic_start) {
+                    return cursor;
+                }
+                cursor = diagnostic_start;
+            }
+            // 逗号与分号属于 Digest 参数和 Cookie 属性的结构，后续字段仍是秘密。
+            b',' | b';' => {
+                cursor += 1;
+                while cursor < input.len() && is_horizontal_whitespace(bytes[cursor]) {
+                    cursor += 1;
+                }
+            }
+            b'|' => {
+                let mut diagnostic_start = cursor + 1;
+                while diagnostic_start < input.len()
+                    && is_horizontal_whitespace(bytes[diagnostic_start])
+                {
+                    diagnostic_start += 1;
+                }
+                if is_independent_diagnostic_at(input, diagnostic_start) {
+                    return cursor;
+                }
+                cursor += 1;
+            }
+            _ => cursor += 1,
+        }
+    }
+    input.len()
+}
+
+/// 识别 Header 后可安全保留并继续单独脱敏的顶层诊断字段。
+fn is_independent_diagnostic_at(input: &str, start: usize) -> bool {
+    let bytes = input.as_bytes();
+    let maximum_key_end = start.saturating_add(80).min(input.len());
+    let mut cursor = start;
+    while cursor < maximum_key_end
+        && bytes
+            .get(cursor)
+            .copied()
+            .is_some_and(is_unquoted_field_name_byte)
+    {
+        cursor += 1;
+    }
+    if cursor == start {
+        return false;
+    }
+    let Some(name) = normalized_field_name(&input[start..cursor]) else {
+        return false;
+    };
+    while cursor < input.len() && is_horizontal_whitespace(bytes[cursor]) {
+        cursor += 1;
+    }
+    if !matches!(bytes.get(cursor), Some(b':' | b'=')) {
+        return false;
+    }
+    matches!(
+        name.as_str(),
+        "requestid"
+            | "traceid"
+            | "correlationid"
+            | "status"
+            | "statuscode"
+            | "httpstatus"
+            | "error"
+            | "errorcode"
+            | "code"
+            | "retryafter"
+            | "retryafterms"
+            | "detail"
+            | "details"
+            | "reason"
+            | "type"
+            | "authorization"
+            | "proxyauthorization"
+            | "cookie"
+            | "setcookie"
+    )
 }
 
 /// 替换一个字段值，同时保留引号、认证 scheme 和后续非敏感上下文。
@@ -459,33 +637,57 @@ fn balanced_value_end(input: &str, start: usize) -> Option<usize> {
     None
 }
 
-/// 保留 Authorization 的标准 scheme，但移除 scheme 后的秘密。
+/// 保留 Authorization 的任意合法 scheme token，但移除 scheme 后的完整秘密。
 fn redact_auth_scheme(value: &str, preserve: bool) -> String {
     if preserve {
-        for scheme in ["bearer", "basic"] {
-            if starts_ascii_case_insensitive(value, scheme)
-                && value
-                    .as_bytes()
-                    .get(scheme.len())
-                    .copied()
-                    .is_some_and(is_horizontal_whitespace)
+        let scheme_end = value
+            .bytes()
+            .take_while(|byte| is_auth_scheme_byte(*byte))
+            .count();
+        if scheme_end > 0
+            && value
+                .as_bytes()
+                .get(scheme_end)
+                .copied()
+                .is_some_and(is_horizontal_whitespace)
+        {
+            let mut secret_start = scheme_end;
+            while secret_start < value.len()
+                && is_horizontal_whitespace(value.as_bytes()[secret_start])
             {
-                let mut secret_start = scheme.len();
-                while secret_start < value.len()
-                    && is_horizontal_whitespace(value.as_bytes()[secret_start])
-                {
-                    secret_start += 1;
-                }
-                return format!(
-                    "{}{}{}",
-                    &value[..scheme.len()],
-                    &value[scheme.len()..secret_start],
-                    REDACTED_SECRET
-                );
+                secret_start += 1;
             }
+            return format!(
+                "{}{}{}",
+                &value[..scheme_end],
+                &value[scheme_end..secret_start],
+                REDACTED_SECRET
+            );
         }
     }
     REDACTED_SECRET.to_owned()
+}
+
+/// RFC 9110 `auth-scheme` 使用的 token 字符集合。
+fn is_auth_scheme_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 /// 未加引号的秘密只消费当前值，不吞掉后续错误码、请求 ID 或其他上下文。
@@ -661,9 +863,13 @@ mod tests {
             "HTTP 401 request_id=req-42\n",
             "AUTHORIZATION: Bearer header-secret\n",
             "Proxy-Authorization: Basic cHJveHk6c2VjcmV0\n",
+            "Authorization: Basic basic-secret ignored-segment request_id=req-basic\n",
+            "Authorization: Digest username=alice, response=digest-response, nonce=digest-nonce request_id=req-digest\n",
+            "Authorization: Digest username=bob, request_id=digest-param-secret\n",
             "x-api-key = api-secret, Retry-After: 30\n",
             "Client_Secret=>\"client-secret\"; PASSWORD: 'two words'\n",
-            "Cookie: sid=cookie-secret; theme=dark\n",
+            "Cookie: sid=cookie-secret; refresh=refresh-cookie-secret request_id=req-cookie\n",
+            "Cookie: sid=second-cookie-secret; request_id=cookie-field-secret\n",
             "Set-Cookie: sid=set-cookie-secret; HttpOnly\n",
             "headers={\\\"Refresh-Token\\\":\\\"refresh-secret\\\"}"
         );
@@ -671,13 +877,21 @@ mod tests {
         for secret in [
             "header-secret",
             "cHJveHk6c2VjcmV0",
+            "basic-secret",
+            "ignored-segment",
+            "username=alice",
+            "digest-response",
+            "digest-nonce",
+            "digest-param-secret",
             "api-secret",
             "client-secret",
             "two words",
             "refresh-secret",
             "cookie-secret",
+            "refresh-cookie-secret",
+            "second-cookie-secret",
+            "cookie-field-secret",
             "set-cookie-secret",
-            "theme=dark",
             "HttpOnly",
         ] {
             assert!(!safe.contains(secret), "仍包含秘密 {secret}: {safe}");
@@ -686,7 +900,9 @@ mod tests {
         assert!(safe.contains("Retry-After: 30"));
         assert!(safe.contains("AUTHORIZATION: Bearer [REDACTED]"));
         assert!(safe.contains("Proxy-Authorization: Basic [REDACTED]"));
-        assert!(safe.contains("Cookie: [REDACTED]"));
+        assert!(safe.contains("Authorization: Basic [REDACTED] request_id=req-basic"));
+        assert!(safe.contains("Authorization: Digest [REDACTED] request_id=req-digest"));
+        assert!(safe.contains("Cookie: [REDACTED] request_id=req-cookie"));
         assert!(safe.matches(REDACTED_SECRET).count() >= 8);
     }
 
@@ -702,6 +918,25 @@ mod tests {
         assert!(safe.contains("request_id=req-9"));
         assert!(safe.contains("token_count=88"));
         assert!(safe.contains("failed E_CONN"));
+    }
+
+    #[test]
+    fn redacts_json_escaped_url_and_preserves_trailing_punctuation() {
+        let raw = r#"failed \"https:\/\/user:password@example.invalid\/v1?api_key=query-secret&request_id=req-json#access_token=fragment-secret\"), status=401"#;
+        let safe = redact_error_secrets(raw);
+        for secret in ["user", "password", "query-secret", "fragment-secret"] {
+            assert!(!safe.contains(secret), "仍包含 URL 秘密 {secret}: {safe}");
+        }
+        assert!(safe.contains(r"https:\/\/example.invalid\/v1"));
+        assert!(safe.contains("api_key=[REDACTED]"));
+        assert!(safe.contains("request_id=req-json"));
+        assert!(safe.contains("access_token=[REDACTED]"));
+        assert!(safe.ends_with(r#"\"), status=401"#));
+
+        let punctuated = r#"failed https:\/\/user:password@example.invalid\/v1?api_key=query-secret#access_token=fragment-secret). request_id=req-punctuation"#;
+        let safe = redact_error_secrets(punctuated);
+        assert!(safe.contains("access_token=[REDACTED]). request_id=req-punctuation"));
+        assert!(!safe.contains("query-secret") && !safe.contains("fragment-secret"));
     }
 
     #[test]
@@ -756,6 +991,16 @@ mod tests {
     fn long_non_secret_escape_run_remains_unchanged() {
         let raw = format!("{} ordinary diagnostic", "\\".repeat(100_000));
         assert_eq!(redact_error_secrets(&raw), raw);
+    }
+
+    #[test]
+    fn oversized_url_candidate_is_consumed_once_and_conservatively_redacted() {
+        let raw = format!("{}), request_id=req-url-limit", "https://".repeat(9 * 1024));
+        assert!(raw.len() > 72 * 1024);
+        assert_eq!(
+            redact_error_secrets(&raw),
+            "[REDACTED]), request_id=req-url-limit"
+        );
     }
 
     #[test]
