@@ -2498,10 +2498,13 @@ impl AgentRunner {
                 break 'response_attempt (response, tool_calls);
             };
 
-            if response.stop_reason != StopReason::ToolUse {
+            // 工具能否执行由已完整归约的内容块决定。不同 Provider 可能在
+            // 带工具内容时报告 completed 或自定义 Other；只要不是明确的
+            // MaxOutputTokens、ContentFilter 或 Cancelled，均允许继续调度。
+            if !stop_reason_allows_tool_calls(&response.stop_reason) {
                 return Err(AgentRunError::InvalidResponse {
                     message: format!(
-                        "普通工具响应必须以 tool_use 结束，实际为 {:?}",
+                        "普通工具响应结束原因不允许执行工具，实际为 {:?}",
                         response.stop_reason
                     ),
                 });
@@ -4038,6 +4041,18 @@ fn model_terminal_error(stop_reason: &StopReason) -> Option<AgentRunError> {
         StopReason::Cancelled => Some(AgentRunError::Cancelled),
         StopReason::Completed | StopReason::ToolUse | StopReason::Other { .. } => None,
     }
+}
+
+/// 判断已完整解析工具调用是否可以进入工具调度阶段。
+///
+/// `ToolUse` 不是唯一能够携带可执行工具块的结束原因：兼容 Provider 可能
+/// 使用 `Completed` 或自定义 `Other`。明确的终止原因在上游已经转换为
+/// `AgentRunError`，因此不会进入本判断。
+fn stop_reason_allows_tool_calls(stop_reason: &StopReason) -> bool {
+    matches!(
+        stop_reason,
+        StopReason::ToolUse | StopReason::Completed | StopReason::Other { .. }
+    )
 }
 
 /// 提取非正常模型响应中已经确认的文本和推理，丢弃不能独立回放的工具调用。

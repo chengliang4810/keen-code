@@ -1200,17 +1200,54 @@ async fn ordinary_text_classifies_model_stop_reasons_and_protocol_errors() {
     }
 }
 
-/// 普通工具调用只有 ToolUse 才可执行，非正常模型终态不执行或持久化未配对 ToolCall。
+/// 完整工具调用由内容块决定是否执行；兼容 Provider 的三种非终止原因均可继续。
 #[tokio::test]
-async fn ordinary_tool_calls_classify_non_tool_use_stop_reasons_without_side_effects() {
+async fn ordinary_tool_calls_follow_complete_content_before_stop_reason() {
     for stop_reason in [
+        StopReason::ToolUse,
         StopReason::Completed,
-        StopReason::MaxOutputTokens,
-        StopReason::ContentFilter,
-        StopReason::Cancelled,
         StopReason::Other {
             reason: "provider_pause".to_owned(),
         },
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply_with_stop(
+                    &[("call-complete-stop", "record", json!({"value": "write"}))],
+                    stop_reason.clone(),
+                ),
+                text_reply("工具已执行"),
+            ],
+        ));
+        let tool = Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ChangesState,
+            ToolConcurrency::Exclusive,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(tool.clone())
+            .expect("停止原因测试工具应可注册");
+        let result = runner(provider, registry)
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+
+        assert!(result.is_success(), "{stop_reason:?}: {:?}", result.error);
+        assert_eq!(result.state.step_count(), 1);
+        assert_eq!(tool.call_count(), 1);
+        assert_eq!(result.messages.len(), 4);
+        assert_eq!(turn_tool_results(&result).len(), 1);
+    }
+}
+
+/// MaxOutputTokens、ContentFilter 和 Cancelled 始终阻止工具执行。
+#[tokio::test]
+async fn ordinary_tool_calls_keep_terminal_stop_reasons_fail_closed() {
+    for stop_reason in [
+        StopReason::MaxOutputTokens,
+        StopReason::ContentFilter,
+        StopReason::Cancelled,
     ] {
         let provider = Arc::new(ScriptedProvider::new(
             ProviderCapabilities::default(),
@@ -1254,15 +1291,71 @@ async fn ordinary_tool_calls_classify_non_tool_use_stop_reasons_without_side_eff
                 );
                 assert_eq!(result.error, Some(AgentRunError::Cancelled));
             }
-            StopReason::Completed | StopReason::Other { .. } => {
-                assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
-                assert!(matches!(
-                    result.error,
-                    Some(AgentRunError::InvalidResponse { .. })
-                ));
+            StopReason::Completed | StopReason::ToolUse | StopReason::Other { .. } => {
+                unreachable!()
             }
-            StopReason::ToolUse => unreachable!(),
         }
+        assert_eq!(result.state.step_count(), 0);
+        assert_eq!(tool.call_count(), 0);
+        assert_eq!(result.messages.len(), 1);
+    }
+}
+
+/// 悬空或参数 JSON 不完整的工具块在模型流归约阶段失败，绝不能进入执行器。
+#[tokio::test]
+async fn malformed_or_incomplete_tool_blocks_fail_closed_before_execution() {
+    for malformed in [false, true] {
+        let mut events = vec![
+            ModelStreamEvent::MessageStart {
+                metadata: ResponseMetadata::default(),
+            },
+            ModelStreamEvent::ToolCallStart {
+                index: 0,
+                id: "call-incomplete".to_owned(),
+                name: "record".to_owned(),
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                id: "call-incomplete".to_owned(),
+                delta: if malformed {
+                    "{\"value\":".to_owned()
+                } else {
+                    "{\"value\":1}".to_owned()
+                },
+            },
+        ];
+        if malformed {
+            events.push(ModelStreamEvent::ToolCallEnd {
+                index: 0,
+                id: "call-incomplete".to_owned(),
+            });
+        }
+        events.push(ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::ToolUse,
+        });
+
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [ScriptedReply::events(events)],
+        ));
+        let tool = Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ChangesState,
+            ToolConcurrency::Exclusive,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(tool.clone())
+            .expect("不完整工具测试工具应可注册");
+        let result = runner(provider, registry)
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+
+        assert!(matches!(
+            result.error,
+            Some(AgentRunError::Model(ModelError::Protocol { .. }))
+        ));
+        assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
         assert_eq!(result.state.step_count(), 0);
         assert_eq!(tool.call_count(), 0);
         assert_eq!(result.messages.len(), 1);
