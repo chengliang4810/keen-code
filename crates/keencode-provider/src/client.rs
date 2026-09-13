@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{Stream, StreamExt};
 use keencode_model::{
-    ModelError, ModelFuture, ModelProvider, ModelRequest, ModelStream, ModelStreamEvent,
-    ProviderCapabilities, ProviderProtocol, TokenUsage,
+    ContentBlock, ModelError, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    ModelStreamEvent, ProviderCapabilities, ProviderProtocol, TokenUsage, ToolResultContent,
 };
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
 use reqwest::{Client, Method};
@@ -27,6 +27,172 @@ use crate::{
     REQUEST_METADATA_TURN_ID, RequestErrorKind, RequestMode, RequestObservation,
     RequestObservationScope, RequestObservationState, RequestObserver,
 };
+
+/// 单次模型请求允许携带的图片总数；超过时只保留时间顺序最新的图片。
+const MAX_REQUEST_MEDIA_ITEMS: usize = 100;
+
+/// 在不修改 Runtime Transcript 的前提下，静默移除请求快照中最旧的超额图片。
+///
+/// 绝大多数请求不超过上限，先只读计数即可保持分段消息零拷贝；只有确实超限时
+/// 才物化当前请求的独立消息数组。工具结果外壳必须保留，以免制造悬空工具调用。
+fn discard_oldest_request_media(request: &mut ModelRequest) {
+    let media_count = request
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .map(|block| match block {
+            ContentBlock::Image { .. } => 1,
+            ContentBlock::ToolResult { tool_result } => tool_result
+                .content
+                .iter()
+                .filter(|item| matches!(item, ToolResultContent::Image { .. }))
+                .count(),
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::ToolCall { .. } => 0,
+        })
+        .sum::<usize>();
+    let mut remaining = media_count.saturating_sub(MAX_REQUEST_MEDIA_ITEMS);
+    if remaining == 0 {
+        return;
+    }
+
+    let messages = request.messages_mut();
+    for message in messages.iter_mut() {
+        message.content.retain_mut(|block| match block {
+            ContentBlock::Image { .. } if remaining > 0 => {
+                remaining -= 1;
+                false
+            }
+            ContentBlock::ToolResult { tool_result } => {
+                tool_result.content.retain(|item| {
+                    if remaining > 0 && matches!(item, ToolResultContent::Image { .. }) {
+                        remaining -= 1;
+                        false
+                    } else {
+                        true
+                    }
+                });
+                true
+            }
+            ContentBlock::Text { .. }
+            | ContentBlock::Reasoning { .. }
+            | ContentBlock::Image { .. }
+            | ContentBlock::ToolCall { .. } => true,
+        });
+    }
+    // 纯图片 user 消息可能在裁剪后为空；删除该消息，其他消息与工具结果外壳保持原序。
+    messages.retain(|message| !message.content.is_empty());
+    debug_assert_eq!(remaining, 0);
+}
+
+#[cfg(test)]
+mod request_media_limit_tests {
+    use super::{MAX_REQUEST_MEDIA_ITEMS, discard_oldest_request_media};
+    use keencode_model::{
+        ContentBlock, ImageContent, ImageSource, Message, MessageRole, ModelRequest, ToolCall,
+        ToolResult, ToolResultContent,
+    };
+
+    fn image(url: impl Into<String>) -> ContentBlock {
+        ContentBlock::Image {
+            image: ImageContent::from_url(url),
+        }
+    }
+
+    fn tool_image(url: impl Into<String>) -> ToolResultContent {
+        ToolResultContent::Image {
+            image: ImageContent::from_url(url),
+        }
+    }
+
+    #[test]
+    fn request_at_media_limit_keeps_shared_message_segment() {
+        let original = ModelRequest::new(
+            "test-model",
+            vec![Message::new(
+                MessageRole::User,
+                (0..MAX_REQUEST_MEDIA_ITEMS)
+                    .map(|index| image(format!("https://example.com/image-{index}.png")))
+                    .collect(),
+            )],
+        );
+        let original_message = original.messages.get(0).expect("测试消息应存在") as *const Message;
+        let mut request = original.clone();
+
+        discard_oldest_request_media(&mut request);
+
+        let retained_message = request.messages.get(0).expect("上限内消息应保留") as *const Message;
+        assert_eq!(
+            retained_message, original_message,
+            "上限内请求不得物化共享历史"
+        );
+        assert_eq!(request.messages[0].content.len(), MAX_REQUEST_MEDIA_ITEMS);
+    }
+
+    #[test]
+    fn request_over_media_limit_discards_oldest_across_user_and_tool_images() {
+        let tool_images = (0..=MAX_REQUEST_MEDIA_ITEMS)
+            .map(|index| tool_image(format!("https://example.com/tool-{index}.png")))
+            .collect();
+        let mut request = ModelRequest::new(
+            "test-model",
+            vec![
+                Message::new(
+                    MessageRole::User,
+                    vec![image("https://example.com/old-user-0.png")],
+                ),
+                Message::new(
+                    MessageRole::User,
+                    vec![image("https://example.com/old-user-1.png")],
+                ),
+                Message::new(
+                    MessageRole::Assistant,
+                    vec![ContentBlock::ToolCall {
+                        tool_call: ToolCall::new("call-media", "read_media", serde_json::json!({})),
+                    }],
+                ),
+                Message::new(
+                    MessageRole::Tool,
+                    vec![ContentBlock::ToolResult {
+                        tool_result: ToolResult::new("call-media", tool_images, false),
+                    }],
+                ),
+                Message::text(MessageRole::User, "继续"),
+            ],
+        );
+
+        discard_oldest_request_media(&mut request);
+
+        assert!(request.validate().is_ok());
+        assert_eq!(request.messages.len(), 3, "裁空的纯图片 user 消息应删除");
+        let ContentBlock::ToolResult { tool_result } = &request.messages[1].content[0] else {
+            panic!("工具结果外壳应保留");
+        };
+        assert_eq!(tool_result.content.len(), MAX_REQUEST_MEDIA_ITEMS);
+        let ToolResultContent::Image { image } = &tool_result.content[0] else {
+            panic!("保留项应为图片");
+        };
+        assert_eq!(
+            image.source,
+            ImageSource::Url {
+                url: "https://example.com/tool-1.png".to_owned(),
+            },
+            "应先删除两个旧 user 图片，再删除最旧工具图片"
+        );
+        let ToolResultContent::Image { image } = &tool_result.content[MAX_REQUEST_MEDIA_ITEMS - 1]
+        else {
+            panic!("最后保留项应为图片");
+        };
+        assert_eq!(
+            image.source,
+            ImageSource::Url {
+                url: format!("https://example.com/tool-{MAX_REQUEST_MEDIA_ITEMS}.png"),
+            },
+            "最新图片必须保留"
+        );
+    }
+}
 
 /// 在线调用失败时把已经脱敏的统一错误同时绑定到当前线级交换。
 #[inline]
@@ -1316,9 +1482,13 @@ impl ModelProvider for ProviderClient {
     ///
     /// 校验与编码等确定性失败不重试；真实 HTTP 尝试失败时，若尚未向下游
     /// 转发任何事件且错误属于可重试类别，则按 [`retry_delay`] 退避后静默重试。
-    fn stream(&self, request: ModelRequest) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
+    fn stream(
+        &self,
+        mut request: ModelRequest,
+    ) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
         let client = self.clone();
         Box::pin(async move {
+            discard_oldest_request_media(&mut request);
             let url = client
                 .config
                 .protocol_url()
