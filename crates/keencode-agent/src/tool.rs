@@ -822,14 +822,16 @@ pub(crate) struct NormalizedToolError {
 
 /// 原子校验 ToolError 的 code 和 message；任一字段违规时整体替换，避免前缀泄漏。
 pub(crate) fn normalize_tool_error(error: &ToolError) -> NormalizedToolError {
-    let valid_code = !error.code.trim().is_empty()
-        && error.code.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_code_bytes;
-    let valid_message = !error.message.trim().is_empty()
-        && error.message.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes;
+    let code = keencode_model::redact_error_secrets(&error.code);
+    let message = keencode_model::redact_error_secrets(&error.message);
+    let valid_code =
+        !code.trim().is_empty() && code.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_code_bytes;
+    let valid_message = !message.trim().is_empty()
+        && message.len() <= TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes;
     if valid_code && valid_message {
         return NormalizedToolError {
-            code: error.code.clone(),
-            message: error.message.clone(),
+            code,
+            message,
             retryable: error.retryable,
         };
     }
@@ -843,7 +845,12 @@ pub(crate) fn normalize_tool_error(error: &ToolError) -> NormalizedToolError {
 impl fmt::Display for ToolError {
     /// 输出稳定错误码和安全说明。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}：{}", self.code, self.message)
+        write!(
+            formatter,
+            "{}：{}",
+            keencode_model::redact_error_secrets(&self.code),
+            keencode_model::redact_error_secrets(&self.message)
+        )
     }
 }
 
@@ -1589,6 +1596,31 @@ mod output_guard_tests {
                 retryable: false,
             }
         );
+    }
+
+    /// 工具错误进入模型观察和 Display 前脱敏，同时保留稳定码与重试语义。
+    #[test]
+    fn tool_error_redaction_preserves_code_and_retryability() {
+        let error = ToolError::retryable(
+            "remote_401",
+            r#"请求失败 request_id=req-tool Authorization: Bearer tool-secret details={\"apiKey\":\"nested-secret\"}"#,
+        );
+        let normalized = normalize_tool_error(&error);
+        assert_eq!(normalized.code, "remote_401");
+        assert!(normalized.retryable);
+        assert!(normalized.message.contains("request_id=req-tool"));
+        assert!(
+            normalized
+                .message
+                .contains("Authorization: Bearer [REDACTED]")
+        );
+        assert!(!normalized.message.contains("tool-secret"));
+        assert!(!normalized.message.contains("nested-secret"));
+
+        let displayed = error.to_string();
+        assert!(displayed.starts_with("remote_401："));
+        assert!(!displayed.contains("tool-secret"));
+        assert!(!displayed.contains("nested-secret"));
     }
 
     /// next_result_capacity 的三个维度与 try_charge_result 判定完全对齐，

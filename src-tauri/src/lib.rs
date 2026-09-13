@@ -380,10 +380,10 @@ fn providers_list_models(
 ) -> Result<ProviderModelsResult, String> {
     if let Some(provider_id) = provider_id.as_deref() {
         providers::validate_model_catalog_scope(&app, provider_id, &base_url, &api_backend)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| keencode_model::redact_error_secrets(&error.to_string()))?;
     }
     providers::list_models(&base_url, api_key.as_deref(), &api_backend)
-        .map_err(|error| error.to_string())
+        .map_err(|error| keencode_model::redact_error_secrets(&error.to_string()))
 }
 
 /// 启动 KeenCode 桌面后端。

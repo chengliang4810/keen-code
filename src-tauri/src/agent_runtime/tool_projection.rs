@@ -16,8 +16,16 @@ pub(super) fn completed_fields(
         | ToolCompletionStatus::Cancelled
         | ToolCompletionStatus::SideEffectUnknown => schema::ToolCallStatus::Failed,
     };
+    let mut projected = result.clone();
+    if projected.is_error || outcome != ToolCompletionStatus::Succeeded {
+        for part in &mut projected.content {
+            if let keencode_resources::ToolResultPart::Text { text } = part {
+                *text = keencode_model::redact_error_secrets(text);
+            }
+        }
+    }
     let raw =
-        serde_json::to_value(result).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        serde_json::to_value(projected).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
     // 正文只保留在当前唯一结果结构中；重复复制到 content 会放大转义后的投递大小。
     // 图片和 Artifact 引用同样原样保留，不在展示投影中展开大结果。
     Ok(schema::ToolCallUpdateFields::new()
@@ -155,5 +163,46 @@ mod tests {
                 "文本不得在标准内容中再复制一份"
             );
         }
+    }
+
+    /// ACP 错误投影做末端防御性脱敏；成功工具输出仍保持字节语义。
+    #[test]
+    fn projection_redacts_failed_text_but_preserves_success_text() {
+        let secret_text = concat!(
+            "工具失败 request_id=req-acp-tool ",
+            "Authorization: Bearer acp-tool-secret ",
+            "details={\"apiKey\":\"nested-acp-tool-secret\"}"
+        );
+        let failed = PersistedToolResult {
+            tool_call_id: "call-failed".to_owned(),
+            content: vec![ToolResultPart::Text {
+                text: secret_text.to_owned(),
+            }],
+            is_error: true,
+        };
+        let fields = completed_fields(ToolCompletionStatus::Failed, &failed).unwrap();
+        let fields = serde_json::to_value(fields).expect("错误投影应可序列化");
+        let raw = &fields["rawOutput"];
+        assert_eq!(raw["toolCallId"], "call-failed");
+        assert_eq!(raw["isError"], true);
+        let safe = raw["content"][0]["text"]
+            .as_str()
+            .expect("错误文本应保留字符串形状");
+        assert!(safe.contains("request_id=req-acp-tool"));
+        assert!(safe.contains("Authorization: Bearer [REDACTED]"));
+        assert!(!safe.contains("acp-tool-secret"));
+        assert!(!safe.contains("nested-acp-tool-secret"));
+
+        let succeeded = PersistedToolResult {
+            tool_call_id: "call-succeeded".to_owned(),
+            content: vec![ToolResultPart::Text {
+                text: secret_text.to_owned(),
+            }],
+            is_error: false,
+        };
+        let fields = completed_fields(ToolCompletionStatus::Succeeded, &succeeded).unwrap();
+        let fields = serde_json::to_value(fields).expect("成功投影应可序列化");
+        let raw = &fields["rawOutput"];
+        assert_eq!(raw["content"][0]["text"], secret_text);
     }
 }

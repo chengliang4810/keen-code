@@ -3148,6 +3148,7 @@ fn runtime_stopped_event(
     reason: TurnStopReason,
     message: String,
 ) -> SessionEvent {
+    let message = keencode_model::redact_error_secrets(&message);
     let stopped = SessionEvent::TurnStopped {
         turn_id: turn_id.clone(),
         reason,
@@ -4381,7 +4382,18 @@ fn map_tool_result(
     let mut content = Vec::with_capacity(result.content.len());
     for part in &result.content {
         content.push(match part {
-            ToolResultContent::Text { text } => map_tool_result_text(inner, text, mode, probe)?,
+            ToolResultContent::Text { text } => {
+                if result.is_error {
+                    map_tool_result_text(
+                        inner,
+                        &keencode_model::redact_error_secrets(text),
+                        mode,
+                        probe,
+                    )?
+                } else {
+                    map_tool_result_text(inner, text, mode, probe)?
+                }
+            }
             ToolResultContent::Image { image } => ToolResultPart::Image {
                 source: map_image_source(inner, &image.source, mode, probe)?,
             },

@@ -22,6 +22,11 @@ const OUTPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(16);
 const OUTPUT_FLUSH_BYTES: usize = 4096;
 const OUTPUT_QUEUE_CAPACITY: usize = 64;
 
+/// PTY 库和后台任务错误进入 Tauri IPC 前统一移除可能携带的认证信息。
+fn terminal_error(context: &str, error: impl std::fmt::Display) -> String {
+    keencode_model::redact_error_secrets(&format!("{context}：{error}"))
+}
+
 fn should_flush_output(pending_bytes: usize, force: bool) -> bool {
     pending_bytes > 0 && (force || pending_bytes >= OUTPUT_FLUSH_BYTES)
 }
@@ -212,23 +217,24 @@ pub fn terminal_create(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|error| format!("创建 PTY 失败：{error}"))?;
-    let mut command = shell_command(&app)?;
+        .map_err(|error| terminal_error("创建 PTY 失败", error))?;
+    let mut command =
+        shell_command(&app).map_err(|error| keencode_model::redact_error_secrets(&error))?;
     let shell_cwd = shell_working_directory(cwd_path);
     command.cwd(&shell_cwd);
     let child = pair
         .slave
         .spawn_command(command)
-        .map_err(|error| format!("启动系统 Shell 失败：{error}"))?;
+        .map_err(|error| terminal_error("启动系统 Shell 失败", error))?;
     drop(pair.slave);
     let writer = pair
         .master
         .take_writer()
-        .map_err(|error| format!("打开终端输入失败：{error}"))?;
+        .map_err(|error| terminal_error("打开终端输入失败", error))?;
     let mut reader = pair
         .master
         .try_clone_reader()
-        .map_err(|error| format!("打开终端输出失败：{error}"))?;
+        .map_err(|error| terminal_error("打开终端输出失败", error))?;
 
     // entry API 原子判定存在性：并发创建同一 id 时后来者报错，
     // 其已启动的 PTY 子进程必须就地收割，不能随局部变量泄漏。
@@ -318,10 +324,10 @@ pub async fn terminal_write(
             .writer
             .write_all(&data)
             .and_then(|_| session.writer.flush())
-            .map_err(|error| format!("写入终端失败：{error}"))
+            .map_err(|error| terminal_error("写入终端失败", error))
     })
     .await
-    .map_err(|error| format!("终端写入后台任务失败：{error}"))?
+    .map_err(|error| terminal_error("终端写入后台任务失败", error))?
 }
 
 #[tauri::command]
@@ -343,7 +349,7 @@ pub fn terminal_resize(
             pixel_width: 0,
             pixel_height: 0,
         })
-        .map_err(|error| format!("调整终端尺寸失败：{error}"))
+        .map_err(|error| terminal_error("调整终端尺寸失败", error))
 }
 
 #[tauri::command]
@@ -366,7 +372,7 @@ impl Drop for TerminalManager {
 
 #[cfg(test)]
 mod tests {
-    use super::{OUTPUT_FLUSH_BYTES, shell_working_directory, should_flush_output};
+    use super::{OUTPUT_FLUSH_BYTES, shell_working_directory, should_flush_output, terminal_error};
     use std::path::Path;
 
     /// 验证普通路径不会被终端工作目录转换改写。
@@ -374,6 +380,23 @@ mod tests {
     fn preserves_regular_working_directory() {
         let path = Path::new(r"D:\projects\keen-code");
         assert_eq!(shell_working_directory(path), path);
+    }
+
+    /// PTY 与阻塞任务的动态错误进入 IPC 前脱敏，但保留定位上下文。
+    #[test]
+    fn terminal_errors_are_redacted_before_ipc() {
+        let safe = terminal_error(
+            "写入终端失败",
+            concat!(
+                "request_id=req-terminal Authorization: Bearer terminal-secret ",
+                "details={\"apiKey\":\"nested-terminal-secret\"}"
+            ),
+        );
+        assert!(safe.starts_with("写入终端失败："));
+        assert!(safe.contains("request_id=req-terminal"));
+        assert!(safe.contains("Authorization: Bearer [REDACTED]"));
+        assert!(!safe.contains("terminal-secret"));
+        assert!(!safe.contains("nested-terminal-secret"));
     }
 
     #[test]

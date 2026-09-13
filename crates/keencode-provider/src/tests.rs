@@ -254,6 +254,45 @@ async fn gateway_rate_limit_msg_keeps_reset_time() {
     server.join().unwrap().unwrap();
 }
 
+/// HTTP 非成功正文中的未知凭据必须移除，状态分类和普通诊断仍可用。
+#[tokio::test]
+async fn http_error_redacts_embedded_credentials_without_losing_status() {
+    let body = json!({
+        "error": {
+            "code": "rate_limit_error",
+            "message": concat!(
+                "请求过于频繁 request_id=req-http ",
+                "Authorization: Bearer http-secret ",
+                "details={\"apiKey\":\"nested-http-secret\"}"
+            )
+        }
+    })
+    .to_string();
+    let (base_url, server) = spawn_catalog_server(vec![("429 Too Many Requests", body)]);
+    let mut config =
+        ProviderConfig::new_unauthenticated("gateway", ProviderProtocol::Responses, base_url)
+            .unwrap();
+    config.retry.max_attempts = 1;
+    let client = crate::ProviderClient::new(config).unwrap();
+    let error = match client.stream(minimal_request()).await {
+        Err(error) => error,
+        Ok(_) => panic!("HTTP 429 应形成错误"),
+    };
+
+    assert!(matches!(
+        error,
+        ModelError::RateLimited {
+            status_code: Some(429),
+            ..
+        }
+    ));
+    assert!(error.message().contains("request_id=req-http"));
+    assert!(error.message().contains("Authorization: Bearer [REDACTED]"));
+    assert!(!error.message().contains("http-secret"));
+    assert!(!error.message().contains("nested-http-secret"));
+    server.join().unwrap().unwrap();
+}
+
 /// 持续有响应数据可以超过读取超时的总时长，停滞则保留 timeout 原因链。
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_read_timeout_is_idle_not_total() {
@@ -2186,6 +2225,46 @@ fn in_band_provider_errors_classify_across_all_protocols() {
             assert_eq!(streaming.message(), message);
         }
     }
+}
+
+/// 真实 HTTP 200 SSE 错误经过客户端流边界后仍保留类别，但不回显嵌套秘密。
+#[tokio::test(flavor = "multi_thread")]
+async fn sse_error_redacts_embedded_credentials_without_losing_category() {
+    let message = concat!(
+        "synthetic rate limit request_id=req-sse ",
+        "Authorization: Bearer sse-secret ",
+        "details={\"apiKey\":\"nested-sse-secret\"}"
+    );
+    let payload =
+        buffered_in_band_error_payload(ProviderProtocol::Responses, "rate_limit_error", message);
+    let body = format!("event: error\ndata: {payload}\n\n");
+    let (base_url, server) = spawn_model_server("text/event-stream", body);
+    let mut config =
+        ProviderConfig::new_unauthenticated("sse-redaction", ProviderProtocol::Responses, base_url)
+            .unwrap();
+    config.retry.max_attempts = 1;
+    let client = crate::ProviderClient::new(config).unwrap();
+    let stream = client
+        .stream(minimal_request())
+        .await
+        .expect("HTTP 200 SSE 应先建立事件流");
+    let error = collect_model_stream(stream)
+        .await
+        .expect_err("SSE error 事件应终止模型流");
+
+    assert!(matches!(
+        error,
+        ModelError::RateLimited {
+            retry_after_ms: None,
+            status_code: None,
+            ..
+        }
+    ));
+    assert!(error.message().contains("request_id=req-sse"));
+    assert!(error.message().contains("Authorization: Bearer [REDACTED]"));
+    assert!(!error.message().contains("sse-secret"));
+    assert!(!error.message().contains("nested-sse-secret"));
+    finish_model_server(server);
 }
 
 /// 验证 Messages 与 Chat Completions 的正常 HTTP 200 响应允许顶层 `error: null`。

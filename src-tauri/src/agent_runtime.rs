@@ -8585,6 +8585,7 @@ fn map_authoritative_event(
             message,
         } => {
             let agent_id = turn_agent_id(state, turn_id.as_str())?;
+            let message = keencode_model::redact_error_secrets(message);
             let event = match reason {
                 TurnStopReason::Cancelled => KeenCodeEvent::TurnCancelled,
                 TurnStopReason::Failed => KeenCodeEvent::TurnFailed {
@@ -17068,6 +17069,11 @@ mod tests {
             TurnStopReason::ModelOutputLimit,
             TurnStopReason::ModelRefusal,
         ] {
+            let message = concat!(
+                "模型没有完整完成 request_id=req-acp-turn ",
+                "Authorization: Bearer acp-turn-secret ",
+                "details={\"apiKey\":\"nested-acp-turn-secret\"}"
+            );
             let turn_id = ResourceTurnId::new("model-stop-turn").unwrap();
             let mut state = session.snapshot().unwrap().state;
             state.turns.insert(
@@ -17082,9 +17088,21 @@ mod tests {
                     completed_at_unix_ms: Some(2),
                     status: TurnStatus::Failed,
                     stop_reason: Some(reason),
-                    outcome_message: Some("模型没有完整完成".to_owned()),
+                    outcome_message: Some(message.to_owned()),
                 },
             );
+            state.transcript.push(TranscriptRecord::MessageAdded(
+                keencode_resources::SessionMessage {
+                    is_meta: false,
+                    message_id: "model-stop-user-message".to_owned(),
+                    turn_id: Some(turn_id.clone()),
+                    agent_id: None,
+                    role: keencode_resources::MessageRole::User,
+                    content: vec![keencode_resources::MessagePart::Text {
+                        text: "验证模型停止".to_owned(),
+                    }],
+                },
+            ));
             let record = SessionEventRecord {
                 schema: SESSION_EVENT_SCHEMA.to_owned(),
                 version: SESSION_EVENT_VERSION,
@@ -17095,7 +17113,7 @@ mod tests {
                 event: SessionEvent::TurnStopped {
                     turn_id,
                     reason,
-                    message: "模型没有完整完成".to_owned(),
+                    message: message.to_owned(),
                 },
             };
             for mode in [
@@ -17115,7 +17133,12 @@ mod tests {
                 let event = &json["envelope"]["event"];
                 assert_eq!(event["type"], "turn_failed");
                 assert_eq!(event["failureKind"], "model");
-                assert_eq!(event["message"], "模型没有完整完成");
+                let safe = event["message"].as_str().expect("失败说明应为文本");
+                assert!(safe.contains("模型没有完整完成"));
+                assert!(safe.contains("request_id=req-acp-turn"));
+                assert!(safe.contains("Authorization: Bearer [REDACTED]"));
+                assert!(!safe.contains("acp-turn-secret"));
+                assert!(!safe.contains("nested-acp-turn-secret"));
             }
         }
     }

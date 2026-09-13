@@ -1803,7 +1803,12 @@ async fn provider_failure_after_dynamic_input_preserves_retry_and_cold_history()
         ProviderCapabilities::default(),
         [ScriptedReply::new(vec![Err(
             ModelError::ProviderUnavailable {
-                message: "模拟 Provider 失败".to_owned(),
+                message: concat!(
+                    "模拟 Provider 失败 request_id=req-runtime error_code=E_PROVIDER ",
+                    "Authorization: Bearer runtime-secret ",
+                    "details={\"apiKey\":\"nested-runtime-secret\"}"
+                )
+                .to_owned(),
                 status_code: None,
                 retryable: false,
             },
@@ -1859,6 +1864,24 @@ async fn provider_failure_after_dynamic_input_preserves_retry_and_cold_history()
 
     let state_after_failure = session.snapshot().expect("失败后的 Snapshot 应读取");
     assert_eq!(state_after_failure.state.dynamic_input_receipts.len(), 1);
+    let failed_turn_id = keencode_resources::TurnId::new(first_turn).expect("失败 Turn ID 应有效");
+    let outcome_message = state_after_failure
+        .state
+        .turns
+        .get(&failed_turn_id)
+        .and_then(|turn| turn.outcome_message.as_deref())
+        .expect("Provider 失败应持久化 TurnStopped 说明");
+    assert!(outcome_message.contains("request_id=req-runtime"));
+    assert!(outcome_message.contains("error_code=E_PROVIDER"));
+    assert!(outcome_message.contains("Authorization: Bearer [REDACTED]"));
+    assert!(!outcome_message.contains("runtime-secret"));
+    assert!(!outcome_message.contains("nested-runtime-secret"));
+    let journal = std::fs::read_to_string(session.inner.journal.log_path())
+        .expect("Provider 失败 Journal 应读取");
+    assert!(journal.contains("request_id=req-runtime"));
+    assert!(journal.contains("error_code=E_PROVIDER"));
+    assert!(!journal.contains("runtime-secret"));
+    assert!(!journal.contains("nested-runtime-secret"));
     let history_after_failure = session
         .model_transcript_for_agent(&root_agent)
         .expect("失败后的 Agent Transcript 应物化");
@@ -3783,6 +3806,48 @@ fn preflight_rejects_before_side_effect_when_unknown_artifact_slots_are_insuffic
     let snapshot = session.snapshot().expect("拒绝后 Snapshot 应读取");
     assert_eq!(snapshot.state.last_sequence, 2);
     assert_eq!(snapshot.active_reservations, 0);
+}
+
+/// 错误工具正文落盘前脱敏，成功正文仍按工具契约原样保留。
+#[test]
+fn tool_result_persistence_redacts_only_error_content() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session = create(&root, "runtime-tool-result-redaction");
+    let text = concat!(
+        "命令失败 request_id=req-tool-persist ",
+        "Authorization: Bearer persisted-secret ",
+        "details={\"apiKey\":\"nested-persisted-secret\"}"
+    );
+    let error = ToolResult::text("call-error", text, true);
+    let persisted_error = map_tool_result(
+        &session.inner,
+        &error,
+        ArtifactMode::Commit,
+        &mut ArtifactProbe::default(),
+    )
+    .expect("错误工具结果应映射");
+    assert_eq!(persisted_error.tool_call_id, "call-error");
+    assert!(persisted_error.is_error);
+    let ToolResultPart::Text { text: safe } = &persisted_error.content[0] else {
+        panic!("短错误工具正文应内联持久化");
+    };
+    assert!(safe.contains("request_id=req-tool-persist"));
+    assert!(safe.contains("Authorization: Bearer [REDACTED]"));
+    assert!(!safe.contains("persisted-secret"));
+    assert!(!safe.contains("nested-persisted-secret"));
+
+    let success = ToolResult::text("call-success", text, false);
+    let persisted_success = map_tool_result(
+        &session.inner,
+        &success,
+        ArtifactMode::Commit,
+        &mut ArtifactProbe::default(),
+    )
+    .expect("成功工具结果应映射");
+    let ToolResultPart::Text { text: retained } = &persisted_success.content[0] else {
+        panic!("短成功工具正文应内联持久化");
+    };
+    assert_eq!(retained, text);
 }
 
 /// 模拟未知 Artifact 已落盘但 Journal 尚未确认的重投，并验证容量账本不会再次占用同一槽位。

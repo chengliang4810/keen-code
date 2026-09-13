@@ -231,24 +231,9 @@ fn unix_timestamp_millis() -> u128 {
 
 /// 只保留可定位问题的文本，避免换行伪造日志记录。
 fn sanitize_text(value: &str) -> String {
-    let mut text = value.replace('\n', "\\n").replace('\r', "\\r");
-    text = redact_bearer(&text);
-    for marker in [
-        "api_key",
-        "apiKey",
-        "api-key",
-        "access_token",
-        "refresh_token",
-        "client_secret",
-        "cookie",
-        "authorization",
-        "Authorization",
-        "token",
-        "password",
-        "secret",
-    ] {
-        text = redact_after_marker(&text, marker);
-    }
+    let mut text = keencode_model::redact_error_secrets(value)
+        .replace('\n', "\\n")
+        .replace('\r', "\\r");
     if text.len() > 4_000 {
         let mut end = 4_000;
         while !text.is_char_boundary(end) {
@@ -258,78 +243,6 @@ fn sanitize_text(value: &str) -> String {
         text.push_str("...(truncated)");
     }
     text
-}
-
-/// 将敏感字段的值替换为固定占位符。
-fn redact_after_marker(input: &str, marker: &str) -> String {
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while let Some(relative) = input[cursor..]
-        .to_ascii_lowercase()
-        .find(&marker.to_ascii_lowercase())
-    {
-        let start = cursor + relative;
-        output.push_str(&input[cursor..start]);
-        let after_marker = start + marker.len();
-        output.push_str(marker);
-        let rest = input[after_marker..].trim_start_matches(['\'', '"', ' ', '\t']);
-        if !rest.starts_with([':', '=']) {
-            cursor = after_marker;
-            continue;
-        }
-        let separator = input.len() - rest.len();
-        output.push_str(&input[after_marker..=separator]);
-        let mut value_start = separator + 1;
-        while value_start < input.len() && input.as_bytes()[value_start].is_ascii_whitespace() {
-            value_start += 1;
-        }
-        output.push_str(&input[separator + 1..value_start]);
-        output.push_str("<redacted>");
-        let mut end = value_start;
-        if end < input.len() && matches!(input.as_bytes()[end], b'\'' | b'"') {
-            let quote = input.as_bytes()[end];
-            end += 1;
-            while end < input.len() {
-                match input.as_bytes()[end] {
-                    b'\\' => end = (end + 2).min(input.len()),
-                    byte if byte == quote => {
-                        end += 1;
-                        break;
-                    }
-                    _ => end += 1,
-                }
-            }
-        } else {
-            while end < input.len() && !matches!(input.as_bytes()[end], b' ' | b',' | b'}' | b']') {
-                end += 1;
-            }
-        }
-        cursor = end;
-    }
-    output.push_str(&input[cursor..]);
-    output
-}
-
-/// 脱敏 HTTP Bearer 认证值。
-fn redact_bearer(input: &str) -> String {
-    let marker = "Bearer ";
-    let mut output = String::with_capacity(input.len());
-    let mut cursor = 0;
-    while let Some(relative) = input[cursor..]
-        .to_ascii_lowercase()
-        .find(&marker.to_ascii_lowercase())
-    {
-        let start = cursor + relative;
-        output.push_str(&input[cursor..start]);
-        output.push_str("Bearer <redacted>");
-        let mut end = start + marker.len();
-        while end < input.len() && !matches!(input.as_bytes()[end], b' ' | b',' | b'}' | b']') {
-            end += 1;
-        }
-        cursor = end;
-    }
-    output.push_str(&input[cursor..]);
-    output
 }
 
 /// 递归生成 JSON 结构摘要，只输出键名、类型和长度。
@@ -467,7 +380,7 @@ mod tests {
         let text = sanitize_text("api_key=sk-test Authorization: Bearer secret-value");
         assert!(!text.contains("sk-test"));
         assert!(!text.contains("secret-value"));
-        assert!(text.contains("<redacted>"));
+        assert!(text.contains("[REDACTED]"));
     }
 
     #[test]
@@ -478,7 +391,22 @@ mod tests {
         assert!(!text.contains("sk-json-secret"));
         assert!(!text.contains("two words"));
         assert!(!text.contains("plain-secret"));
-        assert_eq!(text.matches("<redacted>").count(), 3);
+        assert_eq!(text.matches("[REDACTED]").count(), 3);
+    }
+
+    #[test]
+    fn redacts_nested_json_and_url_credentials_before_log_normalization() {
+        let text = sanitize_text(concat!(
+            "HTTP 401 request_id=req-log\n",
+            "details={\"apiKey\":\"nested-log-secret\"} ",
+            "url=https://user:password@example.invalid/v1?token=query-log-secret&request_id=req-url"
+        ));
+        assert!(!text.contains("nested-log-secret"));
+        assert!(!text.contains("password"));
+        assert!(!text.contains("query-log-secret"));
+        assert!(text.contains("HTTP 401 request_id=req-log\\n"));
+        assert!(text.contains("request_id=req-url"));
+        assert!(text.matches("[REDACTED]").count() >= 2);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::error::Error as _;
 
 use futures_util::stream;
-use keencode_model::{ModelError, ModelStream, ModelStreamEvent};
+use keencode_model::{ModelError, ModelStream, ModelStreamEvent, redact_error_secrets};
 #[cfg(feature = "live-test-trace")]
 use keencode_model::{ModelResponse, ProviderProtocol, collect_model_stream};
 use reqwest::Response;
@@ -97,6 +97,9 @@ pub(crate) fn classify_http_error(
     code: Option<&str>,
 ) -> ModelError {
     let classifier = format!("{} {}", code.unwrap_or_default(), message).to_ascii_lowercase();
+    // 分类使用原始服务语义，向上返回的正文统一移除字段化秘密；公开错误码和
+    // HTTP 状态仍保留在类型字段中，不因脱敏而改变归因。
+    let message = redact_error_secrets(&message);
 
     if classifier.contains("context_length")
         || classifier.contains("context length")
@@ -630,7 +633,7 @@ fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
 /// 移除凭据、控制字符并限制错误文本长度。
 fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
     let redacted = api_key.map_or_else(|| message.to_owned(), |api_key| api_key.redact(message));
-    let mut safe = redacted
+    let mut safe = redact_error_secrets(&redacted)
         .chars()
         .map(|character| {
             if character.is_control() {

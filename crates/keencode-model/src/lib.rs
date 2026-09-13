@@ -9,6 +9,7 @@
 mod error;
 mod message;
 mod provider;
+mod redaction;
 mod request;
 mod scripted;
 mod stream;
@@ -25,6 +26,7 @@ pub use provider::{
     ModelFuture, ModelProvider, ModelStream, ProviderCapabilities, ProviderProtocol,
     ReasoningCapability, StructuredOutputCapability,
 };
+pub use redaction::{REDACTED_SECRET, redact_error_secrets};
 pub use request::{
     ModelRequest, ModelResponse, ReasoningConfig, ReasoningEffort, ResponseMetadata,
     StructuredOutputConfig, ToolChoice,
