@@ -755,6 +755,40 @@ impl AgentToolCatalogUpdateSource for OneShotToolCatalogUpdate {
     }
 }
 
+/// 记录用量锚点在后续轮次从哪个持久消息位置开始增量估算。
+#[derive(Default)]
+struct UsageAnchorSuffixProbe {
+    reads: Mutex<Vec<(usize, usize)>>,
+}
+
+impl UsageAnchorSuffixProbe {
+    fn reads(&self) -> Vec<(usize, usize)> {
+        self.reads.lock().expect("用量锚点测试锁不应损坏").clone()
+    }
+}
+
+impl ContextTokenEstimator for UsageAnchorSuffixProbe {
+    fn estimate_request(&self, request: &keencode_model::ModelRequest) -> u64 {
+        JsonContextTokenEstimator.estimate_request(request)
+    }
+
+    fn estimate_messages(&self, messages: &[Message]) -> u64 {
+        JsonContextTokenEstimator.estimate_messages(messages)
+    }
+
+    fn estimate_messages_from(
+        &self,
+        messages: &keencode_model::ModelMessages,
+        start: usize,
+    ) -> u64 {
+        self.reads
+            .lock()
+            .expect("用量锚点测试锁不应损坏")
+            .push((start, messages.len()));
+        JsonContextTokenEstimator.estimate_messages_from(messages, start)
+    }
+}
+
 /// 判断一条消息是否为 Runtime 私有的延迟工具目录通知。
 fn is_tool_catalog_update_message(message: &Message) -> bool {
     message.role == MessageRole::Developer
@@ -854,6 +888,83 @@ async fn tool_catalog_update_is_delivered_once_per_runner_generation() {
     assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
     assert_eq!(tool_catalog_update_count(&requests[1].messages), 0);
     assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
+/// 瞬时通知不能把用量锚点的持久消息水位向前推一位。
+#[tokio::test]
+async fn tool_catalog_update_does_not_advance_persistent_usage_anchor() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(1_000_000),
+            ..ProviderCapabilities::default()
+        },
+        [
+            ScriptedReply::events([
+                ModelStreamEvent::MessageStart {
+                    metadata: ResponseMetadata::default(),
+                },
+                ModelStreamEvent::ToolCallStart {
+                    index: 0,
+                    id: "catalog-anchor-call".to_owned(),
+                    name: "record".to_owned(),
+                },
+                ModelStreamEvent::ToolCallArgumentsDelta {
+                    index: 0,
+                    id: "catalog-anchor-call".to_owned(),
+                    delta: json!({"value": "work"}).to_string(),
+                },
+                ModelStreamEvent::ToolCallEnd {
+                    index: 0,
+                    id: "catalog-anchor-call".to_owned(),
+                },
+                ModelStreamEvent::Usage {
+                    usage: TokenUsage {
+                        input_tokens: Some(100),
+                        output_tokens: Some(10),
+                        total_tokens: Some(110),
+                        ..TokenUsage::unknown()
+                    },
+                },
+                ModelStreamEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                },
+            ]),
+            text_reply("完成"),
+        ],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ReadOnly,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry.register(tool).unwrap();
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(5, vec!["mcp__new__tool".to_owned()], Vec::new()).unwrap(),
+    ));
+    let estimator = Arc::new(UsageAnchorSuffixProbe::default());
+    let context = ContextManager::new(
+        ContextPolicy::default(),
+        estimator.clone(),
+        Arc::new(ProviderContextCompressor::new(provider.clone())),
+    )
+    .unwrap();
+
+    let result = runner(provider, registry)
+        .with_context_manager(context)
+        .with_tool_catalog_update_source(updates)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let reads = estimator.reads();
+    assert!(!reads.is_empty(), "第二轮应使用用量锚点执行增量估算");
+    assert!(
+        reads
+            .iter()
+            .all(|&(start, message_count)| start == 1 && message_count == 3),
+        "锚点应跨过首轮唯一持久 user 消息，不得计入瞬时通知：{reads:?}"
+    );
 }
 
 /// Provider 超限触发的摘要输入不能看到瞬时目录通知；恢复采样仍复用原通知。

@@ -2235,8 +2235,6 @@ impl AgentRunner {
                 }
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
-            let sampled_request =
-                request_with_transient_message(&model_request, tool_catalog_update.as_ref());
             let (mut response, tool_calls) = loop {
                 self.commit_model_round_usage(
                     request,
@@ -2245,11 +2243,12 @@ impl AgentRunner {
                     &completed_round.response,
                     completed_round.elapsed,
                 )?;
-                // 权威用量提交成功后把上下文估算锚定到本轮请求的真实输入规模：
-                // sampled_request 即产生该用量的确切请求，其后追加的消息按逐块
-                // 规则增量估算（失败轮用量不在此处提交，不形成锚点）。
+                // 权威用量提交成功后，用 Provider 报告的真实输入规模锚定
+                // 本轮持久 Transcript 前缀。瞬时目录通知不进入 Transcript，
+                // 因此 message_count 必须来自 model_request；否则下轮会跳过
+                // 第一条新持久消息。通知 token 的保守高估在下次用量后自愈。
                 self.context
-                    .note_model_round_usage(&sampled_request, &completed_round.response.usage);
+                    .note_model_round_usage(&model_request, &completed_round.response.usage);
                 let response = completed_round.response;
                 // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
                 // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空
