@@ -605,6 +605,9 @@ fn child_registration_omits_recursive_spawn_tool() {
 #[tokio::test]
 async fn agent_returns_identity_under_capacity_and_rejects_recursive_spawn() {
     let saturated = fixture(1, 1);
+    let occupier = spawn_with_tool(&saturated, "occupier").await;
+    let occupier_agent_id = spawned_agent_id(&occupier);
+    let occupier_turn_id = spawned_turn_id(&occupier);
     let queued = spawn_with_tool(&saturated, "queued").await;
     let queued_agent_id = spawned_agent_id(&queued);
     let queued_turn_id = spawned_turn_id(&queued);
@@ -616,10 +619,40 @@ async fn agent_returns_identity_under_capacity_and_rejects_recursive_spawn() {
             .agent_status(&queued_agent_id)
             .expect("排队子 Agent 状态应可读取"),
         CollaborationAgentStatus::WaitingCapacity {
-            turn_id: queued_turn_id
+            turn_id: queued_turn_id.clone()
         }
     );
-    assert_eq!(saturated.execution.launch_count(), 1);
+    assert_eq!(saturated.execution.launch_count(), 2);
+    saturated
+        .coordinator
+        .complete_turn(
+            &occupier_agent_id,
+            &occupier_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .expect("释放占位子 Agent 槽位应成功");
+    assert!(matches!(
+        saturated
+            .coordinator
+            .agent_status(&queued_agent_id)
+            .expect("释放容量后排队子 Agent 状态应可读取"),
+        CollaborationAgentStatus::Running { ref turn_id }
+            if turn_id == &queued_turn_id
+    ));
+    assert_eq!(saturated.execution.launch_count(), 3);
+    saturated
+        .coordinator
+        .complete_turn(
+            &queued_agent_id,
+            &queued_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .expect("排队子 Agent 启动后应可收敛");
+    assert_eq!(saturated.coordinator.capacity().unwrap().global_in_use, 0);
 
     let running = fixture(2, 2);
     let child = spawn_with_tool(&running, "child").await;
