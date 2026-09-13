@@ -6284,7 +6284,7 @@ impl AgentRuntime {
         }
     }
 
-    /// 通过 Collaboration 权威状态对当前 Session 的精确根 Turn 发出幂等取消信号。
+    /// 通过 Collaboration 权威状态对当前 Session 的精确根 Turn 树发出幂等级联取消。
     pub fn cancel_turn(
         &self,
         session_id: &str,

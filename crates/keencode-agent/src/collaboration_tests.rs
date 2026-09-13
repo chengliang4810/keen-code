@@ -2132,9 +2132,9 @@ fn parent_and_last_child_completion_race_is_linearizable() {
     }
 }
 
-/// 取消父 Turn 只中断父执行，已经启动的子 Agent 必须继续独立运行。
+/// 根 Turn 取消必须同时向同一根 Turn 树中已经启动的子 Agent 发出取消信号。
 #[test]
-fn parent_turn_cancellation_does_not_cascade_to_child() {
+fn root_turn_cancellation_cascades_to_running_child() {
     let fixture = fixture(2, 2);
     let root_turn = fixture
         .coordinator
@@ -2160,13 +2160,13 @@ fn parent_turn_cancellation_does_not_cascade_to_child() {
         root_turn
     );
     assert!(root_launch.cancellation.is_cancelled());
-    assert!(!child_launch.cancellation.is_cancelled());
+    assert!(child_launch.cancellation.is_cancelled());
     assert_eq!(
         fixture
             .coordinator
             .agent_status(&child.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running {
+        CollaborationAgentStatus::Cancelling {
             turn_id: child.initial_turn_id.clone(),
         }
     );
@@ -2202,7 +2202,7 @@ fn parent_turn_cancellation_does_not_cascade_to_child() {
             turn_id: root_turn.clone(),
         }
     );
-    assert!(!child_launch.cancellation.is_cancelled());
+    assert!(child_launch.cancellation.is_cancelled());
 
     fixture
         .coordinator
@@ -2219,9 +2219,8 @@ fn parent_turn_cancellation_does_not_cascade_to_child() {
             .coordinator
             .agent_status(&child.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Completed {
+        CollaborationAgentStatus::Interrupted {
             turn_id: child.initial_turn_id,
-            final_message: Some("子任务独立完成".to_owned()),
         }
     );
     let mailbox = fixture.coordinator.mailbox(&fixture.root_agent_id).unwrap();
@@ -2230,9 +2229,231 @@ fn parent_turn_cancellation_does_not_cascade_to_child() {
     assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
 }
 
-/// 验证根树取消期间列表区分正在运行与仍在容量队列中的子 Agent。
+/// 用户 steer 只唤醒目标根 Turn 并追加动态输入，不得被解释成取消树。
 #[test]
-fn list_agents_for_root_preserves_cancelling_and_waiting_states() {
+fn user_steer_keeps_root_turn_tree_running() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "接受动态 steer", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("steer_keeps_child_running"),
+        )
+        .unwrap();
+    let root_launch = fixture.execution.launch(&root_turn);
+    let child_launch = fixture.execution.launch(&child.initial_turn_id);
+
+    fixture
+        .coordinator
+        .steer_agent(&fixture.root_agent_id, &root_turn, "补充而不是取消")
+        .unwrap();
+    assert!(!root_launch.cancellation.is_cancelled());
+    assert!(!child_launch.cancellation.is_cancelled());
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&fixture.root_agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { ref turn_id } if turn_id == &root_turn
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { ref turn_id }
+            if turn_id == &child.initial_turn_id
+    ));
+    assert!(fixture.execution.signals().iter().any(|signal| {
+        signal.agent_id == fixture.root_agent_id
+            && signal.turn_id == root_turn
+            && signal.kind == AgentTurnSignalKind::UserSteer
+    }));
+    let steers = fixture
+        .coordinator
+        .consume_user_steers(&fixture.root_agent_id, &root_turn)
+        .unwrap();
+    assert_eq!(steers.len(), 1);
+    assert_eq!(steers[0].content, "补充而不是取消");
+    acknowledge_steer_batch(
+        fixture.coordinator.as_ref(),
+        &fixture.root_agent_id,
+        &root_turn,
+        &steers,
+    );
+}
+
+/// 取消只覆盖目标 root_turn_id；同一 Session 中旧根 Turn 仍运行的子 Agent 不受影响。
+#[test]
+fn root_turn_cancellation_isolated_from_other_root_turns() {
+    let fixture = fixture(3, 3);
+    let first_root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "第一根 Turn", NO_PLAN)
+        .unwrap();
+    let surviving_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &first_root_turn,
+            &next_tool_call_id(),
+            spawn_request("survives_later_root_cancel"),
+        )
+        .unwrap();
+    let surviving_launch = fixture.execution.launch(&surviving_child.initial_turn_id);
+    fixture
+        .coordinator
+        .complete_turn(
+            &fixture.root_agent_id,
+            &first_root_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+
+    let cancelled_root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "第二根 Turn", NO_PLAN)
+        .unwrap();
+    let cancelled_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &cancelled_root_turn,
+            &next_tool_call_id(),
+            spawn_request("cancelled_with_second_root"),
+        )
+        .unwrap();
+    let cancelled_launch = fixture.execution.launch(&cancelled_child.initial_turn_id);
+    assert_eq!(
+        fixture
+            .coordinator
+            .cancel_turn(&fixture.root_agent_id, &cancelled_root_turn)
+            .unwrap(),
+        crate::TurnCancellationDisposition::Requested
+    );
+
+    assert!(!surviving_launch.cancellation.is_cancelled());
+    assert!(cancelled_launch.cancellation.is_cancelled());
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&surviving_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { ref turn_id }
+            if turn_id == &surviving_child.initial_turn_id
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&cancelled_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Cancelling { ref turn_id }
+            if turn_id == &cancelled_child.initial_turn_id
+    ));
+
+    fixture
+        .coordinator
+        .complete_turn(
+            &cancelled_child.agent.agent_id,
+            &cancelled_child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &fixture.root_agent_id,
+            &cancelled_root_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &surviving_child.agent.agent_id,
+            &surviving_child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
+}
+
+/// Store 无法判定取消批次是否提交时不得提前触发令牌；确认已提交后才执行整树取消。
+#[test]
+fn root_turn_cancellation_preserves_indeterminate_store_boundary() {
+    let unknown = fixture(2, 2);
+    let root_turn = unknown
+        .coordinator
+        .begin_root_turn(&unknown.root_agent_id, "不确定取消", NO_PLAN)
+        .unwrap();
+    let child = unknown
+        .coordinator
+        .spawn_agent(
+            &unknown.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("indeterminate_cancel_child"),
+        )
+        .unwrap();
+    let root_launch = unknown.execution.launch(&root_turn);
+    let child_launch = unknown.execution.launch(&child.initial_turn_id);
+    let events_before = unknown.store.events().len();
+    unknown.store.indeterminate_without_commit(2);
+    assert!(matches!(
+        unknown
+            .coordinator
+            .cancel_turn(&unknown.root_agent_id, &root_turn),
+        Err(CollaborationError::StoreRecoveryRequired { .. })
+    ));
+    assert_eq!(unknown.store.events().len(), events_before);
+    assert!(!root_launch.cancellation.is_cancelled());
+    assert!(!child_launch.cancellation.is_cancelled());
+
+    let committed = fixture(2, 2);
+    let committed_root_turn = committed
+        .coordinator
+        .begin_root_turn(&committed.root_agent_id, "已提交但响应不确定", NO_PLAN)
+        .unwrap();
+    let committed_child = committed
+        .coordinator
+        .spawn_agent(
+            &committed.root_agent_id,
+            &committed_root_turn,
+            &next_tool_call_id(),
+            spawn_request("committed_indeterminate_cancel_child"),
+        )
+        .unwrap();
+    let committed_root_launch = committed.execution.launch(&committed_root_turn);
+    let committed_child_launch = committed.execution.launch(&committed_child.initial_turn_id);
+    committed.store.commit_then_indeterminate();
+    assert_eq!(
+        committed
+            .coordinator
+            .cancel_turn(&committed.root_agent_id, &committed_root_turn)
+            .unwrap(),
+        crate::TurnCancellationDisposition::Requested
+    );
+    assert!(committed_root_launch.cancellation.is_cancelled());
+    assert!(committed_child_launch.cancellation.is_cancelled());
+}
+
+/// 根 Turn 取消后，实时列表必须立即投影运行中与容量队列中子 Turn 的收敛状态。
+#[test]
+fn list_agents_for_root_projects_cascade_statuses_immediately() {
     let fixture = fixture(1, 2);
     let root_turn = fixture
         .coordinator
@@ -2283,17 +2504,16 @@ fn list_agents_for_root_preserves_cancelling_and_waiting_states() {
     ));
     assert!(matches!(
         agents[1].status,
-        CollaborationAgentStatus::Running { ref turn_id } if turn_id == &running_child.initial_turn_id
+        CollaborationAgentStatus::Cancelling { ref turn_id }
+            if turn_id == &running_child.initial_turn_id
     ));
     assert!(matches!(
         agents[2].status,
-        CollaborationAgentStatus::WaitingCapacity { ref turn_id } if turn_id == &waiting_child.initial_turn_id
+        CollaborationAgentStatus::Interrupted { ref turn_id }
+            if turn_id == &waiting_child.initial_turn_id
     ));
-    assert_eq!(
-        agents[2].current_turn_summary.as_deref(),
-        Some("执行 listed_waiting_child 任务")
-    );
-    assert_eq!(agents[2].current_root_turn_id.as_ref(), Some(&root_turn));
+    assert!(agents[2].current_turn_summary.is_none());
+    assert!(agents[2].current_root_turn_id.is_none());
 }
 
 /// live checkpoint 中已完成父 Turn 保持终态，只有崩溃时仍活跃的子 Turn 被恢复为中断。
@@ -4178,9 +4398,9 @@ async fn wait_agent_ignores_claimed_batches_and_reports_new_suffixes() {
     );
 }
 
-/// 父 Turn 取消不级联；只有显式中断目标子 Agent 后，该子 Agent 才进入可重试终态。
+/// 已先进入 Cancelling 的子 Turn 仍应被根级联覆盖，并保留 mailbox/steer 供显式重试。
 #[test]
-fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
+fn root_turn_cancellation_preserves_child_inputs_without_auto_restart() {
     let fixture = fixture(4, 4);
     let root_turn = fixture
         .coordinator
@@ -4197,18 +4417,45 @@ fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
         .unwrap();
     let root_launch = fixture.execution.launch(&root_turn);
     let child_launch = fixture.execution.launch(&child.initial_turn_id);
-
+    fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "取消后保留 mailbox",
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .steer_agent(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            "取消后保留 steer",
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .stop_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+        )
+        .unwrap();
+    let launches_before_cancel = fixture.execution.launches().len();
     fixture
         .coordinator
         .cancel_current_turn(&fixture.root_agent_id)
         .unwrap();
     assert!(root_launch.cancellation.is_cancelled());
-    assert!(!child_launch.cancellation.is_cancelled());
+    assert!(child_launch.cancellation.is_cancelled());
     fixture
         .coordinator
         .complete_turn(
-            &fixture.root_agent_id,
-            &root_turn,
+            &child.agent.agent_id,
+            &child.initial_turn_id,
             AgentTurnOutcome::Completed {
                 final_message: Some("过期成功".to_owned()),
             },
@@ -4217,57 +4464,46 @@ fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
     assert_eq!(
         fixture
             .coordinator
-            .agent_status(&fixture.root_agent_id)
-            .unwrap(),
-        CollaborationAgentStatus::Interrupted {
-            turn_id: root_turn.clone(),
-        }
-    );
-    assert_eq!(
-        fixture
-            .coordinator
             .agent_status(&child.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running {
+        CollaborationAgentStatus::Interrupted {
             turn_id: child.initial_turn_id.clone(),
         }
     );
-    let control_turn = fixture
+    assert_eq!(fixture.execution.launches().len(), launches_before_cancel);
+    let child_checkpoint = fixture
         .coordinator
-        .begin_root_turn(&fixture.root_agent_id, "显式中断并重试子 Agent", NO_PLAN)
+        .checkpoint_root(&fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .into_iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
         .unwrap();
-    assert_eq!(
-        fixture
-            .coordinator
-            .stop_agent(
-                &fixture.root_agent_id,
-                &control_turn,
-                &next_tool_call_id(),
-                &child.agent.agent_id,
-            )
-            .unwrap(),
-        child.initial_turn_id
+    assert!(
+        child_checkpoint
+            .mailbox
+            .iter()
+            .any(|entry| entry.message.content == "取消后保留 mailbox")
     );
-    assert!(child_launch.cancellation.is_cancelled());
+    assert_eq!(child_checkpoint.pending_steers.len(), 1);
+    assert_eq!(
+        child_checkpoint.pending_steers[0].content,
+        "取消后保留 steer"
+    );
     fixture
         .coordinator
         .complete_turn(
-            &child.agent.agent_id,
-            &child.initial_turn_id,
+            &fixture.root_agent_id,
+            &root_turn,
             AgentTurnOutcome::Completed {
-                final_message: Some("不应覆盖中断".to_owned()),
+                final_message: None,
             },
         )
         .unwrap();
-    assert_eq!(
-        fixture
-            .coordinator
-            .agent_status(&child.agent.agent_id)
-            .unwrap(),
-        CollaborationAgentStatus::Interrupted {
-            turn_id: child.initial_turn_id.clone()
-        }
-    );
+    let control_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "显式重试级联中断子 Agent", NO_PLAN)
+        .unwrap();
     let retry_turn = fixture
         .coordinator
         .retry_agent(&fixture.root_agent_id, &control_turn, &child.agent.agent_id)
@@ -4277,6 +4513,33 @@ fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
         fixture.coordinator.agent_status(&child.agent.agent_id).unwrap(),
         CollaborationAgentStatus::Running { turn_id } if turn_id == retry_turn
     ));
+    let mailbox = fixture
+        .coordinator
+        .consume_mailbox(&child.agent.agent_id, &retry_turn, usize::MAX)
+        .unwrap();
+    assert!(
+        mailbox
+            .iter()
+            .any(|message| message.content == "取消后保留 mailbox")
+    );
+    acknowledge_mailbox_batch(
+        fixture.coordinator.as_ref(),
+        &child.agent.agent_id,
+        &retry_turn,
+        &mailbox,
+    );
+    let steers = fixture
+        .coordinator
+        .consume_user_steers(&child.agent.agent_id, &retry_turn)
+        .unwrap();
+    assert_eq!(steers.len(), 1);
+    assert_eq!(steers[0].content, "取消后保留 steer");
+    acknowledge_steer_batch(
+        fixture.coordinator.as_ref(),
+        &child.agent.agent_id,
+        &retry_turn,
+        &steers,
+    );
     fixture
         .coordinator
         .complete_turn(
@@ -4299,9 +4562,9 @@ fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
         .unwrap();
 }
 
-/// 父 Turn 取消与结束都不得释放子 Agent 槽位，等待者仍按原顺序调度。
+/// 根 Turn 取消必须立即中断容量队列中的子 Turn，且不得在槽位释放后重新启动。
 #[test]
-fn parent_cancellation_preserves_waiting_children_and_queue_order() {
+fn root_turn_cancellation_interrupts_waiting_child_without_restart() {
     let fixture = fixture(1, 1);
     let root_turn = fixture
         .coordinator
@@ -4321,6 +4584,7 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
             spawn_request("queued_cancel_first"),
         )
         .unwrap();
+    let first_launch = fixture.execution.launch(&first.initial_turn_id);
     let second = fixture
         .coordinator
         .spawn_agent(
@@ -4336,12 +4600,13 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
         .cancel_current_turn(&fixture.root_agent_id)
         .unwrap();
     assert!(root_launch.cancellation.is_cancelled());
+    assert!(first_launch.cancellation.is_cancelled());
     assert_eq!(
         fixture
             .coordinator
             .agent_status(&first.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running {
+        CollaborationAgentStatus::Cancelling {
             turn_id: first.initial_turn_id.clone(),
         }
     );
@@ -4350,7 +4615,7 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
             .coordinator
             .agent_status(&second.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::WaitingCapacity {
+        CollaborationAgentStatus::Interrupted {
             turn_id: second.initial_turn_id.clone(),
         }
     );
@@ -4389,7 +4654,7 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
             .coordinator
             .agent_status(&first.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running {
+        CollaborationAgentStatus::Cancelling {
             turn_id: first.initial_turn_id.clone(),
         }
     );
@@ -4398,7 +4663,7 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
             .coordinator
             .agent_status(&second.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::WaitingCapacity {
+        CollaborationAgentStatus::Interrupted {
             turn_id: second.initial_turn_id.clone(),
         }
     );
@@ -4415,28 +4680,38 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
     assert_eq!(
         fixture
             .coordinator
-            .agent_status(&second.agent.agent_id)
+            .agent_status(&first.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running {
-            turn_id: second.initial_turn_id.clone(),
+        CollaborationAgentStatus::Interrupted {
+            turn_id: first.initial_turn_id,
         }
     );
-    fixture
-        .coordinator
-        .complete_turn(
-            &second.agent.agent_id,
-            &second.initial_turn_id,
-            AgentTurnOutcome::Completed {
-                final_message: None,
-            },
-        )
-        .unwrap();
+    assert!(
+        fixture
+            .execution
+            .launches()
+            .iter()
+            .all(|launch| launch.turn_id != second.initial_turn_id)
+    );
+    assert_eq!(
+        fixture
+            .coordinator
+            .complete_turn(
+                &second.agent.agent_id,
+                &second.initial_turn_id,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .unwrap(),
+        TurnCompletionDisposition::IgnoredStale
+    );
     assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
 }
 
-/// 父取消与子终态并发到达时必须各自线性化，父取消不得改变子终态。
+/// 根取消与最后一个子终态并发时，以锁内先后决定 Completed 或 Interrupted，不能残留活跃状态。
 #[test]
-fn parent_cancellation_and_last_child_completion_race_is_linearizable() {
+fn root_cancellation_and_last_child_completion_race_is_linearizable() {
     for _attempt in 0..32 {
         let fixture = fixture(2, 2);
         let root_turn = fixture
@@ -4505,16 +4780,18 @@ fn parent_cancellation_and_last_child_completion_race_is_linearizable() {
                 turn_id: root_turn.clone(),
             }
         );
-        assert_eq!(
-            fixture
-                .coordinator
-                .agent_status(&child.agent.agent_id)
-                .unwrap(),
+        let child_status = fixture
+            .coordinator
+            .agent_status(&child.agent.agent_id)
+            .unwrap();
+        assert!(matches!(
+            child_status,
             CollaborationAgentStatus::Completed {
-                turn_id: child.initial_turn_id,
+                ref turn_id,
                 final_message: None,
-            }
-        );
+            } | CollaborationAgentStatus::Interrupted { ref turn_id }
+                if turn_id == &child.initial_turn_id
+        ));
         assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
         assert_eq!(
             fixture
@@ -4528,97 +4805,275 @@ fn parent_cancellation_and_last_child_completion_race_is_linearizable() {
                 .count(),
             1
         );
+        assert_eq!(
+            fixture
+                .store
+                .events()
+                .iter()
+                .filter(|event| {
+                    event.agent_id == child.agent.agent_id
+                        && matches!(
+                            event.kind,
+                            CollaborationEventKind::AgentTurnCompleted { .. }
+                                | CollaborationEventKind::AgentTurnInterrupted
+                        )
+                })
+                .count(),
+            1
+        );
     }
 }
 
-/// 父取消不得抑制子 Agent 已认领的 TriggerTurn，子后续 Turn 仍应独立启动。
+/// 容量授予与根取消并发时，要么先中断等待 Turn，要么取消刚启动 Turn，不能漏出 Running。
 #[test]
-fn parent_cancellation_keeps_child_followup_restart() {
-    let fixture = fixture(2, 2);
-    let root_turn = fixture
-        .coordinator
-        .begin_root_turn(
-            &fixture.root_agent_id,
-            "取消带 Followup 的子 Agent",
-            NO_PLAN,
-        )
-        .unwrap();
-    let child = fixture
-        .coordinator
-        .spawn_agent(
-            &fixture.root_agent_id,
-            &root_turn,
-            &next_tool_call_id(),
-            spawn_request("cancel_followup_child"),
-        )
-        .unwrap();
-    fixture
-        .coordinator
-        .followup_agent(
-            &fixture.root_agent_id,
-            &root_turn,
-            &next_tool_call_id(),
-            &child.agent.agent_id,
-            "父取消后仍需执行",
-        )
-        .unwrap();
-    let launches_before_cancel = fixture.execution.launches().len();
-
-    fixture
-        .coordinator
-        .cancel_current_turn(&fixture.root_agent_id)
-        .unwrap();
-    fixture
-        .coordinator
-        .complete_turn(
-            &child.agent.agent_id,
-            &child.initial_turn_id,
-            AgentTurnOutcome::Completed {
-                final_message: None,
-            },
-        )
-        .unwrap();
-    let launches = fixture.execution.launches();
-    assert_eq!(launches.len(), launches_before_cancel + 1);
-    let followup_turn = launches
-        .last()
-        .expect("子 Agent 后续 Turn 应已启动")
-        .turn_id
-        .clone();
-    assert_eq!(
+fn root_cancellation_and_capacity_grant_race_is_linearizable() {
+    for _attempt in 0..32 {
+        let fixture = fixture(1, 1);
+        let first_root_turn = fixture
+            .coordinator
+            .begin_root_turn(&fixture.root_agent_id, "占用全局容量", NO_PLAN)
+            .unwrap();
+        let occupier = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                &first_root_turn,
+                &next_tool_call_id(),
+                spawn_request("capacity_race_occupier"),
+            )
+            .unwrap();
         fixture
             .coordinator
-            .agent_status(&child.agent.agent_id)
-            .unwrap(),
-        CollaborationAgentStatus::Running {
-            turn_id: followup_turn.clone(),
+            .complete_turn(
+                &fixture.root_agent_id,
+                &first_root_turn,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .unwrap();
+        let cancelled_root_turn = fixture
+            .coordinator
+            .begin_root_turn(&fixture.root_agent_id, "取消容量等待者", NO_PLAN)
+            .unwrap();
+        let waiting = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                &cancelled_root_turn,
+                &next_tool_call_id(),
+                spawn_request("capacity_race_waiting"),
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .coordinator
+                .agent_status(&waiting.agent.agent_id)
+                .unwrap(),
+            CollaborationAgentStatus::WaitingCapacity { .. }
+        ));
+
+        let barrier = Arc::new(Barrier::new(3));
+        let cancel_coordinator = fixture.coordinator.clone();
+        let cancel_agent_id = fixture.root_agent_id.clone();
+        let cancel_barrier = barrier.clone();
+        let cancel = thread::spawn(move || {
+            cancel_barrier.wait();
+            cancel_coordinator.cancel_current_turn(&cancel_agent_id)
+        });
+        let completion_coordinator = fixture.coordinator.clone();
+        let completion_agent_id = occupier.agent.agent_id.clone();
+        let completion_turn_id = occupier.initial_turn_id.clone();
+        let completion_barrier = barrier.clone();
+        let completion = thread::spawn(move || {
+            completion_barrier.wait();
+            completion_coordinator.complete_turn(
+                &completion_agent_id,
+                &completion_turn_id,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+        });
+
+        barrier.wait();
+        assert_eq!(cancel.join().unwrap().unwrap(), cancelled_root_turn);
+        assert_eq!(
+            completion.join().unwrap().unwrap(),
+            TurnCompletionDisposition::Committed
+        );
+        if let CollaborationAgentStatus::Cancelling { turn_id } = fixture
+            .coordinator
+            .agent_status(&waiting.agent.agent_id)
+            .unwrap()
+        {
+            assert_eq!(turn_id, waiting.initial_turn_id);
+            assert!(
+                fixture
+                    .execution
+                    .launch(&turn_id)
+                    .cancellation
+                    .is_cancelled()
+            );
+            fixture
+                .coordinator
+                .complete_turn(
+                    &waiting.agent.agent_id,
+                    &turn_id,
+                    AgentTurnOutcome::Completed {
+                        final_message: None,
+                    },
+                )
+                .unwrap();
         }
-    );
-    fixture
-        .coordinator
-        .complete_turn(
-            &fixture.root_agent_id,
-            &root_turn,
-            AgentTurnOutcome::Completed {
-                final_message: None,
-            },
-        )
-        .unwrap();
-    fixture
-        .coordinator
-        .complete_turn(
-            &child.agent.agent_id,
-            &followup_turn,
-            AgentTurnOutcome::Completed {
-                final_message: None,
-            },
-        )
-        .unwrap();
+        assert_eq!(
+            fixture
+                .coordinator
+                .agent_status(&waiting.agent.agent_id)
+                .unwrap(),
+            CollaborationAgentStatus::Interrupted {
+                turn_id: waiting.initial_turn_id,
+            }
+        );
+        fixture
+            .coordinator
+            .complete_turn(
+                &fixture.root_agent_id,
+                &cancelled_root_turn,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
+    }
 }
 
-/// live checkpoint 恢复时分别中断取消中的父 Turn 与仍运行的子 Turn。
+/// 根取消与子 Followup 恢复竞态必须线性化，取消提交后同一根 Turn 树不得继续运行。
 #[test]
-fn cancelling_parent_and_running_child_restore_as_independent_interruptions() {
+fn root_cancellation_and_child_followup_restart_race_is_linearizable() {
+    for _attempt in 0..32 {
+        let fixture = fixture(2, 2);
+        let root_turn = fixture
+            .coordinator
+            .begin_root_turn(
+                &fixture.root_agent_id,
+                "取消带 Followup 的子 Agent",
+                NO_PLAN,
+            )
+            .unwrap();
+        let child = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                spawn_request("cancel_followup_child"),
+            )
+            .unwrap();
+        fixture
+            .coordinator
+            .followup_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                &child.agent.agent_id,
+                "取消后只保留、不自动执行",
+            )
+            .unwrap();
+        let launches_before_race = fixture.execution.launches().len();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let cancel_coordinator = fixture.coordinator.clone();
+        let cancel_agent_id = fixture.root_agent_id.clone();
+        let cancel_barrier = barrier.clone();
+        let cancel = thread::spawn(move || {
+            cancel_barrier.wait();
+            cancel_coordinator.cancel_current_turn(&cancel_agent_id)
+        });
+        let completion_coordinator = fixture.coordinator.clone();
+        let completion_agent_id = child.agent.agent_id.clone();
+        let completion_turn_id = child.initial_turn_id.clone();
+        let completion_barrier = barrier.clone();
+        let completion = thread::spawn(move || {
+            completion_barrier.wait();
+            completion_coordinator.complete_turn(
+                &completion_agent_id,
+                &completion_turn_id,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+        });
+
+        barrier.wait();
+        assert_eq!(cancel.join().unwrap().unwrap(), root_turn);
+        assert_eq!(
+            completion.join().unwrap().unwrap(),
+            TurnCompletionDisposition::Committed
+        );
+        let child_status = fixture
+            .coordinator
+            .agent_status(&child.agent.agent_id)
+            .unwrap();
+        if let CollaborationAgentStatus::Cancelling { turn_id } = child_status {
+            assert_ne!(turn_id, child.initial_turn_id);
+            assert!(
+                fixture
+                    .execution
+                    .launch(&turn_id)
+                    .cancellation
+                    .is_cancelled()
+            );
+            fixture
+                .coordinator
+                .complete_turn(
+                    &child.agent.agent_id,
+                    &turn_id,
+                    AgentTurnOutcome::Completed {
+                        final_message: None,
+                    },
+                )
+                .unwrap();
+        } else {
+            assert!(matches!(
+                child_status,
+                CollaborationAgentStatus::Interrupted { .. }
+            ));
+        }
+        fixture
+            .coordinator
+            .complete_turn(
+                &fixture.root_agent_id,
+                &root_turn,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .coordinator
+                .agent_status(&child.agent.agent_id)
+                .unwrap(),
+            CollaborationAgentStatus::Interrupted { .. }
+        ));
+        assert!(fixture.execution.launches().len() <= launches_before_race + 1);
+        assert!(
+            fixture
+                .coordinator
+                .mailbox(&child.agent.agent_id)
+                .unwrap()
+                .iter()
+                .any(|message| message.content == "取消后只保留、不自动执行")
+        );
+        assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
+    }
+}
+
+/// 根级联取消的 live checkpoint 冷恢复后必须保持父子均已中断。
+#[test]
+fn root_cascade_checkpoint_restores_parent_and_child_as_interrupted() {
     let fixture = fixture(2, 2);
     let root_turn = fixture
         .coordinator
@@ -4631,6 +5086,24 @@ fn cancelling_parent_and_running_child_restore_as_independent_interruptions() {
             &root_turn,
             &next_tool_call_id(),
             spawn_request("cancel_join_restore_child"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "冷恢复后仍保留的 mailbox",
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .steer_agent(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            "冷恢复后仍保留的 steer",
         )
         .unwrap();
     fixture
@@ -4654,6 +5127,24 @@ fn cancelling_parent_and_running_child_restore_as_independent_interruptions() {
             turn_id: root_turn.clone(),
         }
     );
+    let child_snapshot = root_snapshot
+        .agents
+        .iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .unwrap();
+    assert_eq!(
+        child_snapshot.status,
+        CollaborationAgentStatus::Cancelling {
+            turn_id: child.initial_turn_id.clone(),
+        }
+    );
+    assert_eq!(child_snapshot.pending_steers.len(), 1);
+    assert!(
+        child_snapshot
+            .mailbox
+            .iter()
+            .any(|entry| entry.message.content == "冷恢复后仍保留的 mailbox")
+    );
 
     let restored = restore_coordinator(fixture.store.clone(), 2, 46_000);
     restored.restore_coordinator(checkpoint).unwrap();
@@ -4664,8 +5155,26 @@ fn cancelling_parent_and_running_child_restore_as_independent_interruptions() {
     assert_eq!(
         restored.agent_status(&child.agent.agent_id).unwrap(),
         CollaborationAgentStatus::Interrupted {
-            turn_id: child.initial_turn_id,
+            turn_id: child.initial_turn_id.clone(),
         }
+    );
+    let restored_child = restored
+        .checkpoint_root(&fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .into_iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .unwrap();
+    assert_eq!(restored_child.pending_steers.len(), 1);
+    assert_eq!(
+        restored_child.pending_steers[0].content,
+        "冷恢复后仍保留的 steer"
+    );
+    assert!(
+        restored_child
+            .mailbox
+            .iter()
+            .any(|entry| entry.message.content == "冷恢复后仍保留的 mailbox")
     );
     assert_eq!(restored.capacity().unwrap().global_in_use, 0);
 }

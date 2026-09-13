@@ -2246,6 +2246,12 @@ struct ActiveTurn {
     plan_guard: PlanGuard,
     /// 只影响本 Turn 的独立取消令牌。
     cancellation: TurnCancellation,
+    /// 当前 Turn 是否由所属根 Turn 的用户取消级联覆盖。
+    ///
+    /// 该标记只服务当前进程内迟到终态的收敛：级联取消必须保留动态输入，且不能
+    /// 因 TriggerTurn mailbox 自动续跑。冷恢复会把所有未决 Turn 直接收敛为中断，
+    /// 因而不需要把这个瞬态执行标记另行写入 checkpoint。
+    cancelled_by_root_turn: bool,
     /// 子 Agent Turn 持有的进程级全局槽位；根 Turn 固定为 `None`。
     global_permit: Option<Arc<GlobalTurnPermit>>,
 }
@@ -2970,6 +2976,7 @@ impl CollaborationCoordinator {
                                 prompt: agent.current_turn_prompt.clone(),
                                 plan_guard,
                                 cancellation,
+                                cancelled_by_root_turn: false,
                                 global_permit,
                             },
                         );
@@ -4579,73 +4586,26 @@ impl CollaborationCoordinator {
         }
     }
 
-    /// 取消指定 Agent 的当前 Turn，不影响同一根树中的其他 Agent。
+    /// 取消指定 Agent 的当前 Turn；根 Agent 的用户 Turn 会级联取消同一根 Turn 树。
     pub fn cancel_current_turn(&self, agent_id: &AgentId) -> Result<TurnId, CollaborationError> {
         let agent_id = agent_id.clone();
         self.apply_transition(|state| {
             let status = resident_agent(state, &agent_id)?.status.clone();
-            if let CollaborationAgentStatus::WaitingCapacity { turn_id } = status {
-                let mut events = Vec::new();
-                let mut actions = Vec::new();
-                interrupt_waiting_turn(
-                    state,
-                    &agent_id,
-                    &turn_id,
-                    &agent_id,
-                    &mut events,
-                    &mut actions,
-                )?;
-                return Ok(Transition {
-                    output: turn_id,
-                    events,
-                    actions,
-                });
-            }
-            let Some(turn_id) = status.active_turn_id().cloned() else {
+            let Some(turn_id) = recovered_current_turn_id(&status).cloned() else {
                 return Err(CollaborationError::TargetNotRunning {
                     agent_id: agent_id.clone(),
                 });
             };
-            if matches!(status, CollaborationAgentStatus::Cancelling { .. }) {
-                return Ok(Transition {
-                    output: turn_id,
-                    events: Vec::new(),
-                    actions: Vec::new(),
-                });
-            }
-            let active = state.active_turns.get(&turn_id).cloned().ok_or_else(|| {
-                CollaborationError::TurnMismatch {
-                    agent_id: agent_id.clone(),
-                    turn_id: turn_id.clone(),
-                }
-            })?;
-            let mut events = Vec::new();
-            let mut actions = Vec::new();
-            set_status(
-                state,
-                &agent_id,
-                CollaborationAgentStatus::Cancelling {
-                    turn_id: turn_id.clone(),
-                },
-                EventLink {
-                    source_agent_id: agent_id.clone(),
-                    turn_id: Some(turn_id.clone()),
-                    parent_turn_id: active.parent_turn_id.clone(),
-                    root_turn_id: Some(active.root_turn_id.clone()),
-                },
-                &mut events,
-            )?;
-            mark_activity(state, &agent_id, &mut actions)?;
-            actions.push(PostCommitAction::CancelTurn(active.cancellation));
+            let transition = cancel_turn_transition(state, &agent_id, &turn_id)?;
             Ok(Transition {
                 output: turn_id,
-                events,
-                actions,
+                events: transition.events,
+                actions: transition.actions,
             })
         })
     }
 
-    /// 按 Agent 与 Turn 双重身份精确取消，不把过期 UI 请求作用到更晚的新 Turn。
+    /// 按 Agent 与 Turn 双重身份精确取消；根 Turn 同时覆盖其全部未终止子 Turn。
     pub fn cancel_turn(
         &self,
         agent_id: &AgentId,
@@ -4653,108 +4613,7 @@ impl CollaborationCoordinator {
     ) -> Result<TurnCancellationDisposition, CollaborationError> {
         let agent_id = agent_id.clone();
         let turn_id = turn_id.clone();
-        self.apply_transition(|state| {
-            let status = resident_agent(state, &agent_id)?.status.clone();
-            match status {
-                CollaborationAgentStatus::WaitingCapacity {
-                    turn_id: current_turn_id,
-                } => {
-                    if current_turn_id != turn_id {
-                        return Err(CollaborationError::TurnMismatch {
-                            agent_id: agent_id.clone(),
-                            turn_id: turn_id.clone(),
-                        });
-                    }
-                    let mut events = Vec::new();
-                    let mut actions = Vec::new();
-                    interrupt_waiting_turn(
-                        state,
-                        &agent_id,
-                        &turn_id,
-                        &agent_id,
-                        &mut events,
-                        &mut actions,
-                    )?;
-                    Ok(Transition {
-                        output: TurnCancellationDisposition::Requested,
-                        events,
-                        actions,
-                    })
-                }
-                CollaborationAgentStatus::Running {
-                    turn_id: current_turn_id,
-                } => {
-                    if current_turn_id != turn_id {
-                        return Err(CollaborationError::TurnMismatch {
-                            agent_id: agent_id.clone(),
-                            turn_id: turn_id.clone(),
-                        });
-                    }
-                    let active = state.active_turns.get(&turn_id).cloned().ok_or_else(|| {
-                        CollaborationError::TurnMismatch {
-                            agent_id: agent_id.clone(),
-                            turn_id: turn_id.clone(),
-                        }
-                    })?;
-                    let mut events = Vec::new();
-                    let mut actions = Vec::new();
-                    set_status(
-                        state,
-                        &agent_id,
-                        CollaborationAgentStatus::Cancelling {
-                            turn_id: turn_id.clone(),
-                        },
-                        EventLink {
-                            source_agent_id: agent_id.clone(),
-                            turn_id: Some(turn_id.clone()),
-                            parent_turn_id: active.parent_turn_id.clone(),
-                            root_turn_id: Some(active.root_turn_id.clone()),
-                        },
-                        &mut events,
-                    )?;
-                    mark_activity(state, &agent_id, &mut actions)?;
-                    actions.push(PostCommitAction::CancelTurn(active.cancellation));
-                    Ok(Transition {
-                        output: TurnCancellationDisposition::Requested,
-                        events,
-                        actions,
-                    })
-                }
-                CollaborationAgentStatus::Cancelling {
-                    turn_id: current_turn_id,
-                } => {
-                    if current_turn_id != turn_id {
-                        return Err(CollaborationError::TurnMismatch {
-                            agent_id: agent_id.clone(),
-                            turn_id: turn_id.clone(),
-                        });
-                    }
-                    Ok(Transition {
-                        output: TurnCancellationDisposition::AlreadyRequested,
-                        events: Vec::new(),
-                        actions: Vec::new(),
-                    })
-                }
-                _ => {
-                    let agent = resident_agent(state, &agent_id)?;
-                    if agent
-                        .last_turn
-                        .as_ref()
-                        .is_some_and(|last_turn| last_turn.turn_id == turn_id)
-                    {
-                        return Ok(Transition {
-                            output: TurnCancellationDisposition::NotRunning,
-                            events: Vec::new(),
-                            actions: Vec::new(),
-                        });
-                    }
-                    Err(CollaborationError::TurnMismatch {
-                        agent_id: agent_id.clone(),
-                        turn_id: turn_id.clone(),
-                    })
-                }
-            }
-        })
+        self.apply_transition(|state| cancel_turn_transition(state, &agent_id, &turn_id))
     }
 
     /// StopAgent 仅中断目标子 Agent 的当前 Turn，保留身份和 mailbox。
@@ -4836,6 +4695,7 @@ impl CollaborationCoordinator {
                     &target_agent_id,
                     &turn_id,
                     &source_agent_id,
+                    WaitingTurnInterruptionMode::Standalone,
                     &mut events,
                     &mut actions,
                 )?;
@@ -9277,6 +9137,242 @@ fn queue_turn(
     Ok(())
 }
 
+/// 尚未取得容量的 Turn 被中断后是否允许自动认领 TriggerTurn 继续运行。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WaitingTurnInterruptionMode {
+    /// 精确停止单个 Agent，保留既有自动 Followup 语义。
+    Standalone,
+    /// 用户取消根 Turn，保留动态输入但禁止同一根 Turn 树自动续跑。
+    RootTurnCascade,
+}
+
+/// 规划一次精确取消；根 Agent 的当前 Turn 会覆盖同一根 Turn 标识下的全部未决 Turn。
+fn cancel_turn_transition(
+    state: &mut CoordinatorState,
+    agent_id: &AgentId,
+    turn_id: &TurnId,
+) -> Result<Transition<TurnCancellationDisposition>, CollaborationError> {
+    let agent = resident_agent(state, agent_id)?;
+    let definition = agent.definition.clone();
+    let status = agent.status.clone();
+    let disposition = match &status {
+        CollaborationAgentStatus::WaitingCapacity {
+            turn_id: current_turn_id,
+        }
+        | CollaborationAgentStatus::Running {
+            turn_id: current_turn_id,
+        } if current_turn_id == turn_id => TurnCancellationDisposition::Requested,
+        CollaborationAgentStatus::Cancelling {
+            turn_id: current_turn_id,
+        } if current_turn_id == turn_id => TurnCancellationDisposition::AlreadyRequested,
+        CollaborationAgentStatus::WaitingCapacity { .. }
+        | CollaborationAgentStatus::Running { .. }
+        | CollaborationAgentStatus::Cancelling { .. } => {
+            return Err(CollaborationError::TurnMismatch {
+                agent_id: agent_id.clone(),
+                turn_id: turn_id.clone(),
+            });
+        }
+        _ if agent
+            .last_turn
+            .as_ref()
+            .is_some_and(|last_turn| &last_turn.turn_id == turn_id) =>
+        {
+            return Ok(Transition {
+                output: TurnCancellationDisposition::NotRunning,
+                events: Vec::new(),
+                actions: Vec::new(),
+            });
+        }
+        _ => {
+            return Err(CollaborationError::TurnMismatch {
+                agent_id: agent_id.clone(),
+                turn_id: turn_id.clone(),
+            });
+        }
+    };
+
+    let root_turn_id = match &status {
+        CollaborationAgentStatus::WaitingCapacity { .. } => state
+            .pending_turns
+            .iter()
+            .find(|queued| queued.agent_id == *agent_id && queued.turn_id == *turn_id)
+            .map(|queued| queued.root_turn_id.clone()),
+        CollaborationAgentStatus::Running { .. } | CollaborationAgentStatus::Cancelling { .. } => {
+            state
+                .active_turns
+                .get(turn_id)
+                .filter(|active| active.agent_id == *agent_id)
+                .map(|active| active.root_turn_id.clone())
+        }
+        _ => None,
+    }
+    .ok_or_else(|| CollaborationError::TurnMismatch {
+        agent_id: agent_id.clone(),
+        turn_id: turn_id.clone(),
+    })?;
+
+    if definition.depth == AgentDepth::ROOT {
+        return cancel_root_turn_tree_transition(
+            state,
+            &definition.root_agent_id,
+            &root_turn_id,
+            disposition,
+        );
+    }
+
+    let mut events = Vec::new();
+    let mut actions = Vec::new();
+    match status {
+        CollaborationAgentStatus::WaitingCapacity { .. } => interrupt_waiting_turn(
+            state,
+            agent_id,
+            turn_id,
+            agent_id,
+            WaitingTurnInterruptionMode::Standalone,
+            &mut events,
+            &mut actions,
+        )?,
+        CollaborationAgentStatus::Running { .. } => {
+            let active = state.active_turns.get(turn_id).cloned().ok_or_else(|| {
+                CollaborationError::TurnMismatch {
+                    agent_id: agent_id.clone(),
+                    turn_id: turn_id.clone(),
+                }
+            })?;
+            set_status(
+                state,
+                agent_id,
+                CollaborationAgentStatus::Cancelling {
+                    turn_id: turn_id.clone(),
+                },
+                EventLink {
+                    source_agent_id: agent_id.clone(),
+                    turn_id: Some(turn_id.clone()),
+                    parent_turn_id: active.parent_turn_id,
+                    root_turn_id: Some(active.root_turn_id),
+                },
+                &mut events,
+            )?;
+            mark_activity(state, agent_id, &mut actions)?;
+            actions.push(PostCommitAction::CancelTurn(active.cancellation));
+        }
+        CollaborationAgentStatus::Cancelling { .. } => {}
+        _ => unreachable!("取消状态已在上方完整校验"),
+    }
+    Ok(Transition {
+        output: disposition,
+        events,
+        actions,
+    })
+}
+
+/// 原子取消一个根 Turn 树；终态 Agent 和其他根 Turn 的工作均保持原样。
+fn cancel_root_turn_tree_transition(
+    state: &mut CoordinatorState,
+    root_agent_id: &AgentId,
+    root_turn_id: &TurnId,
+    disposition: TurnCancellationDisposition,
+) -> Result<Transition<TurnCancellationDisposition>, CollaborationError> {
+    let mut active_turns = state
+        .active_turns
+        .values()
+        .filter(|active| {
+            &active.root_agent_id == root_agent_id && &active.root_turn_id == root_turn_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    active_turns.sort_by(|left, right| {
+        (
+            left.agent_id != *root_agent_id,
+            &left.agent_id,
+            &left.turn_id,
+        )
+            .cmp(&(
+                right.agent_id != *root_agent_id,
+                &right.agent_id,
+                &right.turn_id,
+            ))
+    });
+    let mut waiting_turns = state
+        .pending_turns
+        .iter()
+        .filter(|queued| {
+            &queued.root_agent_id == root_agent_id && &queued.root_turn_id == root_turn_id
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    waiting_turns.sort_by(|left, right| {
+        (
+            left.agent_id != *root_agent_id,
+            &left.agent_id,
+            &left.turn_id,
+        )
+            .cmp(&(
+                right.agent_id != *root_agent_id,
+                &right.agent_id,
+                &right.turn_id,
+            ))
+    });
+
+    let mut events = Vec::new();
+    let mut actions = Vec::new();
+    for active in active_turns {
+        let status = resident_agent(state, &active.agent_id)?.status.clone();
+        match status {
+            CollaborationAgentStatus::Running { ref turn_id } if turn_id == &active.turn_id => {
+                set_status(
+                    state,
+                    &active.agent_id,
+                    CollaborationAgentStatus::Cancelling {
+                        turn_id: active.turn_id.clone(),
+                    },
+                    EventLink {
+                        source_agent_id: root_agent_id.clone(),
+                        turn_id: Some(active.turn_id.clone()),
+                        parent_turn_id: active.parent_turn_id.clone(),
+                        root_turn_id: Some(root_turn_id.clone()),
+                    },
+                    &mut events,
+                )?;
+                mark_activity(state, &active.agent_id, &mut actions)?;
+                actions.push(PostCommitAction::CancelTurn(active.cancellation.clone()));
+            }
+            CollaborationAgentStatus::Cancelling { ref turn_id } if turn_id == &active.turn_id => {}
+            _ => {
+                return Err(CollaborationError::InvalidRecovery {
+                    message: "根 Turn 级联取消发现活跃账本与 Agent 状态不一致".to_owned(),
+                });
+            }
+        }
+        state
+            .active_turns
+            .get_mut(&active.turn_id)
+            .expect("级联取消的活跃 Turn 在上方已校验")
+            .cancelled_by_root_turn = true;
+        remove_turn_signals(state, &active.agent_id, &active.turn_id);
+        unclaim_mailbox_turn(state, &active.turn_id);
+    }
+
+    for queued in waiting_turns {
+        interrupt_waiting_turn(
+            state,
+            &queued.agent_id,
+            &queued.turn_id,
+            root_agent_id,
+            WaitingTurnInterruptionMode::RootTurnCascade,
+            &mut events,
+            &mut actions,
+        )?;
+    }
+    schedule_root_turns(state, &mut events, &mut actions)?;
+    Ok(Transition {
+        output: disposition,
+        events,
+        actions,
+    })
+}
+
 /// 原子释放一个子 Agent Turn 占用的 Coordinator 与根树计数。
 fn release_turn_capacity(
     state: &mut CoordinatorState,
@@ -9444,7 +9540,10 @@ fn complete_turn_transition(
     };
     let agent = state.agents.get_mut(agent_id).expect("Agent 在上方已校验");
     agent.last_turn = Some(completed_turn.clone());
-    if was_cancelling && !matches!(mode, TurnCompletionMode::Suspend) {
+    if was_cancelling
+        && !active.cancelled_by_root_turn
+        && !matches!(mode, TurnCompletionMode::Suspend)
+    {
         let claimed_through = agent
             .steer_claim
             .as_ref()
@@ -9488,7 +9587,7 @@ fn complete_turn_transition(
                     mailbox.claimed_turn_id = None;
                 }
             }
-        } else if matches!(mode, TurnCompletionMode::Normal) {
+        } else if matches!(mode, TurnCompletionMode::Normal) && !active.cancelled_by_root_turn {
             claim_followup_after_turn(state, agent_id, &completed_turn, &mut events)?;
         }
         schedule_root_turns(state, &mut events, &mut actions)?;
@@ -9506,6 +9605,7 @@ fn interrupt_waiting_turn(
     agent_id: &AgentId,
     turn_id: &TurnId,
     source_agent_id: &AgentId,
+    mode: WaitingTurnInterruptionMode,
     events: &mut Vec<CollaborationEvent>,
     actions: &mut Vec<PostCommitAction>,
 ) -> Result<(), CollaborationError> {
@@ -9521,6 +9621,9 @@ fn interrupt_waiting_turn(
         .pending_turns
         .remove(position)
         .expect("已查找到的等待 Turn 始终存在");
+    if matches!(mode, WaitingTurnInterruptionMode::RootTurnCascade) {
+        unclaim_mailbox_turn(state, turn_id);
+    }
     let agent = resident_agent(state, agent_id)?;
     if agent.status
         != (CollaborationAgentStatus::WaitingCapacity {
@@ -9591,8 +9694,10 @@ fn interrupt_waiting_turn(
                 actions,
             )?;
         }
-        claim_followup_after_turn(state, agent_id, &completed_turn, events)?;
-        schedule_root_turns(state, events, actions)?;
+        if matches!(mode, WaitingTurnInterruptionMode::Standalone) {
+            claim_followup_after_turn(state, agent_id, &completed_turn, events)?;
+            schedule_root_turns(state, events, actions)?;
+        }
     }
     Ok(())
 }
@@ -9800,6 +9905,7 @@ fn schedule_turn_at_position(
         prompt: queued.prompt.clone(),
         plan_guard: queued.plan_guard,
         cancellation: cancellation.clone(),
+        cancelled_by_root_turn: false,
         global_permit,
     };
     state

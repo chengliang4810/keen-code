@@ -1045,7 +1045,7 @@ impl AcpHost {
         )
     }
 
-    /// 按标准 `session/cancel` 语义只向精确根 Turn 发出取消令牌。
+    /// 按标准 `session/cancel` 语义向精确根 Turn 树发出级联取消。
     async fn handle_cancel(&self, notification: schema::CancelNotification) {
         let session_id = notification.session_id.0.as_ref().to_owned();
         let explicit_turn = match meta_string(notification.meta.as_ref(), META_TURN_ID) {
