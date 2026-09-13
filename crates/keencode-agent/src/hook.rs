@@ -462,54 +462,114 @@ struct HookCircuit {
 }
 
 /// 受同步锁保护的短状态，不跨越任何等待或 Hook 回调。
-#[derive(Default)]
 enum HookCircuitState {
     /// 正常接收调用。
-    #[default]
-    Closed,
+    Closed { generation: u64 },
     /// worker 已确认退出；到达退避截止点后允许一次串行恢复。
-    Recoverable { retry_at: Instant },
+    Recoverable { retry_at: Instant, generation: u64 },
+    /// 当前隔离 worker 拥有的代次；完成转换必须匹配该所有权。
+    Running {
+        generation: u64,
+        recovery_attempt: bool,
+    },
     /// 取消、超时、恢复再次失败等场景可能仍有残留 worker，不再自动重开。
     PermanentlyOpen,
+}
+
+impl Default for HookCircuitState {
+    /// 创建从第一代 worker 开始的关闭状态。
+    fn default() -> Self {
+        Self::Closed { generation: 0 }
+    }
+}
+
+/// 一次隔离 worker 对 Hook 熔断状态的代次所有权。
+#[derive(Clone, Copy)]
+struct HookWorkerOwnership {
+    /// 用于拒绝旧 worker 迟到完成的单调代次。
+    generation: u64,
+    /// 当前 worker 是否已经是唯一一次恢复尝试。
+    recovery_attempt: bool,
 }
 
 impl HookCircuit {
     /// 在等待单入口前快速拒绝仍处退避或永久熔断的调用。
     fn may_enter(&self) -> bool {
         match &*self.state() {
-            HookCircuitState::Closed => true,
-            HookCircuitState::Recoverable { retry_at } => Instant::now() >= *retry_at,
+            HookCircuitState::Closed { .. } | HookCircuitState::Running { .. } => true,
+            HookCircuitState::Recoverable { retry_at, .. } => Instant::now() >= *retry_at,
             HookCircuitState::PermanentlyOpen => false,
         }
     }
 
     /// 在取得单入口后原子声明普通调用或唯一恢复尝试。
-    fn begin_entry(&self) -> Option<bool> {
+    fn begin_entry(&self) -> Option<HookWorkerOwnership> {
         let mut state = self.state();
-        match &*state {
-            HookCircuitState::Closed => Some(false),
-            HookCircuitState::Recoverable { retry_at } if Instant::now() >= *retry_at => {
-                *state = HookCircuitState::Closed;
-                Some(true)
-            }
-            HookCircuitState::Recoverable { .. } | HookCircuitState::PermanentlyOpen => None,
-        }
+        let (previous_generation, recovery_attempt) = match &*state {
+            HookCircuitState::Closed { generation } => (*generation, false),
+            HookCircuitState::Recoverable {
+                retry_at,
+                generation,
+            } if Instant::now() >= *retry_at => (*generation, true),
+            HookCircuitState::Recoverable { .. }
+            | HookCircuitState::Running { .. }
+            | HookCircuitState::PermanentlyOpen => return None,
+        };
+        let Some(generation) = previous_generation.checked_add(1) else {
+            // 代次溢出意味着无法再证明 worker 所有权，必须继续 fail-closed。
+            *state = HookCircuitState::PermanentlyOpen;
+            return None;
+        };
+        *state = HookCircuitState::Running {
+            generation,
+            recovery_attempt,
+        };
+        Some(HookWorkerOwnership {
+            generation,
+            recovery_attempt,
+        })
     }
 
     /// 首次 worker 异常只安排一次按需恢复；恢复 worker 再失败则永久熔断。
-    fn worker_failed(&self, recovery_attempt: bool) {
-        *self.state() = if recovery_attempt {
+    /// 只有当前 Running 代次的所有者可以写入非永久状态。
+    fn worker_failed(&self, ownership: HookWorkerOwnership) {
+        let mut state = self.state();
+        if !matches!(
+            &*state,
+            HookCircuitState::Running {
+                generation,
+                recovery_attempt,
+            } if *generation == ownership.generation
+                && *recovery_attempt == ownership.recovery_attempt
+        ) {
+            return;
+        }
+        *state = if ownership.recovery_attempt {
             HookCircuitState::PermanentlyOpen
         } else {
             HookCircuitState::Recoverable {
                 retry_at: Instant::now() + HOOK_WORKER_RECOVERY_BACKOFF,
+                generation: ownership.generation,
             }
         };
     }
 
     /// worker 正常交付结果后清除之前的恢复历史。
-    fn worker_succeeded(&self) {
-        *self.state() = HookCircuitState::Closed;
+    /// 已经永久熔断时，迟到的旧 worker 结果不得回退状态。
+    fn worker_succeeded(&self, ownership: HookWorkerOwnership) {
+        let mut state = self.state();
+        if matches!(
+            &*state,
+            HookCircuitState::Running {
+                generation,
+                recovery_attempt,
+            } if *generation == ownership.generation
+                && *recovery_attempt == ownership.recovery_attempt
+        ) {
+            *state = HookCircuitState::Closed {
+                generation: ownership.generation,
+            };
+        }
     }
 
     /// 可能存在仍运行的隔离线程时永久阻止自动恢复。
@@ -1406,7 +1466,7 @@ where
     } else {
         registered.circuit.entrance.lock().await
     };
-    let Some(recovery_attempt) = registered.circuit.begin_entry() else {
+    let Some(ownership) = registered.circuit.begin_entry() else {
         drop(entrance_guard);
         return Err(HookError::CircuitOpen {
             phase,
@@ -1416,7 +1476,7 @@ where
     let runtime = match tokio::runtime::Handle::try_current() {
         Ok(runtime) => runtime,
         Err(_) => {
-            registered.circuit.worker_failed(recovery_attempt);
+            registered.circuit.worker_failed(ownership);
             return Err(HookError::WorkerFailed {
                 phase,
                 hook_name: hook_name.to_owned(),
@@ -1435,7 +1495,7 @@ where
             let _ = sender.send(result);
         });
     if worker.is_err() {
-        registered.circuit.worker_failed(recovery_attempt);
+        registered.circuit.worker_failed(ownership);
         return Err(HookError::WorkerFailed {
             phase,
             hook_name: hook_name.to_owned(),
@@ -1473,14 +1533,14 @@ where
     let result = match result {
         Ok(HookWorkerResult::Completed(result)) => {
             worker_lease.mark_completed();
-            registered.circuit.worker_succeeded();
+            registered.circuit.worker_succeeded(ownership);
             result
         }
         Ok(HookWorkerResult::Panicked) => {
             // panic 栈已经在 worker 内完成展开；没有 Hook 回调代码残留，允许
             // 一次由后续调用触发的串行退避恢复。
             worker_lease.mark_completed();
-            registered.circuit.worker_failed(recovery_attempt);
+            registered.circuit.worker_failed(ownership);
             return Err(HookError::WorkerFailed {
                 phase,
                 hook_name: hook_name.to_owned(),
@@ -1589,4 +1649,92 @@ fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
         end = end.saturating_sub(1);
     }
     value[..end].to_owned()
+}
+
+#[cfg(test)]
+mod circuit_tests {
+    use std::sync::{Arc, Barrier};
+
+    use super::*;
+
+    /// 并发取消先写入永久熔断后，旧 worker 的迟到成功不得把状态回退为 Closed。
+    #[test]
+    fn 取消与旧worker成功竞态保持永久熔断() {
+        let circuit = Arc::new(HookCircuit::default());
+        let ownership = circuit.begin_entry().expect("测试 worker 应取得代次所有权");
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_circuit = Arc::clone(&circuit);
+        let worker_ready = Arc::clone(&ready);
+        let worker_release = Arc::clone(&release);
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            worker_release.wait();
+            worker_circuit.worker_succeeded(ownership);
+        });
+
+        ready.wait();
+        circuit.open_permanently();
+        release.wait();
+        worker.join().expect("旧 worker 状态转换线程不应 panic");
+
+        assert!(matches!(
+            &*circuit.state(),
+            HookCircuitState::PermanentlyOpen
+        ));
+    }
+
+    /// 并发取消先写入永久熔断后，旧 worker 的迟到 panic 不得把状态回退为 Recoverable。
+    #[test]
+    fn 取消与旧worker失败竞态保持永久熔断() {
+        let circuit = Arc::new(HookCircuit::default());
+        let ownership = circuit.begin_entry().expect("测试 worker 应取得代次所有权");
+        let ready = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let worker_circuit = Arc::clone(&circuit);
+        let worker_ready = Arc::clone(&ready);
+        let worker_release = Arc::clone(&release);
+        let worker = std::thread::spawn(move || {
+            worker_ready.wait();
+            worker_release.wait();
+            worker_circuit.worker_failed(ownership);
+        });
+
+        ready.wait();
+        circuit.open_permanently();
+        release.wait();
+        worker.join().expect("旧 worker 状态转换线程不应 panic");
+
+        assert!(matches!(
+            &*circuit.state(),
+            HookCircuitState::PermanentlyOpen
+        ));
+    }
+
+    /// 旧代次的完成或失败不能改写新代次正在运行的 worker 状态。
+    #[test]
+    fn 旧代次worker不能覆盖新代次状态() {
+        let circuit = HookCircuit::default();
+        let first = circuit.begin_entry().expect("首个 worker 应取得代次所有权");
+        circuit.worker_succeeded(first);
+        let second = circuit
+            .begin_entry()
+            .expect("第二个 worker 应取得新代次所有权");
+
+        circuit.worker_succeeded(first);
+        circuit.worker_failed(first);
+        assert!(matches!(
+            &*circuit.state(),
+            HookCircuitState::Running {
+                generation,
+                recovery_attempt: false,
+            } if *generation == second.generation
+        ));
+
+        circuit.worker_succeeded(second);
+        assert!(matches!(
+            &*circuit.state(),
+            HookCircuitState::Closed { generation } if *generation == second.generation
+        ));
+    }
 }
