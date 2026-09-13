@@ -32,28 +32,29 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use keencode_agent::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
-    AgentDynamicInputKind, AgentRunner, AgentToolRoundPreflight, AgentToolRoundPreflightError,
-    AgentToolRoundReservation, ContextCompressionTrigger as AgentCompactionTrigger,
-    ModelRoundCompletion, ModelRoundUsage, TOOL_OUTPUT_LIMITS, TerminalReason,
+    AgentDynamicInputKind, AgentRunError, AgentRunner, AgentToolRoundPreflight,
+    AgentToolRoundPreflightError, AgentToolRoundReservation,
+    ContextCompressionTrigger as AgentCompactionTrigger, HookInvocationContext,
+    ModelRoundCompletion, ModelRoundUsage, OnErrorHookContext, TOOL_OUTPUT_LIMITS, TerminalReason,
     ToolCompletionStatus as AgentToolCompletionStatus, ToolEffect as AgentToolEffect,
-    TurnCancellation, TurnRequest, TurnResult, is_canonical_image_media_type,
-    is_canonical_remote_image_url,
+    TurnCancellation, TurnRequest, TurnResult, agent_run_error_category,
+    is_canonical_image_media_type, is_canonical_remote_image_url,
 };
 use keencode_model::{
-    ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole,
+    ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole, ModelError,
     ModelResponse, OpaqueReasoningState, ReasoningContent, ToolCall, ToolResult, ToolResultContent,
 };
 use keencode_resources::{
     ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactRef, ArtifactStore, ArtifactUse,
     CompactionRecord, ContextCompressionTrigger, DynamicInputKind, GeneratedTitleRecord,
     IdempotentAppendOutcome, JournalConfig, MAX_REPLAY_PAGE_RECORDS, MailboxMessage,
-    MailboxMessageId, MessageImageSource, MessagePart, MessageRole, PersistedToolResult, PlanState,
-    ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId, ResourceError,
-    SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
-    SessionId, SessionJournal, SessionLease, SessionLeaseAcquire, SessionMessage, SessionOpen,
-    SessionState, SubAgentState, SubAgentStatus, ToolCompletionStatus, ToolEffect, ToolOutcome,
-    ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason, reduce_record,
-    side_effect_unknown_result,
+    MailboxMessageId, MessageImageSource, MessagePart, MessageRole, OnErrorHookInvocation,
+    PersistedToolResult, PlanState, ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId,
+    ResourceError, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId,
+    SessionEventRecord, SessionId, SessionJournal, SessionLease, SessionLeaseAcquire,
+    SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus, ToolCompletionStatus,
+    ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason,
+    reduce_record, side_effect_unknown_result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -487,6 +488,8 @@ struct ControlState {
     next_reservation_token: u64,
     /// Runtime 自己负责的 Turn 起点、执行中和精确终态恢复账本。
     turn_executions: BTreeMap<String, RuntimeTurnExecution>,
+    /// 当前进程已领取、尚未提交 receipt 的 OnError 调用身份。
+    on_error_in_flight: BTreeSet<String>,
     /// 为当前进程中的每次实际 Agent 执行分配不复用身份。
     next_turn_execution_id: u64,
 }
@@ -510,14 +513,14 @@ enum RuntimeTurnExecution {
     Starting {
         /// 冻结全部调用语义的规范摘要。
         request_sha256: String,
-        /// 为唯一终态保留的 Journal 字节数。
+        /// 为唯一终态与 OnError receipt 保留的 Journal 字节总数。
         terminal_journal_bytes: u64,
     },
     /// 原子起点已确认，Provider 与 Agent Loop 正在执行。
     Running {
         /// 冻结全部调用语义的规范摘要。
         request_sha256: String,
-        /// 为唯一终态保留的 Journal 字节数。
+        /// 为唯一终态与 OnError receipt 保留的 Journal 字节总数。
         terminal_journal_bytes: u64,
         /// 防止旧 Future 清理后来执行状态的不复用进程内身份。
         execution_id: u64,
@@ -528,7 +531,7 @@ enum RuntimeTurnExecution {
     TerminalPending {
         /// 冻结全部调用语义的规范摘要。
         request_sha256: String,
-        /// 已为该终态保留的 Journal 字节数。
+        /// 已为该终态与 OnError receipt 保留的 Journal 字节总数。
         terminal_journal_bytes: u64,
         /// 精确且稳定的终态事件身份。
         event_id: SessionEventId,
@@ -586,6 +589,35 @@ impl RuntimeTurnExecution {
     fn is_active(&self) -> bool {
         !matches!(self, Self::Abandoned { .. })
     }
+}
+
+/// 在 Closing 阶段全部活动 Turn 与 OnError outbox 收尾后推进 Closed，并告知调用方关闭 Publisher。
+fn finalize_runtime_close_if_idle(inner: &RuntimeSessionInner, control: &mut ControlState) -> bool {
+    if control.lifecycle != RuntimeSessionLifecycle::Closing
+        || control
+            .turn_executions
+            .values()
+            .any(RuntimeTurnExecution::is_active)
+        || inner
+            .journal
+            .read_state(|state| !state.on_error_hook_outbox.is_empty())
+            .unwrap_or(true)
+    {
+        return false;
+    }
+    control.lifecycle = RuntimeSessionLifecycle::Closed;
+    true
+}
+
+/// 在控制态进入 Closed 的同一临界区发送 Publisher 最终关闭信号。
+fn close_runtime_publisher_if_idle(
+    inner: &RuntimeSessionInner,
+    control: &mut ControlState,
+) -> Result<(), RuntimeError> {
+    if finalize_runtime_close_if_idle(inner, control) {
+        inner.publisher.close()?;
+    }
+    Ok(())
 }
 
 /// 已确认起点后在 Future Drop 时冻结热路径的同步 RAII 栅栏。
@@ -660,6 +692,86 @@ impl Drop for RuntimeTurnGuard {
                     request_sha256: self.request_sha256.clone(),
                 },
             );
+            control.hard_recovery_required = true;
+            refresh_recovery_required(&mut control);
+            if finalize_runtime_close_if_idle(&inner, &mut control) {
+                let _ = inner.publisher.close();
+            }
+        }
+    }
+}
+
+/// OnError 调用领取期间的进程内去重和取消恢复栅栏。
+struct OnErrorInFlightGuard {
+    /// 不延长 Session 生命周期的共享控制面弱引用。
+    inner: Weak<RuntimeSessionInner>,
+    /// 当前已领取的稳定调用身份。
+    invocation_id: String,
+    /// 正常 receipt 提交前被 Future 丢弃时仍需建立恢复栅栏。
+    armed: bool,
+}
+
+impl OnErrorInFlightGuard {
+    /// 创建一个已经从进程内 outbox 领取的调用保护。
+    fn new(inner: &Arc<RuntimeSessionInner>, invocation_id: String) -> Self {
+        Self {
+            inner: Arc::downgrade(inner),
+            invocation_id,
+            armed: true,
+        }
+    }
+
+    /// receipt 已确认或调用已被明确保留，解除 Drop 保护并清理 in-flight 标记。
+    fn finish(&mut self, receipt_committed: bool) {
+        if !self.armed {
+            return;
+        }
+        if let Some(inner) = self.inner.upgrade()
+            && let Ok(mut control) = inner.control.lock()
+        {
+            control.on_error_in_flight.remove(&self.invocation_id);
+            if !receipt_committed
+                && inner
+                    .journal
+                    .read_state(|state| {
+                        state
+                            .on_error_hook_outbox
+                            .iter()
+                            .any(|invocation| invocation.invocation_id == self.invocation_id)
+                    })
+                    .unwrap_or(true)
+            {
+                control.hard_recovery_required = true;
+                refresh_recovery_required(&mut control);
+            }
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for OnErrorInFlightGuard {
+    /// Future 被取消或异常丢弃时释放去重标记，并冻结尚未 receipt 的调用。
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let Ok(mut control) = inner.control.lock() else {
+            return;
+        };
+        control.on_error_in_flight.remove(&self.invocation_id);
+        let pending = inner
+            .journal
+            .read_state(|state| {
+                state
+                    .on_error_hook_outbox
+                    .iter()
+                    .any(|invocation| invocation.invocation_id == self.invocation_id)
+            })
+            .unwrap_or(true);
+        if pending {
             control.hard_recovery_required = true;
             refresh_recovery_required(&mut control);
         }
@@ -1070,6 +1182,7 @@ impl RuntimeSession {
             usage_sink,
         });
         let runner = runner
+            .without_automatic_on_error()
             .with_commit_sink(commit_sink)
             .with_event_sink(event_sink);
         RuntimeAgentRunner {
@@ -1158,29 +1271,6 @@ impl RuntimeSession {
             .effective_transcript(source_agent_id)?
             .iter()
             .map(|message| materialize_model_message(&self.inner.artifacts, message))
-            .collect()
-    }
-
-    /// 物化一个已注册 Agent 的有效 Transcript，并保留每条消息所属的 Turn。
-    ///
-    /// Provider 中立的 [`Message`] 不携带资源层身份；需要按历史 Turn 判断
-    /// opaque reasoning continuation 是否仍与当前 Provider 兼容的调用方，使用
-    /// 此方法而不是事后尝试从模型消息反推来源。
-    pub fn model_transcript_for_agent_with_turn_ids(
-        &self,
-        source_agent_id: &keencode_resources::AgentId,
-    ) -> Result<Vec<(Option<TurnId>, Message)>, RuntimeError> {
-        let state = self.inner.journal.state()?;
-        state.validate_transcript_history()?;
-        state
-            .effective_transcript(source_agent_id)?
-            .iter()
-            .map(|message| {
-                Ok((
-                    message.turn_id.clone(),
-                    materialize_model_message(&self.inner.artifacts, message)?,
-                ))
-            })
             .collect()
     }
 
@@ -1698,10 +1788,7 @@ impl RuntimeSession {
         self.inner.journal.state().map_err(RuntimeError::from)
     }
 
-    /// 请求关闭共享 Session，并触发所有正在运行 Turn 的 Runtime 权威取消令牌。
-    ///
-    /// 有未决 Turn 时返回错误并保留 Manager 注册项；调用方必须在取消终态完成后
-    /// 重试。只有执行账本清空且最终 durability barrier 成功后才进入 Closed。
+    /// 原子关闭共享 Session，并触发所有正在运行 Turn 的 Runtime 权威取消令牌。
     fn close_runtime(&self) -> Result<(), RuntimeError> {
         let mut control = self
             .inner
@@ -1723,42 +1810,10 @@ impl RuntimeSession {
                 cancellation.cancel();
             }
         }
-        // TerminalPending 已冻结唯一事件身份与正文，close 重试可以直接完成
-        // 对账而无需重跑 Provider。每条只有在 Journal 明确确认后才移除。
-        let pending_terminals = control
-            .turn_executions
-            .iter()
-            .filter_map(|(turn_id, execution)| match execution {
-                RuntimeTurnExecution::TerminalPending {
-                    event_id, event, ..
-                } => Some((turn_id.clone(), event_id.clone(), (**event).clone())),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        for (turn_id, event_id, event) in pending_terminals {
-            commit_runtime_lifecycle_event(&self.inner, &mut control, event_id, event, false)?;
-            if control.hard_recovery_required {
-                return Err(RuntimeError::RecoveryRequired);
-            }
-            control.turn_executions.remove(&turn_id);
-        }
-        if !control.turn_executions.is_empty() {
-            return if control
-                .turn_executions
-                .values()
-                .any(|execution| matches!(execution, RuntimeTurnExecution::Abandoned { .. }))
-            {
-                Err(RuntimeError::RecoveryRequired)
-            } else {
-                Err(RuntimeError::SessionBusy)
-            };
-        }
-        // Manager 丢弃其句柄前必须把包含取消终态的最终批量窗口变成持久化
-        // 前缀。flush 或 Publisher 关闭失败时生命周期保持 Closing，注册项
-        // 由 Manager 保留并允许同句柄重试。
+        // Manager 丢弃其句柄前必须把当前批量窗口变成持久化前缀；失败时
+        // 生命周期保持 Closing，注册项由 Manager 保留并允许同句柄重试。
         self.inner.journal.flush()?;
-        self.inner.publisher.close()?;
-        control.lifecycle = RuntimeSessionLifecycle::Closed;
+        close_runtime_publisher_if_idle(&self.inner, &mut control)?;
         Ok(())
     }
 
@@ -1804,6 +1859,135 @@ impl RuntimeSession {
 }
 
 impl RuntimeAgentRunner {
+    /// 执行当前 Session Journal 中所有尚未确认的 OnError Hook 调用。
+    ///
+    /// 调用保持幂等：同一 `invocation_id` 在 receipt 确认前只会被当前进程领取一次；
+    /// Hook 失败只记录观察诊断，receipt 仍会提交。receipt 无法确认时保留 outbox
+    /// 并建立恢复栅栏，禁止新的 Agent 工作继续推进。
+    pub async fn drain_on_error_hooks(&self) -> Result<(), RuntimeError> {
+        loop {
+            let invocation_id = {
+                let mut control = self
+                    .inner
+                    .control
+                    .lock()
+                    .map_err(|_| RuntimeError::StateUnavailable)?;
+                if control.lifecycle == RuntimeSessionLifecycle::Closed {
+                    return Err(RuntimeError::SessionClosed);
+                }
+                if control.recovery_required {
+                    return Err(RuntimeError::RecoveryRequired);
+                }
+                let state = self.inner.journal.state()?;
+                let Some(invocation) = state.on_error_hook_outbox.iter().find(|invocation| {
+                    !control
+                        .on_error_in_flight
+                        .contains(&invocation.invocation_id)
+                }) else {
+                    return Ok(());
+                };
+                let invocation_id = invocation.invocation_id.clone();
+                control.on_error_in_flight.insert(invocation_id.clone());
+                invocation_id
+            };
+            self.drain_on_error_hook_claimed(invocation_id).await?;
+        }
+    }
+
+    /// 只处理指定 Turn 的 OnError outbox，供终态重投恢复使用。
+    async fn drain_on_error_hooks_for_turn(&self, turn_id: &TurnId) -> Result<(), RuntimeError> {
+        let invocation_id = self.inner.journal.read_state(|state| {
+            state
+                .on_error_hook_outbox
+                .iter()
+                .find(|invocation| &invocation.turn_id == turn_id)
+                .map(|invocation| invocation.invocation_id.clone())
+        })?;
+        if let Some(invocation_id) = invocation_id {
+            self.drain_on_error_hook(&invocation_id).await?;
+        }
+        Ok(())
+    }
+
+    /// 领取并处理一个指定 OnError 调用；已被其他 Future 领取时直接让其继续。
+    async fn drain_on_error_hook(&self, invocation_id: &str) -> Result<(), RuntimeError> {
+        let claimed = {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            if control.lifecycle == RuntimeSessionLifecycle::Closed {
+                return Err(RuntimeError::SessionClosed);
+            }
+            if control.recovery_required {
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            let state = self.inner.journal.state()?;
+            if !state
+                .on_error_hook_outbox
+                .iter()
+                .any(|invocation| invocation.invocation_id == invocation_id)
+            {
+                return Ok(());
+            }
+            if !control.on_error_in_flight.insert(invocation_id.to_owned()) {
+                return Ok(());
+            }
+            true
+        };
+        if claimed {
+            self.drain_on_error_hook_claimed(invocation_id.to_owned())
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// 执行一个已领取调用并无条件尝试提交其 receipt。
+    async fn drain_on_error_hook_claimed(&self, invocation_id: String) -> Result<(), RuntimeError> {
+        let mut guard = OnErrorInFlightGuard::new(&self.inner, invocation_id.clone());
+        let invocation = self.inner.journal.read_state(|state| {
+            state
+                .on_error_hook_outbox
+                .iter()
+                .find(|invocation| invocation.invocation_id == invocation_id)
+                .cloned()
+        })?;
+        let Some(invocation) = invocation else {
+            guard.finish(true);
+            return Ok(());
+        };
+        let hook_result = self
+            .runner
+            .notify_on_error(
+                on_error_hook_context(self.inner.artifacts.session_id(), &invocation)?,
+                &TurnCancellation::new(),
+            )
+            .await;
+        let receipt_result = {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            commit_on_error_hook_receipt(&self.inner, &mut control, &invocation)
+        };
+        if let Err(error) = receipt_result {
+            guard.finish(false);
+            return Err(error);
+        }
+        guard.finish(true);
+        if let Err(error) = hook_result {
+            tracing::warn!(
+                session_id = %invocation.turn_id,
+                invocation_id = %invocation.invocation_id,
+                error = %error,
+                "OnError 观察 Hook 失败，已提交 receipt"
+            );
+        }
+        Ok(())
+    }
+
     /// 从 TurnStarted 到唯一终态完整执行一次模型与工具循环并同步提交全部权威事实。
     pub async fn run_turn(&self, turn: RuntimeTurnRequest) -> Result<TurnResult, RuntimeError> {
         let session_id = turn.request.session_id().as_str().to_owned();
@@ -1822,6 +2006,25 @@ impl RuntimeAgentRunner {
             })
         {
             return Err(RuntimeError::InvalidTurnRequest);
+        }
+        // 健康状态下先排空冷恢复或上一轮未完成的 OnError outbox；若当前栅栏
+        // 正在等待同一 Turn 的事件对账，则先让下面的 TerminalPending/Starting
+        // 重试解除该身份，再执行对应 Hook，不能让全局排空抢先拦截合法重试。
+        let recovery_fenced = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?
+            .recovery_required;
+        if !recovery_fenced {
+            self.drain_on_error_hooks().await?;
+            if self
+                .inner
+                .journal
+                .read_state(|state| !state.on_error_hook_outbox.is_empty())?
+            {
+                return Err(RuntimeError::RecoveryRequired);
+            }
         }
         let turn_id = TurnId::new(turn.request.turn_id().as_str())?;
         let source_agent_id =
@@ -1864,7 +2067,78 @@ impl RuntimeAgentRunner {
             &terminal_event_id,
             &turn_id,
             &source_agent_id,
+            self.inner.config.journal.max_event_bytes,
         )?;
+
+        // 终态提交可能在上一 Future 被取消后停留在 TerminalPending；先在同步控制
+        // 临界区完成终态对账，再释放锁执行异步 Hook，避免把 std::sync::MutexGuard
+        // 带过 await 而使 Runtime Turn Future 失去 Send。
+        let terminal_pending_result = {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            if control.lifecycle != RuntimeSessionLifecycle::Open {
+                return Err(RuntimeError::SessionClosed);
+            }
+            match control.turn_executions.get(turn_id.as_str()).cloned() {
+                Some(RuntimeTurnExecution::Running { .. }) => {
+                    return Err(RuntimeError::TurnAlreadyRunning);
+                }
+                Some(RuntimeTurnExecution::Abandoned { .. }) => {
+                    return Err(RuntimeError::RecoveryRequired);
+                }
+                Some(RuntimeTurnExecution::TerminalPending {
+                    event_id,
+                    event,
+                    result,
+                    ..
+                }) => {
+                    commit_runtime_lifecycle_event(
+                        &self.inner,
+                        &mut control,
+                        event_id,
+                        *event,
+                        false,
+                    )?;
+                    if control.hard_recovery_required {
+                        return Err(RuntimeError::RecoveryRequired);
+                    }
+                    Some(*result)
+                }
+                Some(RuntimeTurnExecution::Starting { .. }) | None => None,
+            }
+        };
+        if let Some(result) = terminal_pending_result {
+            let has_pending_outbox = self.inner.journal.read_state(|state| {
+                state
+                    .on_error_hook_outbox
+                    .iter()
+                    .any(|invocation| invocation.turn_id == turn_id)
+            })?;
+            if has_pending_outbox {
+                self.drain_on_error_hooks_for_turn(&turn_id).await?;
+            }
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            if self.inner.journal.read_state(|state| {
+                state
+                    .on_error_hook_outbox
+                    .iter()
+                    .any(|invocation| invocation.turn_id == turn_id)
+            })? {
+                control.hard_recovery_required = true;
+                refresh_recovery_required(&mut control);
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            control.turn_executions.remove(turn_id.as_str());
+            close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+            return Ok(result);
+        }
 
         let execution_id;
         {
@@ -1888,24 +2162,8 @@ impl RuntimeAgentRunner {
                     RuntimeTurnExecution::Abandoned { .. } => {
                         return Err(RuntimeError::RecoveryRequired);
                     }
-                    RuntimeTurnExecution::TerminalPending {
-                        event_id,
-                        event,
-                        result,
-                        ..
-                    } => {
-                        commit_runtime_lifecycle_event(
-                            &self.inner,
-                            &mut control,
-                            event_id,
-                            *event,
-                            false,
-                        )?;
-                        if control.hard_recovery_required {
-                            return Err(RuntimeError::RecoveryRequired);
-                        }
-                        control.turn_executions.remove(turn_id.as_str());
-                        return Ok(*result);
+                    RuntimeTurnExecution::TerminalPending { .. } => {
+                        return Err(RuntimeError::RecoveryRequired);
                     }
                     RuntimeTurnExecution::Starting { .. } => {
                         starting_retry = true;
@@ -1966,16 +2224,14 @@ impl RuntimeAgentRunner {
                     &start_event_id,
                     &input_probe,
                 )?;
-                if input_journal_bytes > self.inner.config.journal.max_event_bytes
-                    || terminal_journal_bytes > self.inner.config.journal.max_event_bytes
-                {
+                if input_journal_bytes > self.inner.config.journal.max_event_bytes {
                     return Err(RuntimeError::TurnUnpersistable);
                 }
                 let budget = ToolRoundPersistenceBudget {
                     journal_bytes: input_journal_bytes
                         .checked_add(terminal_journal_bytes)
                         .ok_or(RuntimeError::TurnUnpersistable)?,
-                    journal_records: 2,
+                    journal_records: 3,
                     unknown_artifacts: 0,
                     state_items: state_collection_event_items(&input_probe),
                 };
@@ -2141,82 +2397,133 @@ impl RuntimeAgentRunner {
         let mut guard =
             RuntimeTurnGuard::new(&self.inner, &turn_id, request_sha256.clone(), execution_id);
         let result = self.runner.run_turn(turn.request).await;
-        let terminal = runtime_terminal_event(&turn_id, &source_agent_id, &result);
+        let terminal = runtime_terminal_event(
+            self.inner.artifacts.session_id(),
+            &turn_id,
+            &source_agent_id,
+            &result,
+        );
+        let pending_invocation_id = {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            let running_matches =
+                control
+                    .turn_executions
+                    .get(turn_id.as_str())
+                    .is_some_and(|execution| {
+                        execution.request_sha256() == request_sha256
+                            && matches!(
+                                execution,
+                                RuntimeTurnExecution::Running {
+                                    execution_id: running_execution_id,
+                                    ..
+                                } if *running_execution_id == execution_id
+                            )
+                    });
+            if !running_matches {
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            if control.recovery_required || control.hard_recovery_required {
+                control.turn_executions.insert(
+                    turn_id.as_str().to_owned(),
+                    RuntimeTurnExecution::Abandoned { request_sha256 },
+                );
+                control.hard_recovery_required = true;
+                refresh_recovery_required(&mut control);
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            let terminal_bytes = runtime_terminal_event_reservation_bytes(
+                self.inner.artifacts.session_id(),
+                &terminal_event_id,
+                &turn_id,
+                &terminal,
+                self.inner.config.journal.max_event_bytes,
+            )?;
+            if terminal_bytes > terminal_journal_bytes {
+                control.turn_executions.insert(
+                    turn_id.as_str().to_owned(),
+                    RuntimeTurnExecution::Abandoned { request_sha256 },
+                );
+                control.hard_recovery_required = true;
+                refresh_recovery_required(&mut control);
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            control.turn_executions.insert(
+                turn_id.as_str().to_owned(),
+                RuntimeTurnExecution::TerminalPending {
+                    request_sha256,
+                    terminal_journal_bytes,
+                    event_id: terminal_event_id.clone(),
+                    event: Box::new(terminal.clone()),
+                    result: Box::new(result.clone()),
+                },
+            );
+            let terminal_commit = commit_runtime_lifecycle_event(
+                &self.inner,
+                &mut control,
+                terminal_event_id.clone(),
+                terminal,
+                false,
+            );
+            if let Err(error) = terminal_commit {
+                mark_event_indeterminate(&mut control, terminal_event_id.as_str());
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(error);
+            }
+            if control.hard_recovery_required {
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            self.inner.journal.read_state(|state| {
+                state
+                    .on_error_hook_outbox
+                    .iter()
+                    .find(|invocation| invocation.turn_id == turn_id)
+                    .map(|invocation| invocation.invocation_id.clone())
+            })?
+        };
+        if let Some(invocation_id) = pending_invocation_id {
+            self.drain_on_error_hook(&invocation_id).await?;
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            if self.inner.journal.read_state(|state| {
+                state
+                    .on_error_hook_outbox
+                    .iter()
+                    .any(|invocation| invocation.invocation_id == invocation_id)
+            })? {
+                control.hard_recovery_required = true;
+                refresh_recovery_required(&mut control);
+                close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            control.turn_executions.remove(turn_id.as_str());
+            close_runtime_publisher_if_idle(&self.inner, &mut control)?;
+            guard.disarm();
+            return Ok(result);
+        }
         let mut control = self
             .inner
             .control
             .lock()
             .map_err(|_| RuntimeError::StateUnavailable)?;
-        let running_matches =
-            control
-                .turn_executions
-                .get(turn_id.as_str())
-                .is_some_and(|execution| {
-                    execution.request_sha256() == request_sha256
-                        && matches!(
-                            execution,
-                            RuntimeTurnExecution::Running {
-                                execution_id: running_execution_id,
-                                ..
-                            } if *running_execution_id == execution_id
-                        )
-                });
-        if !running_matches {
-            guard.disarm();
-            return Err(RuntimeError::RecoveryRequired);
-        }
-        if control.recovery_required || control.hard_recovery_required {
-            control.turn_executions.insert(
-                turn_id.as_str().to_owned(),
-                RuntimeTurnExecution::Abandoned { request_sha256 },
-            );
-            control.hard_recovery_required = true;
-            refresh_recovery_required(&mut control);
-            guard.disarm();
-            return Err(RuntimeError::RecoveryRequired);
-        }
-        let terminal_bytes = encoded_record_len(
-            self.inner.artifacts.session_id(),
-            &terminal_event_id,
-            &terminal,
-        )?;
-        if terminal_bytes > terminal_journal_bytes {
-            control.turn_executions.insert(
-                turn_id.as_str().to_owned(),
-                RuntimeTurnExecution::Abandoned { request_sha256 },
-            );
-            control.hard_recovery_required = true;
-            refresh_recovery_required(&mut control);
-            guard.disarm();
-            return Err(RuntimeError::RecoveryRequired);
-        }
-        control.turn_executions.insert(
-            turn_id.as_str().to_owned(),
-            RuntimeTurnExecution::TerminalPending {
-                request_sha256,
-                terminal_journal_bytes,
-                event_id: terminal_event_id.clone(),
-                event: Box::new(terminal.clone()),
-                result: Box::new(result.clone()),
-            },
-        );
-        let terminal_commit = commit_runtime_lifecycle_event(
-            &self.inner,
-            &mut control,
-            terminal_event_id.clone(),
-            terminal,
-            false,
-        );
-        if let Err(error) = terminal_commit {
-            mark_event_indeterminate(&mut control, terminal_event_id.as_str());
-            guard.disarm();
-            return Err(error);
-        }
-        if control.hard_recovery_required {
-            guard.disarm();
-            return Err(RuntimeError::RecoveryRequired);
-        }
         control.turn_executions.remove(turn_id.as_str());
+        close_runtime_publisher_if_idle(&self.inner, &mut control)?;
         guard.disarm();
         Ok(result)
     }
@@ -2718,8 +3025,11 @@ fn tool_round_persistence_budget(
     if reserve_cold_recovery_terminal {
         let recovery_turn_id = TurnId::new(key.turn_id.clone())?;
         let recovery_agent_id = keencode_resources::AgentId::new(key.agent_id.clone())?;
-        let recovery_turn_event =
-            recovery_turn_stopped_event(&recovery_turn_id, &recovery_agent_id);
+        let recovery_turn_event = recovery_turn_stopped_event_for_session(
+            &state.session_id,
+            &recovery_turn_id,
+            &recovery_agent_id,
+        );
         let recovery_turn_event_id = recovery_event_id("turn-stopped", &key.turn_id)?;
         let recovery_turn_event_bytes = encoded_record_len(
             &state.session_id,
@@ -2731,6 +3041,24 @@ fn tool_round_persistence_budget(
         }
         journal_bytes = journal_bytes
             .checked_add(recovery_turn_event_bytes)
+            .ok_or(RuntimeError::RecoveryRequired)?;
+        let recovery_invocation_id =
+            runtime_on_error_invocation_id(&state.session_id, &recovery_turn_id)?;
+        let recovery_receipt_event_id =
+            runtime_on_error_receipt_event_id(&state.session_id, &recovery_invocation_id)?;
+        let recovery_receipt_event = SessionEvent::OnErrorHookReceiptCommitted {
+            invocation_id: recovery_invocation_id,
+        };
+        let recovery_receipt_bytes = encoded_record_len(
+            &state.session_id,
+            &recovery_receipt_event_id,
+            &recovery_receipt_event,
+        )?;
+        if recovery_receipt_bytes > inner.config.journal.max_event_bytes {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        journal_bytes = journal_bytes
+            .checked_add(recovery_receipt_bytes)
             .ok_or(RuntimeError::RecoveryRequired)?;
     }
 
@@ -2769,7 +3097,7 @@ fn tool_round_persistence_budget(
     let tool_count = u64::try_from(tool_calls.len()).map_err(|_| RuntimeError::RecoveryRequired)?;
     let journal_records = tool_count
         .checked_mul(3)
-        .and_then(|records| records.checked_add(if reserve_cold_recovery_terminal { 2 } else { 1 }))
+        .and_then(|records| records.checked_add(if reserve_cold_recovery_terminal { 3 } else { 1 }))
         .ok_or(RuntimeError::RecoveryRequired)?;
     let known_state_items = known_messages
         .iter()
@@ -3187,31 +3515,65 @@ fn model_response_text(response: &ModelResponse) -> Option<String> {
 
 /// 返回带子 Agent 状态配对的非正常 Turn 终态事件。
 fn runtime_stopped_event(
+    session_id: &SessionId,
     turn_id: &TurnId,
     source_agent_id: &keencode_resources::AgentId,
     reason: TurnStopReason,
     message: String,
+    error_category: &str,
 ) -> SessionEvent {
-    let message = keencode_model::redact_error_secrets(&message);
+    let message =
+        truncate_runtime_terminal_message(&keencode_model::redact_error_secrets(&message));
     let stopped = SessionEvent::TurnStopped {
         turn_id: turn_id.clone(),
         reason,
         message: message.clone(),
     };
+    if reason == TurnStopReason::Cancelled {
+        return if source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID {
+            stopped
+        } else {
+            SessionEvent::AtomicBatch {
+                events: vec![
+                    stopped,
+                    SessionEvent::SubAgentStatusChanged {
+                        agent_id: source_agent_id.clone(),
+                        turn_id: Some(turn_id.clone()),
+                        status: SubAgentStatus::Interrupted,
+                        result_summary: None,
+                    },
+                ],
+            }
+        };
+    }
+    let invocation_id = runtime_on_error_invocation_id(session_id, turn_id)
+        .unwrap_or_else(|_| digest_hex(turn_id.as_str().as_bytes()));
+    let invocation = OnErrorHookInvocation {
+        invocation_id,
+        turn_id: turn_id.clone(),
+        source_agent_id: source_agent_id.clone(),
+        terminal_reason: reason,
+        error_category: error_category.to_owned(),
+        error_message: message.clone(),
+    };
+    let queued = SessionEvent::OnErrorHookQueued { invocation };
     if source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID {
-        return stopped;
+        return SessionEvent::AtomicBatch {
+            events: vec![stopped, queued],
+        };
     }
     let (status, result_summary) = match reason {
-        TurnStopReason::Cancelled => (SubAgentStatus::Interrupted, None),
         TurnStopReason::Failed
         | TurnStopReason::LimitReached
         | TurnStopReason::ContextBlocked
         | TurnStopReason::ModelOutputLimit
         | TurnStopReason::ModelRefusal => (SubAgentStatus::Failed, Some(message)),
+        TurnStopReason::Cancelled => unreachable!("取消分支已提前返回"),
     };
     SessionEvent::AtomicBatch {
         events: vec![
             stopped,
+            queued,
             SessionEvent::SubAgentStatusChanged {
                 agent_id: source_agent_id.clone(),
                 turn_id: Some(turn_id.clone()),
@@ -3240,14 +3602,42 @@ fn runtime_terminal_reservation_bytes(
     event_id: &SessionEventId,
     turn_id: &TurnId,
     source_agent_id: &keencode_resources::AgentId,
+    max_event_bytes: u64,
 ) -> Result<u64, RuntimeError> {
     let event = runtime_stopped_event(
+        session_id,
         turn_id,
         source_agent_id,
         TurnStopReason::Failed,
         "\0".repeat(MAX_RUNTIME_TERMINAL_MESSAGE_BYTES),
+        "unknown",
     );
-    encoded_record_len(session_id, event_id, &event)
+    runtime_terminal_event_reservation_bytes(session_id, event_id, turn_id, &event, max_event_bytes)
+}
+
+/// 计算实际终态批次与其 OnError receipt 的联合保留容量。
+fn runtime_terminal_event_reservation_bytes(
+    session_id: &SessionId,
+    event_id: &SessionEventId,
+    turn_id: &TurnId,
+    event: &SessionEvent,
+    max_event_bytes: u64,
+) -> Result<u64, RuntimeError> {
+    let terminal_bytes = encoded_record_len(session_id, event_id, event)?;
+    let receipt_id = runtime_on_error_receipt_event_id(
+        session_id,
+        &runtime_on_error_invocation_id(session_id, turn_id)?,
+    )?;
+    let receipt = SessionEvent::OnErrorHookReceiptCommitted {
+        invocation_id: runtime_on_error_invocation_id(session_id, turn_id)?,
+    };
+    let receipt_bytes = encoded_record_len(session_id, &receipt_id, &receipt)?;
+    if terminal_bytes > max_event_bytes || receipt_bytes > max_event_bytes {
+        return Err(RuntimeError::TurnUnpersistable);
+    }
+    terminal_bytes
+        .checked_add(receipt_bytes)
+        .ok_or(RuntimeError::TurnUnpersistable)
 }
 
 /// 测试中为指定 Turn 注入“若干消息已完成 Artifact 物化后失败”的一次性故障。
@@ -3488,6 +3878,117 @@ fn runtime_lifecycle_event_id(
         phase,
     ))?;
     SessionEventId::new(format!("runtime-{phase}-{digest}")).map_err(RuntimeError::from)
+}
+
+/// 为同一 Session/Turn 生成跨重启稳定的 OnError 调用身份。
+fn runtime_on_error_invocation_id(
+    session_id: &SessionId,
+    turn_id: &TurnId,
+) -> Result<String, RuntimeError> {
+    canonical_sha256(&(
+        "keencode/runtime-on-error-invocation/v1",
+        session_id.as_str(),
+        turn_id.as_str(),
+    ))
+}
+
+/// 为同一 OnError 调用生成跨重启稳定的 receipt 事件身份。
+fn runtime_on_error_receipt_event_id(
+    session_id: &SessionId,
+    invocation_id: &str,
+) -> Result<SessionEventId, RuntimeError> {
+    let digest = canonical_sha256(&(
+        "keencode/runtime-on-error-receipt/v1",
+        session_id.as_str(),
+        invocation_id,
+    ))?;
+    SessionEventId::new(format!("runtime-on-error-receipt-{digest}")).map_err(RuntimeError::from)
+}
+
+/// 把资源层 OnError outbox 重建为 Agent Hook 需要的 Provider 中立上下文。
+fn on_error_hook_context(
+    session_id: &SessionId,
+    invocation: &OnErrorHookInvocation,
+) -> Result<OnErrorHookContext, RuntimeError> {
+    let terminal_reason = match invocation.terminal_reason {
+        TurnStopReason::Failed => TerminalReason::Failed,
+        TurnStopReason::LimitReached => TerminalReason::LimitReached,
+        TurnStopReason::ContextBlocked => TerminalReason::ContextBlocked,
+        TurnStopReason::ModelOutputLimit => TerminalReason::ModelOutputLimit,
+        TurnStopReason::ModelRefusal => TerminalReason::ModelRefusal,
+        TurnStopReason::Cancelled => return Err(RuntimeError::RecoveryRequired),
+    };
+    let error_message = invocation.error_message.clone();
+    let error = match invocation.error_category.as_str() {
+        "authentication_failed" => AgentRunError::Model(ModelError::Authentication {
+            message: error_message,
+            status_code: None,
+        }),
+        "billing_error" => AgentRunError::Model(ModelError::QuotaExceeded {
+            message: error_message,
+            status_code: None,
+        }),
+        "model_not_found" => AgentRunError::Model(ModelError::ModelNotFound {
+            message: error_message,
+            status_code: None,
+        }),
+        "rate_limit" => AgentRunError::Model(ModelError::RateLimited {
+            message: error_message,
+            retry_after_ms: None,
+            status_code: None,
+        }),
+        "overloaded" => AgentRunError::Model(ModelError::ProviderUnavailable {
+            message: error_message,
+            status_code: Some(529),
+            retryable: true,
+        }),
+        "invalid_request" => AgentRunError::Model(ModelError::InvalidRequest {
+            message: error_message,
+        }),
+        "server_error" => AgentRunError::Model(ModelError::ProviderUnavailable {
+            message: error_message,
+            status_code: None,
+            retryable: false,
+        }),
+        "max_output_tokens" => AgentRunError::ModelOutputLimit,
+        _ => AgentRunError::Internal {
+            message: error_message,
+        },
+    };
+    Ok(OnErrorHookContext {
+        invocation: HookInvocationContext {
+            session_id: keencode_agent::SessionId::new(session_id.as_str())
+                .map_err(|_| RuntimeError::RecoveryRequired)?,
+            turn_id: keencode_agent::TurnId::new(invocation.turn_id.as_str())
+                .map_err(|_| RuntimeError::RecoveryRequired)?,
+            source_agent_id: keencode_agent::AgentId::new(invocation.source_agent_id.as_str())
+                .map_err(|_| RuntimeError::RecoveryRequired)?,
+        },
+        error,
+        terminal_reason,
+    })
+}
+
+/// 在 receipt 没有既有终态时核对容量，并幂等提交 OnError receipt。
+fn commit_on_error_hook_receipt(
+    inner: &RuntimeSessionInner,
+    control: &mut ControlState,
+    invocation: &OnErrorHookInvocation,
+) -> Result<(), RuntimeError> {
+    let event_id =
+        runtime_on_error_receipt_event_id(inner.artifacts.session_id(), &invocation.invocation_id)?;
+    let event = SessionEvent::OnErrorHookReceiptCommitted {
+        invocation_id: invocation.invocation_id.clone(),
+    };
+    let state = inner.journal.state()?;
+    let terminal_reservation_exists = control
+        .turn_executions
+        .get(invocation.turn_id.as_str())
+        .is_some_and(RuntimeTurnExecution::reserves_terminal_record);
+    if !terminal_reservation_exists && !inner.journal.contains_event_id(&event_id)? {
+        ensure_control_event_capacity(inner, control, &state, &event_id, &event)?;
+    }
+    commit_runtime_lifecycle_event(inner, control, event_id, event, false)
 }
 
 /// 为尚未启动 Turn 终态生成不随请求正文变化的稳定 Journal 批次身份。
@@ -3786,6 +4287,7 @@ fn runtime_mailbox_event_id(
 
 /// 把 Agent Runner 的唯一终态转换为同一 Session Journal 的类型化 Turn 终态。
 fn runtime_terminal_event(
+    session_id: &SessionId,
     turn_id: &TurnId,
     source_agent_id: &keencode_resources::AgentId,
     result: &TurnResult,
@@ -3813,10 +4315,16 @@ fn runtime_terminal_event(
                 .map(ToString::to_string)
                 .unwrap_or_else(|| "Agent Turn 未返回可确认的正常终态".to_owned());
             runtime_stopped_event(
+                session_id,
                 turn_id,
                 source_agent_id,
                 reason,
                 truncate_runtime_terminal_message(&message),
+                result
+                    .error
+                    .as_ref()
+                    .map(agent_run_error_category)
+                    .unwrap_or("unknown"),
             )
         }
     }
@@ -3975,20 +4483,23 @@ fn map_agent_event(
             let applied = expected
                 .checked_add(1)
                 .ok_or(RuntimeError::RecoveryRequired)?;
-            let digest =
-                hints
-                    .compaction_digest
-                    .clone()
-                    .unwrap_or(state.compaction_source_digest_sha256(
-                        &TurnId::new(key.turn_id.clone())?,
-                        &keencode_resources::AgentId::new(key.agent_id.clone())?,
-                        key.model_round,
-                        record.replaced_start_index,
-                        record.replaced_end_index_exclusive,
-                    )?);
+            let turn_id = TurnId::new(key.turn_id.clone())?;
+            let source_agent_id = keencode_resources::AgentId::new(key.agent_id.clone())?;
+            let digest = match hints.compaction_digest.clone() {
+                Some(digest) => digest,
+                None => mapped_compaction_source_digest(
+                    state,
+                    &turn_id,
+                    &source_agent_id,
+                    key.model_round,
+                    record.replaced_start_index,
+                    record.replaced_end_index_exclusive,
+                    !record.projections.is_empty(),
+                )?,
+            };
             Ok(SessionEvent::CompactionApplied {
-                turn_id: TurnId::new(key.turn_id)?,
-                source_agent_id: keencode_resources::AgentId::new(key.agent_id)?,
+                turn_id,
+                source_agent_id,
                 model_round: key.model_round,
                 compaction: CompactionRecord {
                     trigger: match record.trigger {
@@ -4005,6 +4516,16 @@ fn map_agent_event(
                     retained_message_count: record.retained_message_count,
                     source_digest_sha256: digest,
                     summary: record.summary.clone(),
+                    projections: record
+                        .projections
+                        .iter()
+                        .map(|projection| keencode_resources::ToolResultProjection {
+                            message_index: projection.message_index,
+                            block_index: projection.block_index,
+                            content_index: projection.content_index,
+                            projected_text: projection.projected_text.clone(),
+                        })
+                        .collect(),
                     expected_transcript_revision: expected,
                     applied_transcript_revision: applied,
                 },
@@ -5034,6 +5555,8 @@ fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
             dynamic_input_receipts: 1,
             ..StateCollectionItems::default()
         },
+        SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. } => StateCollectionItems::default(),
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionStatusChanged { .. }
@@ -5502,15 +6025,48 @@ fn mapping_compaction_digest(event: &AgentCommitEvent, state: &SessionState) -> 
     };
     let turn_id = TurnId::new(event.turn_id().as_str()).ok()?;
     let agent_id = keencode_resources::AgentId::new(event.source_agent_id().as_str()).ok()?;
-    state
-        .compaction_source_digest_sha256(
-            &turn_id,
-            &agent_id,
-            event.model_round(),
-            record.replaced_start_index,
-            record.replaced_end_index_exclusive,
-        )
-        .ok()
+    mapped_compaction_source_digest(
+        state,
+        &turn_id,
+        &agent_id,
+        event.model_round(),
+        record.replaced_start_index,
+        record.replaced_end_index_exclusive,
+        !record.projections.is_empty(),
+    )
+    .ok()
+}
+
+/// 计算资源层映射所需的压缩来源 Digest；Micro 投影覆盖完整有效 Transcript，
+/// Summary 形态只覆盖被替换区间。
+fn mapped_compaction_source_digest(
+    state: &SessionState,
+    turn_id: &TurnId,
+    source_agent_id: &keencode_resources::AgentId,
+    model_round: u32,
+    replaced_start_index: usize,
+    replaced_end_index_exclusive: usize,
+    micro_projection: bool,
+) -> Result<String, RuntimeError> {
+    if !micro_projection {
+        return Ok(state.compaction_source_digest_sha256(
+            turn_id,
+            source_agent_id,
+            model_round,
+            replaced_start_index,
+            replaced_end_index_exclusive,
+        )?);
+    }
+    let effective = state.effective_transcript(source_agent_id)?;
+    Ok(keencode_resources::compaction_source_digest_sha256(
+        &state.session_id,
+        turn_id,
+        source_agent_id,
+        model_round,
+        state.transcript_revision,
+        0..effective.len(),
+        &effective,
+    )?)
 }
 
 /// 冷恢复第一步：确认所有遗留终端进程已经丢失并记录取消退出。
@@ -5694,7 +6250,11 @@ fn recover_turns(inner: &RuntimeSessionInner) -> Result<(), RuntimeError> {
             .turns
             .get(&turn_id)
             .ok_or(RuntimeError::RecoveryRequired)?;
-        let event = recovery_turn_stopped_event(&turn_id, &turn.source_agent_id);
+        let event = recovery_turn_stopped_event_for_session(
+            inner.artifacts.session_id(),
+            &turn_id,
+            &turn.source_agent_id,
+        );
         append_runtime_resource_event(
             inner,
             recovery_event_id("turn-stopped", turn_id.as_str())?,
@@ -5704,8 +6264,19 @@ fn recover_turns(inner: &RuntimeSessionInner) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-/// 按根 Agent 或子 Agent 身份构造与冷恢复完全一致的单条 Turn 终态事件。
+/// 为容量测试构造固定 Session 作用域的冷恢复 Turn 终态事件。
+#[cfg(test)]
 fn recovery_turn_stopped_event(
+    turn_id: &TurnId,
+    source_agent_id: &keencode_resources::AgentId,
+) -> SessionEvent {
+    let session_id = SessionId::new("recovery-test-session").expect("测试 Session ID 应有效");
+    recovery_turn_stopped_event_for_session(&session_id, turn_id, source_agent_id)
+}
+
+/// 按根 Agent 或子 Agent 身份构造与冷恢复完全一致的单条 Turn 终态事件。
+fn recovery_turn_stopped_event_for_session(
+    session_id: &SessionId,
     turn_id: &TurnId,
     source_agent_id: &keencode_resources::AgentId,
 ) -> SessionEvent {
@@ -5714,12 +6285,25 @@ fn recovery_turn_stopped_event(
         reason: TurnStopReason::Failed,
         message: RECOVERY_TURN_STOP_MESSAGE.to_owned(),
     };
+    let invocation = OnErrorHookInvocation {
+        invocation_id: runtime_on_error_invocation_id(session_id, turn_id)
+            .expect("恢复 Turn 的 OnError 调用身份应可生成"),
+        turn_id: turn_id.clone(),
+        source_agent_id: source_agent_id.clone(),
+        terminal_reason: TurnStopReason::Failed,
+        error_category: "unknown".to_owned(),
+        error_message: RECOVERY_TURN_STOP_MESSAGE.to_owned(),
+    };
+    let queued = SessionEvent::OnErrorHookQueued { invocation };
     if source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID {
-        stopped
+        SessionEvent::AtomicBatch {
+            events: vec![stopped, queued],
+        }
     } else {
         SessionEvent::AtomicBatch {
             events: vec![
                 stopped,
+                queued,
                 SessionEvent::SubAgentStatusChanged {
                     agent_id: source_agent_id.clone(),
                     turn_id: Some(turn_id.clone()),

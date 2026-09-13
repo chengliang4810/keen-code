@@ -2347,12 +2347,12 @@ async fn concurrent_duplicate_turn_invokes_provider_once() {
     );
 }
 
-/// 验证三条 Journal 的精确边界仍保留失败终态，而两条边界会在 Provider 前拒绝。
+/// 验证输入、失败终态和 OnError receipt 的精确记录边界，而不足边界会在 Provider 前拒绝。
 #[tokio::test]
 async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
     let root = TempDir::new().expect("临时目录应创建");
     let mut exact_config = config(&root);
-    exact_config.journal.max_records = 3;
+    exact_config.journal.max_records = 4;
     let exact_session = RuntimeSession::create_session(
         exact_config,
         CreateSessionRequest {
@@ -2361,13 +2361,19 @@ async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
             project_root: root.path().display().to_string(),
         },
     )
-    .expect("三条记录边界 Session 应创建");
+    .expect("四条记录边界 Session 应创建");
     let exact_provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities {
             streaming: true,
             ..ProviderCapabilities::default()
         },
-        [completed_text_reply("最终 Transcript 将因容量被拒绝")],
+        [ScriptedReply::new(vec![Err(
+            ModelError::ProviderUnavailable {
+                message: "精确记录边界失败".to_owned(),
+                status_code: None,
+                retryable: false,
+            },
+        )])],
     ));
     let exact_bound = exact_session.bind_agent_runner(AgentRunner::new(
         exact_provider.clone(),
@@ -2384,7 +2390,7 @@ async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
         .expect("Agent 失败终态本身应可靠提交");
     assert!(!exact_result.is_success());
     let exact_snapshot = exact_session.snapshot().expect("精确边界状态应读取");
-    assert_eq!(exact_snapshot.state.last_sequence, 3);
+    assert_eq!(exact_snapshot.state.last_sequence, 4);
     assert_eq!(
         exact_snapshot
             .state
@@ -2404,7 +2410,7 @@ async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
 
     let second_root = TempDir::new().expect("第二个临时目录应创建");
     let mut insufficient_config = config(&second_root);
-    insufficient_config.journal.max_records = 2;
+    insufficient_config.journal.max_records = 3;
     let insufficient_session = RuntimeSession::create_session(
         insufficient_config,
         CreateSessionRequest {
@@ -2413,7 +2419,7 @@ async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
             project_root: second_root.path().display().to_string(),
         },
     )
-    .expect("两条记录边界 Session 应创建");
+    .expect("三条记录边界 Session 应创建");
     let insufficient_provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
         [completed_text_reply("不应调用")],
@@ -2454,7 +2460,7 @@ async fn runtime_turn_max_records_boundary_reserves_terminal_record() {
 async fn bound_tool_round_does_not_double_reserve_mutually_exclusive_terminal_record() {
     let root = TempDir::new().expect("临时目录应创建");
     let mut runtime_config = config(&root);
-    runtime_config.journal.max_records = 8;
+    runtime_config.journal.max_records = 9;
     let session = RuntimeSession::create_session(
         runtime_config,
         CreateSessionRequest {
@@ -2500,7 +2506,7 @@ async fn bound_tool_round_does_not_double_reserve_mutually_exclusive_terminal_re
     assert!(executed.load(Ordering::SeqCst));
     let snapshot = session.snapshot().expect("精确边界状态应读取");
     // 工具提交后增加唯一耗尽总结指令；总结 Provider 失败仍能保留限额终态。
-    assert_eq!(snapshot.state.last_sequence, 8);
+    assert_eq!(snapshot.state.last_sequence, 9);
     assert!(!snapshot.recovery_required);
     assert_eq!(snapshot.active_reservations, 0);
 }
@@ -3366,7 +3372,7 @@ fn default_runtime_reserves_agent_visible_tool_round_persistence_budget() {
         .reservations
         .get(&key)
         .expect("签发后应保存 reservation");
-    assert_eq!(entry.reserved_journal_records, 8);
+    assert_eq!(entry.reserved_journal_records, 9);
     assert!(
         entry.reserved_journal_bytes
             > u64::try_from(TOOL_OUTPUT_LIMITS.max_round_json_bytes)
@@ -3661,7 +3667,7 @@ async fn rejected_final_round_after_tool_completion_retains_reservation_and_free
             .expect("已产生生命周期进度的 reservation 必须保留");
         assert!(entry.abandoned_after_progress);
         assert_eq!(entry.committed_event_ids.len(), 3);
-        assert_eq!(entry.reserved_journal_records, 2);
+        assert_eq!(entry.reserved_journal_records, 3);
         assert_eq!(entry.reserved_state_items.tools, 0);
         assert_eq!(
             entry.reserved_state_items.tool_outcome_result_content,
@@ -3719,12 +3725,12 @@ async fn rejected_final_round_after_tool_completion_retains_reservation_and_free
     );
 }
 
-/// 验证无审批工具完整生命周期后仍为恢复 Transcript 和 TurnStopped 各保留一条记录。
+/// 验证无审批工具完整生命周期后仍为恢复 Transcript、TurnStopped 和 OnError receipt 各保留一条记录。
 #[tokio::test]
 async fn tool_lifecycle_exact_record_boundary_preserves_cold_recovery() {
     let root = TempDir::new().expect("临时目录应创建");
     let mut runtime_config = config(&root);
-    runtime_config.journal.max_records = 7;
+    runtime_config.journal.max_records = 8;
     let session = RuntimeSession::create_session(
         runtime_config.clone(),
         CreateSessionRequest {
@@ -3788,8 +3794,8 @@ async fn tool_lifecycle_exact_record_boundary_preserves_cold_recovery() {
             .expect("已产生生命周期进度的 reservation 必须保留");
         assert_eq!(entry.committed_event_ids.len(), 3);
         assert_eq!(
-            entry.reserved_journal_records, 2,
-            "必须同时保留恢复 Transcript 和 TurnStopped 记录"
+            entry.reserved_journal_records, 3,
+            "必须同时保留恢复 Transcript、TurnStopped 和 OnError receipt 记录"
         );
     }
 
@@ -3797,15 +3803,28 @@ async fn tool_lifecycle_exact_record_boundary_preserves_cold_recovery() {
     drop(session);
     let recovered =
         match RuntimeSession::open_session(runtime_config, "runtime-confirm-recovery-boundary")
-            .expect("七条 Journal 精确边界应能完成冷恢复")
+            .expect("八条 Journal 精确边界应能完成冷恢复")
         {
             OpenSessionResult::Ready(session) => session,
             OpenSessionResult::Corrupt(report) => {
                 panic!("工具生命周期不应形成损坏日志：{:?}", report.issues)
             }
         };
+    let recovery_runner = recovered.bind_agent_runner(AgentRunner::new(
+        Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            Vec::<ScriptedReply>::new(),
+        )),
+        ToolRegistry::new(),
+        RunLimits::default(),
+    ));
+    recovery_runner
+        .drain_on_error_hooks()
+        .await
+        .expect("冷恢复 OnError outbox 应能提交 receipt");
     let recovered_snapshot = recovered.snapshot().expect("边界恢复后状态应读取");
-    assert_eq!(recovered_snapshot.state.last_sequence, 7);
+    assert_eq!(recovered_snapshot.state.last_sequence, 8);
+    assert!(recovered_snapshot.state.on_error_hook_outbox.is_empty());
     assert_eq!(recovered_snapshot.state.transcript.len(), 1);
     assert_eq!(
         recovered_snapshot
@@ -5258,7 +5277,16 @@ fn cold_recovery_orders_terminal_tool_transcript_and_turn() {
         .expect("应在同一 AtomicBatch 记录恢复模型 Round 与 Transcript");
     let stopped_position = records
         .iter()
-        .position(|record| matches!(&record.event, SessionEvent::TurnStopped { .. }))
+        .position(|record| {
+            matches!(&record.event, SessionEvent::TurnStopped { .. })
+                || matches!(
+                    &record.event,
+                    SessionEvent::AtomicBatch { events }
+                        if events
+                            .iter()
+                            .any(|event| matches!(event, SessionEvent::TurnStopped { .. }))
+                )
+        })
         .expect("应记录 TurnStopped");
     assert!(terminal_position < unknown_position);
     assert!(unknown_position < transcript_position);

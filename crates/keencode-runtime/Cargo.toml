@@ -33,6 +33,8 @@ sha2 = "0.10.9"
 thiserror = "2.0.16"
 # 为每个 Session 提供有界、可检测落后的实时事件广播通道。
 tokio = { version = "1.47.1", features = ["sync"] }
+# 为观察 Hook 失败保留结构化诊断日志。
+tracing = "0.1"
 # 为项目级持久 Goal 生成按时间排序且跨进程唯一的标识。
 uuid = { version = "1.18.1", features = ["v7"] }
 
