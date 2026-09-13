@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::{Stream, StreamExt};
 use keencode_model::{
-    ContentBlock, ModelError, ModelFuture, ModelProvider, ModelRequest, ModelStream,
+    ContentBlock, MessageRole, ModelError, ModelFuture, ModelProvider, ModelRequest, ModelStream,
     ModelStreamEvent, ProviderCapabilities, ProviderProtocol, TokenUsage, ToolResultContent,
 };
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderValue};
@@ -39,17 +39,28 @@ fn discard_oldest_request_media(request: &mut ModelRequest) {
     let media_count = request
         .messages
         .iter()
-        .flat_map(|message| message.content.iter())
-        .map(|block| match block {
-            ContentBlock::Image { .. } => 1,
-            ContentBlock::ToolResult { tool_result } => tool_result
+        .map(|message| match message.role {
+            MessageRole::User => message
                 .content
                 .iter()
-                .filter(|item| matches!(item, ToolResultContent::Image { .. }))
+                .filter(|block| matches!(block, ContentBlock::Image { .. }))
                 .count(),
-            ContentBlock::Text { .. }
-            | ContentBlock::Reasoning { .. }
-            | ContentBlock::ToolCall { .. } => 0,
+            MessageRole::Tool => message
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::ToolResult { tool_result } => tool_result
+                        .content
+                        .iter()
+                        .filter(|item| matches!(item, ToolResultContent::Image { .. }))
+                        .count(),
+                    ContentBlock::Text { .. }
+                    | ContentBlock::Reasoning { .. }
+                    | ContentBlock::Image { .. }
+                    | ContentBlock::ToolCall { .. } => 0,
+                })
+                .sum::<usize>(),
+            MessageRole::System | MessageRole::Developer | MessageRole::Assistant => 0,
         })
         .sum::<usize>();
     let mut remaining = media_count.saturating_sub(MAX_REQUEST_MEDIA_ITEMS);
@@ -58,13 +69,17 @@ fn discard_oldest_request_media(request: &mut ModelRequest) {
     }
 
     let messages = request.messages_mut();
-    for message in messages.iter_mut() {
+    messages.retain_mut(|message| {
+        let trims_user_images = message.role == MessageRole::User;
+        let trims_tool_images = message.role == MessageRole::Tool;
+        let mut removed_user_image = false;
         message.content.retain_mut(|block| match block {
-            ContentBlock::Image { .. } if remaining > 0 => {
+            ContentBlock::Image { .. } if trims_user_images && remaining > 0 => {
                 remaining -= 1;
+                removed_user_image = true;
                 false
             }
-            ContentBlock::ToolResult { tool_result } => {
+            ContentBlock::ToolResult { tool_result } if trims_tool_images => {
                 tool_result.content.retain(|item| {
                     if remaining > 0 && matches!(item, ToolResultContent::Image { .. }) {
                         remaining -= 1;
@@ -78,20 +93,24 @@ fn discard_oldest_request_media(request: &mut ModelRequest) {
             ContentBlock::Text { .. }
             | ContentBlock::Reasoning { .. }
             | ContentBlock::Image { .. }
-            | ContentBlock::ToolCall { .. } => true,
+            | ContentBlock::ToolCall { .. }
+            | ContentBlock::ToolResult { .. } => true,
         });
-    }
-    // 纯图片 user 消息可能在裁剪后为空；删除该消息，其他消息与工具结果外壳保持原序。
-    messages.retain(|message| !message.content.is_empty());
+        // 只删除本轮实际裁掉图片后才变空的 User 消息。预存空消息必须保留，
+        // 让编码前的防御性校验继续拒绝它；ToolResult 内容可空但外壳永远保留。
+        !(trims_user_images && removed_user_image && message.content.is_empty())
+    });
     debug_assert_eq!(remaining, 0);
 }
 
 #[cfg(test)]
 mod request_media_limit_tests {
-    use super::{MAX_REQUEST_MEDIA_ITEMS, discard_oldest_request_media};
+    use std::time::Duration;
+
+    use super::{MAX_REQUEST_MEDIA_ITEMS, ProviderClient, discard_oldest_request_media};
     use keencode_model::{
-        ContentBlock, ImageContent, ImageSource, Message, MessageRole, ModelRequest, ToolCall,
-        ToolResult, ToolResultContent,
+        ContentBlock, ImageContent, ImageSource, Message, MessageRole, ModelError, ModelProvider,
+        ModelRequest, ProviderProtocol, ToolCall, ToolResult, ToolResultContent,
     };
 
     fn image(url: impl Into<String>) -> ContentBlock {
@@ -106,8 +125,43 @@ mod request_media_limit_tests {
         }
     }
 
+    fn valid_images(count: usize, prefix: &str) -> Vec<ContentBlock> {
+        (0..count)
+            .map(|index| image(format!("https://example.com/{prefix}-{index}.png")))
+            .collect()
+    }
+
+    fn invalid_assistant_media_request() -> ModelRequest {
+        ModelRequest::new(
+            "test-model",
+            vec![
+                Message::new(
+                    MessageRole::Assistant,
+                    vec![image("https://example.com/invalid-assistant.png")],
+                ),
+                Message::new(
+                    MessageRole::User,
+                    valid_images(MAX_REQUEST_MEDIA_ITEMS + 1, "valid-user"),
+                ),
+            ],
+        )
+    }
+
+    fn request_with_preexisting_empty_message() -> ModelRequest {
+        ModelRequest::new(
+            "test-model",
+            vec![
+                Message::new(MessageRole::User, Vec::new()),
+                Message::new(
+                    MessageRole::User,
+                    valid_images(MAX_REQUEST_MEDIA_ITEMS + 1, "valid-user"),
+                ),
+            ],
+        )
+    }
+
     #[test]
-    fn request_at_media_limit_keeps_shared_message_segment() {
+    fn request_at_media_limit_validation_and_trim_keep_shared_message_segment() {
         let original = ModelRequest::new(
             "test-model",
             vec![Message::new(
@@ -120,7 +174,9 @@ mod request_media_limit_tests {
         let original_message = original.messages.get(0).expect("测试消息应存在") as *const Message;
         let mut request = original.clone();
 
+        request.validate().expect("上限内原始请求应有效");
         discard_oldest_request_media(&mut request);
+        request.validate().expect("上限内裁剪结果应有效");
 
         let retained_message = request.messages.get(0).expect("上限内消息应保留") as *const Message;
         assert_eq!(
@@ -128,6 +184,102 @@ mod request_media_limit_tests {
             "上限内请求不得物化共享历史"
         );
         assert_eq!(request.messages[0].content.len(), MAX_REQUEST_MEDIA_ITEMS);
+    }
+
+    #[test]
+    fn invalid_assistant_image_is_preserved_for_request_validation() {
+        let mut request = invalid_assistant_media_request();
+
+        discard_oldest_request_media(&mut request);
+
+        assert_eq!(
+            request.messages.len(),
+            2,
+            "非法 Assistant 消息不得被裁剪掩盖"
+        );
+        assert_eq!(request.messages[0].content.len(), 1);
+        assert_eq!(request.messages[1].content.len(), MAX_REQUEST_MEDIA_ITEMS);
+        assert!(matches!(
+            request.validate(),
+            Err(ModelError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn preexisting_empty_message_is_preserved_for_request_validation() {
+        let mut request = request_with_preexisting_empty_message();
+
+        discard_oldest_request_media(&mut request);
+
+        assert!(request.messages[0].content.is_empty());
+        assert!(matches!(
+            request.validate(),
+            Err(ModelError::InvalidRequest { .. })
+        ));
+    }
+
+    #[test]
+    fn user_message_emptied_by_current_trim_is_removed() {
+        let mut request = ModelRequest::new(
+            "test-model",
+            vec![
+                Message::new(
+                    MessageRole::User,
+                    vec![image("https://example.com/oldest.png")],
+                ),
+                Message::new(
+                    MessageRole::User,
+                    valid_images(MAX_REQUEST_MEDIA_ITEMS, "newer"),
+                ),
+            ],
+        );
+
+        discard_oldest_request_media(&mut request);
+
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(request.messages[0].content.len(), MAX_REQUEST_MEDIA_ITEMS);
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn tool_result_shell_is_preserved_when_all_nested_images_are_trimmed() {
+        let mut request = ModelRequest::new(
+            "test-model",
+            vec![
+                Message::new(
+                    MessageRole::Assistant,
+                    vec![ContentBlock::ToolCall {
+                        tool_call: ToolCall::new(
+                            "call-old-media",
+                            "read_media",
+                            serde_json::json!({}),
+                        ),
+                    }],
+                ),
+                Message::new(
+                    MessageRole::Tool,
+                    vec![ContentBlock::ToolResult {
+                        tool_result: ToolResult::new(
+                            "call-old-media",
+                            vec![tool_image("https://example.com/old-tool.png")],
+                            false,
+                        ),
+                    }],
+                ),
+                Message::new(
+                    MessageRole::User,
+                    valid_images(MAX_REQUEST_MEDIA_ITEMS, "newer-user"),
+                ),
+            ],
+        );
+
+        discard_oldest_request_media(&mut request);
+
+        let ContentBlock::ToolResult { tool_result } = &request.messages[1].content[0] else {
+            panic!("裁空图片后仍必须保留 ToolResult 外壳");
+        };
+        assert!(tool_result.content.is_empty());
+        assert!(request.validate().is_ok());
     }
 
     #[test]
@@ -191,6 +343,57 @@ mod request_media_limit_tests {
             },
             "最新图片必须保留"
         );
+    }
+
+    #[tokio::test]
+    async fn stream_and_complete_validate_original_request_before_media_trimming() {
+        let mut config = crate::ProviderConfig::new_unauthenticated(
+            "request-media-validation",
+            ProviderProtocol::Responses,
+            "http://127.0.0.1:1/v1",
+        )
+        .expect("测试 Provider 配置应有效");
+        config.connect_timeout = Duration::from_millis(20);
+        config.retry.max_attempts = 1;
+        let client = ProviderClient::new(config).expect("测试 Provider 客户端应创建");
+        let invalid_requests = [
+            (
+                ModelRequest::new(
+                    "test-model",
+                    vec![
+                        Message::new(MessageRole::User, vec![image("")]),
+                        Message::new(
+                            MessageRole::User,
+                            valid_images(MAX_REQUEST_MEDIA_ITEMS, "valid-newer"),
+                        ),
+                    ],
+                ),
+                "图片地址不能为空",
+            ),
+            (
+                invalid_assistant_media_request(),
+                "消息角色 Assistant 包含了不允许的内容类型",
+            ),
+            (request_with_preexisting_empty_message(), "消息内容不能为空"),
+        ];
+
+        for (invalid_request, expected_message) in invalid_requests {
+            let stream_error = match client.stream(invalid_request.clone()).await {
+                Err(error) => error,
+                Ok(_) => panic!("stream 不得在裁剪非法原始内容后发送请求"),
+            };
+            let complete_error = client
+                .complete(invalid_request)
+                .await
+                .expect_err("complete 不得在裁剪非法原始内容后发送请求");
+
+            for error in [stream_error, complete_error] {
+                assert!(matches!(
+                    error,
+                    ModelError::InvalidRequest { message } if message == expected_message
+                ));
+            }
+        }
     }
 }
 
@@ -1488,7 +1691,9 @@ impl ModelProvider for ProviderClient {
     ) -> ModelFuture<'_, Result<ModelStream, ModelError>> {
         let client = self.clone();
         Box::pin(async move {
-            discard_oldest_request_media(&mut request);
+            // 在任何媒体裁剪前校验调用方提供的原始快照；结果延后到观测器
+            // 建立后处理，只为保留既有的 attempt 前失败记录，不会放行裁剪。
+            let original_validation = request.validate();
             let url = client
                 .config
                 .protocol_url()
@@ -1503,7 +1708,15 @@ impl ModelProvider for ProviderClient {
                     url.as_str().to_owned(),
                 )
             });
+            if let Err(error) = original_validation {
+                if let Some(lifecycle) = &mut lifecycle {
+                    lifecycle.fail_before_attempt(&error);
+                }
+                return Err(error);
+            }
+            discard_oldest_request_media(&mut request);
             if let Err(error) = request.validate() {
+                // 裁剪实现即使后续演进也不能向 Adapter 交付违反领域不变量的请求。
                 if let Some(lifecycle) = &mut lifecycle {
                     lifecycle.fail_before_attempt(&error);
                 }
