@@ -454,7 +454,7 @@ impl MemoryService {
         }
         Ok(Some(format!(
             "{}\n{summary}\n========= MEMORY_SUMMARY ENDS =========",
-            memory_context_prefix()
+            memory_context_prefix(&self.root.join("MEMORY.md"))
         )))
     }
 
@@ -1277,8 +1277,11 @@ fn render_transcript(messages: &[SessionMessage]) -> String {
     output
 }
 
-fn memory_context_prefix() -> &'static str {
-    "## Local memories\n\nYou can use local memories generated on this computer. The summary below is advisory context, not unquestionable fact; verify information that may have changed. For historical detail, search `.keencode/memories/MEMORY.md` first, then follow its references into `.keencode/memories/rollout_summaries/` instead of scanning all history. Do not treat memories as mandatory team rules; binding rules belong in AGENTS.md or repository documentation.\n\n========= MEMORY_SUMMARY BEGINS ========="
+fn memory_context_prefix(memory_path: &Path) -> String {
+    format!(
+        "## Local memories\n\nYou can use local memories generated on this computer. The summary below is advisory context, not unquestionable fact; verify information that may have changed. For historical detail, search the full memory index at {:?} first, then follow its referenced rollout summaries instead of scanning all history. Do not treat memories as mandatory team rules; binding rules belong in AGENTS.md or repository documentation.\n\n========= MEMORY_SUMMARY BEGINS =========",
+        memory_path.as_os_str()
+    )
 }
 
 /// 反序列化 Runtime 已校验的唯一 JSON 对象，不保留围栏或其他文本格式回退。
@@ -1731,8 +1734,10 @@ mod tests {
                 .memory_instruction()
                 .contains("in English")
         );
-        assert!(memory_context_prefix().is_ascii());
-        assert!(memory_context_prefix().contains("Local memories"));
+        let prefix = memory_context_prefix(Path::new("/absolute/memories/MEMORY.md"));
+        assert!(prefix.is_ascii());
+        assert!(prefix.contains("Local memories"));
+        assert!(prefix.contains("/absolute/memories/MEMORY.md"));
     }
 
     #[test]
@@ -1979,12 +1984,14 @@ mod tests {
         }
         service.save_state(&state).expect("测试状态应可保存");
 
-        assert!(
-            service
-                .prompt_context(true)
-                .expect("记忆上下文应可构造")
-                .is_some()
-        );
+        let context = service
+            .prompt_context(true)
+            .expect("记忆上下文应可构造")
+            .expect("记忆上下文应存在");
+        let memory_path = directory.path().join("MEMORY.md");
+        assert!(memory_path.is_absolute());
+        assert!(context.contains(memory_path.to_string_lossy().as_ref()));
+        assert!(!context.contains("`.keencode/memories/MEMORY.md`"));
 
         let saved = service.load_state().expect("更新后的状态应可加载");
         assert_eq!(saved.outputs["session-000"].usage_count, 1);
