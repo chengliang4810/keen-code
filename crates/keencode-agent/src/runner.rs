@@ -105,8 +105,11 @@ const MAX_DYNAMIC_INPUT_MESSAGES_PER_BOUNDARY: usize = 256;
 /// 动态消息已提交后确认持久 claim 的最大尝试次数。
 const DYNAMIC_INPUT_ACKNOWLEDGEMENT_ATTEMPTS: usize = 2;
 
-/// 单次目录变化通知允许列出的新增或移除工具总数。
-const MAX_TOOL_CATALOG_DELTA_NAMES: usize = 512;
+/// 单个目录快照允许参与变化通知的工具名称数量。
+///
+/// 新旧快照都可各自达到 512 项，因此一次完全替换最多包含 512 个新增和
+/// 512 个移除名称；分别约束两侧，不能把合法的 1024 项变化误判为超限。
+const MAX_TOOL_CATALOG_SNAPSHOT_NAMES: usize = 512;
 
 /// 单个目录变化工具名称允许占用的最大 UTF-8 字节数。
 const MAX_TOOL_CATALOG_DELTA_NAME_BYTES: usize = 256;
@@ -479,7 +482,8 @@ impl AgentToolCatalogDelta {
         removed: Vec<String>,
     ) -> Result<Self, AgentToolCatalogUpdateError> {
         if generation == 0
-            || added.len().saturating_add(removed.len()) > MAX_TOOL_CATALOG_DELTA_NAMES
+            || added.len() > MAX_TOOL_CATALOG_SNAPSHOT_NAMES
+            || removed.len() > MAX_TOOL_CATALOG_SNAPSHOT_NAMES
         {
             return Err(AgentToolCatalogUpdateError::new("工具目录变化摘要无效"));
         }

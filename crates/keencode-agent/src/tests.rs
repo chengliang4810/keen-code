@@ -819,6 +819,31 @@ fn tool_catalog_delta_accepts_definition_only_generation_changes() {
     assert!(delta.removed().is_empty());
 }
 
+#[test]
+fn tool_catalog_delta_accepts_full_catalog_replacement() {
+    let added = (0..512)
+        .map(|index| format!("new_tool_{index:03}"))
+        .collect::<Vec<_>>();
+    let removed = (0..512)
+        .map(|index| format!("old_tool_{index:03}"))
+        .collect::<Vec<_>>();
+    let delta = AgentToolCatalogDelta::new(8, added, removed)
+        .expect("完整替换 512 项目录应允许同时报告全部新增和移除名称");
+
+    assert_eq!(delta.added().len(), 512);
+    assert_eq!(delta.removed().len(), 512);
+}
+
+#[test]
+fn tool_catalog_delta_rejects_either_snapshot_over_capacity() {
+    let oversized = (0..513)
+        .map(|index| format!("tool_{index:03}"))
+        .collect::<Vec<_>>();
+
+    assert!(AgentToolCatalogDelta::new(9, oversized.clone(), Vec::new()).is_err());
+    assert!(AgentToolCatalogDelta::new(9, Vec::new(), oversized).is_err());
+}
+
 /// 同一逻辑 Round 的空响应重试必须继续携带同一通知，但通知不能进入权威 Transcript。
 #[tokio::test]
 async fn tool_catalog_update_is_transient_and_reused_by_same_round_retry() {
