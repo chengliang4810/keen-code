@@ -1845,6 +1845,8 @@ struct RuntimeAgentExecutionState {
     extension_diagnostics_generation: Option<u64>,
     /// 各 Agent 在自身首次 Turn 前冻结的稳定提示词事实。
     frozen_prompts: HashMap<RunnerAgentId, Arc<FrozenAgentPrompt>>,
+    /// 按历史 Turn 记录其启动时使用的 Provider 快照，供 opaque reasoning 续传兼容性判断。
+    historical_provider_by_turn: Option<HashMap<String, ProviderSnapshot>>,
 }
 
 /// `frozen_prompts` 的软上限；超过后在下次冻结插入前惰性收缩一次。
@@ -2023,6 +2025,47 @@ impl RuntimeAgentExecution {
             .get()
             .and_then(Weak::upgrade)
             .ok_or_else(|| CollaborationPortError::new("Collaboration 执行端尚未绑定协调器"))
+    }
+
+    /// 惰性读取并缓存历史 Turn 起点的 Provider 快照，避免每次新 Turn 重扫 Journal。
+    fn historical_provider_snapshots(
+        &self,
+    ) -> Result<HashMap<String, ProviderSnapshot>, AgentRuntimeError> {
+        if let Some(cached) = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .historical_provider_by_turn
+            .clone()
+        {
+            return Ok(cached);
+        }
+        let loaded = historical_provider_snapshots_by_turn(&self.session)?;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        Ok(state
+            .historical_provider_by_turn
+            .get_or_insert(loaded)
+            .clone())
+    }
+
+    /// 记录已经完成装配的 Turn Provider，供同一执行端后续 Turn 复用。
+    fn remember_turn_provider(
+        &self,
+        turn_id: &AgentTurnId,
+        provider: ProviderSnapshot,
+    ) -> Result<(), AgentRuntimeError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        state
+            .historical_provider_by_turn
+            .get_or_insert_with(HashMap::new)
+            .insert(turn_id.as_str().to_owned(), provider);
+        Ok(())
     }
 
     /// 将根请求发布到按 TurnId 去重的准备表，并返回命令层完成通知。
@@ -5145,10 +5188,10 @@ impl AgentRuntime {
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
                 .map_err(|error| runtime_operation_failed(error))?;
-        let mut transcript = if is_root {
+        let transcript_with_turn_ids = if is_root {
             execution
                 .session
-                .model_transcript_for_agent(&source_resource_id)
+                .model_transcript_for_agent_with_turn_ids(&source_resource_id)
                 .map_err(|error| runtime_operation_failed(error))?
         } else {
             let mut inherited = launch
@@ -5157,6 +5200,7 @@ impl AgentRuntime {
                 .iter()
                 .map(|message| {
                     serde_json::from_str::<Message>(message)
+                        .map(|message| (None, message))
                         .map_err(|error| runtime_operation_failed(error))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -5164,15 +5208,27 @@ impl AgentRuntime {
                 inherited.extend(
                     execution
                         .session
-                        .model_transcript_for_agent(&source_resource_id)
+                        .model_transcript_for_agent_with_turn_ids(&source_resource_id)
                         .map_err(|error| runtime_operation_failed(error))?,
                 );
             }
             inherited
         };
-        // 跨 Turn 历史只携带可移植内容；签名和加密推理仅在产生它们的 Turn 内续传。
+        let mut transcript = Vec::with_capacity(transcript_with_turn_ids.len());
+        let mut transcript_turn_ids = Vec::with_capacity(transcript_with_turn_ids.len());
+        for (turn_id, message) in transcript_with_turn_ids {
+            transcript_turn_ids.push(turn_id);
+            transcript.push(message);
+        }
+        // 仅保留由同一 Provider、模型、协议和传输配置生成的 opaque reasoning 续传；
         // 不修改 Journal 中的原始推理，也不移除本轮工具循环新生成的续传状态。
-        clear_historical_reasoning_state(&mut transcript);
+        let historical_providers = execution.historical_provider_snapshots()?;
+        clear_historical_reasoning_state(
+            &mut transcript,
+            &transcript_turn_ids,
+            &resolved,
+            &historical_providers,
+        );
         // 动态上下文只在 Provider 边界装配，持久输入仍按原顺序进入 Runtime Journal。
         transcript.extend(input_messages.clone());
 
@@ -5354,6 +5410,7 @@ impl AgentRuntime {
                 )
             }
         };
+        execution.remember_turn_provider(&launch.turn_id, provider_snapshot(&resolved))?;
         Ok((runner, runtime_request, summary))
     }
 
@@ -6883,21 +6940,99 @@ impl AgentRuntime {
     }
 }
 
-/// 保留历史可读推理，去除仅对原模型有效的协议续传状态。
+/// 从 Journal 顺序恢复每个已启动 Turn 使用的 Provider 快照。
 ///
-/// 已知两端线上形态差异（2026-09-12 实测，见
-/// `session_prefix_is_byte_stable_across_tool_turns` 复现器）：轮内工具 Round
-/// 请求使用 active.messages 中的原始推理块（带续传状态），Responses adapter
-/// 会回放完整 reasoning item；跨 Turn 请求经本函数清除续传后，同 adapter 对
-/// 无续传的推理块不输出任何 item，summary 正文亦不随请求发送。轮内与跨 Turn
-/// 对推理历史的处理因此不对称，属有意取舍而非回归：续传状态绑定产生它的
-/// 响应链，跨 Turn 后按原样回放的正确性与兼容性不再有保证。
-fn clear_historical_reasoning_state(messages: &mut Vec<Message>) {
-    for message in messages.iter_mut() {
+/// Provider 快照是 Session 级当前状态，但模型消息只保留所属 Turn；按 Turn
+/// 重建历史快照后，模型切换或传输配置热更新可以清除不兼容的 opaque reasoning
+/// continuation，同时让相同 Provider 链路跨 Turn 保持完整请求前缀。
+fn historical_provider_snapshots_by_turn(
+    session: &RuntimeSession,
+) -> Result<HashMap<String, ProviderSnapshot>, AgentRuntimeError> {
+    let mut providers = HashMap::new();
+    let mut current = None;
+    let mut after = None;
+    loop {
+        let page = session
+            .replay(after, MAX_REPLAY_EVENTS as usize)
+            .map_err(|error| runtime_operation_failed(error))?;
+        for record in &page.records {
+            observe_historical_provider_event(&mut current, &mut providers, &record.event);
+        }
+        let Some(next_after) = page.next_after else {
+            return Ok(providers);
+        };
+        if next_after <= after.unwrap_or(0) {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
+        after = Some(next_after);
+        if !page.has_more {
+            return Ok(providers);
+        }
+    }
+}
+
+/// 按 Journal 事件顺序记录 Provider 更新和 Turn 起点，覆盖原子批次嵌套事件。
+fn observe_historical_provider_event(
+    current: &mut Option<ProviderSnapshot>,
+    providers: &mut HashMap<String, ProviderSnapshot>,
+    event: &SessionEvent,
+) {
+    match event {
+        SessionEvent::AtomicBatch { events } => {
+            for nested in events {
+                observe_historical_provider_event(current, providers, nested);
+            }
+        }
+        SessionEvent::ProviderSnapshotUpdated { provider } => {
+            *current = Some(provider.clone());
+        }
+        SessionEvent::TurnStarted { turn_id, .. } => {
+            if let Some(provider) = current {
+                providers.insert(turn_id.as_str().to_owned(), provider.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 判断历史 Provider 是否仍可安全回放其中的 opaque reasoning 续传。
+fn provider_supports_reasoning_continuation(
+    historical: &ProviderSnapshot,
+    current: &ResolvedProvider,
+) -> bool {
+    historical.provider_id == current.provider_id()
+        && historical.model == current.model()
+        && historical.protocol == provider_protocol_snapshot(current.protocol())
+        && historical.config_fingerprint == current.transport_fingerprint()
+}
+
+/// 保留同一 Provider 链路的历史可读推理和协议续传状态，清除不兼容状态。
+fn clear_historical_reasoning_state(
+    messages: &mut Vec<Message>,
+    turn_ids: &[Option<ResourceTurnId>],
+    current_provider: &ResolvedProvider,
+    historical_providers: &HashMap<String, ProviderSnapshot>,
+) {
+    assert_eq!(
+        messages.len(),
+        turn_ids.len(),
+        "历史模型消息与 Turn 身份数量必须一致"
+    );
+    for (message, turn_id) in messages.iter_mut().zip(turn_ids) {
+        let continuation_compatible = turn_id
+            .as_ref()
+            .and_then(|turn_id| historical_providers.get(turn_id.as_str()))
+            .is_some_and(|historical| {
+                provider_supports_reasoning_continuation(historical, current_provider)
+            });
         message.content.retain_mut(|block| {
             if let ContentBlock::Reasoning { reasoning } = block {
-                reasoning.continuation = None;
-                return !reasoning.text.is_empty() || reasoning.summary.is_some();
+                if !continuation_compatible {
+                    reasoning.continuation = None;
+                }
+                return !reasoning.text.is_empty()
+                    || reasoning.summary.is_some()
+                    || reasoning.continuation.is_some();
             }
             true
         });
@@ -14568,20 +14703,9 @@ mod tests {
     }
 
     /// 工具轮与跨 Turn 的历史前缀逐字节稳定：第 1 轮带 reasoning 与工具调用、
-    /// 第 2 轮纯文本。验证 `clear_historical_reasoning_state` 两端（轮内工具
-    /// Round 请求与跨 Turn 历史请求）对 reasoning 历史的线上形态一致。
-    ///
-    /// 【2026-09-12 实测发现：该断言当前不成立，故暂时 ignore 保留复现器。】
-    /// 轮内工具 Round 请求（active.messages）回放完整 reasoning item（含
-    /// 不透明续传状态）；跨 Turn 请求经 `clear_historical_reasoning_state`
-    /// 清除续传后，Responses adapter 对无续传的推理块不输出任何 item——
-    /// 连同可移植的 summary 正文一起从线上消失。第 2 轮请求前缀因此在
-    /// reasoning item 位置与第 1 轮 Round 2 请求分叉，共享前缀止于首条
-    /// user 消息，工具 Round 的缓存条目无法跨 Turn 复用。修复决策（轮内
-    /// 同步清除、或跨 Turn 保留可移植摘要）需在协议安全与缓存收益间取舍，
-    /// 不在本次 P2 加固范围内擅自改动；修复后移除 `#[ignore]` 即为验收。
+    /// 第 2 轮纯文本。轮内工具 Round 与跨 Turn 历史请求必须复用同一 Provider
+    /// 链路的完整 reasoning item，保证工具 Round 的缓存前缀可以跨 Turn 复用。
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "跨 Turn reasoning item 线上形态两端不一致（见文档注释），保留复现器待修复决策"]
     async fn session_prefix_is_byte_stable_across_tool_turns() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
@@ -16724,17 +16848,25 @@ mod tests {
     }
 
     #[test]
-    fn historical_reasoning_is_portable_without_changing_text_or_tool_calls() {
+    fn historical_reasoning_preserves_compatible_continuation_without_changing_text() {
         use keencode_model::{ContentBlock, Message};
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let runtime =
+            runtime_with_responses_provider(storage.path(), "http://127.0.0.1:9/v1", &["model-a"]);
+        let resolved = runtime
+            .provider_registry
+            .resolve("provider-runtime-test", "model-a")
+            .expect("测试 Provider 应解析");
+        let turn_id = ResourceTurnId::new("historical-reasoning-turn").unwrap();
         let mut messages = vec![Message::new(
             MessageRole::Assistant,
             vec![
                 ContentBlock::Reasoning {
                     reasoning: keencode_model::ReasoningContent {
-                        text: "visible reasoning".into(),
-                        summary: None,
+                        text: String::new(),
+                        summary: Some("visible reasoning".into()),
                         continuation: Some(keencode_model::OpaqueReasoningState::new(
-                            "provider-specific",
+                            "responses-reasoning-item-v1",
                             serde_json::json!({"id":"old-response"}),
                         )),
                     },
@@ -16742,13 +16874,64 @@ mod tests {
                 ContentBlock::text("answer"),
             ],
         )];
-        super::clear_historical_reasoning_state(&mut messages);
+        let historical =
+            HashMap::from([(turn_id.as_str().to_owned(), provider_snapshot(&resolved))]);
+        super::clear_historical_reasoning_state(
+            &mut messages,
+            &[Some(turn_id)],
+            &resolved,
+            &historical,
+        );
+        let ContentBlock::Reasoning { reasoning } = &messages[0].content[0] else {
+            panic!("reasoning retained")
+        };
+        assert_eq!(reasoning.summary.as_deref(), Some("visible reasoning"));
+        assert!(reasoning.continuation.is_some());
+        assert_eq!(messages[0].content[1], ContentBlock::text("answer"));
+    }
+
+    #[test]
+    fn historical_reasoning_clears_incompatible_continuation_but_keeps_text() {
+        use keencode_model::{ContentBlock, Message};
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let runtime =
+            runtime_with_responses_provider(storage.path(), "http://127.0.0.1:9/v1", &["model-a"]);
+        let resolved = runtime
+            .provider_registry
+            .resolve("provider-runtime-test", "model-a")
+            .expect("测试 Provider 应解析");
+        let turn_id = ResourceTurnId::new("incompatible-reasoning-turn").unwrap();
+        let mut messages = vec![Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::Reasoning {
+                reasoning: keencode_model::ReasoningContent {
+                    text: "visible reasoning".into(),
+                    summary: None,
+                    continuation: Some(keencode_model::OpaqueReasoningState::new(
+                        "responses-reasoning-item-v1",
+                        serde_json::json!({"id":"old-response"}),
+                    )),
+                },
+            }],
+        )];
+        let historical = HashMap::from([(
+            turn_id.as_str().to_owned(),
+            ProviderSnapshot {
+                provider_id: "other-provider".to_owned(),
+                ..provider_snapshot(&resolved)
+            },
+        )]);
+        super::clear_historical_reasoning_state(
+            &mut messages,
+            &[Some(turn_id)],
+            &resolved,
+            &historical,
+        );
         let ContentBlock::Reasoning { reasoning } = &messages[0].content[0] else {
             panic!("reasoning retained")
         };
         assert_eq!(reasoning.text, "visible reasoning");
         assert!(reasoning.continuation.is_none());
-        assert_eq!(messages[0].content[1], ContentBlock::text("answer"));
     }
 
     /// 首次设置推理强度必须冻结默认 Provider，切换模型时继续保留该强度。

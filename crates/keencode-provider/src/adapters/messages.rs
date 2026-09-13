@@ -64,10 +64,9 @@ impl MessagesAdapter {
     /// cache_control 语义只在 Anthropic Messages 协议上有效，其他协议
     /// Adapter 不消费该开关。
     ///
-    /// 前提：当前请求链不跨 Turn 回传 thinking（会话级冻结链路已通过
-    /// `clear_historical_reasoning_state` 清除历史续传态），因此无需为无
-    /// thinking 块的 assistant 消息补空 thinking 占位；若未来开启跨 Turn
-    /// thinking 回传，需在打标前补齐该占位再启用断点。
+    /// 前提：只有与当前 Provider 链路兼容的 thinking 才会跨 Turn 回传；因此
+    /// 无 thinking 块的 assistant 消息无需补空 thinking 占位。若协议后续要求
+    /// 跨 Turn 回传的 thinking 形态发生变化，需在打标前重新验证该占位语义。
     pub fn configure_prompt_caching(&mut self, enabled: bool) {
         self.prompt_caching = enabled;
     }
