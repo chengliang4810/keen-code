@@ -544,7 +544,8 @@ fn ensure_mutable_source(state: &SessionState) -> Result<(), ResourceError> {
                 SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Waiting
             )
         })
-        || state.worktrees.values().any(|worktree| !worktree.released);
+        || state.worktrees.values().any(|worktree| !worktree.released)
+        || !state.on_error_hook_outbox.is_empty();
     if active || state.status == SessionStatus::Closed {
         return Err(ResourceError::SessionMutationNotApplicable(
             "Session 仍有活动工作或已经关闭".to_owned(),
@@ -1135,6 +1136,8 @@ fn collect_request_id_binding(
         | SessionEvent::MessageAdded { .. }
         | SessionEvent::TranscriptSegmentCommitted { .. }
         | SessionEvent::DynamicInputReceiptCommitted { .. }
+        | SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. }
         | SessionEvent::ModelRoundCompleted { .. }
         | SessionEvent::ToolExecutionStarted { .. }
         | SessionEvent::ToolFileChangePrepared { .. }
@@ -1232,6 +1235,8 @@ fn rebind_event_request_ids(
         | SessionEvent::MessageAdded { .. }
         | SessionEvent::TranscriptSegmentCommitted { .. }
         | SessionEvent::DynamicInputReceiptCommitted { .. }
+        | SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. }
         | SessionEvent::ModelRoundCompleted { .. }
         | SessionEvent::TerminalOutputRecorded { .. }
         | SessionEvent::TerminalExited { .. }

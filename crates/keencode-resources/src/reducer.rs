@@ -1,6 +1,8 @@
 use thiserror::Error;
 
-use crate::transcript::{compaction_summary_message_id, validate_compaction_source};
+use crate::transcript::{
+    compaction_source_digest_sha256, compaction_summary_message_id, validate_compaction_source,
+};
 use crate::{
     AppliedCompaction, ArtifactUse, DynamicInputReceipt, MailboxState, SESSION_EVENT_SCHEMA,
     SESSION_EVENT_VERSION, SessionEvent, SessionEventRecord, SessionState, SessionStatus,
@@ -288,6 +290,48 @@ fn reduce_record_inner(
             turn.stop_reason = Some(*reason);
             turn.outcome_message = Some(message.clone());
             refresh_derived_status(state);
+        }
+        SessionEvent::OnErrorHookQueued { invocation } => {
+            let turn = state
+                .turns
+                .get(&invocation.turn_id)
+                .ok_or_else(|| ReductionError::new("OnError outbox 引用了不存在的 Turn"))?;
+            if !inside_atomic_batch
+                || invocation.invocation_id.trim().is_empty()
+                || invocation.invocation_id.len() > 256
+                || invocation.source_agent_id != turn.source_agent_id
+                || turn.status == TurnStatus::Running
+                || turn.stop_reason != Some(invocation.terminal_reason)
+                || invocation.terminal_reason == TurnStopReason::Cancelled
+                || invocation.error_category.trim().is_empty()
+                || invocation.error_category.len() > 128
+                || invocation.error_message.trim().is_empty()
+                || invocation.error_message.len() > MAX_SUB_AGENT_RESULT_SUMMARY_BYTES
+                || state.on_error_hook_outbox.iter().any(|existing| {
+                    existing.invocation_id == invocation.invocation_id
+                        || existing.turn_id == invocation.turn_id
+                })
+            {
+                return Err(ReductionError::new(
+                    "OnError outbox 调用身份、终态或错误说明无效",
+                ));
+            }
+            state.on_error_hook_outbox.push(invocation.clone());
+        }
+        SessionEvent::OnErrorHookReceiptCommitted { invocation_id } => {
+            if invocation_id.trim().is_empty() || invocation_id.len() > 256 {
+                return Err(ReductionError::new("OnError receipt 调用标识无效"));
+            }
+            let Some(index) = state
+                .on_error_hook_outbox
+                .iter()
+                .position(|invocation| invocation.invocation_id == *invocation_id)
+            else {
+                return Err(ReductionError::new(
+                    "OnError receipt 没有匹配等待中的 outbox 调用",
+                ));
+            };
+            state.on_error_hook_outbox.remove(index);
         }
         SessionEvent::MessageAdded { message } => {
             if !valid_standalone_message_shape(message)
@@ -791,39 +835,50 @@ fn reduce_record_inner(
             let effective = state
                 .effective_transcript(source_agent_id)
                 .map_err(|error| ReductionError::new(error.to_string()))?;
-            let removed = compaction
-                .replaced_end_index_exclusive
-                .checked_sub(compaction.replaced_start_index);
-            let expected_retained = effective
-                .len()
-                .checked_sub(compaction.replaced_message_count)
-                .and_then(|count| count.checked_add(1));
-            let actual_digest = state
-                .compaction_source_digest_sha256(
+            if compaction.projections.is_empty() {
+                let removed = compaction
+                    .replaced_end_index_exclusive
+                    .checked_sub(compaction.replaced_start_index);
+                let expected_retained = effective
+                    .len()
+                    .checked_sub(compaction.replaced_message_count)
+                    .and_then(|count| count.checked_add(1));
+                let actual_digest = state
+                    .compaction_source_digest_sha256(
+                        turn_id,
+                        source_agent_id,
+                        *model_round,
+                        compaction.replaced_start_index,
+                        compaction.replaced_end_index_exclusive,
+                    )
+                    .map_err(|error| ReductionError::new(error.to_string()))?;
+                let source_range =
+                    compaction.replaced_start_index..compaction.replaced_end_index_exclusive;
+                validate_compaction_source(&effective, source_range)
+                    .map_err(|error| ReductionError::new(error.to_string()))?;
+                if *model_round == 0
+                    || compaction.expected_transcript_revision != state.transcript_revision
+                    || compaction.expected_transcript_revision.checked_add(1)
+                        != Some(compaction.applied_transcript_revision)
+                    || compaction.replaced_start_index >= compaction.replaced_end_index_exclusive
+                    || compaction.replaced_end_index_exclusive > effective.len()
+                    || removed != Some(compaction.replaced_message_count)
+                    || expected_retained != Some(compaction.retained_message_count)
+                    || !valid_sha256(&compaction.source_digest_sha256)
+                    || compaction.source_digest_sha256 != actual_digest
+                    || compaction.summary.trim().is_empty()
+                {
+                    return Err(ReductionError::new("上下文压缩范围或摘要无效"));
+                }
+            } else {
+                validate_micro_compaction_record(
+                    state,
+                    &effective,
                     turn_id,
                     source_agent_id,
                     *model_round,
-                    compaction.replaced_start_index,
-                    compaction.replaced_end_index_exclusive,
-                )
-                .map_err(|error| ReductionError::new(error.to_string()))?;
-            let source_range =
-                compaction.replaced_start_index..compaction.replaced_end_index_exclusive;
-            validate_compaction_source(&effective, source_range)
-                .map_err(|error| ReductionError::new(error.to_string()))?;
-            if *model_round == 0
-                || compaction.expected_transcript_revision != state.transcript_revision
-                || compaction.expected_transcript_revision.checked_add(1)
-                    != Some(compaction.applied_transcript_revision)
-                || compaction.replaced_start_index >= compaction.replaced_end_index_exclusive
-                || compaction.replaced_end_index_exclusive > effective.len()
-                || removed != Some(compaction.replaced_message_count)
-                || expected_retained != Some(compaction.retained_message_count)
-                || !valid_sha256(&compaction.source_digest_sha256)
-                || compaction.source_digest_sha256 != actual_digest
-                || compaction.summary.trim().is_empty()
-            {
-                return Err(ReductionError::new("上下文压缩范围或摘要无效"));
+                    compaction,
+                )?;
             }
             let applied = AppliedCompaction {
                 turn_id: turn_id.clone(),
@@ -831,7 +886,9 @@ fn reduce_record_inner(
                 model_round: *model_round,
                 record: compaction.clone(),
             };
-            if state.contains_transcript_message_id(&compaction_summary_message_id(&applied)) {
+            if compaction.projections.is_empty()
+                && state.contains_transcript_message_id(&compaction_summary_message_id(&applied))
+            {
                 return Err(ReductionError::new("上下文压缩摘要消息标识冲突"));
             }
             state
@@ -1087,6 +1144,7 @@ fn reduce_record_inner(
                     )
                 })
                 || state.worktrees.values().any(|worktree| !worktree.released)
+                || !state.on_error_hook_outbox.is_empty()
             {
                 return Err(ReductionError::new(
                     "Session 仍有运行 Turn、未完成工具、终端、活跃子 Agent 或工作树",
@@ -1099,6 +1157,87 @@ fn reduce_record_inner(
     // 修改前完成。批次则只修改独立 candidate，并在替换原状态前完成一致性校验。
     debug_assert!(inside_atomic_batch || validate_sub_agent_turn_consistency(state).is_ok());
     state.last_sequence = record.sequence;
+    Ok(())
+}
+
+/// 校验 Micro 投影不改变消息数量，只改写可投影的 ToolResult 文本。
+fn validate_micro_compaction_record(
+    state: &SessionState,
+    effective: &[crate::SessionMessage],
+    turn_id: &crate::TurnId,
+    source_agent_id: &crate::AgentId,
+    model_round: u32,
+    compaction: &crate::CompactionRecord,
+) -> Result<(), ReductionError> {
+    if model_round == 0
+        || compaction.expected_transcript_revision != state.transcript_revision
+        || compaction.expected_transcript_revision.checked_add(1)
+            != Some(compaction.applied_transcript_revision)
+        || compaction.replaced_start_index != 0
+        || compaction.replaced_end_index_exclusive != 0
+        || compaction.replaced_message_count != 0
+        || compaction.retained_message_count != effective.len()
+        || !valid_sha256(&compaction.source_digest_sha256)
+        || !compaction.summary.is_empty()
+    {
+        return Err(ReductionError::new("Micro 压缩记录形状或摘要无效"));
+    }
+    let actual_digest = compaction_source_digest_sha256(
+        &state.session_id,
+        turn_id,
+        source_agent_id,
+        model_round,
+        compaction.expected_transcript_revision,
+        0..effective.len(),
+        effective,
+    )
+    .map_err(|error| ReductionError::new(error.to_string()))?;
+    if compaction.source_digest_sha256 != actual_digest {
+        return Err(ReductionError::new("Micro 压缩来源 Digest 无效"));
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    for projection in &compaction.projections {
+        if projection.projected_text.is_empty()
+            || !seen.insert((
+                projection.message_index,
+                projection.block_index,
+                projection.content_index,
+            ))
+        {
+            return Err(ReductionError::new("Micro 压缩投影重复或为空"));
+        }
+        let message = effective
+            .get(projection.message_index)
+            .ok_or_else(|| ReductionError::new("Micro 压缩目标消息下标越界"))?;
+        if message.role != crate::MessageRole::Tool {
+            return Err(ReductionError::new("Micro 压缩目标必须是工具结果消息"));
+        }
+        let Some(crate::MessagePart::ToolResult { content, .. }) =
+            message.content.get(projection.block_index)
+        else {
+            return Err(ReductionError::new("Micro 压缩目标内容块必须是工具结果"));
+        };
+        let source_bytes = match content.get(projection.content_index) {
+            Some(crate::ToolResultPart::Text { text }) => text.len() as u64,
+            Some(crate::ToolResultPart::Artifact {
+                artifact,
+                materialization: crate::ArtifactMaterialization::Utf8Text,
+            }) => artifact.size_bytes,
+            Some(crate::ToolResultPart::Image { .. })
+            | Some(crate::ToolResultPart::Artifact { .. }) => {
+                return Err(ReductionError::new("Micro 压缩目标必须是工具结果文本"));
+            }
+            None => {
+                return Err(ReductionError::new("Micro 压缩目标内容下标越界"));
+            }
+        };
+        if projection.projected_text.len() as u64 >= source_bytes {
+            return Err(ReductionError::new(
+                "Micro 压缩投影必须严格缩短工具结果文本",
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -1136,6 +1275,8 @@ fn validate_standalone_sub_agent_turn_event(
         | SessionEvent::MessageAdded { .. }
         | SessionEvent::TranscriptSegmentCommitted { .. }
         | SessionEvent::DynamicInputReceiptCommitted { .. }
+        | SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. }
         | SessionEvent::ModelRoundCompleted { .. }
         | SessionEvent::ToolRequested { .. }
         | SessionEvent::ToolExecutionStarted { .. }
@@ -1229,6 +1370,8 @@ fn validate_atomic_sub_agent_turn_pairing(
             | SessionEvent::MessageAdded { .. }
             | SessionEvent::TranscriptSegmentCommitted { .. }
             | SessionEvent::DynamicInputReceiptCommitted { .. }
+            | SessionEvent::OnErrorHookQueued { .. }
+            | SessionEvent::OnErrorHookReceiptCommitted { .. }
             | SessionEvent::ModelRoundCompleted { .. }
             | SessionEvent::ToolRequested { .. }
             | SessionEvent::ToolExecutionStarted { .. }
@@ -1362,6 +1505,8 @@ fn validate_atomic_model_round_pairing(events: &[SessionEvent]) -> Result<(), Re
                 }
             }
             SessionEvent::DynamicInputReceiptCommitted { .. } => {}
+            SessionEvent::OnErrorHookQueued { .. }
+            | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
             SessionEvent::SessionCreated { .. }
             | SessionEvent::SessionRenamed { .. }
             | SessionEvent::SessionStatusChanged { .. }

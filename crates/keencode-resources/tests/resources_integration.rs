@@ -364,6 +364,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                 retained_message_count: 1,
                 source_digest_sha256: compaction_digest,
                 summary: "已压缩创建、输入与消息上下文".to_owned(),
+                projections: Vec::new(),
                 expected_transcript_revision: 1,
                 applied_transcript_revision: 2,
             },

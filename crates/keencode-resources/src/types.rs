@@ -401,10 +401,44 @@ pub struct CompactionRecord {
     pub source_digest_sha256: String,
     /// 压缩后的完整摘要正文。
     pub summary: String,
+    /// Micro Compact 对 ToolResult 文本执行的原位投影；摘要压缩形态为空列表。
+    pub projections: Vec<ToolResultProjection>,
     /// 提交前要求仍保持的 Transcript revision。
     pub expected_transcript_revision: u64,
     /// 本次压缩成功后形成的 Transcript revision。
     pub applied_transcript_revision: u64,
+}
+
+/// 一次 Micro Compact 对 ToolResult 文本的确定性原位投影。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ToolResultProjection {
+    /// 投影目标消息在有效 Transcript 中的下标。
+    pub message_index: usize,
+    /// 投影目标消息内容块下标。
+    pub block_index: usize,
+    /// 投影目标 ToolResult 内容下标。
+    pub content_index: usize,
+    /// 投影后的完整文本。
+    pub projected_text: String,
+}
+
+/// 一次已持久化、等待运行时执行的 OnError 观察 Hook 调用。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct OnErrorHookInvocation {
+    /// 由 Session 与 Turn 身份派生的稳定调用标识。
+    pub invocation_id: String,
+    /// 失败 Turn 标识。
+    pub turn_id: TurnId,
+    /// 失败 Turn 的 Agent 标识。
+    pub source_agent_id: AgentId,
+    /// 已写入权威 TurnStopped 的终态原因。
+    pub terminal_reason: TurnStopReason,
+    /// Provider 中立且稳定的错误分类。
+    pub error_category: String,
+    /// 经过脱敏和有界截断的错误说明。
+    pub error_message: String,
 }
 
 /// 触发上下文压缩的稳定原因。
@@ -808,6 +842,16 @@ pub enum SessionEvent {
         /// 安全结果说明。
         message: String,
     },
+    /// 与非取消 TurnStopped 原子提交、等待执行一次 OnError 观察 Hook。
+    OnErrorHookQueued {
+        /// 已绑定失败 Turn 身份和错误分类的稳定调用。
+        invocation: OnErrorHookInvocation,
+    },
+    /// 确认一次 OnError 观察 Hook 调用已经执行完毕；观察失败也必须确认。
+    OnErrorHookReceiptCommitted {
+        /// 待确认调用的稳定标识。
+        invocation_id: String,
+    },
     /// 追加一条不含工具调用或结果的独立消息。
     MessageAdded {
         /// 完整类型化消息。
@@ -1052,6 +1096,8 @@ pub struct SessionState {
     pub transcript: Vec<TranscriptRecord>,
     /// 已写入动态输入段但尚未由 Coordinator 确认消费的可恢复回执历史。
     pub dynamic_input_receipts: Vec<DynamicInputReceipt>,
+    /// 已与失败 Turn 终态原子提交、尚未完成观察 Hook 的持久 outbox。
+    pub on_error_hook_outbox: Vec<OnErrorHookInvocation>,
     /// 按权威提交顺序保存的完整模型 Round 元数据与用量。
     pub model_rounds: Vec<ModelRoundState>,
     /// 按请求标识保存的工具生命周期。
@@ -1090,6 +1136,7 @@ impl SessionState {
             turns: BTreeMap::new(),
             transcript: Vec::new(),
             dynamic_input_receipts: Vec::new(),
+            on_error_hook_outbox: Vec::new(),
             model_rounds: Vec::new(),
             tools: BTreeMap::new(),
             terminals: BTreeMap::new(),

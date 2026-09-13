@@ -2992,6 +2992,8 @@ fn validate_non_batch_event_artifacts(
                 validate_artifact_use(session_id, artifact, validator)?;
             }
         }
+        SessionEvent::OnErrorHookQueued { .. }
+        | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionStatusChanged { .. }
@@ -3201,6 +3203,7 @@ fn validate_state_collections(state: &SessionState, limit: usize) -> Result<(), 
         ("worktrees", state.worktrees.len()),
         ("generated_titles", state.generated_titles.len()),
         ("dynamic_input_receipts", state.dynamic_input_receipts.len()),
+        ("on_error_hook_outbox", state.on_error_hook_outbox.len()),
     ];
     for (collection, actual) in collections {
         if actual > limit {

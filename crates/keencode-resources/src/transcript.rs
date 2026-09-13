@@ -4,7 +4,7 @@ use crate::canonical::canonical_json_sha256;
 use crate::reducer::{valid_message_shape, valid_standalone_message_shape};
 use crate::{
     AgentId, AppliedCompaction, MessagePart, MessageRole, ResourceError, SessionId, SessionMessage,
-    SessionState, TranscriptRecord, TranscriptSegment, TurnId,
+    SessionState, ToolResultPart, TranscriptRecord, TranscriptSegment, TurnId,
 };
 
 /// 压缩摘要在模型上下文中使用的固定低权限用户消息前缀。
@@ -440,6 +440,9 @@ fn apply_compaction(
     effective: &mut Vec<SessionMessage>,
     compaction: &AppliedCompaction,
 ) -> Result<(), ResourceError> {
+    if !compaction.record.projections.is_empty() {
+        return apply_micro_compaction(session_id, effective, compaction);
+    }
     let range =
         compaction.record.replaced_start_index..compaction.record.replaced_end_index_exclusive;
     if range.start >= range.end || range.end > effective.len() {
@@ -474,6 +477,112 @@ fn apply_compaction(
         return Err(ResourceError::Reduction(
             "持久化压缩后的有效消息数量不一致".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// 应用一次 Micro Compact 原位 ToolResult 投影，不增删有效 Transcript 消息。
+fn apply_micro_compaction(
+    session_id: &SessionId,
+    effective: &mut [SessionMessage],
+    compaction: &AppliedCompaction,
+) -> Result<(), ResourceError> {
+    let record = &compaction.record;
+    if !record.summary.is_empty()
+        || record.replaced_start_index != 0
+        || record.replaced_end_index_exclusive != 0
+        || record.replaced_message_count != 0
+        || record.retained_message_count != effective.len()
+        || record.projections.is_empty()
+    {
+        return Err(ResourceError::Reduction(
+            "持久化 Micro 压缩记录形状无效".to_owned(),
+        ));
+    }
+    if !valid_sha256(&record.source_digest_sha256) {
+        return Err(ResourceError::Reduction(
+            "持久化 Micro 压缩来源 Digest 无效".to_owned(),
+        ));
+    }
+    let actual_digest = compaction_source_digest_sha256(
+        session_id,
+        &compaction.turn_id,
+        &compaction.source_agent_id,
+        compaction.model_round,
+        record.expected_transcript_revision,
+        0..effective.len(),
+        effective,
+    )?;
+    if actual_digest != record.source_digest_sha256 {
+        return Err(ResourceError::Reduction(
+            "持久化 Micro 压缩来源 Digest 与有效 Transcript 不一致".to_owned(),
+        ));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for projection in &record.projections {
+        if projection.projected_text.is_empty()
+            || !seen.insert((
+                projection.message_index,
+                projection.block_index,
+                projection.content_index,
+            ))
+        {
+            return Err(ResourceError::Reduction(
+                "持久化 Micro 压缩投影重复或为空".to_owned(),
+            ));
+        }
+        let message = effective.get_mut(projection.message_index).ok_or_else(|| {
+            ResourceError::Reduction("持久化 Micro 压缩目标消息下标越界".to_owned())
+        })?;
+        if message.role != MessageRole::Tool {
+            return Err(ResourceError::Reduction(
+                "持久化 Micro 压缩目标必须是工具结果消息".to_owned(),
+            ));
+        }
+        let Some(MessagePart::ToolResult { content, .. }) =
+            message.content.get_mut(projection.block_index)
+        else {
+            return Err(ResourceError::Reduction(
+                "持久化 Micro 压缩目标内容块必须是工具结果".to_owned(),
+            ));
+        };
+        let Some(content_part) = content.get_mut(projection.content_index) else {
+            return Err(ResourceError::Reduction(
+                "持久化 Micro 压缩目标内容下标越界".to_owned(),
+            ));
+        };
+        match content_part {
+            ToolResultPart::Text { text } => {
+                if projection.projected_text.len() >= text.len() {
+                    return Err(ResourceError::Reduction(
+                        "持久化 Micro 压缩投影必须严格缩短工具结果文本".to_owned(),
+                    ));
+                }
+                if text != &projection.projected_text {
+                    *text = projection.projected_text.clone();
+                }
+            }
+            ToolResultPart::Artifact {
+                materialization: crate::ArtifactMaterialization::Utf8Text,
+                artifact,
+            } => {
+                if projection.projected_text.len() as u64 >= artifact.size_bytes {
+                    return Err(ResourceError::Reduction(
+                        "持久化 Micro 压缩投影必须严格缩短工具结果文本".to_owned(),
+                    ));
+                }
+                // 有效上下文只保留投影后的内联正文；原始 Transcript 仍保留完整
+                // Artifact 引用，审计和重新读取路径不会丢失原始结果。
+                *content_part = ToolResultPart::Text {
+                    text: projection.projected_text.clone(),
+                };
+            }
+            ToolResultPart::Image { .. } | ToolResultPart::Artifact { .. } => {
+                return Err(ResourceError::Reduction(
+                    "持久化 Micro 压缩目标必须是工具结果文本".to_owned(),
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -568,4 +677,12 @@ pub(crate) fn compaction_summary_message_id(compaction: &AppliedCompaction) -> S
         "compaction-{}-{digest_prefix}",
         compaction.record.applied_transcript_revision
     )
+}
+
+/// 校验压缩来源摘要为固定的小写十六进制 SHA-256。
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }

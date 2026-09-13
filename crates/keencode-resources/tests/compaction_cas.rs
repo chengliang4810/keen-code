@@ -107,6 +107,7 @@ fn valid_compaction(
             .compaction_source_digest_sha256(turn_id, agent_id, 1, 0, 2)
             .expect("压缩来源 Digest 应计算"),
         summary: "压缩摘要".to_owned(),
+        projections: Vec::new(),
         expected_transcript_revision: state.transcript_revision,
         applied_transcript_revision: state.transcript_revision + 1,
     }

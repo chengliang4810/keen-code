@@ -1122,6 +1122,7 @@ fn dynamic_input_receipts_preserve_effective_history_and_compaction_recovery() {
             .compaction_source_digest_sha256(&turn_id, &root_agent, 1, 1, 3)
             .expect("可压缩动态范围的 Digest 应生成"),
         summary: "保留动态输入事实后的摘要".to_owned(),
+        projections: Vec::new(),
         expected_transcript_revision: state.transcript_revision,
         applied_transcript_revision: state.transcript_revision + 1,
     };

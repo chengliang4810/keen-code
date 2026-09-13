@@ -6,9 +6,11 @@ use std::path::Path;
 use keencode_model::{ResponseMetadata, StopReason, TokenUsage};
 use keencode_resources::{
     AgentId, COMPACTION_SUMMARY_PREFIX, CompactionRecord, ContextCompressionTrigger, Durability,
-    JournalConfig, MessagePart, MessageRole, PlanState, ResourceError, SessionEvent, SessionId,
-    SessionJournal, SessionMessage, SessionOpen, SessionState, SnapshotPolicy, SubAgentState,
-    SubAgentStatus, TodoItem, TodoStatus, TranscriptSegment, TurnId, WorktreeRecord,
+    JournalConfig, MessagePart, MessageRole, PersistedToolResult, PlanState, RequestId,
+    ResourceError, SessionEvent, SessionId, SessionJournal, SessionMessage, SessionOpen,
+    SessionState, SnapshotPolicy, SubAgentState, SubAgentStatus, TodoItem, TodoStatus,
+    ToolCompletionStatus, ToolEffect, ToolOutcome, ToolRequest, ToolResultPart, TranscriptSegment,
+    TurnId, WorktreeRecord, compaction_source_digest_sha256,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -138,6 +140,7 @@ fn compaction(
             .compaction_source_digest_sha256(turn_id, agent_id, model_round, start, end)
             .expect("压缩来源 Digest 应计算"),
         summary: summary.to_owned(),
+        projections: Vec::new(),
         expected_transcript_revision: state.transcript_revision,
         applied_transcript_revision: state.transcript_revision + 1,
     }
@@ -159,6 +162,167 @@ fn apply_compaction(
             compaction: record,
         })
         .expect("压缩应提交");
+}
+
+/// Micro 投影使用完整有效 Transcript Digest，并在冷重放时原位改写工具结果文本。
+#[test]
+fn micro_compaction_replays_tool_result_projection_from_live_and_cold_state() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session_id = "micro-compaction-recovery";
+    let journal = created_journal(root.path(), session_id);
+    let turn_id = start_turn(&journal, "turn-micro");
+    let agent_id = AgentId::new("root").expect("根 Agent ID 应有效");
+    let request_id = RequestId::derive_model_tool_call(
+        &SessionId::new(session_id).expect("Session ID 应有效"),
+        &turn_id,
+        &agent_id,
+        1,
+        "call-micro",
+    )
+    .expect("工具请求 ID 应派生");
+    let original = "原始工具结果 ".repeat(100);
+    let projected = "原始工具结果 …[已压缩，省略 900 字符；完整内容可从原始来源重新获取]…";
+    journal
+        .append(SessionEvent::ToolRequested {
+            request: ToolRequest {
+                request_id: request_id.clone(),
+                turn_id: turn_id.clone(),
+                agent_id: agent_id.clone(),
+                model_round: 1,
+                request_index: 0,
+                model_tool_call_id: "call-micro".to_owned(),
+                tool_name: "read_file".to_owned(),
+                arguments: json!({"path": "src/lib.rs"}),
+                effect: ToolEffect::ReadOnly,
+            },
+        })
+        .expect("工具请求应提交");
+    journal
+        .append(SessionEvent::ToolExecutionStarted {
+            request_id: request_id.clone(),
+        })
+        .expect("工具启动应提交");
+    journal
+        .append(SessionEvent::ToolCompleted {
+            request_id,
+            outcome: ToolOutcome {
+                status: ToolCompletionStatus::Succeeded,
+                result: PersistedToolResult {
+                    tool_call_id: "call-micro".to_owned(),
+                    content: vec![ToolResultPart::Text {
+                        text: original.clone(),
+                    }],
+                    is_error: false,
+                },
+            },
+        })
+        .expect("工具结果应提交");
+    journal
+        .append(model_round_batch(
+            &turn_id,
+            &agent_id,
+            TranscriptSegment {
+                turn_id: turn_id.clone(),
+                source_agent_id: agent_id.clone(),
+                model_round: 1,
+                segment_index: 0,
+                expected_transcript_revision: 0,
+                messages: vec![
+                    SessionMessage {
+                        is_meta: false,
+                        message_id: "micro-assistant".to_owned(),
+                        turn_id: Some(turn_id.clone()),
+                        agent_id: Some(agent_id.clone()),
+                        role: MessageRole::Assistant,
+                        content: vec![MessagePart::ToolCall {
+                            tool_call_id: "call-micro".to_owned(),
+                            tool_name: "read_file".to_owned(),
+                            arguments: json!({"path": "src/lib.rs"}),
+                        }],
+                    },
+                    SessionMessage {
+                        is_meta: false,
+                        message_id: "micro-tool".to_owned(),
+                        turn_id: Some(turn_id.clone()),
+                        agent_id: Some(agent_id.clone()),
+                        role: MessageRole::Tool,
+                        content: vec![MessagePart::ToolResult {
+                            tool_call_id: "call-micro".to_owned(),
+                            content: vec![ToolResultPart::Text {
+                                text: original.clone(),
+                            }],
+                            is_error: false,
+                        }],
+                    },
+                ],
+            },
+        ))
+        .expect("工具模型 Round 应提交");
+
+    let state = journal.state().expect("Micro 压缩前状态应读取");
+    let effective = state
+        .effective_transcript(&agent_id)
+        .expect("Micro 压缩来源应可重建");
+    let source_digest = compaction_source_digest_sha256(
+        &state.session_id,
+        &turn_id,
+        &agent_id,
+        1,
+        state.transcript_revision,
+        0..effective.len(),
+        &effective,
+    )
+    .expect("完整 Transcript Digest 应计算");
+    let record = CompactionRecord {
+        trigger: ContextCompressionTrigger::Budget,
+        estimated_tokens_before: 1_000,
+        estimated_tokens_after: 100,
+        replaced_start_index: 0,
+        replaced_end_index_exclusive: 0,
+        replaced_message_count: 0,
+        retained_message_count: effective.len(),
+        source_digest_sha256: source_digest,
+        summary: String::new(),
+        projections: vec![keencode_resources::ToolResultProjection {
+            message_index: 1,
+            block_index: 0,
+            content_index: 0,
+            projected_text: projected.to_owned(),
+        }],
+        expected_transcript_revision: state.transcript_revision,
+        applied_transcript_revision: state.transcript_revision + 1,
+    };
+    apply_compaction(&journal, &turn_id, &agent_id, 1, record);
+
+    let live = journal
+        .state()
+        .expect("Micro 压缩后状态应读取")
+        .effective_transcript(&agent_id)
+        .expect("Live Micro Transcript 应重建");
+    assert!(matches!(
+        &live[1].content[0],
+        MessagePart::ToolResult { content, .. }
+            if matches!(&content[0], ToolResultPart::Text { text } if text == projected)
+    ));
+
+    journal.write_snapshot().expect("Micro Snapshot 应写入");
+    drop(journal);
+    let reopened = match SessionJournal::open(
+        root.path(),
+        SessionId::new(session_id).expect("Session ID 应有效"),
+        config(),
+    )
+    .expect("Micro Session 应冷重开")
+    {
+        SessionOpen::Ready(journal) => journal,
+        SessionOpen::Corrupt(report) => panic!("Micro Session 不应损坏：{:?}", report.issues),
+    };
+    let cold = reopened
+        .state()
+        .expect("冷恢复状态应读取")
+        .effective_transcript(&agent_id)
+        .expect("冷恢复 Micro Transcript 应重建");
+    assert_eq!(cold, live);
 }
 
 /// 反序列化一份结构合法但语义被篡改的状态，并断言有效 Transcript 自校验拒绝。
