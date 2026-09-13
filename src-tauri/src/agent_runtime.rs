@@ -32,16 +32,16 @@ use keencode_agent::{
     AgentStreamEventKind, AgentTemplateSnapshot, AgentTool, AgentTreeQuiesceResult, AgentTurnCause,
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
-    CollaborationCoordinator, CollaborationEvent, CollaborationEventKind, CollaborationLimits,
-    CollaborationPortError, CollaborationStore, CollaborationTransitionCommit,
-    ContextCompactionFailureKind, ContextManager, ContextPolicy, ContextTokenEstimator,
-    GoalController, GoalStatus, GoalUsageDelta, HookRuntime, JsonContextTokenEstimator,
-    MailboxMessage as RunnerMailboxMessage, MailboxMessageKind, ModelRoundUsage, PlanGuard,
-    PlanGuardState, ProviderContextCompressor, QuiesceAgentTree, RecoveredAgent,
-    RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits, RuntimeStateError,
-    SessionId as AgentSessionId, StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry,
-    TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest,
-    UuidCollaborationIdGenerator, root_turn_prompt_digest,
+    CollaborationCoordinator, CollaborationEvent, CollaborationEventKind,
+    CollaborationGlobalTurnLimiter, CollaborationPortError, CollaborationStore,
+    CollaborationTransitionCommit, ContextCompactionFailureKind, ContextManager, ContextPolicy,
+    ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookRuntime,
+    JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind,
+    ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor, QuiesceAgentTree,
+    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits,
+    RuntimeStateError, SessionId as AgentSessionId, StructuredOutputMode, TerminalReason,
+    ToolCallId, ToolRegistry, TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId,
+    TurnRequest, UuidCollaborationIdGenerator, root_turn_prompt_digest,
 };
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
@@ -3974,8 +3974,10 @@ pub struct AgentRuntime {
     focused_session: RwLock<Option<String>>,
     /// WebFetch 与 WebSearch 当前原子配置；为空时工具表不暴露网络工具。
     web_service: RwLock<Option<WebServiceConfig>>,
-    /// 新建 Collaboration 协调器使用的后台 Agent 全局 Turn 上限。
+    /// 当前后台 Agent 设置；同时作为设备级和每根树的子 Agent 上限。
     background_agent_limit: AtomicUsize,
+    /// 所有 Session Coordinator 共享的设备级子 Agent 容量。
+    collaboration_global_turn_limiter: Arc<CollaborationGlobalTurnLimiter>,
     /// 已实际启动过 Agent 树的 Session 级 Collaboration v2 生产装配。
     collaboration_sessions: Mutex<HashMap<String, Arc<SessionCollaborationRuntime>>>,
     /// 每个 Session 串行化 Turn 启动屏障，避免 Accepted 先于权威 TurnStarted。
@@ -4078,6 +4080,11 @@ impl AgentRuntime {
             &client_request_gate,
         )));
         let elicitation_router: Arc<dyn ClientRequestRouter> = elicitations.clone();
+        let background_agent_limit = DEFAULT_BACKGROUND_AGENT_LIMIT as usize;
+        let collaboration_global_turn_limiter = Arc::new(
+            CollaborationGlobalTurnLimiter::new(background_agent_limit)
+                .map_err(|error| runtime_operation_failed(error))?,
+        );
         Ok(Self {
             provider_registry,
             provider_reload: Mutex::new(()),
@@ -4094,7 +4101,8 @@ impl AgentRuntime {
             elicitations,
             focused_session: RwLock::new(None),
             web_service: RwLock::new(None),
-            background_agent_limit: AtomicUsize::new(DEFAULT_BACKGROUND_AGENT_LIMIT as usize),
+            background_agent_limit: AtomicUsize::new(background_agent_limit),
+            collaboration_global_turn_limiter,
             collaboration_sessions: Mutex::new(HashMap::new()),
             turn_start_gates: Mutex::new(HashMap::new()),
             title_generation_gates: Mutex::new(HashMap::new()),
@@ -4123,7 +4131,7 @@ impl AgentRuntime {
         &self.elicitations
     }
 
-    /// 更新后续与现存 Session 的后台 Agent 并发上限，Coordinator 总槽位始终包含根 Turn。
+    /// 原子更新后续与现存 Session 的设备级及每根树子 Agent 并发上限。
     pub fn set_background_agent_limit(&self, limit: usize) -> Result<(), AgentRuntimeError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentRuntimeError::RuntimeClosed);
@@ -4131,33 +4139,60 @@ impl AgentRuntime {
         if limit == 0 {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
-        let next_turn_limit = collaboration_turn_limit(limit)?;
-        let previous = self.background_agent_limit.load(Ordering::Acquire);
-        let previous_turn_limit = collaboration_turn_limit(previous)?;
         let runtimes = self
             .collaboration_sessions
             .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .values()
-            .cloned()
-            .collect::<Vec<_>>();
-        let mut updated: Vec<Arc<SessionCollaborationRuntime>> = Vec::new();
-        for runtime in &runtimes {
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let previous_setting = self.background_agent_limit.load(Ordering::Acquire);
+        let previous_global_limit = self
+            .collaboration_global_turn_limiter
+            .capacity()
+            .map_err(|error| runtime_operation_failed(error))?
+            .1;
+        debug_assert_eq!(
+            previous_global_limit, previous_setting,
+            "后台 Agent 设置应与共享 limiter 保持一致"
+        );
+        let mut updated = Vec::new();
+        for runtime in runtimes.values() {
+            let previous_root_limit = runtime
+                .coordinator
+                .capacity()
+                .map_err(|error| runtime_operation_failed(error))?
+                .roots
+                .into_iter()
+                .find_map(|(root_agent_id, _in_use, root_limit)| {
+                    (root_agent_id == runtime.root_agent_id).then_some(root_limit)
+                })
+                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
+            updated.push((Arc::clone(runtime), previous_root_limit));
             if runtime
                 .coordinator
-                .update_turn_limits(&runtime.root_agent_id, next_turn_limit, next_turn_limit)
+                .update_root_turn_limit(&runtime.root_agent_id, limit)
                 .is_err()
             {
-                for applied in updated {
-                    let _ = applied.coordinator.update_turn_limits(
-                        &applied.root_agent_id,
-                        previous_turn_limit,
-                        previous_turn_limit,
-                    );
+                for (applied, previous_root_limit) in updated.into_iter().rev() {
+                    let _ = applied
+                        .coordinator
+                        .update_root_turn_limit(&applied.root_agent_id, previous_root_limit);
                 }
                 return Err(AgentRuntimeError::RuntimeOperationFailed);
             }
-            updated.push(Arc::clone(runtime));
+        }
+        if self
+            .collaboration_global_turn_limiter
+            .update_limit(limit)
+            .is_err()
+        {
+            let _ = self
+                .collaboration_global_turn_limiter
+                .update_limit(previous_global_limit);
+            for (applied, previous_root_limit) in updated.into_iter().rev() {
+                let _ = applied
+                    .coordinator
+                    .update_root_turn_limit(&applied.root_agent_id, previous_root_limit);
+            }
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
         self.background_agent_limit.store(limit, Ordering::Release);
         Ok(())
@@ -4918,11 +4953,9 @@ impl AgentRuntime {
             Arc::clone(&worktrees),
             Arc::clone(&store),
         ));
-        let turn_limit =
-            collaboration_turn_limit(self.background_agent_limit.load(Ordering::Acquire))?;
-        let coordinator = Arc::new(CollaborationCoordinator::new(
-            CollaborationLimits::new(turn_limit)
-                .map_err(|error| runtime_operation_failed(error))?,
+        let turn_limit = self.background_agent_limit.load(Ordering::Acquire);
+        let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
+            Arc::clone(&self.collaboration_global_turn_limiter),
             store.clone(),
             execution.clone(),
             Arc::new(UuidCollaborationIdGenerator),
@@ -4977,6 +5010,11 @@ impl AgentRuntime {
             || handles.len() > 1
         {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
+        if !handles.is_empty() {
+            coordinator
+                .update_root_turn_limit(&root_agent_id, turn_limit)
+                .map_err(|error| runtime_operation_failed(error))?;
         }
         if handles.is_empty() {
             let provisional_profile = AgentProfile {
@@ -7050,13 +7088,6 @@ fn root_turn_summary(text: &str, _developer_context: Option<&str>, plan_enabled:
     digest.update([u8::from(plan_enabled)]);
     let preview = text.trim().chars().take(256).collect::<String>();
     format!("{preview} [sha256:{:x}]", digest.finalize())
-}
-
-/// 将“后台 Agent 数”设置转换为包含根 Turn 的 Coordinator 总槽位数。
-fn collaboration_turn_limit(background_agent_limit: usize) -> Result<usize, AgentRuntimeError> {
-    background_agent_limit
-        .checked_add(1)
-        .ok_or(AgentRuntimeError::RuntimeOperationFailed)
 }
 
 /// 将界面支持的七档推理强度映射为 Provider 中立请求配置。
@@ -9545,12 +9576,13 @@ mod tests {
         AgentProfile, AgentRunner, AgentTreeQuiesceResult, AgentTurnLaunch, AgentTurnOutcome,
         AgentTurnSignal, AgentTurnStartResult, CloseAgentTree, CollaborationAgentStatus,
         CollaborationAppendResult, CollaborationCoordinator, CollaborationError,
-        CollaborationEvent, CollaborationEventKind, CollaborationLimits, CollaborationPortError,
-        CollaborationStore, CollaborationTransitionCommit, ContextCompressor, ContextInheritance,
-        ContextPolicy, ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft,
-        HookRuntime, JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor,
-        QuiesceAgentTree, RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest,
-        ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
+        CollaborationEvent, CollaborationEventKind, CollaborationGlobalTurnLimiter,
+        CollaborationLimits, CollaborationPortError, CollaborationStore,
+        CollaborationTransitionCommit, ContextCompressor, ContextInheritance, ContextPolicy,
+        ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft, HookRuntime,
+        JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor, QuiesceAgentTree,
+        RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest, ToolCallId,
+        ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
         UuidCollaborationIdGenerator,
     };
     use keencode_model::{
@@ -12819,6 +12851,25 @@ mod tests {
         project_root: &Path,
         turn_limit: usize,
     ) -> Arc<super::SessionCollaborationRuntime> {
+        let limiter =
+            Arc::new(CollaborationGlobalTurnLimiter::new(turn_limit).expect("测试容量应有效"));
+        install_test_collaboration_runtime_with_shared_limiter(
+            runtime,
+            session,
+            project_root,
+            limiter,
+            turn_limit,
+        )
+    }
+
+    /// 使用显式共享 limiter 装配测试 Collaboration Runtime。
+    fn install_test_collaboration_runtime_with_shared_limiter(
+        runtime: &Arc<AgentRuntime>,
+        session: &RuntimeSession,
+        project_root: &Path,
+        limiter: Arc<CollaborationGlobalTurnLimiter>,
+        turn_limit: usize,
+    ) -> Arc<super::SessionCollaborationRuntime> {
         let session_id = session.session_id().as_str().to_owned();
         let store = Arc::new(
             SessionCollaborationStore::new(&runtime.storage_root, &session_id)
@@ -12857,8 +12908,8 @@ mod tests {
             worktrees,
             Arc::clone(&store),
         ));
-        let coordinator = Arc::new(CollaborationCoordinator::new(
-            CollaborationLimits::new(turn_limit).expect("测试容量应有效"),
+        let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
+            limiter,
             store.clone(),
             Arc::new(NoopCollaborationExecution),
             Arc::new(UuidCollaborationIdGenerator),
@@ -12881,7 +12932,7 @@ mod tests {
                         worktree_lease: None,
                         tool_snapshot: Vec::new(),
                     },
-                    per_root_turn_limit: 2,
+                    per_root_turn_limit: turn_limit,
                 },
             )
             .expect("测试根 Agent 应注册");
@@ -12898,6 +12949,104 @@ mod tests {
             .expect("测试 Collaboration 表应可写")
             .insert(session_id, collaboration.clone());
         collaboration
+    }
+
+    /// 独立 Coordinator 持有一个共享全局槽位，不污染被测 Session 的恢复快照。
+    struct TestGlobalCapacityOccupier {
+        coordinator: Arc<CollaborationCoordinator>,
+        agent_id: keencode_agent::AgentId,
+        turn_id: AgentTurnId,
+    }
+
+    impl TestGlobalCapacityOccupier {
+        /// 收敛占位 Turn 并释放共享全局槽位。
+        fn finish(self) {
+            self.coordinator
+                .complete_turn(
+                    &self.agent_id,
+                    &self.turn_id,
+                    AgentTurnOutcome::Completed {
+                        final_message: None,
+                    },
+                )
+                .expect("测试占位子 Turn 应收敛");
+        }
+    }
+
+    /// 在独立 Store 中启动一个子 Turn，占用指定共享 limiter 的一个槽位。
+    fn occupy_test_global_turn(
+        runtime: &AgentRuntime,
+        project_root: &Path,
+        limiter: Arc<CollaborationGlobalTurnLimiter>,
+        suffix: &str,
+    ) -> TestGlobalCapacityOccupier {
+        let session = runtime
+            .open_or_create_session(project_root, None, &format!("capacity-occupier-{suffix}"))
+            .expect("占位 Runtime Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let store = Arc::new(
+            SessionCollaborationStore::new(&runtime.storage_root, &session_id)
+                .expect("占位 Collaboration Store 应创建"),
+        );
+        store
+            .bind_runtime_session(&session)
+            .expect("占位 Collaboration Store 应绑定 Session");
+        let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
+            limiter,
+            store,
+            Arc::new(NoopCollaborationExecution),
+            Arc::new(UuidCollaborationIdGenerator),
+        ));
+        let root_agent_id = keencode_agent::AgentId::new(keencode_resources::ROOT_AGENT_ID)
+            .expect("占位根 Agent 标识应有效");
+        coordinator
+            .register_root_with_id(
+                root_agent_id.clone(),
+                RootAgentRequest {
+                    session_id: keencode_agent::SessionId::new(session_id)
+                        .expect("占位 Session 标识应有效"),
+                    profile: AgentProfile {
+                        model: "test-model".to_owned(),
+                        reasoning_effort: None,
+                        plan_guard: PlanGuard::inactive(),
+                        cwd: project_root.to_path_buf(),
+                        worktree_lease: None,
+                        tool_snapshot: Vec::new(),
+                    },
+                    per_root_turn_limit: 1,
+                },
+            )
+            .expect("占位根 Agent 应注册");
+        let root_turn_id = AgentTurnId::new(format!("turn-capacity-occupier-{suffix}-root"))
+            .expect("占位根 Turn 标识应有效");
+        coordinator
+            .begin_root_turn_with_id(
+                &root_agent_id,
+                root_turn_id.clone(),
+                "占用共享全局子 Agent 槽位",
+                PlanGuard::inactive(),
+            )
+            .expect("占位根 Turn 应启动");
+        let child = coordinator
+            .spawn_agent(
+                &root_agent_id,
+                &root_turn_id,
+                &ToolCallId::new(format!("spawn-capacity-occupier-{suffix}"))
+                    .expect("占位工具调用标识应有效"),
+                test_spawn_request("capacity_occupier", project_root),
+            )
+            .expect("占位子 Agent 应启动");
+        assert!(matches!(
+            coordinator
+                .agent_status(&child.agent.agent_id)
+                .expect("占位子 Agent 状态应读取"),
+            CollaborationAgentStatus::Running { .. }
+        ));
+        TestGlobalCapacityOccupier {
+            coordinator,
+            agent_id: child.agent.agent_id,
+            turn_id: child.initial_turn_id,
+        }
     }
 
     /// 创建测试用的单层子 Agent 请求，并使用项目目录作为绝对工作目录。
@@ -12917,6 +13066,197 @@ mod tests {
                 tool_snapshot: Vec::new(),
             },
         }
+    }
+
+    /// 生产装配创建的不同 Session 必须共享设备级 limiter，设置同时覆盖每根树。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn collaboration_sessions_share_device_limit_and_hot_update_roots() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let first_project = tempfile::tempdir().expect("应创建第一项目目录");
+        let second_project = tempfile::tempdir().expect("应创建第二项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let first_session = runtime
+            .open_or_create_session(first_project.path(), None, "shared-limit-first")
+            .expect("第一 Session 应创建");
+        let second_session = runtime
+            .open_or_create_session(second_project.path(), None, "shared-limit-second")
+            .expect("第二 Session 应创建");
+        for session in [&first_session, &second_session] {
+            runtime
+                .ensure_session_delivery(session.session_id().as_str())
+                .expect("Session 投递应建立");
+        }
+        let seed = || RootAgentSeed {
+            model: "test-model".to_owned(),
+            reasoning_effort: None,
+            plan_guard: PlanGuard::inactive(),
+        };
+        let first = runtime
+            .ensure_collaboration_runtime(&first_session, seed())
+            .expect("第一 Collaboration Runtime 应建立");
+        let second = runtime
+            .ensure_collaboration_runtime(&second_session, seed())
+            .expect("第二 Collaboration Runtime 应建立");
+
+        runtime
+            .set_background_agent_limit(3)
+            .expect("热更新后台 Agent 上限应成功");
+        for collaboration in [&first, &second] {
+            let capacity = collaboration.coordinator.capacity().unwrap();
+            assert_eq!(capacity.global_limit, 3);
+            assert_eq!(capacity.roots.len(), 1);
+            assert_eq!(capacity.roots[0].2, 3);
+        }
+        first
+            .coordinator
+            .update_global_turn_limit(4)
+            .expect("任一 Coordinator 应能更新共享 limiter");
+        assert_eq!(second.coordinator.capacity().unwrap().global_limit, 4);
+        runtime
+            .collaboration_global_turn_limiter
+            .update_limit(3)
+            .expect("测试结束前应恢复 Runtime 设置一致性");
+
+        runtime
+            .close_session(first_session.session_id().as_str())
+            .await
+            .expect("第一 Session 应关闭");
+        runtime
+            .close_session(second_session.session_id().as_str())
+            .await
+            .expect("第二 Session 应关闭");
+    }
+
+    /// 设置更新与新 Session 装配并发时，map 锁必须保证新根不会永久保留旧阈值。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_agent_limit_update_races_new_session_without_stale_limit() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "limit-race-session")
+            .expect("测试 Session 应创建");
+        runtime
+            .ensure_session_delivery(session.session_id().as_str())
+            .expect("Session 投递应建立");
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let setter_runtime = Arc::clone(&runtime);
+        let setter_barrier = Arc::clone(&barrier);
+        let ensure_runtime = Arc::clone(&runtime);
+        let ensure_barrier = Arc::clone(&barrier);
+        let ensure_session = session.clone();
+        let (set_result, collaboration) = std::thread::scope(|scope| {
+            let setter = scope.spawn(move || {
+                setter_barrier.wait();
+                setter_runtime.set_background_agent_limit(2)
+            });
+            let ensure = scope.spawn(move || {
+                ensure_barrier.wait();
+                ensure_runtime.ensure_collaboration_runtime(
+                    &ensure_session,
+                    RootAgentSeed {
+                        model: "test-model".to_owned(),
+                        reasoning_effort: None,
+                        plan_guard: PlanGuard::inactive(),
+                    },
+                )
+            });
+            barrier.wait();
+            (
+                setter.join().expect("设置线程不应 panic"),
+                ensure.join().expect("装配线程不应 panic"),
+            )
+        });
+        set_result.expect("并发设置应成功");
+        let collaboration = collaboration.expect("并发装配应成功");
+        let capacity = collaboration.coordinator.capacity().unwrap();
+        assert_eq!(capacity.global_limit, 2);
+        assert_eq!(capacity.roots[0].2, 2);
+        assert_eq!(runtime.background_agent_limit.load(Ordering::Acquire), 2);
+
+        runtime
+            .close_session(session.session_id().as_str())
+            .await
+            .expect("测试 Session 应关闭");
+    }
+
+    /// 冷恢复必须忽略 checkpoint 的旧根阈值，立即采用当前后台 Agent 设置。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovered_root_uses_current_background_agent_limit() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "recovered-limit-session")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .ensure_session_delivery(&session_id)
+            .expect("Session 投递应建立");
+        let store = Arc::new(
+            SessionCollaborationStore::new(storage.path(), &session_id)
+                .expect("恢复测试 Store 应创建"),
+        );
+        store
+            .bind_runtime_session(&session)
+            .expect("恢复测试 Store 应绑定 Session");
+        let seed = CollaborationCoordinator::new(
+            CollaborationLimits::new(7).expect("旧全局容量应有效"),
+            store,
+            Arc::new(NoopCollaborationExecution),
+            Arc::new(UuidCollaborationIdGenerator),
+        );
+        let root_agent_id = keencode_agent::AgentId::new("root").unwrap();
+        seed.register_root_with_id(
+            root_agent_id.clone(),
+            RootAgentRequest {
+                session_id: keencode_agent::SessionId::new(session_id.clone()).unwrap(),
+                profile: test_spawn_request("recovered_limit_root", project.path()).profile,
+                per_root_turn_limit: 7,
+            },
+        )
+        .expect("旧阈值根树应写入 checkpoint");
+        drop(seed);
+
+        runtime
+            .set_background_agent_limit(2)
+            .expect("当前后台 Agent 设置应更新");
+        let collaboration = runtime
+            .ensure_collaboration_runtime(
+                &session,
+                RootAgentSeed {
+                    model: "unused".to_owned(),
+                    reasoning_effort: None,
+                    plan_guard: PlanGuard::inactive(),
+                },
+            )
+            .expect("旧 checkpoint 应恢复");
+        let capacity = collaboration.coordinator.capacity().unwrap();
+        assert_eq!(capacity.global_limit, 2);
+        assert_eq!(capacity.roots, vec![(root_agent_id, 0, 2)]);
+        assert_eq!(
+            collaboration
+                .coordinator
+                .checkpoint_coordinator()
+                .unwrap()
+                .roots[0]
+                .per_root_turn_limit,
+            2
+        );
+
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("恢复测试 Session 应关闭");
     }
 
     /// 为一个已由 Coordinator 生成的等待容量取消记录构造严格配对的双事件。
@@ -12971,7 +13311,7 @@ mod tests {
         commit
     }
 
-    /// 创建一个根 Turn 占满容量、并连续留下两个 WaitingCapacity pending 的测试现场。
+    /// 创建一个运行中子 Turn 占满容量、并连续留下两个 WaitingCapacity pending 的测试现场。
     async fn two_waiting_capacity_fixture() -> (
         tempfile::TempDir,
         tempfile::TempDir,
@@ -12996,8 +13336,20 @@ mod tests {
             &root_turn_summary("等待容量批次根 Turn", None, false),
         )
         .await;
-        let collaboration =
-            install_test_collaboration_runtime_with_limit(&runtime, &session, project.path(), 1);
+        let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).expect("测试容量应有效"));
+        let occupier = occupy_test_global_turn(
+            &runtime,
+            project.path(),
+            Arc::clone(&limiter),
+            "waiting-capacity-batch",
+        );
+        let collaboration = install_test_collaboration_runtime_with_shared_limiter(
+            &runtime,
+            &session,
+            project.path(),
+            limiter,
+            1,
+        );
         let root_turn = collaboration
             .coordinator
             .begin_root_turn_with_id(
@@ -13049,6 +13401,15 @@ mod tests {
             .coordinator
             .cancel_turn(&second_child.agent.agent_id, &second_child.initial_turn_id)
             .expect("第二个等待容量 Turn 应取消");
+        occupier.finish();
+        assert_eq!(
+            collaboration
+                .coordinator
+                .capacity()
+                .expect("收敛后容量应读取")
+                .global_in_use,
+            0
+        );
         let snapshot = collaboration
             .store
             .load_transition_snapshot()
@@ -13248,8 +13609,7 @@ mod tests {
                 threshold_percent: 70,
             },
         };
-        let delivery = materialize_delivery("session-a", 4, draft)
-            .expect("水位草稿应可投递");
+        let delivery = materialize_delivery("session-a", 4, draft).expect("水位草稿应可投递");
         let value = serde_json::to_value(&delivery).expect("水位投递应序列化");
         assert_eq!(value["type"], "keencode_event");
         assert_eq!(value["envelope"]["event"]["type"], "context_water_level");
@@ -19072,8 +19432,20 @@ mod tests {
         )
         .await;
 
-        let collaboration =
-            install_test_collaboration_runtime_with_limit(&runtime, &session, project.path(), 1);
+        let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).expect("测试容量应有效"));
+        let occupier = occupy_test_global_turn(
+            &runtime,
+            project.path(),
+            Arc::clone(&limiter),
+            "waiting-capacity-cold-recovery",
+        );
+        let collaboration = install_test_collaboration_runtime_with_shared_limiter(
+            &runtime,
+            &session,
+            project.path(),
+            limiter,
+            1,
+        );
         let root_turn = collaboration
             .coordinator
             .begin_root_turn_with_id(
@@ -19129,6 +19501,7 @@ mod tests {
                 .keys()
                 .any(|turn_id| turn_id.as_str() == child.initial_turn_id.as_str())
         );
+        occupier.finish();
 
         // 根 Turn 的 Journal 已经完成，退出前同步提交相同的 Collaboration 终态；否则
         // 冷恢复会正确拒绝“Journal 已完成、Coordinator 仍 Running”的不一致快照。
@@ -19538,8 +19911,20 @@ mod tests {
             "等待容量取消测试根 Turn",
         )
         .await;
-        let collaboration =
-            install_test_collaboration_runtime_with_limit(&runtime, &session, project.path(), 1);
+        let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).expect("测试容量应有效"));
+        let occupier = occupy_test_global_turn(
+            &runtime,
+            project.path(),
+            Arc::clone(&limiter),
+            "cancel-outcome-waiting",
+        );
+        let collaboration = install_test_collaboration_runtime_with_shared_limiter(
+            &runtime,
+            &session,
+            project.path(),
+            limiter,
+            1,
+        );
         let root_turn =
             AgentTurnId::new("turn-cancel-outcome-waiting-root").expect("根 Turn 标识应有效");
         collaboration
@@ -19590,6 +19975,7 @@ mod tests {
             duplicate,
             super::BackgroundTaskCancellationOutcome::NotRunning
         );
+        occupier.finish();
     }
 
     /// 仅剩 Store pending 的 WaitingCapacity 取消证据是此前已发出的请求，不应再次报告 Requested。
