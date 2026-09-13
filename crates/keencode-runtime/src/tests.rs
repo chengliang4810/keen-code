@@ -5589,6 +5589,68 @@ fn runtime_manager_close_flush_failure_keeps_registration_for_retry() {
     );
 }
 
+/// close 遇到未确认终态时必须保留 Manager 项，并由后续 close 只重投同一冻结终态。
+#[tokio::test]
+async fn runtime_manager_close_retains_terminal_pending_until_retry_and_final_flush() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let manager = RuntimeManager::new(config(&root)).expect("RuntimeManager 应创建");
+    let session = manager
+        .create(manager_create_request(
+            &root,
+            "manager-close-terminal-retry",
+        ))
+        .expect("Manager 应创建 Session");
+    let turn_id = "manager-close-terminal-retry-turn";
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            ..ProviderCapabilities::default()
+        },
+        [completed_text_reply("冻结终态结果")],
+    ));
+    let runner = session.bind_agent_runner(AgentRunner::new(
+        provider.clone(),
+        ToolRegistry::new(),
+        RunLimits::default(),
+    ));
+    let terminal_event_id = runtime_lifecycle_event_id(
+        session.session_id(),
+        &keencode_resources::TurnId::new(turn_id).expect("Turn ID 应有效"),
+        "turn-terminal",
+    )
+    .expect("终态事件 ID 应派生");
+    inject_runtime_lifecycle_indeterminate(&terminal_event_id);
+
+    assert!(matches!(
+        runner
+            .run_turn(root_runtime_turn(&session, turn_id, "关闭前终态失败"))
+            .await,
+        Err(RuntimeError::RecoveryRequired)
+    ));
+    inject_runtime_lifecycle_indeterminate(&terminal_event_id);
+    assert!(matches!(
+        manager.close("manager-close-terminal-retry"),
+        Err(RuntimeError::RecoveryRequired)
+    ));
+    assert_eq!(
+        manager
+            .registered_session_ids()
+            .expect("待对账时注册表应可读取"),
+        vec![session.session_id().clone()]
+    );
+
+    manager
+        .close("manager-close-terminal-retry")
+        .expect("close 重试确认冻结终态并完成最终 flush 后应注销");
+    assert_eq!(provider.requests().expect("Provider 请求应读取").len(), 1);
+    assert!(
+        manager
+            .registered_session_ids()
+            .expect("注册表应可读取")
+            .is_empty()
+    );
+}
+
 /// 验证两个线程同时创建相同 Session 时只有一个完成进程内注册。
 #[test]
 fn runtime_manager_serializes_concurrent_duplicate_create() {
@@ -5734,6 +5796,16 @@ async fn runtime_manager_close_cancels_only_owned_work_and_fences_old_handles() 
     let session_b = manager
         .create(manager_create_request(&root, "close-session-b"))
         .expect("Session B 应创建");
+    session_a
+        .inner
+        .journal
+        .flush()
+        .expect("Session A 测试基线应先落盘");
+    session_a
+        .inner
+        .journal
+        .defer_batch_timeout_for_tests()
+        .expect("Session A deadline 应推迟");
     let mut close_subscription = session_a.subscribe().expect("Session A 应订阅");
     let gate_a = Arc::new(FirstModelEventGate::new());
     let gate_b = Arc::new(FirstModelEventGate::new());
@@ -5794,8 +5866,20 @@ async fn runtime_manager_close_cancels_only_owned_work_and_fences_old_handles() 
     gate_a.wait_until_entered().await;
     gate_b.wait_until_entered().await;
 
-    manager.close("close-session-a").expect("Session A 应关闭");
+    assert!(matches!(
+        manager.close("close-session-a"),
+        Err(RuntimeError::SessionBusy)
+    ));
     assert!(session_a.snapshot().expect("关闭状态应可读取").closed);
+    assert_eq!(
+        manager
+            .registered_session_ids()
+            .expect("未收敛时注册表应可读取"),
+        vec![
+            session_a.session_id().clone(),
+            session_b.session_id().clone()
+        ]
+    );
     let result_a = task_a
         .await
         .expect("Session A 任务不应异常")
@@ -5803,6 +5887,43 @@ async fn runtime_manager_close_cancels_only_owned_work_and_fences_old_handles() 
     assert_eq!(
         result_a.state.terminal_reason(),
         Some(TerminalReason::Cancelled)
+    );
+    assert!(
+        session_a
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("取消终态待刷窗口应可读取")
+            > 0
+    );
+    set_append_fault(AppendFault::Sync);
+    assert!(manager.close("close-session-a").is_err());
+    clear_append_fault();
+    assert_eq!(
+        manager
+            .registered_session_ids()
+            .expect("最终 flush 失败后注册表应可读取"),
+        vec![
+            session_a.session_id().clone(),
+            session_b.session_id().clone()
+        ]
+    );
+    manager
+        .close("close-session-a")
+        .expect("取消终态 durable 后 Session A 应注销");
+    assert_eq!(
+        session_a
+            .inner
+            .journal
+            .pending_flush_records()
+            .expect("关闭后窗口应可读取"),
+        0
+    );
+    assert_eq!(
+        manager
+            .registered_session_ids()
+            .expect("注销后注册表应可读取"),
+        vec![session_b.session_id().clone()]
     );
     let close_deliveries = drain_runtime_events(&mut close_subscription).await;
     assert!(matches!(
