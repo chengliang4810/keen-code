@@ -307,7 +307,7 @@ impl SessionMcpRuntime {
             return Ok(response);
         }
 
-        let (project_names, desired, existing_fingerprints) = {
+        let (project_names, desired, existing_fingerprints, tracked_names) = {
             let state = self
                 .state
                 .lock()
@@ -323,6 +323,7 @@ impl SessionMcpRuntime {
                     .iter()
                     .map(|(name, server)| (name.clone(), server.config_fingerprint.clone()))
                     .collect::<BTreeMap<_, _>>(),
+                tracked_server_names(&state),
             )
         };
         for server in &prepared {
@@ -334,6 +335,15 @@ impl SessionMcpRuntime {
             {
                 return Err(SessionMcpError::CatalogConflict);
             }
+        }
+        if tracked_names.len().saturating_add(
+            prepared
+                .iter()
+                .filter(|server| !tracked_names.contains(&server.name))
+                .count(),
+        ) > MAX_SESSION_MCP_SERVERS
+        {
+            return Err(SessionMcpError::InvalidConfiguration);
         }
 
         let mut additions = Vec::new();
@@ -1096,6 +1106,20 @@ fn same_server_map(
         })
 }
 
+/// 返回当前状态中所有仍可能出现在 Session MCP 状态响应里的 Server 名称。
+///
+/// 当前和待发布目录可能在 Reason 边界前同时保留不同名称，失败记录也占用同一
+/// 个协议容量；三者必须统一计算，不能只限制已成功连接的待发布 Server。
+fn tracked_server_names(state: &SessionMcpState) -> BTreeSet<String> {
+    state
+        .current_servers
+        .keys()
+        .chain(state.desired_servers.keys())
+        .chain(state.failed_servers.keys())
+        .cloned()
+        .collect()
+}
+
 fn server_statuses(state: &SessionMcpState) -> Vec<SessionMcpServerStatus> {
     let mut statuses = BTreeMap::new();
     for (name, binding) in &state.current_servers {
@@ -1547,6 +1571,93 @@ fn extract_id(body: &str) -> Option<&str> {
     }
 
     #[tokio::test]
+    async fn failure_capacity_keeps_status_encodable_and_rejects_new_names() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = empty_runtime("session-mcp-capacity", directory.path());
+
+        for index in 0..MAX_SESSION_MCP_SERVERS {
+            let name = format!("missing-{index:03}");
+            let response = runtime
+                .load(&format!("load-{index:03}"), vec![missing_server(&name)])
+                .await
+                .expect("容量以内的失败 Server 应保留安全状态");
+            assert_eq!(response.servers.len(), index + 1);
+        }
+
+        let encoder = keencode_acp::AcpResponseEncoder::new();
+        let status = runtime.status().expect("容量以内的状态应可读取");
+        assert_eq!(status.servers.len(), MAX_SESSION_MCP_SERVERS);
+        encoder
+            .encode_result(schema::RequestId::Number(1), &status)
+            .expect("第 512 个失败 Server 的状态应可编码");
+
+        let retry = runtime
+            .load(
+                "retry-existing-failure",
+                vec![missing_server("missing-511")],
+            )
+            .await
+            .expect("容量已满时已有失败名称仍可覆盖");
+        assert_eq!(retry.servers.len(), MAX_SESSION_MCP_SERVERS);
+        encoder
+            .encode_result(schema::RequestId::Number(2), &retry)
+            .expect("已有失败名称覆盖后的变更响应应可编码");
+
+        let started = directory.path().join("migration-started");
+        let closed = directory.path().join("migration-closed");
+        let migrated = runtime
+            .load(
+                "migrate-existing-failure",
+                vec![stdio_server("missing-511", "echo", &started, &closed)],
+            )
+            .await
+            .expect("已有失败名称应可在容量满时迁移为成功连接");
+        assert_eq!(migrated.servers.len(), MAX_SESSION_MCP_SERVERS);
+        assert_eq!(
+            migrated
+                .servers
+                .iter()
+                .filter(|server| server.name == "missing-511")
+                .count(),
+            1
+        );
+        encoder
+            .encode_result(schema::RequestId::Number(3), &migrated)
+            .expect("失败迁移后的变更响应应可编码");
+
+        let overflow_started = directory.path().join("overflow-started");
+        let overflow_closed = directory.path().join("overflow-closed");
+        assert_eq!(
+            runtime
+                .load(
+                    "reject-overflow",
+                    vec![stdio_server(
+                        "new-overflow",
+                        "echo",
+                        &overflow_started,
+                        &overflow_closed,
+                    )],
+                )
+                .await,
+            Err(SessionMcpError::InvalidConfiguration),
+            "新名称超过容量时应在连接前拒绝"
+        );
+        assert_eq!(file_line_count(&overflow_started), 0);
+        let state = runtime.state.lock().unwrap();
+        assert_eq!(tracked_server_names(&state).len(), MAX_SESSION_MCP_SERVERS);
+        assert!(!state.receipts.contains_key("reject-overflow"));
+        drop(state);
+        let status = runtime.status().expect("拒绝超限后已有状态仍应可读取");
+        assert_eq!(status.servers.len(), MAX_SESSION_MCP_SERVERS);
+        encoder
+            .encode_result(schema::RequestId::Number(4), &status)
+            .expect("拒绝超限后状态仍应可编码");
+
+        runtime.close().await;
+        wait_for_file_lines(&closed, 1).await;
+    }
+
+    #[tokio::test]
     async fn project_server_and_tool_conflicts_reject_without_publishing_new_bindings() {
         let directory = tempfile::tempdir().unwrap();
         let preflight_started = directory.path().join("preflight-started");
@@ -1738,5 +1849,49 @@ fn extract_id(body: &str) -> Option<&str> {
             .unwrap();
         assert!(suspended.runtime.lock().unwrap().is_none());
         owner.close_session(&session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_mcp_failure_state_is_fresh_after_cold_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let storage_root = directory.path().join("data");
+
+        let runtime = AgentRuntime::new_for_control_test(storage_root.clone()).unwrap();
+        let session = runtime
+            .open_or_create_session(&project_root, None, "session-mcp-cold-recovery")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        runtime
+            .ensure_session_mcp_runtime(&session_id, &project_root)
+            .unwrap();
+        let failed = runtime
+            .load_session_mcp(
+                &session_id,
+                "cold-failure",
+                vec![missing_server("cold-only")],
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.servers.len(), 1);
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+
+        let cold = AgentRuntime::new_for_control_test(storage_root).unwrap();
+        cold.open_or_create_session(&project_root, Some(&session_id), "cold-open")
+            .unwrap();
+        let status = cold.session_mcp_status(&session_id).unwrap();
+        assert!(
+            status.servers.is_empty(),
+            "冷恢复只恢复持久 Session，不应恢复进程内失败记录"
+        );
+        let retried = cold
+            .load_session_mcp(&session_id, "cold-retry", vec![missing_server("cold-only")])
+            .await
+            .unwrap();
+        assert_eq!(retried.servers.len(), 1);
+        cold.shutdown().await.unwrap();
     }
 }
