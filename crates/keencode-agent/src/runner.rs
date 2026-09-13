@@ -4041,6 +4041,7 @@ fn is_buffered_model_event(kind: &AgentStreamEventKind) -> bool {
                 | keencode_model::ModelStreamEvent::ReasoningDelta { .. }
                 | keencode_model::ModelStreamEvent::ReasoningSummaryDelta { .. }
                 | keencode_model::ModelStreamEvent::ReasoningContinuation { .. }
+                | keencode_model::ModelStreamEvent::MessageEnd { .. }
         }
     )
 }

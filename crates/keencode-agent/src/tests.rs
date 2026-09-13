@@ -5,12 +5,13 @@ use crate::tool::{
     SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, TRUNCATION_MARKER,
     TRUNCATION_PREVIEW_KEEP_BYTES, TRUNCATION_SENTINEL_PREFIX,
 };
+use futures_util::stream;
 use keencode_model::{
     ContentBlock, ImageContent, Message, MessageRole, ModelError, ModelStreamEvent,
     ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason,
     StructuredOutputCapability, StructuredOutputConfig, StructuredOutputEnforcement,
     StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice, ToolDefinition, ToolResult,
-    ToolResultContent,
+    ToolResultContent, collect_model_stream,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -2699,6 +2700,57 @@ async fn structured_native_live_sink_publishes_valid_candidate_only() {
     assert!(result.messages[1].content.iter().any(|block| {
         matches!(block, ContentBlock::Text { text } if text == "{\"answer\":42}")
     }));
+}
+
+/// 结构化候选通过校验后，实时事件保持 Provider 顺序并可完整重放。
+#[tokio::test]
+async fn structured_native_live_sink_preserves_order_for_replay() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [structured_text_reply("顺序推理", "{\"answer\":42}")],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let model_events = event_sink
+        .events()
+        .into_iter()
+        .filter_map(|event| match event.into_kind() {
+            AgentStreamEventKind::ModelEvent { event } => Some(event),
+            AgentStreamEventKind::ModelFailure { .. }
+            | AgentStreamEventKind::ContextCompactionStarted { .. }
+            | AgentStreamEventKind::ContextCompactionFailed { .. }
+            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        model_events.as_slice(),
+        [
+            ModelStreamEvent::MessageStart { .. },
+            ModelStreamEvent::ReasoningDelta { delta, .. },
+            ModelStreamEvent::TextDelta { delta: text, .. },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            },
+        ] if delta == "顺序推理" && text == "{\"answer\":42}"
+    ));
+
+    let replayed = collect_model_stream(Box::pin(stream::iter(
+        model_events.into_iter().map(Ok::<_, ModelError>),
+    )))
+    .await
+    .expect("实时 Sink 已确认事件应当可以完整重放");
+    assert_eq!(
+        replayed.content, result.messages[1].content,
+        "实时事件重放结果必须与权威 Assistant 内容一致"
+    );
 }
 
 /// 原生结构化候选先坏后好时，实时 Sink 与冷恢复权威消息都只包含最终候选。
