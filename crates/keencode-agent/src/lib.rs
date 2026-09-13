@@ -29,6 +29,7 @@ pub use collaboration::{
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
     CollaborationCapacity, CollaborationCoordinator, CollaborationError, CollaborationEvent,
     CollaborationEventBatch, CollaborationEventBatchId, CollaborationEventKind,
+    CollaborationGlobalTurnLimiter,
     CollaborationIdGenerator, CollaborationInvocationInput, CollaborationInvocationKey,
     CollaborationInvocationKind, CollaborationInvocationOutput, CollaborationInvocationReceipt,
     CollaborationLimits, CollaborationPortError, CollaborationStore, CollaborationTransitionCommit,

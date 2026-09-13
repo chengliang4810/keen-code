@@ -10,11 +10,12 @@ use crate::{
     AgentDepth, AgentExecutionPort, AgentId, AgentPath, AgentProfile, AgentTurnCause,
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnSignalKind, CloseAgentTree,
     CollaborationAgentStatus, CollaborationCoordinator, CollaborationError, CollaborationEvent,
-    CollaborationEventKind, CollaborationIdGenerator, CollaborationInvocationKind,
-    CollaborationLimits, CollaborationPortError, CollaborationStore, CollaborationTransitionCommit,
-    ContextInheritance, MailboxDelivery, MailboxMessage, MailboxMessageId, PlanGuard,
-    RecoveredAgentTree, RootAgentRequest, SessionId, SpawnAgentRequest, ToolCallId,
-    TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome, WorktreeLease,
+    CollaborationEventKind, CollaborationGlobalTurnLimiter, CollaborationIdGenerator,
+    CollaborationInvocationKind, CollaborationLimits, CollaborationPortError, CollaborationStore,
+    CollaborationTransitionCommit, ContextInheritance, MailboxDelivery, MailboxMessage,
+    MailboxMessageId, PlanGuard, RecoveredAgentTree, RootAgentRequest, SessionId,
+    SpawnAgentRequest, ToolCallId, TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome,
+    WorktreeLease,
 };
 use keencode_model::{Message, MessageRole};
 use std::collections::{HashMap, HashSet};
@@ -769,6 +770,38 @@ fn fixture(global_limit: usize, root_limit: usize) -> Fixture {
     }
 }
 
+/// 创建共享设备级 limiter、但拥有独立 Store 与执行端口的 Session Coordinator。
+fn fixture_with_shared_limiter(
+    limiter: Arc<CollaborationGlobalTurnLimiter>,
+    root_limit: usize,
+    identity_seed: u64,
+    session_id: &str,
+) -> Fixture {
+    let store = Arc::new(RecordingStore::default());
+    let execution = Arc::new(RecordingExecution::default());
+    let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
+        limiter,
+        store.clone(),
+        execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(identity_seed),
+        }),
+    ));
+    let root = coordinator
+        .register_root(RootAgentRequest {
+            session_id: SessionId::new(session_id).expect("根 Session 标识非空"),
+            profile: profile(session_id),
+            per_root_turn_limit: root_limit,
+        })
+        .expect("根 Agent 应注册成功");
+    Fixture {
+        coordinator,
+        store,
+        execution,
+        root_agent_id: root.agent_id,
+    }
+}
+
 /// 创建无外部依赖的独立 Agent 运行配置。
 fn profile(name: &str) -> AgentProfile {
     AgentProfile {
@@ -1300,7 +1333,7 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "父任务", NO_PLAN)
-        .expect("根 Turn 应占用首个全局槽位");
+        .expect("根 Turn 应直接启动且不占子 Agent 槽位");
     let first_child = fixture
         .coordinator
         .spawn_agent(
@@ -1325,6 +1358,13 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
             .coordinator
             .agent_status(&first_child.agent.agent_id)
             .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&second_child.agent.agent_id)
+            .unwrap(),
         CollaborationAgentStatus::WaitingCapacity { .. }
     ));
     let raised = fixture
@@ -1336,7 +1376,7 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
     assert!(matches!(
         fixture
             .coordinator
-            .agent_status(&first_child.agent.agent_id)
+            .agent_status(&second_child.agent.agent_id)
             .unwrap(),
         CollaborationAgentStatus::Running { .. }
     ));
@@ -1347,10 +1387,19 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
         .expect("降低上限不得取消既有 Turn");
     assert_eq!(lowered.global_limit, 1);
     assert_eq!(lowered.global_in_use, 2);
+    let third_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("third_hot_limit_child"),
+        )
+        .expect("降低上限后新子 Agent 应持久排队");
     assert!(matches!(
         fixture
             .coordinator
-            .agent_status(&second_child.agent.agent_id)
+            .agent_status(&third_child.agent.agent_id)
             .unwrap(),
         CollaborationAgentStatus::WaitingCapacity { .. }
     ));
@@ -1364,7 +1413,7 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
     assert!(matches!(
         fixture
             .coordinator
-            .agent_status(&first_child.agent.agent_id)
+            .agent_status(&second_child.agent.agent_id)
             .unwrap(),
         CollaborationAgentStatus::Running { .. }
     ));
@@ -1419,7 +1468,7 @@ fn concurrent_global_turn_limit_updates_keep_single_start_and_valid_capacity() {
 
     let capacity = fixture.coordinator.capacity().unwrap();
     assert!(matches!(capacity.global_limit, 2 | 3));
-    assert_eq!(capacity.global_in_use, 3);
+    assert_eq!(capacity.global_in_use, 2);
     assert!(matches!(
         fixture
             .coordinator
@@ -1449,6 +1498,194 @@ fn concurrent_global_turn_limit_updates_keep_single_start_and_valid_capacity() {
             .count(),
         1
     );
+}
+
+/// 两个 Session Coordinator 必须共享设备槽位，并按进入全局队列的顺序轮转。
+#[test]
+fn shared_global_limiter_enforces_cross_coordinator_fifo_fairness() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).unwrap());
+    let first = fixture_with_shared_limiter(limiter.clone(), 2, 10_000, "shared-first");
+    let second = fixture_with_shared_limiter(limiter, 2, 20_000, "shared-second");
+    let first_root_turn = first
+        .coordinator
+        .begin_root_turn(&first.root_agent_id, "第一 Session 根任务", NO_PLAN)
+        .unwrap();
+    let second_root_turn = second
+        .coordinator
+        .begin_root_turn(&second.root_agent_id, "第二 Session 根任务", NO_PLAN)
+        .unwrap();
+    let first_running = first
+        .coordinator
+        .spawn_agent(
+            &first.root_agent_id,
+            &first_root_turn,
+            &next_tool_call_id(),
+            spawn_request("shared_first_running"),
+        )
+        .unwrap();
+    let second_waiting = second
+        .coordinator
+        .spawn_agent(
+            &second.root_agent_id,
+            &second_root_turn,
+            &next_tool_call_id(),
+            spawn_request("shared_second_waiting"),
+        )
+        .unwrap();
+    let first_waiting = first
+        .coordinator
+        .spawn_agent(
+            &first.root_agent_id,
+            &first_root_turn,
+            &next_tool_call_id(),
+            spawn_request("shared_first_waiting"),
+        )
+        .unwrap();
+
+    first
+        .coordinator
+        .complete_turn(
+            &first.root_agent_id,
+            &first_root_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(first.coordinator.capacity().unwrap().global_in_use, 1);
+    assert!(matches!(
+        second
+            .coordinator
+            .agent_status(&second_waiting.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+    assert!(matches!(
+        first
+            .coordinator
+            .agent_status(&first_waiting.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+
+    first
+        .coordinator
+        .complete_turn(
+            &first_running.agent.agent_id,
+            &first_running.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        second
+            .coordinator
+            .agent_status(&second_waiting.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+    assert!(matches!(
+        first
+            .coordinator
+            .agent_status(&first_waiting.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+
+    second
+        .coordinator
+        .complete_turn(
+            &second_waiting.agent.agent_id,
+            &second_waiting.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        first
+            .coordinator
+            .agent_status(&first_waiting.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+}
+
+/// 每根树上限独立于设备上限，提升会调度，降低不会取消已运行子 Agent。
+#[test]
+fn per_root_turn_limit_hot_update_is_independent_from_global_limit() {
+    let fixture = fixture(3, 1);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "根级限流", NO_PLAN)
+        .unwrap();
+    let first = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("root_limit_first"),
+        )
+        .unwrap();
+    let second = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("root_limit_second"),
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&first.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&second.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+
+    let raised = fixture
+        .coordinator
+        .update_root_turn_limit(&fixture.root_agent_id, 2)
+        .unwrap();
+    assert_eq!(raised.global_in_use, 2);
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&second.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+    fixture
+        .coordinator
+        .update_root_turn_limit(&fixture.root_agent_id, 1)
+        .unwrap();
+    let third = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("root_limit_third"),
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&third.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+    assert_eq!(fixture.coordinator.capacity().unwrap().global_limit, 3);
 }
 
 /// 为互不相关的既有测试调用分配唯一可信 ToolCall 身份。
@@ -1615,10 +1852,10 @@ fn spawn_is_immediate_single_layer_and_parent_can_finish_before_child() {
     );
 }
 
-/// 父 Turn 完成后立即释放槽位并调度等待中的子 Agent，不等待任一子 Agent 收敛。
+/// 根 Turn 不占子 Agent 槽位；父结束后等待者仍须等运行中的子 Agent 释放容量。
 #[test]
-fn parent_completion_releases_capacity_without_waiting_for_children() {
-    let fixture = fixture(2, 2);
+fn parent_completion_does_not_release_child_capacity() {
+    let fixture = fixture(1, 2);
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "并行父任务", NO_PLAN)
@@ -1667,9 +1904,9 @@ fn parent_completion_releases_capacity_without_waiting_for_children() {
             .coordinator
             .agent_status(&second.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Running { .. }
+        CollaborationAgentStatus::WaitingCapacity { .. }
     ));
-    assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 2);
+    assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 1);
     assert_eq!(
         fixture
             .coordinator
@@ -1704,6 +1941,13 @@ fn parent_completion_releases_capacity_without_waiting_for_children() {
             },
         )
         .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&second.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
     assert_eq!(
         fixture
             .coordinator
@@ -1989,7 +2233,7 @@ fn parent_turn_cancellation_does_not_cascade_to_child() {
 /// 验证根树取消期间列表区分正在运行与仍在容量队列中的子 Agent。
 #[test]
 fn list_agents_for_root_preserves_cancelling_and_waiting_states() {
-    let fixture = fixture(2, 2);
+    let fixture = fixture(1, 2);
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "取消期间列出 Agent", NO_PLAN)
@@ -4055,7 +4299,7 @@ fn parent_cancellation_keeps_child_running_until_explicit_interrupt() {
         .unwrap();
 }
 
-/// 父 Turn 取消不得移除等待容量的子 Agent；父槽位释放后仍按原顺序调度。
+/// 父 Turn 取消与结束都不得释放子 Agent 槽位，等待者仍按原顺序调度。
 #[test]
 fn parent_cancellation_preserves_waiting_children_and_queue_order() {
     let fixture = fixture(1, 1);
@@ -4092,17 +4336,24 @@ fn parent_cancellation_preserves_waiting_children_and_queue_order() {
         .cancel_current_turn(&fixture.root_agent_id)
         .unwrap();
     assert!(root_launch.cancellation.is_cancelled());
-    for child in [&first, &second] {
-        assert_eq!(
-            fixture
-                .coordinator
-                .agent_status(&child.agent.agent_id)
-                .unwrap(),
-            CollaborationAgentStatus::WaitingCapacity {
-                turn_id: child.initial_turn_id.clone(),
-            }
-        );
-    }
+    assert_eq!(
+        fixture
+            .coordinator
+            .agent_status(&first.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running {
+            turn_id: first.initial_turn_id.clone(),
+        }
+    );
+    assert_eq!(
+        fixture
+            .coordinator
+            .agent_status(&second.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity {
+            turn_id: second.initial_turn_id.clone(),
+        }
+    );
     assert_eq!(
         fixture
             .coordinator
@@ -4653,6 +4904,15 @@ fn rejected_quiesce_keeps_capacity_reserved_and_prevents_oversubscription() {
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "无法静止的根任务", NO_PLAN)
         .unwrap();
+    let closing_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &first_turn,
+            &next_tool_call_id(),
+            spawn_request("quiesce_closing_child"),
+        )
+        .unwrap();
     let waiting_root = fixture
         .coordinator
         .register_root(RootAgentRequest {
@@ -4664,6 +4924,15 @@ fn rejected_quiesce_keeps_capacity_reserved_and_prevents_oversubscription() {
     let waiting_turn = fixture
         .coordinator
         .begin_root_turn(&waiting_root.agent_id, "必须等待静止确认", NO_PLAN)
+        .unwrap();
+    let waiting_child = fixture
+        .coordinator
+        .spawn_agent(
+            &waiting_root.agent_id,
+            &waiting_turn,
+            &next_tool_call_id(),
+            spawn_request("quiesce_waiting_child"),
+        )
         .unwrap();
     fixture.execution.reject_all_quiesces();
 
@@ -4692,16 +4961,32 @@ fn rejected_quiesce_keeps_capacity_reserved_and_prevents_oversubscription() {
     assert!(matches!(
         fixture
             .coordinator
+            .agent_status(&closing_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Cancelling { turn_id }
+            if turn_id == closing_child.initial_turn_id
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
             .agent_status(&waiting_root.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::WaitingCapacity { turn_id } if turn_id == waiting_turn
+        CollaborationAgentStatus::Running { turn_id } if turn_id == waiting_turn
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&waiting_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { turn_id }
+            if turn_id == waiting_child.initial_turn_id
     ));
     assert!(
         !fixture
             .execution
             .launches()
             .iter()
-            .any(|launch| launch.turn_id == waiting_turn)
+            .any(|launch| launch.turn_id == waiting_child.initial_turn_id)
     );
     assert!(fixture.execution.quiesces().is_empty());
     assert!(fixture.execution.closes().is_empty());
@@ -4982,12 +5267,12 @@ fn signal_failure_keeps_committed_steer_available() {
 /// 验证全树清理失败不会阻断同批次中属于其他根树的 Turn 启动。
 #[test]
 fn close_failure_does_not_block_later_start_actions() {
-    let fixture = fixture(2, 2);
+    let fixture = fixture(2, 1);
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "占用第一个槽位", NO_PLAN)
         .unwrap();
-    fixture
+    let _occupier = fixture
         .coordinator
         .spawn_agent(
             &fixture.root_agent_id,
@@ -5001,7 +5286,7 @@ fn close_failure_does_not_block_later_start_actions() {
         .register_root(RootAgentRequest {
             session_id: SessionId::new("second-root-session").unwrap(),
             profile: profile("second-root"),
-            per_root_turn_limit: 2,
+            per_root_turn_limit: 1,
         })
         .unwrap();
     let third_root = fixture
@@ -5009,17 +5294,42 @@ fn close_failure_does_not_block_later_start_actions() {
         .register_root(RootAgentRequest {
             session_id: SessionId::new("third-root-session").unwrap(),
             profile: profile("third-root"),
-            per_root_turn_limit: 2,
+            per_root_turn_limit: 1,
         })
         .unwrap();
     let second_turn = fixture
         .coordinator
         .begin_root_turn(&second_root.agent_id, "等待第一个释放槽位", NO_PLAN)
         .unwrap();
+    let second_child = fixture
+        .coordinator
+        .spawn_agent(
+            &second_root.agent_id,
+            &second_turn,
+            &next_tool_call_id(),
+            spawn_request("close_failure_second_child"),
+        )
+        .unwrap();
     let third_turn = fixture
         .coordinator
         .begin_root_turn(&third_root.agent_id, "等待第二个释放槽位", NO_PLAN)
         .unwrap();
+    let third_child = fixture
+        .coordinator
+        .spawn_agent(
+            &third_root.agent_id,
+            &third_turn,
+            &next_tool_call_id(),
+            spawn_request("close_failure_third_child"),
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&third_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
     fixture.execution.fail_next_close();
 
     assert!(matches!(
@@ -5030,27 +5340,43 @@ fn close_failure_does_not_block_later_start_actions() {
         CollaborationError::CommittedExecutionPending { .. }
     ));
     let launches = fixture.execution.launches();
-    assert!(launches.iter().any(|launch| launch.turn_id == second_turn));
-    assert!(launches.iter().any(|launch| launch.turn_id == third_turn));
+    assert!(
+        launches
+            .iter()
+            .any(|launch| launch.turn_id == second_child.initial_turn_id)
+    );
+    assert!(
+        launches
+            .iter()
+            .any(|launch| launch.turn_id == third_child.initial_turn_id)
+    );
     assert!(matches!(
-        fixture.coordinator.agent_status(&second_root.agent_id).unwrap(),
-        CollaborationAgentStatus::Running { turn_id } if turn_id == second_turn
+        fixture
+            .coordinator
+            .agent_status(&second_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { turn_id }
+            if turn_id == second_child.initial_turn_id
     ));
     assert!(matches!(
-        fixture.coordinator.agent_status(&third_root.agent_id).unwrap(),
-        CollaborationAgentStatus::Running { turn_id } if turn_id == third_turn
+        fixture
+            .coordinator
+            .agent_status(&third_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { turn_id }
+            if turn_id == third_child.initial_turn_id
     ));
 }
 
 /// 验证同批第一个 Turn 派发失败会独立收敛，且不阻断后续 Turn 派发。
 #[test]
 fn start_failure_is_compensated_without_blocking_later_start() {
-    let fixture = fixture(2, 2);
+    let fixture = fixture(1, 2);
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "占用第一个槽位", NO_PLAN)
         .unwrap();
-    fixture
+    let occupier = fixture
         .coordinator
         .spawn_agent(
             &fixture.root_agent_id,
@@ -5075,34 +5401,74 @@ fn start_failure_is_compensated_without_blocking_later_start() {
             per_root_turn_limit: 2,
         })
         .unwrap();
-    let failed_turn = fixture
+    let failed_root_turn = fixture
         .coordinator
         .begin_root_turn(&failed_root.agent_id, "首个派发应失败", NO_PLAN)
         .unwrap();
-    let running_turn = fixture
+    let failed_child = fixture
+        .coordinator
+        .spawn_agent(
+            &failed_root.agent_id,
+            &failed_root_turn,
+            &next_tool_call_id(),
+            spawn_request("failed_child_start"),
+        )
+        .unwrap();
+    let running_root_turn = fixture
         .coordinator
         .begin_root_turn(&running_root.agent_id, "后续派发必须成功", NO_PLAN)
+        .unwrap();
+    let running_child = fixture
+        .coordinator
+        .spawn_agent(
+            &running_root.agent_id,
+            &running_root_turn,
+            &next_tool_call_id(),
+            spawn_request("running_child_start"),
+        )
         .unwrap();
     fixture.execution.fail_next_start();
 
     assert!(matches!(
         fixture
             .coordinator
-            .close_root_session(&fixture.root_agent_id)
+            .complete_turn(
+                &occupier.agent.agent_id,
+                &occupier.initial_turn_id,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
             .unwrap_err(),
         CollaborationError::CommittedExecutionPending { .. }
     ));
     assert!(matches!(
-        fixture.coordinator.agent_status(&failed_root.agent_id).unwrap(),
-        CollaborationAgentStatus::Failed { turn_id, .. } if turn_id == failed_turn
+        fixture
+            .coordinator
+            .agent_status(&failed_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Failed { turn_id, .. }
+            if turn_id == failed_child.initial_turn_id
     ));
     assert!(matches!(
-        fixture.coordinator.agent_status(&running_root.agent_id).unwrap(),
-        CollaborationAgentStatus::Running { turn_id } if turn_id == running_turn
+        fixture
+            .coordinator
+            .agent_status(&running_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { turn_id }
+            if turn_id == running_child.initial_turn_id
     ));
     let launches = fixture.execution.launches();
-    assert!(!launches.iter().any(|launch| launch.turn_id == failed_turn));
-    assert!(launches.iter().any(|launch| launch.turn_id == running_turn));
+    assert!(
+        !launches
+            .iter()
+            .any(|launch| launch.turn_id == failed_child.initial_turn_id)
+    );
+    assert!(
+        launches
+            .iter()
+            .any(|launch| launch.turn_id == running_child.initial_turn_id)
+    );
     assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 1);
 }
 
@@ -5113,6 +5479,15 @@ fn waiting_capacity_turns_can_be_cancelled_and_stopped() {
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "占满全局容量", NO_PLAN)
+        .unwrap();
+    let occupier = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("waiting_capacity_occupier"),
+        )
         .unwrap();
     let cancelled = fixture
         .coordinator
@@ -5225,7 +5600,17 @@ fn waiting_capacity_turns_can_be_cancelled_and_stopped() {
             },
         )
         .unwrap();
-    assert_eq!(fixture.execution.launches().len(), 1);
+    fixture
+        .coordinator
+        .complete_turn(
+            &occupier.agent.agent_id,
+            &occupier.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(fixture.execution.launches().len(), 2);
     assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
 }
 
@@ -6310,7 +6695,7 @@ fn child_completion_survives_full_parent_mailbox_and_large_output() {
         completion.kind,
         crate::MailboxMessageKind::ChildTurnFinished { .. }
     ));
-    assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 1);
+    assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
 }
 
 /// 验证同一子 Agent 的新终态会替代尚未消费的旧完成通知。
@@ -6673,7 +7058,7 @@ fn close_tree_outbox_reconciles_and_survives_closed_tree_restore() {
 /// 验证 live checkpoint 的三种未决状态、steer 与 TriggerTurn 归属可确定性恢复。
 #[test]
 fn live_checkpoint_interrupts_pending_states_and_retry_preserves_steer() {
-    let fixture = fixture(2, 2);
+    let fixture = fixture(1, 2);
     let root_turn = fixture
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "保持根 Running", NO_PLAN)
@@ -6745,7 +7130,7 @@ fn live_checkpoint_interrupts_pending_states_and_retry_preserves_steer() {
             if turn_id == &waiting.initial_turn_id
     )));
 
-    let restored = restore_coordinator(fixture.store.clone(), 2, 60_000);
+    let restored = restore_coordinator(fixture.store.clone(), 1, 60_000);
     restored.restore_coordinator(checkpoint).unwrap();
     for (agent_id, turn_id) in [
         (&fixture.root_agent_id, &root_turn),
@@ -7294,7 +7679,16 @@ fn suspend_interrupts_active_and_waiting_turns_without_new_start() {
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "暂停根 Turn", NO_PLAN)
         .unwrap();
-    let child = fixture
+    let running_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("suspend-running-child"),
+            spawn_request("suspend_running_child"),
+        )
+        .unwrap();
+    let waiting_child = fixture
         .coordinator
         .spawn_agent(
             &fixture.root_agent_id,
@@ -7306,11 +7700,11 @@ fn suspend_interrupts_active_and_waiting_turns_without_new_start() {
     assert!(matches!(
         fixture
             .coordinator
-            .agent_status(&child.agent.agent_id)
+            .agent_status(&waiting_child.agent.agent_id)
             .unwrap(),
         CollaborationAgentStatus::WaitingCapacity { .. }
     ));
-    assert_eq!(fixture.execution.launches().len(), 1);
+    assert_eq!(fixture.execution.launches().len(), 2);
 
     fixture
         .coordinator
@@ -7324,7 +7718,14 @@ fn suspend_interrupts_active_and_waiting_turns_without_new_start() {
             .cancellation
             .is_cancelled()
     );
-    assert_eq!(fixture.execution.launches().len(), 1);
+    assert!(
+        fixture
+            .execution
+            .launch(&running_child.initial_turn_id)
+            .cancellation
+            .is_cancelled()
+    );
+    assert_eq!(fixture.execution.launches().len(), 2);
     assert!(matches!(
         fixture
             .coordinator
@@ -7335,9 +7736,18 @@ fn suspend_interrupts_active_and_waiting_turns_without_new_start() {
     assert!(matches!(
         fixture
             .coordinator
-            .agent_status(&child.agent.agent_id)
+            .agent_status(&running_child.agent.agent_id)
             .unwrap(),
-        CollaborationAgentStatus::Interrupted { turn_id } if turn_id == child.initial_turn_id
+        CollaborationAgentStatus::Interrupted { turn_id }
+            if turn_id == running_child.initial_turn_id
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&waiting_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Interrupted { turn_id }
+            if turn_id == waiting_child.initial_turn_id
     ));
     assert_eq!(fixture.coordinator.capacity().unwrap().global_in_use, 0);
     assert_eq!(
@@ -8125,6 +8535,15 @@ fn closing_checkpoint_restore_reserves_capacity_until_quiesce_retry() {
         .coordinator
         .begin_root_turn(&fixture.root_agent_id, "关闭中的活跃 Turn", NO_PLAN)
         .unwrap();
+    let closing_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &closing_turn,
+            &next_tool_call_id(),
+            spawn_request("closing_restore_child"),
+        )
+        .unwrap();
     fixture.execution.reject_all_quiesces();
     assert!(matches!(
         fixture
@@ -8154,6 +8573,13 @@ fn closing_checkpoint_restore_reserves_capacity_until_quiesce_retry() {
         restored.agent_status(&fixture.root_agent_id).unwrap(),
         CollaborationAgentStatus::Cancelling { turn_id } if turn_id == closing_turn
     ));
+    assert!(matches!(
+        restored
+            .agent_status(&closing_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Cancelling { turn_id }
+            if turn_id == closing_child.initial_turn_id
+    ));
     let second_root = restored
         .register_root(RootAgentRequest {
             session_id: SessionId::new("closing-restore-second-root-session").unwrap(),
@@ -8164,17 +8590,31 @@ fn closing_checkpoint_restore_reserves_capacity_until_quiesce_retry() {
     let second_turn = restored
         .begin_root_turn(&second_root.agent_id, "等待 Closing 根释放容量", NO_PLAN)
         .unwrap();
+    let second_child = restored
+        .spawn_agent(
+            &second_root.agent_id,
+            &second_turn,
+            &next_tool_call_id(),
+            spawn_request("closing_restore_waiter"),
+        )
+        .unwrap();
     assert!(matches!(
         restored.agent_status(&second_root.agent_id).unwrap(),
-        CollaborationAgentStatus::WaitingCapacity { turn_id } if turn_id == second_turn
+        CollaborationAgentStatus::Running { turn_id } if turn_id == second_turn
+    ));
+    assert!(matches!(
+        restored.agent_status(&second_child.agent.agent_id).unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { turn_id }
+            if turn_id == second_child.initial_turn_id
     ));
 
     assert_eq!(restored.reconcile_outbox().unwrap(), 1);
     assert_eq!(execution.quiesces().len(), 1);
     assert_eq!(execution.closes().len(), 1);
     assert!(matches!(
-        restored.agent_status(&second_root.agent_id).unwrap(),
-        CollaborationAgentStatus::Running { turn_id } if turn_id == second_turn
+        restored.agent_status(&second_child.agent.agent_id).unwrap(),
+        CollaborationAgentStatus::Running { turn_id }
+            if turn_id == second_child.initial_turn_id
     ));
 }
 

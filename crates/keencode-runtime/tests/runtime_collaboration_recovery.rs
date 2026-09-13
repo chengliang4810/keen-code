@@ -502,7 +502,8 @@ async fn runtime_failure_wins_over_running_collaboration_checkpoint() {
     ));
     assert_eq!(
         coordinator.capacity().expect("容量应可读取").global_in_use,
-        1
+        0,
+        "根 Turn 不应占用后台子 Agent 容量"
     );
 
     let provider = Arc::new(ScriptedProvider::new(

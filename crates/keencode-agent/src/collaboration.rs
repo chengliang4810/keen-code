@@ -14,7 +14,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time::{Instant, timeout_at};
@@ -1459,7 +1460,7 @@ pub struct RecoveredAgentTree {
     pub root_agent_id: AgentId,
     /// 根 Session 所有者标识。
     pub root_session_id: SessionId,
-    /// 该根树允许同时运行的 Turn 上限。
+    /// 该根树允许同时运行的子 Agent Turn 上限；根 Turn 不计入。
     pub per_root_turn_limit: usize,
     /// 根树开放、静止中或待清理的持久生命周期阶段。
     pub lifecycle: RecoveredRootLifecycle,
@@ -1620,10 +1621,10 @@ pub struct RecoveredCoordinator {
     pub root_turn_bindings: Vec<RecoveredRootTurnBinding>,
 }
 
-/// 全局并发上限的经校验配置。
+/// 运行中子 Agent 全局并发上限的经校验配置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollaborationLimits {
-    /// 所有根树合计允许的活跃 Turn 数。
+    /// 所有根树合计允许的运行中子 Agent Turn 数；根 Turn 不计入。
     pub global_turn_limit: usize,
 }
 
@@ -1637,6 +1638,76 @@ impl CollaborationLimits {
     }
 }
 
+/// 可在多个 Coordinator 间共享的进程级子 Agent Turn 容量。
+///
+/// 等待者只在 Turn 入队或容量变化时被驱动，不创建轮询任务。
+pub struct CollaborationGlobalTurnLimiter {
+    state: Mutex<GlobalTurnLimiterState>,
+}
+
+/// 全局 limiter 的小型驻留状态。
+struct GlobalTurnLimiterState {
+    limit: usize,
+    in_use: usize,
+    dispatching: bool,
+    coordinators: HashMap<u64, Weak<CollaborationCoordinatorInner>>,
+    waiters: VecDeque<u64>,
+    waiting: HashSet<u64>,
+}
+
+impl CollaborationGlobalTurnLimiter {
+    /// 创建一个不允许零槽位的共享子 Agent 容量限制器。
+    pub fn new(global_turn_limit: usize) -> Result<Self, CollaborationError> {
+        if global_turn_limit == 0 {
+            return Err(CollaborationError::InvalidTurnLimit);
+        }
+        Ok(Self {
+            state: Mutex::new(GlobalTurnLimiterState {
+                limit: global_turn_limit,
+                in_use: 0,
+                dispatching: false,
+                coordinators: HashMap::new(),
+                waiters: VecDeque::new(),
+                waiting: HashSet::new(),
+            }),
+        })
+    }
+
+    /// 返回当前已占用子 Turn 数与全局上限。
+    pub fn capacity(&self) -> Result<(usize, usize), CollaborationError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+        Ok((state.in_use, state.limit))
+    }
+}
+
+/// 一个子 Turn 持有的 RAII 全局槽位。
+struct GlobalTurnPermit {
+    limiter: Weak<CollaborationGlobalTurnLimiter>,
+}
+
+impl fmt::Debug for GlobalTurnPermit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("GlobalTurnPermit")
+    }
+}
+
+impl Drop for GlobalTurnPermit {
+    fn drop(&mut self) {
+        let Some(limiter) = self.limiter.upgrade() else {
+            return;
+        };
+        if let Ok(mut state) = limiter.state.lock() {
+            debug_assert!(state.in_use > 0, "全局子 Agent permit 计数不得下溢");
+            if state.in_use > 0 {
+                state.in_use -= 1;
+            }
+        }
+    }
+}
+
 /// 注册一棵新根 Agent 树的请求。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RootAgentRequest {
@@ -1644,7 +1715,7 @@ pub struct RootAgentRequest {
     pub session_id: SessionId,
     /// 根 Agent 的独立运行配置与最低 Plan 约束。
     pub profile: AgentProfile,
-    /// 该根树同时运行 Turn 的上限。
+    /// 该根树同时运行子 Agent Turn 的上限；根 Turn 不计入。
     pub per_root_turn_limit: usize,
 }
 
@@ -1703,11 +1774,11 @@ pub struct SpawnedAgent {
 /// 当前全局与各根树的槽位投影。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollaborationCapacity {
-    /// 全局正在使用的 Turn 槽位数。
+    /// 全局正在使用的子 Agent Turn 槽位数。
     pub global_in_use: usize,
-    /// 全局 Turn 槽位上限。
+    /// 全局子 Agent Turn 槽位上限。
     pub global_limit: usize,
-    /// 按根 Agent 排列的当前使用槽位与上限。
+    /// 按根 Agent 排列的当前子 Turn 使用槽位与上限。
     pub roots: Vec<(AgentId, usize, usize)>,
 }
 
@@ -2152,7 +2223,7 @@ struct QueuedTurn {
     plan_guard: PlanGuard,
 }
 
-/// 已同时预约全局与根级槽位的活跃 Turn。
+/// 已进入执行阶段的活跃 Turn。
 #[derive(Clone, Debug)]
 struct ActiveTurn {
     /// 正在执行 Turn 的 Agent。
@@ -2175,6 +2246,8 @@ struct ActiveTurn {
     plan_guard: PlanGuard,
     /// 只影响本 Turn 的独立取消令牌。
     cancellation: TurnCancellation,
+    /// 子 Agent Turn 持有的进程级全局槽位；根 Turn 固定为 `None`。
+    global_permit: Option<Arc<GlobalTurnPermit>>,
 }
 
 /// 驻留协调器中一次协作工具调用的首次输入和成功结果。
@@ -2230,9 +2303,7 @@ struct CoordinatorState {
     root_identity_namespace: AgentId,
     /// 下一棵根树应使用的持久单调序号。
     next_root_sequence: u64,
-    /// 全局 Turn 槽位上限。
-    global_limit: usize,
-    /// 全局当前已预约 Turn 槽位数。
+    /// 本 Coordinator 当前已预约的子 Agent Turn 槽位数。
     global_in_use: usize,
     /// 按根 Agent 标识索引的根树状态。
     roots: HashMap<AgentId, RootEntry>,
@@ -2355,7 +2426,17 @@ struct CompletionDraft<'a> {
 ///
 /// 所有领域转换先在候选快照上完成，事件原子追加成功后才替换驻留状态，
 /// 因此容量预约、mailbox 消费与终态释放不会产生部分提交。
+#[derive(Clone)]
 pub struct CollaborationCoordinator {
+    inner: Arc<CollaborationCoordinatorInner>,
+}
+
+/// Coordinator 的共享内核，使全局 limiter 只需保留弱引用即可事件驱动唤醒。
+struct CollaborationCoordinatorInner {
+    /// 进程内区分 Coordinator 的非持久标识。
+    coordinator_id: u64,
+    /// 可与其他 Coordinator 共享的全局子 Turn limiter。
+    global_turn_limiter: Arc<CollaborationGlobalTurnLimiter>,
     /// 事件追加与冷恢复端口。
     store: Arc<dyn CollaborationStore>,
     /// Agent Loop 启动、唤醒与全树清理端口。
@@ -2370,6 +2451,199 @@ pub struct CollaborationCoordinator {
     root_registration: Mutex<()>,
 }
 
+static NEXT_COORDINATOR_ID: AtomicU64 = AtomicU64::new(1);
+
+impl Drop for CollaborationCoordinatorInner {
+    fn drop(&mut self) {
+        if let Ok(state) = self.state.get_mut() {
+            state.active_turns.clear();
+        }
+        if let Ok(mut limiter) = self.global_turn_limiter.state.lock() {
+            limiter.coordinators.remove(&self.coordinator_id);
+            limiter.waiting.remove(&self.coordinator_id);
+            limiter
+                .waiters
+                .retain(|candidate| *candidate != self.coordinator_id);
+        }
+        let _ = self.global_turn_limiter.drive();
+    }
+}
+
+impl CollaborationGlobalTurnLimiter {
+    /// 在全局 FIFO 中最多保留一个 Coordinator 唤醒项。
+    fn enqueue(&self, coordinator_id: u64) -> Result<(), CollaborationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+        if state.coordinators.contains_key(&coordinator_id)
+            && state.waiting.insert(coordinator_id)
+        {
+            state.waiters.push_back(coordinator_id);
+        }
+        Ok(())
+    }
+
+    /// 为冷恢复中正在收敛的子 Turn 恢复已占用槽位。
+    fn force_acquire(self: &Arc<Self>) -> Result<Arc<GlobalTurnPermit>, CollaborationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+        state.in_use = state
+            .in_use
+            .checked_add(1)
+            .ok_or(CollaborationError::SequenceExhausted)?;
+        Ok(Arc::new(GlobalTurnPermit {
+            limiter: Arc::downgrade(self),
+        }))
+    }
+
+    /// 动态调整全局子 Turn 上限；降低时不取消已运行 Turn。
+    pub fn update_limit(self: &Arc<Self>, limit: usize) -> Result<(), CollaborationError> {
+        if limit == 0 {
+            return Err(CollaborationError::InvalidTurnLimit);
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+            state.limit = limit;
+        }
+        self.drive().map(|_report| ())
+    }
+
+    /// 以 Coordinator 为轮转单位消费全局 FIFO，每次只向一个等待者发放一个槽位。
+    fn drive(self: &Arc<Self>) -> Result<GlobalDispatchReport, CollaborationError> {
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+            if state.dispatching {
+                return Ok(GlobalDispatchReport::default());
+            }
+            state.dispatching = true;
+        }
+
+        let mut combined = GlobalDispatchReport::default();
+        loop {
+            let pass = self.drive_inner();
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => {
+                    poisoned.into_inner().dispatching = false;
+                    return Err(CollaborationError::StatePoisoned);
+                }
+            };
+            let (mut report, deferred_waiters) = match pass {
+                Ok(pass) => pass,
+                Err(error) => {
+                    state.dispatching = false;
+                    return Err(error);
+                }
+            };
+            combined.errors.append(&mut report.errors);
+            let should_continue = state.in_use < state.limit && !state.waiters.is_empty();
+            for coordinator_id in deferred_waiters {
+                if state.coordinators.contains_key(&coordinator_id)
+                    && state.waiting.insert(coordinator_id)
+                {
+                    state.waiters.push_back(coordinator_id);
+                }
+            }
+            if should_continue {
+                drop(state);
+                continue;
+            }
+            state.dispatching = false;
+            return Ok(combined);
+        }
+    }
+
+    /// 执行一次非重入派发；失败的 Coordinator 留在队列中等待后续事件重试。
+    fn drive_inner(
+        self: &Arc<Self>,
+    ) -> Result<(GlobalDispatchReport, Vec<u64>), CollaborationError> {
+        let mut report = GlobalDispatchReport::default();
+        let mut deferred_waiters = Vec::new();
+        loop {
+            let next = {
+                let mut state = self
+                    .state
+                    .lock()
+                    .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+                if state.in_use >= state.limit {
+                    None
+                } else {
+                    let mut next = None;
+                    while let Some(coordinator_id) = state.waiters.pop_front() {
+                        state.waiting.remove(&coordinator_id);
+                        if let Some(coordinator) = state
+                            .coordinators
+                            .get(&coordinator_id)
+                            .and_then(Weak::upgrade)
+                        {
+                            state.in_use = state
+                                .in_use
+                                .checked_add(1)
+                                .ok_or(CollaborationError::SequenceExhausted)?;
+                            next = Some((coordinator_id, coordinator));
+                            break;
+                        }
+                        state.coordinators.remove(&coordinator_id);
+                    }
+                    next
+                }
+            };
+            let Some((coordinator_id, inner)) = next else {
+                break;
+            };
+            let permit = Arc::new(GlobalTurnPermit {
+                limiter: Arc::downgrade(self),
+            });
+            let coordinator = CollaborationCoordinator { inner };
+            let outcome = coordinator.start_one_reserved_child(permit);
+            if let Some(error) = outcome.error {
+                report.errors.push((coordinator_id, error));
+            }
+            match coordinator.has_schedulable_child_turn() {
+                Ok(true) if outcome.started => self.enqueue(coordinator_id)?,
+                Ok(true) => deferred_waiters.push(coordinator_id),
+                Ok(false) => {}
+                Err(error) => report.errors.push((coordinator_id, error)),
+            }
+        }
+        Ok((report, deferred_waiters))
+    }
+}
+
+/// 一次全局驱动中按 Coordinator 归属收集的非 limiter 错误。
+#[derive(Default)]
+struct GlobalDispatchReport {
+    /// 某个 Coordinator 的持久化或执行错误不得污染其他 Session 的调用结果。
+    errors: Vec<(u64, CollaborationError)>,
+}
+
+impl GlobalDispatchReport {
+    /// 取出指定 Coordinator 在本轮驱动中的首个错误。
+    fn error_for(&self, coordinator_id: u64) -> Option<CollaborationError> {
+        self.errors
+            .iter()
+            .find(|(candidate, _error)| *candidate == coordinator_id)
+            .map(|(_candidate, error)| error.clone())
+    }
+}
+
+/// 全局 limiter 驱动一个候选子 Turn 后的结果。
+struct ReservedChildStartOutcome {
+    /// 是否已经持久提交过该子 Turn 的运行态。
+    started: bool,
+    /// 可选的持久或执行错误。
+    error: Option<CollaborationError>,
+}
+
 impl CollaborationCoordinator {
     /// 从已校验容量和端口创建一个空协调器。
     pub fn new(
@@ -2378,8 +2652,25 @@ impl CollaborationCoordinator {
         execution: Arc<dyn AgentExecutionPort>,
         ids: Arc<dyn CollaborationIdGenerator>,
     ) -> Self {
+        let global_turn_limiter = Arc::new(
+            CollaborationGlobalTurnLimiter::new(limits.global_turn_limit)
+                .expect("已校验 CollaborationLimits 必须有效"),
+        );
+        Self::new_with_global_turn_limiter(global_turn_limiter, store, execution, ids)
+    }
+
+    /// 使用进程级共享 limiter 创建 Coordinator，用于跨 Session 统一限制子 Agent。
+    pub fn new_with_global_turn_limiter(
+        global_turn_limiter: Arc<CollaborationGlobalTurnLimiter>,
+        store: Arc<dyn CollaborationStore>,
+        execution: Arc<dyn AgentExecutionPort>,
+        ids: Arc<dyn CollaborationIdGenerator>,
+    ) -> Self {
         let root_identity_namespace = ids.next_agent_id();
-        Self {
+        let coordinator_id = NEXT_COORDINATOR_ID.fetch_add(1, Ordering::Relaxed);
+        let inner = Arc::new(CollaborationCoordinatorInner {
+            coordinator_id,
+            global_turn_limiter: Arc::clone(&global_turn_limiter),
             store,
             execution,
             ids,
@@ -2387,7 +2678,6 @@ impl CollaborationCoordinator {
                 last_event_sequence: 0,
                 root_identity_namespace,
                 next_root_sequence: 1,
-                global_limit: limits.global_turn_limit,
                 global_in_use: 0,
                 roots: HashMap::new(),
                 agents: HashMap::new(),
@@ -2403,7 +2693,13 @@ impl CollaborationCoordinator {
             }),
             execution_fences: Mutex::new(HashMap::new()),
             root_registration: Mutex::new(()),
+        });
+        if let Ok(mut limiter) = global_turn_limiter.state.lock() {
+            limiter
+                .coordinators
+                .insert(coordinator_id, Arc::downgrade(&inner));
         }
+        Self { inner }
     }
 
     /// 在空协调器中原子恢复全局水位、根身份命名空间和全部未移除根树。
@@ -2655,6 +2951,12 @@ impl CollaborationCoordinator {
                     } else if recovered.lifecycle == RecoveredRootLifecycle::Closing {
                         let cancellation = TurnCancellation::new();
                         cancellation.cancel();
+                        let is_child = agent.definition.depth == AgentDepth::CHILD;
+                        let global_permit = if is_child {
+                            Some(self.inner.global_turn_limiter.force_acquire()?)
+                        } else {
+                            None
+                        };
                         candidate.active_turns.insert(
                             turn_id.clone(),
                             ActiveTurn {
@@ -2668,17 +2970,23 @@ impl CollaborationCoordinator {
                                 prompt: agent.current_turn_prompt.clone(),
                                 plan_guard,
                                 cancellation,
+                                global_permit,
                             },
                         );
-                        candidate.global_in_use = candidate
-                            .global_in_use
-                            .checked_add(1)
-                            .ok_or(CollaborationError::SequenceExhausted)?;
-                        candidate
-                            .roots
-                            .get_mut(&recovered.root_agent_id)
-                            .expect("恢复 Closing 根树已创建")
-                            .in_use += 1;
+                        if is_child {
+                            candidate.global_in_use = candidate
+                                .global_in_use
+                                .checked_add(1)
+                                .ok_or(CollaborationError::SequenceExhausted)?;
+                            let root = candidate
+                                .roots
+                                .get_mut(&recovered.root_agent_id)
+                                .expect("恢复 Closing 根树已创建");
+                            root.in_use = root
+                                .in_use
+                                .checked_add(1)
+                                .ok_or(CollaborationError::SequenceExhausted)?;
+                        }
                     }
                 }
                 candidate.agents.insert(
@@ -2732,14 +3040,13 @@ impl CollaborationCoordinator {
             });
         }
 
-        if candidate.global_in_use > candidate.global_limit
-            || candidate
-                .roots
-                .values()
-                .any(|root| root.in_use > root.turn_limit)
+        if candidate
+            .roots
+            .values()
+            .any(|root| root.in_use > root.turn_limit)
         {
             return Err(CollaborationError::InvalidRecovery {
-                message: "恢复中的 Closing 根树活跃 Turn 超过全局或根级容量".to_owned(),
+                message: "恢复中的 Closing 根树活跃子 Turn 超过根级容量".to_owned(),
             });
         }
 
@@ -2822,8 +3129,12 @@ impl CollaborationCoordinator {
         }
         *state = candidate;
         drop(state);
-        self.execute_actions(actions)?;
-        Ok(handles)
+        let result = self.execute_actions(actions);
+        let dispatch = self.request_global_dispatch();
+        match (result, dispatch) {
+            (Ok(()), Ok(())) => Ok(handles),
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        }
     }
 
     /// 注册一棵空闲根 Agent 树，但不自动创建用户 Turn。
@@ -2859,6 +3170,7 @@ impl CollaborationCoordinator {
         }
         validate_agent_profile(&request.profile)?;
         let _registration = self
+            .inner
             .root_registration
             .lock()
             .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
@@ -3237,7 +3549,7 @@ impl CollaborationCoordinator {
             let mut events = Vec::new();
             let mut actions = Vec::new();
             queue_turn(state, queued, &mut events)?;
-            schedule_available(state, &mut events, &mut actions)?;
+            schedule_root_turns(state, &mut events, &mut actions)?;
             Ok(Transition {
                 output: turn_id.clone(),
                 events,
@@ -3315,8 +3627,8 @@ impl CollaborationCoordinator {
                     maximum: MAX_AGENTS_PER_ROOT,
                 });
             }
-            let child_agent_id = self.ids.next_agent_id();
-            let child_session_id = self.ids.next_session_id();
+            let child_agent_id = self.inner.ids.next_agent_id();
+            let child_session_id = self.inner.ids.next_session_id();
             if state
                 .roots
                 .values()
@@ -3411,7 +3723,7 @@ impl CollaborationCoordinator {
             };
             let mut actions = Vec::new();
             queue_turn(state, queued, &mut events)?;
-            schedule_available(state, &mut events, &mut actions)?;
+            schedule_root_turns(state, &mut events, &mut actions)?;
             let output = SpawnedAgent {
                 agent: AgentHandle {
                     agent_id: child_agent_id.clone(),
@@ -3528,7 +3840,7 @@ impl CollaborationCoordinator {
             let source_turn = active_source_turn(state, &source_agent_id, &source_turn_id)?;
             ensure_agent_loaded(
                 state,
-                self.store.as_ref(),
+                self.inner.store.as_ref(),
                 &source_agent_id,
                 &target_agent_id,
             )?;
@@ -3576,7 +3888,7 @@ impl CollaborationCoordinator {
             } else {
                 None
             };
-            let message_id = self.ids.next_message_id();
+            let message_id = self.inner.ids.next_message_id();
             if state.collaboration_invocations.values().any(|record| {
                 matches!(
                     &record.output,
@@ -3640,7 +3952,7 @@ impl CollaborationCoordinator {
             } else {
                 None
             };
-            schedule_available(state, &mut events, &mut actions)?;
+            schedule_root_turns(state, &mut events, &mut actions)?;
             let receipt = record_collaboration_invocation(
                 state,
                 invocation_key.clone(),
@@ -4494,7 +4806,7 @@ impl CollaborationCoordinator {
             let source_turn = active_source_turn(state, &source_agent_id, &source_turn_id)?;
             ensure_agent_loaded(
                 state,
-                self.store.as_ref(),
+                self.inner.store.as_ref(),
                 &source_agent_id,
                 &target_agent_id,
             )?;
@@ -4651,7 +4963,7 @@ impl CollaborationCoordinator {
             let source_turn = active_source_turn(state, &source_agent_id, &source_turn_id)?;
             ensure_agent_loaded(
                 state,
-                self.store.as_ref(),
+                self.inner.store.as_ref(),
                 &source_agent_id,
                 &target_agent_id,
             )?;
@@ -4712,7 +5024,7 @@ impl CollaborationCoordinator {
             let mut events = Vec::new();
             let mut actions = Vec::new();
             queue_turn(state, queued, &mut events)?;
-            schedule_available(state, &mut events, &mut actions)?;
+            schedule_root_turns(state, &mut events, &mut actions)?;
             if let Some(invocation_key) = invocation_key.as_ref() {
                 let receipt = record_collaboration_invocation(
                     state,
@@ -4800,7 +5112,7 @@ impl CollaborationCoordinator {
         // 先封锁执行栅栏，再构造候选状态，避免已经排队的 StartTurn/SignalTurn 越过暂停点。
         fence_state.closing = true;
         let result = self.commit_transition(|state| {
-            materialize_evicted_agents_for_root(state, self.store.as_ref(), &root_agent_id)?;
+            materialize_evicted_agents_for_root(state, self.inner.store.as_ref(), &root_agent_id)?;
             let root = state.roots.get(&root_agent_id).cloned().ok_or_else(|| {
                 CollaborationError::AgentNotFound {
                     agent_id: root_agent_id.clone(),
@@ -4883,7 +5195,7 @@ impl CollaborationCoordinator {
         if result.is_err() {
             // Store 不确定或 checkpoint 失败时也必须保持当前实例 fail-closed；即使
             // 持久化水位尚未确认，后续领域命令仍不能继续产生新的副作用。
-            if let Ok(mut state) = self.state.lock() {
+            if let Ok(mut state) = self.inner.state.lock() {
                 if let Some(root) = state.roots.get_mut(&root_agent_id) {
                     root.suspended = true;
                 }
@@ -4891,7 +5203,12 @@ impl CollaborationCoordinator {
         }
         let (_output, actions) = result?;
         drop(fence_state);
-        self.execute_actions(actions)
+        let result = self.execute_actions(actions);
+        let dispatch = self.request_global_dispatch();
+        match (result, dispatch) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        }
     }
 
     /// 关闭根 Session；先停止调度并等待执行端静止确认，再释放容量和清理 Worktree。
@@ -4905,7 +5222,7 @@ impl CollaborationCoordinator {
                 .lock()
                 .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
             let result = self.commit_transition(|state| {
-                materialize_evicted_agents_for_root(state, self.store.as_ref(), &root_agent_id)?;
+                materialize_evicted_agents_for_root(state, self.inner.store.as_ref(), &root_agent_id)?;
                 let root = state.roots.get(&root_agent_id).cloned().ok_or_else(|| {
                     CollaborationError::AgentNotFound {
                         agent_id: root_agent_id.clone(),
@@ -5046,8 +5363,12 @@ impl CollaborationCoordinator {
             }
             result?
         };
-        self.execute_actions(actions)?;
-        Ok(output)
+        let result = self.execute_actions(actions);
+        let dispatch = self.request_global_dispatch();
+        match (result, dispatch) {
+            (Ok(()), Ok(())) => Ok(output),
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        }
     }
 
     /// 按稳定 AgentPath 解析当前驻留 Agent 身份。
@@ -5094,7 +5415,7 @@ impl CollaborationCoordinator {
         let root_agent_id =
             active_source_turn(&state, source_agent_id, source_turn_id)?.root_agent_id;
         ensure_tree_open(&state, &root_agent_id)?;
-        materialize_evicted_agents_for_root(&mut state, self.store.as_ref(), &root_agent_id)?;
+        materialize_evicted_agents_for_root(&mut state, self.inner.store.as_ref(), &root_agent_id)?;
         let mut agents = state
             .agents
             .values()
@@ -5112,7 +5433,7 @@ impl CollaborationCoordinator {
     ) -> Result<Vec<CollaborationAgentSummary>, CollaborationError> {
         let mut state = self.lock_state()?;
         ensure_tree_open(&state, root_agent_id)?;
-        materialize_evicted_agents_for_root(&mut state, self.store.as_ref(), root_agent_id)?;
+        materialize_evicted_agents_for_root(&mut state, self.inner.store.as_ref(), root_agent_id)?;
         let mut agents = state
             .agents
             .values()
@@ -5121,6 +5442,95 @@ impl CollaborationCoordinator {
             .collect::<Vec<_>>();
         agents.sort_by(|left, right| left.agent.path.cmp(&right.agent.path));
         Ok(agents)
+    }
+
+    /// 当前 Coordinator 是否存在同时满足根级容量与开放状态的子 Turn。
+    fn has_schedulable_child_turn(&self) -> Result<bool, CollaborationError> {
+        let state = self.lock_state()?;
+        Ok(state.pending_turns.iter().any(|queued| {
+            state
+                .agents
+                .get(&queued.agent_id)
+                .is_some_and(|agent| agent.definition.depth == AgentDepth::CHILD)
+                && state.roots.get(&queued.root_agent_id).is_some_and(|root| {
+                    root.lifecycle == RecoveredRootLifecycle::Open
+                        && !root.suspended
+                        && root.in_use < root.turn_limit
+                })
+        }))
+    }
+
+    /// 将当前 Coordinator 登记到全局公平队列并事件驱动调度。
+    fn request_global_dispatch(&self) -> Result<(), CollaborationError> {
+        if self.has_schedulable_child_turn()? {
+            self.inner.global_turn_limiter.enqueue(self.inner.coordinator_id)?;
+        }
+        let report = self.inner.global_turn_limiter.drive()?;
+        match report.error_for(self.inner.coordinator_id) {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// 消费 limiter 已预约的一个槽位，启动本 Coordinator 最早可运行子 Turn。
+    fn start_one_reserved_child(
+        &self,
+        permit: Arc<GlobalTurnPermit>,
+    ) -> ReservedChildStartOutcome {
+        let committed = self.commit_transition(|state| {
+            let position = state.pending_turns.iter().position(|queued| {
+                state
+                    .agents
+                    .get(&queued.agent_id)
+                    .is_some_and(|agent| agent.definition.depth == AgentDepth::CHILD)
+                    && state.roots.get(&queued.root_agent_id).is_some_and(|root| {
+                        root.lifecycle == RecoveredRootLifecycle::Open
+                            && !root.suspended
+                            && root.in_use < root.turn_limit
+                    })
+            });
+            let Some(position) = position else {
+                return Ok(Transition {
+                    output: None,
+                    events: Vec::new(),
+                    actions: Vec::new(),
+                });
+            };
+            let mut events = Vec::new();
+            let mut actions = Vec::new();
+            let turn_id = schedule_turn_at_position(
+                state,
+                position,
+                Some(Arc::clone(&permit)),
+                &mut events,
+                &mut actions,
+            )?;
+            Ok(Transition {
+                output: Some(turn_id),
+                events,
+                actions,
+            })
+        });
+        let (turn_id, actions) = match committed {
+            Ok((turn_id, actions)) => (turn_id, actions),
+            Err(error) => {
+                return ReservedChildStartOutcome {
+                    started: false,
+                    error: Some(error),
+                };
+            }
+        };
+        let Some(_turn_id) = turn_id else {
+            return ReservedChildStartOutcome {
+                started: false,
+                error: None,
+            };
+        };
+        let action_error = self.execute_actions(actions).err();
+        ReservedChildStartOutcome {
+            started: true,
+            error: action_error,
+        }
     }
 
     /// 返回当前全局与每棵根树的容量使用快照。
@@ -5132,45 +5542,51 @@ impl CollaborationCoordinator {
             .map(|root| (root.root_agent_id.clone(), root.in_use, root.turn_limit))
             .collect::<Vec<_>>();
         roots.sort_by(|left, right| left.0.cmp(&right.0));
+        let (global_in_use, global_limit) = self.inner.global_turn_limiter.capacity()?;
         Ok(CollaborationCapacity {
-            global_in_use: state.global_in_use,
-            global_limit: state.global_limit,
+            global_in_use,
+            global_limit,
             roots,
         })
     }
 
-    /// 原子更新全局活跃 Turn 上限；提升后按既有公平队列立即调度，降低时保留已运行 Turn。
+    /// 更新共享全局子 Agent Turn 上限；提升后按全局公平队列立即调度。
     pub fn update_global_turn_limit(
         &self,
         global_turn_limit: usize,
     ) -> Result<CollaborationCapacity, CollaborationError> {
-        if global_turn_limit == 0 {
-            return Err(CollaborationError::InvalidTurnLimit);
-        }
-        self.apply_transition(|state| {
-            state.global_limit = global_turn_limit;
-            let mut events = Vec::new();
-            let mut actions = Vec::new();
-            schedule_available(state, &mut events, &mut actions)?;
-            let mut roots = state
-                .roots
-                .values()
-                .map(|root| (root.root_agent_id.clone(), root.in_use, root.turn_limit))
-                .collect::<Vec<_>>();
-            roots.sort_by(|left, right| left.0.cmp(&right.0));
-            Ok(Transition {
-                output: CollaborationCapacity {
-                    global_in_use: state.global_in_use,
-                    global_limit: state.global_limit,
-                    roots,
-                },
-                events,
-                actions,
-            })
-        })
+        self.inner.global_turn_limiter.update_limit(global_turn_limit)?;
+        self.capacity()
     }
 
-    /// 原子更新全局与指定根树的 Turn 上限；降低时不取消已预约或运行的 Turn。
+    /// 更新指定根树的子 Agent Turn 上限；降低时不取消已运行 Turn。
+    pub fn update_root_turn_limit(
+        &self,
+        root_agent_id: &AgentId,
+        per_root_turn_limit: usize,
+    ) -> Result<CollaborationCapacity, CollaborationError> {
+        if per_root_turn_limit == 0 {
+            return Err(CollaborationError::InvalidTurnLimit);
+        }
+        let root_agent_id = root_agent_id.clone();
+        self.apply_transition(|state| {
+            let root = state
+                .roots
+                .get_mut(&root_agent_id)
+                .ok_or_else(|| CollaborationError::AgentNotFound {
+                    agent_id: root_agent_id.clone(),
+                })?;
+            root.turn_limit = per_root_turn_limit;
+            Ok(Transition {
+                output: (),
+                events: Vec::new(),
+                actions: Vec::new(),
+            })
+        })?;
+        self.capacity()
+    }
+
+    /// 更新共享全局与指定根树的子 Turn 上限。
     pub fn update_turn_limits(
         &self,
         root_agent_id: &AgentId,
@@ -5180,34 +5596,8 @@ impl CollaborationCoordinator {
         if global_turn_limit == 0 || per_root_turn_limit == 0 {
             return Err(CollaborationError::InvalidTurnLimit);
         }
-        let root_agent_id = root_agent_id.clone();
-        self.apply_transition(|state| {
-            ensure_tree_open(state, &root_agent_id)?;
-            state.global_limit = global_turn_limit;
-            state
-                .roots
-                .get_mut(&root_agent_id)
-                .expect("根树在上方已校验")
-                .turn_limit = per_root_turn_limit;
-            let mut events = Vec::new();
-            let mut actions = Vec::new();
-            schedule_available(state, &mut events, &mut actions)?;
-            let mut roots = state
-                .roots
-                .values()
-                .map(|root| (root.root_agent_id.clone(), root.in_use, root.turn_limit))
-                .collect::<Vec<_>>();
-            roots.sort_by(|left, right| left.0.cmp(&right.0));
-            Ok(Transition {
-                output: CollaborationCapacity {
-                    global_in_use: state.global_in_use,
-                    global_limit: state.global_limit,
-                    roots,
-                },
-                events,
-                actions,
-            })
-        })
+        self.update_root_turn_limit(root_agent_id, per_root_turn_limit)?;
+        self.update_global_turn_limit(global_turn_limit)
     }
 
     /// 返回尚未消费的 mailbox 消息快照，不改变 exactly-once 状态。
@@ -5227,7 +5617,7 @@ impl CollaborationCoordinator {
         root_agent_id: &AgentId,
     ) -> Result<RecoveredAgentTree, CollaborationError> {
         let state = self.lock_state()?;
-        checkpoint_root_with_store(&state, root_agent_id, self.store.as_ref())
+        checkpoint_root_with_store(&state, root_agent_id, self.inner.store.as_ref())
     }
 
     /// 生成不含未决 Turn 或 durable outbox 的静止导出快照。
@@ -5237,7 +5627,7 @@ impl CollaborationCoordinator {
     ) -> Result<RecoveredAgentTree, CollaborationError> {
         let state = self.lock_state()?;
         let mut checkpoint =
-            checkpoint_root_with_store(&state, root_agent_id, self.store.as_ref())?;
+            checkpoint_root_with_store(&state, root_agent_id, self.inner.store.as_ref())?;
         let has_current_turn = checkpoint.agents.iter().any(|agent| {
             matches!(
                 agent.status,
@@ -5269,13 +5659,13 @@ impl CollaborationCoordinator {
     /// 在同一状态锁下生成包含空根集、全局水位和根身份 counter 的原子快照。
     pub fn checkpoint_coordinator(&self) -> Result<RecoveredCoordinator, CollaborationError> {
         let state = self.lock_state()?;
-        checkpoint_coordinator_from_state(&state, self.store.as_ref())
+        checkpoint_coordinator_from_state(&state, self.inner.store.as_ref())
     }
 
     /// 返回测试可见的执行 fence 数量，用于证明已移除根不会形成无界墓碑。
     #[cfg(test)]
     pub(crate) fn execution_fence_count(&self) -> usize {
-        self.execution_fences
+        self.inner.execution_fences
             .lock()
             .expect("测试执行 fence 锁不应中毒")
             .len()
@@ -5315,8 +5705,12 @@ impl CollaborationCoordinator {
         actions.extend(signals.into_iter().map(PostCommitAction::SignalTurn));
         actions.extend(quiesces.into_iter().map(PostCommitAction::QuiesceTree));
         actions.extend(closes.into_iter().map(PostCommitAction::CloseTree));
-        self.execute_actions(actions)?;
-        Ok(count)
+        let result = self.execute_actions(actions);
+        let dispatch = self.request_global_dispatch();
+        match (result, dispatch) {
+            (Ok(()), Ok(())) => Ok(count),
+            (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+        }
     }
 
     /// 将一个非活跃子 Agent 从内存驱逐，保留根树身份与路径占用。
@@ -5344,7 +5738,7 @@ impl CollaborationCoordinator {
             revision,
             agent: recovered,
         };
-        self.store
+        self.inner.store
             .save_agent_checkpoint(&checkpoint)
             .map_err(|error| CollaborationError::Store {
                 message: error.message().to_owned(),
@@ -5387,9 +5781,16 @@ impl CollaborationCoordinator {
         &self,
         planner: impl FnOnce(&mut CoordinatorState) -> Result<Transition<T>, CollaborationError>,
     ) -> Result<T, CollaborationError> {
-        let (output, actions) = self.commit_transition(planner)?;
-        self.execute_actions(actions)?;
-        Ok(output)
+        let committed = self.commit_transition(planner);
+        let result = match committed {
+            Ok((output, actions)) => self.execute_actions(actions).map(|()| output),
+            Err(error) => Err(error),
+        };
+        let dispatch = self.request_global_dispatch();
+        match (result, dispatch) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
     }
 
     /// 使用稳定批次标识原子提交事件与完整 checkpoint，并对不确定结果原样重放。
@@ -5407,7 +5808,7 @@ impl CollaborationCoordinator {
             .last()
             .map_or(expected_sequence, |event| event.sequence);
         let batch_id = batch.batch_id.clone();
-        let checkpoint = checkpoint_coordinator_from_state(candidate, self.store.as_ref())?;
+        let checkpoint = checkpoint_coordinator_from_state(candidate, self.inner.store.as_ref())?;
         if checkpoint.last_event_sequence != committed_sequence {
             return Err(CollaborationError::InvalidRecovery {
                 message: "候选 checkpoint 水位与事件批次末序号不一致".to_owned(),
@@ -5415,9 +5816,9 @@ impl CollaborationCoordinator {
         }
         let commit = CollaborationTransitionCommit { batch, checkpoint };
         let first_error = match if allow_recovery_interruptions {
-            self.store.commit_recovery_transition(&commit)
+            self.inner.store.commit_recovery_transition(&commit)
         } else {
-            self.store.commit_transition(&commit)
+            self.inner.store.commit_transition(&commit)
         } {
             CollaborationAppendResult::Appended => return Ok(()),
             CollaborationAppendResult::AlreadyCommitted { current_sequence }
@@ -5462,9 +5863,9 @@ impl CollaborationCoordinator {
             CollaborationAppendResult::Indeterminate { error } => error,
         };
         match if allow_recovery_interruptions {
-            self.store.commit_recovery_transition(&commit)
+            self.inner.store.commit_recovery_transition(&commit)
         } else {
-            self.store.commit_transition(&commit)
+            self.inner.store.commit_transition(&commit)
         } {
             CollaborationAppendResult::Appended => Ok(()),
             CollaborationAppendResult::AlreadyCommitted { current_sequence }
@@ -5537,7 +5938,7 @@ impl CollaborationCoordinator {
         operation: &'static str,
     ) -> Result<(), CollaborationError> {
         let current_sequence =
-            self.store
+            self.inner.store
                 .current_sequence()
                 .map_err(|error| CollaborationError::Store {
                     message: format!("{operation}无法读取 Store 当前水位: {}", error.message()),
@@ -5604,7 +6005,7 @@ impl CollaborationCoordinator {
                     if !still_pending {
                         continue;
                     }
-                    match self.execution.start_turn(*launch) {
+                    match self.inner.execution.start_turn(*launch) {
                         AgentTurnStartResult::Accepted | AgentTurnStartResult::AlreadyAccepted => {
                             if let Err(error) = self.commit_transition(|state| {
                                 let Some(active) = state.active_turns.get(&turn_id).cloned() else {
@@ -5701,7 +6102,7 @@ impl CollaborationCoordinator {
                     let Some(pending_signal) = pending_signal else {
                         continue;
                     };
-                    if self.execution.signal_turn(pending_signal.clone()).is_ok() {
+                    if self.inner.execution.signal_turn(pending_signal.clone()).is_ok() {
                         let mut state = self.lock_state()?;
                         if state.signal_outbox.get(&signal_key).is_some_and(|current| {
                             current.activity_version <= pending_signal.activity_version
@@ -5728,7 +6129,7 @@ impl CollaborationCoordinator {
                     if !still_pending {
                         continue;
                     }
-                    match self.execution.quiesce_tree(request) {
+                    match self.inner.execution.quiesce_tree(request) {
                         AgentTreeQuiesceResult::Quiesced
                         | AgentTreeQuiesceResult::AlreadyQuiesced => {
                             match self.commit_transition(|state| {
@@ -5754,7 +6155,8 @@ impl CollaborationCoordinator {
                                     .global_in_use
                                     .checked_sub(root.in_use)
                                     .ok_or_else(|| CollaborationError::InvalidRecovery {
-                                        message: "全树静止时全局槽位计数下溢".to_owned(),
+                                        message: "全树静止时 Coordinator 子 Agent 槽位计数下溢"
+                                            .to_owned(),
                                     })?;
                                 state.active_turns.retain(|_turn_id, active| {
                                     active.root_agent_id != root_agent_id
@@ -5823,7 +6225,7 @@ impl CollaborationCoordinator {
                                     .close_outbox
                                     .insert(root_agent_id.clone(), close.clone());
                                 actions.push(PostCommitAction::CloseTree(close));
-                                schedule_available(state, &mut events, &mut actions)?;
+                                schedule_root_turns(state, &mut events, &mut actions)?;
                                 Ok(Transition {
                                     output: (),
                                     events,
@@ -5862,7 +6264,7 @@ impl CollaborationCoordinator {
                     if !still_pending {
                         continue;
                     }
-                    if let Err(error) = self.execution.close_tree(request) {
+                    if let Err(error) = self.inner.execution.close_tree(request) {
                         failures.push(format!("Agent 树清理失败: {}", error.message()));
                     } else {
                         match self.commit_transition(|state| {
@@ -5902,7 +6304,7 @@ impl CollaborationCoordinator {
                         }) {
                             Ok((_output, _actions)) => {
                                 drop(fence_state);
-                                self.execution_fences
+                                self.inner.execution_fences
                                     .lock()
                                     .map_err(|_poisoned| CollaborationError::StatePoisoned)?
                                     .remove(&root_agent_id);
@@ -5930,6 +6332,7 @@ impl CollaborationCoordinator {
         root_agent_id: &AgentId,
     ) -> Result<Arc<Mutex<RootExecutionFence>>, CollaborationError> {
         let mut fences = self
+            .inner
             .execution_fences
             .lock()
             .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
@@ -5942,6 +6345,7 @@ impl CollaborationCoordinator {
     /// 获取协调器状态锁，并将中毒转换为领域错误。
     fn lock_state(&self) -> Result<MutexGuard<'_, CoordinatorState>, CollaborationError> {
         let state = self
+            .inner
             .state
             .lock()
             .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
@@ -6659,8 +7063,62 @@ fn collaboration_invocation_text_bytes(
     })
 }
 
-/// 校验协调器级 Agent、mailbox、steer、幂等记录和总文本硬配额。
+/// 校验活跃 Turn 与 Coordinator/根树子 Agent 槽位投影严格一致。
+fn validate_turn_capacity_invariants(
+    state: &CoordinatorState,
+) -> Result<(), CollaborationError> {
+    let mut expected_by_root = HashMap::<AgentId, usize>::new();
+    let mut expected_global = 0usize;
+    for (turn_id, active) in &state.active_turns {
+        let Some(agent) = state.agents.get(&active.agent_id) else {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "活跃 Turn 引用了未知 Agent".to_owned(),
+            });
+        };
+        if turn_id != &active.turn_id
+            || agent.definition.root_agent_id != active.root_agent_id
+            || !state.roots.contains_key(&active.root_agent_id)
+        {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "活跃 Turn 标识或根树归属不一致".to_owned(),
+            });
+        }
+        let is_child = agent.definition.depth == AgentDepth::CHILD;
+        if is_child != active.global_permit.is_some() {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "根 Turn 与子 Agent 全局 permit 归属不一致".to_owned(),
+            });
+        }
+        if is_child {
+            expected_global = expected_global
+                .checked_add(1)
+                .ok_or(CollaborationError::SequenceExhausted)?;
+            let root_in_use = expected_by_root
+                .entry(active.root_agent_id.clone())
+                .or_default();
+            *root_in_use = root_in_use
+                .checked_add(1)
+                .ok_or(CollaborationError::SequenceExhausted)?;
+        }
+    }
+    if state.global_in_use != expected_global {
+        return Err(CollaborationError::InvalidRecovery {
+            message: "Coordinator 子 Agent 槽位计数与活跃 Turn 不一致".to_owned(),
+        });
+    }
+    for root in state.roots.values() {
+        if root.in_use != expected_by_root.get(&root.root_agent_id).copied().unwrap_or(0) {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "根树子 Agent 槽位计数与活跃 Turn 不一致".to_owned(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// 校验协调器容量不变量及 Agent、mailbox、steer、幂等记录和总文本硬配额。
 fn validate_coordinator_quotas(state: &CoordinatorState) -> Result<(), CollaborationError> {
+    validate_turn_capacity_invariants(state)?;
     if state.collaboration_invocations.len() > MAX_COLLABORATION_INVOCATIONS_PER_COORDINATOR {
         return Err(CollaborationError::ResourceLimitExceeded {
             resource: "协调器协作工具幂等记录数量",
@@ -8819,24 +9277,27 @@ fn queue_turn(
     Ok(())
 }
 
-/// 原子释放一个真实执行 Turn 占用的全局与根树容量。
+/// 原子释放一个子 Agent Turn 占用的 Coordinator 与根树计数。
 fn release_turn_capacity(
     state: &mut CoordinatorState,
-    root_agent_id: &AgentId,
+    active: &ActiveTurn,
 ) -> Result<(), CollaborationError> {
+    if active.global_permit.is_none() {
+        return Ok(());
+    }
     state.global_in_use =
         state
             .global_in_use
             .checked_sub(1)
             .ok_or_else(|| CollaborationError::InvalidRecovery {
-                message: "全局槽位计数下溢".to_owned(),
+                message: "Coordinator 子 Agent 槽位计数下溢".to_owned(),
             })?;
     let root =
         state
             .roots
-            .get_mut(root_agent_id)
+            .get_mut(&active.root_agent_id)
             .ok_or_else(|| CollaborationError::AgentNotFound {
-                agent_id: root_agent_id.clone(),
+                agent_id: active.root_agent_id.clone(),
             })?;
     root.in_use =
         root.in_use
@@ -8945,7 +9406,7 @@ fn complete_turn_transition(
     state.active_turns.remove(turn_id);
     state.start_outbox.remove(turn_id);
     remove_turn_signals(state, agent_id, turn_id);
-    release_turn_capacity(state, &active.root_agent_id)?;
+    release_turn_capacity(state, &active)?;
 
     let mut events = Vec::new();
     let mut actions = Vec::new();
@@ -9030,7 +9491,7 @@ fn complete_turn_transition(
         } else if matches!(mode, TurnCompletionMode::Normal) {
             claim_followup_after_turn(state, agent_id, &completed_turn, &mut events)?;
         }
-        schedule_available(state, &mut events, &mut actions)?;
+        schedule_root_turns(state, &mut events, &mut actions)?;
     }
     Ok(Transition {
         output: TurnCompletionDisposition::Committed,
@@ -9131,7 +9592,7 @@ fn interrupt_waiting_turn(
             )?;
         }
         claim_followup_after_turn(state, agent_id, &completed_turn, events)?;
-        schedule_available(state, events, actions)?;
+        schedule_root_turns(state, events, actions)?;
     }
     Ok(())
 }
@@ -9258,38 +9719,57 @@ fn interrupt_waiting_turn_for_suspend(
     Ok(())
 }
 
-/// 在同一候选状态中同时预约全局与根级槽位。
-fn schedule_available(
+/// 根 Turn 不消耗子 Agent 槽位，因此只要根树开放就立即调度。
+fn schedule_root_turns(
     state: &mut CoordinatorState,
     events: &mut Vec<CollaborationEvent>,
     actions: &mut Vec<PostCommitAction>,
 ) -> Result<(), CollaborationError> {
-    while state.global_in_use < state.global_limit {
-        let Some(position) = state.pending_turns.iter().position(|queued| {
-            state.roots.get(&queued.root_agent_id).is_some_and(|root| {
-                root.lifecycle == RecoveredRootLifecycle::Open
-                    && !root.suspended
-                    && root.in_use < root.turn_limit
-            })
-        }) else {
-            break;
-        };
-        let queued = state
-            .pending_turns
-            .remove(position)
-            .expect("已查找到的队列位置始终存在");
-        let agent = resident_agent(state, &queued.agent_id)?;
-        if agent.status
-            != (CollaborationAgentStatus::WaitingCapacity {
-                turn_id: queued.turn_id.clone(),
-            })
-        {
-            return Err(CollaborationError::InvalidRecovery {
-                message: "待调度 Turn 与 Agent 状态不一致".to_owned(),
-            });
-        }
-        let definition = agent.definition.clone();
-        let cancellation = TurnCancellation::new();
+    while let Some(position) = state.pending_turns.iter().position(|queued| {
+            state
+                .agents
+                .get(&queued.agent_id)
+                .is_some_and(|agent| agent.definition.depth == AgentDepth::ROOT)
+                && state.roots.get(&queued.root_agent_id).is_some_and(|root| {
+                    root.lifecycle == RecoveredRootLifecycle::Open && !root.suspended
+                })
+        })
+    {
+        schedule_turn_at_position(state, position, None, events, actions)?;
+    }
+    Ok(())
+}
+
+/// 将一个已选中的等待 Turn 提升为活跃 Turn。
+fn schedule_turn_at_position(
+    state: &mut CoordinatorState,
+    position: usize,
+    global_permit: Option<Arc<GlobalTurnPermit>>,
+    events: &mut Vec<CollaborationEvent>,
+    actions: &mut Vec<PostCommitAction>,
+) -> Result<TurnId, CollaborationError> {
+    let queued = state
+        .pending_turns
+        .remove(position)
+        .expect("已查找到的队列位置始终存在");
+    let agent = resident_agent(state, &queued.agent_id)?;
+    if agent.status
+        != (CollaborationAgentStatus::WaitingCapacity {
+            turn_id: queued.turn_id.clone(),
+        })
+    {
+        return Err(CollaborationError::InvalidRecovery {
+            message: "待调度 Turn 与 Agent 状态不一致".to_owned(),
+        });
+    }
+    let definition = agent.definition.clone();
+    let is_child = definition.depth == AgentDepth::CHILD;
+    if is_child != global_permit.is_some() {
+        return Err(CollaborationError::InvalidRecovery {
+            message: "根 Turn 与子 Agent 全局槽位归属不一致".to_owned(),
+        });
+    }
+    if is_child {
         state.global_in_use = state
             .global_in_use
             .checked_add(1)
@@ -9298,72 +9778,79 @@ fn schedule_available(
             .roots
             .get_mut(&queued.root_agent_id)
             .expect("待调度 Turn 的根树在上方已校验");
+        if root.in_use >= root.turn_limit {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "子 Agent Turn 超过根树并发上限".to_owned(),
+            });
+        }
         root.in_use = root
             .in_use
             .checked_add(1)
             .ok_or(CollaborationError::SequenceExhausted)?;
-        let active = ActiveTurn {
-            agent_id: queued.agent_id.clone(),
-            source_agent_id: queued.source_agent_id.clone(),
-            root_agent_id: queued.root_agent_id.clone(),
-            turn_id: queued.turn_id.clone(),
-            parent_turn_id: queued.parent_turn_id.clone(),
-            root_turn_id: queued.root_turn_id.clone(),
-            cause: queued.cause.clone(),
-            prompt: queued.prompt.clone(),
-            plan_guard: queued.plan_guard,
-            cancellation: cancellation.clone(),
-        };
-        state
-            .active_turns
-            .insert(queued.turn_id.clone(), active.clone());
-        push_event(
-            state,
-            events,
-            &definition,
-            EventLink {
-                source_agent_id: queued.source_agent_id.clone(),
-                turn_id: Some(queued.turn_id.clone()),
-                parent_turn_id: queued.parent_turn_id.clone(),
-                root_turn_id: Some(queued.root_turn_id.clone()),
-            },
-            CollaborationEventKind::AgentTurnStarted {
-                cause: queued.cause.clone(),
-            },
-        )?;
-        set_status(
-            state,
-            &queued.agent_id,
-            CollaborationAgentStatus::Running {
-                turn_id: queued.turn_id.clone(),
-            },
-            EventLink {
-                source_agent_id: queued.source_agent_id,
-                turn_id: Some(queued.turn_id.clone()),
-                parent_turn_id: queued.parent_turn_id.clone(),
-                root_turn_id: Some(queued.root_turn_id.clone()),
-            },
-            events,
-        )?;
-        let launch = AgentTurnLaunch {
-            agent: definition.clone(),
-            turn_id: queued.turn_id.clone(),
-            parent_turn_id: queued.parent_turn_id,
-            root_turn_id: queued.root_turn_id,
-            cause: queued.cause,
-            prompt: queued.prompt,
-            cancellation,
-            plan_guard: queued.plan_guard,
-            capabilities: AgentCapabilities {
-                can_spawn_agent: definition.depth.can_spawn_child(),
-            },
-        };
-        state
-            .start_outbox
-            .insert(launch.turn_id.clone(), launch.clone());
-        actions.push(PostCommitAction::StartTurn(Box::new(launch)));
     }
-    Ok(())
+    let cancellation = TurnCancellation::new();
+    let active = ActiveTurn {
+        agent_id: queued.agent_id.clone(),
+        source_agent_id: queued.source_agent_id.clone(),
+        root_agent_id: queued.root_agent_id.clone(),
+        turn_id: queued.turn_id.clone(),
+        parent_turn_id: queued.parent_turn_id.clone(),
+        root_turn_id: queued.root_turn_id.clone(),
+        cause: queued.cause.clone(),
+        prompt: queued.prompt.clone(),
+        plan_guard: queued.plan_guard,
+        cancellation: cancellation.clone(),
+        global_permit,
+    };
+    state
+        .active_turns
+        .insert(queued.turn_id.clone(), active.clone());
+    push_event(
+        state,
+        events,
+        &definition,
+        EventLink {
+            source_agent_id: queued.source_agent_id.clone(),
+            turn_id: Some(queued.turn_id.clone()),
+            parent_turn_id: queued.parent_turn_id.clone(),
+            root_turn_id: Some(queued.root_turn_id.clone()),
+        },
+        CollaborationEventKind::AgentTurnStarted {
+            cause: queued.cause.clone(),
+        },
+    )?;
+    set_status(
+        state,
+        &queued.agent_id,
+        CollaborationAgentStatus::Running {
+            turn_id: queued.turn_id.clone(),
+        },
+        EventLink {
+            source_agent_id: queued.source_agent_id,
+            turn_id: Some(queued.turn_id.clone()),
+            parent_turn_id: queued.parent_turn_id.clone(),
+            root_turn_id: Some(queued.root_turn_id.clone()),
+        },
+        events,
+    )?;
+    let launch = AgentTurnLaunch {
+        agent: definition.clone(),
+        turn_id: queued.turn_id.clone(),
+        parent_turn_id: queued.parent_turn_id,
+        root_turn_id: queued.root_turn_id,
+        cause: queued.cause,
+        prompt: queued.prompt,
+        cancellation,
+        plan_guard: queued.plan_guard,
+        capabilities: AgentCapabilities {
+            can_spawn_agent: definition.depth.can_spawn_child(),
+        },
+    };
+    state
+        .start_outbox
+        .insert(launch.turn_id.clone(), launch.clone());
+    actions.push(PostCommitAction::StartTurn(Box::new(launch)));
+    Ok(queued.turn_id)
 }
 
 /// 递增 Agent 活动版本并安排提交后广播。
