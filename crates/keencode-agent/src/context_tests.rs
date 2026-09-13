@@ -1,6 +1,7 @@
 //! 上下文预算、压缩与 Runner 恢复语义测试。
 
 use std::future::pending;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use futures_util::{StreamExt, stream};
@@ -324,6 +325,33 @@ impl AgentCommitSink for RejectCompactionCommitSink {
     }
 }
 
+/// 允许压缩记录落盘，但拒绝压缩后重新读取提示段。
+struct RejectPostCompactionHintSink;
+
+impl AgentCommitSink for RejectPostCompactionHintSink {
+    fn commit_model_round_usage(
+        &self,
+        _usage: &ModelRoundUsage,
+    ) -> Result<(), AgentCommitSinkError> {
+        Ok(())
+    }
+
+    fn preflight_tool_round(
+        &self,
+        round: &AgentToolRoundPreflight,
+    ) -> Result<Box<dyn AgentToolRoundReservation>, AgentToolRoundPreflightError> {
+        NoopAgentCommitSink.preflight_tool_round(round)
+    }
+
+    fn commit(&self, event: &AgentCommitEvent) -> Result<(), AgentCommitSinkError> {
+        if matches!(event.kind(), AgentCommitEventKind::RoundCommitted { .. }) {
+            Err(AgentCommitSinkError::rejected("测试拒绝压缩后提示提交"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// 等待取消的压缩器，用于验证中途取消不会提交摘要。
 struct WaitingCompressor {
     /// 摘要 Future 已开始等待的通知。
@@ -352,6 +380,122 @@ impl ContextCompressor for WaitingCompressor {
             Err(ContextError::Cancelled)
         })
     }
+}
+
+/// 记录逻辑压缩前后及最终失败观察边界的测试 Hook。
+struct CompactionProbeHook {
+    /// PreCompact 收到的完整上下文。
+    pre: Mutex<Vec<PreCompactHookContext>>,
+    /// PostCompact 收到的已采纳记录。
+    post: Mutex<Vec<PostCompactHookContext>>,
+    /// OnError 收到的最终非取消失败。
+    errors: Mutex<Vec<OnErrorHookContext>>,
+    /// PreCompact 的固定结果。
+    pre_result: Result<(), HookCallbackError>,
+    /// PostCompact 的固定结果。
+    post_result: Result<(), HookCallbackError>,
+    /// OnError 调用次数。
+    on_error_count: AtomicUsize,
+}
+
+impl CompactionProbeHook {
+    /// 创建前后均放行且只记录上下文的压缩 Hook。
+    fn new() -> Self {
+        Self {
+            pre: Mutex::new(Vec::new()),
+            post: Mutex::new(Vec::new()),
+            errors: Mutex::new(Vec::new()),
+            pre_result: Ok(()),
+            post_result: Ok(()),
+            on_error_count: AtomicUsize::new(0),
+        }
+    }
+
+    /// 令 PreCompact 返回固定错误。
+    fn failing_pre(mut self) -> Self {
+        self.pre_result = Err(HookCallbackError::new(
+            "pre_compact_failed",
+            "合成 PreCompact 失败",
+        ));
+        self
+    }
+
+    /// 令 PostCompact 返回固定错误。
+    fn failing_post(mut self) -> Self {
+        self.post_result = Err(HookCallbackError::new(
+            "post_compact_failed",
+            "合成 PostCompact 失败",
+        ));
+        self
+    }
+
+    /// 返回 PreCompact 上下文快照。
+    fn pre_contexts(&self) -> Vec<PreCompactHookContext> {
+        self.pre.lock().expect("PreCompact 锁不应损坏").clone()
+    }
+
+    /// 返回 PostCompact 上下文快照。
+    fn post_contexts(&self) -> Vec<PostCompactHookContext> {
+        self.post.lock().expect("PostCompact 锁不应损坏").clone()
+    }
+
+    /// 返回 OnError 上下文快照。
+    fn error_contexts(&self) -> Vec<OnErrorHookContext> {
+        self.errors.lock().expect("OnError 锁不应损坏").clone()
+    }
+}
+
+impl AgentHook for CompactionProbeHook {
+    /// 返回压缩生命周期测试使用的稳定名称。
+    fn name(&self) -> &str {
+        "compaction-probe"
+    }
+
+    /// 记录压缩触发、轮次和估算边界。
+    fn pre_compact(
+        &self,
+        context: PreCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.pre
+            .lock()
+            .expect("PreCompact 锁不应损坏")
+            .push(context);
+        let result = self.pre_result.clone();
+        Box::pin(async move { result })
+    }
+
+    /// 记录已经被 active transcript 采纳的唯一结果记录。
+    fn post_compact(
+        &self,
+        context: PostCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.post
+            .lock()
+            .expect("PostCompact 锁不应损坏")
+            .push(context);
+        let result = self.post_result.clone();
+        Box::pin(async move { result })
+    }
+
+    /// 记录最终非取消失败，始终放行以便断言触发边界。
+    fn on_error(
+        &self,
+        context: OnErrorHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.on_error_count.fetch_add(1, Ordering::SeqCst);
+        self.errors
+            .lock()
+            .expect("OnError 锁不应损坏")
+            .push(context);
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// 把单个测试 Hook 注册为 Runner 使用的默认预算 Runtime。
+fn runtime_with_hook(hook: Arc<dyn AgentHook>) -> HookRuntime {
+    let mut registry = HookRegistry::new();
+    registry.register(hook).expect("测试 Hook 应成功注册");
+    HookRuntime::new(registry, HookLimits::default()).expect("默认 Hook 预算应有效")
 }
 
 /// Provider 请求阶段永不就绪，用于验证内置摘要器能主动中断。
@@ -1229,10 +1373,12 @@ async fn runner_precompresses_before_model_round() {
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
         .with_commit_sink(commit_sink.clone())
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner
         .run_turn(turn_request_with_output(atomic_tool_history(), 16))
         .await;
@@ -1284,6 +1430,10 @@ async fn runner_precompresses_before_model_round() {
         event.kind(),
         AgentStreamEventKind::ContextCompactionFailed { .. }
     )));
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
 }
 
 /// 派生输出默认随主请求发送，摘要请求仍然使用策略的独立输出覆盖。
@@ -1334,10 +1484,12 @@ async fn runner_precompression_failure_keeps_original_transcript() {
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
         .with_commit_sink(commit_sink.clone())
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
 
     let result = runner
         .run_turn(turn_request_with_output(original_messages.clone(), 16))
@@ -1375,6 +1527,9 @@ async fn runner_precompression_failure_keeps_original_transcript() {
             failure_kind: ContextCompactionFailureKind::InvalidResult
         }
     ));
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert!(hook.error_contexts().is_empty());
 }
 
 /// 首轮没有可压缩历史时，软阈值不能替代包含输出预留的完整请求硬预算。
@@ -1542,8 +1697,10 @@ async fn runner_cancellation_interrupts_soft_precompression() {
         compressor.clone(),
     )
     .unwrap();
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
-        .with_context_manager(context);
+        .with_context_manager(context)
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let mut request = turn_request_with_output(atomic_tool_history(), 16);
     let cancellation = TurnCancellation::new();
     request.set_cancellation(cancellation.clone());
@@ -1562,6 +1719,9 @@ async fn runner_cancellation_interrupts_soft_precompression() {
         Some(TerminalReason::Cancelled)
     );
     assert!(result.compactions.is_empty() && provider.requests().unwrap().is_empty());
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert!(hook.error_contexts().is_empty());
 }
 
 /// 估算允许提前压缩降级后，Provider 的真实超限仍进入强制恢复并在无历史时停止。
@@ -1659,8 +1819,10 @@ async fn runner_forced_compaction_retries_once_without_new_round() {
         ],
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
-        .with_commit_sink(commit_sink.clone());
+        .with_commit_sink(commit_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner.run_turn(turn_request(atomic_tool_history())).await;
 
     assert!(result.is_success());
@@ -1684,6 +1846,103 @@ async fn runner_forced_compaction_retries_once_without_new_round() {
     );
     assert_eq!(usages[0].model_round(), 1);
     assert_eq!(usages[1].purpose(), ModelCallPurpose::AgentRound);
+    let pre = hook.pre_contexts();
+    let post = hook.post_contexts();
+    assert_eq!(pre.len(), 1);
+    assert_eq!(post.len(), 1);
+    assert_eq!(pre[0].trigger, ContextCompressionTrigger::ProviderOverflow);
+    assert_eq!(pre[0].model_round, 1);
+    assert!(pre[0].estimated_tokens > pre[0].target_tokens);
+    assert_eq!(post[0].model_round, 1);
+    assert_eq!(post[0].record, result.compactions[0]);
+    assert!(hook.error_contexts().is_empty());
+}
+
+/// PreCompact 失败必须阻止压缩器启动，并以 Hook 错误终止后通知一次 OnError。
+#[tokio::test]
+async fn runner_pre_compact_failure_skips_compressor_and_post_hook() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不得请求主模型")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试上下文策略应有效");
+    let hook = Arc::new(CompactionProbeHook::new().failing_pre());
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_hook_runtime(runtime_with_hook(hook.clone()))
+        .run_turn(turn_request_with_output(atomic_tool_history(), 16))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::Hook(HookError::Callback {
+            phase: HookPhase::PreCompact,
+            hook_name: "compaction-probe".to_owned(),
+            code: "pre_compact_failed".to_owned(),
+            message: "合成 PreCompact 失败".to_owned(),
+        }))
+    );
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert_eq!(hook.error_contexts().len(), 1);
+    assert!(compressor.requests().is_empty());
+    assert!(provider.requests().expect("应能读取请求").is_empty());
+    assert!(result.compactions.is_empty());
+}
+
+/// PostCompact 失败发生在采纳边界之后：记录保留，但 Turn 不能报告成功。
+#[tokio::test]
+async fn runner_post_compact_failure_keeps_adopted_record() {
+    let original = atomic_tool_history();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不得请求主模型")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("有效摘要"));
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor,
+    )
+    .expect("测试上下文策略应有效");
+    let hook = Arc::new(CompactionProbeHook::new().failing_post());
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_hook_runtime(runtime_with_hook(hook.clone()))
+        .run_turn(turn_request_with_output(original.clone(), 16))
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Hook(HookError::Callback {
+            phase: HookPhase::PostCompact,
+            ref hook_name,
+            ref code,
+            ..
+        })) if hook_name == "compaction-probe" && code == "post_compact_failed"
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.compactions.len(), 1);
+    assert_ne!(result.messages.as_slice(), original.as_slice());
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
+    assert_eq!(hook.error_contexts().len(), 1);
+    assert!(provider.requests().expect("应能读取请求").is_empty());
 }
 
 /// 唯一恢复请求仍超限时必须返回稳定 ContextBlocked，不能再次摘要或递增 Round。
@@ -2892,10 +3151,12 @@ async fn runner_micro_only_compaction_completes_without_summary_model() {
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
         .with_commit_sink(commit_sink.clone())
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let mut messages = vec![
         Message::text(MessageRole::System, "系统约束"),
         Message::text(MessageRole::User, "旧任务"),
@@ -2956,6 +3217,10 @@ async fn runner_micro_only_compaction_completes_without_summary_model() {
     let decoded: ContextCompressionRecord =
         serde_json::from_slice(&encoded).expect("投影记录应可反序列化");
     assert_eq!(decoded, result.compactions[0]);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
 }
 
 /// 投影收益不足时先应用投影再摘要：摘要输入是缩水后的历史，两条记录按
@@ -2970,9 +3235,11 @@ async fn runner_micro_then_full_summarizes_projected_history() {
         [text_reply("历史摘要"), text_reply("最终回答")],
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
-        .with_commit_sink(commit_sink.clone());
+        .with_commit_sink(commit_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let mut messages = vec![
         Message::text(MessageRole::System, "系统约束"),
         Message::text(MessageRole::User, "旧任务"),
@@ -3017,6 +3284,10 @@ async fn runner_micro_then_full_summarizes_projected_history() {
     );
     assert_eq!(usages[1].purpose(), ModelCallPurpose::AgentRound);
     assert_tool_pairs_intact(&result.messages);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[1]);
 }
 
 /// 摘要返回空文本时预压缩臂按现状容忍继续：投影收益保留、缩水历史继续使用。
@@ -3031,10 +3302,12 @@ async fn runner_micro_gains_survive_tolerated_summary_failure() {
     ));
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(bounded_test_context(provider.clone()))
         .with_commit_sink(commit_sink.clone())
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let mut messages = vec![
         Message::text(MessageRole::System, "系统约束"),
         Message::text(MessageRole::User, "旧任务"),
@@ -3079,6 +3352,70 @@ async fn runner_micro_gains_survive_tolerated_summary_failure() {
         commit_sink.events().as_slice(),
         [event] if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })
     ));
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
+    assert!(hook.error_contexts().is_empty());
+}
+
+/// Full 摘要软失败后虽然已采纳 Micro，但 PostCompact 失败必须终止 Turn，
+/// 不能被“原请求仍装得下”的软容忍分支吞掉。
+#[tokio::test]
+async fn runner_micro_adoption_post_hook_failure_overrides_soft_summary_failure() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("   "), text_reply("不得到达")],
+    ));
+    let hook = Arc::new(CompactionProbeHook::new().failing_post());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
+    let mut messages = vec![
+        Message::text(MessageRole::System, "系统约束"),
+        Message::text(MessageRole::User, "旧任务"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(2_000)));
+    messages.extend(tool_exchange_round("call-2", "y".repeat(200)));
+    messages.extend(tool_exchange_round("call-3", "z".repeat(200)));
+    messages.push(Message::text(MessageRole::Assistant, "中间结论"));
+    messages.push(Message::text(MessageRole::User, "当前任务"));
+
+    let result = runner
+        .run_turn(turn_request_with_output(messages, 16))
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Hook(HookError::Callback {
+            phase: HookPhase::PostCompact,
+            ref hook_name,
+            ref code,
+            ..
+        })) if hook_name == "compaction-probe" && code == "post_compact_failed"
+    ));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert_eq!(hook.post_contexts().len(), 1);
+    let errors = hook.error_contexts();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].terminal_reason, TerminalReason::Failed);
+    assert!(matches!(
+        &errors[0].error,
+        AgentRunError::Hook(HookError::Callback {
+            phase: HookPhase::PostCompact,
+            ..
+        })
+    ));
 }
 
 /// 摘要模型传输失败时预压缩臂按现状终止 Turn，但已回收的投影收益不丢。
@@ -3091,8 +3428,10 @@ async fn runner_micro_gains_survive_fatal_summary_failure() {
         },
         [failed_summary_reply(), text_reply("不得到达")],
     ));
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
-        .with_context_manager(bounded_test_context(provider.clone()));
+        .with_context_manager(bounded_test_context(provider.clone()))
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let mut messages = vec![
         Message::text(MessageRole::System, "系统约束"),
         Message::text(MessageRole::User, "旧任务"),
@@ -3130,6 +3469,11 @@ async fn runner_micro_gains_survive_fatal_summary_failure() {
     assert!(projected_tool_text.contains("已压缩，省略"));
     // 只有失败的摘要请求发生，主 Round 不再发起。
     assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
+    assert_eq!(hook.error_contexts().len(), 1);
 }
 
 /// Micro 投影记录必须可无损 JSON 往返、冷恢复重放一致，且重复应用幂等。
@@ -3334,7 +3678,9 @@ async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_
             text_reply("兜底后恢复"),
         ],
     ));
-    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default());
+    let hook = Arc::new(CompactionProbeHook::new());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner
         .run_turn(turn_request(many_old_messages(30, 2_000)))
         .await;
@@ -3379,6 +3725,11 @@ async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_
     );
     let requests = provider.requests().expect("应能读取 Provider 请求");
     assert_eq!(requests.len(), 3);
+    // 仅失败的逻辑压缩触发一次 PreCompact；机械截断不伪装成逻辑压缩，
+    // 因而不会额外触发 PreCompact/PostCompact。
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert!(hook.error_contexts().is_empty());
     // 记录可整体替换语义重放。
     let replayed = record
         .apply(
@@ -3575,6 +3926,66 @@ async fn runner_summary_success_emits_bounded_read_hint() {
             })
     }));
     assert!(result.messages.len() > original_len.saturating_sub(3));
+}
+
+/// PostCompact 以 active Transcript 已采纳记录为边界；其后的重新读取提示提交失败
+/// 仍不得抹去已经发生的 PostCompact 通知。
+#[tokio::test]
+async fn runner_post_compact_precedes_read_hint_commit() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            context_overflow_reply(),
+            text_reply("区间摘要"),
+            text_reply("不得到达"),
+        ],
+    ));
+    let hook = Arc::new(CompactionProbeHook::new());
+    let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_commit_sink(Arc::new(RejectPostCompactionHintSink))
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
+    let messages = vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::text(MessageRole::User, "旧问题".repeat(300)),
+        Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::text("读取文件"),
+                ContentBlock::ToolCall {
+                    tool_call: ToolCall::new(
+                        "call-1",
+                        "Read",
+                        json!({ "file_path": "src/old_module.rs" }),
+                    ),
+                },
+            ],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text("call-1", "旧文件内容".repeat(300), false),
+            }],
+        ),
+        Message::text(MessageRole::User, "近期问题"),
+        Message::text(MessageRole::Assistant, "近期回答"),
+    ];
+
+    let result = runner.run_turn(turn_request(messages)).await;
+
+    assert!(matches!(result.error, Some(AgentRunError::CommitSink(_))));
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.compactions.len(), 1);
+    let post = hook.post_contexts();
+    assert_eq!(post.len(), 1);
+    assert_eq!(post[0].record, result.compactions[0]);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert_eq!(hook.error_contexts().len(), 1);
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 2);
+    assert!(!result.messages.iter().any(|message| {
+        message.content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.contains("PostCompactionReadHint"))
+        })
+    }));
 }
 
 /// 回注：被替换区间内没有 read 调用时不提交空提示。
@@ -4131,9 +4542,11 @@ async fn runner_predictive_compaction_fires_before_budget_line() {
         [text_reply("最终回答")],
     ));
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
         .with_context_manager(context)
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner
         .run_turn(turn_request_with_output(atomic_tool_history(), 16))
         .await;
@@ -4157,6 +4570,10 @@ async fn runner_predictive_compaction_fires_before_budget_line() {
             .iter()
             .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextWaterLevel { .. }))
     );
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert_eq!(hook.post_contexts().len(), 1);
+    assert_eq!(hook.post_contexts()[0].record, result.compactions[0]);
+    assert!(hook.error_contexts().is_empty());
 }
 
 /// 返回带明确输入用量与缓存读取的工具调用 Round，用于锚定测试的多轮调用。
@@ -4229,10 +4646,12 @@ async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
         .expect("合成工具应能注册");
     let commit_sink = Arc::new(RecordingCommitSink::default());
     let event_sink = Arc::new(RecordingContextEventSink::default());
+    let hook = Arc::new(CompactionProbeHook::new());
     let runner = AgentRunner::new(provider, registry, RunLimits::default())
         .with_context_manager(context)
         .with_commit_sink(commit_sink.clone())
-        .with_event_sink(event_sink.clone());
+        .with_event_sink(event_sink.clone())
+        .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner
         .run_turn(turn_request(vec![
             Message::text(MessageRole::User, "旧".repeat(2_000)),
@@ -4261,6 +4680,9 @@ async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
         })
         .collect();
     assert_eq!(water_levels, [(79, 70)]);
+    assert!(hook.pre_contexts().is_empty());
+    assert!(hook.post_contexts().is_empty());
+    assert!(hook.error_contexts().is_empty());
 }
 
 /// Runner 集成（#23）：水位回落到阈值以下后再次跨越时重新发送水位事件。

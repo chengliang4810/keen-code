@@ -28,6 +28,13 @@ KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息�
 
 默认普通消息不带内部标记；即使用户输入同样的提示词，也正常展示。修复前已存储且没有内部标记的消息不会按正文猜测来源或自动改写。
 
+## 2026-09-13 失败与压缩 Hook 增量
+
+- 最终非取消失败写入 Turn 终态后触发一次 StopFailure；其命令输出和退出码不参与决策，Hook 自身失败不覆盖原始错误，也不阻止后续 StopFailure 观察者。
+- StopFailure 的 `error` 是 matcher 使用的稳定分类，`error_details` 是详细错误文本；不保留非官方 `error_type` 字段。
+- 每次真正开始的逻辑压缩最多触发一对 PreCompact/PostCompact。PostCompact 只在结果已被当前 Transcript 采纳后触发；Micro 投影、完整摘要及二者组合共用一次逻辑生命周期，机械截断不触发。
+- KeenCode 仅有自动压缩入口，因此 PreCompact/PostCompact 的 Claude 兼容 `trigger` 和 matcher 值固定为 `auto`；预算触发或 Provider 超限原因另以扩展字段提供。
+
 ## 已落地的适配
 
 | 范围 | 当前行为 |
@@ -44,14 +51,16 @@ KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息�
 | 插件数据 | `<KeenCode 数据根>/plugins/data/<plugin@marketplace>`，版本更新不改变此路径，不将插件数据写入其源码目录 |
 | Shell 插值 | 普通 Shell 参数展开保持原文；Shell command 禁止 `${user_config.*}` 源码插值，使用 `args` 或配置环境变量传值 |
 | Hook 执行 | command 的 Bash/PowerShell 选择、直接执行 `args`、`timeout`、`async:false`；工作目录为当前项目；复用进程树取消与输出限制 |
-| Hook 匹配 | 区分大小写的正则 matcher，空串/缺省/`*` 匹配全部；Stop 不按 matcher 筛选 |
-| 生命周期 | SessionStart 在会话首次根回合执行时触发一次，UserPromptSubmit 在根回合模型采样前触发；SubagentStart 在每个子代理首次采样前触发，支持 agent_type 匹配、agent_id/agent_type 输入和 additionalContext 注入；已有 PreToolUse/PostToolUse/PostToolUseFailure/Stop 接收标准字段 |
-| 决策 | `hookSpecificOutput.additionalContext`、PreToolUse 的 allow/deny/updatedInput、Stop 的 block/reason；退出码 2 按事件阻断并优先使用 JSON 阻断理由，SessionStart 错误仅记录；其他退出码仍采用有效 JSON 决策，无有效决策时为非阻断错误 |
+| Hook 匹配 | 区分大小写的正则 matcher，空串/缺省/`*` 匹配全部；Stop 不按 matcher 筛选；StopFailure 按稳定错误分类匹配，PreCompact/PostCompact 统一按 `auto` 匹配 |
+| 生命周期 | SessionStart 在会话首次根回合执行时触发一次，UserPromptSubmit 在根回合模型采样前触发；SubagentStart 在每个子代理首次采样前触发，支持 agent_type 匹配、agent_id/agent_type 输入和 additionalContext 注入；已有 PreToolUse/PostToolUse/PostToolUseFailure/Stop 接收标准字段；最终非取消失败终态触发一次 StopFailure，每次逻辑压缩最多触发一对 PreCompact/PostCompact，机械截断不触发 |
+| 决策 | `hookSpecificOutput.additionalContext`、PreToolUse 的 allow/deny/updatedInput、Stop 的 block/reason；退出码 2 按事件阻断并优先使用 JSON 阻断理由，SessionStart 错误仅记录；其他退出码仍采用有效 JSON 决策，无有效决策时为非阻断错误；StopFailure 的输出与退出码不参与决策，且其自身失败不覆盖原始 Turn 错误 |
 | 故障隔离 | 插件提取失败不会阻断其他插件；单个插件 Hook 配置错误不会阻断其他插件 Hook；命令启动、超时、无效输出记录为非阻断错误；未实现事件产生扩展诊断和日志 |
 | 计划模式 | 跳过外部进程 Hook并记录原因，保留只读守卫；不会为了插件兼容绕过计划模式 |
 | 日志 | Hook 开始、结束、耗时、退出码、标准错误与解析/配置错误进入现有日志链路；不记录 stdin、命令正文或返回上下文全文 |
 
 命令默认超时为 600 秒，UserPromptSubmit 为 30 秒；显式 timeout 需大于 0 且不超过 3600 秒。单流输出上限 1 MiB，Agent 每回合 Hook 上下文仍受 64 KiB 总预算约束。
+
+StopFailure 命令输入遵循官方字段：`error` 为 matcher 使用的稳定错误分类，`error_details` 为详细错误文本，不保留非官方 `error_type` 字段。PreCompact/PostCompact 对外均报告 `trigger: "auto"`；KeenCode 没有手动压缩入口，内部预算或 Provider 超限原因另以扩展字段提供。
 
 实际开发优先级以 [291 个市场条目的固定版本核对](audits/claude-market-2026-09-07.md) 为准。以下是规范差异清单，不再把所有条目视为必须一次实现的开发待办。
 
@@ -64,7 +73,7 @@ KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息�
 | 范围 | 仍待补齐的准确内容 |
 | --- | --- |
 | Hook 类型与调度 | `async:true`、`asyncRewake`、`prompt`/`agent`/`http`/`mcp_tool`、handler `if`；`statusMessage` 当前被忽略，没有执行进度展示 |
-| Hook 事件 | 当前只接入 SessionStart、UserPromptSubmit、SubagentStart、PreToolUse、PostToolUse、PostToolUseFailure、Stop。其余事件均无入口，包括 SessionEnd、SubagentStop、PreCompact/PostCompact、Setup、InstructionsLoaded、UserPromptExpansion、MessageDisplay、PostToolBatch、Notification、TaskCreated/Completed、StopFailure、ConfigChange、CwdChanged、DirectoryAdded、FileChanged、WorktreeCreate/Remove、PreModelSwitch/PostModelSwitch、Elicitation/ElicitationResult；权限和团队事件另见产品边界 |
+| Hook 事件 | 当前接入 SessionStart、UserPromptSubmit、SubagentStart、PreToolUse、PostToolUse、PostToolUseFailure、Stop、StopFailure（内部阶段名 OnError）及 PreCompact/PostCompact。其余事件均无入口，包括 SessionEnd、SubagentStop、Setup、InstructionsLoaded、UserPromptExpansion、MessageDisplay、PostToolBatch、Notification、TaskCreated/Completed、ConfigChange、CwdChanged、DirectoryAdded、FileChanged、WorktreeCreate/Remove、PreModelSwitch/PostModelSwitch、Elicitation/ElicitationResult；权限和团队事件另见产品边界 |
 | Hook 输入与反馈 | 缺真实 `transcript_path`、`CLAUDE_ENV_FILE` 环境持久化、完整事件输入/输出 schema；`systemMessage` 与 SessionStart 错误只进日志，尚未形成官方对应的用户可见通知；所有输出字段及 JSON 多行规则未完整对齐 |
 | Skill frontmatter | 尚未实现 `when_to_use`、`argument-hint`、命名 `arguments`、`disallowed-tools`、`model`、`effort`、`context: fork`、`agent`、`background`、`hooks`、`paths`、`shell` 的运行时语义；当前解析器只实现有限标量子集，不是完整 YAML |
 | Skill/command 执行 | 缺动态 Shell 注入（内联及代码块）、fork 子 Agent 执行、调用期间模型/工具/effort 覆盖；Skill 正文缺插件持久数据和项目变量。Commands 当前只保留 description 和正文，不能视为已经复用完整 Skill 元数据语义 |

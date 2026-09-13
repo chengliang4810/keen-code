@@ -8,10 +8,11 @@ use crate::agent_runtime::{
     RuntimeToolContext,
 };
 use keencode_agent::{
-    AgentHook, HookCallbackError, HookContextAddition, HookFuture, HookLimits, HookPhase,
-    HookRegistry, HookRuntime, PlanGuard, PostToolUseContext, PostToolUseFailureContext,
-    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
-    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
+    AgentHook, AgentRunError, HookCallbackError, HookContextAddition, HookFuture, HookLimits,
+    HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard, PostCompactHookContext,
+    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreToolUseAction,
+    PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
+    ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
@@ -1145,6 +1146,9 @@ fn parse_hook_phase(value: &str) -> Option<HookPhase> {
         "pretooluse" => Some(HookPhase::PreToolUse),
         "posttooluse" => Some(HookPhase::PostToolUse),
         "posttoolusefailure" => Some(HookPhase::PostToolUseFailure),
+        "onerror" | "stopfailure" => Some(HookPhase::OnError),
+        "precompact" => Some(HookPhase::PreCompact),
+        "postcompact" => Some(HookPhase::PostCompact),
         "stop" => Some(HookPhase::Stop),
         _ => None,
     }
@@ -1159,6 +1163,9 @@ fn hook_phase_name(phase: HookPhase) -> &'static str {
         HookPhase::PreToolUse => "pre",
         HookPhase::PostToolUse => "post",
         HookPhase::PostToolUseFailure => "failure",
+        HookPhase::OnError => "on-error",
+        HookPhase::PreCompact => "pre-compact",
+        HookPhase::PostCompact => "post-compact",
         HookPhase::Stop => "stop",
     }
 }
@@ -1317,6 +1324,12 @@ fn parse_context_hook(
     matcher: Option<String>,
     mut object: serde_json::Map<String, Value>,
 ) -> Result<HookSpec, String> {
+    if matches!(
+        phase,
+        HookPhase::OnError | HookPhase::PreCompact | HookPhase::PostCompact
+    ) {
+        return Err(format!("{phase} Hook {name} 只支持 command 类型"));
+    }
     let context = object
         .remove("context")
         .map(|value| {
@@ -1565,6 +1578,55 @@ impl AgentHook for NativeCommandHook {
         })
     }
 
+    /// 在最终失败分类匹配时执行只观察命令，忽略其标准输出与决策。
+    fn on_error(
+        &self,
+        context: OnErrorHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        let spec = self.spec.clone();
+        let plan = self.plan;
+        Box::pin(async move {
+            let error_category = hook_error_category(&context.error);
+            if spec.phase != HookPhase::OnError || !matches_tool(&spec.matcher, error_category) {
+                return Ok(());
+            }
+            let payload = on_error_hook_payload(&spec, &context, error_category);
+            run_observer_command_hook(&spec, plan, &payload).await
+        })
+    }
+
+    /// 在自动压缩开始前执行匹配命令，忽略其标准输出与决策。
+    fn pre_compact(
+        &self,
+        context: PreCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        let spec = self.spec.clone();
+        let plan = self.plan;
+        Box::pin(async move {
+            if spec.phase != HookPhase::PreCompact || !matches_tool(&spec.matcher, "auto") {
+                return Ok(());
+            }
+            let payload = pre_compact_hook_payload(&spec, &context);
+            run_observer_command_hook(&spec, plan, &payload).await
+        })
+    }
+
+    /// 在自动压缩结果采纳后执行匹配命令，忽略其标准输出与决策。
+    fn post_compact(
+        &self,
+        context: PostCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        let spec = self.spec.clone();
+        let plan = self.plan;
+        Box::pin(async move {
+            if spec.phase != HookPhase::PostCompact || !matches_tool(&spec.matcher, "auto") {
+                return Ok(());
+            }
+            let payload = post_compact_hook_payload(&spec, &context);
+            run_observer_command_hook(&spec, plan, &payload).await
+        })
+    }
+
     /// 执行 Stop Hook 命令，再解析停止或继续动作。
     fn stop(
         &self,
@@ -1590,6 +1652,59 @@ impl AgentHook for NativeCommandHook {
             parse_stop_hook_output(output)
         })
     }
+}
+
+/// 构造 Claude StopFailure 兼容字段及 KeenCode 稳定扩展字段。
+fn on_error_hook_payload(
+    spec: &CommandHookSpec,
+    context: &OnErrorHookContext,
+    error_category: &str,
+) -> Value {
+    json!({
+        "hook_event_name": "StopFailure",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "error": error_category,
+        "error_details": context.error.to_string(),
+        "terminal_reason": format!("{:?}", context.terminal_reason),
+    })
+}
+
+/// 构造 Claude PreCompact 自动触发字段及 KeenCode 预算边界。
+fn pre_compact_hook_payload(spec: &CommandHookSpec, context: &PreCompactHookContext) -> Value {
+    json!({
+        "hook_event_name": "PreCompact",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "trigger": "auto",
+        "custom_instructions": Value::Null,
+        "model_round": context.model_round,
+        "estimated_tokens": context.estimated_tokens,
+        "target_tokens": context.target_tokens,
+        "keencode_trigger": context.trigger,
+    })
+}
+
+/// 构造 Claude PostCompact 自动触发字段及已采纳记录边界。
+fn post_compact_hook_payload(spec: &CommandHookSpec, context: &PostCompactHookContext) -> Value {
+    json!({
+        "hook_event_name": "PostCompact",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "trigger": "auto",
+        "compact_summary": context.record.summary,
+        "model_round": context.model_round,
+        "compaction_kind": context.record.kind,
+        "estimated_tokens_before": context.record.estimated_tokens_before,
+        "estimated_tokens_after": context.record.estimated_tokens_after,
+        "keencode_trigger": context.record.trigger,
+    })
 }
 
 /// 先执行 Plan 只读守卫，再启动命令子进程。
@@ -1631,6 +1746,73 @@ async fn run_command_hook(
             Ok(String::new())
         }
         result => result,
+    }
+}
+
+/// 执行只观察命令并丢弃全部标准输出；失败由核心阶段契约决定是否阻断 Turn。
+async fn run_observer_command_hook(
+    spec: &CommandHookSpec,
+    plan: PlanGuard,
+    payload: &Value,
+) -> Result<(), HookCallbackError> {
+    plan.authorize(ToolEffect::ChangesState)
+        .map_err(|_| HookCallbackError::new("hook_plan_denied", "计划模式禁止执行命令 Hook"))?;
+    let started = std::time::Instant::now();
+    tracing::info!(hook = %spec.name, phase = %spec.phase, session_id = ?payload.get("session_id").and_then(|value| value.as_str()), prompt_id = ?payload.get("prompt_id").and_then(|value| value.as_str()), "插件观察 Hook 开始");
+    let result = execute_hook_command(spec, payload).await.map(|_| ());
+    match &result {
+        Ok(()) => {
+            tracing::info!(hook = %spec.name, phase = %spec.phase, elapsed_ms = started.elapsed().as_millis() as u64, "插件观察 Hook 完成")
+        }
+        Err(error) => {
+            tracing::error!(hook = %spec.name, phase = %spec.phase, code = %error.code, error = %error.message, elapsed_ms = started.elapsed().as_millis() as u64, "插件观察 Hook 失败")
+        }
+    }
+    result
+}
+
+/// 将 Provider 中立运行错误归一为 Claude StopFailure `error` 与 matcher 使用的稳定分类。
+fn hook_error_category(error: &AgentRunError) -> &'static str {
+    match error {
+        AgentRunError::Model(error) => match error {
+            keencode_model::ModelError::Authentication { .. }
+            | keencode_model::ModelError::Authorization { .. } => "authentication_failed",
+            keencode_model::ModelError::QuotaExceeded { .. } => "billing_error",
+            keencode_model::ModelError::ModelNotFound { .. } => "model_not_found",
+            keencode_model::ModelError::RateLimited { .. } => "rate_limit",
+            keencode_model::ModelError::ProviderUnavailable {
+                status_code: Some(529),
+                ..
+            } => "overloaded",
+            keencode_model::ModelError::ProtocolUnsupported { .. }
+            | keencode_model::ModelError::ContextLengthExceeded { .. }
+            | keencode_model::ModelError::InvalidRequest { .. }
+            | keencode_model::ModelError::UnsupportedCapability { .. }
+            | keencode_model::ModelError::StructuredOutput { .. } => "invalid_request",
+            keencode_model::ModelError::ProviderUnavailable { .. }
+            | keencode_model::ModelError::Transport { .. }
+            | keencode_model::ModelError::StreamInterrupted { .. }
+            | keencode_model::ModelError::Protocol { .. } => "server_error",
+            keencode_model::ModelError::Cancelled { .. } => "unknown",
+        },
+        AgentRunError::ModelOutputLimit => "max_output_tokens",
+        AgentRunError::Context(_) => "invalid_request",
+        AgentRunError::Cancelled
+        | AgentRunError::Hook(_)
+        | AgentRunError::EventSink(_)
+        | AgentRunError::CommitSink(_)
+        | AgentRunError::ToolRoundPreflight(_)
+        | AgentRunError::State(_)
+        | AgentRunError::DynamicInput { .. }
+        | AgentRunError::DynamicInputAcknowledgement { .. }
+        | AgentRunError::DuplicateToolCallId { .. }
+        | AgentRunError::ModelRefusal
+        | AgentRunError::InvalidResponse { .. }
+        | AgentRunError::LimitReached { .. }
+        | AgentRunError::GoalBudgetReached { .. }
+        | AgentRunError::ToolLoop { .. }
+        | AgentRunError::ToolOutputLimit { .. }
+        | AgentRunError::Internal { .. } => "unknown",
     }
 }
 
@@ -2302,8 +2484,9 @@ mod tests {
     use super::super::agent_catalog::{AgentDefinitionSource, ParsedAgentDocument};
     use super::*;
     use keencode_agent::{
-        AgentId, AgentTool, SessionId, ToolCallId, ToolConcurrency, ToolContext, ToolFuture,
-        ToolOutput, TurnCancellation, TurnId,
+        AgentId, AgentTool, ContextCompactionKind, ContextCompressionRecord,
+        ContextCompressionTrigger, HookInvocationContext, SessionId, ToolCallId, ToolConcurrency,
+        ToolContext, ToolFuture, ToolOutput, TurnCancellation, TurnId,
     };
     use keencode_model::ToolDefinition;
     use keencode_tools::{ExecuteExtraTool, SearchExtraTools};
@@ -2600,6 +2783,210 @@ mod tests {
         );
     }
 
+    /// 新观察阶段接受 Claude 与内部别名，并生成不会随配置写法变化的名称片段。
+    #[test]
+    fn observer_hook_phase_aliases_have_stable_names() {
+        for alias in ["OnError", "on_error", "StopFailure", "stop-failure"] {
+            assert_eq!(parse_hook_phase(alias), Some(HookPhase::OnError));
+        }
+        assert_eq!(parse_hook_phase("PreCompact"), Some(HookPhase::PreCompact));
+        assert_eq!(parse_hook_phase("pre_compact"), Some(HookPhase::PreCompact));
+        assert_eq!(
+            parse_hook_phase("PostCompact"),
+            Some(HookPhase::PostCompact)
+        );
+        assert_eq!(
+            parse_hook_phase("post-compact"),
+            Some(HookPhase::PostCompact)
+        );
+        assert_eq!(hook_phase_name(HookPhase::OnError), "on-error");
+        assert_eq!(hook_phase_name(HookPhase::PreCompact), "pre-compact");
+        assert_eq!(hook_phase_name(HookPhase::PostCompact), "post-compact");
+    }
+
+    /// OnError matcher 使用 Provider 中立的稳定分类，而非易变的错误正文。
+    #[test]
+    fn on_error_matcher_categories_are_stable() {
+        let cases = [
+            (
+                AgentRunError::Model(keencode_model::ModelError::Authentication {
+                    message: "expired".to_owned(),
+                    status_code: Some(401),
+                }),
+                "authentication_failed",
+            ),
+            (
+                AgentRunError::Model(keencode_model::ModelError::QuotaExceeded {
+                    message: "quota".to_owned(),
+                    status_code: Some(402),
+                }),
+                "billing_error",
+            ),
+            (
+                AgentRunError::Model(keencode_model::ModelError::RateLimited {
+                    message: "slow down".to_owned(),
+                    retry_after_ms: Some(1_000),
+                    status_code: Some(429),
+                }),
+                "rate_limit",
+            ),
+            (
+                AgentRunError::Model(keencode_model::ModelError::ProviderUnavailable {
+                    message: "busy".to_owned(),
+                    status_code: Some(529),
+                    retryable: true,
+                }),
+                "overloaded",
+            ),
+            (
+                AgentRunError::Model(keencode_model::ModelError::InvalidRequest {
+                    message: "bad request".to_owned(),
+                }),
+                "invalid_request",
+            ),
+            (
+                AgentRunError::Model(keencode_model::ModelError::ProviderUnavailable {
+                    message: "down".to_owned(),
+                    status_code: Some(503),
+                    retryable: true,
+                }),
+                "server_error",
+            ),
+            (AgentRunError::ModelOutputLimit, "max_output_tokens"),
+            (
+                AgentRunError::Internal {
+                    message: "internal".to_owned(),
+                },
+                "unknown",
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(hook_error_category(&error), expected);
+            assert!(matches_tool(&Some(expected.to_owned()), expected));
+        }
+    }
+
+    /// 三个观察阶段的命令输入同时保留 Claude 通用字段与 KeenCode 边界字段。
+    #[test]
+    fn observer_hook_payloads_are_complete_and_stable() {
+        let directory = tempfile::tempdir().expect("创建 Hook payload 测试目录");
+        let mut spec = marker_hook(directory.path());
+        let invocation = HookInvocationContext {
+            session_id: SessionId::new("payload-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("payload-turn").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("payload-agent").expect("Agent 标识有效"),
+        };
+        let error_context = OnErrorHookContext {
+            invocation: invocation.clone(),
+            error: AgentRunError::Model(keencode_model::ModelError::RateLimited {
+                message: "稍后重试".to_owned(),
+                retry_after_ms: Some(500),
+                status_code: Some(429),
+            }),
+            terminal_reason: keencode_agent::TerminalReason::Failed,
+        };
+        spec.phase = HookPhase::OnError;
+        let payload = on_error_hook_payload(&spec, &error_context, "rate_limit");
+        assert_eq!(
+            payload,
+            json!({
+                "hook_event_name": "StopFailure",
+                "cwd": directory.path(),
+                "session_id": "payload-session",
+                "prompt_id": "payload-turn",
+                "agent_id": "payload-agent",
+                "error": "rate_limit",
+                "error_details": "模型调用失败：模型服务限制了请求：稍后重试",
+                "terminal_reason": "Failed",
+            })
+        );
+
+        let pre_context = PreCompactHookContext {
+            invocation: invocation.clone(),
+            trigger: ContextCompressionTrigger::ProviderOverflow,
+            model_round: 3,
+            estimated_tokens: 8_000,
+            target_tokens: 4_000,
+        };
+        spec.phase = HookPhase::PreCompact;
+        let payload = pre_compact_hook_payload(&spec, &pre_context);
+        assert_eq!(
+            payload,
+            json!({
+                "hook_event_name": "PreCompact",
+                "cwd": directory.path(),
+                "session_id": "payload-session",
+                "prompt_id": "payload-turn",
+                "agent_id": "payload-agent",
+                "trigger": "auto",
+                "custom_instructions": Value::Null,
+                "model_round": 3,
+                "estimated_tokens": 8_000,
+                "target_tokens": 4_000,
+                "keencode_trigger": "provider_overflow",
+            })
+        );
+
+        let record = ContextCompressionRecord {
+            kind: ContextCompactionKind::Summary,
+            trigger: ContextCompressionTrigger::ProviderOverflow,
+            estimated_tokens_before: 8_000,
+            estimated_tokens_after: 3_500,
+            replaced_start_index: 1,
+            replaced_end_index_exclusive: 4,
+            replaced_message_count: 3,
+            retained_message_count: 5,
+            source_digest_sha256: "digest".to_owned(),
+            summary: "已采纳摘要".to_owned(),
+            projections: Vec::new(),
+            policy_version: 1,
+        };
+        let post_context = PostCompactHookContext {
+            invocation,
+            model_round: 3,
+            record,
+        };
+        spec.phase = HookPhase::PostCompact;
+        let payload = post_compact_hook_payload(&spec, &post_context);
+        assert_eq!(
+            payload,
+            json!({
+                "hook_event_name": "PostCompact",
+                "cwd": directory.path(),
+                "session_id": "payload-session",
+                "prompt_id": "payload-turn",
+                "agent_id": "payload-agent",
+                "trigger": "auto",
+                "compact_summary": "已采纳摘要",
+                "model_round": 3,
+                "compaction_kind": "summary",
+                "estimated_tokens_before": 8_000,
+                "estimated_tokens_after": 3_500,
+                "keencode_trigger": "provider_overflow",
+            })
+        );
+    }
+
+    /// 三个只观察阶段拒绝声明式 context，避免输出被误解释成决策或模型上下文。
+    #[test]
+    fn observer_hook_phases_reject_context_hooks() {
+        for phase in [
+            HookPhase::OnError,
+            HookPhase::PreCompact,
+            HookPhase::PostCompact,
+        ] {
+            let error = parse_hook_spec(
+                format!("test:{}", hook_phase_name(phase)),
+                phase,
+                None,
+                json!({"type": "context", "context": "不得注入"}),
+                Path::new("/plugin"),
+            )
+            .expect_err("观察阶段必须拒绝 context Hook");
+            assert!(error.contains("只支持 command 类型"));
+        }
+    }
+
     /// 返回执行后在当前目录创建标记文件的跨平台 Hook 命令。
     #[cfg(windows)]
     fn marker_command() -> String {
@@ -2634,6 +3021,18 @@ mod tests {
     #[cfg(not(windows))]
     fn oversized_output_command() -> String {
         "while :; do printf xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done".to_owned()
+    }
+
+    /// 返回输出阻断决策并以状态 2 退出的跨平台命令。
+    #[cfg(windows)]
+    fn observer_decision_command() -> String {
+        r#"[Console]::Out.Write('{"decision":"block","reason":"必须忽略"}'); exit 2"#.to_owned()
+    }
+
+    /// 返回输出阻断决策并以状态 2 退出的跨平台命令。
+    #[cfg(not(windows))]
+    fn observer_decision_command() -> String {
+        r#"printf '{"decision":"block","reason":"必须忽略"}'; exit 2"#.to_owned()
     }
 
     /// 构造会产生一个可观察文件副作用的命令 Hook。
@@ -2810,6 +3209,61 @@ mod tests {
                 .trim(),
             "executed"
         );
+    }
+
+    /// 观察 Hook 必须丢弃 stdout 中的阻断决策；退出状态 2 也不能改写阶段语义。
+    #[tokio::test]
+    async fn observer_hook_discards_stdout_decisions() {
+        let directory = tempfile::tempdir().expect("创建 Hook 测试目录");
+        let mut spec = marker_hook(directory.path());
+        spec.phase = HookPhase::PreCompact;
+        spec.command = observer_decision_command();
+
+        run_observer_command_hook(&spec, PlanGuard::inactive(), &json!({}))
+            .await
+            .expect("观察 Hook 的 stdout 决策必须被忽略");
+    }
+
+    /// 新增观察阶段不能改变既有 SubagentStart 的一次性、按 agent_type 匹配语义。
+    #[tokio::test]
+    async fn subagent_start_lifecycle_still_runs_once() {
+        let directory = tempfile::tempdir().expect("创建 Hook 测试目录");
+        let mut spec = marker_hook(directory.path());
+        spec.phase = HookPhase::SubagentStart;
+        spec.matcher = Some("reviewer".to_owned());
+        let lifecycle = NativeLifecycleHooks {
+            hooks: vec![HookSpec::Command(spec)],
+            plan: PlanGuard::inactive(),
+            started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            agent_type: "reviewer".to_owned(),
+        };
+        let invocation = HookInvocationContext {
+            session_id: SessionId::new("lifecycle-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("lifecycle-turn").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("child-agent").expect("Agent 标识有效"),
+        };
+
+        lifecycle
+            .turn_start(TurnStartHookContext {
+                invocation: invocation.clone(),
+                prompt: "第一次".to_owned(),
+                has_history: false,
+            })
+            .await
+            .expect("首次子 Agent Hook 应执行");
+        let marker = directory.path().join("executed.txt");
+        assert!(marker.is_file());
+        fs::remove_file(&marker).expect("移除首次执行标记");
+
+        lifecycle
+            .turn_start(TurnStartHookContext {
+                invocation,
+                prompt: "第二次".to_owned(),
+                has_history: true,
+            })
+            .await
+            .expect("后续子 Agent Turn 应跳过生命周期 Hook");
+        assert!(!marker.exists());
     }
 
     /// Hook 命令超时必须沿既有稳定错误码返回。

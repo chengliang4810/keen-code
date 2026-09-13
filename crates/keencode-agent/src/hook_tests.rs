@@ -571,6 +571,10 @@ struct ProbeHook {
     failure: Result<ToolHookOutput, HookCallbackError>,
     /// 每次 Stop 调用消费一个输出。
     stop: Mutex<VecDeque<Result<StopHookOutput, HookCallbackError>>>,
+    /// OnError 的固定输出。
+    on_error: Result<(), HookCallbackError>,
+    /// OnError 收到的最终错误与终态上下文。
+    on_error_contexts: Mutex<Vec<OnErrorHookContext>>,
     /// 成功 Post Hook 调用次数。
     post_count: AtomicUsize,
     /// 失败 Post Hook 调用次数。
@@ -588,6 +592,8 @@ impl ProbeHook {
             post: Ok(ToolHookOutput::default()),
             failure: Ok(ToolHookOutput::default()),
             stop: Mutex::new(VecDeque::new()),
+            on_error: Ok(()),
+            on_error_contexts: Mutex::new(Vec::new()),
             post_count: AtomicUsize::new(0),
             failure_count: AtomicUsize::new(0),
             stop_count: AtomicUsize::new(0),
@@ -622,6 +628,20 @@ impl ProbeHook {
             .expect("Stop Hook 队列锁不应损坏")
             .push_back(output);
         self
+    }
+
+    /// 设置 OnError 固定输出。
+    fn with_on_error(mut self, output: Result<(), HookCallbackError>) -> Self {
+        self.on_error = output;
+        self
+    }
+
+    /// 返回 OnError 收到的上下文快照。
+    fn on_error_contexts(&self) -> Vec<OnErrorHookContext> {
+        self.on_error_contexts
+            .lock()
+            .expect("OnError Hook 锁不应损坏")
+            .clone()
     }
 }
 
@@ -692,6 +712,19 @@ impl AgentHook for ProbeHook {
         Box::pin(async move { output })
     }
 
+    /// 记录最终失败上下文并返回预设观察结果。
+    fn on_error(
+        &self,
+        context: OnErrorHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.on_error_contexts
+            .lock()
+            .expect("OnError Hook 锁不应损坏")
+            .push(context);
+        let output = self.on_error.clone();
+        Box::pin(async move { output })
+    }
+
     /// 记录候选轮次并消费预设停止决定。
     fn stop(
         &self,
@@ -709,6 +742,38 @@ impl AgentHook for ProbeHook {
             .pop_front()
             .unwrap_or_else(|| Ok(StopHookOutput::stop()));
         Box::pin(async move { output })
+    }
+}
+
+/// 记录 OnError 通知顺序，可选择返回观察失败。
+struct OnErrorSequenceHook {
+    /// 注册表中的唯一名称。
+    name: &'static str,
+    /// 所有观察者共享的通知顺序。
+    calls: Arc<Mutex<Vec<String>>>,
+    /// 是否返回合成观察失败。
+    fail: bool,
+}
+
+impl AgentHook for OnErrorSequenceHook {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn on_error(
+        &self,
+        _context: OnErrorHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.calls
+            .lock()
+            .expect("OnError 顺序锁不应损坏")
+            .push(self.name.to_owned());
+        let result = if self.fail {
+            Err(HookCallbackError::new("observer_failed", "合成观察失败"))
+        } else {
+            Ok(())
+        };
+        Box::pin(async move { result })
     }
 }
 
@@ -978,6 +1043,7 @@ async fn stop_hook_continue追加上下文并再次请求模型() {
 
     assert!(result.is_success());
     assert_eq!(hook.stop_count.load(Ordering::SeqCst), 2);
+    assert!(hook.on_error_contexts().is_empty());
     let requests = provider.requests().expect("模型请求快照可读取");
     assert_eq!(requests.len(), 2);
     assert!(requests[1].messages.iter().any(|message| {
@@ -992,7 +1058,7 @@ async fn stop_hook_continue追加上下文并再次请求模型() {
     }));
 }
 
-/// Provider 协议错误必须直接失败，不能运行 Stop Hook。
+/// Provider 协议错误必须直接失败、跳过 Stop，并在最终终态后通知一次 OnError。
 #[tokio::test]
 async fn provider协议错误不运行stop_hook() {
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -1012,6 +1078,85 @@ async fn provider协议错误不运行stop_hook() {
 
     assert!(matches!(result.error, Some(AgentRunError::Model(_))));
     assert_eq!(hook.stop_count.load(Ordering::SeqCst), 0);
+    let contexts = hook.on_error_contexts();
+    assert_eq!(contexts.len(), 1);
+    assert_eq!(contexts[0].terminal_reason, TerminalReason::Failed);
+    assert!(matches!(
+        &contexts[0].error,
+        AgentRunError::Model(ModelError::Protocol { message }) if message == "合成协议错误"
+    ));
+}
+
+/// OnError 自身失败只能记录观察失败，不能覆盖原始 Provider 错误或递归触发。
+#[tokio::test]
+async fn on_error失败保留原错误且不递归() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let hook = Arc::new(
+        ProbeHook::new(events.clone()).with_on_error(Err(HookCallbackError::new(
+            "observer_failed",
+            "合成 OnError 失败",
+        ))),
+    );
+    let result = runner(
+        Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [protocol_error_reply()],
+        )),
+        Arc::new(ProbeTool::new(events, false)),
+        hook.clone(),
+        HookLimits::default(),
+    )
+    .run_turn(turn_request(PlanGuard::inactive()))
+    .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::Protocol { ref message }))
+            if message == "合成协议错误"
+    ));
+    assert_eq!(hook.on_error_contexts().len(), 1);
+}
+
+/// 单个 OnError 观察者失败不能阻止后续观察者收到同一最终失败。
+#[tokio::test]
+async fn on_error失败后继续通知剩余观察者() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut hooks = HookRegistry::new();
+    hooks
+        .register(Arc::new(OnErrorSequenceHook {
+            name: "first-observer",
+            calls: calls.clone(),
+            fail: true,
+        }))
+        .expect("首个观察 Hook 应成功注册");
+    hooks
+        .register(Arc::new(OnErrorSequenceHook {
+            name: "second-observer",
+            calls: calls.clone(),
+            fail: false,
+        }))
+        .expect("第二个观察 Hook 应成功注册");
+    let result = AgentRunner::new(
+        Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [protocol_error_reply()],
+        )),
+        ToolRegistry::new(),
+        RunLimits::default(),
+    )
+    .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效"))
+    .run_turn(turn_request(PlanGuard::inactive()))
+    .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::Protocol { ref message }))
+            if message == "合成协议错误"
+    ));
+    assert_eq!(
+        calls.lock().expect("OnError 顺序锁不应损坏").as_slice(),
+        ["first-observer", "second-observer"]
+    );
 }
 
 /// Stop Hook 连续要求继续时必须在配置轮次上限处稳定终止。
@@ -1389,6 +1534,7 @@ async fn 工具取消调用failure_hook后以cancelled结束() {
     assert_eq!(hook.post_count.load(Ordering::SeqCst), 0);
     assert_eq!(hook.failure_count.load(Ordering::SeqCst), 1);
     assert_eq!(hook.stop_count.load(Ordering::SeqCst), 0);
+    assert!(hook.on_error_contexts().is_empty());
     let results = tool_results(&result);
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].tool_call_id, "call-cancel");

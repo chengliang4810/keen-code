@@ -40,12 +40,12 @@ use crate::{
     ContextCompressionRecord, ContextCompressionTrigger, ContextError, ContextManager, CounterKind,
     GoalController, GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
     MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
-    NoopAgentCommitSink, NoopAgentEventSink, PlanGuard, PlanGuardError, PostHookOutputBudget,
-    PostToolUseContext, PostToolUseFailureContext, PreToolUseContext, ResolvedHookContext,
-    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, ToolCompletionStatus,
-    ToolConcurrency, ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash,
-    ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId, TurnPhase, TurnState,
-    TurnTransitionError,
+    NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
+    PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
+    PreCompactHookContext, PreToolUseContext, ResolvedHookContext, ResolvedStopHook, SessionId,
+    StopHookContext, TerminalReason, ToolCompletionStatus, ToolConcurrency, ToolContext, ToolEffect,
+    ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId,
+    TurnPhase, TurnState, TurnTransitionError,
 };
 
 /// 显式运行上限耗尽后只允许一次无工具总结，不注入剩余次数倒计时。
@@ -1119,11 +1119,25 @@ impl AgentRunner {
         trigger: ContextCompressionTrigger,
         target_tokens: u64,
     ) -> Result<ContextCompressionOutcome, AgentRunError> {
+        let estimated_tokens = self.context.estimate_request(model_request);
+        self.hooks
+            .run_pre_compact(
+                PreCompactHookContext {
+                    invocation: hook_invocation_context(request),
+                    trigger,
+                    model_round,
+                    estimated_tokens,
+                    target_tokens,
+                },
+                &request.cancellation,
+            )
+            .await
+            .map_err(AgentRunError::from)?;
         self.deliver_context_compaction_event(
             request,
             model_round,
             AgentStreamEventKind::ContextCompactionStarted {
-                estimated_tokens: self.context.estimate_request(model_request),
+                estimated_tokens,
             },
             true,
         )
@@ -1245,25 +1259,37 @@ impl AgentRunner {
     /// 非 Micro 失败载荷原样返回；Micro 载荷拆出内层错误继续按既有语义处理，
     /// 已回收的投影收益不因后续摘要失败而丢失（预压缩臂容忍继续、forced 臂
     /// 终止，但两种场景下 TurnResult 都保留投影记录与投影后消息）。
-    fn adopt_micro_applied_failure(
+    async fn adopt_micro_applied_failure(
         &self,
+        request: &TurnRequest,
         active: &mut ActiveTurn,
         model_request: &mut ModelRequest,
         error: AgentRunError,
-    ) -> AgentRunError {
+    ) -> Result<AgentRunError, AgentRunError> {
         let AgentRunError::Context(ContextError::MicroAppliedThenFullFailed(failure)) = error
         else {
-            return error;
+            return Ok(error);
         };
         let MicroAppliedThenFullFailure {
             micro_record,
             messages,
             error: inner,
         } = *failure;
-        active.compactions.push(micro_record);
+        active.compactions.push(micro_record.clone());
         active.messages = messages.into();
         model_request.messages = active.messages.clone();
-        AgentRunError::Context(*inner)
+        self.hooks
+            .run_post_compact(
+                PostCompactHookContext {
+                    invocation: hook_invocation_context(request),
+                    model_round: active.state.round_count(),
+                    record: micro_record,
+                },
+                &request.cancellation,
+            )
+            .await
+            .map_err(AgentRunError::from)?;
+        Ok(AgentRunError::Context(*inner))
     }
 
     /// 把压缩产物同时采纳到 `active` 与本轮 `model_request`。
@@ -1281,7 +1307,7 @@ impl AgentRunner {
     /// 错误终态结束，内存投影与持久层不会出现分歧。提示路径列表取自压缩前
     /// 的原始请求（MicroThenFull 的投影不改写 assistant 调用参数，消息下标
     /// 在投影前后两份列表中一致）。
-    fn adopt_compaction_outcome(
+    async fn adopt_compaction_outcome(
         &self,
         request: &TurnRequest,
         active: &mut ActiveTurn,
@@ -1292,9 +1318,21 @@ impl AgentRunner {
             active.compactions.push(micro);
         }
         let read_hint = post_compaction_read_hint_message(&outcome.record, &model_request.messages);
-        active.compactions.push(outcome.record);
         active.messages = outcome.messages.into();
         model_request.messages = active.messages.clone();
+        let record = outcome.record;
+        active.compactions.push(record.clone());
+        self.hooks
+            .run_post_compact(
+                PostCompactHookContext {
+                    invocation: hook_invocation_context(request),
+                    model_round: active.state.round_count(),
+                    record,
+                },
+                &request.cancellation,
+            )
+            .await
+            .map_err(AgentRunError::from)?;
         if let Some(message) = read_hint {
             self.commit_round_messages(request, active, None, vec![message])?;
             model_request.messages = active.messages.clone();
@@ -1688,6 +1726,29 @@ impl AgentRunner {
                 message: "Agent Loop 返回时 Turn 尚未进入终态".to_owned(),
             });
         }
+        if let (Some(error), Some(terminal_reason)) = (&error, active.state.terminal_reason())
+            && terminal_reason != TerminalReason::Cancelled
+            && terminal_reason != TerminalReason::Completed
+            && let Err(hook_error) = self
+                .hooks
+                .run_on_error(
+                    OnErrorHookContext {
+                        invocation: hook_invocation_context(&request),
+                        error: error.clone(),
+                        terminal_reason,
+                    },
+                    &request.cancellation,
+                )
+                .await
+        {
+            tracing::error!(
+                session_id = %request.session_id,
+                turn_id = %request.turn_id,
+                source_agent_id = %request.source_agent_id,
+                error = %hook_error,
+                "OnError Hook 失败，保留原始 Turn 错误"
+            );
+        }
         TurnResult {
             state: active.state,
             messages: active.messages.into_arc(),
@@ -1868,14 +1929,21 @@ impl AgentRunner {
                     .await;
                 match outcome {
                     Ok(outcome) => {
-                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)?
+                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)
+                            .await?
                     }
                     Err(error) => {
                         // Micro 投影已应用但摘要失败：先采纳已回收的投影记录与
                         // 投影后消息（预压缩场景 micro 收益保留），再按内层错误
                         // 的既有分类决定容忍或终止；非 Micro 载荷原样透传。
-                        let error =
-                            self.adopt_micro_applied_failure(active, &mut model_request, error);
+                        let error = self
+                            .adopt_micro_applied_failure(
+                                request,
+                                active,
+                                &mut model_request,
+                                error,
+                            )
+                            .await?;
                         let soft_failure = matches!(
                             error,
                             AgentRunError::Context(
@@ -1947,11 +2015,18 @@ impl AgentRunner {
                     .await;
                 match outcome {
                     Ok(outcome) => {
-                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)?
+                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)
+                            .await?
                     }
                     Err(error) => {
-                        let error =
-                            self.adopt_micro_applied_failure(active, &mut model_request, error);
+                        let error = self
+                            .adopt_micro_applied_failure(
+                                request,
+                                active,
+                                &mut model_request,
+                                error,
+                            )
+                            .await?;
                         let soft_failure = matches!(
                             error,
                             AgentRunError::Context(
@@ -2060,11 +2135,14 @@ impl AgentRunner {
                                 // 唯一一次机械截断兜底；兜底成功后与成功路径同
                                 // 构，由循环顶部换新调用尝试重试。不可用或失败
                                 // 时传播内层错误的既有分类。
-                                let error = self.adopt_micro_applied_failure(
-                                    active,
-                                    &mut model_request,
-                                    error,
-                                );
+                                let error = self
+                                    .adopt_micro_applied_failure(
+                                        request,
+                                        active,
+                                        &mut model_request,
+                                        error,
+                                    )
+                                    .await?;
                                 match self
                                     .try_mechanical_truncation_fallback(
                                         request,
@@ -2096,7 +2174,8 @@ impl AgentRunner {
                             active,
                             &mut model_request,
                             outcome,
-                        )?;
+                        )
+                        .await?;
                         active.state.transition_to(TurnPhase::RequestingModel)?;
                         // 压缩重试不在臂内嵌套采样：臂结束后由循环顶部换新调用
                         // 尝试重新发起同一请求，重试结果回到本循环按臂顺序重新
