@@ -228,6 +228,29 @@ fn empty_reply_with_stop(stop_reason: StopReason) -> ScriptedReply {
     ])
 }
 
+/// 创建携带推理和文本增量的原生结构化候选。
+fn structured_text_reply(reasoning: &str, text: &str) -> ScriptedReply {
+    let mut events = vec![ModelStreamEvent::MessageStart {
+        metadata: ResponseMetadata::default(),
+    }];
+    if !reasoning.is_empty() {
+        events.push(ModelStreamEvent::ReasoningDelta {
+            index: 0,
+            delta: reasoning.to_owned(),
+        });
+    }
+    if !text.is_empty() {
+        events.push(ModelStreamEvent::TextDelta {
+            index: 1,
+            delta: text.to_owned(),
+        });
+    }
+    events.push(ModelStreamEvent::MessageEnd {
+        stop_reason: StopReason::Completed,
+    });
+    ScriptedReply::events(events)
+}
+
 /// 创建最小用户 Turn 请求。
 fn turn_request(plan_guard: PlanGuard) -> TurnRequest {
     TurnRequest::new(
@@ -238,6 +261,21 @@ fn turn_request(plan_guard: PlanGuard) -> TurnRequest {
         vec![Message::text(MessageRole::User, "执行合成测试")],
         plan_guard,
     )
+}
+
+/// 创建使用整数 Schema 的原生结构化 Turn 请求。
+fn native_structured_turn_request() -> TurnRequest {
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 1}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+    request
 }
 
 /// 记录输入并返回固定文本的测试工具。
@@ -326,6 +364,130 @@ impl AgentEventSink for DelayedModelEventSink {
             tokio::time::sleep(Duration::from_millis(2)).await;
             Ok(())
         })
+    }
+}
+
+/// 保存实时模型事件，验证结构化候选只在校验成功后对外可见。
+#[derive(Default)]
+struct RecordingModelEventSink {
+    /// 按 Sink 确认顺序保存事件快照。
+    events: Mutex<Vec<AgentStreamEvent>>,
+}
+
+impl RecordingModelEventSink {
+    /// 返回实时事件快照。
+    fn events(&self) -> Vec<AgentStreamEvent> {
+        self.events
+            .lock()
+            .expect("结构化实时事件测试锁不应损坏")
+            .clone()
+    }
+
+    /// 返回实时出口已经确认的文本增量。
+    fn text(&self) -> String {
+        self.events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                AgentStreamEventKind::ModelEvent {
+                    event: ModelStreamEvent::TextDelta { delta, .. },
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 返回实时出口已经确认的推理增量。
+    fn reasoning(&self) -> String {
+        self.events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                AgentStreamEventKind::ModelEvent {
+                    event:
+                        ModelStreamEvent::ReasoningDelta { delta, .. }
+                        | ModelStreamEvent::ReasoningSummaryDelta { delta, .. },
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl AgentEventSink for RecordingModelEventSink {
+    /// 在返回前保存已经可靠接收的实时事件。
+    fn send<'a>(&'a self, event: &'a AgentStreamEvent) -> AgentEventFuture<'a> {
+        self.events
+            .lock()
+            .expect("结构化实时事件测试锁不应损坏")
+            .push(event.clone());
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// 在第二次模型响应开始时取消 Turn，并保留已确认的实时事件。
+struct CancelSecondModelStartSink {
+    /// 触发当前 Turn 取消的令牌。
+    cancellation: TurnCancellation,
+    /// 已确认的模型开始事件数量。
+    starts: AtomicUsize,
+    /// 按确认顺序保存实时事件。
+    events: Mutex<Vec<AgentStreamEvent>>,
+}
+
+impl CancelSecondModelStartSink {
+    /// 返回实时事件快照。
+    fn events(&self) -> Vec<AgentStreamEvent> {
+        self.events
+            .lock()
+            .expect("取消实时事件测试锁不应损坏")
+            .clone()
+    }
+
+    /// 返回取消前已经确认的文本增量。
+    fn text(&self) -> String {
+        self.events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                AgentStreamEventKind::ModelEvent {
+                    event: ModelStreamEvent::TextDelta { delta, .. },
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 返回取消前已经确认的推理增量。
+    fn reasoning(&self) -> String {
+        self.events()
+            .iter()
+            .filter_map(|event| match event.kind() {
+                AgentStreamEventKind::ModelEvent {
+                    event:
+                        ModelStreamEvent::ReasoningDelta { delta, .. }
+                        | ModelStreamEvent::ReasoningSummaryDelta { delta, .. },
+                } => Some(delta.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+impl AgentEventSink for CancelSecondModelStartSink {
+    /// 确认事件后在第二次响应开始边界触发取消。
+    fn send<'a>(&'a self, event: &'a AgentStreamEvent) -> AgentEventFuture<'a> {
+        self.events
+            .lock()
+            .expect("取消实时事件测试锁不应损坏")
+            .push(event.clone());
+        if matches!(
+            event.kind(),
+            AgentStreamEventKind::ModelEvent {
+                event: ModelStreamEvent::MessageStart { .. }
+            }
+        ) && self.starts.fetch_add(1, Ordering::SeqCst) == 1
+        {
+            self.cancellation.cancel();
+        }
+        Box::pin(async { Ok(()) })
     }
 }
 
@@ -2467,6 +2629,213 @@ async fn runner_corrects_first_invalid_native_structured_response() {
     assert!(requests[1].structured_output.is_some());
     assert_eq!(requests[1].messages.len(), 3);
     assert!(requests[1].messages[2].is_meta);
+}
+
+/// 合法原生结构化候选的实时正文与权威 Assistant 内容保持一致。
+#[tokio::test]
+async fn structured_native_live_sink_publishes_valid_candidate_only() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [structured_text_reply("最终推理", "{\"answer\":42}")],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(event_sink.text(), "{\"answer\":42}");
+    assert_eq!(event_sink.reasoning(), "最终推理");
+    assert!(result.messages[1].content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text } if text == "{\"answer\":42}")
+    }));
+}
+
+/// 原生结构化候选先坏后好时，实时 Sink 与冷恢复权威消息都只包含最终候选。
+#[tokio::test]
+async fn structured_native_live_sink_drops_invalid_candidate_before_correction() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_text_reply("坏推理", "{\"answer\":0}"),
+            structured_text_reply("好推理", "{\"answer\":42}"),
+        ],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(event_sink.text(), "{\"answer\":42}");
+    assert_eq!(event_sink.reasoning(), "好推理");
+    assert_eq!(result.messages.len(), 2);
+    assert!(result.messages[1].content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text } if text == "{\"answer\":42}")
+    }));
+    assert!(
+        !result.messages[1].content.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text == "{\"answer\":0}")
+        })
+    );
+}
+
+/// 连续六个原生坏候选耗尽纠正预算时，实时出口不泄漏任何候选正文。
+#[tokio::test]
+async fn structured_native_live_sink_hides_all_candidates_after_budget_exhaustion() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        (0..6)
+            .map(|index| structured_text_reply("坏推理", &format!("bad-{index}")))
+            .collect::<Vec<_>>(),
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert!(matches!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::StructuredOutput { .. }))
+    ));
+    assert_eq!(event_sink.text(), "");
+    assert_eq!(event_sink.reasoning(), "");
+    assert_eq!(result.messages.len(), 1);
+}
+
+/// 工具模拟的坏文本候选不能进入实时出口，合法保留结果由权威提交恢复。
+#[tokio::test]
+async fn structured_emulated_live_sink_hides_invalid_text_candidate() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            tool_calling: true,
+            structured_output: StructuredOutputCapability::ToolEmulated,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_text_reply("坏推理", "bad-result"),
+            tool_reply(&[(
+                "valid-result",
+                STRUCTURED_RESULT_TOOL,
+                json!({"value": {"answer": 42}}),
+            )]),
+        ],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let mut request = turn_request(PlanGuard::inactive());
+    request.model_request_mut().structured_output = Some(StructuredOutputConfig::new(
+        "answer",
+        json!({
+            "type": "object",
+            "properties": {"answer": {"type": "integer", "minimum": 1}},
+            "required": ["answer"],
+            "additionalProperties": false
+        }),
+    ));
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(result.structured_output, Some(json!({"answer": 42})));
+    assert_eq!(event_sink.text(), "");
+    assert_eq!(event_sink.reasoning(), "");
+    assert_eq!(result.messages.len(), 2);
+    assert!(result.messages[1].content.iter().any(|block| {
+        matches!(block, ContentBlock::Text { text } if text == "{\"answer\":42}")
+    }));
+}
+
+/// 纠正请求遭遇 Provider 错误时保留错误边界，但不泄漏之前的坏候选。
+#[tokio::test]
+async fn structured_live_sink_keeps_provider_failure_without_bad_candidate() {
+    let provider_error = ModelError::ProviderUnavailable {
+        message: "offline".to_owned(),
+        status_code: None,
+        retryable: true,
+    };
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_text_reply("坏推理", "bad-result"),
+            ScriptedReply::new(vec![Err(provider_error.clone())]),
+            structured_text_reply("不可达", "{\"answer\":42}"),
+        ],
+    ));
+    let event_sink = Arc::new(RecordingModelEventSink::default());
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(native_structured_turn_request())
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::Model(provider_error)));
+    assert_eq!(event_sink.text(), "");
+    assert_eq!(event_sink.reasoning(), "");
+    assert!(event_sink.events().iter().any(|event| {
+        matches!(
+            event.kind(),
+            AgentStreamEventKind::ModelFailure {
+                error: ModelError::ProviderUnavailable { .. }
+            }
+        )
+    }));
+    assert_eq!(result.messages.len(), 1);
+}
+
+/// 纠正请求期间取消时只保留取消边界，实时出口与冷恢复均不包含坏候选。
+#[tokio::test]
+async fn structured_live_sink_keeps_cancellation_without_bad_candidate() {
+    let cancellation = TurnCancellation::new();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            structured_output: StructuredOutputCapability::Native,
+            ..ProviderCapabilities::default()
+        },
+        [
+            structured_text_reply("坏推理", "bad-result"),
+            structured_text_reply("不可达", "{\"answer\":42}"),
+        ],
+    ));
+    let event_sink = Arc::new(CancelSecondModelStartSink {
+        cancellation: cancellation.clone(),
+        starts: AtomicUsize::new(0),
+        events: Mutex::new(Vec::new()),
+    });
+    let mut request = native_structured_turn_request();
+    request.set_cancellation(cancellation);
+    let result = runner(provider, ToolRegistry::new())
+        .with_event_sink(event_sink.clone())
+        .run_turn(request)
+        .await;
+
+    assert_eq!(result.error, Some(AgentRunError::Cancelled));
+    assert_eq!(event_sink.text(), "");
+    assert_eq!(event_sink.reasoning(), "");
+    assert!(event_sink.events().iter().any(|event| {
+        matches!(
+            event.kind(),
+            AgentStreamEventKind::ModelFailure {
+                error: ModelError::Cancelled { .. }
+            }
+        )
+    }));
+    assert_eq!(result.messages.len(), 1);
 }
 
 /// 原生结构化输出的截断先经终止检查并按输出上限有界续跑，不提前做 Schema 校验：

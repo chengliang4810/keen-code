@@ -2080,6 +2080,14 @@ impl AgentRunner {
                         message: format!("工具目录通知构造失败：{}", error.message()),
                     })?
             };
+            // 结构化响应在本地校验成功前不能把正文投影到实时 Sink；普通文本和
+            // 摘要 Round 仍保持原有逐事件实时投递。
+            let model_stream_delivery =
+                if !summary_only && !matches!(&structured_mode, StructuredOutputMode::None) {
+                    ModelStreamDelivery::BufferCandidateContent
+                } else {
+                    ModelStreamDelivery::Live
+                };
             // 三个一次性恢复预算互不挤占：上下文超限强制压缩、空响应重试与
             // 输出上限降级各按自身触发条件独立生效。循环重新进入 match 的顺序
             // 保证强制压缩臂继续优先于输出上限降级处理后续错误；强制压缩后
@@ -2095,6 +2103,7 @@ impl AgentRunner {
                             tool_catalog_update.as_ref(),
                         ),
                         model_call_attempt,
+                        model_stream_delivery,
                         &mut active.state,
                     )
                     .await
@@ -2220,8 +2229,9 @@ impl AgentRunner {
                 }
             }
             .map_err(|error| prefer_limit_summary_error(active.limit_summary.as_ref(), error))?;
-            let structured_base_request =
-                request_with_transient_message(&model_request, tool_catalog_update.as_ref());
+            // 结构化纠正只在首个候选确实需要纠正时冻结请求基线；普通 Round
+            // 不应为未使用的 Schema/工具定义创建额外深拷贝。
+            let mut structured_base_request = None;
             let mut correction_in_flight = false;
             let (mut response, tool_calls) = 'response_attempt: loop {
                 self.commit_model_round_usage(
@@ -2242,6 +2252,7 @@ impl AgentRunner {
                     // Transcript 前缀，不能留下会污染后续 Round 估算的用量锚点。
                     self.context.clear_usage_anchor();
                 }
+                let buffered_events = std::mem::take(&mut completed_round.buffered_events);
                 let response = completed_round.response;
                 // 空响应的 ModelOutputLimit 不按终止或恢复处理：没有可续跑的截断
                 // 正文，空部分响应段也会被资源层 reducer 拒绝。它落入下方既有空
@@ -2275,6 +2286,15 @@ impl AgentRunner {
                         && active.limit_summary.is_none()
                         && active.max_output_recovery_count < MAX_OUTPUT_TOKEN_RECOVERY_LIMIT
                     {
+                        // 结构化请求的截断响应不是可校验候选，但既有语义会把安全
+                        // 部分正文写入 Transcript；先发布同一批暂存事件，保持
+                        // live 与冷恢复的可见内容一致。
+                        self.publish_buffered_model_events(
+                            request,
+                            active.state.round_count(),
+                            buffered_events,
+                        )
+                        .await?;
                         // 截断尝试照常记账并提交部分响应（现状语义），随后提交一条
                         // User is_meta 续跑指令，使截断 assistant 消息与下一轮响应
                         // 之间形成两条 assistant 消息隔一条 user 消息的合法序；
@@ -2303,6 +2323,14 @@ impl AgentRunner {
                         continue 'model_round;
                     }
                     let committed = partial_model_response_messages(&response);
+                    if !committed.is_empty() {
+                        self.publish_buffered_model_events(
+                            request,
+                            active.state.round_count(),
+                            buffered_events,
+                        )
+                        .await?;
+                    }
                     active.state.transition_to(TurnPhase::CommittingRound)?;
                     self.commit_round_messages(
                         request,
@@ -2340,6 +2368,7 @@ impl AgentRunner {
                                 tool_catalog_update.as_ref(),
                             ),
                             retry_call_attempt,
+                            model_stream_delivery,
                             &mut active.state,
                         )
                         .await?;
@@ -2404,6 +2433,12 @@ impl AgentRunner {
                 if is_structured_candidate {
                     match complete_structured_output(&structured_mode, response.clone()) {
                         Ok(completion) => {
+                            self.publish_buffered_model_events(
+                                request,
+                                active.state.round_count(),
+                                buffered_events,
+                            )
+                            .await?;
                             let committed = vec![Message::new(
                                 MessageRole::Assistant,
                                 completion.response.content.clone(),
@@ -2430,9 +2465,16 @@ impl AgentRunner {
                         Err(error) => {
                             let next_request = match &error {
                                 AgentRunError::Model(model_error) => {
+                                    let base_request =
+                                        structured_base_request.get_or_insert_with(|| {
+                                            request_with_transient_message(
+                                                &model_request,
+                                                tool_catalog_update.as_ref(),
+                                            )
+                                        });
                                     active.structured_output_correction_budget.next_request(
                                         &structured_mode,
-                                        &structured_base_request,
+                                        base_request,
                                         &response,
                                         model_error,
                                     )
@@ -2453,6 +2495,7 @@ impl AgentRunner {
                                     request,
                                     next_request,
                                     retry_call_attempt,
+                                    ModelStreamDelivery::BufferCandidateContent,
                                     &mut active.state,
                                 )
                                 .await?;
@@ -2494,6 +2537,14 @@ impl AgentRunner {
                     continue 'model_round;
                 }
 
+                // 结构化模式也允许先执行普通业务工具；该响应不是结构化候选，
+                // 之前暂存的正文/推理应在进入工具 Round 前恢复实时可见性。
+                self.publish_buffered_model_events(
+                    request,
+                    active.state.round_count(),
+                    buffered_events,
+                )
+                .await?;
                 active.seen_tool_call_ids = candidate_seen_tool_call_ids;
                 break 'response_attempt (response, tool_calls);
             };
@@ -2764,6 +2815,7 @@ impl AgentRunner {
         turn_request: &TurnRequest,
         model_request: ModelRequest,
         call_attempt: u32,
+        delivery: ModelStreamDelivery,
         state: &mut TurnState,
     ) -> Result<CompletedModelRound, AgentRunError> {
         let started = Instant::now();
@@ -2804,6 +2856,7 @@ impl AgentRunner {
                 cancellation: turn_request.cancellation.clone(),
                 event_timeout,
                 status: tap_status.clone(),
+                delivery,
                 done: false,
             },
             tap_model_stream_event,
@@ -2825,6 +2878,7 @@ impl AgentRunner {
                 response,
                 elapsed: started.elapsed(),
                 call_attempt,
+                buffered_events: take_tap_buffered_events(&tap_status),
             }),
             Err(error) => {
                 self.commit_failed_model_usage(
@@ -2843,6 +2897,43 @@ impl AgentRunner {
                 Err(model_error_to_run_error(error))
             }
         }
+    }
+
+    /// 在结构化候选通过本地校验后发布此前暂存的正文/推理事件。
+    async fn publish_buffered_model_events(
+        &self,
+        turn_request: &TurnRequest,
+        model_round: u32,
+        events: Vec<AgentStreamEvent>,
+    ) -> Result<(), AgentRunError> {
+        if events.is_empty() {
+            return Ok(());
+        }
+        let identity = ModelEventIdentity::for_turn(turn_request, model_round);
+        let event_timeout = Duration::from_millis(self.limits.event_sink_timeout_ms);
+        for event in events {
+            match deliver_event_cancellable(
+                &self.event_sink,
+                &event,
+                event_timeout,
+                &turn_request.cancellation,
+            )
+            .await
+            {
+                Ok(()) => {}
+                Err(CancellableDeliveryError::Cancelled) => {
+                    let error = cancelled_model_error();
+                    deliver_failure_boundary(&self.event_sink, &identity, &error, event_timeout)
+                        .await
+                        .map_err(AgentRunError::EventSink)?;
+                    return Err(AgentRunError::Cancelled);
+                }
+                Err(CancellableDeliveryError::Delivery(error)) => {
+                    return Err(AgentRunError::EventSink(error));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 在任何真实执行前按模型顺序提交全部有效工具请求。
@@ -3742,6 +3833,15 @@ impl ModelEventIdentity {
     }
 }
 
+/// 控制模型正文是否要等结构化候选通过本地校验后再进入实时出口。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ModelStreamDelivery {
+    /// 普通模型请求逐事件投递。
+    Live,
+    /// 暂存正文/推理增量，待候选通过校验后由 Runner 显式冲刷。
+    BufferCandidateContent,
+}
+
 /// tap 流在两次轮询之间保留的 Provider、Sink 与终止栅栏状态。
 struct TappedModelStream {
     /// 尚未消费完成的 Provider 中立事件流。
@@ -3754,6 +3854,8 @@ struct TappedModelStream {
     cancellation: TurnCancellation,
     /// 单事件等待 Sink 确认接收的硬时限。
     event_timeout: Duration,
+    /// 当前请求的正文投递策略。
+    delivery: ModelStreamDelivery,
     /// 向 tap 外层回传不能编码为 ModelError 的 Sink 失败。
     status: Arc<Mutex<ModelStreamTapStatus>>,
     /// MessageEnd、错误、取消或 Sink 失败后的不可逆轮询栅栏。
@@ -3773,6 +3875,8 @@ struct ModelStreamTapStatus {
     usage: TokenUsage,
     /// 已由实时 Sink 确认接收的结束原因。
     stop_reason: Option<StopReason>,
+    /// 尚未发布、等待结构化候选校验结果的正文/推理事件。
+    buffered_events: Vec<AgentStreamEvent>,
 }
 
 /// 失败模型调用中已经由实时 Sink 确认的可记账用量快照。
@@ -3825,6 +3929,20 @@ async fn tap_model_stream_event(
             let envelope = tapped
                 .identity
                 .envelope(AgentStreamEventKind::ModelEvent { event });
+            if tapped.delivery == ModelStreamDelivery::BufferCandidateContent
+                && is_buffered_model_event(envelope.kind())
+            {
+                let AgentStreamEventKind::ModelEvent { event } = envelope.kind() else {
+                    unreachable!("暂存事件必须是模型事件");
+                };
+                let event = event.clone();
+                record_tap_buffered_event(&tapped.status, envelope);
+                // 事件虽未进入 Sink，仍交给严格归约器；Provider 流的完整性和
+                // 用量语义不能因为候选暂存而改变。
+                observe_tap_model_event(&tapped.status, &event);
+                tapped.done = matches!(event, keencode_model::ModelStreamEvent::MessageEnd { .. });
+                return Some((Ok(event), tapped));
+            }
             match deliver_event_cancellable(
                 &tapped.event_sink,
                 &envelope,
@@ -3912,6 +4030,38 @@ fn observe_tap_model_event(
         | keencode_model::ModelStreamEvent::ToolCallArgumentsDelta { .. }
         | keencode_model::ModelStreamEvent::ToolCallEnd { .. } => {}
     }
+}
+
+/// 结构化候选中会直接映射为用户可见正文的模型事件。
+fn is_buffered_model_event(kind: &AgentStreamEventKind) -> bool {
+    matches!(
+        kind,
+        AgentStreamEventKind::ModelEvent {
+            event: keencode_model::ModelStreamEvent::TextDelta { .. }
+                | keencode_model::ModelStreamEvent::ReasoningDelta { .. }
+                | keencode_model::ModelStreamEvent::ReasoningSummaryDelta { .. }
+                | keencode_model::ModelStreamEvent::ReasoningContinuation { .. }
+        }
+    )
+}
+
+/// 暂存未通过结构化校验的正文事件，不触发实时出口。
+fn record_tap_buffered_event(status: &Arc<Mutex<ModelStreamTapStatus>>, event: AgentStreamEvent) {
+    status
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .buffered_events
+        .push(event);
+}
+
+/// 取出一次完整 Provider 调用暂存的正文事件；失败路径直接丢弃该集合。
+fn take_tap_buffered_events(status: &Arc<Mutex<ModelStreamTapStatus>>) -> Vec<AgentStreamEvent> {
+    std::mem::take(
+        &mut status
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .buffered_events,
+    )
 }
 
 /// 返回失败模型调用中已由实时 Sink 确认的明确用量；未知用量不伪造成已消耗。
@@ -4360,6 +4510,8 @@ struct CompletedModelRound {
     elapsed: Duration,
     /// 当前 Turn 内对应的稳定模型调用尝试序号。
     call_attempt: u32,
+    /// 结构化候选在本地校验成功前暂存的正文/推理事件；普通调用为空。
+    buffered_events: Vec<AgentStreamEvent>,
 }
 
 /// 一个已完成模型响应及其可选结构化 JSON 投影。
