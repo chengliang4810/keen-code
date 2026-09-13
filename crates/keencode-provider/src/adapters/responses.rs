@@ -1101,6 +1101,14 @@ fn response_stop_reason(
     if saw_refusal {
         return StopReason::ContentFilter;
     }
+    // 没有 status 和 incomplete reason 时，响应终态本身缺失；即使 output 中有
+    // 完整 function_call，也不能先按工具调用放行，否则 Runtime 无法区分兼容
+    // 的工具终态与畸形响应。
+    if status.is_none() && detail.is_none() {
+        return StopReason::Other {
+            reason: "missing_status".to_owned(),
+        };
+    }
     if saw_tool_call {
         return StopReason::ToolUse;
     }

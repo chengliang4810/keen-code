@@ -1403,6 +1403,50 @@ async fn ordinary_tool_calls_follow_complete_content_before_stop_reason() {
     }
 }
 
+/// 缺少终止原因的完整工具调用不能因为被归一为 Other 而获得执行资格。
+#[tokio::test]
+async fn ordinary_tool_calls_reject_missing_other_stop_reasons_before_execution() {
+    for reason in [
+        "missing_finish_reason",
+        "missing_stop_reason",
+        "missing_status",
+        "missing",
+        "  ",
+    ] {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [tool_reply_with_stop(
+                &[("call-missing-stop", "record", json!({"value": "write"}))],
+                StopReason::Other {
+                    reason: reason.to_owned(),
+                },
+            )],
+        ));
+        let tool = Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ChangesState,
+            ToolConcurrency::Exclusive,
+        ));
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(tool.clone())
+            .expect("缺失终止原因测试工具应可注册");
+        let result = runner(provider, registry)
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+
+        assert!(matches!(
+            result.error,
+            Some(AgentRunError::InvalidResponse { ref message })
+                if message.contains("不允许执行工具")
+        ));
+        assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+        assert_eq!(result.state.step_count(), 0);
+        assert_eq!(tool.call_count(), 0);
+        assert_eq!(result.messages.len(), 1);
+    }
+}
+
 /// MaxOutputTokens、ContentFilter 和 Cancelled 始终阻止工具执行。
 #[tokio::test]
 async fn ordinary_tool_calls_keep_terminal_stop_reasons_fail_closed() {

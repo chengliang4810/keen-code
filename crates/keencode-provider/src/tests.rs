@@ -2785,6 +2785,85 @@ fn responses_terminal_status_wins_over_function_call_content() {
     }
 }
 
+/// 三种协议在完整工具调用缺少终止字段时都必须保留缺失哨兵，交由 Runtime 拒绝执行。
+#[test]
+fn three_protocols_preserve_missing_stop_reason_sentinels_with_complete_tool_calls() {
+    let cases = [
+        (
+            ProviderProtocol::Messages,
+            json!({
+                "id": "msg-missing-stop",
+                "type": "message",
+                "model": "test-model",
+                "content": [{
+                    "type": "tool_use",
+                    "id": "call-missing-stop",
+                    "name": "record",
+                    "input": {"value": 1}
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_stop_reason".to_owned(),
+            },
+        ),
+        (
+            ProviderProtocol::ChatCompletions,
+            json!({
+                "id": "chat-missing-finish",
+                "object": "chat.completion",
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": [{
+                            "id": "call-missing-finish",
+                            "type": "function",
+                            "function": {
+                                "name": "record",
+                                "arguments": "{\"value\":1}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_finish_reason".to_owned(),
+            },
+        ),
+        (
+            ProviderProtocol::Responses,
+            json!({
+                "id": "resp-missing-status",
+                "object": "response",
+                "model": "test-model",
+                "output": [{
+                    "id": "fc-missing-status",
+                    "call_id": "call-missing-status",
+                    "type": "function_call",
+                    "name": "record",
+                    "arguments": "{\"value\":1}"
+                }]
+            }),
+            StopReason::Other {
+                reason: "missing_status".to_owned(),
+            },
+        ),
+    ];
+
+    for (protocol, value, expected_stop_reason) in cases {
+        let events = Adapter::new(protocol)
+            .decode_json(value)
+            .expect("缺失终止字段的完整工具调用应先完成协议归一");
+        let response = collect_events(events);
+        assert_eq!(response.stop_reason, expected_stop_reason);
+        assert!(response.content.iter().any(|block| {
+            matches!(block, ContentBlock::ToolCall { tool_call } if tool_call.name == "record")
+        }));
+    }
+}
+
 /// 验证缓冲 Responses reasoning output item 经统一历史回放后仍保留完整协议字段。
 #[test]
 fn responses_buffered_reasoning_item_round_trips_through_history() {

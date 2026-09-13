@@ -4196,13 +4196,17 @@ fn model_terminal_error(stop_reason: &StopReason) -> Option<AgentRunError> {
 /// 判断已完整解析工具调用是否可以进入工具调度阶段。
 ///
 /// `ToolUse` 不是唯一能够携带可执行工具块的结束原因：兼容 Provider 可能
-/// 使用 `Completed` 或自定义 `Other`。明确的终止原因在上游已经转换为
-/// `AgentRunError`，因此不会进入本判断。
+/// 使用 `Completed` 或有明确名称的自定义 `Other`。适配器用 `Other` 表示
+/// 缺少终止原因时必须保持 fail closed，不能把不完整响应当作可执行请求。
 fn stop_reason_allows_tool_calls(stop_reason: &StopReason) -> bool {
-    matches!(
-        stop_reason,
-        StopReason::ToolUse | StopReason::Completed | StopReason::Other { .. }
-    )
+    match stop_reason {
+        StopReason::ToolUse | StopReason::Completed => true,
+        StopReason::Other { reason } => {
+            let reason = reason.trim();
+            !reason.is_empty() && reason != "missing" && !reason.starts_with("missing_")
+        }
+        StopReason::MaxOutputTokens | StopReason::ContentFilter | StopReason::Cancelled => false,
+    }
 }
 
 /// 提取非正常模型响应中已经确认的文本和推理，丢弃不能独立回放的工具调用。
