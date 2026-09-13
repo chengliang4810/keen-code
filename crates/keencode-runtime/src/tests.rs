@@ -6773,6 +6773,7 @@ async fn failed_turn_rewind_releases_lease_and_allows_resend() {
         source_session_id: session.session_id().clone(),
         target_message_id: message.message_id.clone(),
         expected_text: "original".into(),
+        revert_files: false,
         operation_id: "edit-failed".into(),
     };
     drop(bound);

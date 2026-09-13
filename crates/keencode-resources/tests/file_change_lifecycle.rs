@@ -29,6 +29,8 @@ enum InitialToolState {
 struct FileChangeFixture {
     /// 隔离测试数据的临时根目录。
     root: TempDir,
+    /// 与 Session 存储隔离的真实工作区目录。
+    workspace: TempDir,
     /// 被测试的源 Session 标识。
     session_id: SessionId,
     /// 包含文件变更证据的工具请求标识。
@@ -291,7 +293,17 @@ fn append_second_turn(journal: &SessionJournal, turn_id: &TurnId) -> Result<(), 
 
 /// 创建包含写前、写后快照的真实 Journal，并按指定状态结束工具生命周期。
 fn create_fixture(state: InitialToolState, with_second_turn: bool) -> FileChangeFixture {
+    create_fixture_with_before(state, with_second_turn, Some(b"\xef\xbb\xbfold\r\n\0\xff"))
+}
+
+/// 创建文件恢复夹具；`before_bytes=None` 表示该 Turn 新建了目标文件。
+fn create_fixture_with_before(
+    state: InitialToolState,
+    with_second_turn: bool,
+    before_bytes: Option<&[u8]>,
+) -> FileChangeFixture {
     let root = TempDir::new().expect("临时目录应创建");
+    let workspace = TempDir::new().expect("测试工作区应创建");
     let session_id = SessionId::new("file-change-lifecycle").expect("Session ID 应有效");
     let (journal, artifacts) = open_session(root.path(), &session_id).expect("Session 应打开");
     append(
@@ -337,9 +349,10 @@ fn create_fixture(state: InitialToolState, with_second_turn: bool) -> FileChange
     )
     .expect("ToolExecutionStarted 应提交");
 
-    let before_bytes = b"\xef\xbb\xbfold\r\n\0\xff".to_vec();
+    let before_bytes = before_bytes.map_or_else(Vec::new, <[u8]>::to_vec);
     let after_bytes = b"\xef\xbb\xbfnew\n\r\0\x80".to_vec();
-    let before_snapshot = persist_snapshot(&artifacts, &before_bytes);
+    let before_snapshot =
+        (!before_bytes.is_empty()).then(|| persist_snapshot(&artifacts, &before_bytes));
     let after_snapshot = persist_snapshot(&artifacts, &after_bytes);
     append(
         &journal,
@@ -347,8 +360,8 @@ fn create_fixture(state: InitialToolState, with_second_turn: bool) -> FileChange
         SessionEvent::ToolFileChangePrepared {
             request_id: request_id.clone(),
             change: ToolFileChange {
-                path: root.path().join("result.bin").display().to_string(),
-                before: Some(before_snapshot.clone()),
+                path: workspace.path().join("result.bin").display().to_string(),
+                before: before_snapshot,
                 after: after_snapshot.clone(),
                 applied: false,
             },
@@ -393,6 +406,7 @@ fn create_fixture(state: InitialToolState, with_second_turn: bool) -> FileChange
     drop(artifacts);
     FileChangeFixture {
         root,
+        workspace,
         session_id,
         request_id,
         turn_id,
@@ -665,6 +679,7 @@ fn edit_archive_cold_recovery_copies_file_change_snapshots() {
             source_session_id: fixture.session_id.clone(),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "第二轮用户消息".to_owned(),
+            revert_files: false,
             operation_id: "archive-file-snapshot".to_owned(),
         },
     )
@@ -700,6 +715,144 @@ fn edit_archive_cold_recovery_copies_file_change_snapshots() {
         &fixture.request_id,
         &fixture.before_bytes,
         &fixture.after_bytes,
+    );
+}
+
+/// 开启文件恢复时，把最后根 Turn 已修改的现有文件逐字节恢复到写前快照。
+#[test]
+fn edit_reverts_existing_file_for_last_root_turn() {
+    let fixture = create_fixture(InitialToolState::AppliedAndCompleted, false);
+    let target = fixture.workspace.path().join("result.bin");
+    fs::write(&target, &fixture.after_bytes).expect("工作区应处于工具写后状态");
+
+    let result = prepare_edit_user(
+        fixture.root.path(),
+        journal_config(),
+        artifact_limits(),
+        SessionEditUserRequest {
+            source_session_id: fixture.session_id.clone(),
+            target_message_id: "user-message-turn-1".to_owned(),
+            expected_text: "第一轮用户消息".to_owned(),
+            revert_files: true,
+            operation_id: "revert-existing-file".to_owned(),
+        },
+    )
+    .expect("现有文件应可随编辑恢复");
+
+    assert!(result.reverted_files);
+    assert_eq!(
+        fs::read(target).expect("恢复后的文件应可读"),
+        fixture.before_bytes
+    );
+    let (source, _) = cold_recover(fixture.root.path(), &fixture.session_id)
+        .expect("恢复文件后的源 Session 应可冷恢复");
+    assert!(source.raw_transcript_messages().is_empty());
+}
+
+/// 开启文件恢复时，最后根 Turn 新建的文件必须被删除。
+#[test]
+fn edit_deletes_file_created_by_last_root_turn() {
+    let fixture = create_fixture_with_before(InitialToolState::AppliedAndCompleted, false, None);
+    let target = fixture.workspace.path().join("result.bin");
+    fs::write(&target, &fixture.after_bytes).expect("工作区新文件应处于工具写后状态");
+
+    let result = prepare_edit_user(
+        fixture.root.path(),
+        journal_config(),
+        artifact_limits(),
+        SessionEditUserRequest {
+            source_session_id: fixture.session_id.clone(),
+            target_message_id: "user-message-turn-1".to_owned(),
+            expected_text: "第一轮用户消息".to_owned(),
+            revert_files: true,
+            operation_id: "revert-created-file".to_owned(),
+        },
+    )
+    .expect("本轮新建文件应可随编辑删除");
+
+    assert!(result.reverted_files);
+    assert!(!target.exists(), "本轮新建文件必须恢复为不存在");
+}
+
+/// 关闭文件恢复时不得检查或改写工作区，即使文件已偏离工具写后快照。
+#[test]
+fn edit_without_file_revert_leaves_conflicting_workspace_untouched() {
+    let fixture = create_fixture(InitialToolState::AppliedAndCompleted, false);
+    let target = fixture.workspace.path().join("result.bin");
+    let external = b"external-change-after-turn";
+    fs::write(&target, external).expect("外部变化应写入");
+
+    let result = prepare_edit_user(
+        fixture.root.path(),
+        journal_config(),
+        artifact_limits(),
+        SessionEditUserRequest {
+            source_session_id: fixture.session_id,
+            target_message_id: "user-message-turn-1".to_owned(),
+            expected_text: "第一轮用户消息".to_owned(),
+            revert_files: false,
+            operation_id: "keep-conflicting-file".to_owned(),
+        },
+    )
+    .expect("关闭文件恢复时工作区冲突不应阻止编辑");
+
+    assert!(!result.reverted_files);
+    assert_eq!(fs::read(target).expect("外部文件应仍可读"), external);
+}
+
+/// 开启文件恢复但工作区已再次变化时必须在事务记录和归档发布前失败关闭。
+#[test]
+fn edit_file_revert_conflict_has_no_transaction_side_effects() {
+    let fixture = create_fixture(InitialToolState::AppliedAndCompleted, false);
+    let target = fixture.workspace.path().join("result.bin");
+    let external = b"external-change-after-turn";
+    fs::write(&target, external).expect("外部变化应写入");
+    let source_log = fixture
+        .root
+        .path()
+        .join(fixture.session_id.as_str())
+        .join("events.jsonl");
+    let source_before = fs::read(&source_log).expect("源日志应可读");
+    let sessions_before =
+        keencode_resources::list_session_ids(fixture.root.path()).expect("Session 列表应读取");
+
+    let error = prepare_edit_user(
+        fixture.root.path(),
+        journal_config(),
+        artifact_limits(),
+        SessionEditUserRequest {
+            source_session_id: fixture.session_id.clone(),
+            target_message_id: "user-message-turn-1".to_owned(),
+            expected_text: "第一轮用户消息".to_owned(),
+            revert_files: true,
+            operation_id: "reject-conflicting-file".to_owned(),
+        },
+    )
+    .expect_err("工作区冲突必须阻止文件恢复编辑");
+
+    assert!(matches!(
+        error,
+        ResourceError::SessionMutationNotApplicable(_)
+    ));
+    assert_eq!(fs::read(target).expect("冲突文件应仍可读"), external);
+    assert_eq!(fs::read(source_log).expect("源日志应仍可读"), source_before);
+    assert_eq!(
+        keencode_resources::list_session_ids(fixture.root.path()).expect("Session 列表应再次读取"),
+        sessions_before,
+        "冲突不得发布归档 Session"
+    );
+    assert!(
+        fs::read_dir(
+            fixture
+                .root
+                .path()
+                .join("session-mutations")
+                .join("records"),
+        )
+        .expect("事务记录目录应存在")
+        .next()
+        .is_none(),
+        "冲突不得持久化事务记录"
     );
 }
 

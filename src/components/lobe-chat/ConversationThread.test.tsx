@@ -625,6 +625,10 @@ describe("ConversationThread 思考耗时", () => {
     const css = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(source).toContain("<Textarea");
+    expect(source).toContain("<Checkbox");
+    expect(source).toContain("<Label");
+    expect(source).toContain("const [revertFiles, setRevertFiles] = useState(false)");
+    expect(source).toContain("onSend(value.trim(), revertFiles)");
     expect(source).toContain('event.key === "Escape"');
     expect(source).toContain("event.metaKey || event.ctrlKey");
     expect(source).toContain('className="btn btn--solid"');

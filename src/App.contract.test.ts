@@ -406,7 +406,11 @@ describe("App 编辑重发契约", () => {
     expect(editSource).toContain("api.rewind");
     expect(editSource).toContain("const targetMessageId = message.id;");
     expect(editSource).toContain("targetMessageId,");
-    expect(editSource).toContain("revertFiles: false");
+    expect(editSource).toContain("revertFiles,");
+    expect(editSource).toContain("currentView.active_root_turn_id !== null");
+    expect(editSource).toContain(
+      'currentView.subagents.some((agent) => agent.status === "running")',
+    );
     expect(editSource).toContain(
       "updateSessionPreference(prepared.archivedSessionId, { archived: true })",
     );

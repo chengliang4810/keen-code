@@ -1,3 +1,16 @@
+# 2026-09-13 编辑重发文件恢复选项
+
+- 修改：最后一条真实用户消息的内联编辑器新增“同时恢复本轮及其子 Agent 修改的文件”复选框，默认关闭；直接发送传递 `revertFiles=false`，勾选后传递 `revertFiles=true`。复用现有 shadcn/ui `Checkbox`、`Label`、`Textarea`、`Button` 和原有设计令牌，没有新增 CSS、依赖或后台活动。
+- 基线：HEAD `63e8f9546f6d52125fcb1b5608c6e4736d1c13c4` 的 `src/` 与 `public/`，通过 `git archive HEAD src public` 解压到隔离目录；基线 `ConversationThread.tsx` SHA-256 为 `ec9ff4c830dc04f59a641ef7fd192d1890c85454c6dddd843a5305b0ffcb666d`。当前工作树夹具直接加载真实修改后组件和真实样式。
+- 夹具：`/tmp/keencode-edit-resend-qa.4L4PyU/harness/{index.html,fixture.tsx,vite.config.ts}`；基线和当前版本分别运行在 `http://127.0.0.1:14351/`、`http://127.0.0.1:14352/`，仅用本地合成消息与提交回调，不访问模型、不写用户会话。
+- 环境：macOS 14.8.7、普通 Playwright CLI、Chromium 153，中文、浅色；像素对比为 1280×800、deviceScaleFactor=1，另检查 760×800 窄视口。Browser 插件未提供，因此按前端测试技能使用普通 Playwright。
+- 行为结果：修改前编辑器不存在 checkbox；修改后可访问性快照显示复选框默认 `aria-checked=false` / `data-state=unchecked`。不勾选发送得到 `{messageId:"user-last",revertFiles:false}`；重新打开、勾选并发送得到 `{messageId:"user-last",revertFiles:true}`，成功后编辑器关闭。1280 宽下编辑器宽度保持 504px，高度由 146px 增至 182.398px；760 宽下编辑器位于 x=223–727，页面 `scrollWidth=760`，无横向溢出。两页最终 Console 均为 0 error、0 warning。
+- 像素结果：RGB 任一通道差值 >16 计入；修改前后同状态编辑器差异为 23167/1024000 像素（2.262402%），未掩码，边界 `(579,395)–(1083,508)`，集中于新增复选框、编辑器下边界和下移的操作区。
+- 产物：`/tmp/keencode-edit-resend-qa.4L4PyU/{before-editor.png,after-editor-default.png,after-editor-selected.png,after-submitted-true.png,after-editor-narrow.png,diff-editor.png,comparison-editor.png,pixel-differences.json}`。临时目录会被系统清理，不作为发布产物。
+- 未验收：没有启动、重建或控制原生 Tauri WebView，因此浏览器组件夹具不替代 macOS 原生桌面验收；没有 Windows 实机验证。后端真实工作区恢复、冲突关闭和冷恢复由 Rust 测试覆盖，本夹具只验证可见组件与布尔值交互边界。
+
+---
+
 # 2026-09-10 设置页中的更新弹窗可见性
 
 - 问题：在设置页点击“查看进度／安装并重启”后看不到更新弹窗，必须切回对话页才出现。

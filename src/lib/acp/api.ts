@@ -74,8 +74,8 @@ export interface SessionRewindResult {
   archivedSessionId: string;
   /** 回退完成后权威 Journal 的最后序号。 */
   throughJournalSequence: number;
-  /** 首版固定为 false，不自动恢复项目文件。 */
-  revertedFiles: false;
+  /** 是否按请求完成了项目文件恢复。 */
+  revertedFiles: boolean;
 }
 
 /** 标准 Session 列表投影。 */
@@ -208,8 +208,8 @@ export function sessionRewind(args: {
   targetMessageId: string;
   /** 目标用户消息的完整原始 Agent 文本，不做 trim。 */
   expectedText: string;
-  /** 首版不自动恢复文件，固定为 false。 */
-  revertFiles: false;
+  /** 是否恢复被删除根 Turn 及其子 Agent 已应用的文件变更。 */
+  revertFiles: boolean;
   /** rewind 事务的业务幂等标识，放在 ACP 保留元数据中。 */
   operationId: string;
 }): Promise<SessionRewindResult> {
@@ -219,7 +219,7 @@ export function sessionRewind(args: {
       sessionId: args.sessionId,
       targetMessageId: args.targetMessageId,
       expectedText: args.expectedText,
-      revertFiles: false,
+      revertFiles: args.revertFiles,
       _meta: { "keencode/operationId": args.operationId },
     },
   ).then((result) => {
@@ -228,9 +228,10 @@ export function sessionRewind(args: {
       result === null ||
       Array.isArray(result) ||
       typeof (result as Record<string, unknown>).archivedSessionId !== "string" ||
-      !(result as Record<string, unknown>).archivedSessionId
+      !(result as Record<string, unknown>).archivedSessionId ||
+      typeof (result as Record<string, unknown>).revertedFiles !== "boolean"
     ) {
-      throw new Error("ACP Rewind 响应缺少归档 Session 标识");
+      throw new Error("ACP Rewind 响应格式无效");
     }
     return result as SessionRewindResult;
   });

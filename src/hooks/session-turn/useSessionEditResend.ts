@@ -44,7 +44,11 @@ export function useSessionEditResend({
   const { sendInFlightRef } = state;
 
   return useCallback(
-    async (message: ChatMessage, content: string): Promise<boolean> => {
+    async (
+      message: ChatMessage,
+      content: string,
+      revertFiles = false,
+    ): Promise<boolean> => {
       const sessionId = session.sessionId;
       // 编辑重发会先修改权威历史，必须等待当前真实投影完成恢复。
       const currentView = sessionId
@@ -57,6 +61,8 @@ export function useSessionEditResend({
         !currentView.replay.loaded ||
         currentView.replay.restoring ||
         currentView.delivery.frozen ||
+        currentView.active_root_turn_id !== null ||
+        currentView.subagents.some((agent) => agent.status === "running") ||
         sendInFlightRef.current
       ) {
         return false;
@@ -64,12 +70,11 @@ export function useSessionEditResend({
       // 编辑重发只能回退 Journal 中的权威根用户消息；本地乐观气泡（u-*）或
       // 合成投影标识没有 Journal 对应物，直接拒绝，避免发出注定失败的 rewind。
       const targetMessageId = message.id;
-      if (
-        !currentView.history.some(
-          (item) => item.role === "user" && item.messageId === targetMessageId,
-        )
-      ) {
-        setLocalError("该消息尚未同步完成，不能编辑重发；请直接在输入框重新发送。");
+      const latestAuthoritativeUserMessage = currentView.history
+        .filter((item) => item.role === "user" && item.messageId)
+        .at(-1);
+      if (latestAuthoritativeUserMessage?.messageId !== targetMessageId) {
+        setLocalError("只能编辑最后一条已同步的用户消息。");
         return false;
       }
       try {
@@ -82,14 +87,18 @@ export function useSessionEditResend({
               message.content,
               message.attachments ?? [],
             ),
-            revertFiles: false,
+            revertFiles,
             operationId: createOperationId("session-rewind"),
           });
           updateSessionPreference(prepared.archivedSessionId, { archived: true });
           // rewind 重开了后端 Session，必须通过标准 load 重建完整投影和投递游标。
           currentView.replay.loaded = false;
           await replayHistory(sessionId);
-          await refreshSessions();
+          try {
+            await refreshSessions();
+          } catch {
+            // 权威 rewind 与 replay 已完成；列表刷新失败不能阻断新 Turn。
+          }
         } finally {
           sendInFlightRef.current = false;
         }

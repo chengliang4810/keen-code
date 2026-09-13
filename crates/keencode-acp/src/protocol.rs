@@ -424,19 +424,16 @@ pub struct RewindSessionResponse {
     pub archived_session_id: String,
     /// 回退完成后权威 Journal 的最后序号。
     pub through_journal_sequence: u64,
-    /// 首版固定为 `false`，明确表示没有自动恢复项目文件。
+    /// 是否按请求完成了项目文件恢复。
     pub reverted_files: bool,
 }
 
 impl RewindSessionResponse {
-    /// 校验 Session 水位并拒绝首版未实现的文件自动恢复声明。
+    /// 校验 Session 身份与回退后的 Journal 水位。
     pub fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_identifier(&self.archived_session_id, MAX_IDENTIFIER_BYTES)?;
-        if self.through_journal_sequence == 0
-            || self.reverted_files
-            || self.archived_session_id == self.session_id
-        {
+        if self.through_journal_sequence == 0 || self.archived_session_id == self.session_id {
             return Err(AcpBoundaryError::InvalidSemanticValue);
         }
         Ok(())
@@ -1922,7 +1919,7 @@ pub struct RewindSessionRequest {
     pub target_message_id: String,
     /// 用户正在编辑的完整原文，用于独占事务中的并发与幂等校验。
     pub expected_text: String,
-    /// 是否尝试恢复文件；首版桌面调用固定为 false。
+    /// 是否恢复被删除根 Turn 及其单层子 Agent 已应用的文件变更。
     pub revert_files: bool,
     /// ACP 为调用双方保留的扩展元数据；KeenCode 从中读取稳定 operationId。
     #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
@@ -2154,15 +2151,11 @@ impl ValidateAcpParams for RewindCandidatesRequest {
 }
 
 impl ValidateAcpParams for RewindSessionRequest {
-    /// 校验消息锚点，并拒绝首版不支持的文件恢复。
+    /// 校验 Session、消息锚点与完整原文。
     fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_identifier(&self.target_message_id, MAX_IDENTIFIER_BYTES)?;
-        validate_text(&self.expected_text, MAX_USER_TEXT_BYTES)?;
-        if self.revert_files {
-            return Err(AcpBoundaryError::InvalidSemanticValue);
-        }
-        Ok(())
+        validate_text(&self.expected_text, MAX_USER_TEXT_BYTES)
     }
 }
 

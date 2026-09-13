@@ -8511,6 +8511,11 @@ fn map_authoritative_event(
     atomic_siblings: Option<&[SessionEvent]>,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
     if mode == AuthoritativeProjectionMode::Replay {
+        if replay_hides_root_turn_lifecycle(state, event) {
+            // 编辑重发会保留根 Turn 的终态骨架，以维持子 Agent 与 Mailbox
+            // 控制面引用；没有对应真实用户消息时，这个骨架不属于对话投影。
+            return Ok(Vec::new());
+        }
         let request_id = match event {
             SessionEvent::ToolRequested { request } => Some(&request.request_id),
             SessionEvent::ToolExecutionStarted { request_id }
@@ -8905,6 +8910,33 @@ fn map_authoritative_event(
         | SessionEvent::SessionClosed {} => Vec::new(),
     };
     Ok(drafts)
+}
+
+/// 回放时隐藏仅为控制面引用保留、但已没有独立真实用户消息的根 Turn 生命周期。
+fn replay_hides_root_turn_lifecycle(state: &SessionState, event: &SessionEvent) -> bool {
+    let turn_id = match event {
+        SessionEvent::TurnStarted { turn_id, .. }
+        | SessionEvent::TurnCompleted { turn_id }
+        | SessionEvent::TurnStopped { turn_id, .. } => turn_id,
+        _ => return false,
+    };
+    let Some(turn) = state.turns.get(turn_id) else {
+        return false;
+    };
+    let is_root_turn = turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
+        && turn.root_turn_id == turn.turn_id
+        && turn.parent_turn_id.is_none();
+    is_root_turn
+        && !state.transcript.iter().any(|record| {
+            matches!(
+                record,
+                TranscriptRecord::MessageAdded(message)
+                    if !message.is_meta
+                        && message.role == ResourceMessageRole::User
+                        && message.agent_id.is_none()
+                        && message.turn_id.as_ref() == Some(turn_id)
+            )
+        })
 }
 
 /// 通过标准 ACP 扩展槽携带资源锚点，不冒充要求 UUID 的未启用 messageId 字段。
@@ -17067,6 +17099,164 @@ mod tests {
             );
             assert!(update.get("messageId").is_none());
         }
+    }
+
+    /// rewind 后仅为控制面引用保留的根 Turn 骨架不得在冷回放中生成空对话。
+    #[test]
+    fn replay_hides_root_turn_without_authoritative_user_message() {
+        let storage = tempfile::tempdir().expect("测试目录应创建");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "rewound-root-skeleton".to_owned(),
+                title: "编辑重发骨架".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let mut state = session.snapshot().expect("Session 快照应读取").state;
+        let root_turn_id = ResourceTurnId::new("turn-rewound-root").expect("根 TurnId 应有效");
+        let child_turn_id = ResourceTurnId::new("turn-rewound-child").expect("子 TurnId 应有效");
+        let root_agent_id =
+            ResourceAgentId::new(keencode_resources::ROOT_AGENT_ID).expect("根 AgentId 应有效");
+        let child_agent_id = ResourceAgentId::new("child-agent").expect("子 AgentId 应有效");
+        state.turns.insert(
+            root_turn_id.clone(),
+            TurnState {
+                turn_id: root_turn_id.clone(),
+                source_agent_id: root_agent_id.clone(),
+                root_turn_id: root_turn_id.clone(),
+                parent_turn_id: None,
+                prompt_summary: "已编辑的旧问题".to_owned(),
+                started_at_unix_ms: 2,
+                completed_at_unix_ms: Some(4),
+                status: TurnStatus::Completed,
+                stop_reason: None,
+                outcome_message: None,
+            },
+        );
+        state.turns.insert(
+            child_turn_id.clone(),
+            TurnState {
+                turn_id: child_turn_id.clone(),
+                source_agent_id: child_agent_id.clone(),
+                root_turn_id: root_turn_id.clone(),
+                parent_turn_id: Some(root_turn_id.clone()),
+                prompt_summary: "保留子 Agent 生命周期".to_owned(),
+                started_at_unix_ms: 3,
+                completed_at_unix_ms: Some(4),
+                status: TurnStatus::Completed,
+                stop_reason: None,
+                outcome_message: None,
+            },
+        );
+
+        let root_events = [
+            SessionEvent::TurnStarted {
+                turn_id: root_turn_id.clone(),
+                source_agent_id: root_agent_id.clone(),
+                root_turn_id: root_turn_id.clone(),
+                parent_turn_id: None,
+                prompt_summary: "已编辑的旧问题".to_owned(),
+            },
+            SessionEvent::TurnCompleted {
+                turn_id: root_turn_id.clone(),
+            },
+        ];
+        for (index, event) in root_events.iter().enumerate() {
+            let record = SessionEventRecord {
+                schema: SESSION_EVENT_SCHEMA.to_owned(),
+                version: SESSION_EVENT_VERSION,
+                event_id: SessionEventId::new(format!("rewound-root-{index}"))
+                    .expect("EventId 应有效"),
+                session: state.session_id.clone(),
+                sequence: u64::try_from(index).unwrap_or(0).saturating_add(2),
+                time_unix_ms: 2,
+                event: event.clone(),
+            };
+            assert!(
+                map_authoritative_record(
+                    &session,
+                    &state,
+                    &record,
+                    AuthoritativeProjectionMode::Replay,
+                )
+                .expect("根骨架 replay 应可映射")
+                .is_empty(),
+                "没有真实用户消息的根 Turn 生命周期不得投影"
+            );
+            assert_eq!(
+                map_authoritative_record(
+                    &session,
+                    &state,
+                    &record,
+                    AuthoritativeProjectionMode::Live,
+                )
+                .expect("live 根 Turn 应可映射")
+                .len(),
+                1,
+                "实时 Turn 生命周期不受 rewind 回放过滤影响"
+            );
+        }
+
+        let child_record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("rewound-child-completed").expect("EventId 应有效"),
+            session: state.session_id.clone(),
+            sequence: 4,
+            time_unix_ms: 4,
+            event: SessionEvent::TurnCompleted {
+                turn_id: child_turn_id,
+            },
+        };
+        assert_eq!(
+            map_authoritative_record(
+                &session,
+                &state,
+                &child_record,
+                AuthoritativeProjectionMode::Replay,
+            )
+            .expect("子 Agent 终态 replay 应可映射")
+            .len(),
+            1,
+            "子 Agent 生命周期必须继续投影"
+        );
+
+        state.transcript.push(TranscriptRecord::MessageAdded(
+            keencode_resources::SessionMessage {
+                is_meta: false,
+                message_id: "root-user-message".to_owned(),
+                turn_id: Some(root_turn_id),
+                agent_id: None,
+                role: keencode_resources::MessageRole::User,
+                content: vec![keencode_resources::MessagePart::Text {
+                    text: "仍存在的真实问题".to_owned(),
+                }],
+            },
+        ));
+        let visible_root_record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("visible-root-completed").expect("EventId 应有效"),
+            session: state.session_id.clone(),
+            sequence: 5,
+            time_unix_ms: 5,
+            event: SessionEvent::TurnCompleted {
+                turn_id: ResourceTurnId::new("turn-rewound-root").expect("根 TurnId 应有效"),
+            },
+        };
+        assert_eq!(
+            map_authoritative_record(
+                &session,
+                &state,
+                &visible_root_record,
+                AuthoritativeProjectionMode::Replay,
+            )
+            .expect("带真实用户消息的根 Turn replay 应可映射")
+            .len(),
+            1
+        );
     }
 
     /// 同样的正文由用户输入时可见，由 Hook 追加时在实时和回放中都不可见。

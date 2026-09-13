@@ -714,7 +714,7 @@ fn session_control_response_dtos_use_exact_current_shapes() {
 }
 
 #[test]
-fn session_control_response_validation_rejects_duplicate_candidates_and_false_capabilities() {
+fn session_control_response_validation_rejects_duplicate_candidates_and_false_acceptance() {
     let duplicate = RewindCandidatesResponse {
         session_id: "session-a".to_owned(),
         candidates: vec![
@@ -744,18 +744,17 @@ fn session_control_response_validation_rejects_duplicate_candidates_and_false_ca
         ),
         Err(AcpBoundaryError::InvalidSemanticValue)
     ));
-    assert!(matches!(
-        AcpResponseEncoder::new().encode_result(
+    AcpResponseEncoder::new()
+        .encode_result(
             RequestId::Number(1),
             &RewindSessionResponse {
                 session_id: "session-a".to_owned(),
                 archived_session_id: "archive-a".to_owned(),
                 through_journal_sequence: 1,
                 reverted_files: true,
-            }
-        ),
-        Err(AcpBoundaryError::InvalidSemanticValue)
-    ));
+            },
+        )
+        .expect("完成文件恢复的回退响应应有效");
 }
 
 #[test]
@@ -1434,6 +1433,25 @@ fn keencode_extensions_use_only_keencode_namespace_without_session_aliases() {
 }
 
 #[test]
+fn rewind_request_accepts_file_restore_true() {
+    let request = AcpRequestDecoder::new()
+        .decode_request(
+            "keencode/session/rewind",
+            json!({
+                "sessionId": "session-a",
+                "targetMessageId": "message-a",
+                "expectedText": "原始用户消息",
+                "revertFiles": true
+            }),
+        )
+        .expect("显式文件恢复请求应通过 ACP 边界");
+    assert!(matches!(
+        request,
+        AcpRequest::RewindSession(request) if request.revert_files
+    ));
+}
+
+#[test]
 fn extension_semantics_reject_invalid_rewind_replay_goal_and_oauth_values() {
     let decoder = AcpRequestDecoder::new();
     let invalid = [
@@ -1448,15 +1466,6 @@ fn extension_semantics_reject_invalid_rewind_replay_goal_and_oauth_values() {
                 "targetMessageId": "message-a",
                 "expectedText": "",
                 "revertFiles": false
-            }),
-        ),
-        (
-            "keencode/session/rewind",
-            json!({
-                "sessionId": "session-a",
-                "targetMessageId": "message-a",
-                "expectedText": "原始用户消息",
-                "revertFiles": true
             }),
         ),
         (

@@ -8,6 +8,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -43,6 +44,8 @@ import {
   IconRename,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@/components/ui/spinner";
 import { formatMessageTime } from "@/lib/messageTime";
@@ -368,10 +371,12 @@ function UserMessageEditor({
   initialValue: string;
   locale: Locale;
   onCancel: () => void;
-  onSend: (value: string) => Promise<boolean>;
+  onSend: (value: string, revertFiles: boolean) => Promise<boolean>;
 }) {
   const tr = useMemo(() => createT(locale), [locale]);
+  const revertFilesId = useId();
   const [value, setValue] = useState(initialValue);
+  const [revertFiles, setRevertFiles] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const canSend = value.trim().length > 0 && !submitting;
@@ -387,11 +392,11 @@ function UserMessageEditor({
     if (!canSend) return;
     setSubmitting(true);
     try {
-      if (await onSend(value.trim())) onCancel();
+      if (await onSend(value.trim(), revertFiles)) onCancel();
     } finally {
       setSubmitting(false);
     }
-  }, [canSend, onCancel, onSend, value]);
+  }, [canSend, onCancel, onSend, revertFiles, value]);
 
   return (
     <div className="lobe-chat-user-editor" data-testid="user-message-editor">
@@ -411,6 +416,15 @@ function UserMessageEditor({
           }
         }}
       />
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id={revertFilesId}
+          checked={revertFiles}
+          disabled={submitting}
+          onCheckedChange={(checked) => setRevertFiles(checked === true)}
+        />
+        <Label htmlFor={revertFilesId}>{tr("message.revertFiles")}</Label>
+      </div>
       <div className="lobe-chat-user-editor__actions">
         <Button
           type="button"
@@ -478,6 +492,7 @@ export interface ConversationThreadProps {
   onEditLastUserMessage?: (
     message: ChatMessage,
     content: string,
+    revertFiles: boolean,
   ) => Promise<boolean>;
   /** 当前会话中的子智能体，用于替换 Agent 工具调用行。 */
   subagents?: AcpSubagentInfo[];
@@ -1005,7 +1020,9 @@ export function ConversationThread({
                           initialValue={m.content}
                           locale={locale}
                           onCancel={() => setEditingUserMessageId(null)}
-                          onSend={(content) => onEditLastUserMessage(m, content)}
+                          onSend={(content, revertFiles) =>
+                            onEditLastUserMessage(m, content, revertFiles)
+                          }
                         />
                       ) : m.content.trim() ? (
                         <div

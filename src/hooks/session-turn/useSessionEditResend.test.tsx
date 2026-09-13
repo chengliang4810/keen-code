@@ -131,11 +131,57 @@ describe("useSessionEditResend recovery barrier", () => {
 
     await expect(edit(message, "修改后")).resolves.toBe(true);
     expect(rewind).toHaveBeenCalledOnce();
+    expect(rewind).toHaveBeenCalledWith(expect.objectContaining({
+      targetMessageId: "user-1",
+      revertFiles: false,
+    }));
     expect(executeSend).toHaveBeenCalledOnce();
     expect(executeSend).toHaveBeenCalledWith(expect.objectContaining({
       storedDisplay: "修改后",
       targetSessionId: "session-edit",
     }));
+  });
+
+  it("勾选文件恢复时把 revertFiles=true 原样传给 rewind", async () => {
+    const { options, rewind, executeSend } = makeOptions("ready");
+
+    await expect(renderEditResend(options)(message, "修改后", true)).resolves.toBe(true);
+    expect(rewind).toHaveBeenCalledWith(expect.objectContaining({ revertFiles: true }));
+    expect(executeSend).toHaveBeenCalledOnce();
+  });
+
+  it("权威历史中存在更新用户消息时拒绝编辑旧消息", async () => {
+    const { options, view, rewind, executeSend } = makeOptions("ready");
+    view.history.push({ role: "user", messageId: "user-2", content: "更新问题" });
+
+    await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(false);
+    expect(rewind).not.toHaveBeenCalled();
+    expect(executeSend).not.toHaveBeenCalled();
+    expect(options.ui.setLocalError).toHaveBeenCalled();
+  });
+
+  it.each([
+    ["根 Turn", (view: ReturnType<typeof emptySession>) => { view.active_root_turn_id = "turn-active"; }],
+    ["子 Agent", (view: ReturnType<typeof emptySession>) => {
+      view.subagents.push({ status: "running" } as never);
+    }],
+  ])("存在活动%s时拒绝 rewind", async (_label, markActive) => {
+    const { options, view, rewind, executeSend } = makeOptions("ready");
+    markActive(view);
+
+    await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(false);
+    expect(rewind).not.toHaveBeenCalled();
+    expect(executeSend).not.toHaveBeenCalled();
+  });
+
+  it("列表刷新失败不撤销已完成的 rewind/replay，仍继续发送", async () => {
+    const { options, executeSend } = makeOptions("ready");
+    vi.mocked(options.runtime.refreshSessions).mockRejectedValue(new Error("list failed"));
+
+    await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(true);
+    expect(options.runtime.replayHistory).toHaveBeenCalledOnce();
+    expect(executeSend).toHaveBeenCalledOnce();
+    expect(options.ui.setLocalError).not.toHaveBeenCalled();
   });
   it("本地乐观消息没有权威标识时直接拒绝，不发出 rewind", async () => {
     const { options, rewind, executeSend } = makeOptions("ready");

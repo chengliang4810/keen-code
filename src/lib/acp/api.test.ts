@@ -368,18 +368,20 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
     );
   });
 
-  it("通过 keencode/session/rewind 按消息 id 回退，并把业务操作 ID 放入元数据", async () => {
+  it.each([false, true])(
+    "通过 keencode/session/rewind 按消息 id 回退并透传 revertFiles=%s",
+    async (revertFiles) => {
     const rewind = {
       sessionId: "session-1",
       archivedSessionId: "archive-1",
       throughJournalSequence: 7,
-      revertedFiles: false as const,
+      revertedFiles: revertFiles,
     };
     const args = {
       sessionId: "session-1",
       targetMessageId: "message-2",
       expectedText: "原始正文\n@D:/workspace/file.txt",
-      revertFiles: false as const,
+      revertFiles,
       operationId: "rewind-op",
     };
     clientMocks.acpRequest.mockResolvedValue(rewind);
@@ -391,11 +393,12 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文\n@D:/workspace/file.txt",
-        revertFiles: false,
+        revertFiles,
         _meta: { "keencode/operationId": "rewind-op" },
       },
     );
-  });
+    },
+  );
 
   it("拒绝缺少 archivedSessionId 的 rewind 响应", async () => {
     clientMocks.acpRequest.mockResolvedValue({
@@ -412,8 +415,30 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         revertFiles: false,
         operationId: "rewind-missing-archive",
       }),
-    ).rejects.toThrow("归档 Session 标识");
+    ).rejects.toThrow("响应格式无效");
   });
+
+  it.each([undefined, "false", 0])(
+    "拒绝 revertedFiles=%s 的非法 rewind 响应",
+    async (revertedFiles) => {
+      clientMocks.acpRequest.mockResolvedValue({
+        sessionId: "session-1",
+        archivedSessionId: "archive-1",
+        throughJournalSequence: 7,
+        ...(revertedFiles === undefined ? {} : { revertedFiles }),
+      });
+
+      await expect(
+        sessionRewind({
+          sessionId: "session-1",
+          targetMessageId: "message-2",
+          expectedText: "原始正文",
+          revertFiles: true,
+          operationId: "rewind-invalid-reverted-files",
+        }),
+      ).rejects.toThrow("响应格式无效");
+    },
+  );
 
   it("acpClientRespond 直接委派完整 Client 响应，不改变协议载荷", async () => {
     const response = {
