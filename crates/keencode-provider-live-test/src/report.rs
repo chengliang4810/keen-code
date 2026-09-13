@@ -9039,7 +9039,7 @@ fn validate_initial_semantic_request(
     if request.messages.len() != 1 {
         return Err("Fixture 首个统一请求必须只有一条 Harness 用户消息".to_owned());
     }
-    for message in &request.messages {
+    for message in request.messages.iter() {
         if message.role != MessageRole::User {
             return Err("Fixture 首个统一请求不得包含系统、assistant 或工具历史".to_owned());
         }
@@ -15889,10 +15889,10 @@ mod tests {
                 format!("请原样复述字符串 {wrong}，只输出该字符串本身。"),
             ] {
                 let mut request = text_model_request(expected);
-                request.messages = vec![keencode_model::Message::text(
+                request.messages = std::sync::Arc::new(vec![keencode_model::Message::text(
                     keencode_model::MessageRole::User,
                     prompt,
-                )];
+                )]);
                 let request_body = encode_wire_request(protocol, &request, false)
                     .expect("测试提示词应可由目标 Adapter 编码");
                 let mut record = probe("text", "buffered", "failed");
@@ -15964,7 +15964,7 @@ mod tests {
             .expect("多轮首请求应可编码");
         let mut subsequent_request = complex_model_request(ProviderProtocol::Responses, marker);
         subsequent_request
-            .messages
+            .messages_mut()
             .push(keencode_model::Message::new(
                 keencode_model::MessageRole::Assistant,
                 vec![

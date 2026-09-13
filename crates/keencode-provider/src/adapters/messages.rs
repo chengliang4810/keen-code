@@ -82,7 +82,7 @@ impl MessagesAdapter {
         let mut system = Vec::new();
         let mut messages = Vec::<Value>::new();
 
-        for message in &request.messages {
+        for message in request.messages.iter() {
             match message.role {
                 MessageRole::System | MessageRole::Developer => {
                     for block in &message.content {

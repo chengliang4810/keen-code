@@ -749,7 +749,7 @@ async fn compaction_preserves_instructions_and_tool_exchange_atomicity() {
     assert_eq!(outcome.record.replaced_message_count, 3);
     let summary_requests = compressor.requests();
     assert_eq!(summary_requests.len(), 1);
-    assert_eq!(summary_requests[0].messages, messages[2..5]);
+    assert_eq!(summary_requests[0].messages.as_slice(), &messages[2..5]);
     assert!(matches!(
         summary_requests[0].messages[1].content[1],
         ContentBlock::ToolCall { .. }
@@ -1249,8 +1249,8 @@ async fn runner_precompresses_before_model_round() {
     assert!(requests[0].tools.is_empty());
     assert_eq!(requests[0].tool_choice, ToolChoice::None);
     assert_eq!(
-        requests[1].messages,
-        result.messages[..result.messages.len() - 1]
+        requests[1].messages.as_slice(),
+        &result.messages[..result.messages.len() - 1]
     );
     let committed = commit_sink.events();
     assert_eq!(committed.len(), 2);
@@ -1351,7 +1351,10 @@ async fn runner_precompression_failure_keeps_original_transcript() {
     assert!(result.compactions.is_empty());
     let requests = provider.requests().expect("应能读取请求");
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages, original_messages);
+    assert_eq!(
+        requests[1].messages.as_slice(),
+        original_messages.as_slice()
+    );
     assert!(matches!(commit_sink.events().as_slice(), [event]
         if matches!(event.kind(), AgentCommitEventKind::ModelRoundCommitted { .. })));
     let usages = commit_sink.usages();
@@ -1416,9 +1419,9 @@ async fn runner_uncompressible_precompression_obeys_hard_budget() {
         let requests = provider.requests().unwrap();
         assert_eq!(requests.len(), usize::from(should_continue));
         if should_continue {
-            assert_eq!(requests[0].messages, original);
+            assert_eq!(requests[0].messages.as_slice(), original.as_slice());
         } else {
-            assert_eq!(result.messages, original);
+            assert_eq!(result.messages.as_slice(), original.as_slice());
             assert_eq!(
                 result.error,
                 Some(AgentRunError::Context(ContextError::NothingCompressible))
@@ -1461,7 +1464,7 @@ async fn runner_nonreducing_precompression_continues_without_applying_summary() 
     assert!(result.compactions.is_empty());
     let requests = provider.requests().unwrap();
     assert_eq!(requests.len(), 2);
-    assert_eq!(requests[1].messages, original);
+    assert_eq!(requests[1].messages.as_slice(), original.as_slice());
     assert_eq!(sink.usages().len(), 2);
     assert_eq!(
         sink.usages()[0].purpose(),
@@ -1515,7 +1518,7 @@ async fn runner_precompression_does_not_swallow_unsafe_failures() {
                 ))
             ));
         }
-        assert_eq!(result.messages, original);
+        assert_eq!(result.messages.as_slice(), original.as_slice());
         assert!(result.compactions.is_empty());
         assert_eq!(provider.requests().unwrap().len(), 1);
         assert_eq!(provider.remaining_replies(), Ok(1));
@@ -1598,7 +1601,7 @@ async fn runner_soft_precompression_fallback_does_not_hide_real_overflow() {
         result.error,
         Some(AgentRunError::Context(ContextError::NothingCompressible))
     );
-    assert_eq!(result.messages, original);
+    assert_eq!(result.messages.as_slice(), original.as_slice());
     assert!(result.compactions.is_empty() && compressor.requests().is_empty());
     assert_eq!(provider.requests().unwrap().len(), 1);
 }
@@ -1627,7 +1630,7 @@ async fn runner_compaction_commit_failure_emits_storage_lifecycle() {
         .await;
 
     assert!(matches!(result.error, Some(AgentRunError::CommitSink(_))));
-    assert_eq!(result.messages, original_messages);
+    assert_eq!(result.messages.as_slice(), original_messages.as_slice());
     assert!(result.compactions.is_empty());
     assert_eq!(provider.requests().expect("应只收到摘要请求").len(), 1);
     let events = event_sink.events();
@@ -2923,8 +2926,8 @@ async fn runner_micro_only_compaction_completes_without_summary_model() {
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].tool_choice, ToolChoice::Auto);
     assert_eq!(
-        requests[0].messages,
-        result.messages[..result.messages.len() - 1]
+        requests[0].messages.as_slice(),
+        &result.messages[..result.messages.len() - 1]
     );
     // 摘要调用为零时不得产生压缩用量记账。
     let usages = commit_sink.usages();
@@ -4317,4 +4320,52 @@ async fn runner_water_level_event_resends_after_dipping_below_threshold() {
         })
         .collect();
     assert_eq!(water_levels, [(72, 70), (71, 70)]);
+}
+
+/// #24 压缩替换隔离：`compact` 产物换新快照，输入请求快照不受污染。
+///
+/// 用确定性摘要压缩一段旧历史：压缩前后输入 `request.messages` 保持原样，
+/// 且 `outcome.messages` 与输入不是同一 `Arc`（替换是换新快照而非就地改写）。
+#[tokio::test]
+async fn compaction_replaces_snapshot_without_polluting_input() {
+    let compressor = Arc::new(RecordingCompressor::new("固定摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy {
+            precompress_enabled: true,
+            trigger_percent: 90,
+            target_percent: 50,
+            reserved_output_tokens: 16,
+            forced_target_percent: 50,
+            minimum_recent_units: 2,
+            ..ContextPolicy::default()
+        },
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    let messages = atomic_tool_history();
+    let request = ModelRequest::new("context-model", messages.clone());
+    let input_len = request.messages.len();
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            1,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("旧历史应能安全压缩");
+
+    // 输入快照不受污染：长度与内容保持原样。
+    assert_eq!(request.messages.len(), input_len);
+    assert_eq!(request.messages.as_slice(), messages.as_slice());
+    // 压缩产物是新快照（区间被摘要替换，长度变化且内容不同）。
+    assert_ne!(outcome.messages.len(), input_len);
+    assert!(outcome.messages.iter().any(|message| {
+        message.content.iter().any(|block| match block {
+            ContentBlock::Text { text } => text.contains("固定摘要"),
+            _ => false,
+        })
+    }));
 }

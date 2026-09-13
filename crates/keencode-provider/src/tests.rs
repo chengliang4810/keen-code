@@ -336,7 +336,7 @@ fn tool_history_request() -> ModelRequest {
 /// 创建带指定工具结果内容的统一 Responses 工具回合请求。
 fn tool_history_request_with_content(content: Vec<ToolResultContent>) -> ModelRequest {
     let mut request = tool_history_request();
-    request.messages[3] = Message::new(
+    request.messages_mut()[3] = Message::new(
         MessageRole::Tool,
         vec![ContentBlock::ToolResult {
             tool_result: ToolResult::new("call-1", content, false),
@@ -1476,9 +1476,11 @@ fn chat_tool_images_follow_all_parallel_results() {
                 image: ImageContent::from_base64("image/png", "AAEC"),
             },
         ]);
-        request.messages[2].content.push(ContentBlock::ToolCall {
-            tool_call: ToolCall::new("call-2", "weather", json!({"city": "北京"})),
-        });
+        request.messages_mut()[2]
+            .content
+            .push(ContentBlock::ToolCall {
+                tool_call: ToolCall::new("call-2", "weather", json!({"city": "北京"})),
+            });
         let second = ContentBlock::ToolResult {
             tool_result: ToolResult::new(
                 "call-2",
@@ -1490,16 +1492,16 @@ fn chat_tool_images_follow_all_parallel_results() {
         };
         if split {
             request
-                .messages
+                .messages_mut()
                 .push(Message::new(MessageRole::Tool, vec![second]));
         } else {
-            request.messages[3].content.push(second);
+            request.messages_mut()[3].content.push(second);
         }
         for trailing in [false, true] {
             let mut request = request.clone();
             if trailing {
                 request
-                    .messages
+                    .messages_mut()
                     .push(Message::text(MessageRole::User, "继续"));
             }
             let original = request.clone();
@@ -3891,7 +3893,7 @@ fn minimal_request_is_valid_for_every_adapter() {
 fn internal_message_metadata_does_not_change_provider_input() {
     let request = minimal_request();
     let mut internal = request.clone();
-    internal.messages[0].is_meta = true;
+    internal.messages_mut()[0].is_meta = true;
     for protocol in [
         ProviderProtocol::Messages,
         ProviderProtocol::ChatCompletions,

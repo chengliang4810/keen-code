@@ -1177,7 +1177,7 @@ impl ContextManager {
             // 投影后的消息由 Runner 采纳，原前缀锚点不再有效。
             self.clear_usage_anchor();
             let mut projected_request = request.clone();
-            projected_request.messages = projected_messages.clone();
+            projected_request.messages = Arc::new(projected_messages.clone());
             return match self
                 .compact_full_internal(
                     &projected_request,
@@ -1238,7 +1238,7 @@ impl ContextManager {
     ) -> Result<ContextCompressionRecord, ContextError> {
         let projected_messages = apply_micro_projections(&request.messages, micro_plan);
         let mut compressed_request = request.clone();
-        compressed_request.messages = projected_messages;
+        compressed_request.messages = Arc::new(projected_messages);
         let after = self.estimate_request_unanchored(&compressed_request);
         if after >= before {
             // 投影逐字节缩短文本且逐块估算对字节单调，理论上不可达；保持
@@ -1296,7 +1296,7 @@ impl ContextManager {
         {
             let minimum_messages = build_compressed_messages(request, plan, "");
             let mut minimum_request = request.clone();
-            minimum_request.messages = minimum_messages;
+            minimum_request.messages = minimum_messages.into();
             let minimum_tokens = self.estimate_request_unanchored(&minimum_request);
             if minimum_tokens > max_input_tokens {
                 return Err(ContextError::CompressionRequestTooLarge {
@@ -1334,7 +1334,7 @@ impl ContextManager {
         let messages = build_compressed_messages(request, plan, &summary);
 
         let mut compressed_request = request.clone();
-        compressed_request.messages = messages.clone();
+        compressed_request.messages = Arc::new(messages.clone());
         let after = self.estimate_request_unanchored(&compressed_request);
         if let Some(capabilities) = capabilities
             && let Some(max_input_tokens) = self.strict_main_input_budget(request, capabilities)
@@ -1467,7 +1467,7 @@ impl ContextManager {
         messages.push(mechanical_truncation_marker_message());
         messages.extend_from_slice(&request.messages[drop_end..]);
         let mut compressed_request = request.clone();
-        compressed_request.messages = messages.clone();
+        compressed_request.messages = Arc::new(messages.clone());
         let after = self.estimate_request_unanchored(&compressed_request);
         if after >= before {
             // 删除与标记插入对逐块估算的影响理论上必然净缩减；保持“记录必须
@@ -1597,7 +1597,7 @@ impl ContextManager {
                 let candidate = summaries[0].trim();
                 let candidate_messages = build_compressed_messages(request, plan, candidate);
                 let mut candidate_request = request.clone();
-                candidate_request.messages = candidate_messages;
+                candidate_request.messages = Arc::new(candidate_messages);
                 if self
                     .strict_main_input_budget(
                         request,

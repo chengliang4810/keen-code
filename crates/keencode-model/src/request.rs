@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -130,13 +131,17 @@ pub enum ToolChoice {
 }
 
 /// Agent Runtime 提交给任意模型 Provider 的统一请求。
+///
+/// `messages` 通过 `Arc` 在 Round 间共享：同一 Turn 内多轮请求只做一次引用
+/// 计数递增，不再每轮深拷贝全部历史。追加或替换消息时用 [`ModelRequest::messages_mut`]
+/// 触发写时复制（`Arc::make_mut`），旧快照不受影响。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelRequest {
     /// Provider 配置中选择的模型标识。
     pub model: String,
-    /// 按对话顺序排列的完整有效消息。
-    pub messages: Vec<Message>,
+    /// 按对话顺序排列的完整有效消息（跨 Round 共享，写时复制）。
+    pub messages: Arc<Vec<Message>>,
     /// 当前调用允许模型使用的工具定义。
     pub tools: Vec<ToolDefinition>,
     /// 当前调用的工具选择策略。
@@ -159,11 +164,24 @@ pub struct ModelRequest {
 }
 
 impl ModelRequest {
-    /// 创建只包含模型和消息的最小请求。
-    pub fn new(model: impl Into<String>, messages: Vec<Message>) -> Self {
+    /// 创建只包含模型和消息的最小请求（消息一次性移入共享存储）。
+    ///
+    /// `messages` 接受 `Vec<Message>`（一次性移入）或 `Arc<Vec<Message>>`
+    /// （引用计数共享，零拷贝）：
+    ///
+    /// ```rust
+    /// use std::sync::Arc;
+    /// use keencode_model::{Message, MessageRole, ModelRequest};
+    ///
+    /// let shared: Arc<Vec<Message>> =
+    ///     vec![Message::text(MessageRole::User, "你好")].into();
+    /// let request = ModelRequest::new("test-model", shared);
+    /// assert_eq!(request.messages.len(), 1);
+    /// ```
+    pub fn new(model: impl Into<String>, messages: impl Into<Arc<Vec<Message>>>) -> Self {
         Self {
             model: model.into(),
-            messages,
+            messages: messages.into(),
             tools: Vec::new(),
             tool_choice: ToolChoice::Auto,
             parallel_tool_calls: None,
@@ -174,6 +192,21 @@ impl ModelRequest {
             stop_sequences: Vec::new(),
             metadata: BTreeMap::new(),
         }
+    }
+
+    /// 返回消息的可变引用，共享引用计数大于一时触发写时复制。
+    ///
+    /// 调用者在持有同一 `Arc` 的其他快照存在时追加或替换消息，必须经此方法，
+    /// 否则将污染旧快照。
+    pub fn messages_mut(&mut self) -> &mut Vec<Message> {
+        Arc::make_mut(&mut self.messages)
+    }
+
+    /// 用新的完整消息列表替换当前消息并保持写时复制语义。
+    ///
+    /// 旧 `Arc` 的持有者（如上一轮请求快照）不受影响。
+    pub fn set_messages(&mut self, messages: Vec<Message>) {
+        self.messages = Arc::new(messages);
     }
 
     /// 校验请求满足统一模型层的不变量。
@@ -188,7 +221,7 @@ impl ModelRequest {
                 message: "模型请求至少需要一条消息".to_owned(),
             });
         }
-        for message in &self.messages {
+        for message in self.messages.iter() {
             message.validate()?;
         }
 

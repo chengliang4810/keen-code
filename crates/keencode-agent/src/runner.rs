@@ -473,7 +473,9 @@ pub struct TurnResult {
     /// 已进入唯一终态的状态机快照。
     pub state: TurnState,
     /// 后续模型继续使用的有效 Transcript；被替换历史可由 `compactions` 审计和恢复。
-    pub messages: Vec<Message>,
+    ///
+    /// 调用方可经 `Arc::unwrap_or_clone` 零拷贝取回（Turn 结束后通常唯一持有）。
+    pub messages: Arc<Vec<Message>>,
     /// 正常完成时最后一个模型响应。
     pub final_response: Option<ModelResponse>,
     /// 启用结构化输出并成功时已经通过 Schema 校验的 JSON 值。
@@ -1116,12 +1118,16 @@ impl AgentRunner {
             error: inner,
         } = *failure;
         active.compactions.push(micro_record);
-        active.messages = messages;
-        model_request.messages = active.messages.clone();
+        active.messages = Arc::new(messages);
+        model_request.messages = Arc::clone(&active.messages);
         AgentRunError::Context(*inner)
     }
 
-    /// 采纳一次成功的压缩事务结果并处理摘要记录的伴随回注。
+    /// 把压缩产物同时采纳到 `active` 与本轮 `model_request`。
+    ///
+    /// `active.messages` 与 `model_request.messages` 指向同一新 `Arc` 快照；
+    /// 伴随的 read_hint 段（如有）经 `commit_round_messages` 追加后两侧仍
+    /// 保持同指针（追加走写时复制，本轮内旧快照已无其他持有者）。
     ///
     /// MicroThenFull 的投影记录先于摘要记录入列，持久化重放顺序与应用顺序
     /// 一致；MicroOnly 时 record 即投影记录。摘要形态记录（FullOnly 或
@@ -1143,12 +1149,12 @@ impl AgentRunner {
             active.compactions.push(micro);
         }
         let read_hint = post_compaction_read_hint_message(&outcome.record, &model_request.messages);
-        active.messages = outcome.messages;
-        model_request.messages = active.messages.clone();
+        active.messages = Arc::new(outcome.messages);
+        model_request.messages = Arc::clone(&active.messages);
         active.compactions.push(outcome.record);
         if let Some(message) = read_hint {
             self.commit_round_messages(request, active, None, vec![message])?;
-            model_request.messages = active.messages.clone();
+            model_request.messages = Arc::clone(&active.messages);
         }
         Ok(())
     }
@@ -1192,8 +1198,8 @@ impl AgentRunner {
             &request.cancellation,
         ) {
             Ok(outcome) => {
-                active.messages = outcome.messages;
-                model_request.messages = active.messages.clone();
+                active.messages = Arc::new(outcome.messages);
+                model_request.messages = Arc::clone(&active.messages);
                 active.compactions.push(outcome.record);
                 Ok(true)
             }
@@ -1276,6 +1282,10 @@ impl AgentRunner {
     }
 
     /// 先让 Session 层可靠接收一段 Round 消息，再更新内存 Transcript。
+    ///
+    /// 权威提交成功后才追加内存：追加走 [`Arc::make_mut`]——本 Turn 内
+    /// `active.messages` 与上一轮 `model_request.messages` 若仍共享同一快照，
+    /// 追加会复制式写入，不污染已发出的上一轮请求。
     fn commit_round_messages(
         &self,
         request: &TurnRequest,
@@ -1308,7 +1318,7 @@ impl AgentRunner {
         };
         self.commit_event(request, active.state.round_count(), kind)?;
         active.next_segment_index = next_segment_index;
-        active.messages.extend(messages);
+        Arc::make_mut(&mut active.messages).extend(messages);
         Ok(())
     }
 
@@ -1397,7 +1407,7 @@ impl AgentRunner {
                 },
             )?;
             active.next_segment_index = next_segment_index;
-            active.messages.extend(messages);
+            Arc::make_mut(&mut active.messages).extend(messages);
         }
         let mut last_error = None;
         for _ in 0..DYNAMIC_INPUT_ACKNOWLEDGEMENT_ATTEMPTS {
@@ -1439,7 +1449,7 @@ impl AgentRunner {
         });
         permit.commit(event)?;
         active.next_segment_index = next_segment_index;
-        active.messages.extend(messages);
+        Arc::make_mut(&mut active.messages).extend(messages);
         Ok(())
     }
 
@@ -1451,7 +1461,9 @@ impl AgentRunner {
         self.context.clear_usage_anchor();
         let mut active = ActiveTurn {
             state: TurnState::new(request.turn_id.clone(), request.source_agent_id.clone()),
-            messages: request.model_request.messages.clone(),
+            // 零拷贝起点：与请求模板共享同一 `Arc`，引用计数加一，
+            // 不深拷贝历史消息。
+            messages: Arc::clone(&request.model_request.messages),
             seen_tool_call_ids: HashSet::new(),
             compactions: Vec::new(),
             forced_context_retry_used: false,
@@ -1644,7 +1656,9 @@ impl AgentRunner {
             )?;
 
             let mut model_request = request.model_request.clone();
-            model_request.messages = active.messages.clone();
+            // 主路径零拷贝：与 `active.messages` 共享同一 `Arc`；
+            // `ModelRequest::clone` 自身只递增引用计数，不深拷贝消息。
+            model_request.messages = Arc::clone(&active.messages);
             // 请求级输出覆盖始终最高优先；此处只为未指定的主请求补齐
             // 设置值或窗口派生的默认输出上限，压缩预算据此跟随实际发送值。
             // 配置上限已被厂商判定超限的 Turn 内记忆降级：本 Turn 后续所有
@@ -3820,7 +3834,12 @@ struct ActiveTurn {
     /// 当前 Turn 唯一状态机及其 Round、Step 计数。
     state: TurnState,
     /// 已提交并会用于后续模型 Round 的 Provider 中立消息。
-    messages: Vec<Message>,
+    ///
+    /// 与本轮 `model_request.messages` 共享同一 `Arc` 快照：`commit_*` 新增段
+    /// 走 [`ModelRequest::messages_mut`] 写时复制追加；压缩替换整段时换新
+    /// `Arc`，旧 `model_request` 快照隔离。追加与替换都必须同步两侧的
+    /// `Arc` 指针，不存在“只改一侧”的状态。
+    messages: Arc<Vec<Message>>,
     /// 当前 Turn 所有历史模型 Round 已见的工具调用 ID。
     seen_tool_call_ids: HashSet<String>,
     /// 当前 Turn 已成功提交且等待 Session 层持久化的压缩记录。

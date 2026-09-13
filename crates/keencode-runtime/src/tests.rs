@@ -1744,7 +1744,10 @@ async fn registered_child_followup_allows_zero_initial_messages_and_claims_befor
     assert_eq!(requests.len(), 1);
     let mut expected_messages = history;
     expected_messages.push(mailbox_input);
-    assert_eq!(requests[0].messages, expected_messages);
+    assert_eq!(
+        requests[0].messages.as_slice(),
+        expected_messages.as_slice()
+    );
     assert_eq!(
         requests[0]
             .messages
@@ -1907,7 +1910,10 @@ async fn provider_failure_after_dynamic_input_preserves_retry_and_cold_history()
     );
     let retry_requests = retry_provider.requests().expect("重试 Provider 请求应读取");
     assert_eq!(retry_requests.len(), 1);
-    assert_eq!(retry_requests[0].messages, retry_messages);
+    assert_eq!(
+        retry_requests[0].messages.as_slice(),
+        retry_messages.as_slice()
+    );
     assert_eq!(
         retry_requests[0]
             .messages

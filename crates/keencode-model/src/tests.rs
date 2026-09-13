@@ -1072,3 +1072,64 @@ fn collector_preserves_decode_timing_and_rejects_duplicates() {
         Err(ModelError::Protocol { .. })
     ));
 }
+
+/// #24 主路径零拷贝：`ModelRequest::clone` 只递增 `Arc` 引用计数。
+///
+/// 构造 100 条大文本消息的历史，克隆请求模拟“下一轮复用同一快照”；
+/// `Arc::ptr_eq` 断言两快照共享同一分配（深拷贝则指针不同）。
+#[test]
+fn model_request_clone_shares_messages_snapshot() {
+    let history: Vec<Message> = (0..100)
+        .map(|index| {
+            Message::text(
+                MessageRole::User,
+                format!("历史正文-{index}-{}", "正".repeat(1024)),
+            )
+        })
+        .collect();
+    let request = ModelRequest::new("test-model", history);
+    let next_round = request.clone();
+    assert!(
+        std::sync::Arc::ptr_eq(&request.messages, &next_round.messages),
+        "下一轮请求必须复用同一消息快照，不做全量深拷贝"
+    );
+    assert_eq!(next_round.messages.len(), 100);
+}
+
+/// #24 写时复制：`messages_mut` 追加后旧快照不变、新请求可见新消息。
+#[test]
+fn model_request_messages_mut_preserves_old_snapshot() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![Message::text(MessageRole::User, "首轮输入")],
+    );
+    let snapshot = request.clone();
+    let mut next_round = request.clone();
+    next_round
+        .messages_mut()
+        .push(Message::text(MessageRole::Assistant, "模型回复"));
+    assert_eq!(snapshot.messages.len(), 1);
+    assert_eq!(next_round.messages.len(), 2);
+    assert_eq!(next_round.messages[1].role, MessageRole::Assistant);
+}
+
+/// #24 压缩替换隔离：`set_messages` 换新快照，不污染旧快照。
+#[test]
+fn model_request_set_messages_replaces_snapshot_without_pollution() {
+    let request = ModelRequest::new(
+        "test-model",
+        vec![
+            Message::text(MessageRole::User, "旧历史-1"),
+            Message::text(MessageRole::User, "旧历史-2"),
+        ],
+    );
+    let old_snapshot = request.clone();
+    let mut compressed = request.clone();
+    compressed.set_messages(vec![Message::text(MessageRole::User, "压缩摘要")]);
+    assert_eq!(old_snapshot.messages.len(), 2);
+    assert_eq!(compressed.messages.len(), 1);
+    assert!(!std::sync::Arc::ptr_eq(
+        &old_snapshot.messages,
+        &compressed.messages
+    ));
+}

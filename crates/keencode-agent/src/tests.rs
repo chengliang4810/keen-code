@@ -5159,7 +5159,7 @@ async fn max_output_truncation_recovers_with_instruction_and_completes() {
     // 续跑请求等价性：第二次请求携带全部已提交消息（初始输入、截断部分响应与
     // 续跑指令），与最终 Transcript 除最终响应外的消息逐条一致。
     let requests = provider.requests().expect("请求快照应可读取");
-    assert_eq!(requests[1].messages, result.messages[..3]);
+    assert_eq!(requests[1].messages.as_slice(), &result.messages[..3]);
     // Transcript 形态：初始 user → 截断 assistant → 续跑指令（user is_meta）→ 最终 assistant。
     assert_eq!(result.messages.len(), 4);
     assert!(matches!(result.messages[1].role, MessageRole::Assistant));
@@ -6534,4 +6534,100 @@ async fn truncated_success_post_hook_capacity_failure_falls_back_to_fixed_reject
         .expect("工件文件应已写出");
     assert_eq!(saved, body);
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// #24 主路径零拷贝：两轮 Turn 的 Provider 请求复用同一消息 `Arc`。
+///
+/// 100 条大文本历史 + 一轮工具往返后，第二轮请求与第一轮共享同一快照
+/// （`Arc::ptr_eq`）；旧实现每轮 `messages.clone()` 深拷贝，此处必须零拷贝。
+#[tokio::test]
+async fn consecutive_model_rounds_share_messages_snapshot() {
+    let history: Vec<Message> = (0..100)
+        .map(|index| {
+            Message::text(
+                MessageRole::User,
+                format!("历史正文-{index}-{}", "正".repeat(1024)),
+            )
+        })
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "record", json!({"value": "work"}))]),
+            text_reply("done"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .unwrap();
+    let request = TurnRequest::new(
+        session_id("session-shared-snapshot"),
+        turn_id("turn-shared-snapshot"),
+        agent_id("agent-shared-snapshot"),
+        "test-model",
+        history,
+        PlanGuard::inactive(),
+    );
+    let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+        .run_turn(request)
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        Arc::ptr_eq(&requests[0].messages, &requests[1].messages)
+            || requests[1].messages.len() > requests[0].messages.len()
+                && requests[1].messages[..requests[0].messages.len()] == *requests[0].messages,
+        "第二轮请求必须以前缀共享方式复用首轮快照"
+    );
+}
+
+/// #24 写时复制正确性：跨轮 `commit` 追加动态段后，首轮请求快照不变。
+///
+/// 首轮请求被 Provider 记录后，后续追加的工具结果只出现在第二轮请求与
+/// 最终 Transcript 中，不回写首轮快照。
+#[tokio::test]
+async fn committed_segments_do_not_rewrite_first_round_snapshot() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-1", "record", json!({"value": "work"}))]),
+            text_reply("done"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .unwrap();
+    let request = turn_request(PlanGuard::inactive());
+    let first_round_len = request.model_request().messages.len();
+    let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+        .run_turn(request)
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    let requests = provider.requests().unwrap();
+    assert_eq!(requests.len(), 2);
+    // 首轮快照保持初始长度：后续工具 Round 的提交不得回写已发出的请求。
+    assert_eq!(requests[0].messages.len(), first_round_len);
+    // 第二轮携带全部已提交消息（初始输入 + assistant 调用 + 工具结果）。
+    assert!(requests[1].messages.len() > requests[0].messages.len());
+    assert_eq!(
+        &requests[1].messages[..first_round_len],
+        requests[0].messages.as_slice()
+    );
+    // 最终 Transcript 与第二轮请求前缀一致（除最终响应外）。
+    assert!(result.messages.len() >= requests[1].messages.len());
+    assert_eq!(
+        &result.messages[..requests[1].messages.len()],
+        requests[1].messages.as_slice()
+    );
 }

@@ -59,7 +59,7 @@ impl ChatCompletionsAdapter {
         request.validate()?;
         let mut messages = Vec::new();
         let mut tool_images = Vec::new();
-        for message in &request.messages {
+        for message in request.messages.iter() {
             // 先补齐连续的全部工具结果，避免图片消息打断并行工具调用的响应配对。
             if message.role != MessageRole::Tool && !tool_images.is_empty() {
                 messages

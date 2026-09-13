@@ -2721,7 +2721,7 @@ async fn execute_tool_result_round_trip(
     marker: &str,
 ) -> Result<SuccessfulProbe, ModelError> {
     let first_request = tool_calling_request(model, marker);
-    let mut messages = first_request.messages.clone();
+    let mut messages = (*first_request.messages).clone();
     let tools = first_request.tools.clone();
     let first_response = client.complete(first_request).await?;
     let mut assertions = prefixed_assertions(
@@ -2793,7 +2793,7 @@ async fn execute_tool_result_image_round_trip(
 ) -> Result<SuccessfulProbe, ModelError> {
     let first_marker = first_turn_marker(marker);
     let first_request = tool_calling_request(model, &first_marker);
-    let mut messages = first_request.messages.clone();
+    let mut messages = (*first_request.messages).clone();
     let tools = first_request.tools.clone();
     let first_response = client.complete(first_request).await?;
     let mut assertions = prefixed_assertions(
@@ -2925,7 +2925,7 @@ async fn execute_multi_turn(
 ) -> Result<SuccessfulProbe, ModelError> {
     let first_marker = first_turn_marker(marker);
     let first_request = text_request(model, &first_marker);
-    let mut messages = first_request.messages.clone();
+    let mut messages = (*first_request.messages).clone();
     let first_response = client.complete(first_request).await?;
     let mut assertions = prefixed_assertions(
         evaluate_text(&first_response, &first_marker).assertions,
@@ -5554,7 +5554,7 @@ mod tests {
             let second = tampered_exchanges
                 .get_mut(1)
                 .expect("Messages/Responses 应有第二轮交换");
-            for message in &mut second.model_request.messages {
+            for message in second.model_request.messages_mut().iter_mut() {
                 for block in &mut message.content {
                     if let ContentBlock::ToolResult { tool_result } = block {
                         tool_result.tool_call_id = tampered_call_id.to_owned();

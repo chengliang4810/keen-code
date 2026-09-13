@@ -82,7 +82,7 @@ impl ResponsesAdapter {
             });
         }
         let mut input = Vec::new();
-        for message in &request.messages {
+        for message in request.messages.iter() {
             encode_input_message(message.role, &message.content, &mut input)?;
         }
         let mut body = Map::new();
