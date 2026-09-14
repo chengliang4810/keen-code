@@ -1242,6 +1242,29 @@ impl RuntimeSession {
             .collect()
     }
 
+    /// 物化一个已注册 Agent 的有效 Transcript，并保留每条消息所属的 Turn。
+    ///
+    /// Provider 中立的 [`Message`] 不携带资源层身份；需要按历史 Turn 判断
+    /// opaque reasoning continuation 是否仍与当前 Provider 兼容的调用方，使用
+    /// 此方法而不是事后尝试从模型消息反推来源。
+    pub fn model_transcript_for_agent_with_turn_ids(
+        &self,
+        source_agent_id: &keencode_resources::AgentId,
+    ) -> Result<Vec<(Option<TurnId>, Message)>, RuntimeError> {
+        let state = self.inner.journal.state()?;
+        state.validate_transcript_history()?;
+        state
+            .effective_transcript(source_agent_id)?
+            .iter()
+            .map(|message| {
+                Ok((
+                    message.turn_id.clone(),
+                    materialize_model_message(&self.inner.artifacts, message)?,
+                ))
+            })
+            .collect()
+    }
+
     /// 将一条来自本 Session 权威记录的消息及其 Artifact 物化为 Provider 中立消息。
     pub fn materialize_message(&self, message: &SessionMessage) -> Result<Message, RuntimeError> {
         materialize_model_message(&self.inner.artifacts, message)
