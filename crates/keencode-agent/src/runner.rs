@@ -4149,7 +4149,7 @@ enum CancellableDeliveryError {
     Delivery(AgentEventDeliveryError),
 }
 
-/// 轮询一个 Provider 事件，先等待 Sink 确认，再把同一事件交给严格归约器。
+/// 轮询一个 Provider 事件；普通流先等待 Sink 确认，结构化候选先内部暂存，再交给严格归约器。
 async fn tap_model_stream_event(
     mut tapped: TappedModelStream,
 ) -> Option<(
