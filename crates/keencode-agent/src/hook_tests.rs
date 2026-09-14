@@ -1343,7 +1343,7 @@ async fn 取消后启动hook迟到成功不得提交且重载候选可重试() {
     assert_eq!(state.aborted.load(Ordering::SeqCst), 1);
     assert_eq!(state.delivered.load(Ordering::SeqCst), 0);
 
-    let mut reloaded_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let mut reloaded_registry = HookRegistry::with_circuit_store(old_circuits.for_changed_hooks());
     reloaded_registry
         .register(Arc::new(DeferredTurnStartHook {
             name: "deferred-turn-start",

@@ -196,6 +196,7 @@ async fn blocked_first_prompt_does_not_repeat_session_start() {
 async fn cancelled_session_start_late_success_cannot_complete_reloaded_candidate() {
     let root = tempfile::tempdir().unwrap();
     let state = LifecycleStartState::new();
+    let circuits = HookCircuitStore::new();
     let first_hook = NativeLifecycleHooks {
         hooks: vec![parse_command_hook(
             "test:late-session-start".to_owned(),
@@ -210,7 +211,7 @@ async fn cancelled_session_start_late_success_cannot_complete_reloaded_candidate
         lifecycle_start_state: state.clone(),
         agent_type: "general-purpose".to_owned(),
     };
-    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let mut first_registry = HookRegistry::with_circuit_store(circuits.clone());
     first_registry
         .register(Arc::new(first_hook))
         .expect("首个 SessionStart Hook 应成功注册");
@@ -270,7 +271,7 @@ async fn cancelled_session_start_late_success_cannot_complete_reloaded_candidate
         lifecycle_start_state: state.clone(),
         agent_type: "general-purpose".to_owned(),
     };
-    let mut second_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let mut second_registry = HookRegistry::with_circuit_store(circuits.for_changed_hooks());
     second_registry
         .register(Arc::new(second_hook))
         .expect("重载候选 SessionStart Hook 应成功注册");
@@ -315,6 +316,7 @@ async fn cancelled_session_start_late_success_cannot_complete_reloaded_candidate
 async fn cancelled_prompt_hook_retries_session_start_after_late_completion() {
     let root = tempfile::tempdir().unwrap();
     let state = LifecycleStartState::new();
+    let circuits = HookCircuitStore::new();
     let first_hook = NativeLifecycleHooks {
         hooks: vec![
             parse_command_hook(
@@ -340,7 +342,7 @@ async fn cancelled_prompt_hook_retries_session_start_after_late_completion() {
         lifecycle_start_state: state.clone(),
         agent_type: "general-purpose".to_owned(),
     };
-    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let mut first_registry = HookRegistry::with_circuit_store(circuits.clone());
     first_registry
         .register(Arc::new(first_hook))
         .expect("首个两阶段 Hook 应成功注册");
@@ -393,7 +395,7 @@ async fn cancelled_prompt_hook_retries_session_start_after_late_completion() {
         lifecycle_start_state: state.clone(),
         agent_type: "general-purpose".to_owned(),
     };
-    let mut second_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let mut second_registry = HookRegistry::with_circuit_store(circuits.for_changed_hooks());
     second_registry
         .register(Arc::new(second_hook))
         .expect("重载候选 SessionStart Hook 应成功注册");
