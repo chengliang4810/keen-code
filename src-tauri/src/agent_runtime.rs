@@ -14643,7 +14643,12 @@ mod tests {
         request.max_output_tokens = Some(128);
         let original = request.messages.clone();
         let context = ContextManager::new(
-            ContextPolicy::default(),
+            ContextPolicy {
+                // 本用例验证请求期上下文的预算与隔离，不验证多块递归摘要；
+                // 收紧摘要输出预算，确保历史在一次摘要调用中完整容纳。
+                summary_max_output_tokens: 256,
+                ..ContextPolicy::default()
+            },
             bound.clone(),
             Arc::new(ProviderContextCompressor::new(Arc::new(
                 TurnBoundProvider::new(scripted.clone(), "session", "turn", "root"),
