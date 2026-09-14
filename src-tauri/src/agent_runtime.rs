@@ -280,6 +280,232 @@ struct DefaultProviderBinding {
     generation: u64,
 }
 
+/// 跨扩展候选共享的一次性生命周期启动状态。
+///
+/// `started` 是会话级一次性占位，覆盖已完成阶段和仍在等待确认的预留；`active`
+/// 记录当前未确认回调的 Turn/token。两套状态必须共享，避免热重载创建新 Hook
+/// 候选后，旧 worker 的迟到完成或回滚误触碰新候选的启动记录。
+#[derive(Clone)]
+pub(crate) struct LifecycleStartState {
+    started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
+    active: Arc<Mutex<HashMap<(String, HookPhase), LifecycleStartRecord>>>,
+    next_token: Arc<AtomicU64>,
+    #[cfg(test)]
+    completed_callbacks: Arc<AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct LifecycleStartRecord {
+    turn_id: String,
+    token: u64,
+    claimed: bool,
+    callback_completed: bool,
+}
+
+impl LifecycleStartState {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Arc::new(Mutex::new(HashSet::new())),
+            active: Arc::new(Mutex::new(HashMap::new())),
+            next_token: Arc::new(AtomicU64::new(1)),
+            #[cfg(test)]
+            completed_callbacks: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_started(started: Arc<Mutex<HashSet<(String, HookPhase)>>>) -> Self {
+        Self {
+            started,
+            active: Arc::new(Mutex::new(HashMap::new())),
+            next_token: Arc::new(AtomicU64::new(1)),
+            #[cfg(test)]
+            completed_callbacks: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn started(&self) -> Arc<Mutex<HashSet<(String, HookPhase)>>> {
+        Arc::clone(&self.started)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn callback_completion_count(&self) -> usize {
+        self.completed_callbacks.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn reserve(&self, key: (String, HookPhase), turn_id: String) -> bool {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut started = self
+            .started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if started.contains(&key) || active.contains_key(&key) {
+            return false;
+        }
+        let token = self.next_token.fetch_add(1, Ordering::Relaxed);
+        started.insert(key.clone());
+        active.insert(
+            key,
+            LifecycleStartRecord {
+                turn_id,
+                token,
+                claimed: false,
+                callback_completed: false,
+            },
+        );
+        true
+    }
+
+    pub(crate) fn claim(
+        &self,
+        key: (String, HookPhase),
+        turn_id: String,
+    ) -> Option<LifecycleStartAttempt> {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let record = active.get_mut(&key)?;
+        if record.turn_id != turn_id || record.claimed {
+            return None;
+        }
+        record.claimed = true;
+        let token = record.token;
+        Some(LifecycleStartAttempt {
+            state: self.clone(),
+            key,
+            turn_id,
+            token,
+            callback_completed: false,
+        })
+    }
+
+    fn callback_completed(&self, key: &(String, HookPhase), turn_id: &str, token: u64) -> bool {
+        #[cfg(test)]
+        self.completed_callbacks.fetch_add(1, Ordering::SeqCst);
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = active.get_mut(key) else {
+            return false;
+        };
+        if record.turn_id != turn_id || record.token != token {
+            return false;
+        }
+        record.callback_completed = true;
+        true
+    }
+
+    pub(crate) fn deliver(&self, key: &(String, HookPhase), turn_id: &str) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = active.get(key) else {
+            return;
+        };
+        if record.turn_id == turn_id && record.callback_completed {
+            active.remove(key);
+        }
+    }
+
+    pub(crate) fn abort(&self, key: &(String, HookPhase), turn_id: &str) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = active.get(key) else {
+            return;
+        };
+        if record.turn_id != turn_id {
+            return;
+        }
+        active.remove(key);
+        let mut started = self
+            .started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        started.remove(key);
+    }
+
+    /// 显式 Prompt 阻断结束当前回调时，保留已经完成的启动阶段。
+    pub(crate) fn abort_preserving_completed_start(
+        &self,
+        key: &(String, HookPhase),
+        turn_id: &str,
+    ) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = active.get(key) else {
+            return;
+        };
+        if record.turn_id != turn_id {
+            return;
+        }
+        let callback_completed = record.callback_completed;
+        active.remove(key);
+        if callback_completed {
+            return;
+        }
+        let mut started = self
+            .started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        started.remove(key);
+    }
+
+    fn rollback(&self, key: &(String, HookPhase), turn_id: &str, token: u64) {
+        let mut active = self
+            .active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(record) = active.get(key) else {
+            return;
+        };
+        if record.turn_id != turn_id || record.token != token {
+            return;
+        }
+        active.remove(key);
+        let mut started = self
+            .started
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        started.remove(key);
+    }
+}
+
+/// 生命周期 Hook 回调对一次启动阶段的临时所有权。
+pub(crate) struct LifecycleStartAttempt {
+    state: LifecycleStartState,
+    key: (String, HookPhase),
+    turn_id: String,
+    token: u64,
+    callback_completed: bool,
+}
+
+impl LifecycleStartAttempt {
+    pub(crate) fn callback_succeeded(&mut self) {
+        self.callback_completed =
+            self.state
+                .callback_completed(&self.key, &self.turn_id, self.token);
+    }
+}
+
+impl Drop for LifecycleStartAttempt {
+    fn drop(&mut self) {
+        if !self.callback_completed {
+            self.state.rollback(&self.key, &self.turn_id, self.token);
+        }
+    }
+}
+
 /// 启动根 Turn 时由命令层显式传入、只在模型请求期装配的行为上下文。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RootTurnOptions {
@@ -309,8 +535,8 @@ pub struct RuntimeToolContext {
     project_root: PathBuf,
     /// 当前 Turn 冻结的 Plan 只读守卫。
     plan_guard: PlanGuard,
-    /// 会话存活期间共享各代理启动记录，扩展热重载不重复触发启动 Hook。
-    session_hooks_started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
+    /// 会话存活期间共享各代理启动记录与未确认的生命周期租约。
+    lifecycle_start_state: LifecycleStartState,
 }
 
 /// 扩展候选在装配时产生、仅写入日志的安全诊断。
@@ -358,15 +584,15 @@ impl RuntimeToolContext {
     pub(crate) fn for_extension_test(project_root: PathBuf, plan_guard: PlanGuard) -> Self {
         Self {
             agent_type: "general-purpose".to_owned(),
-            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
+            lifecycle_start_state: LifecycleStartState::new(),
             session_id: "extension-chain-session".to_owned(),
             project_root,
             plan_guard,
         }
     }
 
-    pub(crate) fn session_hooks_started(&self) -> Arc<Mutex<HashSet<(String, HookPhase)>>> {
-        Arc::clone(&self.session_hooks_started)
+    pub(crate) fn lifecycle_start_state(&self) -> LifecycleStartState {
+        self.lifecycle_start_state.clone()
     }
 
     /// 返回当前根 Session 标识。
@@ -1933,7 +2159,7 @@ struct RuntimeAgentExecution {
     state: Arc<Mutex<RuntimeAgentExecutionState>>,
     /// 退出或 Session 拆除开始后禁止新的 Runner 进入执行副作用边界。
     accepting_work: AtomicBool,
-    session_hooks_started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
+    lifecycle_start_state: LifecycleStartState,
     /// 全树静止等待托管 Turn 数量归零的条件变量。
     idle: Arc<Condvar>,
 }
@@ -2038,7 +2264,7 @@ impl RuntimeAgentExecution {
             coordinator: OnceLock::new(),
             state: Arc::new(Mutex::new(RuntimeAgentExecutionState::default())),
             accepting_work: AtomicBool::new(true),
-            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
+            lifecycle_start_state: LifecycleStartState::new(),
             idle: Arc::new(Condvar::new()),
         }
     }
@@ -5741,7 +5967,7 @@ impl AgentRuntime {
         }
         let tool_context = RuntimeToolContext {
             agent_type: agent_type.to_owned(),
-            session_hooks_started: Arc::clone(&execution.session_hooks_started),
+            lifecycle_start_state: execution.lifecycle_start_state.clone(),
             session_id: execution.session_id.clone(),
             project_root: project_root.clone(),
             plan_guard,
@@ -5859,7 +6085,7 @@ impl AgentRuntime {
         }
         let context = RuntimeToolContext {
             agent_type: "general-purpose".to_owned(),
-            session_hooks_started: Arc::new(Mutex::new(HashSet::new())),
+            lifecycle_start_state: LifecycleStartState::new(),
             session_id: session_id.to_owned(),
             project_root: project_root.clone(),
             plan_guard,
@@ -10020,12 +10246,13 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
-        RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome,
-        RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
-        RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
-        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
-        TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
+        LifecycleStartState, MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection,
+        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed, RootTaskTerminalNotice,
+        RootTurnOptions, RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate,
+        RuntimeAgentTemplateContext, RuntimeExtensionCandidate, RuntimeExtensionContributor,
+        RuntimeExtensionDiagnostic, RuntimeGoalUsageSink, RuntimeToolContext,
+        SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
+        authoritative_recovered_turn_outcome, background_task_completion_event,
         clear_historical_reasoning_state, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
@@ -10055,12 +10282,49 @@ mod tests {
         CollaborationEvent, CollaborationEventKind, CollaborationGlobalTurnLimiter,
         CollaborationLimits, CollaborationPortError, CollaborationStore,
         CollaborationTransitionCommit, ContextCompressor, ContextInheritance, ContextPolicy,
-        ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft, HookRuntime,
-        JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor, QuiesceAgentTree,
-        RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest, ToolCallId,
-        ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
+        ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft, HookPhase,
+        HookRuntime, JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor,
+        QuiesceAgentTree, RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest,
+        ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
         UuidCollaborationIdGenerator,
     };
+
+    /// 取消后旧 worker 的迟到成功不能提交，也不能清掉重载候选的新租约。
+    #[test]
+    fn lifecycle_start_state_rejects_late_completion_after_reload() {
+        let state = LifecycleStartState::new();
+        let key = ("root".to_owned(), HookPhase::SessionStart);
+        assert!(state.reserve(key.clone(), "old-turn".to_owned()));
+        let mut old_attempt = state
+            .claim(key.clone(), "old-turn".to_owned())
+            .expect("旧候选应取得启动租约");
+
+        state.abort(&key, "old-turn");
+        assert!(
+            !state
+                .started()
+                .lock()
+                .expect("启动状态锁应可用")
+                .contains(&key)
+        );
+
+        assert!(state.reserve(key.clone(), "reloaded-turn".to_owned()));
+        let mut reloaded_attempt = state
+            .claim(key.clone(), "reloaded-turn".to_owned())
+            .expect("重载候选应取得新启动租约");
+        reloaded_attempt.callback_succeeded();
+        state.deliver(&key, "reloaded-turn");
+
+        old_attempt.callback_succeeded();
+        drop(old_attempt);
+        assert!(
+            state
+                .started()
+                .lock()
+                .expect("启动状态锁应可用")
+                .contains(&key)
+        );
+    }
     use keencode_model::{
         Message as ModelMessage, MessageRole, ModelError, ModelProvider, ModelRequest,
         ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply,

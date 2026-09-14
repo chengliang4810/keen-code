@@ -3,9 +3,9 @@
 use super::agent_catalog::{AgentCatalog, AgentCatalogEntry, AgentTools, build_agent_catalog};
 use super::*;
 use crate::agent_runtime::{
-    AgentRuntime, RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
-    RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeMcpServerSnapshot,
-    RuntimeToolContext,
+    AgentRuntime, LifecycleStartState, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
+    RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
+    RuntimeMcpServerSnapshot, RuntimeToolContext,
 };
 use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
@@ -13,7 +13,7 @@ use keencode_agent::{
     PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
     PreCompactHookOutput, PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction,
     StopHookContext, StopHookOutput, ToolEffect, ToolHookFailureKind, ToolHookOutput, ToolRegistry,
-    TurnStartHookContext, agent_run_error_category,
+    TurnStartAbortReason, TurnStartHookContext, agent_run_error_category,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
@@ -192,57 +192,8 @@ struct CommandHookSpec {
 struct NativeLifecycleHooks {
     hooks: Vec<HookSpec>,
     plan: PlanGuard,
-    started: Arc<std::sync::Mutex<std::collections::HashSet<(String, HookPhase)>>>,
+    lifecycle_start_state: LifecycleStartState,
     agent_type: String,
-}
-
-/// 为一次性生命周期占用代理启动槽；回调被取消或失败时自动释放以允许重试。
-struct LifecycleStartLease {
-    started: Arc<std::sync::Mutex<std::collections::HashSet<(String, HookPhase)>>>,
-    key: (String, HookPhase),
-    completed: bool,
-}
-
-impl LifecycleStartLease {
-    /// 原子占用尚未成功完成的一次性生命周期；已完成或正在执行时返回 `None`。
-    fn acquire(
-        started: Arc<std::sync::Mutex<std::collections::HashSet<(String, HookPhase)>>>,
-        agent_id: String,
-        phase: HookPhase,
-    ) -> Result<Option<Self>, HookCallbackError> {
-        let key = (agent_id, phase);
-        let inserted = started
-            .lock()
-            .map_err(|_| {
-                HookCallbackError::new(
-                    "hook_state_unavailable",
-                    "Hook lifecycle state unavailable",
-                )
-            })?
-            .insert(key.clone());
-        Ok(inserted.then(|| Self {
-            started,
-            key,
-            completed: false,
-        }))
-    }
-
-    /// 一次性阶段已完整成功，后续 Turn 不再释放启动记录。
-    const fn mark_completed(&mut self) {
-        self.completed = true;
-    }
-}
-
-impl Drop for LifecycleStartLease {
-    /// Future 被取消或阶段返回错误时移除预占记录，使下一 Turn 可以重试。
-    fn drop(&mut self) {
-        if self.completed {
-            return;
-        }
-        if let Ok(mut started) = self.started.lock() {
-            started.remove(&self.key);
-        }
-    }
 }
 
 impl AgentHook for NativeLifecycleHooks {
@@ -251,6 +202,22 @@ impl AgentHook for NativeLifecycleHooks {
     }
     fn handles_turn_start(&self) -> bool {
         true
+    }
+
+    fn turn_start_prepare(&self, context: &TurnStartHookContext) {
+        let is_root = context.invocation.source_agent_id.as_str() == "root";
+        let start_phase = if is_root {
+            HookPhase::SessionStart
+        } else {
+            HookPhase::SubagentStart
+        };
+        self.lifecycle_start_state.reserve(
+            (
+                context.invocation.source_agent_id.as_str().to_owned(),
+                start_phase,
+            ),
+            context.invocation.turn_id.as_str().to_owned(),
+        );
     }
 
     fn turn_start(
@@ -264,11 +231,13 @@ impl AgentHook for NativeLifecycleHooks {
             } else {
                 HookPhase::SubagentStart
             };
-            let mut start_lease = LifecycleStartLease::acquire(
-                Arc::clone(&self.started),
-                context.invocation.source_agent_id.as_str().to_owned(),
-                start_phase,
-            )?;
+            let mut start_lease = self.lifecycle_start_state.claim(
+                (
+                    context.invocation.source_agent_id.as_str().to_owned(),
+                    start_phase,
+                ),
+                context.invocation.turn_id.as_str().to_owned(),
+            );
             let start = start_lease.is_some();
             let source = if context.has_history {
                 "resume"
@@ -331,11 +300,47 @@ impl AgentHook for NativeLifecycleHooks {
                 if matches!(phase, HookPhase::SessionStart | HookPhase::SubagentStart)
                     && let Some(lease) = &mut start_lease
                 {
-                    lease.mark_completed();
+                    lease.callback_succeeded();
                 }
             }
             Ok(ToolHookOutput { context: additions })
         })
+    }
+
+    fn turn_start_delivered(&self, context: &TurnStartHookContext) {
+        let is_root = context.invocation.source_agent_id.as_str() == "root";
+        let phase = if is_root {
+            HookPhase::SessionStart
+        } else {
+            HookPhase::SubagentStart
+        };
+        self.lifecycle_start_state.deliver(
+            &(
+                context.invocation.source_agent_id.as_str().to_owned(),
+                phase,
+            ),
+            context.invocation.turn_id.as_str(),
+        );
+    }
+
+    fn turn_start_aborted(&self, context: &TurnStartHookContext, reason: TurnStartAbortReason) {
+        let is_root = context.invocation.source_agent_id.as_str() == "root";
+        let phase = if is_root {
+            HookPhase::SessionStart
+        } else {
+            HookPhase::SubagentStart
+        };
+        let key = (
+            context.invocation.source_agent_id.as_str().to_owned(),
+            phase,
+        );
+        if reason == TurnStartAbortReason::PromptBlocked {
+            self.lifecycle_start_state
+                .abort_preserving_completed_start(&key, context.invocation.turn_id.as_str());
+        } else {
+            self.lifecycle_start_state
+                .abort(&key, context.invocation.turn_id.as_str());
+        }
     }
 }
 
@@ -472,7 +477,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 .register(Arc::new(NativeLifecycleHooks {
                     hooks: lifecycle,
                     plan,
-                    started: context.session_hooks_started(),
+                    lifecycle_start_state: context.lifecycle_start_state(),
                     agent_type: context.agent_type.clone(),
                 }))
                 .map_err(|error| format!("注册生命周期 Hook 失败：{error}"))?;
@@ -4063,7 +4068,7 @@ mod tests {
         let lifecycle = NativeLifecycleHooks {
             hooks: vec![HookSpec::Command(spec)],
             plan: PlanGuard::inactive(),
-            started: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            lifecycle_start_state: LifecycleStartState::new(),
             agent_type: "reviewer".to_owned(),
         };
         let invocation = HookInvocationContext {
@@ -4072,24 +4077,29 @@ mod tests {
             source_agent_id: AgentId::new("child-agent").expect("Agent 标识有效"),
         };
 
+        let first_context = TurnStartHookContext {
+            invocation: invocation.clone(),
+            prompt: "第一次".to_owned(),
+            has_history: false,
+        };
+        lifecycle.turn_start_prepare(&first_context);
         lifecycle
-            .turn_start(TurnStartHookContext {
-                invocation: invocation.clone(),
-                prompt: "第一次".to_owned(),
-                has_history: false,
-            })
+            .turn_start(first_context.clone())
             .await
             .expect("首次子 Agent Hook 应执行");
+        lifecycle.turn_start_delivered(&first_context);
         let marker = directory.path().join("executed.txt");
         assert!(marker.is_file());
         fs::remove_file(&marker).expect("移除首次执行标记");
 
+        let second_context = TurnStartHookContext {
+            invocation,
+            prompt: "第二次".to_owned(),
+            has_history: true,
+        };
+        lifecycle.turn_start_prepare(&second_context);
         lifecycle
-            .turn_start(TurnStartHookContext {
-                invocation,
-                prompt: "第二次".to_owned(),
-                has_history: true,
-            })
+            .turn_start(second_context)
             .await
             .expect("后续子 Agent Turn 应跳过生命周期 Hook");
         assert!(!marker.exists());

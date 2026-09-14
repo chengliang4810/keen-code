@@ -1,7 +1,9 @@
 //! Claude Code 协议的真实 shell 与生命周期回归。
 use super::*;
 #[cfg(unix)]
-use keencode_agent::{AgentId, HookInvocationContext, SessionId, TurnId};
+use keencode_agent::{
+    AgentId, HookError, HookInvocationContext, SessionId, TurnCancellation, TurnId,
+};
 #[cfg(unix)]
 use std::collections::HashSet;
 #[cfg(unix)]
@@ -72,7 +74,7 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
     let hook = NativeLifecycleHooks {
         hooks,
         plan: PlanGuard::inactive(),
-        started: started.clone(),
+        lifecycle_start_state: LifecycleStartState::with_started(started.clone()),
         agent_type: "general-purpose".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -84,6 +86,7 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
         prompt: "hello".to_owned(),
         has_history: false,
     };
+    hook.turn_start_prepare(&context);
     assert_eq!(
         hook.turn_start(context.clone())
             .await
@@ -92,6 +95,8 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
             .len(),
         2
     );
+    hook.turn_start_delivered(&context);
+    hook.turn_start_prepare(&context);
     assert_eq!(hook.turn_start(context).await.unwrap().context.len(), 1);
     assert!(
         started
@@ -134,9 +139,12 @@ async fn blocked_first_prompt_does_not_repeat_session_start() {
             .unwrap(),
         ],
         plan: PlanGuard::inactive(),
-        started: started.clone(),
+        lifecycle_start_state: LifecycleStartState::with_started(started.clone()),
         agent_type: "general-purpose".to_owned(),
     };
+    let mut registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    registry.register(Arc::new(hook)).unwrap();
+    let runtime = HookRuntime::new(registry, HookLimits::default()).unwrap();
     let mut context = TurnStartHookContext {
         invocation: HookInvocationContext {
             session_id: SessionId::new("blocked-prompt-session").unwrap(),
@@ -149,11 +157,14 @@ async fn blocked_first_prompt_does_not_repeat_session_start() {
 
     for turn_id in ["blocked-prompt-turn-1", "blocked-prompt-turn-2"] {
         context.invocation.turn_id = TurnId::new(turn_id).unwrap();
-        let error = hook
-            .turn_start(context.clone())
+        let error = runtime
+            .run_turn_start(context.clone(), &TurnCancellation::new())
             .await
             .expect_err("被阻断的首个 Prompt 应允许重试");
-        assert_eq!(error.code, "hook_prompt_blocked");
+        assert!(matches!(
+            error,
+            HookError::Callback { code, .. } if code == "hook_prompt_blocked"
+        ));
     }
 
     let attempts = fs::read_to_string(root.path().join("attempts.txt")).unwrap();
@@ -174,6 +185,254 @@ async fn blocked_first_prompt_does_not_repeat_session_start() {
     );
     assert!(
         started
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_session_start_late_success_cannot_complete_reloaded_candidate() {
+    let root = tempfile::tempdir().unwrap();
+    let state = LifecycleStartState::new();
+    let first_hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:late-session-start".to_owned(),
+            HookPhase::SessionStart,
+            None,
+            r#"cat >/dev/null; printf started > entered; while [ ! -f release ]; do sleep 0.01; done; printf finished > finished; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"late"}}'"#
+                .to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        lifecycle_start_state: state.clone(),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    first_registry
+        .register(Arc::new(first_hook))
+        .expect("首个 SessionStart Hook 应成功注册");
+    let first_runtime = HookRuntime::new(
+        first_registry,
+        HookLimits {
+            max_callback_ms: 30_000,
+            ..HookLimits::default()
+        },
+    )
+    .unwrap();
+    let first_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("late-session").unwrap(),
+            turn_id: TurnId::new("late-turn-1").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "first".to_owned(),
+        has_history: false,
+    };
+    let cancellation = TurnCancellation::new();
+    let task_cancellation = cancellation.clone();
+    let first_task = tokio::spawn(async move {
+        first_runtime
+            .run_turn_start(first_context, &task_cancellation)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !root.path().join("entered").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("首个 Hook 应在取消前进入命令");
+    cancellation.cancel();
+    let first_result = first_task.await.unwrap();
+    assert!(matches!(first_result, Err(HookError::Cancelled { .. })));
+    assert!(
+        !state
+            .started()
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
+
+    let second_hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:reloaded-session-start".to_owned(),
+            HookPhase::SessionStart,
+            None,
+            r#"cat >/dev/null; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"reloaded"}}'"#
+                .to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        lifecycle_start_state: state.clone(),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let mut second_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    second_registry
+        .register(Arc::new(second_hook))
+        .expect("重载候选 SessionStart Hook 应成功注册");
+    let second_runtime = HookRuntime::new(second_registry, HookLimits::default()).unwrap();
+    let second_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("late-session").unwrap(),
+            turn_id: TurnId::new("late-turn-2").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "reload".to_owned(),
+        has_history: true,
+    };
+    let additions = second_runtime
+        .run_turn_start(second_context, &TurnCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(additions.len(), 1);
+    assert_eq!(additions[0].text, "reloaded");
+
+    let completed_before_release = state.callback_completion_count();
+    std::fs::write(root.path().join("release"), "release").unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while state.callback_completion_count() <= completed_before_release {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("旧 Hook 应在 release 后完成回调 Future");
+    assert!(root.path().join("finished").is_file());
+    assert!(
+        state
+            .started()
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn cancelled_prompt_hook_retries_session_start_after_late_completion() {
+    let root = tempfile::tempdir().unwrap();
+    let state = LifecycleStartState::new();
+    let first_hook = NativeLifecycleHooks {
+        hooks: vec![
+            parse_command_hook(
+                "test:session-start-before-prompt-cancel".to_owned(),
+                HookPhase::SessionStart,
+                None,
+                r#"printf 'session-start\n' >> attempts.txt; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"session guidance"}}'"#
+                    .to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+            parse_command_hook(
+                "test:prompt-blocked-by-cancel".to_owned(),
+                HookPhase::UserPromptSubmit,
+                None,
+                r#"printf entered > prompt-entered; while [ ! -f release ]; do sleep 0.01; done; printf finished > prompt-finished; printf '%s' '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":"prompt guidance"}}'"#
+                    .to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+        ],
+        plan: PlanGuard::inactive(),
+        lifecycle_start_state: state.clone(),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    first_registry
+        .register(Arc::new(first_hook))
+        .expect("首个两阶段 Hook 应成功注册");
+    let first_runtime = HookRuntime::new(first_registry, HookLimits::default()).unwrap();
+    let first_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("cancelled-prompt-session").unwrap(),
+            turn_id: TurnId::new("cancelled-prompt-turn-1").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "first".to_owned(),
+        has_history: false,
+    };
+    let cancellation = TurnCancellation::new();
+    let task_cancellation = cancellation.clone();
+    let first_task = tokio::spawn(async move {
+        first_runtime
+            .run_turn_start(first_context, &task_cancellation)
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !root.path().join("prompt-entered").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("UserPromptSubmit 应在取消前进入命令");
+    cancellation.cancel();
+    let first_result = first_task.await.unwrap();
+    assert!(matches!(first_result, Err(HookError::Cancelled { .. })));
+    assert!(
+        !state
+            .started()
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
+
+    let second_hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:session-start-after-prompt-cancel".to_owned(),
+            HookPhase::SessionStart,
+            None,
+            r#"printf 'session-start\n' >> attempts.txt; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"reloaded guidance"}}'"#
+                .to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        lifecycle_start_state: state.clone(),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let mut second_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    second_registry
+        .register(Arc::new(second_hook))
+        .expect("重载候选 SessionStart Hook 应成功注册");
+    let second_runtime = HookRuntime::new(second_registry, HookLimits::default()).unwrap();
+    let second_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("cancelled-prompt-session").unwrap(),
+            turn_id: TurnId::new("cancelled-prompt-turn-2").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "reload".to_owned(),
+        has_history: true,
+    };
+    let additions = second_runtime
+        .run_turn_start(second_context, &TurnCancellation::new())
+        .await
+        .unwrap();
+    assert_eq!(additions.len(), 1);
+    assert_eq!(additions[0].text, "reloaded guidance");
+
+    std::fs::write(root.path().join("release"), "release").unwrap();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !root.path().join("prompt-finished").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("旧 UserPromptSubmit worker 应在释放后完成");
+    let attempts = fs::read_to_string(root.path().join("attempts.txt")).unwrap();
+    assert_eq!(
+        attempts
+            .lines()
+            .filter(|line| *line == "session-start")
+            .count(),
+        2
+    );
+    assert!(
+        state
+            .started()
             .lock()
             .unwrap()
             .contains(&("root".to_owned(), HookPhase::SessionStart))
@@ -216,7 +475,7 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
             ),
         ],
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: LifecycleStartState::new(),
         agent_type: "general-purpose".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -229,7 +488,9 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
         has_history: false,
     };
 
+    hook.turn_start_prepare(&context);
     let first = hook.turn_start(context.clone()).await.unwrap();
+    hook.turn_start_delivered(&context);
     assert_eq!(
         first
             .context
@@ -238,6 +499,7 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
             .collect::<Vec<_>>(),
         ["session context", "prompt context"]
     );
+    hook.turn_start_prepare(&context);
     let second = hook.turn_start(context).await.unwrap();
     assert_eq!(second.context[0].text, "prompt context");
 
@@ -270,7 +532,7 @@ async fn failed_one_time_lifecycle_hook_is_retried() {
         )
         .unwrap()],
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: LifecycleStartState::new(),
         agent_type: "worker".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -284,6 +546,7 @@ async fn failed_one_time_lifecycle_hook_is_retried() {
     };
 
     for _ in 0..2 {
+        hook.turn_start_prepare(&context);
         let error = hook
             .turn_start(context.clone())
             .await
@@ -489,7 +752,7 @@ async fn installed_superpowers_session_start_contract() {
     let lifecycle = NativeLifecycleHooks {
         hooks,
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: LifecycleStartState::new(),
         agent_type: "general-purpose".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -501,7 +764,9 @@ async fn installed_superpowers_session_start_contract() {
         prompt: "compatibility probe".to_owned(),
         has_history: false,
     };
-    let result = lifecycle.turn_start(context).await.unwrap();
+    lifecycle.turn_start_prepare(&context);
+    let result = lifecycle.turn_start(context.clone()).await.unwrap();
+    lifecycle.turn_start_delivered(&context);
     assert_eq!(result.context.len(), 1);
     assert!(result.context[0].text.contains("using-superpowers"));
 }
@@ -563,7 +828,7 @@ async fn subagent_start_runs_once_per_child_and_injects_context() {
             root.path(),
         ).unwrap()],
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: LifecycleStartState::new(),
         agent_type: "worker".to_owned(),
     };
     let mut context = TurnStartHookContext {
@@ -575,6 +840,7 @@ async fn subagent_start_runs_once_per_child_and_injects_context() {
         prompt: "task".to_owned(),
         has_history: true,
     };
+    hook.turn_start_prepare(&context);
     assert!(
         hook.turn_start(context.clone())
             .await
@@ -582,8 +848,10 @@ async fn subagent_start_runs_once_per_child_and_injects_context() {
             .context
             .is_empty()
     );
+    hook.turn_start_delivered(&context);
     for child in ["child-one", "child-two"] {
         context.invocation.source_agent_id = AgentId::new(child).unwrap();
+        hook.turn_start_prepare(&context);
         assert_eq!(
             hook.turn_start(context.clone())
                 .await
@@ -592,6 +860,8 @@ async fn subagent_start_runs_once_per_child_and_injects_context() {
                 .len(),
             1
         );
+        hook.turn_start_delivered(&context);
+        hook.turn_start_prepare(&context);
         assert!(
             hook.turn_start(context.clone())
                 .await
@@ -611,14 +881,16 @@ async fn subagent_start_runs_once_per_child_and_injects_context() {
         ..hook
     };
     context.invocation.source_agent_id = AgentId::new("child-three").unwrap();
+    nonmatching.turn_start_prepare(&context);
     assert!(
         nonmatching
-            .turn_start(context)
+            .turn_start(context.clone())
             .await
             .unwrap()
             .context
             .is_empty()
     );
+    nonmatching.turn_start_delivered(&context);
 }
 
 /// 在隔离状态目录内执行已安装 ponytail 的真实子代理脚本。
@@ -665,21 +937,21 @@ async fn installed_ponytail_subagent_start_contract() {
     let lifecycle = NativeLifecycleHooks {
         hooks,
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: LifecycleStartState::new(),
         agent_type: "general-purpose".to_owned(),
     };
-    let result = lifecycle
-        .turn_start(TurnStartHookContext {
-            invocation: HookInvocationContext {
-                session_id: SessionId::new("ponytail-session").unwrap(),
-                turn_id: TurnId::new("ponytail-turn").unwrap(),
-                source_agent_id: AgentId::new("ponytail-child").unwrap(),
-            },
-            prompt: "Implement the assigned task".to_owned(),
-            has_history: true,
-        })
-        .await
-        .unwrap();
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("ponytail-session").unwrap(),
+            turn_id: TurnId::new("ponytail-turn").unwrap(),
+            source_agent_id: AgentId::new("ponytail-child").unwrap(),
+        },
+        prompt: "Implement the assigned task".to_owned(),
+        has_history: true,
+    };
+    lifecycle.turn_start_prepare(&context);
+    let result = lifecycle.turn_start(context.clone()).await.unwrap();
+    lifecycle.turn_start_delivered(&context);
     assert!(!result.context.is_empty());
     assert!(format!("{:?}", result.context).contains("Ponytail"));
 }
