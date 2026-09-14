@@ -132,6 +132,8 @@ pub struct PostToolUseContext {
     pub input: Value,
     /// 工具已经生成并通过统一层校验的成功结果。
     pub result: ToolResult,
+    /// 从工具实际开始执行到得到终态结果的墙钟毫秒数。
+    pub duration_ms: u64,
 }
 
 /// PostToolUseFailure Hook 可区分的工具失败原因。
@@ -165,6 +167,8 @@ pub struct PostToolUseFailureContext {
     pub result: ToolResult,
     /// 工具错误、无效输出还是 Turn 取消。
     pub failure: ToolHookFailureKind,
+    /// 从工具实际开始执行到得到失败或取消结果的墙钟毫秒数。
+    pub duration_ms: u64,
 }
 
 /// 模型正常收敛候选完成时 Stop Hook 收到的上下文。
@@ -204,6 +208,32 @@ pub struct PreCompactHookContext {
     pub estimated_tokens: u64,
     /// 本次压缩希望降到的目标 Token 数。
     pub target_tokens: u64,
+}
+
+/// PreCompact Hook 决定本次逻辑压缩是否可以开始。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PreCompactHookOutput {
+    /// 允许后续 Hook 与压缩器继续执行。
+    Continue,
+    /// 阻止本次逻辑压缩，但不将规范决策误报为 Hook 失败。
+    Block {
+        /// Hook 返回的非空阻止原因。
+        reason: String,
+    },
+}
+
+impl PreCompactHookOutput {
+    /// 创建一个放行压缩的结果。
+    pub fn continue_compaction() -> Self {
+        Self::Continue
+    }
+
+    /// 创建一个阻止当前压缩的结果。
+    pub fn block(reason: impl Into<String>) -> Self {
+        Self::Block {
+            reason: reason.into(),
+        }
+    }
 }
 
 /// 压缩结果被当前 Transcript 采纳后 PostCompact Hook 收到的上下文。
@@ -376,8 +406,8 @@ pub trait AgentHook: Send + Sync {
     fn pre_compact(
         &self,
         _context: PreCompactHookContext,
-    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
-        Box::pin(async { Ok(()) })
+    ) -> HookFuture<'_, Result<PreCompactHookOutput, HookCallbackError>> {
+        Box::pin(async { Ok(PreCompactHookOutput::continue_compaction()) })
     }
 
     /// 在压缩结果被当前 Transcript 实际采纳后执行只观察回调。
@@ -973,12 +1003,12 @@ impl HookRuntime {
         &self,
         context: PreCompactHookContext,
         cancellation: &TurnCancellation,
-    ) -> Result<(), HookError> {
+    ) -> Result<PreCompactHookOutput, HookError> {
         for registered in &self.registry.hooks {
             let name = registered.name.clone();
             let hook = registered.hook.clone();
             let callback_context = context.clone();
-            await_hook(
+            let output = await_hook(
                 move |runtime| runtime.block_on(hook.pre_compact(callback_context)),
                 cancellation,
                 HookPhase::PreCompact,
@@ -988,8 +1018,21 @@ impl HookRuntime {
                 self.limits.max_callback_ms,
             )
             .await?;
+            match output {
+                PreCompactHookOutput::Continue => {}
+                PreCompactHookOutput::Block { reason } if reason.trim().is_empty() => {
+                    return Err(HookError::InvalidOutput {
+                        phase: HookPhase::PreCompact,
+                        hook_name: name,
+                        message: "PreCompact Block 原因不能为空".to_owned(),
+                    });
+                }
+                PreCompactHookOutput::Block { reason } => {
+                    return Ok(PreCompactHookOutput::Block { reason });
+                }
+            }
         }
-        Ok(())
+        Ok(PreCompactHookOutput::continue_compaction())
     }
 
     /// 在结果采纳后按注册顺序执行全部 PostCompact Hook；已发生的取消不抹去通知。

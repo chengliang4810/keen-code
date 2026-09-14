@@ -43,10 +43,11 @@ use crate::{
     MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
     NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
     PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
-    PreCompactHookContext, PreToolUseContext, ResolvedHookContext, ResolvedStopHook, SessionId,
-    StopHookContext, TerminalReason, ToolCompletionStatus, ToolConcurrency, ToolContext,
-    ToolEffect, ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry,
-    TurnCancellation, TurnId, TurnPhase, TurnState, TurnTransitionError,
+    PreCompactHookContext, PreCompactHookOutput, PreToolUseContext, ResolvedHookContext,
+    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, ToolCompletionStatus,
+    ToolConcurrency, ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash,
+    ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId, TurnPhase, TurnState,
+    TurnTransitionError,
 };
 
 /// 显式运行上限耗尽后只允许一次无工具总结，不注入剩余次数倒计时。
@@ -887,6 +888,14 @@ impl From<TurnTransitionError> for AgentRunError {
     }
 }
 
+/// 一次逻辑压缩要么产生可采纳结果，要么被 PreCompact 规范决策跳过。
+enum LogicalCompactionOutcome {
+    /// 压缩器已完成且权威事件已提交。
+    Applied(Box<ContextCompressionOutcome>),
+    /// PreCompact Hook 阻止了当前尝试，压缩器与压缩事件均未启动。
+    Blocked,
+}
+
 /// 组合模型、工具、计划守卫和硬上限的单 Turn Agent Runtime。
 pub struct AgentRunner {
     /// 接收 Provider 中立请求并产生严格模型事件流的模型实现。
@@ -1227,9 +1236,10 @@ impl AgentRunner {
         model_round: u32,
         trigger: ContextCompressionTrigger,
         target_tokens: u64,
-    ) -> Result<ContextCompressionOutcome, AgentRunError> {
+    ) -> Result<LogicalCompactionOutcome, AgentRunError> {
         let estimated_tokens = self.context.estimate_request(model_request);
-        self.hooks
+        let pre_compact = self
+            .hooks
             .run_pre_compact(
                 PreCompactHookContext {
                     invocation: hook_invocation_context(request),
@@ -1242,6 +1252,9 @@ impl AgentRunner {
             )
             .await
             .map_err(AgentRunError::from)?;
+        if matches!(pre_compact, PreCompactHookOutput::Block { .. }) {
+            return Ok(LogicalCompactionOutcome::Blocked);
+        }
         self.deliver_context_compaction_event(
             request,
             model_round,
@@ -1394,7 +1407,7 @@ impl AgentRunner {
             .await?;
             return Err(error);
         }
-        Ok(outcome)
+        Ok(LogicalCompactionOutcome::Applied(Box::new(outcome)))
     }
 
     /// 采纳 Micro 投影失败载荷：把已应用的投影记录与消息并入当前 Turn。
@@ -2097,10 +2110,11 @@ impl AgentRunner {
                     )
                     .await;
                 match outcome {
-                    Ok(outcome) => {
-                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)
+                    Ok(LogicalCompactionOutcome::Applied(outcome)) => {
+                        self.adopt_compaction_outcome(request, active, &mut model_request, *outcome)
                             .await?
                     }
+                    Ok(LogicalCompactionOutcome::Blocked) => {}
                     Err(error) => {
                         // Micro 投影已应用但摘要失败：先采纳已回收的投影记录与
                         // 投影后消息（预压缩场景 micro 收益保留），再按内层错误
@@ -2182,10 +2196,11 @@ impl AgentRunner {
                     )
                     .await;
                 match outcome {
-                    Ok(outcome) => {
-                        self.adopt_compaction_outcome(request, active, &mut model_request, outcome)
+                    Ok(LogicalCompactionOutcome::Applied(outcome)) => {
+                        self.adopt_compaction_outcome(request, active, &mut model_request, *outcome)
                             .await?
                     }
+                    Ok(LogicalCompactionOutcome::Blocked) => {}
                     Err(error) => {
                         let error = self
                             .adopt_micro_applied_failure(request, active, &mut model_request, error)
@@ -2315,9 +2330,11 @@ impl AgentRunner {
                     tool_catalog_update_acknowledged = true;
                 }
                 match request_result {
-                    Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. }))
-                        if !active.forced_context_retry_used =>
-                    {
+                    Err(
+                        overflow_error @ AgentRunError::Model(ModelError::ContextLengthExceeded {
+                            ..
+                        }),
+                    ) if !active.forced_context_retry_used => {
                         active.forced_context_retry_used = true;
                         active.state.transition_to(TurnPhase::Compacting)?;
                         let target_tokens = self
@@ -2334,7 +2351,10 @@ impl AgentRunner {
                             )
                             .await
                         {
-                            Ok(outcome) => outcome,
+                            Ok(LogicalCompactionOutcome::Applied(outcome)) => *outcome,
+                            Ok(LogicalCompactionOutcome::Blocked) => {
+                                break Err(overflow_error);
+                            }
                             Err(error) => {
                                 // forced 场景压缩失败不再直接终止：先采纳已回收
                                 // 的 Micro 投影，再在报 ContextBlocked 之前尝试
@@ -5530,6 +5550,7 @@ async fn execute_one_raw(
         cancellation: call_cancellation.child_token(),
     };
     let cancelled = Box::pin(call_cancellation.cancelled());
+    let execution_started = Instant::now();
     let executed = tool.execute(context, call.arguments);
     let wall_clock_limit = tool.timeout();
     // 工件通道在归一阶段使用：单结果超限截断与 Round 聚合截断共用。
@@ -5648,6 +5669,7 @@ async fn execute_one_raw(
                 )
             }
         };
+    let duration_ms = u64::try_from(execution_started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let footprint = measure_tool_result(&result).map_err(|_| AgentRunError::Internal {
         message: "Runtime 生成了无效或超过内部硬上限的工具结果".to_owned(),
     })?;
@@ -5661,6 +5683,7 @@ async fn execute_one_raw(
         observation,
         artifact,
         artifact_sink,
+        duration_ms,
     })
 }
 
@@ -5749,6 +5772,7 @@ async fn run_post_tool_hook(
                         input: call.arguments.clone(),
                         result: executed.result.clone(),
                         failure,
+                        duration_ms: executed.duration_ms,
                     },
                     &request.cancellation,
                 )
@@ -5763,6 +5787,7 @@ async fn run_post_tool_hook(
                         tool_name: call.name.clone(),
                         input: call.arguments.clone(),
                         result: executed.result.clone(),
+                        duration_ms: executed.duration_ms,
                     },
                     &request.cancellation,
                 )
@@ -5803,6 +5828,8 @@ struct RawExecutedTool {
     artifact: Option<TruncatedOutputArtifact>,
     /// 工具提供的输出落盘通道；Round 聚合首次截断时按需保存完整正文。
     artifact_sink: Option<Arc<dyn ToolOutputArtifactSink>>,
+    /// 工具实际执行到终态结果的墙钟毫秒数。
+    duration_ms: u64,
 }
 
 impl RawExecutedTool {

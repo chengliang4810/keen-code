@@ -391,7 +391,7 @@ struct CompactionProbeHook {
     /// OnError 收到的最终非取消失败。
     errors: Mutex<Vec<OnErrorHookContext>>,
     /// PreCompact 的固定结果。
-    pre_result: Result<(), HookCallbackError>,
+    pre_result: Result<PreCompactHookOutput, HookCallbackError>,
     /// PostCompact 的固定结果。
     post_result: Result<(), HookCallbackError>,
     /// OnError 调用次数。
@@ -405,7 +405,7 @@ impl CompactionProbeHook {
             pre: Mutex::new(Vec::new()),
             post: Mutex::new(Vec::new()),
             errors: Mutex::new(Vec::new()),
-            pre_result: Ok(()),
+            pre_result: Ok(PreCompactHookOutput::continue_compaction()),
             post_result: Ok(()),
             on_error_count: AtomicUsize::new(0),
         }
@@ -417,6 +417,12 @@ impl CompactionProbeHook {
             "pre_compact_failed",
             "合成 PreCompact 失败",
         ));
+        self
+    }
+
+    /// 令 PreCompact 返回规范阻止决策。
+    fn blocking_pre(mut self, reason: &str) -> Self {
+        self.pre_result = Ok(PreCompactHookOutput::block(reason));
         self
     }
 
@@ -455,7 +461,7 @@ impl AgentHook for CompactionProbeHook {
     fn pre_compact(
         &self,
         context: PreCompactHookContext,
-    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+    ) -> HookFuture<'_, Result<PreCompactHookOutput, HookCallbackError>> {
         self.pre
             .lock()
             .expect("PreCompact 锁不应损坏")
@@ -1897,6 +1903,74 @@ async fn runner_pre_compact_failure_skips_compressor_and_post_hook() {
     assert_eq!(hook.error_contexts().len(), 1);
     assert!(compressor.requests().is_empty());
     assert!(provider.requests().expect("应能读取请求").is_empty());
+    assert!(result.compactions.is_empty());
+}
+
+/// 主动压缩被 PreCompact 规范阻止时跳过压缩器，并以未改写的请求继续采样。
+#[tokio::test]
+async fn runner_pre_compact_block_skips_proactive_compaction_and_continues() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(2_048),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("压缩被阻止后继续")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试上下文策略应有效");
+    let hook = Arc::new(CompactionProbeHook::new().blocking_pre("保留原始历史"));
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_hook_runtime(runtime_with_hook(hook.clone()))
+        .run_turn(turn_request_with_output(atomic_tool_history(), 16))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert!(hook.error_contexts().is_empty());
+    assert!(compressor.requests().is_empty());
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
+    assert!(result.compactions.is_empty());
+}
+
+/// Provider 已报上下文超限时，PreCompact 阻止必须保留原始 Provider 错误。
+#[tokio::test]
+async fn runner_pre_compact_block_preserves_provider_overflow_error() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [context_overflow_reply()],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        bounded_test_context(provider.clone()).policy().clone(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试上下文策略应有效");
+    let hook = Arc::new(CompactionProbeHook::new().blocking_pre("禁止强制压缩"));
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .with_hook_runtime(runtime_with_hook(hook.clone()))
+        .run_turn(turn_request(vec![Message::text(MessageRole::User, "测试")]))
+        .await;
+
+    assert_eq!(
+        result.error,
+        Some(AgentRunError::Model(ModelError::ContextLengthExceeded {
+            message: "测试上下文超限".to_owned(),
+        }))
+    );
+    assert_eq!(hook.pre_contexts().len(), 1);
+    assert!(hook.post_contexts().is_empty());
+    assert_eq!(hook.error_contexts().len(), 1);
+    assert!(compressor.requests().is_empty());
+    assert_eq!(provider.requests().expect("应能读取请求").len(), 1);
     assert!(result.compactions.is_empty());
 }
 

@@ -434,6 +434,79 @@ impl AgentTool for RecordingTool {
     }
 }
 
+/// 以明确延迟返回成功或失败的工具，用于核验 PostHook 墙钟耗时。
+struct DelayedOutcomeTool;
+
+impl AgentTool for DelayedOutcomeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "delayed_outcome",
+            "验证 PostHook 收到真实工具耗时",
+            json!({
+                "type": "object",
+                "properties": {"fail": {"type": "boolean"}},
+                "required": ["fail"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    fn execute(&self, _context: ToolContext, input: Value) -> ToolFuture<'_> {
+        let fail = input.get("fail").and_then(Value::as_bool) == Some(true);
+        Box::pin(async move {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            if fail {
+                Err(ToolError::permanent("delayed_failure", "合成工具失败"))
+            } else {
+                Ok(ToolOutput::text("合成工具成功"))
+            }
+        })
+    }
+}
+
+/// 分别记录成功与失败 PostHook 看到的实测耗时。
+#[derive(Default)]
+struct ToolDurationHook {
+    success: Mutex<Vec<u64>>,
+    failure: Mutex<Vec<u64>>,
+}
+
+impl AgentHook for ToolDurationHook {
+    fn name(&self) -> &str {
+        "tool-duration-hook"
+    }
+
+    fn post_tool_use(
+        &self,
+        context: PostToolUseContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        self.success
+            .lock()
+            .expect("成功耗时测试锁不应损坏")
+            .push(context.duration_ms);
+        Box::pin(async { Ok(ToolHookOutput::default()) })
+    }
+
+    fn post_tool_use_failure(
+        &self,
+        context: PostToolUseFailureContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        self.failure
+            .lock()
+            .expect("失败耗时测试锁不应损坏")
+            .push(context.duration_ms);
+        Box::pin(async { Ok(ToolHookOutput::default()) })
+    }
+}
+
 /// 为每个模型实时事件引入可观测延迟，证明墙钟耗时来自实际请求路径。
 struct DelayedModelEventSink;
 
@@ -1027,6 +1100,47 @@ fn tool_catalog_delta_rejects_either_snapshot_over_capacity() {
 
     assert!(AgentToolCatalogDelta::new(9, oversized.clone(), Vec::new()).is_err());
     assert!(AgentToolCatalogDelta::new(9, Vec::new(), oversized).is_err());
+}
+
+/// 成功与失败 PostHook 都必须收到工具实际执行的墙钟耗时。
+#[tokio::test]
+async fn post_tool_hooks_receive_measured_execution_duration() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[
+                (
+                    "duration-success",
+                    "delayed_outcome",
+                    json!({"fail": false}),
+                ),
+                ("duration-failure", "delayed_outcome", json!({"fail": true})),
+            ]),
+            text_reply("完成"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(DelayedOutcomeTool))
+        .expect("耗时测试工具应可注册");
+    let hook = Arc::new(ToolDurationHook::default());
+    let mut hooks = HookRegistry::new();
+    hooks
+        .register(hook.clone())
+        .expect("耗时测试 Hook 应可注册");
+
+    let result = runner(provider, registry)
+        .with_hook_runtime(HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置有效"))
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.is_success(), "{:?}", result.error);
+    let success = hook.success.lock().expect("成功耗时测试锁不应损坏");
+    let failure = hook.failure.lock().expect("失败耗时测试锁不应损坏");
+    assert_eq!(success.len(), 1);
+    assert_eq!(failure.len(), 1);
+    assert!(success[0] >= 20, "成功工具耗时应来自 25ms 真实延迟");
+    assert!(failure[0] >= 20, "失败工具耗时应来自 25ms 真实延迟");
 }
 
 /// 同一逻辑 Round 的空响应重试必须继续携带同一通知，但通知不能进入权威 Transcript。

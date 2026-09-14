@@ -2492,6 +2492,7 @@ async fn 并发post_hook最多残留一个隔离线程() {
         tool_name: "probe".to_owned(),
         input: json!({"value": "read"}),
         result: ToolResult::text("gate-call", "ok", false),
+        duration_ms: 7,
     };
     let cancellation = TurnCancellation::new();
 
@@ -2560,6 +2561,7 @@ async fn 候选级store跨registry共享单入口() {
         tool_name: "probe".to_owned(),
         input: json!({"value": "read"}),
         result: ToolResult::text("shared-gate-call", "ok", false),
+        duration_ms: 7,
     };
     let cancellation = TurnCancellation::new();
 
@@ -2754,6 +2756,7 @@ async fn 已取消工具的failure_hook正常完成后不熔断() {
         input: json!({"value": "cancelled"}),
         result: ToolResult::text("call-cancelled-failure", "Turn 已取消", true),
         failure: ToolHookFailureKind::Cancelled,
+        duration_ms: 7,
     };
 
     runtime
