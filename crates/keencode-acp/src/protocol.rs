@@ -503,6 +503,53 @@ impl CancelBackgroundTaskResponse {
     }
 }
 
+/// `keencode/background/resume` 的类型化请求。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeBackgroundTaskRequest {
+    /// 后台子 Agent 所属的根 Session。
+    pub session_id: String,
+    /// 需要恢复的稳定子 Agent 身份；不能使用后台任务的 Turn 标识替代。
+    pub child_thread_id: String,
+    /// ACP 保留元数据；KeenCode 从中读取稳定 operationId。
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
+/// `keencode/background/resume` 的类型化响应。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResumeBackgroundTaskResponse {
+    /// 后台子 Agent 所属的根 Session。
+    pub session_id: String,
+    /// 被恢复的稳定子 Agent 身份。
+    pub child_thread_id: String,
+    /// 本次恢复分配的新后台 Turn 标识。
+    pub task_id: String,
+}
+
+impl ResumeBackgroundTaskResponse {
+    /// 创建一个恢复响应。
+    pub fn new(
+        session_id: impl Into<String>,
+        child_thread_id: impl Into<String>,
+        task_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            session_id: session_id.into(),
+            child_thread_id: child_thread_id.into(),
+            task_id: task_id.into(),
+        }
+    }
+
+    /// 校验 Session、子 Agent 和新 Turn 标识。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        validate_identifier(&self.child_thread_id, MAX_IDENTIFIER_BYTES)?;
+        validate_identifier(&self.task_id, MAX_IDENTIFIER_BYTES)
+    }
+}
+
 /// 会话级 Goal 的固定作用域。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1252,6 +1299,7 @@ impl_validated_response_payload!(
     RewindSessionResponse,
     ReplaySessionResponse,
     CancelBackgroundTaskResponse,
+    ResumeBackgroundTaskResponse,
     ListBackgroundTasksResponse,
     GoalGetResponse,
     GoalMutationResponse,
@@ -1304,6 +1352,8 @@ pub enum AcpRequest {
     ReplaySession(ReplaySessionRequest),
     /// 取消 Session 内一个明确后台任务。
     CancelBackgroundTask(CancelBackgroundTaskRequest),
+    /// 恢复 Session 内一个失败或中断的单层子 Agent。
+    ResumeBackgroundTask(ResumeBackgroundTaskRequest),
     /// 列出一个已授权 Session 的运行中后台任务。
     ListBackgroundTasks(ListBackgroundTasksRequest),
     /// 查询项目当前唯一 Goal。
@@ -1350,6 +1400,7 @@ impl AcpRequest {
             Self::RewindSession(_) => "keencode/session/rewind",
             Self::ReplaySession(_) => "keencode/session/replay",
             Self::CancelBackgroundTask(_) => "keencode/background/cancel",
+            Self::ResumeBackgroundTask(_) => "keencode/background/resume",
             Self::ListBackgroundTasks(_) => "keencode/background/list",
             Self::GoalGet(_) => "keencode/goal/get",
             Self::GoalUpsert(_) => "keencode/goal/upsert",
@@ -1581,6 +1632,9 @@ impl AcpRequestDecoder {
             "keencode/background/cancel" => self
                 .decode_extension(params)
                 .map(AcpRequest::CancelBackgroundTask),
+            "keencode/background/resume" => self
+                .decode_extension(params)
+                .map(AcpRequest::ResumeBackgroundTask),
             "keencode/background/list" => self
                 .decode_extension(params)
                 .map(AcpRequest::ListBackgroundTasks),
@@ -2377,6 +2431,14 @@ impl ValidateAcpParams for CancelBackgroundTaskRequest {
     fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_identifier(&self.task_id, MAX_IDENTIFIER_BYTES)
+    }
+}
+
+impl ValidateAcpParams for ResumeBackgroundTaskRequest {
+    /// 校验 Session 和稳定子 Agent 标识；Turn/task ID 不属于请求身份。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        validate_identifier(&self.child_thread_id, MAX_IDENTIFIER_BYTES)
     }
 }
 

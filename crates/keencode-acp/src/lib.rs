@@ -57,7 +57,8 @@ pub use protocol::{
     McpOAuthCallbackResponse, McpOAuthCallbackStatus, McpOAuthCancelResponse, McpOAuthNotification,
     McpOAuthServerRequest, McpOAuthStartResponse, McpOAuthStartStatus, McpOAuthStatus,
     McpRuntimePhase, McpServerStatus, McpTransportKind, RenameSessionRequest,
-    RenameSessionResponse, ReplaySessionRequest, ReplaySessionResponse, RewindCandidate,
+    RenameSessionResponse, ReplaySessionRequest, ReplaySessionResponse,
+    ResumeBackgroundTaskRequest, ResumeBackgroundTaskResponse, RewindCandidate,
     RewindCandidatesRequest, RewindCandidatesResponse, RewindSessionRequest, RewindSessionResponse,
     SessionConfigUpdateNotification, SessionMcpLoadRequest, SessionMcpMutationResponse,
     SessionMcpServerPhase, SessionMcpServerStatus, SessionMcpStatusRequest,
@@ -71,6 +72,9 @@ mod tests;
 
 #[cfg(test)]
 mod background_list_tests;
+
+#[cfg(test)]
+mod background_resume_tests;
 
 #[cfg(test)]
 mod file_change_tests;

@@ -1551,6 +1551,14 @@ fn keencode_extensions_use_only_keencode_namespace_without_session_aliases() {
             "keencode/background/cancel",
             json!({ "sessionId": "session-a", "taskId": "task-a" }),
         ),
+        (
+            "keencode/background/resume",
+            json!({
+                "sessionId": "session-a",
+                "childThreadId": "child-a",
+                "_meta": { "keencode/operationId": "resume-a" }
+            }),
+        ),
         ("keencode/goal/get", json!({ "sessionId": "session-a" })),
         (
             "keencode/goal/upsert",
@@ -1757,6 +1765,14 @@ fn extension_semantics_accept_current_valid_goal_background_and_replay_shapes() 
         (
             "keencode/background/cancel",
             json!({ "sessionId": "session-a", "taskId": "task-a" }),
+        ),
+        (
+            "keencode/background/resume",
+            json!({
+                "sessionId": "session-a",
+                "childThreadId": "child-a",
+                "_meta": { "keencode/operationId": "resume-a" }
+            }),
         ),
         (
             "keencode/goal/upsert",
