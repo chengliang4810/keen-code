@@ -168,6 +168,115 @@ fn turn_provider_snapshot_is_atomic_and_turn_scoped() {
     }
 }
 
+/// Turn Provider 快照一旦出现在批次中，就必须紧随每个 TurnStarted，且同一 Turn 不得重复记录。
+#[test]
+fn turn_provider_snapshot_rejects_non_adjacent_and_duplicate_records() {
+    let provider_a = ProviderSnapshot {
+        provider_id: "provider-turn-a".to_owned(),
+        model: "model-turn-a".to_owned(),
+        context_window: Some(128_000),
+        protocol: ProviderProtocolSnapshot::OpenAiResponses,
+        config_fingerprint: "sha256:turn-a".to_owned(),
+        reasoning_effort: None,
+    };
+    let provider_b = ProviderSnapshot {
+        provider_id: "provider-turn-b".to_owned(),
+        model: "model-turn-b".to_owned(),
+        context_window: Some(32_000),
+        protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+        config_fingerprint: "sha256:turn-b".to_owned(),
+        reasoning_effort: None,
+    };
+    let turn_id = TurnId::new("turn-provider-ordering").expect("Turn ID 应有效");
+    let root_agent = AgentId::new("root").expect("根 Agent ID 应有效");
+    let started = SessionEvent::TurnStarted {
+        turn_id: turn_id.clone(),
+        source_agent_id: root_agent.clone(),
+        root_turn_id: turn_id.clone(),
+        parent_turn_id: None,
+        prompt_summary: "验证 Provider 快照顺序".to_owned(),
+    };
+    let model_round = SessionEvent::ModelRoundCompleted {
+        turn_id: turn_id.clone(),
+        source_agent_id: root_agent.clone(),
+        model_round: 1,
+        requested_model: provider_a.model.clone(),
+        metadata: ResponseMetadata::default(),
+        usage: TokenUsage::unknown(),
+        stop_reason: StopReason::Completed,
+    };
+    let transcript = SessionEvent::TranscriptSegmentCommitted {
+        segment: TranscriptSegment {
+            turn_id: turn_id.clone(),
+            source_agent_id: root_agent.clone(),
+            model_round: 1,
+            segment_index: 0,
+            expected_transcript_revision: 0,
+            messages: vec![SessionMessage {
+                is_meta: false,
+                message_id: "provider-ordering-response".to_owned(),
+                turn_id: Some(turn_id.clone()),
+                agent_id: Some(root_agent.clone()),
+                role: MessageRole::Assistant,
+                content: vec![MessagePart::Text {
+                    text: "响应".to_owned(),
+                }],
+            }],
+        },
+    };
+    let snapshot_a = SessionEvent::TurnProviderSnapshotRecorded {
+        turn_id: turn_id.clone(),
+        source_agent_id: root_agent.clone(),
+        provider: provider_a,
+    };
+    let snapshot_b = SessionEvent::TurnProviderSnapshotRecorded {
+        turn_id,
+        source_agent_id: root_agent,
+        provider: provider_b,
+    };
+    let second_turn_id = TurnId::new("turn-provider-without-snapshot").expect("Turn ID 应有效");
+    let second_started = SessionEvent::TurnStarted {
+        turn_id: second_turn_id.clone(),
+        source_agent_id: AgentId::new("root").expect("根 Agent ID 应有效"),
+        root_turn_id: second_turn_id,
+        parent_turn_id: None,
+        prompt_summary: "验证遗漏 Provider 快照".to_owned(),
+    };
+
+    for (session_id, events, message) in [
+        (
+            "turn-provider-non-adjacent",
+            vec![started.clone(), model_round, transcript, snapshot_a.clone()],
+            "快照不得落在模型完成和 Transcript 之后",
+        ),
+        (
+            "turn-provider-duplicate",
+            vec![started.clone(), snapshot_a.clone(), snapshot_b],
+            "同一 Turn 不得记录两个不同 Provider",
+        ),
+        (
+            "turn-provider-missing",
+            vec![started, snapshot_a, second_started],
+            "启用 Provider 快照的批次不得遗漏其他 Turn 的快照",
+        ),
+    ] {
+        let root = TempDir::new().expect("临时目录应创建");
+        let journal = ready(root.path(), session_id, SnapshotPolicy::Disabled);
+        create_session(&journal);
+        assert!(
+            journal
+                .append(SessionEvent::AtomicBatch { events })
+                .is_err(),
+            "{message}"
+        );
+        assert_eq!(
+            journal.state().expect("失败后状态应读取").last_sequence,
+            1,
+            "拒绝非法批次不得部分写入 Journal"
+        );
+    }
+}
+
 /// 会话权威记录、嵌套消息和恢复状态都必须拒绝当前 Schema 之外的字段。
 #[test]
 fn persisted_session_structures_reject_unknown_fields() {

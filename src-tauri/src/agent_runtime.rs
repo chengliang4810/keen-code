@@ -19978,6 +19978,98 @@ mod tests {
         assert_eq!(context_window(&a_second), Some(128_000));
     }
 
+    /// 同一原子批次中的 Turn Provider 快照必须让 live 与 replay 产生相同用量投影。
+    #[test]
+    fn live_and_replay_project_turn_provider_snapshot_identically() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "runtime-provider-live-replay".to_owned(),
+                title: "Provider live/replay 一致性".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let session_id = ResourceSessionId::new(session.session_id().as_str().to_owned())
+            .expect("Session 标识应有效");
+        let turn_id = ResourceTurnId::new("turn-provider-live-replay").expect("Turn 标识应有效");
+        let root_agent = ResourceAgentId::new("root").expect("根 Agent 标识应有效");
+        let provider = ProviderSnapshot {
+            provider_id: "provider-live-replay".to_owned(),
+            model: "model-live-replay".to_owned(),
+            context_window: Some(64_000),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-live-replay".to_owned(),
+            reasoning_effort: None,
+        };
+        let record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("provider-live-replay-event")
+                .expect("事件标识应有效"),
+            session: session_id.clone(),
+            sequence: 2,
+            time_unix_ms: 2,
+            event: SessionEvent::AtomicBatch {
+                events: vec![
+                    SessionEvent::TurnStarted {
+                        turn_id: turn_id.clone(),
+                        source_agent_id: root_agent.clone(),
+                        root_turn_id: turn_id.clone(),
+                        parent_turn_id: None,
+                        prompt_summary: "比较 live 与 replay".to_owned(),
+                    },
+                    SessionEvent::TurnProviderSnapshotRecorded {
+                        turn_id: turn_id.clone(),
+                        source_agent_id: root_agent.clone(),
+                        provider,
+                    },
+                    SessionEvent::ModelRoundCompleted {
+                        turn_id,
+                        source_agent_id: root_agent,
+                        model_round: 1,
+                        requested_model: "model-live-replay".to_owned(),
+                        metadata: ResponseMetadata::default(),
+                        usage: TokenUsage {
+                            total_tokens: Some(27),
+                            ..TokenUsage::unknown()
+                        },
+                        stop_reason: StopReason::Completed,
+                    },
+                ],
+            },
+        };
+        let state = SessionState::empty(session_id);
+        let project = |mode| {
+            map_authoritative_record(&session, &state, &record, mode)
+                .expect("Provider 快照批次应可投影")
+                .into_iter()
+                .enumerate()
+                .map(|(index, draft)| {
+                    materialize_delivery(
+                        session.session_id().as_str(),
+                        u64::try_from(index)
+                            .expect("投影序号应可转换")
+                            .saturating_add(1),
+                        draft,
+                    )
+                    .and_then(|delivery| {
+                        serde_json::to_value(delivery)
+                            .map_err(|_| AgentRuntimeError::DeliveryPoisoned)
+                    })
+                    .expect("Provider 投影应可物化")
+                })
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            project(AuthoritativeProjectionMode::Live),
+            project(AuthoritativeProjectionMode::Replay),
+            "同一 Turn Provider 快照下 live/replay 投影必须一致"
+        );
+    }
+
     /// 分页 replay 必须按每个历史模型 Round 当时的 Provider 快照投影上下文窗口。
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_uses_provider_snapshot_at_each_historical_round() {

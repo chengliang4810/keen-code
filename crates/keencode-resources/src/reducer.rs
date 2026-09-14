@@ -1328,10 +1328,49 @@ fn validate_standalone_sub_agent_turn_event(
 }
 
 /// 校验 Turn Provider 快照与同一原子批次中的 TurnStarted 一一配对。
+///
+/// 快照采用严格的两条记录状态机：如果批次包含 Turn Provider 快照，则批次内
+/// 每个 TurnStarted 都必须紧随一个相同 Turn/Agent 的快照；快照也不得出现在
+/// 已存在 Turn 上。这样重复快照、交错事件和快照缺失都会在候选状态修改前拒绝。
 fn validate_atomic_turn_provider_snapshot_pairing(
     state: &SessionState,
     events: &[SessionEvent],
 ) -> Result<(), ReductionError> {
+    let has_provider_snapshot = events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::TurnProviderSnapshotRecorded { .. }));
+
+    if !has_provider_snapshot {
+        return Ok(());
+    }
+
+    for (index, event) in events.iter().enumerate() {
+        let SessionEvent::TurnStarted {
+            turn_id,
+            source_agent_id,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let paired = events.get(index.saturating_add(1)).is_some_and(|next| {
+            matches!(
+                next,
+                SessionEvent::TurnProviderSnapshotRecorded {
+                    turn_id: snapshot_turn_id,
+                    source_agent_id: snapshot_source_agent_id,
+                    ..
+                } if snapshot_turn_id == turn_id
+                    && snapshot_source_agent_id == source_agent_id
+            )
+        });
+        if !paired {
+            return Err(ReductionError::new(
+                "批次包含 Turn Provider 快照时，每个 TurnStarted 必须紧随匹配快照",
+            ));
+        }
+    }
+
     for (index, event) in events.iter().enumerate() {
         let SessionEvent::TurnProviderSnapshotRecorded {
             turn_id,
@@ -1341,23 +1380,22 @@ fn validate_atomic_turn_provider_snapshot_pairing(
         else {
             continue;
         };
-        let Some(start_index) = events.iter().position(|event| {
+        let immediately_preceding = index
+            .checked_sub(1)
+            .and_then(|previous| events.get(previous));
+        let paired = immediately_preceding.is_some_and(|previous| {
             matches!(
-                event,
+                previous,
                 SessionEvent::TurnStarted {
                     turn_id: started_turn_id,
                     source_agent_id: started_source_agent_id,
                     ..
                 } if started_turn_id == turn_id && started_source_agent_id == source_agent_id
             )
-        }) else {
+        });
+        if !paired || state.turns.contains_key(turn_id) {
             return Err(ReductionError::new(
-                "Turn Provider Snapshot 必须与同一批次的 TurnStarted 配对",
-            ));
-        };
-        if start_index >= index || state.turns.contains_key(turn_id) {
-            return Err(ReductionError::new(
-                "Turn Provider Snapshot 必须紧随同批次 TurnStarted 记录新 Turn",
+                "Turn Provider Snapshot 必须紧随匹配 TurnStarted 且每个 Turn 只能记录一次",
             ));
         }
     }
