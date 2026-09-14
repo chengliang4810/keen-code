@@ -1,9 +1,22 @@
+import { useEffect, useState } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { QueuedSend } from "@/lib/sendQueue";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SessionTurnResult } from "@/hooks/useSessionTurn";
 import { Button } from "@/components/ui/button";
-import { IconClock, IconClose } from "@/components/icons";
+import { Textarea } from "@/components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  IconClock,
+  IconMore,
+  IconRename,
+  IconTrash,
+} from "@/components/icons";
 import { queuePreviewText } from "@/lib/sendQueue";
 import { localizeUiError } from "@/lib/session";
 
@@ -31,7 +44,24 @@ export function ComposerQueue({
   steerQueuedItem,
   showToast,
 }: ComposerQueueProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingValue, setEditingValue] = useState("");
+  const cancelEditItem = sendQueue.cancelEditItem;
+
+  useEffect(
+    () => () => {
+      if (editingId) cancelEditItem(editingId);
+    },
+    [cancelEditItem, editingId],
+  );
+
   if (sendQueue.activeQueue.length === 0) return null;
+
+  const closeEditor = () => {
+    if (editingId) sendQueue.cancelEditItem(editingId);
+    setEditingId(null);
+    setEditingValue("");
+  };
 
   return (
     <div
@@ -50,7 +80,9 @@ export function ComposerQueue({
         <Button
           type="button"
           className="composer__queue-clear"
-          disabled={sendQueue.steeringIds.size > 0}
+          disabled={
+            sendQueue.steeringIds.size > 0 || sendQueue.editingIds.size > 0
+          }
           onClick={sendQueue.clearQueue}
         >
           {tr("composer.queueClear")}
@@ -73,53 +105,132 @@ export function ComposerQueue({
       <ul className="composer__queue-list">
         {sendQueue.activeQueue.map((item, index) => (
           <li key={item.id} className="composer__queue-item">
-            <span className="composer__queue-idx" aria-hidden>
-              {index + 1}
-            </span>
-            <span
-              className="composer__queue-text"
-              title={queuePreviewText(
-                item.storedDisplay,
-                item.attachments,
-                200,
-                queuePreviewLabels,
-              )}
-            >
-              {queuePreviewText(
-                item.storedDisplay,
-                item.attachments,
-                72,
-                queuePreviewLabels,
-              )}
-            </span>
-            <Button
-              type="button"
-              className="composer__queue-steer"
-              disabled={
-                session.state !== "streaming" ||
-                sendQueue.steeringIds.has(item.id)
-              }
-              onClick={() => {
-                void sendQueue
-                  .steerItem(item.id, steerQueuedItem)
-                  .catch((error: unknown) =>
-                    showToast(localizeUiError(error, locale), 4000),
-                  );
-              }}
-            >
-              {sendQueue.steeringIds.has(item.id)
-                ? tr("composer.queueSteering")
-                : tr("composer.queueSteer")}
-            </Button>
-            <Button
-              type="button"
-              className="composer__queue-remove"
-              aria-label={tr("composer.queueRemove")}
-              disabled={sendQueue.steeringIds.has(item.id)}
-              onClick={() => sendQueue.removeItem(item.id)}
-            >
-              <IconClose size={12} />
-            </Button>
+            {editingId === item.id ? (
+              <div className="composer__queue-editor">
+                <Textarea
+                  autoFocus
+                  value={editingValue}
+                  aria-label={tr("message.editInput")}
+                  onChange={(event) => setEditingValue(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") closeEditor();
+                    if (
+                      event.key === "Enter" &&
+                      (event.metaKey || event.ctrlKey)
+                    ) {
+                      event.preventDefault();
+                      const next = editingValue.trim();
+                      if (!next && item.attachments.length === 0) return;
+                      sendQueue.updateItem(item.id, next);
+                      setEditingId(null);
+                    }
+                  }}
+                />
+                <div className="composer__queue-editor-actions">
+                  <Button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    onClick={closeEditor}
+                  >
+                    {tr("common.cancel")}
+                  </Button>
+                  <Button
+                    type="button"
+                    className="btn btn--solid btn--sm"
+                    disabled={
+                      !editingValue.trim() && item.attachments.length === 0
+                    }
+                    onClick={() => {
+                      sendQueue.updateItem(item.id, editingValue.trim());
+                      setEditingId(null);
+                    }}
+                  >
+                    {tr("common.save")}
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <span className="composer__queue-idx" aria-hidden>
+                  {index + 1}
+                </span>
+                <span
+                  className="composer__queue-text"
+                  title={queuePreviewText(
+                    item.storedDisplay,
+                    item.attachments,
+                    200,
+                    queuePreviewLabels,
+                  )}
+                >
+                  {queuePreviewText(
+                    item.storedDisplay,
+                    item.attachments,
+                    72,
+                    queuePreviewLabels,
+                  )}
+                </span>
+                <Button
+                  type="button"
+                  className="composer__queue-steer"
+                  disabled={
+                    session.state !== "streaming" ||
+                    sendQueue.steeringIds.has(item.id) ||
+                    sendQueue.editingIds.has(item.id)
+                  }
+                  onClick={() => {
+                    void sendQueue
+                      .steerItem(item.id, steerQueuedItem)
+                      .catch((error: unknown) =>
+                        showToast(localizeUiError(error, locale), 4000),
+                      );
+                  }}
+                >
+                  {sendQueue.steeringIds.has(item.id)
+                    ? tr("composer.queueSteering")
+                    : tr("composer.queueSteer")}
+                </Button>
+                <Button
+                  type="button"
+                  className="composer__queue-remove"
+                  aria-label={tr("composer.queueRemove")}
+                  disabled={
+                    sendQueue.steeringIds.has(item.id) ||
+                    sendQueue.editingIds.has(item.id)
+                  }
+                  onClick={() => sendQueue.removeItem(item.id)}
+                >
+                  <IconTrash size={13} />
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      type="button"
+                      className="composer__queue-more"
+                      aria-label={tr("message.edit")}
+                      disabled={
+                        sendQueue.steeringIds.has(item.id) ||
+                        sendQueue.editingIds.has(item.id)
+                      }
+                    >
+                      <IconMore size={14} />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem
+                      onSelect={() => {
+                        sendQueue.beginEditItem(item.id);
+                        setEditingId(item.id);
+                        setEditingValue(item.storedDisplay);
+                      }}
+                    >
+                      <IconRename size={15} />
+                      {tr("message.editInput")}
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
+            )}
           </li>
         ))}
       </ul>

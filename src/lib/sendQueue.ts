@@ -154,6 +154,21 @@ export function removeQueuedSend(
   return queue.filter((q) => q.id !== id);
 }
 
+/** Replace the editable message body without changing queue order or metadata. */
+export function updateQueuedSend(
+  queue: QueuedSend[],
+  id: string,
+  storedDisplay: string,
+): QueuedSend[] {
+  let changed = false;
+  const next = queue.map((item) => {
+    if (item.id !== id || item.storedDisplay === storedDisplay) return item;
+    changed = true;
+    return { ...item, storedDisplay };
+  });
+  return changed ? next : queue;
+}
+
 /** Pop head; returns [head | null, rest]. */
 export function dequeueSend(
   queue: QueuedSend[],

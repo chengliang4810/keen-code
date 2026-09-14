@@ -11,6 +11,7 @@ import {
   queuePreviewText,
   queueSessionKey,
   removeQueuedSend,
+  updateQueuedSend,
   requeueAfterFlushFail,
   requeueAtFront,
   setQueueForKey,
@@ -325,4 +326,17 @@ describe("sendQueue", () => {
       expect(getQueueForKey(next, "b")).toHaveLength(1);
     });
   });
+});
+
+it("updates a queued message in place without losing its metadata", () => {
+  const item = makeQueuedSend({
+    storedDisplay: "before",
+    attachments: [{ name: "a.txt", path: "/a.txt", isDir: false }],
+    createGoal: true,
+    planMode: true,
+    now: 10,
+  });
+  const next = updateQueuedSend([item], item.id, "after");
+
+  expect(next).toEqual([{ ...item, storedDisplay: "after" }]);
 });

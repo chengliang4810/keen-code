@@ -22,6 +22,7 @@ import {
   SEND_QUEUE_MAX,
   setQueueForKey,
   shouldHoldFlushForLive,
+  updateQueuedSend,
   type QueuedSend,
 } from "@/lib/sendQueue";
 
@@ -85,6 +86,8 @@ export function useSendQueue({
   const queueFlushHoldRef = useRef(false);
   const steeringIdsRef = useRef(new Set<string>());
   const [steeringIds, setSteeringIds] = useState<Set<string>>(new Set());
+  const editingIdsRef = useRef(new Set<string>());
+  const [editingIds, setEditingIds] = useState<Set<string>>(new Set());
   /** UI-visible hold (ref alone does not re-render). */
   const [flushHold, setFlushHold] = useState(false);
   const flushQueueTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -157,6 +160,39 @@ export function useSendQueue({
     [sessionId, writeMap, cancelFlushTimer],
   );
 
+  const beginEditItem = useCallback((id: string) => {
+    const next = new Set(editingIdsRef.current).add(id);
+    editingIdsRef.current = next;
+    setEditingIds(next);
+    cancelFlushTimer();
+  }, [cancelFlushTimer]);
+
+  const cancelEditItem = useCallback((id: string) => {
+    const next = new Set(editingIdsRef.current);
+    next.delete(id);
+    editingIdsRef.current = next;
+    setEditingIds(next);
+  }, []);
+
+  const updateItem = useCallback(
+    (id: string, storedDisplay: string) => {
+      const key = queueSessionKey(sessionId);
+      writeMap(
+        setQueueForKey(
+          sendQueueByKeyRef.current,
+          key,
+          updateQueuedSend(
+            getQueueForKey(sendQueueByKeyRef.current, key),
+            id,
+            storedDisplay,
+          ),
+        ),
+      );
+      cancelEditItem(id);
+    },
+    [cancelEditItem, sessionId, writeMap],
+  );
+
   /**
    * Submit one queued item as steering. Keep it queued until the backend accepts
    * the injection, and pause automatic flushing while that request is in flight.
@@ -225,6 +261,7 @@ export function useSendQueue({
   const flush = useCallback(() => {
     if (sendInFlightRef.current) return;
     if (steeringIdsRef.current.size > 0) return;
+    if (editingIdsRef.current.size > 0) return;
     if (connecting) return;
     if (queueFlushHoldRef.current) return;
     const live = liveHostRef.current;
@@ -317,6 +354,7 @@ export function useSendQueue({
     connecting,
     sendQueueByKey,
     steeringIds,
+    editingIds,
     flush,
     cancelFlushTimer,
     sendInFlightRef,
@@ -335,9 +373,13 @@ export function useSendQueue({
     activeQueue,
     flushHold,
     steeringIds,
+    editingIds,
     enqueue,
     steerItem,
     removeItem,
+    beginEditItem,
+    cancelEditItem,
+    updateItem,
     clearQueue,
     clearDraftQueue,
     dropSessions,

@@ -1651,7 +1651,8 @@ button.composer__context-item {
 }
 
 .composer__queue-steer,
-.composer__queue-remove {
+.composer__queue-remove,
+.composer__queue-more {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
@@ -1674,15 +1675,36 @@ button.composer__context-item {
 }
 
 .composer__queue-steer:hover:not(:disabled),
-.composer__queue-remove:hover:not(:disabled) {
+.composer__queue-remove:hover:not(:disabled),
+.composer__queue-more:hover:not(:disabled) {
   background: var(--bg-elevated);
   color: var(--text-primary);
 }
 
 .composer__queue-steer:disabled,
-.composer__queue-remove:disabled {
+.composer__queue-remove:disabled,
+.composer__queue-more:disabled {
   cursor: default;
   opacity: 0.5;
+}
+
+.composer__queue-editor {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.composer__queue-editor textarea {
+  min-height: 64px;
+  resize: vertical;
+}
+
+.composer__queue-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
 .composer__attachments {
