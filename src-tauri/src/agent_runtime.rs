@@ -20681,7 +20681,10 @@ mod tests {
             "后台任务根 Turn",
         )
         .await;
-        let collaboration = install_test_collaboration_runtime(&runtime, &session, project.path());
+        // 本用例需要同时覆盖一个运行中子 Agent 和一个等待容量的子 Agent；
+        // 后台并发上限只计算子 Agent，不包含根 Turn，因此显式限制为 1。
+        let collaboration =
+            install_test_collaboration_runtime_with_limit(&runtime, &session, project.path(), 1);
         let root_turn = collaboration
             .coordinator
             .begin_root_turn_with_id(
