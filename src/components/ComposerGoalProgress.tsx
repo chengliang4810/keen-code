@@ -59,7 +59,7 @@ export function ComposerGoalProgress({
   onClear,
   running = false,
 }: ComposerGoalProgressProps) {
-  const current = goal?.goal;
+  const current = goal?.goal ?? null;
   const [elapsed, setElapsed] = useState(() =>
     goalElapsedSeconds(current, running, Date.now()),
   );
