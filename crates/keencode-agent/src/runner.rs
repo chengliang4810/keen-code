@@ -1999,7 +1999,7 @@ impl AgentRunner {
                     .unwrap_or_default();
                 let additions = self
                     .hooks
-                    .run_turn_start(
+                    .run_turn_start_resolved(
                         crate::TurnStartHookContext {
                             invocation: hook_invocation_context(request),
                             prompt,

@@ -65,7 +65,7 @@ pub use hook::{
     HookRegistry, HookRuntime, OnErrorHookContext, PostCompactHookContext, PostToolUseContext,
     PostToolUseFailureContext, PreCompactHookContext, PreCompactHookOutput, PreToolUseAction,
     PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
-    ToolHookFailureKind, ToolHookOutput, TurnStartHookContext,
+    ToolHookFailureKind, ToolHookOutput, TurnStartAbortReason, TurnStartHookContext,
 };
 pub(crate) use hook::{PostHookOutputBudget, ResolvedHookContext, ResolvedStopHook};
 pub use ids::{

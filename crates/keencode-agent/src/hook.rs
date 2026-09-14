@@ -352,6 +352,19 @@ impl HookCallbackError {
     }
 }
 
+/// 启动 Hook 尚未交付时外层结束的原因；生命周期实现可据此区分显式阻断与取消。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TurnStartAbortReason {
+    /// 用户 Prompt 被生命周期 Hook 明确阻断；已完成的启动阶段可以保留。
+    PromptBlocked,
+    /// 当前 Turn 收到取消，所有尚未交付的启动状态必须回滚。
+    Cancelled,
+    /// Hook 回调或输出校验失败，所有尚未交付的启动状态必须回滚。
+    Failed,
+    /// 外层启动 Future 被直接丢弃，所有尚未交付的启动状态必须回滚。
+    FutureDropped,
+}
+
 /// 可注册到 AgentRunner 的 Provider 中立 Hook。
 pub trait AgentHook: Send + Sync {
     /// 返回在同一 HookRegistry 内唯一的稳定名称；仅允许字母、数字及 `-_.:/`。
@@ -369,6 +382,18 @@ pub trait AgentHook: Send + Sync {
     ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
         Box::pin(async { Ok(ToolHookOutput::default()) })
     }
+
+    /// 为当前回合预留一次性启动状态，必须发生在隔离 worker 启动之前。
+    fn turn_start_prepare(&self, _context: &TurnStartHookContext) {}
+
+    /// 当前回合的全部启动 Hook 已通过外层校验并可以提交其一次性状态。
+    ///
+    /// 该通知发生在 `run_turn_start` 即将把结果交给调用方时；实现不得在
+    /// `turn_start` 回调内部提前把未交付的结果固化为已完成。
+    fn turn_start_delivered(&self, _context: &TurnStartHookContext) {}
+
+    /// 当前回合的启动 Hook 未能交付；实现按结束原因释放或保留阶段状态。
+    fn turn_start_aborted(&self, _context: &TurnStartHookContext, _reason: TurnStartAbortReason) {}
 
     /// 在工具初始 Schema 与语义校验后决定放行、修改或阻止。
     fn pre_tool_use(
@@ -789,6 +814,51 @@ pub struct HookRuntime {
     limits: HookLimits,
 }
 
+/// 为启动 Hook 的外层 Future 持有临时状态；Future 直接被丢弃时也必须回滚。
+struct TurnStartDeliveryGuard {
+    pending: Vec<(Arc<dyn AgentHook>, TurnStartHookContext)>,
+    armed: bool,
+}
+
+impl TurnStartDeliveryGuard {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            armed: true,
+        }
+    }
+
+    fn push(&mut self, hook: Arc<dyn AgentHook>, context: TurnStartHookContext) {
+        self.pending.push((hook, context));
+    }
+
+    fn abort_all(&mut self, reason: TurnStartAbortReason) {
+        if !self.armed {
+            return;
+        }
+        for (hook, context) in self.pending.drain(..) {
+            hook.turn_start_aborted(&context, reason);
+        }
+        self.armed = false;
+    }
+
+    fn deliver_all(&mut self) {
+        if !self.armed {
+            return;
+        }
+        for (hook, context) in self.pending.drain(..) {
+            hook.turn_start_delivered(&context);
+        }
+        self.armed = false;
+    }
+}
+
+impl Drop for TurnStartDeliveryGuard {
+    fn drop(&mut self) {
+        self.abort_all(TurnStartAbortReason::FutureDropped);
+    }
+}
+
 impl HookRuntime {
     /// 创建一套配置有效的 Hook 运行时。
     pub fn new(registry: HookRegistry, limits: HookLimits) -> Result<Self, HookLimitsError> {
@@ -871,8 +941,24 @@ impl HookRuntime {
         })
     }
 
-    /// 在首轮采样前执行生命周期 Hook。
-    pub(crate) async fn run_turn_start(
+    /// 在首轮采样前执行生命周期 Hook，并返回追加的上下文。
+    pub async fn run_turn_start(
+        &self,
+        context: TurnStartHookContext,
+        cancellation: &TurnCancellation,
+    ) -> Result<Vec<HookContextAddition>, HookError> {
+        self.run_turn_start_resolved(context, cancellation)
+            .await
+            .map(|additions| {
+                additions
+                    .into_iter()
+                    .map(|addition| HookContextAddition::new(addition.text))
+                    .collect()
+            })
+    }
+
+    /// 在首轮采样前执行生命周期 Hook，并保留内部来源信息。
+    pub(crate) async fn run_turn_start_resolved(
         &self,
         context: TurnStartHookContext,
         cancellation: &TurnCancellation,
@@ -883,14 +969,19 @@ impl HookRuntime {
             HookPhase::SubagentStart
         };
         let mut additions = Vec::new();
+        let mut pending_delivery = TurnStartDeliveryGuard::new();
+        let mut last_hook_name = None;
         for registered in &self.registry.hooks {
             if !registered.hook.handles_turn_start() {
                 continue;
             }
             let name = registered.name.clone();
+            last_hook_name = Some(name.clone());
             let hook = registered.hook.clone();
             let callback_context = context.clone();
-            let output = await_hook(
+            pending_delivery.push(registered.hook.clone(), context.clone());
+            registered.hook.turn_start_prepare(&context);
+            let output = match await_hook(
                 move |runtime| runtime.block_on(hook.turn_start(callback_context)),
                 cancellation,
                 phase,
@@ -899,10 +990,45 @@ impl HookRuntime {
                 true,
                 self.limits.max_callback_ms,
             )
-            .await?;
-            additions.extend(validate_additions(output.context, phase, &name)?);
+            .await
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    let reason = match &error {
+                        HookError::Cancelled { .. } => TurnStartAbortReason::Cancelled,
+                        HookError::Callback { phase, code, .. }
+                            if *phase == HookPhase::UserPromptSubmit
+                                && code == "hook_prompt_blocked" =>
+                        {
+                            TurnStartAbortReason::PromptBlocked
+                        }
+                        _ => TurnStartAbortReason::Failed,
+                    };
+                    pending_delivery.abort_all(reason);
+                    return Err(error);
+                }
+            };
+            let output_context = match validate_additions(output.context, phase, &name) {
+                Ok(output_context) => output_context,
+                Err(error) => {
+                    pending_delivery.abort_all(TurnStartAbortReason::Failed);
+                    return Err(error);
+                }
+            };
+            additions.extend(output_context);
         }
-        validate_post_hook_output(&additions)?;
+        if let Err(error) = validate_post_hook_output(&additions) {
+            pending_delivery.abort_all(TurnStartAbortReason::Failed);
+            return Err(error);
+        }
+        if cancellation.is_cancelled() {
+            pending_delivery.abort_all(TurnStartAbortReason::Cancelled);
+            return Err(HookError::Cancelled {
+                phase,
+                hook_name: last_hook_name.unwrap_or_else(|| "turn_start".to_owned()),
+            });
+        }
+        pending_delivery.deliver_all();
         Ok(additions)
     }
 

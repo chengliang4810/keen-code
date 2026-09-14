@@ -472,6 +472,62 @@ impl AgentHook for PendingPhaseHook {
     }
 }
 
+/// 等待外部通知后才返回的启动 Hook，用于验证取消后的迟到成功不会被交付。
+struct DeferredTurnStartHook {
+    name: &'static str,
+    state: Arc<DeferredTurnStartState>,
+    wait_for_release: bool,
+    cancel_on_prepare: Option<TurnCancellation>,
+}
+
+struct DeferredTurnStartState {
+    started: Arc<Notify>,
+    finished: Arc<Notify>,
+    release: Arc<Notify>,
+    delivered: AtomicUsize,
+    aborted: AtomicUsize,
+}
+
+impl AgentHook for DeferredTurnStartHook {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn handles_turn_start(&self) -> bool {
+        true
+    }
+
+    fn turn_start_prepare(&self, _context: &TurnStartHookContext) {
+        if let Some(cancellation) = &self.cancel_on_prepare {
+            cancellation.cancel();
+        }
+    }
+
+    fn turn_start(
+        &self,
+        _context: TurnStartHookContext,
+    ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
+        let state = Arc::clone(&self.state);
+        let wait_for_release = self.wait_for_release;
+        Box::pin(async move {
+            state.started.notify_one();
+            if wait_for_release {
+                state.release.notified().await;
+            }
+            state.finished.notify_one();
+            Ok(ToolHookOutput::default())
+        })
+    }
+
+    fn turn_start_delivered(&self, _context: &TurnStartHookContext) {
+        self.state.delivered.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn turn_start_aborted(&self, _context: &TurnStartHookContext, _reason: TurnStartAbortReason) {
+        self.state.aborted.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
 /// Hook 隔离层需要覆盖的同步、非协作、Tokio 与 panic 回调模式。
 enum IsolationHookMode {
     /// 在回调方法返回 Future 前同步阻塞工作线程。
@@ -1235,6 +1291,206 @@ async fn on_error失败后继续通知剩余观察者() {
         calls.lock().expect("OnError 顺序锁不应损坏").as_slice(),
         ["first-observer", "second-observer"]
     );
+}
+
+/// 取消只撤销未交付的启动结果；旧 worker 迟到成功不能提交，新候选仍可重试。
+#[tokio::test]
+async fn 取消后启动hook迟到成功不得提交且重载候选可重试() {
+    let state = Arc::new(DeferredTurnStartState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        delivered: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    first_registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "deferred-turn-start",
+            state: state.clone(),
+            wait_for_release: true,
+            cancel_on_prepare: None,
+        }))
+        .expect("首个启动 Hook 应成功注册");
+    let first_runtime = HookRuntime::new(first_registry, HookLimits::default())
+        .expect("首个 Hook Runtime 配置应有效");
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("late-start-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("late-start-turn-1").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("root").expect("Agent 标识有效"),
+        },
+        prompt: "首次启动".to_owned(),
+        has_history: false,
+    };
+    let cancellation = TurnCancellation::new();
+    let task_cancellation = cancellation.clone();
+    let first_task = tokio::spawn(async move {
+        first_runtime
+            .run_turn_start(context, &task_cancellation)
+            .await
+    });
+    state.started.notified().await;
+    cancellation.cancel();
+    let first_error = match first_task.await.expect("取消的启动 Hook 任务应退出") {
+        Ok(_) => panic!("取消应阻止启动 Hook 交付"),
+        Err(error) => error,
+    };
+    assert!(matches!(first_error, HookError::Cancelled { .. }));
+    assert_eq!(state.aborted.load(Ordering::SeqCst), 1);
+    assert_eq!(state.delivered.load(Ordering::SeqCst), 0);
+
+    let mut reloaded_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    reloaded_registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "deferred-turn-start",
+            state: state.clone(),
+            wait_for_release: false,
+            cancel_on_prepare: None,
+        }))
+        .expect("重载候选启动 Hook 应成功注册");
+    let reloaded_runtime = HookRuntime::new(reloaded_registry, HookLimits::default())
+        .expect("重载候选 Hook Runtime 配置应有效");
+    let reloaded_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("late-start-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("late-start-turn-2").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("root").expect("Agent 标识有效"),
+        },
+        prompt: "重载后重试".to_owned(),
+        has_history: true,
+    };
+    reloaded_runtime
+        .run_turn_start(reloaded_context, &TurnCancellation::new())
+        .await
+        .expect("重载候选应可重新执行启动 Hook");
+    assert_eq!(state.delivered.load(Ordering::SeqCst), 1);
+
+    state.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), state.finished.notified())
+        .await
+        .expect("旧 worker 应在释放后迟到完成");
+    assert_eq!(state.delivered.load(Ordering::SeqCst), 1);
+    assert_eq!(state.aborted.load(Ordering::SeqCst), 1);
+}
+
+/// 外层启动 Future 被直接丢弃时，已经完成但尚未交付的 Hook 也必须回滚。
+#[tokio::test]
+async fn 外层启动future直接丢弃会回滚全部待交付状态() {
+    let first_state = Arc::new(DeferredTurnStartState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        delivered: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let second_state = Arc::new(DeferredTurnStartState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        delivered: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let mut registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "first-deferred-turn-start",
+            state: first_state.clone(),
+            wait_for_release: false,
+            cancel_on_prepare: None,
+        }))
+        .expect("首个启动 Hook 应成功注册");
+    registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "second-deferred-turn-start",
+            state: second_state.clone(),
+            wait_for_release: true,
+            cancel_on_prepare: None,
+        }))
+        .expect("第二个启动 Hook 应成功注册");
+    let runtime =
+        HookRuntime::new(registry, HookLimits::default()).expect("Hook Runtime 配置应有效");
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("drop-start-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("drop-start-turn").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("root").expect("Agent 标识有效"),
+        },
+        prompt: "丢弃外层启动 Future".to_owned(),
+        has_history: false,
+    };
+    let task_cancellation = TurnCancellation::new();
+    let task =
+        tokio::spawn(async move { runtime.run_turn_start(context, &task_cancellation).await });
+    second_state.started.notified().await;
+    task.abort();
+    assert!(task.await.expect_err("外层任务应被直接取消").is_cancelled());
+
+    assert_eq!(first_state.delivered.load(Ordering::SeqCst), 0);
+    assert_eq!(first_state.aborted.load(Ordering::SeqCst), 1);
+    assert_eq!(second_state.delivered.load(Ordering::SeqCst), 0);
+    assert_eq!(second_state.aborted.load(Ordering::SeqCst), 1);
+
+    second_state.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), second_state.finished.notified())
+        .await
+        .expect("被丢弃的旧启动 worker 应最终返回");
+    assert_eq!(first_state.delivered.load(Ordering::SeqCst), 0);
+    assert_eq!(second_state.delivered.load(Ordering::SeqCst), 0);
+}
+
+/// 前一个启动回调完成后发生取消时，完成状态仍必须等到最终交付才能提交。
+#[tokio::test]
+async fn 启动回调完成后取消仍然回滚未交付状态() {
+    let first_state = Arc::new(DeferredTurnStartState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        delivered: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let second_state = Arc::new(DeferredTurnStartState {
+        started: Arc::new(Notify::new()),
+        finished: Arc::new(Notify::new()),
+        release: Arc::new(Notify::new()),
+        delivered: AtomicUsize::new(0),
+        aborted: AtomicUsize::new(0),
+    });
+    let cancellation = TurnCancellation::new();
+    let mut registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "completed-before-cancel",
+            state: first_state.clone(),
+            wait_for_release: false,
+            cancel_on_prepare: None,
+        }))
+        .expect("首个启动 Hook 应成功注册");
+    registry
+        .register(Arc::new(DeferredTurnStartHook {
+            name: "cancel-on-next-prepare",
+            state: second_state.clone(),
+            wait_for_release: false,
+            cancel_on_prepare: Some(cancellation.clone()),
+        }))
+        .expect("取消测试 Hook 应成功注册");
+    let runtime =
+        HookRuntime::new(registry, HookLimits::default()).expect("Hook Runtime 配置应有效");
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("completed-cancel-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("completed-cancel-turn").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("root").expect("Agent 标识有效"),
+        },
+        prompt: "回调完成后取消".to_owned(),
+        has_history: false,
+    };
+    let result = runtime.run_turn_start(context, &cancellation).await;
+    assert!(matches!(result, Err(HookError::Cancelled { .. })));
+    assert_eq!(first_state.delivered.load(Ordering::SeqCst), 0);
+    assert_eq!(first_state.aborted.load(Ordering::SeqCst), 1);
+    assert_eq!(second_state.delivered.load(Ordering::SeqCst), 0);
+    assert_eq!(second_state.aborted.load(Ordering::SeqCst), 1);
 }
 
 /// 单个 PostCompact 观察者失败不能阻止后续观察者收到同一压缩记录。
