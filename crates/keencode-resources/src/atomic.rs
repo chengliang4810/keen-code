@@ -297,15 +297,13 @@ fn atomic_write_with_mode(
 #[cfg(unix)]
 fn existing_file_mode(destination: &Path) -> Result<Option<u32>, ResourceError> {
     match fs::symlink_metadata(destination) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
-            Err(ResourceError::SymlinkRejected(
-                destination
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("文件")
-                    .to_owned(),
-            ))
-        }
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(ResourceError::SymlinkRejected(
+            destination
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("文件")
+                .to_owned(),
+        )),
         Ok(metadata) if !metadata.is_file() => Err(ResourceError::UnsafePath(
             "目标存在但不是普通文件".to_owned(),
         )),

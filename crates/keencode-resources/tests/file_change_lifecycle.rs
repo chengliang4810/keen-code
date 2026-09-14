@@ -759,8 +759,7 @@ fn edit_reverts_existing_file_preserves_unix_permissions() {
     let fixture = create_fixture(InitialToolState::AppliedAndCompleted, false);
     let target = fixture.workspace.path().join("result.bin");
     fs::write(&target, &fixture.after_bytes).expect("工作区应处于工具写后状态");
-    fs::set_permissions(&target, fs::Permissions::from_mode(0o640))
-        .expect("测试文件权限应可设置");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640)).expect("测试文件权限应可设置");
 
     let result = prepare_edit_user(
         fixture.root.path(),
@@ -777,7 +776,10 @@ fn edit_reverts_existing_file_preserves_unix_permissions() {
     .expect("现有文件应可随编辑恢复");
 
     assert!(result.reverted_files);
-    assert_eq!(fs::read(&target).expect("恢复后的文件应可读"), fixture.before_bytes);
+    assert_eq!(
+        fs::read(&target).expect("恢复后的文件应可读"),
+        fixture.before_bytes
+    );
     assert_eq!(
         fs::metadata(&target)
             .expect("恢复后的文件元数据应可读")
