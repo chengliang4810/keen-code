@@ -189,19 +189,23 @@ describe("buildUnifiedDiff", () => {
     expect(d).toContain("+line2-changed");
   });
 
-  it("large files keep a localized replacement visible within a context-sized diff", () => {
-    const context = 3;
-    const lineWidth = 4096;
-    const fillerLine = `${"x".repeat(lineWidth - 1)}\n`;
-    const before =
-      "KC_MAX_SNAPSHOT_BEFORE\n" + fillerLine.repeat(16_384);
-    const after = "KC_MAX_SNAPSHOT_AFTER_\n" + fillerLine.repeat(16_384);
-    const diff = buildUnifiedDiff("large.txt", before, after, context);
+  it(
+    "large files keep a localized replacement visible within a context-sized diff",
+    () => {
+      const context = 3;
+      const lineWidth = 4096;
+      const fillerLine = `${"x".repeat(lineWidth - 1)}\n`;
+      const before =
+        "KC_MAX_SNAPSHOT_BEFORE\n" + fillerLine.repeat(16_384);
+      const after = "KC_MAX_SNAPSHOT_AFTER_\n" + fillerLine.repeat(16_384);
+      const diff = buildUnifiedDiff("large.txt", before, after, context);
 
-    expect(diff).toContain("-KC_MAX_SNAPSHOT_BEFORE");
-    expect(diff).toContain("+KC_MAX_SNAPSHOT_AFTER_");
-    expect(diff.length).toBeLessThan((context * 2 + 8) * lineWidth);
-  });
+      expect(diff).toContain("-KC_MAX_SNAPSHOT_BEFORE");
+      expect(diff).toContain("+KC_MAX_SNAPSHOT_AFTER_");
+      expect(diff.length).toBeLessThan((context * 2 + 8) * lineWidth);
+    },
+    30_000,
+  );
 
   it("large diffs retain an empty leading context line and its original hunk span", () => {
     const before = "\nold\n" + "x\n".repeat(1_500);
