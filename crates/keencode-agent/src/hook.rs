@@ -998,11 +998,12 @@ impl HookRuntime {
         context: PostCompactHookContext,
         cancellation: &TurnCancellation,
     ) -> Result<(), HookError> {
+        let mut first_error = None;
         for registered in &self.registry.hooks {
             let name = registered.name.clone();
             let hook = registered.hook.clone();
             let callback_context = context.clone();
-            await_hook(
+            if let Err(error) = await_hook(
                 move |runtime| runtime.block_on(hook.post_compact(callback_context)),
                 cancellation,
                 HookPhase::PostCompact,
@@ -1011,9 +1012,13 @@ impl HookRuntime {
                 false,
                 self.limits.max_callback_ms,
             )
-            .await?;
+            .await
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 
     /// 执行全部 Stop Hook；任一 Hook 要求继续时返回按注册顺序合并的上下文。

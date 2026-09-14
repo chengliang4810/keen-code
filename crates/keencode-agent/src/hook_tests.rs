@@ -454,6 +454,22 @@ impl AgentHook for PendingPhaseHook {
             Box::pin(async { Ok(ToolHookOutput::default()) })
         }
     }
+
+    /// 只在 PostCompact 测试中挂起，其他情况直接放行。
+    fn post_compact(
+        &self,
+        _context: PostCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        if self.phase == HookPhase::PostCompact {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(started) = &self.started {
+                started.notify_one();
+            }
+            Box::pin(std::future::pending())
+        } else {
+            Box::pin(async { Ok(()) })
+        }
+    }
 }
 
 /// Hook 隔离层需要覆盖的同步、非协作、Tokio 与 panic 回调模式。
@@ -780,6 +796,62 @@ impl AgentHook for OnErrorSequenceHook {
             Ok(())
         };
         Box::pin(async move { result })
+    }
+}
+
+/// 记录 PostCompact 通知顺序，可选择返回观察失败。
+struct PostCompactSequenceHook {
+    /// 注册表中的唯一名称。
+    name: &'static str,
+    /// 所有观察者共享的通知顺序。
+    calls: Arc<Mutex<Vec<String>>>,
+    /// 本次 PostCompact 回调的固定结果。
+    outcome: Result<(), HookCallbackError>,
+}
+
+impl AgentHook for PostCompactSequenceHook {
+    /// 返回注册表中的稳定名称。
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    /// 记录通知顺序并返回预设观察结果。
+    fn post_compact(
+        &self,
+        _context: PostCompactHookContext,
+    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+        self.calls
+            .lock()
+            .expect("PostCompact 顺序锁不应损坏")
+            .push(self.name.to_owned());
+        let outcome = self.outcome.clone();
+        Box::pin(async move { outcome })
+    }
+}
+
+/// 构造直接调用 Hook Runtime 所需的最小压缩结果上下文。
+fn post_compact_context() -> PostCompactHookContext {
+    PostCompactHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("post-compact-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("post-compact-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("post-compact-agent").expect("Agent 标识应有效"),
+        },
+        model_round: 1,
+        record: ContextCompressionRecord {
+            kind: ContextCompactionKind::Summary,
+            trigger: ContextCompressionTrigger::Budget,
+            estimated_tokens_before: 100,
+            estimated_tokens_after: 50,
+            replaced_start_index: 1,
+            replaced_end_index_exclusive: 2,
+            replaced_message_count: 1,
+            retained_message_count: 2,
+            source_digest_sha256: String::new(),
+            summary: "合成摘要".to_owned(),
+            projections: Vec::new(),
+            policy_version: 1,
+        },
     }
 }
 
@@ -1163,6 +1235,121 @@ async fn on_error失败后继续通知剩余观察者() {
         calls.lock().expect("OnError 顺序锁不应损坏").as_slice(),
         ["first-observer", "second-observer"]
     );
+}
+
+/// 单个 PostCompact 观察者失败不能阻止后续观察者收到同一压缩记录。
+#[tokio::test]
+async fn post_compact失败后继续通知剩余观察者() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let mut hooks = HookRegistry::new();
+    hooks
+        .register(Arc::new(PostCompactSequenceHook {
+            name: "first-observer",
+            calls: calls.clone(),
+            outcome: Err(HookCallbackError::new(
+                "observer_failed",
+                "合成 PostCompact 失败",
+            )),
+        }))
+        .expect("首个 PostCompact 观察 Hook 应成功注册");
+    hooks
+        .register(Arc::new(PostCompactSequenceHook {
+            name: "second-observer",
+            calls: calls.clone(),
+            outcome: Ok(()),
+        }))
+        .expect("第二个 PostCompact 观察 Hook 应成功注册");
+    let runtime = HookRuntime::new(hooks, HookLimits::default()).expect("Hook 配置应有效");
+
+    let result = runtime
+        .run_post_compact(post_compact_context(), &TurnCancellation::new())
+        .await;
+
+    assert_eq!(
+        result,
+        Err(HookError::Callback {
+            phase: HookPhase::PostCompact,
+            hook_name: "first-observer".to_owned(),
+            code: "observer_failed".to_owned(),
+            message: "合成 PostCompact 失败".to_owned(),
+        })
+    );
+    assert_eq!(
+        calls.lock().expect("PostCompact 顺序锁不应损坏").as_slice(),
+        ["first-observer", "second-observer"]
+    );
+}
+
+/// 首个 PostCompact 观察者超时后仍应通知后续观察者，并在共享 Store 中保持熔断。
+#[tokio::test]
+async fn post_compact超时后继续通知且跨registry共享熔断() {
+    let circuits = HookCircuitStore::new();
+    let pending_calls = Arc::new(AtomicUsize::new(0));
+    let observer_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut first_registry = HookRegistry::with_circuit_store(circuits.clone());
+    first_registry
+        .register(Arc::new(PendingPhaseHook {
+            phase: HookPhase::PostCompact,
+            calls: pending_calls.clone(),
+            started: None,
+        }))
+        .expect("首个 PostCompact 观察 Hook 应成功注册");
+    first_registry
+        .register(Arc::new(PostCompactSequenceHook {
+            name: "second-observer",
+            calls: observer_calls.clone(),
+            outcome: Ok(()),
+        }))
+        .expect("第二个 PostCompact 观察 Hook 应成功注册");
+
+    let mut second_registry = HookRegistry::with_circuit_store(circuits);
+    second_registry
+        .register(Arc::new(PendingPhaseHook {
+            phase: HookPhase::PostCompact,
+            calls: pending_calls.clone(),
+            started: None,
+        }))
+        .expect("跨 Registry 的 PostCompact 观察 Hook 应成功注册");
+
+    let limits = HookLimits {
+        max_stop_hook_rounds: 1,
+        max_context_bytes: 1_024,
+        max_callback_ms: 20,
+    };
+    let first_runtime = HookRuntime::new(first_registry, limits).expect("首个 Hook 配置应有效");
+    let second_runtime = HookRuntime::new(second_registry, limits).expect("第二个 Hook 配置应有效");
+
+    let first = first_runtime
+        .run_post_compact(post_compact_context(), &TurnCancellation::new())
+        .await;
+    assert!(matches!(
+        first,
+        Err(HookError::TimedOut {
+            phase: HookPhase::PostCompact,
+            hook_name,
+            maximum_ms: 20,
+        }) if hook_name == "pending-hook"
+    ));
+    assert_eq!(pending_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        observer_calls
+            .lock()
+            .expect("PostCompact 顺序锁不应损坏")
+            .as_slice(),
+        ["second-observer"]
+    );
+
+    let second = second_runtime
+        .run_post_compact(post_compact_context(), &TurnCancellation::new())
+        .await;
+    assert!(matches!(
+        second,
+        Err(HookError::CircuitOpen {
+            phase: HookPhase::PostCompact,
+            hook_name,
+        }) if hook_name == "pending-hook"
+    ));
+    assert_eq!(pending_calls.load(Ordering::SeqCst), 1);
 }
 
 /// Stop Hook 连续要求继续时必须在配置轮次上限处稳定终止。
