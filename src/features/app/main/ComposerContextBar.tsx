@@ -38,6 +38,8 @@ export interface ComposerContextBarProps {
   refreshGitWorktrees: () => Promise<void>;
   editCurrentGoal: () => void;
   confirmClearCurrentGoal: () => void;
+  pauseCurrentGoal: () => void;
+  resumeCurrentGoal: () => void;
 }
 
 export function ComposerContextBar({
@@ -60,6 +62,8 @@ export function ComposerContextBar({
   refreshGitWorktrees,
   editCurrentGoal,
   confirmClearCurrentGoal,
+  pauseCurrentGoal,
+  resumeCurrentGoal,
 }: ComposerContextBarProps) {
   return (
     <>
@@ -81,6 +85,8 @@ export function ComposerContextBar({
         }
         onEdit={editCurrentGoal}
         onClear={confirmClearCurrentGoal}
+        onPause={pauseCurrentGoal}
+        onResume={resumeCurrentGoal}
         running={session.state === "streaming"}
       />
       {welcomeSession ? (

@@ -28,14 +28,17 @@ describe("ComposerGoalProgress", () => {
         }}
         onEdit={vi.fn()}
         onClear={vi.fn()}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
       />,
     );
 
-    expect(html).toContain("进行中的目标");
+    expect(html).toContain("已暂停的目标");
     expect(html).toContain("测试目标模式 UI：保持目标处于进行中");
     expect(html).toContain("15s");
     expect(html).toContain("编辑目标");
     expect(html).toContain("清除目标");
+    expect(html).toContain("继续目标");
   });
 
   it("目标模式标签与紧凑耗时按当前规则展示", () => {
@@ -73,5 +76,6 @@ describe("ComposerGoalProgress", () => {
     };
     expect(goalElapsedSeconds(goal, true, 61_000)).toBe(120);
     expect(goalElapsedSeconds(goal, false, 3_356_000)).toBe(120);
+    expect(goalElapsedSeconds(goal, false, 3_356_000, 240)).toBe(240);
   });
 });

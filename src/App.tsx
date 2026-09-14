@@ -1129,6 +1129,7 @@ export default function App() {
   });
   const {
     ensureConnected,
+    executeSend,
     send,
     editAndResend: editAndResendLastUserMessage,
     stop,
@@ -1674,6 +1675,17 @@ export default function App() {
               refreshGitWorktrees,
               editCurrentGoal,
               confirmClearCurrentGoal,
+              pauseCurrentGoal: () => {
+                void stop();
+              },
+              resumeCurrentGoal: () => {
+                if (!session.sessionId || session.state === "streaming") return;
+                void executeSend({
+                  storedDisplay: locale === "en" ? "Continue the current goal." : "继续执行当前目标。",
+                  att: [],
+                  targetSessionId: session.sessionId,
+                });
+              },
             },
             queue: {
               tr,

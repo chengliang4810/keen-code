@@ -59,6 +59,8 @@ import {
   IconPinnedOff as TbPinnedOff,
   IconPlayerStop as TbPlayerStop,
   IconPlayerStopFilled as TbPlayerStopFilled,
+  IconPlayerPause as TbPlayerPause,
+  IconPlayerPlay as TbPlayerPlay,
   IconPlug as TbPlug,
   IconPlus as TbPlus,
   IconPuzzle as TbPuzzle,
@@ -163,6 +165,8 @@ export const IconSettings = wrap(TbSettings);
 export const IconDoctor = wrap(TbFirstAidKit);
 export const IconStop = wrap(TbPlayerStop);
 export const IconStopFilled = wrap(TbPlayerStopFilled);
+export const IconPause = wrap(TbPlayerPause);
+export const IconPlay = wrap(TbPlayerPlay);
 /** Agent 启动的后台终端进程。 */
 export const IconTerminal = wrap(TbTerminal);
 /** Session fork / branch. */

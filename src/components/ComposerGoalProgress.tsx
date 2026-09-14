@@ -4,6 +4,8 @@ import type { Locale } from "@/i18n";
 import type { AcpGoalProjection } from "@/lib/acp/store";
 import {
   IconClose,
+  IconPause,
+  IconPlay,
   IconRename,
   IconTarget,
   IconTrash,
@@ -19,6 +21,10 @@ export interface ComposerGoalProgressProps {
   onEdit: () => void;
   /** 清除当前目标。 */
   onClear: () => void;
+  /** 暂停当前目标对应的运行回合。 */
+  onPause: () => void;
+  /** 从暂停状态继续执行当前目标。 */
+  onResume: () => void;
   /** 当前 Session 是否仍在执行，用于实时累计目标耗时。 */
   running?: boolean;
 }
@@ -44,11 +50,36 @@ export function goalElapsedSeconds(
   goal: AcpGoalProjection["goal"],
   running: boolean,
   nowMs: number,
+  storedSeconds = 0,
 ): number {
   const persisted = goal?.timeUsedSeconds ?? 0;
-  if (!goal || goal.status !== "active" || !running) return persisted;
+  const saved = Math.max(persisted, storedSeconds);
+  if (!goal || goal.status !== "active" || !running) return saved;
+  if (storedSeconds > 0) return saved;
   const sinceCreated = Math.floor(Math.max(0, nowMs - goal.createdAtMs) / 1000);
-  return Math.max(persisted, sinceCreated);
+  return Math.max(saved, sinceCreated);
+}
+
+function goalElapsedStorageKey(goalId: string): string {
+  return `keencode:goal-elapsed:${goalId}`;
+}
+
+function readStoredGoalElapsed(goalId?: string): number {
+  if (!goalId || typeof window === "undefined") return 0;
+  try {
+    const value = Number(window.localStorage.getItem(goalElapsedStorageKey(goalId)));
+    return Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function storeGoalElapsed(goalId: string, seconds: number): void {
+  try {
+    window.localStorage.setItem(goalElapsedStorageKey(goalId), String(seconds));
+  } catch {
+    // 持久化不可用时仍保留当前进程内计时。
+  }
 }
 
 /** 输入框上方的当前目标状态栏。 */
@@ -57,17 +88,26 @@ export function ComposerGoalProgress({
   goal,
   onEdit,
   onClear,
+  onPause,
+  onResume,
   running = false,
 }: ComposerGoalProgressProps) {
   const current = goal?.goal ?? null;
   const [elapsed, setElapsed] = useState(() =>
-    goalElapsedSeconds(current, running, Date.now()),
+    goalElapsedSeconds(current, running, Date.now(), readStoredGoalElapsed(current?.id)),
   );
 
   // 仅在当前目标真实执行时每秒刷新一次，空闲时不产生后台活动。
   useEffect(() => {
+    const stored = readStoredGoalElapsed(current?.id);
+    const base = goalElapsedSeconds(current, running, Date.now(), stored);
+    const startedAt = Date.now();
     const updateElapsed = () => {
-      setElapsed(goalElapsedSeconds(current, running, Date.now()));
+      const next = running
+        ? base + Math.floor(Math.max(0, Date.now() - startedAt) / 1000)
+        : base;
+      setElapsed(next);
+      if (current) storeGoalElapsed(current.id, next);
     };
     updateElapsed();
     if (!current || current.status !== "active" || !running) return;
@@ -84,7 +124,11 @@ export function ComposerGoalProgress({
   if (!current) return null;
   const zh = locale !== "en";
   const statusLabel =
-    current.status === "completed"
+    current.status === "active" && !running
+      ? zh
+        ? "已暂停的目标"
+        : "Paused goal"
+      : current.status === "completed"
       ? zh
         ? "已完成的目标"
         : "Completed goal"
@@ -98,7 +142,7 @@ export function ComposerGoalProgress({
   const objective = current.objective || current.title;
 
   return (
-    <div className={`composer-goal composer-goal--${current.status}`}>
+    <div className={`composer-goal composer-goal--${current.status === "active" && !running ? "paused" : current.status}`}>
       <IconTarget size={17} />
       <div className="composer-goal__summary" title={objective}>
         <strong>{statusLabel}:</strong>
@@ -107,6 +151,17 @@ export function ComposerGoalProgress({
       <span className="composer-goal__elapsed">
         {formatGoalElapsed(elapsed)}
       </span>
+      {current.status === "active" ? (
+        <Button
+          type="button"
+          className="composer-goal__action"
+          aria-label={running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
+          title={running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
+          onClick={running ? onPause : onResume}
+        >
+          {running ? <IconPause size={15} /> : <IconPlay size={15} />}
+        </Button>
+      ) : null}
       <Button
         type="button"
         className="composer-goal__action"
