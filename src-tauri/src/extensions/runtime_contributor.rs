@@ -43,6 +43,8 @@ pub(super) struct ProjectRuntimeCache {
 const MAX_STALE_BUILD_RETRIES: usize = 3;
 /// 单个 Hook 命令允许产生的标准输出或错误输出字节数。
 const MAX_HOOK_OUTPUT_BYTES: usize = 1024 * 1024;
+/// Hook 外层回调在命令累计时限之外保留的固定清理宽限。
+const HOOK_CALLBACK_CLEANUP_GRACE_MS: u64 = 5_000;
 /// Hook 命令自身的硬超时，短于 Agent Hook 外层超时以便主动清理子进程。
 #[cfg(test)]
 const HOOK_COMMAND_TIMEOUT: Duration = Duration::from_secs(25);
@@ -262,6 +264,36 @@ impl AgentHook for NativeLifecycleHooks {
     }
 }
 
+/// 计算单个适配器回调的墙钟上限；串行生命周期命令必须累计各自时限。
+fn hook_callback_timeout_ms(hooks: &[HookSpec]) -> u64 {
+    let mut root_lifecycle_ms = 0_u64;
+    let mut child_lifecycle_ms = 0_u64;
+    let mut longest_individual_ms = 0_u64;
+    for hook in hooks {
+        let HookSpec::Command(spec) = hook else {
+            continue;
+        };
+        let timeout_ms = u64::try_from(spec.timeout.as_millis()).unwrap_or(u64::MAX);
+        match spec.phase {
+            HookPhase::SessionStart | HookPhase::UserPromptSubmit => {
+                root_lifecycle_ms = root_lifecycle_ms.saturating_add(timeout_ms);
+            }
+            HookPhase::SubagentStart => {
+                child_lifecycle_ms = child_lifecycle_ms.saturating_add(timeout_ms);
+            }
+            _ => longest_individual_ms = longest_individual_ms.max(timeout_ms),
+        }
+    }
+    let command_budget_ms = root_lifecycle_ms
+        .max(child_lifecycle_ms)
+        .max(longest_individual_ms);
+    if command_budget_ms == 0 {
+        HookLimits::default().max_callback_ms
+    } else {
+        command_budget_ms.saturating_add(HOOK_CALLBACK_CLEANUP_GRACE_MS)
+    }
+}
+
 /// 已绑定单个 Turn 计划守卫的命令 Hook。
 struct NativeCommandHook {
     /// 不再引用可变插件状态的命令声明。
@@ -372,15 +404,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 }))
                 .map_err(|error| format!("注册生命周期 Hook 失败：{error}"))?;
         }
-        let max_callback_ms = self
-            .hooks
-            .iter()
-            .filter_map(|spec| match spec {
-                HookSpec::Command(spec) => Some(spec.timeout.as_millis() as u64 + 5_000),
-                _ => None,
-            })
-            .max()
-            .unwrap_or(30_000);
+        let max_callback_ms = hook_callback_timeout_ms(&self.hooks);
         HookRuntime::new(
             registry,
             HookLimits {
@@ -3616,6 +3640,27 @@ mod tests {
         let error = parse_pre_compact_hook_output(json!({"decision": "block"}).to_string())
             .expect_err("缺少 reason 的 block 不是有效决策");
         assert_eq!(error.code, "hook_output_invalid");
+    }
+
+    /// 同一生命周期回调串行执行的命令必须累计时限，其他独立阶段只取单项最大值。
+    #[test]
+    fn callback_timeout_accumulates_serial_lifecycle_commands() {
+        let directory = tempfile::tempdir().expect("创建 Hook 超时预算目录");
+        let command = |phase, timeout_ms| {
+            let mut spec = marker_hook(directory.path());
+            spec.phase = phase;
+            spec.timeout = Duration::from_millis(timeout_ms);
+            HookSpec::Command(spec)
+        };
+        let hooks = vec![
+            command(HookPhase::SessionStart, 1_000),
+            command(HookPhase::UserPromptSubmit, 2_000),
+            command(HookPhase::SubagentStart, 4_000),
+            command(HookPhase::PostToolUse, 3_500),
+        ];
+
+        assert_eq!(hook_callback_timeout_ms(&hooks), 9_000);
+        assert_eq!(hook_callback_timeout_ms(&[]), 30_000);
     }
 
     /// 冻结贡献器必须把唯一 Agent Schema 无损投影为 Runtime 模板。
