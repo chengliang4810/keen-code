@@ -18,6 +18,8 @@ use super::{
 
 /// 文件变更两阶段事件尚未由 Journal 消费的独立容量 reservation。
 pub(crate) struct FileChangeReservation {
+    /// 首次 Prepared 预检绑定的完整变更计划；重试不能只依赖编码后的字节数。
+    pub(crate) planned_change: ToolFileChange,
     /// Prepared 事件的跨重启稳定身份。
     pub(crate) prepared_event_id: SessionEventId,
     /// Applied 事件的跨重启稳定身份。
@@ -49,6 +51,7 @@ pub(crate) struct FileChangeReservation {
 impl FileChangeReservation {
     /// 创建同时保护 Prepared 与 Applied 两条事件的 reservation。
     fn new(
+        planned_change: ToolFileChange,
         prepared_event_id: SessionEventId,
         applied_event_id: SessionEventId,
         prepared_event_bytes: u64,
@@ -58,6 +61,7 @@ impl FileChangeReservation {
     ) -> Result<Self, RuntimeError> {
         let missing_artifact_ids = missing_artifact_uses.keys().cloned().collect();
         Ok(Self {
+            planned_change,
             prepared_event_id,
             applied_event_id,
             prepared_event_bytes,
@@ -78,11 +82,13 @@ impl FileChangeReservation {
 
     /// 为已经确认 Prepared 的应用重试只保留 Applied 事件容量。
     fn applied_only(
+        planned_change: ToolFileChange,
         prepared_event_id: SessionEventId,
         applied_event_id: SessionEventId,
         applied_event_bytes: u64,
     ) -> Self {
         Self {
+            planned_change,
             prepared_event_id,
             applied_event_id,
             prepared_event_bytes: 0,
@@ -104,14 +110,25 @@ impl FileChangeReservation {
         &self,
         prepared_event_id: &SessionEventId,
         applied_event_id: &SessionEventId,
+        planned_change: &ToolFileChange,
         prepared_event_bytes: u64,
         applied_event_bytes: u64,
     ) -> bool {
         self.prepared_event_id == *prepared_event_id
             && self.applied_event_id == *applied_event_id
+            && same_file_change_plan(&self.planned_change, planned_change)
             && self.prepared_event_bytes == prepared_event_bytes
             && self.applied_event_bytes == applied_event_bytes
     }
+}
+
+/// 比较 Prepared 预检计划的不可变身份，忽略仅由 Applied 阶段更新的标志位。
+fn same_file_change_plan(left: &ToolFileChange, right: &ToolFileChange) -> bool {
+    left.path == right.path
+        && left.before == right.before
+        && left.before_readonly == right.before_readonly
+        && left.after == right.after
+        && left.after_readonly == right.after_readonly
 }
 
 /// 文件变更事件的两阶段身份。
@@ -335,6 +352,7 @@ impl RuntimeSession {
                 || !reservation.matches_plan(
                     &prepared_event_id,
                     &applied_event_id,
+                    &planned_change,
                     prepared_event_bytes,
                     applied_event_bytes,
                 )
@@ -358,6 +376,7 @@ impl RuntimeSession {
             control.file_change_reservations.insert(
                 request_id.clone(),
                 FileChangeReservation::new(
+                    planned_change.clone(),
                     prepared_event_id.clone(),
                     applied_event_id.clone(),
                     prepared_event_bytes,
@@ -453,6 +472,7 @@ impl RuntimeSession {
             if !reservation.matches_plan(
                 &prepared_event_id,
                 &applied_event_id,
+                change,
                 reservation.prepared_event_bytes,
                 applied_event_bytes,
             ) || !reservation.prepared_confirmed
@@ -474,6 +494,7 @@ impl RuntimeSession {
             control.file_change_reservations.insert(
                 request_id.clone(),
                 FileChangeReservation::applied_only(
+                    change.clone(),
                     prepared_event_id.clone(),
                     applied_event_id.clone(),
                     applied_event_bytes,
@@ -1528,6 +1549,58 @@ mod tests {
                 ))
                 .count(),
             1
+        );
+    }
+
+    /// Prepared 尚未进入权威状态时，pending reservation 也必须拒绝等长正文冲突。
+    #[test]
+    fn prepared_retry_rejects_equal_size_plan_conflict_before_prepared_state() {
+        let root = TempDir::new().expect("临时目录应创建");
+        let session = create(&root, "file-change-prepared-equal-size-conflict");
+        let request_id = start_tool(&session, "file-change-prepared-equal-size-turn");
+        let path = root
+            .path()
+            .join("prepared-equal-size.txt")
+            .display()
+            .to_string();
+        keencode_resources::test_support::set_append_fault(
+            keencode_resources::test_support::AppendFault::PartialWrite,
+        );
+        assert!(matches!(
+            session.prepare_file_change(&request_id, path.clone(), None, b"old"),
+            Err(RuntimeError::RecoveryRequired)
+        ));
+        keencode_resources::test_support::clear_append_fault();
+        let pending = session.snapshot().expect("待对账状态应读取");
+        assert!(pending.recovery_required);
+        assert_eq!(pending.pending_indeterminate_events, 1);
+        assert!(
+            session
+                .current_tool_file_change(&request_id)
+                .expect("权威工具状态应读取")
+                .is_none(),
+            "Prepared 追加失败时权威 state 不应先出现文件证据"
+        );
+
+        // `old` 与 `new` 长度相同，事件编码字节数相同，但 after 快照身份不同。
+        let conflict = session.prepare_file_change(&request_id, path, None, b"new");
+        assert!(matches!(conflict, Err(RuntimeError::RecoveryRequired)));
+        assert!(
+            session
+                .current_tool_file_change(&request_id)
+                .expect("冲突后权威工具状态应读取")
+                .is_none()
+        );
+        assert_eq!(
+            records(&session)
+                .iter()
+                .filter(|record| matches!(
+                    record.event,
+                    SessionEvent::ToolFileChangePrepared { .. }
+                ))
+                .count(),
+            0,
+            "等长冲突不得趁 Prepared 尚未进入 state 时写入新事件"
         );
     }
 
