@@ -176,6 +176,21 @@ impl Clone for ModelMessages {
     }
 }
 
+impl Drop for ModelMessages {
+    fn drop(&mut self) {
+        // `MessageSegment.previous` is a persistent one-way chain. Taking the tail and
+        // unwrapping unique segments one by one keeps destruction off the call stack;
+        // a shared segment can be released immediately without touching its chain.
+        let mut current = self.tail.take();
+        while let Some(segment) = current {
+            match Arc::try_unwrap(segment) {
+                Ok(segment) => current = segment.previous,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
 impl Default for ModelMessages {
     fn default() -> Self {
         Self::from(Vec::new())
@@ -310,17 +325,14 @@ impl ModelMessages {
     }
 
     /// 消费序列并返回一个连续共享数组；唯一持有的单段历史保持零拷贝。
-    pub fn into_arc(self) -> Arc<Vec<Message>> {
+    pub fn into_arc(mut self) -> Arc<Vec<Message>> {
         if self.tail.is_none() && self.request_prefix.is_empty() && self.request_suffix.is_empty() {
-            return self.base;
+            return std::mem::take(&mut self.base);
         }
-        let Self {
-            base,
-            tail,
-            request_prefix,
-            request_suffix,
-            contiguous: _,
-        } = self;
+        let base = std::mem::take(&mut self.base);
+        let tail = self.tail.take();
+        let request_prefix = std::mem::take(&mut self.request_prefix);
+        let request_suffix = std::mem::take(&mut self.request_suffix);
         let mut messages = if request_prefix.is_empty() {
             Arc::unwrap_or_clone(base)
         } else {

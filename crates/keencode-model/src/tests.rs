@@ -1099,6 +1099,22 @@ fn model_request_clone_and_append_preserve_history_allocations() {
     }
 }
 
+/// #24 深分段历史析构必须迭代完成，不能在 20 万次追加后耗尽调用栈。
+#[test]
+fn model_messages_drop_deep_segment_chain_without_stack_overflow() {
+    const SEGMENT_COUNT: usize = 200_000;
+    let mut messages = crate::ModelMessages::default();
+    for index in 0..SEGMENT_COUNT {
+        messages.append(vec![Message::text(
+            MessageRole::User,
+            format!("深链消息-{index}"),
+        )]);
+    }
+    assert_eq!(messages.len(), SEGMENT_COUNT);
+
+    drop(messages);
+}
+
 /// #24 写时复制：`messages_mut` 追加后旧快照不变、新请求可见新消息。
 #[test]
 fn model_request_messages_mut_preserves_old_snapshot() {
