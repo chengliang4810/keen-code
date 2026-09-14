@@ -38,6 +38,7 @@ pub(crate) struct MessagesAdapter {
     saw_text_block: bool,
     /// 本次 SSE 响应是否已经产生至少一个有意义的内容事件。
     saw_meaningful_content: bool,
+    saw_tool_call: bool,
     /// 是否在线上追加 Anthropic ephemeral 提示缓存断点。
     pub(super) prompt_caching: bool,
 }
@@ -54,6 +55,7 @@ impl MessagesAdapter {
             thinking_signatures: BTreeMap::new(),
             saw_text_block: false,
             saw_meaningful_content: false,
+            saw_tool_call: false,
             prompt_caching: false,
         }
     }
@@ -327,6 +329,12 @@ impl MessagesAdapter {
             });
         }
         let stop_reason = map_stop_reason(response.get("stop_reason").and_then(Value::as_str));
+        validate_tool_stop_reason(
+            &stop_reason,
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
+        )?;
         events.push(ModelStreamEvent::MessageEnd { stop_reason });
         self.ended = true;
         Ok(events)
@@ -383,6 +391,7 @@ impl MessagesAdapter {
             .and_then(Value::as_object)
             .ok_or_else(|| protocol_error("content_block_start 缺少 content_block"))?;
         let block_type = required_str_from_map(block, "type")?;
+        self.saw_tool_call |= block_type == "tool_use";
         let block_kind = match block_type {
             "text" => ActiveContentBlock::Text,
             "thinking" => ActiveContentBlock::Thinking,
@@ -616,14 +625,14 @@ impl MessagesAdapter {
         if self.saw_text_block && !self.saw_meaningful_content {
             return Err(protocol_error("Messages 响应不能只有空文本内容"));
         }
-        output.push_back(ModelStreamEvent::MessageEnd {
-            stop_reason: self
-                .stop_reason
-                .take()
-                .unwrap_or_else(|| StopReason::Other {
-                    reason: "missing_stop_reason".to_owned(),
-                }),
-        });
+        let stop_reason = self
+            .stop_reason
+            .take()
+            .unwrap_or_else(|| StopReason::Other {
+                reason: "missing_stop_reason".to_owned(),
+            });
+        validate_tool_stop_reason(&stop_reason, self.saw_tool_call)?;
+        output.push_back(ModelStreamEvent::MessageEnd { stop_reason });
         self.ended = true;
         Ok(())
     }
@@ -935,6 +944,14 @@ fn decode_usage(value: &Value) -> TokenUsage {
             .and_then(Value::as_u64),
         total_tokens: None,
     }
+}
+
+/// pause_turn 是服务端暂停信号，不能据此提交客户端工具副作用。
+fn validate_tool_stop_reason(reason: &StopReason, saw_tool_call: bool) -> Result<(), ModelError> {
+    if saw_tool_call && matches!(reason, StopReason::Other { reason } if reason == "pause_turn") {
+        return Err(protocol_error("Messages 暂停响应不能提交客户端工具调用"));
+    }
+    Ok(())
 }
 
 /// 映射 Messages 结束原因为 Provider 中立枚举。

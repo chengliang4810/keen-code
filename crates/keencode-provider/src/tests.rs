@@ -2817,6 +2817,100 @@ fn responses_terminal_status_wins_over_function_call_content() {
     }
 }
 
+#[test]
+fn responses_noncompleted_tool_calls_are_rejected() {
+    for (status, detail) in [
+        ("incomplete", None),
+        ("incomplete", Some("unknown_reason")),
+        ("queued", None),
+        ("in_progress", None),
+        ("completed", Some("unknown_reason")),
+    ] {
+        let mut body = json!({
+            "id": "resp-unfinished", "model": "test-model", "status": status,
+            "output": [{"type":"function_call", "call_id":"call-unfinished",
+                "name":"record", "arguments":"{}"}]
+        });
+        if let Some(reason) = detail {
+            body["incomplete_details"] = json!({"reason":reason});
+        }
+        assert!(
+            matches!(
+                Adapter::new(ProviderProtocol::Responses).decode_json(body),
+                Err(ModelError::Protocol { .. })
+            ),
+            "status={status}, detail={detail:?}"
+        );
+    }
+}
+
+#[test]
+fn responses_sse_terminal_event_controls_tool_completion_without_status() {
+    let prefix = [
+        json!({"type":"response.created", "response":{"id":"resp-1", "model":"test-model"}}),
+        json!({"type":"response.output_item.added", "output_index":0,
+            "item":{"type":"function_call", "call_id":"call-1", "name":"record"}}),
+        json!({"type":"response.output_item.done", "output_index":0,
+            "item":{"type":"function_call", "call_id":"call-1", "name":"record", "arguments":"{}"}}),
+    ].iter().map(|frame| format!("data: {frame}\n\n")).collect::<String>();
+    for event in ["response.completed", "response.incomplete"] {
+        let terminal = json!({"type":event,"response":{"id":"resp-1","output":[]}});
+        let raw = format!("{prefix}data: {terminal}\n\n");
+        if event == "response.completed" {
+            let response =
+                collect_events(decode_sse(ProviderProtocol::Responses, &[raw.as_bytes()]));
+            assert_eq!(response.stop_reason, StopReason::ToolUse);
+        } else {
+            assert!(matches!(
+                malformed_sse_error(ProviderProtocol::Responses, &raw),
+                ModelError::Protocol { .. }
+            ));
+        }
+    }
+}
+
+#[test]
+fn messages_paused_client_tools_are_rejected_without_rejecting_custom_stops() {
+    for reason in ["pause_turn", "provider_pause"] {
+        let body = json!({"id":"msg-pause", "type":"message", "model":"test-model",
+            "stop_reason":reason, "content":[{"type":"tool_use", "id":"call-pause", "name":"record", "input":{}}]});
+        let decoded = Adapter::new(ProviderProtocol::Messages).decode_json(body);
+        let frames = [
+            json!({"type":"message_start", "message":{"id":"msg-pause", "model":"test-model"}}),
+            json!({"type":"content_block_start", "index":0, "content_block":{"type":"tool_use", "id":"call-pause", "name":"record", "input":{}}}),
+            json!({"type":"content_block_delta", "index":0, "delta":{"type":"input_json_delta", "partial_json":"{}"}}),
+            json!({"type":"content_block_stop", "index":0}),
+            json!({"type":"message_delta", "delta":{"stop_reason":reason}}),
+            json!({"type":"message_stop"}),
+        ];
+        let raw = frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect::<String>();
+        if reason == "pause_turn" {
+            assert!(matches!(decoded, Err(ModelError::Protocol { .. })));
+            assert!(matches!(
+                malformed_sse_error(ProviderProtocol::Messages, &raw),
+                ModelError::Protocol { .. }
+            ));
+        } else {
+            assert_eq!(
+                collect_events(decoded.expect("兼容终止标签应保留")).stop_reason,
+                StopReason::Other {
+                    reason: reason.to_owned()
+                }
+            );
+            assert_eq!(
+                collect_events(decode_sse(ProviderProtocol::Messages, &[raw.as_bytes()]))
+                    .stop_reason,
+                StopReason::Other {
+                    reason: reason.to_owned()
+                }
+            );
+        }
+    }
+}
+
 /// 三种协议在完整工具调用缺少终止字段时都必须保留缺失哨兵，交由 Runtime 拒绝执行。
 #[test]
 fn three_protocols_preserve_missing_stop_reason_sentinels_with_complete_tool_calls() {

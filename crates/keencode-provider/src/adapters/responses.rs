@@ -295,7 +295,12 @@ impl ResponsesAdapter {
             });
         }
         events.push(ModelStreamEvent::MessageEnd {
-            stop_reason: response_stop_reason(response, self.saw_tool_call, self.saw_refusal),
+            stop_reason: response_stop_reason(
+                response,
+                self.saw_tool_call,
+                self.saw_refusal,
+                None,
+            )?,
         });
         self.ended = true;
         Ok(events)
@@ -599,7 +604,12 @@ impl ResponsesAdapter {
         }
         let stop_reason = match event_type {
             "response.cancelled" => StopReason::Cancelled,
-            _ => response_stop_reason(response, self.saw_tool_call, self.saw_refusal),
+            _ => response_stop_reason(
+                response,
+                self.saw_tool_call,
+                self.saw_refusal,
+                event_type.strip_prefix("response."),
+            )?,
         };
         output.push_back(ModelStreamEvent::MessageEnd { stop_reason });
         self.ended = true;
@@ -1080,11 +1090,13 @@ fn response_stop_reason(
     response: &Map<String, Value>,
     saw_tool_call: bool,
     saw_refusal: bool,
-) -> StopReason {
+    terminal_status: Option<&str>,
+) -> Result<StopReason, ModelError> {
     let status = response
         .get("status")
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty());
+        .filter(|value| !value.trim().is_empty())
+        .or(terminal_status);
     let detail = response
         .get("incomplete_details")
         .and_then(|details| details.get("reason"))
@@ -1093,30 +1105,33 @@ fn response_stop_reason(
     // 明确的取消、输出上限和内容过滤必须优先于工具内容；否则一个带有
     // function_call 的 Responses 截断响应会被误标为 ToolUse，进入真实工具调度。
     if status == Some("cancelled") {
-        return StopReason::Cancelled;
+        return Ok(StopReason::Cancelled);
     }
     match detail {
         Some("max_output_tokens" | "max_completion_tokens") => {
-            return StopReason::MaxOutputTokens;
+            return Ok(StopReason::MaxOutputTokens);
         }
-        Some("content_filter") => return StopReason::ContentFilter,
+        Some("content_filter") => return Ok(StopReason::ContentFilter),
         _ => {}
     }
     if saw_refusal {
-        return StopReason::ContentFilter;
+        return Ok(StopReason::ContentFilter);
     }
     // 没有 status 和 incomplete reason 时，响应终态本身缺失；即使 output 中有
     // 完整 function_call，也不能先按工具调用放行，否则 Runtime 无法区分兼容
     // 的工具终态与畸形响应。
     if status.is_none() && detail.is_none() {
-        return StopReason::Other {
+        return Ok(StopReason::Other {
             reason: "missing_status".to_owned(),
-        };
+        });
     }
     if saw_tool_call {
-        return StopReason::ToolUse;
+        if status != Some("completed") || detail.is_some() {
+            return Err(protocol_error("Responses 函数调用所属响应尚未确认完成"));
+        }
+        return Ok(StopReason::ToolUse);
     }
-    match (status, detail) {
+    Ok(match (status, detail) {
         (Some("completed"), _) => StopReason::Completed,
         (_, Some(reason)) => StopReason::Other {
             reason: reason.to_owned(),
@@ -1127,7 +1142,7 @@ fn response_stop_reason(
         (None, None) => StopReason::Other {
             reason: "missing_status".to_owned(),
         },
-    }
+    })
 }
 
 /// 提取 Provider 错误对象中的安全文本摘要。
