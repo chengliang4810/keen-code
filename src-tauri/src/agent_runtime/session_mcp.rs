@@ -2212,6 +2212,9 @@ fn extract_id(body: &str) -> Option<&str> {
             initial_delta.added(),
             &[keencode_tools::portable_mcp_tool_name("shared-name", "echo").unwrap()]
         );
+        source
+            .acknowledge_update(initial_delta.generation())
+            .expect("首次目录更新已由测试模拟的成功 Provider 请求确认");
 
         assert_eq!(
             runtime.queue_project_snapshot(ProjectToolSnapshot {
