@@ -907,6 +907,7 @@ fn runner(provider: Arc<ScriptedProvider>, registry: ToolRegistry) -> AgentRunne
 struct OneShotToolCatalogUpdate {
     update: Mutex<Option<AgentToolCatalogDelta>>,
     calls: AtomicUsize,
+    acknowledgements: AtomicUsize,
 }
 
 impl OneShotToolCatalogUpdate {
@@ -914,11 +915,16 @@ impl OneShotToolCatalogUpdate {
         Self {
             update: Mutex::new(Some(update)),
             calls: AtomicUsize::new(0),
+            acknowledgements: AtomicUsize::new(0),
         }
     }
 
     fn calls(&self) -> usize {
         self.calls.load(Ordering::SeqCst)
+    }
+
+    fn acknowledgements(&self) -> usize {
+        self.acknowledgements.load(Ordering::SeqCst)
     }
 }
 
@@ -926,6 +932,11 @@ impl AgentToolCatalogUpdateSource for OneShotToolCatalogUpdate {
     fn take_update(&self) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.update.lock().expect("目录变化测试锁不应损坏").take())
+    }
+
+    fn acknowledge_update(&self, _generation: u64) -> Result<(), AgentToolCatalogUpdateError> {
+        self.acknowledgements.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1043,6 +1054,11 @@ async fn tool_catalog_update_is_transient_and_reused_by_same_round_retry() {
 
     assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(updates.calls(), 1, "同一逻辑 Round 的重试不得重复读取目录");
+    assert_eq!(
+        updates.acknowledgements(),
+        1,
+        "同一逻辑 Round 只需在首次成功 Provider 请求后确认一次"
+    );
     let requests = provider.requests().expect("请求快照应可读取");
     assert_eq!(requests.len(), 2);
     assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
@@ -1053,6 +1069,25 @@ async fn tool_catalog_update_is_transient_and_reused_by_same_round_retry() {
         "空响应重试应逐字节复用包含目录通知的请求"
     );
     assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
+/// Provider 的不可恢复失败不能确认目录变化，下一次 Runner 才能重新投递。
+#[tokio::test]
+async fn tool_catalog_update_is_not_acknowledged_after_provider_failure() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [invalid_request_error_reply("不可恢复的测试失败")],
+    ));
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(11, vec!["mcp__new__tool".to_owned()], Vec::new()).unwrap(),
+    ));
+    let result = runner(provider, ToolRegistry::new())
+        .with_tool_catalog_update_source(updates.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(result.error.is_some());
+    assert_eq!(updates.acknowledgements(), 0);
 }
 
 /// 目录通知只属于观察到换代的模型 Round，后续 Round 不得再次注入。
@@ -1082,6 +1117,7 @@ async fn tool_catalog_update_is_delivered_once_per_runner_generation() {
 
     assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(updates.calls(), 2);
+    assert_eq!(updates.acknowledgements(), 1);
     let requests = provider.requests().expect("请求快照应可读取");
     assert_eq!(requests.len(), 2);
     assert_eq!(tool_catalog_update_count(&requests[0].messages), 1);
@@ -1187,6 +1223,7 @@ async fn tool_catalog_update_is_excluded_from_compaction_input() {
 
     assert!(result.is_success(), "{:?}", result.error);
     assert_eq!(updates.calls(), 1);
+    assert_eq!(updates.acknowledgements(), 1);
     assert_eq!(result.compactions.len(), 1);
     let requests = provider.requests().expect("请求快照应可读取");
     assert_eq!(requests.len(), 3);
@@ -1196,6 +1233,36 @@ async fn tool_catalog_update_is_excluded_from_compaction_input() {
     assert_eq!(tool_catalog_update_count(&requests[1].messages), 0);
     assert_eq!(tool_catalog_update_count(&requests[2].messages), 1);
     assert_eq!(tool_catalog_update_count(&result.messages), 0);
+}
+
+/// 即使目录通知本身超过小窗口，也必须在 Provider 调用前安全失败；通知仍
+/// 不得被送入压缩输入或通过远端超限来兜底。
+#[tokio::test]
+async fn oversized_tool_catalog_update_fails_closed_before_provider_call() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(128),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不应被调用")],
+    ));
+    let added = (0..512)
+        .map(|index| format!("added_{index:03}_{}", "a".repeat(240)))
+        .collect::<Vec<_>>();
+    let removed = (0..512)
+        .map(|index| format!("removed_{index:03}_{}", "b".repeat(239)))
+        .collect::<Vec<_>>();
+    let updates = Arc::new(OneShotToolCatalogUpdate::new(
+        AgentToolCatalogDelta::new(6, added, removed).unwrap(),
+    ));
+    let result = runner(provider.clone(), ToolRegistry::new())
+        .with_tool_catalog_update_source(updates.clone())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+
+    assert!(matches!(result.error, Some(AgentRunError::Context(_))));
+    assert!(provider.requests().unwrap().is_empty());
+    assert_eq!(updates.acknowledgements(), 0);
 }
 
 /// 文本 Turn 必须形成单一完成终态并提交 assistant 消息。

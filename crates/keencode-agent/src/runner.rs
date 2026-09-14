@@ -469,6 +469,8 @@ pub struct AgentToolCatalogDelta {
     added: Vec<String>,
     /// 相对该 Runner 上次观察快照移除的工具名称。
     removed: Vec<String>,
+    /// 名称不变但定义或实现发生变化、必须重新搜索定义的工具名称。
+    changed: Vec<String>,
 }
 
 impl AgentToolCatalogDelta {
@@ -481,14 +483,30 @@ impl AgentToolCatalogDelta {
         added: Vec<String>,
         removed: Vec<String>,
     ) -> Result<Self, AgentToolCatalogUpdateError> {
+        Self::new_with_changed(generation, added, removed, Vec::new())
+    }
+
+    /// 创建一个包含同名定义变化的目录变化摘要。
+    pub fn new_with_changed(
+        generation: u64,
+        added: Vec<String>,
+        removed: Vec<String>,
+        changed: Vec<String>,
+    ) -> Result<Self, AgentToolCatalogUpdateError> {
         if generation == 0
             || added.len() > MAX_TOOL_CATALOG_SNAPSHOT_NAMES
             || removed.len() > MAX_TOOL_CATALOG_SNAPSHOT_NAMES
+            || changed.len() > MAX_TOOL_CATALOG_SNAPSHOT_NAMES
         {
             return Err(AgentToolCatalogUpdateError::new("工具目录变化摘要无效"));
         }
-        let mut names = HashSet::with_capacity(added.len().saturating_add(removed.len()));
-        for name in added.iter().chain(removed.iter()) {
+        let mut names = HashSet::with_capacity(
+            added
+                .len()
+                .saturating_add(removed.len())
+                .saturating_add(changed.len()),
+        );
+        for name in added.iter().chain(removed.iter()).chain(changed.iter()) {
             if name.is_empty()
                 || name.trim() != name
                 || name.len() > MAX_TOOL_CATALOG_DELTA_NAME_BYTES
@@ -501,6 +519,7 @@ impl AgentToolCatalogDelta {
             generation,
             added,
             removed,
+            changed,
         })
     }
 
@@ -519,12 +538,18 @@ impl AgentToolCatalogDelta {
         &self.removed
     }
 
+    /// 返回定义发生变化、需要重新搜索的工具名称。
+    pub fn changed(&self) -> &[String] {
+        &self.changed
+    }
+
     /// 构造只属于当前模型请求快照、不得提交 Transcript 的开发者消息。
     fn into_message(self) -> Result<Message, AgentToolCatalogUpdateError> {
         let payload = serde_json::to_string(&serde_json::json!({
             "catalogGeneration": self.generation,
             "added": self.added,
             "removed": self.removed,
+            "changed": self.changed,
         }))
         .map_err(|_| AgentToolCatalogUpdateError::new("工具目录变化摘要编码失败"))?;
         let mut message = Message::text(
@@ -569,8 +594,17 @@ impl Error for AgentToolCatalogUpdateError {}
 
 /// 在模型采样前的安全 Reason 边界原子应用并读取延迟工具目录变化。
 pub trait AgentToolCatalogUpdateSource: Send + Sync {
-    /// 返回该 Runner 自上次观察以来的唯一变化；没有变化时返回 `None`。
+    /// 返回该 Runner 自上次确认以来的唯一变化；没有变化时返回 `None`。
     fn take_update(&self) -> Result<Option<AgentToolCatalogDelta>, AgentToolCatalogUpdateError>;
+
+    /// 确认 Provider 已成功接受包含该目录变化的请求。
+    ///
+    /// 读取变化本身不推进持久观察水位；调用方只有在真实模型请求成功后才能
+    /// 确认，否则下一 Runner 必须仍能看到同一变化。默认实现兼容不需要确认
+    /// 生命周期的独立目录来源。
+    fn acknowledge_update(&self, _generation: u64) -> Result<(), AgentToolCatalogUpdateError> {
+        Ok(())
+    }
 }
 
 /// 默认没有可变延迟工具目录的更新端口。
@@ -867,7 +901,7 @@ pub struct AgentRunner {
     hooks: HookRuntime,
     /// 每次模型采样前 claim mailbox 与用户 Steer 的持久输入端口。
     dynamic_input: Arc<dyn AgentDynamicInputSource>,
-    /// 每个普通模型 Round轮次在压缩后读取一次的瞬时工具目录变化端口。
+    /// 每个普通模型 Round 在预算判断前读取一次的瞬时工具目录变化端口。
     tool_catalog_updates: Arc<dyn AgentToolCatalogUpdateSource>,
     /// 仅根任务注入；子 Agent 和普通独立 Runner 不承担项目 Goal 续跑。
     goal_controller: Option<Arc<dyn GoalController>>,
@@ -2015,6 +2049,27 @@ impl AgentRunner {
                     ) && provider_capabilities.parallel_tool_calls,
                 )
             };
+            // 目录换代在预算判断前读取：瞬时通知虽然不能进入压缩事务或
+            // Transcript，但它确实会占用本次 Provider 请求的输入预算。通知在
+            // 同一逻辑 Round 的所有采样尝试中复用，只有 Provider 成功后才确认。
+            let tool_catalog_update = if summary_only {
+                None
+            } else {
+                self.tool_catalog_updates.take_update().map_err(|error| {
+                    AgentRunError::Internal {
+                        message: format!("工具目录更新失败：{}", error.message()),
+                    }
+                })?
+            };
+            let tool_catalog_message = tool_catalog_update
+                .clone()
+                .map(AgentToolCatalogDelta::into_message)
+                .transpose()
+                .map_err(|error| AgentRunError::Internal {
+                    message: format!("工具目录通知构造失败：{}", error.message()),
+                })?;
+            let budget_request =
+                request_with_transient_message(&model_request, tool_catalog_message.as_ref());
             // 水位告警（#23）先于压缩触发判断：跨越 info 阈值且本轮尚未发送
             // 过时发一条 transient 水位事件；含水位百分比与阈值，不入权威
             // journal。压缩实际执行的轮次只发压缩事件（防重复）。水位事件丢失
@@ -2022,13 +2077,13 @@ impl AgentRunner {
             self.maybe_notify_context_water_level(
                 request,
                 active,
-                &model_request,
+                &budget_request,
                 &provider_capabilities,
             )
             .await;
             if let Some(target_tokens) = self
                 .context
-                .precompression_target(&model_request, &provider_capabilities)
+                .precompression_target(&budget_request, &provider_capabilities)
             {
                 active.state.transition_to(TurnPhase::Compacting)?;
                 let outcome = self
@@ -2062,9 +2117,13 @@ impl AgentRunner {
                             )
                         );
                         if soft_failure
-                            && self
-                                .context
-                                .request_fits_context_window(&model_request, &provider_capabilities)
+                            && self.context.request_fits_context_window(
+                                &request_with_transient_message(
+                                    &model_request,
+                                    tool_catalog_message.as_ref(),
+                                ),
+                                &provider_capabilities,
+                            )
                         {
                             // 摘要失败事件及已发生用量已处理；采纳投影后的
                             // 缩水历史装得下，不伪造压缩提交。
@@ -2104,10 +2163,10 @@ impl AgentRunner {
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             } else if !self
                 .context
-                .predictive_precompression_skipped_by_cache(&model_request, &provider_capabilities)
+                .predictive_precompression_skipped_by_cache(&budget_request, &provider_capabilities)
                 && let Some(target_tokens) = self
                     .context
-                    .predictive_precompression_target(&model_request, &provider_capabilities)
+                    .predictive_precompression_target(&budget_request, &provider_capabilities)
             {
                 // 预测性触发（#17）：与既有触发线走完全相同的压缩臂（同上），
                 // 复用 Budget 触发形态；缓存感知跳过在进入前已判定。
@@ -2140,9 +2199,13 @@ impl AgentRunner {
                             )
                         );
                         if soft_failure
-                            && self
-                                .context
-                                .request_fits_context_window(&model_request, &provider_capabilities)
+                            && self.context.request_fits_context_window(
+                                &request_with_transient_message(
+                                    &model_request,
+                                    tool_catalog_message.as_ref(),
+                                ),
+                                &provider_capabilities,
+                            )
                         {
                         } else if soft_failure {
                             match self
@@ -2176,24 +2239,49 @@ impl AgentRunner {
                 }
                 active.state.transition_to(TurnPhase::RequestingModel)?;
             }
-            // 目录换代只发生在压缩已经结束、真正采样尚未开始的安全 Reason
-            // 边界。消息仅附加到本逻辑轮次的请求副本：它不会进入
+            // 目录通知不属于压缩输入，但必须让最终采样请求在已知窗口内
+            // 适配。通知可能本身就大于小窗口；此时先尝试一次机械截断，仍
+            // 不可容纳则在 Provider 调用前 fail-closed，不能把可避免的超限
+            // 请求交给远端再猜测。
+            if tool_catalog_message.is_some()
+                && provider_capabilities.max_context_tokens.is_some()
+                && !self.context.request_fits_context_window(
+                    &request_with_transient_message(&model_request, tool_catalog_message.as_ref()),
+                    &provider_capabilities,
+                )
+            {
+                active.state.transition_to(TurnPhase::Compacting)?;
+                let recovered = self
+                    .try_mechanical_truncation_fallback(
+                        request,
+                        active,
+                        &mut model_request,
+                        &provider_capabilities,
+                        ContextCompressionTrigger::Budget,
+                    )
+                    .await?;
+                active.state.transition_to(TurnPhase::RequestingModel)?;
+                if !recovered
+                    || !self.context.request_fits_context_window(
+                        &request_with_transient_message(
+                            &model_request,
+                            tool_catalog_message.as_ref(),
+                        ),
+                        &provider_capabilities,
+                    )
+                {
+                    let sampled_request = request_with_transient_message(
+                        &model_request,
+                        tool_catalog_message.as_ref(),
+                    );
+                    return Err(AgentRunError::Context(ContextError::StillExceeded {
+                        estimated_tokens: self.context.estimate_request(&sampled_request),
+                    }));
+                }
+            }
+            // 目录通知只附加到压缩完成后的本轮 Provider 请求副本：它不会进入
             // active.messages、权威提交或压缩输入；同一 Round 的 Provider 重试
-            // 仍复用该通知，下一 Round 则由 source 的观察水位保证不重复。
-            let tool_catalog_update = if summary_only {
-                None
-            } else {
-                self.tool_catalog_updates
-                    .take_update()
-                    .map_err(|error| AgentRunError::Internal {
-                        message: format!("工具目录更新失败：{}", error.message()),
-                    })?
-                    .map(AgentToolCatalogDelta::into_message)
-                    .transpose()
-                    .map_err(|error| AgentRunError::Internal {
-                        message: format!("工具目录通知构造失败：{}", error.message()),
-                    })?
-            };
+            // 仍复用该通知，下一 Round 则由 source 的确认水位保证不重复。
             // 结构化响应在本地校验成功前不能把正文投影到实时 Sink；普通文本和
             // 摘要 Round 仍保持原有逐事件实时投递。
             let model_stream_delivery =
@@ -2207,21 +2295,26 @@ impl AgentRunner {
             // 保证强制压缩臂继续优先于输出上限降级处理后续错误；强制压缩后
             // 的重试同样经循环顶部换新调用尝试发起，不在臂内嵌套采样，重试
             // 结果与首次结果一致按臂顺序重新判定。
+            let mut tool_catalog_update_acknowledged = false;
             let mut completed_round = loop {
                 let model_call_attempt = active.next_model_call_attempt()?;
-                match self
+                let request_result = self
                     .request_model(
                         request,
                         request_with_transient_message(
                             &model_request,
-                            tool_catalog_update.as_ref(),
+                            tool_catalog_message.as_ref(),
                         ),
                         model_call_attempt,
                         model_stream_delivery,
                         &mut active.state,
                     )
-                    .await
-                {
+                    .await;
+                if request_result.is_ok() && !tool_catalog_update_acknowledged {
+                    self.acknowledge_tool_catalog_update(tool_catalog_update.as_ref())?;
+                    tool_catalog_update_acknowledged = true;
+                }
+                match request_result {
                     Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. }))
                         if !active.forced_context_retry_used =>
                     {
@@ -2474,18 +2567,23 @@ impl AgentRunner {
                     active.state.transition_to(TurnPhase::Compacting)?;
                     active.state.transition_to(TurnPhase::RequestingModel)?;
                     let retry_call_attempt = active.next_model_call_attempt()?;
-                    completed_round = self
+                    let retry_result = self
                         .request_model(
                             request,
                             request_with_transient_message(
                                 &model_request,
-                                tool_catalog_update.as_ref(),
+                                tool_catalog_message.as_ref(),
                             ),
                             retry_call_attempt,
                             model_stream_delivery,
                             &mut active.state,
                         )
-                        .await?;
+                        .await;
+                    if retry_result.is_ok() && !tool_catalog_update_acknowledged {
+                        self.acknowledge_tool_catalog_update(tool_catalog_update.as_ref())?;
+                        tool_catalog_update_acknowledged = true;
+                    }
+                    completed_round = retry_result?;
                     continue 'response_attempt;
                 }
 
@@ -2583,7 +2681,7 @@ impl AgentRunner {
                                         structured_base_request.get_or_insert_with(|| {
                                             request_with_transient_message(
                                                 &model_request,
-                                                tool_catalog_update.as_ref(),
+                                                tool_catalog_message.as_ref(),
                                             )
                                         });
                                     active.structured_output_correction_budget.next_request(
@@ -2604,7 +2702,7 @@ impl AgentRunner {
                             active.state.transition_to(TurnPhase::RequestingModel)?;
                             let retry_call_attempt = active.next_model_call_attempt()?;
                             correction_in_flight = true;
-                            completed_round = self
+                            let retry_result = self
                                 .request_model(
                                     request,
                                     next_request,
@@ -2612,7 +2710,12 @@ impl AgentRunner {
                                     ModelStreamDelivery::BufferCandidateContent,
                                     &mut active.state,
                                 )
-                                .await?;
+                                .await;
+                            if retry_result.is_ok() && !tool_catalog_update_acknowledged {
+                                self.acknowledge_tool_catalog_update(tool_catalog_update.as_ref())?;
+                                tool_catalog_update_acknowledged = true;
+                            }
+                            completed_round = retry_result?;
                             continue 'response_attempt;
                         }
                     }
@@ -3011,6 +3114,21 @@ impl AgentRunner {
                 Err(model_error_to_run_error(error))
             }
         }
+    }
+
+    /// Provider 成功接受本轮请求后确认目录变化；失败响应不推进来源水位。
+    fn acknowledge_tool_catalog_update(
+        &self,
+        update: Option<&AgentToolCatalogDelta>,
+    ) -> Result<(), AgentRunError> {
+        let Some(update) = update else {
+            return Ok(());
+        };
+        self.tool_catalog_updates
+            .acknowledge_update(update.generation())
+            .map_err(|error| AgentRunError::Internal {
+                message: format!("工具目录更新确认失败：{}", error.message()),
+            })
     }
 
     /// 在结构化候选通过本地校验后发布此前暂存的完整模型事件。
