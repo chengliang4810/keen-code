@@ -1312,8 +1312,11 @@ export function reduceDeliveryEnvelope(
 export function beginSessionRecovery(view: AcpSessionView): void {
   const sessionId = view.session_id;
   const projectPath = view.project_path;
+  const goal = view.goal;
   Object.assign(view, emptySession(sessionId));
   view.project_path = projectPath;
+  // Goal 是独立持久化的 Session 投影；历史回放重置消息与投递状态时不能伪造清空。
+  view.goal = goal;
   view.status = "connecting";
   view.replay.restoring = true;
 }

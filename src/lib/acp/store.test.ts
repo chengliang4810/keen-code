@@ -844,10 +844,28 @@ describe("Acp recovery and control projections", () => {
   it("恢复重置不可信投影并保留项目绑定", () => {
     const view = emptySession("session-1");
     view.project_path = "D:/projects/demo";
+    view.goal = {
+      revision: 4,
+      goal: {
+        id: "goal-1",
+        title: "恢复会话目标",
+        scope: "session",
+        status: "active",
+        objective: "保留独立 Goal 投影",
+        tokensUsed: 10,
+        timeUsedSeconds: 2,
+        createdAtMs: 1,
+        updatedAtMs: 2,
+      },
+    };
     completeTurn(view);
 
     beginSessionRecovery(view);
     expect(view.project_path).toBe("D:/projects/demo");
+    expect(view.goal).toEqual({
+      revision: 4,
+      goal: expect.objectContaining({ id: "goal-1", objective: "保留独立 Goal 投影" }),
+    });
     expect(view.status).toBe("connecting");
     expect(view.replay.restoring).toBe(true);
     expect(view.delivery.lastSequence).toBeNull();
