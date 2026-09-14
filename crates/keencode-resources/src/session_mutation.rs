@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 use crate::atomic::{
     ATOMIC_TEMP_PREFIX, BoundedJson, BoundedRead, atomic_write,
     atomic_write_preserving_permissions, ensure_regular_file_or_absent, exclusive_lock,
-    prepare_root, read_file_bounded, secure_child_dir, serialize_json_bounded, sync_directory,
+    existing_file_readonly, prepare_root, read_file_bounded, secure_child_dir,
+    serialize_json_bounded, set_file_readonly, sync_directory,
 };
 use crate::{
     ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse, FileSnapshot,
@@ -956,8 +957,16 @@ fn apply_file_restore(
             }
             None => {
                 ensure_regular_file_or_absent(&entry.path)?;
-                fs::remove_file(&entry.path)
-                    .map_err(|error| ResourceError::io("remove_reverted_created_file", error))?;
+                let readonly = existing_file_readonly(&entry.path)?;
+                if readonly == Some(true) {
+                    set_file_readonly(&entry.path, false)?;
+                }
+                if let Err(error) = fs::remove_file(&entry.path) {
+                    if readonly == Some(true) {
+                        set_file_readonly(&entry.path, true)?;
+                    }
+                    return Err(ResourceError::io("remove_reverted_created_file", error));
+                }
                 let parent = entry.path.parent().ok_or_else(|| {
                     ResourceError::UnsafePath("文件恢复目标缺少父目录".to_owned())
                 })?;

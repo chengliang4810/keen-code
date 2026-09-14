@@ -233,7 +233,7 @@ pub(crate) fn atomic_write(
     bytes: &[u8],
     sync: bool,
 ) -> Result<(), ResourceError> {
-    atomic_write_with_mode(destination, bytes, sync, None)
+    atomic_write_with_mode(destination, bytes, sync, None, None)
 }
 
 /// 在原子替换工作区文件时保留现有 Unix 权限位。
@@ -246,7 +246,8 @@ pub(crate) fn atomic_write_preserving_permissions(
     let mode = existing_file_mode(destination)?;
     #[cfg(not(unix))]
     let mode = None;
-    atomic_write_with_mode(destination, bytes, sync, mode)
+    let readonly = existing_file_readonly(destination)?;
+    atomic_write_with_mode(destination, bytes, sync, mode, readonly)
 }
 
 /// 写入临时文件并可选地在替换前设置目标权限位。
@@ -255,6 +256,7 @@ fn atomic_write_with_mode(
     bytes: &[u8],
     sync: bool,
     mode: Option<u32>,
+    readonly: Option<bool>,
 ) -> Result<(), ResourceError> {
     ensure_regular_file_or_absent(destination)?;
     let parent = destination
@@ -287,9 +289,23 @@ fn atomic_write_with_mode(
             .sync_all()
             .map_err(|error| ResourceError::io("sync_atomic_temporary", error))?;
     }
-    temporary
-        .persist(destination)
-        .map_err(|error| ResourceError::io("persist_atomic_file", error.error))?;
+    if readonly == Some(true) {
+        set_file_readonly(destination, false)?;
+    }
+    match temporary.persist(destination) {
+        Ok(file) => {
+            drop(file);
+            if let Some(readonly) = readonly {
+                set_file_readonly(destination, readonly)?;
+            }
+        }
+        Err(error) => {
+            if readonly == Some(true) {
+                set_file_readonly(destination, true)?;
+            }
+            return Err(ResourceError::io("persist_atomic_file", error.error));
+        }
+    }
     sync_directory(parent, sync)
 }
 
@@ -311,6 +327,57 @@ fn existing_file_mode(destination: &Path) -> Result<Option<u32>, ResourceError> 
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ResourceError::io("inspect_file_permissions", error)),
     }
+}
+
+/// 读取现有普通文件的 Windows `FILE_ATTRIBUTE_READONLY` 等价状态。
+///
+/// Windows 的原子替换会把只读属性当作拒绝覆盖条件；其他平台没有对应的
+/// 路径属性，返回 `None` 并保持原有 Unix mode 处理不变。
+pub(crate) fn existing_file_readonly(destination: &Path) -> Result<Option<bool>, ResourceError> {
+    #[cfg(windows)]
+    {
+        match fs::symlink_metadata(destination) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                Err(ResourceError::SymlinkRejected(
+                    destination
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("文件")
+                        .to_owned(),
+                ))
+            }
+            Ok(metadata) if !metadata.is_file() => Err(ResourceError::UnsafePath(
+                "目标存在但不是普通文件".to_owned(),
+            )),
+            Ok(metadata) => Ok(Some(metadata.permissions().readonly())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(ResourceError::io("inspect_file_readonly", error)),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = destination;
+        Ok(None)
+    }
+}
+
+/// 设置 Windows 文件只读属性；其他平台保持原有行为并忽略该属性。
+pub(crate) fn set_file_readonly(destination: &Path, readonly: bool) -> Result<(), ResourceError> {
+    #[cfg(windows)]
+    {
+        ensure_regular_file_or_absent(destination)?;
+        let mut permissions = fs::symlink_metadata(destination)
+            .map_err(|error| ResourceError::io("inspect_file_readonly", error))?
+            .permissions();
+        permissions.set_readonly(readonly);
+        fs::set_permissions(destination, permissions)
+            .map_err(|error| ResourceError::io("set_file_readonly", error))?;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (destination, readonly);
+    }
+    Ok(())
 }
 
 /// 在打开前拒绝检查时可见的符号链接，并限时独占锁定协调文件。
@@ -438,10 +505,12 @@ pub(crate) fn sync_directory(parent: &Path, sync: bool) -> Result<(), ResourceEr
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::time::{Duration, Instant};
 
     use super::{
-        ExclusiveFileLock, exclusive_lock, exclusive_lock_with_timeout, is_exact_lock_contention,
+        ExclusiveFileLock, atomic_write_preserving_permissions, exclusive_lock,
+        exclusive_lock_with_timeout, existing_file_readonly, is_exact_lock_contention,
     };
     use crate::ResourceError;
 
@@ -481,5 +550,62 @@ mod tests {
         assert!(is_exact_lock_contention(&exact));
         let unrelated = std::io::Error::new(std::io::ErrorKind::WouldBlock, "非平台原始锁错误");
         assert!(!is_exact_lock_contention(&unrelated));
+    }
+
+    /// 只读属性是平台可选的路径元数据；当前平台 helper 必须返回稳定结果。
+    #[test]
+    fn readonly_attribute_state_is_platform_specific() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let path = root.path().join("readonly.txt");
+        fs::write(&path, b"before").expect("测试文件应写入");
+        let state = existing_file_readonly(&path).expect("只读属性读取不应失败");
+        #[cfg(windows)]
+        assert_eq!(state, Some(false));
+        #[cfg(not(windows))]
+        assert_eq!(state, None);
+    }
+
+    /// Unix 原子替换仍需保留既有 mode，避免 Windows 属性修复改变其他平台语义。
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_preserves_existing_unix_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let path = root.path().join("mode.txt");
+        fs::write(&path, b"before").expect("测试文件应写入");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).expect("测试 mode 应设置");
+
+        atomic_write_preserving_permissions(&path, b"after", true).expect("原子替换应成功");
+
+        assert_eq!(
+            fs::metadata(&path)
+                .expect("文件应存在")
+                .permissions()
+                .mode()
+                & 0o7777,
+            0o640
+        );
+        assert_eq!(fs::read(&path).expect("文件应可读"), b"after");
+    }
+
+    /// Windows 原子替换必须临时清除只读属性并在成功后恢复它。
+    #[cfg(windows)]
+    #[test]
+    fn atomic_write_preserves_existing_windows_readonly_attribute() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let path = root.path().join("readonly.txt");
+        fs::write(&path, b"before").expect("测试文件应写入");
+        let mut permissions = fs::metadata(&path)
+            .expect("测试文件 metadata 应读取")
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&path, permissions).expect("只读属性应设置");
+
+        atomic_write_preserving_permissions(&path, b"after", true).expect("只读文件应可原子替换");
+
+        let metadata = fs::metadata(&path).expect("替换后文件应存在");
+        assert!(metadata.permissions().readonly());
+        assert_eq!(fs::read(&path).expect("只读文件仍应可读"), b"after");
     }
 }
