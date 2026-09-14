@@ -3,6 +3,9 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use fs2::FileExt;
 use serde::Serialize;
 
@@ -230,6 +233,29 @@ pub(crate) fn atomic_write(
     bytes: &[u8],
     sync: bool,
 ) -> Result<(), ResourceError> {
+    atomic_write_with_mode(destination, bytes, sync, None)
+}
+
+/// 在原子替换工作区文件时保留现有 Unix 权限位。
+pub(crate) fn atomic_write_preserving_permissions(
+    destination: &Path,
+    bytes: &[u8],
+    sync: bool,
+) -> Result<(), ResourceError> {
+    #[cfg(unix)]
+    let mode = existing_file_mode(destination)?;
+    #[cfg(not(unix))]
+    let mode = None;
+    atomic_write_with_mode(destination, bytes, sync, mode)
+}
+
+/// 写入临时文件并可选地在替换前设置目标权限位。
+fn atomic_write_with_mode(
+    destination: &Path,
+    bytes: &[u8],
+    sync: bool,
+    mode: Option<u32>,
+) -> Result<(), ResourceError> {
     ensure_regular_file_or_absent(destination)?;
     let parent = destination
         .parent()
@@ -246,6 +272,15 @@ pub(crate) fn atomic_write(
         .as_file_mut()
         .flush()
         .map_err(|error| ResourceError::io("flush_atomic_temporary", error))?;
+    #[cfg(unix)]
+    if let Some(mode) = mode {
+        temporary
+            .as_file_mut()
+            .set_permissions(fs::Permissions::from_mode(mode))
+            .map_err(|error| ResourceError::io("set_atomic_file_permissions", error))?;
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
     if sync {
         temporary
             .as_file()
@@ -256,6 +291,28 @@ pub(crate) fn atomic_write(
         .persist(destination)
         .map_err(|error| ResourceError::io("persist_atomic_file", error.error))?;
     sync_directory(parent, sync)
+}
+
+/// 读取现有普通文件的 Unix 权限位；缺失目标不携带可继承权限。
+#[cfg(unix)]
+fn existing_file_mode(destination: &Path) -> Result<Option<u32>, ResourceError> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(ResourceError::SymlinkRejected(
+                destination
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("文件")
+                    .to_owned(),
+            ))
+        }
+        Ok(metadata) if !metadata.is_file() => Err(ResourceError::UnsafePath(
+            "目标存在但不是普通文件".to_owned(),
+        )),
+        Ok(metadata) => Ok(Some(metadata.permissions().mode() & 0o7777)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(ResourceError::io("inspect_file_permissions", error)),
+    }
 }
 
 /// 在打开前拒绝检查时可见的符号链接，并限时独占锁定协调文件。

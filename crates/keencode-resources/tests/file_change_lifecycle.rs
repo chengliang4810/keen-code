@@ -4,6 +4,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 use keencode_model::{ResponseMetadata, StopReason, TokenUsage};
 use keencode_resources::{
     AgentId, ArtifactLimits, ArtifactStore, Durability, FileSnapshot, IdempotentAppendOutcome,
@@ -747,6 +750,52 @@ fn edit_reverts_existing_file_for_last_root_turn() {
     let (source, _) = cold_recover(fixture.root.path(), &fixture.session_id)
         .expect("恢复文件后的源 Session 应可冷恢复");
     assert!(source.raw_transcript_messages().is_empty());
+}
+
+/// 恢复已有 Unix 文件时，原子替换必须保留目标当前权限位，并跨冷恢复保持不变。
+#[cfg(unix)]
+#[test]
+fn edit_reverts_existing_file_preserves_unix_permissions() {
+    let fixture = create_fixture(InitialToolState::AppliedAndCompleted, false);
+    let target = fixture.workspace.path().join("result.bin");
+    fs::write(&target, &fixture.after_bytes).expect("工作区应处于工具写后状态");
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o640))
+        .expect("测试文件权限应可设置");
+
+    let result = prepare_edit_user(
+        fixture.root.path(),
+        journal_config(),
+        artifact_limits(),
+        SessionEditUserRequest {
+            source_session_id: fixture.session_id.clone(),
+            target_message_id: "user-message-turn-1".to_owned(),
+            expected_text: "第一轮用户消息".to_owned(),
+            revert_files: true,
+            operation_id: "revert-existing-file-permissions".to_owned(),
+        },
+    )
+    .expect("现有文件应可随编辑恢复");
+
+    assert!(result.reverted_files);
+    assert_eq!(fs::read(&target).expect("恢复后的文件应可读"), fixture.before_bytes);
+    assert_eq!(
+        fs::metadata(&target)
+            .expect("恢复后的文件元数据应可读")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o640,
+    );
+    cold_recover(fixture.root.path(), &fixture.session_id)
+        .expect("恢复文件后的源 Session 应可冷恢复");
+    assert_eq!(
+        fs::metadata(&target)
+            .expect("冷恢复后的文件元数据应可读")
+            .permissions()
+            .mode()
+            & 0o7777,
+        0o640,
+    );
 }
 
 /// 开启文件恢复时，最后根 Turn 新建的文件必须被删除。
