@@ -731,6 +731,9 @@ impl ProviderEntry {
             .map_err(|error| error.to_string())?;
         config.response_mode = response_mode;
         config.request_timeout = Some(Duration::from_secs(request_timeout_secs));
+        // Live-test 的 `max_attempts` 是唯一权威重试预算；关闭 ProviderClient 的
+        // 内层自动重试，避免一次探测被两层预算相乘且让落盘 attempts 失真。
+        config.retry.max_attempts = 1;
         Ok(config)
     }
 
@@ -1444,6 +1447,25 @@ mod tests {
             provider.credential_resume_proof("run-salt"),
             "计算补测证明不得改变普通证明"
         );
+    }
+
+    /// 验证探测编排独占重试预算，ProviderClient 不会再形成乘法重试。
+    #[test]
+    fn provider_config_关闭内层自动重试() {
+        let provider = ProviderEntry {
+            id: "provider".to_owned(),
+            name: "测试".to_owned(),
+            base_url: "https://example.com/v1".to_owned(),
+            models: vec!["model".to_owned()],
+            api_backend: "responses".to_owned(),
+            api_key: "synthetic-secret".to_owned(),
+        };
+
+        let config = provider
+            .provider_config(ProviderProtocol::Responses, WireResponseMode::Buffered, 5)
+            .expect("探测 Provider 配置应有效");
+
+        assert_eq!(config.retry.max_attempts, 1);
     }
 
     /// 验证真实测试拒绝会被恢复 HMAC 低成本枚举的明显弱凭据。
