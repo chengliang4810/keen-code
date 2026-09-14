@@ -208,6 +208,12 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
                 None,
                 "prompt context",
             ),
+            context_hook(
+                "test:subagent-context",
+                HookPhase::SubagentStart,
+                Some("general-purpose".to_owned()),
+                "subagent context",
+            ),
         ],
         plan: PlanGuard::inactive(),
         started: Arc::new(Mutex::new(HashSet::new())),
@@ -234,6 +240,19 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
     );
     let second = hook.turn_start(context).await.unwrap();
     assert_eq!(second.context[0].text, "prompt context");
+
+    let child_context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("context-session").unwrap(),
+            turn_id: TurnId::new("context-child-turn").unwrap(),
+            source_agent_id: AgentId::new("child-agent").unwrap(),
+        },
+        prompt: "child task".to_owned(),
+        has_history: false,
+    };
+    let child_first = hook.turn_start(child_context.clone()).await.unwrap();
+    assert_eq!(child_first.context[0].text, "subagent context");
+    assert!(hook.turn_start(child_context).await.unwrap().context.is_empty());
 }
 
 #[cfg(unix)]
@@ -277,6 +296,100 @@ async fn failed_one_time_lifecycle_hook_is_retried() {
             .lines()
             .count(),
         2
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_command_lifecycle_hook_is_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:failed-session".to_owned(),
+            HookPhase::SessionStart,
+            None,
+            r#"printf 'attempt\n' >> attempts.txt; exit 1"#.to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "worker".to_owned(),
+    };
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("failed-session").unwrap(),
+            turn_id: TurnId::new("failed-turn").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "task".to_owned(),
+        has_history: false,
+    };
+
+    for _ in 0..2 {
+        let error = hook
+            .turn_start(context.clone())
+            .await
+            .expect_err("失败的 SessionStart Hook 必须保留重试机会");
+        assert_eq!(error.code, "hook_command_failed");
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("attempts.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+    assert!(
+        !hook
+            .started
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn outer_timeout_releases_lifecycle_lease() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:timeout-session".to_owned(),
+            HookPhase::SessionStart,
+            None,
+            r#"touch started; sleep 10"#.to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "worker".to_owned(),
+    };
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("timeout-session").unwrap(),
+            turn_id: TurnId::new("timeout-turn").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "task".to_owned(),
+        has_history: false,
+    };
+
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            hook.turn_start(context.clone())
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        !hook
+            .started
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
     );
 }
 

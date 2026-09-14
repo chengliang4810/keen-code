@@ -311,7 +311,7 @@ impl AgentHook for NativeLifecycleHooks {
                                 "source": source,
                                 "prompt": context.prompt,
                             });
-                            let output = run_command_hook(spec, self.plan, &payload).await?;
+                            let output = run_lifecycle_command_hook(spec, self.plan, &payload).await?;
                             if phase == HookPhase::UserPromptSubmit
                                 && let Ok(value) = serde_json::from_str::<Value>(&output)
                                 && value.get("decision").and_then(Value::as_str) == Some("block")
@@ -1914,13 +1914,35 @@ async fn run_command_hook(
     plan: PlanGuard,
     payload: &Value,
 ) -> Result<String, HookCallbackError> {
+    run_command_hook_with_policy(spec, plan, payload, false).await
+}
+
+/// 执行生命周期命令 Hook；命令失败必须传播给一次性 lease 的回滚边界。
+async fn run_lifecycle_command_hook(
+    spec: &CommandHookSpec,
+    plan: PlanGuard,
+    payload: &Value,
+) -> Result<String, HookCallbackError> {
+    run_command_hook_with_policy(spec, plan, payload, true).await
+}
+
+/// 先执行 Plan 只读守卫，再按 Hook 阶段解析有界命令输出。
+async fn run_command_hook_with_policy(
+    spec: &CommandHookSpec,
+    plan: PlanGuard,
+    payload: &Value,
+    strict_failure: bool,
+) -> Result<String, HookCallbackError> {
     plan.authorize(ToolEffect::ChangesState)
         .map_err(|_| HookCallbackError::new("hook_plan_denied", "计划模式禁止执行命令 Hook"))?;
     let started = std::time::Instant::now();
     tracing::info!(hook = %spec.name, phase = %spec.phase, session_id = ?payload.get("session_id").and_then(|value| value.as_str()), prompt_id = ?payload.get("prompt_id").and_then(|value| value.as_str()), "插件 Hook 开始");
-    let result = execute_hook_command(spec, payload)
-        .await
-        .and_then(|output| {
+    let result = if strict_failure {
+        execute_lifecycle_hook_command(spec, payload).await
+    } else {
+        execute_hook_command(spec, payload).await
+    }
+    .and_then(|output| {
             match spec.phase {
                 HookPhase::PreToolUse => {
                     parse_pre_hook_output(output.clone())?;
@@ -1950,6 +1972,9 @@ async fn run_command_hook(
         Err(error) => {
             tracing::error!(hook = %spec.name, phase = %spec.phase, code = %error.code, error = %error.message, elapsed_ms = started.elapsed().as_millis() as u64, "插件 Hook 失败")
         }
+    }
+    if strict_failure {
+        return result;
     }
     match result {
         Err(error) if !matches!(error.code.as_str(), "hook_prompt_blocked" | "hook_stopped") => {
@@ -2015,6 +2040,33 @@ async fn execute_hook_command_with_limits(
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<String, HookCallbackError> {
+    execute_hook_command_with_limits_policy(
+        spec,
+        payload,
+        timeout,
+        max_output_bytes,
+        false,
+    )
+    .await
+}
+
+/// 使用严格失败语义执行生命周期 Hook，失败时必须让一次性 lease 回滚。
+async fn execute_lifecycle_hook_command(
+    spec: &CommandHookSpec,
+    payload: &Value,
+) -> Result<String, HookCallbackError> {
+    execute_hook_command_with_limits_policy(spec, payload, spec.timeout, MAX_HOOK_OUTPUT_BYTES, true)
+        .await
+}
+
+/// 使用明确资源边界执行 Hook，并按调用方选择普通或生命周期失败语义。
+async fn execute_hook_command_with_limits_policy(
+    spec: &CommandHookSpec,
+    payload: &Value,
+    timeout: Duration,
+    max_output_bytes: usize,
+    strict_failure: bool,
+) -> Result<String, HookCallbackError> {
     let output =
         execute_hook_command_process_with_limits(spec, payload, timeout, max_output_bytes).await?;
     if output.status.code() == Some(2) {
@@ -2053,6 +2105,12 @@ async fn execute_hook_command_with_limits(
                 Ok(json!({"decision":"block","reason":reason}).to_string())
             }
             HookPhase::UserPromptSubmit => Err(HookCallbackError::new("hook_prompt_blocked", reason)),
+            HookPhase::SessionStart | HookPhase::SubagentStart if strict_failure => {
+                Err(HookCallbackError::new(
+                    "hook_command_failed",
+                    "生命周期 Hook 命令阻止了当前回合",
+                ))
+            }
             HookPhase::SessionStart | HookPhase::SubagentStart => Ok(String::new()),
             _ => Ok(json!({"hookSpecificOutput":{"additionalContext":reason}}).to_string()),
         };
@@ -2066,6 +2124,12 @@ async fn execute_hook_command_with_limits(
             });
         }
         tracing::error!(hook = %spec.name, phase = %spec.phase, exit_code = ?output.status.code(), error = %bounded_error_text(&stderr), "插件 Hook 命令非阻断失败");
+        if strict_failure {
+            return Err(HookCallbackError::new(
+                "hook_command_failed",
+                "生命周期 Hook 命令以失败状态退出",
+            ));
+        }
         return Ok(String::new());
     }
     if !stderr.trim().is_empty() {
