@@ -240,6 +240,8 @@ mod tests {
         }
         assert!(!core().contains("{{"));
         assert!(!core().contains("Turn date:"));
+        assert!(core().contains("mark a task in_progress before starting work"));
+        assert!(core().contains("always mark it completed when fully accomplished"));
     }
 
     /// 能力说明只能随真实工具存在而启用，子 Agent 不收到创建教程。

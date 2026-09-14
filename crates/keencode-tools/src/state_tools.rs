@@ -47,7 +47,9 @@ impl AgentTool for TodoWriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "TodoWrite",
-            "Replace the current root session's single todo list in full. Keep at most one in_progress item for complex tasks. Submitting an entirely completed list automatically collapses the current todo list.",
+            "Replace the current root session's single todo list in full. Use it for complex multi-step work, multiple requested tasks, or an explicit request to track tasks; skip trivial or purely informational requests.\n\n\
+             Status workflow: pending -> in_progress -> completed. Mark a task in_progress BEFORE starting work; keep at most one item in_progress at a time. Always mark a task completed when its work is fully accomplished, then select the next task. Do not mark a task completed while its implementation is partial, required tests fail, or necessary files, dependencies, or unresolved errors block completion. Keep unfinished work in_progress; add a task describing any blocker that needs resolution.\n\n\
+             Update task details when requirements change and add follow-up tasks discovered during implementation. Remove tasks that are no longer relevant or were created in error rather than marking unperformed work completed. Use the latest available list to avoid duplicates or overwriting newer changes. Send the complete updated list on every call, including content, status, and active_form for each item. Submitting an entirely completed list automatically collapses the current todo list.",
             json!({
                 "type": "object",
                 "properties": {
