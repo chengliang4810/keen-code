@@ -38,8 +38,8 @@ const MAX_HOOK_ERROR_MESSAGE_BYTES: usize = 4 * 1_024;
 /// 工作线程异常退出后，下一次调用可发起唯一恢复尝试前的固定退避。
 pub(crate) const HOOK_WORKER_RECOVERY_BACKOFF: Duration = Duration::from_millis(100);
 
-/// 同一共享 Store 谱系允许同时存活的隔离 Hook worker 上限。
-const MAX_HOOK_WORKERS_PER_STORE: usize = 16;
+/// 单个应用运行时允许同时存活的隔离 Hook worker 默认上限。
+const DEFAULT_MAX_HOOK_WORKERS: usize = 16;
 
 /// Hook 异步回调使用的对象安全 Future。
 pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -510,8 +510,8 @@ struct RegisteredHook {
     hook: Arc<dyn AgentHook>,
     /// 区分可恢复 worker 崩溃与可能残留线程的永久熔断状态。
     circuit: Arc<HookCircuit>,
-    /// 跨 Hook 声明换代共享的隔离 worker 容量边界。
-    worker_admission: Arc<HookWorkerAdmission>,
+    /// 跨项目与 Hook 声明换代共享的隔离 worker 容量边界。
+    worker_admission: HookWorkerAdmission,
 }
 
 /// Hook 隔离线程的熔断状态；只有已确认退出的 worker 才允许一次自动恢复。
@@ -646,43 +646,67 @@ impl HookCircuit {
     }
 }
 
-/// 跨 Hook 声明换代共享的隔离 worker 容量计数。
-struct HookWorkerAdmission {
+/// 隔离 Hook worker 容量的共享状态。
+#[derive(Debug)]
+struct HookWorkerAdmissionState {
     active: AtomicUsize,
     maximum: usize,
 }
 
+/// 由应用运行时持有并注入各项目 Store 的共享 Hook worker 容量。
+///
+/// 每个应用运行时应只创建一个实例；克隆只共享计数，不复制容量。独立应用或
+/// 测试运行时可以分别创建实例，避免进程静态状态污染隔离边界。
+#[derive(Clone, Debug)]
+pub struct HookWorkerAdmission {
+    state: Arc<HookWorkerAdmissionState>,
+}
+
+impl Default for HookWorkerAdmission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HookWorkerAdmission {
-    /// 创建固定且非零容量的 worker 边界。
-    fn new(maximum: usize) -> Self {
+    /// 创建使用固定生产上限的独立应用级容量所有权。
+    pub fn new() -> Self {
+        Self::with_worker_limit(DEFAULT_MAX_HOOK_WORKERS)
+    }
+
+    /// 创建测试使用的非零 worker 容量边界。
+    pub(crate) fn with_worker_limit(maximum: usize) -> Self {
         assert!(maximum > 0, "Hook worker 上限必须大于零");
         Self {
-            active: AtomicUsize::new(0),
-            maximum,
+            state: Arc::new(HookWorkerAdmissionState {
+                active: AtomicUsize::new(0),
+                maximum,
+            }),
         }
     }
 
     /// 非阻塞占用一个 worker 槽；已被残留线程占满时保持 fail-closed。
-    fn try_acquire(self: &Arc<Self>) -> Option<HookWorkerPermit> {
-        self.active
+    fn try_acquire(&self) -> Option<HookWorkerPermit> {
+        self.state
+            .active
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
-                (active < self.maximum).then_some(active + 1)
+                (active < self.state.maximum).then_some(active + 1)
             })
             .ok()?;
         Some(HookWorkerPermit {
-            admission: Arc::clone(self),
+            admission: Arc::clone(&self.state),
         })
     }
 
     /// 返回调用方可用于稳定错误的固定容量。
-    const fn maximum(&self) -> usize {
-        self.maximum
+    fn maximum(&self) -> usize {
+        self.state.maximum
     }
 }
 
 /// 隔离线程真实退出前一直持有的 worker 槽。
 struct HookWorkerPermit {
-    admission: Arc<HookWorkerAdmission>,
+    admission: Arc<HookWorkerAdmissionState>,
 }
 
 impl Drop for HookWorkerPermit {
@@ -692,20 +716,20 @@ impl Drop for HookWorkerPermit {
     }
 }
 
-/// 在同一 Hook 声明代次构建的多个 Turn 之间共享熔断状态，并在后续声明代次
-/// 继续共享固定 worker 容量，避免超时或取消后无法终止的线程随重载无界增长。
+/// 在同一 Hook 声明代次构建的多个 Turn 之间共享熔断状态；worker 容量由应用
+/// 运行时显式注入，跨项目和后续声明代次共享，限制无法终止的残留线程总数。
 ///
 /// 只有 Hook 声明确实变化时才应调用 [`HookCircuitStore::for_changed_hooks`]；Skill、
 /// MCP 等无关候选变化必须克隆当前 Store，以保留已有熔断。
 #[derive(Clone)]
 pub struct HookCircuitStore {
     circuits: Arc<SyncMutex<HashMap<String, Arc<HookCircuit>>>>,
-    worker_admission: Arc<HookWorkerAdmission>,
+    worker_admission: HookWorkerAdmission,
 }
 
 impl Default for HookCircuitStore {
     fn default() -> Self {
-        Self::with_worker_limit(MAX_HOOK_WORKERS_PER_STORE)
+        Self::with_worker_admission(HookWorkerAdmission::new())
     }
 }
 
@@ -721,9 +745,9 @@ impl fmt::Debug for HookCircuitStore {
             .field("circuit_count", &circuit_count)
             .field(
                 "active_workers",
-                &self.worker_admission.active.load(Ordering::Acquire),
+                &self.worker_admission.state.active.load(Ordering::Acquire),
             )
-            .field("maximum_workers", &self.worker_admission.maximum)
+            .field("maximum_workers", &self.worker_admission.state.maximum)
             .finish()
     }
 }
@@ -734,20 +758,17 @@ impl HookCircuitStore {
         Self::default()
     }
 
-    /// 为确实变化的 Hook 声明创建新熔断表，同时保留本谱系的 worker 容量占用。
-    pub fn for_changed_hooks(&self) -> Self {
+    /// 使用应用运行时提供的共享容量创建独立熔断表。
+    pub fn with_worker_admission(worker_admission: HookWorkerAdmission) -> Self {
         Self {
             circuits: Arc::new(SyncMutex::new(HashMap::new())),
-            worker_admission: Arc::clone(&self.worker_admission),
+            worker_admission,
         }
     }
 
-    /// 创建指定 worker 容量的 Store；生产入口使用固定默认值，测试可收紧边界。
-    pub(crate) fn with_worker_limit(maximum: usize) -> Self {
-        Self {
-            circuits: Arc::new(SyncMutex::new(HashMap::new())),
-            worker_admission: Arc::new(HookWorkerAdmission::new(maximum)),
-        }
+    /// 为确实变化的 Hook 声明创建新熔断表，同时保留本谱系的 worker 容量占用。
+    pub fn for_changed_hooks(&self) -> Self {
+        Self::with_worker_admission(self.worker_admission.clone())
     }
 
     /// 返回同名 Hook 的候选级共享状态。
@@ -763,9 +784,9 @@ impl HookCircuitStore {
         )
     }
 
-    /// 返回当前 Store 谱系共享的 worker admission。
-    fn worker_admission(&self) -> Arc<HookWorkerAdmission> {
-        Arc::clone(&self.worker_admission)
+    /// 返回应用运行时注入的共享 worker admission。
+    fn worker_admission(&self) -> HookWorkerAdmission {
+        self.worker_admission.clone()
     }
 }
 
@@ -1469,13 +1490,13 @@ pub enum HookError {
         /// 已冻结的真实 Hook 名称。
         hook_name: String,
     },
-    /// 当前共享 Store 谱系已有过多仍存活的隔离 worker。
+    /// 当前应用运行时已有过多仍存活的隔离 worker。
     WorkerCapacityExceeded {
         /// 本次被容量边界阻止的 Hook 阶段。
         phase: HookPhase,
         /// 已冻结的真实 Hook 名称。
         hook_name: String,
-        /// 同一 Store 谱系允许同时存活的 worker 上限。
+        /// 同一应用运行时允许同时存活的 worker 上限。
         maximum: usize,
     },
     /// Hook 回调在硬时间上限内没有返回。

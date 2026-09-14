@@ -1,5 +1,6 @@
 pub mod plugin_compatibility;
 use flate2::read::GzDecoder;
+use keencode_agent::HookWorkerAdmission;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +57,8 @@ pub struct ExtensionsState {
     plugin_secrets: Mutex<SystemSecretStore>,
     /// 为完整扩展候选分配且永不复用的进程内代次。
     next_runtime_generation: AtomicU64,
+    /// 应用运行时内所有项目共享的隔离 Hook worker 容量所有权。
+    hook_worker_admission: HookWorkerAdmission,
     /// 按规范项目根隔离的候选构建单飞锁与已发布指纹。
     runtime_projects: Mutex<
         BTreeMap<
@@ -111,6 +114,7 @@ impl ExtensionsState {
         project_root: &Path,
     ) -> Result<std::sync::Arc<tokio::sync::Mutex<runtime_contributor::ProjectRuntimeCache>>, String>
     {
+        let hook_worker_admission = self.hook_worker_admission.clone();
         let mut projects = self
             .runtime_projects
             .lock()
@@ -119,7 +123,7 @@ impl ExtensionsState {
             .entry(project_root.to_path_buf())
             .or_insert_with(|| {
                 std::sync::Arc::new(tokio::sync::Mutex::new(
-                    runtime_contributor::ProjectRuntimeCache::default(),
+                    runtime_contributor::ProjectRuntimeCache::new(hook_worker_admission),
                 ))
             })
             .clone())

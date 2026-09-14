@@ -2994,29 +2994,41 @@ async fn hook声明变化重置永久熔断() {
     assert_eq!(new_calls.load(Ordering::SeqCst), 1);
 }
 
-/// 未退出 worker 必须跨 Hook 声明代次继续占用容量，无关候选也不得绕过原熔断。
+/// 未退出 worker 必须跨独立项目 Store 与 Hook 代次共享容量，无关候选不得绕过熔断。
 #[tokio::test]
-async fn 未退出worker跨hook声明代次受共享容量限制() {
-    let root_circuits = HookCircuitStore::with_worker_limit(2);
+async fn 未退出worker跨独立store与hook代次受共享容量限制() {
+    let worker_admission = HookWorkerAdmission::with_worker_limit(2);
+    let first_project_circuits = HookCircuitStore::with_worker_admission(worker_admission.clone());
+    let second_project_circuits = HookCircuitStore::with_worker_admission(worker_admission);
     let limits = HookLimits {
         max_stop_hook_rounds: 1,
         max_context_bytes: 1_024,
         max_callback_ms: 20,
     };
-    let context = PreToolUseContext {
+    let first_context = PreToolUseContext {
         invocation: HookInvocationContext {
-            session_id: SessionId::new("worker-capacity-session").expect("Session 标识应有效"),
-            turn_id: TurnId::new("worker-capacity-turn").expect("Turn 标识应有效"),
-            source_agent_id: AgentId::new("worker-capacity-agent").expect("Agent 标识应有效"),
+            session_id: SessionId::new("first-project-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("first-project-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("first-project-agent").expect("Agent 标识应有效"),
         },
-        tool_call_id: "worker-capacity-call".to_owned(),
+        tool_call_id: "first-project-call".to_owned(),
+        tool_name: "probe".to_owned(),
+        input: json!({"value": "read"}),
+    };
+    let second_context = PreToolUseContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("second-project-session").expect("Session 标识应有效"),
+            turn_id: TurnId::new("second-project-turn").expect("Turn 标识应有效"),
+            source_agent_id: AgentId::new("second-project-agent").expect("Agent 标识应有效"),
+        },
+        tool_call_id: "second-project-call".to_owned(),
         tool_name: "probe".to_owned(),
         input: json!({"value": "read"}),
     };
     let cancellation = TurnCancellation::new();
 
     let first_pending_calls = Arc::new(AtomicUsize::new(0));
-    let mut first_registry = HookRegistry::with_circuit_store(root_circuits.clone());
+    let mut first_registry = HookRegistry::with_circuit_store(first_project_circuits.clone());
     first_registry
         .register(Arc::new(IsolationProbeHook {
             mode: IsolationHookMode::Pending,
@@ -3027,7 +3039,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     let first_runtime = HookRuntime::new(first_registry, limits).expect("Hook 配置应有效");
     assert!(matches!(
         first_runtime
-            .run_pre_tool_use(context.clone(), &cancellation)
+            .run_pre_tool_use(first_context.clone(), &cancellation)
             .await,
         Err(HookError::TimedOut {
             phase: HookPhase::PreToolUse,
@@ -3038,7 +3050,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     assert_eq!(first_pending_calls.load(Ordering::SeqCst), 1);
 
     let unrelated_calls = Arc::new(AtomicUsize::new(0));
-    let mut unrelated_registry = HookRegistry::with_circuit_store(root_circuits.clone());
+    let mut unrelated_registry = HookRegistry::with_circuit_store(first_project_circuits.clone());
     unrelated_registry
         .register(Arc::new(IsolationProbeHook {
             mode: IsolationHookMode::TokioTimer,
@@ -3049,7 +3061,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     let unrelated_runtime = HookRuntime::new(unrelated_registry, limits).expect("Hook 配置应有效");
     assert!(matches!(
         unrelated_runtime
-            .run_pre_tool_use(context.clone(), &cancellation)
+            .run_pre_tool_use(first_context.clone(), &cancellation)
             .await,
         Err(HookError::CircuitOpen {
             phase: HookPhase::PreToolUse,
@@ -3058,7 +3070,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     ));
     assert_eq!(unrelated_calls.load(Ordering::SeqCst), 0);
 
-    let changed_circuits = root_circuits.for_changed_hooks();
+    let changed_circuits = first_project_circuits.for_changed_hooks();
     let changed_healthy_calls = Arc::new(AtomicUsize::new(0));
     let mut changed_registry = HookRegistry::with_circuit_store(changed_circuits.clone());
     changed_registry
@@ -3070,15 +3082,14 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
         .expect("变更后的健康 Hook 应成功注册");
     HookRuntime::new(changed_registry, limits)
         .expect("Hook 配置应有效")
-        .run_pre_tool_use(context.clone(), &cancellation)
+        .run_pre_tool_use(first_context, &cancellation)
         .await
         .expect("真实 Hook 声明变化后应允许健康实现恢复");
     assert_eq!(changed_healthy_calls.load(Ordering::SeqCst), 1);
 
-    let second_pending_circuits = changed_circuits.for_changed_hooks();
     let second_pending_calls = Arc::new(AtomicUsize::new(0));
     let mut second_pending_registry =
-        HookRegistry::with_circuit_store(second_pending_circuits.clone());
+        HookRegistry::with_circuit_store(second_project_circuits.clone());
     second_pending_registry
         .register(Arc::new(IsolationProbeHook {
             mode: IsolationHookMode::Pending,
@@ -3089,7 +3100,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     assert!(matches!(
         HookRuntime::new(second_pending_registry, limits)
             .expect("Hook 配置应有效")
-            .run_pre_tool_use(context.clone(), &cancellation)
+            .run_pre_tool_use(second_context.clone(), &cancellation)
             .await,
         Err(HookError::TimedOut {
             phase: HookPhase::PreToolUse,
@@ -3101,7 +3112,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
 
     let capacity_calls = Arc::new(AtomicUsize::new(0));
     let mut capacity_registry =
-        HookRegistry::with_circuit_store(second_pending_circuits.for_changed_hooks());
+        HookRegistry::with_circuit_store(second_project_circuits.for_changed_hooks());
     capacity_registry
         .register(Arc::new(IsolationProbeHook {
             mode: IsolationHookMode::TokioTimer,
@@ -3112,7 +3123,7 @@ async fn 未退出worker跨hook声明代次受共享容量限制() {
     assert!(matches!(
         HookRuntime::new(capacity_registry, limits)
             .expect("Hook 配置应有效")
-            .run_pre_tool_use(context, &cancellation)
+            .run_pre_tool_use(second_context, &cancellation)
             .await,
         Err(HookError::WorkerCapacityExceeded {
             phase: HookPhase::PreToolUse,

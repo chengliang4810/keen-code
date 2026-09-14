@@ -9,7 +9,7 @@ use crate::agent_runtime::{
 };
 use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
-    HookLimits, HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard,
+    HookLimits, HookPhase, HookRegistry, HookRuntime, HookWorkerAdmission, OnErrorHookContext, PlanGuard,
     PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
     PreCompactHookOutput, PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction,
     StopHookContext, StopHookOutput, ToolEffect, ToolHookFailureKind, ToolHookOutput, ToolRegistry,
@@ -31,7 +31,7 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 
 /// 同一项目已经成功发布的候选指纹与代次。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(super) struct ProjectRuntimeCache {
     /// 最近成功发布的完整输入指纹。
     fingerprint: Option<String>,
@@ -39,8 +39,20 @@ pub(super) struct ProjectRuntimeCache {
     generation: Option<u64>,
     /// 最近成功发布的 Hook 声明指纹；Skill、MCP 等变化不得重置该状态。
     hook_fingerprint: Option<String>,
-    /// 项目整个 Hook 热重载谱系共享的熔断状态与 worker 容量边界。
+    /// 项目 Hook 热重载谱系共享熔断，并使用应用运行时级 worker 容量边界。
     hook_circuits: HookCircuitStore,
+}
+
+impl ProjectRuntimeCache {
+    /// 使用应用运行时共享容量创建项目独立的 Hook 熔断状态。
+    pub(super) fn new(hook_worker_admission: HookWorkerAdmission) -> Self {
+        Self {
+            fingerprint: None,
+            generation: None,
+            hook_fingerprint: None,
+            hook_circuits: HookCircuitStore::with_worker_admission(hook_worker_admission),
+        }
+    }
 }
 
 /// 构建期间允许检测外部配置变化并重新开始的最大次数。

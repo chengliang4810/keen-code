@@ -62,10 +62,10 @@ pub use event::{
 pub use hook::{
     AgentHook, HookCallbackError, HookCircuitStore, HookContextAddition, HookError, HookFuture,
     HookInvocationContext, HookLimits, HookLimitsError, HookPhase, HookRegistrationError,
-    HookRegistry, HookRuntime, OnErrorHookContext, PostCompactHookContext, PostToolUseContext,
-    PostToolUseFailureContext, PreCompactHookContext, PreCompactHookOutput, PreToolUseAction,
-    PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
-    ToolHookFailureKind, ToolHookOutput, TurnStartAbortReason, TurnStartHookContext,
+    HookRegistry, HookRuntime, HookWorkerAdmission, OnErrorHookContext, PostCompactHookContext,
+    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreCompactHookOutput,
+    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
+    StopHookOutput, ToolHookFailureKind, ToolHookOutput, TurnStartAbortReason, TurnStartHookContext,
 };
 pub(crate) use hook::{PostHookOutputBudget, ResolvedHookContext, ResolvedStopHook};
 pub use ids::{
