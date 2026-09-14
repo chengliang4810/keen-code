@@ -1121,7 +1121,9 @@ async fn monitor_bounded_process(
                 "子进程执行超时",
             ));
         }
-        match guard.child.try_wait() {
+        // 只由 Tokio Child 回收主进程；command-group 的 Unix try_wait 会先对整个
+        // PGID 调 waitpid，可能在同组其他直属子进程仍运行时丢失已取得的主进程状态。
+        match guard.child.inner().try_wait() {
             Ok(Some(status)) => {
                 terminate_and_wait(&mut guard.child)
                     .await
@@ -1434,7 +1436,8 @@ pub(crate) async fn monitor_process(
             guard.armed = false;
             return Ok(ProcessTermination::TimedOut);
         }
-        match guard.child.try_wait() {
+        // 退出状态属于主进程，进程组只在后续 terminate_and_wait 中负责清理。
+        match guard.child.inner().try_wait() {
             Ok(Some(status)) => {
                 terminate_and_wait(&mut guard.child).await?;
                 guard.armed = false;
@@ -1817,5 +1820,83 @@ mod bounded_shell_tests {
             "KC_DIRECT_ARGS"
         );
         assert!(output.stderr.is_empty());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod bounded_process_group_tests {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    use super::{
+        AtomicBool, BoundedCommandRequest, Duration, Instant, monitor_bounded_process,
+        run_bounded_command, spawn_bounded_group,
+    };
+
+    /// 同组其他直属子进程仍运行时，不得由组级 waitpid 丢失主进程退出状态。
+    #[tokio::test]
+    async fn primary_exit_preserves_status_while_group_peer_is_running() {
+        let directory = tempfile::tempdir().expect("创建隔离命令目录");
+        let request = BoundedCommandRequest::plugin_shell(
+            None,
+            "sleep 0.2; exit 2",
+            directory.path(),
+            Duration::from_secs(2),
+            1024,
+        )
+        .expect("应解析系统 Bash")
+        .with_stdin(b"{}".to_vec());
+        let mut guard = spawn_bounded_group(&request).expect("应启动主进程组");
+        let process_group = guard.child.id().expect("主进程应保留 PID") as i32;
+
+        // 创建同一 PGID 下的另一个直属子进程，使组级 waitpid 先取得主进程状态后
+        // 仍返回“组内有进程运行”；旧实现会丢弃该状态并在 Tokio 侧得到 ECHILD。
+        let mut peer = Command::new("sleep");
+        peer.arg("2")
+            .current_dir(directory.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(process_group);
+        drop(peer.spawn().expect("应启动同组直属子进程"));
+
+        let status = monitor_bounded_process(
+            &mut guard,
+            Instant::now() + request.timeout,
+            &AtomicBool::new(false),
+        )
+        .await
+        .expect("主进程状态不得被进程组回收竞争丢失");
+        assert_eq!(status.code(), Some(2));
+    }
+
+    /// 并发快速退出必须逐个保留非零状态与 stderr，不得被其他 SIGCHLD 干扰。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_fast_exits_preserve_status_and_stderr() {
+        let directory = tempfile::tempdir().expect("创建隔离命令目录");
+        let mut commands = tokio::task::JoinSet::new();
+        for _ in 0..64 {
+            let cwd = directory.path().to_path_buf();
+            commands.spawn(async move {
+                let request = BoundedCommandRequest::plugin_shell(
+                    None,
+                    "printf 'expected stderr' >&2; exit 2",
+                    &cwd,
+                    Duration::from_secs(2),
+                    1024,
+                )
+                .expect("应解析系统 Bash")
+                .with_stdin(b"{}".to_vec());
+                run_bounded_command(request).await
+            });
+        }
+
+        while let Some(result) = commands.join_next().await {
+            let output = result
+                .expect("并发命令任务不应 panic")
+                .expect("并发快速退出不得丢失进程状态");
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(output.stderr, b"expected stderr");
+        }
     }
 }
