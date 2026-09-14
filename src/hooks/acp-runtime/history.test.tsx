@@ -404,6 +404,61 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     expect(apiMocks.sessionReplay).not.toHaveBeenCalled();
   });
 
+  it("Goal 恢复失败时拒绝本次恢复，并允许下一次重新取得权威快照", async () => {
+    const sessionId = "session-goal-failed";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    apiMocks.sessionLoad.mockResolvedValue(loadResult(sessionId, "plan"));
+    apiMocks.goalGet
+      .mockRejectedValueOnce(new Error("goal unavailable"))
+      .mockResolvedValueOnce({ sessionId, revision: 2, goal: undefined });
+
+    await expect(
+      harness.replayHistory(sessionId, { sessionId, epoch: 1 }),
+    ).rejects.toThrow("goal unavailable");
+    const failed = harness.workspaceRef.current.sessions[sessionId];
+    expect(failed?.replay.restoring).toBe(false);
+    expect(failed?.replay.loaded).toBe(false);
+    expect(failed?.delivery.frozen).toBe(true);
+    expect(failed?.last_error?.code).toBe("session_recovery_failed");
+    expect(harness.setPlanModeSessionKey).not.toHaveBeenCalled();
+
+    harness.setFocus({ sessionId, epoch: 2 });
+    await harness.replayHistory(sessionId, { sessionId, epoch: 2 });
+    const recovered = harness.workspaceRef.current.sessions[sessionId];
+    expect(recovered?.replay.restoring).toBe(false);
+    expect(recovered?.replay.loaded).toBe(true);
+    expect(recovered?.delivery.frozen).toBe(false);
+    expect(recovered?.goal).toEqual({ revision: 2, goal: null });
+    expect(harness.composer.planModeSessionKey).toBe(sessionId);
+    expect(apiMocks.goalGet).toHaveBeenCalledTimes(2);
+  });
+
+  it("较低修订的迟到 Goal 快照不会覆盖已有较新投影", async () => {
+    const sessionId = "session-goal-newer-projection";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    const existingGoal = {
+      id: "goal-current",
+      title: "当前目标",
+      scope: "session" as const,
+      status: "active" as const,
+      objective: "当前目标正文",
+      tokensUsed: 1,
+      timeUsedSeconds: 1,
+      createdAtMs: 1,
+      updatedAtMs: 4,
+    };
+    const view = harness.workspaceRef.current.sessions[sessionId] ??
+      ensureAcpSession(harness.workspaceRef.current, sessionId);
+    view.goal = { revision: 4, goal: existingGoal };
+    apiMocks.sessionLoad.mockResolvedValue(loadResult(sessionId, "default"));
+    apiMocks.goalGet.mockResolvedValue({ sessionId, revision: 3, goal: undefined });
+
+    await harness.replayHistory(sessionId, { sessionId, epoch: 1 });
+
+    expect(view.goal).toEqual({ revision: 4, goal: existingGoal });
+    expect(view.replay.loaded).toBe(true);
+  });
+
   it("load 历史控制信息缺失、串 Session、未结束或水位非法时冻结投影", async () => {
     const sessionId = "session-load-control-invalid";
     const valid = loadResult(sessionId, "plan");

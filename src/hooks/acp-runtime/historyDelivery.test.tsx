@@ -406,12 +406,12 @@ describe("useAcpRuntimeHistory 的 Session delivery barrier", () => {
 
     await flushMicrotasks();
     expect(deliver(harness, sessionId, 1).status).toBe("applied");
-    await recovery;
     await flushMicrotasks();
     expect(ports.goalGet).toHaveBeenCalledWith(sessionId);
+    expect(view.replay.restoring).toBe(true);
 
     pendingGoal.resolve({ sessionId, revision: 5, goal: latestGoal });
-    await flushMicrotasks();
+    await recovery;
     expect(harness.workspaceRef.current.sessions[sessionId]?.goal).toEqual({
       revision: 5,
       goal: latestGoal,
@@ -425,7 +425,7 @@ describe("useAcpRuntimeHistory 的 Session delivery barrier", () => {
     ports.goalGet.mockReturnValue(pendingGoal.promise);
     ports.sessionLoad.mockResolvedValue(loadResult(sessionId));
 
-    await harness.history.replayHistory(sessionId, {
+    const recovery = harness.history.replayHistory(sessionId, {
       sessionId,
       epoch: 1,
     });
@@ -435,7 +435,7 @@ describe("useAcpRuntimeHistory 的 Session delivery barrier", () => {
     const replacement = emptySession(sessionId);
     harness.workspaceRef.current.sessions[sessionId] = replacement;
     pendingGoal.resolve({ sessionId, revision: 1, goal: undefined });
-    await flushMicrotasks();
+    await expect(recovery).rejects.toThrow("Session 恢复 Goal 快照标识不一致");
 
     expect(replacement.goal).toEqual({ revision: 0, goal: null });
   });

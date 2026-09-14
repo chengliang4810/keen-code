@@ -265,21 +265,23 @@ export function useAcpRuntimeHistory({
           if (!isCurrentProjection() || acpWorkspaceRef.current.sessions[sessionId] !== current) {
             throw new Error("Session 恢复期间投影已替换");
           }
+          // 历史恢复期间 Goal 事件会因世代门禁被丢弃；只有重新取得并归约
+          // 当前 Session 的权威快照后，才能宣布恢复成功。
+          const goalSnapshot = await goalGet(sessionId);
+          if (!isCurrentProjection() || goalSnapshot?.sessionId !== sessionId) {
+            throw new Error("Session 恢复 Goal 快照标识不一致");
+          }
+          if (!Number.isSafeInteger(goalSnapshot.revision) || goalSnapshot.revision < 0) {
+            throw new Error("Session 恢复 Goal 修订号无效");
+          }
+          // 恢复期间可能已经观察到更高修订；迟到的较低快照不能覆盖它。
+          if (goalSnapshot.revision >= current.goal.revision) {
+            reduceGoalSnapshot(current, goalSnapshot.revision, goalSnapshot.goal ?? null);
+          }
+          if (!isCurrentProjection()) throw new Error("Session 恢复 Goal 投影已替换");
           completeSessionRecovery(current);
           current.replay.hasMore = page.hasMore;
           publish();
-          // Goal 事件可能在恢复世代门禁处被丢弃；恢复完成后必须从 Host
-          // 重新读取权威快照。查询异步返回时仍需验证 Session、投影身份和世代。
-          void Promise.resolve()
-            .then(() => goalGet(sessionId))
-            .then((result) => {
-              if (!isCurrentProjection() || result?.sessionId !== sessionId ||
-                !Number.isSafeInteger(result.revision) || result.revision < 0 ||
-                result.revision < current.goal.revision) return;
-              reduceGoalSnapshot(current, result.revision, result.goal ?? null);
-              publish();
-            })
-            .catch(() => {});
           startBackfill(sessionId, page, publish);
           void diagnosticsRecord("session_load", JSON.stringify({
             sessionId,
