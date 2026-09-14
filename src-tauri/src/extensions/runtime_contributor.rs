@@ -11,9 +11,9 @@ use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
     HookLimits, HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard,
     PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
-    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
-    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
-    agent_run_error_category,
+    PreCompactHookOutput, PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction,
+    StopHookContext, StopHookOutput, ToolEffect, ToolHookFailureKind, ToolHookOutput, ToolRegistry,
+    TurnStartHookContext, agent_run_error_category,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
@@ -254,7 +254,7 @@ impl AgentHook for NativeLifecycleHooks {
                                 .unwrap_or("插件 Hook 拒绝了当前输入"),
                         ));
                     }
-                    additions.extend(parse_tool_hook_output(output)?.context);
+                    additions.extend(parse_lifecycle_hook_output(output)?.context);
                 }
             }
             Ok(ToolHookOutput { context: additions })
@@ -1576,19 +1576,9 @@ impl AgentHook for NativeCommandHook {
             {
                 return Ok(ToolHookOutput::default());
             }
-            let payload = json!({
-                "hook_event_name": "PostToolUse",
-                "cwd": spec.current_dir,
-                "session_id": context.invocation.session_id.as_str(),
-                "prompt_id": context.invocation.turn_id.as_str(),
-                "agent_id": context.invocation.source_agent_id.as_str(),
-                "tool_use_id": context.tool_call_id,
-                "tool_name": context.tool_name,
-                "tool_input": context.input,
-                "tool_response": context.result,
-            });
+            let payload = post_tool_use_hook_payload(&spec, &context);
             let output = run_command_hook(&spec, plan, &payload).await?;
-            parse_tool_hook_output(output)
+            parse_post_tool_hook_output(HookPhase::PostToolUse, output)
         })
     }
 
@@ -1605,20 +1595,9 @@ impl AgentHook for NativeCommandHook {
             {
                 return Ok(ToolHookOutput::default());
             }
-            let payload = json!({
-                "hook_event_name": "PostToolUseFailure",
-                "cwd": spec.current_dir,
-                "session_id": context.invocation.session_id.as_str(),
-                "prompt_id": context.invocation.turn_id.as_str(),
-                "agent_id": context.invocation.source_agent_id.as_str(),
-                "tool_use_id": context.tool_call_id,
-                "tool_name": context.tool_name,
-                "tool_input": context.input,
-                "tool_response": context.result,
-                "failure": context.failure,
-            });
+            let payload = post_tool_use_failure_hook_payload(&spec, &context);
             let output = run_command_hook(&spec, plan, &payload).await?;
-            parse_tool_hook_output(output)
+            parse_post_tool_hook_output(HookPhase::PostToolUseFailure, output)
         })
     }
 
@@ -1639,19 +1618,20 @@ impl AgentHook for NativeCommandHook {
         })
     }
 
-    /// 在自动压缩开始前执行匹配命令，忽略其标准输出与决策。
+    /// 在自动压缩开始前执行匹配命令，并尊重规范阻止决策。
     fn pre_compact(
         &self,
         context: PreCompactHookContext,
-    ) -> HookFuture<'_, Result<(), HookCallbackError>> {
+    ) -> HookFuture<'_, Result<PreCompactHookOutput, HookCallbackError>> {
         let spec = self.spec.clone();
         let plan = self.plan;
         Box::pin(async move {
             if spec.phase != HookPhase::PreCompact || !matches_tool(&spec.matcher, "auto") {
-                return Ok(());
+                return Ok(PreCompactHookOutput::continue_compaction());
             }
             let payload = pre_compact_hook_payload(&spec, &context);
-            run_observer_command_hook(&spec, plan, &payload).await
+            let output = run_command_hook(&spec, plan, &payload).await?;
+            parse_pre_compact_hook_output(output)
         })
     }
 
@@ -1682,20 +1662,100 @@ impl AgentHook for NativeCommandHook {
             if spec.phase != HookPhase::Stop {
                 return Ok(StopHookOutput::stop());
             }
-            let payload = json!({
-                "hook_event_name": "Stop",
-                "cwd": spec.current_dir,
-                "session_id": context.invocation.session_id.as_str(),
-                "prompt_id": context.invocation.turn_id.as_str(),
-                "agent_id": context.invocation.source_agent_id.as_str(),
-                "modelRound": context.model_round,
-                "stop_hook_active": context.stop_hook_round > 1,
-                "last_assistant_message": context.response,
-            });
+            let payload = stop_hook_payload(&spec, &context);
             let output = run_command_hook(&spec, plan, &payload).await?;
             parse_stop_hook_output(output)
         })
     }
+}
+
+/// 构造 Claude PostToolUse 规范字段，并携带 Runtime 实测的工具耗时。
+fn post_tool_use_hook_payload(spec: &CommandHookSpec, context: &PostToolUseContext) -> Value {
+    json!({
+        "hook_event_name": "PostToolUse",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "tool_use_id": context.tool_call_id,
+        "tool_name": context.tool_name,
+        "tool_input": context.input,
+        "tool_response": context.result,
+        "duration_ms": context.duration_ms,
+    })
+}
+
+/// 构造 Claude PostToolUseFailure 规范字段，不泄漏 KeenCode 内部失败枚举。
+fn post_tool_use_failure_hook_payload(
+    spec: &CommandHookSpec,
+    context: &PostToolUseFailureContext,
+) -> Value {
+    json!({
+        "hook_event_name": "PostToolUseFailure",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "tool_use_id": context.tool_call_id,
+        "tool_name": context.tool_name,
+        "tool_input": context.input,
+        "error": tool_failure_message(&context.result, context.failure),
+        "is_interrupt": context.failure == ToolHookFailureKind::Cancelled,
+        "duration_ms": context.duration_ms,
+    })
+}
+
+/// 将失败工具结果中的文本按顺序归并为 Hook 错误正文。
+fn tool_failure_message(
+    result: &keencode_model::ToolResult,
+    failure: ToolHookFailureKind,
+) -> String {
+    let message = result
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            keencode_model::ToolResultContent::Text { text } => Some(text.as_str()),
+            keencode_model::ToolResultContent::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !message.is_empty() {
+        return message;
+    }
+    match failure {
+        ToolHookFailureKind::ToolError => "工具执行失败",
+        ToolHookFailureKind::InvalidOutput => "工具返回了无效输出",
+        ToolHookFailureKind::OutputLimitExceeded => "工具输出超过容量上限",
+        ToolHookFailureKind::TimedOut => "工具执行超时",
+        ToolHookFailureKind::Cancelled => "工具执行已中断",
+    }
+    .to_owned()
+}
+
+/// 构造 Claude Stop 输入；最后助手消息仅包含按响应顺序归并的普通文本块。
+fn stop_hook_payload(spec: &CommandHookSpec, context: &StopHookContext) -> Value {
+    let last_assistant_message = context
+        .response
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            keencode_model::ContentBlock::Text { text } => Some(text.as_str()),
+            keencode_model::ContentBlock::Reasoning { .. }
+            | keencode_model::ContentBlock::Image { .. }
+            | keencode_model::ContentBlock::ToolCall { .. }
+            | keencode_model::ContentBlock::ToolResult { .. } => None,
+        })
+        .collect::<String>();
+    json!({
+        "hook_event_name": "Stop",
+        "cwd": spec.current_dir,
+        "session_id": context.invocation.session_id.as_str(),
+        "prompt_id": context.invocation.turn_id.as_str(),
+        "agent_id": context.invocation.source_agent_id.as_str(),
+        "modelRound": context.model_round,
+        "stop_hook_active": context.stop_hook_round > 1,
+        "last_assistant_message": last_assistant_message,
+    })
 }
 
 /// 构造 Claude StopFailure 兼容字段及 KeenCode 稳定扩展字段。
@@ -1768,12 +1828,21 @@ async fn run_command_hook(
                 HookPhase::PreToolUse => {
                     parse_pre_hook_output(output.clone())?;
                 }
+                HookPhase::PostToolUse | HookPhase::PostToolUseFailure => {
+                    parse_post_tool_hook_output(spec.phase, output.clone())?;
+                }
                 HookPhase::Stop => {
                     parse_stop_hook_output(output.clone())?;
                 }
-                _ => {
-                    parse_tool_hook_output(output.clone())?;
+                HookPhase::PreCompact => {
+                    parse_pre_compact_hook_output(output.clone())?;
                 }
+                HookPhase::SessionStart
+                | HookPhase::SubagentStart
+                | HookPhase::UserPromptSubmit => {
+                    parse_lifecycle_hook_output(output.clone())?;
+                }
+                HookPhase::OnError | HookPhase::PostCompact => {}
             }
             Ok(output)
         });
@@ -1883,6 +1952,9 @@ async fn execute_hook_command_with_limits(
         return match spec.phase {
             HookPhase::PreToolUse => Ok(json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":reason}}).to_string()),
             HookPhase::Stop => Ok(json!({"decision":"block","reason":reason}).to_string()),
+            HookPhase::PreCompact => {
+                Ok(json!({"decision":"block","reason":reason}).to_string())
+            }
             HookPhase::UserPromptSubmit => Err(HookCallbackError::new("hook_prompt_blocked", reason)),
             HookPhase::SessionStart | HookPhase::SubagentStart => Ok(String::new()),
             _ => Ok(json!({"hookSpecificOutput":{"additionalContext":reason}}).to_string()),
@@ -2063,8 +2135,8 @@ fn parse_pre_hook_output(output: String) -> Result<PreToolUseOutput, HookCallbac
     Ok(PreToolUseOutput { action, context })
 }
 
-/// 将命令输出解析为成功或失败工具 Hook 上下文。
-fn parse_tool_hook_output(output: String) -> Result<ToolHookOutput, HookCallbackError> {
+/// 将 SessionStart、SubagentStart 或 UserPromptSubmit 输出解析为启动上下文。
+fn parse_lifecycle_hook_output(output: String) -> Result<ToolHookOutput, HookCallbackError> {
     if output.trim().is_empty() {
         return Ok(ToolHookOutput::default());
     }
@@ -2093,6 +2165,85 @@ fn parse_tool_hook_output(output: String) -> Result<ToolHookOutput, HookCallback
     Ok(ToolHookOutput { context })
 }
 
+/// 解析工具后 Hook 的规范 JSON 输出；成功进程的普通 stdout 不进入模型上下文。
+fn parse_post_tool_hook_output(
+    phase: HookPhase,
+    output: String,
+) -> Result<ToolHookOutput, HookCallbackError> {
+    if !matches!(
+        phase,
+        HookPhase::PostToolUse | HookPhase::PostToolUseFailure
+    ) {
+        return Err(HookCallbackError::new(
+            "hook_output_invalid",
+            "工具后 Hook 输出的阶段无效",
+        ));
+    }
+    if output.trim().is_empty() {
+        return Ok(ToolHookOutput::default());
+    }
+    let value = parse_hook_output_value(&output)?;
+    let context = match value {
+        Value::String(_) => Vec::new(),
+        Value::Object(object) => {
+            let mut context = output_context(&object)?;
+            if phase == HookPhase::PostToolUse
+                && object.get("decision").and_then(Value::as_str) == Some("block")
+                && let Some(reason) = object
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.trim().is_empty())
+            {
+                context.push(HookContextAddition::new(reason));
+            }
+            context
+        }
+        _ => {
+            return Err(HookCallbackError::new(
+                "hook_output_invalid",
+                "工具后 Hook 输出必须是字符串或对象",
+            ));
+        }
+    };
+    Ok(ToolHookOutput { context })
+}
+
+/// 解析 PreCompact 的阻止决策，其他成功输出只属于 Hook 进程。
+fn parse_pre_compact_hook_output(
+    output: String,
+) -> Result<PreCompactHookOutput, HookCallbackError> {
+    if output.trim().is_empty() {
+        return Ok(PreCompactHookOutput::continue_compaction());
+    }
+    let value = parse_hook_output_value(&output)?;
+    let Value::Object(object) = value else {
+        return Ok(PreCompactHookOutput::continue_compaction());
+    };
+    if object.get("continue") == Some(&Value::Bool(false)) {
+        return Err(HookCallbackError::new(
+            "hook_stopped",
+            object
+                .get("stopReason")
+                .and_then(Value::as_str)
+                .unwrap_or("插件 Hook 终止了回合"),
+        ));
+    }
+    if let Some(message) = object.get("systemMessage").and_then(Value::as_str) {
+        tracing::info!(message = %bounded_error_text(message), "插件 Hook 系统消息");
+    }
+    if object.get("decision").and_then(Value::as_str) != Some("block") {
+        return Ok(PreCompactHookOutput::continue_compaction());
+    }
+    let reason = object
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| !reason.trim().is_empty())
+        .ok_or_else(|| {
+            HookCallbackError::new("hook_output_invalid", "PreCompact block 缺少 reason")
+        })?;
+    Ok(PreCompactHookOutput::block(reason))
+}
+
 /// 将命令输出解析为 Stop Hook 决策。
 fn parse_stop_hook_output(output: String) -> Result<StopHookOutput, HookCallbackError> {
     if output.trim().is_empty() {
@@ -2106,6 +2257,7 @@ fn parse_stop_hook_output(output: String) -> Result<StopHookOutput, HookCallback
         return Ok(StopHookOutput::stop());
     }
     if object.get("decision").and_then(Value::as_str) == Some("block") {
+        let mut context = output_context(&object)?;
         let reason = object
             .get("reason")
             .and_then(Value::as_str)
@@ -2113,31 +2265,33 @@ fn parse_stop_hook_output(output: String) -> Result<StopHookOutput, HookCallback
             .ok_or_else(|| {
                 HookCallbackError::new("hook_output_invalid", "Stop block 缺少 reason")
             })?;
+        context.push(HookContextAddition::new(reason));
         return Ok(StopHookOutput {
             action: StopHookAction::Continue,
-            context: context_additions(Some(reason.to_owned())),
+            context,
         });
     }
     let context = output_context(&object)?;
-    match object
-        .get("action")
-        .and_then(Value::as_str)
-        .unwrap_or("stop")
-    {
-        "stop" if context.is_empty() => Ok(StopHookOutput::stop()),
-        "continue" if !context.is_empty() => Ok(StopHookOutput {
+    match object.get("action").and_then(Value::as_str) {
+        None if context.is_empty() => Ok(StopHookOutput::stop()),
+        None => Ok(StopHookOutput {
             action: StopHookAction::Continue,
             context,
         }),
-        "stop" => Err(HookCallbackError::new(
+        Some("stop") if context.is_empty() => Ok(StopHookOutput::stop()),
+        Some("continue") if !context.is_empty() => Ok(StopHookOutput {
+            action: StopHookAction::Continue,
+            context,
+        }),
+        Some("stop") => Err(HookCallbackError::new(
             "hook_output_invalid",
             "stop 动作不能同时追加 context",
         )),
-        "continue" => Err(HookCallbackError::new(
+        Some("continue") => Err(HookCallbackError::new(
             "hook_output_invalid",
             "continue 动作必须提供 context",
         )),
-        _ => Err(HookCallbackError::new(
+        Some(_) => Err(HookCallbackError::new(
             "hook_output_invalid",
             "Stop Hook action 无效",
         )),
@@ -2192,12 +2346,35 @@ fn context_additions(context: Option<String>) -> Vec<HookContextAddition> {
     context.map(HookContextAddition::new).into_iter().collect()
 }
 
-/// 判断工具名称是否匹配空、星号或竖线分隔的精确表达式。
+/// 判断工具名称是否匹配空、星号、精确名称列表或显式正则。
 fn matches_tool(matcher: &Option<String>, tool_name: &str) -> bool {
     matcher.as_deref().is_none_or(|matcher| {
         matcher.is_empty()
             || matcher == "*"
-            || regex::Regex::new(matcher).is_ok_and(|pattern| pattern.is_match(tool_name))
+            || if matcher.bytes().any(|byte| {
+                matches!(
+                    byte,
+                    b'.' | b'^'
+                        | b'$'
+                        | b'*'
+                        | b'+'
+                        | b'?'
+                        | b'('
+                        | b')'
+                        | b'['
+                        | b']'
+                        | b'{'
+                        | b'}'
+                        | b'\\'
+                )
+            }) {
+                regex::Regex::new(matcher).is_ok_and(|pattern| pattern.is_match(tool_name))
+            } else {
+                matcher
+                    .split(['|', ','])
+                    .map(str::trim)
+                    .any(|candidate| candidate == tool_name)
+            }
     })
 }
 
@@ -3137,6 +3314,107 @@ mod tests {
         );
     }
 
+    /// 工具后事件使用 Claude 规范字段与实测耗时，Stop 仅暴露最后助手文本。
+    #[test]
+    fn tool_and_stop_hook_payloads_follow_standard_shapes() {
+        let directory = tempfile::tempdir().expect("创建 Hook payload 测试目录");
+        let mut spec = marker_hook(directory.path());
+        let invocation = HookInvocationContext {
+            session_id: SessionId::new("payload-session").expect("Session 标识有效"),
+            turn_id: TurnId::new("payload-turn").expect("Turn 标识有效"),
+            source_agent_id: AgentId::new("payload-agent").expect("Agent 标识有效"),
+        };
+
+        spec.phase = HookPhase::PostToolUse;
+        let post_payload = post_tool_use_hook_payload(
+            &spec,
+            &PostToolUseContext {
+                invocation: invocation.clone(),
+                tool_call_id: "call-success".to_owned(),
+                tool_name: "Read".to_owned(),
+                input: json!({"path": "README.md"}),
+                result: keencode_model::ToolResult::text("call-success", "read ok", false),
+                duration_ms: 42,
+            },
+        );
+        assert_eq!(post_payload["hook_event_name"], "PostToolUse");
+        assert_eq!(post_payload["duration_ms"], 42);
+        assert_eq!(post_payload["tool_response"]["toolCallId"], "call-success");
+
+        spec.phase = HookPhase::PostToolUseFailure;
+        let failure_payload = post_tool_use_failure_hook_payload(
+            &spec,
+            &PostToolUseFailureContext {
+                invocation: invocation.clone(),
+                tool_call_id: "call-failure".to_owned(),
+                tool_name: "Write".to_owned(),
+                input: json!({"path": "README.md"}),
+                result: keencode_model::ToolResult::new(
+                    "call-failure",
+                    vec![
+                        keencode_model::ToolResultContent::Text {
+                            text: "write".to_owned(),
+                        },
+                        keencode_model::ToolResultContent::Text {
+                            text: "failed".to_owned(),
+                        },
+                    ],
+                    true,
+                ),
+                failure: ToolHookFailureKind::ToolError,
+                duration_ms: 73,
+            },
+        );
+        assert_eq!(failure_payload["hook_event_name"], "PostToolUseFailure");
+        assert_eq!(failure_payload["error"], "write\nfailed");
+        assert_eq!(failure_payload["is_interrupt"], false);
+        assert_eq!(failure_payload["duration_ms"], 73);
+        assert!(failure_payload.get("tool_response").is_none());
+        assert!(failure_payload.get("failure").is_none());
+        let interrupt_payload = post_tool_use_failure_hook_payload(
+            &spec,
+            &PostToolUseFailureContext {
+                invocation: invocation.clone(),
+                tool_call_id: "call-interrupt".to_owned(),
+                tool_name: "Read".to_owned(),
+                input: json!({"path": "README.md"}),
+                result: keencode_model::ToolResult::text(
+                    "call-interrupt",
+                    "Turn 已取消",
+                    true,
+                ),
+                failure: ToolHookFailureKind::Cancelled,
+                duration_ms: 9,
+            },
+        );
+        assert_eq!(interrupt_payload["is_interrupt"], true);
+
+        spec.phase = HookPhase::Stop;
+        let stop_payload = stop_hook_payload(
+            &spec,
+            &StopHookContext {
+                invocation,
+                response: keencode_model::ModelResponse::new(
+                    keencode_model::ResponseMetadata::default(),
+                    vec![
+                        keencode_model::ContentBlock::text("第一段"),
+                        keencode_model::ContentBlock::Reasoning {
+                            reasoning: keencode_model::ReasoningContent::new("不对 Hook 暴露"),
+                        },
+                        keencode_model::ContentBlock::text("第二段"),
+                    ],
+                    keencode_model::TokenUsage::unknown(),
+                    keencode_model::StopReason::Completed,
+                ),
+                model_round: 4,
+                stop_hook_round: 2,
+            },
+        );
+        assert_eq!(stop_payload["last_assistant_message"], "第一段第二段");
+        assert!(stop_payload["last_assistant_message"].is_string());
+        assert_eq!(stop_payload["stop_hook_active"], true);
+    }
+
     /// 三个只观察阶段拒绝声明式 context，避免输出被误解释成决策或模型上下文。
     #[test]
     fn observer_hook_phases_reject_context_hooks() {
@@ -3205,6 +3483,18 @@ mod tests {
         r#"printf '{"decision":"block","reason":"必须忽略"}'; exit 2"#.to_owned()
     }
 
+    /// 只通过 stderr 返回阻止反馈并以状态 2 退出的跨平台命令。
+    #[cfg(windows)]
+    fn exit_two_stderr_command() -> String {
+        "[Console]::Error.Write('需要保留当前上下文'); exit 2".to_owned()
+    }
+
+    /// 只通过 stderr 返回阻止反馈并以状态 2 退出的跨平台命令。
+    #[cfg(not(windows))]
+    fn exit_two_stderr_command() -> String {
+        "printf '需要保留当前上下文' >&2; exit 2".to_owned()
+    }
+
     /// 构造会产生一个可观察文件副作用的命令 Hook。
     fn marker_hook(directory: &Path) -> CommandHookSpec {
         CommandHookSpec {
@@ -3225,13 +3515,107 @@ mod tests {
         }
     }
 
-    /// Hook matcher 只接受星号或竖线分隔的精确名称。
+    /// 安全名称与列表按大小写精确匹配，显式正则仍保留正则语义。
     #[test]
-    fn matcher_uses_case_sensitive_regular_expressions() {
+    fn matcher_distinguishes_exact_names_lists_and_explicit_regex() {
         assert!(matches_tool(&None, "Read"));
         assert!(matches_tool(&Some("*".to_owned()), "Edit"));
+        assert!(matches_tool(&Some("Read".to_owned()), "Read"));
+        assert!(!matches_tool(&Some("Read".to_owned()), "ReadFile"));
+        assert!(!matches_tool(&Some("Read".to_owned()), "read"));
         assert!(matches_tool(&Some("Read|Grep".to_owned()), "Grep"));
         assert!(!matches_tool(&Some("Read|Grep".to_owned()), "Write"));
+        assert!(matches_tool(&Some("Read, Edit".to_owned()), "Edit"));
+        assert!(matches_tool(
+            &Some("^mcp__.*__write$".to_owned()),
+            "mcp__db__write"
+        ));
+        assert!(!matches_tool(
+            &Some("^mcp__.*__write$".to_owned()),
+            "prefix_mcp__db__write"
+        ));
+    }
+
+    /// Stop 的 additionalContext 可单独继续，也可与 block reason 同时进入下一轮。
+    #[test]
+    fn stop_output_preserves_additional_context_with_block_reason() {
+        let output = parse_stop_hook_output(
+            json!({
+                "decision": "block",
+                "reason": "先补充测试",
+                "hookSpecificOutput": {"additionalContext": "重现命令已准备"}
+            })
+            .to_string(),
+        )
+        .expect("Stop block 应接纳 additionalContext");
+        assert_eq!(output.action, StopHookAction::Continue);
+        assert_eq!(
+            output
+                .context
+                .iter()
+                .map(|addition| addition.text.as_str())
+                .collect::<Vec<_>>(),
+            ["重现命令已准备", "先补充测试"]
+        );
+
+        let output = parse_stop_hook_output(
+            json!({"hookSpecificOutput": {"additionalContext": "请继续核对"}}).to_string(),
+        )
+        .expect("单独 additionalContext 应要求继续");
+        assert_eq!(output.action, StopHookAction::Continue);
+        assert_eq!(output.context[0].text, "请继续核对");
+    }
+
+    /// PostToolUse 仅注入规范 JSON 上下文与 block reason，Failure 不接受 block 决策。
+    #[test]
+    fn post_tool_outputs_ignore_plain_stdout_and_apply_phase_specific_json() {
+        for phase in [HookPhase::PostToolUse, HookPhase::PostToolUseFailure] {
+            assert!(
+                parse_post_tool_hook_output(phase, "ordinary stdout".to_owned())
+                    .expect("普通 stdout 不应失败")
+                    .context
+                    .is_empty()
+            );
+        }
+        let json_output = json!({
+            "decision": "block",
+            "reason": "工具结果需要修正",
+            "hookSpecificOutput": {"additionalContext": "检查到边界条件"}
+        })
+        .to_string();
+        let success = parse_post_tool_hook_output(HookPhase::PostToolUse, json_output.clone())
+            .expect("PostToolUse 规范输出应可解析");
+        assert_eq!(
+            success
+                .context
+                .iter()
+                .map(|addition| addition.text.as_str())
+                .collect::<Vec<_>>(),
+            ["检查到边界条件", "工具结果需要修正"]
+        );
+        let failure = parse_post_tool_hook_output(HookPhase::PostToolUseFailure, json_output)
+            .expect("PostToolUseFailure 应只接纳 additionalContext");
+        assert_eq!(failure.context.len(), 1);
+        assert_eq!(failure.context[0].text, "检查到边界条件");
+    }
+
+    /// PreCompact 只将明确 block 解析为稳定阻止结果，普通 stdout 不参与决策。
+    #[test]
+    fn pre_compact_output_blocks_only_on_standard_decision() {
+        parse_pre_compact_hook_output("ordinary stdout".to_owned()).expect("普通 stdout 应被忽略");
+        let output = parse_pre_compact_hook_output(
+            json!({"decision": "block", "reason": "当前上下文不可压缩"}).to_string(),
+        )
+        .expect("PreCompact block 应解析为规范决策");
+        assert_eq!(
+            output,
+            PreCompactHookOutput::Block {
+                reason: "当前上下文不可压缩".to_owned()
+            }
+        );
+        let error = parse_pre_compact_hook_output(json!({"decision": "block"}).to_string())
+            .expect_err("缺少 reason 的 block 不是有效决策");
+        assert_eq!(error.code, "hook_output_invalid");
     }
 
     /// 冻结贡献器必须把唯一 Agent Schema 无损投影为 Runtime 模板。
@@ -3387,12 +3771,49 @@ mod tests {
     async fn observer_hook_discards_stdout_decisions() {
         let directory = tempfile::tempdir().expect("创建 Hook 测试目录");
         let mut spec = marker_hook(directory.path());
-        spec.phase = HookPhase::PreCompact;
+        spec.phase = HookPhase::PostCompact;
         spec.command = observer_decision_command();
 
         run_observer_command_hook(&spec, PlanGuard::inactive(), &json!({}))
             .await
             .expect("观察 Hook 的 stdout 决策必须被忽略");
+    }
+
+    /// PreCompact 的退出码 2 必须转成稳定阻止结果，不得沿用观察阶段的忽略语义。
+    #[tokio::test]
+    async fn pre_compact_exit_two_blocks_compaction() {
+        let directory = tempfile::tempdir().expect("创建 Hook 测试目录");
+        let mut spec = marker_hook(directory.path());
+        spec.phase = HookPhase::PreCompact;
+        spec.command = exit_two_stderr_command();
+
+        let output = run_command_hook(&spec, PlanGuard::inactive(), &json!({}))
+            .await
+            .expect("PreCompact 退出码 2 应转成规范决策");
+        assert_eq!(
+            parse_pre_compact_hook_output(output).expect("规范决策应可解析"),
+            PreCompactHookOutput::Block {
+                reason: "需要保留当前上下文".to_owned()
+            }
+        );
+    }
+
+    /// 工具后 Hook 的退出码 2 使用 stderr 作为反馈，不与普通成功 stdout 的静默语义混淆。
+    #[tokio::test]
+    async fn post_tool_exit_two_injects_stderr_feedback() {
+        let directory = tempfile::tempdir().expect("创建 Hook 测试目录");
+        for phase in [HookPhase::PostToolUse, HookPhase::PostToolUseFailure] {
+            let mut spec = marker_hook(directory.path());
+            spec.phase = phase;
+            spec.command = exit_two_stderr_command();
+            let output = run_command_hook(&spec, PlanGuard::inactive(), &json!({}))
+                .await
+                .expect("工具后 Hook 退出码 2 应归一为反馈");
+            let parsed = parse_post_tool_hook_output(phase, output)
+                .expect("退出码 2 反馈应可解析");
+            assert_eq!(parsed.context.len(), 1);
+            assert_eq!(parsed.context[0].text, "需要保留当前上下文");
+        }
     }
 
     /// 新增观察阶段不能改变既有 SubagentStart 的一次性、按 agent_type 匹配语义。

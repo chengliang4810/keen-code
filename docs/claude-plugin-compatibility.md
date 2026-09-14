@@ -35,6 +35,13 @@ KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息�
 - 每次真正开始的逻辑压缩最多触发一对 PreCompact/PostCompact。PostCompact 只在结果已被当前 Transcript 采纳后触发；Micro 投影、完整摘要及二者组合共用一次逻辑生命周期，机械截断不触发。
 - KeenCode 仅有自动压缩入口，因此 PreCompact/PostCompact 的 Claude 兼容 `trigger` 和 matcher 值固定为 `auto`；预算触发或 Provider 超限原因另以扩展字段提供。
 
+## 2026-09-14 Hook payload 与决策语义增量
+
+- PostToolUse 携带实测 `duration_ms`；PostToolUseFailure 使用 `error`、`is_interrupt` 与 `duration_ms`，不再暴露 KeenCode 内部的 `tool_response` 或 `failure` 字段。
+- PostToolUse/PostToolUseFailure 的普通成功 stdout 只属于 Hook 进程；仅规范 `additionalContext` 进入模型上下文，PostToolUse 的 `decision: "block"` 还会把 `reason` 作为反馈。
+- Stop 的 `last_assistant_message` 仅归并普通助手文本块；`decision: "block"` 与 `additionalContext` 可同时保留，单独 `additionalContext` 也会继续下一模型轮。
+- PreCompact 的退出码 2 与 `decision: "block"` 都会阻止当前逻辑压缩。主动压缩被阻止后继续使用原请求；Provider 超限后的强制压缩被阻止时保留原始 Provider 错误。
+
 ## 已落地的适配
 
 | 范围 | 当前行为 |
@@ -51,9 +58,9 @@ KeenCode 采用同样的结构化内部消息语义：所有 Hook 追加消息�
 | 插件数据 | `<KeenCode 数据根>/plugins/data/<plugin@marketplace>`，版本更新不改变此路径，不将插件数据写入其源码目录 |
 | Shell 插值 | 普通 Shell 参数展开保持原文；Shell command 禁止 `${user_config.*}` 源码插值，使用 `args` 或配置环境变量传值 |
 | Hook 执行 | command 的 Bash/PowerShell 选择、直接执行 `args`、`timeout`、`async:false`；工作目录为当前项目；复用进程树取消与输出限制 |
-| Hook 匹配 | 区分大小写的正则 matcher，空串/缺省/`*` 匹配全部；Stop 不按 matcher 筛选；StopFailure 按稳定错误分类匹配，PreCompact/PostCompact 统一按 `auto` 匹配 |
+| Hook 匹配 | 空串/缺省/`*` 匹配全部；安全的单名称及 `|`/`,` 名称列表按区分大小写的完整名称匹配，包含显式正则元字符的 matcher 使用正则；Stop 不按 matcher 筛选；StopFailure 按稳定错误分类匹配，PreCompact/PostCompact 统一按 `auto` 匹配 |
 | 生命周期 | SessionStart 在会话首次根回合执行时触发一次，UserPromptSubmit 在根回合模型采样前触发；SubagentStart 在每个子代理首次采样前触发，支持 agent_type 匹配、agent_id/agent_type 输入和 additionalContext 注入；已有 PreToolUse/PostToolUse/PostToolUseFailure/Stop 接收标准字段；最终非取消失败终态触发一次 StopFailure，每次逻辑压缩最多触发一对 PreCompact/PostCompact，机械截断不触发 |
-| 决策 | `hookSpecificOutput.additionalContext`、PreToolUse 的 allow/deny/updatedInput、Stop 的 block/reason；退出码 2 按事件阻断并优先使用 JSON 阻断理由，SessionStart 错误仅记录；其他退出码仍采用有效 JSON 决策，无有效决策时为非阻断错误；StopFailure 的输出与退出码不参与决策，且其自身失败不覆盖原始 Turn 错误 |
+| 决策 | `hookSpecificOutput.additionalContext`、PreToolUse 的 allow/deny/updatedInput、PostToolUse 的 block/reason、Stop 的 block/reason，以及 PreCompact 的 block/reason；退出码 2 按事件阻断并优先使用 JSON 阻断理由，SessionStart 错误仅记录；其他退出码仍采用有效 JSON 决策，无有效决策时为非阻断错误；StopFailure 的输出与退出码不参与决策，且其自身失败不覆盖原始 Turn 错误 |
 | 故障隔离 | 插件提取失败不会阻断其他插件；单个插件 Hook 配置错误不会阻断其他插件 Hook；命令启动、超时、无效输出记录为非阻断错误；未实现事件产生扩展诊断和日志 |
 | 计划模式 | 跳过外部进程 Hook并记录原因，保留只读守卫；不会为了插件兼容绕过计划模式 |
 | 日志 | Hook 开始、结束、耗时、退出码、标准错误与解析/配置错误进入现有日志链路；不记录 stdin、命令正文或返回上下文全文 |
