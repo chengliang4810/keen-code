@@ -9,11 +9,12 @@ use crate::agent_runtime::{
 };
 use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
-    HookLimits, HookPhase, HookRegistry, HookRuntime, HookWorkerAdmission, OnErrorHookContext, PlanGuard,
-    PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
-    PreCompactHookOutput, PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction,
-    StopHookContext, StopHookOutput, ToolEffect, ToolHookFailureKind, ToolHookOutput, ToolRegistry,
-    TurnStartAbortReason, TurnStartHookContext, agent_run_error_category,
+    HookLimits, HookPhase, HookRegistry, HookRuntime, HookWorkerAdmission, OnErrorHookContext,
+    PlanGuard, PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext,
+    PreCompactHookContext, PreCompactHookOutput, PreToolUseAction, PreToolUseContext,
+    PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput, ToolEffect,
+    ToolHookFailureKind, ToolHookOutput, ToolRegistry, TurnStartAbortReason, TurnStartHookContext,
+    agent_run_error_category,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
