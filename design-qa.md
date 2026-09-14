@@ -1,3 +1,17 @@
+# 2026-09-14 编辑重发验收证据重建
+
+- 原因：下方 2026-09-13 记录引用的 `/tmp/keencode-edit-resend-qa.4L4PyU` 截图与像素报告已不存在。本次重新生成可复核证据，没有修改产品源码。
+- 源码：基线 `63e8f9546f6d52125fcb1b5608c6e4736d1c13c4`，当前 `cc62ce0ac762b4eb9791229fb923c10588f12803`；分别使用 `git archive <commit> src public` 重建到隔离目录，直接加载真实 `ConversationThread`、依赖组件与样式。组件 SHA-256 分别为 `ec9ff4c830dc04f59a641ef7fd192d1890c85454c6dddd843a5305b0ffcb666d`、`9ecc7db7f735d3ae81c203f24e33b57af30913b807b898f87e49c23f86c9d742`。
+- 产物根目录：`/Users/chengliang/.codex/artifacts/jian-edit-resend.90WTog`，包含 `before/`、`after/` 两份源码与夹具、`vite.config.mts`、`compare.py`、`pixel-differences.json`，以及 `before-editor.png`、`after-editor-default.png`、`after-editor-selected.png`、`after-editor-narrow.png`、`diff-editor.png`、`comparison-editor.png`。产物保留在系统临时目录外；仍是本地验收证据，不是发布资产。
+- 复现：从仓库运行 `QA_VARIANT=before pnpm exec vite --config /Users/chengliang/.codex/artifacts/jian-edit-resend.90WTog/vite.config.mts`，另一个终端将变量改为 `after`；地址分别为 `http://127.0.0.1:14351/`、`http://127.0.0.1:14352/`。夹具只使用合成用户消息与提交回调，不调用模型或写入用户会话。使用已安装的 Playwright CLI 打开页面、悬停用户消息、点击“编辑并重新发送”；同状态截图后在产物目录执行 `python3 compare.py`。
+- 环境：macOS 14.8.7、Chromium 153、中文、浅色，1280×800 与 760×800，deviceScaleFactor=1。Browser 插件及其 skill 未提供，因此按前端测试技能使用普通 Playwright CLI；没有安装新浏览器依赖。
+- 页面检查：标题和 URL 正确，真实消息与编辑器正常渲染，无 Vite 错误覆盖层。初次基线夹具出现 favicon 404，添加空 data favicon 后修复；当前版本交互后的 Console 为 0 error、0 warning。
+- 交互：基线无复选框；当前复选框初始 `aria-checked=false`，直接发送记录 `revertFiles=false`，重新打开、勾选后发送记录 `revertFiles=true`，两次成功后编辑器均关闭。再次打开恢复未勾选。桌面编辑器为 x=580、y=24、504×182.390625；760px 视口下 x=240、宽504，页面 `scrollWidth=760`，未观察到横向溢出或控件遮挡。
+- 像素：相同 1280×800 编辑状态下，RGB 任一通道差值 >16 的像素为 23236/1024000（2.269140625%），未掩码，差异范围为 `[580,120,1084,233)`；差异集中在新增复选框、下移的发送操作和复制控件，原有编辑器宽度保持504px。有意新增区域与原需求一致。
+- 未验收：浏览器组件夹具不代替原生 Tauri WebView 或 Windows 实机验收；后端文件恢复、取消与冷恢复仍由各自 Rust 门禁验证。
+
+---
+
 # 2026-09-13 编辑重发文件恢复选项
 
 - 修改：最后一条真实用户消息的内联编辑器新增“同时恢复本轮及其子 Agent 修改的文件”复选框，默认关闭；直接发送传递 `revertFiles=false`，勾选后传递 `revertFiles=true`。复用现有 shadcn/ui `Checkbox`、`Label`、`Textarea`、`Button` 和原有设计令牌，没有新增 CSS、依赖或后台活动。
