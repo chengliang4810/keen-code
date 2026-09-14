@@ -129,6 +129,8 @@ const RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS: usize = 8;
 const RUNTIME_TURN_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 /// 执行失败进入协作终态时允许保留的最大 UTF-8 字节数。
 const MAX_COLLABORATION_FAILURE_BYTES: usize = 64 * 1024;
+/// 终态错误投影进入 ACP/UI 事件时允许保留的最大 UTF-8 字节数。
+const MAX_UI_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
 /// 单条扩展诊断日志允许保留的最大 UTF-8 字节数。
 const MAX_EXTENSION_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// 协调器提交文件允许累积保留的等待容量取消证据数量。
@@ -2839,7 +2841,9 @@ fn authoritative_recovered_turn_outcome(
                 .filter(|message| !message.trim().is_empty())
                 .cloned()
                 .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            AgentTurnOutcome::Failed { message }
+            AgentTurnOutcome::Failed {
+                message: redacted_collaboration_failure(&message),
+            }
         }
     };
     Ok(Some(outcome))
@@ -3976,8 +3980,19 @@ fn bounded_collaboration_failure(value: &str) -> String {
 
 /// 失败正文先限制输入，再统一脱敏并再次约束输出；正常完成文本不经过该入口。
 fn redacted_collaboration_failure(value: &str) -> String {
-    let bounded = bounded_collaboration_failure(value);
-    bounded_collaboration_failure(&keencode_model::redact_error_secrets(&bounded))
+    let suffix = "\n...[已截断]";
+    let truncated = value.len() > MAX_COLLABORATION_FAILURE_BYTES;
+    let maximum = if truncated {
+        MAX_COLLABORATION_FAILURE_BYTES.saturating_sub(suffix.len())
+    } else {
+        MAX_COLLABORATION_FAILURE_BYTES
+    };
+    let redacted = keencode_model::redact_error_secrets_bounded(value, maximum);
+    if truncated {
+        format!("{redacted}{suffix}")
+    } else {
+        redacted
+    }
 }
 
 /// 将扩展诊断格式化为有界日志正文。
@@ -8964,7 +8979,8 @@ fn map_authoritative_event(
             message,
         } => {
             let agent_id = turn_agent_id(state, turn_id.as_str())?;
-            let message = keencode_model::redact_error_secrets(message);
+            let message =
+                keencode_model::redact_error_secrets_bounded(message, MAX_UI_ERROR_MESSAGE_BYTES);
             let event = match reason {
                 TurnStopReason::Cancelled => KeenCodeEvent::TurnCancelled,
                 TurnStopReason::Failed => KeenCodeEvent::TurnFailed {
@@ -9814,8 +9830,8 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed,
-        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
+        MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
+        RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
         RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
         RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
         RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
@@ -18768,6 +18784,94 @@ mod tests {
                 assert!(!safe.contains("acp-turn-secret"));
                 assert!(!safe.contains("nested-acp-turn-secret"));
             }
+        }
+    }
+
+    /// Journal 终态进入 ACP/UI 前仍必须覆盖跨 4 KiB 投影边界的 URL userinfo。
+    #[test]
+    fn ui_terminal_projection_redacts_url_userinfo_before_delivery_limit() {
+        let storage = tempfile::tempdir().expect("测试目录应创建");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "ui-bounded-redaction".to_owned(),
+                title: "UI 脱敏边界".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let mut state = session.snapshot().expect("Session 快照应读取").state;
+        let turn_id = ResourceTurnId::new("ui-bounded-turn").expect("Turn ID 应有效");
+        let root_agent_id = ResourceAgentId::new("root").expect("根 Agent ID 应有效");
+        state.turns.insert(
+            turn_id.clone(),
+            TurnState {
+                turn_id: turn_id.clone(),
+                source_agent_id: root_agent_id.clone(),
+                root_turn_id: turn_id.clone(),
+                parent_turn_id: None,
+                prompt_summary: "验证 UI 错误边界".to_owned(),
+                started_at_unix_ms: 1,
+                completed_at_unix_ms: Some(2),
+                status: TurnStatus::Failed,
+                stop_reason: Some(TurnStopReason::Failed),
+                outcome_message: None,
+            },
+        );
+        state.transcript.push(TranscriptRecord::MessageAdded(
+            keencode_resources::SessionMessage {
+                is_meta: false,
+                message_id: "ui-bounded-user".to_owned(),
+                turn_id: Some(turn_id.clone()),
+                agent_id: None,
+                role: keencode_resources::MessageRole::User,
+                content: vec![keencode_resources::MessagePart::Text {
+                    text: "验证 UI 错误边界".to_owned(),
+                }],
+            },
+        ));
+        let url = "https://username:password@example.invalid/v1?api_key=query-secret";
+        let cut = url.find("password").unwrap() + 4;
+        let message = format!(
+            "{} {url} request_id=req-ui-boundary",
+            "x".repeat(MAX_UI_ERROR_MESSAGE_BYTES - cut - 1)
+        );
+        let record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("ui-bounded-event").expect("Event ID 应有效"),
+            session: state.session_id.clone(),
+            sequence: 2,
+            time_unix_ms: 2,
+            event: SessionEvent::TurnStopped {
+                turn_id,
+                reason: TurnStopReason::Failed,
+                message,
+            },
+        };
+        for mode in [
+            AuthoritativeProjectionMode::Live,
+            AuthoritativeProjectionMode::Replay,
+        ] {
+            let draft = map_authoritative_record(&session, &state, &record, mode)
+                .expect("UI 失败终态应可投影")
+                .into_iter()
+                .next()
+                .expect("UI 失败终态应生成草稿");
+            let delivery = materialize_delivery(
+                session.session_id().as_str(),
+                1,
+                draft,
+            )
+            .expect("UI 失败终态应通过 ACP 边界");
+            let value = serde_json::to_value(delivery).expect("UI 投递应序列化");
+            let safe = value["envelope"]["event"]["message"]
+                .as_str()
+                .expect("UI 失败说明应为文本");
+            assert!(safe.len() <= MAX_UI_ERROR_MESSAGE_BYTES);
+            assert!(!safe.contains("username"));
+            assert!(!safe.contains("password"));
+            assert!(!safe.contains("query-secret"));
         }
     }
 

@@ -26,7 +26,7 @@ pub use provider::{
     ModelFuture, ModelProvider, ModelStream, ProviderCapabilities, ProviderProtocol,
     ReasoningCapability, StructuredOutputCapability,
 };
-pub use redaction::{REDACTED_SECRET, redact_error_secrets};
+pub use redaction::{REDACTED_SECRET, redact_error_secrets, redact_error_secrets_bounded};
 pub use request::{
     ModelMessages, ModelRequest, ModelResponse, ReasoningConfig, ReasoningEffort, ResponseMetadata,
     StructuredOutputConfig, ToolChoice,

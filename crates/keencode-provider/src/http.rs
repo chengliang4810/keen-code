@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::error::Error as _;
 
 use futures_util::stream;
-use keencode_model::{ModelError, ModelStream, ModelStreamEvent, redact_error_secrets};
+use keencode_model::{ModelError, ModelStream, ModelStreamEvent, redact_error_secrets_bounded};
 #[cfg(feature = "live-test-trace")]
 use keencode_model::{ModelResponse, ProviderProtocol, collect_model_stream};
 use reqwest::Response;
@@ -648,9 +648,11 @@ fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
 
 /// 移除凭据、控制字符并限制错误文本长度。
 fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
-    let message = bounded_utf8_prefix(message, MAX_ERROR_INPUT_BYTES);
-    let redacted = api_key.map_or_else(|| message.to_owned(), |api_key| api_key.redact(message));
-    let mut safe = redact_error_secrets(&redacted)
+    let mut redacted = redact_error_secrets_bounded(message, MAX_ERROR_INPUT_BYTES);
+    if let Some(api_key) = api_key {
+        redacted = api_key.redact(&redacted);
+    }
+    let mut safe = redacted
         .chars()
         .map(|character| {
             if character.is_control() {

@@ -4078,6 +4078,58 @@ fn tool_result_persistence_redacts_only_error_content() {
     assert_eq!(retained, text);
 }
 
+/// 终态消息在进入 Journal 与 OnError outbox 前必须完整处理跨 64 KiB 边界的 URL userinfo。
+#[test]
+fn runtime_terminal_error_redacts_url_userinfo_before_journal_and_on_error() {
+    let session_id = SessionId::new("session-bounded-redaction").expect("Session ID 应有效");
+    let turn_id =
+        keencode_resources::TurnId::new("turn-bounded-redaction").expect("Turn ID 应有效");
+    let agent_id = AgentId::new("root").expect("根 Agent ID 应有效");
+    let url = "https://username:password@example.invalid/v1?api_key=query-secret";
+    let cut = url.find("password").unwrap() + 4;
+    let message = format!(
+        "{} {url} request_id=req-runtime-boundary",
+        "x".repeat(MAX_RUNTIME_TERMINAL_MESSAGE_BYTES - cut - 1)
+    );
+    let event = super::runtime_stopped_event(
+        &session_id,
+        &turn_id,
+        &agent_id,
+        TurnStopReason::Failed,
+        message,
+        "provider_unavailable",
+    );
+    let SessionEvent::AtomicBatch { events } = event else {
+        panic!("失败终态应同时写入 TurnStopped 与 OnError queued");
+    };
+    let Some(SessionEvent::TurnStopped {
+        message: stopped_message,
+        ..
+    }) = events.first()
+    else {
+        panic!("失败终态批次首项应为 TurnStopped");
+    };
+    let Some(SessionEvent::OnErrorHookQueued { invocation }) = events.get(1) else {
+        panic!("失败终态批次第二项应为 OnErrorHookQueued");
+    };
+    for value in [stopped_message, &invocation.error_message] {
+        assert!(value.len() <= MAX_RUNTIME_TERMINAL_MESSAGE_BYTES);
+        assert!(
+            !value.contains("username"),
+            "Journal/OnError 泄漏 URL 用户名: {value}"
+        );
+        assert!(
+            !value.contains("password"),
+            "Journal/OnError 泄漏 URL 密码: {value}"
+        );
+        assert!(
+            !value.contains("query-secret"),
+            "Journal/OnError 泄漏 URL 查询秘密: {value}"
+        );
+    }
+    assert_eq!(stopped_message, &invocation.error_message);
+}
+
 /// 模拟未知 Artifact 已落盘但 Journal 尚未确认的重投，并验证容量账本不会再次占用同一槽位。
 fn exercise_materialized_artifact_retry(session_id: &str, indeterminate: bool) {
     let root = TempDir::new().expect("临时目录应创建");

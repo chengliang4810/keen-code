@@ -394,6 +394,32 @@ fn oversized_http_error_has_bounded_classification_and_display_cost() {
     assert!(error.message().chars().count() <= 1_000);
 }
 
+/// Provider 错误展示必须先完整处理跨 64 KiB 边界的 URL userinfo，再限制到 1000 字符。
+#[test]
+fn bounded_provider_error_redacts_url_userinfo_before_display_limit() {
+    const INPUT_LIMIT: usize = 64 * 1024;
+    let url = "https://username:password@example.invalid/v1?api_key=query-secret";
+    let cut = url.find("password").unwrap() + 4;
+    let message = format!(
+        "{} {url} request_id=req-provider-boundary",
+        "x".repeat(INPUT_LIMIT - cut - 1)
+    );
+    let safe = classify_http_error(400, None, message, None)
+        .message()
+        .to_owned();
+    assert!(safe.chars().count() <= 1_000);
+    assert!(!safe.contains("username"));
+    assert!(!safe.contains("password"));
+    assert!(!safe.contains("query-secret"));
+
+    let long_plain = "ordinary diagnostic ".repeat(10_000);
+    let bounded = classify_http_error(400, None, long_plain, None)
+        .message()
+        .to_owned();
+    assert!(bounded.chars().count() <= 1_000);
+    assert!(bounded.starts_with("ordinary diagnostic "));
+}
+
 /// 持续有响应数据可以超过读取超时的总时长，停滞则保留 timeout 原因链。
 #[tokio::test(flavor = "multi_thread")]
 async fn gateway_read_timeout_is_idle_not_total() {

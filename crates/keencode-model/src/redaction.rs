@@ -11,6 +11,8 @@ const MAX_URL_CANDIDATE_BYTES: usize = 64 * 1024;
 const MAX_NESTED_URL_DEPTH: usize = 8;
 /// 重建转义 URL 时保留的反斜杠层数上限，避免畸形前缀放大输出。
 const MAX_URL_SLASH_ESCAPE_BACKSLASHES: usize = 8;
+/// 有界脱敏在输出边界之后允许读取的固定候选尾部，确保截断不落在 URL 或字段值中。
+const MAX_BOUNDED_REDACTION_LOOKAHEAD_BYTES: usize = MAX_URL_CANDIDATE_BYTES;
 
 /// 从错误文本中移除常见认证 Header、敏感字段和 URL 凭据。
 ///
@@ -18,6 +20,102 @@ const MAX_URL_SLASH_ESCAPE_BACKSLASHES: usize = 8;
 /// 调用方仍负责按自身边界清理控制字符和限制最终长度。
 pub fn redact_error_secrets(input: &str) -> String {
     redact_error_secrets_at_depth(input, 0)
+}
+
+/// 在固定输出上限内移除错误文本中的秘密，并避免在截断点前留下不完整候选。
+///
+/// 该入口最多把原文读取到 `maximum_bytes + 64 KiB`，并只为这个有界窗口建立脱敏副本。
+/// 输出始终在 UTF-8 字符边界内不超过 `maximum_bytes` 字节。若窗口内没有找到候选终点，
+/// 则丢弃截断点所在的最后一个 token；这样即使 URL 的 `@` 或敏感字段值位于窗口之外，
+/// 也不会把尚未判定的 userinfo/字段前缀交给调用方。
+pub fn redact_error_secrets_bounded(input: &str, maximum_bytes: usize) -> String {
+    if maximum_bytes == 0 || input.is_empty() {
+        return String::new();
+    }
+    let scan_end = bounded_redaction_input_end(input, maximum_bytes);
+    let redacted = redact_error_secrets(&input[..scan_end]);
+    truncate_utf8(&redacted, maximum_bytes)
+}
+
+/// 返回有界脱敏需要读取的原文终点；超出输出边界的候选最多再读取固定窗口。
+fn bounded_redaction_input_end(input: &str, maximum_bytes: usize) -> usize {
+    let retained_end = utf8_boundary_at_or_before(input, maximum_bytes);
+    if retained_end == input.len() {
+        return retained_end;
+    }
+
+    let lookahead_limit = utf8_boundary_at_or_before(
+        input,
+        retained_end.saturating_add(MAX_BOUNDED_REDACTION_LOOKAHEAD_BYTES),
+    );
+    let mut cursor = retained_end;
+    while cursor < lookahead_limit {
+        if input.as_bytes()[cursor] == b'\\' {
+            let mut slash_cursor = cursor;
+            while slash_cursor < lookahead_limit && input.as_bytes()[slash_cursor] == b'\\' {
+                slash_cursor += 1;
+            }
+            if slash_cursor < lookahead_limit && input.as_bytes()[slash_cursor] == b'/' {
+                cursor = slash_cursor + 1;
+                continue;
+            }
+        }
+        let character = input[cursor..]
+            .chars()
+            .next()
+            .expect("有界脱敏游标始终位于非空 UTF-8 后缀");
+        cursor += character.len_utf8();
+        if is_bounded_candidate_terminator(character) {
+            return cursor;
+        }
+    }
+    if cursor == input.len() {
+        return cursor;
+    }
+
+    // 没有在固定窗口内找到候选终点；从最后一个 token 边界结束，绝不保留其不完整前缀。
+    let mut safe_end = retained_end;
+    while safe_end > 0 {
+        let character = input[..safe_end]
+            .chars()
+            .next_back()
+            .expect("安全 token 游标始终位于非空 UTF-8 前缀");
+        if is_bounded_token_boundary(character) {
+            break;
+        }
+        safe_end -= character.len_utf8();
+    }
+    safe_end
+}
+
+/// 判断 URL/字段候选是否已经到达当前错误记录的自然终点。
+fn is_bounded_candidate_terminator(character: char) -> bool {
+    character.is_whitespace()
+        || character.is_control()
+        || matches!(character, '"' | '\'' | '<' | '>' | '\\')
+}
+
+/// 判断可以安全丢弃不完整 token 的边界；只在空白处回退，避免把引号或 URL 标点
+/// 当作边界而保留敏感字段的前半段。
+fn is_bounded_token_boundary(character: char) -> bool {
+    character.is_whitespace() || character.is_control()
+}
+
+/// 返回不超过目标字节数的 UTF-8 前缀终点。
+fn utf8_boundary_at_or_before(value: &str, maximum_bytes: usize) -> usize {
+    let mut end = maximum_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+/// 在 UTF-8 字符边界内限制脱敏后的输出。
+fn truncate_utf8(value: &str, maximum_bytes: usize) -> String {
+    if value.len() <= maximum_bytes {
+        return value.to_owned();
+    }
+    value[..utf8_boundary_at_or_before(value, maximum_bytes)].to_owned()
 }
 
 /// 在固定深度预算内扫描错误正文；URL 组件递归调用仍受同一候选字节上限约束。
@@ -1132,7 +1230,9 @@ fn starts_ascii_case_insensitive(value: &str, prefix: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_NESTED_URL_DEPTH, REDACTED_SECRET, redact_error_secrets};
+    use super::{
+        MAX_NESTED_URL_DEPTH, REDACTED_SECRET, redact_error_secrets, redact_error_secrets_bounded,
+    };
 
     #[test]
     fn redacts_case_variants_separators_and_header_dump() {
@@ -1448,5 +1548,70 @@ mod tests {
         );
         assert!(once.contains("Authorization: Bearer [REDACTED]"));
         assert_eq!(redact_error_secrets(&once), once);
+    }
+
+    #[test]
+    fn bounded_redaction_completes_url_userinfo_before_the_64k_boundary() {
+        const LIMIT: usize = 64 * 1024;
+        let url = "https://username:password@example.invalid/v1?api_key=query-secret";
+        let username_start = url.find("username").unwrap();
+        let colon = url[username_start..].find(':').unwrap() + username_start;
+        let password_start = url.find("password").unwrap();
+        let at = url.find('@').unwrap();
+        for cut in [
+            username_start + 3,
+            colon,
+            colon + 1,
+            password_start + 4,
+            at,
+            at + 1,
+        ] {
+            let filler = "x".repeat(LIMIT - cut - 1);
+            let raw = format!("{filler} {url} request_id=req-boundary");
+            let safe = redact_error_secrets_bounded(&raw, LIMIT);
+            assert!(safe.len() <= LIMIT);
+            assert!(!safe.contains("username"), "URL 用户名泄漏: {safe}");
+            assert!(!safe.contains("password"), "URL 密码泄漏: {safe}");
+            assert!(!safe.contains("query-secret"), "URL 查询秘密泄漏: {safe}");
+        }
+    }
+
+    #[test]
+    fn bounded_redaction_handles_percent_encoded_and_json_escaped_urls() {
+        const LIMIT: usize = 64 * 1024;
+        let url = r#"https:\/\/user:password@example.invalid\/v1?api_key=query-secret&request_id=req-json"#;
+        let cut = url.find("password").unwrap() + 4;
+        let filler = "界".repeat((LIMIT - cut - 1) / "界".len());
+        let raw = format!("{filler} {url} tail");
+        let safe = redact_error_secrets_bounded(&raw, LIMIT);
+        assert!(safe.len() <= LIMIT);
+        for secret in ["user", "password", "query-secret"] {
+            assert!(!safe.contains(secret), "JSON URL 秘密泄漏 {secret}: {safe}");
+        }
+        assert_eq!(redact_error_secrets_bounded(&safe, LIMIT), safe);
+
+        let encoded = "https://outer.invalid/callback?redirect=https%253A%252F%252Finner-user%253Ainner-password%2540inner.invalid%252Fv1";
+        let cut = encoded.find("inner-password").unwrap() + 4;
+        let raw = format!("{} {encoded} tail", "x".repeat(LIMIT - cut - 1));
+        let safe = redact_error_secrets_bounded(&raw, LIMIT);
+        assert!(safe.len() <= LIMIT);
+        assert!(!safe.contains("inner-user"));
+        assert!(!safe.contains("inner-password"));
+    }
+
+    #[test]
+    fn bounded_redaction_is_utf8_safe_and_keeps_long_non_secret_prefix_bounded() {
+        let limit = 1_000;
+        let raw = format!("{} secret=not-a-secret", "界".repeat(2_000));
+        let safe = redact_error_secrets_bounded(&raw, limit);
+        assert!(safe.len() <= limit);
+        assert!(safe.is_char_boundary(safe.len()));
+        assert!(!safe.contains("secret=not-a-secret"));
+
+        let long_plain = "diagnostic ".repeat(20_000);
+        let bounded = redact_error_secrets_bounded(&long_plain, limit);
+        assert!(bounded.len() <= limit);
+        assert!(bounded.starts_with("diagnostic "));
+        assert_eq!(redact_error_secrets_bounded(&bounded, limit), bounded);
     }
 }

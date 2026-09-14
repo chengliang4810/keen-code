@@ -43,7 +43,7 @@ use keencode_agent::{
 use keencode_model::{
     ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole, ModelError,
     ModelResponse, OpaqueReasoningState, ReasoningContent, ToolCall, ToolResult, ToolResultContent,
-    last_non_empty_text,
+    last_non_empty_text, redact_error_secrets_bounded,
 };
 use keencode_resources::{
     ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactRef, ArtifactStore, ArtifactUse,
@@ -3563,8 +3563,7 @@ fn runtime_stopped_event(
     message: String,
     error_category: &str,
 ) -> SessionEvent {
-    let message =
-        truncate_runtime_terminal_message(&keencode_model::redact_error_secrets(&message));
+    let message = redact_error_secrets_bounded(&message, MAX_RUNTIME_TERMINAL_MESSAGE_BYTES);
     let stopped = SessionEvent::TurnStopped {
         turn_id: turn_id.clone(),
         reason,
@@ -4360,7 +4359,7 @@ fn runtime_terminal_event(
                 turn_id,
                 source_agent_id,
                 reason,
-                truncate_runtime_terminal_message(&message),
+                message,
                 result
                     .error
                     .as_ref()
