@@ -46,7 +46,7 @@ use keencode_agent::{
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
     ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
-    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice,
+    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
 };
 use keencode_provider::{
     ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
@@ -2669,18 +2669,17 @@ fn recovered_dynamic_input_claims(
     Ok(claims)
 }
 
-/// 从权威 Transcript 中提取指定 Agent/Turn 最后一条 Assistant 消息的普通文本。
+/// 从权威 Transcript 中提取指定 Agent/Turn 最后一条非空 Assistant 普通文本。
 ///
-/// 根 Agent 的结果摘要没有单独的 Runtime Journal 字段，必须从同一 Turn 的持久
-/// Transcript 重建。只接受身份完全匹配的 Assistant 消息，并保留“最后一条消息没有
-/// 普通文本”这一语义；Artifact 文本必须通过同一 Runtime Session 物化，不能静默丢弃。
-fn recovered_root_final_message(
+/// 结果摘要没有独立的 Runtime Journal 字段，必须从同一 Turn 的持久 Transcript
+/// 重建。只接受身份完全匹配的 Assistant 消息；Artifact 文本必须通过同一 Runtime
+/// Session 物化，不能静默丢弃。
+fn recovered_agent_final_message(
     state: &SessionState,
     session: Option<&RuntimeSession>,
     agent_id: &ResourceAgentId,
     turn_id: &ResourceTurnId,
 ) -> Result<Option<String>, AgentRuntimeError> {
-    let mut last_assistant = None;
     for record in &state.transcript {
         let messages: &[SessionMessage] = match record {
             TranscriptRecord::MessageAdded(message) => std::slice::from_ref(message),
@@ -2701,44 +2700,88 @@ fn recovered_root_final_message(
             if message.role != ResourceMessageRole::Assistant {
                 continue;
             }
-            last_assistant = Some(message);
-        }
-    }
-    let message = last_assistant.ok_or(AgentRuntimeError::RecoveryRequired)?;
-    // 先定位最终响应再读取 Artifact，避免恢复一次根结果时重新物化全部历史模型轮次。
-    let text = if let Some(session) = session {
-        let materialized = session
-            .materialize_message(message)
-            .map_err(|_| AgentRuntimeError::RecoveryRequired)?;
-        if materialized.role != MessageRole::Assistant {
-            return Err(AgentRuntimeError::RecoveryRequired);
-        }
-        materialized
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                ContentBlock::Text { text } => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    } else {
-        let mut text_blocks = Vec::new();
-        for part in &message.content {
-            match part {
-                ResourceMessagePart::Text { text } => text_blocks.push(text.as_str()),
-                ResourceMessagePart::Artifact { .. } => {
-                    return Err(AgentRuntimeError::RecoveryRequired);
-                }
-                ResourceMessagePart::Reasoning { .. }
-                | ResourceMessagePart::Image { .. }
-                | ResourceMessagePart::ToolCall { .. }
-                | ResourceMessagePart::ToolResult { .. } => {}
+            if session.is_none()
+                && message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ResourceMessagePart::Artifact { .. }))
+            {
+                // Artifact 内容必须由同一 Runtime Session 读取；没有
+                // Session 时不能静默跳过任意一段持久结果。
+                return Err(AgentRuntimeError::RecoveryRequired);
             }
         }
-        text_blocks.join("\n")
-    };
-    Ok((!text.is_empty()).then(|| bounded_collaboration_failure(&text)))
+    }
+
+    // 先定位最终的非空正文再读取 Artifact，避免恢复一次结果时重新物化全部
+    // 历史模型轮次；末尾只有工具/推理块时继续向前寻找最后一条非空正文。
+    for record in state.transcript.iter().rev() {
+        let messages: &[SessionMessage] = match record {
+            TranscriptRecord::MessageAdded(message) => std::slice::from_ref(message),
+            TranscriptRecord::SegmentCommitted(segment) => &segment.messages,
+            TranscriptRecord::CompactionApplied(_) => continue,
+        };
+        for message in messages.iter().rev() {
+            if message.turn_id.as_ref() != Some(turn_id)
+                || message.role != ResourceMessageRole::Assistant
+            {
+                continue;
+            }
+            let text = if let Some(session) = session {
+                let materialized = session
+                    .materialize_message(message)
+                    .map_err(|_| AgentRuntimeError::RecoveryRequired)?;
+                if materialized.role != MessageRole::Assistant {
+                    return Err(AgentRuntimeError::RecoveryRequired);
+                }
+                last_non_empty_text(&materialized.content).map(str::to_owned)
+            } else {
+                if message
+                    .content
+                    .iter()
+                    .any(|part| matches!(part, ResourceMessagePart::Artifact { .. }))
+                {
+                    // Artifact 内容必须由同一 Runtime Session 读取；没有
+                    // Session 时静默跳过会把不完整结果伪装成完整摘要。
+                    return Err(AgentRuntimeError::RecoveryRequired);
+                }
+                message.content.iter().rev().find_map(|part| match part {
+                    ResourceMessagePart::Text { text } => {
+                        (!text.trim().is_empty()).then(|| text.to_owned())
+                    }
+                    ResourceMessagePart::Artifact { .. } => None,
+                    ResourceMessagePart::Reasoning { .. }
+                    | ResourceMessagePart::Image { .. }
+                    | ResourceMessagePart::ToolCall { .. }
+                    | ResourceMessagePart::ToolResult { .. } => None,
+                })
+            };
+            if let Some(text) = text {
+                return Ok(Some(bounded_collaboration_failure(&text)));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// 判断指定 Agent/Turn 是否至少有一条权威 Assistant 消息。
+fn transcript_has_agent_assistant(
+    state: &SessionState,
+    agent_id: &ResourceAgentId,
+    turn_id: &ResourceTurnId,
+) -> bool {
+    state.transcript.iter().any(|record| {
+        let messages: &[SessionMessage] = match record {
+            TranscriptRecord::MessageAdded(message) => std::slice::from_ref(message),
+            TranscriptRecord::SegmentCommitted(segment) => &segment.messages,
+            TranscriptRecord::CompactionApplied(_) => return false,
+        };
+        messages.iter().any(|message| {
+            message.turn_id.as_ref() == Some(turn_id)
+                && message.agent_id.as_ref() == Some(agent_id)
+                && message.role == ResourceMessageRole::Assistant
+        })
+    })
 }
 
 /// 将 Runtime Journal 中同一 Agent Turn 的已落盘终态转换为 Collaboration 恢复结果。
@@ -2760,17 +2803,34 @@ fn authoritative_recovered_turn_outcome(
     }
     let outcome = match turn.status {
         TurnStatus::Running => return Ok(None),
-        TurnStatus::Completed => AgentTurnOutcome::Completed {
-            final_message: if resource_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID {
-                recovered_root_final_message(state, session, &resource_agent_id, &resource_turn_id)?
-            } else {
-                state
-                    .sub_agents
-                    .get(&resource_agent_id)
-                    .filter(|agent| agent.current_turn_id.as_ref() == Some(&resource_turn_id))
-                    .and_then(|agent| agent.result_summary.clone())
-            },
-        },
+        TurnStatus::Completed => {
+            let final_message = recovered_agent_final_message(
+                state,
+                session,
+                &resource_agent_id,
+                &resource_turn_id,
+            )?;
+            if resource_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
+                && !transcript_has_agent_assistant(state, &resource_agent_id, &resource_turn_id)
+            {
+                return Err(AgentRuntimeError::RecoveryRequired);
+            }
+            AgentTurnOutcome::Completed {
+                final_message: if resource_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID {
+                    final_message
+                } else {
+                    final_message.or_else(|| {
+                        state
+                            .sub_agents
+                            .get(&resource_agent_id)
+                            .filter(|agent| {
+                                agent.current_turn_id.as_ref() == Some(&resource_turn_id)
+                            })
+                            .and_then(|agent| agent.result_summary.clone())
+                    })
+                },
+            }
+        }
         TurnStatus::Cancelled => AgentTurnOutcome::Interrupted,
         TurnStatus::Failed => {
             let message = turn
@@ -3897,16 +3957,7 @@ fn runtime_turn_outcome(
 
 /// 提取最后一次模型响应的普通文本；纯工具或推理响应保持 `None`。
 fn model_response_text(response: &keencode_model::ModelResponse) -> Option<String> {
-    let text = response
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then(|| bounded_collaboration_failure(&text))
+    last_non_empty_text(&response.content).map(bounded_collaboration_failure)
 }
 
 /// 在 UTF-8 字符边界内限制进入 Collaboration 持久状态的失败或结果文本。
@@ -14421,11 +14472,7 @@ mod tests {
                 else {
                     panic!("Provider 历史消息必须为文本");
                 };
-                assert_eq!(
-                    text.as_ptr(),
-                    expected,
-                    "桌面第 {index} 条历史发生了深拷贝"
-                );
+                assert_eq!(text.as_ptr(), expected, "桌面第 {index} 条历史发生了深拷贝");
             }
         }
     }

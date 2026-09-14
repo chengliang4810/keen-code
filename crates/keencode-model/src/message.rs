@@ -211,6 +211,18 @@ impl ContentBlock {
     }
 }
 
+/// 从有序模型内容中读取最后一条非空普通文本。
+///
+/// Provider 可能在同一个响应中返回多个普通文本块（例如在工具调用或
+/// 推理块前后各返回一段文本）。终态摘要只能代表响应的最后一条 Assistant
+/// 正文，不能把前置块拼接成另一条结果。
+pub fn last_non_empty_text(content: &[ContentBlock]) -> Option<&str> {
+    content.iter().rev().find_map(|block| match block {
+        ContentBlock::Text { text } => (!text.trim().is_empty()).then_some(text.as_str()),
+        _ => None,
+    })
+}
+
 /// 一条 Provider 中立的有序对话消息。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

@@ -43,6 +43,7 @@ use keencode_agent::{
 use keencode_model::{
     ContentBlock, ImageContent, ImageSource, Message, MessageRole as ModelMessageRole, ModelError,
     ModelResponse, OpaqueReasoningState, ReasoningContent, ToolCall, ToolResult, ToolResultContent,
+    last_non_empty_text,
 };
 use keencode_resources::{
     ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactRef, ArtifactStore, ArtifactUse,
@@ -3527,16 +3528,7 @@ fn runtime_completed_event(
 
 /// 提取正常完成响应中的普通文本，并按子 Agent 终态摘要上限截断。
 fn model_response_text(response: &ModelResponse) -> Option<String> {
-    let text = response
-        .content
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    (!text.is_empty()).then(|| truncate_runtime_terminal_message(&text))
+    last_non_empty_text(&response.content).map(|text| truncate_runtime_terminal_message(text))
 }
 
 /// 返回带子 Agent 状态配对的非正常 Turn 终态事件。
