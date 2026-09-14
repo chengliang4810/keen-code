@@ -145,6 +145,7 @@ fn register_collaboration_tools_inner(
     registry.register(Arc::new(FollowupTaskTool::new(coordinator.clone())))?;
     registry.register(Arc::new(InterruptAgentTool::new(coordinator.clone())))?;
     registry.register(Arc::new(RetryAgentTool::new(coordinator.clone())))?;
+    registry.register(Arc::new(ResumeAgentTool::new(coordinator.clone())))?;
     registry.register(Arc::new(ListAgentsTool::new(coordinator.clone())))?;
     registry.register(Arc::new(WaitAgentTool::new(coordinator)))?;
     Ok(())
@@ -521,6 +522,63 @@ impl RuntimeAgentTool for RetryAgentTool {
                 "outcome": "retry_queued",
                 "target_agent_id": input.target_agent_id.as_str(),
                 "turn_id": retry_turn_id.as_str()
+            }))
+        })
+    }
+}
+
+/// 以当前可信来源 Turn 恢复同一根树内失败或中断的单层子 Agent。
+pub struct ResumeAgentTool {
+    /// 唯一负责目标状态、Turn 分配和幂等提交的协作协调器。
+    coordinator: Arc<CollaborationCoordinator>,
+}
+
+impl ResumeAgentTool {
+    /// 创建绑定协作协调器的恢复工具。
+    pub fn new(coordinator: Arc<CollaborationCoordinator>) -> Self {
+        Self { coordinator }
+    }
+}
+
+impl RuntimeAgentTool for ResumeAgentTool {
+    /// 返回只接受目标身份且不能伪造来源 Turn 或 operationId 的严格 Schema。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "resume_agent",
+            "Resume a failed or interrupted single-level child agent with a new turn. The runtime supplies the source agent, source turn, and idempotent operationId.",
+            target_only_schema(),
+        )
+    }
+
+    /// 恢复只改变内部 Agent Turn 调度状态，不直接修改用户项目。
+    fn effect(&self, input: &Value) -> Result<ToolEffect, ToolError> {
+        parse_target_input(input)?;
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 目标状态检查与新 Turn 分配必须保持模型工具调用原始顺序。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    /// 使用 ToolContext 的可信 Agent、Turn 与 ToolCall 身份提交可恢复操作。
+    fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
+        let coordinator = self.coordinator.clone();
+        Box::pin(async move {
+            ensure_not_cancelled(&context)?;
+            let input = parse_target_input(&input)?;
+            let resume_turn_id = coordinator
+                .resume_agent_with_operation(
+                    &context.source_agent_id,
+                    &context.turn_id,
+                    &context.tool_call_id,
+                    &input.target_agent_id,
+                )
+                .map_err(normalize_collaboration_error)?;
+            json_output(json!({
+                "outcome": "resume_queued",
+                "target_agent_id": input.target_agent_id.as_str(),
+                "turn_id": resume_turn_id.as_str()
             }))
         })
     }

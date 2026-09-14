@@ -25,10 +25,10 @@ pub use background::{
 };
 pub use collaboration_tools::{
     CompletedTurnContext, FollowupTaskTool, InterruptAgentTool, ListAgentsTool,
-    ResolvedSpawnAgentTemplate, RetryAgentTool, SendMessageTool, SpawnAgentContextSource,
-    SpawnAgentTemplateContext, SpawnAgentTemplateResolver, SpawnAgentTool, WaitAgentTool,
-    register_collaboration_tools, register_collaboration_tools_with_template_resolver,
-    retain_child_agent_tool_snapshot,
+    ResolvedSpawnAgentTemplate, ResumeAgentTool, RetryAgentTool, SendMessageTool,
+    SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver, SpawnAgentTool,
+    WaitAgentTool, register_collaboration_tools,
+    register_collaboration_tools_with_template_resolver, retain_child_agent_tool_snapshot,
 };
 pub use command::{
     BashTool, BoundedCommandError, BoundedCommandOutput, BoundedCommandRequest, GitTool,

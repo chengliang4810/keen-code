@@ -24,9 +24,9 @@ use super::collaboration_tools::{
 };
 use super::{
     CompletedTurnContext, FollowupTaskTool, InterruptAgentTool, ListAgentsTool,
-    ResolvedSpawnAgentTemplate, RetryAgentTool, SendMessageTool, SpawnAgentContextSource,
-    SpawnAgentTemplateContext, SpawnAgentTemplateResolver, SpawnAgentTool, WaitAgentTool,
-    register_collaboration_tools,
+    ResolvedSpawnAgentTemplate, ResumeAgentTool, RetryAgentTool, SendMessageTool,
+    SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver, SpawnAgentTool,
+    WaitAgentTool, register_collaboration_tools,
 };
 
 /// 测试中按固定结果解析显式 Agent 模板。
@@ -498,7 +498,7 @@ fn assert_agent_not_found(error: ToolError, unknown_target: &str) {
     assert!(!error.message.contains(unknown_target));
 }
 
-/// 注册函数只加入七个严格协作工具，且 Schema 不接受任一运行时身份伪造。
+/// 注册函数只加入八个严格协作工具，且 Schema 不接受任一运行时身份伪造。
 #[test]
 fn registration_and_schemas_reject_runtime_identity_fields() {
     let fixture = fixture(2, 2);
@@ -512,7 +512,7 @@ fn registration_and_schemas_reject_runtime_identity_fields() {
         },
         empty_context_source(),
     )
-    .expect("七个协作工具应注册成功");
+    .expect("八个协作工具应注册成功");
     let definitions = registry.definitions();
     assert_eq!(
         definitions
@@ -523,6 +523,7 @@ fn registration_and_schemas_reject_runtime_identity_fields() {
             "followup_task",
             "interrupt_agent",
             "list_agents",
+            "resume_agent",
             "retry_agent",
             "send_message",
             "spawn_agent",
@@ -594,6 +595,7 @@ fn child_registration_omits_recursive_spawn_tool() {
             "followup_task",
             "interrupt_agent",
             "list_agents",
+            "resume_agent",
             "retry_agent",
             "send_message",
             "wait_agent",
@@ -1708,6 +1710,59 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
             .expect("未知 ID 失败后有效 RetryAgent 仍应执行"),
     );
     assert_eq!(retry_output["outcome"], "retry_queued");
+
+    let resume_fixture = fixture(2, 2);
+    let resume_child = spawn_with_tool(&resume_fixture, "unknown_resume_target").await;
+    let resume_child_agent_id = spawned_agent_id(&resume_child);
+    let resume_child_turn_id = spawned_turn_id(&resume_child);
+    resume_fixture
+        .coordinator
+        .complete_turn(
+            &resume_child_agent_id,
+            &resume_child_turn_id,
+            AgentTurnOutcome::Failed {
+                message: "准备恢复的失败 Turn".to_owned(),
+            },
+        )
+        .expect("恢复目标初始 Turn 应进入失败终态");
+    let resume_operation = ToolCallId::new("resume-agent-tool-operation").unwrap();
+    let resume_context = tool_context_with_call_id(
+        &resume_fixture.root_session_id,
+        &resume_fixture.root_turn_id,
+        &resume_fixture.root_agent_id,
+        resume_operation,
+    );
+    let resume_tool = ResumeAgentTool::new(resume_fixture.coordinator.clone());
+    let first_resume = output_json(
+        resume_tool
+            .execute(
+                resume_context.clone(),
+                json!({ "target_agent_id": resume_child_agent_id.as_str() }),
+            )
+            .await
+            .expect("有效失败子 Agent 应可恢复"),
+    );
+    assert_eq!(first_resume["outcome"], "resume_queued");
+    assert_ne!(
+        first_resume["turn_id"].as_str(),
+        Some(resume_child_turn_id.as_str())
+    );
+    let launches_after_first = resume_fixture.execution.launch_count();
+    let second_resume = output_json(
+        resume_tool
+            .execute(
+                resume_context,
+                json!({ "target_agent_id": resume_child_agent_id.as_str() }),
+            )
+            .await
+            .expect("相同 operationId 应幂等重放恢复结果"),
+    );
+    assert_eq!(second_resume, first_resume);
+    assert_eq!(
+        resume_fixture.execution.launch_count(),
+        launches_after_first,
+        "恢复幂等重放不得重复派发 Turn"
+    );
 }
 
 /// 已驻留的跨树目标仍返回固定跨树错误，且不回显另一棵树的身份。
