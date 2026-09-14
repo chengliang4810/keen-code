@@ -1115,6 +1115,32 @@ fn model_messages_drop_deep_segment_chain_without_stack_overflow() {
     drop(messages);
 }
 
+/// #24 共享深链在小栈线程中同时释放，也必须由最后一个所有者迭代回收。
+#[test]
+fn model_messages_drop_shared_deep_segments_concurrently() {
+    for _ in 0..32 {
+        let mut messages = crate::ModelMessages::default();
+        for _ in 0..8_192 {
+            messages.append(vec![Message::text(MessageRole::User, "shared segment")]);
+        }
+        let other = messages.clone();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers = [messages, other].map(|messages| {
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::Builder::new()
+                .stack_size(256 * 1024)
+                .spawn(move || {
+                    barrier.wait();
+                    drop(messages);
+                })
+                .expect("应创建并发析构线程")
+        });
+        for worker in workers {
+            worker.join().expect("共享深链应在有限栈中释放");
+        }
+    }
+}
+
 /// #24 写时复制：`messages_mut` 追加后旧快照不变、新请求可见新消息。
 #[test]
 fn model_request_messages_mut_preserves_old_snapshot() {

@@ -179,14 +179,11 @@ impl Clone for ModelMessages {
 impl Drop for ModelMessages {
     fn drop(&mut self) {
         // `MessageSegment.previous` is a persistent one-way chain. Taking the tail and
-        // unwrapping unique segments one by one keeps destruction off the call stack;
-        // a shared segment can be released immediately without touching its chain.
+        // `into_inner` ensures one concurrent owner receives each last segment.
+        // `try_unwrap` can fail for both owners and recursively drop the last Err Arc.
         let mut current = self.tail.take();
         while let Some(segment) = current {
-            match Arc::try_unwrap(segment) {
-                Ok(segment) => current = segment.previous,
-                Err(_) => break,
-            }
+            current = Arc::into_inner(segment).and_then(|segment| segment.previous);
         }
     }
 }
