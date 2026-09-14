@@ -2737,7 +2737,7 @@ impl CollaborationCoordinator {
         self.restore_coordinator_with_authoritative_outcomes(recovered, &HashMap::new())
     }
 
-    /// 恢复协调器，并让同一 Turn 已写入 Runtime Journal 的终态优先于旧 checkpoint 未决状态。
+    /// 恢复协调器；Open/Running Turn 接受 Runtime 权威终态，已提交取消和 Closing 树不允许被其覆盖。
     pub fn restore_coordinator_with_authoritative_outcomes(
         &self,
         mut recovered: RecoveredCoordinator,
@@ -2946,8 +2946,20 @@ impl CollaborationCoordinator {
                     let plan_guard = agent
                         .current_plan_guard
                         .expect("live checkpoint Plan 守卫已校验");
-                    if let Some(outcome) = authoritative_outcomes.get(&turn_id) {
-                        consumed_authoritative_turns.insert(turn_id.clone());
+                    if recovered.lifecycle == RecoveredRootLifecycle::Open {
+                        let authoritative_outcome = authoritative_outcomes.get(&turn_id);
+                        if authoritative_outcome.is_some() {
+                            consumed_authoritative_turns.insert(turn_id.clone());
+                        }
+                        let outcome =
+                            if matches!(&agent.status, CollaborationAgentStatus::Cancelling { .. })
+                            {
+                                AgentTurnOutcome::Interrupted
+                            } else {
+                                authoritative_outcome
+                                    .cloned()
+                                    .unwrap_or(AgentTurnOutcome::Interrupted)
+                            };
                         resolved_turns.push(RecoveredTurnResolution {
                             definition: agent.definition.clone(),
                             previous_status: agent.status.clone(),
@@ -2957,21 +2969,7 @@ impl CollaborationCoordinator {
                                 prompt: agent.current_turn_prompt.clone(),
                                 parent_turn_id: agent.current_parent_turn_id.clone(),
                                 root_turn_id,
-                                outcome: outcome.clone(),
-                            },
-                            source_agent_id,
-                        });
-                    } else if recovered.lifecycle == RecoveredRootLifecycle::Open {
-                        resolved_turns.push(RecoveredTurnResolution {
-                            definition: agent.definition.clone(),
-                            previous_status: agent.status.clone(),
-                            turn: TurnRecord {
-                                turn_id,
-                                cause,
-                                prompt: agent.current_turn_prompt.clone(),
-                                parent_turn_id: agent.current_parent_turn_id.clone(),
-                                root_turn_id,
-                                outcome: AgentTurnOutcome::Interrupted,
+                                outcome,
                             },
                             source_agent_id,
                         });

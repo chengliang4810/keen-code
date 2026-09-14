@@ -13,9 +13,9 @@ use crate::{
     CollaborationEventKind, CollaborationGlobalTurnLimiter, CollaborationIdGenerator,
     CollaborationInvocationKind, CollaborationInvocationOutput, CollaborationLimits,
     CollaborationPortError, CollaborationStore, CollaborationTransitionCommit, ContextInheritance,
-    MailboxDelivery, MailboxMessage, MailboxMessageId, PlanGuard, RecoveredAgentTree,
-    RootAgentRequest, SessionId, SpawnAgentRequest, ToolCallId, TurnCompletionDisposition, TurnId,
-    UserSteer, WaitAgentOutcome, WorktreeLease,
+    MailboxDelivery, MailboxMessage, MailboxMessageId, MailboxMessageKind, PlanGuard,
+    RecoveredAgentTree, RootAgentRequest, SessionId, SpawnAgentRequest, ToolCallId,
+    TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome, WorktreeLease,
 };
 use keencode_model::{Message, MessageRole};
 use std::collections::{HashMap, HashSet};
@@ -6301,6 +6301,83 @@ fn full_root_restore_prefers_authoritative_runtime_failure() {
     }));
 }
 
+/// 公开恢复 API 不得让迟到的 Runner 终态覆盖已提交的取消决定。
+#[test]
+fn cancelling_restore_normalizes_authoritative_outcomes_to_interrupted() {
+    let outcomes = [
+        AgentTurnOutcome::Completed {
+            final_message: Some("取消后迟到的完成结果".to_owned()),
+        },
+        AgentTurnOutcome::Failed {
+            message: "取消后迟到的失败结果".to_owned(),
+        },
+    ];
+
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        let fixture = fixture(2, 2);
+        let root_turn = fixture
+            .coordinator
+            .begin_root_turn(&fixture.root_agent_id, "取消竞态父 Turn", NO_PLAN)
+            .unwrap();
+        let child = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                spawn_request("cancelling_authoritative_child"),
+            )
+            .unwrap();
+        fixture
+            .coordinator
+            .cancel_turn(&child.agent.agent_id, &child.initial_turn_id)
+            .unwrap();
+        let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+        assert!(matches!(
+            checkpoint.roots[0]
+                .agents
+                .iter()
+                .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+                .unwrap()
+                .status,
+            CollaborationAgentStatus::Cancelling { ref turn_id }
+                if turn_id == &child.initial_turn_id
+        ));
+        let restored = CollaborationCoordinator::new(
+            CollaborationLimits::new(2).unwrap(),
+            fixture.store.clone(),
+            Arc::new(RecordingExecution::default()),
+            Arc::new(SequentialIds {
+                next: AtomicU64::new(22_000 + index as u64 * 100),
+            }),
+        );
+        let authoritative_outcomes = HashMap::from([(child.initial_turn_id.clone(), outcome)]);
+
+        restored
+            .restore_coordinator_with_authoritative_outcomes(checkpoint, &authoritative_outcomes)
+            .unwrap();
+
+        assert!(matches!(
+            restored.agent_status(&child.agent.agent_id).unwrap(),
+            CollaborationAgentStatus::Interrupted { ref turn_id }
+                if turn_id == &child.initial_turn_id
+        ));
+        let child_completions = restored
+            .mailbox(&fixture.root_agent_id)
+            .unwrap()
+            .into_iter()
+            .filter(|message| message.source_agent_id == child.agent.agent_id)
+            .collect::<Vec<_>>();
+        assert_eq!(child_completions.len(), 1);
+        assert!(matches!(
+            child_completions[0].kind,
+            MailboxMessageKind::ChildTurnFinished {
+                outcome: AgentTurnOutcome::Interrupted
+            }
+        ));
+    }
+}
+
 /// 创建使用既有持久事件 Store 的空恢复协调器。
 fn restore_coordinator(
     store: Arc<RecordingStore>,
@@ -10288,6 +10365,94 @@ fn closing_checkpoint_restore_reserves_capacity_until_quiesce_retry() {
         CollaborationAgentStatus::Running { turn_id }
             if turn_id == second_child.initial_turn_id
     ));
+}
+
+/// Closing 恢复不消费 Runtime 权威终态，整棵树仍须先静止再清理。
+#[test]
+fn closing_restore_rejects_authoritative_outcomes_and_quiesces_tree() {
+    let outcomes = [
+        AgentTurnOutcome::Completed {
+            final_message: Some("Runner 已完成但关闭尚未静止".to_owned()),
+        },
+        AgentTurnOutcome::Failed {
+            message: "Runner 已失败但关闭尚未静止".to_owned(),
+        },
+    ];
+
+    for (index, outcome) in outcomes.into_iter().enumerate() {
+        let fixture = fixture(2, 2);
+        let root_turn = fixture
+            .coordinator
+            .begin_root_turn(&fixture.root_agent_id, "关闭竞态父 Turn", NO_PLAN)
+            .unwrap();
+        let child = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                spawn_request("closing_authoritative_child"),
+            )
+            .unwrap();
+        fixture.execution.reject_all_quiesces();
+        assert!(matches!(
+            fixture
+                .coordinator
+                .close_root_session(&fixture.root_agent_id)
+                .unwrap_err(),
+            CollaborationError::CommittedExecutionPending { .. }
+        ));
+        let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+        assert_eq!(
+            checkpoint.roots[0].lifecycle,
+            RecoveredRootLifecycle::Closing
+        );
+        let authoritative_outcomes = HashMap::from([(child.initial_turn_id.clone(), outcome)]);
+        let execution = Arc::new(RecordingExecution::default());
+        let restored = CollaborationCoordinator::new(
+            CollaborationLimits::new(2).unwrap(),
+            fixture.store.clone(),
+            execution.clone(),
+            Arc::new(SequentialIds {
+                next: AtomicU64::new(83_000 + index as u64 * 100),
+            }),
+        );
+
+        assert!(matches!(
+            restored.restore_coordinator_with_authoritative_outcomes(
+                checkpoint.clone(),
+                &authoritative_outcomes
+            ),
+            Err(CollaborationError::InvalidRecovery { .. })
+        ));
+        assert_eq!(restored.capacity().unwrap().global_in_use, 0);
+        restored
+            .restore_coordinator_with_authoritative_outcomes(checkpoint, &HashMap::new())
+            .expect("Closing 恢复不得要求或写回正在销毁 Turn 的权威终态");
+
+        assert!(matches!(
+            restored.agent_status(&fixture.root_agent_id).unwrap(),
+            CollaborationAgentStatus::Cancelling { turn_id } if turn_id == root_turn
+        ));
+        assert!(matches!(
+            restored.agent_status(&child.agent.agent_id).unwrap(),
+            CollaborationAgentStatus::Cancelling { turn_id }
+                if turn_id == child.initial_turn_id
+        ));
+        assert!(restored.mailbox(&fixture.root_agent_id).unwrap().is_empty());
+        assert!(restored.mailbox(&child.agent.agent_id).unwrap().is_empty());
+        assert_eq!(restored.capacity().unwrap().global_in_use, 1);
+
+        assert_eq!(restored.reconcile_outbox().unwrap(), 1);
+        assert_eq!(execution.quiesces().len(), 1);
+        assert_eq!(execution.closes().len(), 1);
+        assert_eq!(restored.capacity().unwrap().global_in_use, 0);
+        assert!(matches!(
+            restored.agent_status(&fixture.root_agent_id),
+            Err(CollaborationError::AgentNotFound { .. })
+        ));
+        assert!(restored.checkpoint_coordinator().unwrap().roots.is_empty());
+    }
 }
 
 /// 验证规范批次编码对相同内容稳定，并覆盖水位、事件字段和负载字段。
