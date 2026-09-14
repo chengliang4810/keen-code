@@ -1237,13 +1237,19 @@ function reduceKeenCodeEvent(
     case "context_compaction_completed": {
       if (!childAgentId) view.compacting = false;
       // 与思考、正文、工具共用同一有序缓冲；实时与重放都保留发生位置。
-      targetSegments(view, childAgentId)?.push({
+      const segments = targetSegments(view, childAgentId);
+      const notice = {
         kind: "compaction",
         meta: {
           trigger: "auto",
           tokensAfter: event.estimatedTokens,
         },
-      });
+      } as const;
+      if (segments?.at(-1)?.kind === "compaction") {
+        segments[segments.length - 1] = notice;
+      } else {
+        segments?.push(notice);
+      }
       break;
     }
     case "context_compaction_failed": {

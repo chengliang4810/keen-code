@@ -173,6 +173,21 @@ describe("Acp delivery sequence", () => {
     },
   );
 
+  it("同一轮连续压缩只显示最终一次通知", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }, { journalSequence: 1 }));
+    apply(view, eventDelivery(2, {
+      type: "context_compaction_completed", replacedThroughSequence: 1, estimatedTokens: 120,
+    }, { journalSequence: 2 }));
+    apply(view, eventDelivery(3, {
+      type: "context_compaction_completed", replacedThroughSequence: 2, estimatedTokens: 80,
+    }, { journalSequence: 3 }));
+
+    expect(view.live_segments).toEqual([
+      { kind: "compaction", meta: { trigger: "auto", tokensAfter: 80 } },
+    ]);
+  });
+
   it("水位事件写入淡色提示行，不改压缩状态与有序分段", () => {
     const view = emptySession("session-1");
     apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }, { journalSequence: 1 }));
