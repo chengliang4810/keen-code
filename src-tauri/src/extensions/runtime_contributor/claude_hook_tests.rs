@@ -104,6 +104,62 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn context_lifecycle_hooks_inject_at_registered_phases() {
+    let root = tempfile::tempdir().unwrap();
+    let context_hook = |name: &str, phase, matcher, context: &str| {
+        parse_hook_spec(
+            name.to_owned(),
+            phase,
+            matcher,
+            json!({"type":"context", "context":context}),
+            root.path(),
+        )
+        .unwrap()
+    };
+    let hook = NativeLifecycleHooks {
+        hooks: vec![
+            context_hook(
+                "test:session-context",
+                HookPhase::SessionStart,
+                Some("startup".to_owned()),
+                "session context",
+            ),
+            context_hook(
+                "test:prompt-context",
+                HookPhase::UserPromptSubmit,
+                None,
+                "prompt context",
+            ),
+        ],
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("context-session").unwrap(),
+            turn_id: TurnId::new("context-turn").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "hello".to_owned(),
+        has_history: false,
+    };
+
+    let first = hook.turn_start(context.clone()).await.unwrap();
+    assert_eq!(
+        first
+            .context
+            .iter()
+            .map(|addition| addition.text.as_str())
+            .collect::<Vec<_>>(),
+        ["session context", "prompt context"]
+    );
+    let second = hook.turn_start(context).await.unwrap();
+    assert_eq!(second.context[0].text, "prompt context");
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn exit_two_blocks_but_exit_one_is_non_blocking() {
     let root = tempfile::tempdir().unwrap();
     let HookSpec::Command(mut spec) = parse_command_hook(

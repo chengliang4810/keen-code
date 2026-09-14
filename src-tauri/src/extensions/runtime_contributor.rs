@@ -132,6 +132,22 @@ impl HookSpec {
             Self::Command(spec) => &spec.name,
         }
     }
+
+    /// 返回当前 Hook 参与的唯一生命周期阶段。
+    const fn phase(&self) -> HookPhase {
+        match self {
+            Self::Context(spec) => spec.phase,
+            Self::Command(spec) => spec.phase,
+        }
+    }
+
+    /// 返回当前阶段用于筛选工具、来源或代理类型的 matcher。
+    fn matcher(&self) -> &Option<String> {
+        match self {
+            Self::Context(spec) => &spec.matcher,
+            Self::Command(spec) => &spec.matcher,
+        }
+    }
 }
 
 /// 声明式上下文 Hook 的冻结配置。
@@ -222,41 +238,45 @@ impl AgentHook for NativeLifecycleHooks {
                     continue;
                 }
                 for hook in &self.hooks {
-                    let HookSpec::Command(spec) = hook else {
-                        continue;
-                    };
-                    if spec.phase != phase
+                    if hook.phase() != phase
                         || (phase == HookPhase::SessionStart
-                            && !matches_tool(&spec.matcher, source))
+                            && !matches_tool(hook.matcher(), source))
                         || (phase == HookPhase::SubagentStart
-                            && !matches_tool(&spec.matcher, &self.agent_type))
+                            && !matches_tool(hook.matcher(), &self.agent_type))
                     {
                         continue;
                     }
-                    let payload = json!({
-                        "hook_event_name": phase.to_string(),
-                        "session_id": context.invocation.session_id.as_str(),
-                        "agent_id": context.invocation.source_agent_id.as_str(),
-                        "agent_type": self.agent_type,
-                        "prompt_id": context.invocation.turn_id.as_str(),
-                        "cwd": spec.current_dir,
-                        "source": source,
-                        "prompt": context.prompt,
-                    });
-                    let output = run_command_hook(spec, self.plan, &payload).await?;
-                    if phase == HookPhase::UserPromptSubmit
-                        && let Ok(value) = serde_json::from_str::<Value>(&output)
-                        && value.get("decision").and_then(Value::as_str) == Some("block")
-                    {
-                        return Err(HookCallbackError::new(
-                            "hook_prompt_blocked",
-                            value
-                                .get("reason")
-                                .and_then(Value::as_str)
-                                .unwrap_or("插件 Hook 拒绝了当前输入"),
-                        ));
+                    match hook {
+                        HookSpec::Context(spec) => {
+                            additions.extend(context_additions(spec.context.clone()));
+                        }
+                        HookSpec::Command(spec) => {
+                            let payload = json!({
+                                "hook_event_name": phase.to_string(),
+                                "session_id": context.invocation.session_id.as_str(),
+                                "agent_id": context.invocation.source_agent_id.as_str(),
+                                "agent_type": self.agent_type,
+                                "prompt_id": context.invocation.turn_id.as_str(),
+                                "cwd": spec.current_dir,
+                                "source": source,
+                                "prompt": context.prompt,
+                            });
+                            let output = run_command_hook(spec, self.plan, &payload).await?;
+                            if phase == HookPhase::UserPromptSubmit
+                                && let Ok(value) = serde_json::from_str::<Value>(&output)
+                                && value.get("decision").and_then(Value::as_str) == Some("block")
+                            {
+                                return Err(HookCallbackError::new(
+                                    "hook_prompt_blocked",
+                                    value
+                                        .get("reason")
+                                        .and_then(Value::as_str)
+                                        .unwrap_or("插件 Hook 拒绝了当前输入"),
+                                ));
+                            }
+                            additions.extend(parse_tool_hook_output(output)?.context);
+                        }
                     }
-                    additions.extend(parse_lifecycle_hook_output(output)?.context);
                 }
             }
             Ok(ToolHookOutput { context: additions })
@@ -373,15 +393,13 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                     continue;
                 }
                 command.current_dir = context.project_root().to_path_buf();
-                if matches!(
-                    command.phase,
-                    HookPhase::SessionStart
-                        | HookPhase::UserPromptSubmit
-                        | HookPhase::SubagentStart
-                ) {
-                    lifecycle.push(spec);
-                    continue;
-                }
+            }
+            if matches!(
+                spec.phase(),
+                HookPhase::SessionStart | HookPhase::UserPromptSubmit | HookPhase::SubagentStart
+            ) {
+                lifecycle.push(spec);
+                continue;
             }
             let hook: Arc<dyn AgentHook> = match &spec {
                 HookSpec::Context(spec) => Arc::new(NativeContextHook { spec: spec.clone() }),
@@ -3457,6 +3475,61 @@ mod tests {
             .expect_err("观察阶段必须拒绝 context Hook");
             assert!(error.contains("只支持 command 类型"));
         }
+    }
+
+    /// 多个声明式生命周期 Hook 必须归入同一回调，避免注册为永远不会启动的普通 Hook。
+    #[test]
+    fn context_lifecycle_hooks_are_registered_through_aggregate() {
+        let directory = tempfile::tempdir().expect("创建生命周期 Hook 测试目录");
+        let data_root = directory.path().join("data");
+        let project_root = directory.path().join("project");
+        fs::create_dir_all(&data_root).expect("创建测试数据目录");
+        fs::create_dir_all(&project_root).expect("创建测试项目目录");
+        let data_root = fs::canonicalize(data_root).expect("规范测试数据目录");
+        let project_root = fs::canonicalize(project_root).expect("规范测试项目目录");
+        let skills = Arc::new(
+            keencode_skills::discover_skills(&runtime_skill_config_from_snapshot(
+                data_root,
+                project_root.clone(),
+                PluginRuntimeSnapshot::default(),
+            ))
+            .expect("建立空 Skill 目录"),
+        );
+        let context_hook = |name, phase| {
+            parse_hook_spec(
+                name,
+                phase,
+                None,
+                json!({"type":"context", "context":"lifecycle context"}),
+                &project_root,
+            )
+            .expect("声明式生命周期 Hook 应可解析")
+        };
+        let contributor = NativeExtensionContributor {
+            project_root: project_root.clone(),
+            skills,
+            deferred_tools: None,
+            mcp_servers: Vec::new(),
+            hooks: vec![
+                context_hook("test:session-context".to_owned(), HookPhase::SessionStart),
+                context_hook(
+                    "test:prompt-context".to_owned(),
+                    HookPhase::UserPromptSubmit,
+                ),
+            ],
+            hook_circuits: HookCircuitStore::new(),
+            agents: AgentCatalog::default(),
+            commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
+            lsp_runtime: None,
+            diagnostics: Vec::new(),
+        };
+        let context = RuntimeToolContext::for_extension_test(project_root, PlanGuard::inactive());
+
+        let runtime = contributor
+            .build_hook_runtime(&context)
+            .expect("生命周期 Hook Runtime 应可构建");
+
+        assert_eq!(runtime.registry().len(), 1);
     }
 
     /// 返回执行后在当前目录创建标记文件的跨平台 Hook 命令。
