@@ -163,7 +163,7 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
-  /** 每个会话允许同时运行的后台 Agent 数量。 */
+  /** 所有对话共享的设备级后台 Agent 并发上限。 */
   backgroundAgentLimit: number;
   onBackgroundAgentLimit: (value: number) => void;
   /** 内置终端使用的 CSS 字体族列表。 */

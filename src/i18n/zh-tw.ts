@@ -464,7 +464,7 @@ export const zhTW: Record<MessageKey, string> = {
     "KeenCode 執行時阻止系統因閒置進入睡眠，仍可手動睡眠或闔蓋休眠。",
   "settings.backgroundAgentLimit": "背景 Agent 並行數量",
   "settings.backgroundAgentLimitDesc":
-    "每個對話最多同時執行的背景 Agent 數量（預設 10，上限 999）。背景 Shell 獨立計數並固定最多 5 個。",
+    "所有對話共用的背景 Agent 並行上限（裝置級；預設 10，上限 999）。背景 Shell 獨立計數並固定最多 5 個。",
   "settings.webServiceUrl": "相容服務基礎 URL",
   "settings.webServiceUrlDesc":
     "透過 Tavily 相容服務搜尋、擷取網頁，留空使用內建服務。搜尋詞與網址會傳送至服務。僅接受無憑據、查詢參數及片段的 HTTP/HTTPS 位址。",

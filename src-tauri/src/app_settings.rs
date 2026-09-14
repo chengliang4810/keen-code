@@ -105,7 +105,7 @@ pub struct AppSettings {
     pub notification_sound: bool,
     /// 是否阻止系统因用户空闲自动进入睡眠。
     pub keep_computer_awake: bool,
-    /// 每个会话允许同时运行的后台 Agent 数量。
+    /// 所有对话共享的设备级后台 Agent 并发上限。
     pub background_agent_limit: u16,
     /// 内置终端使用的 CSS 字体族列表。
     pub terminal_font_family: String,
@@ -276,7 +276,7 @@ pub struct AppSettingsPatch {
     /// 更新阻止空闲睡眠开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub keep_computer_awake: Option<bool>,
-    /// 更新每个会话的后台 Agent 并发数量。
+    /// 更新所有对话共享的设备级后台 Agent 并发上限。
     #[serde(default, deserialize_with = "deserialize_background_agent_limit")]
     pub background_agent_limit: Option<u16>,
     /// 更新内置终端字体族列表。

@@ -489,7 +489,7 @@ const en = {
     "Prevent idle sleep while KeenCode is running. Manual sleep and lid-close sleep still work.",
   "settings.backgroundAgentLimit": "Background Agent concurrency",
   "settings.backgroundAgentLimitDesc":
-    "Maximum background Agents per conversation (default 10, maximum 999). Background Shell tasks have a separate fixed limit of 5.",
+    "Maximum background Agents shared across all conversations on this device (default 10, maximum 999). Background Shell tasks have a separate fixed limit of 5.",
   "settings.webServiceUrl": "Compatible service base URL",
   "settings.webServiceUrlDesc":
     "Enables WebFetch and WebSearch through a Tavily-compatible service. Leave blank to use the built-in service. Search queries and fetched URLs are sent to the service. Only HTTP and HTTPS URLs without credentials, queries, or fragments are accepted.",
@@ -1698,7 +1698,7 @@ const zh: Record<MessageKey, string> = {
     "KeenCode 运行时阻止系统因空闲进入睡眠，仍可手动睡眠或合盖休眠。",
   "settings.backgroundAgentLimit": "后台 Agent 并发数量",
   "settings.backgroundAgentLimitDesc":
-    "每个对话最多同时运行的后台 Agent 数量（默认 10，上限 999）。后台 Shell 独立计数并固定最多 5 个。",
+    "所有对话共享的后台 Agent 并发上限（设备级；默认 10，上限 999）。后台 Shell 独立计数并固定最多 5 个。",
   "settings.webServiceUrl": "兼容服务基础 URL",
   "settings.webServiceUrlDesc":
     "通过 Tavily 兼容服务搜索、抓取网页，留空使用内置服务。搜索词和网址会发送至服务。仅接受无凭据、查询参数及片段的 HTTP/HTTPS 地址。",
