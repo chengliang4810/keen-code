@@ -558,6 +558,93 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
     ).rejects.toThrow("响应格式无效");
   });
 
+  it("拒绝包含未知字段的 rewind 响应", async () => {
+    clientMocks.acpRequest.mockResolvedValue({
+      sessionId: "session-1",
+      archivedSessionId: "archive-1",
+      throughJournalSequence: 7,
+      revertedFiles: false,
+      extra: true,
+    });
+
+    await expect(
+      sessionRewind({
+        sessionId: "session-1",
+        targetMessageId: "message-2",
+        expectedText: "原始正文",
+        revertFiles: false,
+        operationId: "rewind-unknown-field",
+      }),
+    ).rejects.toThrow("响应格式无效");
+  });
+
+  it("拒绝归档 Session 与源 Session 相同的 rewind 响应", async () => {
+    clientMocks.acpRequest.mockResolvedValue({
+      sessionId: "session-1",
+      archivedSessionId: "session-1",
+      throughJournalSequence: 7,
+      revertedFiles: false,
+    });
+
+    await expect(
+      sessionRewind({
+        sessionId: "session-1",
+        targetMessageId: "message-2",
+        expectedText: "原始正文",
+        revertFiles: false,
+        operationId: "rewind-same-session",
+      }),
+    ).rejects.toThrow("响应格式无效");
+  });
+
+  it.each([
+    ["sessionId", "session-\u0001"],
+    ["archivedSessionId", "archive-\u0001"],
+  ])("拒绝 %s 含控制字符的 rewind 响应", (field, invalidValue) => {
+    const response = {
+      sessionId: "session-1",
+      archivedSessionId: "archive-1",
+      throughJournalSequence: 7,
+      revertedFiles: false,
+      [field]: invalidValue,
+    };
+    clientMocks.acpRequest.mockResolvedValue(response);
+
+    return expect(
+      sessionRewind({
+        sessionId: "session-1",
+        targetMessageId: "message-2",
+        expectedText: "原始正文",
+        revertFiles: false,
+        operationId: `rewind-invalid-${field}-control`,
+      }),
+    ).rejects.toThrow("响应格式无效");
+  });
+
+  it.each(["sessionId", "archivedSessionId"])(
+    "拒绝 %s 超过 256 UTF-8 字节的 rewind 响应",
+    (field) => {
+      const response = {
+        sessionId: "session-1",
+        archivedSessionId: "archive-1",
+        throughJournalSequence: 7,
+        revertedFiles: false,
+        [field]: "x".repeat(257),
+      };
+      clientMocks.acpRequest.mockResolvedValue(response);
+
+      return expect(
+        sessionRewind({
+          sessionId: "session-1",
+          targetMessageId: "message-2",
+          expectedText: "原始正文",
+          revertFiles: false,
+          operationId: `rewind-invalid-${field}-length`,
+        }),
+      ).rejects.toThrow("响应格式无效");
+    },
+  );
+
   it.each(["", "   "])(
     "拒绝 archivedSessionId=%j 的非法 rewind 响应",
     async (archivedSessionId) => {

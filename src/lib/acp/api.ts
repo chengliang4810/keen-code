@@ -5,6 +5,7 @@ import type {
   AcpTauriDelivery,
   GoalRecordDto,
 } from "./events";
+import { isEventIdentifier } from "./events";
 import { invoke } from "../tauri";
 import { acpInitialize, acpNotify, acpRequest, acpRespond } from "./client";
 import { startSessionPrompt } from "./prompt";
@@ -274,14 +275,18 @@ export function sessionRewind(args: {
     },
   ).then((result) => {
     const value = result as Record<string, unknown>;
+    const hasExactFields = typeof result === "object" &&
+      result !== null && !Array.isArray(result) &&
+      Object.keys(value).length === 4 &&
+      ["sessionId", "archivedSessionId", "throughJournalSequence", "revertedFiles"]
+        .every((key) => Object.hasOwn(value, key));
     if (
-      typeof result !== "object" ||
-      result === null ||
-      Array.isArray(result) ||
-      typeof value.sessionId !== "string" ||
+      !hasExactFields ||
+      !isEventIdentifier(value.sessionId) ||
       value.sessionId !== args.sessionId ||
-      typeof value.archivedSessionId !== "string" ||
+      !isEventIdentifier(value.archivedSessionId) ||
       value.archivedSessionId.trim() === "" ||
+      value.archivedSessionId === args.sessionId ||
       typeof value.throughJournalSequence !== "number" ||
       !Number.isSafeInteger(value.throughJournalSequence) ||
       value.throughJournalSequence <= 0 ||

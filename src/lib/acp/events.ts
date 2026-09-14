@@ -620,7 +620,7 @@ function utf8ByteLength(value: string): number {
 }
 
 /** 判断值是否为有界且不含控制字符的事件标识。 */
-function isEventIdentifier(
+export function isEventIdentifier(
   value: unknown,
   maxBytes = MAX_EVENT_IDENTIFIER_BYTES,
 ): value is string {
