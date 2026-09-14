@@ -605,7 +605,9 @@ fn reconcile_existing_prepared(
 ) -> Result<(), RuntimeError> {
     if existing.path != planned.path
         || existing.before != planned.before
+        || existing.before_readonly != planned.before_readonly
         || existing.after != planned.after
+        || existing.after_readonly != planned.after_readonly
     {
         return Err(RuntimeError::ControlOperationConflict);
     }
@@ -1526,6 +1528,70 @@ mod tests {
                 ))
                 .count(),
             1
+        );
+    }
+
+    /// Prepared 重试必须绑定前后只读元数据；相同快照但不同属性不能越过对账边界。
+    #[test]
+    fn prepared_retry_rejects_readonly_metadata_conflict() {
+        let root = TempDir::new().expect("临时目录应创建");
+        let session = create(&root, "file-change-prepared-readonly-conflict");
+        let request_id = start_tool(&session, "file-change-prepared-readonly-turn");
+        let path = root
+            .path()
+            .join("prepared-readonly-retry.txt")
+            .display()
+            .to_string();
+        inject_file_change_append_fault(FileChangeAppendFault::AfterAppend(
+            FileChangePhase::Prepared,
+        ));
+        assert!(matches!(
+            session.prepare_file_change_with_readonly(
+                &request_id,
+                path.clone(),
+                Some(b"before"),
+                b"after",
+                Some(true),
+                Some(false),
+            ),
+            Err(RuntimeError::RecoveryRequired)
+        ));
+
+        let conflicting = session.prepare_file_change_with_readonly(
+            &request_id,
+            path.clone(),
+            Some(b"before"),
+            b"after",
+            Some(false),
+            Some(false),
+        );
+        assert!(matches!(
+            conflicting,
+            Err(RuntimeError::ControlOperationConflict)
+        ));
+        assert!(
+            session
+                .snapshot()
+                .expect("只读冲突后状态应读取")
+                .recovery_required,
+            "只读元数据冲突不得清除待对账状态"
+        );
+
+        session
+            .prepare_file_change_with_readonly(
+                &request_id,
+                path,
+                Some(b"before"),
+                b"after",
+                Some(true),
+                Some(false),
+            )
+            .expect("相同只读元数据重试应完成对账");
+        assert!(
+            !session
+                .snapshot()
+                .expect("只读对账后状态应读取")
+                .recovery_required
         );
     }
 
