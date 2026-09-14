@@ -116,7 +116,7 @@ export async function sessionConnect(args: {
 }): Promise<SessionSnapshot> {
   if (args.sessionId) {
     return sessionSnapshotFromResult(
-      await sessionLoad(args.sessionId, undefined, args.mcpServers ?? []),
+      await sessionLoad(args.sessionId, { limit: 2 }, args.mcpServers ?? []),
     );
   }
   const initialization = await acpInitialize();

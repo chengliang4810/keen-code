@@ -745,9 +745,9 @@ describe("session/load 自动补齐历史", () => {
     expect(deliver(harness, id, 1).status).toBe("applied");
     const segments = view.live_segments;
     await vi.advanceTimersByTimeAsync(16);
-    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 10, cursor: "cursor-1" });
+    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 2, cursor: "cursor-1" });
     await vi.advanceTimersByTimeAsync(16);
-    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 10, cursor: "cursor-2" });
+    expect(ports.sessionLoad).toHaveBeenLastCalledWith(id, { limit: 2, cursor: "cursor-2" });
     expect(view.replay.hasMore).toBe(false);
     expect(view.delivery.lastSequence).toBe(1);
     expect(view.live_segments).toBe(segments);

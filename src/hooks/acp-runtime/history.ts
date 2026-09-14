@@ -167,7 +167,9 @@ export function useAcpRuntimeHistory({
           // 给首屏和每批渲染留出事件循环，不用 Promise 微任务连续占住主线程。
           await new Promise<void>((resolve) => setTimeout(resolve, 16));
           if (!valid()) return;
-          const loaded = await sessionLoad(sessionId, { limit: 10, cursor: job.cursor });
+          // 根回合可能包含大量工具输出；保持与首屏相同的小窗口，避免多个
+          // 合法回合合并后超过 ACP 单响应 1 MiB 的边界。
+          const loaded = await sessionLoad(sessionId, { limit: 2, cursor: job.cursor });
           if (!valid()) return;
           const page = parseHistoryPage(loaded._meta, sessionId);
           if (page.nextCursor === job.cursor) throw new Error("历史分页游标未推进");

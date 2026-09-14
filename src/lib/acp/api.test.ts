@@ -184,6 +184,7 @@ describe("ACP Session 标准 API 映射", () => {
         sessionId: "session-existing",
         cwd: "D:/authoritative-project",
         mcpServers: [],
+        _meta: { "keencode/history": { limit: 2 } },
       },
     );
   });
@@ -227,6 +228,7 @@ describe("ACP Session 标准 API 映射", () => {
       sessionId: "existing",
       cwd: "D:/existing",
       mcpServers,
+      _meta: { "keencode/history": { limit: 2 } },
     });
 
     clientMocks.acpRequest.mockReset().mockResolvedValueOnce({ sessionId: "forked" });
@@ -250,6 +252,7 @@ describe("ACP Session 标准 API 映射", () => {
     await sessionConnect({ sessionId: "cached", operationId: "load-cached" });
     expect(clientMocks.acpRequest).toHaveBeenCalledExactlyOnceWith("session/load", {
       sessionId: "cached", cwd: "D:/cached", mcpServers: [],
+      _meta: { "keencode/history": { limit: 2 } },
     });
   });
 
