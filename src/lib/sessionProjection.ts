@@ -1,6 +1,7 @@
 import type { SessionListItem } from "./acp/api";
 import type { Locale } from "@/i18n";
 import type { SessionPreferences } from "./sessionPreferences";
+import { parseStoredContent, serializeForAgent } from "./draftDoc";
 import {
   mergeAttachments,
   mergeMessageAttachments,
@@ -341,7 +342,8 @@ function hasPersistedCurrentTurnUser(
 ): boolean {
   const stored = latestPersistedCurrentTurnUser(view);
   return stored !== undefined &&
-    parseAttachmentsFromContent(stored.content).text === optimistic.content;
+    parseAttachmentsFromContent(stored.content).text ===
+      serializeForAgent(parseStoredContent(optimistic.content));
 }
 
 /**

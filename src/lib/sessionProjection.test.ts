@@ -316,6 +316,25 @@ describe("sessionProjection", () => {
     ).toEqual(["message-root"]);
   });
 
+  it("按发送语义去重位置不同的 Slash 芯片乐观消息", () => {
+    const previous = [{
+      id: "u-slash",
+      role: "user" as const,
+      content: "对未提交的代码进行代码审查 [[skill:plugin:official:code-review:code-review]]",
+    }];
+    const view = emptySession("session-1");
+    view.active_root_turn_id = "turn-slash";
+    view.history = [{
+      role: "user",
+      messageId: "message-slash",
+      turnId: "turn-slash",
+      content: "/plugin:official:code-review:code-review\n对未提交的代码进行代码审查",
+    }];
+
+    expect(projectAcpConversation(previous, view).map((message) => message.id))
+      .toEqual(["message-slash"]);
+  });
+
   it("实时与 replay 投影保留相同的用户消息标识", () => {
     const live = emptySession("session-1");
     const replay = emptySession("session-1");
