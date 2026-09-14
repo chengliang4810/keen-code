@@ -1843,11 +1843,12 @@ fn extract_id(body: &str) -> Option<&str> {
         runtime
             .queue_project_snapshot(project(3, false, "generation-three"))
             .unwrap();
-        let state = runtime.state.lock().unwrap();
-        assert_eq!(state.desired_project.version.generation, 3);
-        assert!(!state.desired_project.version.revoked);
-        assert_eq!(state.desired_project.tools[0].definition().name, "generation-three");
-        drop(state);
+        {
+            let state = runtime.state.lock().unwrap();
+            assert_eq!(state.desired_project.version.generation, 3);
+            assert!(!state.desired_project.version.revoked);
+            assert_eq!(state.desired_project.tools[0].definition().name, "generation-three");
+        }
         runtime.close().await;
     }
 
