@@ -4086,6 +4086,8 @@ pub struct AgentRuntime {
     title_generation_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 按规范项目根隔离、仅在完整构建成功后原子发布的扩展候选。
     extension_candidates: RwLock<HashMap<PathBuf, Arc<RuntimeExtensionCandidate>>>,
+    /// 串行化项目候选发布与 MCP 撤销，避免旧传播覆盖新候选状态。
+    extension_candidate_change_gate: Mutex<()>,
     /// 每个已打开 Session 独立持有的合成 MCP 目录与动态连接生命周期。
     session_mcp: Mutex<HashMap<String, Arc<session_mcp::SessionMcpRuntime>>>,
     /// Tauri 或测试环境提供的同步可靠投递边界。
@@ -4207,6 +4209,7 @@ impl AgentRuntime {
             turn_start_gates: Mutex::new(HashMap::new()),
             title_generation_gates: Mutex::new(HashMap::new()),
             extension_candidates: RwLock::new(HashMap::new()),
+            extension_candidate_change_gate: Mutex::new(()),
             session_mcp: Mutex::new(HashMap::new()),
             emitter,
             delivery_timeouts,
@@ -4849,6 +4852,10 @@ impl AgentRuntime {
         candidate: RuntimeExtensionCandidate,
     ) -> Result<u64, AgentRuntimeError> {
         let project_root = canonical_project_root(project_root)?;
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
         let generation = candidate.generation();
         let mut current = self
             .extension_candidates
@@ -4863,12 +4870,16 @@ impl AgentRuntime {
         let candidate = Arc::new(candidate);
         current.insert(project_root.clone(), Arc::clone(&candidate));
         drop(current);
-        self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, false);
+        self.queue_project_mcp_snapshot_for_sessions(&project_root);
         Ok(generation)
     }
 
     /// 同步撤销全部项目候选中的 MCP 工具，供配置失效或变更时 fail-closed 使用。
     pub fn revoke_mcp_extension_tools(&self) -> Result<(), AgentRuntimeError> {
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
         let candidates = self
             .extension_candidates
             .read()
@@ -4882,7 +4893,7 @@ impl AgentRuntime {
                 .revoke_mcp_tools()
                 .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
-            self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, true);
+            self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
         Ok(())
     }
@@ -4893,6 +4904,10 @@ impl AgentRuntime {
         project_root: &Path,
     ) -> Result<(), AgentRuntimeError> {
         let project_root = canonical_project_root(project_root)?;
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
         let candidate = self
             .extension_candidates
             .read()
@@ -4905,7 +4920,7 @@ impl AgentRuntime {
                 .revoke_mcp_tools()
                 .map_err(|error| runtime_operation_failed(error))?;
             candidate.mcp_revoked.store(true, Ordering::Release);
-            self.queue_project_mcp_snapshot_for_sessions(&project_root, &candidate, true);
+            self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
         Ok(())
     }

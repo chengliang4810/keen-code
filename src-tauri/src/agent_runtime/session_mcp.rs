@@ -760,10 +760,30 @@ impl AgentRuntime {
     pub(super) fn queue_project_mcp_snapshot_for_sessions(
         &self,
         project_root: &Path,
-        candidate: &Arc<RuntimeExtensionCandidate>,
-        revoked: bool,
     ) {
-        let project = project_snapshot_with_revocation(candidate, revoked);
+        let project = match self.extension_candidates.read() {
+            Ok(candidates) => candidates.get(project_root).map(|candidate| {
+                project_snapshot_with_revocation(
+                    candidate,
+                    candidate.mcp_revoked.load(Ordering::Acquire),
+                )
+            }),
+            Err(_) => {
+                tracing::warn!(
+                    target: "extensions.mcp",
+                    "扩展候选锁不可用，无法传播 Session MCP 快照"
+                );
+                return;
+            }
+        };
+        let Some(project) = project else {
+            tracing::warn!(
+                target: "extensions.mcp",
+                project_root = %project_root.display(),
+                "扩展候选不存在，跳过 Session MCP 快照传播"
+            );
+            return;
+        };
         let runtimes = match self.session_mcp.lock() {
             Ok(runtimes) => runtimes
                 .values()
@@ -781,7 +801,7 @@ impl AgentRuntime {
                     target: "extensions.mcp",
                     session_id = %runtime.session_id,
                     %error,
-                    "项目 MCP 新候选与 Session 独立目录冲突，保留旧目录"
+                    "项目 MCP 新候选已排队但与 Session 独立目录冲突，等待冲突解除"
                 );
             }
         }
