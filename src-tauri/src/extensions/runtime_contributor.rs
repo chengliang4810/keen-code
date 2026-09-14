@@ -196,6 +196,53 @@ struct NativeLifecycleHooks {
     agent_type: String,
 }
 
+/// 为一次性生命周期占用代理启动槽；回调被取消或失败时自动释放以允许重试。
+struct LifecycleStartLease {
+    started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    agent_id: String,
+    completed: bool,
+}
+
+impl LifecycleStartLease {
+    /// 原子占用尚未成功完成的一次性生命周期；已完成或正在执行时返回 `None`。
+    fn acquire(
+        started: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+        agent_id: String,
+    ) -> Result<Option<Self>, HookCallbackError> {
+        let inserted = started
+            .lock()
+            .map_err(|_| {
+                HookCallbackError::new(
+                    "hook_state_unavailable",
+                    "Hook lifecycle state unavailable",
+                )
+            })?
+            .insert(agent_id.clone());
+        Ok(inserted.then(|| Self {
+            started,
+            agent_id,
+            completed: false,
+        }))
+    }
+
+    /// 一次性阶段已完整成功，后续 Turn 不再释放启动记录。
+    const fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for LifecycleStartLease {
+    /// Future 被取消或阶段返回错误时移除预占记录，使下一 Turn 可以重试。
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Ok(mut started) = self.started.lock() {
+            started.remove(&self.agent_id);
+        }
+    }
+}
+
 impl AgentHook for NativeLifecycleHooks {
     fn name(&self) -> &str {
         "plugin:lifecycle"
@@ -210,16 +257,11 @@ impl AgentHook for NativeLifecycleHooks {
     ) -> HookFuture<'_, Result<ToolHookOutput, HookCallbackError>> {
         Box::pin(async move {
             let is_root = context.invocation.source_agent_id.as_str() == "root";
-            let start = self
-                .started
-                .lock()
-                .map_err(|_| {
-                    HookCallbackError::new(
-                        "hook_state_unavailable",
-                        "Hook lifecycle state unavailable",
-                    )
-                })?
-                .insert(context.invocation.source_agent_id.as_str().to_owned());
+            let mut start_lease = LifecycleStartLease::acquire(
+                Arc::clone(&self.started),
+                context.invocation.source_agent_id.as_str().to_owned(),
+            )?;
+            let start = start_lease.is_some();
             let source = if context.has_history {
                 "resume"
             } else {
@@ -278,6 +320,9 @@ impl AgentHook for NativeLifecycleHooks {
                         }
                     }
                 }
+            }
+            if let Some(lease) = &mut start_lease {
+                lease.mark_completed();
             }
             Ok(ToolHookOutput { context: additions })
         })

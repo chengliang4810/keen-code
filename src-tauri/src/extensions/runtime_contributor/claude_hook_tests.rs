@@ -160,6 +160,50 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn failed_one_time_lifecycle_hook_is_retried() {
+    let root = tempfile::tempdir().unwrap();
+    let hook = NativeLifecycleHooks {
+        hooks: vec![parse_command_hook(
+            "test:retry-subagent".to_owned(),
+            HookPhase::SubagentStart,
+            None,
+            r#"printf 'attempt\n' >> attempts.txt; printf '%s' '{"continue":false,"stopReason":"retry"}'"#
+                .to_owned(),
+            root.path(),
+        )
+        .unwrap()],
+        plan: PlanGuard::inactive(),
+        started: Arc::new(Mutex::new(HashSet::new())),
+        agent_type: "worker".to_owned(),
+    };
+    let context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("retry-session").unwrap(),
+            turn_id: TurnId::new("retry-turn").unwrap(),
+            source_agent_id: AgentId::new("retry-child").unwrap(),
+        },
+        prompt: "task".to_owned(),
+        has_history: false,
+    };
+
+    for _ in 0..2 {
+        let error = hook
+            .turn_start(context.clone())
+            .await
+            .expect_err("失败的一次性 Hook 必须保留重试机会");
+        assert_eq!(error.code, "hook_stopped");
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("attempts.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn exit_two_blocks_but_exit_one_is_non_blocking() {
     let root = tempfile::tempdir().unwrap();
     let HookSpec::Command(mut spec) = parse_command_hook(
