@@ -55,11 +55,12 @@ pub(crate) const ULTRA_MODE_CONTRACT_EN: &str = "\
 
 Ultra Mode is enabled for this turn. Proactively delegate independent work when doing so materially improves speed or quality.
 
-1. Keep every delegated task aligned with the active Goal and include the relevant constraints in its prompt.
-2. Use only the single-level Agent tree. Compare available agent descriptions before choosing a specialist.
+1. Keep every delegated task aligned with the active Goal. Every spawn_agent call must provide a concise, stable assignment describing the child's responsibility, while message contains the complete task and constraints.
+2. Use only the single-level Agent tree. Compare available agent descriptions before choosing a specialist, and use list_agents to inspect each known agent's absolute path, assignment, and status.
 3. Agent turns are asynchronous. A parent turn may finish while a child continues; child completion is queued in the parent mailbox and does not automatically start a new parent turn.
-4. Use spawn_agent to create a child, list_agents to inspect known children, send_message for queue-only delivery, followup_task to start a later turn on an idle child, interrupt_agent to stop only the child's current turn, resume_agent to recover a failed or interrupted child with a new turn, and wait_agent only when the current turn actually depends on mailbox activity.
-5. Resolve conflicting results before presenting a conclusion. In Plan Mode, every parent and child remains read-only.";
+4. Address collaboration targets only by absolute paths: /root for the parent and /root/<child> for a child. Use send_message for queue-only delivery, followup_task to start a later turn on an idle child, interrupt_agent to stop only the child's current turn, resume_agent to recover a failed or interrupted child with a new turn, and wait_agent only when the current turn actually depends on mailbox activity.
+5. A child reports to the root only with send_message using target=/root. followup_task must never target /root.
+6. Resolve conflicting results before presenting a conclusion. In Plan Mode, every parent and child remains read-only.";
 
 /// 将任意内部错误转换为不包含请求正文的 Tauri 文本错误。
 fn runtime_error(error: impl std::fmt::Display) -> String {
@@ -274,7 +275,7 @@ pub fn session_disconnect(
 
 #[cfg(test)]
 mod tests {
-    use super::required_identifier;
+    use super::{ULTRA_MODE_CONTRACT_EN, required_identifier};
 
     /// Session 标识必须稳定拒绝空值、隐式裁剪和控制字符。
     #[test]
@@ -286,5 +287,14 @@ mod tests {
         assert!(required_identifier("", "sessionId").is_err());
         assert!(required_identifier(" session-1", "sessionId").is_err());
         assert!(required_identifier("session\n1", "sessionId").is_err());
+    }
+
+    /// Ultra 模式必须明确单层 Agent 的职责、绝对路径和子 Agent 回报边界。
+    #[test]
+    fn ultra_mode_contract_describes_v2_single_level_communication() {
+        assert!(ULTRA_MODE_CONTRACT_EN.contains("must provide a concise, stable assignment"));
+        assert!(ULTRA_MODE_CONTRACT_EN.contains("absolute path, assignment, and status"));
+        assert!(ULTRA_MODE_CONTRACT_EN.contains("target=/root"));
+        assert!(ULTRA_MODE_CONTRACT_EN.contains("followup_task must never target /root"));
     }
 }
