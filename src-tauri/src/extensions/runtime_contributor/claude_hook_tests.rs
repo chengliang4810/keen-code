@@ -512,8 +512,11 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
         prompt: "child task".to_owned(),
         has_history: false,
     };
+    hook.turn_start_prepare(&child_context);
     let child_first = hook.turn_start(child_context.clone()).await.unwrap();
+    hook.turn_start_delivered(&child_context);
     assert_eq!(child_first.context[0].text, "subagent context");
+    hook.turn_start_prepare(&child_context);
     assert!(hook.turn_start(child_context).await.unwrap().context.is_empty());
 }
 
