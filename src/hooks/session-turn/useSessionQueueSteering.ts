@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import type { MessageKey, Vars } from "@/i18n";
+import { reduceGoalSnapshot } from "@/lib/acp/store";
 import { ensureAcpSession } from "@/lib/acp/projection";
 import { buildAgentPrompt } from "@/lib/attachments";
 import { buildGoalDraft } from "@/lib/goalDraft";
@@ -49,8 +50,9 @@ export function useSessionQueueSteering({
           expectedRevision: currentView.goal.revision,
           requestNonce: `${item.id}-goal`,
         });
-        currentView.goal = { revision: result.revision, goal: result.goal };
-        commitWorkspace();
+        if (reduceGoalSnapshot(currentView, result.revision, result.goal)) {
+          commitWorkspace();
+        }
       }
       await api.steer({
         sessionId,

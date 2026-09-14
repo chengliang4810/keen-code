@@ -3,7 +3,12 @@ import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionPromptResult } from "@/lib/acp/api";
 import { AcpRpcError } from "@/lib/acp/client";
-import { createAcpWorkspaceState, emptySession } from "@/lib/acp/store";
+import type { GoalRecordDto } from "@/lib/acp/events";
+import {
+  createAcpWorkspaceState,
+  emptySession,
+  reduceGoalSnapshot,
+} from "@/lib/acp/store";
 import type { ChatMessage, SessionSnapshot } from "@/lib/session";
 import { localizeUiError } from "@/lib/session";
 import type { SessionTurnApiPort, SessionTurnRuntimePort } from "./types";
@@ -42,6 +47,20 @@ function deferred<T>(): {
 async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
   await Promise.resolve();
+}
+
+function goalRecord(id: string, objective: string): GoalRecordDto {
+  return {
+    id,
+    title: objective,
+    scope: "session",
+    status: "active",
+    objective,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  };
 }
 
 type SendUi = UseSessionSendOptions["ui"];
@@ -235,6 +254,33 @@ describe("useSessionSend local error recovery", () => {
     expect(new TextEncoder().encode(sent.title).length).toBeLessThanOrEqual(512);
     expect(fixture.api.send.mock.calls[0][0].text).toContain(objective);
   });
+
+  it("较新的 Goal 已先归约时，迟到的旧 send upsert 不得覆盖投影", async () => {
+    const fixture = makeOptions({});
+    const staleGoal = goalRecord("goal-stale", "发送中的旧目标");
+    const newerGoal = goalRecord("goal-new", "并发更新后的目标");
+    const oldUpsert = deferred<Awaited<ReturnType<SessionTurnApiPort["goalUpsert"]>>>();
+    vi.spyOn(fixture.api, "goalUpsert").mockReturnValue(oldUpsert.promise);
+    const view = fixture.options.runtime.acpWorkspaceRef.current.sessions["session-visible"]!;
+    const send = renderSend(fixture.options);
+
+    const pending = send({
+      ...validSend("send-goal-race"),
+      createGoal: true,
+      storedDisplay: "发送目标",
+    });
+    reduceGoalSnapshot(view, 3, newerGoal);
+    oldUpsert.resolve({
+      revision: 2,
+      goal: staleGoal,
+      deduplicated: false,
+    });
+
+    await expect(pending).resolves.toBe(true);
+    expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
+    expect(fixture.api.send).toHaveBeenCalledOnce();
+  });
+
   beforeEach(() => {
     vi.restoreAllMocks();
   });

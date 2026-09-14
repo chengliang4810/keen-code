@@ -462,8 +462,7 @@ export function useAcpRuntimeEvents({
         void goalGet(envelope.sessionId).then((result) => {
           if (disposed) return;
           const current = acpWorkspaceRef.current.sessions[envelope.sessionId];
-          if (!current || result.revision < current.goal.revision) return;
-          reduceGoalSnapshot(current, result.revision, result.goal ?? null);
+          if (!current || !reduceGoalSnapshot(current, result.revision, result.goal ?? null)) return;
           flushProjection(envelope.sessionId);
         }).catch(() => {});
       }

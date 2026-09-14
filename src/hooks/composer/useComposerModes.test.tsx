@@ -1,11 +1,14 @@
 import { createElement, type EffectCallback } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { emptySession } from "@/lib/acp/store";
+import type { AppDialog } from "@/features/app/models";
+import type { GoalRecordDto } from "@/lib/acp/events";
+import { emptySession, reduceGoalSnapshot } from "@/lib/acp/store";
 import type {
   ComposerApiPort,
   ComposerFeedbackPort,
   ComposerGoalGetResult,
+  ComposerGoalUpsertResult,
   ComposerSessionPort,
   ComposerWorkspacePort,
 } from "../useComposerController";
@@ -35,6 +38,20 @@ function deferred<Value>(): Deferred<Value> {
 
 async function flushMicrotasks(rounds = 4): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve();
+}
+
+function goalRecord(id: string, objective: string): GoalRecordDto {
+  return {
+    id,
+    title: objective,
+    scope: "session",
+    status: "active",
+    objective,
+    tokensUsed: 0,
+    timeUsedSeconds: 0,
+    createdAtMs: 1,
+    updatedAtMs: 1,
+  };
 }
 
 describe("useComposerModes 的 Goal 查询竞态", () => {
@@ -85,5 +102,116 @@ describe("useComposerModes 的 Goal 查询竞态", () => {
     older.resolve({ revision: 6 });
     await flushMicrotasks();
     expect(view.goal.revision).toBe(7);
+  });
+
+  it("较新的 Goal 已先写入时，迟到的旧 clear 响应不得清空投影", async () => {
+    const sessionId = "composer-goal-clear-race";
+    const view = emptySession(sessionId);
+    const currentGoal = goalRecord("goal-1", "当前目标");
+    const newerGoal = goalRecord("goal-2", "并发更新后的目标");
+    view.goal = { revision: 1, goal: currentGoal };
+    const clear = deferred<{
+      sessionId: string;
+      revision: number;
+      clearedGoalId: string;
+      deduplicated: boolean;
+    }>();
+    let dialog: AppDialog = null;
+    const setAppDialog = vi.fn((next: AppDialog) => {
+      dialog = next;
+    });
+    const commitWorkspace = vi.fn();
+    const workspace = {
+      acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+      commitWorkspace,
+      applyViewProjectionRef: { current: vi.fn() },
+    } as unknown as ComposerWorkspacePort;
+    const api = {
+      isTauri: () => false,
+      goals: {
+        clear: vi.fn(() => clear.promise),
+      },
+    } as unknown as ComposerApiPort;
+    const session = { sessionId, acpSessionView: view } as ComposerSessionPort;
+
+    let controller!: ReturnType<typeof useComposerModes>;
+    function ControllerHarness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session,
+        api,
+        workspace,
+        feedback: { setAppDialog } as unknown as ComposerFeedbackPort,
+      });
+      return null;
+    }
+    renderToString(createElement(ControllerHarness));
+    controller.confirmClearCurrentGoal();
+    const clearDialog = dialog as unknown as Extract<AppDialog, { kind: "confirm" }>;
+    expect(clearDialog?.kind).toBe("confirm");
+
+    const pending = clearDialog.onConfirm();
+    reduceGoalSnapshot(view, 3, newerGoal);
+    clear.resolve({
+      sessionId,
+      revision: 2,
+      clearedGoalId: currentGoal.id,
+      deduplicated: false,
+    });
+    await pending;
+
+    expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
+    expect(commitWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("较新的 Goal 已先写入时，迟到的旧 edit 响应不得覆盖投影", async () => {
+    const sessionId = "composer-goal-edit-race";
+    const view = emptySession(sessionId);
+    const currentGoal = goalRecord("goal-1", "当前目标");
+    const newerGoal = goalRecord("goal-3", "并发更新后的目标");
+    const staleEditedGoal = goalRecord("goal-2", "迟到的编辑目标");
+    view.goal = { revision: 1, goal: currentGoal };
+    const upsert = deferred<ComposerGoalUpsertResult>();
+    let dialog: AppDialog = null;
+    const setAppDialog = vi.fn((next: AppDialog) => {
+      dialog = next;
+    });
+    const commitWorkspace = vi.fn();
+    const workspace = {
+      acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+      commitWorkspace,
+      applyViewProjectionRef: { current: vi.fn() },
+    } as unknown as ComposerWorkspacePort;
+    const api = {
+      isTauri: () => false,
+      goals: {
+        upsert: vi.fn(() => upsert.promise),
+      },
+    } as unknown as ComposerApiPort;
+    const session = { sessionId, acpSessionView: view } as ComposerSessionPort;
+    let controller!: ReturnType<typeof useComposerModes>;
+    function Harness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session,
+        api,
+        workspace,
+        feedback: { setAppDialog } as unknown as ComposerFeedbackPort,
+      });
+      return null;
+    }
+
+    renderToString(createElement(Harness));
+    controller.editCurrentGoal();
+    const editDialog = dialog as unknown as Extract<AppDialog, { kind: "prompt" }>;
+    expect(editDialog?.kind).toBe("prompt");
+
+    const pending = editDialog.onSubmit("迟到的编辑目标");
+    reduceGoalSnapshot(view, 3, newerGoal);
+    upsert.resolve({ revision: 2, goal: staleEditedGoal });
+    await pending;
+
+    expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
+    expect(commitWorkspace).not.toHaveBeenCalled();
   });
 });

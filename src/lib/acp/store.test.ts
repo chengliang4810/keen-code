@@ -1089,6 +1089,25 @@ describe("Acp recovery and control projections", () => {
     expect(view.goal).toEqual({ revision: 3, goal });
   });
 
+  it("Goal 归约拒绝较低 revision 且不改变已有投影", () => {
+    const view = emptySession("session-1");
+    const currentGoal = {
+      id: "goal-current",
+      title: "当前目标",
+      scope: "session" as const,
+      status: "active" as const,
+      objective: "当前目标正文",
+      tokensUsed: 1,
+      timeUsedSeconds: 1,
+      createdAtMs: 1,
+      updatedAtMs: 5,
+    };
+    const staleGoal = { ...currentGoal, id: "goal-stale", objective: "迟到目标" };
+    expect(reduceGoalSnapshot(view, 5, currentGoal)).toBe(true);
+    expect(reduceGoalSnapshot(view, 4, staleGoal)).toBe(false);
+    expect(view.goal).toEqual({ revision: 5, goal: currentGoal });
+  });
+
   it("本地发起新轮次只清理上一轮瞬时状态", () => {
     const view = emptySession("session-1");
     view.last_error = { code: "model", message: "old" };

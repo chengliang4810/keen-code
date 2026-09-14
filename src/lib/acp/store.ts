@@ -1277,15 +1277,16 @@ function reduceKeenCodeEvent(
     case "goal_changed": {
       const goal = view.goal.goal;
       const status = event.status;
-      view.goal = {
-        revision: event.revision,
-        goal: !event.goalId
+      reduceGoalSnapshot(
+        view,
+        event.revision,
+        !event.goalId
           ? null
           : goal?.id === event.goalId &&
               (status === "active" || status === "completed" || status === "blocked")
             ? { ...goal, status }
             : null,
-      };
+      );
       break;
     }
     case "system_notification": {
@@ -1463,13 +1464,15 @@ export function failSessionRecovery(view: AcpSessionView, message: string): void
   view.last_error = { code: "session_recovery_failed", message };
 }
 
-/** 归约 `keencode/goal/get` 查询结果（全量替换）。 */
+/** 归约 Goal 快照；旧 revision 不能覆盖已观察到的新投影。 */
 export function reduceGoalSnapshot(
   view: AcpSessionView,
   revision: number,
   goal: GoalRecordDto | null,
-): void {
+): boolean {
+  if (revision < view.goal.revision) return false;
   view.goal = { revision, goal };
+  return true;
 }
 
 /** 归约 `keencode/session/replay` 控制响应并推进 Journal 水位。 */

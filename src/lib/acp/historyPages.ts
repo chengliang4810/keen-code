@@ -1,5 +1,11 @@
 import { parseAcpTauriDelivery } from "./events";
-import { commitLiveTurnToHistory, emptySession, reduceDeliveryEnvelope, type AcpSessionView } from "./store";
+import {
+  commitLiveTurnToHistory,
+  emptySession,
+  reduceDeliveryEnvelope,
+  reduceGoalSnapshot,
+  type AcpSessionView,
+} from "./store";
 
 export interface HistoryPage {
   sessionId: string;
@@ -85,7 +91,9 @@ export function prependHistoryPage(view: AcpSessionView, page: HistoryPage): voi
   const currentAgents = new Set(view.subagents.map((agent) => agent.agent_id));
   view.subagents = [...older.subagents.filter((agent) => !currentAgents.has(agent.agent_id)), ...view.subagents];
   // 历史前缀补齐此前未出现在最近窗口里的持久状态；revision 决定新旧。
-  if (older.goal.revision > view.goal.revision) view.goal = older.goal;
+  if (older.goal.revision > view.goal.revision) {
+    reduceGoalSnapshot(view, older.goal.revision, older.goal.goal);
+  }
   if (older.todos.revision > view.todos.revision) view.todos = older.todos;
   view.replay.hasMore = page.hasMore;
 }

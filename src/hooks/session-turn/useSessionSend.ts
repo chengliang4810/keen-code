@@ -9,7 +9,7 @@ import {
   localizeUiError,
 } from "@/lib/session";
 import { isDraftEmpty, parseStoredContent, serializeForAgent } from "@/lib/draftDoc";
-import { beginLocalSessionTurn } from "@/lib/acp/store";
+import { beginLocalSessionTurn, reduceGoalSnapshot } from "@/lib/acp/store";
 import {
   ensureAcpSession,
   replaceHistoryTurnMetrics,
@@ -394,8 +394,9 @@ export function useSessionSend({
             acpWorkspaceRef.current,
             resolvedSessionId,
           );
-          view.goal = { revision: result.revision, goal: result.goal };
-          commitWorkspace();
+          if (reduceGoalSnapshot(view, result.revision, result.goal)) {
+            commitWorkspace();
+          }
         }
         applyMessagePrefixTitle(resolvedSessionId, optimisticDisplay);
         void applyAutomaticSessionTitle(resolvedSessionId, optimisticDisplay);

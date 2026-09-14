@@ -274,9 +274,10 @@ export function useAcpRuntimeHistory({
           if (!Number.isSafeInteger(goalSnapshot.revision) || goalSnapshot.revision < 0) {
             throw new Error("Session 恢复 Goal 修订号无效");
           }
-          // 恢复期间可能已经观察到更高修订；迟到的较低快照不能覆盖它。
-          if (goalSnapshot.revision >= current.goal.revision) {
-            reduceGoalSnapshot(current, goalSnapshot.revision, goalSnapshot.goal ?? null);
+          // 恢复期间可能已经观察到更高修订；无法确认当前快照完整性时必须
+          // 失败并冻结本次恢复，交给下一次恢复重新取得权威快照。
+          if (!reduceGoalSnapshot(current, goalSnapshot.revision, goalSnapshot.goal ?? null)) {
+            throw new Error("Session 恢复 Goal 快照修订号落后");
           }
           if (!isCurrentProjection()) throw new Error("Session 恢复 Goal 投影已替换");
           completeSessionRecovery(current);

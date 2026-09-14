@@ -91,8 +91,7 @@ export function useComposerModes({
       .then((result) => {
         const view =
           portsRef.current.workspace.acpWorkspaceRef.current.sessions[sessionId];
-        if (!view || result.revision < view.goal.revision) return;
-        reduceGoalSnapshot(view, result.revision, result.goal ?? null);
+        if (!view || !reduceGoalSnapshot(view, result.revision, result.goal ?? null)) return;
         portsRef.current.workspace.commitWorkspace();
         portsRef.current.workspace.applyViewProjectionRef.current(sessionId);
       })
@@ -122,8 +121,7 @@ export function useComposerModes({
           });
           const view =
             currentPorts.workspace.acpWorkspaceRef.current.sessions[sessionId];
-          if (view) {
-            view.goal = { revision: result.revision, goal: null };
+          if (view && reduceGoalSnapshot(view, result.revision, null)) {
             currentPorts.workspace.commitWorkspace();
           }
         } catch (cause) {
@@ -165,8 +163,7 @@ export function useComposerModes({
           });
           const view =
             currentPorts.workspace.acpWorkspaceRef.current.sessions[sessionId];
-          if (view) {
-            view.goal = { revision: result.revision, goal: result.goal };
+          if (view && reduceGoalSnapshot(view, result.revision, result.goal)) {
             currentPorts.workspace.commitWorkspace();
           }
         } catch (cause) {

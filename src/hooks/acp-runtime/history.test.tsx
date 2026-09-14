@@ -433,7 +433,7 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     expect(apiMocks.goalGet).toHaveBeenCalledTimes(2);
   });
 
-  it("较低修订的迟到 Goal 快照不会覆盖已有较新投影", async () => {
+  it("较低修订的 Goal 快照使恢复失败，并允许下一次重试取得权威投影", async () => {
     const sessionId = "session-goal-newer-projection";
     const harness = createHistoryHarness({ sessionId, epoch: 1 });
     const existingGoal = {
@@ -451,12 +451,27 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
       ensureAcpSession(harness.workspaceRef.current, sessionId);
     view.goal = { revision: 4, goal: existingGoal };
     apiMocks.sessionLoad.mockResolvedValue(loadResult(sessionId, "default"));
-    apiMocks.goalGet.mockResolvedValue({ sessionId, revision: 3, goal: undefined });
+    apiMocks.goalGet
+      .mockResolvedValueOnce({ sessionId, revision: 3, goal: undefined })
+      .mockResolvedValueOnce({ sessionId, revision: 5, goal: existingGoal });
 
-    await harness.replayHistory(sessionId, { sessionId, epoch: 1 });
+    await expect(
+      harness.replayHistory(sessionId, { sessionId, epoch: 1 }),
+    ).rejects.toThrow("Session 恢复 Goal 快照修订号落后");
 
     expect(view.goal).toEqual({ revision: 4, goal: existingGoal });
+    expect(view.replay.loaded).toBe(false);
+    expect(view.replay.restoring).toBe(false);
+    expect(view.delivery.frozen).toBe(true);
+    expect(view.last_error?.code).toBe("session_recovery_failed");
+
+    harness.setFocus({ sessionId, epoch: 2 });
+    await harness.replayHistory(sessionId, { sessionId, epoch: 2 });
+
+    expect(view.goal).toEqual({ revision: 5, goal: existingGoal });
     expect(view.replay.loaded).toBe(true);
+    expect(view.delivery.frozen).toBe(false);
+    expect(apiMocks.goalGet).toHaveBeenCalledTimes(2);
   });
 
   it("load 历史控制信息缺失、串 Session、未结束或水位非法时冻结投影", async () => {
