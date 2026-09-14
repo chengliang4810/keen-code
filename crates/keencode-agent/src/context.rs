@@ -34,17 +34,17 @@ pub(crate) const MAX_SUMMARY_RECURSION_DEPTH: usize = 8;
 /// Micro Compact 投影规则的当前版本；投影规则演进时递增并写入每条记录。
 pub const MICRO_COMPACT_POLICY_VERSION: u32 = 1;
 
-/// Micro 投影保留的 head 字符数（peri micro-compact 实测值）。
+/// Micro 投影保留的 head 字符数（当前 micro-compact 策略实测值）。
 const MICRO_PROJECTION_HEAD_CHARS: usize = 350;
 
-/// Micro 投影保留的 tail 字符数（peri micro-compact 实测值）。
+/// Micro 投影保留的 tail 字符数（当前 micro-compact 策略实测值）。
 const MICRO_PROJECTION_TAIL_CHARS: usize = 100;
 
 /// Micro 投影的最小候选长度（字符）；更短的结果不值得截断。
 const MICRO_PROJECTION_MIN_CHARS: usize = 500;
 
-/// Micro 投影的 stale 保护轮数：最近 N 轮内的消息一律不动（对齐 peri
-/// `micro_compact_stale_steps = 3`）。"轮"按内存 transcript 的轮次归属判定：
+/// Micro 投影的 stale 保护轮数：最近 N 轮内的消息一律不动。
+/// "轮"按内存 transcript 的轮次归属判定：
 /// 每个模型 Round 恰好提交一个 assistant 消息（截断续跑等罕见情况会多提交
 /// assistant 消息，只会把保护窗口向更新的方向收紧），从尾部向前数第 N 个
 /// Assistant 消息起直到列表末尾全部受保护。
@@ -64,7 +64,7 @@ const MICRO_COMPACT_MARKER_TEMPLATE: &str =
 /// 提前走既有压缩路径，避免把超限推迟到 Provider 报错。
 pub const PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS: u64 = 15_000;
 
-/// 预测性压缩的缓存感知跳过门限（#17 收尾联动，对齐 peri cache-aware 策略）：
+/// 预测性压缩的缓存感知跳过门限（#17 收尾联动）：
 /// 最新缓存命中率高于该值且头部空间充足时跳过预测性压缩。仅限预测性触发
 /// 这条新路径，不改变既有 85% 触发线。
 pub const PREDICTIVE_CACHE_SKIP_HIT_RATE: f64 = 0.7;
@@ -751,8 +751,8 @@ pub struct ContextPolicy {
     /// 摘要模型可生成的最大输出 Token。
     ///
     /// 长会话摘要必须容纳关键决策、文件路径与未完成事项清单，输出预算过小会把
-    /// 恢复工作所需的细节在生成阶段截断。默认 16_000 对齐 peri 的
-    /// `summary_max_tokens`；CCB 按摘要输出 p99.99=17_387 的实测预留 20_000，
+    /// 恢复工作所需的细节在生成阶段截断。默认 16_000 来自既有摘要输出实测；
+    /// 另一组摘要输出 p99.99=17_387 的实测预留 20_000，
     /// 本值仍低于该实测上界。已知窗口时实际生效值还会被 Provider 最大输出、
     /// 窗口容量（`largest_fitting_summary_output`）与窗口份额（不超过窗口
     /// 一半，见 `summary_output_ceiling`）进一步钳制；摘要预算被窗口钳小是
@@ -937,7 +937,7 @@ impl ContextManager {
     /// 其后新增的消息是该轮响应的 assistant 输出、工具结果与可能的 steer 注入
     /// ——上一轮 output 将作为本轮输入进入上下文，因此必须计入增量估算；不能
     /// 把 usage.output_tokens 直接加到总量上，否则 output 会在“增量 assistant
-    /// 消息”与“输出用量”中被双算（peri 同款警告）。
+    /// 消息”与“输出用量”中被双算。
     ///
     /// 已知低估：锚定分支不计量间非消息 request_context（Memory/Plan 等请求级
     /// 注入）的轮间增量——锚点轮的真实输入已包含当轮注入，但下一轮若注入内容
@@ -1074,8 +1074,7 @@ impl ContextManager {
             .then(|| percent_of(input_budget, self.policy.target_percent).max(1))
     }
 
-    /// 预测性触发前的缓存感知跳过（#17 与 #14 的收尾联动，对齐 peri
-    /// cache-aware 策略）：最新缓存命中率高于
+    /// 预测性触发前的缓存感知跳过（#17 与 #14 的收尾联动）：最新缓存命中率高于
     /// [`PREDICTIVE_CACHE_SKIP_HIT_RATE`] 且头部空间（输入预算 − 当前估算）
     /// 占比超过 [`PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO`] 时返回 `true`。
     /// 命中率缺失（Provider 未报告缓存字段）时返回 `false`，不跳过。
