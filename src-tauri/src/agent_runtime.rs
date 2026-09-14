@@ -32,17 +32,16 @@ use keencode_agent::{
     AgentStreamEventKind, AgentTemplateSnapshot, AgentTool, AgentTreeQuiesceResult, AgentTurnCause,
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
-    CollaborationCoordinator, CollaborationEvent, CollaborationEventKind,
+    CollaborationCoordinator, CollaborationError, CollaborationEvent, CollaborationEventKind,
     CollaborationGlobalTurnLimiter, CollaborationPortError, CollaborationStore,
     CollaborationTransitionCommit, ContextCompactionFailureKind, ContextManager, ContextPolicy,
-    ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookRuntime,
-    HookPhase, JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage,
-    MailboxMessageKind, ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor,
-    QuiesceAgentTree, RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator,
-    RootAgentRequest, RunLimits, RuntimeStateError, SessionId as AgentSessionId,
-    StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry, TurnCancellation,
-    TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator,
-    root_turn_prompt_digest,
+    ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookPhase, HookRuntime,
+    JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind,
+    ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor, QuiesceAgentTree,
+    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits,
+    RuntimeStateError, SessionId as AgentSessionId, StructuredOutputMode, TerminalReason,
+    ToolCallId, ToolRegistry, TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId,
+    TurnRequest, UuidCollaborationIdGenerator, root_turn_prompt_digest,
 };
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
@@ -202,6 +201,20 @@ pub enum AgentRuntimeError {
 fn runtime_operation_failed(error: impl fmt::Display) -> AgentRuntimeError {
     tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Runtime operation failed");
     AgentRuntimeError::RuntimeOperationFailed
+}
+
+/// 将后台子 Agent 当前不可恢复的领域状态归一为稳定公开错误。
+#[track_caller]
+fn map_resume_collaboration_error(error: CollaborationError) -> AgentRuntimeError {
+    match error {
+        CollaborationError::AgentNotFound { .. }
+        | CollaborationError::CrossTreeOperation
+        | CollaborationError::RetryNotAllowed { .. }
+        | CollaborationError::TargetNotIdle { .. }
+        | CollaborationError::TargetStopped { .. }
+        | CollaborationError::TreeClosed { .. } => AgentRuntimeError::InvalidResumeTarget,
+        error => runtime_operation_failed(error),
+    }
 }
 
 /// 保留生产装配失败原因，避免转换成稳定枚举时丢失诊断证据。
@@ -1726,6 +1739,21 @@ struct RootAgentSeed {
     reasoning_effort: Option<String>,
     /// 本 Turn 已生效且子 Agent 不得放宽的 Plan 守卫。
     plan_guard: PlanGuard,
+}
+
+/// 从已校验的持久协调器中恢复首次根注册时冻结的配置。
+fn recovered_root_agent_seed(checkpoint: &RecoveredCoordinator) -> Option<RootAgentSeed> {
+    checkpoint
+        .roots
+        .first()?
+        .known_agents
+        .iter()
+        .find(|agent| agent.depth == AgentDepth::ROOT)
+        .map(|root| RootAgentSeed {
+            model: root.profile.model.clone(),
+            reasoning_effort: root.profile.reasoning_effort.clone(),
+            plan_guard: root.profile.plan_guard,
+        })
 }
 
 /// 执行端当前托管的一条运行中 Turn。
@@ -6658,6 +6686,59 @@ impl AgentRuntime {
         Ok(tasks.into_iter().map(|(_, task)| task).collect::<Vec<_>>())
     }
 
+    /// 从持久 Collaboration 收据查询已提交的后台恢复 Turn。
+    ///
+    /// 冷启动必须先恢复完整 Coordinator、对账关闭 outbox，并建立 Session 投递泵；
+    /// 未命中时由调用方完成扩展初始化后再提交恢复。
+    pub(crate) fn replay_background_resume_receipt(
+        self: &Arc<Self>,
+        session_id: &str,
+        operation_id: &str,
+        child_thread_id: &str,
+    ) -> Result<Option<AgentTurnId>, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        self.ensure_session_delivery(session_id)?;
+        let target_agent_id = RunnerAgentId::new(child_thread_id.to_owned())
+            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
+        let operation_id = ToolCallId::new(operation_id.to_owned())
+            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
+        let existing_collaboration = self
+            .collaboration_sessions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .cloned();
+        let collaboration = if let Some(collaboration) = existing_collaboration {
+            collaboration
+        } else {
+            let Some(transition) = SessionCollaborationStore::new(&self.storage_root, session_id)?
+                .load_transition_snapshot()
+                .map_err(|error| runtime_operation_failed(error))?
+            else {
+                return Ok(None);
+            };
+            let seed = recovered_root_agent_seed(&transition.commit.checkpoint)
+                .ok_or(AgentRuntimeError::InvalidResumeTarget)?;
+            self.ensure_collaboration_runtime(&session, seed)?
+        };
+        reconcile_live_dynamic_input_acknowledgements(&session, &collaboration.coordinator)?;
+        collaboration
+            .coordinator
+            .replay_root_resume_receipt(
+                &collaboration.root_agent_id,
+                &operation_id,
+                &target_agent_id,
+            )
+            .map_err(map_resume_collaboration_error)
+    }
+
     /// 由根 Session 授权恢复一个失败或中断的单层子 Agent，并返回新 Turn 标识。
     ///
     /// `child_thread_id` 始终按 Agent 身份解析；后台列表中的 `task_id` 是 Turn
@@ -6700,40 +6781,26 @@ impl AgentRuntime {
             let persisted = SessionCollaborationStore::new(&self.storage_root, session_id)?
                 .load_transition_snapshot()
                 .map_err(|error| runtime_operation_failed(error))?;
-            let seed = persisted
-                .as_ref()
-                .and_then(|transition| transition.commit.checkpoint.roots.first())
-                .and_then(|tree| {
-                    tree.known_agents
-                        .iter()
-                        .find(|agent| agent.depth == AgentDepth::ROOT)
-                })
-                .map(|root| RootAgentSeed {
-                    model: root.profile.model.clone(),
-                    reasoning_effort: root.profile.reasoning_effort.clone(),
-                    plan_guard: root.profile.plan_guard,
-                })
-                .map_or_else(
-                    || {
-                        let resolved =
-                            self.resolve_session_provider(snapshot.state.provider.as_ref())?;
-                        let reasoning_effort = snapshot
-                            .state
-                            .provider
-                            .as_ref()
-                            .and_then(|provider| provider.reasoning_effort);
-                        Ok(RootAgentSeed {
-                            model: resolved.model().to_owned(),
-                            reasoning_effort: reasoning_effort.map(reasoning_effort_snapshot_name),
-                            plan_guard: if snapshot.state.plan.enabled {
-                                PlanGuard::read_only()
-                            } else {
-                                PlanGuard::inactive()
-                            },
-                        })
+            let seed = if let Some(transition) = persisted.as_ref() {
+                recovered_root_agent_seed(&transition.commit.checkpoint)
+                    .ok_or(AgentRuntimeError::InvalidResumeTarget)?
+            } else {
+                let resolved = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
+                let reasoning_effort = snapshot
+                    .state
+                    .provider
+                    .as_ref()
+                    .and_then(|provider| provider.reasoning_effort);
+                RootAgentSeed {
+                    model: resolved.model().to_owned(),
+                    reasoning_effort: reasoning_effort.map(reasoning_effort_snapshot_name),
+                    plan_guard: if snapshot.state.plan.enabled {
+                        PlanGuard::read_only()
+                    } else {
+                        PlanGuard::inactive()
                     },
-                    Ok,
-                )?;
+                }
+            };
             self.ensure_collaboration_runtime(&session, seed)?
         };
         reconcile_live_dynamic_input_acknowledgements(&session, &collaboration.coordinator)?;
@@ -6744,17 +6811,7 @@ impl AgentRuntime {
                 &operation_id,
                 &target_agent_id,
             )
-            .map_err(|error| match error {
-                keencode_agent::CollaborationError::AgentNotFound { .. }
-                | keencode_agent::CollaborationError::CrossTreeOperation
-                | keencode_agent::CollaborationError::RetryNotAllowed { .. }
-                | keencode_agent::CollaborationError::TargetNotIdle { .. }
-                | keencode_agent::CollaborationError::TargetStopped { .. }
-                | keencode_agent::CollaborationError::TreeClosed { .. } => {
-                    AgentRuntimeError::InvalidResumeTarget
-                }
-                error => runtime_operation_failed(error),
-            })
+            .map_err(map_resume_collaboration_error)
     }
 
     /// 精确取消一个后台 Shell 或单层子 Agent，并返回真实取消结果。
@@ -20053,8 +20110,7 @@ mod tests {
         let record = SessionEventRecord {
             schema: SESSION_EVENT_SCHEMA.to_owned(),
             version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("provider-live-replay-event")
-                .expect("事件标识应有效"),
+            event_id: SessionEventId::new("provider-live-replay-event").expect("事件标识应有效"),
             session: session_id.clone(),
             sequence: 2,
             time_unix_ms: 2,

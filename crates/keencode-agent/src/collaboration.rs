@@ -4854,6 +4854,56 @@ impl CollaborationCoordinator {
         )
     }
 
+    /// 查询根 Session 已提交的恢复收据，不创建新 Turn。
+    ///
+    /// 即使幂等记录仍在内存中，关闭中的根树也不能借重放继续对外成功；目标身份
+    /// 同样必须仍属于该根树。相同 operationId 指向另一目标时保持首次调用冲突语义。
+    pub fn replay_root_resume_receipt(
+        &self,
+        root_agent_id: &AgentId,
+        operation_id: &ToolCallId,
+        target_agent_id: &AgentId,
+    ) -> Result<Option<TurnId>, CollaborationError> {
+        let state = self.lock_state()?;
+        ensure_tree_open(&state, root_agent_id)?;
+        let root_agent = resident_agent(&state, root_agent_id)?;
+        if root_agent.definition.depth != AgentDepth::ROOT
+            || root_agent.definition.root_agent_id != *root_agent_id
+        {
+            return Err(CollaborationError::CrossTreeOperation);
+        }
+        let target_definition = state
+            .roots
+            .values()
+            .find_map(|root| root.known_agents.get(target_agent_id))
+            .ok_or_else(|| CollaborationError::AgentNotFound {
+                agent_id: target_agent_id.clone(),
+            })?;
+        if target_definition.root_agent_id != root_agent.definition.root_agent_id {
+            return Err(CollaborationError::CrossTreeOperation);
+        }
+        let input = CollaborationInvocationInput::ResumeAgent {
+            target_agent_id: target_agent_id.clone(),
+        };
+        let output = replay_root_resume_invocation(
+            &state,
+            root_agent_id,
+            operation_id,
+            target_agent_id,
+            &input,
+        )?;
+        match output {
+            Some(CollaborationInvocationOutput::ResumedAgent {
+                target_agent_id: recorded_target_agent_id,
+                resume_turn_id,
+            }) if recorded_target_agent_id == *target_agent_id => Ok(Some(resume_turn_id)),
+            Some(_) => Err(CollaborationError::InvalidRecovery {
+                message: "ResumeAgent 幂等记录保存了不匹配的结果类型或目标 Agent".to_owned(),
+            }),
+            None => Ok(None),
+        }
+    }
+
     /// 使用可信 ToolCall 身份重试目标 Agent，并跨 Runner 重放返回首次创建的 Turn。
     pub fn retry_agent_with_operation(
         &self,
@@ -5015,6 +5065,9 @@ impl CollaborationCoordinator {
             target_agent_id: target_agent_id.clone(),
         };
         self.apply_transition(|state| {
+            if root_authorized {
+                ensure_tree_open(state, &source_agent_id)?;
+            }
             if !root_authorized
                 && let (Some(source_turn_id), Some(tool_call_id)) =
                     (source_turn_id.as_ref(), tool_call_id)
@@ -7820,17 +7873,44 @@ fn replay_root_resume_invocation(
     target_agent_id: &AgentId,
     input: &CollaborationInvocationInput,
 ) -> Result<Option<CollaborationInvocationOutput>, CollaborationError> {
+    replay_root_resume_invocation_records(
+        state
+            .collaboration_invocations
+            .iter()
+            .map(|(key, record)| (key, record.kind, &record.input_digest, &record.output)),
+        source_agent_id,
+        tool_call_id,
+        target_agent_id,
+        input,
+    )
+}
+
+/// 在运行态账本中统一执行根恢复的摘要、冲突和重复检测。
+fn replay_root_resume_invocation_records<'a>(
+    records: impl IntoIterator<
+        Item = (
+            &'a CollaborationInvocationKey,
+            CollaborationInvocationKind,
+            &'a [u8; 32],
+            &'a CollaborationInvocationOutput,
+        ),
+    >,
+    source_agent_id: &AgentId,
+    tool_call_id: &ToolCallId,
+    target_agent_id: &AgentId,
+    input: &CollaborationInvocationInput,
+) -> Result<Option<CollaborationInvocationOutput>, CollaborationError> {
     let input_digest = collaboration_invocation_input_digest(input);
     let mut matching = None;
     let mut conflict = None;
-    for (key, record) in &state.collaboration_invocations {
+    for (key, kind, record_input_digest, output) in records {
         if key.source_agent_id != *source_agent_id
             || key.tool_call_id != *tool_call_id
-            || record.kind != CollaborationInvocationKind::ResumeAgent
+            || kind != CollaborationInvocationKind::ResumeAgent
         {
             continue;
         }
-        let output_target = match &record.output {
+        let output_target = match output {
             CollaborationInvocationOutput::ResumedAgent {
                 target_agent_id, ..
             } => target_agent_id,
@@ -7840,11 +7920,11 @@ fn replay_root_resume_invocation(
                 });
             }
         };
-        if output_target != target_agent_id || record.input_digest != input_digest {
+        if output_target != target_agent_id || *record_input_digest != input_digest {
             conflict = Some(key.clone());
             continue;
         }
-        if matching.replace(record.output.clone()).is_some() {
+        if matching.replace(output.clone()).is_some() {
             conflict = Some(key.clone());
         }
     }

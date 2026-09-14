@@ -8345,7 +8345,32 @@ fn root_resume_operation_id_conflict_does_not_replay_another_target() {
             &first_child.agent.agent_id,
         )
         .unwrap();
-    let error = fixture
+    let events_before_replay = fixture.store.events().len();
+    assert_eq!(
+        fixture
+            .coordinator
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &first_child.agent.agent_id,
+            )
+            .unwrap(),
+        Some(first_resumed.clone())
+    );
+    assert_eq!(fixture.store.events().len(), events_before_replay);
+    let replay_error = fixture
+        .coordinator
+        .replay_root_resume_receipt(
+            &fixture.root_agent_id,
+            &operation_id,
+            &second_child.agent.agent_id,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        replay_error,
+        CollaborationError::IdempotencyConflict { .. }
+    ));
+    let resume_error = fixture
         .coordinator
         .resume_agent_for_root_with_operation(
             &fixture.root_agent_id,
@@ -8354,7 +8379,7 @@ fn root_resume_operation_id_conflict_does_not_replay_another_target() {
         )
         .unwrap_err();
     assert!(matches!(
-        error,
+        resume_error,
         CollaborationError::IdempotencyConflict { .. }
     ));
     assert!(matches!(
@@ -8362,6 +8387,226 @@ fn root_resume_operation_id_conflict_does_not_replay_another_target() {
         CollaborationAgentStatus::Failed { turn_id, .. } if turn_id == second_child.initial_turn_id
     ));
     assert_ne!(first_resumed, second_child.initial_turn_id);
+}
+
+/// Closing 根树即使保留恢复收据也必须拒绝重放，冷恢复后先静止再清理整棵树。
+#[test]
+fn root_resume_receipt_rejects_closing_tree_and_reconciles_cleanup() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建 Closing 收据目标", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("closing-receipt-spawn"),
+            spawn_request("closing_receipt_child"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Failed {
+                message: "为 Closing 收据测试制造失败".to_owned(),
+            },
+        )
+        .unwrap();
+    let operation_id = fixed_tool_call_id("closing-resume-receipt");
+    let resumed_turn = fixture
+        .coordinator
+        .resume_agent_for_root_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            &child.agent.agent_id,
+        )
+        .unwrap();
+    assert_eq!(
+        fixture
+            .coordinator
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap(),
+        Some(resumed_turn)
+    );
+
+    fixture.execution.reject_all_quiesces();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .close_root_session(&fixture.root_agent_id)
+            .unwrap_err(),
+        CollaborationError::CommittedExecutionPending { .. }
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::TreeClosed { .. }
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .resume_agent_for_root_with_operation(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::TreeClosed { .. }
+    ));
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    assert_eq!(
+        checkpoint.roots[0].lifecycle,
+        RecoveredRootLifecycle::Closing
+    );
+
+    let restored_execution = Arc::new(RecordingExecution::default());
+    let restored = CollaborationCoordinator::new(
+        CollaborationLimits::new(2).unwrap(),
+        fixture.store,
+        restored_execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(81_000),
+        }),
+    );
+    restored.restore_coordinator(checkpoint).unwrap();
+    assert!(matches!(
+        restored
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::TreeClosed { .. }
+    ));
+    assert_eq!(restored.reconcile_outbox().unwrap(), 1);
+    assert_eq!(restored_execution.quiesces().len(), 1);
+    assert_eq!(restored_execution.closes().len(), 1);
+    assert!(matches!(
+        restored
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::AgentNotFound { .. }
+    ));
+}
+
+/// CleanupPending 根树的恢复收据不能绕过待确认 CloseTree，确认后收据随树卸载。
+#[test]
+fn root_resume_receipt_reconciles_cleanup_pending_before_replay() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(
+            &fixture.root_agent_id,
+            "创建 CleanupPending 收据目标",
+            NO_PLAN,
+        )
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("cleanup-receipt-spawn"),
+            spawn_request("cleanup_receipt_child"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Failed {
+                message: "为 CleanupPending 收据测试制造失败".to_owned(),
+            },
+        )
+        .unwrap();
+    let operation_id = fixed_tool_call_id("cleanup-resume-receipt");
+    fixture
+        .coordinator
+        .resume_agent_for_root_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            &child.agent.agent_id,
+        )
+        .unwrap();
+
+    fixture.execution.fail_next_close();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .close_root_session(&fixture.root_agent_id)
+            .unwrap_err(),
+        CollaborationError::CommittedExecutionPending { .. }
+    ));
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    assert_eq!(
+        checkpoint.roots[0].lifecycle,
+        RecoveredRootLifecycle::CleanupPending
+    );
+    assert!(matches!(
+        fixture
+            .coordinator
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::TreeClosed { .. }
+    ));
+
+    let restored_execution = Arc::new(RecordingExecution::default());
+    let restored = CollaborationCoordinator::new(
+        CollaborationLimits::new(2).unwrap(),
+        fixture.store,
+        restored_execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(82_000),
+        }),
+    );
+    restored.restore_coordinator(checkpoint).unwrap();
+    assert!(matches!(
+        restored
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::TreeClosed { .. }
+    ));
+    assert_eq!(restored.reconcile_outbox().unwrap(), 1);
+    assert!(restored_execution.quiesces().is_empty());
+    assert_eq!(restored_execution.closes().len(), 1);
+    assert!(matches!(
+        restored
+            .replay_root_resume_receipt(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap_err(),
+        CollaborationError::AgentNotFound { .. }
+    ));
 }
 
 /// Resume 只接受已有失败或中断终态，运行中、排队、取消中和已完成状态都必须拒绝。

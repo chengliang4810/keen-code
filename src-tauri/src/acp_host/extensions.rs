@@ -460,6 +460,16 @@ async fn resume_background_after_extensions(
     operation_id: String,
     extension_initialization: impl std::future::Future<Output = Result<(), HostFailure>>,
 ) -> Result<ResumeBackgroundTaskResponse, HostFailure> {
+    if let Some(task_id) = runtime
+        .replay_background_resume_receipt(&session_id, &operation_id, &child_thread_id)
+        .map_err(map_runtime_failure)?
+    {
+        return Ok(ResumeBackgroundTaskResponse::new(
+            session_id,
+            child_thread_id,
+            task_id.as_str().to_owned(),
+        ));
+    }
     extension_initialization.await?;
     let task_id = runtime
         .resume_background_agent(&session_id, &operation_id, &child_thread_id)
@@ -1743,8 +1753,7 @@ mod tests {
         let failed_resource_turn_id = failed_child
             .current_turn_id
             .clone()
-            .expect("失败子 Agent 必须绑定旧 Turn")
-            ;
+            .expect("失败子 Agent 必须绑定旧 Turn");
         let failed_turn_id = failed_resource_turn_id.as_str().to_owned();
         assert!(matches!(
             initial_state
@@ -1856,7 +1865,7 @@ mod tests {
             &cold_runtime,
             request.session_id.clone(),
             request.child_thread_id.clone(),
-            operation_id,
+            operation_id.clone(),
             async move {
                 initialization_runtime
                     .publish_extension_candidate(
@@ -1879,6 +1888,16 @@ mod tests {
         );
         assert_eq!(response.session_id, request.session_id);
         assert_eq!(response.child_thread_id, request.child_thread_id);
+        let replayed = resume_background_after_extensions(
+            &cold_runtime,
+            request.session_id.clone(),
+            request.child_thread_id.clone(),
+            operation_id.clone(),
+            std::future::ready(Err(super::HostFailure::Internal)),
+        )
+        .await
+        .expect("已有持久恢复收据时不得等待失败的扩展初始化");
+        assert_eq!(replayed, response, "重放必须返回首次持久化的恢复收据");
         assert_eq!(
             cold_runtime
                 .extension_generation(&project_root)
@@ -1930,6 +1949,70 @@ mod tests {
             .shutdown()
             .await
             .expect("冷恢复测试 Runtime 应完成关闭");
+        drop(reopened);
+        drop(cold_runtime);
+
+        let receipt_runtime = AgentRuntime::new_for_control_test_with_responses_provider(
+            &storage_root,
+            &base_url,
+            "test-model",
+        )
+        .expect("收据重放冷启动 Runtime 应创建");
+        let receipt_session = receipt_runtime
+            .open_or_create_session(&project_root, Some(&request.session_id), "unused")
+            .expect("收据重放 Session 应从磁盘重开");
+        assert!(
+            receipt_runtime
+                .session_delivery(&request.session_id)
+                .is_err(),
+            "重开 Session 本身不应提前创建投递泵"
+        );
+        assert_eq!(
+            receipt_runtime
+                .extension_generation(&project_root)
+                .expect("收据重放扩展代次应读取"),
+            None,
+            "新进程首次请求前不得保留上一进程扩展候选"
+        );
+        let state_before_receipt_replay = receipt_session
+            .snapshot()
+            .expect("收据重放前 Session 状态应读取")
+            .state;
+        let cold_replayed = resume_background_after_extensions(
+            &receipt_runtime,
+            request.session_id.clone(),
+            request.child_thread_id.clone(),
+            operation_id,
+            std::future::ready(Err(super::HostFailure::Internal)),
+        )
+        .await
+        .expect("新进程首个请求必须从完整恢复后的 Coordinator 重放收据");
+        assert_eq!(cold_replayed, response);
+        assert!(
+            receipt_runtime
+                .session_delivery(&request.session_id)
+                .is_ok(),
+            "持久收据命中也必须建立 Session 投递泵"
+        );
+        assert_eq!(
+            receipt_runtime
+                .extension_generation(&project_root)
+                .expect("收据命中后的扩展代次应读取"),
+            None,
+            "持久收据命中不得执行失败的扩展初始化"
+        );
+        assert_eq!(
+            receipt_session
+                .snapshot()
+                .expect("收据重放后 Session 状态应读取")
+                .state,
+            state_before_receipt_replay,
+            "持久收据重放不得创建第二个恢复 Turn"
+        );
+        receipt_runtime
+            .shutdown()
+            .await
+            .expect("收据重放 Runtime 应完成关闭");
     }
 
     /// 从真实 JSON 解码到扩展路由，再用 Runtime SessionStore 核对 A→B→重试 A 的收据。
