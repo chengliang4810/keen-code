@@ -2482,8 +2482,7 @@ impl CollaborationGlobalTurnLimiter {
             .state
             .lock()
             .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
-        if state.coordinators.contains_key(&coordinator_id)
-            && state.waiting.insert(coordinator_id)
+        if state.coordinators.contains_key(&coordinator_id) && state.waiting.insert(coordinator_id)
         {
             state.waiters.push_back(coordinator_id);
         }
@@ -5082,7 +5081,11 @@ impl CollaborationCoordinator {
                 .lock()
                 .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
             let result = self.commit_transition(|state| {
-                materialize_evicted_agents_for_root(state, self.inner.store.as_ref(), &root_agent_id)?;
+                materialize_evicted_agents_for_root(
+                    state,
+                    self.inner.store.as_ref(),
+                    &root_agent_id,
+                )?;
                 let root = state.roots.get(&root_agent_id).cloned().ok_or_else(|| {
                     CollaborationError::AgentNotFound {
                         agent_id: root_agent_id.clone(),
@@ -5323,7 +5326,9 @@ impl CollaborationCoordinator {
     /// 将当前 Coordinator 登记到全局公平队列并事件驱动调度。
     fn request_global_dispatch(&self) -> Result<(), CollaborationError> {
         if self.has_schedulable_child_turn()? {
-            self.inner.global_turn_limiter.enqueue(self.inner.coordinator_id)?;
+            self.inner
+                .global_turn_limiter
+                .enqueue(self.inner.coordinator_id)?;
         }
         let report = self.inner.global_turn_limiter.drive()?;
         match report.error_for(self.inner.coordinator_id) {
@@ -5333,10 +5338,7 @@ impl CollaborationCoordinator {
     }
 
     /// 消费 limiter 已预约的一个槽位，启动本 Coordinator 最早可运行子 Turn。
-    fn start_one_reserved_child(
-        &self,
-        permit: Arc<GlobalTurnPermit>,
-    ) -> ReservedChildStartOutcome {
+    fn start_one_reserved_child(&self, permit: Arc<GlobalTurnPermit>) -> ReservedChildStartOutcome {
         let committed = self.commit_transition(|state| {
             let position = state.pending_turns.iter().position(|queued| {
                 state
@@ -5415,7 +5417,9 @@ impl CollaborationCoordinator {
         &self,
         global_turn_limit: usize,
     ) -> Result<CollaborationCapacity, CollaborationError> {
-        self.inner.global_turn_limiter.update_limit(global_turn_limit)?;
+        self.inner
+            .global_turn_limiter
+            .update_limit(global_turn_limit)?;
         self.capacity()
     }
 
@@ -5430,12 +5434,11 @@ impl CollaborationCoordinator {
         }
         let root_agent_id = root_agent_id.clone();
         self.apply_transition(|state| {
-            let root = state
-                .roots
-                .get_mut(&root_agent_id)
-                .ok_or_else(|| CollaborationError::AgentNotFound {
+            let root = state.roots.get_mut(&root_agent_id).ok_or_else(|| {
+                CollaborationError::AgentNotFound {
                     agent_id: root_agent_id.clone(),
-                })?;
+                }
+            })?;
             root.turn_limit = per_root_turn_limit;
             Ok(Transition {
                 output: (),
@@ -5525,7 +5528,8 @@ impl CollaborationCoordinator {
     /// 返回测试可见的执行 fence 数量，用于证明已移除根不会形成无界墓碑。
     #[cfg(test)]
     pub(crate) fn execution_fence_count(&self) -> usize {
-        self.inner.execution_fences
+        self.inner
+            .execution_fences
             .lock()
             .expect("测试执行 fence 锁不应中毒")
             .len()
@@ -5598,7 +5602,8 @@ impl CollaborationCoordinator {
             revision,
             agent: recovered,
         };
-        self.inner.store
+        self.inner
+            .store
             .save_agent_checkpoint(&checkpoint)
             .map_err(|error| CollaborationError::Store {
                 message: error.message().to_owned(),
@@ -5798,7 +5803,8 @@ impl CollaborationCoordinator {
         operation: &'static str,
     ) -> Result<(), CollaborationError> {
         let current_sequence =
-            self.inner.store
+            self.inner
+                .store
                 .current_sequence()
                 .map_err(|error| CollaborationError::Store {
                     message: format!("{operation}无法读取 Store 当前水位: {}", error.message()),
@@ -5962,7 +5968,12 @@ impl CollaborationCoordinator {
                     let Some(pending_signal) = pending_signal else {
                         continue;
                     };
-                    if self.inner.execution.signal_turn(pending_signal.clone()).is_ok() {
+                    if self
+                        .inner
+                        .execution
+                        .signal_turn(pending_signal.clone())
+                        .is_ok()
+                    {
                         let mut state = self.lock_state()?;
                         if state.signal_outbox.get(&signal_key).is_some_and(|current| {
                             current.activity_version <= pending_signal.activity_version
@@ -6164,7 +6175,8 @@ impl CollaborationCoordinator {
                         }) {
                             Ok((_output, _actions)) => {
                                 drop(fence_state);
-                                self.inner.execution_fences
+                                self.inner
+                                    .execution_fences
                                     .lock()
                                     .map_err(|_poisoned| CollaborationError::StatePoisoned)?
                                     .remove(&root_agent_id);
@@ -6924,9 +6936,7 @@ fn collaboration_invocation_text_bytes(
 }
 
 /// 校验活跃 Turn 与 Coordinator/根树子 Agent 槽位投影严格一致。
-fn validate_turn_capacity_invariants(
-    state: &CoordinatorState,
-) -> Result<(), CollaborationError> {
+fn validate_turn_capacity_invariants(state: &CoordinatorState) -> Result<(), CollaborationError> {
     let mut expected_by_root = HashMap::<AgentId, usize>::new();
     let mut expected_global = 0usize;
     for (turn_id, active) in &state.active_turns {
@@ -6967,7 +6977,12 @@ fn validate_turn_capacity_invariants(
         });
     }
     for root in state.roots.values() {
-        if root.in_use != expected_by_root.get(&root.root_agent_id).copied().unwrap_or(0) {
+        if root.in_use
+            != expected_by_root
+                .get(&root.root_agent_id)
+                .copied()
+                .unwrap_or(0)
+        {
             return Err(CollaborationError::InvalidRecovery {
                 message: "根树子 Agent 槽位计数与活跃 Turn 不一致".to_owned(),
             });
@@ -9388,13 +9403,11 @@ fn release_turn_capacity(
             .ok_or_else(|| CollaborationError::InvalidRecovery {
                 message: "Coordinator 子 Agent 槽位计数下溢".to_owned(),
             })?;
-    let root =
-        state
-            .roots
-            .get_mut(&active.root_agent_id)
-            .ok_or_else(|| CollaborationError::AgentNotFound {
-                agent_id: active.root_agent_id.clone(),
-            })?;
+    let root = state.roots.get_mut(&active.root_agent_id).ok_or_else(|| {
+        CollaborationError::AgentNotFound {
+            agent_id: active.root_agent_id.clone(),
+        }
+    })?;
     root.in_use =
         root.in_use
             .checked_sub(1)
@@ -9831,15 +9844,14 @@ fn schedule_root_turns(
     actions: &mut Vec<PostCommitAction>,
 ) -> Result<(), CollaborationError> {
     while let Some(position) = state.pending_turns.iter().position(|queued| {
-            state
-                .agents
-                .get(&queued.agent_id)
-                .is_some_and(|agent| agent.definition.depth == AgentDepth::ROOT)
-                && state.roots.get(&queued.root_agent_id).is_some_and(|root| {
-                    root.lifecycle == RecoveredRootLifecycle::Open && !root.suspended
-                })
-        })
-    {
+        state
+            .agents
+            .get(&queued.agent_id)
+            .is_some_and(|agent| agent.definition.depth == AgentDepth::ROOT)
+            && state.roots.get(&queued.root_agent_id).is_some_and(|root| {
+                root.lifecycle == RecoveredRootLifecycle::Open && !root.suspended
+            })
+    }) {
         schedule_turn_at_position(state, position, None, events, actions)?;
     }
     Ok(())
