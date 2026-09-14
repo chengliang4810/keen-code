@@ -4156,6 +4156,52 @@ impl AgentRuntime {
         Self::new(storage_root, Arc::new(ControlTestDeliveryEmitter)).map(Arc::new)
     }
 
+    /// 创建绑定本地 Buffered Responses Provider 的控制面测试 Runtime。
+    #[cfg(test)]
+    pub(crate) fn new_for_control_test_with_responses_provider(
+        storage_root: impl Into<std::path::PathBuf>,
+        base_url: &str,
+        model: &str,
+    ) -> Result<Arc<Self>, AgentRuntimeError> {
+        let registry = ProviderRegistry::new();
+        let mut config = keencode_provider::ProviderConfig::new_unauthenticated(
+            "provider-control-test",
+            ProviderProtocol::Responses,
+            base_url,
+        )
+        .map_err(runtime_operation_failed)?;
+        config.response_mode = keencode_provider::WireResponseMode::Buffered;
+        config.default_capabilities = ProviderCapabilities {
+            tool_calling: true,
+            ..ProviderCapabilities::default()
+        };
+        let snapshot = registry
+            .replace_all([keencode_provider::ProviderRegistration::new(
+                config,
+                "Control test provider",
+                "control-test-revision",
+                keencode_provider::ProviderModelPolicy::Enumerated {
+                    models: vec![model.to_owned()],
+                },
+            )
+            .map_err(runtime_operation_failed)?])
+            .map_err(runtime_operation_failed)?;
+        let runtime = Arc::new(Self::new_with_registry(
+            storage_root,
+            Arc::new(ControlTestDeliveryEmitter),
+            registry,
+        )?);
+        *runtime
+            .default_provider
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(DefaultProviderBinding {
+            provider_id: "provider-control-test".to_owned(),
+            model: model.to_owned(),
+            generation: snapshot.generation,
+        });
+        Ok(runtime)
+    }
+
     /// 使用明确 Provider 注册表创建测试或生产装配根。
     fn new_with_registry(
         storage_root: impl Into<std::path::PathBuf>,

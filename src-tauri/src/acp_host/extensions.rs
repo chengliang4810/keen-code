@@ -434,20 +434,41 @@ async fn dispatch_background_resume(
     let child_thread_id = request.child_thread_id;
     let operation_id = request_operation_id(request.meta.as_ref())?;
     let _control = host.lock_session_control(&session_id).await?;
+    let (_, project_root) = authorized_metadata(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
     let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
-    let task_id = host
-        .runtime
+    // 冷启动只会从持久 checkpoint 恢复 Coordinator；扩展候选仍是进程内状态。
+    // 必须在 Coordinator 提交恢复 Turn 前重建完整候选，否则冻结工具快照会在
+    // 响应返回后的异步 launch 中才因 select_exact 失败。
+    let response = resume_background_after_extensions(
+        &host.runtime,
+        session_id,
+        child_thread_id,
+        operation_id,
+        host.ensure_extensions(&project_root),
+    )
+    .await?;
+    host.result_value(id, &response)
+}
+
+/// 只有完整扩展候选成功发布后才允许 Coordinator 提交恢复 Turn 收据。
+async fn resume_background_after_extensions(
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+    session_id: String,
+    child_thread_id: String,
+    operation_id: String,
+    extension_initialization: impl std::future::Future<Output = Result<(), HostFailure>>,
+) -> Result<ResumeBackgroundTaskResponse, HostFailure> {
+    extension_initialization.await?;
+    let task_id = runtime
         .resume_background_agent(&session_id, &operation_id, &child_thread_id)
         .map_err(map_runtime_failure)?;
-    host.result_value(
-        id,
-        &ResumeBackgroundTaskResponse::new(
-            session_id,
-            child_thread_id,
-            task_id.as_str().to_owned(),
-        ),
-    )
+    Ok(ResumeBackgroundTaskResponse::new(
+        session_id,
+        child_thread_id,
+        task_id.as_str().to_owned(),
+    ))
 }
 
 /// 只有底层本次首次发出取消信号时才报告 `cancelled=true`。
@@ -1327,17 +1348,318 @@ mod tests {
     use super::{
         MAX_CANDIDATE_PREVIEW_CHARS, cancellation_was_requested, collect_event_candidates,
         collect_message_candidate, deterministic_goal_id, goal_transition_operation,
-        goal_upsert_operation, map_goal_write_failure, matching_goal_clear_receipt,
-        rename_session_with_receipt, request_operation_id,
+        goal_upsert_operation, map_goal_write_failure, map_runtime_failure,
+        matching_goal_clear_receipt, rename_session_with_receipt, request_operation_id,
+        resume_background_after_extensions,
     };
-    use keencode_acp::{AcpIncomingFrame, AcpRequest, AcpRequestDecoder, GoalInput};
+    use crate::agent_runtime::{
+        AgentRuntime, RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
+        RuntimeExtensionContributor, RuntimeToolContext,
+    };
+    use keencode_acp::{
+        AcpIncomingFrame, AcpRequest, AcpRequestDecoder, GoalInput, ValidateAcpParams,
+    };
+    use keencode_agent::{HookRuntime, ToolRegistry};
     use keencode_resources::{
         AgentId, DocumentOperationReceipt, GoalDocument, MessagePart, MessageRole, ScopeId,
-        SessionEvent, SessionMessage, TurnId,
+        SessionEvent, SessionMessage, SubAgentStatus, TurnId, TurnStatus,
     };
     use keencode_runtime::{CreateSessionRequest, RuntimeConfig, RuntimeSession};
+    use keencode_skills::{SkillCatalog, SkillDiscoveryConfig, discover_skills};
+    use keencode_tools::SkillTool;
+    use serde_json::{Value, json};
     use sha2::{Digest, Sha256};
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::path::Path;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    const COLD_RESUME_ROOT_PROMPT: &str = "创建冷启动扩展恢复子任务";
+    const COLD_RESUME_CHILD_PROMPT: &str = "冷启动扩展恢复子任务";
+
+    /// 冷恢复回环服务的地址、请求计数器与完整捕获结果。
+    type ColdResumeServer = (
+        String,
+        Arc<AtomicUsize>,
+        JoinHandle<Result<Vec<Value>, String>>,
+    );
+
+    /// 冷恢复测试只贡献真实 Skill 工具，避免依赖原生 Wry AppHandle。
+    struct ColdResumeSkillContributor {
+        skills: Arc<SkillCatalog>,
+    }
+
+    impl RuntimeExtensionContributor for ColdResumeSkillContributor {
+        fn register_tools(
+            &self,
+            registry: &mut ToolRegistry,
+            _context: &RuntimeToolContext,
+        ) -> Result<(), String> {
+            registry
+                .register(Arc::new(SkillTool::new(Arc::clone(&self.skills))))
+                .map_err(|error| error.to_string())
+        }
+
+        fn build_hook_runtime(&self, _context: &RuntimeToolContext) -> Result<HookRuntime, String> {
+            Ok(HookRuntime::empty())
+        }
+
+        fn prepare_lsp_runtime(&self, _context: &RuntimeToolContext) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn resolve_agent(
+            &self,
+            _name: &str,
+            _parent: &RuntimeAgentTemplateContext,
+        ) -> Result<Option<RuntimeAgentTemplate>, String> {
+            Ok(None)
+        }
+    }
+
+    /// 从磁盘上的项目 Skill 构建与生产选择路径一致的扩展候选。
+    fn cold_resume_skill_candidate(
+        data_root: &Path,
+        project_root: &Path,
+        generation: u64,
+    ) -> RuntimeExtensionCandidate {
+        let skills = Arc::new(
+            discover_skills(&SkillDiscoveryConfig::new(data_root, project_root))
+                .expect("冷恢复测试 Skill 应完成发现"),
+        );
+        assert!(
+            skills
+                .entries()
+                .iter()
+                .any(|entry| entry.name == "cold-resume"),
+            "扩展候选必须包含冷恢复测试 Skill"
+        );
+        RuntimeExtensionCandidate::new(generation, Arc::new(ColdResumeSkillContributor { skills }))
+            .expect("冷恢复测试扩展候选应创建")
+    }
+
+    /// 判断 Responses 请求是否包含精确用户正文，避免误匹配工具参数中的相同文本。
+    fn request_contains_user_text(request: &Value, expected: &str) -> bool {
+        request["input"].as_array().is_some_and(|messages| {
+            messages.iter().any(|message| {
+                message["role"] == "user"
+                    && message["content"].as_array().is_some_and(|content| {
+                        content
+                            .iter()
+                            .any(|part| part["text"].as_str() == Some(expected))
+                    })
+            })
+        })
+    }
+
+    /// 读取一次带 Content-Length 的本地 JSON 请求。
+    fn read_json_request(stream: &mut TcpStream) -> Result<Value, String> {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .map_err(|error| format!("设置本地模型读取超时失败：{error}"))?;
+        let mut wire = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let header_end = loop {
+            if let Some(position) = wire.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            let count = stream
+                .read(&mut buffer)
+                .map_err(|error| format!("读取本地模型请求头失败：{error}"))?;
+            if count == 0 {
+                return Err("本地模型请求头提前结束".to_owned());
+            }
+            wire.extend_from_slice(&buffer[..count]);
+        };
+        let head = std::str::from_utf8(&wire[..header_end])
+            .map_err(|error| format!("本地模型请求头不是 UTF-8：{error}"))?;
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>())
+            })
+            .ok_or_else(|| "本地模型请求缺少 Content-Length".to_owned())?
+            .map_err(|error| format!("Content-Length 无效：{error}"))?;
+        while wire.len().saturating_sub(header_end) < content_length {
+            let count = stream
+                .read(&mut buffer)
+                .map_err(|error| format!("读取本地模型请求正文失败：{error}"))?;
+            if count == 0 {
+                return Err("本地模型请求正文提前结束".to_owned());
+            }
+            wire.extend_from_slice(&buffer[..count]);
+        }
+        serde_json::from_slice(&wire[header_end..header_end + content_length])
+            .map_err(|error| format!("本地模型请求正文不是 JSON：{error}"))
+    }
+
+    /// 写入一条关闭连接的 JSON HTTP 响应。
+    fn write_json_response(
+        stream: &mut TcpStream,
+        status: &str,
+        body: &Value,
+    ) -> Result<(), String> {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("写入本地模型响应失败：{error}"))
+    }
+
+    /// 根 Agent 先派发子 Agent，子 Agent 首次失败、冷恢复后完成。
+    fn spawn_cold_resume_responses_server() -> ColdResumeServer {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("本地模型端口应绑定");
+        listener
+            .set_nonblocking(true)
+            .expect("本地模型监听器应设为非阻塞");
+        let address = listener.local_addr().expect("本地模型地址应读取");
+        let observed = Arc::new(AtomicUsize::new(0));
+        let server_observed = Arc::clone(&observed);
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut requests = Vec::with_capacity(4);
+            let mut root_requests = 0_usize;
+            let mut child_requests = 0_usize;
+            for _ in 0..4 {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return Err("等待冷恢复模型请求超时".to_owned());
+                            }
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                        Err(error) => return Err(format!("接受冷恢复模型请求失败：{error}")),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .map_err(|error| format!("恢复本地模型连接阻塞模式失败：{error}"))?;
+                let request = read_json_request(&mut stream)?;
+                let (status, body) = if request_contains_user_text(
+                    &request,
+                    COLD_RESUME_CHILD_PROMPT,
+                ) {
+                    child_requests = child_requests.saturating_add(1);
+                    if child_requests == 1 {
+                        (
+                            "400 Bad Request",
+                            json!({
+                                "error": {
+                                    "message": "冷恢复测试子请求首次失败",
+                                    "type": "invalid_request_error",
+                                    "code": "cold_resume_fixture"
+                                }
+                            }),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            json!({
+                                "id": "response-cold-resume-child",
+                                "object": "response",
+                                "model": "test-model",
+                                "status": "completed",
+                                "output": [{
+                                    "id": "message-cold-resume-child",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "冷恢复子任务完成"}]
+                                }],
+                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+                            }),
+                        )
+                    }
+                } else if request_contains_user_text(&request, COLD_RESUME_ROOT_PROMPT) {
+                    root_requests = root_requests.saturating_add(1);
+                    if root_requests == 1 {
+                        (
+                            "200 OK",
+                            json!({
+                                "id": "response-cold-resume-spawn",
+                                "object": "response",
+                                "model": "test-model",
+                                "status": "completed",
+                                "output": [{
+                                    "type": "function_call",
+                                    "id": "fc-cold-resume-spawn",
+                                    "call_id": "call-cold-resume-spawn",
+                                    "name": "spawn_agent",
+                                    "arguments": json!({
+                                        "task_name": "cold_extension_child",
+                                        "message": COLD_RESUME_CHILD_PROMPT,
+                                        "fork_turns": "none"
+                                    }).to_string(),
+                                    "status": "completed"
+                                }],
+                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+                            }),
+                        )
+                    } else {
+                        (
+                            "200 OK",
+                            json!({
+                                "id": "response-cold-resume-root",
+                                "object": "response",
+                                "model": "test-model",
+                                "status": "completed",
+                                "output": [{
+                                    "id": "message-cold-resume-root",
+                                    "type": "message",
+                                    "role": "assistant",
+                                    "content": [{"type": "output_text", "text": "根任务完成"}]
+                                }],
+                                "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+                            }),
+                        )
+                    }
+                } else {
+                    return Err("收到无法识别的冷恢复模型请求".to_owned());
+                };
+                write_json_response(&mut stream, status, &body)?;
+                requests.push(request);
+                server_observed.store(requests.len(), Ordering::Release);
+            }
+            if root_requests != 2 || child_requests != 2 {
+                return Err(format!(
+                    "冷恢复模型请求数量错误：root={root_requests}, child={child_requests}"
+                ));
+            }
+            Ok(requests)
+        });
+        (format!("http://{address}/v1"), observed, server)
+    }
+
+    /// 等待真实 Runtime 的根/子 Agent、Runner 与 Session Journal 全部收敛。
+    async fn wait_for_session_idle(runtime: &Arc<AgentRuntime>, session_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while runtime
+            .session_has_active_work(session_id)
+            .expect("冷恢复测试 Session 活动状态应读取")
+            && Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !runtime
+                .session_has_active_work(session_id)
+                .expect("冷恢复测试 Session 最终活动状态应读取"),
+            "冷恢复测试 Runtime 应在有限时限内收敛"
+        );
+    }
 
     /// 缺失元数据时每次请求都要生成新的身份；显式元数据才负责重试稳定性。
     #[test]
@@ -1355,6 +1677,259 @@ mod tests {
             request_operation_id(Some(&meta)).unwrap(),
             request_operation_id(Some(&meta)).unwrap()
         );
+    }
+
+    /// 冷启动恢复必须先重建扩展候选；初始化失败不得提交收据或异步失败 Turn。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_background_resume_initializes_extensions_before_receipt() {
+        let fixture = tempdir().expect("应创建冷恢复隔离目录");
+        let storage_root = fixture.path().join("data");
+        let project_root = fixture.path().join("project");
+        let skill_root = project_root
+            .join(".agents")
+            .join("skills")
+            .join("cold-resume");
+        std::fs::create_dir_all(&storage_root).expect("应创建冷恢复数据目录");
+        std::fs::create_dir_all(&skill_root).expect("应创建冷恢复 Skill 目录");
+        std::fs::write(
+            skill_root.join("SKILL.md"),
+            "---\nname: cold-resume\ndescription: Cold resume fixture\n---\n\nCold resume test body.\n",
+        )
+        .expect("应写入冷恢复 Skill 文档");
+        let project_root = std::fs::canonicalize(&project_root).expect("项目根应可规范化");
+        let (base_url, observed, server) = spawn_cold_resume_responses_server();
+
+        let runtime = AgentRuntime::new_for_control_test_with_responses_provider(
+            &storage_root,
+            &base_url,
+            "test-model",
+        )
+        .expect("初始冷恢复测试 Runtime 应创建");
+        runtime
+            .publish_extension_candidate(
+                &project_root,
+                cold_resume_skill_candidate(&storage_root, &project_root, 1),
+            )
+            .expect("初始 Skill 扩展候选应发布");
+        let session = runtime
+            .open_or_create_session(&project_root, None, "cold-resume-session")
+            .expect("初始冷恢复测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .start_root_turn(
+                &session_id,
+                "turn-cold-resume-root",
+                COLD_RESUME_ROOT_PROMPT,
+                crate::agent_runtime::RootTurnOptions::default(),
+            )
+            .await
+            .expect("根 Turn 应启动并派发冷恢复子 Agent");
+        wait_for_session_idle(&runtime, &session_id).await;
+        assert_eq!(
+            observed.load(Ordering::Acquire),
+            3,
+            "初始执行应产生两次根请求和一次失败子请求"
+        );
+
+        let initial_state = session.snapshot().expect("初始 Session 状态应读取").state;
+        assert_eq!(initial_state.sub_agents.len(), 1);
+        let failed_child = initial_state
+            .sub_agents
+            .values()
+            .next()
+            .expect("初始执行应创建唯一子 Agent");
+        assert_eq!(failed_child.status, SubAgentStatus::Failed);
+        let child_thread_id = failed_child.agent_id.as_str().to_owned();
+        let failed_resource_turn_id = failed_child
+            .current_turn_id
+            .clone()
+            .expect("失败子 Agent 必须绑定旧 Turn")
+            ;
+        let failed_turn_id = failed_resource_turn_id.as_str().to_owned();
+        assert!(matches!(
+            initial_state
+                .turns
+                .get(&failed_resource_turn_id)
+                .map(|turn| &turn.status),
+            Some(TurnStatus::Failed)
+        ));
+        let checkpoint_path = keencode_resources::session_storage_directory(
+            &storage_root,
+            &keencode_resources::SessionId::new(session_id.clone())
+                .expect("资源 Session 标识应有效"),
+        )
+        .expect("应解析项目作用域 Session 目录")
+        .join("collaboration-v2.json");
+        let initial_checkpoint = std::fs::read(&checkpoint_path).expect("初始 checkpoint 应读取");
+        assert!(
+            String::from_utf8_lossy(&initial_checkpoint).contains("\"Skill\""),
+            "失败子 Turn 的冻结工具快照必须包含扩展 Skill"
+        );
+
+        runtime
+            .shutdown()
+            .await
+            .expect("初始 Runtime 应完成干净关闭");
+        drop(session);
+        drop(runtime);
+
+        let cold_runtime = AgentRuntime::new_for_control_test_with_responses_provider(
+            &storage_root,
+            &base_url,
+            "test-model",
+        )
+        .expect("冷启动 Runtime 应创建");
+        let reopened = cold_runtime
+            .open_or_create_session(&project_root, Some(&session_id), "unused")
+            .expect("冷启动 Session 应从磁盘重开");
+        assert_eq!(
+            cold_runtime
+                .extension_generation(&project_root)
+                .expect("冷启动扩展代次应读取"),
+            None,
+            "扩展候选只存在于进程内，冷启动时必须为空"
+        );
+
+        let raw_request = serde_json::to_vec(&json!({
+            "jsonrpc": "2.0",
+            "id": "rpc-cold-resume",
+            "method": "keencode/background/resume",
+            "params": {
+                "sessionId": session_id,
+                "childThreadId": child_thread_id,
+                "_meta": {"keencode/operationId": "cold-resume-operation"}
+            }
+        }))
+        .expect("冷恢复 ACP 请求应编码");
+        let decoded = AcpRequestDecoder::new()
+            .decode_raw(&raw_request)
+            .expect("冷恢复 ACP 请求应严格解码");
+        let request = match decoded {
+            AcpIncomingFrame::Request(frame) => match frame.into_parts().1 {
+                AcpRequest::ResumeBackgroundTask(request) => request,
+                _ => panic!("应路由到 background resume 扩展"),
+            },
+            AcpIncomingFrame::Notification(_) => panic!("带 ID 的恢复请求不能是通知"),
+        };
+        request.validate().expect("冷恢复 ACP 参数应有效");
+        let operation_id =
+            request_operation_id(request.meta.as_ref()).expect("冷恢复 operationId 应解析");
+
+        let state_before_failure = reopened
+            .snapshot()
+            .expect("初始化失败前 Session 状态应读取")
+            .state;
+        let checkpoint_before_failure =
+            std::fs::read(&checkpoint_path).expect("初始化失败前 checkpoint 应读取");
+        let failed_initialization = resume_background_after_extensions(
+            &cold_runtime,
+            request.session_id.clone(),
+            request.child_thread_id.clone(),
+            operation_id.clone(),
+            std::future::ready(Err(super::HostFailure::Internal)),
+        )
+        .await;
+        assert_eq!(failed_initialization, Err(super::HostFailure::Internal));
+        assert_eq!(
+            reopened
+                .snapshot()
+                .expect("初始化失败后 Session 状态应读取")
+                .state,
+            state_before_failure,
+            "扩展初始化失败不得提交恢复 Turn 或 Journal 收据"
+        );
+        assert_eq!(
+            std::fs::read(&checkpoint_path).expect("初始化失败后 checkpoint 应读取"),
+            checkpoint_before_failure,
+            "扩展初始化失败不得改写 Collaboration checkpoint"
+        );
+        assert_eq!(
+            observed.load(Ordering::Acquire),
+            3,
+            "初始化失败必须在任何恢复 Provider 请求前返回"
+        );
+
+        let initialization_runtime = Arc::clone(&cold_runtime);
+        let initialization_storage = storage_root.clone();
+        let initialization_project = project_root.clone();
+        let response = resume_background_after_extensions(
+            &cold_runtime,
+            request.session_id.clone(),
+            request.child_thread_id.clone(),
+            operation_id,
+            async move {
+                initialization_runtime
+                    .publish_extension_candidate(
+                        &initialization_project,
+                        cold_resume_skill_candidate(
+                            &initialization_storage,
+                            &initialization_project,
+                            1,
+                        ),
+                    )
+                    .map(|_| ())
+                    .map_err(map_runtime_failure)
+            },
+        )
+        .await
+        .expect("扩展重建后冷恢复应返回同步收据");
+        assert_ne!(
+            response.task_id, failed_turn_id,
+            "恢复收据必须绑定新 Turn，而不是失败旧 Turn"
+        );
+        assert_eq!(response.session_id, request.session_id);
+        assert_eq!(response.child_thread_id, request.child_thread_id);
+        assert_eq!(
+            cold_runtime
+                .extension_generation(&project_root)
+                .expect("恢复后的扩展代次应读取"),
+            Some(1)
+        );
+
+        wait_for_session_idle(&cold_runtime, &response.session_id).await;
+        let requests = server
+            .join()
+            .expect("冷恢复本地模型服务不应 panic")
+            .expect("冷恢复模型请求应全部成功处理");
+        assert_eq!(requests.len(), 4);
+        let child_requests = requests
+            .iter()
+            .filter(|request| request_contains_user_text(request, COLD_RESUME_CHILD_PROMPT))
+            .collect::<Vec<_>>();
+        assert_eq!(child_requests.len(), 2);
+        let resumed_request = child_requests[1];
+        assert!(
+            resumed_request["tools"].as_array().is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|tool| tool["name"].as_str() == Some("Skill"))
+            }),
+            "冷恢复子 Turn 的真实 Provider 请求必须恢复冻结 Skill 工具"
+        );
+        let final_state = reopened
+            .snapshot()
+            .expect("冷恢复完成后的 Session 状态应读取")
+            .state;
+        let resumed_turn_id = keencode_resources::TurnId::new(response.task_id.clone())
+            .expect("恢复 Turn 标识应有效");
+        assert!(matches!(
+            final_state
+                .turns
+                .get(&resumed_turn_id)
+                .map(|turn| &turn.status),
+            Some(TurnStatus::Completed)
+        ));
+        let final_child = final_state
+            .sub_agents
+            .values()
+            .next()
+            .expect("冷恢复完成后子 Agent 应存在");
+        assert_eq!(final_child.status, SubAgentStatus::Completed);
+        assert_eq!(final_child.current_turn_id.as_ref(), Some(&resumed_turn_id));
+        cold_runtime
+            .shutdown()
+            .await
+            .expect("冷恢复测试 Runtime 应完成关闭");
     }
 
     /// 从真实 JSON 解码到扩展路由，再用 Runtime SessionStore 核对 A→B→重试 A 的收据。
