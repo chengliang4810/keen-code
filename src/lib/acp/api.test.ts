@@ -539,6 +539,69 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
     ).rejects.toThrow("响应格式无效");
   });
 
+  it("拒绝与请求 Session 不一致的 rewind 响应", async () => {
+    clientMocks.acpRequest.mockResolvedValue({
+      sessionId: "session-other",
+      archivedSessionId: "archive-1",
+      throughJournalSequence: 7,
+      revertedFiles: false,
+    });
+
+    await expect(
+      sessionRewind({
+        sessionId: "session-1",
+        targetMessageId: "message-2",
+        expectedText: "原始正文",
+        revertFiles: false,
+        operationId: "rewind-wrong-session",
+      }),
+    ).rejects.toThrow("响应格式无效");
+  });
+
+  it.each(["", "   "])(
+    "拒绝 archivedSessionId=%j 的非法 rewind 响应",
+    async (archivedSessionId) => {
+      clientMocks.acpRequest.mockResolvedValue({
+        sessionId: "session-1",
+        archivedSessionId,
+        throughJournalSequence: 7,
+        revertedFiles: false,
+      });
+
+      await expect(
+        sessionRewind({
+          sessionId: "session-1",
+          targetMessageId: "message-2",
+          expectedText: "原始正文",
+          revertFiles: false,
+          operationId: "rewind-invalid-archive",
+        }),
+      ).rejects.toThrow("响应格式无效");
+    },
+  );
+
+  it.each([undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.NaN, Number.POSITIVE_INFINITY, "7"])(
+    "拒绝 throughJournalSequence=%s 的非法 rewind 响应",
+    async (throughJournalSequence) => {
+      clientMocks.acpRequest.mockResolvedValue({
+        sessionId: "session-1",
+        archivedSessionId: "archive-1",
+        ...(throughJournalSequence === undefined ? {} : { throughJournalSequence }),
+        revertedFiles: false,
+      });
+
+      await expect(
+        sessionRewind({
+          sessionId: "session-1",
+          targetMessageId: "message-2",
+          expectedText: "原始正文",
+          revertFiles: false,
+          operationId: "rewind-invalid-sequence",
+        }),
+      ).rejects.toThrow("响应格式无效");
+    },
+  );
+
   it.each([undefined, "false", 0])(
     "拒绝 revertedFiles=%s 的非法 rewind 响应",
     async (revertedFiles) => {

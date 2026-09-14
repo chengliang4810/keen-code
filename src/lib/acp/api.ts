@@ -273,13 +273,19 @@ export function sessionRewind(args: {
       _meta: { "keencode/operationId": args.operationId },
     },
   ).then((result) => {
+    const value = result as Record<string, unknown>;
     if (
       typeof result !== "object" ||
       result === null ||
       Array.isArray(result) ||
-      typeof (result as Record<string, unknown>).archivedSessionId !== "string" ||
-      !(result as Record<string, unknown>).archivedSessionId ||
-      typeof (result as Record<string, unknown>).revertedFiles !== "boolean"
+      typeof value.sessionId !== "string" ||
+      value.sessionId !== args.sessionId ||
+      typeof value.archivedSessionId !== "string" ||
+      value.archivedSessionId.trim() === "" ||
+      typeof value.throughJournalSequence !== "number" ||
+      !Number.isSafeInteger(value.throughJournalSequence) ||
+      value.throughJournalSequence <= 0 ||
+      typeof value.revertedFiles !== "boolean"
     ) {
       throw new Error("ACP Rewind 响应格式无效");
     }
