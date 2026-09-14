@@ -517,7 +517,13 @@ async fn context_lifecycle_hooks_inject_at_registered_phases() {
     hook.turn_start_delivered(&child_context);
     assert_eq!(child_first.context[0].text, "subagent context");
     hook.turn_start_prepare(&child_context);
-    assert!(hook.turn_start(child_context).await.unwrap().context.is_empty());
+    assert!(
+        hook.turn_start(child_context)
+            .await
+            .unwrap()
+            .context
+            .is_empty()
+    );
 }
 
 #[cfg(unix)]
@@ -571,14 +577,16 @@ async fn failed_command_lifecycle_hook_is_retried() {
     let root = tempfile::tempdir().unwrap();
     let lifecycle_state = LifecycleStartState::new();
     let hook = NativeLifecycleHooks {
-        hooks: vec![parse_command_hook(
-            "test:failed-session".to_owned(),
-            HookPhase::SessionStart,
-            None,
-            r#"printf 'attempt\n' >> attempts.txt; exit 1"#.to_owned(),
-            root.path(),
-        )
-        .unwrap()],
+        hooks: vec![
+            parse_command_hook(
+                "test:failed-session".to_owned(),
+                HookPhase::SessionStart,
+                None,
+                r#"printf 'attempt\n' >> attempts.txt; exit 1"#.to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+        ],
         plan: PlanGuard::inactive(),
         lifecycle_start_state: lifecycle_state.clone(),
         agent_type: "worker".to_owned(),
@@ -623,14 +631,16 @@ async fn outer_timeout_releases_lifecycle_lease() {
     let root = tempfile::tempdir().unwrap();
     let lifecycle_state = LifecycleStartState::new();
     let hook = NativeLifecycleHooks {
-        hooks: vec![parse_command_hook(
-            "test:timeout-session".to_owned(),
-            HookPhase::SessionStart,
-            None,
-            r#"touch started; sleep 10"#.to_owned(),
-            root.path(),
-        )
-        .unwrap()],
+        hooks: vec![
+            parse_command_hook(
+                "test:timeout-session".to_owned(),
+                HookPhase::SessionStart,
+                None,
+                r#"touch started; sleep 10"#.to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+        ],
         plan: PlanGuard::inactive(),
         lifecycle_start_state: lifecycle_state.clone(),
         agent_type: "worker".to_owned(),
@@ -647,12 +657,9 @@ async fn outer_timeout_releases_lifecycle_lease() {
 
     hook.turn_start_prepare(&context);
     assert!(
-        tokio::time::timeout(
-            Duration::from_millis(100),
-            hook.turn_start(context.clone())
-        )
-        .await
-        .is_err()
+        tokio::time::timeout(Duration::from_millis(100), hook.turn_start(context.clone()))
+            .await
+            .is_err()
     );
     assert!(
         !lifecycle_state

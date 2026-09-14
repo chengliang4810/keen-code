@@ -280,7 +280,8 @@ impl AgentHook for NativeLifecycleHooks {
                                 "source": source,
                                 "prompt": context.prompt,
                             });
-                            let output = run_lifecycle_command_hook(spec, self.plan, &payload).await?;
+                            let output =
+                                run_lifecycle_command_hook(spec, self.plan, &payload).await?;
                             if phase == HookPhase::UserPromptSubmit
                                 && let Ok(value) = serde_json::from_str::<Value>(&output)
                                 && value.get("decision").and_then(Value::as_str) == Some("block")
@@ -1948,28 +1949,26 @@ async fn run_command_hook_with_policy(
         execute_hook_command(spec, payload).await
     }
     .and_then(|output| {
-            match spec.phase {
-                HookPhase::PreToolUse => {
-                    parse_pre_hook_output(output.clone())?;
-                }
-                HookPhase::PostToolUse | HookPhase::PostToolUseFailure => {
-                    parse_post_tool_hook_output(spec.phase, output.clone())?;
-                }
-                HookPhase::Stop => {
-                    parse_stop_hook_output(output.clone())?;
-                }
-                HookPhase::PreCompact => {
-                    parse_pre_compact_hook_output(output.clone())?;
-                }
-                HookPhase::SessionStart
-                | HookPhase::SubagentStart
-                | HookPhase::UserPromptSubmit => {
-                    parse_lifecycle_hook_output(output.clone())?;
-                }
-                HookPhase::OnError | HookPhase::PostCompact => {}
+        match spec.phase {
+            HookPhase::PreToolUse => {
+                parse_pre_hook_output(output.clone())?;
             }
-            Ok(output)
-        });
+            HookPhase::PostToolUse | HookPhase::PostToolUseFailure => {
+                parse_post_tool_hook_output(spec.phase, output.clone())?;
+            }
+            HookPhase::Stop => {
+                parse_stop_hook_output(output.clone())?;
+            }
+            HookPhase::PreCompact => {
+                parse_pre_compact_hook_output(output.clone())?;
+            }
+            HookPhase::SessionStart | HookPhase::SubagentStart | HookPhase::UserPromptSubmit => {
+                parse_lifecycle_hook_output(output.clone())?;
+            }
+            HookPhase::OnError | HookPhase::PostCompact => {}
+        }
+        Ok(output)
+    });
     match &result {
         Ok(_) => {
             tracing::info!(hook = %spec.name, phase = %spec.phase, elapsed_ms = started.elapsed().as_millis() as u64, "插件 Hook 完成")
@@ -2045,14 +2044,7 @@ async fn execute_hook_command_with_limits(
     timeout: Duration,
     max_output_bytes: usize,
 ) -> Result<String, HookCallbackError> {
-    execute_hook_command_with_limits_policy(
-        spec,
-        payload,
-        timeout,
-        max_output_bytes,
-        false,
-    )
-    .await
+    execute_hook_command_with_limits_policy(spec, payload, timeout, max_output_bytes, false).await
 }
 
 /// 使用严格失败语义执行生命周期 Hook，失败时必须让一次性 lease 回滚。
@@ -2060,8 +2052,14 @@ async fn execute_lifecycle_hook_command(
     spec: &CommandHookSpec,
     payload: &Value,
 ) -> Result<String, HookCallbackError> {
-    execute_hook_command_with_limits_policy(spec, payload, spec.timeout, MAX_HOOK_OUTPUT_BYTES, true)
-        .await
+    execute_hook_command_with_limits_policy(
+        spec,
+        payload,
+        spec.timeout,
+        MAX_HOOK_OUTPUT_BYTES,
+        true,
+    )
+    .await
 }
 
 /// 使用明确资源边界执行 Hook，并按调用方选择普通或生命周期失败语义。
@@ -2925,7 +2923,10 @@ mod tests {
         let invalid = runtime_mcp_document_input(&path);
         assert!(invalid.invalid());
         assert_eq!(
-            invalid.diagnostic.as_ref().map(|diagnostic| diagnostic.code.as_str()),
+            invalid
+                .diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.code.as_str()),
             Some("mcp_user_config_invalid")
         );
         assert!(
@@ -3544,11 +3545,7 @@ mod tests {
                 tool_call_id: "call-interrupt".to_owned(),
                 tool_name: "Read".to_owned(),
                 input: json!({"path": "README.md"}),
-                result: keencode_model::ToolResult::text(
-                    "call-interrupt",
-                    "Turn 已取消",
-                    true,
-                ),
+                result: keencode_model::ToolResult::text("call-interrupt", "Turn 已取消", true),
                 failure: ToolHookFailureKind::Cancelled,
                 duration_ms: 9,
             },
@@ -4051,8 +4048,7 @@ mod tests {
             let output = run_command_hook(&spec, PlanGuard::inactive(), &json!({}))
                 .await
                 .expect("工具后 Hook 退出码 2 应归一为反馈");
-            let parsed = parse_post_tool_hook_output(phase, output)
-                .expect("退出码 2 反馈应可解析");
+            let parsed = parse_post_tool_hook_output(phase, output).expect("退出码 2 反馈应可解析");
             assert_eq!(parsed.context.len(), 1);
             assert_eq!(parsed.context[0].text, "需要保留当前上下文");
         }
