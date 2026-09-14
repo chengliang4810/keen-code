@@ -36,12 +36,13 @@ use keencode_agent::{
     CollaborationGlobalTurnLimiter, CollaborationPortError, CollaborationStore,
     CollaborationTransitionCommit, ContextCompactionFailureKind, ContextManager, ContextPolicy,
     ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookRuntime,
-    JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind,
-    ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor, QuiesceAgentTree,
-    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits,
-    RuntimeStateError, SessionId as AgentSessionId, StructuredOutputMode, TerminalReason,
-    ToolCallId, ToolRegistry, TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId,
-    TurnRequest, UuidCollaborationIdGenerator, root_turn_prompt_digest,
+    HookPhase, JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage,
+    MailboxMessageKind, ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor,
+    QuiesceAgentTree, RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator,
+    RootAgentRequest, RunLimits, RuntimeStateError, SessionId as AgentSessionId,
+    StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry, TurnCancellation,
+    TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator,
+    root_turn_prompt_digest,
 };
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
@@ -296,7 +297,7 @@ pub struct RuntimeToolContext {
     /// 当前 Turn 冻结的 Plan 只读守卫。
     plan_guard: PlanGuard,
     /// 会话存活期间共享各代理启动记录，扩展热重载不重复触发启动 Hook。
-    session_hooks_started: Arc<Mutex<HashSet<String>>>,
+    session_hooks_started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
 }
 
 /// 扩展候选在装配时产生、仅写入日志的安全诊断。
@@ -351,7 +352,7 @@ impl RuntimeToolContext {
         }
     }
 
-    pub(crate) fn session_hooks_started(&self) -> Arc<Mutex<HashSet<String>>> {
+    pub(crate) fn session_hooks_started(&self) -> Arc<Mutex<HashSet<(String, HookPhase)>>> {
         Arc::clone(&self.session_hooks_started)
     }
 
@@ -1904,7 +1905,7 @@ struct RuntimeAgentExecution {
     state: Arc<Mutex<RuntimeAgentExecutionState>>,
     /// 退出或 Session 拆除开始后禁止新的 Runner 进入执行副作用边界。
     accepting_work: AtomicBool,
-    session_hooks_started: Arc<Mutex<HashSet<String>>>,
+    session_hooks_started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
     /// 全树静止等待托管 Turn 数量归零的条件变量。
     idle: Arc<Condvar>,
 }

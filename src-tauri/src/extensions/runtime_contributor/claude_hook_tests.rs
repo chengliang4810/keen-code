@@ -93,13 +93,91 @@ async fn session_start_runs_once_and_prompt_hook_runs_each_turn() {
         2
     );
     assert_eq!(hook.turn_start(context).await.unwrap().context.len(), 1);
-    assert!(started.lock().unwrap().contains("root"));
+    assert!(
+        started
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
     let input: Value =
         serde_json::from_slice(&fs::read(root.path().join("startup-input.json")).unwrap()).unwrap();
     assert_eq!(input["hook_event_name"], "SessionStart");
     assert_eq!(input["session_id"], "session");
     assert_eq!(input["source"], "startup");
     assert_eq!(input["cwd"], root.path().to_string_lossy().as_ref());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn blocked_first_prompt_does_not_repeat_session_start() {
+    let root = tempfile::tempdir().unwrap();
+    let started = Arc::new(Mutex::new(HashSet::new()));
+    let hook = NativeLifecycleHooks {
+        hooks: vec![
+            parse_command_hook(
+                "test:session-start".to_owned(),
+                HookPhase::SessionStart,
+                None,
+                r#"printf 'session-start\n' >> attempts.txt; printf '%s' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"session guidance"}}'"#
+                    .to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+            parse_command_hook(
+                "test:user-prompt-submit".to_owned(),
+                HookPhase::UserPromptSubmit,
+                None,
+                r#"printf 'user-prompt-submit\n' >> attempts.txt; printf '%s' '{"decision":"block","reason":"retry this prompt"}'"#
+                    .to_owned(),
+                root.path(),
+            )
+            .unwrap(),
+        ],
+        plan: PlanGuard::inactive(),
+        started: started.clone(),
+        agent_type: "general-purpose".to_owned(),
+    };
+    let mut context = TurnStartHookContext {
+        invocation: HookInvocationContext {
+            session_id: SessionId::new("blocked-prompt-session").unwrap(),
+            turn_id: TurnId::new("blocked-prompt-turn-1").unwrap(),
+            source_agent_id: AgentId::new("root").unwrap(),
+        },
+        prompt: "first prompt".to_owned(),
+        has_history: false,
+    };
+
+    for turn_id in ["blocked-prompt-turn-1", "blocked-prompt-turn-2"] {
+        context.invocation.turn_id = TurnId::new(turn_id).unwrap();
+        let error = hook
+            .turn_start(context.clone())
+            .await
+            .expect_err("被阻断的首个 Prompt 应允许重试");
+        assert_eq!(error.code, "hook_prompt_blocked");
+    }
+
+    let attempts = fs::read_to_string(root.path().join("attempts.txt")).unwrap();
+    assert_eq!(
+        attempts
+            .lines()
+            .filter(|line| *line == "session-start")
+            .count(),
+        1,
+        "UserPromptSubmit 阻断不能释放已完成的 SessionStart lease"
+    );
+    assert_eq!(
+        attempts
+            .lines()
+            .filter(|line| *line == "user-prompt-submit")
+            .count(),
+        2
+    );
+    assert!(
+        started
+            .lock()
+            .unwrap()
+            .contains(&("root".to_owned(), HookPhase::SessionStart))
+    );
 }
 
 #[cfg(unix)]
