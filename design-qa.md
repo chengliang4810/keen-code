@@ -7,6 +7,7 @@
 - 环境：macOS 14.8.7、Chromium 153、中文、浅色，1280×800 与 760×800，deviceScaleFactor=1。Browser 插件及其 skill 未提供，因此按前端测试技能使用普通 Playwright CLI；没有安装新浏览器依赖。
 - 页面检查：标题和 URL 正确，真实消息与编辑器正常渲染，无 Vite 错误覆盖层。初次基线夹具出现 favicon 404，添加空 data favicon 后修复；当前版本交互后的 Console 为 0 error、0 warning。
 - 交互：基线无复选框；当前复选框初始 `aria-checked=false`，直接发送记录 `revertFiles=false`，重新打开、勾选后发送记录 `revertFiles=true`，两次成功后编辑器均关闭。再次打开恢复未勾选。桌面编辑器为 x=580、y=24、504×182.390625；760px 视口下 x=240、宽504，页面 `scrollWidth=760`，未观察到横向溢出或控件遮挡。
+- 勾选证据复核：独立审查发现首次 `after-editor-selected.png` 与默认截图相同，不能证明选中状态；随后重新执行独立 `check` 操作，保存包含 `[checked]` 的 `after-editor-selected-dom.md`，再截图。新选中图 SHA-256 为 `af7dcab075edceb6773a4d64742fd08634e03530ae7a9dceb957ddfe48dc8907`，默认图仍为 `abced7757b66ffbcd5449c4f05a56eb70f70882f1ab979adfcab316bb91a851b`。同次浏览器执行再次读取 `aria-checked=true`，发送回调记录 `revertFiles=true`，发送后编辑器数量为0。
 - 像素：相同 1280×800 编辑状态下，RGB 任一通道差值 >16 的像素为 23236/1024000（2.269140625%），未掩码，差异范围为 `[580,120,1084,233)`；差异集中在新增复选框、下移的发送操作和复制控件，原有编辑器宽度保持504px。有意新增区域与原需求一致。
 - 未验收：浏览器组件夹具不代替原生 Tauri WebView 或 Windows 实机验收；后端文件恢复、取消与冷恢复仍由各自 Rust 门禁验证。
 
