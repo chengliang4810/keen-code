@@ -1687,14 +1687,14 @@ mod tests {
                     .state
                     .turns
                     .values()
-                    .map(|turn| format!("{}:{:?}", turn.turn_id.as_str(), &turn.status))
+                    .map(|turn| format!("{}:{:?}", turn.turn_id.as_str(), turn.status))
                     .collect::<Vec<_>>()
                     .join(",");
                 let sub_agents = snapshot
                     .state
                     .sub_agents
                     .values()
-                    .map(|agent| format!("{}:{:?}", agent.agent_id.as_str(), &agent.status))
+                    .map(|agent| format!("{}:{:?}", agent.agent_id.as_str(), agent.status))
                     .collect::<Vec<_>>()
                     .join(",");
                 format!(
