@@ -4,7 +4,7 @@ use crate::collaboration::{
     AgentTreeQuiesceResult, AgentTurnStartResult, CollaborationAppendResult,
     CollaborationEventBatchId, MAX_AGENTS_PER_COORDINATOR, MAX_AGENTS_PER_ROOT,
     MAX_PORT_ERROR_BYTES, QuiesceAgentTree, RecoveredAgentCheckpoint, RecoveredCoordinator,
-    RecoveredRootLifecycle, collaboration_event_batch,
+    RecoveredRootLifecycle, collaboration_event_batch, redacted_dispatch_error,
 };
 use crate::{
     AgentDepth, AgentExecutionPort, AgentId, AgentPath, AgentProfile, AgentTurnCause,
@@ -534,6 +534,40 @@ impl AgentExecutionPort for RecordingExecution {
             return Err(CollaborationPortError::new("测试全树清理故障"));
         }
         self.closes.lock().expect("关闭锁不应中毒").push(request);
+        Ok(())
+    }
+}
+
+/// 在子 Turn 启动回调内同步更新 limiter，验证公开执行端口可重入且不会自等待。
+struct ReentrantLimitExecution {
+    limiter: Arc<CollaborationGlobalTurnLimiter>,
+    child_update: Mutex<Option<(bool, usize)>>,
+}
+
+impl AgentExecutionPort for ReentrantLimitExecution {
+    fn start_turn(&self, launch: AgentTurnLaunch) -> AgentTurnStartResult {
+        if launch.agent.depth == AgentDepth::CHILD {
+            let report = self
+                .limiter
+                .update_limit(2)
+                .expect("回调内限额更新应完成提交");
+            *self.child_update.lock().expect("可重入结果锁不应中毒") = Some((
+                report.dispatch_in_progress(),
+                report.dispatch_errors().len(),
+            ));
+        }
+        AgentTurnStartResult::Accepted
+    }
+
+    fn signal_turn(&self, _signal: AgentTurnSignal) -> Result<(), CollaborationPortError> {
+        Ok(())
+    }
+
+    fn quiesce_tree(&self, _request: QuiesceAgentTree) -> AgentTreeQuiesceResult {
+        AgentTreeQuiesceResult::Quiesced
+    }
+
+    fn close_tree(&self, _request: CloseAgentTree) -> Result<(), CollaborationPortError> {
         Ok(())
     }
 }
@@ -1421,6 +1455,220 @@ fn global_turn_limit_hot_update_schedules_and_throttles_without_cancelling() {
         fixture.coordinator.update_global_turn_limit(0).unwrap_err(),
         CollaborationError::InvalidTurnLimit
     );
+}
+
+/// 多 Coordinator 限额更新在任一后置 Coordinator 已冻结时不得产生部分写入。
+#[test]
+fn atomic_limit_update_preflights_every_coordinator_before_commit() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(2).unwrap());
+    let first = fixture_with_shared_limiter(limiter.clone(), 2, 30_000, "atomic-first");
+    let second = fixture_with_shared_limiter(limiter.clone(), 2, 40_000, "atomic-second");
+    let first_before = first.coordinator.capacity().unwrap().roots[0].2;
+    let global_before = limiter.capacity().unwrap().1;
+
+    second.store.indeterminate_without_commit(2);
+    assert!(matches!(
+        second
+            .coordinator
+            .begin_root_turn(&second.root_agent_id, "冻结后置 Coordinator", NO_PLAN),
+        Err(CollaborationError::StoreRecoveryRequired { .. })
+    ));
+
+    let error = limiter
+        .update_limits_atomically(
+            &[
+                (first.coordinator.as_ref(), &first.root_agent_id),
+                (second.coordinator.as_ref(), &second.root_agent_id),
+            ],
+            4,
+            4,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CollaborationError::StoreRecoveryRequired { .. }
+    ));
+    assert_eq!(
+        first.coordinator.capacity().unwrap().roots[0].2,
+        first_before
+    );
+    assert_eq!(limiter.capacity().unwrap().1, global_before);
+}
+
+/// 全部预检成功后，多 Coordinator 根级与设备级限额必须作为一次事务一起发布。
+#[test]
+fn atomic_limit_update_commits_all_roots_and_global_limit_together() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(2).unwrap());
+    let first = fixture_with_shared_limiter(limiter.clone(), 1, 50_000, "commit-first");
+    let second = fixture_with_shared_limiter(limiter.clone(), 1, 60_000, "commit-second");
+
+    let report = limiter
+        .update_limits_atomically(
+            &[
+                (first.coordinator.as_ref(), &first.root_agent_id),
+                (second.coordinator.as_ref(), &second.root_agent_id),
+            ],
+            4,
+            3,
+        )
+        .unwrap();
+
+    assert!(report.dispatch_errors().is_empty());
+    assert!(!report.dispatch_in_progress());
+    for fixture in [&first, &second] {
+        let capacity = fixture.coordinator.capacity().unwrap();
+        assert_eq!(capacity.global_limit, 4);
+        assert_eq!(capacity.roots[0].2, 3);
+    }
+}
+
+/// 限额提交后的单次全局驱动必须保留所有 Coordinator 的派发错误且不得回滚配置。
+#[test]
+fn atomic_limit_update_reports_all_post_commit_dispatch_errors() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(2).unwrap());
+    let first = fixture_with_shared_limiter(limiter.clone(), 2, 70_000, "dispatch-first");
+    let second = fixture_with_shared_limiter(limiter.clone(), 2, 80_000, "dispatch-second");
+    let fixtures = [&first, &second];
+    let root_turns = fixtures
+        .iter()
+        .map(|fixture| {
+            fixture
+                .coordinator
+                .begin_root_turn(&fixture.root_agent_id, "派发错误父任务", NO_PLAN)
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let mut waiting_turns = Vec::new();
+
+    for (fixture, root_turn) in fixtures.iter().zip(&root_turns) {
+        fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                root_turn,
+                &next_tool_call_id(),
+                spawn_request("running_before_limit_update"),
+            )
+            .unwrap();
+    }
+    for (fixture, root_turn) in fixtures.iter().zip(&root_turns) {
+        let waiting = fixture
+            .coordinator
+            .spawn_agent(
+                &fixture.root_agent_id,
+                root_turn,
+                &next_tool_call_id(),
+                spawn_request("waiting_before_limit_update"),
+            )
+            .unwrap();
+        assert!(matches!(
+            fixture
+                .coordinator
+                .agent_status(&waiting.agent.agent_id)
+                .unwrap(),
+            CollaborationAgentStatus::WaitingCapacity { .. }
+        ));
+        fixture.execution.fail_next_start();
+        waiting_turns.push(waiting);
+    }
+
+    let report = limiter
+        .update_limits_atomically(
+            &[
+                (first.coordinator.as_ref(), &first.root_agent_id),
+                (second.coordinator.as_ref(), &second.root_agent_id),
+            ],
+            4,
+            2,
+        )
+        .unwrap();
+
+    assert_eq!(report.dispatch_errors().len(), 2);
+    assert!(!report.dispatch_in_progress());
+    assert_eq!(
+        report
+            .dispatch_errors()
+            .iter()
+            .filter_map(|failure| failure.coordinator_id())
+            .collect::<HashSet<_>>(),
+        HashSet::from([
+            first.coordinator.coordinator_id(),
+            second.coordinator.coordinator_id(),
+        ])
+    );
+    for (fixture, waiting) in [&first, &second].into_iter().zip(waiting_turns) {
+        let capacity = fixture.coordinator.capacity().unwrap();
+        assert_eq!(capacity.global_limit, 4);
+        assert_eq!(capacity.roots[0].2, 2);
+        assert!(matches!(
+            fixture
+                .coordinator
+                .agent_status(&waiting.agent.agent_id)
+                .unwrap(),
+            CollaborationAgentStatus::Failed { .. }
+        ));
+    }
+}
+
+/// 派发错误进入新增 tracing 边界前必须移除认证头和 URL userinfo。
+#[test]
+fn limit_dispatch_diagnostics_redact_credentials() {
+    let error = CollaborationError::Store {
+        message: concat!(
+            "Authorization: Bearer dispatch-secret\n",
+            "https://agent-user:agent-password@example.com/failure"
+        )
+        .to_owned(),
+    };
+
+    let safe = redacted_dispatch_error(&error);
+    assert!(!safe.contains("dispatch-secret"));
+    assert!(!safe.contains("agent-password"));
+    assert!(!safe.contains("agent-user"));
+    assert!(safe.contains("[REDACTED]"));
+}
+
+/// 已有 driver 的执行端口同步更新限额时必须立即返回进行中状态，不能等待自身退出。
+#[test]
+fn reentrant_limit_update_reports_existing_dispatch_without_deadlock() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).unwrap());
+    let store = Arc::new(RecordingStore::default());
+    let execution = Arc::new(ReentrantLimitExecution {
+        limiter: limiter.clone(),
+        child_update: Mutex::new(None),
+    });
+    let coordinator = CollaborationCoordinator::new_with_global_turn_limiter(
+        limiter.clone(),
+        store,
+        execution.clone(),
+        Arc::new(SequentialIds::default()),
+    );
+    let root = coordinator
+        .register_root(RootAgentRequest {
+            session_id: SessionId::new("reentrant-limit").unwrap(),
+            profile: profile("reentrant-limit"),
+            per_root_turn_limit: 1,
+        })
+        .unwrap();
+    let root_turn = coordinator
+        .begin_root_turn(&root.agent_id, "可重入限额", NO_PLAN)
+        .unwrap();
+
+    coordinator
+        .spawn_agent(
+            &root.agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("reentrant_limit_child"),
+        )
+        .unwrap();
+
+    assert_eq!(
+        *execution.child_update.lock().unwrap(),
+        Some((true, 0)),
+        "回调内更新必须明确报告已有派发，且不得同步等待自身"
+    );
+    assert_eq!(limiter.capacity().unwrap().1, 2);
 }
 
 /// 并发提高和降低全局上限必须串行化，且每个已排队 Turn 最多启动一次。

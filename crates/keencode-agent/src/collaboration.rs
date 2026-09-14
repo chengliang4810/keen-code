@@ -1798,6 +1798,67 @@ pub struct CollaborationCapacity {
     pub roots: Vec<(AgentId, usize, usize)>,
 }
 
+/// 一次已提交限额更新观察到的单项派发错误。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollaborationLimitDispatchError {
+    /// 错误归属的进程内 Coordinator；`None` 表示全局 limiter 自身失败。
+    coordinator_id: Option<u64>,
+    /// 不改变限额提交事实的派发错误。
+    error: CollaborationError,
+}
+
+impl CollaborationLimitDispatchError {
+    /// 返回错误归属的进程内 Coordinator 标识。
+    pub fn coordinator_id(&self) -> Option<u64> {
+        self.coordinator_id
+    }
+
+    /// 返回原始派发错误。
+    pub fn error(&self) -> &CollaborationError {
+        &self.error
+    }
+}
+
+impl fmt::Display for CollaborationLimitDispatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.coordinator_id {
+            Some(coordinator_id) => {
+                write!(formatter, "Coordinator {coordinator_id}: {}", self.error)
+            }
+            None => write!(formatter, "全局 limiter: {}", self.error),
+        }
+    }
+}
+
+/// 新增派发诊断统一经过凭据脱敏后才进入 tracing 边界。
+pub(crate) fn redacted_dispatch_error(error: &CollaborationError) -> String {
+    keencode_model::redact_error_secrets_bounded(&error.to_string(), MAX_PORT_ERROR_BYTES)
+}
+
+/// 多 Coordinator 限额已经原子提交后的调度结果。
+///
+/// `dispatch_errors` 只描述新限额发布后唤醒既有等待 Turn 时发生的错误；它们不得
+/// 被解释为配置提交失败，也不能再通过回滚撤销已经启动的 Turn。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollaborationLimitUpdateReport {
+    dispatch_errors: Vec<CollaborationLimitDispatchError>,
+    dispatch_in_progress: bool,
+}
+
+impl CollaborationLimitUpdateReport {
+    /// 返回配置提交后各 Coordinator 的调度错误。
+    pub fn dispatch_errors(&self) -> &[CollaborationLimitDispatchError] {
+        &self.dispatch_errors
+    }
+
+    /// 是否已有另一轮全局派发正在消费等待队列。
+    ///
+    /// `true` 不表示配置失败；后续派发错误会在产生位置携带 Coordinator 标识记录。
+    pub fn dispatch_in_progress(&self) -> bool {
+        self.dispatch_in_progress
+    }
+}
+
 /// 重复或过期终态回调的处理结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TurnCompletionDisposition {
@@ -2526,19 +2587,152 @@ impl CollaborationGlobalTurnLimiter {
         }))
     }
 
-    /// 动态调整全局子 Turn 上限；降低时不取消已运行 Turn。
-    pub fn update_limit(self: &Arc<Self>, limit: usize) -> Result<(), CollaborationError> {
-        if limit == 0 {
+    /// 一次性发布共享全局上限和多个 Coordinator 的指定根上限。
+    ///
+    /// 返回 `Err` 时尚未修改任何限额；返回 `Ok` 时全部限额已经在同一个临界区
+    /// 完成发布。发布后的等待 Turn 调度不属于可回滚配置事务，其错误单独进入报告。
+    pub fn update_limits_atomically(
+        self: &Arc<Self>,
+        roots: &[(&CollaborationCoordinator, &AgentId)],
+        global_turn_limit: usize,
+        per_root_turn_limit: usize,
+    ) -> Result<CollaborationLimitUpdateReport, CollaborationError> {
+        if global_turn_limit == 0 || per_root_turn_limit == 0 {
             return Err(CollaborationError::InvalidTurnLimit);
         }
-        {
-            let mut state = self
+
+        // 同一 Coordinator 只获取一次状态锁；按进程内单调标识排序，避免多个
+        // 原子更新调用以不同次序获取 Coordinator 锁。
+        let mut grouped = HashMap::<u64, (Arc<CollaborationCoordinatorInner>, Vec<AgentId>)>::new();
+        for (coordinator, root_agent_id) in roots {
+            if !Arc::ptr_eq(&coordinator.inner.global_turn_limiter, self) {
+                return Err(CollaborationError::InvalidRecovery {
+                    message: "原子限额更新包含其他全局 limiter 的 Coordinator".to_owned(),
+                });
+            }
+            let entry = grouped
+                .entry(coordinator.inner.coordinator_id)
+                .or_insert_with(|| (Arc::clone(&coordinator.inner), Vec::new()));
+            if entry.1.contains(root_agent_id) {
+                return Err(CollaborationError::InvalidRecovery {
+                    message: "原子限额更新包含重复根 Agent".to_owned(),
+                });
+            }
+            entry.1.push((*root_agent_id).clone());
+        }
+        let mut grouped = grouped.into_values().collect::<Vec<_>>();
+        grouped.sort_by_key(|(inner, _roots)| inner.coordinator_id);
+        for (_inner, roots) in &mut grouped {
+            roots.sort();
+        }
+
+        let mut coordinator_states = Vec::with_capacity(grouped.len());
+        for (inner, roots) in &grouped {
+            let state = inner
                 .state
                 .lock()
                 .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
-            state.limit = limit;
+            if let Some(message) = &state.store_recovery_required {
+                return Err(CollaborationError::StoreRecoveryRequired {
+                    message: message.clone(),
+                });
+            }
+            if let Some(root_agent_id) = roots
+                .iter()
+                .find(|root_agent_id| !state.roots.contains_key(*root_agent_id))
+            {
+                return Err(CollaborationError::AgentNotFound {
+                    agent_id: root_agent_id.clone(),
+                });
+            }
+            coordinator_states.push(state);
         }
-        self.drive().map(|_report| ())
+        // 既有路径只会在持有 Coordinator 状态锁时短暂读取全局状态；全局驱动
+        // 在进入 Coordinator 前会释放全局锁，因此这里以全局锁收尾不会反向死锁。
+        let mut global_state = self
+            .state
+            .lock()
+            .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+        for (state, (_inner, roots)) in coordinator_states.iter_mut().zip(&grouped) {
+            for root_agent_id in roots {
+                state
+                    .roots
+                    .get_mut(root_agent_id)
+                    .expect("根 Agent 已在同一状态锁下完成预检")
+                    .turn_limit = per_root_turn_limit;
+            }
+        }
+        global_state.limit = global_turn_limit;
+        drop(global_state);
+        drop(coordinator_states);
+
+        // 所有受影响 Coordinator 必须先完成入队，再由一次全局驱动统一收集结果。
+        // 否则第一个 Coordinator 发起的 drive 可能同时消费其他 Coordinator 的等待项，
+        // 而逐个 request_global_dispatch 只会返回调用方自己的错误，导致其余错误丢失。
+        let mut dispatch_errors = Vec::new();
+        for (inner, _roots) in &grouped {
+            let coordinator = CollaborationCoordinator {
+                inner: Arc::clone(inner),
+            };
+            match coordinator.has_schedulable_child_turn() {
+                Ok(true) => {
+                    if let Err(error) = self.enqueue(inner.coordinator_id) {
+                        let failure = CollaborationLimitDispatchError {
+                            coordinator_id: Some(inner.coordinator_id),
+                            error,
+                        };
+                        tracing::warn!(
+                            coordinator_id = inner.coordinator_id,
+                            error = %redacted_dispatch_error(&failure.error),
+                            "限额提交后无法登记 Coordinator 派发"
+                        );
+                        dispatch_errors.push(failure);
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let failure = CollaborationLimitDispatchError {
+                        coordinator_id: Some(inner.coordinator_id),
+                        error,
+                    };
+                    tracing::warn!(
+                        coordinator_id = inner.coordinator_id,
+                        error = %redacted_dispatch_error(&failure.error),
+                        "限额提交后无法检查 Coordinator 待派发 Turn"
+                    );
+                    dispatch_errors.push(failure);
+                }
+            }
+        }
+        let dispatch_in_progress = match self.drive() {
+            Ok(mut report) => {
+                dispatch_errors.append(&mut report.errors);
+                report.dispatch_in_progress
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %redacted_dispatch_error(&error),
+                    "限额提交后的全局派发失败"
+                );
+                dispatch_errors.push(CollaborationLimitDispatchError {
+                    coordinator_id: None,
+                    error,
+                });
+                false
+            }
+        };
+        Ok(CollaborationLimitUpdateReport {
+            dispatch_errors,
+            dispatch_in_progress,
+        })
+    }
+
+    /// 动态调整全局子 Turn 上限；降低时不取消已运行 Turn。
+    pub fn update_limit(
+        self: &Arc<Self>,
+        limit: usize,
+    ) -> Result<CollaborationLimitUpdateReport, CollaborationError> {
+        self.update_limits_atomically(&[], limit, 1)
     }
 
     /// 以 Coordinator 为轮转单位消费全局 FIFO，每次只向一个等待者发放一个槽位。
@@ -2549,7 +2743,10 @@ impl CollaborationGlobalTurnLimiter {
                 .lock()
                 .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
             if state.dispatching {
-                return Ok(GlobalDispatchReport::default());
+                return Ok(GlobalDispatchReport {
+                    dispatch_in_progress: true,
+                    ..GlobalDispatchReport::default()
+                });
             }
             state.dispatching = true;
         }
@@ -2561,6 +2758,7 @@ impl CollaborationGlobalTurnLimiter {
                 Ok(state) => state,
                 Err(poisoned) => {
                     poisoned.into_inner().dispatching = false;
+                    tracing::warn!("全局派发结束时 limiter 状态锁已中毒");
                     return Err(CollaborationError::StatePoisoned);
                 }
             };
@@ -2568,6 +2766,10 @@ impl CollaborationGlobalTurnLimiter {
                 Ok(pass) => pass,
                 Err(error) => {
                     state.dispatching = false;
+                    tracing::warn!(
+                        error = %redacted_dispatch_error(&error),
+                        "全局派发轮次失败"
+                    );
                     return Err(error);
                 }
             };
@@ -2633,13 +2835,46 @@ impl CollaborationGlobalTurnLimiter {
             let coordinator = CollaborationCoordinator { inner };
             let outcome = coordinator.start_one_reserved_child(permit);
             if let Some(error) = outcome.error {
-                report.errors.push((coordinator_id, error));
+                let failure = CollaborationLimitDispatchError {
+                    coordinator_id: Some(coordinator_id),
+                    error,
+                };
+                tracing::warn!(
+                    coordinator_id,
+                    error = %redacted_dispatch_error(&failure.error),
+                    "Coordinator 子 Turn 派发未收敛"
+                );
+                report.errors.push(failure);
             }
             match coordinator.has_schedulable_child_turn() {
-                Ok(true) if outcome.started => self.enqueue(coordinator_id)?,
+                Ok(true) if outcome.started => {
+                    if let Err(error) = self.enqueue(coordinator_id) {
+                        let failure = CollaborationLimitDispatchError {
+                            coordinator_id: Some(coordinator_id),
+                            error,
+                        };
+                        tracing::warn!(
+                            coordinator_id,
+                            error = %redacted_dispatch_error(&failure.error),
+                            "Coordinator 后续等待 Turn 重新入队失败"
+                        );
+                        report.errors.push(failure);
+                    }
+                }
                 Ok(true) => deferred_waiters.push(coordinator_id),
                 Ok(false) => {}
-                Err(error) => report.errors.push((coordinator_id, error)),
+                Err(error) => {
+                    let failure = CollaborationLimitDispatchError {
+                        coordinator_id: Some(coordinator_id),
+                        error,
+                    };
+                    tracing::warn!(
+                        coordinator_id,
+                        error = %redacted_dispatch_error(&failure.error),
+                        "Coordinator 派发后状态检查失败"
+                    );
+                    report.errors.push(failure);
+                }
             }
         }
         Ok((report, deferred_waiters))
@@ -2650,7 +2885,9 @@ impl CollaborationGlobalTurnLimiter {
 #[derive(Default)]
 struct GlobalDispatchReport {
     /// 某个 Coordinator 的持久化或执行错误不得污染其他 Session 的调用结果。
-    errors: Vec<(u64, CollaborationError)>,
+    errors: Vec<CollaborationLimitDispatchError>,
+    /// `true` 表示当前调用遇到已有 driver，未同步等待其结果。
+    dispatch_in_progress: bool,
 }
 
 impl GlobalDispatchReport {
@@ -2658,8 +2895,8 @@ impl GlobalDispatchReport {
     fn error_for(&self, coordinator_id: u64) -> Option<CollaborationError> {
         self.errors
             .iter()
-            .find(|(candidate, _error)| *candidate == coordinator_id)
-            .map(|(_candidate, error)| error.clone())
+            .find(|failure| failure.coordinator_id == Some(coordinator_id))
+            .map(|failure| failure.error.clone())
     }
 }
 
@@ -2672,6 +2909,11 @@ struct ReservedChildStartOutcome {
 }
 
 impl CollaborationCoordinator {
+    /// 返回用于同一进程内关联共享 limiter 诊断的稳定 Coordinator 标识。
+    pub fn coordinator_id(&self) -> u64 {
+        self.inner.coordinator_id
+    }
+
     /// 从已校验容量和端口创建一个空协调器。
     pub fn new(
         limits: CollaborationLimits,
@@ -5755,9 +5997,20 @@ impl CollaborationCoordinator {
         &self,
         global_turn_limit: usize,
     ) -> Result<CollaborationCapacity, CollaborationError> {
-        self.inner
+        let report = self
+            .inner
             .global_turn_limiter
             .update_limit(global_turn_limit)?;
+        if !report.dispatch_errors().is_empty() {
+            return Err(CollaborationError::CommittedExecutionPending {
+                message: report
+                    .dispatch_errors()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("；"),
+            });
+        }
         self.capacity()
     }
 
@@ -5794,11 +6047,22 @@ impl CollaborationCoordinator {
         global_turn_limit: usize,
         per_root_turn_limit: usize,
     ) -> Result<CollaborationCapacity, CollaborationError> {
-        if global_turn_limit == 0 || per_root_turn_limit == 0 {
-            return Err(CollaborationError::InvalidTurnLimit);
+        let report = self.inner.global_turn_limiter.update_limits_atomically(
+            &[(self, root_agent_id)],
+            global_turn_limit,
+            per_root_turn_limit,
+        )?;
+        if !report.dispatch_errors().is_empty() {
+            return Err(CollaborationError::CommittedExecutionPending {
+                message: report
+                    .dispatch_errors()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("；"),
+            });
         }
-        self.update_root_turn_limit(root_agent_id, per_root_turn_limit)?;
-        self.update_global_turn_limit(global_turn_limit)
+        self.capacity()
     }
 
     /// 返回尚未消费的 mailbox 消息快照，不改变 exactly-once 状态。
