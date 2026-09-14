@@ -4559,7 +4559,7 @@ impl AgentRuntime {
             .map_err(|error| runtime_operation_failed(error))
     }
 
-    /// 向与来源 Session 绑定同一项目且已连接桌面投递的全部 Session 发布 Goal 变化。
+    /// 向产生变化的 Session 发布 Goal 变化；Goal 状态按 Session 隔离。
     pub fn publish_goal_changed(
         &self,
         source_session_id: &str,
@@ -4567,40 +4567,20 @@ impl AgentRuntime {
         revision: u64,
         status: Option<String>,
     ) {
-        let Ok(source) = self.runtime_manager.get(source_session_id.to_owned()) else {
+        let Ok(delivery) = self.session_delivery(source_session_id) else {
             return;
         };
-        let Ok(source_snapshot) = source.snapshot() else {
-            return;
-        };
-        let Ok(session_ids) = self.runtime_manager.registered_session_ids() else {
-            return;
-        };
-        for session_id in session_ids {
-            let Ok(session) = self.runtime_manager.get(session_id.as_str().to_owned()) else {
-                continue;
-            };
-            let Ok(snapshot) = session.snapshot() else {
-                continue;
-            };
-            if snapshot.state.project_root != source_snapshot.state.project_root {
-                continue;
-            }
-            let Ok(delivery) = self.session_delivery(session_id.as_str()) else {
-                continue;
-            };
-            let _ = delivery.send_batch_detached(vec![DeliveryDraft::KeenCodeEvent {
-                turn_id: None,
-                source_agent_id: None,
-                journal_sequence: None,
-                occurred_at_ms: unix_time_ms(),
-                event: KeenCodeEvent::GoalChanged {
-                    goal_id: goal_id.clone(),
-                    revision,
-                    status: status.clone(),
-                },
-            }]);
-        }
+        let _ = delivery.send_batch_detached(vec![DeliveryDraft::KeenCodeEvent {
+            turn_id: None,
+            source_agent_id: None,
+            journal_sequence: None,
+            occurred_at_ms: unix_time_ms(),
+            event: KeenCodeEvent::GoalChanged {
+                goal_id,
+                revision,
+                status,
+            },
+        }]);
     }
 
     /// 用当前默认 Provider 执行按指定 Schema 严格校验的无工具记忆模型调用。
@@ -16628,6 +16608,65 @@ mod tests {
             .close_session(&session_id)
             .await
             .expect("测试 Session 应关闭");
+    }
+
+    /// 同一项目的不同 Session 必须只收到各自的 GoalChanged，不能共享 Goal 投影。
+    #[tokio::test]
+    async fn goal_changed_is_scoped_to_source_session() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        let source = runtime
+            .open_or_create_session(project.path(), None, "goal-source-session")
+            .expect("来源 Session 应创建");
+        let other = runtime
+            .open_or_create_session(project.path(), None, "goal-other-session")
+            .expect("同项目的另一个 Session 应创建");
+        assert_ne!(source.session_id(), other.session_id());
+        let source_session_id = source.session_id().as_str().to_owned();
+        let other_session_id = other.session_id().as_str().to_owned();
+        runtime
+            .attach_session_delivery(&source_session_id)
+            .expect("来源 Session 投递应建立");
+        runtime
+            .attach_session_delivery(&other_session_id)
+            .expect("另一个 Session 投递应建立");
+
+        runtime.publish_goal_changed(
+            &source_session_id,
+            Some("goal-source".to_owned()),
+            7,
+            Some("active".to_owned()),
+        );
+        let deliveries = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let deliveries = emitter.snapshot();
+                if !deliveries.is_empty() {
+                    break deliveries;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("GoalChanged 应在有界时间内投递");
+        assert_eq!(deliveries.len(), 1, "另一个 Session 不得收到 GoalChanged");
+        assert_eq!(deliveries[0]["type"], "keencode_event");
+        assert_eq!(deliveries[0]["envelope"]["sessionId"], source_session_id);
+        assert_eq!(deliveries[0]["envelope"]["event"]["type"], "goal_changed");
+        assert_eq!(deliveries[0]["envelope"]["event"]["goalId"], "goal-source");
+        assert_eq!(deliveries[0]["envelope"]["event"]["revision"], 7);
+
+        runtime
+            .close_session(&source_session_id)
+            .await
+            .expect("来源 Session 应关闭");
+        runtime
+            .close_session(&other_session_id)
+            .await
+            .expect("另一个 Session 应关闭");
     }
 
     /// 恢复期间 live 事件必须缓存，末页后只释放冻结水位之后的事件。
