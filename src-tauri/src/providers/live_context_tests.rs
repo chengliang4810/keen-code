@@ -1353,6 +1353,7 @@ fn request_observation_with_secret_text(marker: &str) -> RequestObservation {
         endpoint: format!("https://{marker}.example.test/v1/responses"),
         at_ms: 1_700_000_000_000,
         duration_ms: Some(42),
+        retry_delay_ms: None,
         response_headers_at_ms: Some(1_700_000_000_010),
         http_status: Some(503),
         provider_request_id: Some(format!("{marker}-provider-request-id")),

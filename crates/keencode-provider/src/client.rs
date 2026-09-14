@@ -750,6 +750,7 @@ impl RequestLifecycle {
             now,
             None,
             None,
+            None,
         );
         lifecycle
     }
@@ -764,6 +765,7 @@ impl RequestLifecycle {
             RequestObservationState::Started,
             self.attempt,
             now,
+            None,
             None,
             None,
         );
@@ -803,11 +805,12 @@ impl RequestLifecycle {
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
             Some(error),
+            None,
         );
     }
 
     /// 记录一次将被自动重试的尝试失败；不形成逻辑终态，随后等待退避并重新开始尝试。
-    fn fail_attempt(&mut self, error: &ModelError) {
+    fn fail_attempt(&mut self, error: &ModelError, retry_delay_ms: u64) {
         if self.terminal {
             return;
         }
@@ -820,6 +823,7 @@ impl RequestLifecycle {
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 Some(error),
+                Some(retry_delay_ms),
             );
         }
     }
@@ -839,6 +843,7 @@ impl RequestLifecycle {
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 Some(error),
+                None,
             );
         }
         self.emit(
@@ -848,6 +853,7 @@ impl RequestLifecycle {
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
             Some(error),
+            None,
         );
     }
 
@@ -866,6 +872,7 @@ impl RequestLifecycle {
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 None,
+                None,
             );
         }
         self.emit(
@@ -874,6 +881,7 @@ impl RequestLifecycle {
             self.attempt,
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
+            None,
             None,
         );
     }
@@ -893,6 +901,7 @@ impl RequestLifecycle {
                 now,
                 Some(now.saturating_sub(started_at_ms)),
                 None,
+                None,
             );
         }
         self.emit(
@@ -901,6 +910,7 @@ impl RequestLifecycle {
             self.attempt,
             now,
             Some(now.saturating_sub(self.logical_started_at_ms)),
+            None,
             None,
         );
     }
@@ -914,6 +924,7 @@ impl RequestLifecycle {
         at_ms: u64,
         duration_ms: Option<u64>,
         error: Option<&ModelError>,
+        retry_delay_ms: Option<u64>,
     ) {
         let observation = RequestObservation {
             scope,
@@ -927,6 +938,7 @@ impl RequestLifecycle {
             endpoint: self.endpoint.clone(),
             at_ms,
             duration_ms,
+            retry_delay_ms,
             response_headers_at_ms: self.response_headers_at_ms,
             http_status: self.http_status,
             provider_request_id: self.provider_request_id.clone(),
@@ -1049,27 +1061,22 @@ impl RetryModelStream {
         let will_retry = !self.forwarded_output
             && self.attempts_started < policy.max_attempts
             && is_retryable_failure(&error, http_status, &policy);
-        if let Some(lifecycle) = self.lifecycle.as_mut() {
-            if will_retry {
-                lifecycle.fail_attempt(&error);
-            } else {
+        if !will_retry {
+            if let Some(lifecycle) = self.lifecycle.as_mut() {
                 lifecycle.fail(&error);
             }
-        }
-        if !will_retry {
             self.inner = None;
             return FailureAction::Terminal(error);
         }
-        // 每次退避调度的 attempt、总次数与等待毫秒都可由 RequestObserver 的
-        // Attempt/Failed -> Attempt/Started 事件对观测；后续接线时由 Runtime
-        // 事件桥投影为 keencode-acp 的 `ModelRetryScheduled` 事件（上限
-        // 32 次、延迟 10 分钟），本层只负责 observation，不直接接 UI。
         let delay = retry_delay(
             &policy,
             self.attempts_started,
             retry_after_ms(&error),
             jitter_factor(jitter_seed(self.attempts_started)),
         );
+        if let Some(lifecycle) = self.lifecycle.as_mut() {
+            lifecycle.fail_attempt(&error, delay.as_millis().min(u64::MAX as u128) as u64);
+        }
         self.inner = None;
         self.backoff = Some(BackoffSleep::new(delay));
         FailureAction::RetryScheduled
@@ -1803,10 +1810,20 @@ impl ModelProvider for ProviderClient {
                         let policy = &client.config.retry;
                         let will_retry = attempts_started < policy.max_attempts
                             && is_retryable_failure(&failure.error, http_status, policy);
+                        let delay = will_retry.then(|| {
+                            retry_delay(
+                                policy,
+                                attempts_started,
+                                retry_after_ms(&failure.error),
+                                jitter_factor(jitter_seed(attempts_started)),
+                            )
+                        });
                         if let Some(lifecycle) = &mut lifecycle {
-                            if will_retry {
-                                // 观测语义：上一次尝试 fail，退避后新尝试 start_attempt。
-                                lifecycle.fail_attempt(&failure.error);
+                            if let Some(delay) = delay {
+                                lifecycle.fail_attempt(
+                                    &failure.error,
+                                    delay.as_millis().min(u64::MAX as u128) as u64,
+                                );
                             } else {
                                 lifecycle.fail(&failure.error);
                             }
@@ -1814,13 +1831,7 @@ impl ModelProvider for ProviderClient {
                         if !will_retry {
                             return Err(failure.error);
                         }
-                        BackoffSleep::new(retry_delay(
-                            policy,
-                            attempts_started,
-                            retry_after_ms(&failure.error),
-                            jitter_factor(jitter_seed(attempts_started)),
-                        ))
-                        .await;
+                        BackoffSleep::new(delay.expect("可重试请求必须包含退避时长")).await;
                     }
                 }
             };

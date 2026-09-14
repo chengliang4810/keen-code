@@ -96,6 +96,8 @@ pub struct RequestObservation {
     pub at_ms: u64,
     /// 已结束观测从开始到当前的毫秒数。
     pub duration_ms: Option<u64>,
+    /// 本次失败已经安排自动重试时，下一次尝试前等待的毫秒数。
+    pub retry_delay_ms: Option<u64>,
     /// 首次收到响应头的 Unix 毫秒时间。
     pub response_headers_at_ms: Option<u64>,
     /// 远端返回的 HTTP 状态。

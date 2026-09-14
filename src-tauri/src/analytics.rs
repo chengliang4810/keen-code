@@ -16,7 +16,10 @@ use std::{
     fs::{self, OpenOptions},
     io::{BufRead, BufReader, BufWriter, Write},
     path::Path,
-    sync::mpsc::{self, Sender, SyncSender},
+    sync::{
+        Arc, OnceLock,
+        mpsc::{self, Sender, SyncSender},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::AppHandle;
@@ -156,6 +159,19 @@ pub struct TaskCacheUsage {
 
 pub struct AnalyticsRecorder {
     sender: Sender<AnalyticsEvent>,
+    retry_notifier: OnceLock<Arc<dyn Fn(ModelRetryNotice) + Send + Sync>>,
+}
+
+/// Provider 已确定会继续尝试时，投递给桌面实时会话的安全重试事实。
+#[derive(Debug, Clone)]
+pub(crate) struct ModelRetryNotice {
+    pub session_id: String,
+    pub turn_id: String,
+    pub agent_id: String,
+    pub attempt: u32,
+    pub max_attempts: u32,
+    pub delay_ms: u64,
+    pub message: String,
 }
 
 impl AnalyticsRecorder {
@@ -216,7 +232,10 @@ impl AnalyticsRecorder {
                 let _ = writer.flush();
                 let _ = writer.get_ref().sync_data();
             })?;
-        Ok(Self { sender })
+        Ok(Self {
+            sender,
+            retry_notifier: OnceLock::new(),
+        })
     }
 
     /// 创建写入端已断开的测试记录器，不触碰文件系统。
@@ -224,7 +243,19 @@ impl AnalyticsRecorder {
     pub(crate) fn with_disconnected_writer_for_test() -> Self {
         let (sender, receiver) = mpsc::channel();
         drop(receiver);
-        Self { sender }
+        Self {
+            sender,
+            retry_notifier: OnceLock::new(),
+        }
+    }
+
+    pub(crate) fn set_retry_notifier(
+        &self,
+        notifier: Arc<dyn Fn(ModelRetryNotice) + Send + Sync>,
+    ) -> Result<(), String> {
+        self.retry_notifier
+            .set(notifier)
+            .map_err(|_| "模型重试通知器已经初始化".to_owned())
     }
 
     /// 原生验收中断开同一个正式记录器，不替换 Tauri state 或生产退出流程。
@@ -257,6 +288,28 @@ impl AnalyticsRecorder {
     ///
     /// 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
     pub(crate) fn record_request(&self, observation: RequestObservation) {
+        if observation.scope == RequestObservationScope::Attempt
+            && observation.state == RequestObservationState::Failed
+            && observation.purpose.as_deref() == Some("agent")
+            && let (Some(delay_ms), Some(session_id), Some(turn_id), Some(agent_id), Some(message)) = (
+                observation.retry_delay_ms,
+                observation.session_id.clone(),
+                observation.turn_id.clone(),
+                observation.agent_id.clone(),
+                observation.error_summary.clone(),
+            )
+            && let Some(notifier) = self.retry_notifier.get()
+        {
+            notifier(ModelRetryNotice {
+                session_id,
+                turn_id,
+                agent_id,
+                attempt: observation.attempt,
+                max_attempts: observation.max_attempts,
+                delay_ms,
+                message,
+            });
+        }
         if observation.state == RequestObservationState::Failed {
             tracing::error!(
                 session_id = observation.session_id.as_deref().unwrap_or(""),
@@ -833,12 +886,13 @@ mod tests {
     #[cfg(unix)]
     use super::open_record_file;
     use super::{
-        AnalyticsRecorder, ObservationWriterState, RequestErrorKind, RequestMode,
+        AnalyticsRecorder, ModelRetryNotice, ObservationWriterState, RequestErrorKind, RequestMode,
         RequestObservation, RequestObservationScope, RequestObservationState, RequestRecord,
         dedupe_records, filter_records, protocol_name, read_records_from_path,
         record_from_observation, summarize_task_cache_usage, summarize_usage,
     };
     use keencode_model::{ProviderProtocol, TokenUsage};
+    use std::sync::{Arc, Mutex};
 
     fn observation(
         scope: RequestObservationScope,
@@ -861,6 +915,7 @@ mod tests {
                 175
             },
             duration_ms: (state != RequestObservationState::Started).then_some(75),
+            retry_delay_ms: None,
             response_headers_at_ms: (state == RequestObservationState::Completed).then_some(125),
             http_status: (state == RequestObservationState::Completed).then_some(200),
             provider_request_id: Some("provider-1".to_owned()),
@@ -883,6 +938,37 @@ mod tests {
             agent_id: Some("agent-1".to_owned()),
             purpose: Some("primary".to_owned()),
         }
+    }
+
+    #[test]
+    fn retryable_attempt_failure_notifies_live_session() {
+        let recorder = AnalyticsRecorder::with_disconnected_writer_for_test();
+        let notices = Arc::new(Mutex::new(Vec::<ModelRetryNotice>::new()));
+        let captured = Arc::clone(&notices);
+        recorder
+            .set_retry_notifier(Arc::new(move |notice| {
+                captured.lock().unwrap().push(notice);
+            }))
+            .unwrap();
+        let mut failed = observation(
+            RequestObservationScope::Attempt,
+            RequestObservationState::Failed,
+            2,
+        );
+        failed.purpose = Some("agent".to_owned());
+        failed.retry_delay_ms = Some(750);
+
+        recorder.record_request(failed);
+
+        let notices = notices.lock().unwrap();
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].session_id, "session-1");
+        assert_eq!(notices[0].turn_id, "turn-1");
+        assert_eq!(notices[0].agent_id, "agent-1");
+        assert_eq!(notices[0].attempt, 2);
+        assert_eq!(notices[0].max_attempts, 6);
+        assert_eq!(notices[0].delay_ms, 750);
+        assert_eq!(notices[0].message, "timeout");
     }
 
     fn record(id: &str, model: &str, status: &str, requested_at_ms: u64) -> RequestRecord {

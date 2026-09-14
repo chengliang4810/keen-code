@@ -12,7 +12,8 @@ mod live_prompt_tests;
 mod tool_projection;
 
 use crate::{
-    analytics::AnalyticsRecorder, app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
+    analytics::{AnalyticsRecorder, ModelRetryNotice},
+    app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
     client_request::ClientRequestDisplayGate, elicitation::ElicitationCoordinator, providers,
     storage,
 };
@@ -4402,12 +4403,49 @@ impl AgentRuntime {
                 .map_err(|error| initialization_failed("analytics_recorder", error))?,
         );
         app.manage(Arc::clone(&analytics));
-        let registry = ProviderRegistry::with_request_observer(analytics);
+        let registry = ProviderRegistry::with_request_observer(analytics.clone());
         let runtime = Arc::new(Self::new_with_registry(storage_root, emitter, registry)?);
+        let weak_runtime = Arc::downgrade(&runtime);
+        analytics
+            .set_retry_notifier(Arc::new(move |notice| {
+                if let Some(runtime) = weak_runtime.upgrade() {
+                    runtime.publish_model_retry_notice(notice);
+                }
+            }))
+            .map_err(|error| initialization_failed("model_retry_notifier", error))?;
         runtime
             .reload_providers(app)
             .map_err(|error| initialization_failed("reload_providers", error))?;
         Ok(runtime)
+    }
+
+    /// 将 Provider 已确认安排的下一次尝试发布到当前 Session 实时投递世代。
+    fn publish_model_retry_notice(&self, notice: ModelRetryNotice) {
+        let sender = match self.session_delivery(&notice.session_id) {
+            Ok(sender) => sender,
+            Err(error) => {
+                tracing::error!(session_id = %notice.session_id, %error, "模型重试状态投递失败");
+                return;
+            }
+        };
+        let draft = DeliveryDraft::KeenCodeEvent {
+            turn_id: Some(notice.turn_id),
+            source_agent_id: Some(notice.agent_id),
+            journal_sequence: None,
+            occurred_at_ms: unix_time_ms(),
+            event: KeenCodeEvent::ModelRetryScheduled {
+                attempt: notice.attempt,
+                max_attempts: notice.max_attempts,
+                delay_ms: notice.delay_ms,
+                message: notice.message,
+            },
+        };
+        let session_id = notice.session_id;
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = sender.send_live_batch(vec![draft], None).await {
+                tracing::error!(%session_id, %error, "模型重试状态投递失败");
+            }
+        });
     }
 
     /// 使用明确存储根和投递器创建尚未连接 Session 的装配根。
@@ -10239,6 +10277,7 @@ fn ensure_session_project(
 
 #[cfg(test)]
 mod tests {
+    use crate::analytics::ModelRetryNotice;
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
@@ -14976,6 +15015,48 @@ mod tests {
         assert!(values[1].get("envelope").is_some());
         assert_eq!(values[2]["type"], "client_request");
         assert_eq!(values[2]["request"]["jsonrpc"], "2.0");
+    }
+
+    #[tokio::test]
+    async fn provider_retry_notice_reaches_session_delivery() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "retry-notice")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .ensure_session_delivery(&session_id)
+            .expect("测试投递应建立");
+
+        runtime.publish_model_retry_notice(ModelRetryNotice {
+            session_id,
+            turn_id: "turn-retry".to_owned(),
+            agent_id: "root".to_owned(),
+            attempt: 2,
+            max_attempts: 10,
+            delay_ms: 750,
+            message: "模型传输超时".to_owned(),
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if emitter.snapshot().iter().any(|delivery| {
+                    delivery["envelope"]["event"]["type"] == "model_retry_scheduled"
+                        && delivery["envelope"]["event"]["attempt"] == 2
+                        && delivery["envelope"]["event"]["delayMs"] == 750
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("重试状态应送达桌面投递器");
     }
 
     /// 水位 transient 草稿经 materialize 后为无 Journal 序号的 Turn 级投递。
