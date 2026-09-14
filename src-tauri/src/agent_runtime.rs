@@ -6242,6 +6242,9 @@ impl AgentRuntime {
         let subscription = session
             .subscribe()
             .map_err(|error| runtime_operation_failed(error))?;
+        // 先订阅再读取可重建索引：两者之间追加的事件至少存在于订阅中，
+        // 而索引失败会直接拒绝建立实时泵，不会伪装成空 Provider 历史。
+        let provider_projection = provider_projection_from_history(&session)?;
         let generation = self
             .next_live_pump_generation
             .fetch_add(1, Ordering::AcqRel)
@@ -6255,6 +6258,7 @@ impl AgentRuntime {
             generation,
             subscription,
             cancelled,
+            provider_projection,
         ));
         Ok(delivery)
     }
@@ -6966,7 +6970,7 @@ impl AgentRuntime {
         } else {
             self.session_delivery(session_id)?
         };
-        // 同一 delivery 世代的连续分页复用 Provider 游标；断点跳转才重新扫描历史前缀。
+        // 同一 delivery 世代的连续分页复用完整 Turn Provider 索引。
         let mut replay_cursor = delivery.replay_cursor.lock().await;
         let mut next_cursor = replay_cursor.clone();
         let continuous = next_cursor.frozen_state.is_some()
@@ -6976,10 +6980,9 @@ impl AgentRuntime {
             let snapshot = session
                 .snapshot()
                 .map_err(|error| runtime_operation_failed(error))?;
-            let provider_projection = provider_projection_before_sequence(&session, start_after)?;
+            let provider_projection = provider_projection_from_history(&session)?;
             next_cursor.next_after = start_after;
-            next_cursor.provider = provider_projection.current;
-            next_cursor.providers_by_turn = provider_projection.by_turn;
+            next_cursor.providers_by_turn = provider_projection.into_indexed();
             next_cursor.through_sequence = Some(snapshot.state.last_sequence);
             next_cursor.frozen_state = Some(Arc::new(snapshot.state));
         }
@@ -7004,43 +7007,40 @@ impl AgentRuntime {
         next_cursor.through_sequence = Some(through_journal_sequence);
         let mut drafts = Vec::new();
         let mut next_after = start_after;
-        let mut historical_provider = ProviderProjection {
-            current: next_cursor.provider.clone(),
-            by_turn: next_cursor.providers_by_turn.clone(),
-        };
+        let mut historical_provider =
+            ProviderProjection::from_indexed(std::mem::take(&mut next_cursor.providers_by_turn));
         for record in page.records {
             if record.sequence > through_journal_sequence {
                 break;
             }
-            // 先在临时 Provider 上映射；只有物理记录适合当前页时才提交游标。
-            let (record_drafts, next_historical_provider) =
-                map_authoritative_record_with_projection(
-                    &session,
-                    frozen_state,
-                    &record,
-                    AuthoritativeProjectionMode::Replay,
-                    historical_provider.clone(),
-                )?;
-            if record_drafts.len() > MAX_REPLAY_EVENTS as usize {
+            // 只为当前物理记录保留可回滚增量；容量拒绝时不推进 Provider 与游标。
+            let mapped = map_authoritative_record_with_projection(
+                &session,
+                frozen_state,
+                &record,
+                AuthoritativeProjectionMode::Replay,
+                &mut historical_provider,
+            )?;
+            if mapped.drafts.len() > MAX_REPLAY_EVENTS as usize {
+                mapped.rollback(&mut historical_provider);
                 return Err(AgentRuntimeError::RuntimeOperationFailed);
             }
-            if !record_drafts.is_empty() && drafts.len().saturating_add(record_drafts.len()) > limit
+            if !mapped.drafts.is_empty() && drafts.len().saturating_add(mapped.drafts.len()) > limit
             {
+                mapped.rollback(&mut historical_provider);
                 if next_after == start_after {
                     return Err(AgentRuntimeError::RuntimeOperationFailed);
                 }
                 break;
             }
-            drafts.extend(record_drafts);
-            historical_provider = next_historical_provider;
+            drafts.extend(mapped.commit());
             next_after = record.sequence;
             // 达到投影上限后仍继续消费零投影物理记录，使 Provider 快照、事件水位等
             // 不可见事实不会被卡在上一页；下一条会产生投影的记录会在上面的容量检查处
             // 保留给下一页，并且不会提交该记录携带的临时 Provider 状态。
         }
         next_cursor.next_after = next_after;
-        next_cursor.provider = historical_provider.current;
-        next_cursor.providers_by_turn = historical_provider.by_turn;
+        next_cursor.providers_by_turn = historical_provider.into_indexed();
         let replayed_events =
             u32::try_from(drafts.len()).map_err(|error| runtime_operation_failed(error))?;
         let has_more = next_after < through_journal_sequence;
@@ -7223,26 +7223,26 @@ impl AgentRuntime {
 fn historical_provider_snapshots_by_turn(
     session: &RuntimeSession,
 ) -> Result<HashMap<String, ProviderSnapshot>, AgentRuntimeError> {
-    let mut projection = ProviderProjection::default();
-    let mut after = None;
-    loop {
-        let page = session
-            .replay(after, MAX_REPLAY_EVENTS as usize)
-            .map_err(|error| runtime_operation_failed(error))?;
-        for record in &page.records {
-            projection.observe_event(&record.event);
-        }
-        let Some(next_after) = page.next_after else {
-            return Ok(projection.by_turn);
-        };
-        if next_after <= after.unwrap_or(0) {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        after = Some(next_after);
-        if !page.has_more {
-            return Ok(projection.by_turn);
-        }
-    }
+    Ok(session
+        .history_index()
+        .map_err(runtime_operation_failed)?
+        .turn_providers
+        .into_iter()
+        .map(|(turn_id, provider)| (turn_id.as_str().to_owned(), provider))
+        .collect())
+}
+
+/// 从可重建历史索引创建完整 Turn Provider 投影；索引读取失败必须向上传播。
+fn provider_projection_from_history(
+    session: &RuntimeSession,
+) -> Result<ProviderProjection, AgentRuntimeError> {
+    let providers = session
+        .history_index()
+        .map_err(runtime_operation_failed)?
+        .turn_providers
+        .into_iter()
+        .collect();
+    Ok(ProviderProjection::from_indexed(Arc::new(providers)))
 }
 
 /// 判断历史 Provider 是否仍可安全回放其中的 opaque reasoning 续传。
@@ -7615,76 +7615,98 @@ fn provider_snapshot(provider: &ResolvedProvider) -> ProviderSnapshot {
 
 /// 权威事件投影使用的 Provider 状态。
 ///
-/// Session 的默认 Provider 与某个 Turn 实际使用的 Provider 是两个不同的
-/// 维度。默认快照只作为没有 Turn 级记录的旧事件回退；一旦事件声明了 Turn
-/// 快照，模型 Round 必须按自己的 `turn_id` 读取，不能被并发 Turn 的最后一次
-/// Provider 更新覆盖。
-#[derive(Clone, Debug, Default)]
+/// Session 默认 Provider 不能代表历史 Turn 实际使用的配置。模型 Round 只按
+/// `turn_id` 读取原子持久的快照；缺失时保持未知，不回退到其他 Turn 或当前默认值。
+/// 历史索引作为不可变基线，实时新事件只增量写入 `observed`，避免每条事件复制整张表。
+#[derive(Debug, Default)]
 struct ProviderProjection {
-    /// 当前 Session 默认 Provider；只用于旧事件和没有 Turn 级快照的测试夹具。
-    current: Option<ProviderSnapshot>,
-    /// 每个 Turn 启动时实际使用的 Provider 快照。
-    by_turn: HashMap<String, ProviderSnapshot>,
+    /// 从完整 Journal 可重建索引获得的不可变 Turn 快照。
+    indexed: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>,
+    /// 建立基线后从实时事件观察到的新 Turn 快照。
+    observed: HashMap<ResourceTurnId, ProviderSnapshot>,
 }
 
 impl ProviderProjection {
-    /// 从当前 Session 默认 Provider 创建一个尚未观察事件的投影。
-    fn from_current(current: Option<ProviderSnapshot>) -> Self {
+    /// 从共享历史索引创建增量投影。
+    fn from_indexed(indexed: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>) -> Self {
         Self {
-            current,
-            by_turn: HashMap::new(),
+            indexed,
+            observed: HashMap::new(),
         }
     }
 
-    /// 返回指定 Turn 的 Provider；有明确 Turn 快照时绝不回退到其他 Turn。
+    /// 返回指定 Turn 的权威 Provider，缺失时绝不回退到 Session 默认值。
     fn for_turn(&self, turn_id: &ResourceTurnId) -> Option<&ProviderSnapshot> {
-        self.by_turn.get(turn_id.as_str()).or(self.current.as_ref())
+        self.observed
+            .get(turn_id)
+            .or_else(|| self.indexed.get(turn_id))
     }
 
-    /// 按 Journal 事件顺序更新默认 Provider 与 Turn 级 Provider 状态。
-    fn observe_event(&mut self, event: &SessionEvent) {
+    /// 按 Journal 事件顺序增量更新 Turn Provider，并记录可回滚的当条事件变更。
+    fn observe_event(
+        &mut self,
+        event: &SessionEvent,
+        delta: &mut ProviderProjectionDelta,
+    ) -> Result<(), AgentRuntimeError> {
         match event {
             SessionEvent::AtomicBatch { events } => {
                 for nested in events {
-                    self.observe_event(nested);
-                }
-            }
-            SessionEvent::ProviderSnapshotUpdated { provider } => {
-                self.current = Some(provider.clone());
-            }
-            SessionEvent::TurnStarted { turn_id, .. } => {
-                // 新格式会在同一 AtomicBatch 的后续事件中写入精确快照；旧
-                // Journal 没有该事件时，TurnStarted 仍需冻结当时的默认值。
-                if let Some(provider) = self.current.clone() {
-                    self.by_turn
-                        .entry(turn_id.as_str().to_owned())
-                        .or_insert(provider);
+                    self.observe_event(nested, delta)?;
                 }
             }
             SessionEvent::TurnProviderSnapshotRecorded {
                 turn_id, provider, ..
             } => {
-                self.by_turn
-                    .insert(turn_id.as_str().to_owned(), provider.clone());
+                if let Some(existing) = self.for_turn(turn_id) {
+                    if existing != provider {
+                        return Err(AgentRuntimeError::RuntimeOperationFailed);
+                    }
+                } else {
+                    self.observed.insert(turn_id.clone(), provider.clone());
+                    delta.inserted.push(turn_id.clone());
+                }
             }
             _ => {}
         }
+        Ok(())
     }
+
+    /// 撤销当条物理记录导入的增量，不触碰其他 Turn 快照。
+    fn rollback(&mut self, delta: ProviderProjectionDelta) {
+        for turn_id in delta.inserted.into_iter().rev() {
+            self.observed.remove(&turn_id);
+        }
+    }
+
+    /// 将索引基线和实时增量合并为新的共享基线。
+    fn into_indexed(self) -> Arc<HashMap<ResourceTurnId, ProviderSnapshot>> {
+        if self.observed.is_empty() {
+            return self.indexed;
+        }
+        let mut providers =
+            Arc::try_unwrap(self.indexed).unwrap_or_else(|shared| (*shared).clone());
+        providers.extend(self.observed);
+        Arc::new(providers)
+    }
+}
+
+/// 一条物理 Journal 记录对 Provider 投影的有界变更。
+#[derive(Debug, Default)]
+struct ProviderProjectionDelta {
+    /// 本记录首次观察到的 Turn；回滚时只删除这些增量。
+    inserted: Vec<ResourceTurnId>,
 }
 
 /// 一次连续 replay 分页共享的历史 Provider 游标。
 ///
-/// `next_after` 只在物理 Journal 记录真正被当前页接受后推进；`provider` 始终
-/// 表示该游标之后一条记录的历史 Provider。`through_sequence` 在一次完整恢复中
+/// `next_after` 只在物理 Journal 记录真正被当前页接受后推进；`through_sequence` 在一次完整恢复中
 /// 固定，避免实时追加的事件改变已经发给 Client 的分页边界。
 #[derive(Clone, Debug, Default)]
 struct ReplayProviderCursor {
     /// 已被当前恢复页接受的最后一个物理 Journal sequence。
     next_after: u64,
-    /// 扫描到 `next_after` 后的历史 Provider 快照。
-    provider: Option<ProviderSnapshot>,
-    /// 扫描到 `next_after` 后各 Turn 的历史 Provider 快照。
-    providers_by_turn: HashMap<String, ProviderSnapshot>,
+    /// 当前固定 Journal 窗口内全部 Turn 的历史 Provider 快照。
+    providers_by_turn: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>,
     /// 当前完整 replay 固定的 Journal 水位；尚未开始时为空。
     through_sequence: Option<u64>,
     /// 与固定水位一致的状态；连续分页共享，尾页确认投递后立即释放。
@@ -8500,21 +8522,8 @@ async fn run_runtime_event_pump(
     generation: u64,
     mut subscription: RuntimeEventSubscription,
     mut cancelled: oneshot::Receiver<()>,
+    mut provider_projection: ProviderProjection,
 ) {
-    // 订阅可能在已有 Session 上建立；先从完整 Journal 恢复 Turn 级快照，
-    // 这样重连后的晚到 ModelRoundCompleted 也不会退回到当前默认 Provider。
-    let mut provider_projection = runtime
-        .upgrade()
-        .and_then(|runtime| runtime.runtime_manager.get(session_id.clone()).ok())
-        .and_then(|session| {
-            let snapshot = session.snapshot().ok()?;
-            let by_turn = historical_provider_snapshots_by_turn(&session).ok()?;
-            Some(ProviderProjection {
-                current: snapshot.state.provider,
-                by_turn,
-            })
-        })
-        .unwrap_or_default();
     loop {
         let received = tokio::select! {
             _ = &mut cancelled => break,
@@ -8550,12 +8559,9 @@ async fn run_runtime_event_pump(
                         &snapshot.state,
                         &record,
                         AuthoritativeProjectionMode::Live,
-                        provider_projection.clone(),
+                        &mut provider_projection,
                     ) {
-                        Ok((drafts, next_provider_projection)) => {
-                            provider_projection = next_provider_projection;
-                            drafts
-                        }
+                        Ok(mapped) => mapped.commit(),
                         Err(error) => {
                             tracing::error!(session_id, %error, "Runtime 事件投递失败");
                             break;
@@ -8600,23 +8606,23 @@ async fn run_runtime_event_pump(
                     break;
                 }
             };
-            // 丢失事件后重新订阅前刷新整份 Turn 快照；后续事件只在该基线之上
-            // 增量推进，实际历史缺口仍由外层 replay 水位修复。
-            if let Ok(snapshot) = session.snapshot()
-                && let Ok(by_turn) = historical_provider_snapshots_by_turn(&session)
-            {
-                provider_projection = ProviderProjection {
-                    current: snapshot.state.provider,
-                    by_turn,
-                };
-            }
-            subscription = match session.subscribe() {
+            // 丢失事件后仍须先订阅再刷新基线，避免索引读取期间出现新缺口；
+            // 实际已丢失的历史区间继续由外层 replay 水位修复。
+            let next_subscription = match session.subscribe() {
                 Ok(subscription) => subscription,
                 Err(error) => {
                     tracing::error!(session_id, %error, "Runtime 事件投递失败");
                     break;
                 }
             };
+            provider_projection = match provider_projection_from_history(&session) {
+                Ok(provider) => provider,
+                Err(error) => {
+                    tracing::error!(session_id, %error, "Runtime 事件投影索引恢复失败");
+                    break;
+                }
+            };
+            subscription = next_subscription;
         }
     }
     if let Some(runtime) = runtime.upgrade()
@@ -9029,6 +9035,34 @@ enum AuthoritativeProjectionMode {
     Replay,
 }
 
+/// 同一物理 Journal 记录递归投影其普通事件或原子批次时共享的只读上下文。
+#[derive(Clone, Copy)]
+struct AuthoritativeRecordContext<'a> {
+    session: &'a RuntimeSession,
+    state: &'a SessionState,
+    record: &'a SessionEventRecord,
+    mode: AuthoritativeProjectionMode,
+}
+
+/// 一条物理记录的投影结果；调用方必须在接受或拒绝该记录后显式提交或回滚。
+#[must_use]
+struct MappedAuthoritativeRecord {
+    drafts: Vec<DeliveryDraft>,
+    provider_delta: ProviderProjectionDelta,
+}
+
+impl MappedAuthoritativeRecord {
+    /// 接受当前记录的 Provider 增量并返回投影草稿。
+    fn commit(self) -> Vec<DeliveryDraft> {
+        self.drafts
+    }
+
+    /// 拒绝当前记录，撤销它已导入的 Provider 增量。
+    fn rollback(self, provider: &mut ProviderProjection) {
+        provider.rollback(self.provider_delta);
+    }
+}
+
 /// 将一条权威 Journal 记录映射为 live 与 replay 共用语义的 ACP 草稿集合。
 #[cfg(test)]
 fn map_authoritative_record(
@@ -9037,53 +9071,64 @@ fn map_authoritative_record(
     record: &SessionEventRecord,
     mode: AuthoritativeProjectionMode,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    let (drafts, _) = map_authoritative_record_with_projection(
-        session,
-        state,
-        record,
-        mode,
-        ProviderProjection::from_current(state.provider.clone()),
-    )?;
-    Ok(drafts)
+    let mut provider = ProviderProjection::default();
+    Ok(
+        map_authoritative_record_with_projection(session, state, record, mode, &mut provider)?
+            .commit(),
+    )
 }
 
-/// 使用指定 Provider 投影映射一条权威 Journal 记录，并返回记录后的投影。
+/// 使用指定 Provider 投影映射一条权威 Journal 记录，错误时立即回滚当条增量。
 fn map_authoritative_record_with_projection(
     session: &RuntimeSession,
     state: &SessionState,
     record: &SessionEventRecord,
     mode: AuthoritativeProjectionMode,
-    mut provider: ProviderProjection,
-) -> Result<(Vec<DeliveryDraft>, ProviderProjection), AgentRuntimeError> {
-    let drafts = map_authoritative_event(
-        session,
-        state,
-        record,
+    provider: &mut ProviderProjection,
+) -> Result<MappedAuthoritativeRecord, AgentRuntimeError> {
+    let mut provider_delta = ProviderProjectionDelta::default();
+    let drafts = match map_authoritative_event(
+        AuthoritativeRecordContext {
+            session,
+            state,
+            record,
+            mode,
+        },
         &record.event,
-        mode,
-        &mut provider,
+        provider,
+        &mut provider_delta,
         None,
-    )?;
-    Ok((drafts, provider))
+    ) {
+        Ok(drafts) => drafts,
+        Err(error) => {
+            provider.rollback(provider_delta);
+            return Err(error);
+        }
+    };
+    Ok(MappedAuthoritativeRecord {
+        drafts,
+        provider_delta,
+    })
 }
 
 /// 递归映射普通事件或原子批次，并让批次内全部投递共享同一 Journal sequence。
 fn map_authoritative_event(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
+    context: AuthoritativeRecordContext<'_>,
     event: &SessionEvent,
-    mode: AuthoritativeProjectionMode,
     provider: &mut ProviderProjection,
+    provider_delta: &mut ProviderProjectionDelta,
     atomic_siblings: Option<&[SessionEvent]>,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
+    let AuthoritativeRecordContext {
+        session,
+        state,
+        record,
+        mode,
+    } = context;
     if mode == AuthoritativeProjectionMode::Replay {
         if replay_hides_root_turn_lifecycle(state, event) {
             // 编辑重发会保留根 Turn 的终态骨架，以维持子 Agent 与 Mailbox
             // 控制面引用；没有对应真实用户消息时，这个骨架不属于对话投影。
-            if matches!(event, SessionEvent::TurnStarted { .. }) {
-                provider.observe_event(event);
-            }
             return Ok(Vec::new());
         }
         let request_id = match event {
@@ -9109,12 +9154,10 @@ fn map_authoritative_event(
             let mut drafts = Vec::new();
             for nested in events {
                 drafts.extend(map_authoritative_event(
-                    session,
-                    state,
-                    record,
+                    context,
                     nested,
-                    mode,
                     provider,
+                    provider_delta,
                     Some(events),
                 )?);
             }
@@ -9137,7 +9180,6 @@ fn map_authoritative_event(
             parent_turn_id,
             ..
         } => {
-            provider.observe_event(event);
             vec![keencode_event_draft(
                 record,
                 Some(turn_id.as_str()),
@@ -9473,12 +9515,9 @@ fn map_authoritative_event(
                 }),
             ),
         )],
-        SessionEvent::ProviderSnapshotUpdated { provider: _ } => {
-            provider.observe_event(event);
-            Vec::new()
-        }
+        SessionEvent::ProviderSnapshotUpdated { .. } => Vec::new(),
         SessionEvent::TurnProviderSnapshotRecorded { .. } => {
-            provider.observe_event(event);
+            provider.observe_event(event, provider_delta)?;
             Vec::new()
         }
         SessionEvent::OnErrorHookQueued { .. }
@@ -9735,6 +9774,7 @@ fn replay_segment_tool_drafts(
     }
     let mut drafts = Vec::new();
     let mut provider = ProviderProjection::default();
+    let mut provider_delta = ProviderProjectionDelta::default();
     for (time_unix_ms, event) in events {
         // 保留生命周期真实时间和与 live 相同的 raw output；Journal 游标则归属于
         // 当前原子段，不能倒退到已被前页消费的物理请求记录。
@@ -9748,12 +9788,15 @@ fn replay_segment_tool_drafts(
             event,
         };
         drafts.extend(map_authoritative_event(
-            session,
-            state,
-            &projected,
+            AuthoritativeRecordContext {
+                session,
+                state,
+                record: &projected,
+                mode: AuthoritativeProjectionMode::Live,
+            },
             &projected.event,
-            AuthoritativeProjectionMode::Live,
             &mut provider,
+            &mut provider_delta,
             None,
         )?);
     }
@@ -9831,45 +9874,6 @@ fn model_round_usage_draft(
             context_window,
         )),
     )]
-}
-
-/// 从 Journal 顺序恢复指定 sequence 之前的默认和各 Turn Provider 快照。
-///
-/// `after` 分页不能只读取当前页，否则从中间水位开始的 replay 会把最终快照误用到
-/// 历史 Round；这里按有界页扫描前缀，既覆盖普通记录也覆盖 AtomicBatch 内嵌更新。
-fn provider_projection_before_sequence(
-    session: &RuntimeSession,
-    sequence: u64,
-) -> Result<ProviderProjection, AgentRuntimeError> {
-    if sequence == 0 {
-        return Ok(ProviderProjection::default());
-    }
-    let mut after = None;
-    let mut projection = ProviderProjection::default();
-    loop {
-        let page = session
-            .replay(after, MAX_REPLAY_EVENTS as usize)
-            .map_err(|error| runtime_operation_failed(error))?;
-        for record in &page.records {
-            if record.sequence > sequence {
-                return Ok(projection);
-            }
-            projection.observe_event(&record.event);
-            if record.sequence == sequence {
-                return Ok(projection);
-            }
-        }
-        let Some(next_after) = page.next_after else {
-            return Ok(projection);
-        };
-        if next_after <= after.unwrap_or(0) {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        after = Some(next_after);
-        if !page.has_more {
-            return Ok(projection);
-        }
-    }
 }
 
 /// 构造带权威 Journal sequence 的 KeenCode 生命周期草稿。
@@ -10383,8 +10387,17 @@ mod tests {
         prompt: &str,
         used: u64,
     ) {
+        let capabilities = ProviderCapabilities::default();
+        let provider_snapshot = ProviderSnapshot {
+            provider_id: "scripted-provider".to_owned(),
+            model: model.to_owned(),
+            context_window: capabilities.max_context_tokens,
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "scripted-provider-config".to_owned(),
+            reasoning_effort: None,
+        };
         let provider = Arc::new(ScriptedProvider::new(
-            ProviderCapabilities::default(),
+            capabilities,
             [completed_reply_with_usage(
                 "完成",
                 TokenUsage {
@@ -10413,11 +10426,14 @@ mod tests {
                 ToolRegistry::new(),
                 RunLimits::default(),
             ))
-            .run_turn(RuntimeTurnRequest::root(
-                request,
-                vec![input],
-                root_turn_summary(prompt, None, false),
-            ))
+            .run_turn(
+                RuntimeTurnRequest::root(
+                    request,
+                    vec![input],
+                    root_turn_summary(prompt, None, false),
+                )
+                .with_provider_snapshot(provider_snapshot),
+            )
             .await
             .expect("测试模型 Round 应完成");
     }
@@ -14277,10 +14293,19 @@ mod tests {
         prompt: &str,
         prompt_summary: &str,
     ) {
+        let capabilities = ProviderCapabilities::default();
         let provider = Arc::new(ScriptedProvider::new(
-            ProviderCapabilities::default(),
+            capabilities.clone(),
             [completed_reply("完成")],
         ));
+        let provider_snapshot = ProviderSnapshot {
+            provider_id: "scripted-provider".to_owned(),
+            model: "test-model".to_owned(),
+            context_window: capabilities.max_context_tokens,
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "scripted-provider-config".to_owned(),
+            reasoning_effort: None,
+        };
         let input = ModelMessage::text(MessageRole::User, prompt);
         let request = TurnRequest::new(
             keencode_agent::SessionId::new(session.session_id().as_str())
@@ -14297,11 +14322,10 @@ mod tests {
                 ToolRegistry::new(),
                 RunLimits::default(),
             ))
-            .run_turn(RuntimeTurnRequest::root(
-                request,
-                vec![input],
-                prompt_summary,
-            ))
+            .run_turn(
+                RuntimeTurnRequest::root(request, vec![input], prompt_summary)
+                    .with_provider_snapshot(provider_snapshot),
+            )
             .await
             .expect("测试根 Turn 应完成");
     }
@@ -17078,7 +17102,249 @@ mod tests {
         assert_eq!(full.replay.unwrap().start_after, 0);
     }
 
-    /// 连续 replay 分页必须提交零投影物理记录的游标和 Provider 状态。
+    /// 最新根轮次页必须恢复在更旧页启动、跨页完成的子 Agent Turn Provider。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn history_page_restores_cross_root_child_turn_providers() {
+        use super::HistoryLoadRequest;
+
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let project = tempfile::tempdir().expect("应创建测试项目目录");
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "history-cross-root-provider")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let old_root_turn_id = "history-provider-old-root";
+        persist_completed_root_turn(
+            &session,
+            old_root_turn_id,
+            "启动后台子 Agent",
+            "启动后台子 Agent",
+        )
+        .await;
+
+        let different_model_provider = ProviderSnapshot {
+            provider_id: "provider-child-different".to_owned(),
+            model: "child-model".to_owned(),
+            context_window: Some(24_000),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-child-different".to_owned(),
+            reasoning_effort: None,
+        };
+        let same_model_provider = ProviderSnapshot {
+            provider_id: "provider-child-same-model".to_owned(),
+            model: "shared-model".to_owned(),
+            context_window: Some(32_000),
+            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+            config_fingerprint: "fingerprint-child-same-model".to_owned(),
+            reasoning_effort: None,
+        };
+        let current_provider = ProviderSnapshot {
+            provider_id: "provider-current-root".to_owned(),
+            model: "shared-model".to_owned(),
+            context_window: Some(128_000),
+            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+            config_fingerprint: "fingerprint-current-root".to_owned(),
+            reasoning_effort: None,
+        };
+
+        let start_child = |turn_id: &str,
+                           agent_id: &str,
+                           used: u64,
+                           provider_snapshot: ProviderSnapshot,
+                           entered: Arc<AtomicBool>,
+                           gate: Arc<tokio::sync::Notify>| {
+            let child_session = session.clone();
+            let turn_id = turn_id.to_owned();
+            let agent_id = agent_id.to_owned();
+            let root_turn_id = old_root_turn_id.to_owned();
+            tokio::spawn(async move {
+                let model = provider_snapshot.model.clone();
+                let capabilities = ProviderCapabilities {
+                    max_context_tokens: provider_snapshot.context_window,
+                    ..ProviderCapabilities::default()
+                };
+                let provider = Arc::new(GateProvider {
+                    inner: Arc::new(ScriptedProvider::new(
+                        capabilities,
+                        [completed_reply_with_usage(
+                            "子 Agent 完成",
+                            TokenUsage {
+                                input_tokens: Some(used.saturating_sub(1)),
+                                output_tokens: Some(1),
+                                reasoning_tokens: None,
+                                cache_read_tokens: None,
+                                cache_write_tokens: None,
+                                total_tokens: Some(used),
+                            },
+                        )],
+                    )),
+                    entered,
+                    gate,
+                });
+                let input = ModelMessage::text(MessageRole::User, "执行跨页子任务");
+                let request = TurnRequest::new(
+                    keencode_agent::SessionId::new(child_session.session_id().as_str())
+                        .expect("Agent Session 标识应有效"),
+                    keencode_agent::TurnId::new(turn_id.clone()).expect("子 Turn 标识应有效"),
+                    keencode_agent::AgentId::new(agent_id.clone()).expect("子 Agent 标识应有效"),
+                    model,
+                    vec![input.clone()],
+                    PlanGuard::inactive(),
+                );
+                child_session
+                    .bind_agent_runner(AgentRunner::new(
+                        provider,
+                        ToolRegistry::new(),
+                        RunLimits::default(),
+                    ))
+                    .run_turn(
+                        RuntimeTurnRequest::initial_child(
+                            request,
+                            vec![input],
+                            root_turn_id.clone(),
+                            root_turn_id,
+                            "执行跨页子任务",
+                            SubAgentState {
+                                agent_id: ResourceAgentId::new(agent_id.clone())
+                                    .expect("资源子 Agent 标识应有效"),
+                                parent_agent_id: ResourceAgentId::new("root")
+                                    .expect("根 Agent 标识应有效"),
+                                agent_path: format!("/root/{agent_id}"),
+                                task: "执行跨页子任务".to_owned(),
+                                status: SubAgentStatus::Pending,
+                                current_turn_id: None,
+                                result_summary: None,
+                            },
+                        )
+                        .with_provider_snapshot(provider_snapshot),
+                    )
+                    .await
+            })
+        };
+
+        let different_entered = Arc::new(AtomicBool::new(false));
+        let different_gate = Arc::new(tokio::sync::Notify::new());
+        let different_task = start_child(
+            "history-provider-child-different",
+            "history_provider_child_different",
+            17,
+            different_model_provider,
+            Arc::clone(&different_entered),
+            Arc::clone(&different_gate),
+        );
+        let same_entered = Arc::new(AtomicBool::new(false));
+        let same_gate = Arc::new(tokio::sync::Notify::new());
+        let same_task = start_child(
+            "history-provider-child-same",
+            "history_provider_child_same",
+            19,
+            same_model_provider,
+            Arc::clone(&same_entered),
+            Arc::clone(&same_gate),
+        );
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !different_entered.load(Ordering::SeqCst) || !same_entered.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "两个子 Turn 必须在新根轮次前写入 Provider 快照"
+            );
+            tokio::task::yield_now().await;
+        }
+
+        session
+            .set_provider_snapshot("history-current-provider", current_provider.clone())
+            .expect("当前 Session Provider 应更新");
+        persist_usage_root_turn_with_provider_snapshot(
+            &session,
+            "history-provider-new-root",
+            "shared-model",
+            "更新的根轮次",
+            23,
+            current_provider,
+        )
+        .await;
+
+        different_gate.notify_one();
+        same_gate.notify_one();
+        assert!(
+            different_task
+                .await
+                .expect("不同模型子 Turn 任务不应 panic")
+                .expect("不同模型子 Turn 应完成")
+                .is_success()
+        );
+        assert!(
+            same_task
+                .await
+                .expect("同模型子 Turn 任务不应 panic")
+                .expect("同模型子 Turn 应完成")
+                .is_success()
+        );
+
+        let child_start_sequences = session
+            .history_index()
+            .expect("历史索引应读取")
+            .context
+            .into_iter()
+            .filter(|(key, _)| key.starts_with("child-start:history-provider-child-"))
+            .flat_map(|(_, sequences)| sequences)
+            .collect::<Vec<_>>();
+        assert_eq!(child_start_sequences.len(), 2);
+
+        let page = runtime
+            .load_history_page(
+                &session_id,
+                HistoryLoadRequest {
+                    limit: 1,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("最新根轮次页应加载");
+        let start_after = page.replay.as_ref().expect("首页应进入投递泵").start_after;
+        assert!(page.has_more);
+        assert!(
+            child_start_sequences
+                .iter()
+                .all(|sequence| *sequence <= start_after),
+            "子 Turn 必须确实启动于当前历史页之前"
+        );
+
+        let usage_by_turn = emitter
+            .snapshot()
+            .into_iter()
+            .filter_map(|value| {
+                if value["type"] != "session_update"
+                    || value["envelope"]["update"]["sessionUpdate"] != "usage_update"
+                {
+                    return None;
+                }
+                Some((
+                    value["envelope"]["turnId"].as_str()?.to_owned(),
+                    (
+                        value["envelope"]["update"]["used"].as_u64()?,
+                        value["envelope"]["update"]["size"].as_u64()?,
+                    ),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            usage_by_turn.get("history-provider-child-different"),
+            Some(&(17, 24_000)),
+            "不同模型的跨页子 Turn 不得因当前默认模型而丢失用量"
+        );
+        assert_eq!(
+            usage_by_turn.get("history-provider-child-same"),
+            Some(&(19, 32_000)),
+            "同模型的跨页子 Turn 必须使用自己的上下文窗口"
+        );
+    }
+
+    /// 连续 replay 分页必须提交零投影物理记录的游标，但 Session 默认 Provider 不得进入 Turn 索引。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn replay_advances_physical_cursor_through_zero_projection_records() {
         let storage = tempfile::tempdir().expect("应创建测试存储目录");
@@ -17099,7 +17365,7 @@ mod tests {
             reasoning_effort: None,
         };
         session
-            .set_provider_snapshot("replay-zero-provider", provider.clone())
+            .set_provider_snapshot("replay-zero-provider", provider)
             .expect("Provider 快照应提交");
         let provider_sequence = session
             .snapshot()
@@ -17130,7 +17396,7 @@ mod tests {
         {
             let cursor = delivery.replay_cursor.lock().await;
             assert_eq!(cursor.next_after, provider_sequence);
-            assert_eq!(cursor.provider, Some(provider.clone()));
+            assert!(cursor.providers_by_turn.is_empty());
             assert_eq!(cursor.through_sequence, Some(tail_sequence));
             assert_eq!(
                 cursor.frozen_state.as_ref().unwrap().last_sequence,
@@ -17157,7 +17423,7 @@ mod tests {
             .expect("测试 replay 投递应关闭");
     }
 
-    /// 非连续 after 必须从请求水位前重建 Provider，而不是沿用当前分页缓存。
+    /// 非连续 after 必须从权威索引重建完整 Turn Provider，而不是沿用当前分页缓存。
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn replay_non_contiguous_after_rebuilds_provider_cursor() {
         let storage = tempfile::tempdir().expect("应创建测试存储目录");
@@ -17184,50 +17450,62 @@ mod tests {
             config_fingerprint: "fingerprint-replay-b".to_owned(),
             reasoning_effort: None,
         };
-        session
-            .set_provider_snapshot("replay-non-contiguous-a", provider_a.clone())
-            .expect("Provider A 快照应提交");
+        persist_usage_root_turn_with_provider_snapshot(
+            &session,
+            "replay-provider-turn-a",
+            "model-replay-a",
+            "Provider A",
+            11,
+            provider_a.clone(),
+        )
+        .await;
         let provider_a_sequence = session
             .snapshot()
-            .expect("Provider A 序号应读取")
+            .expect("Provider A Turn 序号应读取")
             .state
             .last_sequence;
-        session
-            .rename("replay-non-contiguous-rename-a", "历史标题 A")
-            .expect("中间投影事件 A 应提交");
-        session
-            .rename("replay-non-contiguous-rename-a-2", "历史标题 A-2")
-            .expect("第二个中间投影事件 A 应提交");
-        session
-            .set_provider_snapshot("replay-non-contiguous-b", provider_b.clone())
-            .expect("Provider B 快照应提交");
-        let provider_b_sequence = session
-            .snapshot()
-            .expect("Provider B 序号应读取")
-            .state
-            .last_sequence;
-        session
-            .rename("replay-non-contiguous-rename-b", "历史标题 B")
-            .expect("尾部投影事件 B 应提交");
+        persist_usage_root_turn_with_provider_snapshot(
+            &session,
+            "replay-provider-turn-b",
+            "model-replay-b",
+            "Provider B",
+            13,
+            provider_b.clone(),
+        )
+        .await;
 
         let first = runtime
-            .replay_session(session.session_id().as_str(), None, 3)
+            .replay_session(session.session_id().as_str(), None, 1)
             .await
             .expect("首个 replay 分页应成功");
-        assert_eq!(first.next_after, provider_b_sequence);
         assert!(first.has_more);
-        let jumped = runtime
-            .replay_session(session.session_id().as_str(), Some(provider_a_sequence), 1)
-            .await
-            .expect("非连续 replay 分页应成功");
-        assert_eq!(jumped.next_after, provider_a_sequence + 1);
         let delivery = runtime
             .session_delivery(session.session_id().as_str())
             .expect("当前 replay 投递应存在");
+        let stale_turn =
+            ResourceTurnId::new("replay-provider-stale-turn").expect("伪造 Turn 标识应有效");
+        delivery.replay_cursor.lock().await.providers_by_turn =
+            Arc::new(HashMap::from([(stale_turn.clone(), provider_b.clone())]));
+
+        let jumped = runtime
+            .replay_session(
+                session.session_id().as_str(),
+                Some(provider_a_sequence),
+                1_000,
+            )
+            .await
+            .expect("非连续 replay 分页应成功");
+        assert!(!jumped.has_more);
+        let providers = Arc::clone(&delivery.replay_cursor.lock().await.providers_by_turn);
         assert_eq!(
-            delivery.replay_cursor.lock().await.provider,
-            Some(provider_a)
+            providers.get(&ResourceTurnId::new("replay-provider-turn-a").unwrap()),
+            Some(&provider_a)
         );
+        assert_eq!(
+            providers.get(&ResourceTurnId::new("replay-provider-turn-b").unwrap()),
+            Some(&provider_b)
+        );
+        assert!(!providers.contains_key(&stale_turn));
         runtime
             .close_session_delivery(session.session_id().as_str())
             .await
@@ -19782,14 +20060,16 @@ mod tests {
         let turn_id = ResourceTurnId::new("turn-usage-projection").expect("Turn 标识应有效");
         let source_agent_id = ResourceAgentId::new("root").expect("来源 Agent 标识应有效");
         let mut state = SessionState::empty(session_id.clone());
-        state.provider = Some(ProviderSnapshot {
+        let provider = ProviderSnapshot {
             provider_id: "provider-a".to_owned(),
             model: "test-model".to_owned(),
             context_window: Some(128_000),
             protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
             config_fingerprint: "fingerprint".to_owned(),
             reasoning_effort: None,
-        });
+        };
+        // 即使 Session 默认 Provider 看似匹配，缺失 Turn 快照也必须保持未知。
+        state.provider = Some(provider.clone());
         let make_record = |usage: TokenUsage| SessionEventRecord {
             schema: SESSION_EVENT_SCHEMA.to_owned(),
             version: SESSION_EVENT_VERSION,
@@ -19810,6 +20090,22 @@ mod tests {
                 stop_reason: StopReason::Completed,
             },
         };
+        let map_with_provider = |record: &SessionEventRecord,
+                                 mode: AuthoritativeProjectionMode,
+                                 provider: ProviderSnapshot| {
+            let mut projection = ProviderProjection::from_indexed(Arc::new(HashMap::from([(
+                turn_id.clone(),
+                provider,
+            )])));
+            map_authoritative_record_with_projection(
+                &session,
+                &state,
+                record,
+                mode,
+                &mut projection,
+            )
+            .map(|mapped| mapped.commit())
+        };
 
         let total_record = make_record(TokenUsage {
             input_tokens: Some(90),
@@ -19819,18 +20115,30 @@ mod tests {
             cache_write_tokens: None,
             total_tokens: Some(100),
         });
-        let live = map_authoritative_record(
+        let missing_turn_provider = map_authoritative_record(
             &session,
             &state,
             &total_record,
             AuthoritativeProjectionMode::Live,
         )
+        .expect("缺失 Turn Provider 时应保留原始用量事件");
+        assert!(missing_turn_provider.iter().all(|draft| matches!(
+            draft,
+            DeliveryDraft::KeenCodeEvent {
+                event: KeenCodeEvent::ModelUsageReported { .. },
+                ..
+            }
+        )));
+        let live = map_with_provider(
+            &total_record,
+            AuthoritativeProjectionMode::Live,
+            provider.clone(),
+        )
         .expect("已知总用量应投影");
-        let replay = map_authoritative_record(
-            &session,
-            &state,
+        let replay = map_with_provider(
             &total_record,
             AuthoritativeProjectionMode::Replay,
+            provider.clone(),
         )
         .expect("已知总用量应重放");
         assert_eq!(live.len(), 2);
@@ -19881,15 +20189,14 @@ mod tests {
         assert_eq!(live_value["envelope"]["update"]["used"], 100);
         assert_eq!(live_value["envelope"]["update"]["size"], 128_000);
 
-        let summed = map_authoritative_record(
-            &session,
-            &state,
+        let summed = map_with_provider(
             &make_record(TokenUsage {
                 input_tokens: Some(11),
                 output_tokens: Some(7),
                 ..TokenUsage::unknown()
             }),
             AuthoritativeProjectionMode::Live,
+            provider.clone(),
         )
         .expect("输入和输出均明确时应投影");
         assert_eq!(summed.len(), 2);
@@ -19905,11 +20212,10 @@ mod tests {
         assert_eq!(summed_value["envelope"]["update"]["used"], 18);
 
         assert!(
-            map_authoritative_record(
-                &session,
-                &state,
+            map_with_provider(
                 &make_record(TokenUsage::unknown()),
                 AuthoritativeProjectionMode::Live,
+                provider.clone(),
             )
             .expect("未知用量不应造成投影错误")
             .iter()
@@ -19921,18 +20227,13 @@ mod tests {
                 }
             ))
         );
-        let mut no_context_state = state.clone();
-        no_context_state
-            .provider
-            .as_mut()
-            .expect("测试 Provider 快照应存在")
-            .context_window = None;
+        let mut no_context_provider = provider;
+        no_context_provider.context_window = None;
         assert!(
-            map_authoritative_record(
-                &session,
-                &no_context_state,
+            map_with_provider(
                 &total_record,
                 AuthoritativeProjectionMode::Replay,
+                no_context_provider,
             )
             .expect("未知上下文窗口不应造成投影错误")
             .iter()
@@ -20030,15 +20331,15 @@ mod tests {
             (3, started(turn_b.clone())),
             (4, provider_event(turn_b.clone(), provider_b.clone())),
         ] {
-            let (_, next) = map_authoritative_record_with_projection(
+            let _ = map_authoritative_record_with_projection(
                 &session,
                 &state,
                 &record(sequence, event),
                 AuthoritativeProjectionMode::Replay,
-                projection,
+                &mut projection,
             )
-            .expect("Turn Provider 事件应可投影");
-            projection = next;
+            .expect("Turn Provider 事件应可投影")
+            .commit();
         }
 
         let context_window = |drafts: &[DeliveryDraft]| {
@@ -20053,32 +20354,35 @@ mod tests {
                 _ => None,
             })
         };
-        let (a_first, projection) = map_authoritative_record_with_projection(
+        let a_first = map_authoritative_record_with_projection(
             &session,
             &state,
             &round(5, turn_a.clone(), "model-a"),
             AuthoritativeProjectionMode::Replay,
-            projection,
+            &mut projection,
         )
-        .expect("Turn A 首轮应可投影");
+        .expect("Turn A 首轮应可投影")
+        .commit();
         assert_eq!(context_window(&a_first), Some(128_000));
-        let (b_round, projection) = map_authoritative_record_with_projection(
+        let b_round = map_authoritative_record_with_projection(
             &session,
             &state,
             &round(6, turn_b.clone(), "model-b"),
             AuthoritativeProjectionMode::Replay,
-            projection,
+            &mut projection,
         )
-        .expect("Turn B 轮次应可投影");
+        .expect("Turn B 轮次应可投影")
+        .commit();
         assert_eq!(context_window(&b_round), Some(32_000));
-        let (a_second, _) = map_authoritative_record_with_projection(
+        let a_second = map_authoritative_record_with_projection(
             &session,
             &state,
             &round(7, turn_a, "model-a"),
             AuthoritativeProjectionMode::Replay,
-            projection,
+            &mut projection,
         )
-        .expect("Turn A 后续轮次应可投影");
+        .expect("Turn A 后续轮次应可投影")
+        .commit();
         assert_eq!(context_window(&a_second), Some(128_000));
     }
 
@@ -20173,81 +20477,193 @@ mod tests {
         );
     }
 
-    /// 分页 replay 必须按每个历史模型 Round 当时的 Provider 快照投影上下文窗口。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn replay_uses_provider_snapshot_at_each_historical_round() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+    /// 权威记录投影失败必须只撤销当条 Provider 增量，不污染后续 live/replay 状态。
+    #[test]
+    fn provider_projection_rolls_back_failed_record_increment() {
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "provider-projection-rollback".to_owned(),
+                title: "Provider 回滚".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let session_id =
+            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
+        let turn_id =
+            ResourceTurnId::new("provider-projection-failed-turn").expect("Turn 标识应有效");
+        let agent_id =
+            ResourceAgentId::new("provider_projection_failed_agent").expect("Agent 标识应有效");
+        let provider = ProviderSnapshot {
+            provider_id: "provider-failed-record".to_owned(),
+            model: "model-failed-record".to_owned(),
+            context_window: Some(64_000),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-failed-record".to_owned(),
+            reasoning_effort: None,
+        };
+        let record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("provider-projection-failed-record")
+                .expect("事件标识应有效"),
+            session: session_id.clone(),
+            sequence: 2,
+            time_unix_ms: 2,
+            event: SessionEvent::AtomicBatch {
+                events: vec![
+                    SessionEvent::TurnProviderSnapshotRecorded {
+                        turn_id: turn_id.clone(),
+                        source_agent_id: agent_id.clone(),
+                        provider,
+                    },
+                    SessionEvent::SubAgentStatusChanged {
+                        agent_id,
+                        turn_id: Some(turn_id.clone()),
+                        status: SubAgentStatus::Completed,
+                        result_summary: Some("不应成功".to_owned()),
+                    },
+                ],
+            },
+        };
+        let mut projection = ProviderProjection::default();
+        assert!(
+            map_authoritative_record_with_projection(
+                &session,
+                &SessionState::empty(session_id),
+                &record,
+                AuthoritativeProjectionMode::Live,
+                &mut projection,
+            )
+            .is_err()
         );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "replay-provider-history-operation")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        let provider_a = ProviderSnapshot {
-            provider_id: "provider-a".to_owned(),
-            model: "model-a".to_owned(),
+        assert!(
+            projection.for_turn(&turn_id).is_none(),
+            "同一记录后续映射失败时必须撤销已观察的 Provider"
+        );
+    }
+
+    /// 大历史投影处理单条新 Turn 时只保留一条可回滚增量，不复制索引基线。
+    #[test]
+    fn provider_projection_updates_large_history_without_cloning_baseline() {
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "provider-projection-large-history".to_owned(),
+                title: "Provider 大历史".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let session_id =
+            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
+        let baseline_provider = ProviderSnapshot {
+            provider_id: "provider-baseline".to_owned(),
+            model: "model-baseline".to_owned(),
             context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-a".to_owned(),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-baseline".to_owned(),
             reasoning_effort: None,
         };
-        let provider_b = ProviderSnapshot {
-            provider_id: "provider-b".to_owned(),
-            model: "model-b".to_owned(),
-            context_window: Some(32_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-b".to_owned(),
-            reasoning_effort: None,
-        };
-
-        let provider_a_sequence = session
-            .set_provider_snapshot("replay-provider-a", provider_a)
-            .expect("历史 Provider A 应写入")
-            .last_sequence;
-        persist_usage_root_turn(&session, "replay-turn-a", "model-a", "历史模型 A", 11).await;
-        session
-            .set_provider_snapshot("replay-provider-b", provider_b)
-            .expect("历史 Provider B 应写入");
-        persist_usage_root_turn(&session, "replay-turn-b", "model-b", "历史模型 B", 13).await;
-
-        // 第一页消费首条 SessionCreated 及其后的零投影 Provider 快照，第二页从该物理水位开始。
-        let first_page = runtime
-            .replay_session(&session_id, None, 1)
-            .await
-            .expect("首个 replay 分页应成功");
-        assert_eq!(first_page.start_after, 0);
-        assert_eq!(first_page.next_after, provider_a_sequence);
-        assert!(first_page.has_more);
-        runtime
-            .replay_session(&session_id, Some(first_page.next_after), 1_000)
-            .await
-            .expect("后续 replay 分页应成功");
-
-        let usage = emitter
-            .snapshot()
-            .into_iter()
-            .filter_map(|value| {
-                (value["type"] == "session_update"
-                    && value["envelope"]["update"]["sessionUpdate"] == "usage_update")
-                    .then(|| {
-                        (
-                            value["envelope"]["update"]["used"].as_u64(),
-                            value["envelope"]["update"]["size"].as_u64(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            usage,
-            vec![(Some(11), Some(128_000)), (Some(13), Some(32_000))]
+        let indexed = Arc::new(
+            (0..4_096)
+                .map(|index| {
+                    (
+                        ResourceTurnId::new(format!("provider-baseline-turn-{index}"))
+                            .expect("基线 Turn 标识应有效"),
+                        baseline_provider.clone(),
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
         );
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("测试 replay 投递应关闭");
+        let mut projection = ProviderProjection::from_indexed(Arc::clone(&indexed));
+        let new_turn =
+            ResourceTurnId::new("provider-projection-new-turn").expect("新 Turn 标识应有效");
+        let record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("provider-projection-new-record")
+                .expect("事件标识应有效"),
+            session: session_id.clone(),
+            sequence: 2,
+            time_unix_ms: 2,
+            event: SessionEvent::TurnProviderSnapshotRecorded {
+                turn_id: new_turn.clone(),
+                source_agent_id: ResourceAgentId::new("root").expect("根 Agent 标识应有效"),
+                provider: ProviderSnapshot {
+                    provider_id: "provider-new".to_owned(),
+                    model: "model-new".to_owned(),
+                    context_window: Some(32_000),
+                    protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+                    config_fingerprint: "fingerprint-new".to_owned(),
+                    reasoning_effort: None,
+                },
+            },
+        };
+        let mapped = map_authoritative_record_with_projection(
+            &session,
+            &SessionState::empty(session_id),
+            &record,
+            AuthoritativeProjectionMode::Live,
+            &mut projection,
+        )
+        .expect("新 Turn Provider 应增量投影");
+        assert!(Arc::ptr_eq(&projection.indexed, &indexed));
+        assert_eq!(projection.observed.len(), 1);
+        assert_eq!(
+            mapped.provider_delta.inserted.as_slice(),
+            std::slice::from_ref(&new_turn)
+        );
+        mapped.rollback(&mut projection);
+        assert!(projection.for_turn(&new_turn).is_none());
+        assert!(Arc::ptr_eq(&projection.indexed, &indexed));
+
+        let committed = map_authoritative_record_with_projection(
+            &session,
+            &SessionState::empty(
+                ResourceSessionId::new(session.session_id().as_str())
+                    .expect("资源 Session 标识应有效"),
+            ),
+            &record,
+            AuthoritativeProjectionMode::Replay,
+            &mut projection,
+        )
+        .expect("回滚后同一 Turn Provider 应可重新投影");
+        assert!(committed.commit().is_empty());
+        assert!(projection.for_turn(&new_turn).is_some());
+    }
+
+    /// 实时泵的 Provider 历史索引损坏时必须返回错误，不得降级为空投影。
+    #[test]
+    fn provider_projection_history_index_failure_is_not_defaulted() {
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let session_id = "provider-projection-corrupt-history";
+        let mut config = RuntimeConfig::new(storage.path());
+        config.journal.durability = keencode_resources::Durability::Flush;
+        let session = RuntimeSession::create_session(
+            config,
+            CreateSessionRequest {
+                session_id: session_id.to_owned(),
+                title: "Provider 损坏历史".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(storage.path().join(session_id).join("events.jsonl"))
+            .expect("事件日志应打开");
+        writeln!(log, "{{")
+            .and_then(|()| log.flush())
+            .expect("损坏尾记录应写入");
+
+        assert!(matches!(
+            super::provider_projection_from_history(&session),
+            Err(AgentRuntimeError::RuntimeOperationFailed)
+        ));
     }
 
     /// 分页 replay 必须跨物理记录保留显式 Turn Provider，并正确处理不同 Turn 交错的用量。

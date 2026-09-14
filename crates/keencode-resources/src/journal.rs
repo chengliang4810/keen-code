@@ -45,8 +45,6 @@ thread_local! {
 pub struct SessionHistoryIndex {
     /// 根轮次起始物理序号，按提交顺序排列。
     pub root_starts: Vec<u64>,
-    /// 稀疏 Session Provider 变更，用于从中间窗口恢复当时的默认配置。
-    pub providers: BTreeMap<u64, crate::ProviderSnapshot>,
     /// 每个 Turn 实际使用的 Provider 快照，供任意历史窗口权威投影模型统计。
     pub turn_providers: BTreeMap<crate::TurnId, crate::ProviderSnapshot>,
     /// 子 Agent 身份、状态和 Todo 的稀疏定位，不保留事件正文。
@@ -103,9 +101,6 @@ impl SessionHistoryIndex {
                     .entry("todo".to_owned())
                     .or_default()
                     .push(sequence);
-            }
-            SessionEvent::ProviderSnapshotUpdated { provider } => {
-                self.providers.insert(sequence, provider.clone());
             }
             SessionEvent::TurnProviderSnapshotRecorded {
                 turn_id, provider, ..

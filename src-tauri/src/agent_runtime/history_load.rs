@@ -33,7 +33,9 @@ pub(crate) struct HistoryLoadPage {
 
 pub(super) struct HistoryBackfill {
     state: Arc<SessionState>,
-    index: keencode_resources::SessionHistoryIndex,
+    root_starts: Vec<u64>,
+    context: std::collections::BTreeMap<String, Vec<u64>>,
+    providers_by_turn: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>,
     before: u64,
     anchor: String,
 }
@@ -72,12 +74,20 @@ impl AgentRuntime {
             *history = Some(
                 tokio::task::spawn_blocking(move || {
                     let state = session.snapshot().map_err(runtime_operation_failed)?.state;
-                    let index = session.history_index().map_err(runtime_operation_failed)?;
+                    let keencode_resources::SessionHistoryIndex {
+                        root_starts,
+                        turn_providers,
+                        context,
+                    } = session.history_index().map_err(runtime_operation_failed)?;
+                    let providers_by_turn =
+                        Arc::new(turn_providers.into_iter().collect::<HashMap<_, _>>());
                     let anchor = history_anchor(&session, state.last_sequence)?;
                     Ok::<_, AgentRuntimeError>(HistoryBackfill {
                         before: state.last_sequence + 1,
                         state: Arc::new(state),
-                        index,
+                        root_starts,
+                        context,
+                        providers_by_turn,
                         anchor,
                     })
                 })
@@ -92,17 +102,11 @@ impl AgentRuntime {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
         let before = cached.before;
-        let start = history_window_start(&cached.index.root_starts, before, request.limit);
+        let start = history_window_start(&cached.root_starts, before, request.limit);
         let state = Arc::clone(&cached.state);
         let through = state.last_sequence;
-        let provider = cached
-            .index
-            .providers
-            .range(..start)
-            .next_back()
-            .map(|(_, value)| value.clone());
+        let providers_by_turn = Arc::clone(&cached.providers_by_turn);
         let context_sequences = cached
-            .index
             .context
             .values()
             .filter_map(|sequences| {
@@ -111,7 +115,6 @@ impl AgentRuntime {
             })
             .collect::<std::collections::BTreeSet<_>>();
         let child_turns = cached
-            .index
             .context
             .keys()
             .filter_map(|key| key.strip_prefix("child-start:").map(str::to_owned))
@@ -123,18 +126,20 @@ impl AgentRuntime {
                 return Err(AgentRuntimeError::RuntimeOperationFailed);
             }
             let mut context = Vec::new();
+            let mut provider = ProviderProjection::from_indexed(providers_by_turn);
             for sequence in context_sequences {
                 let page = read_session
                     .replay((sequence > 1).then_some(sequence - 1), 1)
                     .map_err(runtime_operation_failed)?;
                 for record in page.records {
-                    let (mapped, _) = map_authoritative_record_with_projection(
+                    let mapped = map_authoritative_record_with_projection(
                         &read_session,
                         &state,
                         &record,
                         AuthoritativeProjectionMode::Replay,
-                        ProviderProjection::from_current(provider.clone()),
-                    )?;
+                        &mut provider,
+                    )?
+                    .commit();
                     context.extend(mapped.into_iter().filter(|draft| match draft {
                         DeliveryDraft::KeenCodeEvent {
                             event:
@@ -164,7 +169,7 @@ impl AgentRuntime {
                 &state,
                 start,
                 before,
-                provider,
+                &mut provider,
             )?);
             Ok(context)
         })
@@ -248,9 +253,8 @@ fn history_window_drafts(
     state: &SessionState,
     start: u64,
     before: u64,
-    provider: Option<ProviderSnapshot>,
+    provider: &mut ProviderProjection,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    let mut provider = ProviderProjection::from_current(provider);
     let mut after = start - 1;
     let mut drafts = Vec::new();
     while after + 1 < before {
@@ -265,15 +269,15 @@ fn history_window_drafts(
             if record.sequence >= before {
                 break;
             }
-            let (mapped, next) = map_authoritative_record_with_projection(
+            let mapped = map_authoritative_record_with_projection(
                 session,
                 state,
                 &record,
                 AuthoritativeProjectionMode::Replay,
                 provider,
-            )?;
+            )?
+            .commit();
             drafts.extend(mapped);
-            provider = next;
             after = record.sequence;
         }
     }
