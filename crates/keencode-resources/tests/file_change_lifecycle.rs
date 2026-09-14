@@ -365,7 +365,9 @@ fn create_fixture_with_before(
             change: ToolFileChange {
                 path: workspace.path().join("result.bin").display().to_string(),
                 before: before_snapshot,
+                before_readonly: None,
                 after: after_snapshot.clone(),
+                after_readonly: None,
                 applied: false,
             },
         },

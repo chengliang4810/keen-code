@@ -12,7 +12,7 @@ use crate::{
 /// 当前全新 Session 事件格式的固定 schema 名称。
 pub const SESSION_EVENT_SCHEMA: &str = "keencode/session-event";
 /// 当前全新 Session 事件格式版本。
-pub const SESSION_EVENT_VERSION: u32 = 7;
+pub const SESSION_EVENT_VERSION: u32 = 8;
 /// Session 内唯一根 Agent 使用的固定标识。
 pub const ROOT_AGENT_ID: &str = "root";
 /// 冷恢复时返回给模型的唯一副作用未知错误文本。
@@ -329,8 +329,12 @@ pub struct ToolFileChange {
     pub path: String,
     /// 变更前的文件快照；`None` 明确表示原文件不存在。
     pub before: Option<FileSnapshot>,
+    /// 变更前的 Windows `FILE_ATTRIBUTE_READONLY` 状态；其他平台为 `None`。
+    pub before_readonly: Option<bool>,
     /// 变更后的文件快照。
     pub after: FileSnapshot,
+    /// 变更后预期的 Windows `FILE_ATTRIBUTE_READONLY` 状态；其他平台为 `None`。
+    pub after_readonly: Option<bool>,
     /// 文件变更是否已经实际应用到工作区。
     pub applied: bool,
 }

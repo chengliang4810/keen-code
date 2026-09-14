@@ -230,6 +230,19 @@ impl RuntimeSession {
         before: Option<&[u8]>,
         after: &[u8],
     ) -> Result<(), RuntimeError> {
+        self.prepare_file_change_with_readonly(request_id, path, before, after, None, None)
+    }
+
+    /// 在文件变更证据中持久化平台可选的前后只读状态。
+    pub fn prepare_file_change_with_readonly(
+        &self,
+        request_id: &RequestId,
+        path: String,
+        before: Option<&[u8]>,
+        after: &[u8],
+        before_readonly: Option<bool>,
+        after_readonly: Option<bool>,
+    ) -> Result<(), RuntimeError> {
         let prepared_event_id = file_change_event_id(
             self.inner.artifacts.session_id(),
             request_id,
@@ -268,7 +281,9 @@ impl RuntimeSession {
         let planned_change = ToolFileChange {
             path,
             before: before_snapshot,
+            before_readonly,
             after: after_snapshot,
+            after_readonly,
             applied: false,
         };
 

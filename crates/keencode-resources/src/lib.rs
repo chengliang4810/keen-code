@@ -27,7 +27,7 @@ pub use artifact::{
     ArtifactCapacity, ArtifactLimits, ArtifactMaterialized, ArtifactPreview, ArtifactRef,
     ArtifactStore, ArtifactValidator,
 };
-pub use atomic::{FilesystemCapabilities, filesystem_capabilities};
+pub use atomic::{FilesystemCapabilities, existing_file_readonly, filesystem_capabilities};
 pub use catalog::{StoredSessionMetadata, delete_session_storage, list_session_ids};
 pub use document::{
     DocumentLimits, DocumentOperationOutcome, DocumentOperationReceipt, GoalDocument,

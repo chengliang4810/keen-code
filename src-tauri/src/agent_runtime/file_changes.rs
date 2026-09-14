@@ -9,7 +9,10 @@ use keencode_acp::{
     ReadFileChangeRequest, ReadFileChangeResponse, schema,
 };
 use keencode_agent::{ToolContext, ToolError};
-use keencode_resources::{RequestId, SessionEventRecord, SessionState, ToolEffect, ToolFileChange};
+use keencode_resources::{
+    RequestId, SessionEventRecord, SessionState, ToolEffect, ToolFileChange,
+    existing_file_readonly,
+};
 use keencode_runtime::RuntimeSession;
 use keencode_tools::{FileMutationRecorder, PreparedFileMutation};
 
@@ -96,8 +99,20 @@ impl FileMutationRecorder for RuntimeFileMutationRecorder {
             return Err(recording_error());
         }
         let path = path.to_str().ok_or_else(recording_error)?.to_owned();
+        let before_readonly = existing_file_readonly(path.as_ref()).map_err(|_| recording_error())?;
+        #[cfg(windows)]
+        let after_readonly = Some(before_readonly.unwrap_or(false));
+        #[cfg(not(windows))]
+        let after_readonly = None;
         self.session
-            .prepare_file_change(&request_id, path, before, after)
+            .prepare_file_change_with_readonly(
+                &request_id,
+                path,
+                before,
+                after,
+                before_readonly,
+                after_readonly,
+            )
             .map_err(|_| recording_error())?;
         Ok(Box::new(RuntimePreparedFileMutation {
             session: self.session.clone(),

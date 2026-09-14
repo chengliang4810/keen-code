@@ -112,7 +112,7 @@ fn canonical_state_sha256(state: &Value) -> String {
 /// 验证所有停止原因均由 Journal 无损重放，且事件不再保存冗余 status。
 #[test]
 fn all_stop_reasons_round_trip_through_journal() {
-    assert_eq!(SESSION_EVENT_VERSION, 7);
+    assert_eq!(SESSION_EVENT_VERSION, 8);
     let root = TempDir::new().expect("临时目录应创建");
     for (index, reason) in [
         TurnStopReason::Cancelled,

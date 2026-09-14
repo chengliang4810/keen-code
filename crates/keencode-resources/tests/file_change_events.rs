@@ -151,7 +151,9 @@ fn prepared_event(request_id: &RequestId, path: &str, after: FileSnapshot) -> Se
         change: ToolFileChange {
             path: path.to_owned(),
             before: None,
+            before_readonly: None,
             after,
+            after_readonly: None,
             applied: false,
         },
     }

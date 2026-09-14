@@ -9,10 +9,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atomic::{
-    ATOMIC_TEMP_PREFIX, BoundedJson, BoundedRead, atomic_write,
-    atomic_write_preserving_permissions, ensure_regular_file_or_absent, exclusive_lock,
-    existing_file_readonly, prepare_root, read_file_bounded, secure_child_dir,
-    serialize_json_bounded, set_file_readonly, sync_directory,
+    ATOMIC_TEMP_PREFIX, BoundedJson, BoundedRead, atomic_write, atomic_write_with_readonly,
+    ensure_regular_file_or_absent, exclusive_lock, existing_file_readonly, prepare_root,
+    read_file_bounded, secure_child_dir, serialize_json_bounded, set_file_readonly, sync_directory,
 };
 use crate::{
     ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse, FileSnapshot,
@@ -25,7 +24,7 @@ use crate::{
 /// Session 变更事务记录使用的固定 schema。
 const MUTATION_SCHEMA: &str = "keencode/session-mutation";
 /// Session 变更事务记录的唯一格式版本。
-const MUTATION_VERSION: u32 = 3;
+const MUTATION_VERSION: u32 = 4;
 /// 单个事务记录允许占用的最大字节数。
 const MAX_MUTATION_RECORD_BYTES: u64 = 64 * 1024;
 /// 启动恢复一次允许扫描的最大事务记录数。
@@ -129,8 +128,12 @@ struct FileRestorePlan {
     path: PathBuf,
     /// 第一笔变更之前的完整快照；空值表示原文件不存在。
     before: Option<FileSnapshot>,
+    /// 第一笔变更之前的 Windows `FILE_ATTRIBUTE_READONLY` 状态。
+    before_readonly: Option<bool>,
     /// 最后一笔变更实际应用后的完整快照。
     after: FileSnapshot,
+    /// 最后一笔变更实际应用后的 Windows `FILE_ATTRIBUTE_READONLY` 状态。
+    after_readonly: Option<bool>,
 }
 
 /// 唯一受支持的 Session 变更事务记录。
@@ -856,19 +859,24 @@ fn file_restore_plan(
             ));
         }
         if let Some(existing) = by_path.get_mut(&path) {
-            if change.before.as_ref() != Some(&existing.after) {
+            if change.before.as_ref() != Some(&existing.after)
+                || change.before_readonly != existing.after_readonly
+            {
                 return Err(ResourceError::SessionMutationNotApplicable(
                     "同一路径的文件变更快照不连续，不能安全恢复".to_owned(),
                 ));
             }
             existing.after = change.after.clone();
+            existing.after_readonly = change.after_readonly;
         } else {
             by_path.insert(
                 path.clone(),
                 FileRestorePlan {
                     path,
                     before: change.before.clone(),
+                    before_readonly: change.before_readonly,
                     after: change.after.clone(),
+                    after_readonly: change.after_readonly,
                 },
             );
         }
@@ -892,7 +900,7 @@ fn collect_applied_file_change_ids(event: &SessionEvent, ids: &mut Vec<RequestId
 /// 在生成不保存用户文件正文的确定性恢复计划摘要。
 fn file_restore_plan_sha256(plan: &[FileRestorePlan]) -> String {
     let mut hasher = Sha256::new();
-    update_hash_part(&mut hasher, b"keencode/session-edit-file-restore/v1");
+    update_hash_part(&mut hasher, b"keencode/session-edit-file-restore/v2");
     for entry in plan {
         update_hash_part(&mut hasher, entry.path.as_os_str().as_encoded_bytes());
         match &entry.before {
@@ -903,10 +911,20 @@ fn file_restore_plan_sha256(plan: &[FileRestorePlan]) -> String {
             }
             None => update_hash_part(&mut hasher, b"none"),
         }
+        update_optional_readonly_hash(&mut hasher, entry.before_readonly);
         update_hash_part(&mut hasher, &entry.after.size_bytes.to_le_bytes());
         update_hash_part(&mut hasher, entry.after.sha256.as_bytes());
+        update_optional_readonly_hash(&mut hasher, entry.after_readonly);
     }
     format!("{:x}", hasher.finalize())
+}
+
+/// 把平台可选的只读状态纳入恢复计划摘要，避免恢复时重新猜测已丢失属性。
+fn update_optional_readonly_hash(hasher: &mut Sha256, readonly: Option<bool>) {
+    match readonly {
+        Some(value) => update_hash_part(hasher, if value { b"readonly" } else { b"writable" }),
+        None => update_hash_part(hasher, b"unsupported-or-unknown"),
+    }
 }
 
 /// 在任何用户文件写入入前验证全部 Artifact 与工作当前文件状态，冲突不留下副作用。
@@ -922,8 +940,8 @@ fn preflight_file_restore(
             artifacts.validate_file_snapshot(before)?;
         }
         let current = current_file_identity(&entry.path)?;
-        if !identity_matches_snapshot(current.as_ref(), Some(&entry.after))
-            && !identity_matches_snapshot(current.as_ref(), entry.before.as_ref())
+        if !content_matches_snapshot(current.as_ref(), Some(&entry.after))
+            && !content_matches_snapshot(current.as_ref(), entry.before.as_ref())
         {
             return Err(ResourceError::SessionMutationNotApplicable(format!(
                 "文件已在工具修改后再次变化，不能安全恢复：{}",
@@ -942,19 +960,53 @@ fn apply_file_restore(
     preflight_file_restore(artifacts, plan)?;
     for entry in plan {
         let current = current_file_identity(&entry.path)?;
-        if identity_matches_snapshot(current.as_ref(), entry.before.as_ref()) {
-            continue;
-        }
-        if !identity_matches_snapshot(current.as_ref(), Some(&entry.after)) {
-            return Err(ResourceError::SessionMutationNotApplicable(format!(
-                "文件恢复提交前状态已变化：{}",
-                entry.path.display()
-            )));
+        match classify_file_restore_action(current.as_ref(), entry) {
+            FileRestoreAction::AlreadyRestored => continue,
+            FileRestoreAction::RepairBeforeReadonly => {
+                // 内容已经恢复但进程可能在设置 Windows 属性前崩溃；只收敛属性，
+                // 不重复替换文件，避免再次扩大崩溃窗口。
+                set_file_readonly(&entry.path, entry.before_readonly.unwrap_or(false))?;
+                let repaired = current_file_identity(&entry.path)?;
+                if !identity_matches_snapshot(
+                    repaired.as_ref(),
+                    entry.before.as_ref(),
+                    entry.before_readonly,
+                ) {
+                    return Err(ResourceError::SessionMutationRecoveryRequired(format!(
+                        "文件恢复属性无法确认：{}",
+                        entry.path.display()
+                    )));
+                }
+                continue;
+            }
+            FileRestoreAction::RepairAfterReadonly => {
+                // 原子替换前清除只读属性后崩溃时，内容仍是 after 但属性不符；
+                // 先恢复 after 属性，再重试完整替换。
+                set_file_readonly(&entry.path, entry.after_readonly.unwrap_or(false))?;
+                let repaired = current_file_identity(&entry.path)?;
+                if !identity_matches_snapshot(
+                    repaired.as_ref(),
+                    Some(&entry.after),
+                    entry.after_readonly,
+                ) {
+                    return Err(ResourceError::SessionMutationRecoveryRequired(format!(
+                        "文件恢复前置属性无法确认：{}",
+                        entry.path.display()
+                    )));
+                }
+            }
+            FileRestoreAction::RestoreContent => {}
+            FileRestoreAction::Conflict => {
+                return Err(ResourceError::SessionMutationNotApplicable(format!(
+                    "文件恢复提交前状态已变化：{}",
+                    entry.path.display()
+                )));
+            }
         }
         match &entry.before {
             Some(before) => {
                 let bytes = artifacts.read_file_snapshot(before)?;
-                atomic_write_preserving_permissions(&entry.path, &bytes, true)?;
+                atomic_write_with_readonly(&entry.path, &bytes, true, entry.before_readonly)?;
             }
             None => {
                 ensure_regular_file_or_absent(&entry.path)?;
@@ -975,7 +1027,11 @@ fn apply_file_restore(
             }
         }
         let restored = current_file_identity(&entry.path)?;
-        if !identity_matches_snapshot(restored.as_ref(), entry.before.as_ref()) {
+        if !identity_matches_snapshot(
+            restored.as_ref(),
+            entry.before.as_ref(),
+            entry.before_readonly,
+        ) {
             return Err(ResourceError::SessionMutationRecoveryRequired(format!(
                 "文件恢复结果无法确认：{}",
                 entry.path.display()
@@ -985,8 +1041,34 @@ fn apply_file_restore(
     Ok(())
 }
 
-/// 返回普通文件的字节长度与 SHA-256；缺失文件为 `None`，符号链接一律拒绝。
-fn current_file_identity(path: &Path) -> Result<Option<(u64, String)>, ResourceError> {
+/// 普通文件恢复校验使用的内容与平台可选属性。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    /// 原始文件字节长度。
+    size_bytes: u64,
+    /// 原始文件 SHA-256。
+    sha256: String,
+    /// Windows `FILE_ATTRIBUTE_READONLY`；其他平台为 `None`。
+    readonly: Option<bool>,
+}
+
+/// 恢复一条路径时由内容和只读状态共同决定的幂等动作。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FileRestoreAction {
+    /// 内容与 before 以及其期望属性都已满足。
+    AlreadyRestored,
+    /// 内容已是 before，只需修复 before 的只读属性。
+    RepairBeforeReadonly,
+    /// 内容仍是 after，但原子替换前的只读属性被清除，只需先修复 after 属性。
+    RepairAfterReadonly,
+    /// 当前内容是 after，属性也正确，需要执行内容恢复。
+    RestoreContent,
+    /// 当前内容既不是 before 也不是 after，必须拒绝恢复。
+    Conflict,
+}
+
+/// 返回普通文件的字节、SHA-256 与只读状态；缺失文件为 `None`，符号链接一律拒绝。
+fn current_file_identity(path: &Path) -> Result<Option<FileIdentity>, ResourceError> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1007,20 +1089,63 @@ fn current_file_identity(path: &Path) -> Result<Option<(u64, String)>, ResourceE
     }
     let bytes =
         fs::read(path).map_err(|error| ResourceError::io("read_file_restore_target", error))?;
-    Ok(Some((bytes.len() as u64, sha256_hex(&bytes))))
+    Ok(Some(FileIdentity {
+        size_bytes: bytes.len() as u64,
+        sha256: sha256_hex(&bytes),
+        readonly: existing_file_readonly(path)?,
+    }))
 }
 
-/// 比较文件当前身份与可选快照；两边均为空表示文件已恢复为不存在。
-fn identity_matches_snapshot(
-    current: Option<&(u64, String)>,
+/// 只比较内容身份；用于识别属性修复或原子替换中途的崩溃窗口。
+fn content_matches_snapshot(
+    current: Option<&FileIdentity>,
     snapshot: Option<&FileSnapshot>,
 ) -> bool {
     match (current, snapshot) {
         (None, None) => true,
-        (Some((size, sha256)), Some(snapshot)) => {
-            *size == snapshot.size_bytes && sha256 == &snapshot.sha256
+        (Some(current), Some(snapshot)) => {
+            current.size_bytes == snapshot.size_bytes && current.sha256 == snapshot.sha256
         }
         (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+/// 比较文件当前内容与可选快照以及期望的只读状态；两边均为空表示不存在。
+fn identity_matches_snapshot(
+    current: Option<&FileIdentity>,
+    snapshot: Option<&FileSnapshot>,
+    expected_readonly: Option<bool>,
+) -> bool {
+    if !content_matches_snapshot(current, snapshot) {
+        return false;
+    }
+    match (current, snapshot) {
+        (None, None) => true,
+        (Some(current), Some(_)) => {
+            expected_readonly.is_none_or(|expected| current.readonly == Some(expected))
+        }
+        (None, Some(_)) | (Some(_), None) => false,
+    }
+}
+
+/// 识别恢复事务在属性变更或原子替换各崩溃窗口中的下一步动作。
+fn classify_file_restore_action(
+    current: Option<&FileIdentity>,
+    entry: &FileRestorePlan,
+) -> FileRestoreAction {
+    if identity_matches_snapshot(current, entry.before.as_ref(), entry.before_readonly) {
+        return FileRestoreAction::AlreadyRestored;
+    }
+    if content_matches_snapshot(current, entry.before.as_ref()) {
+        return FileRestoreAction::RepairBeforeReadonly;
+    }
+    if !content_matches_snapshot(current, Some(&entry.after)) {
+        return FileRestoreAction::Conflict;
+    }
+    if identity_matches_snapshot(current, Some(&entry.after), entry.after_readonly) {
+        FileRestoreAction::RestoreContent
+    } else {
+        FileRestoreAction::RepairAfterReadonly
     }
 }
 
@@ -2236,19 +2361,21 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MutationFault, edit_request_sha256, fork_session, inject_mutation_fault, operation_key,
-        prepare_edit_user, read_all_records, recover_session_mutations, root_user_messages,
-        target_root_user_sequence,
+        FileIdentity, FileRestoreAction, FileRestorePlan, MutationFault,
+        classify_file_restore_action, content_matches_snapshot, edit_request_sha256, fork_session,
+        identity_matches_snapshot, inject_mutation_fault, operation_key, prepare_edit_user,
+        read_all_records, recover_session_mutations, root_user_messages, target_root_user_sequence,
     };
     use crate::{
-        AgentId, ArtifactLimits, ArtifactMaterialization, ArtifactStore, GeneratedTitleRecord,
-        IdempotentAppendOutcome, JournalConfig, MailboxMessage, MailboxMessageId, MailboxState,
-        MessagePart, MessageRole, PersistedToolResult, PlanState, ProviderProtocolSnapshot,
-        ProviderSnapshot, RequestId, ResourceError, SessionEditUserRequest, SessionEvent,
-        SessionEventId, SessionEventRecord, SessionForkRequest, SessionId, SessionJournal,
-        SessionLease, SessionLeaseAcquire, SessionMessage, SessionOpen, SubAgentState,
-        SubAgentStatus, TodoItem, TodoStatus, ToolCompletionStatus, ToolEffect, ToolFileChange,
-        ToolOutcome, ToolRequest, ToolResultPart, TranscriptSegment, TurnId, WorktreeRecord,
+        AgentId, ArtifactLimits, ArtifactMaterialization, ArtifactStore, FileSnapshot,
+        GeneratedTitleRecord, IdempotentAppendOutcome, JournalConfig, MailboxMessage,
+        MailboxMessageId, MailboxState, MessagePart, MessageRole, PersistedToolResult, PlanState,
+        ProviderProtocolSnapshot, ProviderSnapshot, RequestId, ResourceError,
+        SessionEditUserRequest, SessionEvent, SessionEventId, SessionEventRecord,
+        SessionForkRequest, SessionId, SessionJournal, SessionLease, SessionLeaseAcquire,
+        SessionMessage, SessionOpen, SubAgentState, SubAgentStatus, TodoItem, TodoStatus,
+        ToolCompletionStatus, ToolEffect, ToolFileChange, ToolOutcome, ToolRequest, ToolResultPart,
+        TranscriptSegment, TurnId, WorktreeRecord,
     };
 
     /// 在临时存储根创建默认的两个完整用户 Turn 和一个 Artifact。
@@ -2480,7 +2607,9 @@ mod tests {
                 change: ToolFileChange {
                     path: path.display().to_string(),
                     before,
+                    before_readonly: None,
                     after: after_snapshot,
+                    after_readonly: None,
                     applied: false,
                 },
             },
@@ -3820,6 +3949,108 @@ mod tests {
                 .map(|agent| &agent.status),
             Some(&SubAgentStatus::Completed),
             "子 Agent 生命周期事实必须保留"
+        );
+    }
+
+    /// 文件内容相同但只读属性丢失时，恢复状态必须识别为可收敛的中间窗口，
+    /// 同时禁止把它误认为已经完成的 before 状态。
+    #[test]
+    fn file_restore_identity_tracks_readonly_separately_from_content() {
+        let before = FileSnapshot {
+            size_bytes: 6,
+            sha256: super::sha256_hex(b"before"),
+            chunks: Vec::new(),
+        };
+        let current = FileIdentity {
+            size_bytes: before.size_bytes,
+            sha256: before.sha256.clone(),
+            readonly: Some(false),
+        };
+
+        assert!(content_matches_snapshot(Some(&current), Some(&before)));
+        assert!(!identity_matches_snapshot(
+            Some(&current),
+            Some(&before),
+            Some(true),
+        ));
+        assert!(identity_matches_snapshot(
+            Some(&current),
+            Some(&before),
+            Some(false),
+        ));
+    }
+
+    /// 原子替换在清除只读属性后崩溃时，after 内容仍可被识别并在重试前修复属性；
+    /// 新建文件删除失败后也不能因属性变化而丢失继续删除的机会。
+    #[test]
+    fn file_restore_content_window_remains_retryable_after_readonly_loss() {
+        let before = FileSnapshot {
+            size_bytes: 6,
+            sha256: super::sha256_hex(b"before"),
+            chunks: Vec::new(),
+        };
+        let after = FileSnapshot {
+            size_bytes: 5,
+            sha256: super::sha256_hex(b"after"),
+            chunks: Vec::new(),
+        };
+        let current_after = FileIdentity {
+            size_bytes: after.size_bytes,
+            sha256: after.sha256.clone(),
+            readonly: Some(false),
+        };
+        let current_before = FileIdentity {
+            size_bytes: before.size_bytes,
+            sha256: before.sha256.clone(),
+            readonly: Some(false),
+        };
+        let plan = FileRestorePlan {
+            path: Path::new("C:\\workspace\\file.txt").to_owned(),
+            before: Some(before.clone()),
+            before_readonly: Some(true),
+            after: after.clone(),
+            after_readonly: Some(true),
+        };
+
+        assert_eq!(
+            classify_file_restore_action(Some(&current_after), &plan),
+            FileRestoreAction::RepairAfterReadonly
+        );
+        assert_eq!(
+            classify_file_restore_action(Some(&current_before), &plan),
+            FileRestoreAction::RepairBeforeReadonly
+        );
+        let restored = FileIdentity {
+            readonly: Some(true),
+            ..current_before
+        };
+        assert_eq!(
+            classify_file_restore_action(Some(&restored), &plan),
+            FileRestoreAction::AlreadyRestored
+        );
+        let conflict = FileIdentity {
+            size_bytes: 7,
+            sha256: super::sha256_hex(b"changed"),
+            readonly: Some(false),
+        };
+        assert_eq!(
+            classify_file_restore_action(Some(&conflict), &plan),
+            FileRestoreAction::Conflict
+        );
+        let created_plan = FileRestorePlan {
+            path: Path::new("C:\\workspace\\created.txt").to_owned(),
+            before: None,
+            before_readonly: None,
+            after,
+            after_readonly: Some(true),
+        };
+        assert_eq!(
+            classify_file_restore_action(Some(&current_after), &created_plan),
+            FileRestoreAction::RepairAfterReadonly
+        );
+        assert_eq!(
+            classify_file_restore_action(None, &created_plan),
+            FileRestoreAction::AlreadyRestored
         );
     }
 

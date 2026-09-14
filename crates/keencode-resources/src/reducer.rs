@@ -2340,6 +2340,7 @@ fn valid_tool_outcome(outcome: &crate::ToolOutcome) -> bool {
 fn valid_tool_file_change_shape(change: &crate::ToolFileChange) -> bool {
     !change.path.trim().is_empty()
         && valid_cross_platform_absolute_path(&change.path)
+        && (change.before.is_some() || change.before_readonly.is_none())
         && !change.applied
         && change.after.validate_shape().is_ok()
         && change
