@@ -11,11 +11,11 @@ use crate::{
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnSignalKind, CloseAgentTree,
     CollaborationAgentStatus, CollaborationCoordinator, CollaborationError, CollaborationEvent,
     CollaborationEventKind, CollaborationGlobalTurnLimiter, CollaborationIdGenerator,
-    CollaborationInvocationKind, CollaborationLimits, CollaborationPortError, CollaborationStore,
-    CollaborationTransitionCommit, ContextInheritance, MailboxDelivery, MailboxMessage,
-    MailboxMessageId, PlanGuard, RecoveredAgentTree, RootAgentRequest, SessionId,
-    SpawnAgentRequest, ToolCallId, TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome,
-    WorktreeLease,
+    CollaborationInvocationKind, CollaborationInvocationOutput, CollaborationLimits,
+    CollaborationPortError, CollaborationStore, CollaborationTransitionCommit, ContextInheritance,
+    MailboxDelivery, MailboxMessage, MailboxMessageId, PlanGuard, RecoveredAgentTree,
+    RootAgentRequest, SessionId, SpawnAgentRequest, ToolCallId, TurnCompletionDisposition, TurnId,
+    UserSteer, WaitAgentOutcome, WorktreeLease,
 };
 use keencode_model::{Message, MessageRole};
 use std::collections::{HashMap, HashSet};
@@ -7820,7 +7820,7 @@ fn resume_agent_after_cold_restore_preserves_causality_claims_and_operation_resu
     );
 }
 
-/// Resume 必须把失败 Turn 尚未消费的 TriggerTurn mailbox 归属重绑定到新 Turn。
+/// Resume 后的 checkpoint 必须区分首次触发 Turn 与当前归属，并保留输入 claim 和首次回执。
 #[test]
 fn resume_rebinds_trigger_turn_after_pending_dynamic_input_failure() {
     let fixture = fixture(4, 4);
@@ -7847,17 +7847,23 @@ fn resume_rebinds_trigger_turn_after_pending_dynamic_input_failure() {
             },
         )
         .unwrap();
-    let (_, trigger_turn) = fixture
+    let followup_call_id = fixed_tool_call_id("resume-trigger-rebind-followup");
+    let (message_id, trigger_turn) = fixture
         .coordinator
         .followup_agent(
             &fixture.root_agent_id,
             &root_turn,
-            &next_tool_call_id(),
+            &followup_call_id,
             &child.agent.agent_id,
             "触发失败恢复",
         )
         .unwrap();
     let trigger_turn = trigger_turn.expect("空闲子 Agent 应启动 TriggerTurn");
+    let claimed = fixture
+        .coordinator
+        .consume_mailbox(&child.agent.agent_id, &trigger_turn, usize::MAX)
+        .unwrap();
+    assert_eq!(claimed.len(), 1);
     fixture
         .coordinator
         .complete_turn_with_pending_dynamic_input(
@@ -7875,33 +7881,421 @@ fn resume_rebinds_trigger_turn_after_pending_dynamic_input_failure() {
         .unwrap();
     let child_snapshot = fixture
         .coordinator
-        .checkpoint_root(&fixture.root_agent_id)
+        .checkpoint_coordinator()
         .unwrap()
+        .roots
+        .into_iter()
+        .find(|tree| tree.root_agent_id == fixture.root_agent_id)
+        .expect("checkpoint 应包含目标根树")
         .agents
         .into_iter()
         .find(|agent| agent.definition.agent_id == child.agent.agent_id)
         .expect("checkpoint 应包含恢复目标");
     assert_eq!(
+        child_snapshot.mailbox[0].initial_triggered_turn_id,
+        Some(trigger_turn.clone())
+    );
+    assert_eq!(
         child_snapshot.mailbox[0].claimed_turn_id,
         Some(resumed_turn.clone())
     );
+    assert_eq!(
+        child_snapshot.mailbox_claim_turn_id,
+        Some(resumed_turn.clone())
+    );
 
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let restored_execution = Arc::new(RecordingExecution::default());
+    let restored = CollaborationCoordinator::new(
+        CollaborationLimits::new(4).unwrap(),
+        fixture.store.clone(),
+        restored_execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(97_000),
+        }),
+    );
+    restored.restore_coordinator(checkpoint).unwrap();
+    let launches_before_replay = restored_execution.launches().len();
+    assert_eq!(
+        restored
+            .followup_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &followup_call_id,
+                &child.agent.agent_id,
+                "触发失败恢复",
+            )
+            .unwrap(),
+        (message_id, Some(trigger_turn.clone()))
+    );
+    assert_eq!(restored_execution.launches().len(), launches_before_replay);
+
+    let rebound_turn = restored
+        .resume_agent_for_root(&fixture.root_agent_id, &child.agent.agent_id)
+        .unwrap();
+    let rebound = restored
+        .consume_mailbox(&child.agent.agent_id, &rebound_turn, usize::MAX)
+        .unwrap();
+    assert_eq!(rebound, claimed);
+    let rebound_snapshot = restored
+        .checkpoint_root(&fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .into_iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .expect("checkpoint 应包含再次恢复的目标");
+    assert_eq!(
+        rebound_snapshot.mailbox_claim_turn_id,
+        Some(rebound_turn.clone())
+    );
+    acknowledge_mailbox_batch(&restored, &child.agent.agent_id, &rebound_turn, &rebound);
+}
+
+/// 多次 Resume/Retry 只能更新当前 mailbox 与输入 claim 归属，不能改写首次触发身份。
+#[test]
+fn repeated_resume_and_retry_keep_initial_trigger_and_latest_claim_restorable() {
+    let fixture = fixture(4, 4);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建多次重绑场景", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("repeated_trigger_rebind"),
+        )
+        .unwrap();
     fixture
         .coordinator
         .complete_turn(
             &child.agent.agent_id,
-            &resumed_turn,
+            &child.initial_turn_id,
             AgentTurnOutcome::Completed {
                 final_message: None,
             },
         )
         .unwrap();
-    assert!(fixture.execution.launches().iter().any(|launch| {
-        launch.agent.agent_id == child.agent.agent_id
-            && launch.turn_id != child.initial_turn_id
-            && launch.turn_id != trigger_turn
-            && launch.turn_id != resumed_turn
-    }));
+    let (_, initial_trigger) = fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("repeated-trigger-message"),
+            &child.agent.agent_id,
+            "多次重绑仍只保留一次触发",
+        )
+        .unwrap();
+    let initial_trigger = initial_trigger.expect("空闲目标应创建首次触发 Turn");
+    fixture
+        .coordinator
+        .consume_mailbox(&child.agent.agent_id, &initial_trigger, usize::MAX)
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn_with_pending_dynamic_input(
+            &child.agent.agent_id,
+            &initial_trigger,
+            AgentTurnOutcome::Failed {
+                message: "首次失败".to_owned(),
+            },
+        )
+        .unwrap();
+
+    let first_resume = fixture
+        .coordinator
+        .resume_agent_for_root(&fixture.root_agent_id, &child.agent.agent_id)
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn_with_pending_dynamic_input(
+            &child.agent.agent_id,
+            &first_resume,
+            AgentTurnOutcome::Failed {
+                message: "再次失败".to_owned(),
+            },
+        )
+        .unwrap();
+    let retry_turn = fixture
+        .coordinator
+        .retry_agent(&fixture.root_agent_id, &root_turn, &child.agent.agent_id)
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn_with_pending_dynamic_input(
+            &child.agent.agent_id,
+            &retry_turn,
+            AgentTurnOutcome::Failed {
+                message: "第三次失败".to_owned(),
+            },
+        )
+        .unwrap();
+    let latest_resume = fixture
+        .coordinator
+        .resume_agent_for_root(&fixture.root_agent_id, &child.agent.agent_id)
+        .unwrap();
+
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let child_snapshot = checkpoint
+        .roots
+        .iter()
+        .find(|tree| tree.root_agent_id == fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .unwrap();
+    assert_eq!(
+        child_snapshot.mailbox[0].initial_triggered_turn_id.as_ref(),
+        Some(&initial_trigger)
+    );
+    assert_eq!(
+        child_snapshot.mailbox[0].claimed_turn_id.as_ref(),
+        Some(&latest_resume)
+    );
+    assert_eq!(
+        child_snapshot.mailbox_claim_turn_id.as_ref(),
+        Some(&latest_resume)
+    );
+
+    restore_coordinator(fixture.store.clone(), 4, 98_000)
+        .restore_coordinator(checkpoint)
+        .unwrap();
+}
+
+/// 运行中目标收到的 TriggerTurn 与 QueueOnly 都不能伪造首次触发 Turn。
+#[test]
+fn running_trigger_and_queue_only_restore_without_initial_trigger() {
+    let fixture = fixture(4, 4);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "运行中投递消息", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("running_trigger_identity"),
+        )
+        .unwrap();
+    let queue_message_id = fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("running-queue-only"),
+            &child.agent.agent_id,
+            "只入队",
+        )
+        .unwrap();
+    let trigger_call_id = fixed_tool_call_id("running-trigger-turn");
+    let (trigger_message_id, triggered_turn_id) = fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &trigger_call_id,
+            &child.agent.agent_id,
+            "当前 Turn 后再处理",
+        )
+        .unwrap();
+    assert!(triggered_turn_id.is_none());
+
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let child_snapshot = checkpoint
+        .roots
+        .iter()
+        .find(|tree| tree.root_agent_id == fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .unwrap();
+    let queue_message = child_snapshot
+        .mailbox
+        .iter()
+        .find(|entry| entry.message.message_id == queue_message_id)
+        .unwrap();
+    assert!(queue_message.initial_triggered_turn_id.is_none());
+    assert!(queue_message.claimed_turn_id.is_none());
+    let trigger_message = child_snapshot
+        .mailbox
+        .iter()
+        .find(|entry| entry.message.message_id == trigger_message_id)
+        .unwrap();
+    assert!(trigger_message.initial_triggered_turn_id.is_none());
+    assert!(trigger_message.claimed_turn_id.is_some());
+
+    let restored_execution = Arc::new(RecordingExecution::default());
+    let restored = CollaborationCoordinator::new(
+        CollaborationLimits::new(4).unwrap(),
+        fixture.store.clone(),
+        restored_execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(99_000),
+        }),
+    );
+    restored.restore_coordinator(checkpoint).unwrap();
+    let launches_before_replay = restored_execution.launches().len();
+    assert_eq!(
+        restored
+            .followup_agent(
+                &fixture.root_agent_id,
+                &root_turn,
+                &trigger_call_id,
+                &child.agent.agent_id,
+                "当前 Turn 后再处理",
+            )
+            .unwrap(),
+        (trigger_message_id, None)
+    );
+    assert_eq!(restored_execution.launches().len(), launches_before_replay);
+}
+
+/// 恢复必须拒绝篡改首次触发、当前归属，以及拿另一消息冒充 SendMessage 回执。
+#[test]
+fn recovery_rejects_tampered_trigger_ownership_and_unrelated_message_receipt() {
+    let fixture = fixture(4, 4);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建 mailbox 篡改快照", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("mailbox_trigger_tamper"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    let trigger_call_id = fixed_tool_call_id("tamper-trigger-message");
+    let (trigger_message_id, trigger_turn) = fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &trigger_call_id,
+            &child.agent.agent_id,
+            "首次触发消息",
+        )
+        .unwrap();
+    let trigger_turn = trigger_turn.unwrap();
+    let first_queue_call_id = fixed_tool_call_id("tamper-queue-first");
+    let first_queue_message_id = fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &root_turn,
+            &first_queue_call_id,
+            &child.agent.agent_id,
+            "第一封 QueueOnly",
+        )
+        .unwrap();
+    let second_queue_call_id = fixed_tool_call_id("tamper-queue-second");
+    let second_queue_message_id = fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &root_turn,
+            &second_queue_call_id,
+            &child.agent.agent_id,
+            "第二封 QueueOnly",
+        )
+        .unwrap();
+    let snapshot = fixture.coordinator.checkpoint_coordinator().unwrap();
+
+    let mut tampered_initial = snapshot.clone();
+    let trigger_entry = tampered_initial
+        .roots
+        .iter_mut()
+        .flat_map(|tree| tree.agents.iter_mut())
+        .flat_map(|agent| agent.mailbox.iter_mut())
+        .find(|entry| entry.message.message_id == trigger_message_id)
+        .unwrap();
+    trigger_entry.initial_triggered_turn_id = Some(child.initial_turn_id.clone());
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 4, 100_000)
+            .restore_coordinator(tampered_initial)
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+
+    let mut tampered_claim = snapshot.clone();
+    let trigger_entry = tampered_claim
+        .roots
+        .iter_mut()
+        .flat_map(|tree| tree.agents.iter_mut())
+        .flat_map(|agent| agent.mailbox.iter_mut())
+        .find(|entry| entry.message.message_id == trigger_message_id)
+        .unwrap();
+    assert_eq!(trigger_entry.claimed_turn_id.as_ref(), Some(&trigger_turn));
+    trigger_entry.claimed_turn_id = Some(child.initial_turn_id.clone());
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 4, 101_000)
+            .restore_coordinator(tampered_claim)
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+
+    let mut missing_receipt = snapshot.clone();
+    missing_receipt
+        .invocations
+        .retain(|invocation| invocation.key.tool_call_id != first_queue_call_id);
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 4, 102_000)
+            .restore_coordinator(missing_receipt)
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+
+    let mut unrelated_receipts = snapshot;
+    for invocation in &mut unrelated_receipts.invocations {
+        let replacement = if invocation.key.tool_call_id == first_queue_call_id {
+            Some(second_queue_message_id.clone())
+        } else if invocation.key.tool_call_id == second_queue_call_id {
+            Some(first_queue_message_id.clone())
+        } else {
+            None
+        };
+        if let Some(replacement) = replacement {
+            let CollaborationInvocationOutput::Message { message_id, .. } = &mut invocation.output
+            else {
+                panic!("QueueOnly 调用必须保存 Message 输出");
+            };
+            *message_id = replacement;
+        }
+    }
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 4, 103_000)
+            .restore_coordinator(unrelated_receipts)
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
 }
 
 /// 根授权恢复的 operationId 不能把另一目标的 Resume 记录误当成幂等重放。
@@ -9416,6 +9810,91 @@ fn cold_load_rejects_tampered_checkpoint_revision_and_digest() {
                 &next_tool_call_id(),
                 &child_agent_id,
                 "digest 篡改后冷加载",
+            )
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+}
+
+/// 局部 checkpoint 摘要必须覆盖 mailbox 首次触发 Turn，不能只保护可变当前归属。
+#[test]
+fn cold_load_digest_rejects_tampered_initial_mailbox_trigger() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建首次触发摘要快照", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("initial_trigger_digest"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    fixture.execution.fail_next_start();
+    assert!(matches!(
+        fixture.coordinator.followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("initial-trigger-digest-message"),
+            &child.agent.agent_id,
+            "保留首次触发身份",
+        ),
+        Err(CollaborationError::CommittedExecutionPending { .. })
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Failed { .. }
+    ));
+    fixture
+        .coordinator
+        .evict_idle_agent(&child.agent.agent_id)
+        .unwrap();
+    let mut tampered = fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .get(&child.agent.agent_id)
+        .expect("驱逐应保存局部 checkpoint")
+        .clone();
+    assert!(
+        tampered.agent.mailbox[0]
+            .initial_triggered_turn_id
+            .is_some()
+    );
+    tampered.agent.mailbox[0].initial_triggered_turn_id = None;
+    fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .insert(child.agent.agent_id.clone(), tampered);
+
+    assert!(matches!(
+        fixture
+            .coordinator
+            .send_message(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                &child.agent.agent_id,
+                "篡改后冷加载",
             )
             .unwrap_err(),
         CollaborationError::InvalidRecovery { .. }

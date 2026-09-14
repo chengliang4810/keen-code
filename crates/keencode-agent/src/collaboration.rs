@@ -1375,12 +1375,14 @@ impl CollaborationIdGenerator for UuidCollaborationIdGenerator {
     }
 }
 
-/// 持久化快照中一封 mailbox 消息及其 Followup 触发归属。
+/// 持久化快照中一封 mailbox 消息及其 Followup 触发身份与当前归属。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RecoveredMailboxMessage {
     /// 需要恢复的完整 mailbox 消息。
     pub message: MailboxMessage,
-    /// 该 TriggerTurn 消息已经归属的待执行或活跃 Turn；普通消息固定为 `None`。
+    /// TriggerTurn 首次为空闲目标创建的 Turn；创建后永不随重试或恢复改写。
+    pub initial_triggered_turn_id: Option<TurnId>,
+    /// 该 TriggerTurn 消息当前归属的待执行或活跃 Turn；普通消息固定为 `None`。
     pub claimed_turn_id: Option<TurnId>,
 }
 
@@ -2083,12 +2085,14 @@ impl From<AgentPathError> for CollaborationError {
     }
 }
 
-/// mailbox 内部条目同时记录 TriggerTurn 是否已归属到某个 Turn。
+/// mailbox 内部条目同时记录 TriggerTurn 的首次触发身份与当前 Turn 归属。
 #[derive(Clone, Debug)]
 struct MailboxEntry {
     /// 对外可见并持久化的完整消息。
     message: MailboxMessage,
-    /// 已为该 TriggerTurn 消息创建或复用的待执行 Turn。
+    /// 首次入队时为空闲目标创建的 Turn；后续只读。
+    initial_triggered_turn_id: Option<TurnId>,
+    /// 当前为该 TriggerTurn 消息创建或复用的待执行 Turn。
     claimed_turn_id: Option<TurnId>,
 }
 
@@ -2177,6 +2181,8 @@ struct EvictedAgentCheckpointRef {
     steer_count: usize,
     /// 局部 checkpoint 中尚未消费的 steer 正文字节数。
     steer_bytes: usize,
+    /// 局部 checkpoint 中 mailbox 首次触发 Turn 标识的总字节数。
+    initial_triggered_turn_bytes: usize,
     /// 除 mailbox 与 steer 外，该 Agent 动态保留文本的字节数。
     dynamic_text_bytes: usize,
 }
@@ -2422,7 +2428,9 @@ struct MailboxDraft {
     parent_turn_id: Option<TurnId>,
     /// 根 Turn。
     root_turn_id: Option<TurnId>,
-    /// TriggerTurn 已归属的待执行或活跃 Turn。
+    /// TriggerTurn 首次为空闲目标创建的 Turn。
+    initial_triggered_turn_id: Option<TurnId>,
+    /// TriggerTurn 当前归属的待执行或活跃 Turn。
     claimed_turn_id: Option<TurnId>,
 }
 
@@ -3936,6 +3944,7 @@ impl CollaborationCoordinator {
                     related_turn_id: Some(source_turn.turn_id.clone()),
                     parent_turn_id: Some(source_turn.turn_id.clone()),
                     root_turn_id: Some(source_turn.root_turn_id.clone()),
+                    initial_triggered_turn_id: candidate_turn_id.clone(),
                     claimed_turn_id,
                 },
                 &mut events,
@@ -5894,6 +5903,17 @@ impl CollaborationCoordinator {
             .iter()
             .map(|steer| steer.content.len())
             .sum();
+        let initial_triggered_turn_bytes = checkpoint
+            .agent
+            .mailbox
+            .iter()
+            .map(|mailbox| {
+                mailbox
+                    .initial_triggered_turn_id
+                    .as_ref()
+                    .map_or(0, |turn_id| turn_id.as_str().len())
+            })
+            .sum();
         let dynamic_text_bytes = recovered_agent_dynamic_text_bytes(&checkpoint.agent);
         let mut candidate = state.clone();
         let root = candidate
@@ -5910,6 +5930,7 @@ impl CollaborationCoordinator {
                 digest,
                 steer_count,
                 steer_bytes,
+                initial_triggered_turn_bytes,
                 dynamic_text_bytes,
             },
         );
@@ -7049,6 +7070,7 @@ fn encode_recovered_agent(encoder: &mut CanonicalDigest, agent: &RecoveredAgent)
     encoder.u64(agent.mailbox.len() as u64);
     for mailbox in &agent.mailbox {
         encode_mailbox_message(encoder, &mailbox.message);
+        encode_optional_turn(encoder, mailbox.initial_triggered_turn_id.as_ref());
         encode_optional_turn(encoder, mailbox.claimed_turn_id.as_ref());
     }
     encoder.u64(agent.next_mailbox_sequence);
@@ -7093,7 +7115,7 @@ fn encode_recovered_agent(encoder: &mut CanonicalDigest, agent: &RecoveredAgent)
 
 /// 对局部驱逐 checkpoint 计算版本化规范摘要。
 fn recovered_agent_checkpoint_digest(checkpoint: &RecoveredAgentCheckpoint) -> [u8; 32] {
-    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.agent-checkpoint.v3");
+    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.agent-checkpoint.v4");
     encoder.text(checkpoint.root_agent_id.as_str());
     encoder.u64(checkpoint.revision);
     encode_recovered_agent(&mut encoder, &checkpoint.agent);
@@ -7397,6 +7419,23 @@ fn validate_coordinator_quotas(state: &CoordinatorState) -> Result<(), Collabora
         .flat_map(|root| root.evicted_agent_checkpoints.values())
         .map(|checkpoint| checkpoint.dynamic_text_bytes)
         .sum::<usize>();
+    let resident_initial_triggered_turn_bytes = state
+        .agents
+        .values()
+        .flat_map(|agent| agent.mailbox.iter())
+        .map(|entry| {
+            entry
+                .initial_triggered_turn_id
+                .as_ref()
+                .map_or(0, |turn_id| turn_id.as_str().len())
+        })
+        .sum::<usize>();
+    let evicted_initial_triggered_turn_bytes = state
+        .roots
+        .values()
+        .flat_map(|root| root.evicted_agent_checkpoints.values())
+        .map(|checkpoint| checkpoint.initial_triggered_turn_bytes)
+        .sum::<usize>();
     let pending_prompt_bytes = state
         .pending_turns
         .iter()
@@ -7429,6 +7468,8 @@ fn validate_coordinator_quotas(state: &CoordinatorState) -> Result<(), Collabora
         .saturating_add(definition_bytes)
         .saturating_add(resident_dynamic_bytes)
         .saturating_add(evicted_dynamic_bytes)
+        .saturating_add(resident_initial_triggered_turn_bytes)
+        .saturating_add(evicted_initial_triggered_turn_bytes)
         .saturating_add(pending_prompt_bytes)
         .saturating_add(active_prompt_bytes)
         .saturating_add(invocation_bytes)
@@ -8287,6 +8328,17 @@ fn restore_collaboration_invocations(
             },
         );
     }
+    if state
+        .agents
+        .values()
+        .flat_map(|agent| agent.mailbox.iter())
+        .filter(|entry| matches!(entry.message.kind, MailboxMessageKind::AgentMessage))
+        .any(|entry| !message_ids.contains(&entry.message.message_id))
+    {
+        return Err(CollaborationError::InvalidRecovery {
+            message: "未消费 Agent mailbox 消息缺少唯一 SendMessage 幂等记录".to_owned(),
+        });
+    }
     state.collaboration_invocations = records;
     Ok(())
 }
@@ -8399,6 +8451,13 @@ fn validate_recovered_collaboration_invocation(
             }
             if let Some(entry) = matching_entries.first() {
                 let message = &entry.message;
+                let expected_input_digest = collaboration_invocation_input_digest(
+                    &CollaborationInvocationInput::SendMessage {
+                        target_agent_id: message.target_agent_id.clone(),
+                        content: message.content.clone(),
+                        delivery: message.delivery,
+                    },
+                );
                 if message.source_agent_id != invocation.key.source_agent_id
                     || message.kind != MailboxMessageKind::AgentMessage
                     || message.related_turn_id.as_ref() != Some(&invocation.key.source_turn_id)
@@ -8410,9 +8469,8 @@ fn validate_recovered_collaboration_invocation(
                             turn_id,
                         )
                     })
-                    || triggered_turn_id
-                        .as_ref()
-                        .is_some_and(|turn_id| entry.claimed_turn_id.as_ref() != Some(turn_id))
+                    || invocation.input_digest != expected_input_digest
+                    || entry.initial_triggered_turn_id.as_ref() != triggered_turn_id.as_ref()
                 {
                     return Err(CollaborationError::InvalidRecovery {
                         message: "SendMessage 幂等结果与未消费 mailbox 条目不一致".to_owned(),
@@ -9151,14 +9209,30 @@ fn validate_recovered_tree(
                     message: "恢复 mailbox 的来源、目标、Turn 或 FIFO 序列无效".to_owned(),
                 });
             }
-            if mailbox.claimed_turn_id.as_ref().is_some_and(|claimed| {
+            let is_agent_message = matches!(mailbox.message.kind, MailboxMessageKind::AgentMessage);
+            let invalid_initial_trigger =
+                mailbox
+                    .initial_triggered_turn_id
+                    .as_ref()
+                    .is_some_and(|triggered| {
+                        mailbox.message.delivery != MailboxDelivery::TriggerTurn
+                            || !is_agent_message
+                            || !turn_belongs(triggered)
+                    });
+            let invalid_current_claim = mailbox.claimed_turn_id.as_ref().is_some_and(|claimed| {
                 mailbox.message.delivery != MailboxDelivery::TriggerTurn
-                    || !matches!(mailbox.message.kind, MailboxMessageKind::AgentMessage)
+                    || !is_agent_message
                     || current_turn_id != Some(claimed)
                     || !turn_belongs(claimed)
-            }) {
+            });
+            if invalid_initial_trigger
+                || invalid_current_claim
+                || mailbox.message.delivery == MailboxDelivery::QueueOnly
+                    && (mailbox.initial_triggered_turn_id.is_some()
+                        || mailbox.claimed_turn_id.is_some())
+            {
                 return Err(CollaborationError::InvalidRecovery {
-                    message: "恢复 mailbox 保留了无效的 TriggerTurn 归属".to_owned(),
+                    message: "恢复 mailbox 保留了无效的 TriggerTurn 首次触发或当前归属".to_owned(),
                 });
             }
             match &mailbox.message.kind {
@@ -9207,6 +9281,7 @@ fn validate_recovered_tree(
                     if source.depth != AgentDepth::CHILD
                         || mailbox.message.target_agent_id != tree.root_agent_id
                         || mailbox.message.delivery != MailboxDelivery::QueueOnly
+                        || mailbox.initial_triggered_turn_id.is_some()
                         || mailbox.claimed_turn_id.is_some()
                         || mailbox.message.related_turn_id.as_ref()
                             != Some(&source_last_turn.turn_id)
@@ -10590,6 +10665,7 @@ fn queue_mailbox_message(
     target.mailbox_bytes = next_mailbox_bytes;
     target.mailbox.push_back(MailboxEntry {
         message: message.clone(),
+        initial_triggered_turn_id: draft.initial_triggered_turn_id,
         claimed_turn_id: draft.claimed_turn_id,
     });
     let root = state
@@ -10840,6 +10916,7 @@ fn queue_completion_message(
         .ok_or(CollaborationError::SequenceExhausted)?;
     target.mailbox.push_back(MailboxEntry {
         message: message.clone(),
+        initial_triggered_turn_id: None,
         claimed_turn_id: None,
     });
     let root = state
@@ -11037,6 +11114,7 @@ fn agent_entry_from_recovered(agent: &RecoveredAgent) -> AgentEntry {
             .cloned()
             .map(|entry| MailboxEntry {
                 message: entry.message,
+                initial_triggered_turn_id: entry.initial_triggered_turn_id,
                 claimed_turn_id: entry.claimed_turn_id,
             })
             .collect(),
@@ -11130,6 +11208,7 @@ fn recovered_agent_from_entry(
             .iter()
             .map(|entry| RecoveredMailboxMessage {
                 message: entry.message.clone(),
+                initial_triggered_turn_id: entry.initial_triggered_turn_id.clone(),
                 claimed_turn_id: entry.claimed_turn_id.clone(),
             })
             .collect(),
