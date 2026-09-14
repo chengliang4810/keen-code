@@ -1,12 +1,15 @@
 use super::{
     HostFailure, TerminalTurn, initialize_unpublished_session_mcp, map_session_mcp_failure,
-    model_config_option, operation_id, prompt_stop_reason, prompt_turn_id,
+    model_config_option, operation_id, prompt_stop_reason, prompt_turn_id, session_control_lock,
 };
 use keencode_acp::schema;
+use keencode_agent::PlanGuard;
 use keencode_resources::{
     SessionForkRequest as RuntimeForkRequest, SessionId, TurnStatus, TurnStopReason,
 };
 use keencode_runtime::RuntimeError;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use tempfile::tempdir;
 
 /// 模型配置错误仅传固定分类，不把内部诊断、路径、连接地址或凭据送到客户端。
@@ -242,6 +245,100 @@ async fn standard_session_mcp_failures_preserve_cleanup_and_retry_ownership() {
         .close_session(&target_id)
         .await
         .expect("应关闭 fork 测试 Session");
+}
+
+/// Prompt 冻结工具的启动阶段必须等待 fork/rewind 完成原 MCP 侧车恢复；
+/// 若绕过同一 Session 控制锁，它会在 reopen 与 restore 之间创建空侧车并抢占目录。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prompt_tool_freeze_waits_for_suspended_session_mcp_restore() {
+    let fixture = tempdir().expect("应创建 Prompt/MCP 并发测试根");
+    let storage_root = fixture.path().join("data");
+    let project_root = fixture.path().join("project");
+    std::fs::create_dir_all(&project_root).expect("应创建测试项目根");
+    let runtime = crate::agent_runtime::AgentRuntime::new_for_control_test(&storage_root)
+        .expect("应创建控制面 Runtime");
+    let session = runtime
+        .open_or_create_session(&project_root, None, "prompt-mcp-control")
+        .expect("应创建测试 Session");
+    let session_id = session.session_id().as_str().to_owned();
+    drop(session);
+
+    let failed = runtime
+        .load_session_mcp(
+            &session_id,
+            "retain-failed-server",
+            vec![schema::McpServer::Stdio(schema::McpServerStdio::new(
+                "retained-server",
+                "definitely-missing-keencode-session-mcp-command",
+            ))],
+        )
+        .await
+        .expect("连接失败应保留安全 Session 状态");
+    assert_eq!(failed.servers.len(), 1);
+
+    let controls = Arc::new(Mutex::new(BTreeMap::new()));
+    let mutation_lock = session_control_lock(&controls, &session_id).expect("应取得修改控制锁");
+    let mutation_guard = mutation_lock.lock_owned().await;
+    let suspended = runtime
+        .suspend_session_mcp(&session_id)
+        .expect("应暂停原 MCP 侧车");
+    runtime
+        .close_session(&session_id)
+        .await
+        .expect("应临时关闭 Session");
+    let reopened = runtime
+        .open_or_create_session(&project_root, Some(&session_id), "mutation-restore")
+        .expect("应重新打开 Session");
+    drop(reopened);
+    runtime
+        .ensure_session_delivery(&session_id)
+        .expect("应恢复桌面投递");
+
+    let prompt_lock = session_control_lock(&controls, &session_id).expect("应取得 Prompt 控制锁");
+    let prompt_runtime = Arc::clone(&runtime);
+    let prompt_session_id = session_id.clone();
+    let prompt_project_root = project_root.clone();
+    let (attempted, attempted_rx) = tokio::sync::oneshot::channel();
+    let prompt = tokio::spawn(async move {
+        let _ = attempted.send(());
+        let _prompt_start_control = prompt_lock.lock_owned().await;
+        let delivery = prompt_runtime
+            .ensure_session_delivery(&prompt_session_id)
+            .expect("Prompt 应取得恢复后的投递");
+        let frozen = prompt_runtime.freeze_turn_tools(
+            &prompt_session_id,
+            &prompt_project_root,
+            PlanGuard::inactive(),
+            &delivery,
+        );
+        let status = prompt_runtime.session_mcp_status(&prompt_session_id);
+        (frozen, status)
+    });
+    attempted_rx.await.expect("Prompt 并发任务应开始等待");
+    tokio::task::yield_now().await;
+    assert!(
+        !prompt.is_finished(),
+        "原侧车恢复前 Prompt 不得冻结竞争目录"
+    );
+
+    runtime
+        .restore_session_mcp(&session_id, &project_root, &suspended)
+        .expect("控制锁内恢复必须重新绑定原 MCP 侧车");
+    drop(mutation_guard);
+
+    let (frozen, status) = prompt.await.expect("Prompt 并发任务不应 panic");
+    frozen.expect("恢复完成后 Prompt 应冻结工具");
+    let status = status.expect("恢复完成后 Prompt 应读取原 MCP 状态");
+    assert_eq!(status.servers.len(), 1);
+    assert_eq!(status.servers[0].name, "retained-server");
+    assert_eq!(
+        status.servers[0].status,
+        keencode_acp::SessionMcpServerPhase::Failed
+    );
+    runtime
+        .close_session(&session_id)
+        .await
+        .expect("应关闭并发测试 Session");
 }
 
 /// 模型 Token 上限、Runtime 轮次上限和拒答必须返回不同的标准 ACP 停止原因。

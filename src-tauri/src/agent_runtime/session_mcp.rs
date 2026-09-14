@@ -833,6 +833,15 @@ impl AgentRuntime {
             .map_err(|_| SessionMcpError::StateUnavailable)?;
         if let Some(runtime) = runtimes.get(session_id) {
             runtime.ensure_project(&project_root)?;
+            // fork/rewind 暂停期间侧车不在全局表中，项目候选传播可能正好越过它。
+            // 每次重新绑定 Prompt/状态入口时用当前候选幂等补齐快照；目录冲突已经
+            // 进入 desired state，仍交给既有卸载/Reason 边界收敛。
+            if let Err(error) =
+                runtime.queue_project_snapshot(project_snapshot(candidates.get(&project_root)))
+                && error != SessionMcpError::CatalogConflict
+            {
+                return Err(error);
+            }
             return Ok(Arc::clone(runtime));
         }
         let project = project_snapshot(candidates.get(&project_root));
@@ -1698,6 +1707,47 @@ fn extract_id(body: &str) -> Option<&str> {
         }
     }
 
+    /// 只提供项目 MCP 工具的不可变测试候选。
+    struct ProjectMcpContributor {
+        tools: Vec<Arc<dyn AgentTool>>,
+    }
+
+    impl crate::agent_runtime::RuntimeExtensionContributor for ProjectMcpContributor {
+        fn register_tools(
+            &self,
+            _registry: &mut keencode_agent::ToolRegistry,
+            _context: &crate::agent_runtime::RuntimeToolContext,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn build_hook_runtime(
+            &self,
+            _context: &crate::agent_runtime::RuntimeToolContext,
+        ) -> Result<keencode_agent::HookRuntime, String> {
+            Ok(keencode_agent::HookRuntime::empty())
+        }
+
+        fn prepare_lsp_runtime(
+            &self,
+            _context: &crate::agent_runtime::RuntimeToolContext,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn mcp_tool_implementations(&self) -> Vec<Arc<dyn AgentTool>> {
+            self.tools.clone()
+        }
+
+        fn resolve_agent(
+            &self,
+            _name: &str,
+            _parent: &crate::agent_runtime::RuntimeAgentTemplateContext,
+        ) -> Result<Option<crate::agent_runtime::RuntimeAgentTemplate>, String> {
+            Ok(None)
+        }
+    }
+
     #[tokio::test]
     async fn mutation_receipts_publish_once_per_runner_and_keep_sessions_isolated() {
         let directory = tempfile::tempdir().unwrap();
@@ -2207,7 +2257,7 @@ fn extract_id(body: &str) -> Option<&str> {
         );
         source
             .acknowledge_update(initial_delta.generation())
-            .expect("首次目录更新已由测试模拟的成功 Provider 请求确认");
+            .expect("Provider 已接受初始目录后应推进观察水位");
 
         assert_eq!(
             runtime.queue_project_snapshot(ProjectToolSnapshot {
@@ -2389,6 +2439,57 @@ fn extract_id(body: &str) -> Option<&str> {
             .restore_session_mcp(&session_id, &project_root, &suspended)
             .unwrap();
         assert!(suspended.runtime.lock().unwrap().is_none());
+        owner.close_session(&session_id).await.unwrap();
+    }
+
+    /// 暂停窗口内发布的项目候选不会命中已摘除侧车；恢复后的首次 Prompt 绑定
+    /// 必须从当前候选补齐目录，不能继续使用暂停前的旧项目快照。
+    #[tokio::test]
+    async fn restored_runtime_reconciles_project_candidate_missed_while_suspended() {
+        let directory = tempfile::tempdir().unwrap();
+        let project_root = directory.path().join("project");
+        std::fs::create_dir_all(&project_root).unwrap();
+        let owner = AgentRuntime::new_for_control_test(directory.path().join("data")).unwrap();
+        let session = owner
+            .open_or_create_session(&project_root, None, "session-mcp-candidate-restore")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        let original = owner
+            .ensure_session_mcp_runtime(&session_id, &project_root)
+            .unwrap();
+        let suspended = owner.suspend_session_mcp(&session_id).unwrap();
+
+        owner
+            .publish_extension_candidate(
+                &project_root,
+                RuntimeExtensionCandidate::new(
+                    1,
+                    Arc::new(ProjectMcpContributor {
+                        tools: vec![NamedTool::new("candidate-after-suspend".to_owned())],
+                    }),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        owner
+            .restore_session_mcp(&session_id, &project_root, &suspended)
+            .unwrap();
+
+        let restored = owner
+            .ensure_session_mcp_runtime(&session_id, &project_root)
+            .unwrap();
+        assert!(Arc::ptr_eq(&restored, &original));
+        let update = restored
+            .update_source()
+            .take_update()
+            .unwrap()
+            .expect("恢复后的绑定应发布暂停期间的新项目候选");
+        assert_eq!(update.added(), &["candidate-after-suspend".to_owned()]);
+        assert_eq!(
+            restored.catalog().definitions()[0].name,
+            "candidate-after-suspend"
+        );
         owner.close_session(&session_id).await.unwrap();
     }
 

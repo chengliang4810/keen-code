@@ -574,6 +574,13 @@ impl AcpHost {
         let ultra_mode = meta_bool(request.meta.as_ref(), META_ULTRA_MODE)?;
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
+        // 项目候选可能连接外部 MCP；先在 Session 控制锁之外完成，避免一个
+        // 项目的慢扩展发现阻塞该 Session 的纯本地控制操作。
+        self.ensure_extensions(&project_root).await?;
+        // Prompt 只把“打开 Session 到 TurnStarted”的启动阶段纳入同一把锁。
+        // fork/rewind 会持有该锁直到原 MCP 侧车恢复，因此两者的线性化结果只能是：
+        // Prompt 先启动并令修改因 active work 失败，或修改完整恢复后 Prompt 再冻结工具。
+        let prompt_start_control = self.lock_session_control(&session_id).await?;
         let session = self
             .runtime
             .open_or_create_session(&project_root, Some(&session_id), "acp-prompt")
@@ -581,7 +588,6 @@ impl AcpHost {
         self.runtime
             .ensure_session_delivery(&session_id)
             .map_err(map_runtime_failure)?;
-        self.ensure_extensions(&project_root).await?;
         let snapshot = session
             .snapshot()
             .map_err(|error| internal_failure(error))?;
@@ -604,6 +610,9 @@ impl AcpHost {
             )
             .await
             .map_err(map_runtime_failure)?;
+        // Provider 回合可能持续很久；目录已经冻结且 TurnStarted 已成为权威事实后
+        // 立即释放控制锁，不把普通模型执行与 Session MCP load/status/unload 串行。
+        drop(prompt_start_control);
         if matches!(outcome, RootTurnStartOutcome::Started)
             && memory_settings.local_memories
             && let Some(memories) = self.app.try_state::<Arc<crate::memories::MemoryService>>()

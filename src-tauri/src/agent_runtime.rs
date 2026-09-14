@@ -5772,7 +5772,7 @@ impl AgentRuntime {
 
     /// 测试专用：不创建协作 Session，只冻结本地、Web 与扩展候选工具。
     #[cfg(test)]
-    fn freeze_turn_tools(
+    pub(crate) fn freeze_turn_tools(
         &self,
         session_id: &str,
         project_root: &Path,
