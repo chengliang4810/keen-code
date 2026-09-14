@@ -16,6 +16,7 @@ const ports = vi.hoisted(() => ({
   receive: null as ((value: unknown) => void) | null,
   now: 1000,
   load: vi.fn(),
+  goalGet: vi.fn(),
   diagnostics: vi.fn().mockResolvedValue(undefined),
   unlisten: vi.fn(),
 }));
@@ -39,7 +40,7 @@ vi.mock("@/lib/acp/api", async (original) => ({
   diagnosticsRecord: ports.diagnostics,
   acpClientRespond: vi.fn().mockResolvedValue(undefined),
   cancelledClientResponse: vi.fn(),
-  goalGet: vi.fn(),
+  goalGet: ports.goalGet,
 }));
 
 /** 保存 effect 的真实清理函数，避免测试遗留订阅或批处理定时器。 */
@@ -155,6 +156,8 @@ beforeEach(() => {
   ports.now = 1000;
   ports.receive = null;
   ports.load.mockReset();
+  ports.goalGet.mockReset().mockImplementation((sessionId: string) =>
+    Promise.resolve({ sessionId, revision: 0 }));
   ports.diagnostics.mockClear();
   ports.unlisten.mockClear();
   vi.stubGlobal("window", {
