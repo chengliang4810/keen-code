@@ -4121,17 +4121,17 @@ struct ModelStreamTapStatus {
     delivery_error: Option<AgentEventDeliveryError>,
     /// 当前 Round 是否已经成功发送唯一失败边界。
     failure_boundary_sent: bool,
-    /// 已由实时 Sink 确认接收的响应元数据。
+    /// 普通流经 Sink 确认、结构化候选流经内部观察的响应元数据。
     metadata: ResponseMetadata,
-    /// 已由实时 Sink 确认接收的最新用量快照。
+    /// 普通流经 Sink 确认、结构化候选流经内部观察的最新用量快照。
     usage: TokenUsage,
-    /// 已由实时 Sink 确认接收的结束原因。
+    /// 普通流经 Sink 确认、结构化候选流经内部观察的结束原因。
     stop_reason: Option<StopReason>,
     /// 尚未发布、等待结构化候选校验结果的全部模型事件。
     buffered_events: Vec<AgentStreamEvent>,
 }
 
-/// 失败模型调用中已经由实时 Sink 确认的可记账用量快照。
+/// 失败模型调用中已确认或内部观察到的可记账用量快照。
 struct ModelStreamTapUsage {
     /// Provider 在响应开始事件中报告的元数据。
     metadata: ResponseMetadata,
@@ -4252,7 +4252,7 @@ async fn finish_tapped_with_model_error(
     (item, tapped)
 }
 
-/// 记录已由实时 Sink 确认的模型事件，供失败调用安全保留部分用量。
+/// 记录普通流经 Sink 确认或结构化候选流内部观察到的事件，保留失败调用用量。
 fn observe_tap_model_event(
     status: &Arc<Mutex<ModelStreamTapStatus>>,
     event: &keencode_model::ModelStreamEvent,
