@@ -584,7 +584,7 @@ pub struct ProviderSnapshot {
     pub context_window: Option<u64>,
     /// 实际使用的厂商协议。
     pub protocol: ProviderProtocolSnapshot,
-    /// 移除凭据后的配置摘要。
+    /// 同时绑定传输配置与凭据修订、但不含凭据正文的配置身份摘要。
     pub config_fingerprint: String,
     /// 当前 Session 每个 Agent 模型 Round 使用的推理强度；`None` 表示关闭。
     pub reasoning_effort: Option<ReasoningEffortSnapshot>,
@@ -822,6 +822,19 @@ pub enum SessionEvent {
         parent_turn_id: Option<TurnId>,
         /// 用户输入摘要。
         prompt_summary: String,
+    },
+    /// 原子记录一个 Turn 实际解析出的 Provider 配置身份。
+    ///
+    /// 该事件只绑定当前 Turn，不改变 Session 后续默认 Provider；因此子 Agent
+    /// 的显式模型覆盖不会污染根 Session 的配置状态。事件必须与 `TurnStarted`
+    /// 位于同一原子批次，冷恢复时从 Journal 按 Turn 重建。
+    TurnProviderSnapshotRecorded {
+        /// Turn 标识。
+        turn_id: TurnId,
+        /// 执行当前 Turn 的根 Agent 或单层子 Agent。
+        source_agent_id: AgentId,
+        /// 当前 Turn 实际使用的 Provider、模型、协议和配置身份。
+        provider: ProviderSnapshot,
     },
     /// 在一条物理 Journal 记录中原子应用一组不可分割事件。
     AtomicBatch {

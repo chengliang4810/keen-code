@@ -3007,6 +3007,7 @@ fn validate_non_batch_event_artifacts(
         | SessionEvent::TerminalExited { .. }
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
+        | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }

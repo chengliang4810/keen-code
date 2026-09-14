@@ -177,6 +177,7 @@ fn reduce_record_inner(
             validate_atomic_batch_shape(&record.event)?;
             validate_atomic_model_round_pairing(events)?;
             validate_atomic_sub_agent_turn_pairing(state, events)?;
+            validate_atomic_turn_provider_snapshot_pairing(state, events)?;
             let physical_sequence = record.sequence;
             let mut candidate = state.clone();
             for event in events {
@@ -967,13 +968,29 @@ fn reduce_record_inner(
             state.plan = plan.clone();
         }
         SessionEvent::ProviderSnapshotUpdated { provider } => {
-            if provider.provider_id.trim().is_empty()
-                || provider.model.trim().is_empty()
-                || provider.config_fingerprint.trim().is_empty()
-            {
-                return Err(ReductionError::new("Provider Snapshot 字段不能为空"));
-            }
+            validate_provider_snapshot(provider)?;
             state.provider = Some(provider.clone());
+        }
+        SessionEvent::TurnProviderSnapshotRecorded {
+            turn_id,
+            source_agent_id,
+            provider,
+        } => {
+            if !inside_atomic_batch {
+                return Err(ReductionError::new(
+                    "Turn Provider Snapshot 必须与 TurnStarted 原子提交",
+                ));
+            }
+            let turn = state
+                .turns
+                .get(turn_id)
+                .ok_or_else(|| ReductionError::new("Turn Provider Snapshot 引用了不存在的 Turn"))?;
+            if turn.source_agent_id != *source_agent_id {
+                return Err(ReductionError::new(
+                    "Turn Provider Snapshot 的 Agent 身份与 Turn 不匹配",
+                ));
+            }
+            validate_provider_snapshot(provider)?;
         }
         SessionEvent::TitleGenerated { result } => {
             if !valid_control_operation_id(&result.operation_id)
@@ -1291,6 +1308,7 @@ fn validate_standalone_sub_agent_turn_event(
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
+        | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
@@ -1307,6 +1325,54 @@ fn validate_standalone_sub_agent_turn_event(
     } else {
         Ok(())
     }
+}
+
+/// 校验 Turn Provider 快照与同一原子批次中的 TurnStarted 一一配对。
+fn validate_atomic_turn_provider_snapshot_pairing(
+    state: &SessionState,
+    events: &[SessionEvent],
+) -> Result<(), ReductionError> {
+    for (index, event) in events.iter().enumerate() {
+        let SessionEvent::TurnProviderSnapshotRecorded {
+            turn_id,
+            source_agent_id,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let Some(start_index) = events.iter().position(|event| {
+            matches!(
+                event,
+                SessionEvent::TurnStarted {
+                    turn_id: started_turn_id,
+                    source_agent_id: started_source_agent_id,
+                    ..
+                } if started_turn_id == turn_id && started_source_agent_id == source_agent_id
+            )
+        }) else {
+            return Err(ReductionError::new(
+                "Turn Provider Snapshot 必须与同一批次的 TurnStarted 配对",
+            ));
+        };
+        if start_index >= index || state.turns.contains_key(turn_id) {
+            return Err(ReductionError::new(
+                "Turn Provider Snapshot 必须紧随同批次 TurnStarted 记录新 Turn",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// 校验 Provider 快照中用于恢复和清理 opaque 状态的非敏感字段。
+fn validate_provider_snapshot(provider: &crate::ProviderSnapshot) -> Result<(), ReductionError> {
+    if provider.provider_id.trim().is_empty()
+        || provider.model.trim().is_empty()
+        || provider.config_fingerprint.trim().is_empty()
+    {
+        return Err(ReductionError::new("Provider Snapshot 字段不能为空"));
+    }
+    Ok(())
 }
 
 /// 校验原子批次没有把子 Agent Turn 从 Pending 直接穿越到终态而跳过状态事件。
@@ -1386,6 +1452,7 @@ fn validate_atomic_sub_agent_turn_pairing(
             | SessionEvent::TodoReplaced { .. }
             | SessionEvent::PlanChanged { .. }
             | SessionEvent::ProviderSnapshotUpdated { .. }
+            | SessionEvent::TurnProviderSnapshotRecorded { .. }
             | SessionEvent::TitleGenerated { .. }
             | SessionEvent::SubAgentSpawned { .. }
             | SessionEvent::SubAgentStatusChanged { .. }
@@ -1529,6 +1596,7 @@ fn validate_atomic_model_round_pairing(events: &[SessionEvent]) -> Result<(), Re
             | SessionEvent::TodoReplaced { .. }
             | SessionEvent::PlanChanged { .. }
             | SessionEvent::ProviderSnapshotUpdated { .. }
+            | SessionEvent::TurnProviderSnapshotRecorded { .. }
             | SessionEvent::TitleGenerated { .. }
             | SessionEvent::SubAgentSpawned { .. }
             | SessionEvent::SubAgentStatusChanged { .. }

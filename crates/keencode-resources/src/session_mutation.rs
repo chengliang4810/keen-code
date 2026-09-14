@@ -716,6 +716,7 @@ fn retain_edit_control_event(
         SessionEvent::TurnStarted { turn_id, .. }
         | SessionEvent::TurnCompleted { turn_id }
         | SessionEvent::TurnStopped { turn_id, .. }
+        | SessionEvent::TurnProviderSnapshotRecorded { turn_id, .. }
             if preserved_turn_ids.contains(turn_id) =>
         {
             Some(event.clone())
@@ -1160,6 +1161,7 @@ fn collect_request_id_binding(
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
+        | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
@@ -1253,6 +1255,7 @@ fn rebind_event_request_ids(
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
+        | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
@@ -2928,6 +2931,18 @@ mod tests {
                         parent_turn_id: Some(root_turn_id),
                         prompt_summary: "验证控制面保留".to_owned(),
                     },
+                    SessionEvent::TurnProviderSnapshotRecorded {
+                        turn_id: child_turn_id.clone(),
+                        source_agent_id: child_agent.clone(),
+                        provider: ProviderSnapshot {
+                            provider_id: "provider-edit-child".to_owned(),
+                            model: "model-edit-child".to_owned(),
+                            context_window: Some(128_000),
+                            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+                            config_fingerprint: "fingerprint-edit-child".to_owned(),
+                            reasoning_effort: None,
+                        },
+                    },
                     SessionEvent::SubAgentStatusChanged {
                         agent_id: child_agent.clone(),
                         turn_id: Some(child_turn_id.clone()),
@@ -3343,6 +3358,17 @@ mod tests {
         )
         .expect("带已完成控制面的编辑应成功");
         let (state, records_before_retry, _) = load_session(root.path(), &source_id);
+        assert!(records_before_retry.iter().any(|record| {
+            matches!(
+                &record.event,
+                SessionEvent::AtomicBatch { events }
+                    if events.iter().any(|event| matches!(
+                        event,
+                        SessionEvent::TurnProviderSnapshotRecorded { turn_id, .. }
+                            if turn_id.as_str() == "turn-edit-child"
+                    ))
+            )
+        }));
         assert_eq!(
             state
                 .raw_transcript_messages()

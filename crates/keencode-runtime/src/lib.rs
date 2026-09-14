@@ -255,6 +255,8 @@ pub struct RuntimeTurnRequest {
     prompt_summary: String,
     /// 首次启动子 Agent 时需要与 TurnStarted 原子提交的身份；后续 Turn 固定为空。
     spawned_agent: Option<SubAgentState>,
+    /// 本 Turn 实际解析出的 Provider 配置身份；生产装配必须提供，测试夹具可省略。
+    provider_snapshot: Option<ProviderSnapshot>,
 }
 
 impl RuntimeTurnRequest {
@@ -272,6 +274,7 @@ impl RuntimeTurnRequest {
             parent_turn_id: None,
             prompt_summary: prompt_summary.into(),
             spawned_agent: None,
+            provider_snapshot: None,
         }
     }
 
@@ -290,6 +293,7 @@ impl RuntimeTurnRequest {
             parent_turn_id: Some(parent_turn_id.into()),
             prompt_summary: prompt_summary.into(),
             spawned_agent: None,
+            provider_snapshot: None,
         }
     }
 
@@ -309,7 +313,14 @@ impl RuntimeTurnRequest {
             parent_turn_id: Some(parent_turn_id.into()),
             prompt_summary: prompt_summary.into(),
             spawned_agent: Some(spawned_agent),
+            provider_snapshot: None,
         }
+    }
+
+    /// 绑定当前 Turn 实际使用的 Provider 配置身份。
+    pub fn with_provider_snapshot(mut self, provider: ProviderSnapshot) -> Self {
+        self.provider_snapshot = Some(provider);
+        self
     }
 }
 
@@ -2238,6 +2249,7 @@ impl RuntimeAgentRunner {
                 parent_turn_id.as_ref(),
                 &turn.prompt_summary,
                 turn.spawned_agent.as_ref(),
+                turn.provider_snapshot.as_ref(),
                 ArtifactMode::Probe,
                 &mut probe,
             )?;
@@ -2297,6 +2309,7 @@ impl RuntimeAgentRunner {
                     parent_turn_id.as_ref(),
                     &turn.prompt_summary,
                     turn.spawned_agent.as_ref(),
+                    turn.provider_snapshot.as_ref(),
                     ArtifactMode::Commit,
                     &mut commit_probe,
                 );
@@ -2324,6 +2337,7 @@ impl RuntimeAgentRunner {
                                     parent_turn_id.as_ref(),
                                     &turn.prompt_summary,
                                     turn.spawned_agent.as_ref(),
+                                    turn.provider_snapshot.as_ref(),
                                     ArtifactMode::Commit,
                                     &mut retry_probe,
                                 ) {
@@ -3375,6 +3389,7 @@ fn runtime_turn_request_sha256(turn: &RuntimeTurnRequest) -> Result<String, Runt
         &turn.parent_turn_id,
         &turn.prompt_summary,
         &turn.spawned_agent,
+        &turn.provider_snapshot,
         plan_guard,
     ))
 }
@@ -3430,6 +3445,7 @@ fn runtime_input_event(
     parent_turn_id: Option<&TurnId>,
     prompt_summary: &str,
     spawned_agent: Option<&SubAgentState>,
+    provider_snapshot: Option<&ProviderSnapshot>,
     mode: ArtifactMode,
     probe: &mut ArtifactProbe,
 ) -> Result<SessionEvent, RuntimeError> {
@@ -3452,6 +3468,13 @@ fn runtime_input_event(
         parent_turn_id: parent_turn_id.cloned(),
         prompt_summary: prompt_summary.to_owned(),
     });
+    if let Some(provider) = provider_snapshot {
+        events.push(SessionEvent::TurnProviderSnapshotRecorded {
+            turn_id: turn_id.clone(),
+            source_agent_id: source_agent_id.clone(),
+            provider: provider.clone(),
+        });
+    }
     if is_child {
         events.push(SessionEvent::SubAgentStatusChanged {
             agent_id: source_agent_id.clone(),
@@ -5491,6 +5514,7 @@ fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
             turns: 1,
             ..StateCollectionItems::default()
         },
+        SessionEvent::TurnProviderSnapshotRecorded { .. } => StateCollectionItems::default(),
         SessionEvent::AtomicBatch { events } => events
             .iter()
             .fold(StateCollectionItems::default(), |total, event| {

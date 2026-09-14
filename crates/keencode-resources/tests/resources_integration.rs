@@ -80,6 +80,94 @@ fn reasoning_effort_snapshot_round_trips_stable_public_values() {
     );
 }
 
+/// Turn Provider 快照必须与 TurnStarted 原子配对，且只记录 Turn 身份，不污染 Session 默认 Provider。
+#[test]
+fn turn_provider_snapshot_is_atomic_and_turn_scoped() {
+    let provider = ProviderSnapshot {
+        provider_id: "provider-turn".to_owned(),
+        model: "model-turn".to_owned(),
+        context_window: Some(128_000),
+        protocol: ProviderProtocolSnapshot::OpenAiResponses,
+        config_fingerprint: "sha256:turn".to_owned(),
+        reasoning_effort: None,
+    };
+    let turn_id = TurnId::new("turn-provider-snapshot").expect("Turn ID 应有效");
+    let root_agent = AgentId::new("root").expect("根 Agent ID 应有效");
+    let turn_started = SessionEvent::TurnStarted {
+        turn_id: turn_id.clone(),
+        source_agent_id: root_agent.clone(),
+        root_turn_id: turn_id.clone(),
+        parent_turn_id: None,
+        prompt_summary: "验证 Provider 身份".to_owned(),
+    };
+    let turn_provider = SessionEvent::TurnProviderSnapshotRecorded {
+        turn_id: turn_id.clone(),
+        source_agent_id: root_agent.clone(),
+        provider: provider.clone(),
+    };
+
+    let root = TempDir::new().expect("临时目录应创建");
+    let journal = ready(
+        root.path(),
+        "turn-provider-snapshot",
+        SnapshotPolicy::Disabled,
+    );
+    create_session(&journal);
+    assert!(
+        journal.append(turn_provider.clone()).is_err(),
+        "Provider 快照不得脱离 TurnStarted 单独提交"
+    );
+    assert_eq!(journal.state().expect("状态应读取").last_sequence, 1);
+    journal
+        .append(SessionEvent::AtomicBatch {
+            events: vec![turn_started.clone(), turn_provider.clone()],
+        })
+        .expect("配对的 Turn Provider 快照应原子提交");
+    let state = journal.state().expect("状态应读取");
+    assert!(
+        state.provider.is_none(),
+        "Turn 快照不得改变 Session 默认 Provider"
+    );
+    drop(journal);
+    let reopened = ready(
+        root.path(),
+        "turn-provider-snapshot",
+        SnapshotPolicy::Disabled,
+    );
+    assert_eq!(reopened.state().expect("冷恢复状态应读取"), state);
+
+    for (session, events, message) in [
+        (
+            "turn-provider-order",
+            vec![turn_provider.clone(), turn_started.clone()],
+            "快照在 TurnStarted 前不得提交",
+        ),
+        (
+            "turn-provider-agent",
+            vec![
+                turn_started,
+                SessionEvent::TurnProviderSnapshotRecorded {
+                    turn_id,
+                    source_agent_id: AgentId::new("child").expect("子 Agent ID 应有效"),
+                    provider,
+                },
+            ],
+            "快照 Agent 身份必须匹配 Turn",
+        ),
+    ] {
+        let root = TempDir::new().expect("临时目录应创建");
+        let journal = ready(root.path(), session, SnapshotPolicy::Disabled);
+        create_session(&journal);
+        assert!(
+            journal
+                .append(SessionEvent::AtomicBatch { events })
+                .is_err(),
+            "{message}"
+        );
+        assert_eq!(journal.state().expect("失败后状态应读取").last_sequence, 1);
+    }
+}
+
 /// 会话权威记录、嵌套消息和恢复状态都必须拒绝当前 Schema 之外的字段。
 #[test]
 fn persisted_session_structures_reject_unknown_fields() {
