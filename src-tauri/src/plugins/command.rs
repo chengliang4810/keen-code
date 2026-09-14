@@ -75,6 +75,13 @@ impl PluginCommandCatalog {
         if let Some(entry) = self.commands.get(&key) {
             return Some(entry);
         }
+        // Provider 可能把 Slash 名称开头的 `plugin:` 误当协议前缀剥离；
+        // 只补全后做完整键匹配，不接受模糊或跨市场解析。
+        if !key.starts_with("plugin:") {
+            if let Some(entry) = self.commands.get(&format!("plugin:{key}")) {
+                return Some(entry);
+            }
+        }
         let mut matches = self.commands.values().filter(|entry| {
             super::public_component_name(&entry.name)
                 .is_some_and(|public| public.eq_ignore_ascii_case(name))
@@ -610,6 +617,20 @@ mod tests {
                 .get("PLUGIN:OFFICIAL:DEMO:review")
                 .map(|entry| entry.name.as_str()),
             Some("plugin:official:demo:Review")
+        );
+    }
+
+    #[test]
+    fn catalog_accepts_exact_name_with_provider_stripped_plugin_prefix() {
+        let catalog =
+            PluginCommandCatalog::from_snapshot(&snapshot_with_command("commands/review.md"))
+                .expect("command 目录应构建成功");
+
+        assert_eq!(
+            catalog
+                .get("official:demo:review")
+                .map(|entry| entry.name.as_str()),
+            Some("plugin:official:demo:review")
         );
     }
 
