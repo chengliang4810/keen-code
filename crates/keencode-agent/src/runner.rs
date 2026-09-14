@@ -1387,7 +1387,9 @@ impl AgentRunner {
         active.compactions.push(micro_record.clone());
         active.messages = messages.into();
         model_request.messages = active.messages.clone();
-        self.hooks
+        // PostCompact 是采纳后的观察通知；失败不得覆盖已经发生的压缩失败。
+        let _ = self
+            .hooks
             .run_post_compact(
                 PostCompactHookContext {
                     invocation: hook_invocation_context(request),
@@ -1430,7 +1432,9 @@ impl AgentRunner {
         model_request.messages = active.messages.clone();
         let record = outcome.record;
         active.compactions.push(record.clone());
-        self.hooks
+        // 压缩记录已经采纳，观察者失败不得回滚或终止当前 Turn。
+        let _ = self
+            .hooks
             .run_post_compact(
                 PostCompactHookContext {
                     invocation: hook_invocation_context(request),
