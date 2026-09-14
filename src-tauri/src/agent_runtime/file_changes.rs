@@ -10,8 +10,7 @@ use keencode_acp::{
 };
 use keencode_agent::{ToolContext, ToolError};
 use keencode_resources::{
-    RequestId, SessionEventRecord, SessionState, ToolEffect, ToolFileChange,
-    existing_file_readonly,
+    RequestId, SessionEventRecord, SessionState, ToolEffect, ToolFileChange, existing_file_readonly,
 };
 use keencode_runtime::RuntimeSession;
 use keencode_tools::{FileMutationRecorder, PreparedFileMutation};
@@ -99,7 +98,8 @@ impl FileMutationRecorder for RuntimeFileMutationRecorder {
             return Err(recording_error());
         }
         let path = path.to_str().ok_or_else(recording_error)?.to_owned();
-        let before_readonly = existing_file_readonly(path.as_ref()).map_err(|_| recording_error())?;
+        let before_readonly =
+            existing_file_readonly(path.as_ref()).map_err(|_| recording_error())?;
         #[cfg(windows)]
         let after_readonly = Some(before_readonly.unwrap_or(false));
         #[cfg(not(windows))]
