@@ -2,7 +2,9 @@ use std::collections::VecDeque;
 use std::error::Error as _;
 
 use futures_util::stream;
-use keencode_model::{ModelError, ModelStream, ModelStreamEvent, redact_error_secrets_bounded};
+use keencode_model::{
+    ModelError, ModelStream, ModelStreamEvent, REDACTED_SECRET, redact_error_secrets_bounded,
+};
 #[cfg(feature = "live-test-trace")]
 use keencode_model::{ModelResponse, ProviderProtocol, collect_model_stream};
 use reqwest::Response;
@@ -648,10 +650,15 @@ fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
 
 /// 移除凭据、控制字符并限制错误文本长度。
 fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
-    let mut redacted = redact_error_secrets_bounded(message, MAX_ERROR_INPUT_BYTES);
-    if let Some(api_key) = api_key {
-        redacted = api_key.redact(&redacted);
-    }
+    // 先替换完整的 Provider 凭据，再运行按字段边界识别的通用脱敏。
+    // 否则像 `secret,foo` 这样的合法凭据会先被通用规则截成
+    // `secret`，随后精确替换找不到完整值，留下 `,foo`。
+    let redacted = if let Some(api_key) = api_key {
+        let exact = redact_api_key_bounded(api_key, message, MAX_ERROR_INPUT_BYTES);
+        redact_error_secrets_bounded(&exact, MAX_ERROR_INPUT_BYTES)
+    } else {
+        redact_error_secrets_bounded(message, MAX_ERROR_INPUT_BYTES)
+    };
     let mut safe = redacted
         .chars()
         .map(|character| {
@@ -669,6 +676,47 @@ fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
     safe
 }
 
+/// 按原文窗口精确移除 Provider 凭据，并独立限制重建后的输出字节数。
+///
+/// 查找窗口只比原文保留边界多读取一个凭据长度，足以识别从边界前开始、
+/// 在边界后结束的完整凭据。替换不会移动后续原文的扫描边界，因此前面的
+/// 多次长凭据即使显著缩短输出，也不会让窗口末尾留下未识别的凭据前缀。
+fn redact_api_key_bounded(api_key: &ApiKey, input: &str, maximum_bytes: usize) -> String {
+    if maximum_bytes == 0 || input.is_empty() {
+        return String::new();
+    }
+
+    let retained_end = bounded_utf8_prefix(input, maximum_bytes).len();
+    let search_end =
+        bounded_utf8_prefix(input, retained_end.saturating_add(api_key.expose().len())).len();
+    let mut output = String::with_capacity(maximum_bytes.min(retained_end));
+    let mut cursor = 0;
+
+    for (match_start, _) in input[..search_end].match_indices(api_key.expose()) {
+        if match_start >= retained_end {
+            break;
+        }
+
+        let unmatched = &input[cursor..match_start];
+        let remaining = maximum_bytes.saturating_sub(output.len());
+        let bounded = bounded_utf8_prefix(unmatched, remaining);
+        output.push_str(bounded);
+        if bounded.len() != unmatched.len() || REDACTED_SECRET.len() > remaining - bounded.len() {
+            return output;
+        }
+
+        output.push_str(REDACTED_SECRET);
+        cursor = match_start + api_key.expose().len();
+        if cursor >= retained_end {
+            return output;
+        }
+    }
+
+    let remaining = maximum_bytes.saturating_sub(output.len());
+    output.push_str(bounded_utf8_prefix(&input[cursor..retained_end], remaining));
+    output
+}
+
 /// 按 UTF-8 边界借用不可信文本的有界前缀，避免先为超大错误分配副本。
 fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
     if value.len() <= maximum_bytes {
@@ -679,4 +727,50 @@ fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
         end -= 1;
     }
     &value[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApiKey, MAX_ERROR_INPUT_BYTES, REDACTED_SECRET, redact_api_key_bounded, safe_error_message,
+    };
+
+    #[test]
+    fn safe_error_message_redacts_full_api_keys_before_generic_fields() {
+        for key in ["secret,foo", "secret foo", "secret;foo"] {
+            let api_key = ApiKey::new(key).expect("测试凭据应有效");
+            let message = format!("api_key={key} request_id=req-redaction");
+
+            assert_eq!(
+                safe_error_message(Some(&api_key), &message),
+                "api_key=[REDACTED] request_id=req-redaction"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_error_message_redacts_repeated_maximum_length_api_keys() {
+        let key = format!("sk-{}", "x".repeat(16 * 1024 - 3));
+        let api_key = ApiKey::new(key.clone()).expect("最大长度测试凭据应有效");
+        let message = format!("{key},{key};{key} {key},{key}");
+
+        assert_eq!(
+            safe_error_message(Some(&api_key), &message),
+            "[REDACTED],[REDACTED];[REDACTED] [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn bounded_api_key_redaction_recognizes_match_crossing_input_boundary() {
+        let key = format!("secret,{}", "k".repeat(64));
+        let api_key = ApiKey::new(key.clone()).expect("边界测试凭据应有效");
+        let prefix = "p".repeat(MAX_ERROR_INPUT_BYTES - REDACTED_SECRET.len());
+        let message = format!("{prefix}{key} trailing");
+
+        let redacted = redact_api_key_bounded(&api_key, &message, MAX_ERROR_INPUT_BYTES);
+
+        assert_eq!(redacted.len(), MAX_ERROR_INPUT_BYTES);
+        assert!(redacted.ends_with(REDACTED_SECRET));
+        assert!(!redacted.contains(&key));
+    }
 }
