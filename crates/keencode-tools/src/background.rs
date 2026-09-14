@@ -508,6 +508,7 @@ impl BackgroundTaskManager {
         session_id: &str,
         summary: String,
         spec: ProcessSpec,
+        timeout: Option<Duration>,
     ) -> Result<BackgroundTaskInfo, ToolError> {
         let _lifecycle_gate = self.inner.lifecycle_gate.lock().await;
         if !self.is_accepting_tasks() {
@@ -662,7 +663,6 @@ impl BackgroundTaskManager {
             OutputStream::Stderr,
         ));
         let completion_events = self.inner.completion_events.clone();
-        let timeout = spec.timeout;
         let label = spec.label;
         tokio::spawn(async move {
             supervise_background_task(
@@ -1093,13 +1093,13 @@ async fn supervise_background_task(
     task: Arc<BackgroundTaskRecord>,
     mut guard: ProcessGroupGuard,
     cancellation: TurnCancellation,
-    timeout: Duration,
+    timeout: Option<Duration>,
     label: &'static str,
     stdout_task: JoinHandle<io::Result<u64>>,
     stderr_task: JoinHandle<io::Result<u64>>,
     completion_events: broadcast::Sender<BackgroundTaskCompletion>,
 ) {
-    let deadline = Instant::now() + timeout;
+    let deadline = timeout.map(|timeout| Instant::now() + timeout);
     let termination = monitor_process(&mut guard, &cancellation, deadline).await;
     if termination.is_err() && terminate_and_wait(&mut guard.child).await.is_ok() {
         guard.armed = false;

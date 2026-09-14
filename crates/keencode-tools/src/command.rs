@@ -102,6 +102,7 @@ impl AgentTool for BashTool {
             let input = parse_shell_input(&input, &environment)?;
             let cwd = resolve_command_cwd(&environment, input.cwd.as_deref())?;
             let timeout = command_timeout(&environment, input.timeout_ms)?;
+            let background_timeout = input.timeout_ms.map(Duration::from_millis);
             let summary = command_summary("Bash", input.description.as_deref())?;
             let spec = ProcessSpec {
                 label: "Bash",
@@ -125,7 +126,12 @@ impl AgentTool for BashTool {
                     )
                 })?;
                 let task = manager
-                    .start_process(context.session_id.as_str(), summary, spec)
+                    .start_process(
+                        context.session_id.as_str(),
+                        summary,
+                        spec,
+                        background_timeout,
+                    )
                     .await?;
                 return Ok(ToolOutput::text(render_background_start(&task)));
             }
@@ -203,6 +209,7 @@ impl AgentTool for PowerShellTool {
             let input = parse_shell_input(&input, &environment)?;
             let cwd = resolve_command_cwd(&environment, input.cwd.as_deref())?;
             let timeout = command_timeout(&environment, input.timeout_ms)?;
+            let background_timeout = input.timeout_ms.map(Duration::from_millis);
             let summary = command_summary("PowerShell", input.description.as_deref())?;
             let script = powershell_script(&input.command);
             let spec = ProcessSpec {
@@ -233,7 +240,12 @@ impl AgentTool for PowerShellTool {
                     )
                 })?;
                 let task = manager
-                    .start_process(context.session_id.as_str(), summary, spec)
+                    .start_process(
+                        context.session_id.as_str(),
+                        summary,
+                        spec,
+                        background_timeout,
+                    )
                     .await?;
                 return Ok(ToolOutput::text(render_background_start(&task)));
             }
@@ -1406,7 +1418,7 @@ async fn supervise_spawned(
         preview_limit,
     ));
     let deadline = Instant::now() + spec.timeout;
-    let termination = monitor_process(&mut guard, cancellation, deadline).await?;
+    let termination = monitor_process(&mut guard, cancellation, Some(deadline)).await?;
     let stdout = await_capture(stdout_task, "stdout").await?;
     let stderr = await_capture(stderr_task, "stderr").await?;
     let report = render_process_report(spec, &termination, stdout, stderr).await;
@@ -1423,7 +1435,7 @@ async fn supervise_spawned(
 pub(crate) async fn monitor_process(
     guard: &mut ProcessGroupGuard,
     cancellation: &TurnCancellation,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> Result<ProcessTermination, ToolError> {
     loop {
         if cancellation.is_cancelled() {
@@ -1431,7 +1443,7 @@ pub(crate) async fn monitor_process(
             guard.armed = false;
             return Ok(ProcessTermination::Cancelled);
         }
-        if Instant::now() >= deadline {
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             terminate_and_wait(&mut guard.child).await?;
             guard.armed = false;
             return Ok(ProcessTermination::TimedOut);
@@ -1454,7 +1466,12 @@ pub(crate) async fn monitor_process(
         }
         tokio::select! {
             _ = cancellation.cancelled() => {}
-            _ = sleep_until(deadline) => {}
+            _ = async {
+                match deadline {
+                    Some(deadline) => sleep_until(deadline).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
             _ = sleep(PROCESS_POLL_INTERVAL) => {}
         }
     }

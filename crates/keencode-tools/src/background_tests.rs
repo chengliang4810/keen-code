@@ -14,7 +14,7 @@ use tempfile::TempDir;
 
 use crate::{
     BackgroundOutputCursor, BackgroundTaskManager, BackgroundTaskStatus, TaskOutputTool,
-    TaskStopTool, ToolEnvironment, register_local_tools_with_background,
+    TaskStopTool, ToolEnvironment, ToolLimits, register_local_tools_with_background,
 };
 
 /// Windows 并发测试负载下等待真实进程输出或终态的宽松上限。
@@ -186,6 +186,18 @@ fn cancellable_command() -> &'static str {
 #[cfg(not(windows))]
 fn timeout_command() -> &'static str {
     "sleep 10"
+}
+
+/// 当前平台用于证明后台任务不继承普通命令默认超时的命令。
+#[cfg(windows)]
+fn exceeds_default_timeout_command() -> &'static str {
+    "Start-Sleep -Milliseconds 300; [Console]::Out.Write('survived')"
+}
+
+/// 当前平台用于证明后台任务不继承普通命令默认超时的命令。
+#[cfg(not(windows))]
+fn exceeds_default_timeout_command() -> &'static str {
+    "sleep 0.3; printf survived"
 }
 
 /// 用于验证 UTF-8 边界的完整预期文本。
@@ -590,6 +602,39 @@ async fn background_timeout_commits_failed_completion() {
         .expect("超时任务状态应保留");
     assert_eq!(task.status, BackgroundTaskStatus::Failed);
     assert!(manager.list_running().expect("应查询运行任务").is_empty());
+}
+
+/// 未指定 timeout_ms 的后台任务必须持续运行，不继承普通命令默认超时。
+#[tokio::test]
+async fn background_without_timeout_outlives_foreground_default() {
+    let directory = tempfile::tempdir().expect("应创建后台任务测试目录");
+    let limits = ToolLimits {
+        default_command_timeout_ms: 100,
+        max_command_timeout_ms: 1_000,
+        ..ToolLimits::default()
+    };
+    let environment = Arc::new(
+        ToolEnvironment::with_limits(directory.path(), limits).expect("显式工具资源上限应有效"),
+    );
+    let manager = Arc::new(
+        BackgroundTaskManager::new(directory.path().join("background"), 16 * 1024)
+            .expect("后台任务 Manager 应有效"),
+    );
+    let mut completions = manager.subscribe_completions();
+
+    launch_background(
+        environment,
+        manager.clone(),
+        exceeds_default_timeout_command(),
+    )
+    .await
+    .expect("无显式超时的后台任务应启动");
+
+    let completion = tokio::time::timeout(TEST_PROCESS_WAIT, completions.recv())
+        .await
+        .expect("后台任务应自行完成")
+        .expect("后台任务完成事件应可读");
+    assert_eq!(completion.status, BackgroundTaskStatus::Succeeded);
 }
 
 /// 任务读取和停止必须同时绑定 Session，显式越界游标也必须失败关闭。
