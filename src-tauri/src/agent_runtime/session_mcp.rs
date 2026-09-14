@@ -282,14 +282,7 @@ impl SessionMcpRuntime {
         if state.desired_project.version == project.version {
             return Ok(());
         }
-        if project
-            .server_names
-            .iter()
-            .any(|name| state.desired_servers.contains_key(name))
-        {
-            return Err(SessionMcpError::CatalogConflict);
-        }
-        validate_composite_catalog(&project.tools, &state.desired_servers)?;
+        validate_project_catalog(&project, &state.desired_servers)?;
         state.desired_project = project;
         Ok(())
     }
@@ -364,6 +357,15 @@ impl SessionMcpRuntime {
                     .state
                     .lock()
                     .map_err(|_| SessionMcpError::StateUnavailable)?;
+                // 项目候选可在连接等待期间换代；失败记录也必须在提交点重新
+                // 校验 Server 名称，不能让项目候选与 failed 状态同名共存。
+                validate_project_catalog(&state.desired_project, &state.desired_servers)?;
+                if failed
+                    .iter()
+                    .any(|(name, _)| state.desired_project.server_names.contains(name))
+                {
+                    return Err(SessionMcpError::CatalogConflict);
+                }
                 for (name, failure) in failed {
                     state.failed_servers.insert(name, failure);
                 }
@@ -401,7 +403,9 @@ impl SessionMcpRuntime {
             for binding in &additions {
                 candidate.insert(binding.name.clone(), Arc::clone(binding));
             }
-            validate_composite_catalog(&state.desired_project.tools, &candidate)?;
+            // 项目候选可在连接等待期间换代；成功绑定提交前必须完整重验项目
+            // Server 名称和工具目录，项目候选始终优先且冲突时不发布连接。
+            validate_project_catalog(&state.desired_project, &candidate)?;
             let changed = !additions.is_empty();
             for binding in additions.drain(..) {
                 state.failed_servers.remove(&binding.name);
@@ -512,13 +516,7 @@ impl SessionMcpRuntime {
             if state.closed {
                 return Err(SessionMcpError::Closed);
             }
-            if desired
-                .keys()
-                .any(|name| state.desired_project.server_names.contains(name))
-            {
-                return Err(SessionMcpError::CatalogConflict);
-            }
-            validate_composite_catalog(&state.desired_project.tools, &desired)?;
+            validate_project_catalog(&state.desired_project, &desired)?;
             state.desired_servers = desired;
             state.failed_servers.clear();
             state.receipts.clear();
@@ -1079,6 +1077,21 @@ fn validate_composite_catalog(
         .map_err(|_| SessionMcpError::CatalogConflict)
 }
 
+/// 在项目候选与 Session Server 的共同提交点校验名称和工具目录。
+fn validate_project_catalog(
+    project: &ProjectToolSnapshot,
+    servers: &BTreeMap<String, Arc<SessionServerBinding>>,
+) -> Result<(), SessionMcpError> {
+    if project
+        .server_names
+        .iter()
+        .any(|name| servers.contains_key(name))
+    {
+        return Err(SessionMcpError::CatalogConflict);
+    }
+    validate_composite_catalog(&project.tools, servers)
+}
+
 fn composite_tools(
     project_tools: &[Arc<dyn AgentTool>],
     servers: &BTreeMap<String, Arc<SessionServerBinding>>,
@@ -1322,11 +1335,21 @@ mod tests {
                     r###"
 use std::fs::OpenOptions;
 use std::io::{self, BufRead, Write};
+use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 fn append_from_env(name: &str) {
     let Ok(path) = std::env::var(name) else { return; };
     let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
     writeln!(file, "1").unwrap();
+}
+
+fn wait_for_release() {
+    let Ok(path) = std::env::var("KEENCODE_SESSION_MCP_TEST_RELEASE") else { return; };
+    while !Path::new(&path).exists() {
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn main() {
@@ -1344,7 +1367,13 @@ fn main() {
         let response = if line.contains("\"method\":\"initialize\"") {
             format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"{protocol}","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"fake-session-mcp","version":"1"}}}}}}"#)
         } else if line.contains("\"method\":\"tools/list\"") {
-            format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[{{"name":"{tool}","description":"session test tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true}}}}]}}}}"#)
+            append_from_env("KEENCODE_SESSION_MCP_TEST_GATE_REACHED");
+            wait_for_release();
+            if std::env::var_os("KEENCODE_SESSION_MCP_TEST_FAIL").is_some() {
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[]}}}}"#)
+            } else {
+                format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[{{"name":"{tool}","description":"session test tool","inputSchema":{{"type":"object"}},"annotations":{{"readOnlyHint":true}}}}]}}}}"#)
+            }
         } else {
             format!(r#"{{"jsonrpc":"2.0","id":{id},"result":{{}}}}"#)
         };
@@ -1398,6 +1427,35 @@ fn extract_id(body: &str) -> Option<&str> {
                     ),
                 ]),
         )
+    }
+
+    fn gated_stdio_server(
+        name: &str,
+        tool: &str,
+        started: &Path,
+        closed: &Path,
+        release: &Path,
+        gate_reached: &Path,
+        fail: bool,
+    ) -> schema::McpServer {
+        let schema::McpServer::Stdio(mut server) = stdio_server(name, tool, started, closed) else {
+            unreachable!("测试夹具必须使用 stdio Server");
+        };
+        server.env.push(schema::EnvVariable::new(
+            "KEENCODE_SESSION_MCP_TEST_RELEASE",
+            release.to_string_lossy(),
+        ));
+        server.env.push(schema::EnvVariable::new(
+            "KEENCODE_SESSION_MCP_TEST_GATE_REACHED",
+            gate_reached.to_string_lossy(),
+        ));
+        if fail {
+            server.env.push(schema::EnvVariable::new(
+                "KEENCODE_SESSION_MCP_TEST_FAIL",
+                "1",
+            ));
+        }
+        schema::McpServer::Stdio(server)
     }
 
     fn missing_server(name: &str) -> schema::McpServer {
@@ -1570,6 +1628,73 @@ fn extract_id(body: &str) -> Option<&str> {
         runtime.close().await;
     }
 
+    async fn assert_project_candidate_wins_during_load(fail: bool) {
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let closed = directory.path().join("closed");
+        let gate_reached = directory.path().join("gate-reached");
+        let release = directory.path().join("release");
+        let runtime = empty_runtime("session-project-race", directory.path());
+        let server = gated_stdio_server(
+            "raced-server",
+            "echo",
+            &started,
+            &closed,
+            &release,
+            &gate_reached,
+            fail,
+        );
+        let loading_runtime = Arc::clone(&runtime);
+        let loading = tokio::spawn(async move {
+            loading_runtime
+                .load("project-race", vec![server])
+                .await
+        });
+
+        wait_for_file_lines(&gate_reached, 1).await;
+        runtime
+            .queue_project_snapshot(ProjectToolSnapshot {
+                version: ProjectCatalogVersion {
+                    generation: 1,
+                    revoked: false,
+                },
+                server_names: BTreeSet::from(["raced-server".to_owned()]),
+                tools: Vec::new(),
+            })
+            .expect("项目候选应能在连接等待期间排队");
+        std::fs::write(&release, b"release").expect("应释放连接闸门");
+
+        assert_eq!(
+            loading.await.expect("并发加载任务不应 panic"),
+            Err(SessionMcpError::CatalogConflict),
+            "项目候选必须在成功和失败提交路径都优先"
+        );
+        wait_for_file_lines(&closed, 1).await;
+        {
+            let state = runtime.state.lock().unwrap();
+            assert!(state.desired_servers.is_empty(), "冲突成功绑定不得泄漏");
+            assert!(state.failed_servers.is_empty(), "冲突失败记录不得泄漏");
+            assert_eq!(
+                state.desired_project.server_names,
+                BTreeSet::from(["raced-server".to_owned()])
+            );
+        }
+        assert!(runtime.catalog().is_empty(), "冲突连接不得发布到目录");
+        runtime.close().await;
+    }
+
+    /// 项目候选在成功连接提交前换代时，动态 Server 必须关闭且不得发布。
+    #[tokio::test]
+    async fn project_candidate_wins_over_successful_load_race() {
+        assert_project_candidate_wins_during_load(false).await;
+    }
+
+    /// 项目候选在失败连接提交前换代时，failed Server 名称也不得泄漏。
+    #[tokio::test]
+    async fn project_candidate_wins_over_failed_load_race() {
+        assert_project_candidate_wins_during_load(true).await;
+    }
+
     #[tokio::test]
     async fn failure_capacity_keeps_status_encodable_and_rejects_new_names() {
         let directory = tempfile::tempdir().unwrap();
@@ -1643,10 +1768,11 @@ fn extract_id(body: &str) -> Option<&str> {
             "新名称超过容量时应在连接前拒绝"
         );
         assert_eq!(file_line_count(&overflow_started), 0);
-        let state = runtime.state.lock().unwrap();
-        assert_eq!(tracked_server_names(&state).len(), MAX_SESSION_MCP_SERVERS);
-        assert!(!state.receipts.contains_key("reject-overflow"));
-        drop(state);
+        {
+            let state = runtime.state.lock().unwrap();
+            assert_eq!(tracked_server_names(&state).len(), MAX_SESSION_MCP_SERVERS);
+            assert!(!state.receipts.contains_key("reject-overflow"));
+        }
         let status = runtime.status().expect("拒绝超限后已有状态仍应可读取");
         assert_eq!(status.servers.len(), MAX_SESSION_MCP_SERVERS);
         encoder
