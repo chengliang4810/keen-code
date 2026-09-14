@@ -81,6 +81,16 @@ struct ProjectCatalogVersion {
     revoked: bool,
 }
 
+impl ProjectCatalogVersion {
+    /// 比较项目候选发布身份；更高代次优先，同代次撤销状态优先。
+    fn supersedes(self, current: Self) -> bool {
+        self.generation > current.generation
+            || (self.generation == current.generation
+                && self.revoked
+                && !current.revoked)
+    }
+}
+
 /// 一个不共享项目可变目录的项目 MCP 工具快照。
 struct ProjectToolSnapshot {
     version: ProjectCatalogVersion,
@@ -270,7 +280,7 @@ impl SessionMcpRuntime {
         }
     }
 
-    /// 排队项目 MCP 新快照；冲突时保持当前和既有待发布目录不变。
+    /// 排队项目 MCP 新快照；旧候选被忽略，冲突候选仍保留等待后续解除。
     fn queue_project_snapshot(&self, project: ProjectToolSnapshot) -> Result<(), SessionMcpError> {
         let mut state = self
             .state
@@ -279,12 +289,15 @@ impl SessionMcpRuntime {
         if state.closed {
             return Err(SessionMcpError::Closed);
         }
-        if state.desired_project.version == project.version {
+        if !project.version.supersedes(state.desired_project.version) {
             return Ok(());
         }
-        validate_project_catalog(&project, &state.desired_servers)?;
+        for name in &project.server_names {
+            state.failed_servers.remove(name);
+        }
+        let validation = validate_project_catalog(&project, &state.desired_servers);
         state.desired_project = project;
-        Ok(())
+        validation
     }
 
     /// 动态加载一批 Server；连接与候选校验全部成功后才改变 desired state。
@@ -430,7 +443,7 @@ impl SessionMcpRuntime {
         commit_result
     }
 
-    /// 动态撤销单个 Session Server；真正目录换代由下一 Reason 边界完成。
+    /// 动态撤销单个 Session Server，并立即尝试发布解除冲突后的待处理目录。
     async fn unload(
         &self,
         operation_id: &str,
@@ -448,11 +461,18 @@ impl SessionMcpRuntime {
         if state.closed {
             return Err(SessionMcpError::Closed);
         }
-        if state.desired_project.server_names.contains(server_name) {
-            return Err(SessionMcpError::CatalogConflict);
-        }
         let changed = state.desired_servers.remove(server_name).is_some();
         state.failed_servers.remove(server_name);
+        drop(state);
+        // 卸载可能正好解除项目候选与动态 Server 的冲突；在同一变更闸门内
+        // 立即发布最新待处理项目目录，避免必须等待下一次 Turn 才收敛。
+        if changed {
+            self.apply_pending()?;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SessionMcpError::StateUnavailable)?;
         let response =
             mutation_response_locked(&self.session_id, &self.catalog, &state, changed, false);
         insert_receipt(
@@ -562,6 +582,9 @@ impl SessionMcpRuntime {
         if !project_changed && !servers_changed {
             return Ok(());
         }
+        // 项目候选可能在冲突时已进入 desired state；在真正替换目录前
+        // 再次校验当前动态 Server，避免把名称或工具冲突发布到运行态。
+        validate_project_catalog(&state.desired_project, &state.desired_servers)?;
         let tools = composite_tools(&state.desired_project.tools, &state.desired_servers);
         self.catalog
             .replace_all(tools)
@@ -1715,6 +1738,119 @@ fn extract_id(body: &str) -> Option<&str> {
         assert_project_candidate_wins_during_load(true).await;
     }
 
+    #[test]
+    fn project_catalog_version_prefers_new_generations_and_same_generation_revocation() {
+        let generation_one = ProjectCatalogVersion {
+            generation: 1,
+            revoked: false,
+        };
+        let generation_one_revoked = ProjectCatalogVersion {
+            generation: 1,
+            revoked: true,
+        };
+        let generation_two = ProjectCatalogVersion {
+            generation: 2,
+            revoked: false,
+        };
+        assert!(generation_one.supersedes(ProjectCatalogVersion::default()));
+        assert!(generation_one_revoked.supersedes(generation_one));
+        assert!(!generation_one.supersedes(generation_one_revoked));
+        assert!(generation_two.supersedes(generation_one_revoked));
+        assert!(!generation_one_revoked.supersedes(generation_two));
+    }
+
+    #[tokio::test]
+    async fn project_candidate_replaces_same_named_failed_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = empty_runtime("session-project-failed-name", directory.path());
+        let source = runtime.update_source();
+        let failed = runtime
+            .load("load-failed-name", vec![missing_server("foo")])
+            .await
+            .expect("失败 Server 应保留安全状态");
+        assert_eq!(failed.servers[0].name, "foo");
+        assert_eq!(failed.servers[0].status, SessionMcpServerPhase::Failed);
+
+        runtime
+            .queue_project_snapshot(ProjectToolSnapshot {
+                version: ProjectCatalogVersion {
+                    generation: 1,
+                    revoked: false,
+                },
+                server_names: BTreeSet::from(["foo".to_owned()]),
+                tools: vec![NamedTool::new("project-foo".to_owned())],
+            })
+            .expect("项目候选应接管同名失败 Server");
+        {
+            let state = runtime.state.lock().unwrap();
+            assert!(state.failed_servers.is_empty());
+            assert_eq!(state.desired_project.version.generation, 1);
+        }
+
+        let delta = source
+            .take_update()
+            .expect("项目候选目录应可应用")
+            .expect("项目候选目录应产生变化");
+        assert_eq!(delta.added(), &["project-foo".to_owned()]);
+        assert!(runtime.status().unwrap().servers.is_empty());
+        runtime.close().await;
+    }
+
+    #[tokio::test]
+    async fn stale_project_candidates_cannot_regress_revocation_or_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = empty_runtime("session-project-version-order", directory.path());
+        let project = |generation: u64, revoked: bool, name: &str| ProjectToolSnapshot {
+            version: ProjectCatalogVersion {
+                generation,
+                revoked,
+            },
+            server_names: BTreeSet::new(),
+            tools: (!revoked)
+                .then(|| NamedTool::new(name.to_owned()) as Arc<dyn AgentTool>)
+                .into_iter()
+                .collect(),
+        };
+
+        runtime
+            .queue_project_snapshot(project(2, false, "generation-two"))
+            .unwrap();
+        runtime
+            .queue_project_snapshot(project(1, false, "stale-generation-one"))
+            .unwrap();
+        assert_eq!(
+            runtime.state.lock().unwrap().desired_project.version,
+            ProjectCatalogVersion {
+                generation: 2,
+                revoked: false,
+            }
+        );
+
+        runtime
+            .queue_project_snapshot(project(2, true, "same-generation-revoked"))
+            .unwrap();
+        runtime
+            .queue_project_snapshot(project(2, false, "stale-unrevoked"))
+            .unwrap();
+        assert_eq!(
+            runtime.state.lock().unwrap().desired_project.version,
+            ProjectCatalogVersion {
+                generation: 2,
+                revoked: true,
+            }
+        );
+
+        runtime
+            .queue_project_snapshot(project(3, false, "generation-three"))
+            .unwrap();
+        let state = runtime.state.lock().unwrap();
+        assert_eq!(state.desired_project.version.generation, 3);
+        assert!(!state.desired_project.version.revoked);
+        assert_eq!(state.desired_project.tools[0].definition().name, "generation-three");
+        drop(state);
+        runtime.close().await;
+    }
+
     #[tokio::test]
     async fn failure_capacity_keeps_status_encodable_and_rejects_new_names() {
         let directory = tempfile::tempdir().unwrap();
@@ -1872,7 +2008,7 @@ fn extract_id(body: &str) -> Option<&str> {
     }
 
     #[tokio::test]
-    async fn conflicting_project_candidate_keeps_the_existing_session_catalog() {
+    async fn conflicting_project_candidate_waits_for_dynamic_unload() {
         let directory = tempfile::tempdir().unwrap();
         let started = directory.path().join("started");
         let closed = directory.path().join("closed");
@@ -1885,6 +2021,14 @@ fn extract_id(body: &str) -> Option<&str> {
             )
             .await
             .unwrap();
+        let initial_delta = source
+            .take_update()
+            .unwrap()
+            .expect("动态 Server 首次发布应产生目录更新");
+        assert_eq!(
+            initial_delta.added(),
+            &[keencode_tools::portable_mcp_tool_name("shared-name", "echo").unwrap()]
+        );
 
         assert_eq!(
             runtime.queue_project_snapshot(ProjectToolSnapshot {
@@ -1897,13 +2041,10 @@ fn extract_id(body: &str) -> Option<&str> {
             }),
             Err(SessionMcpError::CatalogConflict)
         );
-        let delta = source
-            .take_update()
-            .unwrap()
-            .expect("原 Session 待发布目录仍应正常发布");
         assert_eq!(
-            delta.added(),
-            &[keencode_tools::portable_mcp_tool_name("shared-name", "echo").unwrap()]
+            source.take_update(),
+            Err(AgentToolCatalogUpdateError::new("Session MCP 目录存在名称冲突")),
+            "冲突候选已排队，但在动态 Server 释放前不得覆盖当前目录"
         );
         assert_eq!(
             runtime.status().unwrap().servers[0].status,
@@ -1914,8 +2055,28 @@ fn extract_id(body: &str) -> Option<&str> {
                 .catalog()
                 .definitions()
                 .iter()
-                .all(|definition| definition.name != "project-only")
+                .any(|definition| {
+                    definition.name
+                        == keencode_tools::portable_mcp_tool_name("shared-name", "echo")
+                            .unwrap()
+                })
         );
+
+        runtime
+            .unload("unload-conflict", "shared-name")
+            .await
+            .expect("释放动态 Server 后应应用最新项目候选");
+        let delta = source
+            .take_update()
+            .unwrap()
+            .expect("解除冲突后项目目录应发布");
+        assert_eq!(delta.added(), &["project-only".to_owned()]);
+        assert_eq!(
+            delta.removed(),
+            &[keencode_tools::portable_mcp_tool_name("shared-name", "echo").unwrap()]
+        );
+        assert!(runtime.status().unwrap().servers.is_empty());
+        assert_eq!(runtime.catalog().definitions()[0].name, "project-only");
         runtime.close().await;
         wait_for_file_lines(&closed, 1).await;
     }
