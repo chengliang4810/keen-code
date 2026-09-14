@@ -1518,6 +1518,11 @@ pub enum CollaborationInvocationInput {
         /// 需要重试的目标 Agent。
         target_agent_id: AgentId,
     },
+    /// 恢复失败或中断的同树单层子 Agent。
+    ResumeAgent {
+        /// 需要恢复的目标 Agent。
+        target_agent_id: AgentId,
+    },
 }
 
 /// 协作幂等记录中不含用户正文的稳定操作类型。
@@ -1533,6 +1538,8 @@ pub enum CollaborationInvocationKind {
     SteerAgent,
     /// 重试失败或中断的 Agent。
     RetryAgent,
+    /// 恢复失败或中断的单层子 Agent。
+    ResumeAgent,
 }
 
 /// 幂等记录保存的首次成功结果。
@@ -1562,6 +1569,13 @@ pub enum CollaborationInvocationOutput {
         target_agent_id: AgentId,
         /// 首次重试分配的新 Turn。
         retry_turn_id: TurnId,
+    },
+    /// 首次恢复创建且后续重放必须原样返回的新 Turn。
+    ResumedAgent {
+        /// 首次恢复的目标 Agent。
+        target_agent_id: AgentId,
+        /// 首次恢复分配的新 Turn。
+        resume_turn_id: TurnId,
     },
 }
 
@@ -4767,6 +4781,70 @@ impl CollaborationCoordinator {
         self.retry_agent_inner(source_agent_id, source_turn_id, None, target_agent_id)
     }
 
+    /// 由可信运行中 Turn 恢复同一根树内失败或中断的单层子 Agent。
+    ///
+    /// 恢复与重试都不会复用旧 Turn；恢复会以目标最近 Turn 的父链和根 Turn
+    /// 作为新 Turn 的因果锚点，并把尚未确认的动态输入一并重绑定到新 Turn。
+    pub fn resume_agent(
+        &self,
+        source_agent_id: &AgentId,
+        source_turn_id: &TurnId,
+        target_agent_id: &AgentId,
+    ) -> Result<TurnId, CollaborationError> {
+        self.resume_agent_inner(
+            source_agent_id,
+            Some(source_turn_id),
+            None,
+            target_agent_id,
+            false,
+        )
+    }
+
+    /// 使用可信 ToolCall 身份恢复目标子 Agent，并跨 Runner 重放首次新 Turn。
+    pub fn resume_agent_with_operation(
+        &self,
+        source_agent_id: &AgentId,
+        source_turn_id: &TurnId,
+        tool_call_id: &ToolCallId,
+        target_agent_id: &AgentId,
+    ) -> Result<TurnId, CollaborationError> {
+        self.resume_agent_inner(
+            source_agent_id,
+            Some(source_turn_id),
+            Some(tool_call_id),
+            target_agent_id,
+            false,
+        )
+    }
+
+    /// 由根 Agent 授权恢复同一根 Session 内的单层子 Agent。
+    ///
+    /// 该入口不要求根 Agent 存在活跃 Turn。它只允许运行时已经授权的根身份
+    /// 调用，并使用目标旧 Turn 作为因果锚点，避免 ACP 客户端伪造活跃根 Turn。
+    pub fn resume_agent_for_root(
+        &self,
+        root_agent_id: &AgentId,
+        target_agent_id: &AgentId,
+    ) -> Result<TurnId, CollaborationError> {
+        self.resume_agent_inner(root_agent_id, None, None, target_agent_id, true)
+    }
+
+    /// 以根 Session 的稳定操作身份恢复子 Agent，并幂等重放首次新 Turn。
+    pub fn resume_agent_for_root_with_operation(
+        &self,
+        root_agent_id: &AgentId,
+        operation_id: &ToolCallId,
+        target_agent_id: &AgentId,
+    ) -> Result<TurnId, CollaborationError> {
+        self.resume_agent_inner(
+            root_agent_id,
+            None,
+            Some(operation_id),
+            target_agent_id,
+            true,
+        )
+    }
+
     /// 使用可信 ToolCall 身份重试目标 Agent，并跨 Runner 重放返回首次创建的 Turn。
     pub fn retry_agent_with_operation(
         &self,
@@ -4906,6 +4984,206 @@ impl CollaborationCoordinator {
             }
             Ok(Transition {
                 output: new_turn_id.clone(),
+                events,
+                actions,
+            })
+        })
+    }
+
+    /// 统一执行可信来源和根 Session 授权的恢复转换。
+    fn resume_agent_inner(
+        &self,
+        source_agent_id: &AgentId,
+        source_turn_id: Option<&TurnId>,
+        tool_call_id: Option<&ToolCallId>,
+        target_agent_id: &AgentId,
+        root_authorized: bool,
+    ) -> Result<TurnId, CollaborationError> {
+        let source_agent_id = source_agent_id.clone();
+        let source_turn_id = source_turn_id.cloned();
+        let target_agent_id = target_agent_id.clone();
+        let invocation_input = CollaborationInvocationInput::ResumeAgent {
+            target_agent_id: target_agent_id.clone(),
+        };
+        self.apply_transition(|state| {
+            if !root_authorized
+                && let (Some(source_turn_id), Some(tool_call_id)) =
+                    (source_turn_id.as_ref(), tool_call_id)
+            {
+                let invocation_key = CollaborationInvocationKey {
+                    source_agent_id: source_agent_id.clone(),
+                    source_turn_id: source_turn_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                };
+                if let Some(output) =
+                    replay_collaboration_invocation(state, &invocation_key, &invocation_input)?
+                {
+                    let CollaborationInvocationOutput::ResumedAgent { resume_turn_id, .. } = output
+                    else {
+                        return Err(CollaborationError::InvalidRecovery {
+                            message: "ResumeAgent 幂等记录保存了不匹配的结果类型".to_owned(),
+                        });
+                    };
+                    return Ok(Transition {
+                        output: resume_turn_id,
+                        events: Vec::new(),
+                        actions: Vec::new(),
+                    });
+                }
+            }
+
+            let source_turn = if root_authorized {
+                None
+            } else {
+                Some(active_source_turn(
+                    state,
+                    &source_agent_id,
+                    source_turn_id.as_ref().expect("非根恢复必须提供来源 Turn"),
+                )?)
+            };
+            ensure_agent_loaded(
+                state,
+                self.inner.store.as_ref(),
+                &source_agent_id,
+                &target_agent_id,
+            )?;
+            let source = resident_agent(state, &source_agent_id)?;
+            let target = resident_agent(state, &target_agent_id)?;
+            if (root_authorized && source.definition.depth != AgentDepth::ROOT)
+                || source.definition.root_agent_id != target.definition.root_agent_id
+            {
+                return Err(CollaborationError::CrossTreeOperation);
+            }
+            let last_turn =
+                target
+                    .last_turn
+                    .clone()
+                    .ok_or_else(|| CollaborationError::RetryNotAllowed {
+                        agent_id: target_agent_id.clone(),
+                    })?;
+            let previous_turn_id = last_turn.turn_id.clone();
+            let target_root_agent_id = target.definition.root_agent_id.clone();
+            let target_plan_guard = if let Some(source_turn) = source_turn.as_ref() {
+                effective_child_plan_guard(
+                    source.definition.profile.plan_guard,
+                    source_turn.plan_guard,
+                    target.definition.profile.plan_guard,
+                )
+            } else {
+                target.definition.profile.plan_guard
+            };
+            let target_definition = target.definition.clone();
+            let parent_turn_id = last_turn.parent_turn_id.clone();
+            let root_turn_id = last_turn.root_turn_id.clone();
+            let invocation_key = tool_call_id.map(|tool_call_id| CollaborationInvocationKey {
+                source_agent_id: source_agent_id.clone(),
+                // 根授权恢复以目标旧 Turn 作为稳定因果锚点；普通模型恢复
+                // 仍以真实来源 Turn 作为 ToolCall 幂等身份的一部分。
+                source_turn_id: source_turn_id
+                    .clone()
+                    .unwrap_or_else(|| previous_turn_id.clone()),
+                tool_call_id: tool_call_id.clone(),
+            });
+            if let Some(invocation_key) = invocation_key.as_ref()
+                && let Some(output) =
+                    replay_collaboration_invocation(state, invocation_key, &invocation_input)?
+            {
+                let CollaborationInvocationOutput::ResumedAgent { resume_turn_id, .. } = output
+                else {
+                    return Err(CollaborationError::InvalidRecovery {
+                        message: "ResumeAgent 幂等记录保存了不匹配的结果类型".to_owned(),
+                    });
+                };
+                return Ok(Transition {
+                    output: resume_turn_id,
+                    events: Vec::new(),
+                    actions: Vec::new(),
+                });
+            }
+            if root_authorized
+                && let Some(tool_call_id) = tool_call_id
+                && let Some(output) = replay_root_resume_invocation(
+                    state,
+                    &source_agent_id,
+                    tool_call_id,
+                    &target_agent_id,
+                    &invocation_input,
+                )?
+            {
+                let CollaborationInvocationOutput::ResumedAgent { resume_turn_id, .. } = output
+                else {
+                    return Err(CollaborationError::InvalidRecovery {
+                        message: "ResumeAgent 幂等记录保存了不匹配的结果类型".to_owned(),
+                    });
+                };
+                return Ok(Transition {
+                    output: resume_turn_id,
+                    events: Vec::new(),
+                    actions: Vec::new(),
+                });
+            }
+            if target.definition.depth != AgentDepth::CHILD
+                || !matches!(
+                    target.status,
+                    CollaborationAgentStatus::Interrupted { .. }
+                        | CollaborationAgentStatus::Failed { .. }
+                )
+            {
+                return Err(CollaborationError::RetryNotAllowed {
+                    agent_id: target_agent_id.clone(),
+                });
+            }
+            let new_turn_id = allocate_turn_id(state, &target_root_agent_id)?;
+            let queued = QueuedTurn {
+                agent_id: target_agent_id.clone(),
+                root_agent_id: target_root_agent_id,
+                turn_id: new_turn_id.clone(),
+                source_agent_id: source_agent_id.clone(),
+                parent_turn_id,
+                root_turn_id,
+                cause: AgentTurnCause::Retry {
+                    previous_turn_id: previous_turn_id.clone(),
+                },
+                prompt: last_turn.prompt,
+                plan_guard: target_plan_guard,
+            };
+            let target = state
+                .agents
+                .get_mut(&target_agent_id)
+                .expect("恢复目标在上方已校验");
+            rebind_pending_inputs(target, &previous_turn_id, &new_turn_id);
+            let invocation_link = EventLink {
+                source_agent_id: source_agent_id.clone(),
+                turn_id: Some(previous_turn_id.clone()),
+                parent_turn_id: queued.parent_turn_id.clone(),
+                root_turn_id: Some(queued.root_turn_id.clone()),
+            };
+            let mut events = Vec::new();
+            let mut actions = Vec::new();
+            queue_turn(state, queued, &mut events)?;
+            schedule_root_turns(state, &mut events, &mut actions)?;
+            if let Some(invocation_key) = invocation_key {
+                let receipt = record_collaboration_invocation(
+                    state,
+                    invocation_key,
+                    invocation_input.clone(),
+                    CollaborationInvocationOutput::ResumedAgent {
+                        target_agent_id: target_agent_id.clone(),
+                        resume_turn_id: new_turn_id.clone(),
+                    },
+                )?;
+                push_event(
+                    state,
+                    &mut events,
+                    &target_definition,
+                    invocation_link,
+                    CollaborationEventKind::CollaborationInvocationCommitted {
+                        receipt: Box::new(receipt),
+                    },
+                )?;
+            }
+            Ok(Transition {
+                output: new_turn_id,
                 events,
                 actions,
             })
@@ -6457,6 +6735,10 @@ fn encode_collaboration_invocation_input(
             encoder.tag(4);
             encoder.text(target_agent_id.as_str());
         }
+        CollaborationInvocationInput::ResumeAgent { target_agent_id } => {
+            encoder.tag(5);
+            encoder.text(target_agent_id.as_str());
+        }
     }
 }
 
@@ -6517,6 +6799,14 @@ fn encode_collaboration_invocation_output(
             encoder.text(target_agent_id.as_str());
             encoder.text(retry_turn_id.as_str());
         }
+        CollaborationInvocationOutput::ResumedAgent {
+            target_agent_id,
+            resume_turn_id,
+        } => {
+            encoder.tag(5);
+            encoder.text(target_agent_id.as_str());
+            encoder.text(resume_turn_id.as_str());
+        }
     }
 }
 
@@ -6532,6 +6822,7 @@ fn encode_collaboration_invocation_receipt(
         CollaborationInvocationKind::StopAgent => 2,
         CollaborationInvocationKind::SteerAgent => 3,
         CollaborationInvocationKind::RetryAgent => 4,
+        CollaborationInvocationKind::ResumeAgent => 5,
     });
     encoder.u64(receipt.input_digest.len() as u64);
     for byte in receipt.input_digest {
@@ -6932,6 +7223,13 @@ fn collaboration_invocation_text_bytes(
             .as_str()
             .len()
             .saturating_add(retry_turn_id.as_str().len()),
+        CollaborationInvocationOutput::ResumedAgent {
+            target_agent_id,
+            resume_turn_id,
+        } => target_agent_id
+            .as_str()
+            .len()
+            .saturating_add(resume_turn_id.as_str().len()),
     })
 }
 
@@ -7469,6 +7767,56 @@ fn replay_collaboration_invocation(
     })
 }
 
+/// 按根 Session 的稳定操作身份恢复幂等记录；同一操作不能指向另一目标。
+///
+/// 根授权入口无法在请求中携带来源 Turn，因此首次提交使用目标旧 Turn 作为
+/// 幂等键。目标后续已经完成新的 Turn 时，仍需通过已持久化的目标引用找回该
+/// 精确记录；只按来源与 ToolCall 取第一条记录会把另一个目标的操作误当重放。
+fn replay_root_resume_invocation(
+    state: &CoordinatorState,
+    source_agent_id: &AgentId,
+    tool_call_id: &ToolCallId,
+    target_agent_id: &AgentId,
+    input: &CollaborationInvocationInput,
+) -> Result<Option<CollaborationInvocationOutput>, CollaborationError> {
+    let input_digest = collaboration_invocation_input_digest(input);
+    let mut matching = None;
+    let mut conflict = None;
+    for (key, record) in &state.collaboration_invocations {
+        if key.source_agent_id != *source_agent_id
+            || key.tool_call_id != *tool_call_id
+            || record.kind != CollaborationInvocationKind::ResumeAgent
+        {
+            continue;
+        }
+        let output_target = match &record.output {
+            CollaborationInvocationOutput::ResumedAgent {
+                target_agent_id, ..
+            } => target_agent_id,
+            _ => {
+                return Err(CollaborationError::InvalidRecovery {
+                    message: "ResumeAgent 幂等记录保存了不匹配的结果类型".to_owned(),
+                });
+            }
+        };
+        if output_target != target_agent_id || record.input_digest != input_digest {
+            conflict = Some(key.clone());
+            continue;
+        }
+        if matching.replace(record.output.clone()).is_some() {
+            conflict = Some(key.clone());
+        }
+    }
+    if let Some(key) = conflict {
+        return Err(CollaborationError::IdempotencyConflict {
+            source_agent_id: key.source_agent_id,
+            source_turn_id: key.source_turn_id,
+            tool_call_id: key.tool_call_id,
+        });
+    }
+    Ok(matching)
+}
+
 /// 将首次成功结果写入当前候选状态，禁止覆盖任何既有可信调用身份。
 fn record_collaboration_invocation(
     state: &mut CoordinatorState,
@@ -7519,6 +7867,9 @@ fn collaboration_invocation_kind(
         CollaborationInvocationInput::StopAgent { .. } => CollaborationInvocationKind::StopAgent,
         CollaborationInvocationInput::SteerAgent { .. } => CollaborationInvocationKind::SteerAgent,
         CollaborationInvocationInput::RetryAgent { .. } => CollaborationInvocationKind::RetryAgent,
+        CollaborationInvocationInput::ResumeAgent { .. } => {
+            CollaborationInvocationKind::ResumeAgent
+        }
     }
 }
 
@@ -7544,6 +7895,9 @@ fn collaboration_invocation_types_match(
         ) | (
             CollaborationInvocationKind::RetryAgent,
             CollaborationInvocationOutput::RetriedAgent { .. }
+        ) | (
+            CollaborationInvocationKind::ResumeAgent,
+            CollaborationInvocationOutput::ResumedAgent { .. }
         )
     )
 }
@@ -8127,6 +8481,40 @@ fn validate_recovered_collaboration_invocation(
             {
                 return Err(CollaborationError::InvalidRecovery {
                     message: "RetryAgent 幂等结果与来源、目标或新 Turn 不一致".to_owned(),
+                });
+            }
+        }
+        (
+            CollaborationInvocationKind::ResumeAgent,
+            CollaborationInvocationOutput::ResumedAgent {
+                target_agent_id,
+                resume_turn_id,
+            },
+        ) => {
+            let target_definition = root.known_agents.get(target_agent_id).ok_or_else(|| {
+                CollaborationError::InvalidRecovery {
+                    message: "ResumeAgent 幂等结果引用了未知目标 Agent".to_owned(),
+                }
+            })?;
+            let resume_sequence =
+                turn_sequence_for_root(&source_definition.root_agent_id, resume_turn_id);
+            let source_sequence = turn_sequence_for_root(
+                &source_definition.root_agent_id,
+                &invocation.key.source_turn_id,
+            );
+            if target_definition.root_agent_id != source_definition.root_agent_id
+                || target_definition.depth != AgentDepth::CHILD
+                || !turn_id_belongs_to_root(
+                    &source_definition.root_agent_id,
+                    root.next_turn_sequence,
+                    resume_turn_id,
+                )
+                || resume_sequence.is_none()
+                || source_sequence
+                    .is_some_and(|source| resume_sequence.is_some_and(|resume| resume <= source))
+            {
+                return Err(CollaborationError::InvalidRecovery {
+                    message: "ResumeAgent 幂等结果与来源、目标或新 Turn 不一致".to_owned(),
                 });
             }
         }

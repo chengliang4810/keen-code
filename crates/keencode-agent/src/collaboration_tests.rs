@@ -7697,6 +7697,361 @@ fn live_checkpoint_interrupts_pending_states_and_retry_preserves_steer() {
     acknowledge_steer_batch(&restored, &cancelling.agent.agent_id, &retry_turn, &steers);
 }
 
+/// 根授权可在冷恢复后恢复中断子 Agent，且新 Turn 保留因果链、动态输入和幂等结果。
+#[test]
+fn resume_agent_after_cold_restore_preserves_causality_claims_and_operation_result() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建可恢复子 Agent", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("resume_cold_child"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "恢复后继续处理 mailbox",
+        )
+        .unwrap();
+    let claimed_mailbox = fixture
+        .coordinator
+        .consume_mailbox(&child.agent.agent_id, &child.initial_turn_id, 1)
+        .unwrap();
+    assert_eq!(claimed_mailbox.len(), 1);
+    fixture
+        .coordinator
+        .steer_agent(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            "恢复后继续处理 steer",
+        )
+        .unwrap();
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+
+    let restored_execution = Arc::new(RecordingExecution::default());
+    let restored = Arc::new(CollaborationCoordinator::new(
+        CollaborationLimits::new(2).unwrap(),
+        fixture.store.clone(),
+        restored_execution.clone(),
+        Arc::new(SequentialIds {
+            next: AtomicU64::new(70_000),
+        }),
+    ));
+    restored.restore_coordinator(checkpoint).unwrap();
+    assert!(matches!(
+        restored.agent_status(&child.agent.agent_id).unwrap(),
+        CollaborationAgentStatus::Interrupted { turn_id } if turn_id == child.initial_turn_id
+    ));
+    assert!(matches!(
+        restored.agent_status(&fixture.root_agent_id).unwrap(),
+        CollaborationAgentStatus::Interrupted { turn_id } if turn_id == root_turn
+    ));
+
+    let operation_id = fixed_tool_call_id("resume-cold-operation");
+    let resumed_turn = restored
+        .resume_agent_for_root_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            &child.agent.agent_id,
+        )
+        .unwrap();
+    assert_ne!(resumed_turn, child.initial_turn_id);
+    let launch = restored_execution.launch(&resumed_turn);
+    assert_eq!(launch.parent_turn_id, Some(root_turn.clone()));
+    assert_eq!(launch.root_turn_id, root_turn);
+    assert!(matches!(
+        launch.cause,
+        AgentTurnCause::Retry { ref previous_turn_id } if previous_turn_id == &child.initial_turn_id
+    ));
+
+    let rebound_mailbox = restored
+        .consume_mailbox(&child.agent.agent_id, &resumed_turn, usize::MAX)
+        .unwrap();
+    assert_eq!(rebound_mailbox, claimed_mailbox);
+    acknowledge_mailbox_batch(
+        restored.as_ref(),
+        &child.agent.agent_id,
+        &resumed_turn,
+        &rebound_mailbox,
+    );
+    let rebound_steers = restored
+        .consume_user_steers(&child.agent.agent_id, &resumed_turn)
+        .unwrap();
+    assert_eq!(rebound_steers.len(), 1);
+    assert_eq!(rebound_steers[0].turn_id, resumed_turn);
+    assert_eq!(rebound_steers[0].content, "恢复后继续处理 steer");
+    acknowledge_steer_batch(
+        restored.as_ref(),
+        &child.agent.agent_id,
+        &resumed_turn,
+        &rebound_steers,
+    );
+
+    restored
+        .complete_turn(
+            &child.agent.agent_id,
+            &resumed_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        restored
+            .resume_agent_for_root_with_operation(
+                &fixture.root_agent_id,
+                &operation_id,
+                &child.agent.agent_id,
+            )
+            .unwrap(),
+        resumed_turn,
+        "恢复操作在目标后续完成后仍应返回首次新 Turn"
+    );
+}
+
+/// 根授权恢复的 operationId 不能把另一目标的 Resume 记录误当成幂等重放。
+#[test]
+fn root_resume_operation_id_conflict_does_not_replay_another_target() {
+    let fixture = fixture(4, 4);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "恢复多个失败子 Agent", NO_PLAN)
+        .unwrap();
+    let first_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("resume-conflict-spawn-a"),
+            spawn_request("resume_conflict_a"),
+        )
+        .unwrap();
+    let second_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &fixed_tool_call_id("resume-conflict-spawn-b"),
+            spawn_request("resume_conflict_b"),
+        )
+        .unwrap();
+    for child in [&first_child, &second_child] {
+        fixture
+            .coordinator
+            .complete_turn(
+                &child.agent.agent_id,
+                &child.initial_turn_id,
+                AgentTurnOutcome::Failed {
+                    message: "恢复冲突测试失败".to_owned(),
+                },
+            )
+            .unwrap();
+    }
+    let operation_id = fixed_tool_call_id("resume-conflict-operation");
+    let first_resumed = fixture
+        .coordinator
+        .resume_agent_for_root_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            &first_child.agent.agent_id,
+        )
+        .unwrap();
+    let error = fixture
+        .coordinator
+        .resume_agent_for_root_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            &second_child.agent.agent_id,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        CollaborationError::IdempotencyConflict { .. }
+    ));
+    assert!(matches!(
+        fixture.coordinator.agent_status(&second_child.agent.agent_id).unwrap(),
+        CollaborationAgentStatus::Failed { turn_id, .. } if turn_id == second_child.initial_turn_id
+    ));
+    assert_ne!(first_resumed, second_child.initial_turn_id);
+}
+
+/// Resume 只接受已有失败或中断终态，运行中、排队、取消中和已完成状态都必须拒绝。
+#[test]
+fn resume_rejects_non_terminal_child_states() {
+    let running_fixture = fixture(2, 2);
+    let running_root = running_fixture
+        .coordinator
+        .begin_root_turn(&running_fixture.root_agent_id, "运行中目标", NO_PLAN)
+        .unwrap();
+    let running_child = running_fixture
+        .coordinator
+        .spawn_agent(
+            &running_fixture.root_agent_id,
+            &running_root,
+            &next_tool_call_id(),
+            spawn_request("resume_running"),
+        )
+        .unwrap();
+    assert!(matches!(
+        running_fixture.coordinator.resume_agent_for_root(
+            &running_fixture.root_agent_id,
+            &running_child.agent.agent_id
+        ),
+        Err(CollaborationError::RetryNotAllowed { .. })
+    ));
+
+    let waiting_fixture = fixture(1, 2);
+    let waiting_root = waiting_fixture
+        .coordinator
+        .begin_root_turn(&waiting_fixture.root_agent_id, "排队目标", NO_PLAN)
+        .unwrap();
+    let _first_child = waiting_fixture
+        .coordinator
+        .spawn_agent(
+            &waiting_fixture.root_agent_id,
+            &waiting_root,
+            &next_tool_call_id(),
+            spawn_request("resume_capacity_holder"),
+        )
+        .unwrap();
+    let waiting_child = waiting_fixture
+        .coordinator
+        .spawn_agent(
+            &waiting_fixture.root_agent_id,
+            &waiting_root,
+            &next_tool_call_id(),
+            spawn_request("resume_waiting"),
+        )
+        .unwrap();
+    assert!(matches!(
+        waiting_fixture
+            .coordinator
+            .agent_status(&waiting_child.agent.agent_id),
+        Ok(CollaborationAgentStatus::WaitingCapacity { .. })
+    ));
+    assert!(matches!(
+        waiting_fixture.coordinator.resume_agent_for_root(
+            &waiting_fixture.root_agent_id,
+            &waiting_child.agent.agent_id
+        ),
+        Err(CollaborationError::RetryNotAllowed { .. })
+    ));
+
+    let cancelling_fixture = fixture(2, 2);
+    let cancelling_root = cancelling_fixture
+        .coordinator
+        .begin_root_turn(&cancelling_fixture.root_agent_id, "取消中目标", NO_PLAN)
+        .unwrap();
+    let cancelling_child = cancelling_fixture
+        .coordinator
+        .spawn_agent(
+            &cancelling_fixture.root_agent_id,
+            &cancelling_root,
+            &next_tool_call_id(),
+            spawn_request("resume_cancelling"),
+        )
+        .unwrap();
+    cancelling_fixture
+        .coordinator
+        .stop_agent(
+            &cancelling_fixture.root_agent_id,
+            &cancelling_root,
+            &next_tool_call_id(),
+            &cancelling_child.agent.agent_id,
+        )
+        .unwrap();
+    assert!(matches!(
+        cancelling_fixture
+            .coordinator
+            .agent_status(&cancelling_child.agent.agent_id),
+        Ok(CollaborationAgentStatus::Cancelling { .. })
+    ));
+    assert!(matches!(
+        cancelling_fixture.coordinator.resume_agent_for_root(
+            &cancelling_fixture.root_agent_id,
+            &cancelling_child.agent.agent_id
+        ),
+        Err(CollaborationError::RetryNotAllowed { .. })
+    ));
+
+    let completed_fixture = fixture(2, 2);
+    let completed_root = completed_fixture
+        .coordinator
+        .begin_root_turn(&completed_fixture.root_agent_id, "已完成目标", NO_PLAN)
+        .unwrap();
+    let completed_child = completed_fixture
+        .coordinator
+        .spawn_agent(
+            &completed_fixture.root_agent_id,
+            &completed_root,
+            &next_tool_call_id(),
+            spawn_request("resume_completed"),
+        )
+        .unwrap();
+    completed_fixture
+        .coordinator
+        .complete_turn(
+            &completed_child.agent.agent_id,
+            &completed_child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert!(matches!(
+        completed_fixture.coordinator.resume_agent_for_root(
+            &completed_fixture.root_agent_id,
+            &completed_child.agent.agent_id
+        ),
+        Err(CollaborationError::RetryNotAllowed { .. })
+    ));
+}
+
+/// 根授权恢复不会接受未知 Agent、根 Agent 或另一棵树的身份。
+#[test]
+fn root_resume_rejects_unknown_root_and_cross_tree_targets() {
+    let fixture = fixture(2, 2);
+    let unknown = AgentId::new("unknown-resume-target").unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .resume_agent_for_root(&fixture.root_agent_id, &unknown),
+        Err(CollaborationError::AgentNotFound { .. })
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .resume_agent_for_root(&fixture.root_agent_id, &fixture.root_agent_id),
+        Err(CollaborationError::RetryNotAllowed { .. })
+    ));
+
+    let other_root = fixture
+        .coordinator
+        .register_root(RootAgentRequest {
+            session_id: SessionId::new("resume-other-tree").unwrap(),
+            profile: profile("resume-other-tree"),
+            per_root_turn_limit: 2,
+        })
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .resume_agent_for_root(&fixture.root_agent_id, &other_root.agent_id),
+        Err(CollaborationError::CrossTreeOperation)
+    ));
+}
+
 /// 验证运行时树级普通消息字节边界与同一状态生成的可恢复 checkpoint 一致。
 #[test]
 fn runtime_tree_mailbox_byte_limit_produces_restorable_checkpoint() {
