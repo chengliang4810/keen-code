@@ -7820,6 +7820,90 @@ fn resume_agent_after_cold_restore_preserves_causality_claims_and_operation_resu
     );
 }
 
+/// Resume 必须把失败 Turn 尚未消费的 TriggerTurn mailbox 归属重绑定到新 Turn。
+#[test]
+fn resume_rebinds_trigger_turn_after_pending_dynamic_input_failure() {
+    let fixture = fixture(4, 4);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建 TriggerTurn 恢复场景", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("resume_trigger_rebind"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    let (_, trigger_turn) = fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "触发失败恢复",
+        )
+        .unwrap();
+    let trigger_turn = trigger_turn.expect("空闲子 Agent 应启动 TriggerTurn");
+    fixture
+        .coordinator
+        .complete_turn_with_pending_dynamic_input(
+            &child.agent.agent_id,
+            &trigger_turn,
+            AgentTurnOutcome::Failed {
+                message: "模拟动态输入确认失败".to_owned(),
+            },
+        )
+        .unwrap();
+
+    let resumed_turn = fixture
+        .coordinator
+        .resume_agent_for_root(&fixture.root_agent_id, &child.agent.agent_id)
+        .unwrap();
+    let child_snapshot = fixture
+        .coordinator
+        .checkpoint_root(&fixture.root_agent_id)
+        .unwrap()
+        .agents
+        .into_iter()
+        .find(|agent| agent.definition.agent_id == child.agent.agent_id)
+        .expect("checkpoint 应包含恢复目标");
+    assert_eq!(
+        child_snapshot.mailbox[0].claimed_turn_id,
+        Some(resumed_turn.clone())
+    );
+
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &resumed_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    assert!(fixture.execution.launches().iter().any(|launch| {
+        launch.agent.agent_id == child.agent.agent_id
+            && launch.turn_id != child.initial_turn_id
+            && launch.turn_id != trigger_turn
+            && launch.turn_id != resumed_turn
+    }));
+}
+
 /// 根授权恢复的 operationId 不能把另一目标的 Resume 记录误当成幂等重放。
 #[test]
 fn root_resume_operation_id_conflict_does_not_replay_another_target() {

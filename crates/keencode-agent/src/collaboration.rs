@@ -8136,6 +8136,11 @@ fn input_claim_event_context(
 
 /// 将崩溃、取消或失败 Turn 遗留的输入及其 claim 原子重绑定到后续 Turn。
 fn rebind_pending_inputs(agent: &mut AgentEntry, previous_turn_id: &TurnId, turn_id: &TurnId) {
+    for entry in &mut agent.mailbox {
+        if entry.claimed_turn_id.as_ref() == Some(previous_turn_id) {
+            entry.claimed_turn_id = Some(turn_id.clone());
+        }
+    }
     for steer in &mut agent.steers {
         if &steer.turn_id == previous_turn_id {
             steer.turn_id = turn_id.clone();
