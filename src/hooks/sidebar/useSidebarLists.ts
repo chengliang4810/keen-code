@@ -86,11 +86,20 @@ export function useSidebarLists({
     if (!api.isTauri()) return;
     const phase = "sessions_list/projects_list";
     try {
-      const persistedProjects = await api.projectsList();
+      const [rows, persistedProjects] = await Promise.all([
+        sessionsList(),
+        api.projectsList(),
+      ]);
       if (!mounted.current) return;
-      const projection = projectSidebar([], loadSessionPreferences(), persistedProjects);
+      const projection = projectSidebar(
+        rows,
+        loadSessionPreferences(),
+        persistedProjects,
+      );
       setProjects(projection.projects);
-      setSessions([]);
+      setSessions(
+        projection.sessions.filter((session) => session.projectId === null),
+      );
       setActiveProject((previous) => {
         if (
           previous &&

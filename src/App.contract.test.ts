@@ -430,13 +430,15 @@ describe("App 启动工作台契约", () => {
     const refreshEnd = sidebarSource.indexOf("useEffect(", refreshStart);
     const refreshSource = sidebarSource.slice(refreshStart, refreshEnd);
     const readyIndex = refreshSource.indexOf("setAppBooting(false)");
-    const listIndex = refreshSource.indexOf("await api.projectsList()");
+    const listIndex = refreshSource.indexOf("api.projectsList()");
 
     expect(refreshStart).toBeGreaterThanOrEqual(0);
     expect(refreshEnd).toBeGreaterThan(refreshStart);
     expect(readyIndex).toBeGreaterThanOrEqual(0);
     expect(listIndex).toBeGreaterThan(readyIndex);
     expect(refreshSource).not.toContain("sessionGetState");
+    expect(refreshSource).toContain("sessionsList()");
+    expect(refreshSource).toContain("session.projectId === null");
     expect(appSource).not.toContain("appGate");
     expect(appSource).not.toContain("@/components/RuntimeGate");
   });
