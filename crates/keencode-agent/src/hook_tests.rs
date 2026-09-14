@@ -1306,7 +1306,8 @@ async fn 取消后启动hook迟到成功不得提交且重载候选可重试() {
         delivered: AtomicUsize::new(0),
         aborted: AtomicUsize::new(0),
     });
-    let mut first_registry = HookRegistry::with_circuit_store(HookCircuitStore::new());
+    let old_circuits = HookCircuitStore::new();
+    let mut first_registry = HookRegistry::with_circuit_store(old_circuits.clone());
     first_registry
         .register(Arc::new(DeferredTurnStartHook {
             name: "deferred-turn-start",
