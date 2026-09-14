@@ -40,13 +40,15 @@ thread_local! {
     static REPLAY_SEEK_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
-/// 可重建的历史定位索引；只保存轮次边界和稀疏 Provider 快照，不复制正文。
+/// 可重建的历史定位索引；只保存轮次边界、Turn Provider 和稀疏上下文定位，不复制正文。
 #[derive(Clone, Debug, Default)]
 pub struct SessionHistoryIndex {
     /// 根轮次起始物理序号，按提交顺序排列。
     pub root_starts: Vec<u64>,
-    /// 稀疏 Provider 变更，用于从中间窗口准确恢复模型统计。
+    /// 稀疏 Session Provider 变更，用于从中间窗口恢复当时的默认配置。
     pub providers: BTreeMap<u64, crate::ProviderSnapshot>,
+    /// 每个 Turn 实际使用的 Provider 快照，供任意历史窗口权威投影模型统计。
+    pub turn_providers: BTreeMap<crate::TurnId, crate::ProviderSnapshot>,
     /// 子 Agent 身份、状态和 Todo 的稀疏定位，不保留事件正文。
     pub context: BTreeMap<String, Vec<u64>>,
 }
@@ -104,6 +106,12 @@ impl SessionHistoryIndex {
             }
             SessionEvent::ProviderSnapshotUpdated { provider } => {
                 self.providers.insert(sequence, provider.clone());
+            }
+            SessionEvent::TurnProviderSnapshotRecorded {
+                turn_id, provider, ..
+            } => {
+                self.turn_providers
+                    .insert(turn_id.clone(), provider.clone());
             }
             _ => {}
         }

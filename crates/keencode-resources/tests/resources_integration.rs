@@ -124,6 +124,15 @@ fn turn_provider_snapshot_is_atomic_and_turn_scoped() {
         })
         .expect("配对的 Turn Provider 快照应原子提交");
     let state = journal.state().expect("状态应读取");
+    assert_eq!(
+        journal
+            .history_index()
+            .expect("历史索引应读取")
+            .turn_providers
+            .get(&turn_id),
+        Some(&provider),
+        "内存索引必须保留完整 Turn Provider 快照"
+    );
     assert!(
         state.provider.is_none(),
         "Turn 快照不得改变 Session 默认 Provider"
@@ -135,6 +144,15 @@ fn turn_provider_snapshot_is_atomic_and_turn_scoped() {
         SnapshotPolicy::Disabled,
     );
     assert_eq!(reopened.state().expect("冷恢复状态应读取"), state);
+    assert_eq!(
+        reopened
+            .history_index()
+            .expect("冷恢复历史索引应读取")
+            .turn_providers
+            .get(&turn_id),
+        Some(&provider),
+        "可重建索引必须从 Journal 恢复 Turn Provider 快照"
+    );
 
     for (session, events, message) in [
         (
