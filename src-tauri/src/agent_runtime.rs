@@ -4581,58 +4581,35 @@ impl AgentRuntime {
             .collaboration_sessions
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        let previous_setting = self.background_agent_limit.load(Ordering::Acquire);
-        let previous_global_limit = self
+        let sessions_by_coordinator = runtimes
+            .iter()
+            .map(|(session_id, runtime)| {
+                (runtime.coordinator.coordinator_id(), session_id.as_str())
+            })
+            .collect::<HashMap<_, _>>();
+        let root_refs = runtimes
+            .values()
+            .map(|runtime| (runtime.coordinator.as_ref(), &runtime.root_agent_id))
+            .collect::<Vec<_>>();
+        let report = self
             .collaboration_global_turn_limiter
-            .capacity()
-            .map_err(|error| runtime_operation_failed(error))?
-            .1;
-        debug_assert_eq!(
-            previous_global_limit, previous_setting,
-            "后台 Agent 设置应与共享 limiter 保持一致"
-        );
-        let mut updated = Vec::new();
-        for runtime in runtimes.values() {
-            let previous_root_limit = runtime
-                .coordinator
-                .capacity()
-                .map_err(|error| runtime_operation_failed(error))?
-                .roots
-                .into_iter()
-                .find_map(|(root_agent_id, _in_use, root_limit)| {
-                    (root_agent_id == runtime.root_agent_id).then_some(root_limit)
-                })
-                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            updated.push((Arc::clone(runtime), previous_root_limit));
-            if runtime
-                .coordinator
-                .update_root_turn_limit(&runtime.root_agent_id, limit)
-                .is_err()
-            {
-                for (applied, previous_root_limit) in updated.into_iter().rev() {
-                    let _ = applied
-                        .coordinator
-                        .update_root_turn_limit(&applied.root_agent_id, previous_root_limit);
-                }
-                return Err(AgentRuntimeError::RuntimeOperationFailed);
-            }
-        }
-        if self
-            .collaboration_global_turn_limiter
-            .update_limit(limit)
-            .is_err()
-        {
-            let _ = self
-                .collaboration_global_turn_limiter
-                .update_limit(previous_global_limit);
-            for (applied, previous_root_limit) in updated.into_iter().rev() {
-                let _ = applied
-                    .coordinator
-                    .update_root_turn_limit(&applied.root_agent_id, previous_root_limit);
-            }
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
+            .update_limits_atomically(&root_refs, limit, limit)
+            .map_err(|error| runtime_operation_failed(error))?;
         self.background_agent_limit.store(limit, Ordering::Release);
+        for failure in report.dispatch_errors() {
+            let session_id = failure
+                .coordinator_id()
+                .and_then(|coordinator_id| sessions_by_coordinator.get(&coordinator_id).copied());
+            tracing::warn!(
+                coordinator_id = ?failure.coordinator_id(),
+                session_id = ?session_id,
+                error = %redacted_collaboration_failure(&failure.error().to_string()),
+                "后台 Agent 限额已提交；等待 Turn 调度尚未收敛"
+            );
+        }
+        if report.dispatch_in_progress() {
+            tracing::debug!("后台 Agent 限额已提交；已有全局派发轮次继续处理等待队列");
+        }
         Ok(())
     }
 
@@ -6627,47 +6604,44 @@ impl AgentRuntime {
             )
         };
         let _gate = gate.lock().await;
-        let collaboration = self
-            .collaboration_sessions
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            .cloned();
         let mut close_error = None;
-        if let Some(collaboration) = collaboration {
-            if let Err(error) = collaboration
-                .coordinator
-                .close_root_session(&collaboration.root_agent_id)
-                && !matches!(
-                    error,
-                    keencode_agent::CollaborationError::AgentNotFound { .. }
-                )
-            {
-                // 协调器已冻结或终态尚未收敛时不能伪造关闭成功；但仍须继续
-                // 拆除本地后台资源，保留磁盘事实交给下一次冷恢复处理。
-                close_error = Some(AgentRuntimeError::RecoveryRequired);
-            }
-            if let Err(error) = collaboration.stop_background_completion_pump() {
-                close_error.get_or_insert(error);
-            }
-            if let Err(error) = collaboration.execution.stop_local_work_for_close() {
-                close_error.get_or_insert(error);
-            }
-            match self.collaboration_sessions.lock() {
-                Ok(mut runtimes) => {
-                    if runtimes
-                        .get(session_id)
-                        .is_some_and(|current| Arc::ptr_eq(current, &collaboration))
-                    {
-                        runtimes.remove(session_id);
-                    }
+        let collaboration = {
+            let mut runtimes = self
+                .collaboration_sessions
+                .lock()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+            let collaboration = runtimes.get(session_id).cloned();
+            if let Some(collaboration) = collaboration.as_ref() {
+                // 根关闭与移除和设置热更新共用这把 map 锁：setter 只能完整看到
+                // 关闭前的根，或在线性化移除后完全忽略它。
+                if let Err(error) = collaboration
+                    .coordinator
+                    .close_root_session(&collaboration.root_agent_id)
+                    && !matches!(
+                        error,
+                        keencode_agent::CollaborationError::AgentNotFound { .. }
+                    )
+                {
+                    // 协调器已冻结或终态尚未收敛时不能伪造关闭成功；但仍须继续
+                    // 拆除本地后台资源，保留磁盘事实交给下一次冷恢复处理。
+                    close_error = Some(AgentRuntimeError::RecoveryRequired);
                 }
-                Err(_) => {
-                    close_error.get_or_insert(AgentRuntimeError::StateUnavailable);
+                if let Err(error) = collaboration.stop_background_completion_pump() {
+                    close_error.get_or_insert(error);
+                }
+                if let Err(error) = collaboration.execution.stop_local_work_for_close() {
+                    close_error.get_or_insert(error);
+                }
+                if runtimes
+                    .get(session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, collaboration))
+                {
+                    runtimes.remove(session_id);
                 }
             }
-            drop(collaboration);
-        }
+            collaboration
+        };
+        drop(collaboration);
         self.close_session_mcp(session_id).await;
         if let Err(error) = self.close_session_delivery(session_id).await {
             close_error.get_or_insert(error);
@@ -14406,6 +14380,92 @@ mod tests {
             .expect("第二 Session 应关闭");
     }
 
+    /// 任一后续 Session 已冻结时，设置预检失败不得先修改较早遍历到的健康根树。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn background_agent_limit_preflight_failure_keeps_all_limits_unchanged() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let first_project = tempfile::tempdir().expect("应创建第一项目目录");
+        let second_project = tempfile::tempdir().expect("应创建第二项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let first_session = runtime
+            .open_or_create_session(first_project.path(), None, "atomic-limit-first")
+            .expect("第一 Session 应创建");
+        let second_session = runtime
+            .open_or_create_session(second_project.path(), None, "atomic-limit-second")
+            .expect("第二 Session 应创建");
+        for session in [&first_session, &second_session] {
+            runtime
+                .ensure_session_delivery(session.session_id().as_str())
+                .expect("测试 Session 投递应建立");
+        }
+        let seed = || RootAgentSeed {
+            model: "test-model".to_owned(),
+            reasoning_effort: None,
+            plan_guard: PlanGuard::inactive(),
+        };
+        let first = runtime
+            .ensure_collaboration_runtime(&first_session, seed())
+            .expect("第一 Collaboration Runtime 应建立");
+        let second = runtime
+            .ensure_collaboration_runtime(&second_session, seed())
+            .expect("第二 Collaboration Runtime 应建立");
+        let ordered = runtime
+            .collaboration_sessions
+            .lock()
+            .expect("Collaboration 表应读取")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(ordered.len(), 2);
+        let healthy = Arc::clone(&ordered[0]);
+        let frozen = Arc::clone(&ordered[1]);
+        std::fs::write(&frozen.store.transition_path, b"invalid Collaboration JSON")
+            .expect("应破坏后遍历 Session 的 Collaboration 提交文件");
+        assert!(matches!(
+            frozen.coordinator.close_root_session(&frozen.root_agent_id),
+            Err(CollaborationError::StoreRecoveryRequired { .. })
+        ));
+
+        let previous_root_limit = healthy.coordinator.capacity().unwrap().roots[0].2;
+        let previous_global_limit = runtime
+            .collaboration_global_turn_limiter
+            .capacity()
+            .unwrap()
+            .1;
+        let previous_setting = runtime.background_agent_limit.load(Ordering::Acquire);
+        assert_eq!(
+            runtime.set_background_agent_limit(previous_setting + 1),
+            Err(AgentRuntimeError::RuntimeOperationFailed)
+        );
+        assert_eq!(
+            healthy.coordinator.capacity().unwrap().roots[0].2,
+            previous_root_limit
+        );
+        assert_eq!(
+            runtime
+                .collaboration_global_turn_limiter
+                .capacity()
+                .unwrap()
+                .1,
+            previous_global_limit
+        );
+        assert_eq!(
+            runtime.background_agent_limit.load(Ordering::Acquire),
+            previous_setting
+        );
+
+        for session_id in [
+            first_session.session_id().as_str(),
+            second_session.session_id().as_str(),
+        ] {
+            let _ = runtime.close_session(session_id).await;
+        }
+        drop((first, second));
+    }
+
     /// 设置更新与新 Session 装配并发时，map 锁必须保证新根不会永久保留旧阈值。
     #[tokio::test(flavor = "multi_thread")]
     async fn background_agent_limit_update_races_new_session_without_stale_limit() {
@@ -20188,6 +20248,101 @@ mod tests {
             .close_session(&session_id)
             .await
             .expect("重开的 Session 应关闭");
+    }
+
+    /// 根关闭尚在静止等待时，设置更新必须等到 map 中的旧 Runtime 已完整移除。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_agent_limit_update_serializes_with_session_close() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "close-limit-race-operation")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .ensure_session_delivery(&session_id)
+            .expect("测试 Session 投递应建立");
+        let collaboration = runtime
+            .ensure_collaboration_runtime(
+                &session,
+                RootAgentSeed {
+                    model: "test-model".to_owned(),
+                    reasoning_effort: None,
+                    plan_guard: PlanGuard::inactive(),
+                },
+            )
+            .expect("Collaboration 装配应建立");
+        let pending_turn_id =
+            AgentTurnId::new("turn-close-limit-race").expect("测试 Turn 标识应有效");
+        let cancellation = TurnCancellation::new();
+        collaboration
+            .execution
+            .state
+            .lock()
+            .expect("执行状态锁应可用")
+            .running_turns
+            .insert(
+                pending_turn_id.clone(),
+                super::ManagedRuntimeTurn {
+                    agent_id: collaboration.root_agent_id.clone(),
+                    agent_depth: super::AgentDepth::ROOT,
+                    summary: "关闭竞态占位任务".to_owned(),
+                    started_at_unix_ms: 1,
+                    started: Instant::now(),
+                    cancellation: cancellation.clone(),
+                    terminal_outcome: Some(AgentTurnOutcome::Interrupted),
+                },
+            );
+
+        let close_runtime = Arc::clone(&runtime);
+        let close_session_id = session_id.clone();
+        let close =
+            tokio::spawn(async move { close_runtime.close_session(&close_session_id).await });
+        tokio::time::timeout(Duration::from_secs(2), cancellation.cancelled())
+            .await
+            .expect("关闭应进入根树静止等待");
+        let map_locked_during_close = runtime.collaboration_sessions.try_lock().is_err();
+
+        let setter_runtime = Arc::clone(&runtime);
+        let setter =
+            tokio::task::spawn_blocking(move || setter_runtime.set_background_agent_limit(2));
+        {
+            let mut state = collaboration
+                .execution
+                .state
+                .lock()
+                .expect("执行状态锁应可用");
+            state.running_turns.remove(&pending_turn_id);
+            collaboration.execution.idle.notify_all();
+        }
+
+        assert_eq!(close.await.expect("关闭任务不应 panic"), Ok(()));
+        assert_eq!(setter.await.expect("设置任务不应 panic"), Ok(()));
+        assert!(
+            map_locked_during_close,
+            "close_session 必须持有映射锁直到根关闭并移除完成"
+        );
+        assert!(
+            runtime
+                .collaboration_sessions
+                .lock()
+                .expect("Collaboration 表应读取")
+                .get(&session_id)
+                .is_none()
+        );
+        assert_eq!(runtime.background_agent_limit.load(Ordering::Acquire), 2);
+        assert_eq!(
+            runtime
+                .collaboration_global_turn_limiter
+                .capacity()
+                .unwrap()
+                .1,
+            2
+        );
     }
 
     /// 协调器关闭因 Store 冻结失败时，仍必须清理完成泵、投递和 Runtime 注册。
