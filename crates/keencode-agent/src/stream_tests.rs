@@ -5039,6 +5039,92 @@ fn assert_failed_usage_without_transcript(
     );
 }
 
+/// 原生与工具模拟结构化流失败时保留已报告用量，但不发布候选模型事件。
+#[tokio::test]
+async fn structured_failed_streams_account_usage_without_publishing_candidates() {
+    for capability in [
+        keencode_model::StructuredOutputCapability::Native,
+        keencode_model::StructuredOutputCapability::ToolEmulated,
+    ] {
+        for failure in 0..4 {
+            let usage = reported_usage();
+            let stream_usage = usage.clone();
+            let cancellation = TurnCancellation::new();
+            let stream_cancellation = cancellation.clone();
+            let provider_stream: ModelStream = Box::pin(stream::unfold(0_u8, move |index| {
+                let usage = stream_usage.clone();
+                let cancellation = stream_cancellation.clone();
+                async move {
+                    match index {
+                        0 => Some((
+                            Ok(ModelStreamEvent::MessageStart {
+                                metadata: ResponseMetadata::default(),
+                            }),
+                            1,
+                        )),
+                        1 => Some((Ok(ModelStreamEvent::Usage { usage }), 2)),
+                        2 => match failure {
+                            0 => None,
+                            1 => Some((
+                                Err(ModelError::Transport {
+                                    message: "reported usage then disconnect".to_owned(),
+                                    retryable: false,
+                                }),
+                                3,
+                            )),
+                            2 => Some((
+                                Ok(ModelStreamEvent::MessageStart {
+                                    metadata: ResponseMetadata::default(),
+                                }),
+                                3,
+                            )),
+                            _ => {
+                                cancellation.cancel();
+                                pending::<Option<(Result<ModelStreamEvent, ModelError>, u8)>>()
+                                    .await
+                            }
+                        },
+                        _ => None,
+                    }
+                }
+            }));
+            let provider: Arc<dyn ModelProvider> = Arc::new(StreamQueueProvider::new(
+                ProviderCapabilities {
+                    structured_output: capability,
+                    tool_calling: true,
+                    ..ProviderCapabilities::default()
+                },
+                [provider_stream],
+            ));
+            let sink = Arc::new(RecordingSink::default());
+            let mut request = test_turn_request();
+            request.set_cancellation(cancellation);
+            request.model_request_mut().structured_output = Some(
+                keencode_model::StructuredOutputConfig::new(
+                    "answer",
+                    json!({"type":"object", "properties":{"answer":{"type":"integer"}}, "required":["answer"], "additionalProperties":false}),
+                ),
+            );
+            let result = event_runner(provider, sink.clone(), sink.clone(), RunLimits::default())
+                .run_turn(request)
+                .await;
+            assert_eq!(
+                sink.usages().len(),
+                1,
+                "capability={capability:?}, failure={failure}, error={:?}",
+                result.error
+            );
+            assert_failed_usage_without_transcript(&result, &sink, &usage);
+            assert!(
+                sink.snapshot()
+                    .iter()
+                    .all(|event| !matches!(event.kind(), AgentStreamEventKind::ModelEvent { .. })),
+                "结构化失败候选不能发布模型事件"
+            );
+        }
+    }
+}
+
 /// Provider 在 Usage 后传输失败时仍须提交已确认用量，不得提交不完整 Transcript。
 #[tokio::test]
 async fn provider_transport_error_after_usage_commits_usage_without_transcript() {

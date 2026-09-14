@@ -4188,9 +4188,9 @@ async fn tap_model_stream_event(
                     unreachable!("暂存事件必须是模型事件");
                 };
                 let event = event.clone();
+                // 候选不对外发布，但 Provider 已报告的用量仍是失败调用的记账依据。
+                observe_tap_model_event(&tapped.status, &event);
                 record_tap_buffered_event(&tapped.status, envelope);
-                // 事件虽未进入 Sink，仍交给严格归约器；但只有 Sink 已确认的
-                // 事件才能进入失败用量快照，避免无效候选的暂存 Usage 被记账。
                 tapped.done = matches!(event, keencode_model::ModelStreamEvent::MessageEnd { .. });
                 return Some((Ok(event), tapped));
             }
@@ -4310,7 +4310,7 @@ fn take_tap_buffered_events(status: &Arc<Mutex<ModelStreamTapStatus>>) -> Vec<Ag
     )
 }
 
-/// 返回失败模型调用中已由实时 Sink 确认的明确用量；未知用量不伪造成已消耗。
+/// 返回失败模型调用已确认的用量，包括结构化候选内部观察值；未知用量不伪造成已消耗。
 fn tap_model_usage(status: &Arc<Mutex<ModelStreamTapStatus>>) -> Option<ModelStreamTapUsage> {
     let status = status
         .lock()

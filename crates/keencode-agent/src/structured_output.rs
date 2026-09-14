@@ -266,7 +266,10 @@ fn append_native_correction_context(
         })
         .cloned()
         .collect::<Vec<_>>();
-    if !assistant_content.is_empty() {
+    if assistant_content
+        .iter()
+        .any(|block| matches!(block, ContentBlock::Text { .. }))
+    {
         additions.push(Message::new(MessageRole::Assistant, assistant_content));
     }
     let mut message = Message::text(MessageRole::User, instruction);
@@ -302,7 +305,12 @@ fn append_emulated_correction_context(
             _ => None,
         })
         .collect::<Vec<_>>();
-    if !assistant_content.is_empty() {
+    if assistant_content.iter().any(|block| {
+        matches!(
+            block,
+            ContentBlock::Text { .. } | ContentBlock::ToolCall { .. }
+        )
+    }) {
         additions.push(Message::new(MessageRole::Assistant, assistant_content));
     }
     if tool_call_ids.is_empty() {
@@ -725,6 +733,38 @@ mod tests {
         assert!(message.len() <= MAX_STRUCTURED_OUTPUT_DIAGNOSTIC_BYTES);
         assert!(message.ends_with("..."));
         assert!(message.is_char_boundary(message.len()));
+    }
+
+    /// 纯推理候选不可形成无正文、无工具调用的 Assistant 纠正消息。
+    #[test]
+    fn correction_skips_reasoning_only_assistant_candidates() {
+        for mode in [
+            StructuredOutputMode::Native(test_config()),
+            StructuredOutputMode::ToolEmulated(test_config()),
+        ] {
+            let base = test_request(&mode);
+            let mut response = text_response("invalid", StopReason::Completed);
+            response.content = vec![ContentBlock::Reasoning {
+                reasoning: keencode_model::ReasoningContent::new("private reasoning"),
+            }];
+            let error = mode
+                .parse_response(&response)
+                .expect_err("纯推理不满足结构化结果");
+            let correction = mode.correction_request(&base, &response, &error, 1);
+            assert_eq!(correction.messages.len(), base.messages.len() + 1);
+            assert_eq!(
+                correction.messages[base.messages.len()].role,
+                MessageRole::User
+            );
+            assert!(correction.messages[base.messages.len()].is_meta);
+            if matches!(mode, StructuredOutputMode::Native(_)) {
+                response.content.push(ContentBlock::ToolCall {
+                    tool_call: ToolCall::new("discarded", "record", json!({})),
+                });
+                let correction = mode.correction_request(&base, &response, &error, 1);
+                assert_eq!(correction.messages.len(), base.messages.len() + 1);
+            }
+        }
     }
 
     /// 保留结果工具的 value 包装不能把根 JSON 类型收窄为对象。
