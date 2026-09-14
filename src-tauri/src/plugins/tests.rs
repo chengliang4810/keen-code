@@ -917,6 +917,30 @@ fn loads_default_hooks_file() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// 插件详情的兼容性提示必须与 Agent Runtime 已接入的 Hook 事件保持一致。
+#[test]
+fn supported_runtime_hooks_are_not_reported_as_unsupported() {
+    let hooks = serde_json::json!({
+        "SessionStart": [],
+        "SubagentStart": [],
+        "UserPromptSubmit": [],
+        "PreToolUse": [],
+        "PostToolUse": [],
+        "PostToolUseFailure": [],
+        "Stop": [],
+        "StopFailure": [],
+        "OnError": [],
+        "PreCompact": [],
+        "PostCompact": [],
+        "FutureEvent": []
+    });
+
+    assert_eq!(
+        unsupported_hook_events(Some(&hooks)),
+        vec!["FutureEvent".to_owned()]
+    );
+}
+
 /// 配置名称将被归一为合法的 `KEENCODE_PLUGIN_*` 变量命名空间。
 #[test]
 fn normalizes_plugin_variable_namespace() {

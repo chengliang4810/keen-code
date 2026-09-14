@@ -1603,10 +1603,15 @@ fn unsupported_hook_events(hooks: Option<&Value>) -> Vec<String> {
                     .replace(['_', '-'], "")
                     .as_str(),
                 "sessionstart"
+                    | "subagentstart"
                     | "userpromptsubmit"
                     | "pretooluse"
                     | "posttooluse"
                     | "posttoolusefailure"
+                    | "onerror"
+                    | "stopfailure"
+                    | "precompact"
+                    | "postcompact"
                     | "stop"
             )
         })
