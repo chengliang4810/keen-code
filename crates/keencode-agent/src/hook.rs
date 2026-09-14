@@ -6,6 +6,7 @@ use std::fmt;
 use std::future::Future;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::Instant;
 
@@ -36,6 +37,9 @@ const MAX_HOOK_ERROR_MESSAGE_BYTES: usize = 4 * 1_024;
 
 /// 工作线程异常退出后，下一次调用可发起唯一恢复尝试前的固定退避。
 pub(crate) const HOOK_WORKER_RECOVERY_BACKOFF: Duration = Duration::from_millis(100);
+
+/// 同一共享 Store 谱系允许同时存活的隔离 Hook worker 上限。
+const MAX_HOOK_WORKERS_PER_STORE: usize = 16;
 
 /// Hook 异步回调使用的对象安全 Future。
 pub type HookFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -506,6 +510,8 @@ struct RegisteredHook {
     hook: Arc<dyn AgentHook>,
     /// 区分可恢复 worker 崩溃与可能残留线程的永久熔断状态。
     circuit: Arc<HookCircuit>,
+    /// 跨 Hook 声明换代共享的隔离 worker 容量边界。
+    worker_admission: Arc<HookWorkerAdmission>,
 }
 
 /// Hook 隔离线程的熔断状态；只有已确认退出的 worker 才允许一次自动恢复。
@@ -640,19 +646,108 @@ impl HookCircuit {
     }
 }
 
-/// 在同一扩展候选代次构建的多个 Turn 之间共享 Hook 熔断与单入口状态。
+/// 跨 Hook 声明换代共享的隔离 worker 容量计数。
+struct HookWorkerAdmission {
+    active: AtomicUsize,
+    maximum: usize,
+}
+
+impl HookWorkerAdmission {
+    /// 创建固定且非零容量的 worker 边界。
+    fn new(maximum: usize) -> Self {
+        assert!(maximum > 0, "Hook worker 上限必须大于零");
+        Self {
+            active: AtomicUsize::new(0),
+            maximum,
+        }
+    }
+
+    /// 非阻塞占用一个 worker 槽；已被残留线程占满时保持 fail-closed。
+    fn try_acquire(self: &Arc<Self>) -> Option<HookWorkerPermit> {
+        self.active
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.maximum).then_some(active + 1)
+            })
+            .ok()?;
+        Some(HookWorkerPermit {
+            admission: Arc::clone(self),
+        })
+    }
+
+    /// 返回调用方可用于稳定错误的固定容量。
+    const fn maximum(&self) -> usize {
+        self.maximum
+    }
+}
+
+/// 隔离线程真实退出前一直持有的 worker 槽。
+struct HookWorkerPermit {
+    admission: Arc<HookWorkerAdmission>,
+}
+
+impl Drop for HookWorkerPermit {
+    fn drop(&mut self) {
+        let previous = self.admission.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "Hook worker 计数不得下溢");
+    }
+}
+
+/// 在同一 Hook 声明代次构建的多个 Turn 之间共享熔断状态，并在后续声明代次
+/// 继续共享固定 worker 容量，避免超时或取消后无法终止的线程随重载无界增长。
 ///
-/// 新建扩展候选时创建新实例即构成显式重载边界；同一候选内按冻结 Hook 名称
-/// 复用状态，避免每个 Turn 重新构建 [`HookRuntime`] 时绕过熔断或并发入口。
-#[derive(Clone, Default)]
+/// 只有 Hook 声明确实变化时才应调用 [`HookCircuitStore::for_changed_hooks`]；Skill、
+/// MCP 等无关候选变化必须克隆当前 Store，以保留已有熔断。
+#[derive(Clone)]
 pub struct HookCircuitStore {
     circuits: Arc<SyncMutex<HashMap<String, Arc<HookCircuit>>>>,
+    worker_admission: Arc<HookWorkerAdmission>,
+}
+
+impl Default for HookCircuitStore {
+    fn default() -> Self {
+        Self::with_worker_limit(MAX_HOOK_WORKERS_PER_STORE)
+    }
+}
+
+impl fmt::Debug for HookCircuitStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let circuit_count = self
+            .circuits
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .len();
+        formatter
+            .debug_struct("HookCircuitStore")
+            .field("circuit_count", &circuit_count)
+            .field(
+                "active_workers",
+                &self.worker_admission.active.load(Ordering::Acquire),
+            )
+            .field("maximum_workers", &self.worker_admission.maximum)
+            .finish()
+    }
 }
 
 impl HookCircuitStore {
-    /// 创建一套不包含历史熔断状态的候选级 Store。
+    /// 创建一套不包含历史熔断状态的 Hook Store 谱系。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 为确实变化的 Hook 声明创建新熔断表，同时保留本谱系的 worker 容量占用。
+    pub fn for_changed_hooks(&self) -> Self {
+        Self {
+            circuits: Arc::new(SyncMutex::new(HashMap::new())),
+            worker_admission: Arc::clone(&self.worker_admission),
+        }
+    }
+
+    /// 创建指定 worker 容量的 Store；生产入口使用固定默认值，测试可收紧边界。
+    pub(crate) fn with_worker_limit(maximum: usize) -> Self {
+        Self {
+            circuits: Arc::new(SyncMutex::new(HashMap::new())),
+            worker_admission: Arc::new(HookWorkerAdmission::new(maximum)),
+        }
     }
 
     /// 返回同名 Hook 的候选级共享状态。
@@ -667,6 +762,11 @@ impl HookCircuitStore {
                 .or_insert_with(|| Arc::new(HookCircuit::default())),
         )
     }
+
+    /// 返回当前 Store 谱系共享的 worker admission。
+    fn worker_admission(&self) -> Arc<HookWorkerAdmission> {
+        Arc::clone(&self.worker_admission)
+    }
 }
 
 /// 按注册顺序执行且名称唯一的 Hook 集合。
@@ -676,7 +776,7 @@ pub struct HookRegistry {
     hooks: Vec<RegisteredHook>,
     /// 用于拒绝重复名称的稳定索引。
     names: HashSet<String>,
-    /// 当前扩展候选代次内按冻结名称共享的熔断与单入口状态。
+    /// 当前 Hook 声明代次按冻结名称共享的熔断与跨代 worker 容量。
     circuits: HookCircuitStore,
 }
 
@@ -719,10 +819,12 @@ impl HookRegistry {
             });
         }
         let circuit = self.circuits.circuit(name);
+        let worker_admission = self.circuits.worker_admission();
         self.hooks.push(RegisteredHook {
             name: name.to_owned(),
             hook,
             circuit,
+            worker_admission,
         });
         Ok(())
     }
@@ -1367,6 +1469,15 @@ pub enum HookError {
         /// 已冻结的真实 Hook 名称。
         hook_name: String,
     },
+    /// 当前共享 Store 谱系已有过多仍存活的隔离 worker。
+    WorkerCapacityExceeded {
+        /// 本次被容量边界阻止的 Hook 阶段。
+        phase: HookPhase,
+        /// 已冻结的真实 Hook 名称。
+        hook_name: String,
+        /// 同一 Store 谱系允许同时存活的 worker 上限。
+        maximum: usize,
+    },
     /// Hook 回调在硬时间上限内没有返回。
     TimedOut {
         /// 超时发生的 Hook 阶段。
@@ -1435,6 +1546,14 @@ impl fmt::Display for HookError {
             Self::CircuitOpen { phase, hook_name } => {
                 write!(formatter, "Hook {hook_name} 已熔断，拒绝再次进入 {phase}")
             }
+            Self::WorkerCapacityExceeded {
+                phase,
+                hook_name,
+                maximum,
+            } => write!(
+                formatter,
+                "Hook {hook_name} 在 {phase} 被拒绝：共享隔离工作线程已达到上限 {maximum}"
+            ),
             Self::TimedOut {
                 phase,
                 hook_name,
@@ -1640,6 +1759,14 @@ where
     } else {
         registered.circuit.entrance.lock().await
     };
+    let Some(worker_permit) = registered.worker_admission.try_acquire() else {
+        drop(entrance_guard);
+        return Err(HookError::WorkerCapacityExceeded {
+            phase,
+            hook_name: hook_name.to_owned(),
+            maximum: registered.worker_admission.maximum(),
+        });
+    };
     let Some(ownership) = registered.circuit.begin_entry() else {
         drop(entrance_guard);
         return Err(HookError::CircuitOpen {
@@ -1666,6 +1793,9 @@ where
                 Ok(result) => HookWorkerResult::Completed(result),
                 Err(_) => HookWorkerResult::Panicked,
             };
+            // 回调栈已彻底退出；先释放容量，再交付完成信号，避免后续 Hook
+            // 在观察到成功后仍短暂命中已结束 worker 的容量占用。
+            drop(worker_permit);
             let _ = sender.send(result);
         });
     if worker.is_err() {

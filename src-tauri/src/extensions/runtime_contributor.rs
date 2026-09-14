@@ -37,6 +37,10 @@ pub(super) struct ProjectRuntimeCache {
     fingerprint: Option<String>,
     /// 与指纹同时成功发布的 Runtime 候选代次。
     generation: Option<u64>,
+    /// 最近成功发布的 Hook 声明指纹；Skill、MCP 等变化不得重置该状态。
+    hook_fingerprint: Option<String>,
+    /// 项目整个 Hook 热重载谱系共享的熔断状态与 worker 容量边界。
+    hook_circuits: HookCircuitStore,
 }
 
 /// 构建期间允许检测外部配置变化并重新开始的最大次数。
@@ -103,7 +107,7 @@ struct NativeExtensionContributor {
     mcp_servers: Vec<RuntimeMcpServerSnapshot>,
     /// 每个 Turn 重新实例化的 Hook 规范。
     hooks: Vec<HookSpec>,
-    /// 同一候选代次内跨 Turn 共享的 Hook 熔断与单入口状态。
+    /// 同一 Hook 声明代次跨 Turn 共享熔断，并跨后续声明代次共享 worker 容量。
     hook_circuits: HookCircuitStore,
     /// 已冻结的 Agent 模板目录。
     agents: AgentCatalog,
@@ -615,6 +619,7 @@ pub(crate) async fn ensure_runtime_extension_candidate(
             return Ok(generation);
         }
         let fingerprint = inputs.fingerprint.clone();
+        let hook_fingerprint = hook_fingerprint(&inputs.hooks);
         if inputs.mcp_config_invalid {
             runtime
                 .revoke_mcp_extension_tools()
@@ -637,7 +642,13 @@ pub(crate) async fn ensure_runtime_extension_candidate(
                 .await
                 .map_err(|_| "无法安全停用旧 MCP OAuth 绑定".to_owned())?;
         }
-        let contributor = build_contributor(inputs, oauth).await?;
+        let hook_circuits = if cache.hook_fingerprint.as_deref() == Some(hook_fingerprint.as_str())
+        {
+            cache.hook_circuits.clone()
+        } else {
+            cache.hook_circuits.for_changed_hooks()
+        };
+        let contributor = build_contributor(inputs, oauth, hook_circuits.clone()).await?;
         let current_fingerprint = {
             let _guard = state.lock_io()?;
             prepare_extension_inputs(app, &project_root)?.fingerprint
@@ -656,6 +667,8 @@ pub(crate) async fn ensure_runtime_extension_candidate(
             .map_err(|error| format!("发布扩展候选失败：{error}"))?;
         cache.fingerprint = Some(fingerprint);
         cache.generation = Some(published);
+        cache.hook_fingerprint = Some(hook_fingerprint);
+        cache.hook_circuits = hook_circuits;
         return Ok(published);
     }
     Err("扩展候选构建未收敛".to_owned())
@@ -777,6 +790,7 @@ fn runtime_mcp_document_input(path: &Path) -> RuntimeMcpDocumentInput {
 async fn build_contributor(
     inputs: PreparedExtensionInputs,
     oauth: Arc<crate::mcp_oauth::McpOAuthRegistry>,
+    hook_circuits: HookCircuitStore,
 ) -> Result<NativeExtensionContributor, String> {
     let initial_diagnostics = inputs.diagnostics;
     let (deferred_tools, tool_diagnostics, mcp_servers) =
@@ -812,7 +826,7 @@ async fn build_contributor(
         deferred_tools,
         mcp_servers,
         hooks: inputs.hooks,
-        hook_circuits: HookCircuitStore::new(),
+        hook_circuits,
         agents: inputs.agents,
         commands: inputs.commands,
         lsp_runtime,
@@ -2560,6 +2574,17 @@ fn canonicalize_json(input: &Value) -> Value {
     }
 }
 
+/// 只对 Hook 运行语义计算稳定摘要；无关扩展输入变化必须继续复用原熔断表。
+fn hook_fingerprint(hooks: &[HookSpec]) -> String {
+    let mut digest = Sha256::new();
+    for hook in hooks {
+        let debug = format!("{hook:?}");
+        digest.update((debug.len() as u64).to_le_bytes());
+        digest.update(debug.as_bytes());
+    }
+    hex_digest(&digest.finalize())
+}
+
 /// 计算完整扩展输入的稳定 SHA-256 指纹。
 #[allow(clippy::too_many_arguments)]
 fn extension_fingerprint(
@@ -3002,6 +3027,38 @@ mod tests {
             mcp_extension_fingerprint(&project_root, &data_root, &repaired),
             configured_fingerprint,
             "修复后应恢复带 Server 目录的稳定缓存身份"
+        );
+    }
+
+    /// Hook 指纹只随冻结运行语义变化，相同规范不得因重新构建而重置熔断。
+    #[test]
+    fn hook_fingerprint_tracks_frozen_runtime_semantics() {
+        let directory = tempfile::tempdir().expect("创建 Hook 指纹测试目录");
+        let original = HookSpec::Command(marker_hook(directory.path()));
+        let rebuilt = original.clone();
+
+        assert_eq!(
+            hook_fingerprint(std::slice::from_ref(&original)),
+            hook_fingerprint(std::slice::from_ref(&rebuilt)),
+            "相同 Hook 规范必须产生相同指纹"
+        );
+
+        let mut changed_command = marker_hook(directory.path());
+        changed_command.command.push_str(" changed");
+        assert_ne!(
+            hook_fingerprint(std::slice::from_ref(&original)),
+            hook_fingerprint(&[HookSpec::Command(changed_command)]),
+            "命令变化必须建立新的 Hook 声明代次"
+        );
+
+        let mut changed_environment = marker_hook(directory.path());
+        changed_environment
+            .environment
+            .insert("HOOK_TEST".to_owned(), "changed".to_owned());
+        assert_ne!(
+            hook_fingerprint(std::slice::from_ref(&original)),
+            hook_fingerprint(&[HookSpec::Command(changed_environment)]),
+            "运行环境变化必须建立新的 Hook 声明代次"
         );
     }
 
