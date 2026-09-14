@@ -3,11 +3,14 @@ import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   ReplayResult,
+  GoalGetResult,
   SessionLoadResult,
   SessionSnapshot,
 } from "@/lib/acp/api";
 import type {
+  GoalRecordDto,
   AcpDeliveryEnvelope,
+  KeenCodeEventEnvelope,
   SessionUpdate,
 } from "@/lib/acp/events";
 import {
@@ -15,6 +18,7 @@ import {
 } from "@/lib/acp/projection";
 import {
   createAcpWorkspaceState,
+  emptySession,
   reduceDeliveryEnvelope,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
@@ -28,6 +32,8 @@ import {
 const ports = vi.hoisted(() => ({
   /** 模拟标准 `session/load` 控制请求。 */
   sessionLoad: vi.fn(),
+  /** 模拟恢复完成后的权威 Goal 快照查询。 */
+  goalGet: vi.fn(),
   /** 模拟新建 Session 的连接请求。 */
   sessionConnect: vi.fn(),
   /** SSR 渲染不会运行的 effect 队列，由测试显式调度。 */
@@ -45,6 +51,7 @@ vi.mock("@/lib/acp/api", async (original) => ({
   ...await original<typeof import("@/lib/acp/api")>(),
   diagnosticsRecord: vi.fn().mockResolvedValue(undefined),
   sessionLoad: ports.sessionLoad,
+  goalGet: ports.goalGet,
   sessionConnect: ports.sessionConnect,
 }));
 
@@ -149,6 +156,20 @@ function deliveryEnvelope(
     deliverySequence,
     occurredAtMs: 1_000 + deliverySequence,
     update: textUpdate(`历史投递 ${deliverySequence}`),
+  };
+}
+
+/** 构造恢复世代中会被顺序门禁丢弃的 Goal 变更事件。 */
+function staleGoalChangedEnvelope(
+  sessionId: string,
+  deliverySequence: number,
+): KeenCodeEventEnvelope {
+  return {
+    schemaVersion: 1,
+    sessionId,
+    deliverySequence,
+    occurredAtMs: 1_000 + deliverySequence,
+    event: { type: "goal_changed", revision: 5 },
   };
 }
 
@@ -260,6 +281,8 @@ function createHistoryHarness(initialFocus: ViewFocus) {
 
 beforeEach(() => {
   ports.sessionLoad.mockReset();
+  ports.goalGet.mockReset().mockImplementation((sessionId: string) =>
+    Promise.resolve({ sessionId, revision: 0 }));
   ports.sessionConnect.mockReset();
   ports.effects.length = 0;
   vi.useRealTimers();
@@ -338,6 +361,83 @@ describe("useAcpRuntimeHistory 的 Session delivery barrier", () => {
     expect(view.replay.loaded).toBe(true);
     expect(view.delivery.lastSequence).toBe(1);
     expect(view.replay.restoring).toBe(false);
+  });
+
+  it("恢复期间丢弃 Goal 事件后，完成恢复仍强制读取最新 Goal", async () => {
+    const sessionId = "session-goal-recovery";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    const oldGoal: GoalRecordDto = {
+      id: "goal-old",
+      title: "旧目标",
+      scope: "session",
+      status: "active",
+      objective: "旧目标正文",
+      tokensUsed: 1,
+      timeUsedSeconds: 1,
+      createdAtMs: 1,
+      updatedAtMs: 1,
+    };
+    const latestGoal: GoalRecordDto = {
+      ...oldGoal,
+      id: "goal-new",
+      title: "新目标",
+      objective: "恢复后权威目标",
+      updatedAtMs: 5,
+    };
+    const pendingGoal = deferred<GoalGetResult>();
+    ports.goalGet.mockReturnValue(pendingGoal.promise);
+    ports.sessionLoad.mockResolvedValue(loadResult(sessionId, replayResult(sessionId, {
+      throughDeliverySequence: 1,
+    })));
+    const recovery = harness.history.replayHistory(sessionId, {
+      sessionId,
+      epoch: 1,
+    });
+    await flushMicrotasks();
+    const view = harness.workspaceRef.current.sessions[sessionId]!;
+    view.goal = { revision: 4, goal: oldGoal };
+
+    const stale = reduceDeliveryEnvelope(
+      view,
+      staleGoalChangedEnvelope(sessionId, 9),
+    );
+    expect(stale).toEqual({ status: "stale_generation" });
+    expect(view.goal).toEqual({ revision: 4, goal: oldGoal });
+
+    await flushMicrotasks();
+    expect(deliver(harness, sessionId, 1).status).toBe("applied");
+    await recovery;
+    await flushMicrotasks();
+    expect(ports.goalGet).toHaveBeenCalledWith(sessionId);
+
+    pendingGoal.resolve({ sessionId, revision: 5, goal: latestGoal });
+    await flushMicrotasks();
+    expect(harness.workspaceRef.current.sessions[sessionId]?.goal).toEqual({
+      revision: 5,
+      goal: latestGoal,
+    });
+  });
+
+  it("旧恢复 Goal 响应在 Session 投影替换后不得写回新投影", async () => {
+    const sessionId = "session-goal-replaced";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    const pendingGoal = deferred<GoalGetResult>();
+    ports.goalGet.mockReturnValue(pendingGoal.promise);
+    ports.sessionLoad.mockResolvedValue(loadResult(sessionId));
+
+    await harness.history.replayHistory(sessionId, {
+      sessionId,
+      epoch: 1,
+    });
+    await flushMicrotasks();
+    expect(ports.goalGet).toHaveBeenCalledWith(sessionId);
+
+    const replacement = emptySession(sessionId);
+    harness.workspaceRef.current.sessions[sessionId] = replacement;
+    pendingGoal.resolve({ sessionId, revision: 1, goal: undefined });
+    await flushMicrotasks();
+
+    expect(replacement.goal).toEqual({ revision: 0, goal: null });
   });
 
   it("无 origin 的并发 replayHistory 共享同一个 load 并共同等待消费", async () => {

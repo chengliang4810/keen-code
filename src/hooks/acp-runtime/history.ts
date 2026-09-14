@@ -2,6 +2,7 @@ import { parseHistoryPage, prependHistoryPage, type HistoryPage } from "@/lib/ac
 import { useCallback, useEffect, useRef } from "react";
 import {
   diagnosticsRecord,
+  goalGet,
   sessionConnect,
   sessionLoad,
   sessionSnapshotFromResult,
@@ -14,6 +15,7 @@ import {
   beginSessionRecovery,
   completeSessionRecovery,
   failSessionRecovery,
+  reduceGoalSnapshot,
   reduceReplayResult,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
@@ -99,6 +101,8 @@ export function useAcpRuntimeHistory({
   const deliveryWaitersRef = useRef(new Map<string, DeliveryWaiter>());
   /** 卸载使旧异步恢复失效，迟到响应不能回写新的页面生命周期。 */
   const lifecycleEpochRef = useRef(0);
+  /** 每次恢复建立新的投影世代；旧 Goal 查询不得写入后续恢复的投影。 */
+  const recoveryGenerationBySessionRef = useRef(new Map<string, number>());
   const backfillBySessionRef = useRef(new Map<string, { cursor: string; view: object; running: boolean }>());
 
 
@@ -109,6 +113,7 @@ export function useAcpRuntimeHistory({
     }
     deliveryWaitersRef.current.clear();
     recoveryBySessionRef.current.clear();
+    recoveryGenerationBySessionRef.current.clear();
     backfillBySessionRef.current.clear();
     recoveryFocusBySessionRef.current.clear();
   }, []);
@@ -201,6 +206,9 @@ export function useAcpRuntimeHistory({
       }
       const recoveryOrigin = originView ?? currentViewFocus();
       const lifecycleEpoch = lifecycleEpochRef.current;
+      const recoveryGeneration =
+        (recoveryGenerationBySessionRef.current.get(sessionId) ?? 0) + 1;
+      recoveryGenerationBySessionRef.current.set(sessionId, recoveryGeneration);
       const mayProjectView = () =>
         shouldAdoptView(recoveryOrigin, currentViewFocus(), sessionId);
       const publish = () => {
@@ -209,6 +217,10 @@ export function useAcpRuntimeHistory({
       };
       const recovery = (async () => {
         const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
+        const isCurrentProjection = () =>
+          lifecycleEpoch === lifecycleEpochRef.current &&
+          recoveryGenerationBySessionRef.current.get(sessionId) === recoveryGeneration &&
+          acpWorkspaceRef.current.sessions[sessionId] === view;
         invalidateContextUsage(sessionId);
         const latency = turnLatencyBySessionRef.current.get(sessionId);
         if (latency) {
@@ -224,7 +236,7 @@ export function useAcpRuntimeHistory({
           const started = performance.now();
           const loaded = await sessionLoad(sessionId, { limit: 2 });
           const hostCompleted = performance.now();
-          if (lifecycleEpoch !== lifecycleEpochRef.current) throw new Error("Session 历史恢复已取消");
+          if (!isCurrentProjection()) throw new Error("Session 历史恢复已取消");
           const replay = completedLoadReplay(loaded._meta, sessionId);
           const page = parseHistoryPage(loaded._meta, sessionId);
           const snapshot = sessionSnapshotFromResult(loaded);
@@ -245,16 +257,29 @@ export function useAcpRuntimeHistory({
             modelBySessionRef.current.set(sessionId, modelIdFromSessionReference(modelValue));
           }
           const current = acpWorkspaceRef.current.sessions[sessionId];
-          if (!current) throw new Error("Session 恢复完成前投影已移除");
+          if (!current || !isCurrentProjection()) throw new Error("Session 恢复完成前投影已替换");
           // 首页 load 建立投递世代，旧页独立归约，不再从零 replay。
           reduceReplayResult(current, replay);
           await awaitDelivery(sessionId, replay.throughDeliverySequence);
           const deliveryCompleted = performance.now();
-          if (lifecycleEpoch !== lifecycleEpochRef.current) throw new Error("Session 历史恢复已取消");
-          if (acpWorkspaceRef.current.sessions[sessionId] !== current) throw new Error("Session 恢复期间投影已替换");
+          if (!isCurrentProjection() || acpWorkspaceRef.current.sessions[sessionId] !== current) {
+            throw new Error("Session 恢复期间投影已替换");
+          }
           completeSessionRecovery(current);
           current.replay.hasMore = page.hasMore;
           publish();
+          // Goal 事件可能在恢复世代门禁处被丢弃；恢复完成后必须从 Host
+          // 重新读取权威快照。查询异步返回时仍需验证 Session、投影身份和世代。
+          void Promise.resolve()
+            .then(() => goalGet(sessionId))
+            .then((result) => {
+              if (!isCurrentProjection() || result?.sessionId !== sessionId ||
+                !Number.isSafeInteger(result.revision) || result.revision < 0 ||
+                result.revision < current.goal.revision) return;
+              reduceGoalSnapshot(current, result.revision, result.goal ?? null);
+              publish();
+            })
+            .catch(() => {});
           startBackfill(sessionId, page, publish);
           void diagnosticsRecord("session_load", JSON.stringify({
             sessionId,
@@ -282,7 +307,7 @@ export function useAcpRuntimeHistory({
         } catch (error) {
           if (lifecycleEpoch !== lifecycleEpochRef.current) throw error;
           const current = acpWorkspaceRef.current.sessions[sessionId];
-          if (current) {
+          if (current && isCurrentProjection()) {
             failSessionRecovery(
               current,
               error instanceof Error ? error.message : String(error),

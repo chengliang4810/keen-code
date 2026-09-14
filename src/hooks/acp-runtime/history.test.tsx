@@ -17,6 +17,8 @@ import { useAcpRuntimeHistory } from "./history";
 const apiMocks = vi.hoisted(() => ({
   /** 模拟标准 `session/load` 控制请求。 */
   sessionLoad: vi.fn(),
+  /** 模拟恢复完成后的权威 Goal 快照查询。 */
+  goalGet: vi.fn(),
   /** 模拟分页 `session/replay` 控制请求。 */
   sessionReplay: vi.fn(),
   /** 新建连接只创建 Session，不对空历史重复 load。 */
@@ -182,6 +184,8 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
   });
   beforeEach(() => {
     apiMocks.sessionLoad.mockReset();
+    apiMocks.goalGet.mockReset().mockImplementation((sessionId: string) =>
+      Promise.resolve({ sessionId, revision: 0 }));
     apiMocks.sessionReplay.mockReset();
     apiMocks.sessionConnect.mockReset();
   });
