@@ -556,6 +556,18 @@ export function deriveFieldsFromSegments(segments: MessageSegment[]): {
   };
 }
 
+/** 返回有序子 Agent Turn 中最后一条非空 Assistant 正文。 */
+export function lastNonEmptyContentFromSegments(
+  segments: readonly MessageSegment[],
+): string | null {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const segment = segments[index];
+    if (segment?.kind !== "content") continue;
+    if (segment.text.trim()) return segment.text;
+  }
+  return null;
+}
+
 /**
  * Compact a segment timeline for display / persistence hygiene:
  * - drop empty thought/content pieces

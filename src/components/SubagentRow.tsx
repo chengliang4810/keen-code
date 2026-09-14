@@ -13,9 +13,25 @@ import { useEffect, useState } from "react";
 
 const EXCERPT_LIMIT = 110;
 
-/** 运行中展示最新活动，终态回到原始委派任务。 */
+/** 读取当前子 Agent 最后一轮的终态结果或错误。 */
+function terminalExcerpt(agent: AcpSubagentInfo): string {
+  const latestTurn = agent.turns?.at(-1);
+  if (agent.status === "failed") {
+    return latestTurn?.error?.trim() || agent.result?.trim() || "";
+  }
+  if (agent.status === "done") {
+    return agent.result?.trim() || latestTurn?.result?.trim() || "";
+  }
+  return "";
+}
+
+/** 运行中展示当前 Turn 的最新活动，终态优先展示最终结果或错误。 */
 export function subagentExcerpt(agent: AcpSubagentInfo): string {
-  const latest = [...agent.segments].reverse().find((segment) =>
+  const latestTurn = agent.turns?.at(-1);
+  const activitySegments = agent.status === "running" && latestTurn
+    ? agent.segments.slice(latestTurn.segmentStart, latestTurn.segmentEnd)
+    : agent.segments;
+  const latest = [...activitySegments].reverse().find((segment) =>
     segment.kind !== "compaction" &&
       (segment.kind === "tool" ? Boolean(segment.title.trim()) : Boolean(segment.text.trim())),
   );
@@ -24,7 +40,9 @@ export function subagentExcerpt(agent: AcpSubagentInfo): string {
       ? latest.title
       : latest.text
     : "";
-  const raw = agent.status === "running" ? activity : agent.prompt?.trim() || "";
+  const raw = agent.status === "running"
+    ? activity
+    : terminalExcerpt(agent) || agent.prompt?.trim() || "";
   const flat = raw.replace(/\s+/g, " ");
   return flat.length > EXCERPT_LIMIT
     ? `${flat.slice(0, EXCERPT_LIMIT)}…`

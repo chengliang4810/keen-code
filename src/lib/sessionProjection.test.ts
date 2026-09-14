@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { beginLocalSessionTurn, emptySession } from "./acp/store";
+import type { AcpSubagentInfo } from "./acp/store";
 import {
   mergeAcpLiveMessage,
   mergeAcpTurnError,
@@ -7,6 +8,7 @@ import {
   projectAcpHistory,
   projectAcpSessionState,
   projectAcpSnapshot,
+  projectSubagentConversation,
   projectSidebar,
 } from "./sessionProjection";
 
@@ -446,6 +448,50 @@ describe("sessionProjection", () => {
       { role: "user", content: "第一条", model: "gpt-5.6-luna" },
       { role: "assistant", content: "完成", model: "gpt-5.6-luna" },
     ]);
+  });
+
+  it("子 Agent 每轮使用固化结果，失败优先展示错误且保留完整 segments", () => {
+    const agent: AcpSubagentInfo = {
+      agent_id: "child-1",
+      agent_name: "review",
+      task_title: "检查",
+      prompt: "检查项目",
+      nickname: null,
+      status: "failed",
+      is_background: false,
+      started_at: 1,
+      stopped_at: 4,
+      result: "最终错误",
+      segments: [
+        { kind: "content", text: "前置正文" },
+        { kind: "tool", toolCallId: "read", title: "Read", status: "completed" },
+        { kind: "content", text: "失败前的正文" },
+      ],
+      turns: [{
+        metrics: {
+          turnId: "turn-1",
+          startedAtMs: 1,
+          deliveryInterrupted: false,
+          sendAcknowledgedAtMs: null,
+          firstSseAtMs: null,
+          firstTokenAtMs: null,
+          firstVisibleTokenAtMs: null,
+          completedAtMs: 4,
+          usageObservations: [],
+        },
+        segmentStart: 0,
+        segmentEnd: 3,
+        status: "failed",
+        result: "不应优先显示",
+        error: "稳定失败说明",
+      }],
+    };
+    const [message] = projectSubagentConversation(agent).filter((item) => item.role === "assistant");
+    expect(message).toMatchObject({
+      content: "稳定失败说明",
+      segments: agent.segments,
+      streaming: false,
+    });
   });
 
   it("把持久化失败 Turn 投影为带耗时的空 Assistant 记录", () => {

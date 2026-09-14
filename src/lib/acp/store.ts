@@ -11,6 +11,7 @@ import { parseAttachmentsFromContent, type Attachment } from "../attachments";
 import {
   compactMessageSegments,
   deriveFieldsFromSegments,
+  lastNonEmptyContentFromSegments,
   type ContextCompactMeta,
   type MessageToolSegment,
   type MessageFileChange,
@@ -89,6 +90,8 @@ export interface AcpSubagentTurn {
   segmentEnd?: number;
   prompt?: string;
   status: AcpSubagentInfo["status"];
+  /** 成功 Turn 的最后一条非空 Assistant 正文；取消不伪造该字段。 */
+  result?: string | null;
   error?: string;
 }
 
@@ -653,6 +656,74 @@ function targetSegments(
   return agent ? agent.segments : null;
 }
 
+/** 查找子 Agent 的指定 Turn；Turn 是结果、错误和用量的唯一边界。 */
+function findSubagentTurn(
+  agent: AcpSubagentInfo,
+  turnId: string | undefined,
+): AcpSubagentTurn | undefined {
+  if (!turnId) return undefined;
+  return agent.turns?.find((turn) => turn.metrics.turnId === turnId);
+}
+
+/** 返回子 Agent 当前（最后创建）的 Turn。 */
+function latestSubagentTurn(
+  agent: AcpSubagentInfo,
+): AcpSubagentTurn | undefined {
+  return agent.turns?.at(-1);
+}
+
+/** 没有更晚 Turn 时，事件才可以改变 Agent 的总体终态。 */
+function isCurrentSubagentTurn(
+  agent: AcpSubagentInfo,
+  turnId: string | undefined,
+): boolean {
+  const turns = agent.turns ?? [];
+  return turns.length === 0 || latestSubagentTurn(agent)?.metrics.turnId === turnId;
+}
+
+/** 将生命周期状态归一为子 Agent Turn 状态。 */
+function subagentTurnStatus(
+  status: Extract<KeenCodeEvent, { type: "agent_status_changed" }>["status"],
+): AcpSubagentTurn["status"] {
+  return projectAgentStatus(status);
+}
+
+function isTerminalSubagentStatus(
+  status: AcpSubagentTurn["status"],
+): boolean {
+  return status !== "running";
+}
+
+/** 固化一个子 Agent Turn 的终态，不修改其它续跑 Turn 的指标或正文。 */
+function settleSubagentTurn(
+  agent: AcpSubagentInfo,
+  turn: AcpSubagentTurn | undefined,
+  status: AcpSubagentTurn["status"],
+  occurredAtMs: number,
+  error?: string,
+): void {
+  if (!turn) return;
+  if (isTerminalSubagentStatus(turn.status) && status === "running") return;
+  turn.status = status;
+  if (status !== "running") {
+    if (turn.segmentEnd == null) turn.segmentEnd = agent.segments.length;
+    turn.metrics = reduceTurnLatency(turn.metrics, {
+      type: "completed",
+      turnId: turn.metrics.turnId,
+      atMs: occurredAtMs,
+    });
+  }
+  if (status === "done") {
+    // 结果只取本 Turn 最后一条非空普通正文；思考、工具输出和前置正文
+    // 都留在 segments 详情中，不能拼成另一条终态摘要。
+    turn.result = lastNonEmptyContentFromSegments(
+      agent.segments.slice(turn.segmentStart, turn.segmentEnd),
+    );
+  } else if (status === "failed" && error) {
+    turn.error = error;
+  }
+}
+
 /** 仅把已由权威 `agent_spawned` 登记的身份路由到子 Agent 时间线。 */
 export function resolveChildAgentId(
   view: AcpSessionView,
@@ -1046,19 +1117,39 @@ function reduceKeenCodeEvent(
       if (childAgentId) {
         const agent = view.subagents.find((item) => item.agent_id === childAgentId);
         if (agent) {
-          agent.status = status === "completed"
+          const turn = agent.turns?.find((item) => item.metrics.turnId === turnId);
+          const turnStatus = status === "completed"
             ? "done"
             : status === "cancelled"
               ? "interrupted"
               : "failed";
-          agent.stopped_at = occurredAtMs;
-          if (event.type === "turn_failed") agent.result = event.message;
-          const turn = agent.turns?.find((item) => item.metrics.turnId === turnId);
-          if (turn) {
-            turn.metrics = reduceTurnLatency(turn.metrics, { type: "completed", turnId, atMs: occurredAtMs });
-            turn.segmentEnd = agent.segments.length;
-            turn.status = agent.status;
-            if (event.type === "turn_failed") turn.error = event.message;
+          settleSubagentTurn(
+            agent,
+            turn,
+            turnStatus,
+            occurredAtMs,
+            event.type === "turn_failed" ? event.message : undefined,
+          );
+
+          // A delayed terminal event for an older Turn must still settle that
+          // Turn, but it cannot end or rewrite a newer followup.
+          if (isCurrentSubagentTurn(agent, turnId)) {
+            agent.status = turn?.status ?? turnStatus;
+            if (turn?.metrics.completedAtMs != null) {
+              // The completion timestamp comes from the Turn latency state,
+              // which is the same Host-clock evidence used for its duration.
+              agent.stopped_at = turn.metrics.completedAtMs;
+            } else {
+              agent.stopped_at = occurredAtMs;
+            }
+            if (turnStatus === "done") {
+              agent.result = turn?.result ?? null;
+            } else if (turnStatus === "failed") {
+              agent.result = event.type === "turn_failed" ? event.message : turn?.error ?? null;
+            } else {
+              // Cancellation is an interruption, not a successful summary.
+              agent.result = null;
+            }
           }
         }
         break;
@@ -1109,8 +1200,34 @@ function reduceKeenCodeEvent(
     case "agent_status_changed": {
       const agent = view.subagents.find((item) => item.agent_id === event.agentId);
       if (!agent) break;
-      agent.status = projectAgentStatus(event.status);
-      if (agent.status !== "running") agent.stopped_at = occurredAtMs;
+      const nextStatus = subagentTurnStatus(event.status);
+      const turn = findSubagentTurn(agent, turnId);
+      const current = isCurrentSubagentTurn(agent, turnId);
+
+      // Keep the per-Turn record useful when the status event is the only
+      // terminal notice available, but never let an old Turn change the
+      // Agent-level status of a newer followup.
+      if (turn) settleSubagentTurn(agent, turn, nextStatus, occurredAtMs);
+      if (!current) break;
+
+      // A terminal Turn is monotonic. A late running/waiting status cannot
+      // reopen it, and a paired status event cannot replace its result/error.
+      const effectiveStatus = turn && isTerminalSubagentStatus(turn.status)
+        ? turn.status
+        : nextStatus;
+      agent.status = effectiveStatus;
+      if (effectiveStatus !== "running") {
+        if (turn?.metrics.completedAtMs != null) {
+          agent.stopped_at = turn.metrics.completedAtMs;
+        } else {
+          agent.stopped_at = occurredAtMs;
+        }
+        if (effectiveStatus === "done" && turn?.result !== undefined) {
+          agent.result = turn.result;
+        } else if (effectiveStatus === "failed" && turn?.error) {
+          agent.result = turn.error;
+        }
+      }
       break;
     }
     case "context_compaction_started": {
@@ -1193,13 +1310,20 @@ function reduceKeenCodeEvent(
       if (event.taskKind !== "agent" || !event.agentId) break;
       const agent = view.subagents.find((item) => item.agent_id === event.agentId);
       if (!agent) break;
-      agent.status = event.status === "succeeded"
+      const nextStatus = event.status === "succeeded"
         ? "done"
         : event.status === "cancelled"
           ? "interrupted"
           : "failed";
-      agent.stopped_at = occurredAtMs;
-      agent.result = event.summary ?? null;
+      const turn = findSubagentTurn(agent, event.taskId);
+      // This event is a non-authoritative task notification. It may update
+      // the visible status for a matching current task, but must not invent
+      // result text, completion time, metrics, or a terminal state for a new
+      // followup after the task that emitted it.
+      if (turn && !isCurrentSubagentTurn(agent, event.taskId)) break;
+      if (turn && isTerminalSubagentStatus(turn.status)) break;
+      if (!turn && (agent.turns?.length ?? 0) > 0) break;
+      agent.status = nextStatus;
       break;
     }
     case "agent_message_queued":

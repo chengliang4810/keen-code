@@ -56,12 +56,17 @@ describe("ConversationSummaryPanel helpers", () => {
     }))).toBe("读取文件");
   });
 
-  it("完成或错误后展示原始委派任务", () => {
+  it("完成或错误后优先展示最终结果", () => {
     expect(subagentExcerpt(agent({
       status: "failed",
       prompt: "只读检查侧边栏 Agent 信息",
       result: "LLM HTTP 500",
-    }))).toBe("只读检查侧边栏 Agent 信息");
+    }))).toBe("LLM HTTP 500");
+    expect(subagentExcerpt(agent({
+      status: "done",
+      prompt: "检查子任务",
+      result: "已完成并通过验证",
+    }))).toBe("已完成并通过验证");
   });
 
   it("只在点击任务摘要面板以外时关闭", () => {

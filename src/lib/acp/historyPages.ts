@@ -52,11 +52,31 @@ export function prependHistoryPage(view: AcpSessionView, page: HistoryPage): voi
         const prefix = previous.turns?.find((item) => item.metrics.turnId === turn.metrics.turnId);
         const usage = new Map(prefix?.metrics.usageObservations.map((item) => [item.observationId, item]));
         for (const item of turn.metrics.usageObservations) usage.set(item.observationId, item);
+        const inheritedResult = prefix && turn.status !== "failed" && turn.status !== "interrupted"
+          ? prefix.result
+          : undefined;
+        const inheritedError = prefix && turn.status === "failed"
+          ? prefix.error
+          : undefined;
         return {
           ...turn,
           segmentStart: prefix?.segmentStart ?? turn.segmentStart + offset,
-          ...(turn.segmentEnd == null ? {} : { segmentEnd: turn.segmentEnd + offset }),
+          ...(turn.segmentEnd == null
+            ? prefix?.segmentEnd == null ? {} : { segmentEnd: prefix.segmentEnd }
+            : { segmentEnd: turn.segmentEnd + offset }),
           prompt: turn.prompt ?? prefix?.prompt,
+          // 当前页代表较新的归约结果。只有当前 Turn 没有该字段时，
+          // 才从更早页补齐，避免旧页结果覆盖续跑或最新终态。
+          ...(Object.hasOwn(turn, "result")
+            ? { result: turn.result }
+            : inheritedResult !== undefined
+              ? { result: inheritedResult }
+              : {}),
+          ...(Object.hasOwn(turn, "error")
+            ? { error: turn.error }
+            : inheritedError !== undefined
+              ? { error: inheritedError }
+              : {}),
           metrics: { ...turn.metrics, usageObservations: [...usage.values()] },
         };
       }),

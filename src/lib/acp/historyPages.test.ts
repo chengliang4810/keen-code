@@ -60,3 +60,37 @@ it("跨页子任务合并正文和轮次区间，保持最近终态", () => {
   expect(agent.turns![0]?.segmentStart).toBe(0);
   expect(agent.turns![0]?.segmentEnd).toBe(2);
 });
+
+it("跨页合并子任务结果和错误时由较新页获胜", () => {
+  const lifecycle = (sequence: number, event: object, child = true) => ({
+    type: "keencode_event",
+    envelope: { schemaVersion: 1, sessionId: "s", deliverySequence: sequence, occurredAtMs: 1000 + sequence,
+      turnId: child ? "child-turn" : "root-turn", sourceAgentId: child ? "child" : "root",
+      journalSequence: sequence, event },
+  });
+  const spawn = lifecycle(1, { type: "agent_spawned", agentId: "child", parentAgentId: "root",
+    agentPath: "root/child", task: "task", parentTurnId: "root-turn", rootTurnId: "root-turn" }, false);
+  const start = lifecycle(2, { type: "turn_started", rootTurnId: "root-turn", parentTurnId: "root-turn" });
+  const chunk = (sequence: number, value: string) => ({ type: "session_update", envelope: {
+    ...text("s", sequence, value).envelope, turnId: "child-turn", sourceAgentId: "child",
+    update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: value } },
+  } });
+  const complete = lifecycle(4, { type: "turn_completed" });
+  const view = emptySession("s");
+
+  // 最近页先到，代表当前 Turn 的较新结果。
+  prependHistoryPage(view, { sessionId: "s", hasMore: true, nextCursor: "older",
+    deliveries: [spawn, start, chunk(3, "新结果"), complete] });
+  // 旧页带有同一 Turn 的过时失败/结果，不能覆盖最近页。
+  prependHistoryPage(view, { sessionId: "s", hasMore: false, nextCursor: null,
+    deliveries: [spawn, start, chunk(3, "旧结果"), lifecycle(4, {
+      type: "turn_failed", failureKind: "model", message: "旧错误",
+    })] });
+
+  const agent = view.subagents[0]!;
+  expect(agent.turns?.[0]).toMatchObject({
+    status: "done",
+    result: "新结果",
+  });
+  expect(agent.turns?.[0]).not.toHaveProperty("error");
+});

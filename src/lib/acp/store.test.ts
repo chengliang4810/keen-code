@@ -748,6 +748,139 @@ describe("Acp realtime and replay equivalence", () => {
 });
 
 describe("Acp subagent projection", () => {
+  it("每个子 Agent Turn 固化最后一条正文，失败保留错误且中断不伪造摘要", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, {
+      type: "agent_spawned",
+      agentId: "child-1",
+      parentAgentId: "root",
+      agentPath: "/root/review",
+      task: "核对子任务",
+      parentTurnId: "turn-root",
+      rootTurnId: "turn-root",
+    }, { turnId: "turn-root", sourceAgentId: "root", journalSequence: 1 }));
+    const childStart = (sequence: number, turnId: string) => apply(view, eventDelivery(sequence, {
+      type: "turn_started",
+      parentTurnId: "turn-root",
+      rootTurnId: "turn-root",
+    }, { sourceAgentId: "child-1", turnId, journalSequence: sequence }));
+    const childText = (sequence: number, turnId: string, text: string) => apply(view, updateDelivery(
+      sequence,
+      { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+      "child-1",
+      turnId,
+    ));
+
+    childStart(2, "child-turn-1");
+    childText(3, "child-turn-1", "前置说明");
+    apply(view, updateDelivery(4, {
+      sessionUpdate: "tool_call",
+      toolCallId: "child-tool",
+      title: "Read",
+      status: "completed",
+    }, "child-1", "child-turn-1"));
+    childText(5, "child-turn-1", "最终结果");
+    apply(view, eventDelivery(6, { type: "turn_completed" }, {
+      sourceAgentId: "child-1",
+      turnId: "child-turn-1",
+      journalSequence: 6,
+    }));
+
+    const agent = view.subagents[0]!;
+    expect(agent.result).toBe("最终结果");
+    expect(agent.turns?.[0]).toMatchObject({
+      status: "done",
+      result: "最终结果",
+      segmentEnd: 3,
+    });
+
+    childStart(7, "child-turn-2");
+    childText(8, "child-turn-2", "失败前的部分正文");
+    apply(view, eventDelivery(9, {
+      type: "turn_failed",
+      failureKind: "model",
+      message: "模型响应失败",
+    }, {
+      sourceAgentId: "child-1",
+      turnId: "child-turn-2",
+      journalSequence: 9,
+    }));
+    expect(agent.status).toBe("failed");
+    expect(agent.result).toBe("模型响应失败");
+    expect(agent.turns?.[1]).toMatchObject({
+      status: "failed",
+      error: "模型响应失败",
+    });
+
+    childStart(10, "child-turn-3");
+    childText(11, "child-turn-3", "中断前的部分正文");
+    apply(view, eventDelivery(12, { type: "turn_cancelled" }, {
+      sourceAgentId: "child-1",
+      turnId: "child-turn-3",
+      journalSequence: 12,
+    }));
+    expect(agent.status).toBe("interrupted");
+    expect(agent.result).toBeNull();
+    expect(agent.turns?.[2]).toMatchObject({ status: "interrupted" });
+    expect(agent.turns?.[2]).not.toHaveProperty("result");
+    expect(agent.segments.at(-1)).toEqual({ kind: "content", text: "中断前的部分正文" });
+  });
+
+  it("迟到旧 Turn 的状态和后台完成通知不会结束新的续跑", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, {
+      type: "agent_spawned",
+      agentId: "child-1",
+      parentAgentId: "root",
+      agentPath: "/root/review",
+      task: "核对子任务",
+      parentTurnId: "turn-root",
+      rootTurnId: "turn-root",
+    }, { turnId: "turn-root", sourceAgentId: "root", journalSequence: 1 }));
+    apply(view, eventDelivery(2, {
+      type: "turn_started",
+      parentTurnId: "turn-root",
+      rootTurnId: "turn-root",
+    }, { sourceAgentId: "child-1", turnId: "child-turn-1", journalSequence: 2 }));
+    apply(view, updateDelivery(3, {
+      sessionUpdate: "agent_message_chunk",
+      content: { type: "text", text: "首轮结果" },
+    }, "child-1", "child-turn-1"));
+    apply(view, eventDelivery(4, { type: "turn_completed" }, {
+      sourceAgentId: "child-1",
+      turnId: "child-turn-1",
+      journalSequence: 4,
+    }));
+    apply(view, eventDelivery(5, {
+      type: "turn_started",
+      parentTurnId: "turn-root",
+      rootTurnId: "turn-root",
+    }, { sourceAgentId: "child-1", turnId: "child-turn-2", journalSequence: 5 }));
+
+    const agent = view.subagents[0]!;
+    apply(view, eventDelivery(6, {
+      type: "agent_status_changed",
+      agentId: "child-1",
+      status: "completed",
+    }, { sourceAgentId: "child-1", turnId: "child-turn-1", journalSequence: 6 }));
+    apply(view, eventDelivery(7, {
+      type: "background_task_completed",
+      taskId: "child-turn-1",
+      taskKind: "agent",
+      agentId: "child-1",
+      status: "succeeded",
+      durationMs: 1,
+      summary: "旧后台摘要不应覆盖",
+    }, { sessionScoped: true }));
+
+    expect(agent.status).toBe("running");
+    expect(agent.stopped_at).toBeNull();
+    expect(agent.result).toBeNull();
+    expect(agent.turns?.[0]).toMatchObject({ status: "done", result: "首轮结果" });
+    expect(agent.turns?.[1]).toMatchObject({ status: "running" });
+    expect(agent.turns?.[1]?.metrics.completedAtMs).toBeNull();
+  });
+
   it("子 Agent 流独立归约且不会驱动根 Agent 正文", () => {
     const view = emptySession("session-1");
     apply(view, eventDelivery(1, {

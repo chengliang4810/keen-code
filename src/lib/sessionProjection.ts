@@ -45,9 +45,17 @@ export function projectSubagentConversation(agent: AcpSubagentInfo): ChatMessage
     const segments = agent.segments.slice(turn.segmentStart, turn.segmentEnd);
     const fields = deriveFieldsFromSegments(segments);
     const turnMetrics = summarizeTurnLatency(turn.metrics);
+    const result = turn.error ??
+      turn.result ??
+      (index === turns.length - 1 && turn.status !== "running"
+        ? agent.result
+        : undefined) ??
+      fields.content;
     messages.push({
       id, role: "assistant", segments, turnMetrics,
-      content: fields.content || turn.error || (index === turns.length - 1 ? agent.result : null) || "",
+      // 终态结果是 Runtime/Reducer 固化的字段；失败优先展示稳定错误，
+      // 只有旧数据或中断 Turn 没有结果时才从完整时间线回退正文。
+      content: result || "",
       streaming: turn.status === "running",
       ...(turnMetrics.totalMs != null ? { thinkingDurationMs: turnMetrics.totalMs } : {}),
     });
