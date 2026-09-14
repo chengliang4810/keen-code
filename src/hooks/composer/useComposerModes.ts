@@ -91,7 +91,7 @@ export function useComposerModes({
       .then((result) => {
         const view =
           portsRef.current.workspace.acpWorkspaceRef.current.sessions[sessionId];
-        if (!view) return;
+        if (!view || result.revision < view.goal.revision) return;
         reduceGoalSnapshot(view, result.revision, result.goal ?? null);
         portsRef.current.workspace.commitWorkspace();
         portsRef.current.workspace.applyViewProjectionRef.current(sessionId);
