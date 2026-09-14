@@ -6697,8 +6697,7 @@ impl AgentRuntime {
                             .and_then(|provider| provider.reasoning_effort);
                         Ok(RootAgentSeed {
                             model: resolved.model().to_owned(),
-                            reasoning_effort: reasoning_effort
-                                .map(reasoning_effort_snapshot_name),
+                            reasoning_effort: reasoning_effort.map(reasoning_effort_snapshot_name),
                             plan_guard: if snapshot.state.plan.enabled {
                                 PlanGuard::read_only()
                             } else {
@@ -9934,11 +9933,11 @@ mod tests {
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
         MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
-        RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
-        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
-        RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
-        RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
-        authoritative_recovered_turn_outcome, background_task_completion_event,
+        RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome,
+        RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
+        RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
+        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
+        TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
         clear_historical_reasoning_state, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
@@ -18961,12 +18960,8 @@ mod tests {
                 .into_iter()
                 .next()
                 .expect("UI 失败终态应生成草稿");
-            let delivery = materialize_delivery(
-                session.session_id().as_str(),
-                1,
-                draft,
-            )
-            .expect("UI 失败终态应通过 ACP 边界");
+            let delivery = materialize_delivery(session.session_id().as_str(), 1, draft)
+                .expect("UI 失败终态应通过 ACP 边界");
             let value = serde_json::to_value(delivery).expect("UI 投递应序列化");
             let safe = value["envelope"]["event"]["message"]
                 .as_str()

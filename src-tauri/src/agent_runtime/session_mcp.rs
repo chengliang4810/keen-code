@@ -85,9 +85,7 @@ impl ProjectCatalogVersion {
     /// 比较项目候选发布身份；更高代次优先，同代次撤销状态优先。
     fn supersedes(self, current: Self) -> bool {
         self.generation > current.generation
-            || (self.generation == current.generation
-                && self.revoked
-                && !current.revoked)
+            || (self.generation == current.generation && self.revoked && !current.revoked)
     }
 }
 
@@ -642,9 +640,10 @@ impl SessionMcpRuntime {
             .lock()
             .ok()
             .and_then(|state| {
-                state.pending_catalog_transition.as_ref().map(|pending| {
-                    (pending.from_generation, pending.from_definitions.clone())
-                })
+                state
+                    .pending_catalog_transition
+                    .as_ref()
+                    .map(|pending| (pending.from_generation, pending.from_definitions.clone()))
             })
             .unwrap_or_else(|| (generation, definition_map(&definitions)))
     }
@@ -788,10 +787,7 @@ impl AgentToolCatalogUpdateSource for SessionToolCatalogUpdateSource {
         Ok(Some(delta))
     }
 
-    fn acknowledge_update(
-        &self,
-        generation: u64,
-    ) -> Result<(), AgentToolCatalogUpdateError> {
+    fn acknowledge_update(&self, generation: u64) -> Result<(), AgentToolCatalogUpdateError> {
         let mut observed = self
             .observed
             .lock()
@@ -912,10 +908,7 @@ impl AgentRuntime {
     }
 
     /// 项目候选发布或撤销后把新快照排队传播到所有匹配 Session。
-    pub(super) fn queue_project_mcp_snapshot_for_sessions(
-        &self,
-        project_root: &Path,
-    ) {
+    pub(super) fn queue_project_mcp_snapshot_for_sessions(&self, project_root: &Path) {
         let project = match self.extension_candidates.read() {
             Ok(candidates) => candidates.get(project_root).map(|candidate| {
                 project_snapshot_with_revocation(
@@ -1870,11 +1863,8 @@ fn extract_id(body: &str) -> Option<&str> {
             fail,
         );
         let loading_runtime = Arc::clone(&runtime);
-        let loading = tokio::spawn(async move {
-            loading_runtime
-                .load("project-race", vec![server])
-                .await
-        });
+        let loading =
+            tokio::spawn(async move { loading_runtime.load("project-race", vec![server]).await });
 
         wait_for_file_lines(&gate_reached, 1).await;
         runtime
@@ -2029,7 +2019,10 @@ fn extract_id(body: &str) -> Option<&str> {
             let state = runtime.state.lock().unwrap();
             assert_eq!(state.desired_project.version.generation, 3);
             assert!(!state.desired_project.version.revoked);
-            assert_eq!(state.desired_project.tools[0].definition().name, "generation-three");
+            assert_eq!(
+                state.desired_project.tools[0].definition().name,
+                "generation-three"
+            );
         }
         runtime.close().await;
     }
@@ -2229,24 +2222,19 @@ fn extract_id(body: &str) -> Option<&str> {
         );
         assert_eq!(
             source.take_update(),
-            Err(AgentToolCatalogUpdateError::new("Session MCP 目录存在名称冲突")),
+            Err(AgentToolCatalogUpdateError::new(
+                "Session MCP 目录存在名称冲突"
+            )),
             "冲突候选已排队，但在动态 Server 释放前不得覆盖当前目录"
         );
         assert_eq!(
             runtime.status().unwrap().servers[0].status,
             SessionMcpServerPhase::Ready
         );
-        assert!(
-            runtime
-                .catalog()
-                .definitions()
-                .iter()
-                .any(|definition| {
-                    definition.name
-                        == keencode_tools::portable_mcp_tool_name("shared-name", "echo")
-                            .unwrap()
-                })
-        );
+        assert!(runtime.catalog().definitions().iter().any(|definition| {
+            definition.name
+                == keencode_tools::portable_mcp_tool_name("shared-name", "echo").unwrap()
+        }));
 
         runtime
             .unload("unload-conflict", "shared-name")

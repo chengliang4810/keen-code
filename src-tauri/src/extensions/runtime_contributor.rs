@@ -10,17 +10,16 @@ use crate::agent_runtime::{
 use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
     HookLimits, HookPhase, HookRegistry, HookRuntime, OnErrorHookContext, PlanGuard,
-    PostCompactHookContext,
-    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreToolUseAction,
-    PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext, StopHookOutput,
-    ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext, agent_run_error_category,
+    PostCompactHookContext, PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext,
+    PreToolUseAction, PreToolUseContext, PreToolUseOutput, StopHookAction, StopHookContext,
+    StopHookOutput, ToolEffect, ToolHookOutput, ToolRegistry, TurnStartHookContext,
+    agent_run_error_category,
 };
 use keencode_mcp::McpClientOptions;
 use keencode_tools::{
     BoundedCommandError, BoundedCommandOutput, BoundedCommandRequest, DeferredToolCatalog,
     LspDiagnostic, LspRuntime, LspServerConfig, McpDiagnosticCode, McpToolBuildReport,
-    McpToolDiagnostic, SkillTool, prepare_mcp_server_tools, register_lsp_tool,
-    run_bounded_command,
+    McpToolDiagnostic, SkillTool, prepare_mcp_server_tools, register_lsp_tool, run_bounded_command,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
