@@ -294,21 +294,20 @@ export function ComposerToolbar({
 
       <span className="composer__spacer" />
       {effectiveCanStop ? (
-        <>
-          {hasConfiguredModel &&
-            hasBody &&
-            shouldEnqueueSend(session.state, connecting) ? (
-            <Tip label={tr("composer.send")}>
-              <Button
-                type="button"
-                className="icon-btn icon-btn--primary"
-                onClick={() => void send()}
-                aria-label={tr("composer.send")}
-              >
-                <IconArrowUp size={16} />
-              </Button>
-            </Tip>
-          ) : null}
+        hasConfiguredModel &&
+        hasBody &&
+        shouldEnqueueSend(session.state, connecting) ? (
+          <Tip label={tr("composer.send")}>
+            <Button
+              type="button"
+              className="icon-btn icon-btn--primary"
+              onClick={() => void send()}
+              aria-label={tr("composer.send")}
+            >
+              <IconArrowUp size={16} />
+            </Button>
+          </Tip>
+        ) : (
           <Tip label={tr("composer.stop")}>
             <Button
               type="button"
@@ -319,7 +318,7 @@ export function ComposerToolbar({
               <IconStop size={14} />
             </Button>
           </Tip>
-        </>
+        )
       ) : (
         <Tip label={tr("composer.send")}>
           <Button
