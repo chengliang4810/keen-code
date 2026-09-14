@@ -74,6 +74,21 @@ struct PreparedExtensionInputs {
     lsp_servers: Vec<LspServerConfig>,
 }
 
+/// 用户 MCP 文件转换成运行时输入后的当前唯一状态。
+struct RuntimeMcpDocumentInput {
+    /// 有效文件正文，或损坏时用于 fail-closed 的空目录。
+    document: McpDocument,
+    /// 损坏文件对应的安全诊断；有效或缺失文件没有诊断。
+    diagnostic: Option<RuntimeExtensionDiagnostic>,
+}
+
+impl RuntimeMcpDocumentInput {
+    /// 损坏状态属于扩展缓存身份，不能与合法空目录共用候选。
+    fn invalid(&self) -> bool {
+        self.diagnostic.is_some()
+    }
+}
+
 /// 当前项目完整扩展能力的不可变贡献器。
 struct NativeExtensionContributor {
     /// 该贡献器唯一适用的规范项目根。
@@ -592,27 +607,12 @@ fn prepare_extension_inputs(
     );
     let (hooks, hook_diagnostics) = parse_plugin_hooks(&plugins);
     let user_path = mcp_user_config_path(app)?;
-    let (mcp_document, user_diagnostic) = match load_mcp_document(&user_path) {
-        Ok(document) => (document.unwrap_or_else(empty_mcp_document), None),
-        Err(error) => {
-            tracing::warn!(
-                path = %user_path.display(),
-                %error,
-                "用户 MCP 配置无效，本次扩展候选使用空用户配置"
-            );
-            (
-                empty_mcp_document(),
-                Some(RuntimeExtensionDiagnostic {
-                    source: "mcp".to_owned(),
-                    server: "<user-config>".to_owned(),
-                    code: "mcp_user_config_invalid".to_owned(),
-                    message: "用户 MCP 配置无效，已禁用本次运行中的用户 MCP Server".to_owned(),
-                    tool: None,
-                }),
-            )
-        }
-    };
-    let mcp_config_invalid = user_diagnostic.is_some();
+    let user_mcp_input = runtime_mcp_document_input(&user_path);
+    let mcp_config_invalid = user_mcp_input.invalid();
+    let RuntimeMcpDocumentInput {
+        document: mcp_document,
+        diagnostic: user_diagnostic,
+    } = user_mcp_input;
     let (mcp_servers, mut diagnostics) =
         runtime_mcp_servers_from_sources(&mcp_document, plugins.clone(), project_root)?;
     diagnostics.extend(hook_diagnostics);
@@ -623,6 +623,7 @@ fn prepare_extension_inputs(
         project_root,
         &data_root,
         &mcp_document,
+        mcp_config_invalid,
         &plugins,
         &skills,
         &agents,
@@ -640,6 +641,33 @@ fn prepare_extension_inputs(
         hooks,
         lsp_servers,
     })
+}
+
+/// 严格读取用户 MCP 文件；损坏时只保留空目录和安全诊断。
+fn runtime_mcp_document_input(path: &Path) -> RuntimeMcpDocumentInput {
+    match load_mcp_document(path) {
+        Ok(document) => RuntimeMcpDocumentInput {
+            document: document.unwrap_or_else(empty_mcp_document),
+            diagnostic: None,
+        },
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                %error,
+                "用户 MCP 配置无效，本次扩展候选使用空用户配置"
+            );
+            RuntimeMcpDocumentInput {
+                document: empty_mcp_document(),
+                diagnostic: Some(RuntimeExtensionDiagnostic {
+                    source: "mcp".to_owned(),
+                    server: "<user-config>".to_owned(),
+                    code: "mcp_user_config_invalid".to_owned(),
+                    message: "用户 MCP 配置无效，已禁用本次运行中的用户 MCP Server".to_owned(),
+                    tool: None,
+                }),
+            }
+        }
+    }
 }
 
 /// 异步连接全部 MCP Server，成功后构造不可变贡献器。
@@ -2197,6 +2225,7 @@ fn extension_fingerprint(
     project_root: &Path,
     data_root: &Path,
     mcp_document: &McpDocument,
+    mcp_config_invalid: bool,
     plugins: &PluginRuntimeSnapshot,
     skills: &keencode_skills::SkillCatalog,
     agents: &AgentCatalog,
@@ -2205,6 +2234,7 @@ fn extension_fingerprint(
     let mut digest = Sha256::new();
     hash_path(&mut digest, project_root);
     hash_value(&mut digest, &mcp_document.root)?;
+    digest.update([u8::from(mcp_config_invalid)]);
     for plugin in &plugins.plugins {
         digest.update(plugin.id.to_string().as_bytes());
         hash_path(&mut digest, &plugin.root);
@@ -2504,6 +2534,132 @@ mod tests {
     use keencode_model::ToolDefinition;
     use keencode_tools::{ExecuteExtraTool, SearchExtraTools};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 用完整扩展缓存算法计算单个用户 MCP 输入的测试指纹。
+    fn mcp_extension_fingerprint(
+        project_root: &Path,
+        data_root: &Path,
+        input: &RuntimeMcpDocumentInput,
+    ) -> String {
+        let plugins = PluginRuntimeSnapshot::default();
+        let skills = keencode_skills::discover_skills(&runtime_skill_config_from_snapshot(
+            data_root.to_path_buf(),
+            project_root.to_path_buf(),
+            plugins.clone(),
+        ))
+        .expect("应建立空 Skill 目录");
+        extension_fingerprint(
+            project_root,
+            data_root,
+            &input.document,
+            input.invalid(),
+            &plugins,
+            &skills,
+            &AgentCatalog::default(),
+            &[],
+        )
+        .expect("MCP 扩展指纹应可计算")
+    }
+
+    /// 合法空目录、损坏文件与修复后的同一空目录必须形成可逆缓存身份，
+    /// 否则损坏状态会命中旧候选并吞掉 fail-closed 诊断。
+    #[test]
+    fn invalid_user_mcp_state_changes_extension_fingerprint_until_repaired() {
+        let directory = tempfile::tempdir().expect("创建 MCP 指纹测试目录");
+        let data_root = directory.path().join("data");
+        let project_root = directory.path().join("project");
+        fs::create_dir_all(&data_root).expect("创建数据目录");
+        fs::create_dir_all(&project_root).expect("创建项目目录");
+        let path = data_root.join("mcp.json");
+
+        fs::write(&path, r#"{"mcpServers":{}}"#).expect("写入合法空 MCP 目录");
+        let valid = runtime_mcp_document_input(&path);
+        assert!(!valid.invalid());
+        assert!(valid.diagnostic.is_none());
+        let valid_fingerprint = mcp_extension_fingerprint(&project_root, &data_root, &valid);
+
+        fs::write(&path, r#"{"mcpServers":"#).expect("写入损坏 MCP 配置");
+        let invalid = runtime_mcp_document_input(&path);
+        assert!(invalid.invalid());
+        assert_eq!(
+            invalid.diagnostic.as_ref().map(|diagnostic| diagnostic.code.as_str()),
+            Some("mcp_user_config_invalid")
+        );
+        assert!(
+            runtime_mcp_servers_from_sources(
+                &invalid.document,
+                PluginRuntimeSnapshot::default(),
+                &project_root,
+            )
+            .expect("损坏配置应归约为空目录")
+            .0
+            .is_empty()
+        );
+        let invalid_fingerprint = mcp_extension_fingerprint(&project_root, &data_root, &invalid);
+        assert_ne!(
+            invalid_fingerprint, valid_fingerprint,
+            "损坏标记必须使合法空目录的缓存失效"
+        );
+
+        fs::write(&path, r#"{"mcpServers":{}}"#).expect("修复 MCP 配置");
+        let repaired = runtime_mcp_document_input(&path);
+        assert!(!repaired.invalid());
+        assert!(repaired.diagnostic.is_none());
+        assert_eq!(
+            mcp_extension_fingerprint(&project_root, &data_root, &repaired),
+            valid_fingerprint,
+            "修复为相同有效目录后应恢复稳定缓存身份"
+        );
+
+        let configured_text = r#"{"mcpServers":{"demo":{"command":"demo-mcp"}}}"#;
+        fs::write(&path, configured_text).expect("写入带 Server 的合法 MCP 目录");
+        let configured = runtime_mcp_document_input(&path);
+        let configured_fingerprint =
+            mcp_extension_fingerprint(&project_root, &data_root, &configured);
+        assert_eq!(
+            runtime_mcp_servers_from_sources(
+                &configured.document,
+                PluginRuntimeSnapshot::default(),
+                &project_root,
+            )
+            .expect("合法配置应生成运行时目录")
+            .0
+            .len(),
+            1
+        );
+
+        fs::write(&path, r#"{"mcpServers":"#).expect("再次损坏 MCP 配置");
+        let invalid = runtime_mcp_document_input(&path);
+        assert!(
+            runtime_mcp_servers_from_sources(
+                &invalid.document,
+                PluginRuntimeSnapshot::default(),
+                &project_root,
+            )
+            .expect("损坏配置应撤销运行时目录")
+            .0
+            .is_empty()
+        );
+
+        fs::write(&path, configured_text).expect("修复带 Server 的 MCP 目录");
+        let repaired = runtime_mcp_document_input(&path);
+        assert_eq!(
+            runtime_mcp_servers_from_sources(
+                &repaired.document,
+                PluginRuntimeSnapshot::default(),
+                &project_root,
+            )
+            .expect("修复后应重建运行时目录")
+            .0
+            .len(),
+            1
+        );
+        assert_eq!(
+            mcp_extension_fingerprint(&project_root, &data_root, &repaired),
+            configured_fingerprint,
+            "修复后应恢复带 Server 目录的稳定缓存身份"
+        );
+    }
 
     /// 有资源入口时工具发现失败仍保持 Connected，无入口或 Server 不可用时保持 Failed。
     #[test]
