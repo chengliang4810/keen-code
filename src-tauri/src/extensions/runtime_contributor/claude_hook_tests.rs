@@ -566,6 +566,7 @@ async fn failed_one_time_lifecycle_hook_is_retried() {
 #[tokio::test]
 async fn failed_command_lifecycle_hook_is_retried() {
     let root = tempfile::tempdir().unwrap();
+    let lifecycle_state = LifecycleStartState::new();
     let hook = NativeLifecycleHooks {
         hooks: vec![parse_command_hook(
             "test:failed-session".to_owned(),
@@ -576,7 +577,7 @@ async fn failed_command_lifecycle_hook_is_retried() {
         )
         .unwrap()],
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: lifecycle_state.clone(),
         agent_type: "worker".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -590,6 +591,7 @@ async fn failed_command_lifecycle_hook_is_retried() {
     };
 
     for _ in 0..2 {
+        hook.turn_start_prepare(&context);
         let error = hook
             .turn_start(context.clone())
             .await
@@ -604,8 +606,8 @@ async fn failed_command_lifecycle_hook_is_retried() {
         2
     );
     assert!(
-        !hook
-            .started
+        !lifecycle_state
+            .started()
             .lock()
             .unwrap()
             .contains(&("root".to_owned(), HookPhase::SessionStart))
@@ -616,6 +618,7 @@ async fn failed_command_lifecycle_hook_is_retried() {
 #[tokio::test]
 async fn outer_timeout_releases_lifecycle_lease() {
     let root = tempfile::tempdir().unwrap();
+    let lifecycle_state = LifecycleStartState::new();
     let hook = NativeLifecycleHooks {
         hooks: vec![parse_command_hook(
             "test:timeout-session".to_owned(),
@@ -626,7 +629,7 @@ async fn outer_timeout_releases_lifecycle_lease() {
         )
         .unwrap()],
         plan: PlanGuard::inactive(),
-        started: Arc::new(Mutex::new(HashSet::new())),
+        lifecycle_start_state: lifecycle_state.clone(),
         agent_type: "worker".to_owned(),
     };
     let context = TurnStartHookContext {
@@ -639,6 +642,7 @@ async fn outer_timeout_releases_lifecycle_lease() {
         has_history: false,
     };
 
+    hook.turn_start_prepare(&context);
     assert!(
         tokio::time::timeout(
             Duration::from_millis(100),
@@ -648,8 +652,8 @@ async fn outer_timeout_releases_lifecycle_lease() {
         .is_err()
     );
     assert!(
-        !hook
-            .started
+        !lifecycle_state
+            .started()
             .lock()
             .unwrap()
             .contains(&("root".to_owned(), HookPhase::SessionStart))
