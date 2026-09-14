@@ -4,10 +4,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use keencode_agent::{
-    AgentCapabilities, AgentId, AgentProfile, AgentTemplateSnapshot, AgentTool as RuntimeAgentTool,
-    CollaborationAgentStatus, CollaborationCoordinator, CollaborationError, ContextInheritance,
-    SpawnAgentRequest, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
-    ToolRegistry, ToolRegistryError, WaitAgentOutcome,
+    AgentCapabilities, AgentHandle, AgentId, AgentPath, AgentProfile, AgentTemplateSnapshot,
+    AgentTool as RuntimeAgentTool, CollaborationAgentStatus, CollaborationCoordinator,
+    CollaborationError, ContextInheritance, MAX_AGENT_ASSIGNMENT_BYTES, SpawnAgentRequest,
+    ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput, ToolRegistry,
+    ToolRegistryError, WaitAgentOutcome,
 };
 use keencode_model::{Message, ToolDefinition};
 use serde::Deserialize;
@@ -17,25 +18,47 @@ use serde_json::{Value, json};
 pub(super) const MAX_INITIAL_TASK_BYTES: usize = 256 * 1024;
 /// Agent 间单条消息允许的最大 UTF-8 字节数。
 pub(super) const MAX_MESSAGE_BYTES: usize = 64 * 1024;
-/// 不透明 Agent 标识允许的最大 UTF-8 字节数。
-pub(super) const MAX_AGENT_ID_BYTES: usize = 256;
+/// 单层绝对 Agent 路径允许的最大 UTF-8 字节数。
+pub(super) const MAX_AGENT_PATH_BYTES: usize = 70;
 /// WaitAgent 单次等待允许的最大毫秒数。
 pub(super) const MAX_WAIT_TIMEOUT_MILLISECONDS: u64 = 300_000;
 /// RecentTurns 允许继承的最大 Turn 数量。
 const MAX_RECENT_TURNS: u32 = 10_000;
 /// 单次协作工具 JSON 文本结果允许的最大 UTF-8 字节数。
-const MAX_TOOL_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
+/// list_agents 单页最多返回的身份数量。
+pub(super) const MAX_LIST_AGENTS_LIMIT: usize = 32;
 /// 只能由根 Agent 使用、不得冻结进子 Agent Profile 的工具名称。
-const ROOT_ONLY_AGENT_TOOL_NAMES: [&str; 5] =
-    ["spawn_agent", "AskUser", "TodoWrite", "Goal", "Plan"];
+const ROOT_ONLY_AGENT_TOOL_NAMES: [&str; 8] = [
+    "spawn_agent",
+    "interrupt_agent",
+    "retry_agent",
+    "resume_agent",
+    "AskUser",
+    "TodoWrite",
+    "Goal",
+    "Plan",
+];
+/// 每个子 Agent 在用户或模板任务工具之外固定拥有的通信控制面。
+const CHILD_COMMUNICATION_TOOL_NAMES: [&str; 4] =
+    ["list_agents", "send_message", "followup_task", "wait_agent"];
 
-/// 从待持久化或恢复的工具快照中移除全部根 Agent 专用工具。
-pub fn retain_child_agent_tool_snapshot(tool_names: &mut Vec<String>) {
+/// 从用户或模板可选择的任务工具中移除根专用工具和后台固定通信工具。
+pub fn retain_child_agent_task_tool_snapshot(tool_names: &mut Vec<String>) {
     tool_names.retain(|name| {
         !ROOT_ONLY_AGENT_TOOL_NAMES
             .iter()
             .any(|root_only| name == root_only)
+            && !CHILD_COMMUNICATION_TOOL_NAMES
+                .iter()
+                .any(|communication| name == communication)
     });
+}
+
+/// 收紧子 Agent 工具并以稳定顺序追加不可移除的通信控制面。
+pub fn finalize_child_agent_tool_snapshot(tool_names: &mut Vec<String>) {
+    retain_child_agent_task_tool_snapshot(tool_names);
+    tool_names.extend(CHILD_COMMUNICATION_TOOL_NAMES.map(str::to_owned));
 }
 
 /// 显式 Agent 模板解析时只允许使用的可信父 Turn 上下文。
@@ -140,12 +163,12 @@ fn register_collaboration_tools_inner(
             spawn = spawn.with_template_resolver(template_resolver);
         }
         registry.register(Arc::new(spawn))?;
+        registry.register(Arc::new(InterruptAgentTool::new(coordinator.clone())))?;
+        registry.register(Arc::new(RetryAgentTool::new(coordinator.clone())))?;
+        registry.register(Arc::new(ResumeAgentTool::new(coordinator.clone())))?;
     }
     registry.register(Arc::new(SendMessageTool::new(coordinator.clone())))?;
     registry.register(Arc::new(FollowupTaskTool::new(coordinator.clone())))?;
-    registry.register(Arc::new(InterruptAgentTool::new(coordinator.clone())))?;
-    registry.register(Arc::new(RetryAgentTool::new(coordinator.clone())))?;
-    registry.register(Arc::new(ResumeAgentTool::new(coordinator.clone())))?;
     registry.register(Arc::new(ListAgentsTool::new(coordinator.clone())))?;
     registry.register(Arc::new(WaitAgentTool::new(coordinator)))?;
     Ok(())
@@ -190,7 +213,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "spawn_agent",
-            "Create a concurrent, single-level child agent and immediately return its stable identity and initial turn ID. Children cannot create agents.",
+            "Create a concurrent, single-level child agent and return its stable absolute path. The assignment is a concise lifecycle responsibility visible to every agent in the same root tree; the message is the child's complete initial task. Children cannot create agents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -205,6 +228,12 @@ impl RuntimeAgentTool for SpawnAgentTool {
                         "minLength": 1,
                         "maxLength": MAX_INITIAL_TASK_BYTES
                     },
+                    "assignment": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_AGENT_ASSIGNMENT_BYTES,
+                        "description": "Concise lifecycle responsibility visible to every agent in this root tree; create a new agent instead of changing this responsibility"
+                    },
                     "fork_turns": {
                         "type": "string",
                         "description": "none, all, or a decimal integer from 1 through 10000; defaults to all. Inherits only completed parent turns, not the running turn. all keeps the parent model configuration and cannot be combined with model or reasoning_effort overrides or a template that overrides the model"
@@ -218,7 +247,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                     "model": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Optional configured model identifier in provider_id::model form" },
                     "reasoning_effort": { "type": "string", "minLength": 1, "maxLength": 64 }
                 },
-                "required": ["task_name", "message"],
+                "required": ["task_name", "message", "assignment"],
                 "additionalProperties": false
             }),
         )
@@ -286,7 +315,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                 None
             };
             // 模板可以重选父工具，因此必须在全部覆盖完成后统一收紧最终持久快照。
-            retain_child_agent_tool_snapshot(&mut child_profile.tool_snapshot);
+            finalize_child_agent_tool_snapshot(&mut child_profile.tool_snapshot);
             let context_snapshot = freeze_parent_context(
                 context_source.as_ref(),
                 &SpawnAgentTemplateContext {
@@ -304,6 +333,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                     SpawnAgentRequest {
                         task_name: input.task_name,
                         initial_task: input.message,
+                        assignment: input.assignment.clone(),
                         context_inheritance: input.context_inheritance,
                         context_snapshot,
                         agent_template,
@@ -313,10 +343,8 @@ impl RuntimeAgentTool for SpawnAgentTool {
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "created",
-                "agent_id": spawned.agent.agent_id.as_str(),
-                "session_id": spawned.agent.session_id.as_str(),
                 "path": spawned.agent.path.as_str(),
-                "initial_turn_id": spawned.initial_turn_id.as_str()
+                "assignment": input.assignment
             }))
         })
     }
@@ -453,17 +481,18 @@ impl RuntimeAgentTool for InterruptAgentTool {
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
             let input = parse_target_input(&input)?;
+            let target = resolve_target_agent(&coordinator, &context, &input.target)?;
             let stopped_turn_id = coordinator
                 .stop_agent(
                     &context.source_agent_id,
                     &context.turn_id,
                     &context.tool_call_id,
-                    &input.target_agent_id,
+                    &target.agent_id,
                 )
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "interrupt_requested",
-                "target_agent_id": input.target_agent_id.as_str(),
+                "target": target.path.as_str(),
                 "turn_id": stopped_turn_id.as_str()
             }))
         })
@@ -510,17 +539,18 @@ impl RuntimeAgentTool for RetryAgentTool {
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
             let input = parse_target_input(&input)?;
+            let target = resolve_target_agent(&coordinator, &context, &input.target)?;
             let retry_turn_id = coordinator
                 .retry_agent_with_operation(
                     &context.source_agent_id,
                     &context.turn_id,
                     &context.tool_call_id,
-                    &input.target_agent_id,
+                    &target.agent_id,
                 )
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "retry_queued",
-                "target_agent_id": input.target_agent_id.as_str(),
+                "target": target.path.as_str(),
                 "turn_id": retry_turn_id.as_str()
             }))
         })
@@ -567,17 +597,18 @@ impl RuntimeAgentTool for ResumeAgentTool {
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
             let input = parse_target_input(&input)?;
+            let target = resolve_target_agent(&coordinator, &context, &input.target)?;
             let resume_turn_id = coordinator
                 .resume_agent_with_operation(
                     &context.source_agent_id,
                     &context.turn_id,
                     &context.tool_call_id,
-                    &input.target_agent_id,
+                    &target.agent_id,
                 )
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "resume_queued",
-                "target_agent_id": input.target_agent_id.as_str(),
+                "target": target.path.as_str(),
                 "turn_id": resume_turn_id.as_str()
             }))
         })
@@ -624,18 +655,19 @@ impl RuntimeAgentTool for SendMessageTool {
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
             let input = parse_send_message_input(&input)?;
+            let target = resolve_target_agent(&coordinator, &context, &input.target)?;
             let message_id = coordinator
                 .send_message(
                     &context.source_agent_id,
                     &context.turn_id,
                     &context.tool_call_id,
-                    &input.target_agent_id,
+                    &target.agent_id,
                     input.message,
                 )
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "queued",
-                "target_agent_id": input.target_agent_id.as_str(),
+                "target": target.path.as_str(),
                 "message_id": message_id.as_str(),
                 "delivery": "queue_only"
             }))
@@ -683,18 +715,19 @@ impl RuntimeAgentTool for FollowupTaskTool {
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
             let input = parse_send_message_input(&input)?;
+            let target = resolve_target_agent(&coordinator, &context, &input.target)?;
             let (message_id, triggered_turn_id) = coordinator
                 .followup_agent(
                     &context.source_agent_id,
                     &context.turn_id,
                     &context.tool_call_id,
-                    &input.target_agent_id,
+                    &target.agent_id,
                     input.message,
                 )
                 .map_err(normalize_collaboration_error)?;
             json_output(json!({
                 "outcome": "queued",
-                "target_agent_id": input.target_agent_id.as_str(),
+                "target": target.path.as_str(),
                 "message_id": message_id.as_str(),
                 "delivery": "trigger_turn",
                 "triggered_turn_id": triggered_turn_id.as_ref().map(|turn_id| turn_id.as_str())
@@ -717,18 +750,18 @@ impl ListAgentsTool {
 }
 
 impl RuntimeAgentTool for ListAgentsTool {
-    /// 返回不接受目标或来源身份的严格空对象 Schema。
+    /// 返回不接受来源身份、只允许稳定游标和页大小的严格 Schema。
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "list_agents",
-            "List all known agents, stable paths, and current lifecycle states in the current agent's root tree. Does not return model configuration, working directories, tool snapshots, or message bodies.",
-            empty_schema(),
+            "List a bounded page of agents in the current root tree by stable absolute path, including each child's lifecycle assignment and status. Use next_cursor to continue. Internal IDs, turns, model configuration, directories, tools, tasks, and message bodies are hidden.",
+            list_agents_schema(),
         )
     }
 
     /// 列表查询不改变 Agent 或用户项目状态。
     fn effect(&self, input: &Value) -> Result<ToolEffect, ToolError> {
-        parse_empty_input(input)?;
+        parse_list_agents_input(input)?;
         Ok(ToolEffect::ReadOnly)
     }
 
@@ -742,24 +775,37 @@ impl RuntimeAgentTool for ListAgentsTool {
         let coordinator = self.coordinator.clone();
         Box::pin(async move {
             ensure_not_cancelled(&context)?;
-            parse_empty_input(&input)?;
-            let agents = coordinator
+            let input = parse_list_agents_input(&input)?;
+            let mut agents = coordinator
                 .list_agents(&context.source_agent_id, &context.turn_id)
-                .map_err(normalize_collaboration_error)?
+                .map_err(normalize_collaboration_error)?;
+            if let Some(cursor) = input.cursor.as_ref() {
+                agents.retain(|summary| summary.agent.path.as_str() > cursor.as_str());
+            }
+            let has_more = agents.len() > input.limit;
+            agents.truncate(input.limit);
+            let next_cursor = has_more
+                .then(|| {
+                    agents
+                        .last()
+                        .map(|summary| summary.agent.path.as_str().to_owned())
+                })
+                .flatten();
+            let agents = agents
                 .into_iter()
                 .map(|summary| {
-                    let (status, turn_id) = status_projection(&summary.status);
                     json!({
-                        "agent_id": summary.agent.agent_id.as_str(),
-                        "session_id": summary.agent.session_id.as_str(),
-                        "parent_agent_id": summary.parent_agent_id.as_ref().map(|agent_id| agent_id.as_str()),
                         "path": summary.agent.path.as_str(),
-                        "status": status,
-                        "turn_id": turn_id
+                        "assignment": summary.assignment,
+                        "status": status_projection(&summary.status)
                     })
                 })
                 .collect::<Vec<_>>();
-            json_output(json!({ "agents": agents }))
+            json_output(json!({
+                "agents": agents,
+                "next_cursor": next_cursor,
+                "has_more": has_more
+            }))
         })
     }
 }
@@ -770,6 +816,8 @@ struct ParsedSpawnAgentInput {
     task_name: String,
     /// 第一个子 Agent Turn 的完整任务。
     message: String,
+    /// 生命周期内稳定且对同树 Agent 可见的职责摘要。
+    assignment: String,
     /// 由有限枚举构造的父上下文继承范围。
     context_inheritance: ContextInheritance,
     /// 可选的 Agent catalog 稳定名称。
@@ -788,6 +836,8 @@ struct SpawnAgentInput {
     task_name: String,
     /// 第一个子 Agent Turn 的完整任务。
     message: String,
+    /// 生命周期内稳定且对同树 Agent 可见的职责摘要。
+    assignment: String,
     /// none、all 或正整数文本；缺失时继承全部历史。
     fork_turns: Option<String>,
     /// 可选的 Agent catalog 稳定名称。
@@ -806,42 +856,55 @@ struct WaitInput {
     timeout_ms: u64,
 }
 
-/// interrupt_agent 的严格输入。
+/// 根 Agent 控制工具的严格绝对路径输入。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TargetInput {
-    /// 需要停止的同树子 Agent 标识。
-    target_agent_id: String,
+    /// 需要控制的同树 Agent 绝对路径。
+    target: String,
 }
 
-/// 已解析并校验的不透明目标 Agent 标识。
+/// 已解析并校验的目标 Agent 路径。
 struct ParsedTargetInput {
-    /// 只可作为目标、不能替代 ToolContext 来源身份的 Agent 标识。
-    target_agent_id: AgentId,
+    /// 只可作为目标、不能替代 ToolContext 来源身份的稳定路径。
+    target: AgentPath,
 }
 
 /// send_message 与 followup_task 共享的严格输入。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SendMessageInput {
-    /// 接收消息的同树 Agent 标识。
-    target_agent_id: String,
+    /// 接收消息的同树 Agent 绝对路径。
+    target: String,
     /// 需要持久化到 mailbox 的完整正文。
     message: String,
 }
 
 /// 已完成边界校验的 SendMessage 输入。
 struct ParsedSendMessageInput {
-    /// 只可作为目标、不能替代 ToolContext 来源身份的 Agent 标识。
-    target_agent_id: AgentId,
+    /// 只可作为目标、不能替代 ToolContext 来源身份的稳定路径。
+    target: AgentPath,
     /// 已校验非空和 UTF-8 字节上限的正文。
     message: String,
 }
 
-/// list_agents 的严格空对象输入。
+/// list_agents 的有界稳定路径游标输入。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EmptyInput {}
+struct ListAgentsInput {
+    /// 上一页返回的最后一个稳定路径；缺失时从根路径开始。
+    cursor: Option<String>,
+    /// 单页最多返回的 Agent 数量。
+    limit: Option<usize>,
+}
+
+/// list_agents 完成边界校验后的分页输入。
+struct ParsedListAgentsInput {
+    /// 只返回严格位于该路径之后的 Agent。
+    cursor: Option<AgentPath>,
+    /// 单页固定数量上限。
+    limit: usize,
+}
 
 /// 解析 spawn_agent 输入并执行 Schema 之外的继承与覆盖约束。
 fn parse_spawn_agent_input(input: &Value) -> Result<ParsedSpawnAgentInput, ToolError> {
@@ -859,6 +922,14 @@ fn parse_spawn_agent_input(input: &Value) -> Result<ParsedSpawnAgentInput, ToolE
         ));
     }
     validate_required_text(&input.message, MAX_INITIAL_TASK_BYTES, "message")?;
+    validate_required_text(&input.assignment, MAX_AGENT_ASSIGNMENT_BYTES, "assignment")?;
+    if input.assignment.trim() != input.assignment || input.assignment.chars().any(char::is_control)
+    {
+        return Err(ToolError::permanent(
+            "invalid_input",
+            "assignment 不能包含首尾空白或控制字符",
+        ));
+    }
     let fork_turns = input.fork_turns.as_deref().unwrap_or("all");
     let context_inheritance = match fork_turns {
         "none" => ContextInheritance::None,
@@ -905,6 +976,7 @@ fn parse_spawn_agent_input(input: &Value) -> Result<ParsedSpawnAgentInput, ToolE
     Ok(ParsedSpawnAgentInput {
         task_name: input.task_name,
         message: input.message,
+        assignment: input.assignment,
         context_inheritance,
         agent: input.agent,
         model: input.model,
@@ -1010,63 +1082,77 @@ fn parse_wait_input(input: &Value) -> Result<WaitInput, ToolError> {
 fn parse_target_input(input: &Value) -> Result<ParsedTargetInput, ToolError> {
     let input: TargetInput = serde_json::from_value(input.clone()).map_err(invalid_input)?;
     Ok(ParsedTargetInput {
-        target_agent_id: parse_target_agent_id(input.target_agent_id)?,
+        target: parse_target_path(input.target)?,
     })
 }
 
-/// 解析消息输入并执行不透明身份和正文 UTF-8 字节校验。
+/// 解析消息输入并执行绝对路径和正文 UTF-8 字节校验。
 fn parse_send_message_input(input: &Value) -> Result<ParsedSendMessageInput, ToolError> {
     let input: SendMessageInput = serde_json::from_value(input.clone()).map_err(invalid_input)?;
     validate_required_text(&input.message, MAX_MESSAGE_BYTES, "message")?;
     Ok(ParsedSendMessageInput {
-        target_agent_id: parse_target_agent_id(input.target_agent_id)?,
+        target: parse_target_path(input.target)?,
         message: input.message,
     })
 }
 
-/// 严格解析 list_agents 的空对象输入。
-fn parse_empty_input(input: &Value) -> Result<(), ToolError> {
-    serde_json::from_value::<EmptyInput>(input.clone())
-        .map(|_input| ())
-        .map_err(invalid_input)
+/// 解析 list_agents 的稳定路径游标和单页上限。
+fn parse_list_agents_input(input: &Value) -> Result<ParsedListAgentsInput, ToolError> {
+    let input: ListAgentsInput = serde_json::from_value(input.clone()).map_err(invalid_input)?;
+    let limit = input.limit.unwrap_or(MAX_LIST_AGENTS_LIMIT);
+    if !(1..=MAX_LIST_AGENTS_LIMIT).contains(&limit) {
+        return Err(ToolError::permanent(
+            "invalid_input",
+            format!("limit 必须在 1..={MAX_LIST_AGENTS_LIMIT} 之间"),
+        ));
+    }
+    Ok(ParsedListAgentsInput {
+        cursor: input.cursor.map(parse_target_path).transpose()?,
+        limit,
+    })
 }
 
-/// 将内部 Agent 状态投影为稳定状态名和可选 Turn 标识，不回显结果正文。
-fn status_projection(status: &CollaborationAgentStatus) -> (&'static str, Option<&str>) {
+/// 将内部 Agent 状态投影为稳定状态名，不回显 Turn 或结果正文。
+fn status_projection(status: &CollaborationAgentStatus) -> &'static str {
     match status {
-        CollaborationAgentStatus::PendingInit => ("pending_init", None),
-        CollaborationAgentStatus::Idle => ("idle", None),
-        CollaborationAgentStatus::WaitingCapacity { turn_id } => {
-            ("waiting_capacity", Some(turn_id.as_str()))
-        }
-        CollaborationAgentStatus::Running { turn_id } => ("running", Some(turn_id.as_str())),
-        CollaborationAgentStatus::Cancelling { turn_id } => ("cancelling", Some(turn_id.as_str())),
-        CollaborationAgentStatus::Completed { turn_id, .. } => {
-            ("completed", Some(turn_id.as_str()))
-        }
-        CollaborationAgentStatus::Interrupted { turn_id } => {
-            ("interrupted", Some(turn_id.as_str()))
-        }
-        CollaborationAgentStatus::Failed { turn_id, .. } => ("failed", Some(turn_id.as_str())),
-        CollaborationAgentStatus::Stopped => ("stopped", None),
+        CollaborationAgentStatus::PendingInit => "pending_init",
+        CollaborationAgentStatus::Idle => "idle",
+        CollaborationAgentStatus::WaitingCapacity { .. } => "waiting_capacity",
+        CollaborationAgentStatus::Running { .. } => "running",
+        CollaborationAgentStatus::Cancelling { .. } => "cancelling",
+        CollaborationAgentStatus::Completed { .. } => "completed",
+        CollaborationAgentStatus::Interrupted { .. } => "interrupted",
+        CollaborationAgentStatus::Failed { .. } => "failed",
+        CollaborationAgentStatus::Stopped => "stopped",
     }
 }
 
-/// 从有界、无控制字符且无首尾空白的文本创建不透明目标身份。
-fn parse_target_agent_id(value: String) -> Result<AgentId, ToolError> {
+/// 从有界文本解析 V2 单层拓扑中的绝对 Agent 路径。
+fn parse_target_path(value: String) -> Result<AgentPath, ToolError> {
     if value.is_empty()
-        || value.len() > MAX_AGENT_ID_BYTES
+        || value.len() > MAX_AGENT_PATH_BYTES
         || value.trim() != value
         || value.chars().any(char::is_control)
     {
         return Err(ToolError::permanent(
             "invalid_input",
-            "target_agent_id 必须是 1..=256 UTF-8 字节且不含首尾空白或控制字符",
+            "target 必须是合法的 /root 或 /root/<child> 绝对路径",
         ));
     }
-    AgentId::new(value).map_err(|_error| {
-        ToolError::permanent("invalid_input", "target_agent_id 不是有效的 Agent 标识")
-    })
+    AgentPath::parse(value)
+        .map_err(|_error| ToolError::permanent("invalid_input", "target 不是有效的 Agent 路径"))
+}
+
+/// 在可信来源 Turn 的同一根树内把模型路径解析为内部 AgentId。
+fn resolve_target_agent(
+    coordinator: &CollaborationCoordinator,
+    context: &ToolContext,
+    target: &AgentPath,
+) -> Result<AgentHandle, ToolError> {
+    coordinator
+        .resolve_path_for_source(&context.source_agent_id, target)
+        .map_err(normalize_collaboration_error)?
+        .ok_or_else(|| ToolError::permanent("agent_not_found", "目标 Agent 不存在"))
 }
 
 /// 校验必须非空且受 UTF-8 字节上限约束的工具文本。
@@ -1095,13 +1181,14 @@ fn target_only_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "target_agent_id": {
+            "target": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": MAX_AGENT_ID_BYTES
+                "maxLength": MAX_AGENT_PATH_BYTES,
+                "description": "Absolute path returned by spawn_agent/list_agents, such as /root/backend"
             }
         },
-        "required": ["target_agent_id"],
+        "required": ["target"],
         "additionalProperties": false
     })
 }
@@ -1111,11 +1198,11 @@ fn message_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "target_agent_id": {
+            "target": {
                 "type": "string",
                 "minLength": 1,
-                "maxLength": MAX_AGENT_ID_BYTES,
-                "description": "Use the agent_id returned by spawn_agent/list_agents; task names and paths are not accepted"
+                "maxLength": MAX_AGENT_PATH_BYTES,
+                "description": "Use an absolute path returned by spawn_agent/list_agents, such as /root/backend"
             },
             "message": {
                 "type": "string",
@@ -1123,16 +1210,29 @@ fn message_schema() -> Value {
                 "maxLength": MAX_MESSAGE_BYTES
             }
         },
-        "required": ["target_agent_id", "message"],
+        "required": ["target", "message"],
         "additionalProperties": false
     })
 }
 
-/// 返回 list_agents 使用的严格空对象 Schema。
-fn empty_schema() -> Value {
+/// 返回 list_agents 使用的稳定路径游标 Schema。
+fn list_agents_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {},
+        "properties": {
+            "cursor": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": MAX_AGENT_PATH_BYTES,
+                "description": "Return paths strictly after this next_cursor value"
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": MAX_LIST_AGENTS_LIMIT,
+                "description": "Maximum agents in this page; defaults to 32"
+            }
+        },
         "additionalProperties": false
     })
 }
@@ -1163,6 +1263,7 @@ fn normalize_collaboration_error(error: CollaborationError) -> ToolError {
         | CollaborationError::InvalidAgentPath(_)
         | CollaborationError::InvalidMessageId
         | CollaborationError::EmptyMessage
+        | CollaborationError::InvalidAssignment
         | CollaborationError::TextTooLarge { .. }
         | CollaborationError::InvalidAgentProfile { .. }
         | CollaborationError::InvalidContextInheritance
@@ -1215,6 +1316,14 @@ fn normalize_collaboration_error(error: CollaborationError) -> ToolError {
         CollaborationError::CannotStopSelf => {
             ToolError::permanent("cannot_stop_self", "StopAgent 不能停止调用者自身")
         }
+        CollaborationError::CannotFollowupRoot => ToolError::permanent(
+            "cannot_followup_root",
+            "根 Agent 不能由 FollowupTask 创建内部 Turn；请使用 send_message",
+        ),
+        CollaborationError::ReadOnlyMessageToWritableChild => ToolError::permanent(
+            "plan_guard_violation",
+            "只读 Turn 不能向正在非只读执行的子 Agent 投递消息",
+        ),
         CollaborationError::RetryNotAllowed { .. } => {
             ToolError::permanent("retry_not_allowed", "目标 Agent 当前不能重试")
         }

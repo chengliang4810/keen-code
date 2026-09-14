@@ -650,6 +650,7 @@ async fn child_runtime_failure_reaches_parent_mailbox_exactly_once_after_restore
     let child_request = SpawnAgentRequest {
         task_name: "worker".to_owned(),
         initial_task: "执行一个会失败的子任务".to_owned(),
+        assignment: "负责可恢复失败场景".to_owned(),
         context_inheritance: ContextInheritance::None,
         context_snapshot: Vec::new(),
         agent_template: None,

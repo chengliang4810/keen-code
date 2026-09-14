@@ -77,7 +77,7 @@ use keencode_tools::{
     ToolEnvironment, WebServiceConfig, register_collaboration_tools,
     register_collaboration_tools_with_template_resolver, register_deferred_tools,
     register_local_tools_with_background, register_state_tools, register_web_tools,
-    retain_child_agent_tool_snapshot,
+    finalize_child_agent_tool_snapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -113,7 +113,7 @@ const COLLABORATION_TRANSITION_SCHEMA: &str = "keencode/session/collaboration-tr
 /// Collaboration v2 局部 Agent checkpoint 文件使用的唯一 Schema。
 const COLLABORATION_AGENT_SCHEMA: &str = "keencode/session/collaboration-agent-checkpoint";
 /// Collaboration v2 原子提交文件当前唯一版本。
-const COLLABORATION_TRANSITION_VERSION: u32 = 1;
+const COLLABORATION_TRANSITION_VERSION: u32 = 2;
 /// 单个完整协调器提交文件允许读取的最大字节数。
 const MAX_COLLABORATION_TRANSITION_FILE_BYTES: u64 = 1280 * 1024 * 1024;
 /// 单个局部 Agent checkpoint 文件允许读取的最大字节数。
@@ -2696,9 +2696,9 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
                     MailboxMessageKind::ChildTurnFinished { .. } => "child_turn_finished",
                 };
                 body.push_str(&format!(
-                    "\n\n[sequence={} source={} kind={kind}]\n{}",
+                    "\n\n[sequence={} from_path={} kind={kind}]\n{}",
                     message.sequence,
-                    message.source_agent_id.as_str(),
+                    message.source_agent_path.as_str(),
                     message.content
                 ));
             }
@@ -3680,9 +3680,9 @@ fn expected_mailbox_dynamic_input_text(
             MailboxMessageKind::ChildTurnFinished { .. } => "child_turn_finished",
         };
         body.push_str(&format!(
-            "\n\n[sequence={} source={} kind={kind}]\n{}",
+            "\n\n[sequence={} from_path={} kind={kind}]\n{}",
             message.sequence,
-            message.source_agent_id.as_str(),
+            message.source_agent_path.as_str(),
             message.content
         ));
     }
@@ -5533,7 +5533,13 @@ impl AgentRuntime {
                 .flatten();
             let mut input_messages = Vec::new();
             if matches!(launch.cause, AgentTurnCause::InitialTask) {
-                let mut system = "You are a single-level child agent. Complete only the assigned task and report verifiable results to the root agent through collaboration tools.".to_owned();
+                let assignment = launch.agent.assignment.as_deref().ok_or(
+                    AgentRuntimeError::RuntimeOperationFailed,
+                )?;
+                let mut system = format!(
+                    "You are a single-level child agent. Your canonical path is {self_path}; your parent path is /root. Your stable lifecycle assignment, visible to every agent in this root tree, is: {assignment}. Complete work within that assignment and report verifiable results with send_message using target=/root; never use followup_task for /root. Use list_agents to discover siblings and their assignments, and address siblings only by absolute /root/<child> paths.",
+                    self_path = launch.agent.path.as_str(),
+                );
                 if let Some(template) = launch.agent.agent_template.as_ref()
                     && !template.system_prompt.trim().is_empty()
                 {
@@ -10177,7 +10183,7 @@ fn split_child_agent_model_override(
 fn runtime_tool_snapshot(profile: &AgentProfile, is_root: bool) -> Vec<String> {
     let mut tool_snapshot = profile.tool_snapshot.clone();
     if !is_root {
-        retain_child_agent_tool_snapshot(&mut tool_snapshot);
+        finalize_child_agent_tool_snapshot(&mut tool_snapshot);
     }
     tool_snapshot
 }
@@ -12593,6 +12599,26 @@ mod tests {
             1,
             "后续用户 Turn 必须只注入一份 mailbox"
         );
+        let mailbox_input = second_requests[0]
+            .messages
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .find_map(|content| match content {
+                keencode_model::ContentBlock::Text { text }
+                    if text.contains("最终候选期间到达的 mailbox") =>
+                {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("后续模型请求应包含 mailbox 动态输入");
+        assert!(mailbox_input.contains(
+            "from_path=/root/mailbox_final_candidate_source"
+        ));
+        assert!(
+            !mailbox_input.contains(child.agent.agent_id.as_str()),
+            "模型可见 mailbox 不能暴露内部 AgentId"
+        );
         assert!(
             collaboration
                 .coordinator
@@ -13936,6 +13962,8 @@ mod tests {
             message_id: keencode_agent::MailboxMessageId::new("mailbox-first").unwrap(),
             sequence: 7,
             source_agent_id: keencode_agent::AgentId::new("agent-source").unwrap(),
+            source_agent_path: keencode_agent::AgentPath::parse("/root/source").unwrap(),
+            source_plan_guard: PlanGuard::inactive(),
             target_agent_id: keencode_agent::AgentId::new("agent-target").unwrap(),
             delivery: keencode_agent::MailboxDelivery::QueueOnly,
             kind: keencode_agent::MailboxMessageKind::AgentMessage,
@@ -13948,6 +13976,8 @@ mod tests {
             message_id: keencode_agent::MailboxMessageId::new("mailbox-second").unwrap(),
             sequence: 8,
             source_agent_id: keencode_agent::AgentId::new("agent-source").unwrap(),
+            source_agent_path: keencode_agent::AgentPath::parse("/root/source").unwrap(),
+            source_plan_guard: PlanGuard::inactive(),
             target_agent_id: keencode_agent::AgentId::new("agent-target").unwrap(),
             delivery: keencode_agent::MailboxDelivery::QueueOnly,
             kind: keencode_agent::MailboxMessageKind::AgentMessage,
@@ -14024,7 +14054,7 @@ mod tests {
         );
     }
 
-    /// 冷恢复的旧子 Agent Profile 在执行选择前必须再次移除根专用工具。
+    /// 冷恢复的子 Agent Profile 在执行选择前必须移除根专用工具并补齐通信控制面。
     #[test]
     fn recovered_child_profile_is_filtered_before_runtime_tool_selection() {
         let profile = AgentProfile {
@@ -14047,7 +14077,14 @@ mod tests {
         };
         assert_eq!(
             runtime_tool_snapshot(&profile, false),
-            ["Read", "SendMessage"]
+            [
+                "Read",
+                "SendMessage",
+                "list_agents",
+                "send_message",
+                "followup_task",
+                "wait_agent",
+            ]
         );
         assert_eq!(runtime_tool_snapshot(&profile, true), profile.tool_snapshot);
     }
@@ -14304,6 +14341,7 @@ mod tests {
         SpawnAgentRequest {
             task_name: name.to_owned(),
             initial_task: format!("执行 {name} 测试任务"),
+            assignment: format!("负责 {name} 测试范围"),
             context_inheritance: ContextInheritance::None,
             context_snapshot: Vec::new(),
             agent_template: None,
@@ -16839,6 +16877,15 @@ mod tests {
         let child_input = requests[child_request_index]["input"]
             .as_array()
             .expect("子 Agent Responses 请求应包含 input 数组");
+        let child_visible_text = child_input
+            .iter()
+            .filter_map(|message| message["content"][0]["text"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(child_visible_text.contains("canonical path is /root/child_instructions"));
+        assert!(child_visible_text.contains("负责 child_instructions 测试范围"));
+        assert!(child_visible_text.contains("send_message using target=/root"));
+        assert!(child_visible_text.contains("absolute /root/<child> paths"));
         let root_developer = root_input
             .iter()
             .filter_map(|message| {

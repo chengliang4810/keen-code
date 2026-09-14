@@ -13,9 +13,10 @@ use crate::{
     CollaborationEventKind, CollaborationGlobalTurnLimiter, CollaborationIdGenerator,
     CollaborationInvocationKind, CollaborationInvocationOutput, CollaborationLimits,
     CollaborationPortError, CollaborationStore, CollaborationTransitionCommit, ContextInheritance,
-    MailboxDelivery, MailboxMessage, MailboxMessageId, MailboxMessageKind, PlanGuard,
-    RecoveredAgentTree, RootAgentRequest, SessionId, SpawnAgentRequest, ToolCallId,
-    TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome, WorktreeLease,
+    MAX_AGENT_ASSIGNMENT_BYTES, MailboxDelivery, MailboxMessage, MailboxMessageId,
+    MailboxMessageKind, PlanGuard, RecoveredAgentTree, RootAgentRequest, SessionId,
+    SpawnAgentRequest, ToolCallId, TurnCompletionDisposition, TurnId, UserSteer, WaitAgentOutcome,
+    WorktreeLease,
 };
 use keencode_model::{Message, MessageRole};
 use std::collections::{HashMap, HashSet};
@@ -855,6 +856,7 @@ fn spawn_request(name: &str) -> SpawnAgentRequest {
     SpawnAgentRequest {
         task_name: name.to_owned(),
         initial_task: format!("执行 {name} 任务"),
+        assignment: format!("负责 {name} 生命周期范围"),
         context_inheritance: ContextInheritance::RecentTurns { count: 2 },
         context_snapshot: Vec::new(),
         agent_template: None,
@@ -1091,6 +1093,74 @@ fn context_snapshot_is_frozen_validated_and_idempotent() {
     ));
 }
 
+/// assignment 是必填的稳定生命周期元数据，核心入口也必须拒绝非规范文本且不写状态。
+#[test]
+fn spawn_rejects_invalid_assignment_without_persisting_state() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "校验子 Agent 职责", NO_PLAN)
+        .unwrap();
+    let before = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let invalid_assignments = [
+        "".to_owned(),
+        " 职责".to_owned(),
+        "职责 ".to_owned(),
+        "职责\u{0007}".to_owned(),
+        "界".repeat(MAX_AGENT_ASSIGNMENT_BYTES / 3 + 1),
+    ];
+    for (index, assignment) in invalid_assignments.into_iter().enumerate() {
+        let mut request = spawn_request(&format!("bad_assignment_{index}"));
+        request.assignment = assignment;
+        assert_eq!(
+            fixture
+                .coordinator
+                .spawn_agent(
+                    &fixture.root_agent_id,
+                    &root_turn,
+                    &next_tool_call_id(),
+                    request,
+                )
+                .unwrap_err(),
+            CollaborationError::InvalidAssignment
+        );
+        assert_eq!(
+            fixture.coordinator.checkpoint_coordinator().unwrap(),
+            before,
+            "非法 assignment 不得创建身份、Turn 或幂等记录"
+        );
+    }
+}
+
+/// assignment 必须进入 spawn 幂等输入，不能在同一 ToolCall 重放时静默改变。
+#[test]
+fn spawn_assignment_is_part_of_idempotent_input() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "冻结子 Agent 职责", NO_PLAN)
+        .unwrap();
+    let tool_call_id = fixed_tool_call_id("assignment-idempotency");
+    let request = spawn_request("stable_assignment");
+    fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &tool_call_id,
+            request.clone(),
+        )
+        .unwrap();
+    let mut changed = request;
+    changed.assignment = "被改写的职责".to_owned();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .spawn_agent(&fixture.root_agent_id, &root_turn, &tool_call_id, changed,),
+        Err(CollaborationError::IdempotencyConflict { .. })
+    ));
+}
+
 /// Plan 只读守卫必须从父 Agent 向子 Agent 单调收紧，并完整进入恢复快照。
 #[test]
 fn child_profile_inherits_read_only_plan_across_restore_and_replay() {
@@ -1271,6 +1341,195 @@ fn followup_inherits_current_source_turn_plan_guard_for_existing_child() {
     let followup_turn = followup_turn.expect("空闲子 Agent 应创建 Followup Turn");
     assert_eq!(
         fixture.execution.launch(&followup_turn).plan_guard,
+        PlanGuard::read_only()
+    );
+}
+
+/// 只读来源不能向正在可写执行或等待容量的子 Agent 注入指令，拒绝前后状态必须一致。
+#[test]
+fn read_only_source_cannot_message_writable_running_or_waiting_child() {
+    let fixture = fixture(1, 2);
+    let writable_root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建可写子 Agent", NO_PLAN)
+        .unwrap();
+    let running_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &writable_root_turn,
+            &next_tool_call_id(),
+            spawn_request("writable_running"),
+        )
+        .unwrap();
+    let waiting_child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &writable_root_turn,
+            &next_tool_call_id(),
+            spawn_request("writable_waiting"),
+        )
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&running_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::Running { .. }
+    ));
+    assert!(matches!(
+        fixture
+            .coordinator
+            .agent_status(&waiting_child.agent.agent_id)
+            .unwrap(),
+        CollaborationAgentStatus::WaitingCapacity { .. }
+    ));
+    fixture
+        .coordinator
+        .complete_turn(
+            &fixture.root_agent_id,
+            &writable_root_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    let read_only_root_turn = fixture
+        .coordinator
+        .begin_root_turn(
+            &fixture.root_agent_id,
+            "只读来源不得注入可写执行",
+            PlanGuard::read_only(),
+        )
+        .unwrap();
+
+    let before_running = fixture.coordinator.checkpoint_coordinator().unwrap();
+    assert_eq!(
+        fixture
+            .coordinator
+            .send_message(
+                &fixture.root_agent_id,
+                &read_only_root_turn,
+                &next_tool_call_id(),
+                &running_child.agent.agent_id,
+                "不得进入运行中的可写子 Agent",
+            )
+            .unwrap_err(),
+        CollaborationError::ReadOnlyMessageToWritableChild
+    );
+    assert_eq!(
+        fixture.coordinator.checkpoint_coordinator().unwrap(),
+        before_running
+    );
+
+    let before_waiting = fixture.coordinator.checkpoint_coordinator().unwrap();
+    assert_eq!(
+        fixture
+            .coordinator
+            .followup_agent(
+                &fixture.root_agent_id,
+                &read_only_root_turn,
+                &next_tool_call_id(),
+                &waiting_child.agent.agent_id,
+                "不得进入等待中的可写子 Agent",
+            )
+            .unwrap_err(),
+        CollaborationError::ReadOnlyMessageToWritableChild
+    );
+    assert_eq!(
+        fixture.coordinator.checkpoint_coordinator().unwrap(),
+        before_waiting
+    );
+}
+
+/// 延迟 QueueOnly 消息的只读来源必须收紧之后由普通来源触发的 Followup Turn。
+#[test]
+fn delayed_mailbox_messages_merge_the_strictest_plan_guard() {
+    let fixture = fixture(2, 2);
+    let setup_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建空闲目标", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &setup_turn,
+            &next_tool_call_id(),
+            spawn_request("delayed_plan_guard"),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &fixture.root_agent_id,
+            &setup_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+
+    let read_only_turn = fixture
+        .coordinator
+        .begin_root_turn(
+            &fixture.root_agent_id,
+            "排队只读消息",
+            PlanGuard::read_only(),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &read_only_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "延迟处理的只读消息",
+        )
+        .unwrap();
+    let queued = fixture.coordinator.mailbox(&child.agent.agent_id).unwrap();
+    assert_eq!(queued[0].source_agent_path, AgentPath::root());
+    assert_eq!(queued[0].source_plan_guard, PlanGuard::read_only());
+    fixture
+        .coordinator
+        .complete_turn(
+            &fixture.root_agent_id,
+            &read_only_turn,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+
+    let writable_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "普通来源触发 Followup", NO_PLAN)
+        .unwrap();
+    let (_, triggered_turn) = fixture
+        .coordinator
+        .followup_agent(
+            &fixture.root_agent_id,
+            &writable_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "现在处理全部 mailbox",
+        )
+        .unwrap();
+    let triggered_turn = triggered_turn.expect("空闲子 Agent 应创建 Followup Turn");
+    assert_eq!(
+        fixture.execution.launch(&triggered_turn).plan_guard,
         PlanGuard::read_only()
     );
 }
@@ -3918,6 +4177,60 @@ fn mailbox_is_fifo_exactly_once_and_delivery_modes_are_distinct() {
             },
         )
         .unwrap();
+}
+
+/// 根 Agent 只能接收 QueueOnly 报告，Followup 不得为根创建内部 Turn 或留下持久痕迹。
+#[test]
+fn followup_to_root_is_rejected_before_commit_while_send_message_remains_allowed() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "验证根 mailbox 语义", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request("root_message_source"),
+        )
+        .unwrap();
+    let before = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let events_before = fixture.store.events().len();
+    assert_eq!(
+        fixture
+            .coordinator
+            .followup_agent(
+                &child.agent.agent_id,
+                &child.initial_turn_id,
+                &next_tool_call_id(),
+                &fixture.root_agent_id,
+                "不得唤醒根 Agent",
+            )
+            .unwrap_err(),
+        CollaborationError::CannotFollowupRoot
+    );
+    assert_eq!(fixture.store.events().len(), events_before);
+    assert_eq!(
+        fixture.coordinator.checkpoint_coordinator().unwrap(),
+        before
+    );
+
+    fixture
+        .coordinator
+        .send_message(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            &next_tool_call_id(),
+            &fixture.root_agent_id,
+            "允许向根 Agent 报告",
+        )
+        .unwrap();
+    let mailbox = fixture.coordinator.mailbox(&fixture.root_agent_id).unwrap();
+    assert_eq!(mailbox.len(), 1);
+    assert_eq!(mailbox[0].delivery, MailboxDelivery::QueueOnly);
+    assert_eq!(mailbox[0].source_agent_path, child.agent.path);
 }
 
 /// 验证 mailbox claim 跨崩溃恢复保留原批次，重试后才可确认并读取后续输入。
@@ -10236,6 +10549,7 @@ fn recovered_tree_with_agent_count(
         definition.path = AgentPath::root()
             .child(format!("child_{child_index}"))
             .unwrap();
+        definition.assignment = Some(format!("负责配额子 Agent {child_index}"));
         definition.depth = AgentDepth::CHILD;
         let mut agent = root_agent.clone();
         agent.definition = definition.clone();
@@ -10330,6 +10644,66 @@ fn evicted_child_checkpoint_fixture() -> (Fixture, AgentId, RecoveredAgentCheckp
         .expect("驱逐应保存局部 checkpoint")
         .clone();
     (fixture, child.agent.agent_id, checkpoint, root_turn)
+}
+
+/// assignment 在完整冷恢复后保持不变，且 Agent 列表继续公开同一稳定职责。
+#[test]
+fn child_assignment_survives_full_coordinator_restore() {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建稳定职责", NO_PLAN)
+        .unwrap();
+    let mut request = spawn_request("assignment_restore");
+    request.assignment = "负责冷恢复后的稳定职责".to_owned();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            request,
+        )
+        .unwrap();
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    let restored = restore_coordinator(fixture.store.clone(), 2, 80_500);
+    restored.restore_coordinator(checkpoint).unwrap();
+    let summary = restored
+        .list_agents_for_root(&fixture.root_agent_id)
+        .unwrap()
+        .into_iter()
+        .find(|summary| summary.agent.agent_id == child.agent.agent_id)
+        .expect("恢复后列表应包含子 Agent");
+    assert_eq!(
+        summary.assignment.as_deref(),
+        Some("负责冷恢复后的稳定职责")
+    );
+}
+
+/// 局部 checkpoint 摘要必须覆盖 assignment，修改职责后不得冷加载。
+#[test]
+fn cold_load_digest_rejects_tampered_assignment() {
+    let (fixture, child_agent_id, mut checkpoint, root_turn) = evicted_child_checkpoint_fixture();
+    checkpoint.agent.definition.assignment = Some("被篡改的职责".to_owned());
+    fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .insert(child_agent_id.clone(), checkpoint);
+    assert!(matches!(
+        fixture
+            .coordinator
+            .send_message(
+                &fixture.root_agent_id,
+                &root_turn,
+                &next_tool_call_id(),
+                &child_agent_id,
+                "assignment 篡改后冷加载",
+            )
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
 }
 
 /// 验证局部 checkpoint 的 revision 或内容摘要被篡改后都拒绝冷加载。
@@ -10465,6 +10839,110 @@ fn cold_load_digest_rejects_tampered_initial_mailbox_trigger() {
                 &next_tool_call_id(),
                 &child.agent.agent_id,
                 "篡改后冷加载",
+            )
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+}
+
+/// 创建带未消费 mailbox 的已驱逐子 Agent，用于验证消息来源元数据摘要。
+fn evicted_child_mailbox_checkpoint(
+    name: &str,
+) -> (Fixture, AgentId, RecoveredAgentCheckpoint, TurnId) {
+    let fixture = fixture(2, 2);
+    let root_turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "创建 mailbox 摘要快照", NO_PLAN)
+        .unwrap();
+    let child = fixture
+        .coordinator
+        .spawn_agent(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            spawn_request(name),
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .send_message(
+            &fixture.root_agent_id,
+            &root_turn,
+            &next_tool_call_id(),
+            &child.agent.agent_id,
+            "保留来源路径与 PlanGuard",
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .complete_turn(
+            &child.agent.agent_id,
+            &child.initial_turn_id,
+            AgentTurnOutcome::Completed {
+                final_message: None,
+            },
+        )
+        .unwrap();
+    fixture
+        .coordinator
+        .evict_idle_agent(&child.agent.agent_id)
+        .unwrap();
+    let checkpoint = fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .get(&child.agent.agent_id)
+        .expect("驱逐应保存 mailbox checkpoint")
+        .clone();
+    (fixture, child.agent.agent_id, checkpoint, root_turn)
+}
+
+/// 局部 checkpoint 摘要必须覆盖 mailbox 的来源路径与来源 PlanGuard。
+#[test]
+fn cold_load_digest_rejects_tampered_mailbox_source_metadata() {
+    let (path_fixture, path_child_id, mut path_checkpoint, path_root_turn) =
+        evicted_child_mailbox_checkpoint("mailbox_path_digest");
+    path_checkpoint.agent.mailbox[0].message.source_agent_path =
+        AgentPath::parse("/root/forged_source").unwrap();
+    path_fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .insert(path_child_id.clone(), path_checkpoint);
+    assert!(matches!(
+        path_fixture
+            .coordinator
+            .send_message(
+                &path_fixture.root_agent_id,
+                &path_root_turn,
+                &next_tool_call_id(),
+                &path_child_id,
+                "路径篡改后冷加载",
+            )
+            .unwrap_err(),
+        CollaborationError::InvalidRecovery { .. }
+    ));
+
+    let (guard_fixture, guard_child_id, mut guard_checkpoint, guard_root_turn) =
+        evicted_child_mailbox_checkpoint("mailbox_guard_digest");
+    guard_checkpoint.agent.mailbox[0].message.source_plan_guard = PlanGuard::read_only();
+    guard_fixture
+        .store
+        .recovered
+        .lock()
+        .expect("恢复锁不应中毒")
+        .insert(guard_child_id.clone(), guard_checkpoint);
+    assert!(matches!(
+        guard_fixture
+            .coordinator
+            .send_message(
+                &guard_fixture.root_agent_id,
+                &guard_root_turn,
+                &next_tool_call_id(),
+                &guard_child_id,
+                "PlanGuard 篡改后冷加载",
             )
             .unwrap_err(),
         CollaborationError::InvalidRecovery { .. }

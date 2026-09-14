@@ -54,6 +54,9 @@ const MAX_RETAINED_TEXT_BYTES_PER_COORDINATOR: usize = 1024 * 1024 * 1024;
 /// 单条任务、消息、Steer 或最终文本允许的最大 UTF-8 字节数。
 const MAX_COLLABORATION_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
+/// 单个子 Agent 生命周期职责允许持久化并向同树 Agent 展示的最大 UTF-8 字节数。
+pub const MAX_AGENT_ASSIGNMENT_BYTES: usize = 512;
+
 /// 单个 Agent mailbox 最多保留的未消费消息数量。
 const MAX_MAILBOX_MESSAGES_PER_AGENT: usize = 4_096;
 
@@ -256,6 +259,18 @@ fn validate_optional_text(value: &str, field: &'static str) -> Result<(), Collab
             field,
             maximum_bytes: MAX_COLLABORATION_TEXT_BYTES,
         });
+    }
+    Ok(())
+}
+
+/// 校验子 Agent 生命周期内稳定、可向同树 Agent 展示的职责摘要。
+fn validate_agent_assignment(value: &str) -> Result<(), CollaborationError> {
+    if value.trim().is_empty()
+        || value.len() > MAX_AGENT_ASSIGNMENT_BYTES
+        || value.trim() != value
+        || value.chars().any(char::is_control)
+    {
+        return Err(CollaborationError::InvalidAssignment);
     }
     Ok(())
 }
@@ -475,6 +490,17 @@ fn effective_child_plan_guard(
     }
 }
 
+/// 合并两个来源，只要任一方只读就保持只读。
+fn strictest_plan_guard(left: PlanGuard, right: PlanGuard) -> PlanGuard {
+    if matches!(left.state(), PlanGuardState::ReadOnly)
+        || matches!(right.state(), PlanGuardState::ReadOnly)
+    {
+        PlanGuard::read_only()
+    } else {
+        PlanGuard::inactive()
+    }
+}
+
 /// 校验执行器终态文本，避免失败补偿或模型输出绕过正文边界。
 fn validate_turn_outcome(outcome: &AgentTurnOutcome) -> Result<(), CollaborationError> {
     match outcome {
@@ -683,6 +709,8 @@ pub struct AgentDefinition {
     pub parent_agent_id: Option<AgentId>,
     /// 在根树内稳定且可持久的 Agent 路径。
     pub path: AgentPath,
+    /// 子 Agent 生命周期内稳定且对同树可见的职责；根 Agent 固定为 `None`。
+    pub assignment: Option<String>,
     /// 只能是根层或一层子 Agent 的深度。
     pub depth: AgentDepth,
     /// 创建时固定的上下文继承方式。
@@ -907,6 +935,10 @@ pub struct MailboxMessage {
     pub sequence: u64,
     /// 发送消息的 Agent。
     pub source_agent_id: AgentId,
+    /// 发送方在根树内的稳定路径，供模型直接回复而不暴露内部 AgentId。
+    pub source_agent_path: AgentPath,
+    /// 发送方 Turn 的有效 Plan 守卫，防止延迟消息在更宽松的目标 Turn 中执行。
+    pub source_plan_guard: PlanGuard,
     /// 接收消息的 Agent。
     pub target_agent_id: AgentId,
     /// 是否允许在目标空闲时触发新 Turn。
@@ -1742,6 +1774,8 @@ pub struct SpawnAgentRequest {
     pub task_name: String,
     /// 子 Agent 第一个 Turn 的完整任务文本。
     pub initial_task: String,
+    /// 子 Agent 生命周期内稳定且会向同树其他 Agent 展示的职责摘要。
+    pub assignment: String,
     /// 子 Agent 的父上下文继承方式。
     pub context_inheritance: ContextInheritance,
     /// 按继承范围在 spawn 时冻结并规范编码的 Provider 中立父消息。
@@ -1770,6 +1804,8 @@ pub struct CollaborationAgentSummary {
     pub agent: AgentHandle,
     /// 直接父 Agent；根 Agent 固定为 `None`。
     pub parent_agent_id: Option<AgentId>,
+    /// 子 Agent 生命周期内稳定的职责；根 Agent 固定为 `None`。
+    pub assignment: Option<String>,
     /// 查询时的当前 Turn 或最近 Turn 状态。
     pub status: CollaborationAgentStatus,
     /// 当前未决 Turn 的有界任务摘要；空闲或没有初始正文时为空。
@@ -1890,6 +1926,8 @@ pub enum CollaborationError {
     InvalidMessageId,
     /// 需要发送或 steer 的文本为空。
     EmptyMessage,
+    /// 子 Agent 职责为空、包含边界空白或控制字符，或超过专用上限。
+    InvalidAssignment,
     /// 用户或执行端口提供的文本超过确定性内存边界。
     TextTooLarge {
         /// 超限字段的稳定名称。
@@ -1971,6 +2009,10 @@ pub enum CollaborationError {
     CannotStopRoot,
     /// StopAgent 不允许中断调用者自身。
     CannotStopSelf,
+    /// FollowupTask 不允许为根 Agent 创建内部 Turn；向根报告应使用 SendMessage。
+    CannotFollowupRoot,
+    /// 只读来源不能把指令投递给正在非只读执行的子 Agent。
+    ReadOnlyMessageToWritableChild,
     /// 只有失败或中断的 Turn 才能重试。
     RetryNotAllowed {
         /// 当前不允许重试的 Agent。
@@ -2049,6 +2091,8 @@ impl fmt::Display for CollaborationError {
             Self::InvalidAgentPath(error) => write!(formatter, "{error}"),
             Self::InvalidMessageId => formatter.write_str("mailbox 消息标识不能为空"),
             Self::EmptyMessage => formatter.write_str("协作消息不能为空"),
+            Self::InvalidAssignment => formatter
+                .write_str("子 Agent 职责必须非空、无首尾空白或控制字符，且不超过 512 UTF-8 字节"),
             Self::TextTooLarge {
                 field,
                 maximum_bytes,
@@ -2088,6 +2132,12 @@ impl fmt::Display for CollaborationError {
             }
             Self::CannotStopRoot => formatter.write_str("StopAgent 不能中断根 Agent"),
             Self::CannotStopSelf => formatter.write_str("StopAgent 不能中断调用者自身"),
+            Self::CannotFollowupRoot => {
+                formatter.write_str("FollowupTask 不能为根 Agent 创建内部 Turn")
+            }
+            Self::ReadOnlyMessageToWritableChild => {
+                formatter.write_str("只读来源不能向正在非只读执行的子 Agent 投递消息")
+            }
             Self::RetryNotAllowed { agent_id } => {
                 write!(formatter, "Agent {agent_id} 当前不能重试")
             }
@@ -2473,6 +2523,10 @@ struct EventLink {
 struct MailboxDraft {
     /// 发送消息的 Agent。
     source_agent_id: AgentId,
+    /// 发送方在同一根树内的稳定路径。
+    source_agent_path: AgentPath,
+    /// 发送方当前 Turn 的有效 Plan 守卫。
+    source_plan_guard: PlanGuard,
     /// 接收消息的 Agent。
     target_agent_id: AgentId,
     /// 全局唯一消息标识。
@@ -3466,6 +3520,7 @@ impl CollaborationCoordinator {
             root_session_id: request.session_id,
             parent_agent_id: None,
             path: AgentPath::root(),
+            assignment: None,
             depth: AgentDepth::ROOT,
             context_inheritance: ContextInheritance::None,
             context_snapshot: Vec::new(),
@@ -3835,6 +3890,7 @@ impl CollaborationCoordinator {
         request: SpawnAgentRequest,
     ) -> Result<SpawnedAgent, CollaborationError> {
         validate_required_text(&request.initial_task, "子 Agent 初始任务")?;
+        validate_agent_assignment(&request.assignment)?;
         validate_context_inheritance(&request.context_inheritance)?;
         validate_context_snapshot(&request.context_inheritance, &request.context_snapshot)?;
         if let Some(template) = &request.agent_template {
@@ -3924,6 +3980,7 @@ impl CollaborationCoordinator {
                 root_session_id,
                 parent_agent_id: Some(source_agent_id.clone()),
                 path: path.clone(),
+                assignment: Some(request.assignment.clone()),
                 depth: AgentDepth::CHILD,
                 context_inheritance: request.context_inheritance.clone(),
                 context_snapshot: request.context_snapshot.clone(),
@@ -4117,6 +4174,11 @@ impl CollaborationCoordinator {
             if source.definition.root_agent_id != target.definition.root_agent_id {
                 return Err(CollaborationError::CrossTreeOperation);
             }
+            if delivery == MailboxDelivery::TriggerTurn
+                && target.definition.depth == AgentDepth::ROOT
+            {
+                return Err(CollaborationError::CannotFollowupRoot);
+            }
             if !target.status.can_receive_messages() {
                 return Err(CollaborationError::TargetStopped {
                     agent_id: target_agent_id.clone(),
@@ -4131,11 +4193,38 @@ impl CollaborationCoordinator {
             let target_active_turn = target.status.active_turn_id().cloned();
             let target_root_agent_id = target.definition.root_agent_id.clone();
             let target_definition = target.definition.clone();
-            let target_plan_guard = effective_child_plan_guard(
-                source.definition.profile.plan_guard,
-                source_turn.plan_guard,
-                target_definition.profile.plan_guard,
-            );
+            let source_path = source.definition.path.clone();
+            let source_plan_guard =
+                strictest_plan_guard(source.definition.profile.plan_guard, source_turn.plan_guard);
+            let target_current_plan_guard = match &target.status {
+                CollaborationAgentStatus::WaitingCapacity { turn_id } => state
+                    .pending_turns
+                    .iter()
+                    .find(|turn| turn.agent_id == target_agent_id && &turn.turn_id == turn_id)
+                    .map(|turn| turn.plan_guard),
+                CollaborationAgentStatus::Running { turn_id }
+                | CollaborationAgentStatus::Cancelling { turn_id } => state
+                    .active_turns
+                    .get(turn_id)
+                    .filter(|turn| turn.agent_id == target_agent_id)
+                    .map(|turn| turn.plan_guard),
+                _ => None,
+            };
+            if target_definition.depth == AgentDepth::CHILD
+                && matches!(source_plan_guard.state(), PlanGuardState::ReadOnly)
+                && target_current_plan_guard
+                    .is_some_and(|guard| matches!(guard.state(), PlanGuardState::Inactive))
+            {
+                return Err(CollaborationError::ReadOnlyMessageToWritableChild);
+            }
+            let target_plan_guard = target
+                .mailbox
+                .iter()
+                .filter(|entry| matches!(entry.message.kind, MailboxMessageKind::AgentMessage))
+                .fold(
+                    strictest_plan_guard(target_definition.profile.plan_guard, source_plan_guard),
+                    |guard, entry| strictest_plan_guard(guard, entry.message.source_plan_guard),
+                );
             let invocation_link = EventLink {
                 source_agent_id: source_agent_id.clone(),
                 turn_id: Some(source_turn.turn_id.clone()),
@@ -4176,6 +4265,8 @@ impl CollaborationCoordinator {
                 state,
                 MailboxDraft {
                     source_agent_id: source_agent_id.clone(),
+                    source_agent_path: source_path,
+                    source_plan_guard,
                     target_agent_id: target_agent_id.clone(),
                     message_id: message_id.clone(),
                     delivery,
@@ -5839,6 +5930,43 @@ impl CollaborationCoordinator {
             }))
     }
 
+    /// 以可信来源 Agent 的根树为边界解析模型提供的稳定绝对路径。
+    ///
+    /// 此处不要求来源 Turn 仍活跃，因为领域命令需要先把路径还原为内部身份，才能由
+    /// 幂等记录重放已经提交的结果；新副作用仍由各领域入口校验当前来源 Turn。
+    pub fn resolve_path_for_source(
+        &self,
+        source_agent_id: &AgentId,
+        path: &AgentPath,
+    ) -> Result<Option<AgentHandle>, CollaborationError> {
+        let state = self.lock_state()?;
+        let root_agent_id = state
+            .roots
+            .values()
+            .find(|root| root.known_agents.contains_key(source_agent_id))
+            .map(|root| root.root_agent_id.clone())
+            .ok_or_else(|| CollaborationError::AgentNotFound {
+                agent_id: source_agent_id.clone(),
+            })?;
+        ensure_tree_open(&state, &root_agent_id)?;
+        let root =
+            state
+                .roots
+                .get(&root_agent_id)
+                .ok_or_else(|| CollaborationError::AgentNotFound {
+                    agent_id: root_agent_id.clone(),
+                })?;
+        Ok(root
+            .known_agents
+            .values()
+            .find(|definition| &definition.path == path)
+            .map(|definition| AgentHandle {
+                agent_id: definition.agent_id.clone(),
+                session_id: definition.session_id.clone(),
+                path: definition.path.clone(),
+            }))
+    }
+
     /// 返回指定驻留 Agent 的当前状态快照。
     pub fn agent_status(
         &self,
@@ -6849,7 +6977,7 @@ pub(crate) fn collaboration_event_batch(
     expected_sequence: u64,
     events: &[CollaborationEvent],
 ) -> CollaborationEventBatch {
-    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.event-batch.v2");
+    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.event-batch.v3");
     encoder.u64(expected_sequence);
     encoder.u64(events.len() as u64);
     for event in events {
@@ -7004,6 +7132,7 @@ fn encode_agent_definition(encoder: &mut CanonicalDigest, definition: &AgentDefi
     encoder.text(definition.root_session_id.as_str());
     encode_optional_agent(encoder, definition.parent_agent_id.as_ref());
     encoder.text(definition.path.as_str());
+    encode_optional_text(encoder, definition.assignment.as_deref());
     encoder.tag(definition.depth.value());
     encode_context_inheritance(encoder, &definition.context_inheritance);
     encoder.u64(definition.context_snapshot.len() as u64);
@@ -7034,6 +7163,7 @@ fn encode_collaboration_invocation_input(
             encoder.tag(0);
             encoder.text(&request.task_name);
             encoder.text(&request.initial_task);
+            encoder.text(&request.assignment);
             encode_context_inheritance(encoder, &request.context_inheritance);
             encoder.u64(request.context_snapshot.len() as u64);
             for message in &request.context_snapshot {
@@ -7080,7 +7210,7 @@ fn encode_collaboration_invocation_input(
 
 /// 对完整规范协作工具输入计算版本化 SHA-256 摘要。
 fn collaboration_invocation_input_digest(input: &CollaborationInvocationInput) -> [u8; 32] {
-    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.invocation-input.v2");
+    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.invocation-input.v3");
     encode_collaboration_invocation_input(&mut encoder, input);
     encoder.finish_bytes()
 }
@@ -7241,6 +7371,11 @@ fn encode_mailbox_message(encoder: &mut CanonicalDigest, message: &MailboxMessag
     encoder.text(message.message_id.as_str());
     encoder.u64(message.sequence);
     encoder.text(message.source_agent_id.as_str());
+    encoder.text(message.source_agent_path.as_str());
+    encoder.tag(match message.source_plan_guard.state() {
+        PlanGuardState::Inactive => 0,
+        PlanGuardState::ReadOnly => 1,
+    });
     encoder.text(message.target_agent_id.as_str());
     encoder.tag(match message.delivery {
         MailboxDelivery::QueueOnly => 0,
@@ -7430,7 +7565,7 @@ fn encode_recovered_agent(encoder: &mut CanonicalDigest, agent: &RecoveredAgent)
 
 /// 对局部驱逐 checkpoint 计算版本化规范摘要。
 fn recovered_agent_checkpoint_digest(checkpoint: &RecoveredAgentCheckpoint) -> [u8; 32] {
-    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.agent-checkpoint.v4");
+    let mut encoder = CanonicalDigest::new(b"keencode.collaboration.agent-checkpoint.v5");
     encoder.text(checkpoint.root_agent_id.as_str());
     encoder.u64(checkpoint.revision);
     encode_recovered_agent(&mut encoder, &checkpoint.agent);
@@ -7468,6 +7603,7 @@ fn recovered_agent_dynamic_text_bytes(agent: &RecoveredAgent) -> usize {
 /// 返回不可变 Agent 配置中由用户提供的文本字节数。
 fn agent_definition_text_bytes(definition: &AgentDefinition) -> usize {
     let mut total = definition.profile.model.len();
+    total = total.saturating_add(definition.assignment.as_ref().map_or(0, String::len));
     total = total.saturating_add(
         definition
             .profile
@@ -8418,6 +8554,7 @@ fn collaboration_agent_summary(
             path: entry.definition.path.clone(),
         },
         parent_agent_id: entry.definition.parent_agent_id.clone(),
+        assignment: entry.definition.assignment.clone(),
         status: entry.status.clone(),
         current_turn_summary,
         current_root_turn_id,
@@ -9196,6 +9333,7 @@ fn validate_recovered_tree(
                 if definition.agent_id != tree.root_agent_id
                     || definition.parent_agent_id.is_some()
                     || definition.path != AgentPath::root()
+                    || definition.assignment.is_some()
                     || definition.session_id != tree.root_session_id
                     || definition.context_inheritance != ContextInheritance::None
                     || !definition.context_snapshot.is_empty()
@@ -9208,6 +9346,16 @@ fn validate_recovered_tree(
                 }
             }
             depth if depth == AgentDepth::CHILD => {
+                let assignment = definition.assignment.as_deref().ok_or_else(|| {
+                    CollaborationError::InvalidRecovery {
+                        message: "恢复子 Agent 缺少稳定职责".to_owned(),
+                    }
+                })?;
+                validate_agent_assignment(assignment).map_err(|error| {
+                    CollaborationError::InvalidRecovery {
+                        message: error.to_string(),
+                    }
+                })?;
                 if definition.parent_agent_id.as_ref() != Some(&tree.root_agent_id)
                     || !definition.path.as_str().starts_with("/root/")
                     || matches!(definition.context_inheritance, ContextInheritance::None)
@@ -9523,9 +9671,22 @@ fn validate_recovered_tree(
                     message: error.to_string(),
                 },
             )?;
+            let source_definition = known_by_id
+                .get(&mailbox.message.source_agent_id)
+                .copied()
+                .ok_or_else(|| CollaborationError::InvalidRecovery {
+                    message: "恢复 mailbox 来源 Agent 不存在".to_owned(),
+                })?;
             if mailbox.message.message_id.as_str().len() > MAX_PROFILE_FIELD_BYTES
                 || mailbox.message.target_agent_id != definition.agent_id
-                || !known_by_id.contains_key(&mailbox.message.source_agent_id)
+                || mailbox.message.source_agent_path != source_definition.path
+                || matches!(
+                    source_definition.profile.plan_guard.state(),
+                    PlanGuardState::ReadOnly
+                ) && matches!(
+                    mailbox.message.source_plan_guard.state(),
+                    PlanGuardState::Inactive
+                )
                 || mailbox.message.related_turn_id.is_none()
                 || mailbox
                     .message
@@ -9621,6 +9782,7 @@ fn validate_recovered_tree(
                         MAX_COMPLETION_NOTIFICATION_BYTES,
                     );
                     if source.depth != AgentDepth::CHILD
+                        || mailbox.message.source_plan_guard != source.profile.plan_guard
                         || mailbox.message.target_agent_id != tree.root_agent_id
                         || mailbox.message.delivery != MailboxDelivery::QueueOnly
                         || mailbox.initial_triggered_turn_id.is_some()
@@ -10991,6 +11153,8 @@ fn queue_mailbox_message(
         message_id: draft.message_id,
         sequence,
         source_agent_id: draft.source_agent_id.clone(),
+        source_agent_path: draft.source_agent_path,
+        source_plan_guard: draft.source_plan_guard,
         target_agent_id: draft.target_agent_id.clone(),
         delivery: draft.delivery,
         kind: draft.kind,
@@ -11228,6 +11392,8 @@ fn queue_completion_message(
         message_id,
         sequence,
         source_agent_id: source_definition.agent_id.clone(),
+        source_agent_path: source_definition.path.clone(),
+        source_plan_guard: source_definition.profile.plan_guard,
         target_agent_id: target_agent_id.clone(),
         delivery: MailboxDelivery::QueueOnly,
         kind: MailboxMessageKind::ChildTurnFinished {
@@ -11317,7 +11483,6 @@ fn claim_followup_after_turn(
 ) -> Result<(), CollaborationError> {
     let agent = resident_agent(state, agent_id)?;
     let root_agent_id = agent.definition.root_agent_id.clone();
-    let plan_guard = agent.definition.profile.plan_guard;
     let Some(first) = agent
         .mailbox
         .iter()
@@ -11332,6 +11497,13 @@ fn claim_followup_after_turn(
     else {
         return Ok(());
     };
+    let plan_guard = agent
+        .mailbox
+        .iter()
+        .filter(|entry| matches!(entry.message.kind, MailboxMessageKind::AgentMessage))
+        .fold(agent.definition.profile.plan_guard, |guard, entry| {
+            strictest_plan_guard(guard, entry.message.source_plan_guard)
+        });
     let next_turn_id = allocate_turn_id(state, &root_agent_id)?;
     let agent = state
         .agents

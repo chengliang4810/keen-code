@@ -504,11 +504,12 @@ pub struct AgentsListResult {
     pub agents: Vec<AgentDto>,
 }
 
-/// 创建子智能体时可选择的工具目录。
+/// 创建子智能体时可选择的任务工具目录。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentToolCatalog {
-    /// 全局 Agent 模板支持选择的固定工具名；条件工具可能在当前 Session 不可用。
+    /// 全局 Agent 模板支持选择的任务工具名；条件工具可能在当前 Session 不可用。
+    /// 固定通信工具由 Runtime 追加，不进入该目录。
     pub tools: Vec<String>,
 }
 
@@ -526,7 +527,8 @@ pub struct AgentDetail {
     pub path: Option<String>,
     /// 模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 provider。
     pub model: Option<String>,
-    /// 允许使用的工具；None 表示继承主智能体全部工具。
+    /// 允许使用的任务工具；None 表示继承主智能体全部任务工具。
+    /// 固定通信工具不持久化在该字段中。
     pub tools: Option<Vec<String>>,
     /// 显式排除的工具。
     pub disallowed_tools: Vec<String>,
@@ -1038,11 +1040,12 @@ pub fn agents_list(
 /// 仍会出现在支持目录中；模板实际被显式应用时，父 Agent 快照缺少所选工具会在
 /// 启动前以 `agent_template_invalid` 拒绝，不会静默降级。MCP 工具名是动态发现的，
 /// 不写入这个固定目录。子 Agent 后台非交互运行，无法直接使用宿主问答流程；进度
-/// 由 Agent 生命周期事件上报而非 TodoWrite，因此根 Agent 专用的五项工具均排除。
+/// 由 Agent 生命周期事件上报而非 TodoWrite，因此根 Agent 专用工具均排除。四个
+/// 固定通信工具由 Runtime 在用户选择的任务工具之后追加，也不作为可取消选项展示。
 #[tauri::command]
 pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
-    // 先使用完整固定工具名称集合，再复用 Runtime 的根专用工具过滤规则，避免
-    // 子 Agent 工具边界在模板目录和运行时快照之间出现第二套排除逻辑。
+    // 先使用完整固定工具名称集合，再复用 Runtime 的任务工具筛选规则，避免
+    // 用户可选目录与最终子 Agent 工具边界出现第二套排除逻辑。
     let mut tools = [
         "Bash",
         "PowerShell",
@@ -1077,7 +1080,7 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
     .into_iter()
     .map(str::to_owned)
     .collect::<Vec<_>>();
-    keencode_tools::retain_child_agent_tool_snapshot(&mut tools);
+    keencode_tools::retain_child_agent_task_tool_snapshot(&mut tools);
     Ok(AgentToolCatalog { tools })
 }
 

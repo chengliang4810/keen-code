@@ -1611,6 +1611,7 @@ mod tests {
                                     "arguments": json!({
                                         "task_name": "cold_extension_child",
                                         "message": COLD_RESUME_CHILD_PROMPT,
+                                        "assignment": "负责验证冷恢复后的扩展工具初始化",
                                         "fork_turns": "none"
                                     }).to_string(),
                                     "status": "completed"

@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use keencode_agent::{
-    AgentCapabilities, AgentExecutionPort, AgentId, AgentProfile, AgentTemplateSnapshot,
-    AgentTool as RuntimeAgentTool, AgentTreeQuiesceResult, AgentTurnLaunch, AgentTurnOutcome,
-    AgentTurnSignal, AgentTurnStartResult, CloseAgentTree, CollaborationAgentStatus,
-    CollaborationAppendResult, CollaborationCoordinator, CollaborationEventBatchId,
-    CollaborationIdGenerator, CollaborationLimits, CollaborationPortError, CollaborationStore,
-    CollaborationTransitionCommit, MailboxMessageId, PlanGuard, QuiesceAgentTree,
+    AgentCapabilities, AgentExecutionPort, AgentHandle, AgentId, AgentPath, AgentProfile,
+    AgentTemplateSnapshot, AgentTool as RuntimeAgentTool, AgentTreeQuiesceResult, AgentTurnLaunch,
+    AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
+    CollaborationAgentStatus, CollaborationAppendResult, CollaborationCoordinator,
+    CollaborationEventBatchId, CollaborationIdGenerator, CollaborationLimits,
+    CollaborationPortError, CollaborationStore, CollaborationTransitionCommit,
+    MAX_AGENT_ASSIGNMENT_BYTES, MailboxMessageId, PlanGuard, QuiesceAgentTree,
     RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, SessionId, ToolCallId,
     ToolContext, ToolError, ToolRegistry, TurnCancellation, TurnId,
 };
@@ -20,13 +21,15 @@ use keencode_model::{Message, MessageRole, ToolResultContent};
 use serde_json::{Value, json};
 
 use super::collaboration_tools::{
-    MAX_AGENT_ID_BYTES, MAX_INITIAL_TASK_BYTES, MAX_MESSAGE_BYTES, MAX_WAIT_TIMEOUT_MILLISECONDS,
+    MAX_AGENT_PATH_BYTES, MAX_INITIAL_TASK_BYTES, MAX_LIST_AGENTS_LIMIT, MAX_MESSAGE_BYTES,
+    MAX_WAIT_TIMEOUT_MILLISECONDS,
 };
 use super::{
     CompletedTurnContext, FollowupTaskTool, InterruptAgentTool, ListAgentsTool,
     ResolvedSpawnAgentTemplate, ResumeAgentTool, RetryAgentTool, SendMessageTool,
     SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver, SpawnAgentTool,
-    WaitAgentTool, register_collaboration_tools,
+    WaitAgentTool, finalize_child_agent_tool_snapshot, register_collaboration_tools,
+    retain_child_agent_task_tool_snapshot,
 };
 
 /// 测试中按固定结果解析显式 Agent 模板。
@@ -449,6 +452,7 @@ fn agent_input(task_name: &str) -> Value {
     json!({
         "task_name": task_name,
         "message": format!("执行 {task_name} 子任务"),
+        "assignment": format!("负责 {task_name} 生命周期范围"),
         "fork_turns": "2"
     })
 }
@@ -472,24 +476,40 @@ async fn spawn_with_tool(fixture: &Fixture, task_name: &str) -> Value {
     )
 }
 
-/// 从 spawn_agent 工具输出解析可信子 Agent 标识。
-fn spawned_agent_id(output: &Value) -> AgentId {
-    AgentId::new(
-        output["agent_id"]
-            .as_str()
-            .expect("spawn_agent 输出应包含 agent_id"),
-    )
-    .expect("spawn_agent 输出标识应有效")
+/// 从 spawn_agent 的公开结果取得稳定绝对路径。
+fn spawned_path(output: &Value) -> &str {
+    output["path"]
+        .as_str()
+        .expect("spawn_agent 输出应包含 path")
 }
 
-/// 从 spawn_agent 工具输出解析初始 Turn 标识。
-fn spawned_turn_id(output: &Value) -> TurnId {
-    TurnId::new(
-        output["initial_turn_id"]
-            .as_str()
-            .expect("spawn_agent 输出应包含 initial_turn_id"),
-    )
-    .expect("Agent 初始 Turn 标识应有效")
+/// 从只公开稳定路径的 spawn_agent 输出解析内部测试身份。
+fn spawned_agent(fixture: &Fixture, output: &Value) -> AgentHandle {
+    let path = AgentPath::parse(spawned_path(output)).expect("spawn_agent 输出路径应有效");
+    fixture
+        .coordinator
+        .resolve_path(&fixture.root_agent_id, &path)
+        .expect("测试应能解析子 Agent 路径")
+        .expect("子 Agent 路径应存在")
+}
+
+/// 从只公开稳定路径的 spawn_agent 输出解析内部测试 AgentId。
+fn spawned_agent_id(fixture: &Fixture, output: &Value) -> AgentId {
+    spawned_agent(fixture, output).agent_id
+}
+
+/// 从协调器状态解析 spawn 后的初始 Turn 标识。
+fn spawned_turn_id(fixture: &Fixture, output: &Value) -> TurnId {
+    let agent_id = spawned_agent_id(fixture, output);
+    match fixture
+        .coordinator
+        .agent_status(&agent_id)
+        .expect("spawn 后状态应可读取")
+    {
+        CollaborationAgentStatus::WaitingCapacity { turn_id }
+        | CollaborationAgentStatus::Running { turn_id } => turn_id,
+        status => panic!("spawn 后应存在待执行或运行中的初始 Turn，实际为 {status:?}"),
+    }
 }
 
 /// 断言未知目标只返回固定不存在错误，并且不回显目标文本。
@@ -498,7 +518,7 @@ fn assert_agent_not_found(error: ToolError, unknown_target: &str) {
     assert!(!error.message.contains(unknown_target));
 }
 
-/// 注册函数只加入八个严格协作工具，且 Schema 不接受任一运行时身份伪造。
+/// 根注册函数只加入八个严格协作工具，且 Schema 不接受任一运行时身份伪造。
 #[test]
 fn registration_and_schemas_reject_runtime_identity_fields() {
     let fixture = fixture(2, 2);
@@ -543,14 +563,24 @@ fn registration_and_schemas_reject_runtime_identity_fields() {
             );
         }
     }
-    for tool_name in ["send_message", "followup_task"] {
+    for tool_name in [
+        "send_message",
+        "followup_task",
+        "interrupt_agent",
+        "retry_agent",
+        "resume_agent",
+    ] {
         let definition = definitions
             .iter()
             .find(|definition| definition.name == tool_name)
-            .expect("消息工具定义应存在");
+            .expect("目标工具定义应存在");
         assert_eq!(
-            definition.input_schema["properties"]["target_agent_id"]["description"],
-            "Use the agent_id returned by spawn_agent/list_agents; task names and paths are not accepted"
+            definition.input_schema["properties"]["target"]["description"],
+            if matches!(tool_name, "send_message" | "followup_task") {
+                "Use an absolute path returned by spawn_agent/list_agents, such as /root/backend"
+            } else {
+                "Absolute path returned by spawn_agent/list_agents, such as /root/backend"
+            }
         );
     }
     let agent = definitions
@@ -570,7 +600,7 @@ fn registration_and_schemas_reject_runtime_identity_fields() {
     }
 }
 
-/// 单层子 Agent 只能使用通信、等待、查询和中断工具，不能递归创建 Agent。
+/// 单层子 Agent 只注册四个通信工具，不能递归创建或控制生命周期。
 #[test]
 fn child_registration_omits_recursive_spawn_tool() {
     let fixture = fixture(2, 2);
@@ -591,13 +621,36 @@ fn child_registration_omits_recursive_spawn_tool() {
             .into_iter()
             .map(|definition| definition.name)
             .collect::<Vec<_>>(),
-        vec![
-            "followup_task",
-            "interrupt_agent",
+        vec!["followup_task", "list_agents", "send_message", "wait_agent",]
+    );
+}
+
+/// 用户或模板只选择任务工具；固定通信控制面由 Runtime 在最终快照中统一追加。
+#[test]
+fn child_task_tool_selection_is_separate_from_fixed_communication_tools() {
+    let mut selectable = [
+        "Read",
+        "spawn_agent",
+        "interrupt_agent",
+        "list_agents",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "Goal",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    retain_child_agent_task_tool_snapshot(&mut selectable);
+    assert_eq!(selectable, ["Read"]);
+
+    finalize_child_agent_tool_snapshot(&mut selectable);
+    assert_eq!(
+        selectable,
+        [
+            "Read",
             "list_agents",
-            "resume_agent",
-            "retry_agent",
             "send_message",
+            "followup_task",
             "wait_agent",
         ]
     );
@@ -608,11 +661,11 @@ fn child_registration_omits_recursive_spawn_tool() {
 async fn agent_returns_identity_under_capacity_and_rejects_recursive_spawn() {
     let saturated = fixture(1, 1);
     let occupier = spawn_with_tool(&saturated, "occupier").await;
-    let occupier_agent_id = spawned_agent_id(&occupier);
-    let occupier_turn_id = spawned_turn_id(&occupier);
+    let occupier_agent_id = spawned_agent_id(&saturated, &occupier);
+    let occupier_turn_id = spawned_turn_id(&saturated, &occupier);
     let queued = spawn_with_tool(&saturated, "queued").await;
-    let queued_agent_id = spawned_agent_id(&queued);
-    let queued_turn_id = spawned_turn_id(&queued);
+    let queued_agent_id = spawned_agent_id(&saturated, &queued);
+    let queued_turn_id = spawned_turn_id(&saturated, &queued);
     assert_eq!(queued["outcome"], "created");
     assert_eq!(queued["path"], "/root/queued");
     assert_eq!(
@@ -658,8 +711,8 @@ async fn agent_returns_identity_under_capacity_and_rejects_recursive_spawn() {
 
     let running = fixture(2, 2);
     let child = spawn_with_tool(&running, "child").await;
-    let child_agent_id = spawned_agent_id(&child);
-    let child_turn_id = spawned_turn_id(&child);
+    let child_agent_id = spawned_agent_id(&running, &child);
+    let child_turn_id = spawned_turn_id(&running, &child);
     let child_context = tool_context(&running.root_session_id, &child_turn_id, &child_agent_id);
     let error = spawn_tool(running.coordinator, profile("nested"))
         .execute(child_context, agent_input("nested"))
@@ -682,8 +735,20 @@ async fn spawned_child_profile_removes_root_only_tools_from_snapshot() {
             .await
             .expect("子 Agent 应以收紧后的工具快照创建"),
     );
-    let launch = fixture.execution.launch(&spawned_turn_id(&output));
-    assert_eq!(launch.agent.profile.tool_snapshot, ["Read", "SendMessage"]);
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
+    assert_eq!(
+        launch.agent.profile.tool_snapshot,
+        [
+            "Read",
+            "SendMessage",
+            "list_agents",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+        ]
+    );
 }
 
 /// Plan 根 Turn 通过 Agent 工具创建的子 Agent 必须继承唯一的只读守卫。
@@ -698,7 +763,7 @@ async fn agent_tool_inherits_parent_turn_plan_guard() {
             .await
             .unwrap(),
     );
-    let child_turn_id = spawned_turn_id(&output);
+    let child_turn_id = spawned_turn_id(&fixture, &output);
     let launch = fixture.execution.launch(&child_turn_id);
     assert_eq!(launch.plan_guard, PlanGuard::read_only());
     assert_eq!(launch.agent.profile.plan_guard, PlanGuard::read_only());
@@ -735,6 +800,7 @@ async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
                 json!({
                     "task_name": "review_task",
                     "message": "审查当前改动",
+                    "assignment": "负责审查当前改动",
                     "fork_turns": "none",
                     "agent": "reviewer"
                 }),
@@ -742,11 +808,20 @@ async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
             .await
             .expect("显式模板应在创建前解析"),
     );
-    let child_turn_id = spawned_turn_id(&output);
+    let child_turn_id = spawned_turn_id(&fixture, &output);
     let launch = fixture.execution.launch(&child_turn_id);
     assert_eq!(launch.agent.agent_template, Some(template_snapshot.clone()));
     assert_eq!(launch.agent.profile.model, "provider-a::review-model");
-    assert_eq!(launch.agent.profile.tool_snapshot, vec!["Read"]);
+    assert_eq!(
+        launch.agent.profile.tool_snapshot,
+        vec![
+            "Read",
+            "list_agents",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+        ]
+    );
 
     let checkpoint = fixture
         .coordinator
@@ -812,6 +887,7 @@ async fn explicit_agent_template_cannot_restore_root_only_tools() {
                 json!({
                     "task_name": "explicit_template_tools",
                     "message": "审查当前改动",
+                    "assignment": "负责显式模板审查",
                     "fork_turns": "none",
                     "agent": "reviewer"
                 }),
@@ -819,8 +895,19 @@ async fn explicit_agent_template_cannot_restore_root_only_tools() {
             .await
             .expect("显式模板应创建收紧后的子 Agent"),
     );
-    let launch = fixture.execution.launch(&spawned_turn_id(&output));
-    assert_eq!(launch.agent.profile.tool_snapshot, ["Read"]);
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
+    assert_eq!(
+        launch.agent.profile.tool_snapshot,
+        [
+            "Read",
+            "list_agents",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+        ]
+    );
 }
 
 /// 显式 Agent 未知或解析失败时必须在创建身份前 fail-closed。
@@ -850,6 +937,7 @@ async fn explicit_agent_template_unknown_and_error_do_not_spawn() {
                 json!({
                     "task_name": "strict_template",
                     "message": "不得回退到通用 Agent",
+                    "assignment": "负责严格模板解析",
                     "fork_turns": "none",
                     "agent": "missing"
                 }),
@@ -891,6 +979,7 @@ async fn explicit_agent_template_model_override_is_rejected_for_all_history() {
         json!({
             "task_name": "all_template_child",
             "message": "不得切换模型后继承完整历史",
+            "assignment": "负责完整历史模板验证",
             "fork_turns": "all",
             "agent": "other-model"
         }),
@@ -918,13 +1007,16 @@ async fn spawn_agent_none_context_does_not_read_transcript_source() {
             json!({
                 "task_name": "none_context_child",
                 "message": "不要继承父 Transcript",
+                "assignment": "负责无上下文任务",
                 "fork_turns": "none"
             }),
         )
         .await
         .expect("none 继承不应读取 Transcript 来源"),
     );
-    let launch = fixture.execution.launch(&spawned_turn_id(&output));
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
     assert!(launch.agent.context_snapshot.is_empty());
     assert_eq!(source.call_count(), 0);
 }
@@ -958,13 +1050,16 @@ async fn spawn_agent_all_context_freezes_completed_turn_messages_in_order() {
             json!({
                 "task_name": "all_context_child",
                 "message": "继承全部已完成 Turn",
+                "assignment": "负责完整上下文任务",
                 "fork_turns": "all"
             }),
         )
         .await
         .expect("all 继承应冻结全部已完成 Turn"),
     );
-    let launch = fixture.execution.launch(&spawned_turn_id(&output));
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
     assert_eq!(
         launch.agent.context_snapshot,
         messages
@@ -1016,13 +1111,16 @@ async fn spawn_agent_recent_context_selects_completed_turn_groups_not_messages()
             json!({
                 "task_name": "recent_context_child",
                 "message": "只继承最近两个已完成 Turn",
+                "assignment": "负责近期上下文任务",
                 "fork_turns": "2"
             }),
         )
         .await
         .expect("最近 N 继承应按 Turn 截取"),
     );
-    let launch = fixture.execution.launch(&spawned_turn_id(&output));
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
     assert_eq!(
         launch.agent.context_snapshot,
         recent
@@ -1048,6 +1146,7 @@ async fn spawn_agent_context_source_failure_does_not_create_child() {
         json!({
             "task_name": "failed_context_child",
             "message": "来源失败时不得创建",
+            "assignment": "负责上下文失败验证",
             "fork_turns": "all"
         }),
     )
@@ -1067,12 +1166,14 @@ async fn spawn_agent_rejects_model_overrides_when_forking_all_turns() {
         json!({
             "task_name": "model_override",
             "message": "尝试覆盖模型",
+            "assignment": "负责模型覆盖验证",
             "fork_turns": "all",
             "model": "other-model"
         }),
         json!({
             "task_name": "effort_override",
             "message": "尝试覆盖推理强度",
+            "assignment": "负责推理强度覆盖验证",
             "reasoning_effort": "high"
         }),
     ] {
@@ -1114,7 +1215,7 @@ async fn agent_and_send_message_replay_same_trusted_call_id_without_duplicates()
     assert_eq!(replayed_agent, first_agent);
     assert_eq!(fixture.execution.launch_count(), launches_after_first);
 
-    let child_agent_id = spawned_agent_id(&first_agent);
+    let child_agent_id = spawned_agent_id(&fixture, &first_agent);
     let message_call_id =
         ToolCallId::new("message-replay-call").expect("消息重放 ToolCall 标识应有效");
     let message_context = tool_context_with_call_id(
@@ -1124,7 +1225,7 @@ async fn agent_and_send_message_replay_same_trusted_call_id_without_duplicates()
         message_call_id,
     );
     let message_input = json!({
-        "target_agent_id": child_agent_id.as_str(),
+        "target": spawned_path(&first_agent),
         "message": "只允许持久化一次的消息"
     });
     let message_tool = SendMessageTool::new(fixture.coordinator.clone());
@@ -1170,8 +1271,7 @@ async fn same_trusted_call_id_with_changed_input_is_safe_conflict() {
             .await
             .expect("首次 Agent 调用应成功"),
     );
-    let child_agent_id = spawned_agent_id(&first_agent);
-    let child_turn_id = spawned_turn_id(&first_agent);
+    let child_turn_id = spawned_turn_id(&fixture, &first_agent);
     let launches_after_first = fixture.execution.launch_count();
 
     let secret_changed_input = "changed-secret-不应出现在错误结果";
@@ -1187,10 +1287,7 @@ async fn same_trusted_call_id_with_changed_input_is_safe_conflict() {
     assert_eq!(fixture.execution.launch_count(), launches_after_first);
 
     let cross_operation_error = InterruptAgentTool::new(fixture.coordinator.clone())
-        .execute(
-            context,
-            json!({ "target_agent_id": child_agent_id.as_str() }),
-        )
+        .execute(context, json!({ "target": spawned_path(&first_agent) }))
         .await
         .expect_err("同一 ToolCall 改为 interrupt_agent 必须稳定冲突");
     assert_eq!(
@@ -1228,8 +1325,8 @@ async fn collaboration_replay_survives_cold_coordinator_restore() {
             .await
             .expect("冷恢复前 Agent 调用应成功"),
     );
-    let child_agent_id = spawned_agent_id(&first_agent);
-    let child_turn_id = spawned_turn_id(&first_agent);
+    let child_agent_id = spawned_agent_id(&fixture, &first_agent);
+    let child_turn_id = spawned_turn_id(&fixture, &first_agent);
 
     let message_call_id =
         ToolCallId::new("cold-message-call").expect("冷恢复消息 ToolCall 标识应有效");
@@ -1240,7 +1337,7 @@ async fn collaboration_replay_survives_cold_coordinator_restore() {
         message_call_id.clone(),
     );
     let message_input = json!({
-        "target_agent_id": child_agent_id.as_str(),
+        "target": spawned_path(&first_agent),
         "message": "冷恢复后不能重复的消息"
     });
     let first_message = output_json(
@@ -1251,7 +1348,7 @@ async fn collaboration_replay_survives_cold_coordinator_restore() {
     );
     let stop_call_id =
         ToolCallId::new("cold-stop-call").expect("冷恢复 StopAgent ToolCall 标识应有效");
-    let stop_input = json!({ "target_agent_id": child_agent_id.as_str() });
+    let stop_input = json!({ "target": spawned_path(&first_agent) });
     let first_stop = output_json(
         InterruptAgentTool::new(fixture.coordinator.clone())
             .execute(
@@ -1392,7 +1489,8 @@ async fn commit_then_indeterminate_reconciles_without_duplicate_collaboration_ef
     assert_eq!(replayed_agent, first_agent);
     assert_eq!(fixture.execution.launch_count(), launches_after_first);
 
-    let child_agent_id = spawned_agent_id(&first_agent);
+    let child_agent_id = spawned_agent_id(&fixture, &first_agent);
+    let child_turn_id = spawned_turn_id(&fixture, &first_agent);
     fixture.store.commit_then_indeterminate();
     let message_call_id =
         ToolCallId::new("indeterminate-message-call").expect("不确定消息 ToolCall 标识应有效");
@@ -1403,7 +1501,7 @@ async fn commit_then_indeterminate_reconciles_without_duplicate_collaboration_ef
         message_call_id,
     );
     let message_input = json!({
-        "target_agent_id": child_agent_id.as_str(),
+        "target": spawned_path(&first_agent),
         "message": "提交后不确定但只能入队一次"
     });
     let message_tool = SendMessageTool::new(fixture.coordinator.clone());
@@ -1439,7 +1537,7 @@ async fn commit_then_indeterminate_reconciles_without_duplicate_collaboration_ef
         &fixture.root_agent_id,
         stop_call_id,
     );
-    let stop_input = json!({ "target_agent_id": child_agent_id.as_str() });
+    let stop_input = json!({ "target": spawned_path(&first_agent) });
     let stop_tool = InterruptAgentTool::new(fixture.coordinator.clone());
     let first_stop = output_json(
         stop_tool
@@ -1462,7 +1560,7 @@ async fn commit_then_indeterminate_reconciles_without_duplicate_collaboration_ef
     assert!(
         fixture
             .execution
-            .launch(&spawned_turn_id(&first_agent))
+            .launch(&child_turn_id)
             .cancellation
             .is_cancelled(),
         "提交后不确定的 StopAgent 对账成功后必须执行取消动作"
@@ -1505,14 +1603,14 @@ async fn commit_then_indeterminate_reconciles_without_duplicate_collaboration_ef
 async fn wait_reports_activity_without_consuming_or_leaking_mailbox_content() {
     let fixture = fixture(2, 2);
     let child = spawn_with_tool(&fixture, "worker").await;
-    let child_agent_id = spawned_agent_id(&child);
-    let child_turn_id = spawned_turn_id(&child);
+    let child_agent_id = spawned_agent_id(&fixture, &child);
+    let child_turn_id = spawned_turn_id(&fixture, &child);
     let secret = "mailbox-secret-正文-不得出现在等待结果";
     SendMessageTool::new(fixture.coordinator.clone())
         .execute(
             tool_context(&fixture.root_session_id, &child_turn_id, &child_agent_id),
             json!({
-                "target_agent_id": fixture.root_agent_id.as_str(),
+                "target": "/root",
                 "message": secret
             }),
         )
@@ -1593,18 +1691,17 @@ async fn wait_handles_timeout_turn_end_and_cancellation() {
     assert_eq!(error.code, "turn_cancelled");
 }
 
-/// 未知 ID 或路径只能返回 agent_not_found；随后使用有效身份仍可完成四类操作。
+/// 未知路径或内部 ID 只能返回安全错误；随后使用有效路径仍可完成五类操作。
 #[tokio::test]
 async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() {
     let send_fixture = fixture(2, 2);
     let send_child = spawn_with_tool(&send_fixture, "unknown_send_target").await;
-    let send_child_agent_id = spawned_agent_id(&send_child);
     let unknown_path = "/root/native_reader_a";
     let send_error = SendMessageTool::new(send_fixture.coordinator.clone())
         .execute(
             send_fixture.root_context(),
             json!({
-                "target_agent_id": unknown_path,
+                "target": unknown_path,
                 "message": "未知路径"
             }),
         )
@@ -1616,7 +1713,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
             .execute(
                 send_fixture.root_context(),
                 json!({
-                    "target_agent_id": send_child_agent_id.as_str(),
+                    "target": spawned_path(&send_child),
                     "message": "有效 SendMessage"
                 }),
             )
@@ -1627,13 +1724,12 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
 
     let followup_fixture = fixture(2, 2);
     let followup_child = spawn_with_tool(&followup_fixture, "unknown_followup_target").await;
-    let followup_child_agent_id = spawned_agent_id(&followup_child);
-    let unknown_id = "unknown-followup-agent";
+    let unknown_id = "/root/unknown_followup_agent";
     let followup_error = FollowupTaskTool::new(followup_fixture.coordinator.clone())
         .execute(
             followup_fixture.root_context(),
             json!({
-                "target_agent_id": unknown_id,
+                "target": unknown_id,
                 "message": "未知 ID"
             }),
         )
@@ -1645,7 +1741,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
             .execute(
                 followup_fixture.root_context(),
                 json!({
-                    "target_agent_id": followup_child_agent_id.as_str(),
+                    "target": spawned_path(&followup_child),
                     "message": "有效 FollowupTask"
                 }),
             )
@@ -1657,11 +1753,10 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
 
     let interrupt_fixture = fixture(2, 2);
     let interrupt_child = spawn_with_tool(&interrupt_fixture, "unknown_interrupt_target").await;
-    let interrupt_child_agent_id = spawned_agent_id(&interrupt_child);
     let interrupt_error = InterruptAgentTool::new(interrupt_fixture.coordinator.clone())
         .execute(
             interrupt_fixture.root_context(),
-            json!({ "target_agent_id": unknown_path }),
+            json!({ "target": unknown_path }),
         )
         .await
         .expect_err("未知路径不能被 InterruptAgent 当作恢复故障");
@@ -1670,7 +1765,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
         InterruptAgentTool::new(interrupt_fixture.coordinator.clone())
             .execute(
                 interrupt_fixture.root_context(),
-                json!({ "target_agent_id": interrupt_child_agent_id.as_str() }),
+                json!({ "target": spawned_path(&interrupt_child) }),
             )
             .await
             .expect("未知路径失败后有效 InterruptAgent 仍应执行"),
@@ -1679,8 +1774,8 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
 
     let retry_fixture = fixture(2, 2);
     let retry_child = spawn_with_tool(&retry_fixture, "unknown_retry_target").await;
-    let retry_child_agent_id = spawned_agent_id(&retry_child);
-    let retry_child_turn_id = spawned_turn_id(&retry_child);
+    let retry_child_agent_id = spawned_agent_id(&retry_fixture, &retry_child);
+    let retry_child_turn_id = spawned_turn_id(&retry_fixture, &retry_child);
     retry_fixture
         .coordinator
         .complete_turn(
@@ -1691,11 +1786,11 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
             },
         )
         .expect("重试目标初始 Turn 应进入失败终态");
-    let retry_unknown_id = "unknown-retry-agent";
+    let retry_unknown_id = "/root/unknown_retry_agent";
     let retry_error = RetryAgentTool::new(retry_fixture.coordinator.clone())
         .execute(
             retry_fixture.root_context(),
-            json!({ "target_agent_id": retry_unknown_id }),
+            json!({ "target": retry_unknown_id }),
         )
         .await
         .expect_err("未知 ID 不能被 RetryAgent 当作恢复故障");
@@ -1704,7 +1799,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
         RetryAgentTool::new(retry_fixture.coordinator.clone())
             .execute(
                 retry_fixture.root_context(),
-                json!({ "target_agent_id": retry_child_agent_id.as_str() }),
+                json!({ "target": spawned_path(&retry_child) }),
             )
             .await
             .expect("未知 ID 失败后有效 RetryAgent 仍应执行"),
@@ -1713,8 +1808,8 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
 
     let resume_fixture = fixture(2, 2);
     let resume_child = spawn_with_tool(&resume_fixture, "unknown_resume_target").await;
-    let resume_child_agent_id = spawned_agent_id(&resume_child);
-    let resume_child_turn_id = spawned_turn_id(&resume_child);
+    let resume_child_agent_id = spawned_agent_id(&resume_fixture, &resume_child);
+    let resume_child_turn_id = spawned_turn_id(&resume_fixture, &resume_child);
     resume_fixture
         .coordinator
         .complete_turn(
@@ -1737,7 +1832,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
         resume_tool
             .execute(
                 resume_context.clone(),
-                json!({ "target_agent_id": resume_child_agent_id.as_str() }),
+                json!({ "target": spawned_path(&resume_child) }),
             )
             .await
             .expect("有效失败子 Agent 应可恢复"),
@@ -1752,7 +1847,7 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
         resume_tool
             .execute(
                 resume_context,
-                json!({ "target_agent_id": resume_child_agent_id.as_str() }),
+                json!({ "target": spawned_path(&resume_child) }),
             )
             .await
             .expect("相同 operationId 应幂等重放恢复结果"),
@@ -1765,9 +1860,9 @@ async fn unknown_target_errors_are_directed_and_valid_targets_remain_operable() 
     );
 }
 
-/// 已驻留的跨树目标仍返回固定跨树错误，且不回显另一棵树的身份。
+/// 绝对路径始终限定在来源根树，且模型不能回退为内部 AgentId 寻址。
 #[tokio::test]
-async fn resident_cross_tree_target_remains_forbidden_without_identity_leak() {
+async fn absolute_paths_never_cross_source_tree_and_internal_ids_are_rejected() {
     let fixture = fixture(4, 4);
     let other_root = fixture
         .coordinator
@@ -1777,7 +1872,7 @@ async fn resident_cross_tree_target_remains_forbidden_without_identity_leak() {
             per_root_turn_limit: 2,
         })
         .expect("第二棵根树应注册成功");
-    fixture
+    let other_root_turn = fixture
         .coordinator
         .begin_root_turn(
             &other_root.agent_id,
@@ -1785,18 +1880,49 @@ async fn resident_cross_tree_target_remains_forbidden_without_identity_leak() {
             PlanGuard::inactive(),
         )
         .expect("第二棵根树 Turn 应启动");
+    let foreign_child = fixture
+        .coordinator
+        .spawn_agent(
+            &other_root.agent_id,
+            &other_root_turn,
+            &next_tool_call_id(),
+            keencode_agent::SpawnAgentRequest {
+                task_name: "foreign_only".to_owned(),
+                initial_task: "只属于另一棵树".to_owned(),
+                assignment: "负责另一棵树的任务".to_owned(),
+                context_inheritance: keencode_agent::ContextInheritance::None,
+                context_snapshot: Vec::new(),
+                agent_template: None,
+                profile: profile("foreign-only"),
+            },
+        )
+        .expect("第二棵树应能创建子 Agent");
+
+    let foreign_path = foreign_child.agent.path.as_str().to_owned();
+    let path_error = SendMessageTool::new(fixture.coordinator.clone())
+        .execute(
+            fixture.root_context(),
+            json!({
+                "target": foreign_path,
+                "message": "不得跨树投递"
+            }),
+        )
+        .await
+        .expect_err("另一棵树存在的同名绝对路径在来源树中仍应视为不存在");
+    assert_agent_not_found(path_error, &foreign_path);
+
     let foreign_agent_id = other_root.agent_id.as_str().to_owned();
     let error = SendMessageTool::new(fixture.coordinator.clone())
         .execute(
             fixture.root_context(),
             json!({
-                "target_agent_id": foreign_agent_id,
-                "message": "不得跨树投递"
+                "target": foreign_agent_id,
+                "message": "不得使用内部 ID 寻址"
             }),
         )
         .await
-        .expect_err("驻留的跨树目标必须保持禁止");
-    assert_eq!(error.code, "cross_tree_operation_forbidden");
+        .expect_err("内部 AgentId 必须在路径解析前拒绝");
+    assert_eq!(error.code, "invalid_input");
     assert!(!error.message.contains(&foreign_agent_id));
 }
 
@@ -1805,12 +1931,11 @@ async fn resident_cross_tree_target_remains_forbidden_without_identity_leak() {
 async fn stop_is_idempotent_and_validates_causal_source_turn() {
     let fixture = fixture(3, 3);
     let child = spawn_with_tool(&fixture, "stop_target").await;
-    let child_agent_id = spawned_agent_id(&child);
-    let child_turn_id = spawned_turn_id(&child);
+    let child_agent_id = spawned_agent_id(&fixture, &child);
+    let child_turn_id = spawned_turn_id(&fixture, &child);
     let other_child = spawn_with_tool(&fixture, "other_stop_target").await;
-    let other_child_agent_id = spawned_agent_id(&other_child);
     let tool = InterruptAgentTool::new(fixture.coordinator.clone());
-    let input = json!({ "target_agent_id": child_agent_id.as_str() });
+    let input = json!({ "target": spawned_path(&child) });
     let context = fixture.root_context();
     let first = output_json(
         tool.execute(context.clone(), input.clone())
@@ -1835,7 +1960,7 @@ async fn stop_is_idempotent_and_validates_causal_source_turn() {
     let conflict = tool
         .execute(
             context.clone(),
-            json!({ "target_agent_id": other_child_agent_id.as_str() }),
+            json!({ "target": spawned_path(&other_child) }),
         )
         .await
         .expect_err("同一 ToolCall 改写停止目标必须冲突");
@@ -1885,8 +2010,8 @@ async fn stop_is_idempotent_and_validates_causal_source_turn() {
 async fn send_message_never_triggers_an_idle_agent_turn() {
     let fixture = fixture(2, 2);
     let child = spawn_with_tool(&fixture, "message_target").await;
-    let child_agent_id = spawned_agent_id(&child);
-    let child_turn_id = spawned_turn_id(&child);
+    let child_agent_id = spawned_agent_id(&fixture, &child);
+    let child_turn_id = spawned_turn_id(&fixture, &child);
     fixture
         .coordinator
         .complete_turn(
@@ -1903,7 +2028,7 @@ async fn send_message_never_triggers_an_idle_agent_turn() {
             .execute(
                 fixture.root_context(),
                 json!({
-                    "target_agent_id": child_agent_id.as_str(),
+                    "target": spawned_path(&child),
                     "message": "只排队"
                 }),
             )
@@ -1934,8 +2059,8 @@ async fn send_message_never_triggers_an_idle_agent_turn() {
 async fn followup_task_triggers_idle_but_not_running_agent_turn() {
     let fixture = fixture(2, 2);
     let child = spawn_with_tool(&fixture, "followup_target").await;
-    let child_agent_id = spawned_agent_id(&child);
-    let child_turn_id = spawned_turn_id(&child);
+    let child_agent_id = spawned_agent_id(&fixture, &child);
+    let child_turn_id = spawned_turn_id(&fixture, &child);
     fixture
         .coordinator
         .complete_turn(
@@ -1953,7 +2078,7 @@ async fn followup_task_triggers_idle_but_not_running_agent_turn() {
             .execute(
                 fixture.root_context(),
                 json!({
-                    "target_agent_id": child_agent_id.as_str(),
+                    "target": spawned_path(&child),
                     "message": "唤醒空闲目标"
                 }),
             )
@@ -1982,7 +2107,7 @@ async fn followup_task_triggers_idle_but_not_running_agent_turn() {
             .execute(
                 fixture.root_context(),
                 json!({
-                    "target_agent_id": child_agent_id.as_str(),
+                    "target": spawned_path(&child),
                     "message": "运行中只发活动信号"
                 }),
             )
@@ -2000,18 +2125,17 @@ async fn followup_task_triggers_idle_but_not_running_agent_turn() {
     );
 }
 
-/// list_agents 只公开身份和生命周期摘要，不泄露配置、工具或 mailbox 正文。
+/// list_agents 只公开稳定路径、职责和状态，不泄露内部身份、配置或 mailbox 正文。
 #[tokio::test]
 async fn list_agents_excludes_profiles_tools_and_message_content() {
     let fixture = fixture(2, 2);
     let child = spawn_with_tool(&fixture, "listed_child").await;
-    let child_agent_id = spawned_agent_id(&child);
     let secret = "list-agents-mailbox-secret-不得泄露";
     SendMessageTool::new(fixture.coordinator.clone())
         .execute(
             fixture.root_context(),
             json!({
-                "target_agent_id": child_agent_id.as_str(),
+                "target": spawned_path(&child),
                 "message": secret
             }),
         )
@@ -2029,13 +2153,19 @@ async fn list_agents_excludes_profiles_tools_and_message_content() {
         .expect("list_agents 应返回 Agent 数组");
     assert_eq!(agents.len(), 2);
     assert!(agents.iter().any(|agent| {
-        agent["agent_id"] == fixture.root_agent_id.as_str() && agent["path"] == "/root"
+        agent["path"] == "/root" && agent["assignment"].is_null() && agent["status"] == "running"
     }));
     assert!(agents.iter().any(|agent| {
-        agent["agent_id"] == child_agent_id.as_str() && agent["path"] == "/root/listed_child"
+        agent["path"] == "/root/listed_child"
+            && agent["assignment"] == "负责 listed_child 生命周期范围"
+            && agent["status"] == "running"
     }));
     for agent in agents {
         for forbidden in [
+            "agent_id",
+            "session_id",
+            "parent_agent_id",
+            "turn_id",
             "model",
             "reasoning_effort",
             "plan_guard",
@@ -2051,6 +2181,8 @@ async fn list_agents_excludes_profiles_tools_and_message_content() {
             );
         }
     }
+    assert!(output["next_cursor"].is_null());
+    assert_eq!(output["has_more"], false);
     let serialized = serde_json::to_string(&output).expect("列表摘要应可序列化");
     let root_cwd = serde_json::to_string(&profile("root").cwd).expect("工作目录应可序列化");
     for secret_value in [secret, "model-root", &root_cwd, "SendMessage"] {
@@ -2059,6 +2191,50 @@ async fn list_agents_excludes_profiles_tools_and_message_content() {
             "list_agents 不得泄露敏感配置或正文"
         );
     }
+}
+
+/// list_agents 使用稳定绝对路径游标分页，页间不重复也不遗漏。
+#[tokio::test]
+async fn list_agents_paginates_by_stable_path() {
+    let fixture = fixture(4, 4);
+    spawn_with_tool(&fixture, "alpha").await;
+    spawn_with_tool(&fixture, "beta").await;
+
+    let first = output_json(
+        ListAgentsTool::new(fixture.coordinator.clone())
+            .execute(fixture.root_context(), json!({ "limit": 1 }))
+            .await
+            .expect("第一页应成功"),
+    );
+    assert_eq!(first["agents"][0]["path"], "/root");
+    assert_eq!(first["next_cursor"], "/root");
+    assert_eq!(first["has_more"], true);
+
+    let second = output_json(
+        ListAgentsTool::new(fixture.coordinator.clone())
+            .execute(
+                fixture.root_context(),
+                json!({ "cursor": first["next_cursor"], "limit": 1 }),
+            )
+            .await
+            .expect("第二页应成功"),
+    );
+    assert_eq!(second["agents"][0]["path"], "/root/alpha");
+    assert_eq!(second["next_cursor"], "/root/alpha");
+    assert_eq!(second["has_more"], true);
+
+    let third = output_json(
+        ListAgentsTool::new(fixture.coordinator.clone())
+            .execute(
+                fixture.root_context(),
+                json!({ "cursor": second["next_cursor"], "limit": 1 }),
+            )
+            .await
+            .expect("第三页应成功"),
+    );
+    assert_eq!(third["agents"][0]["path"], "/root/beta");
+    assert!(third["next_cursor"].is_null());
+    assert_eq!(third["has_more"], false);
 }
 
 /// 所有协作工具都拒绝额外身份字段、超长 UTF-8 和越界数量。
@@ -2076,6 +2252,28 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
         .expect_err("额外 Turn 字段必须被拒绝");
     assert_eq!(error.code, "invalid_input");
 
+    for invalid_assignment in [
+        "".to_owned(),
+        " 职责".to_owned(),
+        "职责 ".to_owned(),
+        "职责\u{0007}".to_owned(),
+        "界".repeat(MAX_AGENT_ASSIGNMENT_BYTES / 3 + 1),
+    ] {
+        let error = spawn_tool(fixture.coordinator.clone(), profile("bad-assignment"))
+            .execute(
+                fixture.root_context(),
+                json!({
+                    "task_name": "bad_assignment",
+                    "message": "验证非法职责",
+                    "assignment": invalid_assignment,
+                    "fork_turns": "none"
+                }),
+            )
+            .await
+            .expect_err("非法 assignment 必须在创建前拒绝");
+        assert_eq!(error.code, "invalid_input");
+    }
+
     let oversized_task = "界".repeat(MAX_INITIAL_TASK_BYTES / 3 + 1);
     let error = spawn_tool(fixture.coordinator.clone(), profile("large"))
         .execute(
@@ -2083,6 +2281,7 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
             json!({
                 "task_name": "large",
                 "message": oversized_task,
+                "assignment": "负责超长任务验证",
                 "fork_turns": "none"
             }),
         )
@@ -2090,11 +2289,11 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
         .expect_err("多字节初始任务必须按 UTF-8 字节拒绝");
     assert_eq!(error.code, "invalid_input");
 
-    let oversized_target = "界".repeat(MAX_AGENT_ID_BYTES / 3 + 1);
+    let oversized_target = format!("/root/{}", "界".repeat(MAX_AGENT_PATH_BYTES / 3 + 1));
     let error = InterruptAgentTool::new(fixture.coordinator.clone())
         .execute(
             fixture.root_context(),
-            json!({ "target_agent_id": oversized_target }),
+            json!({ "target": oversized_target }),
         )
         .await
         .expect_err("多字节目标标识必须按 UTF-8 字节拒绝");
@@ -2105,7 +2304,7 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
         .execute(
             fixture.root_context(),
             json!({
-                "target_agent_id": fixture.root_agent_id.as_str(),
+                "target": "/root",
                 "message": oversized_message
             }),
         )
@@ -2121,6 +2320,14 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
         .await
         .expect_err("越界等待时长必须被拒绝");
     assert_eq!(error.code, "invalid_input");
+
+    for limit in [0, MAX_LIST_AGENTS_LIMIT + 1] {
+        let error = ListAgentsTool::new(fixture.coordinator.clone())
+            .execute(fixture.root_context(), json!({ "limit": limit }))
+            .await
+            .expect_err("越界列表页大小必须被拒绝");
+        assert_eq!(error.code, "invalid_input");
+    }
 }
 
 /// 当前 Turn 已结束后，六类协作命令都不能凭旧 ToolContext 产生新副作用。
@@ -2128,7 +2335,6 @@ async fn inputs_enforce_strict_shape_utf8_bytes_and_numeric_limits() {
 async fn ended_parent_turn_rejects_all_new_collaboration_commands() {
     let fixture = fixture(2, 2);
     let child = spawn_with_tool(&fixture, "ended_target").await;
-    let child_agent_id = spawned_agent_id(&child);
     fixture
         .coordinator
         .complete_turn(
@@ -2149,7 +2355,7 @@ async fn ended_parent_turn_rejects_all_new_collaboration_commands() {
         .execute(
             stale_context.clone(),
             json!({
-                "target_agent_id": child_agent_id.as_str(),
+                "target": spawned_path(&child),
                 "message": "late"
             }),
         )
@@ -2159,7 +2365,7 @@ async fn ended_parent_turn_rejects_all_new_collaboration_commands() {
         .execute(
             stale_context.clone(),
             json!({
-                "target_agent_id": child_agent_id.as_str(),
+                "target": spawned_path(&child),
                 "message": "late follow-up"
             }),
         )
@@ -2168,7 +2374,7 @@ async fn ended_parent_turn_rejects_all_new_collaboration_commands() {
     let stop_error = InterruptAgentTool::new(fixture.coordinator.clone())
         .execute(
             stale_context.clone(),
-            json!({ "target_agent_id": child_agent_id.as_str() }),
+            json!({ "target": spawned_path(&child) }),
         )
         .await
         .expect_err("已结束父 Turn 不得停止目标");

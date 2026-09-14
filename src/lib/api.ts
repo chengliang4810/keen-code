@@ -946,12 +946,12 @@ export async function agentsList(projectPath?: string | null) {
   });
 }
 
-/** 创建子智能体时可勾选授权的工具目录。 */
+/** 创建子智能体时可勾选的任务工具目录；固定通信工具由 Runtime 追加。 */
 export interface AgentToolCatalogResult {
   tools: string[];
 }
 
-/** 返回创建子智能体时可勾选授权的工具目录。 */
+/** 返回创建子智能体时可勾选的任务工具目录。 */
 export async function agentsToolCatalog() {
   return invoke<AgentToolCatalogResult>("agents_tool_catalog");
 }
@@ -968,7 +968,7 @@ export interface AgentDetailDto {
   path: string | null;
   /** 模型覆盖（"{provider_id}::{model}"）；null 表示跟随会话 Provider。 */
   model: string | null;
-  /** 允许使用的工具；null 表示继承主智能体全部工具。 */
+  /** 允许使用的任务工具；null 表示继承主智能体全部任务工具。 */
   tools: string[] | null;
   /** 显式排除的工具。 */
   disallowedTools: string[];

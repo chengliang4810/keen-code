@@ -2,7 +2,7 @@
 
 use super::*;
 
-/// 全局 Agent 模板目录列出固定支持工具，但不暴露根 Agent 专用或动态 MCP 工具。
+/// 全局 Agent 模板目录只列出用户可选任务工具，不暴露根专用、固定通信或动态 MCP 工具。
 #[test]
 fn agents_tool_catalog_lists_template_support_tools() {
     let catalog = agents_tool_catalog().expect("Agent 模板工具目录应可读取");
@@ -26,19 +26,25 @@ fn agents_tool_catalog_lists_template_support_tools() {
             "SearchExtraTools",
             "ExecuteExtraTool",
             "LSP",
-            "send_message",
-            "followup_task",
-            "interrupt_agent",
-            "retry_agent",
-            "resume_agent",
-            "list_agents",
-            "wait_agent",
         ]
     );
-    for excluded in ["spawn_agent", "AskUser", "TodoWrite", "Goal", "Plan"] {
+    for excluded in [
+        "spawn_agent",
+        "interrupt_agent",
+        "retry_agent",
+        "resume_agent",
+        "AskUser",
+        "TodoWrite",
+        "Goal",
+        "Plan",
+        "list_agents",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+    ] {
         assert!(
             !catalog.tools.iter().any(|name| name == excluded),
-            "目录不应包含根 Agent 专用工具 {excluded}"
+            "目录不应包含不可由用户选择的工具 {excluded}"
         );
     }
 }
