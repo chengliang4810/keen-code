@@ -39,6 +39,18 @@ export function formatGoalElapsed(seconds: number): string {
   return `${Math.floor(safe / 3600)}h`;
 }
 
+/** 运行中的目标按持久化创建时间恢复，避免组件重挂载后重新从零计时。 */
+export function goalElapsedSeconds(
+  goal: AcpGoalProjection["goal"],
+  running: boolean,
+  nowMs: number,
+): number {
+  const persisted = goal?.timeUsedSeconds ?? 0;
+  if (!goal || goal.status !== "active" || !running) return persisted;
+  const sinceCreated = Math.floor(Math.max(0, nowMs - goal.createdAtMs) / 1000);
+  return Math.max(persisted, sinceCreated);
+}
+
 /** 输入框上方的当前目标状态栏。 */
 export function ComposerGoalProgress({
   locale,
@@ -48,19 +60,26 @@ export function ComposerGoalProgress({
   running = false,
 }: ComposerGoalProgressProps) {
   const current = goal?.goal;
-  const [elapsed, setElapsed] = useState(current?.timeUsedSeconds ?? 0);
+  const [elapsed, setElapsed] = useState(() =>
+    goalElapsedSeconds(current, running, Date.now()),
+  );
 
   // 仅在当前目标真实执行时每秒刷新一次，空闲时不产生后台活动。
   useEffect(() => {
-    const base = current?.timeUsedSeconds ?? 0;
-    setElapsed(base);
+    const updateElapsed = () => {
+      setElapsed(goalElapsedSeconds(current, running, Date.now()));
+    };
+    updateElapsed();
     if (!current || current.status !== "active" || !running) return;
-    const startedAt = Date.now();
-    const timer = window.setInterval(() => {
-      setElapsed(base + Math.floor((Date.now() - startedAt) / 1000));
-    }, 1000);
+    const timer = window.setInterval(updateElapsed, 1000);
     return () => window.clearInterval(timer);
-  }, [current?.id, current?.status, current?.timeUsedSeconds, running]);
+  }, [
+    current?.id,
+    current?.status,
+    current?.createdAtMs,
+    current?.timeUsedSeconds,
+    running,
+  ]);
 
   if (!current) return null;
   const zh = locale !== "en";
