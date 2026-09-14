@@ -183,6 +183,50 @@ describe("useSessionEditResend recovery barrier", () => {
     expect(executeSend).toHaveBeenCalledOnce();
     expect(options.ui.setLocalError).not.toHaveBeenCalled();
   });
+
+  it.each(["turn_completed", "turn_failed"] as const)(
+    "rewind 响应失败后仍恢复新投递世代的 %s，且保持发送锁直到恢复完成",
+    async (type) => {
+      const { options, view, rewind, executeSend } = makeOptions("ready");
+      view.delivery.lastSequence = 100;
+      rewind.mockRejectedValueOnce(new Error("rewind response lost"));
+      vi.mocked(options.runtime.replayHistory).mockImplementation(async () => {
+        expect(options.state.sendInFlightRef.current).toBe(true);
+        expect(view.replay.loaded).toBe(false);
+        beginSessionRecovery(view);
+        completeSessionRecovery(view);
+        const envelope = {
+          schemaVersion: 1 as const,
+          sessionId: "session-edit",
+          turnId: "new-turn",
+          sourceAgentId: "root",
+          occurredAtMs: 1000,
+        };
+        expect(reduceDeliveryEnvelope(view, {
+          ...envelope,
+          deliverySequence: 1,
+          event: { type: "turn_started", rootTurnId: "new-turn" },
+        }).status).toBe("applied");
+        expect(reduceDeliveryEnvelope(view, {
+          ...envelope,
+          deliverySequence: 2,
+          event: type === "turn_failed"
+            ? { type, failureKind: "model", message: "模型响应失败" }
+            : { type },
+        }).status).toBe("applied");
+      });
+
+      await expect(renderEditResend(options)(message, "修改后")).resolves.toBe(false);
+      expect(rewind).toHaveBeenCalledOnce();
+      expect(options.runtime.replayHistory).toHaveBeenCalledOnce();
+      expect(executeSend).not.toHaveBeenCalled();
+      expect(view.delivery.lastSequence).toBe(2);
+      expect(view.status).toBe("idle");
+      expect(options.ui.setLocalError).toHaveBeenCalled();
+      expect(options.state.sendInFlightRef.current).toBe(false);
+    },
+  );
+
   it("本地乐观消息没有权威标识时直接拒绝，不发出 rewind", async () => {
     const { options, rewind, executeSend } = makeOptions("ready");
     const edit = renderEditResend(options);

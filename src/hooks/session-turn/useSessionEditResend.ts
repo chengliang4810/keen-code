@@ -3,6 +3,7 @@ import type { SessionSnapshot, ChatMessage } from "@/lib/session";
 import { buildAgentPrompt } from "@/lib/attachments";
 import { localizeUiError } from "@/lib/session";
 import { createOperationId } from "@/lib/acp/api";
+import { beginSessionRecovery } from "@/lib/acp/store";
 import type {
   ExecuteSend,
   SessionTurnApiPort,
@@ -80,20 +81,39 @@ export function useSessionEditResend({
       try {
         sendInFlightRef.current = true;
         try {
-          const prepared = await api.rewind({
-            sessionId,
-            targetMessageId,
-            expectedText: buildAgentPrompt(
-              message.content,
-              message.attachments ?? [],
-            ),
-            revertFiles,
-            operationId: createOperationId("session-rewind"),
-          });
-          updateSessionPreference(prepared.archivedSessionId, { archived: true });
-          // rewind 重开了后端 Session，必须通过标准 load 重建完整投影和投递游标。
-          currentView.replay.loaded = false;
-          await replayHistory(sessionId);
+          // 变更请求可能已经在 Host 提交但响应在 IPC 边界丢失；先清空旧投递世代，
+          // 让随后恢复的序号 1/2 不会被误判为旧事件。发送锁覆盖整个恢复窗口。
+          beginSessionRecovery(currentView);
+          let rewindFailed = false;
+          let rewindFailure: unknown;
+          try {
+            const prepared = await api.rewind({
+              sessionId,
+              targetMessageId,
+              expectedText: buildAgentPrompt(
+                message.content,
+                message.attachments ?? [],
+              ),
+              revertFiles,
+              operationId: createOperationId("session-rewind"),
+            });
+            updateSessionPreference(prepared.archivedSessionId, { archived: true });
+          } catch (cause) {
+            // Rewind 可能已在 Host 完成事务后才丢失响应；无论 API 成功与否都必须
+            // 继续标准恢复，成功时建立新投递世代，失败时也重建当前权威历史。
+            rewindFailed = true;
+            rewindFailure = cause;
+          }
+          let replayFailed = false;
+          let replayFailure: unknown;
+          try {
+            await replayHistory(sessionId);
+          } catch (cause) {
+            replayFailed = true;
+            replayFailure = cause;
+          }
+          if (rewindFailed) throw rewindFailure;
+          if (replayFailed) throw replayFailure;
           try {
             await refreshSessions();
           } catch {
