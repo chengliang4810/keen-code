@@ -5241,6 +5241,8 @@ impl AgentRuntime {
             let summary = child_agent_turn_summary(launch.prompt.as_deref());
             (resolved, reasoning, input_messages, Vec::new(), summary)
         };
+        let mut turn_provider_snapshot = provider_snapshot(&resolved);
+        turn_provider_snapshot.reasoning_effort = reasoning_effort.map(reasoning_effort_snapshot);
 
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
@@ -5277,7 +5279,7 @@ impl AgentRuntime {
             transcript_turn_ids.push(turn_id);
             transcript.push(message);
         }
-        // 仅保留由同一 Provider、模型、协议和传输配置生成的 opaque reasoning 续传；
+        // 仅保留由同一 Provider、模型、协议和完整配置身份生成的 opaque reasoning 续传；
         // 不修改 Journal 中的原始推理，也不移除本轮工具循环新生成的续传状态。
         let historical_providers = execution.historical_provider_snapshots()?;
         clear_historical_reasoning_state(
@@ -5423,6 +5425,7 @@ impl AgentRuntime {
         );
         let runtime_request = if is_root {
             RuntimeTurnRequest::root(request, input_messages, summary.clone())
+                .with_provider_snapshot(turn_provider_snapshot.clone())
         } else {
             let parent_turn_id = launch
                 .parent_turn_id
@@ -5457,6 +5460,7 @@ impl AgentRuntime {
                         result_summary: None,
                     },
                 )
+                .with_provider_snapshot(turn_provider_snapshot.clone())
             } else {
                 RuntimeTurnRequest::child(
                     request,
@@ -5465,9 +5469,10 @@ impl AgentRuntime {
                     parent_turn_id.as_str(),
                     summary.clone(),
                 )
+                .with_provider_snapshot(turn_provider_snapshot.clone())
             }
         };
-        execution.remember_turn_provider(&launch.turn_id, provider_snapshot(&resolved))?;
+        execution.remember_turn_provider(&launch.turn_id, turn_provider_snapshot)?;
         Ok((runner, runtime_request, summary))
     }
 
@@ -5858,16 +5863,6 @@ impl AgentRuntime {
             .provider
             .as_ref()
             .and_then(|provider| provider.reasoning_effort);
-        let mut current_provider = provider_snapshot(&resolved);
-        current_provider.reasoning_effort = reasoning_effort;
-        if snapshot.state.provider.as_ref() != Some(&current_provider) {
-            session
-                .set_provider_snapshot(
-                    &control_operation_id("provider", session_id, turn_id),
-                    current_provider,
-                )
-                .map_err(runtime_operation_failed)?;
-        }
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
         if let Some(context) = normalized_developer_context {
@@ -6054,7 +6049,7 @@ impl AgentRuntime {
                     model: provider.model().to_owned(),
                     context_window: provider.capabilities(provider.model()).max_context_tokens,
                     protocol,
-                    config_fingerprint: provider.transport_fingerprint().to_owned(),
+                    config_fingerprint: provider.config_identity().to_owned(),
                     reasoning_effort,
                 },
             )
@@ -6765,8 +6760,10 @@ impl AgentRuntime {
             let snapshot = session
                 .snapshot()
                 .map_err(|error| runtime_operation_failed(error))?;
+            let provider_projection = provider_projection_before_sequence(&session, start_after)?;
             next_cursor.next_after = start_after;
-            next_cursor.provider = provider_snapshot_before_sequence(&session, start_after)?;
+            next_cursor.provider = provider_projection.current;
+            next_cursor.providers_by_turn = provider_projection.by_turn;
             next_cursor.through_sequence = Some(snapshot.state.last_sequence);
             next_cursor.frozen_state = Some(Arc::new(snapshot.state));
         }
@@ -6791,19 +6788,23 @@ impl AgentRuntime {
         next_cursor.through_sequence = Some(through_journal_sequence);
         let mut drafts = Vec::new();
         let mut next_after = start_after;
-        let mut historical_provider = next_cursor.provider.clone();
+        let mut historical_provider = ProviderProjection {
+            current: next_cursor.provider.clone(),
+            by_turn: next_cursor.providers_by_turn.clone(),
+        };
         for record in page.records {
             if record.sequence > through_journal_sequence {
                 break;
             }
             // 先在临时 Provider 上映射；只有物理记录适合当前页时才提交游标。
-            let (record_drafts, next_historical_provider) = map_authoritative_record_with_provider(
-                &session,
-                frozen_state,
-                &record,
-                AuthoritativeProjectionMode::Replay,
-                historical_provider.clone(),
-            )?;
+            let (record_drafts, next_historical_provider) =
+                map_authoritative_record_with_projection(
+                    &session,
+                    frozen_state,
+                    &record,
+                    AuthoritativeProjectionMode::Replay,
+                    historical_provider.clone(),
+                )?;
             if record_drafts.len() > MAX_REPLAY_EVENTS as usize {
                 return Err(AgentRuntimeError::RuntimeOperationFailed);
             }
@@ -6822,7 +6823,8 @@ impl AgentRuntime {
             // 保留给下一页，并且不会提交该记录携带的临时 Provider 状态。
         }
         next_cursor.next_after = next_after;
-        next_cursor.provider = historical_provider;
+        next_cursor.provider = historical_provider.current;
+        next_cursor.providers_by_turn = historical_provider.by_turn;
         let replayed_events =
             u32::try_from(drafts.len()).map_err(|error| runtime_operation_failed(error))?;
         let has_more = next_after < through_journal_sequence;
@@ -7005,50 +7007,25 @@ impl AgentRuntime {
 fn historical_provider_snapshots_by_turn(
     session: &RuntimeSession,
 ) -> Result<HashMap<String, ProviderSnapshot>, AgentRuntimeError> {
-    let mut providers = HashMap::new();
-    let mut current = None;
+    let mut projection = ProviderProjection::default();
     let mut after = None;
     loop {
         let page = session
             .replay(after, MAX_REPLAY_EVENTS as usize)
             .map_err(|error| runtime_operation_failed(error))?;
         for record in &page.records {
-            observe_historical_provider_event(&mut current, &mut providers, &record.event);
+            projection.observe_event(&record.event);
         }
         let Some(next_after) = page.next_after else {
-            return Ok(providers);
+            return Ok(projection.by_turn);
         };
         if next_after <= after.unwrap_or(0) {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
         after = Some(next_after);
         if !page.has_more {
-            return Ok(providers);
+            return Ok(projection.by_turn);
         }
-    }
-}
-
-/// 按 Journal 事件顺序记录 Provider 更新和 Turn 起点，覆盖原子批次嵌套事件。
-fn observe_historical_provider_event(
-    current: &mut Option<ProviderSnapshot>,
-    providers: &mut HashMap<String, ProviderSnapshot>,
-    event: &SessionEvent,
-) {
-    match event {
-        SessionEvent::AtomicBatch { events } => {
-            for nested in events {
-                observe_historical_provider_event(current, providers, nested);
-            }
-        }
-        SessionEvent::ProviderSnapshotUpdated { provider } => {
-            *current = Some(provider.clone());
-        }
-        SessionEvent::TurnStarted { turn_id, .. } => {
-            if let Some(provider) = current {
-                providers.insert(turn_id.as_str().to_owned(), provider.clone());
-            }
-        }
-        _ => {}
     }
 }
 
@@ -7060,7 +7037,7 @@ fn provider_supports_reasoning_continuation(
     historical.provider_id == current.provider_id()
         && historical.model == current.model()
         && historical.protocol == provider_protocol_snapshot(current.protocol())
-        && historical.config_fingerprint == current.transport_fingerprint()
+        && historical.config_fingerprint == current.config_identity()
 }
 
 /// 保留同一 Provider 链路的历史可读推理和协议续传状态，清除不兼容状态。
@@ -7415,8 +7392,67 @@ fn provider_snapshot(provider: &ResolvedProvider) -> ProviderSnapshot {
         model: provider.model().to_owned(),
         context_window: provider.capabilities(provider.model()).max_context_tokens,
         protocol: provider_protocol_snapshot(provider.protocol()),
-        config_fingerprint: provider.transport_fingerprint().to_owned(),
+        config_fingerprint: provider.config_identity().to_owned(),
         reasoning_effort: None,
+    }
+}
+
+/// 权威事件投影使用的 Provider 状态。
+///
+/// Session 的默认 Provider 与某个 Turn 实际使用的 Provider 是两个不同的
+/// 维度。默认快照只作为没有 Turn 级记录的旧事件回退；一旦事件声明了 Turn
+/// 快照，模型 Round 必须按自己的 `turn_id` 读取，不能被并发 Turn 的最后一次
+/// Provider 更新覆盖。
+#[derive(Clone, Debug, Default)]
+struct ProviderProjection {
+    /// 当前 Session 默认 Provider；只用于旧事件和没有 Turn 级快照的测试夹具。
+    current: Option<ProviderSnapshot>,
+    /// 每个 Turn 启动时实际使用的 Provider 快照。
+    by_turn: HashMap<String, ProviderSnapshot>,
+}
+
+impl ProviderProjection {
+    /// 从当前 Session 默认 Provider 创建一个尚未观察事件的投影。
+    fn from_current(current: Option<ProviderSnapshot>) -> Self {
+        Self {
+            current,
+            by_turn: HashMap::new(),
+        }
+    }
+
+    /// 返回指定 Turn 的 Provider；有明确 Turn 快照时绝不回退到其他 Turn。
+    fn for_turn(&self, turn_id: &ResourceTurnId) -> Option<&ProviderSnapshot> {
+        self.by_turn.get(turn_id.as_str()).or(self.current.as_ref())
+    }
+
+    /// 按 Journal 事件顺序更新默认 Provider 与 Turn 级 Provider 状态。
+    fn observe_event(&mut self, event: &SessionEvent) {
+        match event {
+            SessionEvent::AtomicBatch { events } => {
+                for nested in events {
+                    self.observe_event(nested);
+                }
+            }
+            SessionEvent::ProviderSnapshotUpdated { provider } => {
+                self.current = Some(provider.clone());
+            }
+            SessionEvent::TurnStarted { turn_id, .. } => {
+                // 新格式会在同一 AtomicBatch 的后续事件中写入精确快照；旧
+                // Journal 没有该事件时，TurnStarted 仍需冻结当时的默认值。
+                if let Some(provider) = self.current.clone() {
+                    self.by_turn
+                        .entry(turn_id.as_str().to_owned())
+                        .or_insert(provider);
+                }
+            }
+            SessionEvent::TurnProviderSnapshotRecorded {
+                turn_id, provider, ..
+            } => {
+                self.by_turn
+                    .insert(turn_id.as_str().to_owned(), provider.clone());
+            }
+            _ => {}
+        }
     }
 }
 
@@ -7431,6 +7467,8 @@ struct ReplayProviderCursor {
     next_after: u64,
     /// 扫描到 `next_after` 后的历史 Provider 快照。
     provider: Option<ProviderSnapshot>,
+    /// 扫描到 `next_after` 后各 Turn 的历史 Provider 快照。
+    providers_by_turn: HashMap<String, ProviderSnapshot>,
     /// 当前完整 replay 固定的 Journal 水位；尚未开始时为空。
     through_sequence: Option<u64>,
     /// 与固定水位一致的状态；连续分页共享，尾页确认投递后立即释放。
@@ -8247,6 +8285,20 @@ async fn run_runtime_event_pump(
     mut subscription: RuntimeEventSubscription,
     mut cancelled: oneshot::Receiver<()>,
 ) {
+    // 订阅可能在已有 Session 上建立；先从完整 Journal 恢复 Turn 级快照，
+    // 这样重连后的晚到 ModelRoundCompleted 也不会退回到当前默认 Provider。
+    let mut provider_projection = runtime
+        .upgrade()
+        .and_then(|runtime| runtime.runtime_manager.get(session_id.clone()).ok())
+        .and_then(|session| {
+            let snapshot = session.snapshot().ok()?;
+            let by_turn = historical_provider_snapshots_by_turn(&session).ok()?;
+            Some(ProviderProjection {
+                current: snapshot.state.provider,
+                by_turn,
+            })
+        })
+        .unwrap_or_default();
     loop {
         let received = tokio::select! {
             _ = &mut cancelled => break,
@@ -8277,13 +8329,17 @@ async fn run_runtime_event_pump(
                     };
                     log_runtime_event(&session_id, &snapshot.state, record.sequence, &record.event);
                     terminal_notice = root_task_terminal_notice(&snapshot.state, &record.event);
-                    match map_authoritative_record(
+                    match map_authoritative_record_with_projection(
                         &session,
                         &snapshot.state,
                         &record,
                         AuthoritativeProjectionMode::Live,
+                        provider_projection.clone(),
                     ) {
-                        Ok(drafts) => drafts,
+                        Ok((drafts, next_provider_projection)) => {
+                            provider_projection = next_provider_projection;
+                            drafts
+                        }
                         Err(error) => {
                             tracing::error!(session_id, %error, "Runtime 事件投递失败");
                             break;
@@ -8328,6 +8384,16 @@ async fn run_runtime_event_pump(
                     break;
                 }
             };
+            // 丢失事件后重新订阅前刷新整份 Turn 快照；后续事件只在该基线之上
+            // 增量推进，实际历史缺口仍由外层 replay 水位修复。
+            if let Ok(snapshot) = session.snapshot()
+                && let Ok(by_turn) = historical_provider_snapshots_by_turn(&session)
+            {
+                provider_projection = ProviderProjection {
+                    current: snapshot.state.provider,
+                    by_turn,
+                };
+            }
             subscription = match session.subscribe() {
                 Ok(subscription) => subscription,
                 Err(error) => {
@@ -8748,31 +8814,31 @@ enum AuthoritativeProjectionMode {
 }
 
 /// 将一条权威 Journal 记录映射为 live 与 replay 共用语义的 ACP 草稿集合。
+#[cfg(test)]
 fn map_authoritative_record(
     session: &RuntimeSession,
     state: &SessionState,
     record: &SessionEventRecord,
     mode: AuthoritativeProjectionMode,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    let (drafts, _) = map_authoritative_record_with_provider(
+    let (drafts, _) = map_authoritative_record_with_projection(
         session,
         state,
         record,
         mode,
-        state.provider.clone(),
+        ProviderProjection::from_current(state.provider.clone()),
     )?;
     Ok(drafts)
 }
 
-/// 使用指定历史 Provider 映射一条权威 Journal 记录，并返回记录后的 Provider 状态。
-fn map_authoritative_record_with_provider(
+/// 使用指定 Provider 投影映射一条权威 Journal 记录，并返回记录后的投影。
+fn map_authoritative_record_with_projection(
     session: &RuntimeSession,
     state: &SessionState,
     record: &SessionEventRecord,
     mode: AuthoritativeProjectionMode,
-    provider: Option<ProviderSnapshot>,
-) -> Result<(Vec<DeliveryDraft>, Option<ProviderSnapshot>), AgentRuntimeError> {
-    let mut provider = provider;
+    mut provider: ProviderProjection,
+) -> Result<(Vec<DeliveryDraft>, ProviderProjection), AgentRuntimeError> {
     let drafts = map_authoritative_event(
         session,
         state,
@@ -8792,13 +8858,16 @@ fn map_authoritative_event(
     record: &SessionEventRecord,
     event: &SessionEvent,
     mode: AuthoritativeProjectionMode,
-    provider: &mut Option<ProviderSnapshot>,
+    provider: &mut ProviderProjection,
     atomic_siblings: Option<&[SessionEvent]>,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
     if mode == AuthoritativeProjectionMode::Replay {
         if replay_hides_root_turn_lifecycle(state, event) {
             // 编辑重发会保留根 Turn 的终态骨架，以维持子 Agent 与 Mailbox
             // 控制面引用；没有对应真实用户消息时，这个骨架不属于对话投影。
+            if matches!(event, SessionEvent::TurnStarted { .. }) {
+                provider.observe_event(event);
+            }
             return Ok(Vec::new());
         }
         let request_id = match event {
@@ -8851,17 +8920,20 @@ fn map_authoritative_event(
             root_turn_id,
             parent_turn_id,
             ..
-        } => vec![keencode_event_draft(
-            record,
-            Some(turn_id.as_str()),
-            Some(source_agent_id.as_str()),
-            KeenCodeEvent::TurnStarted {
-                root_turn_id: root_turn_id.as_str().to_owned(),
-                parent_turn_id: parent_turn_id
-                    .as_ref()
-                    .map(|turn_id| turn_id.as_str().to_owned()),
-            },
-        )],
+        } => {
+            provider.observe_event(event);
+            vec![keencode_event_draft(
+                record,
+                Some(turn_id.as_str()),
+                Some(source_agent_id.as_str()),
+                KeenCodeEvent::TurnStarted {
+                    root_turn_id: root_turn_id.as_str().to_owned(),
+                    parent_turn_id: parent_turn_id
+                        .as_ref()
+                        .map(|turn_id| turn_id.as_str().to_owned()),
+                },
+            )]
+        }
         SessionEvent::TurnCompleted { turn_id } => {
             let agent_id = turn_agent_id(state, turn_id.as_str())?;
             vec![keencode_event_draft(
@@ -9107,7 +9179,7 @@ fn map_authoritative_event(
         } => {
             let mut drafts = model_round_usage_draft(
                 record,
-                provider.as_ref(),
+                provider.for_turn(turn_id),
                 turn_id,
                 source_agent_id,
                 requested_model,
@@ -9184,8 +9256,12 @@ fn map_authoritative_event(
                 }),
             ),
         )],
-        SessionEvent::ProviderSnapshotUpdated { provider: next } => {
-            *provider = Some(next.clone());
+        SessionEvent::ProviderSnapshotUpdated { provider: _ } => {
+            provider.observe_event(event);
+            Vec::new()
+        }
+        SessionEvent::TurnProviderSnapshotRecorded { .. } => {
+            provider.observe_event(event);
             Vec::new()
         }
         SessionEvent::OnErrorHookQueued { .. }
@@ -9441,6 +9517,7 @@ fn replay_segment_tool_drafts(
         ));
     }
     let mut drafts = Vec::new();
+    let mut provider = ProviderProjection::default();
     for (time_unix_ms, event) in events {
         // 保留生命周期真实时间和与 live 相同的 raw output；Journal 游标则归属于
         // 当前原子段，不能倒退到已被前页消费的物理请求记录。
@@ -9459,7 +9536,7 @@ fn replay_segment_tool_drafts(
             &projected,
             &projected.event,
             AuthoritativeProjectionMode::Live,
-            &mut None,
+            &mut provider,
             None,
         )?);
     }
@@ -9539,60 +9616,42 @@ fn model_round_usage_draft(
     )]
 }
 
-/// 从 Journal 顺序恢复指定 sequence 之前最近一次 Provider 快照。
+/// 从 Journal 顺序恢复指定 sequence 之前的默认和各 Turn Provider 快照。
 ///
 /// `after` 分页不能只读取当前页，否则从中间水位开始的 replay 会把最终快照误用到
 /// 历史 Round；这里按有界页扫描前缀，既覆盖普通记录也覆盖 AtomicBatch 内嵌更新。
-fn provider_snapshot_before_sequence(
+fn provider_projection_before_sequence(
     session: &RuntimeSession,
     sequence: u64,
-) -> Result<Option<ProviderSnapshot>, AgentRuntimeError> {
+) -> Result<ProviderProjection, AgentRuntimeError> {
     if sequence == 0 {
-        return Ok(None);
+        return Ok(ProviderProjection::default());
     }
     let mut after = None;
-    let mut provider = None;
+    let mut projection = ProviderProjection::default();
     loop {
         let page = session
             .replay(after, MAX_REPLAY_EVENTS as usize)
             .map_err(|error| runtime_operation_failed(error))?;
         for record in &page.records {
             if record.sequence > sequence {
-                return Ok(provider);
+                return Ok(projection);
             }
-            update_provider_snapshot_from_event(&mut provider, &record.event);
+            projection.observe_event(&record.event);
             if record.sequence == sequence {
-                return Ok(provider);
+                return Ok(projection);
             }
         }
         let Some(next_after) = page.next_after else {
-            return Ok(provider);
+            return Ok(projection);
         };
         if next_after <= after.unwrap_or(0) {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
         after = Some(next_after);
         if !page.has_more {
-            return Ok(provider);
+            return Ok(projection);
         }
-    }
-}
-
-/// 按物理 Journal 记录内的事件顺序推进 Provider 历史状态。
-fn update_provider_snapshot_from_event(
-    provider: &mut Option<ProviderSnapshot>,
-    event: &SessionEvent,
-) {
-    match event {
-        SessionEvent::AtomicBatch { events } => {
-            for nested in events {
-                update_provider_snapshot_from_event(provider, nested);
-            }
-        }
-        SessionEvent::ProviderSnapshotUpdated { provider: next } => {
-            *provider = Some(next.clone());
-        }
-        _ => {}
     }
 }
 
@@ -9740,20 +9799,22 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed, RootTaskTerminalNotice,
-        RootTurnOptions, RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate,
-        RuntimeAgentTemplateContext, RuntimeExtensionCandidate, RuntimeExtensionContributor,
-        RuntimeExtensionDiagnostic, RuntimeGoalUsageSink, RuntimeToolContext,
-        SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
+        ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed,
+        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
+        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
+        RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
+        RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
         authoritative_recovered_turn_outcome, background_task_completion_event,
-        complete_runtime_turn, coordinator_has_pending_dynamic_input_claim,
-        dynamic_input_receipt_matches_claim, extension_diagnostic_message,
-        is_retryable_runtime_turn_completion_error, map_authoritative_record, materialize_delivery,
+        clear_historical_reasoning_state, complete_runtime_turn,
+        coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
+        extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
+        map_authoritative_record, map_authoritative_record_with_projection, materialize_delivery,
         parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
-        recovered_authoritative_turn_outcomes, release_runtime_turn_state,
-        root_task_terminal_notice, root_turn_summary, runtime_tool_snapshot,
-        should_retry_runtime_turn_completion, split_child_agent_model_override,
-        validate_generated_title, validate_recovered_mailbox_claim, wait_for_turn_started,
+        provider_supports_reasoning_continuation, recovered_authoritative_turn_outcomes,
+        release_runtime_turn_state, root_task_terminal_notice, root_turn_summary,
+        runtime_tool_snapshot, should_retry_runtime_turn_completion,
+        split_child_agent_model_override, validate_generated_title,
+        validate_recovered_mailbox_claim, wait_for_turn_started,
     };
     use keencode_acp::schema::{
         ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
@@ -10142,6 +10203,60 @@ mod tests {
             ))
             .await
             .expect("测试模型 Round 应完成");
+    }
+
+    /// 写入带显式 Turn Provider 快照的模型 Round，供冷恢复与分页投影测试使用。
+    async fn persist_usage_root_turn_with_provider_snapshot(
+        session: &RuntimeSession,
+        turn_id: &str,
+        model: &str,
+        prompt: &str,
+        used: u64,
+        provider_snapshot: ProviderSnapshot,
+    ) {
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                max_context_tokens: provider_snapshot.context_window,
+                ..ProviderCapabilities::default()
+            },
+            [completed_reply_with_usage(
+                "完成",
+                TokenUsage {
+                    input_tokens: Some(used.saturating_sub(1)),
+                    output_tokens: Some(1),
+                    reasoning_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(used),
+                },
+            )],
+        ));
+        let input = ModelMessage::text(MessageRole::User, prompt);
+        let request = TurnRequest::new(
+            keencode_agent::SessionId::new(session.session_id().as_str())
+                .expect("测试 Session 标识应有效"),
+            keencode_agent::TurnId::new(turn_id).expect("测试 Turn 标识应有效"),
+            keencode_agent::AgentId::new("root").expect("测试根 Agent 标识应有效"),
+            model,
+            vec![input.clone()],
+            PlanGuard::inactive(),
+        );
+        session
+            .bind_agent_runner(AgentRunner::new(
+                provider,
+                ToolRegistry::new(),
+                RunLimits::default(),
+            ))
+            .run_turn(
+                RuntimeTurnRequest::root(
+                    request,
+                    vec![input],
+                    root_turn_summary(prompt, None, false),
+                )
+                .with_provider_snapshot(provider_snapshot),
+            )
+            .await
+            .expect("带 Provider 快照的测试模型 Round 应完成");
     }
 
     /// 启动只接受一次请求的本地 Responses 服务，并返回捕获的 JSON 请求正文。
@@ -17056,18 +17171,12 @@ mod tests {
             .expect("应热替换模型配置");
 
         let resolved = runtime.resolve_session_provider(Some(&original)).unwrap();
-        assert_ne!(
-            resolved.transport_fingerprint(),
-            original.config_fingerprint
-        );
+        assert_ne!(resolved.config_identity(), original.config_fingerprint);
         runtime
             .set_session_effort(session_id, "refresh-effort", "high")
             .unwrap();
         let refreshed = session.snapshot().unwrap().state.provider.unwrap();
-        assert_eq!(
-            refreshed.config_fingerprint,
-            resolved.transport_fingerprint()
-        );
+        assert_eq!(refreshed.config_fingerprint, resolved.config_identity());
         assert_eq!(refreshed.model, original.model);
     }
 
@@ -17134,7 +17243,7 @@ mod tests {
                 .provider
                 .unwrap()
                 .context_window,
-            Some(64000)
+            None
         );
         runtime.close_session(id).await.unwrap();
     }
@@ -17224,6 +17333,259 @@ mod tests {
         };
         assert_eq!(reasoning.text, "visible reasoning");
         assert!(reasoning.continuation.is_none());
+    }
+
+    /// 凭据修订变化即使不改变传输端点，也必须清除 opaque reasoning 续传。
+    #[test]
+    fn credential_revision_change_clears_reasoning_continuation() {
+        use keencode_model::{ContentBlock, Message};
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let runtime =
+            runtime_with_responses_provider(storage.path(), "http://127.0.0.1:9/v1", &["model-a"]);
+        let original = runtime
+            .provider_registry
+            .resolve("provider-runtime-test", "model-a")
+            .expect("原始 Provider 应解析");
+        let mut rotated_config = ProviderConfig::new_unauthenticated(
+            "provider-runtime-test",
+            keencode_model::ProviderProtocol::Responses,
+            "http://127.0.0.1:9/v1",
+        )
+        .expect("轮换后的 Provider 配置应有效");
+        rotated_config.response_mode = WireResponseMode::Buffered;
+        runtime
+            .provider_registry
+            .replace_all([ProviderRegistration::new(
+                rotated_config,
+                "Runtime 测试 Provider",
+                "rotated-revision",
+                ProviderModelPolicy::Enumerated {
+                    models: vec!["model-a".to_owned()],
+                },
+            )
+            .expect("轮换后的 Provider 注册项应有效")])
+            .expect("凭据修订轮换应成功");
+        let rotated = runtime
+            .provider_registry
+            .resolve("provider-runtime-test", "model-a")
+            .expect("轮换后的 Provider 应解析");
+        assert_eq!(
+            original.transport_fingerprint(),
+            rotated.transport_fingerprint(),
+            "凭据轮换不应改变传输指纹"
+        );
+        assert_ne!(original.config_identity(), rotated.config_identity());
+
+        let turn_id = ResourceTurnId::new("credential-rotation-turn").unwrap();
+        let mut messages = vec![Message::new(
+            MessageRole::Assistant,
+            vec![
+                ContentBlock::Reasoning {
+                    reasoning: keencode_model::ReasoningContent {
+                        text: "可见推理".to_owned(),
+                        summary: None,
+                        continuation: Some(keencode_model::OpaqueReasoningState::new(
+                            "responses-reasoning-item-v1",
+                            serde_json::json!({"id":"old-response"}),
+                        )),
+                    },
+                },
+                ContentBlock::text("answer"),
+            ],
+        )];
+        let historical =
+            HashMap::from([(turn_id.as_str().to_owned(), provider_snapshot(&original))]);
+        assert!(!provider_supports_reasoning_continuation(
+            historical.get(turn_id.as_str()).unwrap(),
+            &rotated,
+        ));
+        clear_historical_reasoning_state(&mut messages, &[Some(turn_id)], &rotated, &historical);
+        let ContentBlock::Reasoning { reasoning } = &messages[0].content[0] else {
+            panic!("可见 reasoning 应保留")
+        };
+        assert_eq!(reasoning.text, "可见推理");
+        assert!(reasoning.continuation.is_none());
+        assert_eq!(messages[0].content[1], ContentBlock::text("answer"));
+    }
+
+    /// 子 Agent 的显式 Provider/model 覆盖必须随 Turn 快照持久化，并在冷恢复后按 Turn 还原。
+    #[tokio::test]
+    async fn child_provider_override_survives_cold_recovery() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let registry = keencode_provider::ProviderRegistry::new();
+        let registration = |provider_id: &str, model: &str, revision: &str| {
+            ProviderRegistration::new(
+                ProviderConfig::new_unauthenticated(
+                    provider_id,
+                    keencode_model::ProviderProtocol::Responses,
+                    "http://127.0.0.1:9/v1",
+                )
+                .expect("Provider 配置应有效"),
+                format!("{provider_id} 测试 Provider"),
+                revision,
+                ProviderModelPolicy::Enumerated {
+                    models: vec![model.to_owned()],
+                },
+            )
+            .expect("Provider 注册项应有效")
+        };
+        let generation = registry
+            .replace_all([
+                registration("provider-a", "model-a", "revision-a"),
+                registration("provider-b", "model-b", "revision-b"),
+            ])
+            .expect("Provider 注册表应替换")
+            .generation;
+        let runtime = Arc::new(
+            AgentRuntime::new_with_registry(
+                storage.path(),
+                RecordingEmitter::successful(),
+                registry,
+            )
+            .expect("Runtime 应创建"),
+        );
+        *runtime
+            .default_provider
+            .write()
+            .expect("默认 Provider 锁应读取") = Some(super::DefaultProviderBinding {
+            provider_id: "provider-a".to_owned(),
+            model: "model-a".to_owned(),
+            generation,
+        });
+        let session = runtime
+            .open_or_create_session(project.path(), None, "child-provider-cold-recovery")
+            .expect("Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let root_turn_id = AgentTurnId::new("root-provider-cold").expect("根 Turn ID 应有效");
+        let child_turn_id = AgentTurnId::new("child-provider-cold").expect("子 Turn ID 应有效");
+        let root_provider = provider_snapshot(
+            &runtime
+                .provider_registry
+                .resolve("provider-a", "model-a")
+                .expect("根 Provider 应解析"),
+        );
+        let child_provider = provider_snapshot(
+            &runtime
+                .provider_registry
+                .resolve("provider-b", "model-b")
+                .expect("覆盖 Provider 应解析"),
+        );
+        let root_input = ModelMessage::text(MessageRole::User, "root");
+        let root_request = TurnRequest::new(
+            keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session ID 应有效"),
+            root_turn_id.clone(),
+            RunnerAgentId::new("root").expect("根 Agent ID 应有效"),
+            "model-a",
+            vec![root_input.clone()],
+            PlanGuard::inactive(),
+        );
+        let root_result = session
+            .bind_agent_runner(AgentRunner::new(
+                Arc::new(ScriptedProvider::new(
+                    ProviderCapabilities::default(),
+                    [completed_reply("root done")],
+                )),
+                ToolRegistry::new(),
+                RunLimits::default(),
+            ))
+            .run_turn(
+                RuntimeTurnRequest::root(root_request, vec![root_input], "root")
+                    .with_provider_snapshot(root_provider),
+            )
+            .await
+            .expect("根 Turn 应完成");
+        assert!(root_result.is_success(), "根 Turn 失败：{root_result:?}");
+
+        let child_agent = ResourceAgentId::new("override_child").expect("子 Agent ID 应有效");
+        let child_input = ModelMessage::text(MessageRole::User, "child");
+        let child_request = TurnRequest::new(
+            keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session ID 应有效"),
+            child_turn_id.clone(),
+            RunnerAgentId::new("override_child").expect("子 Agent ID 应有效"),
+            "model-b",
+            vec![child_input.clone()],
+            PlanGuard::inactive(),
+        );
+        let child_result = session
+            .bind_agent_runner(AgentRunner::new(
+                Arc::new(ScriptedProvider::new(
+                    ProviderCapabilities::default(),
+                    [completed_reply("child done")],
+                )),
+                ToolRegistry::new(),
+                RunLimits::default(),
+            ))
+            .run_turn(
+                RuntimeTurnRequest::initial_child(
+                    child_request,
+                    vec![child_input],
+                    root_turn_id.as_str(),
+                    root_turn_id.as_str(),
+                    "child",
+                    SubAgentState {
+                        agent_id: child_agent,
+                        parent_agent_id: ResourceAgentId::new("root").expect("根 Agent ID 应有效"),
+                        agent_path: "/root/override_child".to_owned(),
+                        task: "child".to_owned(),
+                        status: SubAgentStatus::Pending,
+                        current_turn_id: None,
+                        result_summary: None,
+                    },
+                )
+                .with_provider_snapshot(child_provider.clone()),
+            )
+            .await
+            .expect("子 Turn 应完成");
+        assert!(child_result.is_success(), "子 Turn 失败：{child_result:?}");
+        assert!(
+            session
+                .snapshot()
+                .expect("Session 快照应读取")
+                .state
+                .provider
+                .is_none(),
+            "Turn Provider 快照不得污染 Session 当前 Provider"
+        );
+
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("Session 应关闭");
+        drop(session);
+        drop(runtime);
+
+        let recovered_runtime = Arc::new(
+            AgentRuntime::new_with_registry(storage.path(), RecordingEmitter::successful(), {
+                let registry = keencode_provider::ProviderRegistry::new();
+                registry
+                    .replace_all([
+                        registration("provider-a", "model-a", "revision-a"),
+                        registration("provider-b", "model-b", "revision-b"),
+                    ])
+                    .expect("冷恢复 Provider 注册表应替换");
+                registry
+            })
+            .expect("冷恢复 Runtime 应创建"),
+        );
+        let recovered = recovered_runtime
+            .open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "child-provider-cold-recovery-reopen",
+            )
+            .expect("Session 应冷恢复");
+        let historical = super::historical_provider_snapshots_by_turn(&recovered)
+            .expect("历史 Provider 快照应可重建");
+        assert_eq!(
+            historical.get(child_turn_id.as_str()),
+            Some(&child_provider),
+            "冷恢复必须保留子 Agent 的显式 Provider/model 覆盖"
+        );
+        recovered_runtime
+            .close_session(&session_id)
+            .await
+            .expect("冷恢复 Session 应关闭");
     }
 
     /// 首次设置推理强度必须冻结默认 Provider，切换模型时继续保留该强度。
@@ -19219,6 +19581,142 @@ mod tests {
         );
     }
 
+    /// Turn Provider 快照必须跨物理 Journal 记录保持，并在并发 Turn 交错时按 Turn 取用量窗口。
+    #[test]
+    fn provider_projection_keeps_interleaved_turn_identities() {
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "runtime-provider-projection-interleaved".to_owned(),
+                title: "Provider 投影交错测试".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        let session_id =
+            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
+        let state = SessionState::empty(session_id.clone());
+        let turn_a = ResourceTurnId::new("turn-provider-a").expect("Turn A 标识应有效");
+        let turn_b = ResourceTurnId::new("turn-provider-b").expect("Turn B 标识应有效");
+        let root = ResourceAgentId::new("root").expect("根 Agent 标识应有效");
+        let provider_a = ProviderSnapshot {
+            provider_id: "provider-a".to_owned(),
+            model: "model-a".to_owned(),
+            context_window: Some(128_000),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-a".to_owned(),
+            reasoning_effort: None,
+        };
+        let provider_b = ProviderSnapshot {
+            provider_id: "provider-b".to_owned(),
+            model: "model-b".to_owned(),
+            context_window: Some(32_000),
+            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+            config_fingerprint: "fingerprint-b".to_owned(),
+            reasoning_effort: None,
+        };
+        let record = |sequence: u64, event: SessionEvent| SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new(format!("provider-projection-{sequence}"))
+                .expect("事件标识应有效"),
+            session: session_id.clone(),
+            sequence,
+            time_unix_ms: sequence,
+            event,
+        };
+        let started = |turn_id: ResourceTurnId| SessionEvent::TurnStarted {
+            turn_id,
+            source_agent_id: root.clone(),
+            root_turn_id: ResourceTurnId::new("root-turn-provider-projection")
+                .expect("根 Turn 标识应有效"),
+            parent_turn_id: None,
+            prompt_summary: "Provider 投影测试".to_owned(),
+        };
+        let provider_event = |turn_id: ResourceTurnId, provider: ProviderSnapshot| {
+            SessionEvent::TurnProviderSnapshotRecorded {
+                turn_id,
+                source_agent_id: root.clone(),
+                provider,
+            }
+        };
+        let round = |sequence: u64, turn_id: ResourceTurnId, model: &str| {
+            record(
+                sequence,
+                SessionEvent::ModelRoundCompleted {
+                    turn_id,
+                    source_agent_id: root.clone(),
+                    model_round: 1,
+                    requested_model: model.to_owned(),
+                    metadata: ResponseMetadata::default(),
+                    usage: TokenUsage {
+                        total_tokens: Some(10),
+                        ..TokenUsage::unknown()
+                    },
+                    stop_reason: StopReason::Completed,
+                },
+            )
+        };
+        let mut projection = ProviderProjection::default();
+        for (sequence, event) in [
+            (1, started(turn_a.clone())),
+            (2, provider_event(turn_a.clone(), provider_a.clone())),
+            (3, started(turn_b.clone())),
+            (4, provider_event(turn_b.clone(), provider_b.clone())),
+        ] {
+            let (_, next) = map_authoritative_record_with_projection(
+                &session,
+                &state,
+                &record(sequence, event),
+                AuthoritativeProjectionMode::Replay,
+                projection,
+            )
+            .expect("Turn Provider 事件应可投影");
+            projection = next;
+        }
+
+        let context_window = |drafts: &[DeliveryDraft]| {
+            drafts.iter().find_map(|draft| match draft {
+                DeliveryDraft::SessionUpdate { update, .. }
+                    if matches!(update.as_ref(), SessionUpdate::UsageUpdate(_)) =>
+                {
+                    serde_json::to_value(update)
+                        .ok()
+                        .and_then(|value| value.get("size").and_then(Value::as_u64))
+                }
+                _ => None,
+            })
+        };
+        let (a_first, projection) = map_authoritative_record_with_projection(
+            &session,
+            &state,
+            &round(5, turn_a.clone(), "model-a"),
+            AuthoritativeProjectionMode::Replay,
+            projection,
+        )
+        .expect("Turn A 首轮应可投影");
+        assert_eq!(context_window(&a_first), Some(128_000));
+        let (b_round, projection) = map_authoritative_record_with_projection(
+            &session,
+            &state,
+            &round(6, turn_b.clone(), "model-b"),
+            AuthoritativeProjectionMode::Replay,
+            projection,
+        )
+        .expect("Turn B 轮次应可投影");
+        assert_eq!(context_window(&b_round), Some(32_000));
+        let (a_second, _) = map_authoritative_record_with_projection(
+            &session,
+            &state,
+            &round(7, turn_a, "model-a"),
+            AuthoritativeProjectionMode::Replay,
+            projection,
+        )
+        .expect("Turn A 后续轮次应可投影");
+        assert_eq!(context_window(&a_second), Some(128_000));
+    }
+
     /// 分页 replay 必须按每个历史模型 Round 当时的 Provider 快照投影上下文窗口。
     #[tokio::test(flavor = "multi_thread")]
     async fn replay_uses_provider_snapshot_at_each_historical_round() {
@@ -19289,6 +19787,82 @@ mod tests {
         assert_eq!(
             usage,
             vec![(Some(11), Some(128_000)), (Some(13), Some(32_000))]
+        );
+        runtime
+            .close_session_delivery(&session_id)
+            .await
+            .expect("测试 replay 投递应关闭");
+    }
+
+    /// 分页 replay 必须跨物理记录保留显式 Turn Provider，并正确处理不同 Turn 交错的用量。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn replay_uses_explicit_turn_provider_snapshots_across_records() {
+        let storage = tempfile::tempdir().expect("应创建测试存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "replay-explicit-provider-operation")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let provider_a = ProviderSnapshot {
+            provider_id: "provider-explicit-a".to_owned(),
+            model: "model-explicit-a".to_owned(),
+            context_window: Some(96_000),
+            protocol: ProviderProtocolSnapshot::OpenAiResponses,
+            config_fingerprint: "fingerprint-explicit-a".to_owned(),
+            reasoning_effort: None,
+        };
+        let provider_b = ProviderSnapshot {
+            provider_id: "provider-explicit-b".to_owned(),
+            model: "model-explicit-b".to_owned(),
+            context_window: Some(24_000),
+            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
+            config_fingerprint: "fingerprint-explicit-b".to_owned(),
+            reasoning_effort: None,
+        };
+        persist_usage_root_turn_with_provider_snapshot(
+            &session,
+            "replay-explicit-turn-a",
+            "model-explicit-a",
+            "显式 Provider A",
+            17,
+            provider_a,
+        )
+        .await;
+        persist_usage_root_turn_with_provider_snapshot(
+            &session,
+            "replay-explicit-turn-b",
+            "model-explicit-b",
+            "显式 Provider B",
+            19,
+            provider_b,
+        )
+        .await;
+
+        runtime
+            .replay_session(&session_id, None, 1_000)
+            .await
+            .expect("显式 Provider 历史应可 replay");
+        let usage = emitter
+            .snapshot()
+            .into_iter()
+            .filter_map(|value| {
+                (value["type"] == "session_update"
+                    && value["envelope"]["update"]["sessionUpdate"] == "usage_update")
+                    .then(|| {
+                        (
+                            value["envelope"]["update"]["used"].as_u64(),
+                            value["envelope"]["update"]["size"].as_u64(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            usage,
+            vec![(Some(17), Some(96_000)), (Some(19), Some(24_000))]
         );
         runtime
             .close_session_delivery(&session_id)

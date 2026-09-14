@@ -128,12 +128,12 @@ impl AgentRuntime {
                     .replay((sequence > 1).then_some(sequence - 1), 1)
                     .map_err(runtime_operation_failed)?;
                 for record in page.records {
-                    let (mapped, _) = map_authoritative_record_with_provider(
+                    let (mapped, _) = map_authoritative_record_with_projection(
                         &read_session,
                         &state,
                         &record,
                         AuthoritativeProjectionMode::Replay,
-                        None,
+                        ProviderProjection::from_current(provider.clone()),
                     )?;
                     context.extend(mapped.into_iter().filter(|draft| match draft {
                         DeliveryDraft::KeenCodeEvent {
@@ -248,8 +248,9 @@ fn history_window_drafts(
     state: &SessionState,
     start: u64,
     before: u64,
-    mut provider: Option<ProviderSnapshot>,
+    provider: Option<ProviderSnapshot>,
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
+    let mut provider = ProviderProjection::from_current(provider);
     let mut after = start - 1;
     let mut drafts = Vec::new();
     while after + 1 < before {
@@ -264,7 +265,7 @@ fn history_window_drafts(
             if record.sequence >= before {
                 break;
             }
-            let (mapped, next) = map_authoritative_record_with_provider(
+            let (mapped, next) = map_authoritative_record_with_projection(
                 session,
                 state,
                 &record,
