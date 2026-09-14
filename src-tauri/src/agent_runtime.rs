@@ -38,10 +38,11 @@ use keencode_agent::{
     ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookPhase, HookRuntime,
     JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind,
     ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor, QuiesceAgentTree,
-    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RootAgentRequest, RunLimits,
-    RuntimeStateError, SessionId as AgentSessionId, StructuredOutputMode, TerminalReason,
-    ToolCallId, ToolRegistry, TurnCancellation, TurnCancellationDisposition, TurnId as AgentTurnId,
-    TurnRequest, UuidCollaborationIdGenerator, root_turn_prompt_digest,
+    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RecoveredRootLifecycle,
+    RootAgentRequest, RunLimits, RuntimeStateError, SessionId as AgentSessionId,
+    StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry, TurnCancellation,
+    TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator,
+    root_turn_prompt_digest,
 };
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
@@ -3375,10 +3376,20 @@ fn validate_journal_turn_correspondence(
     if expected_outcome.is_some_and(|expected| expected != &actual_outcome) {
         return Err(AgentRuntimeError::RecoveryRequired);
     }
+    if matches!(
+        &agent.status,
+        CollaborationAgentStatus::Cancelling {
+            turn_id: cancelling_turn_id
+        } if cancelling_turn_id == turn_id
+    ) {
+        // Journal 终态可能先于取消回调落盘；在线路径会把同一竞态归一为 Interrupted。
+        return Ok(Some(AgentTurnOutcome::Interrupted));
+    }
     Ok(Some(actual_outcome))
 }
 
-/// 只收集 checkpoint 当前未决 Turn 在 Runtime Journal 中已经形成的唯一权威终态，
+/// 只收集 Open 根树未决 Turn 在 Runtime Journal 中已经形成的唯一权威终态；
+/// Closing 根树仅校验 Journal 对应关系，避免越过全树静止边界写回完成通知。
 /// 同时拒绝已终态 checkpoint 缺少 Journal 终态或因果字段不一致的冷启动。
 #[cfg(test)]
 fn recovered_authoritative_turn_outcomes(
@@ -3404,7 +3415,11 @@ fn recovered_authoritative_turn_outcomes_with_waiting_capacity(
     let Some(checkpoint) = checkpoint else {
         return Ok(outcomes);
     };
-    for agent in checkpoint.roots.iter().flat_map(|root| &root.agents) {
+    for (lifecycle, agent) in checkpoint
+        .roots
+        .iter()
+        .flat_map(|root| root.agents.iter().map(move |agent| (root.lifecycle, agent)))
+    {
         if let Some(last_turn) = agent.last_turn.as_ref() {
             let root_plan_guard = collaboration_root_plan_guard(
                 checkpoint,
@@ -3462,7 +3477,7 @@ fn recovered_authoritative_turn_outcomes_with_waiting_capacity(
             agent.current_turn_prompt.as_deref(),
             agent.current_plan_guard,
         )?;
-        if validate_journal_turn_correspondence(
+        let outcome = validate_journal_turn_correspondence(
             state,
             session,
             agent,
@@ -3473,8 +3488,9 @@ fn recovered_authoritative_turn_outcomes_with_waiting_capacity(
             root_turn_id,
             root_plan_guard,
             None,
-        )?
-        .is_some_and(|outcome| outcomes.insert(turn_id.clone(), outcome).is_some())
+        )?;
+        if lifecycle == RecoveredRootLifecycle::Open
+            && outcome.is_some_and(|outcome| outcomes.insert(turn_id.clone(), outcome).is_some())
         {
             return Err(AgentRuntimeError::RecoveryRequired);
         }
@@ -10247,11 +10263,11 @@ mod tests {
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
         LifecycleStartState, MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection,
-        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RootAgentSeed, RootTaskTerminalNotice,
-        RootTurnOptions, RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate,
-        RuntimeAgentTemplateContext, RuntimeExtensionCandidate, RuntimeExtensionContributor,
-        RuntimeExtensionDiagnostic, RuntimeGoalUsageSink, RuntimeToolContext,
-        SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
+        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RecoveredRootLifecycle, RootAgentSeed,
+        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
+        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
+        RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
+        RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
         authoritative_recovered_turn_outcome, background_task_completion_event,
         clear_historical_reasoning_state, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
@@ -11686,6 +11702,223 @@ mod tests {
                 final_message: Some("子任务完成摘要".to_owned()),
             })
         );
+    }
+
+    /// 取消已提交而 Runner 终态先落 Journal 时，冷恢复必须沿用在线取消语义。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelling_checkpoint_normalizes_completed_journal_turn_to_interrupted() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "cancelling-journal-race")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let collaboration = install_test_collaboration_runtime(&runtime, &session, project.path());
+        let root_turn =
+            AgentTurnId::new("turn-cancelling-journal-root").expect("根 Turn 标识应有效");
+        let root_prompt = "保持父 Runtime Turn 运行";
+        collaboration
+            .coordinator
+            .begin_root_turn_with_id(
+                &collaboration.root_agent_id,
+                root_turn.clone(),
+                root_prompt,
+                PlanGuard::inactive(),
+            )
+            .expect("根 Collaboration Turn 应启动");
+        let child_request = test_spawn_request("cancelling_journal_child", project.path());
+        let child = collaboration
+            .coordinator
+            .spawn_agent(
+                &collaboration.root_agent_id,
+                &root_turn,
+                &ToolCallId::new("spawn-cancelling-journal-child").expect("spawn 调用标识应有效"),
+                child_request.clone(),
+            )
+            .expect("子 Agent 应创建");
+
+        let root_provider_gate = Arc::new(tokio::sync::Notify::new());
+        let root_provider_entered = Arc::new(AtomicBool::new(false));
+        let root_provider = Arc::new(GateProvider {
+            inner: Arc::new(ScriptedProvider::new(
+                ProviderCapabilities::default(),
+                [completed_reply("父 Runtime Turn 完成")],
+            )),
+            entered: Arc::clone(&root_provider_entered),
+            gate: Arc::clone(&root_provider_gate),
+        });
+        let root_input = ModelMessage::text(MessageRole::User, root_prompt);
+        let root_request = TurnRequest::new(
+            keencode_agent::SessionId::new(session_id.clone()).expect("Session 标识应有效"),
+            root_turn.clone(),
+            collaboration.root_agent_id.clone(),
+            "test-model",
+            vec![root_input.clone()],
+            PlanGuard::inactive(),
+        );
+        let root_session = session.clone();
+        let root_task = tokio::spawn(async move {
+            root_session
+                .bind_agent_runner(AgentRunner::new(
+                    root_provider,
+                    ToolRegistry::new(),
+                    RunLimits::default(),
+                ))
+                .run_turn(RuntimeTurnRequest::root(
+                    root_request,
+                    vec![root_input],
+                    root_turn_summary(root_prompt, None, false),
+                ))
+                .await
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !root_provider_entered.load(Ordering::SeqCst) {
+            assert!(Instant::now() < deadline, "根 Runtime Turn 应进入模型采样");
+            tokio::task::yield_now().await;
+        }
+
+        let child_input = ModelMessage::text(MessageRole::User, &child_request.initial_task);
+        let child_runtime_request = TurnRequest::new(
+            keencode_agent::SessionId::new(session_id.clone()).expect("Session 标识应有效"),
+            child.initial_turn_id.clone(),
+            child.agent.agent_id.clone(),
+            "test-model",
+            vec![child_input.clone()],
+            PlanGuard::inactive(),
+        );
+        let child_result = session
+            .bind_agent_runner(AgentRunner::new(
+                Arc::new(ScriptedProvider::new(
+                    ProviderCapabilities::default(),
+                    [completed_reply("子 Runtime Turn 已完成")],
+                )),
+                ToolRegistry::new(),
+                RunLimits::default(),
+            ))
+            .run_turn(RuntimeTurnRequest::initial_child(
+                child_runtime_request,
+                vec![child_input],
+                root_turn.as_str(),
+                root_turn.as_str(),
+                child_request.initial_task.clone(),
+                SubAgentState {
+                    agent_id: ResourceAgentId::new(child.agent.agent_id.as_str().to_owned())
+                        .expect("资源子 Agent 标识应有效"),
+                    parent_agent_id: ResourceAgentId::new(
+                        collaboration.root_agent_id.as_str().to_owned(),
+                    )
+                    .expect("资源父 Agent 标识应有效"),
+                    agent_path: child.agent.path.as_str().to_owned(),
+                    task: child_request.initial_task,
+                    status: SubAgentStatus::Pending,
+                    current_turn_id: None,
+                    result_summary: None,
+                },
+            ))
+            .await
+            .expect("子 Runtime Turn 应提交 Journal 终态");
+        assert!(child_result.is_success());
+        collaboration
+            .coordinator
+            .cancel_turn(&child.agent.agent_id, &child.initial_turn_id)
+            .expect("子 Collaboration Turn 应进入 Cancelling");
+        let checkpoint = collaboration
+            .coordinator
+            .checkpoint_coordinator()
+            .expect("真实 Cancelling checkpoint 应读取");
+        let journal = session.snapshot().expect("真实 Journal 快照应读取");
+        let resource_child_turn =
+            ResourceTurnId::new(child.initial_turn_id.as_str().to_owned()).unwrap();
+        assert_eq!(
+            journal.state.turns[&resource_child_turn].status,
+            TurnStatus::Completed
+        );
+        assert!(matches!(
+            super::recovered_agent_for_id(&checkpoint, &child.agent.agent_id)
+                .expect("checkpoint 应包含子 Agent")
+                .status,
+            CollaborationAgentStatus::Cancelling { ref turn_id }
+                if turn_id == &child.initial_turn_id
+        ));
+
+        let outcomes = recovered_authoritative_turn_outcomes(Some(&checkpoint), &journal.state)
+            .expect("Journal 与 checkpoint 应完成严格对账");
+        assert_eq!(
+            outcomes.get(&child.initial_turn_id),
+            Some(&AgentTurnOutcome::Interrupted)
+        );
+        let mut closing_checkpoint = checkpoint.clone();
+        closing_checkpoint.roots[0].lifecycle = RecoveredRootLifecycle::Closing;
+        for recovered_agent in &mut closing_checkpoint.roots[0].agents {
+            let turn_id = recovered_agent
+                .status
+                .active_turn_id()
+                .cloned()
+                .expect("Closing 测试中的 Agent 应保持未决 Turn");
+            recovered_agent.status = CollaborationAgentStatus::Cancelling { turn_id };
+        }
+        assert!(
+            recovered_authoritative_turn_outcomes(Some(&closing_checkpoint), &journal.state)
+                .expect("Closing checkpoint 仍应严格校验已有 Journal 记录")
+                .is_empty(),
+            "Closing 根树不得向 Coordinator 提供权威终态"
+        );
+
+        runtime
+            .collaboration_sessions
+            .lock()
+            .expect("测试 Collaboration 表应可写")
+            .remove(&session_id);
+        let root_agent_id = collaboration.root_agent_id.clone();
+        drop(collaboration);
+        let recovered_store = Arc::new(
+            SessionCollaborationStore::new(storage.path(), &session_id)
+                .expect("冷恢复 Store 应创建"),
+        );
+        recovered_store
+            .bind_runtime_session(&session)
+            .expect("冷恢复 Store 应绑定 Session");
+        let restored = CollaborationCoordinator::new(
+            CollaborationLimits::new(2).expect("测试容量应有效"),
+            recovered_store,
+            Arc::new(NoopCollaborationExecution),
+            Arc::new(UuidCollaborationIdGenerator),
+        );
+        restored
+            .restore_coordinator_with_authoritative_outcomes(checkpoint, &outcomes)
+            .expect("取消竞态应按 Interrupted 冷恢复");
+        assert!(matches!(
+            restored.agent_status(&child.agent.agent_id).unwrap(),
+            CollaborationAgentStatus::Interrupted { ref turn_id }
+                if turn_id == &child.initial_turn_id
+        ));
+        let child_completion = restored
+            .mailbox(&root_agent_id)
+            .expect("父 mailbox 应读取")
+            .into_iter()
+            .find(|message| message.source_agent_id == child.agent.agent_id)
+            .expect("恢复应生成唯一子 Turn 终态通知");
+        assert!(matches!(
+            child_completion.kind,
+            keencode_agent::MailboxMessageKind::ChildTurnFinished {
+                outcome: AgentTurnOutcome::Interrupted
+            }
+        ));
+
+        root_provider_gate.notify_one();
+        root_task
+            .await
+            .expect("根 Runtime 任务不应 panic")
+            .expect("根 Runtime Turn 应完成");
+        drop(restored);
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("测试 Session 应关闭");
     }
 
     /// Collaboration 已保存终态但 Journal 缺少对应 Turn 时，冷启动必须要求恢复而不能静默接受。
