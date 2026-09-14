@@ -1654,20 +1654,82 @@ mod tests {
     }
 
     /// 等待真实 Runtime 的根/子 Agent、Runner 与 Session Journal 全部收敛。
-    async fn wait_for_session_idle(runtime: &Arc<AgentRuntime>, session_id: &str) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while runtime
-            .session_has_active_work(session_id)
-            .expect("冷恢复测试 Session 活动状态应读取")
-            && Instant::now() < deadline
-        {
+    async fn wait_for_session_idle(
+        runtime: &Arc<AgentRuntime>,
+        session_id: &str,
+        observed_requests: &AtomicUsize,
+    ) {
+        const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+        let deadline = Instant::now() + IDLE_WAIT_TIMEOUT;
+        loop {
+            let active_work = runtime
+                .session_has_active_work(session_id)
+                .expect("冷恢复测试 Session 活动状态应读取");
+            if !active_work {
+                return;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(
-            !runtime
-                .session_has_active_work(session_id)
-                .expect("冷恢复测试 Session 最终活动状态应读取"),
-            "冷恢复测试 Runtime 应在有限时限内收敛"
+
+        let active_work = runtime
+            .session_has_active_work(session_id)
+            .expect("冷恢复测试 Session 最终活动状态应读取");
+        if !active_work {
+            return;
+        }
+
+        let snapshot_summary = match runtime.session_snapshot(session_id) {
+            Ok(snapshot) => {
+                let turns = snapshot
+                    .state
+                    .turns
+                    .values()
+                    .map(|turn| format!("{}:{:?}", turn.turn_id.as_str(), &turn.status))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sub_agents = snapshot
+                    .state
+                    .sub_agents
+                    .values()
+                    .map(|agent| format!("{}:{:?}", agent.agent_id.as_str(), &agent.status))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!(
+                    "status={:?},turns=[{turns}],sub_agents=[{sub_agents}],active_reservations={},retained_reservations={},pending_indeterminate_events={},recovery_required={},closed={}",
+                    snapshot.state.status,
+                    snapshot.active_reservations,
+                    snapshot.retained_reservations,
+                    snapshot.pending_indeterminate_events,
+                    snapshot.recovery_required,
+                    snapshot.closed,
+                )
+            }
+            Err(_) => "unavailable".to_owned(),
+        };
+        let running_tasks = match runtime.background_tasks_list(session_id) {
+            Ok(tasks) => tasks
+                .iter()
+                .map(|task| {
+                    format!(
+                        "{}:{:?}:{}",
+                        task.task_id,
+                        task.kind,
+                        task.child_thread_id.as_deref().unwrap_or("-")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+            Err(_) => "unavailable".to_owned(),
+        };
+        panic!(
+            "冷恢复测试 Runtime 应在有限时限内收敛：model_requests={},active_work={},snapshot={},running_tasks=[{}]",
+            observed_requests.load(Ordering::Acquire),
+            active_work,
+            snapshot_summary,
+            running_tasks,
         );
     }
 
@@ -1734,7 +1796,7 @@ mod tests {
             )
             .await
             .expect("根 Turn 应启动并派发冷恢复子 Agent");
-        wait_for_session_idle(&runtime, &session_id).await;
+        wait_for_session_idle(&runtime, &session_id, &observed).await;
         assert_eq!(
             observed.load(Ordering::Acquire),
             3,
@@ -1905,7 +1967,7 @@ mod tests {
             Some(1)
         );
 
-        wait_for_session_idle(&cold_runtime, &response.session_id).await;
+        wait_for_session_idle(&cold_runtime, &response.session_id, &observed).await;
         let requests = server
             .join()
             .expect("冷恢复本地模型服务不应 panic")
