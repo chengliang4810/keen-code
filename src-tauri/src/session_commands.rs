@@ -58,7 +58,7 @@ Ultra Mode is enabled for this turn. Proactively delegate independent work when 
 1. Keep every delegated task aligned with the active Goal and include the relevant constraints in its prompt.
 2. Use only the single-level Agent tree. Compare available agent descriptions before choosing a specialist.
 3. Agent turns are asynchronous. A parent turn may finish while a child continues; child completion is queued in the parent mailbox and does not automatically start a new parent turn.
-4. Use spawn_agent to create a child, list_agents to inspect known children, send_message for queue-only delivery, followup_task to start a later turn on an idle child, interrupt_agent to stop only the child's current turn, and wait_agent only when the current turn actually depends on mailbox activity.
+4. Use spawn_agent to create a child, list_agents to inspect known children, send_message for queue-only delivery, followup_task to start a later turn on an idle child, interrupt_agent to stop only the child's current turn, resume_agent to recover a failed or interrupted child with a new turn, and wait_agent only when the current turn actually depends on mailbox activity.
 5. Resolve conflicting results before presenting a conclusion. In Plan Mode, every parent and child remains read-only.";
 
 /// 将任意内部错误转换为不包含请求正文的 Tauri 文本错误。

@@ -30,6 +30,7 @@ fn agents_tool_catalog_lists_template_support_tools() {
             "followup_task",
             "interrupt_agent",
             "retry_agent",
+            "resume_agent",
             "list_agents",
             "wait_agent",
         ]

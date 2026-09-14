@@ -15,9 +15,9 @@ use keencode_acp::{
     AcpRequest, CancelBackgroundTaskResponse, GoalClearResponse, GoalGetResponse,
     GoalMutationResponse, McpConnectionStatus, McpListResponse, McpOAuthCallbackRequest,
     McpOAuthStatus, McpRuntimePhase, McpServerStatus, McpTransportKind, RenameSessionResponse,
-    ReplaySessionResponse, RewindCandidate, RewindCandidatesResponse, RewindSessionResponse,
-    SessionMcpLoadRequest, SessionMcpStatusRequest, SessionMcpUnloadRequest, SteerSessionResponse,
-    ValidateAcpParams,
+    ReplaySessionResponse, ResumeBackgroundTaskResponse, RewindCandidate, RewindCandidatesResponse,
+    RewindSessionResponse, SessionMcpLoadRequest, SessionMcpStatusRequest, SessionMcpUnloadRequest,
+    SteerSessionResponse, ValidateAcpParams,
 };
 use keencode_resources::{
     GoalDocument, GoalFileStore, GoalRecord as ResourceGoalRecord,
@@ -106,7 +106,12 @@ pub(super) async fn dispatch(
         AcpRequest::RewindCandidates(request) => dispatch_rewind_candidates(host, id, request),
         AcpRequest::RewindSession(request) => dispatch_rewind(host, id, request).await,
         AcpRequest::ReplaySession(request) => dispatch_replay(host, id, request).await,
-        AcpRequest::CancelBackgroundTask(request) => dispatch_background_cancel(host, id, request),
+        AcpRequest::CancelBackgroundTask(request) => {
+            dispatch_background_cancel(host, id, request).await
+        }
+        AcpRequest::ResumeBackgroundTask(request) => {
+            dispatch_background_resume(host, id, request).await
+        }
         AcpRequest::ListBackgroundTasks(request) => dispatch_background_list(host, id, request),
         AcpRequest::GoalGet(request) => dispatch_goal_get(host, id, request),
         AcpRequest::GoalUpsert(request) => dispatch_goal_upsert(host, id, request),
@@ -395,7 +400,7 @@ fn dispatch_background_list(
 }
 
 /// 精确授权并取消一个后台任务；没有任务时返回明确的 `cancelled=false`。
-fn dispatch_background_cancel(
+async fn dispatch_background_cancel(
     host: &AcpHost,
     id: schema::RequestId,
     request: keencode_acp::CancelBackgroundTaskRequest,
@@ -403,6 +408,7 @@ fn dispatch_background_cancel(
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
     let session_id = request.session_id;
     let task_id = request.task_id;
+    let _control = host.lock_session_control(&session_id).await?;
     let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
     let outcome = host
@@ -415,6 +421,33 @@ fn dispatch_background_cancel(
         cancelled: cancellation_was_requested(outcome),
     };
     host.result_value(id, &response)
+}
+
+/// 授权恢复一个失败或中断的单层子 Agent；请求身份必须是 childThreadId。
+async fn dispatch_background_resume(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: keencode_acp::ResumeBackgroundTaskRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let session_id = request.session_id;
+    let child_thread_id = request.child_thread_id;
+    let operation_id = request_operation_id(request.meta.as_ref())?;
+    let _control = host.lock_session_control(&session_id).await?;
+    let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    let task_id = host
+        .runtime
+        .resume_background_agent(&session_id, &operation_id, &child_thread_id)
+        .map_err(map_runtime_failure)?;
+    host.result_value(
+        id,
+        &ResumeBackgroundTaskResponse::new(
+            session_id,
+            child_thread_id,
+            task_id.as_str().to_owned(),
+        ),
+    )
 }
 
 /// 只有底层本次首次发出取消信号时才报告 `cancelled=true`。

@@ -1066,6 +1066,7 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
         "followup_task",
         "interrupt_agent",
         "retry_agent",
+        "resume_agent",
         "list_agents",
         "wait_agent",
     ]

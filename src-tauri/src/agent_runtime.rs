@@ -182,6 +182,8 @@ pub enum AgentRuntimeError {
     SessionProjectMismatch,
     /// Session Runtime 控制面操作失败。
     RuntimeOperationFailed,
+    /// 请求恢复的后台子 Agent 身份或生命周期状态不符合当前恢复契约。
+    InvalidResumeTarget,
     /// 全局或项目指令损坏、不可读或超过自动注入预算。
     InstructionsUnavailable,
     /// Journal 与 Collaboration 的冷恢复事实无法证明属于同一条 Turn 谱系。
@@ -241,6 +243,7 @@ impl fmt::Display for AgentRuntimeError {
             Self::SessionUnavailable => formatter.write_str("Session 不存在或不可恢复"),
             Self::SessionProjectMismatch => formatter.write_str("Session 不属于当前项目"),
             Self::RuntimeOperationFailed => formatter.write_str("Session Runtime 操作失败"),
+            Self::InvalidResumeTarget => formatter.write_str("后台子 Agent 当前不能恢复"),
             Self::InstructionsUnavailable => {
                 formatter.write_str("无法加载全局或项目指令文件：请检查文件类型、UTF-8 编码和大小")
             }
@@ -6626,6 +6629,106 @@ impl AgentRuntime {
                 .then_with(|| left.task_id.cmp(&right.task_id))
         });
         Ok(tasks.into_iter().map(|(_, task)| task).collect::<Vec<_>>())
+    }
+
+    /// 由根 Session 授权恢复一个失败或中断的单层子 Agent，并返回新 Turn 标识。
+    ///
+    /// `child_thread_id` 始终按 Agent 身份解析；后台列表中的 `task_id` 是 Turn
+    /// 身份，二者不能互换。恢复不伪造活跃根 Turn，Coordinator 会以目标旧 Turn
+    /// 的因果链、输入和动态 claim 创建一个新的 Turn，并由 operationId 去重。
+    pub fn resume_background_agent(
+        self: &Arc<Self>,
+        session_id: &str,
+        operation_id: &str,
+        child_thread_id: &str,
+    ) -> Result<AgentTurnId, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        let target_agent_id = RunnerAgentId::new(child_thread_id.to_owned())
+            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
+        let operation_id = ToolCallId::new(operation_id.to_owned())
+            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| runtime_operation_failed(error))?;
+        self.ensure_session_delivery(session_id)?;
+        let existing_collaboration = self
+            .collaboration_sessions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .cloned();
+        let collaboration = if let Some(collaboration) = existing_collaboration {
+            collaboration
+        } else {
+            // 已有持久 checkpoint 时恢复操作可以先按 checkpoint 中冻结的根 Profile
+            // 装配；这样同一 operationId 的重放不会因为当前 Provider 暂不可用而
+            // 丢失已经提交的新 Turn。全新 Session 仍必须要求当前 Provider。
+            let persisted = SessionCollaborationStore::new(&self.storage_root, session_id)?
+                .load_transition_snapshot()
+                .map_err(|error| runtime_operation_failed(error))?;
+            let seed = persisted
+                .as_ref()
+                .and_then(|transition| transition.commit.checkpoint.roots.first())
+                .and_then(|tree| {
+                    tree.known_agents
+                        .iter()
+                        .find(|agent| agent.depth == AgentDepth::ROOT)
+                })
+                .map(|root| RootAgentSeed {
+                    model: root.profile.model.clone(),
+                    reasoning_effort: root.profile.reasoning_effort.clone(),
+                    plan_guard: root.profile.plan_guard,
+                })
+                .map_or_else(
+                    || {
+                        let resolved =
+                            self.resolve_session_provider(snapshot.state.provider.as_ref())?;
+                        let reasoning_effort = snapshot
+                            .state
+                            .provider
+                            .as_ref()
+                            .and_then(|provider| provider.reasoning_effort);
+                        Ok(RootAgentSeed {
+                            model: resolved.model().to_owned(),
+                            reasoning_effort: reasoning_effort
+                                .map(reasoning_effort_snapshot_name),
+                            plan_guard: if snapshot.state.plan.enabled {
+                                PlanGuard::read_only()
+                            } else {
+                                PlanGuard::inactive()
+                            },
+                        })
+                    },
+                    Ok,
+                )?;
+            self.ensure_collaboration_runtime(&session, seed)?
+        };
+        reconcile_live_dynamic_input_acknowledgements(&session, &collaboration.coordinator)?;
+        collaboration
+            .coordinator
+            .resume_agent_for_root_with_operation(
+                &collaboration.root_agent_id,
+                &operation_id,
+                &target_agent_id,
+            )
+            .map_err(|error| match error {
+                keencode_agent::CollaborationError::AgentNotFound { .. }
+                | keencode_agent::CollaborationError::CrossTreeOperation
+                | keencode_agent::CollaborationError::RetryNotAllowed { .. }
+                | keencode_agent::CollaborationError::TargetNotIdle { .. }
+                | keencode_agent::CollaborationError::TargetStopped { .. }
+                | keencode_agent::CollaborationError::TreeClosed { .. } => {
+                    AgentRuntimeError::InvalidResumeTarget
+                }
+                error => runtime_operation_failed(error),
+            })
     }
 
     /// 精确取消一个后台 Shell 或单层子 Agent，并返回真实取消结果。

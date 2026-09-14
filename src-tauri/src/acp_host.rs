@@ -1331,6 +1331,7 @@ fn map_runtime_failure(error: AgentRuntimeError) -> HostFailure {
     tracing::error!(%error, "Agent runtime operation failed");
     match error {
         AgentRuntimeError::InvalidSession => HostFailure::InvalidParams,
+        AgentRuntimeError::InvalidResumeTarget => HostFailure::InvalidParams,
         AgentRuntimeError::SessionUnavailable | AgentRuntimeError::SessionProjectMismatch => {
             HostFailure::ResourceNotFound
         }
