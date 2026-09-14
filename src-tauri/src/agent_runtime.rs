@@ -4667,7 +4667,21 @@ impl AgentRuntime {
         let session = if let Some(session_id) = requested_session_id {
             validate_session_id(session_id)?;
             match self.runtime_manager.get(session_id.to_owned()) {
-                Ok(session) => session,
+                Ok(session) if session.is_open().map_err(runtime_operation_failed)? => session,
+                Ok(_) => {
+                    // 关闭流程可能已经冻结句柄、但在最后清理失败前仍留在 Manager。
+                    // 加载或配置既有对话时先完成幂等关闭，再从 Journal 建立新句柄。
+                    self.runtime_manager
+                        .close(session_id.to_owned())
+                        .map_err(runtime_operation_failed)?;
+                    match self.runtime_manager.open(session_id.to_owned()) {
+                        Ok(OpenSessionResult::Ready(session)) => session,
+                        Ok(OpenSessionResult::Corrupt(_)) => {
+                            return Err(AgentRuntimeError::SessionUnavailable);
+                        }
+                        Err(error) => return Err(runtime_operation_failed(error)),
+                    }
+                }
                 Err(RuntimeError::SessionNotRegistered) => {
                     match self.runtime_manager.open(session_id.to_owned()) {
                         Ok(OpenSessionResult::Ready(session)) => session,

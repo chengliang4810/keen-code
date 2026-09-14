@@ -1562,6 +1562,15 @@ impl RuntimeSession {
         subscription
     }
 
+    /// 返回当前共享句柄是否仍接受 Session 写操作。
+    pub fn is_open(&self) -> Result<bool, RuntimeError> {
+        self.inner
+            .control
+            .lock()
+            .map(|control| control.lifecycle == RuntimeSessionLifecycle::Open)
+            .map_err(|_| RuntimeError::StateUnavailable)
+    }
+
     /// 对当前 Session 内正在运行的指定 Turn 触发 Runtime 权威取消令牌。
     pub fn cancel_turn(
         &self,
