@@ -210,6 +210,16 @@ struct MutationReceipt {
     response: SessionMcpMutationResponse,
 }
 
+/// 最近一次尚未被成功模型请求确认的目录换代。
+///
+/// `from_definitions` 必须保留换代前的完整定义，而不是只保留名称集合：新建
+/// Runner 可能发生在 `replace_exact` 已经发布之后，仍需要从旧快照生成通知。
+struct PendingCatalogTransition {
+    from_generation: u64,
+    from_definitions: BTreeMap<String, ToolDefinition>,
+    generation: u64,
+}
+
 /// Session 目录的已发布与待发布双缓冲状态。
 struct SessionMcpState {
     current_project: ProjectToolSnapshot,
@@ -219,6 +229,7 @@ struct SessionMcpState {
     failed_servers: BTreeMap<String, FailedServer>,
     receipts: BTreeMap<String, MutationReceipt>,
     receipt_order: VecDeque<String>,
+    pending_catalog_transition: Option<PendingCatalogTransition>,
     closed: bool,
 }
 
@@ -259,6 +270,7 @@ impl SessionMcpRuntime {
                 failed_servers: BTreeMap::new(),
                 receipts: BTreeMap::new(),
                 receipt_order: VecDeque::new(),
+                pending_catalog_transition: None,
                 closed: false,
             }),
         }))
@@ -586,12 +598,55 @@ impl SessionMcpRuntime {
         // 再次校验当前动态 Server，避免把名称或工具冲突发布到运行态。
         validate_project_catalog(&state.desired_project, &state.desired_servers)?;
         let tools = composite_tools(&state.desired_project.tools, &state.desired_servers);
+        let (from_generation, from_definitions) = self.catalog.generation_and_definitions();
         self.catalog
             .replace_all(tools)
             .map_err(|_| SessionMcpError::CatalogConflict)?;
+        let generation = self.catalog.generation_and_definitions().0;
+        if let Some(pending) = state.pending_catalog_transition.as_mut() {
+            // 如果上一个换代尚未被模型请求确认，继续保留最初的旧快照，
+            // 让新的 Runner 一次看到从未确认前到最新目录的完整变化。
+            pending.generation = generation;
+        } else {
+            state.pending_catalog_transition = Some(PendingCatalogTransition {
+                from_generation,
+                from_definitions: definition_map(&from_definitions),
+                generation,
+            });
+        }
         state.current_project = clone_project_snapshot(&state.desired_project);
         state.current_servers = state.desired_servers.clone();
         Ok(())
+    }
+
+    /// Provider 成功接受指定目录代次后清除对应的全局待确认状态。
+    fn acknowledge_catalog_update(&self, generation: u64) -> Result<(), SessionMcpError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| SessionMcpError::StateUnavailable)?;
+        if state
+            .pending_catalog_transition
+            .as_ref()
+            .is_some_and(|pending| pending.generation == generation)
+        {
+            state.pending_catalog_transition = None;
+        }
+        Ok(())
+    }
+
+    /// 返回新建 Runner 应从哪个定义快照开始观察目录。
+    fn initial_catalog_observation(&self) -> (u64, BTreeMap<String, ToolDefinition>) {
+        let (generation, definitions) = self.catalog.generation_and_definitions();
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| {
+                state.pending_catalog_transition.as_ref().map(|pending| {
+                    (pending.from_generation, pending.from_definitions.clone())
+                })
+            })
+            .unwrap_or_else(|| (generation, definition_map(&definitions)))
     }
 
     fn receipt(
@@ -640,6 +695,7 @@ impl SessionMcpRuntime {
             state.failed_servers.clear();
             state.receipts.clear();
             state.receipt_order.clear();
+            state.pending_catalog_transition = None;
             let _ = self.catalog.replace_all(Vec::new());
             leases
         };
@@ -649,18 +705,37 @@ impl SessionMcpRuntime {
     }
 }
 
-/// 每个 Runner 独立保存观察水位，确保并发 Runner 各收到一次相同换代。
+/// 每个 Runner 独立保存观察水位，确保并发 Runner 各收到一次相同换代；
+/// Provider 成功前保留本轮在途通知。
 struct SessionToolCatalogUpdateSource {
     runtime: Arc<SessionMcpRuntime>,
-    observed: Mutex<(u64, BTreeSet<String>)>,
+    observed: Mutex<ObservedCatalog>,
+}
+
+/// 一个 Runner 对目录的本地观察水位和尚未确认的本轮通知。
+struct ObservedCatalog {
+    generation: u64,
+    definitions: BTreeMap<String, ToolDefinition>,
+    in_flight: Option<InFlightCatalogUpdate>,
+}
+
+/// Provider 成功前冻结的目录变化与其目标定义快照。
+struct InFlightCatalogUpdate {
+    delta: AgentToolCatalogDelta,
+    target_generation: u64,
+    target_definitions: BTreeMap<String, ToolDefinition>,
 }
 
 impl SessionToolCatalogUpdateSource {
     fn new(runtime: Arc<SessionMcpRuntime>) -> Self {
-        let (generation, definitions) = runtime.catalog.generation_and_definitions();
+        let (generation, definitions) = runtime.initial_catalog_observation();
         Self {
             runtime,
-            observed: Mutex::new((generation, definition_names(&definitions))),
+            observed: Mutex::new(ObservedCatalog {
+                generation,
+                definitions,
+                in_flight: None,
+            }),
         }
     }
 }
@@ -671,18 +746,75 @@ impl AgentToolCatalogUpdateSource for SessionToolCatalogUpdateSource {
             .apply_pending()
             .map_err(|error| AgentToolCatalogUpdateError::new(error.to_string()))?;
         let (generation, definitions) = self.runtime.catalog.generation_and_definitions();
-        let names = definition_names(&definitions);
+        let definitions = definition_map(&definitions);
         let mut observed = self
             .observed
             .lock()
             .map_err(|_| AgentToolCatalogUpdateError::new("工具目录观察水位不可用"))?;
-        if observed.0 == generation {
+        if let Some(in_flight) = &observed.in_flight {
+            return Ok(Some(in_flight.delta.clone()));
+        }
+        if observed.generation == generation {
             return Ok(None);
         }
-        let added = names.difference(&observed.1).cloned().collect::<Vec<_>>();
-        let removed = observed.1.difference(&names).cloned().collect::<Vec<_>>();
-        *observed = (generation, names);
-        AgentToolCatalogDelta::new(generation, added, removed).map(Some)
+        let added = definitions
+            .keys()
+            .filter(|name| !observed.definitions.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = observed
+            .definitions
+            .keys()
+            .filter(|name| !definitions.contains_key(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        let changed = definitions
+            .iter()
+            .filter_map(|(name, definition)| {
+                observed
+                    .definitions
+                    .get(name)
+                    .filter(|previous| *previous != definition)
+                    .map(|_| name.clone())
+            })
+            .collect::<Vec<_>>();
+        let delta = AgentToolCatalogDelta::new_with_changed(generation, added, removed, changed)
+            .map_err(|error| AgentToolCatalogUpdateError::new(error.message().to_owned()))?;
+        observed.in_flight = Some(InFlightCatalogUpdate {
+            delta: delta.clone(),
+            target_generation: generation,
+            target_definitions: definitions,
+        });
+        Ok(Some(delta))
+    }
+
+    fn acknowledge_update(
+        &self,
+        generation: u64,
+    ) -> Result<(), AgentToolCatalogUpdateError> {
+        let mut observed = self
+            .observed
+            .lock()
+            .map_err(|_| AgentToolCatalogUpdateError::new("工具目录观察水位不可用"))?;
+        let Some(in_flight) = observed.in_flight.as_ref() else {
+            if observed.generation == generation {
+                return Ok(());
+            }
+            return Err(AgentToolCatalogUpdateError::new("工具目录确认代次不匹配"));
+        };
+        if in_flight.target_generation != generation {
+            return Err(AgentToolCatalogUpdateError::new("工具目录确认代次不匹配"));
+        }
+        self.runtime
+            .acknowledge_catalog_update(generation)
+            .map_err(|error| AgentToolCatalogUpdateError::new(error.to_string()))?;
+        let in_flight = observed
+            .in_flight
+            .take()
+            .expect("已检查的目录确认状态应仍存在");
+        observed.generation = in_flight.target_generation;
+        observed.definitions = in_flight.target_definitions;
+        Ok(())
     }
 }
 
@@ -1287,10 +1419,10 @@ fn sha256_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn definition_names(definitions: &[ToolDefinition]) -> BTreeSet<String> {
+fn definition_map(definitions: &[ToolDefinition]) -> BTreeMap<String, ToolDefinition> {
     definitions
         .iter()
-        .map(|definition| definition.name.clone())
+        .map(|definition| (definition.name.clone(), definition.clone()))
         .collect()
 }
 
@@ -1543,11 +1675,15 @@ fn extract_id(body: &str) -> Option<&str> {
 
     impl NamedTool {
         fn new(name: String) -> Arc<Self> {
-            Arc::new(Self(ToolDefinition::new(
+            Self::with_definition(ToolDefinition::new(
                 name,
                 "项目目录冲突测试工具",
                 json!({ "type": "object" }),
-            )))
+            ))
+        }
+
+        fn with_definition(definition: ToolDefinition) -> Arc<Self> {
+            Arc::new(Self(definition))
         }
     }
 
@@ -1610,6 +1746,9 @@ fn extract_id(body: &str) -> Option<&str> {
             assert_eq!(delta.generation(), 2);
             assert_eq!(delta.added(), std::slice::from_ref(&expected_name));
             assert!(delta.removed().is_empty());
+            source
+                .acknowledge_update(delta.generation())
+                .expect("成功投递目录通知后应确认观察水位");
         }
         assert!(first_runner.take_update().unwrap().is_none());
         assert!(isolated_runner.take_update().unwrap().is_none());
@@ -1636,10 +1775,53 @@ fn extract_id(body: &str) -> Option<&str> {
             assert_eq!(delta.generation(), 3);
             assert!(delta.added().is_empty());
             assert_eq!(delta.removed(), std::slice::from_ref(&expected_name));
+            source
+                .acknowledge_update(delta.generation())
+                .expect("成功投递撤销通知后应确认观察水位");
         }
         wait_for_file_lines(&closed, 1).await;
         runtime.close().await;
         isolated.close().await;
+    }
+
+    #[tokio::test]
+    async fn unacknowledged_catalog_change_survives_failed_runner_and_reaches_next_runner() {
+        let directory = tempfile::tempdir().unwrap();
+        let started = directory.path().join("started");
+        let closed = directory.path().join("closed");
+        let runtime = empty_runtime("session-retry", directory.path());
+        runtime
+            .load(
+                "load-retry",
+                vec![stdio_server("local", "echo", &started, &closed)],
+            )
+            .await
+            .unwrap();
+
+        let failed_runner = runtime.update_source();
+        let first = failed_runner
+            .take_update()
+            .unwrap()
+            .expect("失败 Runner 应先看到目录变化");
+        assert_eq!(first.generation(), 2);
+
+        // 模拟首次 Provider 请求不可恢复失败：没有确认调用，新的 Runner
+        // 仍应从待确认换代前的定义快照生成同一通知。
+        let retry_runner = runtime.update_source();
+        let retry = retry_runner
+            .take_update()
+            .unwrap()
+            .expect("下一 Runner 仍应看到未确认目录变化");
+        assert_eq!(retry, first);
+        assert_eq!(
+            retry.added(),
+            &[keencode_tools::portable_mcp_tool_name("local", "echo").unwrap()]
+        );
+
+        retry_runner.acknowledge_update(retry.generation()).unwrap();
+        let after_success = runtime.update_source();
+        assert!(after_success.take_update().unwrap().is_none());
+        runtime.close().await;
     }
 
     #[tokio::test]
@@ -2093,6 +2275,19 @@ fn extract_id(body: &str) -> Option<&str> {
         runtime.replace_exact(vec![first.clone()]).await.unwrap();
         assert_eq!(runtime.status().unwrap().catalog_generation, 2);
         assert_eq!(file_line_count(&started), 1);
+        let replacement_runner = runtime.update_source();
+        let replacement_delta = replacement_runner
+            .take_update()
+            .unwrap()
+            .expect("replace_exact 发布后新 Runner 应收到目录变化");
+        assert_eq!(replacement_delta.generation(), 2);
+        assert_eq!(
+            replacement_delta.added(),
+            &[keencode_tools::portable_mcp_tool_name("local", "echo").unwrap()]
+        );
+        replacement_runner
+            .acknowledge_update(replacement_delta.generation())
+            .unwrap();
         runtime.replace_exact(vec![first]).await.unwrap();
         assert_eq!(runtime.status().unwrap().catalog_generation, 2);
         assert_eq!(file_line_count(&started), 1, "相同完整配置不得重连");
@@ -2120,6 +2315,53 @@ fn extract_id(body: &str) -> Option<&str> {
         wait_for_file_lines(&closed, 1).await;
         runtime.close().await;
         wait_for_file_lines(&closed, 2).await;
+    }
+
+    #[tokio::test]
+    async fn same_name_definition_change_is_reported_as_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = SessionMcpRuntime::new(
+            "session-schema-change".to_owned(),
+            directory.path().to_path_buf(),
+            ProjectToolSnapshot {
+                version: ProjectCatalogVersion {
+                    generation: 1,
+                    revoked: false,
+                },
+                server_names: BTreeSet::new(),
+                tools: vec![NamedTool::with_definition(ToolDefinition::new(
+                    "same-tool",
+                    "旧定义",
+                    json!({ "type": "object", "properties": { "old": { "type": "string" } } }),
+                ))],
+            },
+        )
+        .unwrap();
+        let source = runtime.update_source();
+        runtime
+            .queue_project_snapshot(ProjectToolSnapshot {
+                version: ProjectCatalogVersion {
+                    generation: 2,
+                    revoked: false,
+                },
+                server_names: BTreeSet::new(),
+                tools: vec![NamedTool::with_definition(ToolDefinition::new(
+                    "same-tool",
+                    "新定义",
+                    json!({ "type": "object", "properties": { "new": { "type": "number" } } }),
+                ))],
+            })
+            .unwrap();
+
+        let delta = source
+            .take_update()
+            .unwrap()
+            .expect("同名定义变化应产生目录通知");
+        assert!(delta.added().is_empty());
+        assert!(delta.removed().is_empty());
+        assert_eq!(delta.changed(), &["same-tool".to_owned()]);
+        source.acknowledge_update(delta.generation()).unwrap();
+        runtime.close().await;
     }
 
     #[tokio::test]
