@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   type Dispatch,
@@ -27,6 +28,7 @@ import {
 } from "@/lib/session";
 import {
   createOperationId,
+  diagnosticsRecord,
   type SessionSnapshot as AcpSessionSnapshot,
 } from "@/lib/acp/api";
 import { ensureAcpSession } from "@/lib/acp/projection";
@@ -183,6 +185,9 @@ export function useSessionNavigation({
   portsRef.current = { route, runtime, sidebar, composer, providers, ui };
   /** 会话草稿只在当前桌面生命周期保存；空草稿不占缓存，不与新对话草稿混用。 */
   const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
+  const navigationTimingRef = useRef<{
+    sessionId: string; epoch: number; started: number; firstCommit?: number;
+  } | null>(null);
 
   const {
     draftKeyRef,
@@ -200,6 +205,23 @@ export function useSessionNavigation({
     }),
     [],
   );
+
+  useLayoutEffect(() => {
+    const timing = navigationTimingRef.current;
+    if (!timing || timing.sessionId !== ui.session.sessionId ||
+        timing.epoch !== viewEpochRef.current || timing.firstCommit !== undefined) return;
+    timing.firstCommit = performance.now();
+    if (typeof requestAnimationFrame !== "function") return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (navigationTimingRef.current !== timing) return;
+      void diagnosticsRecord("session_navigation", JSON.stringify({
+        sessionId: timing.sessionId, phase: "first_frame",
+        commitMs: Math.round(timing.firstCommit! - timing.started),
+        frameMs: Math.round(performance.now() - timing.started),
+        frameAfterCommitMs: Math.round(performance.now() - timing.firstCommit!),
+      })).catch(() => {});
+    }));
+  }, [ui.session.sessionId, viewEpochRef]);
 
   const draftNavigationLocation = useCallback(
     (): DraftNavigationLocation => ({
@@ -253,6 +275,7 @@ export function useSessionNavigation({
       const current = portsRef.current;
       // The browser preview deliberately does not create ACP sessions.
       if (!current.runtime.isTauri() || typeof window === "undefined") return;
+      const started = performance.now();
 
       const projectForSession =
         project !== undefined
@@ -271,6 +294,9 @@ export function useSessionNavigation({
       snapshotOutgoingDraft();
       bumpViewEpoch();
       snapshotOutgoingSession();
+      navigationTimingRef.current = {
+        sessionId: row.id, epoch: viewEpochRef.current, started,
+      };
 
       openingSessionIdRef.current = row.id;
       viewingSessionIdRef.current = row.id;
@@ -281,6 +307,12 @@ export function useSessionNavigation({
       const targetMessages = current.runtime.messagesBySessionRef.current.get(row.id) ?? [];
       current.runtime.messagesRef.current = targetMessages;
       current.ui.setMessages(targetMessages);
+      const cachedView = current.runtime.workspaceRef.current.sessions[row.id];
+      current.ui.setSession(cachedView?.replay.loaded
+        ? { ...projectAcpSnapshot(cachedView), title: row.title }
+        : { ...IDLE_SNAPSHOT, sessionId: row.id, state: "connecting", title: row.title,
+            projectPath: projectForSession?.path ?? null });
+      current.sidebar.setActiveProject(projectForSession);
       const originView = currentViewFocus();
       openingSessionEpochRef.current = originView.epoch;
       const canAdoptOpenView = () =>
@@ -298,9 +330,12 @@ export function useSessionNavigation({
       );
 
       try {
+        const connectStarted = performance.now();
         const operationId = createOperationId("session-connect");
         let hostState: AcpSessionSnapshot["state"] | null = null;
         let view = current.runtime.workspaceRef.current.sessions[row.id];
+        let connectMs = 0;
+        let replayMs = 0;
         if (!view) {
           const connected = await current.runtime.connect({
             projectPath: projectForSession?.path || undefined,
@@ -309,9 +344,12 @@ export function useSessionNavigation({
           });
           current.runtime.observeHostActiveTurn(connected);
           hostState = connected.state;
+          connectMs = performance.now() - connectStarted;
           view = ensureAcpSession(current.runtime.workspaceRef.current, row.id);
           view.project_path = projectForSession?.path ?? null;
+          const replayStarted = performance.now();
           await current.runtime.replayHistory(row.id, originView);
+          replayMs = performance.now() - replayStarted;
         } else {
           // 后台 Session 重新获得原生焦点，提问通知才能正确归属当前任务。
           const connected = await current.runtime.connect({
@@ -321,8 +359,11 @@ export function useSessionNavigation({
           });
           current.runtime.observeHostActiveTurn(connected);
           hostState = connected.state;
+          connectMs = performance.now() - connectStarted;
           try {
+            const replayStarted = performance.now();
             await current.runtime.replayHistory(row.id, originView);
+            replayMs = performance.now() - replayStarted;
           } catch {
             const reconnected = await current.runtime.connect({
               projectPath: projectForSession?.path || undefined,
@@ -348,6 +389,11 @@ export function useSessionNavigation({
           ? { ...projected, state: hostState }
           : projected;
         current.ui.setSession(snapshot);
+        void diagnosticsRecord("session_navigation", JSON.stringify({
+          sessionId: row.id, phase: "ready", cached: cachedView?.replay.loaded === true,
+          connectMs: Math.round(connectMs), replayMs: Math.round(replayMs),
+          readyMs: Math.round(performance.now() - started),
+        })).catch(() => {});
         current.ui.setLiveHost(snapshot);
         current.runtime.liveHostRef.current = snapshot;
         current.sidebar.setActiveProject(projectForSession);
@@ -367,6 +413,14 @@ export function useSessionNavigation({
         await current.runtime.refreshSessions();
       } catch (cause) {
         if (canAdoptOpenView()) {
+          void diagnosticsRecord("session_navigation", JSON.stringify({
+            sessionId: row.id, phase: "failed",
+            elapsedMs: Math.round(performance.now() - started),
+            reason: cause instanceof Error ? cause.message : String(cause),
+          })).catch(() => {});
+          current.ui.setSession((previous) => previous.sessionId === row.id
+            ? { ...previous, state: "disconnected" }
+            : previous);
           current.ui.setLocalError(localizeUiError(cause, locale));
         }
         clearOpeningSlot();

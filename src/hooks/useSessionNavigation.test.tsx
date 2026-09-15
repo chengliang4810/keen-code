@@ -4,6 +4,12 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useSessionNavigation, type UseSessionNavigationOptions } from "./useSessionNavigation";
 import { createAcpWorkspaceState } from "@/lib/acp/store";
 import { IDLE_SNAPSHOT } from "@/lib/session";
+import { diagnosticsRecord } from "@/lib/acp/api";
+
+vi.mock("@/lib/acp/api", async (original) => ({
+  ...await original<typeof import("@/lib/acp/api")>(),
+  diagnosticsRecord: vi.fn().mockResolvedValue(undefined),
+}));
 
 function createHarness() {
   const setModelId = vi.fn();
@@ -64,6 +70,10 @@ it("连续导航隔离两会话草稿、附件和失败气泡，迟到恢复不�
   let finish!: (value: Awaited<ReturnType<typeof options.runtime.connect>>) => void;
   options.runtime.connect = vi.fn(() => new Promise<Awaited<ReturnType<typeof options.runtime.connect>>>((resolve) => { finish = resolve; }));
   const opening = navigation.openSession(row("dashboard"));
+  expect(options.ui.setSession).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: "dashboard", title: "dashboard", state: "connecting",
+  }));
+  expect(options.sidebar.setActiveProject).toHaveBeenCalledWith(null);
   expect(options.composer.draftRef.current).toBe("");
   expect(options.composer.attachmentsRef.current).toEqual([]);
   expect(options.runtime.messagesRef.current).toEqual([]);
@@ -72,6 +82,7 @@ it("连续导航隔离两会话草稿、附件和失败气泡，迟到恢复不�
   const finishDashboard = finish;
   options.runtime.connect = vi.fn().mockResolvedValue({ sessionId: "hy4-session", state: "ready" });
   await navigation.openSession(row("hy4-session"));
+  expect(diagnosticsRecord).toHaveBeenCalledWith("session_navigation", expect.stringContaining('"phase":"ready"'));
   expect(options.composer.draftRef.current).toBe("CART");
   expect(options.composer.attachmentsRef.current).toEqual([file]);
   finishDashboard({ sessionId: "dashboard", state: "ready" } as Awaited<ReturnType<typeof options.runtime.connect>>);
