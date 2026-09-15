@@ -1021,8 +1021,11 @@
 }
 
 .lobe-chat-thinking__body {
+  max-height: 40vh;
   margin: 8px 0 0 8px;
   padding: 0 0 0 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--chat-divider);
   color: var(--chat-text-3);
   font-size: 13px;

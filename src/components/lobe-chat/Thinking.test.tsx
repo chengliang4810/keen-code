@@ -110,7 +110,7 @@ describe("Thinking processing duration", () => {
     expect(element.scrollLeft).toBe(0);
   });
 
-  it("运行扫光尊重 reduced-motion，展开正文不再使用内部滚动区", () => {
+  it("运行扫光尊重 reduced-motion，展开的长正文限制高度并独立滚动", () => {
     const css = readFileSync(
       new URL("./lobe-chat.css", import.meta.url),
       "utf8",
@@ -119,11 +119,14 @@ describe("Thinking processing duration", () => {
     expect(css).toMatch(
       /@media \(prefers-reduced-motion: reduce\)\s*\{[\s\S]*?\.lobe-chat-thinking__trigger::after\s*\{[^}]*animation:\s*none;/,
     );
-    expect(css).not.toMatch(
-      /\.lobe-chat-thinking__body\s*\{[^}]*max-height:/s,
+    expect(css).toMatch(
+      /\.lobe-chat-thinking__body\s*\{[^}]*max-height:\s*40vh;/s,
     );
-    expect(css).not.toMatch(
-      /\.lobe-chat-thinking__body\s*\{[^}]*overflow-y:\s*auto/s,
+    expect(css).toMatch(
+      /\.lobe-chat-thinking__body\s*\{[^}]*overflow-y:\s*auto;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-chat-thinking__body\s*\{[^}]*overscroll-behavior:\s*contain;/s,
     );
   });
 });
