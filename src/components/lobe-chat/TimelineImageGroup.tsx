@@ -8,7 +8,7 @@ import type { MessageToolSegment } from "@/lib/session";
 
 /** 连续的图片读取共用一行；折叠时卸载预览并释放 Blob。 */
 export function TimelineImageGroup({ tools, locale }: { tools: MessageToolSegment[]; locale: Locale }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const sources = tools.flatMap((tool) => tool.imageSources ?? []);
   const tr = createT(locale);
   return (
