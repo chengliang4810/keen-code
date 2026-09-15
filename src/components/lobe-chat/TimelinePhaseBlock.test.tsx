@@ -1,4 +1,5 @@
 import React from "react";
+import fs from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import type { TimelinePhase } from "@/lib/timelinePhases";
@@ -58,6 +59,17 @@ function cancelledTool(
 }
 
 describe("TimelinePhaseBlock", () => {
+  it("工具组标题与对话正文左侧对齐", () => {
+    const css = fs.readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(
+      /\.lobe-timeline-phase__trigger\s*\{[^}]*padding:\s*2px 0;/s,
+    );
+  });
+
   it("活动工具组默认折叠并在标题显示当前命令", () => {
     const html = renderToString(
       React.createElement(TimelinePhaseBlock, {
