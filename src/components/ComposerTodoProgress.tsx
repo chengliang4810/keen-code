@@ -17,6 +17,8 @@ export interface ComposerTodoProgressProps {
   locale: Locale;
   /** ACP Plan 事件归约出的当前 Todo 投影。 */
   todos?: AcpTodoProjection | null;
+  /** 当前 Session 是否仍在执行；终态后的 Todo 不得继续显示运行动画。 */
+  running?: boolean;
 }
 
 /** 把运行时状态收敛为计划卡片支持的三个展示状态。 */
@@ -41,6 +43,7 @@ export function composerTodoStep(
 export function ComposerTodoProgress({
   locale,
   todos,
+  running = false,
 }: ComposerTodoProgressProps) {
   const items = todos?.items ?? [];
   const step = useMemo(() => composerTodoStep(items), [items]);
@@ -70,7 +73,9 @@ export function ComposerTodoProgress({
     >
       <ol className="composer-todo__card" aria-hidden={!open}>
         {items.map((item, index) => {
-          const status = normalizeComposerTodoStatus(item.status);
+          const status = normalizeComposerTodoStatus(
+            item.status === "in_progress" && !running ? "pending" : item.status,
+          );
           return (
             <li
               key={`${todos?.revision ?? 0}:${index}:${item.content}`}

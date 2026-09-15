@@ -18,6 +18,7 @@ describe("ComposerTodoProgress", () => {
       <ComposerTodoProgress
         locale="zh"
         todos={{ revision: 2, items }}
+        running
       />,
     );
 
@@ -29,6 +30,21 @@ describe("ComposerTodoProgress", () => {
     expect(html).toContain('stroke-dasharray="33.33333333333333 100"');
     expect(html).toContain('aria-expanded="false"');
     expect(html).not.toContain("TodoWrite");
+  });
+
+  it("Turn 结束后不再把遗留的 in_progress Todo 显示为运行中", () => {
+    const html = renderToString(
+      <ComposerTodoProgress
+        locale="zh"
+        todos={{
+          revision: 2,
+          items: [{ content: "等待下一轮继续", status: "in_progress" }],
+        }}
+      />,
+    );
+
+    expect(html).toContain("composer-todo__item--pending");
+    expect(html).not.toContain("composer-todo__item--in_progress");
   });
 
   it("没有计划时不占用输入框上方空间", () => {

@@ -70,6 +70,7 @@ export function ComposerContextBar({
       <ComposerTodoProgress
         key={`composer-todo-${session.sessionId ?? "draft"}`}
         locale={locale}
+        running={session.state === "streaming"}
         todos={
           acpSessionView?.session_id === session.sessionId
             ? acpSessionView.todos
