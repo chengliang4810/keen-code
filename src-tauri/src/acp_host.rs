@@ -29,6 +29,7 @@ use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tracing::Instrument;
 
@@ -52,6 +53,10 @@ const SUPPORTED_PROTOCOL_VERSION: schema::ProtocolVersion = schema::ProtocolVers
 const SESSION_LIST_PAGE_SIZE: usize = 100;
 /// 历史页必须保持根回合完整；长工具链单轮可超过协议默认的 1 MiB。
 const ACP_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
+/// 单个 Session 加载阶段超过该时长时记录结构化慢日志。
+const SLOW_SESSION_LOAD_PHASE: Duration = Duration::from_millis(500);
+/// 完整 Session 加载超过该时长时记录结构化慢日志。
+const SLOW_SESSION_LOAD_TOTAL: Duration = Duration::from_secs(1);
 /// ACP `_meta` 中可选的稳定创建操作标识。
 const META_OPERATION_ID: &str = "keencode/operationId";
 /// ACP `_meta` 中可选的精确 Turn 标识。
@@ -87,6 +92,28 @@ const ROOT_SOURCE_AGENT_ID: &str = ROOT_AGENT_ID;
 
 /// 全局唯一的当前进程 ACP Host。
 static ACP_HOST: OnceLock<Arc<AcpHost>> = OnceLock::new();
+
+/// 记录 Session 加载阶段耗时；慢路径提升为 warn，便于在用户感知卡顿前发现回归。
+fn record_session_load_phase(session_id: &str, phase: &str, elapsed: Duration) {
+    let elapsed_ms = elapsed.as_millis();
+    if elapsed >= SLOW_SESSION_LOAD_PHASE {
+        tracing::warn!(
+            target: "keencode_diagnostics",
+            session_id,
+            phase,
+            elapsed_ms,
+            "slow session load phase"
+        );
+    } else {
+        tracing::info!(
+            target: "keencode_diagnostics",
+            session_id,
+            phase,
+            elapsed_ms,
+            "session load phase completed"
+        );
+    }
+}
 
 /// ACP 握手状态；协议版本只在成功 initialize 后固定。
 #[derive(Default)]
@@ -434,7 +461,7 @@ impl AcpHost {
         let mcp_servers = request.mcp_servers.clone();
         let session_id = request.session_id.0.as_ref().to_owned();
         let _control = self.lock_session_control(&session_id).await?;
-        let started = std::time::Instant::now();
+        let load_started = std::time::Instant::now();
         let requested_root = self.authorized_cwd(&request.cwd)?;
         let history = request
             .meta
@@ -483,16 +510,21 @@ impl AcpHost {
             let started = std::time::Instant::now();
             let stored_root = authorize_stored_session_root(&runtime, &app, &id)
                 .map_err(|_| HostFailure::ResourceNotFound)?;
-            if requested_root != stored_root { return Err(HostFailure::ResourceNotFound); }
-            tracing::info!(target: "keencode_diagnostics", phase = "session_authorize", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+            if requested_root != stored_root {
+                return Err(HostFailure::ResourceNotFound);
+            }
+            record_session_load_phase(&id, "session_authorize", started.elapsed());
             let started = std::time::Instant::now();
             // 仅恢复目标日志，查看历史不需要 MCP/LSP 或供应商网络连接。
-            let session = runtime.open_or_create_session(&stored_root, Some(&id), "acp-load")
+            let session = runtime
+                .open_or_create_session(&stored_root, Some(&id), "acp-load")
                 .map_err(map_runtime_failure)?;
-            tracing::info!(target: "keencode_diagnostics", phase = "session_open", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+            record_session_load_phase(&id, "session_open", started.elapsed());
             Ok::<_, HostFailure>(session)
-        }).await.map_err(internal_failure)??;
-        tracing::info!(target: "keencode_diagnostics", phase = "session_restore", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+        })
+        .await
+        .map_err(internal_failure)??;
+        record_session_load_phase(&session_id, "session_restore", load_started.elapsed());
         if !mcp_servers.is_empty() {
             self.ensure_extensions(&mcp_project_root).await?;
         }
@@ -517,7 +549,7 @@ impl AcpHost {
             Some(page) => page.replay.clone().ok_or(HostFailure::Internal)?,
             None => self.replay_full_session(&session_id).await?,
         };
-        tracing::info!(target: "keencode_diagnostics", phase = "session_history_delivery", elapsed_ms = started.elapsed().as_millis(), through_sequence = replay.through_journal_sequence, "session phase completed");
+        record_session_load_phase(&session_id, "session_history_delivery", started.elapsed());
         let started = std::time::Instant::now();
         let snapshot = session
             .snapshot()
@@ -534,7 +566,43 @@ impl AcpHost {
             META_REPLAY.to_owned(),
             serde_json::to_value(&replay).map_err(|error| internal_failure(error))?,
         );
-        tracing::info!(target: "keencode_diagnostics", phase = "session_response", elapsed_ms = started.elapsed().as_millis(), "session phase completed");
+        record_session_load_phase(&session_id, "session_response", started.elapsed());
+        let total_elapsed = load_started.elapsed();
+        let total_elapsed_ms = total_elapsed.as_millis();
+        let state = &snapshot.state;
+        if total_elapsed >= SLOW_SESSION_LOAD_TOTAL {
+            tracing::warn!(
+                target: "keencode_diagnostics",
+                session_id,
+                phase = "session_load_total",
+                elapsed_ms = total_elapsed_ms,
+                journal_bytes = snapshot.journal_bytes,
+                event_records = state.last_sequence,
+                transcript_records = state.transcript.len(),
+                turns = state.turns.len(),
+                model_rounds = state.model_rounds.len(),
+                tools = state.tools.len(),
+                sub_agents = state.sub_agents.len(),
+                mailbox_messages = state.mailbox.len(),
+                "slow session load"
+            );
+        } else {
+            tracing::info!(
+                target: "keencode_diagnostics",
+                session_id,
+                phase = "session_load_total",
+                elapsed_ms = total_elapsed_ms,
+                journal_bytes = snapshot.journal_bytes,
+                event_records = state.last_sequence,
+                transcript_records = state.transcript.len(),
+                turns = state.turns.len(),
+                model_rounds = state.model_rounds.len(),
+                tools = state.tools.len(),
+                sub_agents = state.sub_agents.len(),
+                mailbox_messages = state.mailbox.len(),
+                "session load completed"
+            );
+        }
         Ok(schema::LoadSessionResponse::new()
             .modes(session_mode_state(snapshot.state.plan.enabled))
             .config_options(config_options)

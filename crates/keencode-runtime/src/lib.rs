@@ -197,6 +197,8 @@ pub enum TurnCancellationOutcome {
 pub struct RuntimeSnapshot {
     /// 从完整权威日志归约得到的 Session 状态。
     pub state: SessionState,
+    /// 当前权威 Journal 文件大小；用于发现无界增长和加载风险。
+    pub journal_bytes: u64,
     /// 当前共享 Runtime Session 是否已被 Manager 关闭并禁止启动新工作。
     pub closed: bool,
     /// 当前进程是否因不确定提交或硬持久化错误而冻结后续权威工作。
@@ -1194,8 +1196,10 @@ impl RuntimeSession {
             .values()
             .filter(|entry| entry.retained_event.is_some() || entry.abandoned_after_progress)
             .count();
+        let journal_bytes = journal_len(&self.inner.journal)?;
         Ok(RuntimeSnapshot {
             state,
+            journal_bytes,
             closed: control.lifecycle != RuntimeSessionLifecycle::Open,
             recovery_required: control.recovery_required,
             active_reservations: control.reservations.len(),
