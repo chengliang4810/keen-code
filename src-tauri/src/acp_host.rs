@@ -7,8 +7,9 @@ use crate::agent_runtime::{
     AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome,
 };
 use crate::session_commands::{
-    PLAN_MODE_CONTRACT_EN, ULTRA_MODE_CONTRACT_EN, authorized_metadata, close_session_for_mutation,
-    restore_session_after_mutation, retry_session_mutation, session_mode_state,
+    PLAN_MODE_CONTRACT_EN, ULTRA_MODE_CONTRACT_EN, authorize_stored_session_root,
+    authorized_metadata, close_session_for_mutation, restore_session_after_mutation,
+    retry_session_mutation, session_mode_state,
 };
 use keencode_acp::schema;
 use keencode_acp::{
@@ -480,7 +481,7 @@ impl AcpHost {
         let session = tokio::task::spawn_blocking(move || {
             let _span = span.enter();
             let started = std::time::Instant::now();
-            let (_, stored_root) = authorized_metadata(&runtime, &app, &id)
+            let stored_root = authorize_stored_session_root(&runtime, &app, &id)
                 .map_err(|_| HostFailure::ResourceNotFound)?;
             if requested_root != stored_root { return Err(HostFailure::ResourceNotFound); }
             tracing::info!(target: "keencode_diagnostics", phase = "session_authorize", elapsed_ms = started.elapsed().as_millis(), "session phase completed");

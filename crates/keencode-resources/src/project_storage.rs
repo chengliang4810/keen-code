@@ -178,6 +178,22 @@ pub fn session_project_directory(
     Ok(Some(secure_child_dir(&projects, &id)?))
 }
 
+/// 通过会话定位读取并校验所属项目描述，不访问会话 Journal。
+pub fn session_project_storage(
+    root: &Path,
+    session_id: &SessionId,
+) -> Result<Option<ProjectStorage>, ResourceError> {
+    let Some(directory) = session_project_directory(root, session_id)? else {
+        return Ok(None);
+    };
+    let descriptor = read_json::<ProjectStorage>(&directory.join("project.json"))?
+        .ok_or_else(|| ResourceError::UnsafePath("项目描述缺失".into()))?;
+    if directory.file_name().and_then(|name| name.to_str()) != Some(descriptor.id.as_str()) {
+        return Err(ResourceError::UnsafePath("项目描述与存储目录不一致".into()));
+    }
+    Ok(Some(descriptor))
+}
+
 /// 解析对话相关文件的统一目录。
 pub fn session_storage_directory(
     root: &Path,
@@ -261,6 +277,13 @@ mod tests {
         register_session_location(root.path(), &id, &first).unwrap();
         assert!(register_session_location(root.path(), &id, &second).is_err());
         assert_eq!(
+            session_project_storage(root.path(), &id)
+                .unwrap()
+                .unwrap()
+                .path,
+            "/project-one"
+        );
+        assert_eq!(
             session_storage_directory(root.path(), &id).unwrap(),
             first.join(id.as_str())
         );
@@ -276,5 +299,19 @@ mod tests {
                 .is_none()
         );
         assert!(session_storage_directory(root.path(), &id).is_err());
+    }
+
+    #[test]
+    fn session_project_storage_rejects_a_mismatched_descriptor() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = ensure_project_storage(root.path(), "/project-one").unwrap();
+        let id = SessionId::new("session-one").unwrap();
+        register_session_location(root.path(), &id, &directory).unwrap();
+        fs::write(
+            directory.join("project.json"),
+            br#"{"id":"project-other","name":"other","path":"/project-one"}"#,
+        )
+        .unwrap();
+        assert!(session_project_storage(root.path(), &id).is_err());
     }
 }

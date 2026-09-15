@@ -119,6 +119,27 @@ pub(crate) fn authorized_metadata(
     Ok((metadata, root))
 }
 
+/// 通过可重建定位索引授权 Session 所属项目，不为授权重复打开权威 Journal。
+pub(crate) fn authorize_stored_session_root(
+    runtime: &AgentRuntime,
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<PathBuf, String> {
+    required_identifier(session_id, "sessionId")?;
+    if let Ok(session) = runtime.runtime_manager().get(session_id) {
+        let metadata = session
+            .read_state(|state| StoredSessionMetadata::from_state(state, false))
+            .map_err(runtime_error)?
+            .ok_or_else(|| format!("Session {session_id} 尚未创建"))?;
+        return authorize_stored_root(app, &metadata.project_root);
+    }
+    let id = keencode_resources::SessionId::new(session_id.to_owned()).map_err(runtime_error)?;
+    let project = keencode_resources::session_project_storage(runtime.storage_root(), &id)
+        .map_err(runtime_error)?
+        .ok_or_else(|| format!("Session {session_id} 不存在"))?;
+    authorize_stored_root(app, &project.path)
+}
+
 /// 打开一个已经通过当前项目登记表授权的 Session。
 pub(crate) fn open_authorized_session(
     runtime: &AgentRuntime,

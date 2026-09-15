@@ -4602,6 +4602,11 @@ impl AgentRuntime {
         &self.runtime_manager
     }
 
+    /// 返回项目与 Session 定位索引所在的数据根目录。
+    pub fn storage_root(&self) -> &Path {
+        &self.storage_root
+    }
+
     /// 返回进程内唯一 Elicitation 协调器，AskUser 不得建立旁路待决账本。
     pub fn elicitation_coordinator(&self) -> &Arc<ElicitationCoordinator> {
         &self.elicitations

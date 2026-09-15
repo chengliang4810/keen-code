@@ -74,5 +74,5 @@ pub use types::{SIDE_EFFECT_UNKNOWN_RESULT_TEXT, side_effect_unknown_result};
 pub use project_storage::{
     ProjectStorage, ensure_project_storage, project_storage_directories, project_storage_for_path,
     register_project_storage, register_session_location, remove_session_location,
-    session_project_directory, session_storage_directory,
+    session_project_directory, session_project_storage, session_storage_directory,
 };
