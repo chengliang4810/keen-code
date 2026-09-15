@@ -1048,6 +1048,20 @@ fn sub_agent_path_and_mailbox_causality_are_strict() {
             },
         })
         .expect("合法子 Agent 路径应创建");
+    let sibling = AgentId::new("mailbox-sibling").expect("兄弟 Agent ID 应有效");
+    journal
+        .append(SessionEvent::SubAgentSpawned {
+            agent: SubAgentState {
+                agent_id: sibling.clone(),
+                parent_agent_id: root_agent.clone(),
+                agent_path: "/root/mailbox_sibling".to_owned(),
+                task: "接收兄弟 Agent 消息".to_owned(),
+                status: SubAgentStatus::Pending,
+                current_turn_id: None,
+                result_summary: None,
+            },
+        })
+        .expect("同一根 Agent 的一级兄弟应创建");
     assert_reduction_error(journal.append(SessionEvent::SubAgentSpawned {
         agent: SubAgentState {
             agent_id: AgentId::new("mailbox-child-alias").expect("子 Agent ID 应有效"),
@@ -1117,9 +1131,17 @@ fn sub_agent_path_and_mailbox_causality_are_strict() {
             "mail-child-valid",
             child.clone(),
             root_agent.clone(),
-            child_turn,
+            child_turn.clone(),
         ))
         .expect("子 Agent 消息应绑定自身 Turn");
+    journal
+        .append(message(
+            "mail-sibling-valid",
+            child.clone(),
+            sibling,
+            child_turn,
+        ))
+        .expect("同一根 Agent 的一级兄弟消息应绑定来源 Turn");
     journal
         .append(message("mail-root-valid", root_agent, child, root_turn))
         .expect("根 Agent 消息应绑定自身 Turn");

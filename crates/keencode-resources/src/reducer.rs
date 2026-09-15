@@ -1065,14 +1065,16 @@ fn reduce_record_inner(
             if message.body.trim().is_empty() && message.artifact.is_none() {
                 return Err(ReductionError::new("邮箱消息正文和 Artifact 不能同时为空"));
             }
-            let route_is_valid = state
-                .sub_agents
-                .get(&message.from)
+            let source_agent = state.sub_agents.get(&message.from);
+            let target_agent = state.sub_agents.get(&message.to);
+            let route_is_valid = source_agent
                 .is_some_and(|agent| agent.parent_agent_id == message.to)
-                || state
-                    .sub_agents
-                    .get(&message.to)
-                    .is_some_and(|agent| agent.parent_agent_id == message.from);
+                || target_agent.is_some_and(|agent| agent.parent_agent_id == message.from)
+                || source_agent
+                    .zip(target_agent)
+                    .is_some_and(|(source, target)| {
+                        source.parent_agent_id == target.parent_agent_id
+                    });
             let source_turn_is_valid = state
                 .turns
                 .get(&message.related_turn_id)
