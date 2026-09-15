@@ -13,7 +13,7 @@ use crate::session_commands::{
 use keencode_acp::schema;
 use keencode_acp::{
     AcpBoundaryError, AcpIncomingFrame, AcpNotification, AcpRequest, AcpRequestDecoder,
-    AcpResponseEncoder, AcpResponsePayload,
+    AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload,
 };
 use keencode_agent::{CollaborationIdGenerator, UuidCollaborationIdGenerator};
 use keencode_resources::{
@@ -49,6 +49,8 @@ mod tests;
 const SUPPORTED_PROTOCOL_VERSION: schema::ProtocolVersion = schema::ProtocolVersion::V1;
 /// `session/list` 单页的固定上限；客户端可用返回的 cursor 继续读取。
 const SESSION_LIST_PAGE_SIZE: usize = 100;
+/// 历史页必须保持根回合完整；长工具链单轮可超过协议默认的 1 MiB。
+const ACP_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// ACP `_meta` 中可选的稳定创建操作标识。
 const META_OPERATION_ID: &str = "keencode/operationId";
 /// ACP `_meta` 中可选的精确 Turn 标识。
@@ -169,11 +171,14 @@ fn session_control_lock(
 
 /// 安装当前应用唯一 ACP Host；必须在 Agent Runtime 已进入 Tauri State 后调用。
 pub(crate) fn install(app: &AppHandle, runtime: Arc<AgentRuntime>) -> Result<(), String> {
+    let response_limits = AcpResponseLimits::new(ACP_RESPONSE_MAX_BYTES, 64, 65_536)
+        .map_err(|error| error.to_string())?;
     let host = Arc::new(AcpHost {
         app: app.clone(),
         runtime,
         decoder: AcpRequestDecoder::new(),
-        encoder: AcpResponseEncoder::new(),
+        encoder: AcpResponseEncoder::with_limits(response_limits)
+            .map_err(|error| error.to_string())?,
         handshake: Mutex::new(HandshakeState::default()),
         control_gate: tokio::sync::Mutex::new(()),
         session_controls: Mutex::new(BTreeMap::new()),
