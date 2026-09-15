@@ -120,9 +120,24 @@ pub(crate) fn reduce_record_from_valid_state(
     state: &mut SessionState,
     record: &SessionEventRecord,
 ) -> Result<(), ReductionError> {
+    reduce_record_from_valid_state_with_atomic_mode(state, record, true)
+}
+
+pub(crate) fn reduce_record_for_snapshot_validation(
+    state: &mut SessionState,
+    record: &SessionEventRecord,
+) -> Result<(), ReductionError> {
+    reduce_record_from_valid_state_with_atomic_mode(state, record, false)
+}
+
+fn reduce_record_from_valid_state_with_atomic_mode(
+    state: &mut SessionState,
+    record: &SessionEventRecord,
+    transactional_atomic_batch: bool,
+) -> Result<(), ReductionError> {
     validate_sub_agent_turn_consistency(state)?;
     validate_standalone_sub_agent_turn_event(state, &record.event)?;
-    reduce_record_inner(state, record, false)?;
+    reduce_record_inner(state, record, false, transactional_atomic_batch)?;
     state.updated_at_unix_ms = record.time_unix_ms;
     if matches!(record.event, SessionEvent::SessionCreated { .. }) {
         state.created_at_unix_ms = record.time_unix_ms;
@@ -135,6 +150,7 @@ fn reduce_record_inner(
     state: &mut SessionState,
     record: &SessionEventRecord,
     inside_atomic_batch: bool,
+    transactional_atomic_batch: bool,
 ) -> Result<(), ReductionError> {
     validate_envelope(state, record)?;
     if state.status == SessionStatus::Closed
@@ -179,9 +195,10 @@ fn reduce_record_inner(
             validate_atomic_sub_agent_turn_pairing(state, events)?;
             validate_atomic_turn_provider_snapshot_pairing(state, events)?;
             let physical_sequence = record.sequence;
-            let mut candidate = state.clone();
+            let mut candidate = transactional_atomic_batch.then(|| state.clone());
+            let target = candidate.as_mut().unwrap_or(state);
             for event in events {
-                let sequence = candidate
+                let sequence = target
                     .last_sequence
                     .checked_add(1)
                     .ok_or_else(|| ReductionError::new("原子批次内部 sequence 计算溢出"))?;
@@ -192,11 +209,13 @@ fn reduce_record_inner(
                     record.time_unix_ms,
                     event.clone(),
                 );
-                reduce_record_inner(&mut candidate, &nested, true)?;
+                reduce_record_inner(target, &nested, true, transactional_atomic_batch)?;
             }
-            validate_sub_agent_turn_consistency(&candidate)?;
-            candidate.last_sequence = physical_sequence;
-            *state = candidate;
+            validate_sub_agent_turn_consistency(target)?;
+            target.last_sequence = physical_sequence;
+            if let Some(candidate) = candidate {
+                *state = candidate;
+            }
             return Ok(());
         }
         SessionEvent::SessionStatusChanged { status } => {

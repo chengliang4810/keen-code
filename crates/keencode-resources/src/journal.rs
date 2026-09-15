@@ -19,7 +19,8 @@ use crate::atomic::{
 };
 use crate::canonical::canonical_json_sha256;
 use crate::reducer::{
-    reduce_record_from_valid_state, validate_atomic_batch_shape, validate_owned_atomic_batch_shape,
+    reduce_record_for_snapshot_validation, reduce_record_from_valid_state,
+    validate_atomic_batch_shape, validate_owned_atomic_batch_shape,
 };
 use crate::{
     ArtifactId, ArtifactMaterialization, ArtifactUse, ArtifactValidator, CorruptionIssue,
@@ -2444,6 +2445,11 @@ fn load_session(
         validate_state_collections(&state, config.max_state_collection_items)?;
         valid_records += 1;
     }
+    // 有效 Snapshot 之后存在健康尾记录时，在本次打开结束前刷新缓存水位。
+    // 否则每次重新打开都会重复归约同一批尾部 AtomicBatch，并反复克隆大状态。
+    if issues.is_empty() && valid_records > start {
+        snapshot_needs_rebuild = true;
+    }
 
     let mut history_index = SessionHistoryIndex::default();
     for record in read.records.iter().take(valid_records) {
@@ -2765,19 +2771,24 @@ fn snapshot_is_valid(
         && snapshot.through_event_sha256 == expected_event_hash
         && snapshot.through_log_sha256 == expected_log_hash
         && snapshot.state.last_sequence == snapshot.through_sequence
-        && state_hash(&snapshot.state).is_ok_and(|hash| hash == snapshot.state_sha256);
+        && state_hash(&snapshot.state).is_ok_and(|hash| hash == snapshot.state_sha256)
+        && validate_state_collections(&snapshot.state, config.max_state_collection_items).is_ok();
     if !anchors_match {
         return false;
     }
     let mut replayed = SessionState::empty(session_id.clone());
-    for record in read.records.iter().take(sequence) {
-        if reduce_record_from_valid_state(&mut replayed, record).is_err()
-            || validate_state_collections(&replayed, config.max_state_collection_items).is_err()
+    for (index, record) in read.records.iter().take(sequence).enumerate() {
+        if reduce_record_for_snapshot_validation(&mut replayed, record).is_err() {
+            return false;
+        }
+        if (index + 1) % JOURNAL_BATCH_MAX_RECORDS == 0
+            && validate_state_collections(&replayed, config.max_state_collection_items).is_err()
         {
             return false;
         }
     }
-    replayed == snapshot.state
+    validate_state_collections(&replayed, config.max_state_collection_items).is_ok()
+        && replayed == snapshot.state
 }
 
 /// 读取并反序列化 Snapshot。
