@@ -42,6 +42,13 @@
   --terminal-canvas: #0d0d0d;
   --surface-tint-light: #eef0f3;
   --ext-warn: #e0b44a;
+  /* 思考强度滑块的品牌色与“快速”色。轨道与旋钮在深浅主题下都使用这组固定值，
+   * 与画面动效的取值同源，避免画布与 DOM 出现两套颜色。 */
+  --effort-brand: #cc6b47;
+  --effort-brand-ink: #ed9470;
+  --effort-fast: #ffd65c;
+  --effort-fast-ink: #eda821;
+  --effort-spark: #ffffff;
 
 
   --space-1: 4px;

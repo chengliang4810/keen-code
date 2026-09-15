@@ -1,20 +1,20 @@
-import { IconBrain, IconChevronDown } from "@/components/icons";
+import { IconBrain, IconBolt, IconChevronDown } from "@/components/icons";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { EffortSlider } from "@/components/ui/effort-slider";
 import { Label } from "@/components/ui/label";
-import { Slider } from "@/components/ui/slider";
-import { Switch } from "@/components/ui/switch";
 import { Tip } from "@/components/ui/tooltip";
 import {
   effortDisplayLabel,
   effortsForModel,
   type ModelOption,
 } from "@/lib/modelCatalog";
+import { resolveEffortTrackKind } from "@/lib/effortTrack";
+import "@/styles/effort-slider.css";
 
 export interface ComposerReasoningMenuProps {
   open: boolean;
@@ -26,7 +26,6 @@ export interface ComposerReasoningMenuProps {
     reasoning: string;
     reasoningUnsupported: string;
     ultra: string;
-    ultraDescription: string;
     effortNone: string;
     effortMinimal: string;
     effortHigh: string;
@@ -56,6 +55,15 @@ function effortLabel(
   });
 }
 
+/** 标题样式类：与滑块的四态同源，最高档、快速与融合各有颜色。 */
+export function effortTitleClass(
+  isMax: boolean,
+  fast: boolean,
+): string {
+  const kind = resolveEffortTrackKind(isMax, fast);
+  return `effort-title effort-title--${kind}`;
+}
+
 /** 模型推理强度与 Ultra 委派策略的独立面板。 */
 export function ComposerReasoningMenu({
   open,
@@ -75,6 +83,8 @@ export function ComposerReasoningMenu({
   const currentLabel = hasEffort
     ? effortLabel(effortList[Math.max(0, effortIndex)]!.id, model, labels)
     : labels.reasoningUnsupported;
+  // 标题与滑块共用四态：最高档由档位决定，快速复用 Ultra 开关。
+  const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
 
   const trigger = (
     <DropdownMenuTrigger asChild>
@@ -107,40 +117,38 @@ export function ComposerReasoningMenu({
         sideOffset={8}
       >
         <div className="grid gap-4">
-          <div className="grid gap-3">
-            <div className="flex items-center justify-between gap-2">
-              <Label htmlFor="composer-reasoning-effort">{labels.reasoning}</Label>
-              <span className="text-sm text-muted-foreground">{currentLabel}</span>
-            </div>
-            <Slider
-              id="composer-reasoning-effort"
-              aria-label={labels.reasoning}
-              value={[Math.max(0, effortIndex)]}
-              onValueChange={([index]) => {
-                const next = effortList[index ?? -1];
-                if (next) onEffort(next.id);
-              }}
-              min={0}
-              max={Math.max(0, effortList.length - 1)}
-              step={1}
-              disabled={!hasEffort || effortList.length < 2}
-            />
+          {/* 上游 EffortSliderCard 布局：左上名称、中央大标题、右上快速按钮。 */}
+          <div className="effort-panel__head">
+            <Label
+              htmlFor="composer-reasoning-effort"
+              className="effort-panel__model"
+            >
+              {labels.reasoning}
+            </Label>
+            <span className={effortTitleClass(isMax, ultra)}>{currentLabel}</span>
+            <Tip label={labels.ultra}>
+              <Button
+                type="button"
+                className={`effort-panel__fast ${ultra ? "is-on" : ""}`}
+                aria-pressed={ultra}
+                aria-label={labels.ultra}
+                onClick={() => onUltra(!ultra)}
+              >
+                <IconBolt size={15} />
+              </Button>
+            </Tip>
           </div>
-          <DropdownMenuSeparator />
-          <div className="flex items-start justify-between gap-4">
-            <div className="grid gap-1">
-              <Label htmlFor="composer-ultra-mode">{labels.ultra}</Label>
-              <span className="text-xs text-muted-foreground">
-                {labels.ultraDescription}
-              </span>
-            </div>
-            <Switch
-              id="composer-ultra-mode"
-              aria-label={labels.ultra}
-              checked={ultra}
-              onCheckedChange={onUltra}
-            />
-          </div>
+          <EffortSlider
+            id="composer-reasoning-effort"
+            count={hasEffort ? effortList.length : 0}
+            index={Math.max(0, effortIndex)}
+            onIndexChange={(next) => {
+              const entry = effortList[next];
+              if (entry) onEffort(entry.id);
+            }}
+            fast={ultra}
+            label={labels.reasoning}
+          />
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

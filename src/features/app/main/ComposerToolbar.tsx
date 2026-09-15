@@ -248,7 +248,6 @@ export function ComposerToolbar({
           reasoning: tr("composer.effort"),
           reasoningUnsupported: tr("composer.reasoningUnsupported"),
           ultra: tr("composer.ultra"),
-          ultraDescription: tr("composer.ultraDescription"),
           effortNone: tr("effort.none"),
           effortMinimal: tr("effort.minimal"),
           effortHigh: tr("effort.high"),

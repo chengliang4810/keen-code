@@ -57,16 +57,21 @@ describe("ComposerReasoningMenu", () => {
     expect(html).toContain(">中<");
   });
 
-  it("面板使用单值离散 Slider，Ultra 保持独立 Switch", () => {
+  it("面板使用 EffortSlider 胶囊滑块，Ultra 是左上角亮起按钮", () => {
     const source = readFileSync(
       new URL("./ComposerReasoningMenu.tsx", import.meta.url),
       "utf8",
     );
 
-    expect(source).toContain("value={[Math.max(0, effortIndex)]}");
-    expect(source).toContain("step={1}");
-    expect(source).toContain("<Switch");
-    expect(source).toContain("checked={ultra}");
-    expect(source.match(/<DropdownMenuSeparator/g)).toHaveLength(1);
+    expect(source).toContain("<EffortSlider");
+    expect(source).not.toContain("<Slider ");
+    expect(source).toContain("fast={ultra}");
+    expect(source).toContain('className={`effort-panel__fast ${ultra ? "is-on" : ""}`}');
+    expect(source).toContain("aria-pressed={ultra}");
+    expect(source).toContain("onUltra(!ultra)");
+    // 描述行与 Switch 已移除。
+    expect(source).not.toContain("<Switch");
+    expect(source).not.toContain("ultraDescription");
+    expect(source.match(/<DropdownMenuSeparator/g)).toBeNull();
   });
 });

@@ -1,3 +1,17 @@
+# 2026-09-15 思考强度滑块四态动效
+
+- 需求：对照 Droppy Code（gitlab.com/droppyformac1/droppy-code，本地克隆 /tmp/droppy-inspect/droppy-code）`EffortSlider.swift` 移植思考强度滑块的胶囊轨道与四态 Canvas 动效（plain/supercharged/fast/fusion）。拍板：品牌色固定 Claude 陶土橙；fast 态由面板内既有 Ultra 开关驱动（不新增控件、不改 Rust）；新建专用胶囊滑块组件（B2）+ CSS 玻璃旋钮近似（C1）。
+- 修改：`src/lib/effortTrack.ts`（四态判定 + 动效纯规则，`fract(sin())` 哈希无状态粒子、速度线、双槽闪电、扫光、fusion 渐变/等离子/火花/呼吸缝核）、`src/components/ui/effort-slider.tsx`（Radix Slider 行为层 + 自绘视觉层，填充宽度 `inset + p*(W-2*inset)` 与 Radix thumb 边界公式等价）、`src/styles/effort-slider.css`（令牌化样式，零裸色）、`src/styles/tokens.css`（`--effort-brand/-ink`、`--effort-fast/-ink`、`--effort-spark` 六个新令牌）、`src/components/ComposerReasoningMenu.tsx`（换用 EffortSlider，Ultra 同时驱动 fast，标题按四态着色）。
+- 有意差异（相对上游）：粒子辉光用 `shadowBlur` 替代 `ctx.filter`（Safari 18 才支持后者）；fusion 扫光只画一遍；品牌色不做 provider 映射（KeenCode providerId 为用户自定义字符串）；plain 填充用品牌暗色而非蓝色业务 accent；旋钮玻璃用 `backdrop-filter blur+saturate` 近似，无真实折射。
+- 门禁：`pnpm run typecheck` 通过；`pnpm run lint:css` 通过；完整 `pnpm test` 143 文件 / 1384 项通过（含新增 `src/lib/effortTrack.test.ts` 14 项与改写的 `ComposerReasoningMenu.test.tsx` 3 项）。
+- 浏览器夹具验收：`output/playwright/effort-slider-20260915/`（index.html + fixture.tsx，四个滑块分别固定 plain/supercharged/fast/fusion），`pnpm exec vite --port 14361` 后用本机 Chrome（无头）访问，截图 `four-states.png`。四行类名分别为 `effort-slider--plain/supercharged/fast/fusion`；每行 4 档位 1 旋钮；canvas 仅挂载 3 份（plain 不挂载）。
+- 像素证据：动效画布实际点亮像素 supercharged=518、fast=3182、fusion=44402（devicePixelRatio=1 下画布 298×149 / 127×64），plain 无画布。reduced-motion（`reducedMotion: 'reduce'` 上下文）下画布挂载但 0 像素点亮。
+- 几何断言：thumb 中心 y=88.5 = 轨道中心 y=88.5（修复了 Radix 包裹层 `top:0` 导致旋钮偏上 21px 的问题，thumb `top` 取根高一半）；键盘 ArrowRight 后 `aria-valuenow` 0→2、填充宽 127.3→212.7px；指针拖拽 supercharged 旋钮到最左后 `aria-valuenow=0`。
+- Console：仅夹具自身的 React key 展开警告与 favicon 404，产品代码 0 error。
+- 未验收：浏览器夹具不替代原生 Tauri WebView / Windows 实机验收；真实 Composer 面板中的布局（330px 宽下拉内）未截图，夹具宽度同为 330px 等效验证；触觉反馈（上游 NSHapticFeedback）Web 无等价物，以 240ms 下沉动画近似。
+
+---
+
 # 2026-09-14 编辑重发验收证据重建
 
 - 原因：下方 2026-09-13 记录引用的 `/tmp/keencode-edit-resend-qa.4L4PyU` 截图与像素报告已不存在。本次重新生成可复核证据，没有修改产品源码。
