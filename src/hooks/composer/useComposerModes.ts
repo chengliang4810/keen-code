@@ -111,10 +111,18 @@ export function useComposerModes({
       danger: true,
       onConfirm: async () => {
         try {
+          const snapshot = await currentPorts.api.goals.get(sessionId);
+          const currentView =
+            currentPorts.workspace.acpWorkspaceRef.current.sessions[sessionId];
+          if (!snapshot.goal) {
+            if (currentView && reduceGoalSnapshot(currentView, snapshot.revision, null)) {
+              currentPorts.workspace.commitWorkspace();
+            }
+            return;
+          }
           const result = await currentPorts.api.goals.clear({
             sessionId,
-            expectedRevision:
-              currentPorts.session.acpSessionView?.goal.revision ?? 0,
+            expectedRevision: snapshot.revision,
             requestNonce: `keencode-${Date.now()}-${Math.random()
               .toString(36)
               .slice(2)}`,

@@ -129,6 +129,7 @@ describe("useComposerModes 的 Goal 查询竞态", () => {
     const api = {
       isTauri: () => false,
       goals: {
+        get: vi.fn().mockResolvedValue({ revision: 1, goal: currentGoal }),
         clear: vi.fn(() => clear.promise),
       },
     } as unknown as ComposerApiPort;
@@ -162,6 +163,55 @@ describe("useComposerModes 的 Goal 查询竞态", () => {
 
     expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
     expect(commitWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("清除 Goal 前使用权威 revision，不使用过期前端投影", async () => {
+    const sessionId = "composer-goal-stale-revision";
+    const view = emptySession(sessionId);
+    const currentGoal = goalRecord("goal-1", "当前目标");
+    view.goal = { revision: 1, goal: currentGoal };
+    let dialog: AppDialog = null;
+    const setAppDialog = vi.fn((next: AppDialog) => {
+      dialog = next;
+    });
+    const clear = vi.fn().mockResolvedValue({
+      sessionId,
+      revision: 8,
+      clearedGoalId: currentGoal.id,
+      deduplicated: false,
+    });
+    const workspace = {
+      acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+      commitWorkspace: vi.fn(),
+      applyViewProjectionRef: { current: vi.fn() },
+    } as unknown as ComposerWorkspacePort;
+    const api = {
+      isTauri: () => false,
+      goals: {
+        get: vi.fn().mockResolvedValue({ revision: 7, goal: currentGoal }),
+        clear,
+      },
+    } as unknown as ComposerApiPort;
+    const session = { sessionId, acpSessionView: view } as ComposerSessionPort;
+    let controller!: ReturnType<typeof useComposerModes>;
+    function Harness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session,
+        api,
+        workspace,
+        feedback: { setAppDialog } as unknown as ComposerFeedbackPort,
+      });
+      return null;
+    }
+
+    renderToString(createElement(Harness));
+    controller.confirmClearCurrentGoal();
+    const clearDialog = dialog as unknown as Extract<AppDialog, { kind: "confirm" }>;
+    await clearDialog.onConfirm();
+
+    expect(clear).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 7 }));
+    expect(view.goal).toEqual({ revision: 8, goal: null });
   });
 
   it("较新的 Goal 已先写入时，迟到的旧 edit 响应不得覆盖投影", async () => {
