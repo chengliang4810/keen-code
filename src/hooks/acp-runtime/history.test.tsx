@@ -8,6 +8,7 @@ import type {
 import { ensureAcpSession } from "@/lib/acp/projection";
 import {
   createAcpWorkspaceState,
+  emptySession,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
 import type { ViewFocus } from "@/lib/viewFocus";
@@ -402,6 +403,28 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     expect(harness.setPlanModeSessionKey).not.toHaveBeenCalled();
     expect(apiMocks.sessionLoad).toHaveBeenCalledOnce();
     expect(apiMocks.sessionReplay).not.toHaveBeenCalled();
+  });
+
+  it("运行中后台恢复失败时保留最后可信投影并冻结后续增量", async () => {
+    const sessionId = "session-live-recovery-failed";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    const view = emptySession(sessionId);
+    view.replay.loaded = true;
+    view.status = "streaming";
+    view.active_root_turn_id = "turn-live";
+    view.history.push({ role: "assistant", content: "visible output" });
+    harness.workspaceRef.current.sessions[sessionId] = view;
+    apiMocks.sessionLoad.mockRejectedValue(new Error("load failed"));
+
+    await expect(harness.recoverSession(sessionId)).rejects.toThrow("load failed");
+
+    const failed = harness.workspaceRef.current.sessions[sessionId];
+    expect(failed).not.toBe(view);
+    expect(failed?.status).toBe("streaming");
+    expect(failed?.active_root_turn_id).toBe("turn-live");
+    expect(failed?.history).toEqual([{ role: "assistant", content: "visible output" }]);
+    expect(failed?.delivery.frozen).toBe(true);
+    expect(failed?.last_error?.code).toBe("session_recovery_failed");
   });
 
   it("Goal 恢复失败时拒绝本次恢复，并允许下一次重新取得权威快照", async () => {

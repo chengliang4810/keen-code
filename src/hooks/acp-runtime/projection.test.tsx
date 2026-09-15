@@ -49,6 +49,9 @@ it("恢复窗口内的投影不清空当前消息与本地缓存，恢复完成�
   result.applyViewProjection("cart");
   expect(visible.map((message) => message.content)).toEqual(["cached"]);
   expect(cache.get("cart")).toBe(cached);
+  expect(options.setSession).not.toHaveBeenCalled();
+  expect(options.setLiveHost).not.toHaveBeenCalled();
+  expect(options.setLiveMap).not.toHaveBeenCalled();
   view.replay.restoring = false;
   view.history.push({ role: "user", content: "loaded" });
   result.applyViewProjection("cart");

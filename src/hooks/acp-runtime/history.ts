@@ -219,6 +219,8 @@ export function useAcpRuntimeHistory({
       };
       const recovery = (async () => {
         const view = ensureAcpSession(acpWorkspaceRef.current, sessionId);
+        const visibleBeforeRecovery = view.replay.loaded ? structuredClone(view) : null;
+        const visibleStatusBeforeRecovery = visibleBeforeRecovery?.status;
         const isCurrentProjection = () =>
           lifecycleEpoch === lifecycleEpochRef.current &&
           recoveryGenerationBySessionRef.current.get(sessionId) === recoveryGeneration &&
@@ -313,10 +315,14 @@ export function useAcpRuntimeHistory({
           if (lifecycleEpoch !== lifecycleEpochRef.current) throw error;
           const current = acpWorkspaceRef.current.sessions[sessionId];
           if (current && isCurrentProjection()) {
-            failSessionRecovery(
-              current,
-              error instanceof Error ? error.message : String(error),
-            );
+            const message = error instanceof Error ? error.message : String(error);
+            if (visibleBeforeRecovery) {
+              acpWorkspaceRef.current.sessions[sessionId] = visibleBeforeRecovery;
+              failSessionRecovery(visibleBeforeRecovery, message);
+              visibleBeforeRecovery.status = visibleStatusBeforeRecovery ?? "ready";
+            } else {
+              failSessionRecovery(current, message);
+            }
             publish();
           }
           throw error;

@@ -135,14 +135,16 @@ export default function App() {
   );
   /** 把 ref 中的最新工作区提交到渲染状态。 */
   const commitWorkspace = useCallback(() => {
-    setAcpWorkspace({
+    setAcpWorkspace((previous) => ({
       sessions: Object.fromEntries(
         Object.entries(acpWorkspaceRef.current.sessions).map(([id, view]) => [
           id,
-          { ...view },
+          view.replay.restoring && previous.sessions[id]
+            ? previous.sessions[id]
+            : { ...view },
         ]),
       ),
-    });
+    }));
   }, []);
 
   const { themePreference, skin, applyThemeChoice, applySkinChoice } =
