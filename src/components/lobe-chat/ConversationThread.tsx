@@ -139,7 +139,9 @@ function ContextCompactionNotice({
 }) {
   const tr = createT(locale);
   const auto = (meta?.trigger || "auto") !== "manual";
-  const title = tr(auto ? "compact.bannerAuto" : "compact.bannerManual");
+  const title = tr(meta?.status === "running" ? "compact.bannerRunning"
+    : meta?.status === "failed" ? "compact.bannerFailed"
+    : auto ? "compact.bannerAuto" : "compact.bannerManual");
   let detail = "";
   if (
     meta?.tokensBefore != null && meta.tokensAfter != null &&
@@ -154,7 +156,7 @@ function ContextCompactionNotice({
   }
   const summary = meta?.summaryPreview?.trim();
   return (
-    <div className="lobe-timeline-tool" role="status" data-testid="context-compaction" data-trigger={meta?.trigger || "auto"}>
+    <div className="lobe-timeline-tool" role="status" data-testid="context-compaction" data-trigger={meta?.trigger || "auto"} data-status={meta?.status || "completed"}>
       <span className="lobe-timeline-tool__row" title={[detail, summary].filter(Boolean).join("\n")}>
         <span className="lobe-timeline-tool__icon" aria-hidden><IconArrowsMinimize size={17} /></span>
         <span className="lobe-timeline-tool__action">{title}</span>

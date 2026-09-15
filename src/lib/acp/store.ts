@@ -656,6 +656,22 @@ function targetSegments(
   return agent ? agent.segments : null;
 }
 
+function lastPendingCompactionIndex(segments: MessageSegment[] | null): number {
+  if (!segments) return -1;
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const segment = segments[index];
+    if (segment.kind === "compaction" && segment.meta.status === "running") return index;
+  }
+  return -1;
+}
+
+function discardPendingCompactions(segments: MessageSegment[]): void {
+  for (let index = segments.length - 1; index >= 0; index--) {
+    const segment = segments[index];
+    if (segment.kind === "compaction" && segment.meta.status === "running") segments.splice(index, 1);
+  }
+}
+
 /** 查找子 Agent 的指定 Turn；Turn 是结果、错误和用量的唯一边界。 */
 function findSubagentTurn(
   agent: AcpSubagentInfo,
@@ -1058,6 +1074,7 @@ function reduceKeenCodeEvent(
       if (childAgentId) {
         const agent = view.subagents.find((item) => item.agent_id === childAgentId);
         if (agent) {
+          if (isCurrentSubagentTurn(agent, turnId)) discardPendingCompactions(agent.segments);
           agent.status = "running";
           agent.started_at = occurredAtMs;
           agent.stopped_at = null;
@@ -1155,6 +1172,8 @@ function reduceKeenCodeEvent(
         break;
       }
       if (view.active_root_turn_id !== turnId) break;
+      view.compacting = false;
+      discardPendingCompactions(view.live_segments);
       const durationMs = view.turn_started_at == null
         ? undefined
         : Math.max(0, occurredAtMs - view.turn_started_at);
@@ -1232,6 +1251,10 @@ function reduceKeenCodeEvent(
     }
     case "context_compaction_started": {
       if (!childAgentId) view.compacting = true;
+      targetSegments(view, childAgentId)?.push({
+        kind: "compaction",
+        meta: { trigger: "auto", status: "running", tokensBefore: event.estimatedTokens },
+      });
       break;
     }
     case "context_compaction_completed": {
@@ -1245,7 +1268,14 @@ function reduceKeenCodeEvent(
           tokensAfter: event.estimatedTokens,
         },
       } as const;
-      if (segments?.at(-1)?.kind === "compaction") {
+      const pending = lastPendingCompactionIndex(segments);
+      if (segments && pending >= 0) {
+        const previous = segments[pending];
+        segments[pending] = {
+          ...notice,
+          meta: { ...notice.meta, tokensBefore: previous.kind === "compaction" ? previous.meta.tokensBefore : undefined },
+        };
+      } else if (segments?.at(-1)?.kind === "compaction") {
         segments[segments.length - 1] = notice;
       } else {
         segments?.push(notice);
@@ -1254,6 +1284,12 @@ function reduceKeenCodeEvent(
     }
     case "context_compaction_failed": {
       if (!childAgentId) view.compacting = false;
+      const segments = targetSegments(view, childAgentId);
+      const pending = lastPendingCompactionIndex(segments);
+      if (segments && pending >= 0) {
+        const segment = segments[pending];
+        if (segment.kind === "compaction") segment.meta = { ...segment.meta, status: "failed" };
+      }
       break;
     }
     case "context_water_level": {

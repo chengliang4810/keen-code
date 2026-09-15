@@ -79,6 +79,17 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).not.toContain('class="lobe-chat-compact"');
   });
 
+  it("压缩开始与失败使用实时状态文案", () => {
+    const render = (status: "running" | "failed") => renderToString(
+      <ConversationThread locale="zh" sessionState="streaming" attachLabels={attachLabels}
+        messages={[{ id: "compacting", role: "assistant", content: "", streaming: true,
+          segments: [{ kind: "compaction", meta: { trigger: "auto", status } }] }]} />,
+    );
+    expect(render("running")).toContain("上下文压缩中");
+    expect(render("running")).toContain('data-status="running"');
+    expect(render("failed")).toContain("上下文压缩失败");
+  });
+
   it("水位行以淡色提示渲染用量与阈值，复用通知行形态", () => {
     const html = renderToString(
       <ConversationThread

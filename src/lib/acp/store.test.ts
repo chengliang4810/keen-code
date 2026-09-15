@@ -214,12 +214,42 @@ describe("Acp delivery sequence", () => {
     apply(view, updateDelivery(4, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "子任务进度" } }, "child-1", "child-turn-1"));
     apply(view, eventDelivery(5, { type: "context_compaction_completed", replacedThroughSequence: 4, estimatedTokens: 100 }, { sourceAgentId: "child-1", turnId: "child-turn-1" }));
     expect(view.compacting).toBe(true);
-    expect(view.live_segments).toEqual([]);
+    expect(view.live_segments).toMatchObject([{ kind: "compaction", meta: { status: "running" } }]);
     expect(view.history).toEqual([]);
     expect(view.subagents[0]?.segments.map(segment => segment.kind)).toEqual(["content", "compaction"]);
     apply(view, eventDelivery(6, { type: "context_compaction_failed", failureKind: "model" }));
     expect(view.compacting).toBe(false);
+    expect(view.live_segments).toMatchObject([{ kind: "compaction", meta: { status: "failed" } }]);
+  });
+
+  it("压缩开始立即显示，完成时原位更新且保留前后 Token", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }));
+    apply(view, updateDelivery(2, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "压缩前" } }));
+    apply(view, eventDelivery(3, { type: "context_compaction_started", estimatedTokens: 18_000 }));
+    expect(view.compacting).toBe(true);
+    expect(view.live_segments?.map(segment => segment.kind)).toEqual(["content", "compaction"]);
+    expect(projectAcpConversation([], view).at(-1)?.segments?.[1]).toMatchObject({
+      kind: "compaction", meta: { status: "running", tokensBefore: 18_000 },
+    });
+    apply(view, eventDelivery(4, { type: "context_compaction_completed", replacedThroughSequence: 3, estimatedTokens: 12_000 }, { journalSequence: 4 }));
+    expect(view.compacting).toBe(false);
+    expect(view.live_segments).toMatchObject([
+      { kind: "content" },
+      { kind: "compaction", meta: { tokensBefore: 18_000, tokensAfter: 12_000 } },
+    ]);
+    expect(view.live_segments[1]).not.toMatchObject({ meta: { status: "running" } });
+  });
+
+  it("取消 Turn 清除没有完成事件的压缩中状态", () => {
+    const view = emptySession("session-1");
+    apply(view, eventDelivery(1, { type: "turn_started", rootTurnId: "turn-1" }, { turnId: "turn-1" }));
+    apply(view, eventDelivery(2, { type: "context_compaction_started", estimatedTokens: 18_000 }, { turnId: "turn-1" }));
+    expect(view.compacting).toBe(true);
+    apply(view, eventDelivery(3, { type: "turn_cancelled" }, { turnId: "turn-1" }));
+    expect(view.compacting).toBe(false);
     expect(view.live_segments).toEqual([]);
+    expect(view.history.some(message => message.segments?.some(segment => segment.kind === "compaction"))).toBe(false);
   });
 
   it("原生取消从唯一完整结果提取正文，迟到调用不能回退终态", () => {

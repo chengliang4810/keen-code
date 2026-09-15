@@ -172,6 +172,7 @@ export interface TurnMarkerPayload {
 
 export interface ContextCompactMeta {
   trigger: "auto" | "manual" | string;
+  status?: "running" | "failed";
   tokensBefore?: number;
   tokensAfter?: number;
   summaryPreview?: string;

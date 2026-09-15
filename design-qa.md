@@ -750,3 +750,8 @@ historical result: passed; current release: not reverified
 - 场景：100 条长列表和 12 条短列表，非吸底阅读时前插 10 条。基线锚点分别从 y=38/44 移至 868/874，修改版分别保持 y=38/44，偏移均从 830 px 降至 0。
 - 相同初始状态截图：before/after-{large,small}-initial.png，两组均 0/990000 像素不同（RGB 任一通道不同即计数，无 mask）；前插截图为 before/after-{large,small}-prepended.png，差异图为 diff-{large,small}-initial.png。
 - 类型检查及 146 项相关前端测试通过。浏览器日志仅 favicon 404 与开发提示，无业务错误。未取得同状态原生 macOS WebView 前后截图，也未量化真实点击耗时；浏览器坐标与像素验证不能替代原生验收。
+# 2026-09-15 压缩状态时间线验收缺口
+
+- 基线：提交 `3d88b171` 的 `src/` 和 `public/` 可通过 `git archive 3d88b171 src public` 在隔离目录重建；当前工作区改动在 `src/lib/acp/store.ts`、`src/components/lobe-chat/ConversationThread.tsx` 和文案文件。用户提供的截图仅显示多次“已自动压缩”，没有相同会话状态下的压缩开始帧，不能作为前后像素基线。
+- 已验证：合成事件 `context_compaction_started` → `context_compaction_completed` / `context_compaction_failed` / `turn_cancelled` 的时间线投影测试和组件渲染测试；未取得原生桌面窗口同状态、同视口及 deviceScaleFactor 的前后截图。当前原生计算机控制 API 禁用，不能完成本次原生像素差异检查；浏览器或历史截图不能替代。
+- 待验收：分别用上述基线与当前版本在隔离开发桌面进程运行，保持 macOS、中文、浅色、同视口和 deviceScaleFactor，用同一合成压缩事件序列截图并比较像素；再在真实长会话确认开始提示及时出现、完成后原位更新，且不会每轮反复压缩。
