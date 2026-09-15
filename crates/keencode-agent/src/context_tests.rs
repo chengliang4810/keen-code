@@ -4266,16 +4266,16 @@ fn predictive_trigger_fires_when_expected_growth_exceeds_budget() {
     );
 }
 
-/// 预测性触发缺省输出时按 reserved 口径预留；显式大输出抬高预期增长。
+/// 显式大输出已经从输入预算扣除，预测增长不能再次计入其上限。
 #[test]
-fn predictive_trigger_uses_actual_max_output_when_present() {
+fn predictive_trigger_does_not_double_count_max_output() {
     let capabilities = ProviderCapabilities {
         max_context_tokens: Some(100_000),
         ..ProviderCapabilities::default()
     };
     // 显式 max_output 32_000：输入预算 68_000（100_000 − 32_000），85% 线 57_800。
-    // 估算 40_000 不触发既有线；预期增长 32_000 + 15_000 = 47_000，
-    // 40_000 + 47_000 = 87_000 ≥ 68_000，预测触发，目标 40_800。
+    // 估算 40_000 不触发既有线；预期增长 4_096 + 15_000 = 19_096，
+    // 40_000 + 19_096 < 68_000，不触发预测压缩。
     let manager = ContextManager::new(
         ContextPolicy::default(),
         Arc::new(FixedEstimator {
@@ -4290,7 +4290,31 @@ fn predictive_trigger_uses_actual_max_output_when_present() {
     assert_eq!(manager.precompression_target(&request, &capabilities), None);
     assert_eq!(
         manager.predictive_precompression_target(&request, &capabilities),
-        Some(40_800)
+        None
+    );
+}
+
+#[test]
+fn predictive_trigger_large_output_does_not_compact_every_round() {
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(250_000),
+        ..ProviderCapabilities::default()
+    };
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(FixedEstimator {
+            request_tokens: 18_000,
+            message_tokens: 0,
+        }),
+        Arc::new(RecordingCompressor::new("unused")),
+    )
+    .expect("默认策略应有效");
+    let mut request = ModelRequest::new("model", vec![Message::text(MessageRole::User, "请求")]);
+    request.max_output_tokens = Some(128_000);
+    assert_eq!(manager.precompression_target(&request, &capabilities), None);
+    assert_eq!(
+        manager.predictive_precompression_target(&request, &capabilities),
+        None
     );
 }
 

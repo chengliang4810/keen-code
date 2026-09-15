@@ -1047,9 +1047,8 @@ impl ContextManager {
     /// 相同的压缩目标（复用 `Budget` 触发形态，不新增变体：穷举匹配点横跨
     /// agent/resources/runtime 三个 crate，新增变体改动远大于收益）。
     ///
-    /// 预期增长 = 本轮实际发送的 `max_output_tokens`（缺省时退回
-    /// `reserved_output_tokens`，与 [`ContextManager::input_budget`] 的预留口径
-    /// 一致）+ [`PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS`]；命中率守卫见
+    /// 输出上限已由输入预算预留，不再将其当作历史增长重复扣除。
+    /// 预期增长 = 策略默认输出预留 + [`PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS`]；命中率守卫见
     /// [`ContextManager::predictive_precompression_skipped_by_cache`]。
     pub fn predictive_precompression_target(
         &self,
@@ -1064,8 +1063,7 @@ impl ContextManager {
             // 已达到既有触发线时交给 precompression_target，不走预测路径。
             return None;
         }
-        let expected_growth = u64::from(request.max_output_tokens.unwrap_or(0))
-            .max(self.policy.reserved_output_tokens)
+        let expected_growth = u64::from(self.policy.reserved_output_tokens)
             .saturating_add(PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS);
         (self
             .estimate_request(request)
