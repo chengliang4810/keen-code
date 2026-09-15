@@ -266,6 +266,20 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     expect(apiMocks.sessionLoad).not.toHaveBeenCalled();
   });
 
+  it("切回已恢复会话直接使用内存投影，不重新请求历史首页", async () => {
+    const sessionId = "session-cached";
+    const harness = createHistoryHarness({ sessionId, epoch: 1 });
+    const view = ensureAcpSession(harness.workspaceRef.current, sessionId);
+    view.replay.loaded = true;
+    view.title = "已恢复会话";
+
+    const connected = await harness.connectSession({ sessionId, operationId: "cached" });
+    await harness.replayHistory(sessionId, { sessionId, epoch: 1 });
+
+    expect(connected.title).toBe("已恢复会话");
+    expect(apiMocks.sessionLoad).not.toHaveBeenCalled();
+  });
+
   it("load 等待期间导航到另一个 Session 时不覆盖 Composer", async () => {
     const sessionId = "session-plan";
     const harness = createHistoryHarness({ sessionId, epoch: 1 });

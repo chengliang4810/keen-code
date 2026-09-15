@@ -395,7 +395,10 @@ export function useAcpRuntimeHistory({
       }
       return opened;
     }
-    await recoverSession(args.sessionId, currentViewFocus());
+    const existing = acpWorkspaceRef.current.sessions[args.sessionId];
+    if (!existing?.replay.loaded || existing.replay.restoring) {
+      await recoverSession(args.sessionId, currentViewFocus());
+    }
     const view = acpWorkspaceRef.current.sessions[args.sessionId];
     if (!view || view.delivery.frozen) throw new Error("Session 历史恢复未完成");
     const projected = projectAcpSnapshot(view);
