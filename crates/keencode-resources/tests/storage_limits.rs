@@ -175,7 +175,7 @@ fn goal_cas(
         .map(|outcome| outcome.into_document())
 }
 
-/// 验证 Active Goal 不可直接清除或换标识，终态不可重开，合法终态可清除。
+/// 验证 Active Goal 可由用户撤销但不可换标识，终态不可重开且可清除。
 #[test]
 fn goal_cas_enforces_irreversible_single_goal_lifecycle() {
     let root = TempDir::new().expect("临时目录应创建");
@@ -192,15 +192,49 @@ fn goal_cas_enforces_irreversible_single_goal_lifecycle() {
     )
     .expect("Active Goal 应创建");
 
-    assert!(matches!(
-        goal_cas(
-            &store,
-            "goal-clear-active",
-            first.revision,
-            GoalDocument::new(completed_scope.clone(), None)
+    let active_scope = ScopeId::new("goal-active-clear").expect("Scope 应有效");
+    let active = goal_cas(
+        &store,
+        "goal-create-active-clear",
+        0,
+        GoalDocument::new(
+            active_scope.clone(),
+            Some(active_goal("019d0000-0000-7000-8000-000000000099")),
         ),
-        Err(ResourceError::InvalidGoalTransition(_))
-    ));
+    )
+    .expect("待撤销 Active Goal 应创建");
+    let mut paused_goal = active.goal.clone().expect("Active Goal 应存在");
+    paused_goal.status = GoalStatus::Paused;
+    paused_goal.updated_at_unix_ms += 1;
+    let paused = goal_cas(
+        &store,
+        "goal-pause-active",
+        active.revision,
+        GoalDocument::new(active_scope.clone(), Some(paused_goal)),
+    )
+    .expect("Active Goal 应暂停");
+    let mut resumed_goal = paused.goal.clone().expect("Paused Goal 应存在");
+    resumed_goal.status = GoalStatus::Active;
+    resumed_goal.updated_at_unix_ms += 1;
+    let resumed = goal_cas(
+        &store,
+        "goal-resume-paused",
+        paused.revision,
+        GoalDocument::new(active_scope.clone(), Some(resumed_goal)),
+    )
+    .expect("Paused Goal 应继续");
+    let cleared_active = goal_cas(
+        &store,
+        "goal-clear-active",
+        resumed.revision,
+        GoalDocument::new(active_scope, None),
+    )
+    .expect("用户应能直接清除 Active Goal");
+    assert!(cleared_active.goal.is_none());
+    assert_eq!(
+        cleared_active.retired_goal_ids,
+        ["019d0000-0000-7000-8000-000000000099"]
+    );
     let mut replaced = first.goal.clone().expect("Goal 应存在");
     replaced.id = "019d0000-0000-7000-8000-000000000002".to_owned();
     replaced.updated_at_unix_ms += 1;

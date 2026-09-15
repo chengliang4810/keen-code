@@ -158,6 +158,8 @@ impl MemoryDocument {
 pub enum GoalStatus {
     /// Agent 仍应继续推进目标。
     Active,
+    /// 用户暂停目标；当前 Turn 结束后不再自动续跑。
+    Paused,
     /// 目标已经完成，不允许再次迁移。
     Completed,
     /// 目标因无法自行解决的原因阻塞，不允许再次迁移。
@@ -224,7 +226,7 @@ pub struct GoalSnapshot {
     pub revision: u64,
     /// 当前唯一 Goal；清除后为 `None`。
     pub goal: Option<GoalRecord>,
-    /// 已清除终态 Goal 的标识墓碑。
+    /// 已清除 Goal 的标识墓碑。
     pub retired_goal_ids: Vec<String>,
 }
 
@@ -242,7 +244,7 @@ pub struct GoalDocument {
     pub revision: u64,
     /// 当前唯一 Goal；明确清除时为 `None`。
     pub goal: Option<GoalRecord>,
-    /// 已进入终态并清除的 Goal 标识墓碑，防止相同 Goal 被重新激活。
+    /// 已清除 Goal 的标识墓碑，防止相同 Goal 被重新激活。
     pub retired_goal_ids: Vec<String>,
     /// 最近成功接受的有界幂等操作收据，按提交顺序保存。
     pub operation_receipts: Vec<DocumentOperationReceipt>,
@@ -479,7 +481,7 @@ impl GoalFileStore {
         if let Some(retired_id) = current
             .as_ref()
             .and_then(|value| value.goal.as_ref())
-            .filter(|goal| goal.status.is_terminal() && document.goal.is_none())
+            .filter(|_| document.goal.is_none())
             .map(|goal| goal.id.clone())
         {
             document.retired_goal_ids.push(retired_id);
@@ -907,7 +909,7 @@ fn validate_goal(document: &GoalDocument, persisted: bool) -> Result<(), Resourc
             || goal.created_at_unix_ms == 0
             || goal.updated_at_unix_ms < goal.created_at_unix_ms
             || match goal.status {
-                GoalStatus::Active => {
+                GoalStatus::Active | GoalStatus::Paused => {
                     goal.blocked_reason.is_some() || goal.completion_evidence.is_some()
                 }
                 GoalStatus::Blocked => {
@@ -978,13 +980,8 @@ fn validate_goal_transition(
                 "不存在 Goal 时不能重复清除".to_owned(),
             ));
         }
-        (Some(previous), None) => {
-            if !previous.status.is_terminal() {
-                return Err(ResourceError::InvalidGoalTransition(
-                    "active Goal 必须先进入 completed 或 blocked 才能清除".to_owned(),
-                ));
-            }
-        }
+        // 用户确认删除可以撤销任意当前 Goal；墓碑仍阻止同一标识重新激活。
+        (Some(_), None) => {}
         (Some(previous), Some(candidate)) => {
             if previous.status.is_terminal() {
                 return Err(ResourceError::InvalidGoalTransition(

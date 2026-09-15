@@ -965,6 +965,21 @@ fn goal_responses_use_complete_records_revisions_and_tombstones() {
 
 #[test]
 fn goal_response_validation_rejects_invalid_status_budget_time_and_revision() {
+    let paused = GoalGetResponse {
+        session_id: "session-a".to_owned(),
+        revision: 2,
+        goal: Some(sample_goal(GoalStatus::Paused)),
+    };
+    let (paused_raw, paused_value) = encode_typed_result(&paused);
+    assert_eq!(paused_value["result"]["goal"]["status"], json!("paused"));
+    assert_eq!(
+        AcpResponseDecoder::new()
+            .decode_result::<GoalGetResponse>(&paused_raw)
+            .expect("paused Goal 响应应恢复")
+            .result(),
+        &paused
+    );
+
     let mut invalid_goals = Vec::new();
     let mut missing_reason = sample_goal(GoalStatus::Blocked);
     missing_reason.blocked_reason = None;
@@ -972,6 +987,9 @@ fn goal_response_validation_rejects_invalid_status_budget_time_and_revision() {
     let mut unexpected_reason = sample_goal(GoalStatus::Active);
     unexpected_reason.blocked_reason = Some("不应存在".to_owned());
     invalid_goals.push(unexpected_reason);
+    let mut paused_with_reason = sample_goal(GoalStatus::Paused);
+    paused_with_reason.blocked_reason = Some("暂停不应携带原因".to_owned());
+    invalid_goals.push(paused_with_reason);
     let mut missing_evidence = sample_goal(GoalStatus::Completed);
     missing_evidence.completion_evidence = None;
     invalid_goals.push(missing_evidence);

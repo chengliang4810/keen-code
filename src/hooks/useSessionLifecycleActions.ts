@@ -27,6 +27,7 @@ import {
   createOperationId,
   goalClear,
   goalGet,
+  goalTransition,
   goalUpsert,
   sessionDelete,
   sessionDisconnect,
@@ -56,6 +57,7 @@ export const acpSessionApi = {
   goals: {
     get: goalGet,
     clear: goalClear,
+    transition: goalTransition,
     upsert: goalUpsert,
   },
   disconnect: sessionDisconnect,

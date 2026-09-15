@@ -1289,7 +1289,7 @@ function reduceKeenCodeEvent(
         !event.goalId
           ? null
           : goal?.id === event.goalId &&
-              (status === "active" || status === "completed" || status === "blocked")
+              (status === "active" || status === "paused" || status === "completed" || status === "blocked")
             ? { ...goal, status }
             : null,
       );

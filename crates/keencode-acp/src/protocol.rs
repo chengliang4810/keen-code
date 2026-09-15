@@ -564,6 +564,8 @@ pub enum GoalScope {
 pub enum GoalStatus {
     /// Agent 仍应继续推进目标。
     Active,
+    /// 用户已暂停目标。
+    Paused,
     /// 目标已经完成且不可再次迁移。
     Completed,
     /// 目标被无法自行解决的外部条件阻塞。
@@ -630,7 +632,7 @@ impl GoalRecord {
             self.blocked_reason.as_deref(),
             self.completion_evidence.as_deref(),
         ) {
-            (GoalStatus::Active, None, None) => Ok(()),
+            (GoalStatus::Active | GoalStatus::Paused, None, None) => Ok(()),
             (GoalStatus::Blocked, Some(reason), None) => validate_text(reason, MAX_USER_TEXT_BYTES),
             (GoalStatus::Completed, None, Some(evidence)) => {
                 validate_text(evidence, MAX_USER_TEXT_BYTES)
@@ -1362,7 +1364,7 @@ pub enum AcpRequest {
     GoalUpsert(GoalUpsertRequest),
     /// 把项目 Goal 迁移到不可逆终态。
     GoalTransition(GoalTransitionRequest),
-    /// 清除已经进入终态的项目 Goal。
+    /// 清除用户确认不再需要的当前 Goal。
     GoalClear(GoalClearRequest),
     /// 查询当前项目或全局 MCP Server 连接状态。
     McpList(McpListRequest),
@@ -2215,6 +2217,8 @@ pub struct GoalUpsertRequest {
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GoalTransitionStatus {
+    /// 暂停自动目标续跑，不取消当前 Turn。
+    Paused,
     /// 目标已经实际完成。
     Completed,
     /// 目标因为无法自行解决的外部条件阻塞。
@@ -2241,7 +2245,7 @@ pub struct GoalTransitionRequest {
     pub request_nonce: String,
 }
 
-/// 清除已经进入终态的项目 Goal。
+/// 清除用户确认不再需要的当前 Goal。
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct GoalClearRequest {
@@ -2496,6 +2500,7 @@ impl ValidateAcpParams for GoalTransitionRequest {
         validate_identifier(&self.goal_id, MAX_IDENTIFIER_BYTES)?;
         validate_identifier(&self.request_nonce, MAX_IDENTIFIER_BYTES)?;
         match (&self.status, &self.reason, &self.completion_evidence) {
+            (GoalTransitionStatus::Paused, None, None) => Ok(()),
             (GoalTransitionStatus::Completed, None, Some(evidence)) => {
                 validate_text(evidence, MAX_USER_TEXT_BYTES)
             }

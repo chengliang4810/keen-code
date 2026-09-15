@@ -95,6 +95,8 @@ pub trait TodoController: Send + Sync {
 pub enum GoalStatus {
     /// Agent 仍应继续推进目标。
     Active,
+    /// 用户暂停目标；Runner 不再自动续跑。
+    Paused,
     /// 目标已经完成，不允许再次迁移。
     Completed,
     /// 目标因无法自行解决的原因阻塞，不允许再次迁移。
@@ -123,7 +125,7 @@ impl GoalTransition {
     /// 校验终态及条件字段，并规范化原因或完成证据。
     pub fn normalized(mut self) -> Result<Self, RuntimeStateError> {
         match self.status {
-            GoalStatus::Active => Err(RuntimeStateError::invalid(
+            GoalStatus::Active | GoalStatus::Paused => Err(RuntimeStateError::invalid(
                 "Goal 只能从 active 迁移到 completed 或 blocked",
             )),
             GoalStatus::Completed => {

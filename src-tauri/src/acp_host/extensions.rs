@@ -7,8 +7,8 @@
 use super::{AcpHost, HostFailure, internal_failure, map_runtime_failure, map_session_mcp_failure};
 use crate::agent_runtime::{BackgroundTaskCancellationOutcome, RuntimeMcpServerSnapshot};
 use crate::session_commands::{
-    authorized_metadata, close_session_for_mutation, open_authorized_session,
-    restore_session_after_mutation, retry_session_mutation,
+    authorize_stored_session_root, authorized_metadata, close_session_for_mutation,
+    open_authorized_session, restore_session_after_mutation, retry_session_mutation,
 };
 use keencode_acp::schema;
 use keencode_acp::{
@@ -651,10 +651,12 @@ fn dispatch_goal_transition(
     let target_status = match status {
         keencode_acp::GoalTransitionStatus::Completed => ResourceGoalStatus::Completed,
         keencode_acp::GoalTransitionStatus::Blocked => ResourceGoalStatus::Blocked,
+        keencode_acp::GoalTransitionStatus::Paused => ResourceGoalStatus::Paused,
     };
     let (blocked_reason, completion_evidence) = match target_status {
         ResourceGoalStatus::Blocked => (request.reason, None),
         ResourceGoalStatus::Completed => (None, request.completion_evidence),
+        ResourceGoalStatus::Paused => (None, None),
         ResourceGoalStatus::Active => unreachable!("Goal transition 不接受 active"),
     };
     let operation = goal_transition_operation(
@@ -723,7 +725,7 @@ fn dispatch_goal_transition(
     host.result_value(id, &response)
 }
 
-/// 清除已经进入终态的 Goal，并返回持久化的墓碑标识。
+/// 清除用户确认不再需要的当前 Goal，并返回持久化的墓碑标识。
 fn dispatch_goal_clear(
     host: &AcpHost,
     id: schema::RequestId,
@@ -1114,7 +1116,7 @@ fn goal_store_and_scope(
     host: &AcpHost,
     session_id: &str,
 ) -> Result<(GoalFileStore, ScopeId), HostFailure> {
-    let (_, project_root) = authorized_metadata(&host.runtime, &host.app, session_id)
+    let project_root = authorize_stored_session_root(&host.runtime, &host.app, session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
     let session = SessionId::new(session_id.to_owned()).map_err(|_| HostFailure::InvalidParams)?;
     let storage_root =
@@ -1133,6 +1135,7 @@ fn acp_goal_record(goal: ResourceGoalRecord) -> keencode_acp::GoalRecord {
         scope: keencode_acp::GoalScope::Session,
         status: match goal.status {
             ResourceGoalStatus::Active => keencode_acp::GoalStatus::Active,
+            ResourceGoalStatus::Paused => keencode_acp::GoalStatus::Paused,
             ResourceGoalStatus::Completed => keencode_acp::GoalStatus::Completed,
             ResourceGoalStatus::Blocked => keencode_acp::GoalStatus::Blocked,
         },
@@ -1153,6 +1156,7 @@ fn acp_goal_record(goal: ResourceGoalRecord) -> keencode_acp::GoalRecord {
 fn goal_status_name(status: ResourceGoalStatus) -> &'static str {
     match status {
         ResourceGoalStatus::Active => "active",
+        ResourceGoalStatus::Paused => "paused",
         ResourceGoalStatus::Completed => "completed",
         ResourceGoalStatus::Blocked => "blocked",
     }

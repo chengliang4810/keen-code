@@ -525,7 +525,7 @@ export function goalTransition(args: {
   /** 当前 Goal 标识。 */
   goalId: string;
   /** Goal 只能进入不可逆终态。 */
-  status: "completed" | "blocked";
+  status: "paused" | "completed" | "blocked";
   /** 仅 blocked 状态必须携带的原因。 */
   reason?: string;
   /** 仅 completed 状态必须携带的非空验收证据。 */
@@ -547,7 +547,7 @@ export function goalTransition(args: {
   return acpRequest("keencode/goal/transition", args, args.requestNonce);
 }
 
-/** 清除当前 Session 的持久 Goal。 */
+/** 清除用户确认不再需要的当前 Session Goal。 */
 export function goalClear(args: {
   /** 目标 Session 标识；Goal 按会话隔离。 */
   sessionId: string;

@@ -24,6 +24,8 @@ export interface ComposerModesController {
   togglePlanMode: (sessionKey: string) => void;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
+  pauseCurrentGoal: () => Promise<boolean>;
+  resumeCurrentGoal: () => Promise<boolean>;
 }
 
 export interface UseComposerModesOptions {
@@ -184,6 +186,63 @@ export function useComposerModes({
     });
   }, [tr]);
 
+  const pauseCurrentGoal = useCallback(async () => {
+    const ports = portsRef.current;
+    const sessionId = ports.session.sessionId;
+    const projection = ports.session.acpSessionView?.goal;
+    const goal = projection?.goal;
+    if (!sessionId || !projection || !goal || goal.status !== "active") return false;
+    try {
+      const result = await ports.api.goals.transition({
+        sessionId,
+        goalId: goal.id,
+        status: "paused",
+        expectedRevision: projection.revision,
+        requestNonce: `keencode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      });
+      const view = ports.workspace.acpWorkspaceRef.current.sessions[sessionId];
+      if (view && reduceGoalSnapshot(view, result.revision, result.goal)) {
+        ports.workspace.commitWorkspace();
+      }
+      return true;
+    } catch (cause) {
+      ports.feedback.showToast(String(cause), 4000);
+      return false;
+    }
+  }, []);
+
+  const resumeCurrentGoal = useCallback(async () => {
+    const ports = portsRef.current;
+    const sessionId = ports.session.sessionId;
+    const projection = ports.session.acpSessionView?.goal;
+    const goal = projection?.goal;
+    if (!sessionId || !projection || !goal) return false;
+    if (goal.status === "active") return true;
+    if (goal.status !== "paused") return false;
+    try {
+      const result = await ports.api.goals.upsert({
+        sessionId,
+        goal: {
+          title: goal.title,
+          objective: goal.objective,
+          ...(goal.description ? { description: goal.description } : {}),
+          ...(goal.progressPercent != null ? { progressPercent: goal.progressPercent } : {}),
+          ...(goal.tokenBudget != null ? { tokenBudget: goal.tokenBudget } : {}),
+        },
+        expectedRevision: projection.revision,
+        requestNonce: `keencode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+      });
+      const view = ports.workspace.acpWorkspaceRef.current.sessions[sessionId];
+      if (view && reduceGoalSnapshot(view, result.revision, result.goal)) {
+        ports.workspace.commitWorkspace();
+      }
+      return true;
+    } catch (cause) {
+      ports.feedback.showToast(String(cause), 4000);
+      return false;
+    }
+  }, []);
+
   return {
     goalModeSessionKey,
     setGoalModeSessionKey,
@@ -198,5 +257,7 @@ export function useComposerModes({
     togglePlanMode,
     confirmClearCurrentGoal,
     editCurrentGoal,
+    pauseCurrentGoal,
+    resumeCurrentGoal,
   };
 }

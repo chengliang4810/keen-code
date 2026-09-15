@@ -517,6 +517,7 @@ export default function App() {
       goals: {
         get: acpSessionApi.goals.get,
         clear: acpSessionApi.goals.clear,
+        transition: acpSessionApi.goals.transition,
         upsert: acpSessionApi.goals.upsert,
       },
     },
@@ -606,6 +607,8 @@ export default function App() {
     setShowStatusModal,
     confirmClearCurrentGoal,
     editCurrentGoal,
+    pauseCurrentGoal,
+    resumeCurrentGoal,
   } = composer;
 
   const sidebar = useSidebarController({
@@ -1675,15 +1678,16 @@ export default function App() {
               refreshGitWorktrees,
               editCurrentGoal,
               confirmClearCurrentGoal,
-              pauseCurrentGoal: () => {
-                void stop();
-              },
+              pauseCurrentGoal: () => void pauseCurrentGoal(),
               resumeCurrentGoal: () => {
-                if (!session.sessionId || session.state === "streaming") return;
-                void executeSend({
-                  storedDisplay: locale === "en" ? "Continue the current goal." : "继续执行当前目标。",
-                  att: [],
-                  targetSessionId: session.sessionId,
+                if (!session.sessionId) return;
+                void resumeCurrentGoal().then((resumed) => {
+                  if (!resumed || session.state === "streaming") return;
+                  void executeSend({
+                    storedDisplay: locale === "en" ? "Continue the current goal." : "继续执行当前目标。",
+                    att: [],
+                    targetSessionId: session.sessionId,
+                  });
                 });
               },
             },

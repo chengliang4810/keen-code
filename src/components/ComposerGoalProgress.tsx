@@ -45,19 +45,13 @@ export function formatGoalElapsed(seconds: number): string {
   return `${Math.floor(safe / 3600)}h`;
 }
 
-/** 运行中的目标按持久化创建时间恢复，避免组件重挂载后重新从零计时。 */
+/** 目标耗时只使用 Runtime 持久值与本机已累计的实际运行时长。 */
 export function goalElapsedSeconds(
   goal: AcpGoalProjection["goal"],
-  running: boolean,
-  nowMs: number,
   storedSeconds = 0,
 ): number {
   const persisted = goal?.timeUsedSeconds ?? 0;
-  const saved = Math.max(persisted, storedSeconds);
-  if (!goal || goal.status !== "active" || !running) return saved;
-  if (storedSeconds > 0) return saved;
-  const sinceCreated = Math.floor(Math.max(0, nowMs - goal.createdAtMs) / 1000);
-  return Math.max(saved, sinceCreated);
+  return Math.max(persisted, storedSeconds);
 }
 
 function goalElapsedStorageKey(goalId: string): string {
@@ -94,13 +88,13 @@ export function ComposerGoalProgress({
 }: ComposerGoalProgressProps) {
   const current = goal?.goal ?? null;
   const [elapsed, setElapsed] = useState(() =>
-    goalElapsedSeconds(current, running, Date.now(), readStoredGoalElapsed(current?.id)),
+    goalElapsedSeconds(current, readStoredGoalElapsed(current?.id)),
   );
 
   // 仅在当前目标真实执行时每秒刷新一次，空闲时不产生后台活动。
   useEffect(() => {
     const stored = readStoredGoalElapsed(current?.id);
-    const base = goalElapsedSeconds(current, running, Date.now(), stored);
+    const base = goalElapsedSeconds(current, stored);
     const startedAt = Date.now();
     const updateElapsed = () => {
       const next = running
@@ -124,7 +118,7 @@ export function ComposerGoalProgress({
   if (!current) return null;
   const zh = locale !== "en";
   const statusLabel =
-    current.status === "active" && !running
+    current.status === "paused" || (current.status === "active" && !running)
       ? zh
         ? "已暂停的目标"
         : "Paused goal"
@@ -142,7 +136,7 @@ export function ComposerGoalProgress({
   const objective = current.objective || current.title;
 
   return (
-    <div className={`composer-goal composer-goal--${current.status === "active" && !running ? "paused" : current.status}`}>
+    <div className={`composer-goal composer-goal--${current.status === "paused" || (current.status === "active" && !running) ? "paused" : current.status}`}>
       <IconTarget size={17} />
       <div className="composer-goal__summary" title={objective}>
         <strong>{statusLabel}:</strong>
@@ -151,15 +145,15 @@ export function ComposerGoalProgress({
       <span className="composer-goal__elapsed">
         {formatGoalElapsed(elapsed)}
       </span>
-      {current.status === "active" ? (
+      {current.status === "active" || current.status === "paused" ? (
         <Button
           type="button"
           className="composer-goal__action"
-          aria-label={running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
-          title={running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
-          onClick={running ? onPause : onResume}
+          aria-label={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
+          title={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
+          onClick={current.status === "active" && running ? onPause : onResume}
         >
-          {running ? <IconPause size={15} /> : <IconPlay size={15} />}
+          {current.status === "active" && running ? <IconPause size={15} /> : <IconPlay size={15} />}
         </Button>
       ) : null}
       <Button

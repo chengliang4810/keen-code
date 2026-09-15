@@ -40,12 +40,16 @@ async function flushMicrotasks(rounds = 4): Promise<void> {
   for (let index = 0; index < rounds; index += 1) await Promise.resolve();
 }
 
-function goalRecord(id: string, objective: string): GoalRecordDto {
+function goalRecord(
+  id: string,
+  objective: string,
+  status: GoalRecordDto["status"] = "active",
+): GoalRecordDto {
   return {
     id,
     title: objective,
     scope: "session",
-    status: "active",
+    status,
     objective,
     tokensUsed: 0,
     timeUsedSeconds: 0,
@@ -260,6 +264,125 @@ describe("useComposerModes 的 Goal 查询竞态", () => {
     reduceGoalSnapshot(view, 3, newerGoal);
     upsert.resolve({ revision: 2, goal: staleEditedGoal });
     await pending;
+
+    expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
+    expect(commitWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("暂停只迁移 Goal 状态，不取消当前 Turn", async () => {
+    const sessionId = "composer-goal-pause";
+    const view = emptySession(sessionId);
+    const currentGoal = goalRecord("goal-1", "当前目标");
+    const pausedGoal = goalRecord("goal-1", "当前目标", "paused");
+    view.goal = { revision: 4, goal: currentGoal };
+    const transition = vi.fn().mockResolvedValue({ revision: 5, goal: pausedGoal });
+    const commitWorkspace = vi.fn();
+    const api = {
+      isTauri: () => false,
+      goals: { transition },
+    } as unknown as ComposerApiPort;
+    let controller!: ReturnType<typeof useComposerModes>;
+
+    function Harness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session: { sessionId, acpSessionView: view } as ComposerSessionPort,
+        api,
+        workspace: {
+          acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+          commitWorkspace,
+          applyViewProjectionRef: { current: vi.fn() },
+        } as unknown as ComposerWorkspacePort,
+        feedback: {} as ComposerFeedbackPort,
+      });
+      return null;
+    }
+
+    renderToString(createElement(Harness));
+    await expect(controller.pauseCurrentGoal()).resolves.toBe(true);
+
+    expect(transition).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId,
+      goalId: currentGoal.id,
+      status: "paused",
+      expectedRevision: 4,
+    }));
+    expect(view.goal).toEqual({ revision: 5, goal: pausedGoal });
+    expect(commitWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("继续 paused Goal 时恢复 active，active Goal 不重复写入", async () => {
+    const sessionId = "composer-goal-resume";
+    const view = emptySession(sessionId);
+    const pausedGoal = goalRecord("goal-1", "继续处理目标", "paused");
+    const activeGoal = goalRecord("goal-1", "继续处理目标");
+    view.goal = { revision: 2, goal: pausedGoal };
+    const upsert = vi.fn().mockResolvedValue({ revision: 3, goal: activeGoal });
+    const api = {
+      isTauri: () => false,
+      goals: { upsert },
+    } as unknown as ComposerApiPort;
+    let controller!: ReturnType<typeof useComposerModes>;
+
+    function Harness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session: { sessionId, acpSessionView: view } as ComposerSessionPort,
+        api,
+        workspace: {
+          acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+          commitWorkspace: vi.fn(),
+          applyViewProjectionRef: { current: vi.fn() },
+        } as unknown as ComposerWorkspacePort,
+        feedback: {} as ComposerFeedbackPort,
+      });
+      return null;
+    }
+
+    renderToString(createElement(Harness));
+    await expect(controller.resumeCurrentGoal()).resolves.toBe(true);
+    expect(upsert).toHaveBeenCalledTimes(1);
+    expect(upsert).toHaveBeenCalledWith(expect.objectContaining({ expectedRevision: 2 }));
+    expect(view.goal).toEqual({ revision: 3, goal: activeGoal });
+
+    await expect(controller.resumeCurrentGoal()).resolves.toBe(true);
+    expect(upsert).toHaveBeenCalledTimes(1);
+  });
+
+  it("迟到的暂停响应不得覆盖更高 revision 的目标", async () => {
+    const sessionId = "composer-goal-pause-race";
+    const view = emptySession(sessionId);
+    const currentGoal = goalRecord("goal-1", "当前目标");
+    const newerGoal = goalRecord("goal-1", "已经编辑的新目标");
+    const pausedGoal = goalRecord("goal-1", "当前目标", "paused");
+    view.goal = { revision: 1, goal: currentGoal };
+    const transition = deferred<ComposerGoalUpsertResult>();
+    const commitWorkspace = vi.fn();
+    let controller!: ReturnType<typeof useComposerModes>;
+
+    function Harness() {
+      controller = useComposerModes({
+        locale: "zh",
+        session: { sessionId, acpSessionView: view } as ComposerSessionPort,
+        api: {
+          isTauri: () => false,
+          goals: { transition: vi.fn(() => transition.promise) },
+        } as unknown as ComposerApiPort,
+        workspace: {
+          acpWorkspaceRef: { current: { sessions: { [sessionId]: view } } },
+          commitWorkspace,
+          applyViewProjectionRef: { current: vi.fn() },
+        } as unknown as ComposerWorkspacePort,
+        feedback: {} as ComposerFeedbackPort,
+      });
+      return null;
+    }
+
+    renderToString(createElement(Harness));
+    const pending = controller.pauseCurrentGoal();
+    reduceGoalSnapshot(view, 3, newerGoal);
+    transition.resolve({ revision: 2, goal: pausedGoal });
+    await expect(pending).resolves.toBe(true);
 
     expect(view.goal).toEqual({ revision: 3, goal: newerGoal });
     expect(commitWorkspace).not.toHaveBeenCalled();

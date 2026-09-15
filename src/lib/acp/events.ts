@@ -429,7 +429,7 @@ export type KeenCodeEvent =
       /** 项目级 Goal 状态的单调修订号。 */
       revision: number;
       /** 当前 Goal 生命周期状态；与 Goal 标识成对出现。 */
-      status?: "active" | "completed" | "blocked";
+      status?: "active" | "paused" | "completed" | "blocked";
     }
   | { type: "system_notification"; level: AcpSystemNotificationLevel; message: string }
   | {
@@ -496,7 +496,7 @@ export interface GoalRecordDto {
   /** 当前固定为会话作用域。 */
   scope: "session";
   /** Goal 生命周期状态。 */
-  status: "active" | "completed" | "blocked";
+  status: "active" | "paused" | "completed" | "blocked";
   /** 可选补充说明。 */
   description?: string;
   /** 可选人工进度百分比。 */
@@ -1101,7 +1101,7 @@ function isKeenCodeEvent(value: unknown): value is KeenCodeEvent {
         isPositiveInteger(value.revision) &&
         isOmittedOr(value, "goalId", isEventIdentifier) &&
         isOmittedOr(value, "status", (status) =>
-          status === "active" || status === "completed" || status === "blocked") &&
+          status === "active" || status === "paused" || status === "completed" || status === "blocked") &&
         (Object.hasOwn(value, "goalId") === Object.hasOwn(value, "status"));
     case "system_notification":
       return hasOnlyKeys(value, ["type", "level", "message"]) &&

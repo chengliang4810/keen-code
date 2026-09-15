@@ -784,6 +784,7 @@ fn agent_todo_snapshot(snapshot: &ResourceTodoSnapshot) -> AgentTodoSnapshot {
 fn resource_goal_status(status: AgentGoalStatus) -> ResourceGoalStatus {
     match status {
         AgentGoalStatus::Active => ResourceGoalStatus::Active,
+        AgentGoalStatus::Paused => ResourceGoalStatus::Paused,
         AgentGoalStatus::Completed => ResourceGoalStatus::Completed,
         AgentGoalStatus::Blocked => ResourceGoalStatus::Blocked,
     }
@@ -793,6 +794,7 @@ fn resource_goal_status(status: AgentGoalStatus) -> ResourceGoalStatus {
 fn agent_goal_status(status: ResourceGoalStatus) -> AgentGoalStatus {
     match status {
         ResourceGoalStatus::Active => AgentGoalStatus::Active,
+        ResourceGoalStatus::Paused => AgentGoalStatus::Paused,
         ResourceGoalStatus::Completed => AgentGoalStatus::Completed,
         ResourceGoalStatus::Blocked => AgentGoalStatus::Blocked,
     }

@@ -10206,6 +10206,7 @@ fn map_agent_status(status: &SubAgentStatus) -> AgentLifecycleStatus {
 fn goal_status_name(status: GoalStatus) -> &'static str {
     match status {
         GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
         GoalStatus::Completed => "completed",
         GoalStatus::Blocked => "blocked",
     }

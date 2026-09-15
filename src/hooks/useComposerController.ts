@@ -87,6 +87,8 @@ export interface ComposerGoalPort {
     /** 本次清理的幂等标识。 */
     requestNonce: string;
   }) => Promise<ComposerGoalClearResult>;
+  /** 改变当前会话 Goal 的运行状态。 */
+  transition: typeof import("@/lib/acp/api").goalTransition;
   /** 创建或更新当前会话唯一 Goal。 */
   upsert: (args: {
     /** 提供项目作用域的 Session 标识。 */
@@ -269,6 +271,8 @@ export interface ComposerController {
   goalToolCompletionSignature: string;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
+  pauseCurrentGoal: () => Promise<boolean>;
+  resumeCurrentGoal: () => Promise<boolean>;
 }
 
 function resizeComposerElement(element: HTMLElement): void {
@@ -554,5 +558,7 @@ export function useComposerController({
     goalToolCompletionSignature: modes.goalToolCompletionSignature,
     confirmClearCurrentGoal: modes.confirmClearCurrentGoal,
     editCurrentGoal: modes.editCurrentGoal,
+    pauseCurrentGoal: modes.pauseCurrentGoal,
+    resumeCurrentGoal: modes.resumeCurrentGoal,
   };
 }

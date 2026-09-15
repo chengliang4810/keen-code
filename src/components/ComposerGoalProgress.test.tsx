@@ -48,7 +48,7 @@ describe("ComposerGoalProgress", () => {
       .toContain("目标");
   });
 
-  it("会话重新加载后按目标创建时间恢复运行耗时", () => {
+  it("目标创建后的空闲时间不计入运行耗时", () => {
     expect(goalElapsedSeconds({
       id: "goal-1",
       title: "长时间目标",
@@ -59,7 +59,7 @@ describe("ComposerGoalProgress", () => {
       updatedAtMs: 1_000,
       tokensUsed: 0,
       timeUsedSeconds: 0,
-    }, true, 3_356_000)).toBe(3_355);
+    })).toBe(0);
   });
 
   it("持久化耗时更大或目标未运行时不倒退", () => {
@@ -74,8 +74,7 @@ describe("ComposerGoalProgress", () => {
       tokensUsed: 0,
       timeUsedSeconds: 120,
     };
-    expect(goalElapsedSeconds(goal, true, 61_000)).toBe(120);
-    expect(goalElapsedSeconds(goal, false, 3_356_000)).toBe(120);
-    expect(goalElapsedSeconds(goal, false, 3_356_000, 240)).toBe(240);
+    expect(goalElapsedSeconds(goal)).toBe(120);
+    expect(goalElapsedSeconds(goal, 240)).toBe(240);
   });
 });
