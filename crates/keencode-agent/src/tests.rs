@@ -4624,6 +4624,19 @@ mod goal_loop_tests {
                             )
                             .unwrap();
                     }
+                    "edit" => {
+                        self.0
+                            .update_goal(
+                                op,
+                                GoalPatch {
+                                    title: Some("新交付目标".to_owned()),
+                                    objective: Some("按照编辑后的目标实现并验证".to_owned()),
+                                    description: Some(Some("放弃与新目标冲突的旧计划".to_owned())),
+                                    ..GoalPatch::default()
+                                },
+                            )
+                            .unwrap();
+                    }
                     "cancel" => self.1.as_ref().unwrap().cancel(),
                     action => {
                         let blocked = action == "block";
@@ -4730,6 +4743,59 @@ mod goal_loop_tests {
             state.goal_snapshot().unwrap().goal.unwrap().status,
             GoalStatus::Blocked
         );
+    }
+
+    #[tokio::test]
+    async fn edited_goal_injects_previous_and_current_content_at_continuation_boundary() {
+        let state = state("session-runner", true);
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [
+                tool_reply(&[("edit-goal", "goal_test", json!({"action": "edit"}))]),
+                text_reply("继续旧计划"),
+                tool_reply(&[(
+                    "complete-edited-goal",
+                    "goal_test",
+                    json!({"action": "complete"}),
+                )]),
+                text_reply("新目标已经完成"),
+            ],
+        ));
+
+        let result = goal_runner(provider.clone(), state, RunLimits::default())
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+
+        assert!(result.is_success(), "{:?}", result.error);
+        let requests = provider.requests().unwrap();
+        assert_eq!(requests.len(), 4);
+        let update = requests[2]
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.role == MessageRole::Developer
+                    && message.content.iter().any(|block| {
+                        matches!(
+                            block,
+                            ContentBlock::Text { text }
+                                if text.contains("The user updated the active goal")
+                        )
+                    })
+            })
+            .expect("目标续跑边界应注入编辑通知");
+        let text = update
+            .content
+            .iter()
+            .find_map(|block| match block {
+                ContentBlock::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(text.contains("实现并验证修复"));
+        assert!(text.contains("按照编辑后的目标实现并验证"));
+        assert!(text.contains("Previous goal data"));
+        assert!(text.contains("Current goal data"));
     }
 
     #[tokio::test]

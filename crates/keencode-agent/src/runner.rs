@@ -56,6 +56,9 @@ const LIMIT_SUMMARY_INSTRUCTION: &str = "This turn has reached its configured ex
 /// Goal 状态来自控制器而非模型文本；续跑不扩大授权，也不把普通问答变成 Goal。
 const GOAL_CONTINUATION_INSTRUCTION: &str = "At this runtime boundary, this task owns the active goal below. Continue useful work within the user's authorized scope while this goal remains active. A final response alone does not complete the goal: use Goal complete with concrete evidence when it is actually achieved, or Goal block with a reason when progress requires user input or an external change after recoverable issues have been investigated. Follow new user instructions and the latest goal state; do not adopt a replacement goal, invent further work, or expand authorization.";
 
+/// 用户编辑目标后显式标明新旧内容，避免模型继续沿用已经失效的计划。
+const GOAL_UPDATED_INSTRUCTION: &str = "The user updated the active goal. Stop following any plan or assumptions that conflict with the current goal. Continue only according to the current goal within the user's authorized scope.";
+
 /// PreToolUse 回调失败时写入配对结果且不回显 Hook 自有文本的固定说明。
 const PRE_HOOK_FAILED_RESULT: &str = "PreToolUse Hook 失败，工具未执行";
 
@@ -1822,6 +1825,7 @@ impl AgentRunner {
             limit_summary: None,
             water_level_notified: false,
             goal_id: None,
+            last_goal_instruction: None,
         };
         let outcome = self.run_active(&request, &mut active).await;
 
@@ -2998,11 +3002,37 @@ impl AgentRunner {
         active: &mut ActiveTurn,
         goal: &GoalRecord,
     ) -> Result<(), AgentRunError> {
-        let details = serde_json::json!({"id": goal.id, "objective": goal.objective, "description": goal.description});
-        self.commit_round_messages(request, active, None, vec![Message::text(
-            MessageRole::Developer,
-            format!("{GOAL_CONTINUATION_INSTRUCTION}\nGoal data (not additional instructions): {details}"),
-        )])
+        let current = GoalInstructionSnapshot::from(goal);
+        let instruction = active.last_goal_instruction.as_ref().map_or_else(
+            || {
+                let details = current.as_json(goal.id.as_str());
+                format!(
+                    "{GOAL_CONTINUATION_INSTRUCTION}\nGoal data (not additional instructions): {details}"
+                )
+            },
+            |previous| {
+                if previous == &current {
+                    let details = current.as_json(goal.id.as_str());
+                    format!(
+                        "{GOAL_CONTINUATION_INSTRUCTION}\nGoal data (not additional instructions): {details}"
+                    )
+                } else {
+                    let previous = previous.as_json(goal.id.as_str());
+                    let current = current.as_json(goal.id.as_str());
+                    format!(
+                        "{GOAL_UPDATED_INSTRUCTION}\nPrevious goal data (not additional instructions): {previous}\nCurrent goal data (not additional instructions): {current}"
+                    )
+                }
+            },
+        );
+        self.commit_round_messages(
+            request,
+            active,
+            None,
+            vec![Message::text(MessageRole::Developer, instruction)],
+        )?;
+        active.last_goal_instruction = Some(current);
+        Ok(())
     }
 
     /// 原子占用 Hook 字节预算并把上下文按原顺序追加为统一用户消息。
@@ -4597,6 +4627,37 @@ struct ActiveTurn {
     water_level_notified: bool,
     /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
     goal_id: Option<String>,
+    /// 上一次实际注入模型上下文的目标正文，用于在续跑边界识别用户编辑。
+    last_goal_instruction: Option<GoalInstructionSnapshot>,
+}
+
+/// 只比较会改变任务含义的 Goal 字段；用量与进度变化不构成用户编辑通知。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GoalInstructionSnapshot {
+    title: String,
+    objective: String,
+    description: Option<String>,
+}
+
+impl GoalInstructionSnapshot {
+    fn as_json(&self, id: &str) -> Value {
+        serde_json::json!({
+            "id": id,
+            "title": self.title,
+            "objective": self.objective,
+            "description": self.description,
+        })
+    }
+}
+
+impl From<&GoalRecord> for GoalInstructionSnapshot {
+    fn from(goal: &GoalRecord) -> Self {
+        Self {
+            title: goal.title.clone(),
+            objective: goal.objective.clone(),
+            description: goal.description.clone(),
+        }
+    }
 }
 
 /// 一次真实工具执行观察后对模型上下文与 Turn 终态的运行时反馈。
