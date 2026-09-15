@@ -14,8 +14,9 @@ mod tool_projection;
 use crate::{
     analytics::{AnalyticsRecorder, ModelRetryNotice},
     app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
-    client_request::ClientRequestDisplayGate, elicitation::ElicitationCoordinator, providers,
-    storage,
+    client_request::ClientRequestDisplayGate,
+    elicitation::ElicitationCoordinator,
+    providers, storage,
 };
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
@@ -75,10 +76,10 @@ use keencode_tools::{
     AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus,
     CompletedTurnContext, GitWorktreeLeaseManager, ResolvedSpawnAgentTemplate,
     SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver,
-    ToolEnvironment, WebServiceConfig, register_collaboration_tools,
-    register_collaboration_tools_with_template_resolver, register_deferred_tools,
-    register_local_tools_with_background, register_state_tools, register_web_tools,
-    finalize_child_agent_tool_snapshot,
+    ToolEnvironment, WebServiceConfig, finalize_child_agent_tool_snapshot,
+    register_collaboration_tools, register_collaboration_tools_with_template_resolver,
+    register_deferred_tools, register_local_tools_with_background, register_state_tools,
+    register_web_tools,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -5590,9 +5591,11 @@ impl AgentRuntime {
                 .flatten();
             let mut input_messages = Vec::new();
             if matches!(launch.cause, AgentTurnCause::InitialTask) {
-                let assignment = launch.agent.assignment.as_deref().ok_or(
-                    AgentRuntimeError::RuntimeOperationFailed,
-                )?;
+                let assignment = launch
+                    .agent
+                    .assignment
+                    .as_deref()
+                    .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
                 let mut system = format!(
                     "You are a single-level child agent. Your canonical path is {self_path}; your parent path is /root. Your stable lifecycle assignment, visible to every agent in this root tree, is: {assignment}. Complete work within that assignment and report verifiable results with send_message using target=/root; never use followup_task for /root. Use list_agents to discover siblings and their assignments, and address siblings only by absolute /root/<child> paths.",
                     self_path = launch.agent.path.as_str(),
@@ -6543,6 +6546,51 @@ impl AgentRuntime {
             provider_projection,
         ));
         Ok(delivery)
+    }
+
+    /// 重新打开 Session 时替换已知失败的投递世代；结果未知时继续拒绝，避免重复投递。
+    pub async fn ensure_healthy_session_delivery(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let reset_gate = self.delivery_reset_gate(session_id)?;
+        {
+            let _reset_guard = reset_gate.lock().await;
+            let current = self
+                .deliveries
+                .lock()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .get(session_id)
+                .cloned();
+            if let Some(current) = current {
+                match current.lifecycle.rejection() {
+                    None => {}
+                    Some(AgentRuntimeError::DeliveryPoisoned) => {
+                        current.shutdown().await?;
+                        let replacement = SessionDeliverySender::spawn_with_config(
+                            session_id,
+                            Arc::clone(&self.emitter),
+                            true,
+                            DELIVERY_QUEUE_CAPACITY,
+                            self.delivery_timeouts,
+                        );
+                        self.deliveries
+                            .lock()
+                            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                            .insert(session_id.to_owned(), replacement);
+                    }
+                    Some(error) => return Err(error),
+                }
+            }
+        }
+        self.ensure_session_delivery(session_id)
     }
 
     /// 返回一个已建立 Session 的当前桌面投递世代。
@@ -10297,7 +10345,6 @@ fn ensure_session_project(
 
 #[cfg(test)]
 mod tests {
-    use crate::analytics::ModelRetryNotice;
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
@@ -10319,6 +10366,7 @@ mod tests {
         split_child_agent_model_override, validate_generated_title,
         validate_recovered_mailbox_claim, wait_for_turn_started,
     };
+    use crate::analytics::ModelRetryNotice;
     use keencode_acp::schema::{
         ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
         ElicitationCapabilities, ElicitationFormCapabilities, ElicitationFormMode,
@@ -12671,9 +12719,7 @@ mod tests {
                 _ => None,
             })
             .expect("后续模型请求应包含 mailbox 动态输入");
-        assert!(mailbox_input.contains(
-            "from_path=/root/mailbox_final_candidate_source"
-        ));
+        assert!(mailbox_input.contains("from_path=/root/mailbox_final_candidate_source"));
         assert!(
             !mailbox_input.contains(child.agent.agent_id.as_str()),
             "模型可见 mailbox 不能暴露内部 AgentId"
@@ -18244,6 +18290,43 @@ mod tests {
             .close_session_delivery(session.session_id().as_str())
             .await
             .expect("投递应关闭");
+    }
+
+    /// 已知 emit 失败可在下一次打开时换代，不能永久复用已停止的发送端。
+    #[tokio::test]
+    async fn ensure_healthy_session_delivery_replaces_poisoned_generation() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let emitter = RecordingEmitter::failing_at(1);
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "delivery-reopen-operation")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str();
+        let poisoned = runtime
+            .ensure_session_delivery(session_id)
+            .expect("首次 ensure 应建立投递");
+        assert_eq!(
+            poisoned.send_batch(vec![text_draft("failed")]).await,
+            Err(AgentRuntimeError::DesktopEmitFailed)
+        );
+
+        let replacement = runtime
+            .ensure_healthy_session_delivery(session_id)
+            .await
+            .expect("重新打开应替换已知失败世代");
+        assert!(!replacement.commands.same_channel(&poisoned.commands));
+        replacement
+            .send_replay_batch(vec![journal_text_draft("replayed", 1)], 1, true)
+            .await
+            .expect("新世代应恢复投递");
+        assert_eq!(emitter.snapshot().len(), 2);
+        runtime
+            .close_session_delivery(session_id)
+            .await
+            .expect("替换后的投递应关闭");
     }
 
     /// 权威 TurnStarted 屏障必须可观察，且相同 Turn 输入只能返回去重结果。

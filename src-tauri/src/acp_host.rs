@@ -533,7 +533,8 @@ impl AcpHost {
             .await
             .map_err(map_session_mcp_failure)?;
         self.runtime
-            .ensure_session_delivery(&session_id)
+            .ensure_healthy_session_delivery(&session_id)
+            .await
             .map_err(map_runtime_failure)?;
         let started = std::time::Instant::now();
         let history_page = match history {
