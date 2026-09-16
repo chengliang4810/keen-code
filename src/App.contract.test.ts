@@ -386,7 +386,7 @@ describe("App Ultra 模式契约", () => {
     const ultraToggleStart = stageSource.indexOf("onUltra={(enabled)");
     const ultraToggle = stageSource.slice(
       ultraToggleStart,
-      stageSource.indexOf("{hasStartedConversation", ultraToggleStart),
+      stageSource.indexOf("{hasContextUsageData", ultraToggleStart),
     );
     expect(ultraToggle).not.toContain("setGoalModeSessionKey");
     expect(ultraToggle).not.toContain("setPlanModeSessionKey");
@@ -623,7 +623,7 @@ describe("App 会话空态对齐契约", () => {
   it("空态与欢迎态只描述正在查看的会话，避免加载窗口误报", () => {
     const source = readSource("./App.tsx");
     const start = source.indexOf("const welcomeSession =");
-    const end = source.indexOf("const hasStartedConversation", start);
+    const end = source.indexOf("const sessionTurn = useSessionTurn(", start);
     const emptyStateSource = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);

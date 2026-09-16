@@ -1053,10 +1053,6 @@ export default function App() {
     messages.length === 0 &&
     session.state !== "streaming" &&
     session.state !== "connecting";
-  /** 至少发出过一条用户消息后才展示上下文占用。 */
-  const hasStartedConversation = messages.some(
-    (message) => message.role === "user",
-  );
   const sessionTurn = useSessionTurn({
     locale,
     session,
@@ -1790,7 +1786,6 @@ export default function App() {
               navigateSettings,
               contextUsageDisplay,
               taskCacheUsage,
-              hasStartedConversation,
               draft,
               attachments,
               connecting,

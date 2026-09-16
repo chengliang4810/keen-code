@@ -1,5 +1,6 @@
 /** ACP context usage display types and formatters. */
 
+import type { TaskCacheUsage } from "./api";
 import type { SessionContextUsage } from "@/features/app/models";
 
 export type ContextUsageSource = "known" | "estimated" | "unknown";
@@ -22,6 +23,17 @@ export function invalidateSessionContextUsage(
   sessionId: string,
 ): void {
   usageBySession.delete(sessionId);
+}
+
+/**
+ * 是否存在可展示的上下文或任务缓存用量。
+ * 首轮请求进行中时用量尚未上报，此时返回 false，避免渲染全为 “—” 的空入口。
+ */
+export function hasContextUsageData(
+  display: ContextUsageDisplay,
+  taskCacheUsage: TaskCacheUsage | null,
+): boolean {
+  return display.tokens != null || (taskCacheUsage?.requestCount ?? 0) > 0;
 }
 
 /** Compact token display: 999 / 1.2k / 12k / 1.5M. */

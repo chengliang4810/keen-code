@@ -7,6 +7,7 @@ import type {
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { AcpSessionView } from "@/lib/acp/store";
 import type { ContextUsageDisplay } from "@/lib/contextUsage";
+import { hasContextUsageData } from "@/lib/contextUsage";
 import type {
   CustomProvider,
   TaskCacheUsage,
@@ -76,7 +77,6 @@ export interface ComposerToolbarProps {
   navigateSettings: (section?: SettingsSectionId) => void;
   contextUsageDisplay: ContextUsageDisplay;
   taskCacheUsage: TaskCacheUsage | null;
-  hasStartedConversation: boolean;
   draft: string;
   attachments: Attachment[];
   connecting: boolean;
@@ -121,7 +121,6 @@ export function ComposerToolbar({
   navigateSettings,
   contextUsageDisplay,
   taskCacheUsage,
-  hasStartedConversation,
   draft,
   attachments,
   connecting,
@@ -143,6 +142,8 @@ export function ComposerToolbar({
       model.id === modelId &&
       (!activeCustomProvider?.id || model.providerId === activeCustomProvider.id),
   );
+  const currentTaskCacheUsage =
+    taskCacheUsage?.sessionId === session.sessionId ? taskCacheUsage : null;
   const hasBody =
     !isDraftEmpty(parseStoredContent(draft)) || attachments.length > 0;
 
@@ -275,14 +276,10 @@ export function ComposerToolbar({
         }
       />
 
-      {hasStartedConversation ? (
+      {hasContextUsageData(contextUsageDisplay, currentTaskCacheUsage) ? (
         <ContextUsageChip
           display={contextUsageDisplay}
-          taskCacheUsage={
-            taskCacheUsage?.sessionId === session.sessionId
-              ? taskCacheUsage
-              : null
-          }
+          taskCacheUsage={currentTaskCacheUsage}
           labels={{
             aria: tr("context.chipAria"),
             contextUsageRate: tr("context.usageRate"),
