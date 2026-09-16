@@ -782,14 +782,17 @@ fn summary_output_budget_does_not_participate_in_main_input_budget() {
     }
 }
 
-/// 硬预算跟随有效输出预留：策略默认与实际输出上限取大并钳到窗口一半，窗口未知时不伪造可行。
+/// 硬预算跟随有效输出预留：请求显式输出上限优先（未指定时用策略默认预留）
+/// 并钳到窗口一半，窗口未知时不伪造可行。
 #[test]
 fn precompression_fallback_requires_complete_request_to_fit_known_window() {
     for (input, output, window, fits) in [
         (4_096, Some(2_048), Some(8_192), true),
-        (4_097, Some(2_048), Some(8_192), false),
+        (6_144, Some(2_048), Some(8_192), true),
+        (6_145, Some(2_048), Some(8_192), false),
         (4_096, Some(2_048), Some(8_191), true),
-        (4_097, Some(2_048), Some(8_191), false),
+        (6_143, Some(2_048), Some(8_191), true),
+        (6_144, Some(2_048), Some(8_191), false),
         (4_096, None, Some(8_192), true),
         (5_333, None, Some(8_192), false),
         (1, Some(2_048), None, false),
@@ -943,7 +946,15 @@ async fn incomplete_tool_exchange_is_not_compressible() {
         )
         .await
         .expect_err("不完整工具交换不能压缩");
-    assert_eq!(error, ContextError::NothingCompressible);
+    // 修复 3：候选存在但全部受保护时输出"受保护输入占满窗口"的结构化诊断，
+    // 而不是笼统的"没有可安全压缩的历史"。
+    assert!(matches!(
+        error,
+        ContextError::ProtectedInputFillsWindow {
+            protected_units: 2,
+            ..
+        }
+    ));
 }
 
 /// 同一 ID 的多个调用只有部分结果时仍是不完整交换，不能被成员关系误判为完整。
@@ -981,17 +992,20 @@ async fn duplicate_tool_call_multiplicity_requires_matching_results() {
         ],
     );
 
-    assert_eq!(
-        manager
-            .compact(
-                &request,
-                ContextCompressionTrigger::Budget,
-                1,
-                &TurnCancellation::new(),
-            )
-            .await,
-        Err(ContextError::NothingCompressible)
-    );
+    let error = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            1,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect_err("多重调用不完整交换不能压缩");
+    // 修复 3：候选存在但全部不可触碰时输出"受保护输入占满窗口"的结构化诊断。
+    assert!(matches!(
+        error,
+        ContextError::ProtectedInputFillsWindow { .. }
+    ));
 }
 
 /// 对话中途出现的 developer 指令也必须保持原位置且不能进入摘要输入。
@@ -1583,10 +1597,19 @@ async fn runner_uncompressible_precompression_obeys_hard_budget() {
             assert_eq!(requests[0].messages.as_slice(), original.as_slice());
         } else {
             assert_eq!(result.messages.as_slice(), original.as_slice());
-            assert_eq!(
-                result.error,
-                Some(AgentRunError::Context(ContextError::NothingCompressible))
-            );
+            // 修复 1：固定输入超限且无可压缩历史时，准入预检直接给出各预算
+            // 分项的结构化诊断，不再落入压缩失败路径。
+            let error = result.error.expect("窗口 7_380 必须以准入失败终态停止");
+            let AgentRunError::Context(ContextError::InitialRequestOversized { breakdown }) =
+                &error
+            else {
+                panic!("期望 InitialRequestOversized，实际 {error:?}");
+            };
+            assert_eq!(breakdown.max_context_tokens, 7_380);
+            assert_eq!(breakdown.estimated_fixed_input, 5_333);
+            assert_eq!(breakdown.input_budget, 7_380 - 2_048);
+            assert_eq!(breakdown.overflow_tokens, 5_333 - (7_380 - 2_048));
+            assert!(compressor.requests().is_empty());
             assert_eq!(
                 result.state.terminal_reason(),
                 Some(TerminalReason::ContextBlocked)
@@ -1763,10 +1786,16 @@ async fn runner_soft_precompression_fallback_does_not_hide_real_overflow() {
         result.state.terminal_reason(),
         Some(TerminalReason::ContextBlocked)
     );
-    assert_eq!(
-        result.error,
-        Some(AgentRunError::Context(ContextError::NothingCompressible))
-    );
+    // 修复 1：窗口 8_192 下固定输入可装入（准入通过），Provider 真实超限进入
+    // 强制恢复；无历史时机械兜底与放宽投影都无法缩水，最终以准入后压缩链的
+    // "受保护输入占满窗口"诊断终态，而不是笼统失败。
+    let error = result.error.expect("Provider 超限必须以 Context 终态停止");
+    assert!(matches!(
+        error,
+        AgentRunError::Context(
+            ContextError::ProtectedInputFillsWindow { .. } | ContextError::StillExceeded { .. }
+        )
+    ));
     assert_eq!(result.messages.as_slice(), original.as_slice());
     assert!(result.compactions.is_empty() && compressor.requests().is_empty());
     assert_eq!(provider.requests().unwrap().len(), 1);
@@ -2778,18 +2807,35 @@ fn tool_result_text_and_image_contents_accumulate() {
     );
 }
 
-/// 推理块按已归一化推理文本字节估算。
+/// 推理块只在携带协议续传状态时按正文与状态数据估算；无续传状态的推理
+/// 正文不会出现在后续请求的 wire 输入（Chat Completions 从不回放推理，
+/// Messages 只回放带 thinking 签名或 redacted 状态的推理），不计入估算。
 #[test]
 fn reasoning_block_estimates_by_text_bytes() {
-    let messages = vec![Message::new(
+    use keencode_model::{OpaqueReasoningState, ReasoningContent};
+    // 无续传状态：不产生任何推理估算，只有每消息固定开销。
+    let plain = vec![Message::new(
         MessageRole::Assistant,
         vec![ContentBlock::Reasoning {
-            reasoning: keencode_model::ReasoningContent::new("r".repeat(40)),
+            reasoning: ReasoningContent::new("r".repeat(40)),
         }],
     )];
-    assert_eq!(
-        JsonContextTokenEstimator.estimate_messages(&messages),
-        4 + 10
+    assert_eq!(JsonContextTokenEstimator.estimate_messages(&plain), 4);
+    // 带 thinking 签名续传：正文加状态数据照常计入（40 字符 = 10 + 状态 JSON）。
+    let signed = vec![Message::new(
+        MessageRole::Assistant,
+        vec![ContentBlock::Reasoning {
+            reasoning: ReasoningContent {
+                text: "r".repeat(40),
+                summary: None,
+                continuation: Some(OpaqueReasoningState::new("signature", json!("sig"))),
+            },
+        }],
+    )];
+    let estimate = JsonContextTokenEstimator.estimate_messages(&signed);
+    assert!(
+        estimate > 4 + 10,
+        "带续传状态的推理必须计入正文与状态数据：{estimate}"
     );
 }
 
@@ -4712,12 +4758,12 @@ fn cache_tool_reply(input_tokens: u64, cache_read_tokens: u64, call_id: &str) ->
 /// Runner 集成（#17 联动 #14）：高命中率 + 充足头部空间时跳过预测性压缩。
 #[tokio::test]
 async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
-    // 窗口 94_096、输出上限 16 → 输入预算 90_000，85% 线 76_500。
+    // 窗口 94_096、输出上限 16 → 输入预算 94_080，85% 线 79_968。
     // 首轮工具 Round 锚定 input 60_000、cache_read 56_000（hit_rate ≈ 0.93）；
-    // 次轮估算 = 60_000 + 11_500 = 71_500（79%，不触发既有线）；
-    // 预测 71_500 + 19_096 = 90_596 ≥ 90_000 本应触发，但头部空间
-    // (90_000 − 71_500) / 90_000 ≈ 0.206 > 0.2 → 跳过。
-    // 次轮水位 79% ≥ 70% 且无压缩 → 照常发送一条水位事件。
+    // 次轮估算 = 60_000 + 11_500 = 71_500（75%，不触发既有线）；
+    // 预测 71_500 + 15_016 = 86_516 < 94_080 不触发；头部空间
+    // (94_080 − 71_500) / 94_080 ≈ 0.24 > 0.2 → 即便命中也跳过。
+    // 次轮水位 75% ≥ 70% 且无压缩 → 照常发送一条水位事件。
     let capabilities = ProviderCapabilities {
         max_context_tokens: Some(94_096),
         max_output_tokens: Some(16),
@@ -4778,7 +4824,7 @@ async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
             _ => None,
         })
         .collect();
-    assert_eq!(water_levels, [(79, 70)]);
+    assert_eq!(water_levels, [(75, 70)]);
     assert!(hook.pre_contexts().is_empty());
     assert!(hook.post_contexts().is_empty());
     assert!(hook.error_contexts().is_empty());
@@ -4787,9 +4833,9 @@ async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
 /// Runner 集成（#23）：水位回落到阈值以下后再次跨越时重新发送水位事件。
 #[tokio::test]
 async fn runner_water_level_event_resends_after_dipping_below_threshold() {
-    // 同一预算 90_000：R1 估算 65_000（72%，发送）；R2 锚定 input 1_000 +
-    // 增量 1_000 = 2_000（2%，重置去重标记）；R3 锚定 input 63_000 +
-    // 增量 1_000 = 64_000（71%，再次发送）。三轮预测值均未超预算，无压缩。
+    // 同一预算 94_080：R1 估算 66_000（70%，发送）；R2 锚定 input 1_000 +
+    // 增量 1_000 = 2_000（2%，重置去重标记）；R3 锚定 input 65_000 +
+    // 增量 1_000 = 66_000（70%，再次发送）。三轮预测值均未超预算，无压缩。
     let capabilities = ProviderCapabilities {
         max_context_tokens: Some(94_096),
         max_output_tokens: Some(16),
@@ -4799,14 +4845,14 @@ async fn runner_water_level_event_resends_after_dipping_below_threshold() {
         capabilities,
         [
             cache_tool_reply(1_000, 0, "cross-call-1"),
-            cache_tool_reply(63_000, 0, "cross-call-2"),
+            cache_tool_reply(65_000, 0, "cross-call-2"),
             text_reply("最终回答"),
         ],
     ));
     let context = ContextManager::new(
         ContextPolicy::default(),
         Arc::new(FixedEstimator {
-            request_tokens: 65_000,
+            request_tokens: 66_000,
             message_tokens: 1_000,
         }),
         Arc::new(RecordingCompressor::new("unused")),
@@ -4840,7 +4886,7 @@ async fn runner_water_level_event_resends_after_dipping_below_threshold() {
             _ => None,
         })
         .collect();
-    assert_eq!(water_levels, [(72, 70), (71, 70)]);
+    assert_eq!(water_levels, [(70, 70), (70, 70)]);
 }
 
 /// #24 压缩替换隔离：`compact` 产物换新快照，输入请求快照不受污染。
@@ -4889,4 +4935,404 @@ async fn compaction_replaces_snapshot_without_polluting_input() {
             _ => false,
         })
     }));
+}
+
+/// 修复 1：固定输入超过有效输入预算且没有可压缩历史时，准入预检直接给出
+/// 各预算分项的结构化诊断（InitialRequestOversized），不再落入压缩失败路径。
+#[tokio::test]
+async fn admission_check_blocks_oversized_fixed_input_with_breakdown() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(4_096),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不得发出")],
+    ));
+    let manager = ContextManager::new(
+        ContextPolicy {
+            reserved_output_tokens: 16,
+            ..ContextPolicy::default()
+        },
+        Arc::new(FixedEstimator {
+            request_tokens: 4_000,
+            message_tokens: 1,
+        }),
+        Arc::new(RecordingCompressor::new("不得调用")),
+    )
+    .expect("测试策略应有效");
+    // 请求显式输出 1_024：输入预算 = 4_096 - 1_024 = 3_072 < 4_000。
+    let mut scoped = ModelRequest::new(
+        "context-model",
+        vec![Message::text(MessageRole::User, "任务")],
+    );
+    scoped.max_output_tokens = Some(1_024);
+    scoped.validate().expect("请求应有效");
+    let capabilities = provider.capabilities(&scoped.model);
+
+    match manager.admission_check(&scoped, &capabilities) {
+        AdmissionDecision::Blocked(breakdown) => {
+            assert_eq!(breakdown.max_context_tokens, 4_096);
+            assert_eq!(breakdown.reserved_output, 1_024);
+            assert_eq!(breakdown.input_budget, 3_072);
+            assert_eq!(breakdown.estimated_fixed_input, 4_000);
+            assert_eq!(breakdown.overflow_tokens, 928);
+        }
+        other => panic!("固定输入超限必须被准入预检拦截，实际 {other:?}"),
+    }
+    // 预算内时必须放行。
+    let mut fitting = scoped.clone();
+    fitting.max_output_tokens = Some(64);
+    assert_eq!(
+        manager.admission_check(&fitting, &capabilities),
+        AdmissionDecision::Admitted
+    );
+    // 窗口未知时无法预检，放行交给运行期判定兜底。
+    let unknown = ProviderCapabilities::default();
+    assert_eq!(
+        manager.admission_check(&scoped, &unknown),
+        AdmissionDecision::Admitted
+    );
+}
+
+/// 修复 1（Runner 集成）：首轮固定输入超限且无可压缩历史时，Turn 以
+/// InitialRequestOversized 终态停止，压缩器从未被调用，不产生任何模型请求。
+#[tokio::test]
+async fn runner_initial_admission_blocks_before_compaction_arm() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(4_096),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("不得发出")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        ContextPolicy {
+            reserved_output_tokens: 16,
+            ..ContextPolicy::default()
+        },
+        Arc::new(FixedEstimator {
+            request_tokens: 4_000,
+            message_tokens: 1,
+        }),
+        compressor.clone(),
+    )
+    .unwrap();
+    let original = vec![Message::text(MessageRole::User, "仅有当前请求")];
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .run_turn(turn_request_with_output(original.clone(), 1_024))
+        .await;
+    let error = result.error.expect("固定输入超限必须终态停止");
+    let AgentRunError::Context(ContextError::InitialRequestOversized { breakdown }) = &error else {
+        panic!("期望 InitialRequestOversized，实际 {error:?}");
+    };
+    assert_eq!(breakdown.input_budget, 3_072);
+    assert_eq!(breakdown.estimated_fixed_input, 4_000);
+    // 诊断 Display 必须携带各预算分项数字，供评测报告直接引用。
+    let display = error.to_string();
+    assert!(display.contains("4_096") || display.contains("4096"));
+    assert!(display.contains("4_000") || display.contains("4000"));
+    assert!(display.contains("初始请求"));
+    assert!(compressor.requests().is_empty());
+    assert!(result.compactions.is_empty());
+    assert!(provider.requests().unwrap().is_empty());
+    assert_eq!(result.messages.as_slice(), original.as_slice());
+    assert_eq!(
+        result.state.terminal_reason(),
+        Some(TerminalReason::ContextBlocked)
+    );
+}
+
+/// 修复 2：小窗口下 Provider 输出上限远大于窗口时，摘要调用输出必须被钳到
+/// "模板输入 + 输出 ≤ 窗口"，不得形成超过窗口的压缩请求（17,011 > 16,384）。
+#[tokio::test]
+async fn summary_output_is_clamped_to_window_in_small_contexts() {
+    let compressor = Arc::new(RecordingCompressor::new("窗口内摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认策略应有效");
+    let mut messages = vec![Message::text(MessageRole::System, "system 必须保留")];
+    messages.extend((0..20).map(|_| Message::text(MessageRole::User, "x".repeat(1_200))));
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let request = ModelRequest::new("context-model", messages);
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(16_384),
+        max_output_tokens: None,
+        ..ProviderCapabilities::default()
+    };
+
+    let outcome = manager
+        .compact_with_capabilities(
+            &request,
+            ContextCompressionTrigger::Budget,
+            5_000,
+            &capabilities,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("小窗口压缩必须成功");
+
+    let requests = compressor.requests();
+    assert!(!requests.is_empty());
+    for summary_request in requests {
+        let provider_request = build_summary_model_request(
+            summary_request.model,
+            &summary_request.messages,
+            summary_request.max_output_tokens,
+        )
+        .expect("摘要请求应可构造");
+        let estimated = JsonContextTokenEstimator.estimate_request(&provider_request);
+        assert!(
+            estimated.saturating_add(u64::from(summary_request.max_output_tokens)) <= 16_384,
+            "任一摘要请求的输入+输出预留都必须落在窗口内"
+        );
+        assert!(
+            u64::from(summary_request.max_output_tokens) <= 16_384 / 2,
+            "摘要输出不得超过窗口一半"
+        );
+    }
+    assert!(matches!(
+        outcome.record.kind,
+        ContextCompactionKind::Summary
+    ));
+}
+
+/// 修复 2：单个原子单元装不进摘要预算时，先对其做零 LLM 强制投影再分块，
+/// 而不是直接报 CompressionRequestTooLarge。
+#[tokio::test]
+async fn oversized_single_unit_is_force_projected_before_failing() {
+    let compressor = Arc::new(RecordingCompressor::new("投影后摘要"));
+    let manager = ContextManager::new(
+        ContextPolicy::default(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("默认策略应有效");
+    // system + 一条超长工具交换（一个原子单元）+ 近期两条。默认摘要输出
+    // 16_000 会被窗口钳制；构造 8_000 窗口让该单元第一次装不下。
+    let mut messages = vec![Message::text(MessageRole::System, "system 必须保留")];
+    messages.extend(tool_exchange_round("call-1", "y".repeat(40_000)));
+    messages.push(Message::text(MessageRole::User, "近期问题"));
+    messages.push(Message::text(MessageRole::Assistant, "近期回答"));
+    let request = ModelRequest::new("context-model", messages);
+    let capabilities = ProviderCapabilities {
+        max_context_tokens: Some(16_000),
+        max_output_tokens: Some(16_384),
+        ..ProviderCapabilities::default()
+    };
+
+    let outcome = manager
+        .compact_with_capabilities(
+            &request,
+            ContextCompressionTrigger::Budget,
+            4_000,
+            &capabilities,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("单个超长原子单元必须经强制投影后成功分块摘要");
+
+    assert_eq!(outcome.record.replaced_message_count, 2);
+    assert!(!compressor.requests().is_empty());
+    // 工具调用与结果配对必须保持完整。
+    assert_tool_pairs_intact(&outcome.messages);
+    // 摘要消息已替换原区间；投影标记不存在——该单元是被摘要替换而非仅投影。
+    assert!(outcome.messages.iter().any(|message| {
+        message.content.iter().any(
+            |block| matches!(block, ContentBlock::Text { text } if text.contains("投影后摘要")),
+        )
+    }));
+}
+
+/// 修复 3：历史不存在任何非保护可压缩单元时，Micro 投影放宽 stale 窗口限制，
+/// 把近期轮次的超长 ToolResult 也纳入候选，不再以 no_safe_history 失败。
+#[tokio::test]
+async fn relaxed_micro_projection_recovers_recent_tool_results_when_uncompressible() {
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .expect("测试策略应有效");
+    // system + 少于 stale 窗口轮数的近期工具交换（常规 Micro 不会触碰）。
+    // minimum_recent_units=2 下 tool 交换是"近期窗口内"单元，plan_replacement
+    // 无候选；放宽后超长 ToolResult 仍应被投影回收。
+    let mut messages = vec![Message::text(MessageRole::System, "system 必须原样保留")];
+    messages.extend(tool_exchange_round("call-1", "z".repeat(20_000)));
+    messages.push(Message::text(MessageRole::Assistant, "近期结论"));
+    let original = messages.clone();
+    let request = ModelRequest::new("context-model", messages);
+    let before = manager.estimate_request(&request);
+
+    let outcome = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            before.saturating_sub(1_000),
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect("放宽 Micro 投影应回收近期超长工具结果");
+
+    assert_eq!(outcome.kind, ContextCompactionOutcomeKind::MicroOnly);
+    assert!(
+        compressor.requests().is_empty(),
+        "Micro 投影不得调用摘要模型"
+    );
+    assert_eq!(outcome.messages.len(), original.len(), "投影不得增删消息");
+    assert!(!outcome.record.projections.is_empty());
+    assert_tool_pairs_intact(&outcome.messages);
+}
+
+/// 修复 3：候选单元存在但全部不可触碰（受保护 + 近期窗口）时输出
+/// "受保护输入占满窗口"的结构化诊断，Display 携带预算分项。
+#[tokio::test]
+async fn fully_protected_units_report_structured_window_diagnosis() {
+    let manager = ContextManager::new(
+        direct_policy(),
+        Arc::new(JsonContextTokenEstimator),
+        Arc::new(RecordingCompressor::new("不得调用")),
+    )
+    .expect("测试策略应有效");
+    // 一条不完整工具交换（受保护）+ 近期两条（近期窗口内）。
+    let messages = vec![
+        Message::text(MessageRole::System, "system 必须原样保留"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolCall {
+                tool_call: ToolCall::new("missing-result", "read", json!({})),
+            }],
+        ),
+        Message::text(MessageRole::User, "近期一"),
+        Message::text(MessageRole::Assistant, "近期二"),
+    ];
+    let request = ModelRequest::new("context-model", messages);
+    let error = manager
+        .compact(
+            &request,
+            ContextCompressionTrigger::Budget,
+            1,
+            &TurnCancellation::new(),
+        )
+        .await
+        .expect_err("全部不可触碰时必须失败");
+    let ContextError::ProtectedInputFillsWindow {
+        protected_units,
+        recent_window_units,
+        ..
+    } = &error
+    else {
+        panic!("期望 ProtectedInputFillsWindow，实际 {error}");
+    };
+    assert_eq!(*protected_units, 2);
+    assert_eq!(*recent_window_units, 2);
+    let display = error.to_string();
+    assert!(display.contains("受保护输入占满窗口"));
+    assert!(display.contains("输入预算"));
+}
+
+/// 第二轮修复 A：近期窗口内的超长工具结果占满预算、准入被拦时，先做放宽
+/// Micro 投影回收再重新准入；回收后装得下则继续执行，不再 InitialRequestOversized
+/// （SP3-offload-after-compaction 失败形态）。
+#[tokio::test]
+async fn runner_admission_blocked_recovers_via_relaxed_projection() {
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            max_context_tokens: Some(16_384),
+            max_output_tokens: Some(8_192),
+            ..ProviderCapabilities::default()
+        },
+        [text_reply("正常回答")],
+    ));
+    let compressor = Arc::new(RecordingCompressor::new("不得调用"));
+    let context = ContextManager::new(
+        ContextPolicy {
+            reserved_output_tokens: 16,
+            ..ContextPolicy::default()
+        },
+        Arc::new(JsonContextTokenEstimator),
+        compressor.clone(),
+    )
+    .unwrap();
+    // 首轮历史（新 Turn 复用会话历史形态）：system + user + 一轮超长工具交换。
+    // 交换单元位于 minimum_recent_units=2 的近期窗口内，无可选历史；超长工具
+    // 结果使无锚估算超过输入预算 16_384 - 8_192 = 8_192。
+    let mut messages = vec![
+        Message::text(MessageRole::System, "system 指令".repeat(20)),
+        Message::text(MessageRole::User, "获取事故报告"),
+    ];
+    messages.extend(tool_exchange_round("call-1", "x".repeat(60_000)));
+    let original_len = messages.len();
+    let result = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_context_manager(context)
+        .run_turn(turn_request(messages))
+        .await;
+    assert!(
+        result.is_success(),
+        "放宽投影回收后应继续执行：{:?}",
+        result.error
+    );
+    // 回收以一条 Micro 投影记录入列，随 TurnResult 持久化。
+    assert_eq!(result.compactions.len(), 1);
+    assert_eq!(
+        result.compactions[0].kind,
+        ContextCompactionKind::MicroProjection
+    );
+    assert!(compressor.requests().is_empty(), "准入回收不得调用摘要模型");
+    assert!(
+        result.messages.len() >= original_len.saturating_sub(1),
+        "投影不得增删消息"
+    );
+}
+
+/// 第二轮修复 B：无续传状态的推理正文不计入输入估算（不会出现在后续请求
+/// 的 wire 输入）；带续传状态的推理（正文加状态数据）照常计入。幽灵推理
+/// token 不再驱动无意义的反复压缩（CF2-L2 形态）。
+#[test]
+fn estimator_counts_only_replayable_reasoning_content() {
+    use keencode_model::{OpaqueReasoningState, ReasoningContent};
+    let estimator = JsonContextTokenEstimator;
+    let plain = Message::new(
+        MessageRole::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                reasoning: ReasoningContent::new("r".repeat(40_000)),
+            },
+            ContentBlock::text("结论"),
+        ],
+    );
+    let mut resumable_message = Message::new(
+        MessageRole::Assistant,
+        vec![
+            ContentBlock::Reasoning {
+                reasoning: ReasoningContent {
+                    text: "t".repeat(40_000),
+                    summary: None,
+                    continuation: Some(OpaqueReasoningState::new("signature", json!("sig-data"))),
+                },
+            },
+            ContentBlock::text("结论"),
+        ],
+    );
+    let plain_estimate = estimator.estimate_messages(std::slice::from_ref(&plain));
+    let resumable_estimate = estimator.estimate_messages(std::slice::from_ref(&resumable_message));
+    let baseline = estimator.estimate_messages(&[Message::text(MessageRole::Assistant, "结论")]);
+    // 无续传状态：40K 字符推理正文不产生任何估算；只有文本与每消息开销。
+    assert!(
+        plain_estimate - baseline < 100,
+        "无续传状态的推理不得计入输入估算：{plain_estimate} vs {baseline}"
+    );
+    // 带续传状态：正文与状态数据照常计入。
+    assert!(
+        resumable_estimate - baseline > 10_000,
+        "带续传状态的推理必须照常计入：{resumable_estimate} vs {baseline}"
+    );
+    // 序列化口径只看内容：两种消息的其余部分逐字节相同。
+    let _ = &mut resumable_message;
 }

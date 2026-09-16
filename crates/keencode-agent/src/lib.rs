@@ -43,12 +43,12 @@ pub use collaboration::{
     root_turn_prompt_digest,
 };
 pub use context::{
-    CONTEXT_WATER_LEVEL_INFO_PERCENT, ContextCompactionKind, ContextCompactionOutcomeKind,
-    ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger,
-    ContextCompressor, ContextError, ContextFuture, ContextManager, ContextPolicy,
-    ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,
-    ContextSummaryRequest, ContextTokenEstimator, JsonContextTokenEstimator,
-    MICRO_COMPACT_POLICY_VERSION, MicroAppliedThenFullFailure,
+    AdmissionDecision, CONTEXT_WATER_LEVEL_INFO_PERCENT, ContextCompactionKind,
+    ContextCompactionOutcomeKind, ContextCompressionOutcome, ContextCompressionRecord,
+    ContextCompressionTrigger, ContextCompressor, ContextError, ContextFuture, ContextManager,
+    ContextPolicy, ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,
+    ContextSummaryRequest, ContextTokenEstimator, InitialRequestBudgetBreakdown,
+    JsonContextTokenEstimator, MICRO_COMPACT_POLICY_VERSION, MicroAppliedThenFullFailure,
     PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO, PREDICTIVE_CACHE_SKIP_HIT_RATE,
     PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS, ProviderContextCompressor, ToolResultProjection,
 };

@@ -18,8 +18,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::context::{
-    context_error_is_cancelled, context_error_model_usage, context_error_without_summary_usage,
-    post_compaction_read_hint_message,
+    AdmissionDecision, context_error_is_cancelled, context_error_model_usage,
+    context_error_without_summary_usage, post_compaction_read_hint_message,
 };
 use crate::event::AgentToolRoundBinding;
 use crate::structured_output::{
@@ -1501,6 +1501,43 @@ impl AgentRunner {
         Ok(())
     }
 
+    /// 准入被拦时尝试一次放宽 stale 窗口的零 LLM Micro 投影回收。
+    ///
+    /// 返回 `Ok(true)` 表示投影已采纳（记录入列、消息同步），调用方应重新
+    /// 准入；`Ok(false)` 表示没有候选投影（不产生任何记录与事件）；`Err`
+    /// 表示投影应用失败或被取消，取消优先于一切。
+    async fn recover_admission_with_projection(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+        model_request: &mut ModelRequest,
+    ) -> Result<bool, AgentRunError> {
+        ensure_not_cancelled(&request.cancellation)?;
+        let Some(micro_plan) =
+            crate::context::plan_micro_compaction_relaxed(&model_request.messages)
+        else {
+            return Ok(false);
+        };
+        let outcome = self
+            .context
+            .apply_relaxed_micro_projection(
+                model_request,
+                ContextCompressionTrigger::Budget,
+                &micro_plan,
+            )
+            .map_err(|error| {
+                if context_error_is_cancelled(&error) {
+                    AgentRunError::Cancelled
+                } else {
+                    AgentRunError::Context(error)
+                }
+            })?;
+        active.compactions.push(outcome.record.clone());
+        active.messages = outcome.messages.into();
+        model_request.messages = active.messages.clone();
+        Ok(true)
+    }
+
     /// 在报 ContextBlocked 之前尝试唯一一次零 LLM 机械截断兜底。
     ///
     /// 返回 `Ok(true)` 表示兜底已应用（记录入列、消息已采纳、锚点已清），
@@ -1523,6 +1560,31 @@ impl AgentRunner {
             return Ok(false);
         }
         active.mechanical_truncation_used = true;
+        // 修复 3：机械截断的候选范围与摘要共享同一受保护定义，纯受保护历史
+        // 下机械截断同样无事可做；先做一次放宽 stale 窗口的零 LLM Micro 投影，
+        // 有收益即先回收这部分（记录入列、消息采纳），再继续机械截断判定。
+        // 取消优先：投影前先检查取消信号，避免取消竞态下多采纳一条记录。
+        ensure_not_cancelled(&request.cancellation)?;
+        if let Some(micro_plan) =
+            crate::context::plan_micro_compaction_relaxed(&model_request.messages)
+        {
+            match self
+                .context
+                .apply_relaxed_micro_projection(model_request, trigger, &micro_plan)
+            {
+                Ok(outcome) => {
+                    active.compactions.push(outcome.record.clone());
+                    active.messages = outcome.messages.into();
+                    model_request.messages = active.messages.clone();
+                }
+                Err(error) if context_error_is_cancelled(&error) => {
+                    return Err(AgentRunError::Cancelled);
+                }
+                // 投影防御性失败（CompressionDidNotReduce 理论不可达）不阻断
+                // 兜底链路，继续按原口径尝试机械截断。
+                Err(_) => {}
+            }
+        }
         let target_tokens = self.context.forced_target(model_request, capabilities);
         self.deliver_context_compaction_event(
             request,
@@ -2085,8 +2147,48 @@ impl AgentRunner {
                 .map_err(|error| AgentRunError::Internal {
                     message: format!("工具目录通知构造失败：{}", error.message()),
                 })?;
-            let budget_request =
+            let mut budget_request =
                 request_with_transient_message(&model_request, tool_catalog_message.as_ref());
+            // 初始请求准入预检：不存在任何可供压缩选中的历史单元时（典型是
+            // 首轮的 system/developer + 当前 user），固定输入超过有效输入预算
+            // 意味着压缩臂必然失败；此时先尝试一次放宽 stale 窗口的零 LLM
+            // Micro 投影——近期轮次的超长工具结果正是常见可回收项——回收后
+            // 重新准入；仍超限才给出各预算分项的结构化诊断，不进入压缩失败
+            // 路径。存在可压缩历史的轮次（含 Provider 超限恢复）仍沿用既有
+            // 触发线与压缩臂。
+            if !self.context.has_compressible_history(&model_request) {
+                if let AdmissionDecision::Blocked(breakdown) = self
+                    .context
+                    .admission_check(&budget_request, &provider_capabilities)
+                {
+                    match self
+                        .recover_admission_with_projection(request, active, &mut model_request)
+                        .await
+                    {
+                        Ok(true) => {
+                            budget_request = request_with_transient_message(
+                                &model_request,
+                                tool_catalog_message.as_ref(),
+                            );
+                            if let AdmissionDecision::Blocked(breakdown) = self
+                                .context
+                                .admission_check(&budget_request, &provider_capabilities)
+                            {
+                                return Err(AgentRunError::Context(
+                                    ContextError::InitialRequestOversized { breakdown },
+                                ));
+                            }
+                        }
+                        Ok(false) => {
+                            return Err(AgentRunError::Context(
+                                ContextError::InitialRequestOversized { breakdown },
+                            ));
+                        }
+                        Err(AgentRunError::Cancelled) => return Err(AgentRunError::Cancelled),
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
             // 水位告警（#23）先于压缩触发判断：跨越 info 阈值且本轮尚未发送
             // 过时发一条 transient 水位事件；含水位百分比与阈值，不入权威
             // journal。压缩实际执行的轮次只发压缩事件（防重复）。水位事件丢失
@@ -2130,6 +2232,7 @@ impl AgentRunner {
                             error,
                             AgentRunError::Context(
                                 ContextError::NothingCompressible
+                                    | ContextError::ProtectedInputFillsWindow { .. }
                                     | ContextError::EmptySummary
                                     | ContextError::CompressionDidNotReduce { .. },
                             )
@@ -2213,6 +2316,7 @@ impl AgentRunner {
                             error,
                             AgentRunError::Context(
                                 ContextError::NothingCompressible
+                                    | ContextError::ProtectedInputFillsWindow { .. }
                                     | ContextError::EmptySummary
                                     | ContextError::CompressionDidNotReduce { .. },
                             )
@@ -6030,6 +6134,8 @@ fn context_compaction_failure_kind(error: &ContextError) -> ContextCompactionFai
             context_compaction_failure_kind(&failure.error)
         }
         ContextError::NothingCompressible
+        | ContextError::ProtectedInputFillsWindow { .. }
+        | ContextError::InitialRequestOversized { .. }
         | ContextError::CompressionRequestTooLarge { .. }
         | ContextError::SummaryRecursionLimit
         | ContextError::CompressionDidNotReduce { .. }

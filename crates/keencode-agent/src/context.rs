@@ -91,6 +91,15 @@ pub enum ContextCompressionTrigger {
     ProviderOverflow,
 }
 
+/// 初始请求准入预检（`admission_check`）的判定结果。
+#[derive(Clone, Debug, PartialEq)]
+pub enum AdmissionDecision {
+    /// 固定输入在有效输入预算内，或窗口未知无法预检。
+    Admitted,
+    /// 固定输入超过有效输入预算且首轮没有可压缩历史；附带各预算分项。
+    Blocked(InitialRequestBudgetBreakdown),
+}
+
 /// 可直接写入 Session 事件或其他持久层的压缩记录。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -514,12 +523,30 @@ impl ProviderContextCompressor {
                 };
             }
             let capabilities = self.provider.capabilities(&request.model);
-            let max_output_tokens = capabilities
-                .max_output_tokens
-                .map(|maximum| maximum.min(u64::from(u32::MAX)) as u32)
-                .map(|maximum| maximum.min(request.max_output_tokens))
-                .unwrap_or(request.max_output_tokens)
-                .max(1);
+            // 输出上限与主路径 summary_output_ceiling 同口径：请求值、Provider
+            // 最大输出与窗口一半三方取小，再经 largest_fitting_summary_output
+            // 收缩到"模板输入 + 输出预留 ≤ 窗口"。缺任一层钳制都会让 16K 窗口
+            // 下的摘要请求把输出预留顶到窗口之外（如估算 17,011 > 16,384）。
+            let max_output_tokens = match capabilities.max_context_tokens {
+                Some(window) => {
+                    let ceiling = (u64::from(request.max_output_tokens))
+                        .min(capabilities.max_output_tokens.unwrap_or(u64::MAX))
+                        .min(window / 2)
+                        .max(1);
+                    largest_fitting_summary_output(
+                        &request.model,
+                        u32::try_from(ceiling).unwrap_or(u32::MAX),
+                        window,
+                    )
+                    .unwrap_or(1)
+                }
+                None => capabilities
+                    .max_output_tokens
+                    .map(|maximum| maximum.min(u64::from(u32::MAX)) as u32)
+                    .map(|maximum| maximum.min(request.max_output_tokens))
+                    .unwrap_or(request.max_output_tokens)
+                    .max(1),
+            };
             let model_request = match build_summary_model_request(
                 request.model,
                 &request.messages,
@@ -1003,6 +1030,44 @@ impl ContextManager {
             .is_some_and(|budget| self.estimate_request(request) <= budget)
     }
 
+    /// 首个模型请求前的准入预检：区分"固定输入过大"与"可压缩历史"。
+    ///
+    /// 首轮没有用量锚点，也没有任何非保护历史单元（system/developer 与当前
+    /// user 之外至多是上一会话遗留消息），固定输入（指令、任务材料、工具定义
+    /// 与请求级注入）超过有效输入预算时，压缩臂必然以 `NothingCompressible`
+    /// 失败——此时应直接给出各预算分项的结构化诊断，而不是落入压缩失败路径。
+    /// 窗口未知时无法预检，返回 `Admitted` 交由既有运行期判定兜底。
+    pub fn admission_check(
+        &self,
+        request: &ModelRequest,
+        capabilities: &ProviderCapabilities,
+    ) -> AdmissionDecision {
+        let Some(window) = capabilities.max_context_tokens else {
+            return AdmissionDecision::Admitted;
+        };
+        let reserved_output = self.effective_reserved_output(request, capabilities);
+        let input_budget = window.saturating_sub(reserved_output).max(1);
+        let estimated = self.estimate_request_unanchored(request);
+        if estimated <= input_budget {
+            return AdmissionDecision::Admitted;
+        }
+        let tools_tokens = request.tools.iter().fold(0_u64, |sum, tool| {
+            sum.saturating_add(utf8_text_tokens(&tool.name))
+                .saturating_add(utf8_text_tokens(&tool.description))
+                .saturating_add(serialized_json_tokens(&tool.input_schema))
+        });
+        let breakdown = InitialRequestBudgetBreakdown {
+            max_context_tokens: window,
+            reserved_output,
+            input_budget,
+            estimated_fixed_input: estimated,
+            tools_tokens,
+            messages_tokens: estimated.saturating_sub(tools_tokens),
+            overflow_tokens: estimated.saturating_sub(input_budget),
+        };
+        AdmissionDecision::Blocked(breakdown)
+    }
+
     /// 当请求超过已知模型窗口的预压缩阈值时返回目标总 Token，否则返回 `None`。
     ///
     /// 既有 85% 触发线（`trigger_percent`）保持不变；预测性触发（#17）由
@@ -1175,7 +1240,10 @@ impl ContextManager {
             .unwrap_or(self.policy.summary_max_output_tokens);
         // 期望减量沿用 plan_replacement 的口径：降到目标之外再覆盖摘要规模。
         let desired_reduction = desired_reduction(before, target_tokens, summary_output_ceiling);
-        if let Some(micro_plan) = plan_micro_compaction(&request.messages) {
+        // 修复 3：历史不存在任何非保护可压缩单元（plan_replacement 必然失败）
+        // 时放宽 Micro 候选到近期轮次——受保护边界不变，只解除 stale 窗口限制。
+        let relaxed_micro = !self.has_compressible_history(request);
+        if let Some(micro_plan) = plan_micro_compaction(&request.messages, relaxed_micro) {
             if micro_plan.saved_tokens >= desired_reduction {
                 return self.apply_micro_compaction(request, trigger, &micro_plan, before);
             }
@@ -1296,6 +1364,7 @@ impl ContextManager {
             before,
             target_tokens,
             summary_output_ceiling,
+            self.policy_input_budget_hint(request, capabilities),
         )?;
         let source_messages = request.messages[plan.start..plan.end].to_vec();
         let digest = digest_messages(&source_messages)?;
@@ -1718,19 +1787,21 @@ impl ContextManager {
         Ok(summaries)
     }
 
-    /// 返回主请求的有效输出预留：取策略默认预留与实际将发送输出上限的较大者。
+    /// 返回主请求的有效输出预留：请求显式输出上限优先，未指定时用策略默认预留。
     ///
-    /// 策略默认预留是下限；请求显式或由能力派生的输出上限更大时以实际值预留，
-    /// 保证压缩预算跟随实际发送值。已知窗口时预留钳制到窗口一半，
-    /// 使总输入预算恒为正；超钳后以窗口一半为预留，压缩相应更早介入。
-    /// 窗口未知时不钳制，保持策略默认或请求显式值。
+    /// 请求显式（或由能力派生）的输出上限是本次实际将发送的值，按它预留；
+    /// 策略默认预留只在请求未指定时兜底，不把小窗口请求的输出预留放大到
+    /// 策略默认值（8K 窗口 + 显式 2K 输出按 4K 预留会凭空减半输入预算）。
+    /// 已知窗口时预留钳制到窗口一半，使总输入预算恒为正；超钳后以窗口一半
+    /// 为预留，压缩相应更早介入。窗口未知时不钳制。
     fn effective_reserved_output(
         &self,
         request: &ModelRequest,
         capabilities: &ProviderCapabilities,
     ) -> u64 {
-        let requested = request.max_output_tokens.map_or(0, u64::from);
-        let reserved = requested.max(self.policy.reserved_output_tokens);
+        let reserved = request
+            .max_output_tokens
+            .map_or(self.policy.reserved_output_tokens, u64::from);
         match capabilities.max_context_tokens {
             Some(window) => reserved.min(window / 2),
             None => reserved,
@@ -1770,6 +1841,7 @@ impl ContextManager {
         before: u64,
         target_tokens: u64,
         summary_output_ceiling: u32,
+        input_budget_hint: Option<u64>,
     ) -> Result<ReplacementPlan, ContextError> {
         let tail_start = units.len().saturating_sub(self.policy.minimum_recent_units);
         let desired_reduction = desired_reduction(before, target_tokens, summary_output_ceiling);
@@ -1809,12 +1881,37 @@ impl ContextManager {
         }
 
         let Some((run_start, run_end, _)) = best_run else {
+            // 修复 3：区分"确实没有候选单元"与"单元存在但全部不可触碰"
+            // （受保护或位于近期保留窗口内）。后者是"受保护输入占满窗口"的
+            // 诊断场景，必须输出预算分项而不是笼统失败。
+            if !units.is_empty() {
+                let protected_units = units.iter().filter(|unit| unit.protected).count();
+                let recent_window_units = units.len() - protected_units;
+                return Err(ContextError::ProtectedInputFillsWindow {
+                    estimated_input: before,
+                    input_budget: input_budget_hint.unwrap_or(before.max(1)),
+                    protected_units,
+                    recent_window_units,
+                });
+            }
             return Err(ContextError::NothingCompressible);
         };
         Ok(ReplacementPlan {
             start: units[run_start].start,
             end: units[run_end - 1].end,
         })
+    }
+
+    /// 从当前请求与已知 Provider 能力派生输入预算提示；窗口未知时返回 `None`。
+    ///
+    /// 仅供 [`ContextError::ProtectedInputFillsWindow`] 诊断填充预算分项；
+    /// 压缩事务的决策本身不依赖该值。
+    fn policy_input_budget_hint(
+        &self,
+        request: &ModelRequest,
+        capabilities: Option<&ProviderCapabilities>,
+    ) -> Option<u64> {
+        capabilities.and_then(|item| self.input_budget(request, item))
     }
 }
 
@@ -2013,6 +2110,16 @@ fn split_source_chunks(
             continue;
         }
         if chunk_start == unit.start {
+            // 单个原子单元装不下：先对其做零 LLM 强制投影，按预算估算保留
+            // 长度逐级收缩；投影后放得下则以该单元自成一块继续分块，仍放
+            // 不下才是真正的 CompressionRequestTooLarge。
+            if let Some(projected) =
+                force_project_single_unit(model, &messages[unit.start..unit.end], budget)?
+            {
+                chunks.push(projected);
+                chunk_start = unit.end;
+                continue;
+            }
             let request = build_summary_model_request(
                 model.to_owned(),
                 &messages[unit.start..unit.end],
@@ -2029,6 +2136,11 @@ fn split_source_chunks(
         chunk_start = unit.start;
         let unit_only = &messages[unit.start..unit.end];
         if !summary_request_fits(model, unit_only, budget)? {
+            if let Some(projected) = force_project_single_unit(model, unit_only, budget)? {
+                chunks.push(projected);
+                chunk_start = unit.end;
+                continue;
+            }
             let request =
                 build_summary_model_request(model.to_owned(), unit_only, budget.max_output_tokens)?;
             return Err(ContextError::CompressionRequestTooLarge {
@@ -2043,6 +2155,35 @@ fn split_source_chunks(
         chunks.push(messages[chunk_start..plan.end].to_vec());
     }
     Ok(chunks)
+}
+
+/// 对单个装不进摘要预算的原子单元做零 LLM 强制投影（修复 2）。
+///
+/// 按 `max_input_tokens` 估算的 head/tail 保留长度逐级收缩重试；投影后
+/// `summary_request_fits` 即返回投影后消息。文本不含可投影 ToolResult 或
+/// 各级保留长度仍放不下时返回 `None`，由调用方按原口径报错。
+fn force_project_single_unit(
+    model: &str,
+    unit_messages: &[Message],
+    budget: SummaryBudget,
+) -> Result<Option<Vec<Message>>, ContextError> {
+    let max_text_chars = max_tool_result_text_chars(unit_messages);
+    if max_text_chars <= MICRO_PROJECTION_HEAD_CHARS + MICRO_PROJECTION_TAIL_CHARS + 16 {
+        return Ok(None);
+    }
+    // 保留长度从"预算按字节÷4 的一半"起步，逐级减半，下限为常规 head/tail。
+    let base = (budget.max_input_tokens / 4).max(1);
+    let mut keep = usize::try_from(base)
+        .unwrap_or(usize::MAX)
+        .min(max_text_chars / 2 - 8);
+    while keep >= MICRO_PROJECTION_HEAD_CHARS.min(MICRO_PROJECTION_TAIL_CHARS) {
+        let projected = force_project_unit_messages(unit_messages, keep);
+        if summary_request_fits(model, &projected, budget)? {
+            return Ok(Some(projected));
+        }
+        keep /= 2;
+    }
+    Ok(None)
 }
 
 /// 按生成摘要消息边界分组，确保递归摘要本身也不会提交超窗请求。
@@ -2179,6 +2320,8 @@ fn attach_summary_usage(
         // Micro 失败载荷在内层错误上已经附加过用量，不再二次包装。
         ContextError::MicroAppliedThenFullFailed(_) => error,
         ContextError::NothingCompressible
+        | ContextError::ProtectedInputFillsWindow { .. }
+        | ContextError::InitialRequestOversized { .. }
         | ContextError::RecordMismatch { .. }
         | ContextError::StillExceeded { .. }
         | ContextError::InvalidPolicy { .. } => error,
@@ -2199,6 +2342,8 @@ pub(crate) fn context_error_is_cancelled(error: &ContextError) -> bool {
         }
         ContextError::InvalidPolicy { .. }
         | ContextError::NothingCompressible
+        | ContextError::ProtectedInputFillsWindow { .. }
+        | ContextError::InitialRequestOversized { .. }
         | ContextError::CompressionFailed { .. }
         | ContextError::EmptySummary
         | ContextError::RecursiveToolCall
@@ -2219,6 +2364,8 @@ pub(crate) fn context_error_model_usage(error: &ContextError) -> Option<&Context
         }
         ContextError::InvalidPolicy { .. }
         | ContextError::NothingCompressible
+        | ContextError::ProtectedInputFillsWindow { .. }
+        | ContextError::InitialRequestOversized { .. }
         | ContextError::CompressionFailed { .. }
         | ContextError::EmptySummary
         | ContextError::RecursiveToolCall
@@ -2259,6 +2406,29 @@ pub enum ContextError {
     },
     /// 当前历史只有受保护指令、近期消息或不完整工具交换，无法安全替换。
     NothingCompressible,
+    /// 存在可压缩候选但全部为受保护单元，受保护输入已占满有效输入预算。
+    ///
+    /// 与 [`ContextError::NothingCompressible`] 的区别：后者表示确实没有候选
+    /// 原子单元；本变体表示候选存在但安全边界全部禁止触碰，诊断必须说明
+    /// 受保护输入规模与预算缺口，而不是笼统的"没有可压缩历史"。
+    ProtectedInputFillsWindow {
+        /// 当前请求的全量逐块估算 Token。
+        estimated_input: u64,
+        /// 扣除输出预留后的有效输入预算 Token。
+        input_budget: u64,
+        /// 受保护原子单元数量（system/developer、不完整工具交换等）。
+        protected_units: usize,
+        /// 处于近期保留窗口内而不可触碰的非保护原子单元数量。
+        recent_window_units: usize,
+    },
+    /// 首个模型请求的固定输入已超过有效输入预算，且首轮没有可压缩历史。
+    ///
+    /// 由初始请求准入预检（`admission_check`）产生；Runner 据此在进入压缩臂
+    /// 之前直接终止，避免把"固定输入过大"误报成"没有可安全压缩的历史"。
+    InitialRequestOversized {
+        /// 各预算分项明细。
+        breakdown: InitialRequestBudgetBreakdown,
+    },
     /// 摘要 Provider、序列化或协议归约失败。
     CompressionFailed {
         /// 不包含完整历史或凭据的安全说明。
@@ -2322,12 +2492,63 @@ pub struct MicroAppliedThenFullFailure {
     pub error: Box<ContextError>,
 }
 
+/// 初始请求准入失败的各预算分项明细。
+///
+/// 数字全部来自无锚全量逐块估算口径，供错误 Display 与评测报告直接引用。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct InitialRequestBudgetBreakdown {
+    /// Provider 报告的最大上下文窗口 Token。
+    pub max_context_tokens: u64,
+    /// 有效输出预留（max(请求输出, 策略默认预留)，钳制到窗口一半）。
+    pub reserved_output: u64,
+    /// 窗口扣除输出预留后的有效输入预算。
+    pub input_budget: u64,
+    /// 固定输入的全量逐块估算 Token（含工具定义与请求固定开销）。
+    pub estimated_fixed_input: u64,
+    /// 其中工具定义占用的估算 Token。
+    pub tools_tokens: u64,
+    /// 其中消息部分占用的估算 Token。
+    pub messages_tokens: u64,
+    /// 固定输入超出输入预算的部分。
+    pub overflow_tokens: u64,
+}
+
 impl fmt::Display for ContextError {
     /// 输出不包含完整上下文或凭据的稳定中文说明。
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidPolicy { message } => write!(formatter, "上下文策略无效：{message}"),
             Self::NothingCompressible => formatter.write_str("没有可安全压缩的历史上下文"),
+            Self::ProtectedInputFillsWindow {
+                estimated_input,
+                input_budget,
+                protected_units,
+                recent_window_units,
+            } => write!(
+                formatter,
+                "受保护输入占满窗口：估算 {estimated_input} Token，输入预算 {input_budget} Token，\
+                 受保护单元 {protected_units} 个，近期保留窗口内单元 {recent_window_units} 个，\
+                 安全边界禁止触碰且无可投影内容"
+            ),
+            Self::InitialRequestOversized { breakdown } => {
+                let InitialRequestBudgetBreakdown {
+                    max_context_tokens,
+                    reserved_output,
+                    input_budget,
+                    estimated_fixed_input,
+                    tools_tokens,
+                    messages_tokens,
+                    overflow_tokens,
+                } = breakdown;
+                write!(
+                    formatter,
+                    "初始请求固定输入超过有效输入预算：窗口 {max_context_tokens} Token，\
+                     输出预留 {reserved_output} Token，输入预算 {input_budget} Token，\
+                     固定输入估算 {estimated_fixed_input} Token（工具定义 {tools_tokens}，\
+                     消息 {messages_tokens}），超出 {overflow_tokens} Token；\
+                     没有可压缩历史（零 LLM 投影后仍无候选），无法通过压缩腾出空间"
+                )
+            }
             Self::CompressionFailed { message } => write!(formatter, "上下文压缩失败：{message}"),
             Self::EmptySummary => formatter.write_str("上下文压缩失败：摘要为空"),
             Self::RecursiveToolCall => {
@@ -2404,26 +2625,58 @@ fn desired_reduction(before: u64, target_tokens: u64, summary_output_ceiling: u3
 }
 
 /// 一次零 LLM Micro 投影的完整计划与按字节÷4 口径估算的收益。
-struct MicroCompactionPlan {
+pub(crate) struct MicroCompactionPlan {
     /// 逐条 ToolResult 文本投影，按消息顺序排列。
     projections: Vec<ToolResultProjection>,
     /// 全部投影按 Σ(原字节 − 投影后字节)÷4 估算的收益 Token。
     saved_tokens: u64,
 }
 
+/// 纯计算扫描 transcript 并规划零 LLM 投影候选：旧 ToolResult 文本的
+/// head/tail 投影，以及已完成轮次 Assistant 消息的推理内容省略。
+///
+/// 只读且绝不调用副作用 API 或摘要模型。跳过规则（v1）：
+/// - stale 保护：最近 [`MICRO_COMPACT_STALE_ROUNDS`] 轮内的 Tool 消息一律
+///   不动；总轮数不足 stale 轮数时整段列表都视为近期内容，ToolResult 不做
+///   任何投影；
+/// - 推理省略不受 stale 窗口限制：除最后一条 Assistant 消息外，已完成轮次
+///   的推理正文在其工具轮结束后不再被后续请求依赖，省略为短标记即可（摘要
+///   与协议续传状态原样保留）；最后一条 Assistant 消息可能正处于当前工具
+///   循环中，其推理与续传状态必须完整保留；
+/// - 受保护单元：system/developer 指令永不动——投影只改写 Tool 文本或
+///   Assistant 推理正文，不增删消息，assistant + tool_result 原子对的配对
+///   保持完整；
+/// - 非文本内容：ToolResult 内的 Image 等内容跳过，不参与投影（v1 范围）；
+/// - 已投影文本：携带 sentinel 标记的文本跳过，保证二次规划幂等；
+/// - 短文本：不超过 [`MICRO_PROJECTION_MIN_CHARS`] 字符的候选不值得截断。
+///
+/// `relaxed`（修复 3）：历史不存在任何非保护可压缩单元时，解除 Tool 消息的
+/// stale 窗口限制，把近期轮次的 ToolResult 也纳入候选——安全边界只要求
+/// "不改写指令、不拆散工具配对"，投影只替换文本内容，两种保护都不受影响。
 /// 纯计算扫描 transcript 并规划旧 ToolResult 文本的 head/tail 投影。
 ///
 /// 只读且绝不调用副作用 API 或摘要模型。跳过规则（v1）：
-/// - stale 保护：最近 [`MICRO_COMPACT_STALE_ROUNDS`] 轮内的消息一律不动；
-///   总轮数不足 stale 轮数时整段列表都视为近期内容，不做任何投影；
+/// - stale 保护：最近 [`MICRO_COMPACT_STALE_ROUNDS`] 轮内的 Tool 消息一律
+///   不动；总轮数不足 stale 轮数时整段列表都视为近期内容，ToolResult 不做
+///   任何投影；
 /// - 受保护单元：system/developer 指令与 assistant 一侧永不动——本函数只
 ///   选中 Tool 角色消息内的 ToolResult 文本，且投影不增删消息，assistant +
-///   tool_result 原子对的配对保持完整；
+///   tool_result 原子对的配对保持完整。推理正文不在此投影：无续传状态的
+///   推理本就不计入输入估算（见 `estimate_message_tokens`），带续传状态的
+///   推理与签名配对、改写会破坏 Messages 协议的回放校验；
 /// - 非文本内容：ToolResult 内的 Image 等内容跳过，不参与投影（v1 范围）；
 /// - 已投影文本：携带 sentinel 标记的文本跳过，保证二次规划幂等；
-/// - 短文本：不超过 [`MICRO_PROJECTION_MIN_CHARS`] 字符的结果不值得截断。
-fn plan_micro_compaction(messages: &[Message]) -> Option<MicroCompactionPlan> {
-    let protected_from = micro_stale_window_start(messages)?;
+/// - 短文本：不超过 [`MICRO_PROJECTION_MIN_CHARS`] 字符的候选不值得截断。
+///
+/// `relaxed`（修复 3）：历史不存在任何非保护可压缩单元时，解除 stale 窗口
+/// 限制，把近期轮次的 ToolResult 也纳入候选——安全边界只要求"不改写指令、
+/// 不拆散工具配对"，投影只替换文本内容，两种保护都不受影响。
+fn plan_micro_compaction(messages: &[Message], relaxed: bool) -> Option<MicroCompactionPlan> {
+    let protected_from = if relaxed {
+        messages.len()
+    } else {
+        micro_stale_window_start(messages)?
+    };
     let mut projections = Vec::new();
     let mut saved_bytes = 0_u64;
     for (message_index, message) in messages.iter().enumerate().take(protected_from) {
@@ -2469,6 +2722,31 @@ fn plan_micro_compaction(messages: &[Message]) -> Option<MicroCompactionPlan> {
     })
 }
 
+/// Runner 机械截断兜底入口（修复 3）用的放宽 Micro 规划。
+///
+/// 与 [`ContextManager::compact_internal`] 内的常规规划共享 planner，但无论
+/// 历史是否存在可压缩单元都解除 stale 窗口限制：兜底场景本身就是"压缩与
+/// 机械截断全部装不下"的最后关头，受保护边界不变，只扩大可投影文本范围。
+pub(crate) fn plan_micro_compaction_relaxed(messages: &[Message]) -> Option<MicroCompactionPlan> {
+    plan_micro_compaction(messages, true)
+}
+
+impl ContextManager {
+    /// 应用一份放宽 Micro 投影计划并产出可持久化记录。
+    ///
+    /// 与 [`ContextManager::apply_micro_compaction`] 相同的投影与记录语义；
+    /// 单独暴露是因为 Runner 的机械截断兜底需要在压缩事务之外先回收投影收益。
+    pub(crate) fn apply_relaxed_micro_projection(
+        &self,
+        request: &ModelRequest,
+        trigger: ContextCompressionTrigger,
+        plan: &MicroCompactionPlan,
+    ) -> Result<ContextCompressionOutcome, ContextError> {
+        let before = self.estimate_request_unanchored(request);
+        self.apply_micro_compaction(request, trigger, plan, before)
+    }
+}
+
 /// 返回 stale 保护窗口的起始消息下标；总轮数不足 stale 轮数时返回 `None`，
 /// 表示从尾部向前数不足 [`MICRO_COMPACT_STALE_ROUNDS`] 个 Assistant 消息，
 /// 全部消息都属于最近轮次而受到保护。
@@ -2506,6 +2784,64 @@ fn project_tool_result_text(text: &str) -> (String, u64) {
     (projected, saved)
 }
 
+/// 单个原子单元装不进摘要预算时对其做零 LLM 强制投影（修复 2）。
+///
+/// 与常规 Micro Compact 的区别：不受 stale 窗口与最小字符数保护，只保留
+/// sentinel 幂等——投影只改写 ToolResult 文本内容，不增删消息，assistant +
+/// tool_result 配对边界保持完整。`keep_chars` 是每个文本保留的 head/tail
+/// 长度（字符），按预算估算并随分块递减。返回投影后的消息副本；文本长度
+/// 不足以再投影时返回原副本。
+fn force_project_unit_messages(messages: &[Message], keep_chars: usize) -> Vec<Message> {
+    let mut projected = messages.to_vec();
+    for message in &mut projected {
+        if message.role != MessageRole::Tool {
+            continue;
+        }
+        for block in &mut message.content {
+            let ContentBlock::ToolResult { tool_result } = block else {
+                continue;
+            };
+            for part in &mut tool_result.content {
+                let ToolResultContent::Text { text } = part else {
+                    continue;
+                };
+                let total_chars = text.chars().count();
+                if total_chars <= keep_chars.saturating_mul(2) + 16
+                    || text.contains(MICRO_COMPACT_SENTINEL)
+                {
+                    continue;
+                }
+                let head: String = text.chars().take(keep_chars).collect();
+                let tail: String = text.chars().skip(total_chars - keep_chars).collect();
+                let omitted = total_chars - keep_chars.saturating_mul(2);
+                let marker =
+                    MICRO_COMPACT_MARKER_TEMPLATE.replace("{omitted}", &omitted.to_string());
+                *text = format!("{head}{marker}{tail}");
+            }
+        }
+    }
+    projected
+}
+
+/// 返回消息列表中单条 ToolResult 文本的最大字符长度。
+fn max_tool_result_text_chars(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| message.role == MessageRole::Tool)
+        .flat_map(|message| message.content.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_result } => Some(tool_result),
+            _ => None,
+        })
+        .flat_map(|tool_result| tool_result.content.iter())
+        .filter_map(|part| match part {
+            ToolResultContent::Text { text } => Some(text.chars().count()),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// 把 Micro 投影计划原位应用到消息副本上；计划内的下标由 planner 保证有效。
 fn apply_micro_projections(messages: &[Message], plan: &MicroCompactionPlan) -> Vec<Message> {
     let mut messages = messages.to_vec();
@@ -2522,6 +2858,24 @@ fn apply_micro_projections(messages: &[Message], plan: &MicroCompactionPlan) -> 
         }
     }
     messages
+}
+
+/// 判断请求中是否存在至少一个位于近期保留窗口之前的非保护历史原子单元。
+///
+/// 准入预检与放宽 Micro 决策共用：`plan_replacement` 只能选中近期窗口之前
+/// 的非保护单元；不存在任何可选单元时，压缩臂必然失败，应走准入诊断或
+/// 放宽投影。
+pub(crate) fn has_compressible_history(messages: &[Message], minimum_recent_units: usize) -> bool {
+    let units = transcript_units(messages);
+    let tail_start = units.len().saturating_sub(minimum_recent_units);
+    units[..tail_start].iter().any(|unit| !unit.protected)
+}
+
+impl ContextManager {
+    /// 当前请求是否存在可供 [`ContextManager::plan_replacement`] 选中的历史单元。
+    pub(crate) fn has_compressible_history(&self, request: &ModelRequest) -> bool {
+        has_compressible_history(&request.messages, self.policy.minimum_recent_units)
+    }
 }
 
 /// 把 assistant 工具调用及其连续完整结果绑定为不可拆分单元。
@@ -2677,6 +3031,13 @@ fn estimate_image_tokens(source: &ImageSource) -> u64 {
 }
 
 /// 估算一段统一消息的输入 Token：逐内容块累加并保留每消息固定开销。
+///
+/// 推理正文只在携带协议续传状态时计入：各协议适配器只回放带续传状态的
+/// 推理（Messages 的 thinking/redacted_thinking），无续传状态的推理正文
+/// （如 Chat Completions 的 `reasoning_content`）不会出现在后续请求的
+/// wire 输入里——把它计入会制造持续的幽灵压力，驱动无意义的反复压缩
+/// 甚至把保留窗口"挤爆"（CF2-L2：8.3K 幽灵推理 token → 第 4 轮压缩请求
+/// 估算 21,558 超过 16,384 窗口）。续传状态数据本身按序列化字节计入。
 fn estimate_message_tokens<'a>(messages: impl IntoIterator<Item = &'a Message>) -> u64 {
     let mut total = 0_u64;
     for message in messages {
@@ -2684,7 +3045,13 @@ fn estimate_message_tokens<'a>(messages: impl IntoIterator<Item = &'a Message>) 
         for block in &message.content {
             total = total.saturating_add(match block {
                 ContentBlock::Text { text } => utf8_text_tokens(text),
-                ContentBlock::Reasoning { reasoning } => utf8_text_tokens(&reasoning.text),
+                ContentBlock::Reasoning { reasoning } => match &reasoning.continuation {
+                    // 只有带续传状态的推理会随请求回放：正文加状态数据都计入。
+                    Some(state) => utf8_text_tokens(&reasoning.text)
+                        .saturating_add(serialized_json_tokens(state)),
+                    // 无续传状态的推理正文不会进入后续请求的 wire 输入，不计入。
+                    None => 0,
+                },
                 ContentBlock::Image { image } => estimate_image_tokens(&image.source),
                 // 工具调用按名称加序列化参数计；调用 id 与包装字段不参与
                 // 模型输入语义，与 CCB 的逐块口径保持一致。
