@@ -5,7 +5,7 @@
     "arch": "x64",
     "cpu": "Intel(R) Core(TM) i7-9750H CPU @ 2.60GHz",
     "logicalCpus": 12,
-    "binary": "/Users/chengliang/Documents/jian-desktop/src-tauri/target/debug/keencode-desktop",
+    "binary": "src-tauri/target/debug/keencode-desktop",
     "binaryBytes": 170935648
   },
   "methodology": {

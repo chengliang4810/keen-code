@@ -1787,7 +1787,7 @@ mod tests {
 
     #[test]
     fn memory_context_prefix_preserves_windows_path_verbatim() {
-        let memory_path = r"C:\Users\程 亮\AppData\Roaming\KeenCode memories\MEMORY.md";
+        let memory_path = r"C:\Users\示例用户\AppData\Roaming\KeenCode memories\MEMORY.md";
 
         let prefix = if Path::new(memory_path).is_absolute() {
             memory_context_prefix(Path::new(memory_path))

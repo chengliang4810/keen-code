@@ -22,7 +22,7 @@
 
 ## 开发数据与验证
 
-本次仅对 ~/.keencode-dev 做一次性离线整理，未添加产品兼容或迁移代码，未修改正式 ~/.keencode。备份位于 /Users/chengliang/.keencode-dev-before-project-storage-20260911-234208。23 个会话分入 2 个项目数据目录，全部会话日志与备份逐字节一致，原项目登记不变。
+本次仅对 ~/.keencode-dev 做一次性离线整理，未添加产品兼容或迁移代码，未修改正式 ~/.keencode。备份位于 `~/.keencode-dev-before-project-storage-20260911-234208`。23 个会话分入 2 个项目数据目录，全部会话日志与备份逐字节一致，原项目登记不变。
 
 - 前端 typecheck 通过；完整测试 140 个文件、1306 项通过。
 - resources 单元与集成测试通过；runtime 最终测试 107 项通过。

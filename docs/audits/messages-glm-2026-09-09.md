@@ -145,7 +145,7 @@ cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop live_message
 
 ## 证据索引
 
-本机证据根目录：`/Users/chengliang/.codex/visualizations/2026/09/08/01a0817d-dff7-78e2-9de3-089b926e8a54/messages-glm-validation/`。认证配置位于隔离临时目录，权限 0600，不包含在证据、源码或报告中。
+本机证据根目录：`~/.codex/visualizations/2026/09/08/01a0817d-dff7-78e2-9de3-089b926e8a54/messages-glm-validation/`。认证配置位于隔离临时目录，权限 0600，不包含在证据、源码或报告中。
 
 - `protocol-baseline/`、`protocol-retest/`、`reasoning-budget-retest/`：包含失败的 JSON/SSE 协议请求与响应。
 - `ab-*-baseline/`、`ab-*-current/`、`scope-final/`、`ab-summary.json`：重复对照、最终边界回归和逐次用量。
