@@ -1,3 +1,16 @@
+# 2026-09-17 提问卡片头部导航组贴右上角
+
+- 问题：长问题把卡片头部撑成多行后，头部右侧的翻页/关闭导航组（`1 / 2`、`‹`、`›`、`✕`）落到问题正文的垂直中间，而不是停在右上角。
+- 根因：`src/styles/app-conversation.css` 的共享规则 `.ask-user__header, .ask-user__nav, .ask-user__custom, .ask-user__footer { display: flex; align-items: center; }` 让 `.ask-user__header` 也吃到 `align-items: center`；该头部自身的规则块只覆盖 `min-height` 与 `gap`。`.ask-user__prompt` 是 `flex: 1` 且 `white-space: pre-wrap`，长问题折成多行后把头部撑高，30px 高的 `.ask-user__nav` 于是被居中到整块文本的垂直中点。单行问题时文本块与导航同为 30px 高，`center` 与 `flex-start` 无差别，因此只在长问题下暴露。
+- 修改：`src/styles/app-conversation.css` 的 `.ask-user__header` 增加 `align-items: flex-start` 并加一行说明注释；未新增控件、依赖或其它样式改动。`src/lib/composerOverlayLayout.test.ts` 增加一条读真实 CSS 的回归断言。
+- 门禁：`pnpm run typecheck` 通过；`pnpm run lint:css` 通过；`pnpm exec vitest run src/lib/composerOverlayLayout.test.ts src/components/AskUserModal.test.ts` 9 项通过。
+- 浏览器夹具：`output/playwright/ask-user-header-20260917/`（`index.html`/`fixture.tsx` 加载当前源码与真实样式，`index-baseline.html`/`fixture-baseline.tsx` + `baseline-app.css` 把 `app-conversation.css` 换成 `git show HEAD:src/styles/app-conversation.css` 的副本，其余导入链同序）。问题正文取自用户截图场景，折成 5 行。`pnpm exec vite --config output/playwright/ask-user-header-20260917/vite.config.mts` 起 `http://127.0.0.1:14381/`，用本机 Chrome for Testing（`chromium-1228`）截图，deviceScaleFactor=1、浅色、中文、1440×900。
+- 几何：卡片与问题文本块几何完全不变（`.ask-user` y=459、952×427；`.ask-user__prompt` y=474、770×189）。仅 `.ask-user__nav` 的 y 由 553.5（= 474 + (189-30)/2，垂直居中）变为 474（贴头部顶边），x=1041、140×30 不变。
+- 像素：`baseline.png` 与 `after.png` 同状态比较，RGB 任一通道差值 >16 的像素 360/1296000（0.0278%），差异范围 `(1053,483)–(1172,576)`，即仅导航组移动区域，其余逐像素一致。
+- 未验收：浏览器组件夹具不替代原生 Tauri WebView / Windows 实机验收；真实会话中由 Runtime 触发的问答流程未重启桌面应用复核。
+
+---
+
 # 2026-09-17 模型菜单“管理模型”入口
 
 - 需求：模型选择器级联菜单底部新增分隔线与“管理模型”入口，跳转设置 → 模型设置。
