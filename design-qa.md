@@ -1,3 +1,15 @@
+# 2026-09-17 模型菜单“管理模型”入口
+
+- 需求：模型选择器级联菜单底部新增分隔线与“管理模型”入口，跳转设置 → 模型设置。
+- 修改：`src/components/ComposerModelMenu.tsx`（底部 `DropdownMenuSeparator` + `DropdownMenuItem`，复用既有 `onAddModel` 回调，新增 `labels.manageModels`）、`src/features/app/main/ComposerToolbar.tsx`（透传 `composer.manageModels`）、`src/i18n/messages.ts` 与 `src/i18n/zh-tw.ts`（三语言文案）。未改 CSS，未新增控件或依赖。
+- 门禁：`pnpm run typecheck` 通过；`pnpm test` 的前端部分 `vitest run` 144 文件 / 1397 项通过（含更新后的 `ComposerModelMenu.test.tsx`）。`pnpm test` 整体仍失败于本次未改动的 `src-tauri/prompts/README.md` 与未跟踪 `.zcode/` 触发的 clean-room 来源门禁，已单独复现确认与本次改动无关。
+- 浏览器夹具：`output/playwright/model-menu-manage-20260917/`（`index.html`/`fixture.tsx` 加载当前组件，`index-baseline.html`/`fixture-baseline.tsx` 加载 `5f3d6e1e` 的组件副本，两者模型目录与标签一致），`npx vite --config output/playwright/model-menu-manage-20260917/vite.config.mts` 起 `http://127.0.0.1:14371/`，用本机 Chrome for Testing（`chromium-1228`）截图，deviceScaleFactor=1、浅色、中文、900×600。
+- 交互与几何：菜单项文本由 `["tokenharbor","opencode"]` 变为 `["tokenharbor","opencode","管理模型"]`；下拉高度 96.1875 → 133.25px，x/y/宽（24/60/196）不变；点击“管理模型”使 `onAddModel` 计数 1。
+- 像素：`baseline-menu.png` 与 `after-menu.png` 同状态比较，RGB 任一通道差值 >16 的像素 919/540000（0.1702%），差异范围 `[7,139,237,210)`，其余区域逐像素一致。
+- 未验收：浏览器夹具不替代原生 Tauri WebView / Windows 实机验收；未重启桌面应用复核真实设置跳转与深链。
+
+---
+
 # 2026-09-15 思考强度滑块四态动效
 
 - 需求：对照 Droppy Code（gitlab.com/droppyformac1/droppy-code，本地克隆 /tmp/droppy-inspect/droppy-code）`EffortSlider.swift` 移植思考强度滑块的胶囊轨道与四态 Canvas 动效（plain/supercharged/fast/fusion）。拍板：品牌色固定 Claude 陶土橙；fast 态由面板内既有 Ultra 开关驱动（不新增控件、不改 Rust）；新建专用胶囊滑块组件（B2）+ CSS 玻璃旋钮近似（C1）。
