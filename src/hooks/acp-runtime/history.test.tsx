@@ -166,11 +166,17 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
   it("重启恢复采用 Session 模型，后台恢复只更新缓存", async () => {
     const harness = createHistoryHarness({ sessionId: "session-model", epoch: 1 });
     const result = loadResult("session-model", "default");
-    result.configOptions = [{ id: "model", name: "模型", currentValue: "fix-local::hy3" }];
+    result.configOptions = [
+      { id: "model", name: "模型", currentValue: "fix-local::hy3" },
+      { id: "reasoning_effort", name: "推理强度", currentValue: "high" },
+    ];
     apiMocks.sessionLoad.mockResolvedValue(result);
     await harness.replayHistory("session-model", { sessionId: "session-model", epoch: 1 });
     expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy3");
     expect(harness.setModelId).toHaveBeenLastCalledWith("hy3");
+    expect(
+      harness.workspaceRef.current.sessions["session-model"]?.reasoning_effort,
+    ).toBe("high");
 
     harness.setModelId.mockClear();
     const pending = deferred<SessionLoadResult>();

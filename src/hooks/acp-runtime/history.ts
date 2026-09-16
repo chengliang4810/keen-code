@@ -260,6 +260,12 @@ export function useAcpRuntimeHistory({
           if (typeof modelValue === "string" && modelValue.length > 0) {
             modelBySessionRef.current.set(sessionId, modelIdFromSessionReference(modelValue));
           }
+          const effortValue = loaded.configOptions.find(
+            (option) => option.id === "reasoning_effort",
+          )?.currentValue;
+          if (typeof effortValue === "string" && effortValue.length > 0) {
+            view.reasoning_effort = effortValue;
+          }
           const current = acpWorkspaceRef.current.sessions[sessionId];
           if (!current || !isCurrentProjection()) throw new Error("Session 恢复完成前投影已替换");
           // 首页 load 建立投递世代，旧页独立归约，不再从零 replay。

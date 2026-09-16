@@ -144,6 +144,8 @@ export function useSessionConnection({
             effort,
             operationId: `${operationId}-effort`,
           });
+          // session/new 响应只反映默认强度；实体化后以草稿当前选择为准。
+          view.reasoning_effort = effort;
         }
         if (draftMessages?.length) {
           messagesBySessionRef.current.set(openedSessionId, draftMessages);

@@ -13,7 +13,7 @@ import type {
   TaskCacheUsage,
 } from "@/lib/api";
 import type { Attachment } from "@/lib/attachments";
-import type { ModelOption } from "@/lib/modelCatalog";
+import { findModel, type ModelOption } from "@/lib/modelCatalog";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import { Button } from "@/components/ui/button";
@@ -137,11 +137,13 @@ export function ComposerToolbar({
   const goalActive = Boolean(
     currentGoalActive || goalModeSessionKey === sessionKey,
   );
-  const activeModel = availableModels.find(
-    (model) =>
-      model.id === modelId &&
-      (!activeCustomProvider?.id || model.providerId === activeCustomProvider.id),
-  );
+  // 会话实际模型可能不属于当前活跃供应商；与模型菜单一致按 id 兜底，避免思考强度控件消失。
+  const activeModel =
+    availableModels.find(
+      (model) =>
+        model.id === modelId &&
+        (!activeCustomProvider?.id || model.providerId === activeCustomProvider.id),
+    ) ?? findModel(modelId, availableModels);
   const currentTaskCacheUsage =
     taskCacheUsage?.sessionId === session.sessionId ? taskCacheUsage : null;
   const hasBody =

@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type SetStateAction,
 } from "react";
 import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import { useThemeAppearance } from "@/hooks/useThemeAppearance";
@@ -375,6 +376,20 @@ export default function App() {
     isValidEffort,
     isValidModelId,
   } = providerModels;
+
+  /** Composer 修改思考强度时同步工作区视图；投影恢复以视图值为准，避免旧值顶回。 */
+  const composerSetEffort = useCallback(
+    (next: SetStateAction<string>) => {
+      setEffort(next);
+      if (typeof next !== "string") return;
+      const sessionId = viewingSessionIdRef.current;
+      const view = sessionId
+        ? acpWorkspaceRef.current.sessions[sessionId]
+        : undefined;
+      if (view) view.reasoning_effort = next;
+    },
+    [setEffort],
+  );
 
   const [subagentModelLabels, setSubagentModelLabels] = useState<
     Record<string, string>
@@ -1777,7 +1792,7 @@ export default function App() {
               composerPanel,
               setComposerPanel,
               effort,
-              setEffort,
+              setEffort: composerSetEffort,
               isValidEffort,
               isValidModelId,
               modelBySessionRef,
