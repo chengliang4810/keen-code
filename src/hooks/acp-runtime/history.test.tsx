@@ -183,6 +183,23 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy4-preview");
     expect(harness.setModelId).not.toHaveBeenCalled();
   });
+
+  it("新建会话从 session/new 响应登记初始模型", async () => {
+    const harness = createHistoryHarness({ sessionId: null, epoch: 1 });
+    apiMocks.sessionConnect.mockResolvedValue({
+      sessionId: "session-new",
+      state: "idle",
+      activeTurnId: null,
+      backend: "acp",
+      projectPath: null,
+      title: null,
+      lastError: null,
+      configOptions: [{ id: "model", name: "模型", currentValue: "fix-local::hy3" }],
+    });
+    await harness.connectSession({ sessionId: null, operationId: "op-new" });
+    expect(harness.modelBySessionRef.current.get("session-new")).toBe("hy3");
+    expect(harness.workspaceRef.current.sessions["session-new"]?.replay.loaded).toBe(true);
+  });
   beforeEach(() => {
     apiMocks.sessionLoad.mockReset();
     apiMocks.goalGet.mockReset().mockImplementation((sessionId: string) =>

@@ -391,6 +391,17 @@ export function useAcpRuntimeHistory({
       if (opened.sessionId) {
         const view = ensureAcpSession(acpWorkspaceRef.current, opened.sessionId);
         view.project_path = opened.projectPath ?? null;
+        // 新建会话不再二次 load；从 session/new 响应登记初始模型，
+        // 否则切回该会话时模型菜单停留在上一个会话的选择。
+        const modelValue = opened.configOptions?.find(
+          (option) => option.id === "model",
+        )?.currentValue;
+        if (typeof modelValue === "string" && modelValue.length > 0) {
+          modelBySessionRef.current.set(
+            opened.sessionId,
+            modelIdFromSessionReference(modelValue),
+          );
+        }
         view.replay.loaded = true;
       }
       return opened;
@@ -409,7 +420,7 @@ export function useAcpRuntimeHistory({
       title: view.title, lastError: view.last_error?.message ?? null,
     };
     return snapshot;
-  }, [recoverSession, currentViewFocus]);
+  }, [recoverSession, currentViewFocus, modelBySessionRef]);
 
   return { replayHistory, recoverSession, observeSessionDelivery, connectSession };
 }

@@ -113,7 +113,10 @@ export async function sessionConnect(args: {
   mcpServers?: AcpMcpServerConfig[];
   /** 新建 Session 时用于确定性对账，调用重试必须复用。 */
   operationId: string;
-}): Promise<SessionSnapshot> {
+}): Promise<SessionSnapshot & {
+  /** Runtime 当前 Session 配置项；仅新建分支返回，供调用方登记初始模型。 */
+  configOptions?: Array<{ id: string; currentValue?: unknown }>;
+}> {
   if (args.sessionId) {
     return sessionSnapshotFromResult(
       await sessionLoad(args.sessionId, { limit: 2 }, args.mcpServers ?? []),
@@ -124,7 +127,11 @@ export async function sessionConnect(args: {
   if (typeof cwd !== "string" || !cwd.trim()) {
     throw new Error("ACP Host 未提供新会话工作目录");
   }
-  const result = await acpRequest<{ sessionId: string; _meta?: Record<string, unknown> }>(
+  const result = await acpRequest<{
+    sessionId: string;
+    configOptions?: Array<{ id: string; currentValue?: unknown }>;
+    _meta?: Record<string, unknown>;
+  }>(
     "session/new",
     {
       cwd,
@@ -135,7 +142,7 @@ export async function sessionConnect(args: {
   );
   const snapshot = sessionSnapshotFromResult(result);
   if (result.sessionId !== snapshot.sessionId) throw new Error("ACP 新会话标识不一致");
-  return snapshot;
+  return { ...snapshot, configOptions: result.configOptions };
 }
 
 /** 将本 Host 的命名空间快照投影为 UI 状态，不读取任何历史字段别名。 */
