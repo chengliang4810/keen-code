@@ -52,3 +52,43 @@ describe("ProvidersPanel 消息格式 Select 契约", () => {
     expect(source).toContain('className="settings-input"');
   });
 });
+
+describe("ProvidersPanel 供应商信息导出与导入", () => {
+  it("编辑表单头部提供复制与导出入口，新增模式不显示", () => {
+    const head = source.slice(
+      source.indexOf('className="prov-form__head"'),
+      source.indexOf('className="prov-form__grid"'),
+    );
+    expect(head).toContain("providers.find((item) => item.id === editingId)");
+    expect(head).toContain("copyProvider(provider)");
+    expect(head).toContain("exportProvider(provider)");
+    expect(head).toContain("tr(\"prov.copy\")");
+    expect(head).toContain("tr(\"prov.exportOne\")");
+    // 两个入口只在已有供应商（编辑态）出现，新建草稿没有可导出的持久配置。
+    expect(head).toContain("editingId ? (");
+  });
+
+  it("左栏提供导出全部与导入入口，导入走后端合并而不是本地逐个 upsert", () => {
+    const rail = source.slice(
+      source.indexOf('className="prov-transfer-row"'),
+      source.indexOf('className="prov-rail"'),
+    );
+    expect(rail).toContain("exportAllProviders()");
+    expect(rail).toContain("tr(\"prov.exportAll\")");
+    expect(rail).toContain("tr(\"prov.importAll\")");
+    const transfer = source.slice(
+      source.indexOf("const submitImport"),
+      source.indexOf("/** 切换远端模型的勾选状态"),
+    );
+    expect(transfer).toContain("api.providersImport(importDraft.text)");
+    expect(transfer).not.toContain("providersUpsert");
+  });
+
+  it("导入弹窗在选择文件后先本地预检结构，再启用提交", () => {
+    const modal = source.slice(source.indexOf("open={importDraft !== null}"));
+    expect(modal).toContain("pickImportFile()");
+    expect(modal).toContain("importDraft.check.ok");
+    expect(modal).toContain("submitImport()");
+    expect(modal).toContain("tr(\"prov.importWorking\")");
+  });
+});

@@ -9,6 +9,11 @@ import { createT, type Locale } from "@/i18n";
 import { formatTokenCount } from "@/lib/contextUsage";
 import { localizeUiError } from "@/lib/session";
 import {
+  checkProviderImportText,
+  providerExportFilename,
+  type ProviderImportCheck,
+} from "@/lib/providerTransfer";
+import {
   Select,
   SelectContent,
   SelectGroup,
@@ -19,6 +24,8 @@ import {
 import { Checkbox } from "@/components/ui/checkbox";
 import { GlassModal } from "@/components/GlassModal";
 import {
+  IconCopy,
+  IconDownload,
   IconEdit,
   IconPlus,
   IconRefresh,
@@ -57,6 +64,16 @@ type FormState = {
 };
 
 type RightMode = "empty" | "create" | "edit";
+
+/** 导入弹窗的当前待导入文件状态；null 表示关闭。 */
+type ImportDraft = {
+  /** 用户选择的文件文本。 */
+  text: string;
+  /** 前端结构预检结果；error 时禁用提交。 */
+  check: ProviderImportCheck;
+  /** 提交进行中标记。 */
+  submitting: boolean;
+};
 
 type RemoteModel = {
   id: string;
@@ -487,6 +504,118 @@ export function ProvidersPanel({
     }
   };
 
+  /** 导入弹窗的当前待导入文件状态；null 表示关闭。 */
+  const [importDraft, setImportDraft] = useState<ImportDraft | null>(null);
+
+  /** 导入弹窗的前端结构预检错误本地化文案。 */
+  const importErrorLabel = (error: "json" | "schema" | "empty") =>
+    error === "schema"
+      ? tr("prov.importErr.schema")
+      : error === "empty"
+        ? tr("prov.importErr.empty")
+        : tr("prov.importErr.json");
+
+  /** 把 JSON 文本作为下载文件保存；与会话导出共用浏览器下载通道。 */
+  const downloadJson = (text: string, filename: string) => {
+    const blob = new Blob([text], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  /** 以 JSON 复制当前编辑供应商的完整配置（含 API Key）。 */
+  const copyProvider = async (provider: api.CustomProvider) => {
+    try {
+      const json = await api.providersExport(provider.id);
+      await navigator.clipboard.writeText(json);
+      setHint(tr("prov.copyDone"));
+      setHintTone("ok");
+    } catch (copyError) {
+      setHint(tr("prov.copyFail", { error: localizeUiError(copyError, locale) }));
+      setHintTone("err");
+    }
+  };
+
+  /** 导出当前编辑供应商的完整配置为 JSON 文件。 */
+  const exportProvider = async (provider: api.CustomProvider) => {
+    try {
+      const json = await api.providersExport(provider.id);
+      downloadJson(json, providerExportFilename(provider.name || provider.id));
+      setHint(tr("prov.exportDone"));
+      setHintTone("ok");
+    } catch (exportError) {
+      setHint(tr("prov.exportFail", { error: localizeUiError(exportError, locale) }));
+      setHintTone("err");
+    }
+  };
+
+  /** 导出全部供应商配置为 JSON 文件。 */
+  const exportAllProviders = async () => {
+    try {
+      const json = await api.providersExport(null);
+      downloadJson(json, providerExportFilename(null));
+      setHint(tr("prov.exportDone"));
+      setHintTone("ok");
+    } catch (exportError) {
+      setHint(tr("prov.exportFail", { error: localizeUiError(exportError, locale) }));
+      setHintTone("err");
+    }
+  };
+
+  /** 打开系统文件选择器并读取待导入 JSON。 */
+  const pickImportFile = async () => {
+    if (!api.isTauri() || importDraft?.submitting) return;
+    try {
+      const text = await api.pickTextFile();
+      if (text == null) return;
+      setImportDraft({
+        text,
+        check: checkProviderImportText(text),
+        submitting: false,
+      });
+    } catch (pickError) {
+      setHint(localizeUiError(pickError, locale));
+      setHintTone("err");
+    }
+  };
+
+  /** 提交导入：后端按标识合并并热加载，完成后刷新本地列表。 */
+  const submitImport = async () => {
+    if (!importDraft || importDraft.submitting) return;
+    if (!importDraft.check.ok) return;
+    setImportDraft({ ...importDraft, submitting: true });
+    try {
+      const result = await api.providersImport(importDraft.text);
+      setList({
+        providers: result.providers,
+        defaultModel: result.defaultModel,
+        activeProviderId: result.activeProviderId,
+      });
+      setImportDraft(null);
+      // 空态导入后直接展示首个供应商，避免详情面板与实际保存状态脱节。
+      if (rightMode === "empty" && result.providers[0]) {
+        openEdit(result.providers[0]);
+      }
+      setHint(
+        tr("prov.importDone", {
+          added: result.added,
+          updated: result.updated,
+        }),
+      );
+      setHintTone("ok");
+      onProviderActivated?.();
+    } catch (importError) {
+      setImportDraft((current) =>
+        current ? { ...current, submitting: false } : current,
+      );
+      setHint(tr("prov.importFail", { error: localizeUiError(importError, locale) }));
+      setHintTone("err");
+    }
+  };
+
   /** 切换远端模型的勾选状态。 */
   const toggleRemoteModel = (model: string) => {
     setSelectedRemoteModels((current) => {
@@ -571,6 +700,42 @@ export function ProvidersPanel({
             <IconPlus size={16} />
             {tr("prov.new")}
           </Button>
+          <div className="prov-transfer-row">
+            <Button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() => void exportAllProviders()}
+              disabled={busy || providers.length === 0}
+            >
+              <IconDownload size={14} />
+              {tr("prov.exportAll")}
+            </Button>
+            <Button
+              type="button"
+              className="btn btn--ghost btn--sm"
+              onClick={() =>
+                setImportDraft({
+                  text: "",
+                  check: { ok: false, error: "json" },
+                  submitting: false,
+                })
+              }
+              disabled={busy}
+            >
+              {tr("prov.importAll")}
+            </Button>
+          </div>
+          {/* 表单未展示时（空态）导出结果只能落在左栏。 */}
+          {rightMode === "empty" && hint ? (
+            <div
+              className={
+                "prov-form__hint" +
+                (hintTone === "ok" ? " is-ok" : hintTone === "err" ? " is-err" : "")
+              }
+            >
+              {hint}
+            </div>
+          ) : null}
 
           <div className="prov-rail" role="list">
             {providers.map((provider) => (
@@ -625,6 +790,34 @@ export function ProvidersPanel({
                 <h3 className="prov-detail__title">
                   {editingId ? tr("prov.editTitle") : tr("prov.addTitle")}
                 </h3>
+                {editingId ? (
+                  <span className="prov-transfer-row">
+                    <Button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      onClick={() => {
+                        const provider = providers.find((item) => item.id === editingId);
+                        if (provider) void copyProvider(provider);
+                      }}
+                      disabled={busy}
+                    >
+                      <IconCopy size={14} />
+                      {tr("prov.copy")}
+                    </Button>
+                    <Button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      onClick={() => {
+                        const provider = providers.find((item) => item.id === editingId);
+                        if (provider) void exportProvider(provider);
+                      }}
+                      disabled={busy}
+                    >
+                      <IconDownload size={14} />
+                      {tr("prov.exportOne")}
+                    </Button>
+                  </span>
+                ) : null}
               </div>
 
               <div className="prov-form__grid">
@@ -1078,6 +1271,63 @@ export function ProvidersPanel({
         ) : (
           <div className="prov-model-empty">{tr("prov.emptyList")}</div>
         )}
+      </GlassModal>
+
+      <GlassModal
+        open={importDraft !== null}
+        onClose={() => {
+          if (!importDraft?.submitting) setImportDraft(null);
+        }}
+        title={tr("prov.importTitle")}
+        size="md"
+        closeLabel={tr("common.close")}
+        wrapBody
+        footer={
+          <>
+            <Button
+              type="button"
+              className="btn btn--ghost"
+              disabled={importDraft?.submitting}
+              onClick={() => setImportDraft(null)}
+            >
+              {tr("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              className="btn btn--solid"
+              disabled={!importDraft || !importDraft.check.ok || importDraft.submitting}
+              onClick={() => void submitImport()}
+            >
+              {importDraft?.submitting
+                ? tr("prov.importWorking")
+                : tr("prov.importSubmit")}
+            </Button>
+          </>
+        }
+      >
+        <p className="prov-field__hint">{tr("prov.importHint")}</p>
+        <div className="prov-transfer-row">
+          <Button
+            type="button"
+            className="btn btn--ghost"
+            onClick={() => void pickImportFile()}
+            disabled={importDraft?.submitting}
+          >
+            {tr("prov.importPickFile")}
+          </Button>
+          <span className="prov-field__hint">{tr("prov.importPickHint")}</span>
+        </div>
+        {importDraft && importDraft.text ? (
+          importDraft.check.ok ? (
+            <p className="prov-form__hint is-ok">
+              {tr("prov.importParsed", { n: importDraft.check.count })}
+            </p>
+          ) : (
+            <p className="prov-form__hint is-err" role="alert">
+              {importErrorLabel(importDraft.check.error)}
+            </p>
+          )
+        ) : null}
       </GlassModal>
 
       <GlassModal

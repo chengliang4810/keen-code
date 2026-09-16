@@ -386,6 +386,54 @@ fn providers_list_models(
         .map_err(|error| keencode_model::redact_error_secrets(&error.to_string()))
 }
 
+/// 导出供应商配置 JSON 文档；provider_id 为空时导出全部供应商。
+#[tauri::command]
+fn providers_export(provider_id: Option<String>, app: AppHandle) -> Result<String, String> {
+    providers::export(&app, provider_id.as_deref()).map_err(|error| error.to_string())
+}
+
+/// 导入供应商配置并按标识合并到当前列表，随后热加载运行时。
+#[tauri::command]
+async fn providers_import(
+    config: String,
+    app: AppHandle,
+    agent_runtime: State<'_, Arc<AgentRuntime>>,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) -> Result<providers::ProvidersImportResult, String> {
+    diagnostics.log(
+        "info",
+        "ipc.providers_import",
+        format!("命令进入 bytes={}", config.len()),
+    );
+    let import_app = app.clone();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || providers::import(&import_app, &config))
+            .await
+            .map_err(|error| format!("供应商导入后台任务失败：{error}"))?
+            .map_err(|error| {
+                diagnostics.log(
+                    "error",
+                    "ipc.providers_import",
+                    format!("导入失败: {error:#}"),
+                );
+                error.to_string()
+            })?;
+    agent_runtime.reload_providers(&app).map_err(|error| {
+        diagnostics.log(
+            "error",
+            "ipc.providers_import",
+            format!("热加载失败: {error}"),
+        );
+        error.to_string()
+    })?;
+    diagnostics.log(
+        "info",
+        "ipc.providers_import",
+        format!("命令完成 added={} updated={}", result.added, result.updated),
+    );
+    Ok(result)
+}
+
 /// 启动 KeenCode 桌面后端。
 pub fn run() {
     let app = desktop_builder(Instant::now())
@@ -487,6 +535,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             providers_remove,
             providers_select_model,
             providers_list_models,
+            providers_export,
+            providers_import,
             model_metadata::model_metadata_get,
             model_metadata::model_metadata_get_many,
             acp_host::acp_dispatch,
@@ -548,6 +598,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::path_reveal,
             workspace::pick_directory,
             workspace::pick_attach_files,
+            workspace::pick_text_file,
             workspace::save_pasted_attachment,
             workspace::read_local_image,
             read_tool_image,

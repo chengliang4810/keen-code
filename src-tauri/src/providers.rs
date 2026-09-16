@@ -35,6 +35,8 @@ const PROVIDER_CREDENTIAL_REVISION_DOMAIN: &[u8] =
 const PROVIDER_CONFIG_SCHEMA: &str = "keencode/providers";
 /// 当前供应商配置文件的固定格式版本。
 const PROVIDER_CONFIG_VERSION: u32 = 1;
+/// 供应商导出文档的固定 schema 名称；导入同时接受完整配置文件 schema。
+const PROVIDER_EXPORT_SCHEMA: &str = "keencode/providers-export";
 
 /// KeenCode 持久化的自定义供应商记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -442,6 +444,163 @@ pub fn remove(app: &AppHandle, provider_id: &str) -> Result<ProvidersListResult>
     }
     save_state(app, &state)?;
     Ok(render_list(state))
+}
+
+/// 供应商导出文档结构；记录结构与持久化配置完全一致，含明文 API Key。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ProviderExportFile {
+    /// 固定 schema 名称。
+    schema: String,
+    /// 固定格式版本。
+    version: u32,
+    /// 导出的供应商记录。
+    providers: Vec<ProviderRecord>,
+}
+
+/// 供应商导入结果：合并后的完整状态与本次计数。
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProvidersImportResult {
+    /// 合并后的供应商列表。
+    pub providers: Vec<CustomProvider>,
+    /// 当前激活供应商的默认模型。
+    pub default_model: Option<String>,
+    /// 当前激活供应商标识。
+    pub active_provider_id: Option<String>,
+    /// 本次新增的供应商数量。
+    pub added: usize,
+    /// 本次按同标识覆盖的供应商数量。
+    pub updated: usize,
+}
+
+/// 导出供应商配置 JSON 文档；provider_id 为空时导出全部供应商。
+pub fn export(app: &AppHandle, provider_id: Option<&str>) -> Result<String> {
+    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
+    let state = load_state(app)?;
+    let providers = match provider_id {
+        Some(id) => {
+            let id = validate_provider_id(id)?;
+            let record = state
+                .providers
+                .iter()
+                .find(|provider| provider.id == id)
+                .with_context(|| format!("找不到供应商 {id}"))?;
+            vec![record.clone()]
+        }
+        None => state.providers.clone(),
+    };
+    let file = ProviderExportFile {
+        schema: PROVIDER_EXPORT_SCHEMA.to_owned(),
+        version: PROVIDER_CONFIG_VERSION,
+        providers,
+    };
+    let bytes = serde_json::to_vec_pretty(&file).context("序列化供应商导出失败")?;
+    String::from_utf8(bytes).context("供应商导出内容不是有效 UTF-8")
+}
+
+/// 解析导入文本：接受导出文档与完整配置文件两种 schema，返回严格校验前的记录。
+fn parse_provider_import(config: &str) -> Result<Vec<ProviderRecord>> {
+    if config.len() as u64 > MAX_PROVIDER_CONFIG_BYTES {
+        anyhow::bail!("供应商导入内容超过 {MAX_PROVIDER_CONFIG_BYTES} 字节");
+    }
+    let value: Value = serde_json::from_str(config).context("供应商导入内容不是有效 JSON")?;
+    let schema = value
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if schema != PROVIDER_EXPORT_SCHEMA && schema != PROVIDER_CONFIG_SCHEMA {
+        anyhow::bail!("供应商导入 schema 不受支持：{schema}");
+    }
+    let version = value
+        .get("version")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if version != u64::from(PROVIDER_CONFIG_VERSION) {
+        anyhow::bail!("供应商导入版本不受支持：{version}");
+    }
+    let records: Vec<ProviderRecord> = serde_json::from_value(
+        value
+            .get("providers")
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("供应商导入内容缺少 providers 列表"))?,
+    )
+    .context("供应商导入记录无效")?;
+    if records.is_empty() {
+        anyhow::bail!("供应商导入内容至少需要包含一个供应商");
+    }
+    let mut seen = std::collections::HashSet::new();
+    for record in &records {
+        if !seen.insert(record.id.as_str()) {
+            anyhow::bail!("供应商导入内容包含重复标识：{}", record.id);
+        }
+    }
+    Ok(records)
+}
+
+/// 将导入记录合并进当前状态：同标识覆盖，其余追加；不主动切换当前选中。
+fn merge_provider_import(
+    mut state: ProviderState,
+    records: Vec<ProviderRecord>,
+) -> Result<(ProviderState, usize, usize)> {
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    for record in records {
+        match state
+            .providers
+            .iter()
+            .position(|provider| provider.id == record.id)
+        {
+            Some(index) => {
+                updated += 1;
+                let keeps_current_provider =
+                    state.active_provider_id.as_deref() == Some(record.id.as_str());
+                state.providers[index] = record;
+                // 与表单保存同源：当前激活模型被导入记录移除时回退到该供应商首个模型。
+                if keeps_current_provider
+                    && state.active_model_id.as_ref().is_none_or(|model| {
+                        !state.providers[index]
+                            .models
+                            .iter()
+                            .any(|item| item == model)
+                    })
+                {
+                    state.active_model_id = state.providers[index].models.first().cloned();
+                }
+            }
+            None => {
+                added += 1;
+                let is_first_provider = state.providers.is_empty();
+                state.providers.push(record);
+                // 空状态首次导入与表单保存同源：补齐当前供应商与模型。
+                if is_first_provider {
+                    let provider = state.providers.last().expect("刚追加的供应商记录");
+                    state.active_provider_id = Some(provider.id.clone());
+                    state.active_model_id = provider.models.first().cloned();
+                }
+            }
+        }
+    }
+    validate_state(&state)?;
+    Ok((state, added, updated))
+}
+
+/// 导入供应商配置并按标识合并保存；除空状态首次导入与激活模型被移除的回退外，
+/// 不切换当前激活的供应商或模型。
+pub fn import(app: &AppHandle, config: &str) -> Result<ProvidersImportResult> {
+    let records = parse_provider_import(config)?;
+    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
+    let state = load_state(app)?;
+    let (state, added, updated) = merge_provider_import(state, records)?;
+    save_state(app, &state)?;
+    let list = render_list(state);
+    Ok(ProvidersImportResult {
+        providers: list.providers,
+        default_model: list.default_model,
+        active_provider_id: list.active_provider_id,
+        added,
+        updated,
+    })
 }
 
 /// 选择指定供应商下的模型并同步运行时配置。
@@ -1009,8 +1168,8 @@ mod live_context_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint, validate_api_key,
-        validate_base_url, validate_catalog_secret_scope, validate_context_1m,
+        ProviderExportFile, ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint,
+        validate_api_key, validate_base_url, validate_catalog_secret_scope, validate_context_1m,
         validate_context_windows, validate_exact_endpoint, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
@@ -1333,6 +1492,144 @@ mod tests {
             validate_catalog_secret_scope(&provider, "https://api.example.com/v1", "messages")
                 .is_err()
         );
+    }
+
+    /// 构造一个用于导入测试的最小合法供应商记录。
+    fn import_test_record(id: &str) -> ProviderRecord {
+        ProviderRecord {
+            id: id.to_string(),
+            name: format!("Provider {id}"),
+            base_url: "https://api.example.com/v1".to_string(),
+            models: vec!["test-model".to_string()],
+            api_backend: "responses".to_string(),
+            api_key: None,
+            context_windows: BTreeMap::new(),
+            max_output_tokens: BTreeMap::new(),
+            chat_output_token_field: Default::default(),
+            read_timeout_seconds: 300,
+            context_1m: BTreeMap::new(),
+            supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
+        }
+    }
+
+    /// 导出文档结构必须能原样被导入解析器接受，且拒绝未知 schema 与版本。
+    #[test]
+    fn provider_import_parses_export_document() {
+        let records = vec![
+            import_test_record("provider-a"),
+            import_test_record("provider-b"),
+        ];
+        let file = ProviderExportFile {
+            schema: super::PROVIDER_EXPORT_SCHEMA.to_string(),
+            version: super::PROVIDER_CONFIG_VERSION,
+            providers: records,
+        };
+        let text = serde_json::to_string(&file).expect("序列化导出文档");
+        let parsed = super::parse_provider_import(&text).expect("导出文档应可导入");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].id, "provider-a");
+
+        let mut unknown_schema = serde_json::to_value(&file).expect("导出文档转 JSON");
+        unknown_schema["schema"] = "unknown/schema".into();
+        assert!(super::parse_provider_import(unknown_schema.to_string().as_str()).is_err());
+
+        let mut unknown_version = serde_json::to_value(&file).expect("导出文档转 JSON");
+        unknown_version["version"] = 99.into();
+        assert!(super::parse_provider_import(unknown_version.to_string().as_str()).is_err());
+    }
+
+    /// 导入同时接受完整配置文件 schema，并拒绝空列表和重复标识。
+    #[test]
+    fn provider_import_accepts_full_config_and_rejects_duplicates() {
+        let state = ProviderState {
+            active_provider_id: Some("provider-a".to_string()),
+            active_model_id: Some("test-model".to_string()),
+            providers: vec![import_test_record("provider-a")],
+        };
+        let file = ProviderFile::from_state(&state);
+        let text = serde_json::to_string(&file).expect("序列化完整配置");
+        let parsed = super::parse_provider_import(&text).expect("完整配置应可导入");
+        assert_eq!(parsed.len(), 1);
+
+        let empty = r#"{"schema":"keencode/providers-export","version":1,"providers":[]}"#;
+        assert!(super::parse_provider_import(empty).is_err());
+
+        let duplicated = r#"{"schema":"keencode/providers-export","version":1,"providers":[
+            {"id":"a","name":"A","baseUrl":"https://api.example.com/v1","models":["m"],
+             "apiBackend":"responses","apiKey":null,"contextWindows":{},"context1m":{},
+             "supportsVision":{"m":false}},
+            {"id":"a","name":"A2","baseUrl":"https://api.example.com/v1","models":["m"],
+             "apiBackend":"responses","apiKey":null,"contextWindows":{},"context1m":{},
+             "supportsVision":{"m":false}}]}"#;
+        assert!(super::parse_provider_import(duplicated).is_err());
+    }
+
+    /// 合并语义：同标识覆盖、其余追加、不改变当前激活供应商与模型。
+    #[test]
+    fn provider_import_merges_by_id_without_touching_selection() {
+        let mut existing = import_test_record("provider-a");
+        existing.name = "Old Name".to_string();
+        let state = ProviderState {
+            active_provider_id: Some("provider-a".to_string()),
+            active_model_id: Some("test-model".to_string()),
+            providers: vec![existing],
+        };
+        let incoming = vec![
+            import_test_record("provider-a"),
+            import_test_record("provider-b"),
+        ];
+        let (merged, added, updated) =
+            super::merge_provider_import(state, incoming).expect("合并导入记录");
+        assert_eq!((added, updated), (1, 1));
+        assert_eq!(merged.providers.len(), 2);
+        assert_eq!(merged.providers[0].name, "Provider provider-a");
+        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
+        assert_eq!(merged.active_model_id.as_deref(), Some("test-model"));
+    }
+
+    /// 空状态首次导入必须补齐当前供应商与模型，否则保存校验会整体失败。
+    #[test]
+    fn provider_import_into_empty_state_selects_first_provider() {
+        let (merged, added, updated) = super::merge_provider_import(
+            ProviderState::default(),
+            vec![
+                import_test_record("provider-a"),
+                import_test_record("provider-b"),
+            ],
+        )
+        .expect("空状态导入");
+        assert_eq!((added, updated), (2, 0));
+        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
+        assert_eq!(merged.active_model_id.as_deref(), Some("test-model"));
+    }
+
+    /// 覆盖当前供应商时删除了激活模型，必须回退到该供应商的首个模型。
+    #[test]
+    fn provider_import_falls_back_when_active_model_removed() {
+        let mut removed_model = import_test_record("provider-a");
+        removed_model.models = vec!["replacement-model".to_string()];
+        removed_model.supports_vision = [("replacement-model".to_string(), false)]
+            .into_iter()
+            .collect();
+        let state = ProviderState {
+            active_provider_id: Some("provider-a".to_string()),
+            active_model_id: Some("test-model".to_string()),
+            providers: vec![import_test_record("provider-a")],
+        };
+        let (merged, added, updated) =
+            super::merge_provider_import(state, vec![removed_model]).expect("覆盖当前供应商");
+        assert_eq!((added, updated), (0, 1));
+        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
+        assert_eq!(merged.active_model_id.as_deref(), Some("replacement-model"));
+    }
+
+    /// 合并结果必须通过完整状态校验；携带非法记录的导入整体失败。
+    #[test]
+    fn provider_import_merge_rejects_invalid_records() {
+        let state = ProviderState::default();
+        let mut record = import_test_record("provider-a");
+        record.supports_vision.clear();
+        assert!(super::merge_provider_import(state, vec![record]).is_err());
     }
 }
 

@@ -1221,6 +1221,34 @@ export async function providersRemove(id: string) {
   return invoke<ProvidersListResult>("providers_remove", { id });
 }
 
+/** 导出供应商配置 JSON 文档；providerId 为空时导出全部供应商。 */
+export async function providersExport(providerId?: string | null) {
+  return invoke<string>("providers_export", {
+    providerId: providerId ?? null,
+  });
+}
+
+/** 供应商导入结果：合并后的完整状态与本次计数。 */
+export interface ProvidersImportResult {
+  providers: CustomProvider[];
+  defaultModel: string | null;
+  activeProviderId: string | null;
+  /** 本次新增的供应商数量。 */
+  added: number;
+  /** 本次按同标识覆盖的供应商数量。 */
+  updated: number;
+}
+
+/** 导入供应商配置 JSON 文档并按标识合并；后端负责校验与热加载。 */
+export async function providersImport(config: string) {
+  return invoke<ProvidersImportResult>("providers_import", { config });
+}
+
+/** 打开单文件选择器并读取 UTF-8 文本内容；用户取消时返回 null。 */
+export async function pickTextFile() {
+  return invoke<string | null>("pick_text_file");
+}
+
 export async function providersSelectModel(providerId: string, modelId: string) {
   return invoke<ProvidersListResult>("providers_select_model", {
     providerId,

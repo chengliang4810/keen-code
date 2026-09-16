@@ -934,6 +934,48 @@ pub async fn pick_attach_files(app: AppHandle) -> Result<Vec<String>, String> {
         .collect()
 }
 
+/// 用户显式选择文本文件允许读取的最大字节数。
+const MAX_PICKED_TEXT_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 打开单文件选择器并读取 UTF-8 文本内容；路径由用户在原生对话框中显式选择。
+#[tauri::command]
+pub async fn pick_text_file(app: AppHandle) -> Result<Option<String>, String> {
+    let Some(selected) = app
+        .dialog()
+        .file()
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|error| format!("选择结果不是本机文件路径：{error}"))?;
+    tauri::async_runtime::spawn_blocking(move || read_picked_text_file(path))
+        .await
+        .map_err(|error| format!("读取选择文件后台任务失败：{error}"))?
+}
+
+/// 读取用户显式选择的 UTF-8 文本文件，拒绝目录与超限文件。
+fn read_picked_text_file(path: PathBuf) -> Result<Option<String>, String> {
+    let metadata = fs::metadata(&path)
+        .map_err(|error| format!("读取选择文件失败：{}：{error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("选择目标不是普通文件：{}", path.display()));
+    }
+    if metadata.len() > MAX_PICKED_TEXT_BYTES {
+        return Err(format!(
+            "选择文件超过 {MAX_PICKED_TEXT_BYTES} 字节：{}",
+            path.display()
+        ));
+    }
+    let bytes = fs::read(&path)
+        .map_err(|error| format!("读取选择文件失败：{}：{error}", path.display()))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| format!("选择文件不是有效 UTF-8 文本：{}", path.display()))
+}
+
 /// 将 WebView 剪贴板中的文件持久化为 Agent 可读取的本机附件。
 #[tauri::command]
 pub fn save_pasted_attachment(

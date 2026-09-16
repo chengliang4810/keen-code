@@ -1464,6 +1464,14 @@ textarea::-webkit-scrollbar-thumb:active,
   margin-left: auto;
 }
 
+/* 供应商导入导出入口仅定义布局，按钮外观复用既有变体。 */
+.prov-transfer-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .prov-delete-msg {
   margin: 0;
   font-size: 14px;

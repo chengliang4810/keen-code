@@ -97,4 +97,40 @@ describe("供应商 API Key 本地持久化契约", () => {
       undefined,
     );
   });
+
+  it("导出供应商按标识请求单个文档，导出全部传 null", async () => {
+    const invoke = vi.fn().mockResolvedValue("{}");
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+
+    await api.providersExport("provider");
+    expect(invoke).toHaveBeenCalledWith("providers_export", { providerId: "provider" }, undefined);
+
+    await api.providersExport(null);
+    expect(invoke).toHaveBeenCalledWith("providers_export", { providerId: null }, undefined);
+  });
+
+  it("导入供应商提交原始文本，由后端完成校验与合并", async () => {
+    const invoke = vi.fn().mockResolvedValue({
+      providers: [],
+      defaultModel: null,
+      activeProviderId: null,
+      added: 0,
+      updated: 0,
+    });
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+
+    await api.providersImport('{"schema":"keencode/providers-export"}');
+    expect(invoke).toHaveBeenCalledWith(
+      "providers_import",
+      { config: '{"schema":"keencode/providers-export"}' },
+      undefined,
+    );
+  });
+
+  it("导入选择器返回用户显式选择的文件文本", async () => {
+    const invoke = vi.fn().mockResolvedValue("json-text");
+    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+    await expect(api.pickTextFile()).resolves.toBe("json-text");
+    expect(invoke).toHaveBeenCalledWith("pick_text_file", {}, undefined);
+  });
 });
