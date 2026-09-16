@@ -576,7 +576,7 @@ fn terminal_turn_references_and_compaction_ranges_are_rejected() {
     let compaction_digest = journal
         .state()
         .expect("状态应读取")
-        .compaction_source_digest_sha256(&compaction_turn, &root_agent, 1, 0, 2)
+        .compaction_source_digest_sha256(&compaction_turn, &root_agent, 1, 0, 2, "有效压缩")
         .expect("压缩 Digest 应计算");
     journal
         .append(SessionEvent::CompactionApplied {

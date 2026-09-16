@@ -104,7 +104,7 @@ fn valid_compaction(
         replaced_message_count: 2,
         retained_message_count: 1,
         source_digest_sha256: state
-            .compaction_source_digest_sha256(turn_id, agent_id, 1, 0, 2)
+            .compaction_source_digest_sha256(turn_id, agent_id, 1, 0, 2, "压缩摘要")
             .expect("压缩来源 Digest 应计算"),
         summary: "压缩摘要".to_owned(),
         projections: Vec::new(),

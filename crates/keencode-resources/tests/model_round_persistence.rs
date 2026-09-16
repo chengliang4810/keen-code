@@ -1105,7 +1105,14 @@ fn dynamic_input_receipts_preserve_effective_history_and_compaction_recovery() {
 
     // 先验证包含两类动态消息的来源范围可生成 Digest；旧逻辑会因 receipt 把段剔除而越界。
     let digest_with_dynamic = state
-        .compaction_source_digest_sha256(&turn_id, &root_agent, 1, 0, 2)
+        .compaction_source_digest_sha256(
+            &turn_id,
+            &root_agent,
+            1,
+            0,
+            2,
+            "保留动态输入事实后的摘要",
+        )
         .expect("动态输入应参与压缩来源 Digest");
     assert_eq!(digest_with_dynamic.len(), 64);
 
@@ -1119,7 +1126,14 @@ fn dynamic_input_receipts_preserve_effective_history_and_compaction_recovery() {
         replaced_message_count: 2,
         retained_message_count: 2,
         source_digest_sha256: state
-            .compaction_source_digest_sha256(&turn_id, &root_agent, 1, 1, 3)
+            .compaction_source_digest_sha256(
+                &turn_id,
+                &root_agent,
+                1,
+                1,
+                3,
+                "保留动态输入事实后的摘要",
+            )
             .expect("可压缩动态范围的 Digest 应生成"),
         summary: "保留动态输入事实后的摘要".to_owned(),
         projections: Vec::new(),

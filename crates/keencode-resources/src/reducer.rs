@@ -870,6 +870,7 @@ fn reduce_record_inner(
                         *model_round,
                         compaction.replaced_start_index,
                         compaction.replaced_end_index_exclusive,
+                        &compaction.summary,
                     )
                     .map_err(|error| ReductionError::new(error.to_string()))?;
                 let source_range =
@@ -1228,6 +1229,8 @@ fn validate_micro_compaction_record(
         compaction.expected_transcript_revision,
         0..effective.len(),
         effective,
+        &compaction.summary,
+        &compaction.projections,
     )
     .map_err(|error| ReductionError::new(error.to_string()))?;
     if compaction.source_digest_sha256 != actual_digest {

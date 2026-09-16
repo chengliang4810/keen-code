@@ -33,7 +33,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use keencode_agent::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
     AgentDynamicInputKind, AgentRunError, AgentRunner, AgentToolRoundPreflight,
-    AgentToolRoundPreflightError, AgentToolRoundReservation,
+    AgentToolRoundPreflightError, AgentToolRoundReservation, ContextCompressionRecord,
     ContextCompressionTrigger as AgentCompactionTrigger, HookInvocationContext,
     ModelRoundCompletion, ModelRoundUsage, OnErrorHookContext, TOOL_OUTPUT_LIMITS, TerminalReason,
     ToolCompletionStatus as AgentToolCompletionStatus, ToolEffect as AgentToolEffect,
@@ -4545,9 +4545,7 @@ fn map_agent_event(
                     &turn_id,
                     &source_agent_id,
                     key.model_round,
-                    record.replaced_start_index,
-                    record.replaced_end_index_exclusive,
-                    !record.projections.is_empty(),
+                    record,
                 )?,
             };
             Ok(SessionEvent::CompactionApplied {
@@ -6079,36 +6077,37 @@ fn mapping_compaction_digest(event: &AgentCommitEvent, state: &SessionState) -> 
     };
     let turn_id = TurnId::new(event.turn_id().as_str()).ok()?;
     let agent_id = keencode_resources::AgentId::new(event.source_agent_id().as_str()).ok()?;
-    mapped_compaction_source_digest(
-        state,
-        &turn_id,
-        &agent_id,
-        event.model_round(),
-        record.replaced_start_index,
-        record.replaced_end_index_exclusive,
-        !record.projections.is_empty(),
-    )
-    .ok()
+    mapped_compaction_source_digest(state, &turn_id, &agent_id, event.model_round(), record).ok()
 }
 
 /// 计算资源层映射所需的压缩来源 Digest；Micro 投影覆盖完整有效 Transcript，
-/// Summary 形态只覆盖被替换区间。
+/// Summary 形态只覆盖被替换区间。Digest 同时绑定摘要/投影正文，
+/// 防止持久化记录在来源消息一致的前提下伪造注入内容。
 fn mapped_compaction_source_digest(
     state: &SessionState,
     turn_id: &TurnId,
     source_agent_id: &keencode_resources::AgentId,
     model_round: u32,
-    replaced_start_index: usize,
-    replaced_end_index_exclusive: usize,
-    micro_projection: bool,
+    record: &ContextCompressionRecord,
 ) -> Result<String, RuntimeError> {
-    if !micro_projection {
+    let projections: Vec<keencode_resources::ToolResultProjection> = record
+        .projections
+        .iter()
+        .map(|projection| keencode_resources::ToolResultProjection {
+            message_index: projection.message_index,
+            block_index: projection.block_index,
+            content_index: projection.content_index,
+            projected_text: projection.projected_text.clone(),
+        })
+        .collect();
+    if projections.is_empty() {
         return Ok(state.compaction_source_digest_sha256(
             turn_id,
             source_agent_id,
             model_round,
-            replaced_start_index,
-            replaced_end_index_exclusive,
+            record.replaced_start_index,
+            record.replaced_end_index_exclusive,
+            &record.summary,
         )?);
     }
     let effective = state.effective_transcript(source_agent_id)?;
@@ -6120,6 +6119,8 @@ fn mapped_compaction_source_digest(
         state.transcript_revision,
         0..effective.len(),
         &effective,
+        &record.summary,
+        &projections,
     )?)
 }
 

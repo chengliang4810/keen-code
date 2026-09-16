@@ -746,6 +746,7 @@ async fn cold_reopen_replans_compaction_deterministically_without_network_retry(
             1,
             outcome_before.record.replaced_start_index,
             outcome_before.record.replaced_end_index_exclusive,
+            &outcome_before.record.summary,
         )
         .expect("重开前资源 Digest 应可计算");
     assert_eq!(compressor_before.requests().len(), 1);
@@ -792,6 +793,7 @@ async fn cold_reopen_replans_compaction_deterministically_without_network_retry(
             1,
             outcome_after.record.replaced_start_index,
             outcome_after.record.replaced_end_index_exclusive,
+            &outcome_after.record.summary,
         )
         .expect("重开后资源 Digest 应可计算");
 
@@ -825,6 +827,7 @@ async fn cold_reopen_replans_compaction_deterministically_without_network_retry(
                 1,
                 outcome_after.record.replaced_start_index,
                 outcome_after.record.replaced_end_index_exclusive,
+                &outcome_after.record.summary,
             )
             .expect("相同资源 Transcript 的 Digest 应可重复计算")
     );

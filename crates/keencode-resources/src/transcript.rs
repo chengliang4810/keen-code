@@ -4,7 +4,8 @@ use crate::canonical::canonical_json_sha256;
 use crate::reducer::{valid_message_shape, valid_standalone_message_shape};
 use crate::{
     AgentId, AppliedCompaction, MessagePart, MessageRole, ResourceError, SessionId, SessionMessage,
-    SessionState, ToolResultPart, TranscriptRecord, TranscriptSegment, TurnId,
+    SessionState, ToolResultPart, ToolResultProjection, TranscriptRecord, TranscriptSegment,
+    TurnId,
 };
 
 /// 压缩摘要在模型上下文中使用的固定低权限用户消息前缀。
@@ -15,7 +16,10 @@ const COMPACTION_DIGEST_SCHEMA: &str = "keencode/compaction-source";
 /// 压缩来源 Digest 使用的固定算法版本。
 const COMPACTION_DIGEST_VERSION: u32 = 1;
 
-/// 计算绑定 Turn、Agent、模型 Round 和实际替换消息的规范 JSON SHA-256。
+/// 计算绑定 Turn、Agent、模型 Round、实际替换消息与摘要/投影正文的规范 JSON SHA-256。
+///
+/// Summary 与投影是压缩会注入模型上下文的内容，必须与来源消息一起进 Digest，
+/// 否则持久化历史可以在 Digest 校验通过的前提下伪造摘要或投影文本。
 pub fn compaction_source_digest_sha256(
     session_id: &SessionId,
     turn_id: &TurnId,
@@ -24,6 +28,8 @@ pub fn compaction_source_digest_sha256(
     expected_transcript_revision: u64,
     replaced_range: std::ops::Range<usize>,
     messages: &[SessionMessage],
+    summary: &str,
+    projections: &[ToolResultProjection],
 ) -> Result<String, ResourceError> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -48,6 +54,10 @@ pub fn compaction_source_digest_sha256(
         replaced_end_index_exclusive: usize,
         /// 按有效上下文顺序排列的实际替换消息。
         messages: &'a [SessionMessage],
+        /// 绑定的重新注入摘要正文；Micro 投影形态恒为空。
+        summary: &'a str,
+        /// 绑定的 Micro 投影列表；摘要形态恒为空。
+        projections: &'a [ToolResultProjection],
     }
 
     let replaced_count = replaced_range.end.checked_sub(replaced_range.start);
@@ -67,6 +77,8 @@ pub fn compaction_source_digest_sha256(
         replaced_start_index: replaced_range.start,
         replaced_end_index_exclusive: replaced_range.end,
         messages,
+        summary,
+        projections,
     })
 }
 
@@ -276,7 +288,7 @@ impl SessionState {
         Ok(effective)
     }
 
-    /// 计算目标压缩范围在当前有效 Transcript 中应提交的带域 Digest。
+    /// 计算摘要形态压缩在目标范围上应提交的带域 Digest（Micro 投影形态直接使用自由函数）。
     pub fn compaction_source_digest_sha256(
         &self,
         turn_id: &TurnId,
@@ -284,6 +296,7 @@ impl SessionState {
         model_round: u32,
         replaced_start_index: usize,
         replaced_end_index_exclusive: usize,
+        summary: &str,
     ) -> Result<String, ResourceError> {
         let effective = self.effective_transcript(source_agent_id)?;
         let messages = effective
@@ -297,6 +310,8 @@ impl SessionState {
             self.transcript_revision,
             replaced_start_index..replaced_end_index_exclusive,
             messages,
+            summary,
+            &[],
         )
     }
 
@@ -466,6 +481,8 @@ fn apply_compaction(
         compaction.record.expected_transcript_revision,
         range.clone(),
         &effective[range.clone()],
+        &compaction.record.summary,
+        &compaction.record.projections,
     )?;
     if actual_digest != compaction.record.source_digest_sha256 {
         return Err(ResourceError::Reduction(
@@ -512,6 +529,8 @@ fn apply_micro_compaction(
         record.expected_transcript_revision,
         0..effective.len(),
         effective,
+        &record.summary,
+        &record.projections,
     )?;
     if actual_digest != record.source_digest_sha256 {
         return Err(ResourceError::Reduction(

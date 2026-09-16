@@ -562,7 +562,14 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
     let compaction_digest = journal
         .state()
         .expect("状态应读取")
-        .compaction_source_digest_sha256(&turn_id, &root_agent, 1, 0, 1)
+        .compaction_source_digest_sha256(
+            &turn_id,
+            &root_agent,
+            1,
+            0,
+            1,
+            "已压缩创建、输入与消息上下文",
+        )
         .expect("压缩 Digest 应计算");
     journal
         .append(SessionEvent::CompactionApplied {
