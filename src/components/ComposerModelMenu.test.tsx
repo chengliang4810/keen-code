@@ -75,6 +75,7 @@ describe("ComposerModelMenu", () => {
         labels: {
           model: "模型",
           addModel: "添加模型",
+          manageModels: "管理模型",
         },
         onModel: () => {},
         onAddModel: () => {},
@@ -104,6 +105,7 @@ describe("ComposerModelMenu", () => {
         labels={{
           model: "模型",
           addModel: "添加模型",
+          manageModels: "管理模型",
         }}
         onModel={() => {}}
         onAddModel={() => {}}

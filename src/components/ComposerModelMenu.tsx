@@ -9,6 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuPortal,
+  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -34,9 +35,10 @@ export interface ComposerModelMenuProps {
   labels: {
     model: string;
     addModel: string;
+    manageModels: string;
   };
   onModel: (id: string, providerId?: string) => void;
-  /** 无供应商配置时打开模型设置。 */
+  /** 打开模型设置。 */
   onAddModel: () => void;
 }
 
@@ -186,6 +188,10 @@ export function ComposerModelMenu({
             </DropdownMenuSub>
           ))}
         </DropdownMenuGroup>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={onAddModel}>
+          <span className="truncate">{labels.manageModels}</span>
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

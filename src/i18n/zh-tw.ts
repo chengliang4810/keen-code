@@ -351,6 +351,7 @@ export const zhTW: Record<MessageKey, string> = {
   "composer.projectCleared": "已取消對話的專案繫結",
   "composer.model": "模型",
   "composer.addModel": "新增模型",
+  "composer.manageModels": "管理模型",
   "composer.effort": "思考程度",
   "composer.ultra": "Ultra",
   "composer.ultraDescription": "主動將複雜工作委派給專用 Agent",

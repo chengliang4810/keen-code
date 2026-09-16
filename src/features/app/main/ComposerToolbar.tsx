@@ -202,6 +202,7 @@ export function ComposerToolbar({
         labels={{
           model: tr("composer.model"),
           addModel: tr("composer.addModel"),
+          manageModels: tr("composer.manageModels"),
         }}
         onModel={(nextModelId, providerId) => {
           if (!isValidModelId(nextModelId, availableModels)) return;
