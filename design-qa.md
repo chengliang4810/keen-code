@@ -1,3 +1,18 @@
+# 2026-09-17 移除编辑重发的文件恢复复选框
+
+- 需求：删除最后一条用户消息内联编辑器中的“同时恢复本轮及其子 Agent 修改的文件”复选框，并一并移除其背后的文件恢复能力。
+- 修改：前端 `src/components/lobe-chat/ConversationThread.tsx`（删除 `Checkbox`、`Label` 与 `revertFiles` 状态，`onSend` 收敛为单参数）、`src/hooks/session-turn/useSessionEditResend.ts`、`src/hooks/session-turn/types.ts`、`src/lib/acp/api.ts`（rewind 请求与响应不再携带文件恢复字段）、`src/i18n/messages.ts` 与 `src/i18n/zh-tw.ts`（三语言文案）；后端 `crates/keencode-acp/src/protocol.rs`、`src-tauri/src/acp_host/extensions.rs`、`crates/keencode-resources/src/session_mutation.rs`（恢复计划、预检、应用与崩溃分类逻辑及其事务字段）、`crates/keencode-resources/src/atomic.rs`（只读原子替换原语随唯一调用方一并删除）。未改 CSS，未新增依赖或后台活动。
+- 门禁：`pnpm run typecheck` 通过；`pnpm run lint:css` 通过；`pnpm exec vitest run` 144 文件 / 1394 项通过；`cargo test -p keencode-resources --tests` 全部通过，`-p keencode-acp`、`-p keencode-runtime`、`-p keencode-desktop --lib` 全部通过；`cargo check --workspace --all-targets` 与 `src-tauri` 检查均无警告。
+- 基线：`2e881fe7^`（`c3dcad32e0a3d16d3e37c4b19cbb6ade4899fb45`，复选框仍在），用 `git archive c3dcad32 src public` 解压到夹具的 `baseline/` 目录。基线 `ConversationThread.tsx` SHA-256 为 `5b04c0c08b84d53739fbaf320bc177fb81f7da9bea1ef74386443058aaa6eedf`，当前为 `25eed44c65c02575163e08812a013f772dee5d00a2663b03af560823a698348b`。
+- 夹具：`output/playwright/edit-resend-remove-20260917/`。`fixture.tsx` 自动点击“编辑并重新发送”进入编辑态；`QA_VARIANT=baseline` 加载 `baseline/` 源码副本，`QA_VARIANT=current` 通过符号链接加载工作树 `src/`，两变体使用各自独立的 Vite 依赖缓存。运行 `QA_VARIANT=baseline pnpm exec vite --config output/playwright/edit-resend-remove-20260917/vite.config.mts` 与 `QA_VARIANT=current ...`，地址分别为 `http://127.0.0.1:14381/`、`http://127.0.0.1:14382/`；`node shoot.mjs` 截图与几何采集，`python3 compare.py` 比对。夹具只使用合成消息与提交回调，不调用模型、不写用户会话。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，1280×800 与 760×800，deviceScaleFactor=1。
+- DOM 与几何：基线编辑器内 `[role=checkbox]` 为 1 个、label 文本为“同时恢复本轮及其子 Agent 修改的文件”，当前两者均为 0。1280 宽下编辑器 x=580、y=24、宽 504，高度由 182.390625px 回到 146px（与 2026-09-13 记录中复选框加入前的 146px 一致）；760 宽下 x=240、宽 504，页面 `scrollWidth` 等于视口宽，无横向溢出。
+- 像素：RGB 任一通道差值 >16 计入，未掩码。1280×800 差异 23236/1024000（2.269141%），范围 `[580,120,1084,233)`；760×800 差异 23236/608000（3.821711%），范围 `[240,120,744,233)`。差异集中于被删除的复选框行及其下方随之位移的区域，其余区域逐像素一致。两页 Console 均为 0 error、0 warning。
+- 已知影响：事务记录格式版本由 4 提升到 5、编辑请求摘要由 `v3` 提升到 `v4`，由旧版本写入的事务记录会被拒绝。实测把本机真实的 3 条 v4 记录复制到隔离存储根后调用 `recover_session_mutations`，返回 `SessionMutationRecoveryRequired("事务记录 schema 或版本无效")`；`RuntimeManager` 的列表与打开路径都会对每个项目目录调用该恢复，因此这些项目残留记录时会阻断会话列表与打开，需要删除已完成的墓碑记录。本机 `~/.keencode` 下另有 2 条更早的 v2 根级记录，改动前即已无法通过同一校验，不属于本次影响。
+- 未验收：浏览器组件夹具不替代原生 Tauri WebView / Windows 实机验收；真实会话中经 ACP 的 rewind 往返未在桌面应用内重跑。
+
+---
+
 # 2026-09-17 提问卡片头部导航组贴右上角
 
 - 问题：长问题把卡片头部撑成多行后，头部右侧的翻页/关闭导航组（`1 / 2`、`‹`、`›`、`✕`）落到问题正文的垂直中间，而不是停在右上角。
