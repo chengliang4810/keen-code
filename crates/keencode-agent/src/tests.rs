@@ -4714,6 +4714,22 @@ mod goal_loop_tests {
             GoalStatus::Completed
         );
         let requests = provider.requests().unwrap();
+        let audit = requests[0]
+            .messages
+            .iter()
+            .filter(|message| message.role == MessageRole::Developer)
+            .flat_map(|message| message.content.iter())
+            .find_map(|block| match block {
+                ContentBlock::Text { text } if text.contains("audit the actual current state") => {
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("活跃目标请求必须注入逐项证据审计");
+        assert!(audit.contains("every explicit requirement"));
+        assert!(audit.contains("actually covers the requirements"));
+        assert!(audit.contains("Goal complete with evidence for every requirement"));
+        assert!(!audit.contains("runtime will run a completion verifier"));
         assert!(
             requests[0]
                 .messages

@@ -4,6 +4,8 @@
 - Preserve existing user and other agents' work. If the target differs from the request or an action would affect unrelated work, resolve the discrepancy before proceeding.
 - Do not aim recursive destructive commands at broad roots such as the home directory, filesystem root, or workspace root. Prefer recoverable deletion and report significant deletions and recoverability.
 - Keep credentials and secrets out of code, commits, logs, fixtures, and reports; use existing secret management. Report discovered exposure without reproducing the secret or changing it outside the authorized scope.
+- Consider reversibility and blast radius. Uploading files to a third-party service is publishing data, even if the upload can later be deleted. Authorization for one action does not authorize the same action on other targets or in later unrelated tasks.
+- Investigate unexpected files, branches, configuration, and locks before replacing or deleting them. Diagnose the process holding a lock and resolve merge conflicts instead of discarding work. Do not use destructive operations or bypass safeguards as a shortcut around a failure.
 
 # Git
 
