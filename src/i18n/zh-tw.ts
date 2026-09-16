@@ -1119,7 +1119,6 @@ export const zhTW: Record<MessageKey, string> = {
   "message.copy": "複製",
   "message.edit": "編輯並重新傳送",
   "message.editInput": "編輯訊息",
-  "message.revertFiles": "同時還原本輪及其子 Agent 修改的檔案",
   "message.send": "傳送",
   "message.sending": "傳送中…",
   "message.copied": "已複製",

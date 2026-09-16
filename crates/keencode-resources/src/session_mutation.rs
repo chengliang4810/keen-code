@@ -9,12 +9,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::atomic::{
-    ATOMIC_TEMP_PREFIX, BoundedJson, BoundedRead, atomic_write, atomic_write_with_readonly,
-    ensure_regular_file_or_absent, exclusive_lock, existing_file_readonly, prepare_root,
-    read_file_bounded, secure_child_dir, serialize_json_bounded, set_file_readonly, sync_directory,
+    ATOMIC_TEMP_PREFIX, BoundedJson, BoundedRead, atomic_write, ensure_regular_file_or_absent,
+    exclusive_lock, prepare_root, read_file_bounded, secure_child_dir, serialize_json_bounded,
+    sync_directory,
 };
 use crate::{
-    ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse, FileSnapshot,
+    ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse,
     JournalConfig, MAX_REPLAY_PAGE_RECORDS, MessageImageSource, MessagePart, MessageRole,
     RequestId, ResourceError, SessionEvent, SessionEventId, SessionEventRecord, SessionId,
     SessionJournal, SessionLease, SessionLeaseAcquire, SessionOpen, SessionState, SessionStatus,
@@ -24,7 +24,7 @@ use crate::{
 /// Session 变更事务记录使用的固定 schema。
 const MUTATION_SCHEMA: &str = "keencode/session-mutation";
 /// Session 变更事务记录的唯一格式版本。
-const MUTATION_VERSION: u32 = 4;
+const MUTATION_VERSION: u32 = 5;
 /// 单个事务记录允许占用的最大字节数。
 const MAX_MUTATION_RECORD_BYTES: u64 = 64 * 1024;
 /// 启动恢复一次允许扫描的最大事务记录数。
@@ -59,8 +59,6 @@ pub struct SessionEditUserRequest {
     pub target_message_id: String,
     /// 前端当前展示的目标用户消息完整模型文本。
     pub expected_text: String,
-    /// 是否把该根 Turn 及其单层子 Agent 已应用的文件变更恢复到 Turn 前状态。
-    pub revert_files: bool,
     /// 归档与截断共同使用的跨重启操作标识。
     pub operation_id: String,
 }
@@ -70,8 +68,6 @@ pub struct SessionEditUserRequest {
 pub struct SessionEditUserResult {
     /// 保存截断前完整历史的确定性归档 Session。
     pub archived_session_id: SessionId,
-    /// 是否按请求执行了文件恢复事务；没有文件变更时仍表示该模式已启用。
-    pub reverted_files: bool,
 }
 
 /// 磁盘事务当前是否已经完整提交。
@@ -105,10 +101,6 @@ enum MutationKind {
         truncated_log_sha256: String,
         /// 截断并重放控制面事件后源日志的最后 sequence。
         truncated_last_sequence: u64,
-        /// 是否恢复目标 Turn 及其子 Agent 已应用的文件变更。
-        revert_files: bool,
-        /// 确定性文件恢复计划摘要；关闭恢复时为空。
-        file_restore_plan_sha256: Option<String>,
     },
 }
 
@@ -119,21 +111,6 @@ struct EditTarget {
     cutoff_sequence: u64,
     /// 目标消息所属根 Turn。
     root_turn_id: TurnId,
-}
-
-/// 同一路径在目标 Turn 中全部已应用变更折叠后的恢复计划。
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileRestorePlan {
-    /// 只接受当前文件处于 `after` 或已恢复到 `before`，其余状态 fail closed。
-    path: PathBuf,
-    /// 第一笔变更之前的完整快照；空值表示原文件不存在。
-    before: Option<FileSnapshot>,
-    /// 第一笔变更之前的 Windows `FILE_ATTRIBUTE_READONLY` 状态。
-    before_readonly: Option<bool>,
-    /// 最后一笔变更实际应用后的完整快照。
-    after: FileSnapshot,
-    /// 最后一笔变更实际应用后的 Windows `FILE_ATTRIBUTE_READONLY` 状态。
-    after_readonly: Option<bool>,
 }
 
 /// 唯一受支持的 Session 变更事务记录。
@@ -290,10 +267,8 @@ pub fn prepare_edit_user(
     if let Some(record) = read_record_if_present(&record_path)? {
         validate_existing_request(&record, &request_sha256)?;
         resume_record(&root, &layout, journal_config, artifact_limits, &record)?;
-        let reverted_files = record_reverts_files(&record);
         return Ok(SessionEditUserResult {
             archived_session_id: record.target_session_id,
-            reverted_files,
         });
     }
 
@@ -314,14 +289,6 @@ pub fn prepare_edit_user(
     let truncated_state = reduce_records(&request.source_session_id, &truncated_records)?;
     ensure_mutable_source(&truncated_state)?;
     encode_records(&truncated_records, journal_config)?;
-    let file_restore_plan = if request.revert_files {
-        let plan = file_restore_plan(&source, &target.root_turn_id)?;
-        preflight_file_restore(&source.artifacts, &plan)?;
-        Some(plan)
-    } else {
-        None
-    };
-    let file_restore_plan_sha256 = file_restore_plan.as_deref().map(file_restore_plan_sha256);
     let target_session_id = derived_session_id(
         "edit-archive",
         &request.source_session_id,
@@ -349,8 +316,6 @@ pub fn prepare_edit_user(
             cutoff_sequence: target.cutoff_sequence,
             truncated_log_sha256: records_sha256(&truncated_records)?,
             truncated_last_sequence: truncated_state.last_sequence,
-            revert_files: request.revert_files,
-            file_restore_plan_sha256,
         },
         target_session_id,
         target_title,
@@ -373,7 +338,6 @@ pub fn prepare_edit_user(
     mark_completed(&record_path, record.clone())?;
     Ok(SessionEditUserResult {
         archived_session_id: record.target_session_id,
-        reverted_files: request.revert_files,
     })
 }
 
@@ -823,338 +787,6 @@ fn materialize_user_text(
     Ok(text)
 }
 
-/// 把目标根 Turn（含其单层子 Agent）的已应用文件变更按路径折叠为逆序恢复计划。
-fn file_restore_plan(
-    source: &SourceBundle,
-    root_turn_id: &TurnId,
-) -> Result<Vec<FileRestorePlan>, ResourceError> {
-    let mut applied_request_ids = Vec::new();
-    for record in &source.records {
-        collect_applied_file_change_ids(&record.event, &mut applied_request_ids);
-    }
-    let mut by_path = BTreeMap::<PathBuf, FileRestorePlan>::new();
-    for request_id in applied_request_ids {
-        let Some(tool) = source.state.tools.get(&request_id) else {
-            return Err(ResourceError::SessionMutationRecoveryRequired(
-                "文件恢复计划引用了不存在的工具".to_owned(),
-            ));
-        };
-        let belongs_to_target = source
-            .state
-            .turns
-            .get(&tool.request.turn_id)
-            .is_some_and(|turn| turn.root_turn_id == *root_turn_id);
-        if !belongs_to_target {
-            continue;
-        }
-        let Some(change) = tool.file_change.as_ref().filter(|change| change.applied) else {
-            return Err(ResourceError::SessionMutationRecoveryRequired(
-                "已应用文件事件缺少完整变更快照".to_owned(),
-            ));
-        };
-        let path = PathBuf::from(&change.path);
-        if !path.is_absolute() {
-            return Err(ResourceError::UnsafePath(
-                "文件恢复目标必须是绝对路径".to_owned(),
-            ));
-        }
-        if let Some(existing) = by_path.get_mut(&path) {
-            if change.before.as_ref() != Some(&existing.after)
-                || change.before_readonly != existing.after_readonly
-            {
-                return Err(ResourceError::SessionMutationNotApplicable(
-                    "同一路径的文件变更快照不连续，不能安全恢复".to_owned(),
-                ));
-            }
-            existing.after = change.after.clone();
-            existing.after_readonly = change.after_readonly;
-        } else {
-            by_path.insert(
-                path.clone(),
-                FileRestorePlan {
-                    path,
-                    before: change.before.clone(),
-                    before_readonly: change.before_readonly,
-                    after: change.after.clone(),
-                    after_readonly: change.after_readonly,
-                },
-            );
-        }
-    }
-    Ok(by_path.into_values().collect())
-}
-
-/// 按物理事件顺序收集真正越过 Applied 边界的文件请求标识。
-fn collect_applied_file_change_ids(event: &SessionEvent, ids: &mut Vec<RequestId>) {
-    match event {
-        SessionEvent::AtomicBatch { events } => {
-            for event in events {
-                collect_applied_file_change_ids(event, ids);
-            }
-        }
-        SessionEvent::ToolFileChangeApplied { request_id } => ids.push(request_id.clone()),
-        _ => {}
-    }
-}
-
-/// 在生成不保存用户文件正文的确定性恢复计划摘要。
-fn file_restore_plan_sha256(plan: &[FileRestorePlan]) -> String {
-    let mut hasher = Sha256::new();
-    update_hash_part(&mut hasher, b"keencode/session-edit-file-restore/v2");
-    for entry in plan {
-        update_hash_part(&mut hasher, entry.path.as_os_str().as_encoded_bytes());
-        match &entry.before {
-            Some(snapshot) => {
-                update_hash_part(&mut hasher, b"some");
-                update_hash_part(&mut hasher, &snapshot.size_bytes.to_le_bytes());
-                update_hash_part(&mut hasher, snapshot.sha256.as_bytes());
-            }
-            None => update_hash_part(&mut hasher, b"none"),
-        }
-        update_optional_readonly_hash(&mut hasher, entry.before_readonly);
-        update_hash_part(&mut hasher, &entry.after.size_bytes.to_le_bytes());
-        update_hash_part(&mut hasher, entry.after.sha256.as_bytes());
-        update_optional_readonly_hash(&mut hasher, entry.after_readonly);
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-/// 把平台可选的只读状态纳入恢复计划摘要，避免恢复时重新猜测已丢失属性。
-fn update_optional_readonly_hash(hasher: &mut Sha256, readonly: Option<bool>) {
-    match readonly {
-        Some(value) => update_hash_part(hasher, if value { b"readonly" } else { b"writable" }),
-        None => update_hash_part(hasher, b"unsupported-or-unknown"),
-    }
-}
-
-/// 在任何用户文件写入入前验证全部 Artifact 与工作当前文件状态，冲突不留下副作用。
-fn preflight_file_restore(
-    artifacts: &ArtifactStore,
-    plan: &[FileRestorePlan],
-) -> Result<(), ResourceError> {
-    for entry in plan {
-        entry.after.validate_shape()?;
-        artifacts.validate_file_snapshot(&entry.after)?;
-        if let Some(before) = &entry.before {
-            before.validate_shape()?;
-            artifacts.validate_file_snapshot(before)?;
-        }
-        let current = current_file_identity(&entry.path)?;
-        if !content_matches_snapshot(current.as_ref(), Some(&entry.after))
-            && !content_matches_snapshot(current.as_ref(), entry.before.as_ref())
-        {
-            return Err(ResourceError::SessionMutationNotApplicable(format!(
-                "文件已在工具修改后再次变化，不能安全恢复：{}",
-                entry.path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// 幂等恢复全部路径；崩溃重试允许某些路径已经处于目标 `before` 状态。
-fn apply_file_restore(
-    artifacts: &ArtifactStore,
-    plan: &[FileRestorePlan],
-) -> Result<(), ResourceError> {
-    preflight_file_restore(artifacts, plan)?;
-    for entry in plan {
-        let current = current_file_identity(&entry.path)?;
-        match classify_file_restore_action(current.as_ref(), entry) {
-            FileRestoreAction::AlreadyRestored => continue,
-            FileRestoreAction::RepairBeforeReadonly => {
-                // 内容已经恢复但进程可能在设置 Windows 属性前崩溃；只收敛属性，
-                // 不重复替换文件，避免再次扩大崩溃窗口。
-                set_file_readonly(&entry.path, entry.before_readonly.unwrap_or(false))?;
-                let repaired = current_file_identity(&entry.path)?;
-                if !identity_matches_snapshot(
-                    repaired.as_ref(),
-                    entry.before.as_ref(),
-                    entry.before_readonly,
-                ) {
-                    return Err(ResourceError::SessionMutationRecoveryRequired(format!(
-                        "文件恢复属性无法确认：{}",
-                        entry.path.display()
-                    )));
-                }
-                continue;
-            }
-            FileRestoreAction::RepairAfterReadonly => {
-                // 原子替换前清除只读属性后崩溃时，内容仍是 after 但属性不符；
-                // 先恢复 after 属性，再重试完整替换。
-                set_file_readonly(&entry.path, entry.after_readonly.unwrap_or(false))?;
-                let repaired = current_file_identity(&entry.path)?;
-                if !identity_matches_snapshot(
-                    repaired.as_ref(),
-                    Some(&entry.after),
-                    entry.after_readonly,
-                ) {
-                    return Err(ResourceError::SessionMutationRecoveryRequired(format!(
-                        "文件恢复前置属性无法确认：{}",
-                        entry.path.display()
-                    )));
-                }
-            }
-            FileRestoreAction::RestoreContent => {}
-            FileRestoreAction::Conflict => {
-                return Err(ResourceError::SessionMutationNotApplicable(format!(
-                    "文件恢复提交前状态已变化：{}",
-                    entry.path.display()
-                )));
-            }
-        }
-        match &entry.before {
-            Some(before) => {
-                let bytes = artifacts.read_file_snapshot(before)?;
-                atomic_write_with_readonly(&entry.path, &bytes, true, entry.before_readonly)?;
-            }
-            None => {
-                ensure_regular_file_or_absent(&entry.path)?;
-                let readonly = existing_file_readonly(&entry.path)?;
-                if readonly == Some(true) {
-                    set_file_readonly(&entry.path, false)?;
-                }
-                if let Err(error) = fs::remove_file(&entry.path) {
-                    if readonly == Some(true) {
-                        set_file_readonly(&entry.path, true)?;
-                    }
-                    return Err(ResourceError::io("remove_reverted_created_file", error));
-                }
-                let parent = entry.path.parent().ok_or_else(|| {
-                    ResourceError::UnsafePath("文件恢复目标缺少父目录".to_owned())
-                })?;
-                sync_directory(parent, true)?;
-            }
-        }
-        let restored = current_file_identity(&entry.path)?;
-        if !identity_matches_snapshot(
-            restored.as_ref(),
-            entry.before.as_ref(),
-            entry.before_readonly,
-        ) {
-            return Err(ResourceError::SessionMutationRecoveryRequired(format!(
-                "文件恢复结果无法确认：{}",
-                entry.path.display()
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// 普通文件恢复校验使用的内容与平台可选属性。
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct FileIdentity {
-    /// 原始文件字节长度。
-    size_bytes: u64,
-    /// 原始文件 SHA-256。
-    sha256: String,
-    /// Windows `FILE_ATTRIBUTE_READONLY`；其他平台为 `None`。
-    readonly: Option<bool>,
-}
-
-/// 恢复一条路径时由内容和只读状态共同决定的幂等动作。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FileRestoreAction {
-    /// 内容与 before 以及其期望属性都已满足。
-    AlreadyRestored,
-    /// 内容已是 before，只需修复 before 的只读属性。
-    RepairBeforeReadonly,
-    /// 内容仍是 after，但原子替换前的只读属性被清除，只需先修复 after 属性。
-    RepairAfterReadonly,
-    /// 当前内容是 after，属性也正确，需要执行内容恢复。
-    RestoreContent,
-    /// 当前内容既不是 before 也不是 after，必须拒绝恢复。
-    Conflict,
-}
-
-/// 返回普通文件的字节、SHA-256 与只读状态；缺失文件为 `None`，符号链接一律拒绝。
-fn current_file_identity(path: &Path) -> Result<Option<FileIdentity>, ResourceError> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(ResourceError::io("inspect_file_restore_target", error)),
-    };
-    if metadata.file_type().is_symlink() {
-        return Err(ResourceError::SymlinkRejected(
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("文件")
-                .to_owned(),
-        ));
-    }
-    if !metadata.is_file() {
-        return Err(ResourceError::UnsafePath(
-            "文件恢复目标存在但不是普通文件".to_owned(),
-        ));
-    }
-    let bytes =
-        fs::read(path).map_err(|error| ResourceError::io("read_file_restore_target", error))?;
-    Ok(Some(FileIdentity {
-        size_bytes: bytes.len() as u64,
-        sha256: sha256_hex(&bytes),
-        readonly: existing_file_readonly(path)?,
-    }))
-}
-
-/// 只比较内容身份；用于识别属性修复或原子替换中途的崩溃窗口。
-fn content_matches_snapshot(
-    current: Option<&FileIdentity>,
-    snapshot: Option<&FileSnapshot>,
-) -> bool {
-    match (current, snapshot) {
-        (None, None) => true,
-        (Some(current), Some(snapshot)) => {
-            current.size_bytes == snapshot.size_bytes && current.sha256 == snapshot.sha256
-        }
-        (None, Some(_)) | (Some(_), None) => false,
-    }
-}
-
-/// 比较文件当前内容与可选快照以及期望的只读状态；两边均为空表示不存在。
-fn identity_matches_snapshot(
-    current: Option<&FileIdentity>,
-    snapshot: Option<&FileSnapshot>,
-    expected_readonly: Option<bool>,
-) -> bool {
-    if !content_matches_snapshot(current, snapshot) {
-        return false;
-    }
-    match (current, snapshot) {
-        (None, None) => true,
-        (Some(current), Some(_)) => {
-            expected_readonly.is_none_or(|expected| current.readonly == Some(expected))
-        }
-        (None, Some(_)) | (Some(_), None) => false,
-    }
-}
-
-/// 识别恢复事务在属性变更或原子替换各崩溃窗口中的下一步动作。
-fn classify_file_restore_action(
-    current: Option<&FileIdentity>,
-    entry: &FileRestorePlan,
-) -> FileRestoreAction {
-    if identity_matches_snapshot(current, entry.before.as_ref(), entry.before_readonly) {
-        return FileRestoreAction::AlreadyRestored;
-    }
-    if content_matches_snapshot(current, entry.before.as_ref()) {
-        return FileRestoreAction::RepairBeforeReadonly;
-    }
-    if !content_matches_snapshot(current, Some(&entry.after)) {
-        return FileRestoreAction::Conflict;
-    }
-    if identity_matches_snapshot(current, Some(&entry.after), entry.after_readonly) {
-        FileRestoreAction::RestoreContent
-    } else {
-        FileRestoreAction::RepairAfterReadonly
-    }
-}
-
-/// 与其他事务摘要共用的带长度前缀 Hash 输入。
-fn update_hash_part(hasher: &mut Sha256, part: &[u8]) {
-    hasher.update((part.len() as u64).to_le_bytes());
-    hasher.update(part);
-}
-
 /// 将源记录重绑定到目标 Session，并追加确定性标题覆盖事件。
 fn target_records(
     source: &[SessionEventRecord],
@@ -1478,8 +1110,6 @@ fn resume_prepared(
                 cutoff_sequence,
                 truncated_log_sha256,
                 truncated_last_sequence,
-                revert_files,
-                file_restore_plan_sha256: expected_plan_sha256,
             } => {
                 let target = prepared_edit_target(
                     source,
@@ -1497,20 +1127,7 @@ fn resume_prepared(
                         "编辑后日志无法从冻结源锚点重建".to_owned(),
                     ));
                 }
-                let file_restore = if *revert_files {
-                    let plan = file_restore_plan(source, &target.root_turn_id)?;
-                    let actual_plan_sha256 = file_restore_plan_sha256(&plan);
-                    if expected_plan_sha256.as_deref() != Some(actual_plan_sha256.as_str()) {
-                        return Err(ResourceError::SessionMutationRecoveryRequired(
-                            "文件恢复计划无法从冻结源锚点重建".to_owned(),
-                        ));
-                    }
-                    preflight_file_restore(&source.artifacts, &plan)?;
-                    Some(plan)
-                } else {
-                    None
-                };
-                Some((truncated, file_restore))
+                Some(truncated)
             }
         }
     } else {
@@ -1554,15 +1171,7 @@ fn resume_prepared(
             &operation_key(&record.source_session_id, &record.operation_id),
             MutationFault::AfterArchivePublished,
         )?;
-        if let Some((truncated, file_restore)) = edit_effects {
-            if let Some(plan) = file_restore {
-                apply_file_restore(&source.artifacts, &plan)?;
-            }
-            #[cfg(test)]
-            fail_mutation_if(
-                &operation_key(&record.source_session_id, &record.operation_id),
-                MutationFault::AfterFileRestore,
-            )?;
+        if let Some(truncated) = edit_effects {
             rewrite_source_log(root, &record.source_session_id, journal_config, &truncated)?;
             #[cfg(test)]
             fail_mutation_if(
@@ -1984,17 +1593,6 @@ fn mark_completed(path: &Path, mut record: MutationRecord) -> Result<(), Resourc
     write_record(path, &record)
 }
 
-/// 返回编辑事务持久化的文件恢复模式；fork 永远不会恢复文件。
-fn record_reverts_files(record: &MutationRecord) -> bool {
-    matches!(
-        record.kind,
-        MutationKind::EditUser {
-            revert_files: true,
-            ..
-        }
-    )
-}
-
 /// 校验事务记录结构、文件身份和恢复字段一致性。
 fn validate_record(record: &MutationRecord) -> Result<(), ResourceError> {
     if record.schema != MUTATION_SCHEMA || record.version != MUTATION_VERSION {
@@ -2021,8 +1619,6 @@ fn validate_record(record: &MutationRecord) -> Result<(), ResourceError> {
         cutoff_sequence,
         truncated_log_sha256,
         truncated_last_sequence,
-        revert_files,
-        file_restore_plan_sha256,
     } = &record.kind
         && (validate_message_id(target_message_id).is_err()
             || !is_sha256(expected_text_sha256)
@@ -2030,12 +1626,7 @@ fn validate_record(record: &MutationRecord) -> Result<(), ResourceError> {
             || *truncated_last_sequence == 0
             || *truncated_last_sequence > record.source_last_sequence
             || *cutoff_sequence <= 1
-            || *cutoff_sequence > record.source_last_sequence
-            || if *revert_files {
-                !file_restore_plan_sha256.as_deref().is_some_and(is_sha256)
-            } else {
-                file_restore_plan_sha256.is_some()
-            })
+            || *cutoff_sequence > record.source_last_sequence)
     {
         return Err(ResourceError::SessionMutationRecoveryRequired(
             "编辑事务恢复字段无效".to_owned(),
@@ -2061,14 +1652,12 @@ fn validate_record(record: &MutationRecord) -> Result<(), ResourceError> {
         MutationKind::EditUser {
             target_message_id,
             expected_text_sha256,
-            revert_files,
             ..
         } => edit_request_sha256_parts(
             &record.source_session_id,
             &record.operation_id,
             target_message_id,
             expected_text_sha256,
-            *revert_files,
         ),
     };
     if expected_request_sha256 != record.request_sha256 {
@@ -2234,7 +1823,6 @@ fn edit_request_sha256(request: &SessionEditUserRequest) -> String {
         &request.operation_id,
         &request.target_message_id,
         &expected_text_sha256,
-        request.revert_files,
     )
 }
 
@@ -2244,19 +1832,13 @@ fn edit_request_sha256_parts(
     operation_id: &str,
     target_message_id: &str,
     expected_text_sha256: &str,
-    revert_files: bool,
 ) -> String {
     sha256_parts(&[
-        b"keencode/session-edit-user-request/v3",
+        b"keencode/session-edit-user-request/v4",
         source_session_id.as_str().as_bytes(),
         operation_id.as_bytes(),
         target_message_id.as_bytes(),
         expected_text_sha256.as_bytes(),
-        if revert_files {
-            b"true".as_slice()
-        } else {
-            b"false".as_slice()
-        },
     ])
 }
 
@@ -2309,8 +1891,6 @@ fn is_sha256(value: &str) -> bool {
 enum MutationFault {
     /// 归档已发布但源日志尚未截断。
     AfterArchivePublished,
-    /// 文件已经恢复但源日志仍保持原始状态。
-    AfterFileRestore,
     /// 源日志已截断但完成墓碑尚未提交。
     AfterSourceRewritten,
     /// 目标效果均完成但完成墓碑尚未提交。
@@ -2357,24 +1937,20 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use keencode_model::{ResponseMetadata, StopReason, TokenUsage};
     use tempfile::tempdir;
 
     use super::{
-        FileIdentity, FileRestoreAction, FileRestorePlan, MutationFault,
-        classify_file_restore_action, content_matches_snapshot, edit_request_sha256, fork_session,
-        identity_matches_snapshot, inject_mutation_fault, operation_key, prepare_edit_user,
-        read_all_records, recover_session_mutations, root_user_messages, target_root_user_sequence,
+        MutationFault, edit_request_sha256, fork_session, inject_mutation_fault, operation_key,
+        prepare_edit_user, read_all_records, recover_session_mutations, root_user_messages,
+        target_root_user_sequence,
     };
     use crate::{
-        AgentId, ArtifactLimits, ArtifactMaterialization, ArtifactStore, FileSnapshot,
-        GeneratedTitleRecord, IdempotentAppendOutcome, JournalConfig, MailboxMessage,
-        MailboxMessageId, MailboxState, MessagePart, MessageRole, PersistedToolResult, PlanState,
-        ProviderProtocolSnapshot, ProviderSnapshot, RequestId, ResourceError,
-        SessionEditUserRequest, SessionEvent, SessionEventId, SessionEventRecord,
+        AgentId, ArtifactLimits, ArtifactMaterialization, ArtifactStore, GeneratedTitleRecord,
+        IdempotentAppendOutcome, JournalConfig, MailboxMessage, MailboxMessageId, MailboxState,
+        MessagePart, MessageRole, PlanState, ProviderProtocolSnapshot, ProviderSnapshot,
+        ResourceError, SessionEditUserRequest, SessionEvent, SessionEventId, SessionEventRecord,
         SessionForkRequest, SessionId, SessionJournal, SessionLease, SessionLeaseAcquire,
         SessionMessage, SessionOpen, SubAgentState, SubAgentStatus, TodoItem, TodoStatus,
-        ToolCompletionStatus, ToolEffect, ToolFileChange, ToolOutcome, ToolRequest, ToolResultPart,
         TranscriptSegment, TurnId, WorktreeRecord,
     };
 
@@ -2539,367 +2115,6 @@ mod tests {
                 ],
             },
         );
-    }
-
-    /// 为同一运行中 Turn 追加一笔完整、已物化且已应用的文件工具生命周期。
-    #[allow(clippy::too_many_arguments)]
-    fn append_applied_file_change(
-        journal: &SessionJournal,
-        artifacts: &ArtifactStore,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-        agent_id: &AgentId,
-        path: &Path,
-        before: Option<&[u8]>,
-        after: &[u8],
-        model_round: u32,
-        suffix: &str,
-    ) {
-        let model_tool_call_id = format!("call-file-{suffix}");
-        let request_id = RequestId::derive_model_tool_call(
-            session_id,
-            turn_id,
-            agent_id,
-            model_round,
-            &model_tool_call_id,
-        )
-        .expect("文件工具 RequestId 应派生");
-        append(
-            journal,
-            &format!("file-request-{suffix}"),
-            SessionEvent::ToolRequested {
-                request: ToolRequest {
-                    request_id: request_id.clone(),
-                    turn_id: turn_id.clone(),
-                    agent_id: agent_id.clone(),
-                    model_round,
-                    request_index: 0,
-                    model_tool_call_id: model_tool_call_id.clone(),
-                    tool_name: "write_file".to_owned(),
-                    arguments: serde_json::json!({ "path": path }),
-                    effect: ToolEffect::ChangesState,
-                },
-            },
-        );
-        append(
-            journal,
-            &format!("file-start-{suffix}"),
-            SessionEvent::ToolExecutionStarted {
-                request_id: request_id.clone(),
-            },
-        );
-        let before = before.map(|bytes| {
-            let snapshot = artifacts.plan_file_snapshot(bytes).expect("写前快照应规划");
-            artifacts
-                .persist_file_snapshot(&snapshot, bytes)
-                .expect("写前快照应持久化");
-            snapshot
-        });
-        let after_snapshot = artifacts.plan_file_snapshot(after).expect("写后快照应规划");
-        artifacts
-            .persist_file_snapshot(&after_snapshot, after)
-            .expect("写后快照应持久化");
-        append(
-            journal,
-            &format!("file-prepared-{suffix}"),
-            SessionEvent::ToolFileChangePrepared {
-                request_id: request_id.clone(),
-                change: ToolFileChange {
-                    path: path.display().to_string(),
-                    before,
-                    before_readonly: None,
-                    after: after_snapshot,
-                    after_readonly: None,
-                    applied: false,
-                },
-            },
-        );
-        append(
-            journal,
-            &format!("file-applied-{suffix}"),
-            SessionEvent::ToolFileChangeApplied {
-                request_id: request_id.clone(),
-            },
-        );
-        let tool_result = PersistedToolResult {
-            tool_call_id: model_tool_call_id.clone(),
-            content: vec![ToolResultPart::Text {
-                text: "文件写入完成".to_owned(),
-            }],
-            is_error: false,
-        };
-        append(
-            journal,
-            &format!("file-completed-{suffix}"),
-            SessionEvent::ToolCompleted {
-                request_id: request_id.clone(),
-                outcome: ToolOutcome {
-                    status: ToolCompletionStatus::Succeeded,
-                    result: tool_result.clone(),
-                },
-            },
-        );
-        let expected_transcript_revision = journal
-            .state()
-            .expect("工具 Transcript 前状态应读取")
-            .transcript_revision;
-        append(
-            journal,
-            &format!("file-transcript-{suffix}"),
-            SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::ModelRoundCompleted {
-                        turn_id: turn_id.clone(),
-                        source_agent_id: agent_id.clone(),
-                        model_round,
-                        requested_model: "file-restore-test-model".to_owned(),
-                        metadata: ResponseMetadata {
-                            decode_duration_ms: None,
-                            response_id: Some(format!("response-{suffix}")),
-                            model: Some("file-restore-test-model".to_owned()),
-                        },
-                        usage: TokenUsage::unknown(),
-                        stop_reason: StopReason::Completed,
-                    },
-                    SessionEvent::TranscriptSegmentCommitted {
-                        segment: TranscriptSegment {
-                            turn_id: turn_id.clone(),
-                            source_agent_id: agent_id.clone(),
-                            model_round,
-                            segment_index: 0,
-                            expected_transcript_revision,
-                            messages: vec![
-                                SessionMessage {
-                                    is_meta: false,
-                                    message_id: format!("file-call-message-{suffix}"),
-                                    turn_id: Some(turn_id.clone()),
-                                    agent_id: Some(agent_id.clone()),
-                                    role: MessageRole::Assistant,
-                                    content: vec![MessagePart::ToolCall {
-                                        tool_call_id: model_tool_call_id.clone(),
-                                        tool_name: "write_file".to_owned(),
-                                        arguments: serde_json::json!({ "path": path }),
-                                    }],
-                                },
-                                SessionMessage {
-                                    is_meta: false,
-                                    message_id: format!("file-result-message-{suffix}"),
-                                    turn_id: Some(turn_id.clone()),
-                                    agent_id: Some(agent_id.clone()),
-                                    role: MessageRole::Tool,
-                                    content: vec![MessagePart::ToolResult {
-                                        tool_call_id: model_tool_call_id,
-                                        content: tool_result.content,
-                                        is_error: tool_result.is_error,
-                                    }],
-                                },
-                            ],
-                        },
-                    },
-                ],
-            },
-        );
-    }
-
-    /// 创建最后根 Turn 含一笔或多笔连续文件变更的完整 Session。
-    fn create_file_restore_source(
-        root: &Path,
-        workspace: &Path,
-        session_name: &str,
-        versions: &[&[u8]],
-    ) -> SessionId {
-        assert!(versions.len() >= 2, "至少需要写前和写后两个版本");
-        let session_id = SessionId::new(session_name).expect("测试 SessionId 应有效");
-        let lease = match SessionLease::try_acquire(root, session_id.clone())
-            .expect("测试 lease 应获取")
-        {
-            SessionLeaseAcquire::Acquired(lease) => lease,
-            SessionLeaseAcquire::Busy { .. } => panic!("测试 Session 不应已被占用"),
-        };
-        let artifacts = Arc::new(
-            ArtifactStore::open(root, session_id.clone(), ArtifactLimits::default())
-                .expect("测试 ArtifactStore 应打开"),
-        );
-        let journal = match SessionJournal::open_with_artifact_validator(
-            root,
-            session_id.clone(),
-            JournalConfig::default(),
-            artifacts.clone(),
-        )
-        .expect("测试 Journal 应打开")
-        {
-            SessionOpen::Ready(journal) => journal,
-            SessionOpen::Corrupt(_) => panic!("新测试 Journal 不应损坏"),
-        };
-        append(
-            &journal,
-            "file-restore-created",
-            SessionEvent::SessionCreated {
-                title: "文件恢复 Session".to_owned(),
-                project_root: workspace.display().to_string(),
-            },
-        );
-        let turn_id = TurnId::new("turn-file-restore").expect("TurnId 应有效");
-        append_root_turn_start_with_message_id(
-            &journal,
-            turn_id.as_str(),
-            "user-message-file-restore",
-            "恢复本轮文件",
-        );
-        let path = workspace.join("tracked.txt");
-        let root_agent_id = AgentId::new("root").expect("根 AgentId 应有效");
-        for (index, window) in versions.windows(2).enumerate() {
-            append_applied_file_change(
-                &journal,
-                &artifacts,
-                &session_id,
-                &turn_id,
-                &root_agent_id,
-                &path,
-                Some(window[0]),
-                window[1],
-                u32::try_from(index).unwrap_or(0).saturating_add(1),
-                &index.to_string(),
-            );
-        }
-        fs::write(&path, versions.last().expect("末版本应存在")).expect("工作区应写入最终版本");
-        append(
-            &journal,
-            "file-restore-turn-completed",
-            SessionEvent::TurnCompleted { turn_id },
-        );
-        drop(journal);
-        drop(artifacts);
-        drop(lease);
-        session_id
-    }
-
-    /// 创建最后根 Turn 的已完成单层子 Agent 修改文件的完整 Session。
-    fn create_child_file_restore_source(
-        root: &Path,
-        workspace: &Path,
-        session_name: &str,
-        before: &[u8],
-        after: &[u8],
-    ) -> SessionId {
-        let session_id = SessionId::new(session_name).expect("测试 SessionId 应有效");
-        let lease = match SessionLease::try_acquire(root, session_id.clone())
-            .expect("测试 lease 应获取")
-        {
-            SessionLeaseAcquire::Acquired(lease) => lease,
-            SessionLeaseAcquire::Busy { .. } => panic!("测试 Session 不应已被占用"),
-        };
-        let artifacts = Arc::new(
-            ArtifactStore::open(root, session_id.clone(), ArtifactLimits::default())
-                .expect("测试 ArtifactStore 应打开"),
-        );
-        let journal = match SessionJournal::open_with_artifact_validator(
-            root,
-            session_id.clone(),
-            JournalConfig::default(),
-            artifacts.clone(),
-        )
-        .expect("测试 Journal 应打开")
-        {
-            SessionOpen::Ready(journal) => journal,
-            SessionOpen::Corrupt(_) => panic!("新测试 Journal 不应损坏"),
-        };
-        append(
-            &journal,
-            "child-file-created",
-            SessionEvent::SessionCreated {
-                title: "子 Agent 文件恢复".to_owned(),
-                project_root: workspace.display().to_string(),
-            },
-        );
-        let root_turn_id = TurnId::new("turn-child-file-root").expect("根 TurnId 应有效");
-        append_root_turn_start_with_message_id(
-            &journal,
-            root_turn_id.as_str(),
-            "user-message-child-file",
-            "恢复子 Agent 文件",
-        );
-        let root_agent_id = AgentId::new("root").expect("根 AgentId 应有效");
-        let child_agent_id = AgentId::new("file_child").expect("子 AgentId 应有效");
-        let child_turn_id = TurnId::new("turn-child-file").expect("子 TurnId 应有效");
-        append(
-            &journal,
-            "child-file-spawned",
-            SessionEvent::SubAgentSpawned {
-                agent: SubAgentState {
-                    agent_id: child_agent_id.clone(),
-                    parent_agent_id: root_agent_id,
-                    agent_path: "/root/file_child".to_owned(),
-                    task: "修改文件".to_owned(),
-                    status: SubAgentStatus::Pending,
-                    current_turn_id: None,
-                    result_summary: None,
-                },
-            },
-        );
-        append(
-            &journal,
-            "child-file-turn-started",
-            SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::TurnStarted {
-                        turn_id: child_turn_id.clone(),
-                        source_agent_id: child_agent_id.clone(),
-                        root_turn_id: root_turn_id.clone(),
-                        parent_turn_id: Some(root_turn_id.clone()),
-                        prompt_summary: "修改文件".to_owned(),
-                    },
-                    SessionEvent::SubAgentStatusChanged {
-                        agent_id: child_agent_id.clone(),
-                        turn_id: Some(child_turn_id.clone()),
-                        status: SubAgentStatus::Running,
-                        result_summary: None,
-                    },
-                ],
-            },
-        );
-        let path = workspace.join("child.txt");
-        append_applied_file_change(
-            &journal,
-            &artifacts,
-            &session_id,
-            &child_turn_id,
-            &child_agent_id,
-            &path,
-            Some(before),
-            after,
-            1,
-            "child",
-        );
-        fs::write(&path, after).expect("子 Agent 工作区最终版本应写入");
-        append(
-            &journal,
-            "child-file-completed",
-            SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::TurnCompleted {
-                        turn_id: child_turn_id.clone(),
-                    },
-                    SessionEvent::SubAgentStatusChanged {
-                        agent_id: child_agent_id,
-                        turn_id: Some(child_turn_id),
-                        status: SubAgentStatus::Completed,
-                        result_summary: Some("文件修改完成".to_owned()),
-                    },
-                ],
-            },
-        );
-        append(
-            &journal,
-            "child-file-root-completed",
-            SessionEvent::TurnCompleted {
-                turn_id: root_turn_id,
-            },
-        );
-        drop(journal);
-        drop(artifacts);
-        drop(lease);
-        session_id
     }
 
     /// 原子追加一个仍处于 Pending 状态的单层子 Agent。
@@ -3228,7 +2443,6 @@ mod tests {
             source_session_id: source_id.clone(),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "重复用户消息".to_owned(),
-            revert_files: false,
             operation_id: operation_id.to_owned(),
         };
         assert!(
@@ -3434,7 +2648,6 @@ mod tests {
             source_session_id: SessionId::new("session-source-edit").expect("SessionId 应有效"),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "第二条用户消息".to_owned(),
-            revert_files: false,
             operation_id: "edit-operation".to_owned(),
         };
         let first = prepare_edit_user(
@@ -3475,7 +2688,6 @@ mod tests {
             source_session_id: source_id.clone(),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "第二条用户消息".to_owned(),
-            revert_files: false,
             operation_id: "edit-control-operation".to_owned(),
         };
 
@@ -3578,7 +2790,6 @@ mod tests {
                 source_session_id: source_id.clone(),
                 target_message_id: "user-message-turn-1".to_owned(),
                 expected_text: "第一条用户消息".to_owned(),
-                revert_files: false,
                 operation_id: "early-edit-operation".to_owned(),
             },
         )
@@ -3631,7 +2842,6 @@ mod tests {
                 source_session_id: source_id.clone(),
                 target_message_id: "user-message-turn-2".to_owned(),
                 expected_text: "重复用户消息".to_owned(),
-                revert_files: false,
                 operation_id: "duplicate-text-operation".to_owned(),
             },
         )
@@ -3657,7 +2867,6 @@ mod tests {
             source_session_id: source_id.clone(),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "第二条用户消息".to_owned(),
-            revert_files: false,
             operation_id: "edit-rebinding-operation".to_owned(),
         };
         let first = prepare_edit_user(
@@ -3684,7 +2893,6 @@ mod tests {
                 source_session_id: source_id.clone(),
                 target_message_id: "user-message-turn-1".to_owned(),
                 expected_text: "第一条用户消息".to_owned(),
-                revert_files: false,
                 operation_id: "edit-rebinding-operation".to_owned(),
             },
         )
@@ -3692,49 +2900,6 @@ mod tests {
         assert!(matches!(error, ResourceError::SessionMutationConflict));
         let (_, after, _) = load_session(root.path(), &source_id);
         assert_eq!(before, after, "冲突不得修改源 Journal");
-    }
-
-    /// 同一 operationId 不能在重试时改变文件恢复语义。
-    #[test]
-    fn edit_rejects_operation_id_rebinding_to_different_revert_files() {
-        let root = tempdir().expect("临时目录应创建");
-        create_source(root.path(), "session-source-revert-option-conflict");
-        let source_id =
-            SessionId::new("session-source-revert-option-conflict").expect("SessionId 应有效");
-        prepare_edit_user(
-            root.path(),
-            JournalConfig::default(),
-            ArtifactLimits::default(),
-            SessionEditUserRequest {
-                source_session_id: source_id.clone(),
-                target_message_id: "user-message-turn-2".to_owned(),
-                expected_text: "第二条用户消息".to_owned(),
-                revert_files: false,
-                operation_id: "revert-option-conflict".to_owned(),
-            },
-        )
-        .expect("首次编辑事务应成功");
-        let (_, before, _) = load_session(root.path(), &source_id);
-
-        let error = prepare_edit_user(
-            root.path(),
-            JournalConfig::default(),
-            ArtifactLimits::default(),
-            SessionEditUserRequest {
-                source_session_id: source_id.clone(),
-                target_message_id: "user-message-turn-2".to_owned(),
-                expected_text: "第二条用户消息".to_owned(),
-                revert_files: true,
-                operation_id: "revert-option-conflict".to_owned(),
-            },
-        )
-        .expect_err("同 operationId 改变 revertFiles 必须冲突");
-        assert!(matches!(error, ResourceError::SessionMutationConflict));
-        assert_eq!(
-            load_session(root.path(), &source_id).1,
-            before,
-            "冲突不得重复改写源日志"
-        );
     }
 
     /// 任意未完成子 Agent 都必须在归档前被拒绝，且不得留下事务副作用。
@@ -3757,7 +2922,6 @@ mod tests {
                 source_session_id: source_id.clone(),
                 target_message_id: "user-message-turn-2".to_owned(),
                 expected_text: "第二条用户消息".to_owned(),
-                revert_files: false,
                 operation_id: "pending-agent-operation".to_owned(),
             },
         )
@@ -3821,7 +2985,6 @@ mod tests {
             source_session_id: source_id.clone(),
             target_message_id: "user-message-turn-2".to_owned(),
             expected_text: "旧文本".to_owned(),
-            revert_files: false,
             operation_id: "stale-operation".to_owned(),
         };
         let request_digest = edit_request_sha256(&request);
@@ -3866,270 +3029,6 @@ mod tests {
             "session-source-recovery-source-turn-2",
             "recover-after-source-turn-2",
         );
-    }
-
-    /// 同一路径多次写入必须折叠为第一份 before 到最后一份 after 再恢复。
-    #[test]
-    fn edit_file_restore_folds_multiple_changes_on_same_path() {
-        let root = tempdir().expect("Session 临时目录应创建");
-        let workspace = tempdir().expect("工作区临时目录应创建");
-        let versions: [&[u8]; 3] = [b"old", b"middle", b"new"];
-        let source_id = create_file_restore_source(
-            root.path(),
-            workspace.path(),
-            "session-multiple-file-changes",
-            &versions,
-        );
-        let result = prepare_edit_user(
-            root.path(),
-            JournalConfig::default(),
-            ArtifactLimits::default(),
-            SessionEditUserRequest {
-                source_session_id: source_id.clone(),
-                target_message_id: "user-message-file-restore".to_owned(),
-                expected_text: "恢复本轮文件".to_owned(),
-                revert_files: true,
-                operation_id: "multiple-file-changes".to_owned(),
-            },
-        )
-        .expect("连续文件变更应可折叠恢复");
-
-        assert!(result.reverted_files);
-        assert_eq!(
-            fs::read(workspace.path().join("tracked.txt")).expect("恢复后的文件应可读"),
-            b"old"
-        );
-        assert!(
-            load_session(root.path(), &source_id)
-                .0
-                .raw_transcript_messages()
-                .is_empty(),
-            "目标根 Turn 的用户、模型和工具正文必须移除"
-        );
-    }
-
-    /// 文件恢复范围必须包含目标根 Turn 下已完成单层子 Agent 的已应用变更。
-    #[test]
-    fn edit_file_restore_includes_completed_child_agent_changes() {
-        let root = tempdir().expect("Session 临时目录应创建");
-        let workspace = tempdir().expect("工作区临时目录应创建");
-        let source_id = create_child_file_restore_source(
-            root.path(),
-            workspace.path(),
-            "session-child-file-restore",
-            b"child-before",
-            b"child-after",
-        );
-
-        let result = prepare_edit_user(
-            root.path(),
-            JournalConfig::default(),
-            ArtifactLimits::default(),
-            SessionEditUserRequest {
-                source_session_id: source_id.clone(),
-                target_message_id: "user-message-child-file".to_owned(),
-                expected_text: "恢复子 Agent 文件".to_owned(),
-                revert_files: true,
-                operation_id: "child-file-restore".to_owned(),
-            },
-        )
-        .expect("已完成子 Agent 文件变更应可随根 Turn 恢复");
-
-        assert!(result.reverted_files);
-        assert_eq!(
-            fs::read(workspace.path().join("child.txt")).expect("子 Agent 文件应可读"),
-            b"child-before"
-        );
-        let state = load_session(root.path(), &source_id).0;
-        assert!(state.raw_transcript_messages().is_empty());
-        assert_eq!(
-            state
-                .sub_agents
-                .get(&AgentId::new("file_child").expect("子 AgentId 应有效"))
-                .map(|agent| &agent.status),
-            Some(&SubAgentStatus::Completed),
-            "子 Agent 生命周期事实必须保留"
-        );
-    }
-
-    /// 文件内容相同但只读属性丢失时，恢复状态必须识别为可收敛的中间窗口，
-    /// 同时禁止把它误认为已经完成的 before 状态。
-    #[test]
-    fn file_restore_identity_tracks_readonly_separately_from_content() {
-        let before = FileSnapshot {
-            size_bytes: 6,
-            sha256: super::sha256_hex(b"before"),
-            chunks: Vec::new(),
-        };
-        let current = FileIdentity {
-            size_bytes: before.size_bytes,
-            sha256: before.sha256.clone(),
-            readonly: Some(false),
-        };
-
-        assert!(content_matches_snapshot(Some(&current), Some(&before)));
-        assert!(!identity_matches_snapshot(
-            Some(&current),
-            Some(&before),
-            Some(true),
-        ));
-        assert!(identity_matches_snapshot(
-            Some(&current),
-            Some(&before),
-            Some(false),
-        ));
-    }
-
-    /// 原子替换在清除只读属性后崩溃时，after 内容仍可被识别并在重试前修复属性；
-    /// 新建文件删除失败后也不能因属性变化而丢失继续删除的机会。
-    #[test]
-    fn file_restore_content_window_remains_retryable_after_readonly_loss() {
-        let before = FileSnapshot {
-            size_bytes: 6,
-            sha256: super::sha256_hex(b"before"),
-            chunks: Vec::new(),
-        };
-        let after = FileSnapshot {
-            size_bytes: 5,
-            sha256: super::sha256_hex(b"after"),
-            chunks: Vec::new(),
-        };
-        let current_after = FileIdentity {
-            size_bytes: after.size_bytes,
-            sha256: after.sha256.clone(),
-            readonly: Some(false),
-        };
-        let current_before = FileIdentity {
-            size_bytes: before.size_bytes,
-            sha256: before.sha256.clone(),
-            readonly: Some(false),
-        };
-        let plan = FileRestorePlan {
-            path: Path::new("C:\\workspace\\file.txt").to_owned(),
-            before: Some(before.clone()),
-            before_readonly: Some(true),
-            after: after.clone(),
-            after_readonly: Some(true),
-        };
-
-        assert_eq!(
-            classify_file_restore_action(Some(&current_after), &plan),
-            FileRestoreAction::RepairAfterReadonly
-        );
-        assert_eq!(
-            classify_file_restore_action(Some(&current_before), &plan),
-            FileRestoreAction::RepairBeforeReadonly
-        );
-        let restored = FileIdentity {
-            readonly: Some(true),
-            ..current_before
-        };
-        assert_eq!(
-            classify_file_restore_action(Some(&restored), &plan),
-            FileRestoreAction::AlreadyRestored
-        );
-        let conflict = FileIdentity {
-            size_bytes: 7,
-            sha256: super::sha256_hex(b"changed"),
-            readonly: Some(false),
-        };
-        assert_eq!(
-            classify_file_restore_action(Some(&conflict), &plan),
-            FileRestoreAction::Conflict
-        );
-        let created_plan = FileRestorePlan {
-            path: Path::new("C:\\workspace\\created.txt").to_owned(),
-            before: None,
-            before_readonly: None,
-            after,
-            after_readonly: Some(true),
-        };
-        assert_eq!(
-            classify_file_restore_action(Some(&current_after), &created_plan),
-            FileRestoreAction::RepairAfterReadonly
-        );
-        assert_eq!(
-            classify_file_restore_action(None, &created_plan),
-            FileRestoreAction::AlreadyRestored
-        );
-    }
-
-    /// 文件恢复事务在归档、文件提交和日志提交三个崩溃点都必须冷恢复收敛。
-    #[test]
-    fn edit_file_restore_recovers_from_every_persisted_boundary() {
-        for (index, fault) in [
-            MutationFault::AfterArchivePublished,
-            MutationFault::AfterFileRestore,
-            MutationFault::AfterSourceRewritten,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let root = tempdir().expect("Session 临时目录应创建");
-            let workspace = tempdir().expect("工作区临时目录应创建");
-            let session_name = format!("session-file-recovery-{index}");
-            let operation_id = format!("file-recovery-{index}");
-            let versions: [&[u8]; 2] = [b"before", b"after"];
-            let source_id =
-                create_file_restore_source(root.path(), workspace.path(), &session_name, &versions);
-            inject_mutation_fault(&operation_key(&source_id, &operation_id), fault);
-            let request = SessionEditUserRequest {
-                source_session_id: source_id.clone(),
-                target_message_id: "user-message-file-restore".to_owned(),
-                expected_text: "恢复本轮文件".to_owned(),
-                revert_files: true,
-                operation_id,
-            };
-
-            assert!(
-                prepare_edit_user(
-                    root.path(),
-                    JournalConfig::default(),
-                    ArtifactLimits::default(),
-                    request.clone(),
-                )
-                .is_err(),
-                "故障点 {fault:?} 必须中断首次调用"
-            );
-            assert_eq!(
-                recover_session_mutations(
-                    root.path(),
-                    JournalConfig::default(),
-                    ArtifactLimits::default(),
-                )
-                .expect("冷恢复应完成事务"),
-                1,
-                "故障点 {fault:?} 应恢复一条事务"
-            );
-            assert_eq!(
-                fs::read(workspace.path().join("tracked.txt")).expect("恢复后的文件应可读"),
-                b"before",
-                "故障点 {fault:?} 必须恢复写前文件"
-            );
-            let (_, before_retry, _) = load_session(root.path(), &source_id);
-            let result = prepare_edit_user(
-                root.path(),
-                JournalConfig::default(),
-                ArtifactLimits::default(),
-                request,
-            )
-            .expect("恢复后的同 operationId 应幂等成功");
-            assert!(result.reverted_files);
-            assert_eq!(
-                load_session(root.path(), &source_id).1,
-                before_retry,
-                "恢复后的重试不得重复写入生命周期"
-            );
-            assert_eq!(
-                recover_session_mutations(
-                    root.path(),
-                    JournalConfig::default(),
-                    ArtifactLimits::default(),
-                )
-                .expect("完成事务不应再次恢复"),
-                0
-            );
-        }
     }
 
     /// Transcript 动态输入中的用户消息不能伪装成根 Turn 起点消息。

@@ -37,7 +37,6 @@ function makeOptions(
     sessionId,
     archivedSessionId: "session-archived",
     throughJournalSequence: 1,
-    revertedFiles: false,
   });
   const executeSend = vi.fn().mockResolvedValue(true);
   const options = {
@@ -133,21 +132,12 @@ describe("useSessionEditResend recovery barrier", () => {
     expect(rewind).toHaveBeenCalledOnce();
     expect(rewind).toHaveBeenCalledWith(expect.objectContaining({
       targetMessageId: "user-1",
-      revertFiles: false,
     }));
     expect(executeSend).toHaveBeenCalledOnce();
     expect(executeSend).toHaveBeenCalledWith(expect.objectContaining({
       storedDisplay: "修改后",
       targetSessionId: "session-edit",
     }));
-  });
-
-  it("勾选文件恢复时把 revertFiles=true 原样传给 rewind", async () => {
-    const { options, rewind, executeSend } = makeOptions("ready");
-
-    await expect(renderEditResend(options)(message, "修改后", true)).resolves.toBe(true);
-    expect(rewind).toHaveBeenCalledWith(expect.objectContaining({ revertFiles: true }));
-    expect(executeSend).toHaveBeenCalledOnce();
   });
 
   it("权威历史中存在更新用户消息时拒绝编辑旧消息", async () => {

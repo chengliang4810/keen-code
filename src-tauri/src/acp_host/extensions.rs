@@ -319,7 +319,6 @@ async fn dispatch_rewind(
         source_session_id,
         target_message_id: request.target_message_id,
         expected_text: request.expected_text,
-        revert_files: request.revert_files,
         operation_id,
     };
     let mutation_result = retry_session_mutation(|| {
@@ -350,7 +349,6 @@ async fn dispatch_rewind(
         session_id,
         archived_session_id: mutation_result.archived_session_id.as_str().to_owned(),
         through_journal_sequence: snapshot.state.last_sequence,
-        reverted_files: mutation_result.reverted_files,
     };
     host.result_value(id, &response)
 }

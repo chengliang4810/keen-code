@@ -45,11 +45,7 @@ export function useSessionEditResend({
   const { sendInFlightRef } = state;
 
   return useCallback(
-    async (
-      message: ChatMessage,
-      content: string,
-      revertFiles = false,
-    ): Promise<boolean> => {
+    async (message: ChatMessage, content: string): Promise<boolean> => {
       const sessionId = session.sessionId;
       // 编辑重发会先修改权威历史，必须等待当前真实投影完成恢复。
       const currentView = sessionId
@@ -94,7 +90,6 @@ export function useSessionEditResend({
                 message.content,
                 message.attachments ?? [],
               ),
-              revertFiles,
               operationId: createOperationId("session-rewind"),
             });
             updateSessionPreference(prepared.archivedSessionId, { archived: true });

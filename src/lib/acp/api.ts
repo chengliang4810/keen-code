@@ -80,8 +80,6 @@ export interface SessionRewindResult {
   archivedSessionId: string;
   /** 回退完成后权威 Journal 的最后序号。 */
   throughJournalSequence: number;
-  /** 是否按请求完成了项目文件恢复。 */
-  revertedFiles: boolean;
 }
 
 /** 标准 Session 列表投影。 */
@@ -266,8 +264,6 @@ export function sessionRewind(args: {
   targetMessageId: string;
   /** 目标用户消息的完整原始 Agent 文本，不做 trim。 */
   expectedText: string;
-  /** 是否恢复被删除根 Turn 及其子 Agent 已应用的文件变更。 */
-  revertFiles: boolean;
   /** rewind 事务的业务幂等标识，放在 ACP 保留元数据中。 */
   operationId: string;
 }): Promise<SessionRewindResult> {
@@ -277,15 +273,14 @@ export function sessionRewind(args: {
       sessionId: args.sessionId,
       targetMessageId: args.targetMessageId,
       expectedText: args.expectedText,
-      revertFiles: args.revertFiles,
       _meta: { "keencode/operationId": args.operationId },
     },
   ).then((result) => {
     const value = result as Record<string, unknown>;
     const hasExactFields = typeof result === "object" &&
       result !== null && !Array.isArray(result) &&
-      Object.keys(value).length === 4 &&
-      ["sessionId", "archivedSessionId", "throughJournalSequence", "revertedFiles"]
+      Object.keys(value).length === 3 &&
+      ["sessionId", "archivedSessionId", "throughJournalSequence"]
         .every((key) => Object.hasOwn(value, key));
     if (
       !hasExactFields ||
@@ -296,8 +291,7 @@ export function sessionRewind(args: {
       value.archivedSessionId === args.sessionId ||
       typeof value.throughJournalSequence !== "number" ||
       !Number.isSafeInteger(value.throughJournalSequence) ||
-      value.throughJournalSequence <= 0 ||
-      typeof value.revertedFiles !== "boolean"
+      value.throughJournalSequence <= 0
     ) {
       throw new Error("ACP Rewind 响应格式无效");
     }

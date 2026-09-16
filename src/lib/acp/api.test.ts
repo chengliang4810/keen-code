@@ -492,20 +492,16 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
     );
   });
 
-  it.each([false, true])(
-    "通过 keencode/session/rewind 按消息 id 回退并透传 revertFiles=%s",
-    async (revertFiles) => {
+  it("通过 keencode/session/rewind 按消息 id 回退", async () => {
     const rewind = {
       sessionId: "session-1",
       archivedSessionId: "archive-1",
       throughJournalSequence: 7,
-      revertedFiles: revertFiles,
     };
     const args = {
       sessionId: "session-1",
       targetMessageId: "message-2",
       expectedText: "原始正文\n@D:/workspace/file.txt",
-      revertFiles,
       operationId: "rewind-op",
     };
     clientMocks.acpRequest.mockResolvedValue(rewind);
@@ -517,18 +513,15 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文\n@D:/workspace/file.txt",
-        revertFiles,
         _meta: { "keencode/operationId": "rewind-op" },
       },
     );
-    },
-  );
+  });
 
   it("拒绝缺少 archivedSessionId 的 rewind 响应", async () => {
     clientMocks.acpRequest.mockResolvedValue({
       sessionId: "session-1",
       throughJournalSequence: 7,
-      revertedFiles: false,
     });
 
     await expect(
@@ -536,7 +529,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文",
-        revertFiles: false,
         operationId: "rewind-missing-archive",
       }),
     ).rejects.toThrow("响应格式无效");
@@ -547,7 +539,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
       sessionId: "session-other",
       archivedSessionId: "archive-1",
       throughJournalSequence: 7,
-      revertedFiles: false,
     });
 
     await expect(
@@ -555,7 +546,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文",
-        revertFiles: false,
         operationId: "rewind-wrong-session",
       }),
     ).rejects.toThrow("响应格式无效");
@@ -566,7 +556,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
       sessionId: "session-1",
       archivedSessionId: "archive-1",
       throughJournalSequence: 7,
-      revertedFiles: false,
       extra: true,
     });
 
@@ -575,7 +564,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文",
-        revertFiles: false,
         operationId: "rewind-unknown-field",
       }),
     ).rejects.toThrow("响应格式无效");
@@ -586,7 +574,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
       sessionId: "session-1",
       archivedSessionId: "session-1",
       throughJournalSequence: 7,
-      revertedFiles: false,
     });
 
     await expect(
@@ -594,7 +581,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文",
-        revertFiles: false,
         operationId: "rewind-same-session",
       }),
     ).rejects.toThrow("响应格式无效");
@@ -608,7 +594,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
       sessionId: "session-1",
       archivedSessionId: "archive-1",
       throughJournalSequence: 7,
-      revertedFiles: false,
       [field]: invalidValue,
     };
     clientMocks.acpRequest.mockResolvedValue(response);
@@ -618,7 +603,6 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         targetMessageId: "message-2",
         expectedText: "原始正文",
-        revertFiles: false,
         operationId: `rewind-invalid-${field}-control`,
       }),
     ).rejects.toThrow("响应格式无效");
@@ -631,8 +615,7 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         archivedSessionId: "archive-1",
         throughJournalSequence: 7,
-        revertedFiles: false,
-        [field]: "x".repeat(257),
+          [field]: "x".repeat(257),
       };
       clientMocks.acpRequest.mockResolvedValue(response);
 
@@ -641,8 +624,7 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
           sessionId: "session-1",
           targetMessageId: "message-2",
           expectedText: "原始正文",
-          revertFiles: false,
-          operationId: `rewind-invalid-${field}-length`,
+            operationId: `rewind-invalid-${field}-length`,
         }),
       ).rejects.toThrow("响应格式无效");
     },
@@ -655,16 +637,14 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         archivedSessionId,
         throughJournalSequence: 7,
-        revertedFiles: false,
-      });
+        });
 
       await expect(
         sessionRewind({
           sessionId: "session-1",
           targetMessageId: "message-2",
           expectedText: "原始正文",
-          revertFiles: false,
-          operationId: "rewind-invalid-archive",
+            operationId: "rewind-invalid-archive",
         }),
       ).rejects.toThrow("响应格式无效");
     },
@@ -677,38 +657,14 @@ describe("ACP KeenCode 扩展和 Prompt API 映射", () => {
         sessionId: "session-1",
         archivedSessionId: "archive-1",
         ...(throughJournalSequence === undefined ? {} : { throughJournalSequence }),
-        revertedFiles: false,
-      });
+        });
 
       await expect(
         sessionRewind({
           sessionId: "session-1",
           targetMessageId: "message-2",
           expectedText: "原始正文",
-          revertFiles: false,
-          operationId: "rewind-invalid-sequence",
-        }),
-      ).rejects.toThrow("响应格式无效");
-    },
-  );
-
-  it.each([undefined, "false", 0])(
-    "拒绝 revertedFiles=%s 的非法 rewind 响应",
-    async (revertedFiles) => {
-      clientMocks.acpRequest.mockResolvedValue({
-        sessionId: "session-1",
-        archivedSessionId: "archive-1",
-        throughJournalSequence: 7,
-        ...(revertedFiles === undefined ? {} : { revertedFiles }),
-      });
-
-      await expect(
-        sessionRewind({
-          sessionId: "session-1",
-          targetMessageId: "message-2",
-          expectedText: "原始正文",
-          revertFiles: true,
-          operationId: "rewind-invalid-reverted-files",
+            operationId: "rewind-invalid-sequence",
         }),
       ).rejects.toThrow("响应格式无效");
     },

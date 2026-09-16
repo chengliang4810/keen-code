@@ -424,8 +424,6 @@ pub struct RewindSessionResponse {
     pub archived_session_id: String,
     /// 回退完成后权威 Journal 的最后序号。
     pub through_journal_sequence: u64,
-    /// 是否按请求完成了项目文件恢复。
-    pub reverted_files: bool,
 }
 
 impl RewindSessionResponse {
@@ -2138,8 +2136,6 @@ pub struct RewindSessionRequest {
     pub target_message_id: String,
     /// 用户正在编辑的完整原文，用于独占事务中的并发与幂等校验。
     pub expected_text: String,
-    /// 是否恢复被删除根 Turn 及其单层子 Agent 已应用的文件变更。
-    pub revert_files: bool,
     /// ACP 为调用双方保留的扩展元数据；KeenCode 从中读取稳定 operationId。
     #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
     pub meta: Option<Meta>,

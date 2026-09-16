@@ -79,8 +79,6 @@ export interface SessionTurnApiPort {
     targetMessageId: string;
     /** 目标用户消息的完整原始 Agent 文本，不做 trim。 */
     expectedText: string;
-    /** 是否恢复被删除根 Turn 及其子 Agent 已应用的文件变更。 */
-    revertFiles: boolean;
     /** rewind 事务的幂等标识，同时作为 JSON-RPC 请求 ID。 */
     operationId: string;
   }) => Promise<SessionRewindResult>;
