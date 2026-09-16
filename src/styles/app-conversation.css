@@ -568,7 +568,9 @@
   align-items: center;
 }
 
+/* 长问题会折成多行，导航组必须贴右上角，不随文本块垂直居中。 */
 .ask-user__header {
+  align-items: flex-start;
   min-height: 32px;
   gap: 12px;
 }

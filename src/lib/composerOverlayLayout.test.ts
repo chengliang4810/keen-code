@@ -47,4 +47,10 @@ describe("底部问答与输入区的独立布局", () => {
     expect(card).toContain("max-height: calc(100dvh - 96px)");
     expect(card).toContain("overflow-y: auto");
   });
+
+  it("多行问题下导航组贴右上角，不随文本块垂直居中", () => {
+    const css = readSource(new URL("../styles/app-conversation.css", import.meta.url));
+    const header = css.match(/\.ask-user__header\s*\{([^}]+)\}/)?.[1];
+    expect(header).toContain("align-items: flex-start");
+  });
 });
