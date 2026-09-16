@@ -242,6 +242,10 @@ mod tests {
         assert!(!core().contains("Turn date:"));
         assert!(core().contains("mark a task in_progress before starting work"));
         assert!(core().contains("always mark it completed when fully accomplished"));
+        // 身份与协作风格、受众假设和篇幅约束属于稳定前缀，不能被后续精简悄悄移除。
+        assert!(core().contains("Write for a person, not a console."));
+        assert!(core().contains("Avoid cheerleading, motivational language"));
+        assert!(core().contains("Do not exceed roughly 50-70 lines"));
     }
 
     /// 能力说明只能随真实工具存在而启用，子 Agent 不收到创建教程。
