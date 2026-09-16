@@ -54,6 +54,40 @@ describe("ConversationThread 思考耗时", () => {
     );
     expect(live).toContain("正在推理");
   });
+  it("关闭思考过程后，被隐藏思考分隔的相邻工具仍聚合成一个栏目", () => {
+    const messages: ChatMessage[] = [{
+      id: "assistant-grouped", role: "assistant", content: "完成",
+      segments: [
+        { kind: "thought", text: "第一段推理" },
+        { kind: "tool", toolCallId: "t1", title: "Read a", toolKind: "Read", status: "completed" },
+        { kind: "thought", text: "第二段推理" },
+        { kind: "tool", toolCallId: "t2", title: "Read b", toolKind: "Read", status: "completed" },
+        { kind: "content", text: "完成" },
+      ],
+    }];
+    const off = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={messages.slice()}
+        sessionState="ready"
+        attachLabels={attachLabels}
+        showThinkingProcess={false}
+      />,
+    );
+    expect(off.match(/data-testid="timeline-phase"/g)).toHaveLength(1);
+    expect(off).not.toContain("第一段推理");
+
+    const on = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={messages.slice()}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(on).not.toContain('data-testid="timeline-phase"');
+  });
+
   it("压缩状态以低强调工具行位于正文之间，不出现在第一句之前", () => {
     const html = renderToString(
       <ConversationThread

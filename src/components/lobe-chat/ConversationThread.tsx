@@ -1137,12 +1137,19 @@ export function ConversationThread({
             const isFindCurrent = findActive?.messageId === m.id;
             // Phase projection: thought+tools collapse when phase ends (content
             // / next thought), not only when the full answer is done.
-            const conversationSegs = segs.filter((segment) => {
+            const conversationSegs = segs.filter((segment, index) => {
               if (segment.kind === "tool") {
                 return !isComposerStateTool(segment);
               }
-              if (segment.kind === "thought" && !m.streaming) {
-                return hasMeaningfulThinkingText(segment.text);
+              if (segment.kind === "thought") {
+                // 隐藏的思考不产生 DOM，因此不能继续阻断相邻工具聚合；
+                // 只有流式中仍在推进的末段思考保持可见。
+                if (!showThinkingProcess) {
+                  return !!m.streaming && index === segs.length - 1;
+                }
+                if (!m.streaming) {
+                  return hasMeaningfulThinkingText(segment.text);
+                }
               }
               return true;
             });
