@@ -31,8 +31,6 @@
   --find-current-strong: #ffb020;
   --find-alt: #e6b800;
   --find-alt-strong: #f5d76e;
-  /* Attachment drop overlay tint, ring, and ink. */
-  --drop-blue: #4682ff;
   /* Fixed ink & canvases (video letterbox, media overlays, paper pages) */
   --ink-black: #000000;
   --ink-on-media: #ffffff;

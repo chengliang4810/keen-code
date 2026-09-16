@@ -5,7 +5,6 @@ import type {
   SetStateAction,
 } from "react";
 import type { MessageKey, Vars } from "@/i18n";
-import type { DragZone } from "@/lib/dragZone";
 import type { LayoutPrefs } from "@/lib/layout";
 import type { AskUserPanelProps } from "./main/AskUserPanel";
 import type { ComposerAttachmentsProps } from "./main/ComposerAttachments";
@@ -25,7 +24,6 @@ import { ComposerQueue } from "./main/ComposerQueue";
 import { ComposerAttachments } from "./main/ComposerAttachments";
 import { ComposerInputArea } from "./main/ComposerInputArea";
 import { ComposerToolbar } from "./main/ComposerToolbar";
-import { IconAttach } from "@/components/icons";
 import { useConversationWidth } from "@/hooks/useConversationWidth";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
@@ -34,7 +32,6 @@ type Translator = (key: MessageKey, vars?: Vars) => string;
 export interface MainStageFrameProps {
   layout: LayoutPrefs;
   setLayout: SetState<LayoutPrefs>;
-  dragZone: DragZone;
   toast: string | null;
   tr: Translator;
   composerFloatPad: number;
@@ -85,7 +82,6 @@ export function MainStage({
   const {
     layout,
     setLayout,
-    dragZone,
     toast,
     tr,
     composerFloatPad,
@@ -101,19 +97,9 @@ export function MainStage({
       className={
         "main" +
         (layout.sidebarCollapsed ? " main--sidebar-hidden" : "") +
-        (layout.asideCollapsed ? " main--aside-hidden" : "") +
-        (dragZone === "main" ? " is-drop-target" : "")
+        (layout.asideCollapsed ? " main--aside-hidden" : "")
       }
     >
-      {dragZone === "main" ? (
-        <div className="drop-overlay drop-overlay--attach" aria-hidden>
-          <div className="drop-overlay__card">
-            <span className="drop-overlay__icon"><IconAttach size={22} /></span>
-            <strong>{tr("composer.dropAttachTitle")}</strong>
-            <span>{tr("composer.dropAttachHint")}</span>
-          </div>
-        </div>
-      ) : null}
       {toast ? <div className="app-toast" role="status">{toast}</div> : null}
 
       <MainHeader {...header} layout={layout} setLayout={setLayout} />
@@ -161,10 +147,7 @@ export function MainStage({
             <div
               inert={Boolean(askUser.askUser)}
               ref={composer.shellRef}
-              className={
-                "composer" +
-                (dragZone === "main" ? " composer--drop-ready" : "")
-              }
+              className="composer"
             >
               <ComposerQueue {...composer.queue} />
               <ComposerAttachments {...composer.attachments} />

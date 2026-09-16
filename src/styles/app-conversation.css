@@ -1529,12 +1529,6 @@ button.composer__context-item {
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
 }
 
-/* Subtle composer focus while main is drop-target (not a second frame) */
-.composer--drop-ready {
-  border-color: var(--border-focus);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--border-focus) 25%, transparent);
-}
-
 .composer__queue {
   display: flex;
   flex-direction: column;

@@ -29,7 +29,6 @@ import type {
 import type { Attachment } from "@/lib/attachments";
 import type { PromptHistoryEntry } from "@/lib/composerPromptHistory";
 import type { SkillInfo, SlashItem } from "@/lib/slashCatalog";
-import type { DragZone } from "@/lib/dragZone";
 import { calculateComposerOverlayLayout } from "@/lib/composerOverlayLayout";
 import type { ComposerPlusEntry } from "@/components/ComposerPlusPanel";
 import { useComposerAttachments } from "./composer/useComposerAttachments";
@@ -153,15 +152,6 @@ export interface ComposerActionPort {
   exportActiveSession: () => void | Promise<void>;
 }
 
-export type ComposerPlatform = "mac" | "win" | "other";
-
-export interface ComposerDropPort {
-  platform: ComposerPlatform;
-  hitZone: (clientX: number, clientY: number) => DragZone;
-  setDragZone: StateSetter<DragZone>;
-  onProjectPaths: (paths: string[]) => void | Promise<void>;
-}
-
 export interface UseComposerControllerOptions {
   locale: Locale;
   session: ComposerSessionPort;
@@ -173,7 +163,6 @@ export interface UseComposerControllerOptions {
   /** 问答卡片位于输入区上方，两者共同决定消息底部留白。 */
   askUserWrapRef?: RefObject<HTMLDivElement | null>;
   askUserKey?: string | number | null;
-  drop?: ComposerDropPort;
 }
 
 export interface ComposerController {
@@ -291,7 +280,6 @@ export function useComposerController({
   actions,
   askUserWrapRef,
   askUserKey = null,
-  drop,
 }: UseComposerControllerOptions): ComposerController {
   const [draft, setDraftState] = useState("");
   const draftRef = useRef(draft);
@@ -375,7 +363,6 @@ export function useComposerController({
     navigation,
     feedback,
     closeComposerMenu: slash.closeComposerMenu,
-    drop,
   });
   const promptHistory = useComposerPromptHistory({
     locale,

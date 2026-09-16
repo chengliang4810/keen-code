@@ -1,6 +1,5 @@
 import {
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -18,10 +17,8 @@ import {
   mergeDraftNavigationAttachments,
 } from "@/lib/draftNavigation";
 import { localizeUiError } from "@/lib/session";
-import { toClientDragPoint } from "@/lib/dragZone";
 import type {
   ComposerApiPort,
-  ComposerDropPort,
   ComposerFeedbackPort,
   ComposerNavigationPort,
   Ref,
@@ -34,7 +31,6 @@ export interface UseComposerAttachmentsOptions {
   navigation: ComposerNavigationPort;
   feedback: ComposerFeedbackPort;
   closeComposerMenu: () => void;
-  drop?: ComposerDropPort;
 }
 
 export interface ComposerAttachmentsController {
@@ -62,13 +58,10 @@ export function useComposerAttachments({
   navigation,
   feedback,
   closeComposerMenu,
-  drop,
 }: UseComposerAttachmentsOptions): ComposerAttachmentsController {
   const tr = useMemo(() => createT(locale), [locale]);
   const portsRef = useRef({ api, navigation, feedback });
   portsRef.current = { api, navigation, feedback };
-  const dropRef = useRef(drop);
-  dropRef.current = drop;
 
   const [attachments, setAttachmentsState] = useState<Attachment[]>([]);
   const attachmentsRef = useRef<Attachment[]>([]);
@@ -204,110 +197,6 @@ export function useComposerAttachments({
     }),
     [tr],
   );
-
-  useEffect(() => {
-    if (!drop) return;
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    const dragPathsRef: Ref<string[]> = { current: [] };
-    void (async () => {
-      if (!portsRef.current.api.isTauri()) return;
-      try {
-        const { getCurrentWebview } = await import("@tauri-apps/api/webview");
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
-        const webview = getCurrentWebview();
-        const windowHandle = getCurrentWindow();
-        const factor = await windowHandle.scaleFactor();
-        const stopListening = await webview.onDragDropEvent((event) => {
-          if (cancelled) return;
-          const currentDrop = dropRef.current;
-          if (!currentDrop) return;
-          const payload = event.payload;
-          if (
-            (payload.type === "enter" || payload.type === "drop") &&
-            payload.paths?.length
-          ) {
-            dragPathsRef.current = payload.paths;
-          }
-          if (payload.type === "leave") {
-            currentDrop.setDragZone(null);
-            dragPathsRef.current = [];
-            return;
-          }
-          if (payload.type === "enter" || payload.type === "over") {
-            const point = toClientDragPoint(
-              payload.position,
-              factor,
-              currentDrop.platform,
-            );
-            currentDrop.setDragZone(currentDrop.hitZone(point.x, point.y));
-            return;
-          }
-          if (payload.type !== "drop") return;
-          const point = toClientDragPoint(
-            payload.position,
-            factor,
-            currentDrop.platform,
-          );
-          const zone = currentDrop.hitZone(point.x, point.y);
-          const paths = payload.paths?.length
-            ? payload.paths
-            : dragPathsRef.current;
-          currentDrop.setDragZone(null);
-          dragPathsRef.current = [];
-          if (!paths.length) {
-            portsRef.current.feedback.setLocalError(
-              tr("attach.droppedNone"),
-            );
-            return;
-          }
-          if (zone === "project") {
-            void currentDrop.onProjectPaths(paths);
-          } else if (zone === "main") {
-            void addAttachmentsFromPaths(paths);
-          }
-        });
-        if (cancelled) stopListening();
-        else unlisten = stopListening;
-      } catch {
-        // Webview drag events are optional in browser preview.
-      }
-    })();
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [addAttachmentsFromPaths, drop, tr]);
-
-  useEffect(() => {
-    if (!drop) return;
-    const onDragOver = (event: globalThis.DragEvent) => {
-      if (!event.dataTransfer?.types?.includes("Files")) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-    };
-    const onDrop = (event: globalThis.DragEvent) => {
-      if (!event.dataTransfer?.files?.length) return;
-      const paths = Array.from(event.dataTransfer.files)
-        .map((file) => (file as File & { path?: string }).path || "")
-        .filter(Boolean);
-      const currentDrop = dropRef.current;
-      if (!currentDrop) return;
-      const zone = currentDrop.hitZone(event.clientX, event.clientY);
-      if (!paths.length) return;
-      event.preventDefault();
-      event.stopPropagation();
-      currentDrop.setDragZone(null);
-      if (zone === "project") void currentDrop.onProjectPaths(paths);
-      else if (zone === "main") void addAttachmentsFromPaths(paths);
-    };
-    window.addEventListener("dragover", onDragOver);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragover", onDragOver);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, [addAttachmentsFromPaths, drop]);
 
   return {
     attachments,

@@ -1,12 +1,10 @@
 import {
   useCallback,
   useEffect,
-  useRef,
   type Dispatch,
   type RefObject,
   type SetStateAction,
 } from "react";
-import type { MessageKey, Vars } from "@/i18n";
 import type { LayoutPrefs } from "@/lib/layout";
 import {
   ASIDE_WIDTH_MIN,
@@ -26,8 +24,6 @@ type StateSetter<T> = Dispatch<SetStateAction<T>>;
 
 export type WorkbenchPlatform = "mac" | "win" | "other";
 
-export type WorkbenchTranslator = (key: MessageKey, vars?: Vars) => string;
-
 export interface UseWorkbenchDragResizeOptions {
   isTauri: () => boolean;
   platform: WorkbenchPlatform;
@@ -35,9 +31,6 @@ export interface UseWorkbenchDragResizeOptions {
   addProjectDropRef: RefObject<HTMLElement | null>;
   setDragZone: StateSetter<DragZone>;
   selectAddProjectSourceFromPaths: (paths: string[]) => void | Promise<void>;
-  addAttachmentsFromPaths: (paths: string[]) => void | Promise<void>;
-  setLocalError: StateSetter<string | null>;
-  translate: WorkbenchTranslator;
   sidebarRef: RefObject<HTMLElement | null>;
   asideRef: RefObject<HTMLElement | null>;
   layout: LayoutPrefs;
@@ -56,9 +49,6 @@ export function useWorkbenchDragResize({
   addProjectDropRef,
   setDragZone,
   selectAddProjectSourceFromPaths,
-  addAttachmentsFromPaths,
-  setLocalError,
-  translate,
   sidebarRef,
   asideRef,
   layout,
@@ -68,7 +58,6 @@ export function useWorkbenchDragResize({
   resizingAside,
   setResizingAside,
 }: UseWorkbenchDragResizeOptions): void {
-  const dragPathsRef = useRef<string[]>([]);
   const hitDragZone = useCallback(
     (clientX: number, clientY: number): DragZone =>
       hitDragZoneFromRects(
@@ -80,7 +69,7 @@ export function useWorkbenchDragResize({
     [addProjectDropRef, addProjectOpen],
   );
 
-  // Tauri OS file drag-drop (full absolute paths).
+  // Tauri OS file drag-drop: only the add-project source control accepts paths.
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
@@ -97,46 +86,24 @@ export function useWorkbenchDragResize({
         const stopListening = await webview.onDragDropEvent((event) => {
           if (cancelled) return;
           const payload = event.payload;
-          if (payload.type === "enter" || payload.type === "drop") {
-            if ("paths" in payload && payload.paths?.length) {
-              dragPathsRef.current = payload.paths;
-            }
-          }
           if (payload.type === "leave") {
             setDragZone(null);
-            dragPathsRef.current = [];
             return;
           }
+          const { x, y } = toClientDragPoint(
+            payload.position,
+            factor,
+            platform,
+          );
           if (payload.type === "enter" || payload.type === "over") {
-            const { x, y } = toClientDragPoint(
-              payload.position,
-              factor,
-              platform,
-            );
             setDragZone(hitDragZone(x, y));
             return;
           }
-          if (payload.type === "drop") {
-            const { x, y } = toClientDragPoint(
-              payload.position,
-              factor,
-              platform,
-            );
-            const zone = hitDragZone(x, y);
-            const paths = payload.paths?.length
-              ? payload.paths
-              : dragPathsRef.current;
-            setDragZone(null);
-            dragPathsRef.current = [];
-            if (!paths.length) {
-              setLocalError(translate("attach.droppedNone"));
-              return;
-            }
-            if (zone === "project") {
-              void selectAddProjectSourceFromPaths(paths);
-            } else if (zone === "main") {
-              void addAttachmentsFromPaths(paths);
-            }
+          if (payload.type !== "drop") return;
+          const zone = hitDragZone(x, y);
+          setDragZone(null);
+          if (zone === "project" && payload.paths?.length) {
+            void selectAddProjectSourceFromPaths(payload.paths);
           }
         });
         if (cancelled) stopListening();
@@ -151,43 +118,12 @@ export function useWorkbenchDragResize({
       unlisten?.();
     };
   }, [
-    addAttachmentsFromPaths,
     hitDragZone,
     isTauri,
     platform,
     selectAddProjectSourceFromPaths,
     setDragZone,
-    setLocalError,
-    translate,
   ]);
-
-  // HTML5 fallback: some image drags only expose File list in the webview.
-  useEffect(() => {
-    const onDragOver = (event: DragEvent) => {
-      if (!event.dataTransfer?.types?.includes("Files")) return;
-      event.preventDefault();
-      event.dataTransfer.dropEffect = "copy";
-    };
-    const onDrop = (event: DragEvent) => {
-      if (!event.dataTransfer?.files?.length) return;
-      const files = Array.from(event.dataTransfer.files);
-      const paths = files
-        .map((file) => (file as File & { path?: string }).path || "")
-        .filter(Boolean);
-      const zone = hitDragZone(event.clientX, event.clientY);
-      if (!paths.length) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (zone === "project") void selectAddProjectSourceFromPaths(paths);
-      else if (zone === "main") void addAttachmentsFromPaths(paths);
-    };
-    window.addEventListener("dragover", onDragOver);
-    window.addEventListener("drop", onDrop);
-    return () => {
-      window.removeEventListener("dragover", onDragOver);
-      window.removeEventListener("drop", onDrop);
-    };
-  }, [addAttachmentsFromPaths, hitDragZone, selectAddProjectSourceFromPaths]);
 
   useEffect(() => {
     if (!resizingSidebar) return;

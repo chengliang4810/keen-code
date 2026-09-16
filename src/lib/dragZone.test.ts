@@ -49,9 +49,9 @@ describe("hitDragZoneFromRects", () => {
     expect(hitDragZoneFromRects(200, 300, projectDrop, true)).toBeNull();
   });
 
-  it("treats drops as attachments when the panel is closed", () => {
-    expect(hitDragZoneFromRects(350, 300, projectDrop, false)).toBe("main");
-    expect(hitDragZoneFromRects(100, 100, null, false)).toBe("main");
+  it("ignores every drop while the panel is closed", () => {
+    expect(hitDragZoneFromRects(350, 300, projectDrop, false)).toBeNull();
+    expect(hitDragZoneFromRects(100, 100, null, false)).toBeNull();
   });
 
   it("ignores modal drops until the control is mounted", () => {

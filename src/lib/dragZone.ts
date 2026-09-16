@@ -1,5 +1,5 @@
 /**
- * File drag-drop zone hit testing: add-project panel vs main attachments.
+ * OS file-drop zone hit testing for the add-project panel.
  *
  * Project folders are accepted only by the visible source-folder control.
  *
@@ -9,7 +9,7 @@
  * to roughly half the window on Retina. Windows ScreenToClient is physical.
  */
 
-export type DragZone = "project" | "main" | null;
+export type DragZone = "project" | null;
 
 export interface RectLike {
   left: number;
@@ -41,9 +41,9 @@ export function toClientDragPoint(
 }
 
 /**
- * When the add-project panel is closed, every file drop is an attachment.
- * While it is open, only its source-folder control accepts a project folder;
- * dropping elsewhere is ignored so the modal cannot mutate content behind it.
+ * Only the open add-project panel's source-folder control accepts a project
+ * folder; dropping elsewhere is ignored so the modal cannot mutate content
+ * behind it.
  */
 export function hitDragZoneFromRects(
   clientX: number,
@@ -51,7 +51,7 @@ export function hitDragZoneFromRects(
   projectDrop: RectLike | null,
   addProjectOpen: boolean,
 ): DragZone {
-  if (!addProjectOpen) return "main";
+  if (!addProjectOpen) return null;
   if (!projectDrop || projectDrop.width < 2) return null;
   if (
     clientX >= projectDrop.left &&

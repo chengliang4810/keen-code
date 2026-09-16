@@ -454,7 +454,7 @@ export default function App() {
       }, 0),
     [messages],
   );
-  /** Live drag-drop target for zone overlays (null = not dragging). */
+  /** Live drag-drop target for the add-project source control (null = not dragging). */
   const [dragZone, setDragZone] = useState<DragZone>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const {
@@ -1036,9 +1036,6 @@ export default function App() {
     addProjectDropRef,
     setDragZone,
     selectAddProjectSourceFromPaths,
-    addAttachmentsFromPaths,
-    setLocalError,
-    translate: tr,
     sidebarRef,
     asideRef,
     layout,
@@ -1587,7 +1584,6 @@ export default function App() {
           stage={{
             layout,
             setLayout,
-            dragZone,
             toast,
             tr,
             composerFloatPad,
