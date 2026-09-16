@@ -19,6 +19,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1099,6 +1100,55 @@ fn prepare_server_configs_allow_empty(
     Ok(prepared)
 }
 
+/// Stdio 子进程可继承的宿主环境白名单：仅无凭据的定位、语言与代理类变量，
+/// 其余宿主变量（含各类密钥）不透传；用户显式配置的 server.env 始终优先。
+fn is_inheritable_env_name(name: &str) -> bool {
+    const EXACT: &[&str] = &[
+        "PATH", "HOME", "USER", "USERNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP", "TERM",
+        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+    ];
+    let upper = name.to_ascii_uppercase();
+    EXACT.contains(&upper.as_str()) || name.starts_with("LC_") || name.starts_with("XDG_")
+}
+
+/// Stdio MCP 子进程的继承环境：按白名单过滤宿主变量，用户显式配置的同名变量
+/// （ASCII 大小写不敏感）让位于稍后的覆盖写入。
+fn stdio_environment(user_env: &[schema::EnvVariable]) -> BTreeMap<String, String> {
+    let mut environment = BTreeMap::new();
+    let mut inherited = HashSet::new();
+    for (name, value) in std::env::vars() {
+        if !is_inheritable_env_name(&name) {
+            continue;
+        }
+        if user_env.iter().any(|variable| variable.name.eq_ignore_ascii_case(&name))
+            || !inherited.insert(name.to_ascii_uppercase())
+        {
+            continue;
+        }
+        environment.insert(name, value);
+    }
+    environment
+}
+
+/// 拒绝 link-local 与云 metadata 主机，缓解 MCP HTTP SSRF；loopback 与普通私网不受影响。
+fn is_blocked_http_host(host: &str) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    if matches!(
+        host.to_ascii_lowercase().as_str(),
+        "metadata.google.internal" | "metadata.goog"
+    ) {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_link_local(),
+        Ok(IpAddr::V6(ip)) => {
+            (ip.segments()[0] & 0xffc0) == 0xfe80
+                || ip.to_ipv4_mapped().is_some_and(|v4| v4.is_link_local())
+        }
+        Err(_) => false,
+    }
+}
+
 fn convert_server_config(
     server: schema::McpServer,
     project_root: &Path,
@@ -1115,6 +1165,7 @@ fn convert_server_config(
             if !matches!(parsed.scheme(), "http" | "https")
                 || !parsed.username().is_empty()
                 || parsed.password().is_some()
+                || parsed.host_str().is_some_and(is_blocked_http_host)
             {
                 return Err(SessionMcpError::InvalidConfiguration);
             }
@@ -1155,7 +1206,7 @@ fn convert_server_config(
             for argument in &server.args {
                 validate_text(argument, MAX_MCP_CONFIG_TEXT_BYTES, true)?;
             }
-            let mut environment = BTreeMap::new();
+            let mut environment = stdio_environment(&server.env);
             let mut normalized_names = HashSet::new();
             for variable in server.env {
                 validate_environment_name(&variable.name)?;
@@ -1169,7 +1220,8 @@ fn convert_server_config(
             config.args = server.args;
             config.current_dir = Some(project_root.to_path_buf());
             config.environment = environment;
-            config.inherit_environment = true;
+            // 宿主环境已按白名单过滤进 environment；整份继承保持关闭。
+            config.inherit_environment = false;
             Ok(PreparedServerConfig {
                 name: server.name,
                 transport: McpTransportKind::Stdio,
@@ -1646,6 +1698,93 @@ fn extract_id(body: &str) -> Option<&str> {
         std::fs::read_to_string(path)
             .map(|text| text.lines().count())
             .unwrap_or(0)
+    }
+
+    #[test]
+    fn env_name_allowlist_matches_core_variables_only() {
+        assert!(is_inheritable_env_name("PATH"));
+        assert!(is_inheritable_env_name("Path"));
+        assert!(is_inheritable_env_name("LANG"));
+        assert!(is_inheritable_env_name("LC_ALL"));
+        assert!(is_inheritable_env_name("XDG_DATA_HOME"));
+        assert!(is_inheritable_env_name("http_proxy"));
+        assert!(!is_inheritable_env_name("ANTHROPIC_API_KEY"));
+        assert!(!is_inheritable_env_name("AWS_SECRET_ACCESS_KEY"));
+        assert!(!is_inheritable_env_name("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn stdio_environment_blocks_credential_inheritance() {
+        let environment = stdio_environment(&[]);
+        assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!environment.contains_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(environment.keys().any(|name| name.eq_ignore_ascii_case("PATH")));
+    }
+
+    #[test]
+    fn stdio_environment_defers_to_explicit_user_env() {
+        let environment = stdio_environment(&[schema::EnvVariable::new("PATH", "custom-path")]);
+        assert!(!environment.keys().any(|name| name.eq_ignore_ascii_case("PATH")));
+    }
+
+    #[test]
+    fn http_host_filter_blocks_metadata_targets_only() {
+        assert!(is_blocked_http_host("169.254.169.254"));
+        assert!(is_blocked_http_host("fe80::1"));
+        assert!(is_blocked_http_host("::ffff:169.254.169.254"));
+        assert!(is_blocked_http_host("metadata.google.internal"));
+        assert!(is_blocked_http_host("metadata.goog"));
+        assert!(is_blocked_http_host("METADATA.GOOGLE.INTERNAL"));
+        assert!(!is_blocked_http_host("127.0.0.1"));
+        assert!(!is_blocked_http_host("::1"));
+        assert!(!is_blocked_http_host("192.168.1.10"));
+        assert!(!is_blocked_http_host("example.com"));
+        assert!(!is_blocked_http_host("metadata.internal"));
+    }
+
+    #[test]
+    fn convert_server_config_filters_stdio_env_and_blocks_metadata_urls() {
+        let server = schema::McpServer::Stdio(
+            schema::McpServerStdio::new("mcp", "some-command").env(vec![
+                schema::EnvVariable::new("PATH", "custom-path"),
+                schema::EnvVariable::new("ANTHROPIC_API_KEY", "explicit"),
+            ]),
+        );
+        let prepared = convert_server_config(server, Path::new("/tmp")).expect("stdio 配置必须可用");
+        let McpServerConfig::Stdio(config) = prepared.config else {
+            unreachable!("stdio server 必须产出 stdio 配置");
+        };
+        assert!(!config.inherit_environment);
+        assert_eq!(
+            config.environment.get("PATH").map(String::as_str),
+            Some("custom-path")
+        );
+        assert_eq!(
+            config
+                .environment
+                .get("ANTHROPIC_API_KEY")
+                .map(String::as_str),
+            Some("explicit")
+        );
+
+        for url in [
+            "http://169.254.169.254/mcp",
+            "http://[fe80::1]/mcp",
+            "https://metadata.google.internal/mcp",
+        ] {
+            let server = schema::McpServer::Http(schema::McpServerHttp::new("mcp", url));
+            assert!(
+                convert_server_config(server, Path::new("/tmp")).is_err(),
+                "必须拒绝 {url}"
+            );
+        }
+        for url in ["http://127.0.0.1:8123/mcp", "https://example.com/mcp"] {
+            let server = schema::McpServer::Http(schema::McpServerHttp::new("mcp", url));
+            assert!(
+                convert_server_config(server, Path::new("/tmp")).is_ok(),
+                "必须允许 {url}"
+            );
+        }
     }
 
     async fn wait_for_file_lines(path: &Path, expected: usize) {
