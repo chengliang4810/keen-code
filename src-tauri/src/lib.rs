@@ -532,7 +532,6 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             diagnostics_log_path,
             diagnostics_record,
             startup_frontend_ready,
-            app_exit::app_request_exit,
             app_exit::app_confirm_exit,
             app_updates::app_update_info,
             app_updates::app_update_check,

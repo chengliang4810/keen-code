@@ -68,6 +68,7 @@ export function useAppSettings({
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
+  const [closeToTray, setCloseToTray] = useState(true);
   const [backgroundAgentLimit, setBackgroundAgentLimit] = useState(10);
   const [terminalFontFamily, setTerminalFontFamily] = useState(
     DEFAULT_TERMINAL_FONT_FAMILY,
@@ -133,6 +134,7 @@ export function useAppSettings({
         setNotificationSound(settings.notificationSound);
         setAppUpdateDownloadSource(settings.appUpdateDownloadSource);
         setKeepComputerAwake(settings.keepComputerAwake);
+        setCloseToTray(settings.closeToTray);
         setBackgroundAgentLimit(settings.backgroundAgentLimit);
         setTerminalFontFamily(settings.terminalFontFamily);
         setTerminalShell(settings.terminalShell);
@@ -281,6 +283,19 @@ export function useAppSettings({
     [keepComputerAwake, updateSetting],
   );
 
+  const onCloseToTray = useCallback(
+    (value: boolean) => {
+      updateSetting({
+        key: "closeToTray",
+        value,
+        optimistic: value,
+        previous: closeToTray,
+        apply: setCloseToTray,
+      });
+    },
+    [closeToTray, updateSetting],
+  );
+
   const onBackgroundAgentLimit = useCallback(
     (value: number) => {
       updateSetting({
@@ -401,6 +416,8 @@ export function useAppSettings({
     onNotificationSound,
     keepComputerAwake,
     onKeepComputerAwake,
+    closeToTray,
+    onCloseToTray,
     backgroundAgentLimit,
     onBackgroundAgentLimit,
     terminalFontFamily,

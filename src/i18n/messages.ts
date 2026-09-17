@@ -10,6 +10,10 @@ const en = {
   // App chrome
   "app.versionFooter": "KeenCode · MIT",
 
+  // System tray / macOS menu bar
+  "tray.show": "Show KeenCode",
+  "tray.quit": "Quit KeenCode",
+
   // Window chrome (Windows self-drawn controls)
   "window.minimize": "Minimize",
   "window.maximize": "Maximize",
@@ -483,6 +487,9 @@ const en = {
   "settings.keepComputerAwake": "Keep computer awake",
   "settings.keepComputerAwakeDesc":
     "Prevent idle sleep while KeenCode is running. Manual sleep and lid-close sleep still work.",
+  "settings.closeToTray": "Keep running in the menu bar",
+  "settings.closeToTrayDesc":
+    "Closing the main window hides it to the system tray instead of quitting, so running tasks continue. Click the tray icon to bring the window back.",
   "settings.backgroundAgentLimit": "Background Agent concurrency",
   "settings.backgroundAgentLimitDesc":
     "Maximum background Agents shared across all conversations on this device (default 10, maximum 999). Background Shell tasks have a separate fixed limit of 5.",
@@ -1256,6 +1263,9 @@ const en = {
 const zh: Record<MessageKey, string> = {
   "app.versionFooter": "KeenCode · MIT",
 
+  "tray.show": "显示 KeenCode",
+  "tray.quit": "退出 KeenCode",
+
   "window.minimize": "最小化",
   "window.maximize": "最大化",
   "window.restore": "还原",
@@ -1710,6 +1720,9 @@ const zh: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持电脑运行",
   "settings.keepComputerAwakeDesc":
     "KeenCode 运行时阻止系统因空闲进入睡眠，仍可手动睡眠或合盖休眠。",
+  "settings.closeToTray": "关闭窗口后保留在系统托盘",
+  "settings.closeToTrayDesc":
+    "关闭主窗口时隐藏到系统托盘而不是退出应用，运行中的任务继续执行。点击托盘图标可随时恢复窗口。",
   "settings.backgroundAgentLimit": "后台 Agent 并发数量",
   "settings.backgroundAgentLimitDesc":
     "所有对话共享的后台 Agent 并发上限（设备级；默认 10，上限 999）。后台 Shell 独立计数并固定最多 5 个。",

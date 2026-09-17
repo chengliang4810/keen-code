@@ -4,6 +4,9 @@ import type { MessageKey } from "./messages";
 export const zhTW: Record<MessageKey, string> = {
   "app.versionFooter": "KeenCode · MIT",
 
+  "tray.show": "顯示 KeenCode",
+  "tray.quit": "結束 KeenCode",
+
   "window.minimize": "最小化",
   "window.maximize": "最大化",
   "window.restore": "還原",
@@ -458,6 +461,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.keepComputerAwake": "保持電腦運作",
   "settings.keepComputerAwakeDesc":
     "KeenCode 執行時阻止系統因閒置進入睡眠，仍可手動睡眠或闔蓋休眠。",
+  "settings.closeToTray": "關閉視窗後保留在系統匣",
+  "settings.closeToTrayDesc":
+    "關閉主視窗時隱藏到系統匣而非結束應用程式，執行中的任務會繼續進行。點擊系統匣圖示可隨時還原視窗。",
   "settings.backgroundAgentLimit": "背景 Agent 並行數量",
   "settings.backgroundAgentLimitDesc":
     "所有對話共用的背景 Agent 並行上限（裝置級；預設 10，上限 999）。背景 Shell 獨立計數並固定最多 5 個。",

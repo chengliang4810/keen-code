@@ -11,14 +11,39 @@ export async function startupFrontendReady() {
   return invoke<void>("startup_frontend_ready");
 }
 
-/** 请求退出；有运行中任务时由应用展示确认提示。 */
-export async function appRequestExit() {
-  return invoke<number>("app_request_exit");
-}
-
 /** 停止所有运行中任务及其终端进程，然后退出。 */
 export async function appConfirmExit() {
   return invoke<void>("app_confirm_exit");
+}
+
+/** 处理主窗口关闭手势：设置要求常驻时隐藏到系统托盘，否则请求退出。 */
+export async function appCloseWindow() {
+  return invoke<void>("app_close_window");
+}
+
+/** 托盘菜单中的一个会话入口。 */
+export interface TraySessionEntry {
+  /** Session 稳定标识。 */
+  id: string;
+  /** 当前界面上显示的会话标题。 */
+  title: string;
+}
+
+/** 托盘菜单的完整投影。 */
+export interface TrayMenuPayload {
+  /** 固定项在当前界面语言下的文案。 */
+  labels: {
+    newChat: string;
+    show: string;
+    quit: string;
+  };
+  /** 需要出现在菜单里的最近会话。 */
+  sessions: TraySessionEntry[];
+}
+
+/** 用当前界面语言的投影替换系统托盘菜单。 */
+export async function traySetMenu(menu: TrayMenuPayload) {
+  return invoke<void>("tray_set_menu", { menu });
 }
 
 /** Agent Runtime 当前登记且仍在运行的普通后台任务类别。 */
@@ -681,6 +706,8 @@ export interface AppSettings {
   notificationSound: boolean;
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake: boolean;
+  /** 关闭主窗口时隐藏到系统托盘常驻，而不是退出应用。 */
+  closeToTray: boolean;
   /** 所有对话共享的设备级后台 Agent 并发上限。 */
   backgroundAgentLimit: number;
   /** 内置终端使用的 CSS 字体族列表。 */
@@ -710,6 +737,7 @@ export type AppSettingsPatch = Partial<
     | "showThinkingProcess"
     | "notificationSound"
     | "keepComputerAwake"
+    | "closeToTray"
     | "backgroundAgentLimit"
     | "terminalFontFamily"
     | "terminalShell"

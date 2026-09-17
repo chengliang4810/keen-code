@@ -72,7 +72,9 @@ export function useAppDialog() {
       );
       unlistenClose = await getCurrentWindow().onCloseRequested((event) => {
         event.preventDefault();
-        void api.appRequestExit().catch((error) => {
+        // 关闭主窗口按当前设置决定隐藏到托盘还是请求退出；
+        // 仍有任务运行时后端补发 app://exit-requested 触发确认。
+        void api.appCloseWindow().catch((error) => {
           showExitFailure(error);
         });
       });

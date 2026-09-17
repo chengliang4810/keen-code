@@ -53,6 +53,9 @@ export interface SettingsRouteSettings {
   onNotificationSound?: (value: boolean) => void;
   keepComputerAwake: boolean;
   onKeepComputerAwake?: (value: boolean) => void;
+  /** 关闭主窗口时隐藏到系统托盘常驻，而不是退出应用。 */
+  closeToTray: boolean;
+  onCloseToTray?: (value: boolean) => void;
   backgroundAgentLimit: number;
   onBackgroundAgentLimit: (value: number) => void;
   terminalFontFamily: string;

@@ -38,6 +38,7 @@ function settings(overrides: Partial<AppSettings> = {}): AppSettings {
     showThinkingProcess: true,
     notificationSound: true,
     keepComputerAwake: true,
+    closeToTray: true,
     backgroundAgentLimit: 10,
     terminalFontFamily: "monospace",
     terminalShell: "auto",

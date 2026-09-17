@@ -21,6 +21,7 @@ import { useAcpSessionRuntime } from "@/hooks/useAcpSessionRuntime";
 import { useSessionTurn } from "@/hooks/useSessionTurn";
 import { useComposerController } from "@/hooks/useComposerController";
 import { useSidebarController } from "@/hooks/useSidebarController";
+import { useTrayMenu } from "@/hooks/useTrayMenu";
 import {
   useSessionNavigation,
   type SessionNavigationNewChat,
@@ -1223,6 +1224,15 @@ export default function App() {
     openSession: sessionNavigation.openSession,
   };
   const { openSession, newChat } = sessionNavigation;
+  // 托盘菜单跨侧栏会话投影与导航，属于跨业务域协调，因此在这里装配。
+  useTrayMenu({
+    locale,
+    sessions,
+    projects,
+    appBooting,
+    newChat,
+    openSession,
+  });
   const sessionLifecycle = useSessionLifecycleActions({
     locale,
     appBooting,

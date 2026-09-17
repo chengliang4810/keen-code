@@ -84,12 +84,6 @@ pub fn request_exit(app: &AppHandle) -> Result<usize, String> {
 }
 
 #[tauri::command]
-/// 处理标题栏或菜单发起的退出请求。
-pub fn app_request_exit(app: AppHandle) -> Result<usize, String> {
-    request_exit(&app)
-}
-
-#[tauri::command]
 /// 确认停止全部工作并退出应用；同步返回后由后台收尾线程保证进程结束。
 ///
 /// 保持同步命令以在主线程执行：Runtime 的异步线程池被阻塞时（如文件锁列车），

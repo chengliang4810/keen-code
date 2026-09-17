@@ -163,6 +163,9 @@ export interface SettingsPageProps {
   /** 是否阻止系统因用户空闲自动进入睡眠。 */
   keepComputerAwake?: boolean;
   onKeepComputerAwake?: (v: boolean) => void;
+  /** 关闭主窗口时隐藏到系统托盘常驻，而不是退出应用。 */
+  closeToTray?: boolean;
+  onCloseToTray?: (v: boolean) => void;
   /** 所有对话共享的设备级后台 Agent 并发上限。 */
   backgroundAgentLimit: number;
   onBackgroundAgentLimit: (value: number) => void;
@@ -316,6 +319,8 @@ export function SettingsPage({
   onNotificationSound,
   keepComputerAwake = true,
   onKeepComputerAwake,
+  closeToTray = true,
+  onCloseToTray,
   backgroundAgentLimit,
   onBackgroundAgentLimit,
   terminalFontFamily,
@@ -671,6 +676,21 @@ export function SettingsPage({
                     checked={keepComputerAwake}
                     onChange={(checked) => onKeepComputerAwake?.(checked)}
                     ariaLabel={t("settings.keepComputerAwake")}
+                  />
+                </div>
+                <div className="settings-row" id="settings-anchor-close-to-tray">
+                  <div className="settings-row__text">
+                    <div className="settings-row__label">
+                      {t("settings.closeToTray")}
+                    </div>
+                    <div className="settings-row__desc">
+                      {t("settings.closeToTrayDesc")}
+                    </div>
+                  </div>
+                  <SettingsSwitch
+                    checked={closeToTray}
+                    onChange={(checked) => onCloseToTray?.(checked)}
+                    ariaLabel={t("settings.closeToTray")}
                   />
                 </div>
                 <div

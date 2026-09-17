@@ -34,6 +34,26 @@ describe("SettingsPage Select 契约", () => {
   });
 });
 
+describe("SettingsPage 托盘常驻契约", () => {
+  it("关闭窗口后保留在系统托盘使用 shadcn 开关，位于空闲睡眠开关之后", () => {
+    const start = source.indexOf('id="settings-anchor-close-to-tray"');
+    const end = source.indexOf(
+      'id="settings-anchor-background-agent-limit"',
+      start,
+    );
+    const traySource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(traySource).toContain("<SettingsSwitch");
+    expect(traySource).not.toMatch(/<input(?:\s|>)/);
+    expect(traySource).toContain('t("settings.closeToTray")');
+    expect(traySource).toContain('t("settings.closeToTrayDesc")');
+    expect(traySource).toContain("checked={closeToTray}");
+    expect(traySource).toContain("onCloseToTray?.(checked)");
+  });
+});
+
 describe("SettingsPage 后台任务并发契约", () => {
   it("后台 Agent 使用范围为 1 到 999 的数字输入", () => {
     const start = source.indexOf('id="settings-anchor-background-agent-limit"');
