@@ -68,7 +68,7 @@ impl AgentTool for BashTool {
         ToolDefinition::new(
             "Bash",
             "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.",
-            shell_schema(self.background_tasks.is_some()),
+            shell_schema(&self.environment, self.background_tasks.is_some()),
         )
     }
 
@@ -175,7 +175,7 @@ impl AgentTool for PowerShellTool {
         ToolDefinition::new(
             "PowerShell",
             "Run a command using system PowerShell without profiles or interaction, forcing UTF-8 pipeline output. Commands are always treated as side-effecting tools. Cancellation or timeout terminates the entire process tree.",
-            shell_schema(self.background_tasks.is_some()),
+            shell_schema(&self.environment, self.background_tasks.is_some()),
         )
     }
 
@@ -649,14 +649,19 @@ impl Drop for ProcessGroupGuard {
     }
 }
 
-/// 返回 Bash 与 PowerShell 共享的工具输入 Schema。
-fn shell_schema(background_enabled: bool) -> Value {
+/// 返回 Bash 与 PowerShell 共享的工具输入 Schema；超时说明按环境配置的实际值生成。
+fn shell_schema(environment: &ToolEnvironment, background_enabled: bool) -> Value {
+    let limits = environment.limits();
+    let timeout_description = format!(
+        "Optional timeout in milliseconds; omit to use the {} ms default, values above {} fail validation.",
+        limits.default_command_timeout_ms, limits.max_command_timeout_ms,
+    );
     let mut schema = json!({
         "type": "object",
         "properties": {
             "command": { "type": "string", "minLength": 1 },
             "cwd": { "type": "string", "minLength": 1 },
-            "timeout_ms": { "type": "integer", "minimum": 1 }
+            "timeout_ms": { "type": "integer", "minimum": 1, "description": timeout_description }
         },
         "required": ["command"],
         "additionalProperties": false
@@ -671,7 +676,27 @@ fn shell_schema(background_enabled: bool) -> Value {
         "description".to_owned(),
         json!({ "type": "string", "minLength": 1, "maxLength": 160 }),
     );
-    properties.insert("run_in_background".to_owned(), json!({ "type": "boolean" }));
+    // 后台任务不继承前台默认超时：未指定 timeout_ms 即无时限运行，直到进程退出、
+    // 显式超时到期或会话/应用关闭时随进程树一起回收。
+    properties.insert(
+        "run_in_background".to_owned(),
+        json!({
+            "type": "boolean",
+            "description": "When true, start a session-scoped background task and return its task ID immediately instead of waiting. The task is not subject to the foreground default timeout: without timeout_ms it runs until the process exits (no time limit), and with timeout_ms it is killed once that limit elapses. Closing the session or quitting the app stops the entire process tree. Read incremental output with TaskOutput; stop it with TaskStop."
+        }),
+    );
+    let background_timeout_description = format!(
+        "For a normal command, omit to use the {} ms default; for a background task, omit to run without a time limit. A set value is milliseconds until the process tree is killed; values above {} fail validation.",
+        limits.default_command_timeout_ms, limits.max_command_timeout_ms,
+    );
+    properties.insert(
+        "timeout_ms".to_owned(),
+        json!({
+            "type": "integer",
+            "minimum": 1,
+            "description": background_timeout_description
+        }),
+    );
     schema
 }
 

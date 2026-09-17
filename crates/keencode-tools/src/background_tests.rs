@@ -280,6 +280,23 @@ fn background_registration_exposes_real_task_tools() {
         shell.input_schema["properties"]["run_in_background"]["type"],
         "boolean"
     );
+    // 参数说明必须让模型知道后台任务不继承前台默认超时，且会随会话关闭回收。
+    let run_in_background = shell.input_schema["properties"]["run_in_background"]["description"]
+        .as_str()
+        .expect("run_in_background 应带参数说明");
+    assert!(
+        run_in_background.contains("no time limit")
+            && run_in_background.contains("session-scoped")
+            && run_in_background.contains("quitting the app"),
+        "run_in_background 说明应覆盖无时限运行与会话生命周期：{run_in_background}"
+    );
+    let timeout_ms = shell.input_schema["properties"]["timeout_ms"]["description"]
+        .as_str()
+        .expect("timeout_ms 应带参数说明");
+    assert!(
+        timeout_ms.contains("without a time limit") && timeout_ms.contains("3600000"),
+        "timeout_ms 说明应区分前台默认与后台无限时：{timeout_ms}"
+    );
 }
 
 /// 总输出预算必须保证两个同时活跃的流都能容纳一个完整四字节 UTF-8 标量。
