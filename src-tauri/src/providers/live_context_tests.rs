@@ -944,7 +944,6 @@ async fn run_live_context_test_inner(
         context_windows: Default::default(),
         max_output_tokens: Default::default(),
         chat_output_token_field: Default::default(),
-        read_timeout_seconds: 300,
         context_1m: Default::default(),
         supports_vision: Default::default(),
     };
@@ -1309,7 +1308,6 @@ fn provider_fixture_protocol_conversion_is_explicit_and_non_mutating() {
         context_windows: Default::default(),
         max_output_tokens: Default::default(),
         chat_output_token_field: Default::default(),
-        read_timeout_seconds: 300,
         context_1m: Default::default(),
         supports_vision: Default::default(),
     };

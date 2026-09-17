@@ -142,7 +142,6 @@ async fn live_messages_desktop_lifecycle() {
     std::fs::write(root.join("facts.txt"), facts).unwrap();
     let mut provider = CustomProvider {
         chat_output_token_field: Default::default(),
-        read_timeout_seconds: 300,
         id: "messages-runtime-validation".into(),
         name: "Synthetic runtime".into(),
         models: vec![model.clone()],

@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as api from "@/lib/api";
 
 describe("供应商 API Key 本地持久化契约", () => {
-  it("显式传递兼容网关预算字段与响应等待超时", async () => {
+  it("显式传递兼容网关预算字段", async () => {
     const invoke = vi.fn().mockResolvedValue({});
     vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
-    await api.providersUpsert({ id: "gateway", models: ["hy3"], baseUrl: "http://127.0.0.1:1/v1", apiBackend: "chat_completions", supportsVision: {}, createOnly: true, chatOutputTokenField: "max_tokens", readTimeoutSeconds: 900 });
-    expect(invoke).toHaveBeenCalledWith("providers_upsert", expect.objectContaining({ chatOutputTokenField: "max_tokens", readTimeoutSeconds: 900 }), undefined);
+    await api.providersUpsert({ id: "gateway", models: ["hy3"], baseUrl: "http://127.0.0.1:1/v1", apiBackend: "chat_completions", supportsVision: {}, createOnly: true, chatOutputTokenField: "max_tokens", });
+    expect(invoke).toHaveBeenCalledWith("providers_upsert", expect.objectContaining({ chatOutputTokenField: "max_tokens", }), undefined);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -42,7 +42,6 @@ describe("供应商 API Key 本地持久化契约", () => {
         contextWindows: {},
         maxOutputTokens: { model: 128000 },
         chatOutputTokenField: "max_completion_tokens",
-        readTimeoutSeconds: 300,
         supportsVision: { model: false },
         context1m: {},
         createOnly: true,
