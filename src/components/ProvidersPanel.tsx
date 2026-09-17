@@ -552,19 +552,6 @@ export function ProvidersPanel({
     }
   };
 
-  /** 导出全部供应商配置为 JSON 文件。 */
-  const exportAllProviders = async () => {
-    try {
-      const json = await api.providersExport(null);
-      downloadJson(json, providerExportFilename(null));
-      setHint(tr("prov.exportDone"));
-      setHintTone("ok");
-    } catch (exportError) {
-      setHint(tr("prov.exportFail", { error: localizeUiError(exportError, locale) }));
-      setHintTone("err");
-    }
-  };
-
   /** 打开系统文件选择器并读取待导入 JSON。 */
   const pickImportFile = async () => {
     if (!api.isTauri() || importDraft?.submitting) return;
@@ -700,16 +687,8 @@ export function ProvidersPanel({
             <IconPlus size={16} />
             {tr("prov.new")}
           </Button>
+          {/* 单按钮行容器保留既有 ghost 按钮的尺寸与左对齐，不被列布局拉伸。 */}
           <div className="prov-transfer-row">
-            <Button
-              type="button"
-              className="btn btn--ghost btn--sm"
-              onClick={() => void exportAllProviders()}
-              disabled={busy || providers.length === 0}
-            >
-              <IconDownload size={14} />
-              {tr("prov.exportAll")}
-            </Button>
             <Button
               type="button"
               className="btn btn--ghost btn--sm"
@@ -725,7 +704,7 @@ export function ProvidersPanel({
               {tr("prov.importAll")}
             </Button>
           </div>
-          {/* 表单未展示时（空态）导出结果只能落在左栏。 */}
+          {/* 表单未展示时（空态）提示只能落在左栏。 */}
           {rightMode === "empty" && hint ? (
             <div
               className={

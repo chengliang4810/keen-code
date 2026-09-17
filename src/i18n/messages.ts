@@ -680,7 +680,6 @@ const en = {
   "prov.exportOne": "Export JSON",
   "prov.exportDone": "Provider config exported.",
   "prov.exportFail": "Export failed: {error}",
-  "prov.exportAll": "Export all",
   "prov.importAll": "Import",
   "prov.importTitle": "Import providers",
   "prov.importHint":
@@ -1905,7 +1904,6 @@ const zh: Record<MessageKey, string> = {
   "prov.exportOne": "导出 JSON",
   "prov.exportDone": "供应商信息已导出。",
   "prov.exportFail": "导出失败：{error}",
-  "prov.exportAll": "导出全部",
   "prov.importAll": "导入",
   "prov.importTitle": "导入供应商",
   "prov.importHint":

@@ -98,15 +98,12 @@ describe("供应商 API Key 本地持久化契约", () => {
     );
   });
 
-  it("导出供应商按标识请求单个文档，导出全部传 null", async () => {
+  it("导出供应商按标识请求单个文档", async () => {
     const invoke = vi.fn().mockResolvedValue("{}");
     vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
 
     await api.providersExport("provider");
     expect(invoke).toHaveBeenCalledWith("providers_export", { providerId: "provider" }, undefined);
-
-    await api.providersExport(null);
-    expect(invoke).toHaveBeenCalledWith("providers_export", { providerId: null }, undefined);
   });
 
   it("导入供应商提交原始文本，由后端完成校验与合并", async () => {

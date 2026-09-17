@@ -39,9 +39,6 @@ describe("providerExportFilename", () => {
     expect(providerExportFilename("  ")).toBe(
       "keencode-providers-all.json",
     );
-    expect(providerExportFilename(null)).toBe(
-      "keencode-providers-all.json",
-    );
   });
 });
 

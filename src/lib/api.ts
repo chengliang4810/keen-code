@@ -1221,11 +1221,9 @@ export async function providersRemove(id: string) {
   return invoke<ProvidersListResult>("providers_remove", { id });
 }
 
-/** 导出供应商配置 JSON 文档；providerId 为空时导出全部供应商。 */
-export async function providersExport(providerId?: string | null) {
-  return invoke<string>("providers_export", {
-    providerId: providerId ?? null,
-  });
+/** 导出指定供应商的配置 JSON 文档。 */
+export async function providersExport(providerId: string) {
+  return invoke<string>("providers_export", { providerId });
 }
 
 /** 供应商导入结果：合并后的完整状态与本次计数。 */

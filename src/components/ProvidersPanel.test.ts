@@ -68,14 +68,17 @@ describe("ProvidersPanel 供应商信息导出与导入", () => {
     expect(head).toContain("editingId ? (");
   });
 
-  it("左栏提供导出全部与导入入口，导入走后端合并而不是本地逐个 upsert", () => {
+  it("左栏在新增入口之后提供导入入口，导入走后端合并而不是本地逐个 upsert", () => {
     const rail = source.slice(
-      source.indexOf('className="prov-transfer-row"'),
+      source.indexOf('className="prov-split__list"'),
       source.indexOf('className="prov-rail"'),
     );
-    expect(rail).toContain("exportAllProviders()");
-    expect(rail).toContain("tr(\"prov.exportAll\")");
-    expect(rail).toContain("tr(\"prov.importAll\")");
+    expect(rail.indexOf("openCreate")).toBeLessThan(
+      rail.indexOf('tr("prov.importAll")'),
+    );
+    // 导出全部入口已移除，左栏只保留导入。
+    expect(rail).not.toContain("prov.exportAll");
+    expect(rail).not.toContain("exportAllProviders");
     const transfer = source.slice(
       source.indexOf("const submitImport"),
       source.indexOf("/** 切换远端模型的勾选状态"),

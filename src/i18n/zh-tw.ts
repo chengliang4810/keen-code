@@ -649,7 +649,6 @@ export const zhTW: Record<MessageKey, string> = {
   "prov.exportOne": "匯出 JSON",
   "prov.exportDone": "供應商資訊已匯出。",
   "prov.exportFail": "匯出失敗：{error}",
-  "prov.exportAll": "匯出全部",
   "prov.importAll": "匯入",
   "prov.importTitle": "匯入供應商",
   "prov.importHint":

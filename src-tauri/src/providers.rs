@@ -474,26 +474,20 @@ pub struct ProvidersImportResult {
     pub updated: usize,
 }
 
-/// 导出供应商配置 JSON 文档；provider_id 为空时导出全部供应商。
-pub fn export(app: &AppHandle, provider_id: Option<&str>) -> Result<String> {
+/// 导出单个供应商配置 JSON 文档。
+pub fn export(app: &AppHandle, provider_id: &str) -> Result<String> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
     let state = load_state(app)?;
-    let providers = match provider_id {
-        Some(id) => {
-            let id = validate_provider_id(id)?;
-            let record = state
-                .providers
-                .iter()
-                .find(|provider| provider.id == id)
-                .with_context(|| format!("找不到供应商 {id}"))?;
-            vec![record.clone()]
-        }
-        None => state.providers.clone(),
-    };
+    let id = validate_provider_id(provider_id)?;
+    let record = state
+        .providers
+        .iter()
+        .find(|provider| provider.id == id)
+        .with_context(|| format!("找不到供应商 {id}"))?;
     let file = ProviderExportFile {
         schema: PROVIDER_EXPORT_SCHEMA.to_owned(),
         version: PROVIDER_CONFIG_VERSION,
-        providers,
+        providers: vec![record.clone()],
     };
     let bytes = serde_json::to_vec_pretty(&file).context("序列化供应商导出失败")?;
     String::from_utf8(bytes).context("供应商导出内容不是有效 UTF-8")

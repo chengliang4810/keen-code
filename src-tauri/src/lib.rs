@@ -386,10 +386,10 @@ fn providers_list_models(
         .map_err(|error| keencode_model::redact_error_secrets(&error.to_string()))
 }
 
-/// 导出供应商配置 JSON 文档；provider_id 为空时导出全部供应商。
+/// 导出单个供应商的配置 JSON 文档。
 #[tauri::command]
-fn providers_export(provider_id: Option<String>, app: AppHandle) -> Result<String, String> {
-    providers::export(&app, provider_id.as_deref()).map_err(|error| error.to_string())
+fn providers_export(provider_id: String, app: AppHandle) -> Result<String, String> {
+    providers::export(&app, &provider_id).map_err(|error| error.to_string())
 }
 
 /// 导入供应商配置并按标识合并到当前列表，随后热加载运行时。

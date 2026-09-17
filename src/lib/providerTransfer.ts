@@ -33,11 +33,9 @@ export function providerExportIds(text: string): string[] {
   return [];
 }
 
-/** 导出文件名：单个供应商用其名称，导出全部用固定前缀。 */
-export function providerExportFilename(
-  providerName: string | null | undefined,
-): string {
-  const base = (providerName ?? "")
+/** 导出文件名：使用供应商名称，名称不可用时回退固定前缀。 */
+export function providerExportFilename(providerName: string): string {
+  const base = providerName
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9\u4e00-\u9fff]+/gi, "-")

@@ -1,3 +1,17 @@
+# 2026-09-17 模型设置移除“导出全部”并把“导入”移到新增之后
+
+- 需求：模型设置左栏不再提供“导出全部”，并把“导入”入口放到“添加提供商”之后。
+- 修改：`src/components/ProvidersPanel.tsx`（删除左栏“导出全部”按钮与 `exportAllProviders`，导入按钮紧随“添加提供商”，复用既有 `.prov-transfer-row` 单按钮行容器保持 ghost 尺寸与左对齐）；`src/i18n/messages.ts`、`src/i18n/zh-tw.ts`（删除 `prov.exportAll` 三语文案）；`src/lib/api.ts`、`src/lib/providerTransfer.ts`（`providersExport` 收窄为必填 `providerId`，导出文件名不再接受空名称）；`src-tauri/src/lib.rs`、`src-tauri/src/providers.rs`（`providers_export` 与 `providers::export` 只接受具体供应商标识，删除全部导出分支）；`src/components/ProvidersPanel.test.ts`、`src/components/ProvidersPanel.test.tsx`、`src/lib/providerTransfer.test.ts` 同步断言。未改 CSS，未新增依赖或后台活动。
+- 门禁：`pnpm run typecheck` 通过；`pnpm exec vitest run` 144 文件 / 1406 项通过；`cargo check --manifest-path src-tauri/Cargo.toml -p keencode-desktop` 通过；`cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib providers` 47 项通过。
+- 基线：`37218407a6ee8fa494371bc80f31b9463b490c6b`，`git show HEAD:src/...` 取出改动前的源码写入夹具 `baseline/src/`。基线 `ProvidersPanel.tsx` SHA-256 为 `ad7681f40b48b817b8a81a73bb10b803a9c5e60e6d2fb7082b4492c50ab8443a`，当前为 `9ef06f893aa0f8b8b06d208537c64b89d63ee8ceea71ecab0547964d3bfc6d4a`。
+- 夹具：`output/playwright/providers-import-order-20260917/`。`baseline/` 为改动前源码副本，`current/src` 通过符号链接指向工作树 `src/`，两变体共用 `node_modules` 但使用独立 Vite 依赖缓存。`QA_VARIANT=baseline pnpm exec vite --config output/playwright/providers-import-order-20260917/vite.config.mts` 与 `QA_VARIANT=current ...` 分别起 `http://127.0.0.1:14411/`、`http://127.0.0.1:14412/`；`node shoot.mjs` 截图与几何采集，`python3 compare.py` 比对。夹具用合成供应商列表与内存 Tauri 命令桩，不读真实配置、不写用户数据。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，1280×800，deviceScaleFactor=1。
+- DOM 与几何：“添加提供商”两版均为 x=24、y=24、280×34；左栏按钮序列由 `[添加提供商, 导出全部, 导入]` 变为 `[添加提供商, 导入]`，导入按钮由 x=120 移到 x=24、y=68、46×28（与基线“导出全部”同一点位）；`.prov-transfer-row`（24,68,280×28）、`.prov-rail`（24,106,280×513）与首个供应商条目（24,106,278×63.27）几何完全不变。
+- 像素：RGB 任一通道差值 >16 计入，未掩码。差异 819/1024000（0.07998%），范围 `[35,68,166,96)`，即被移除的“导出全部”按钮及其后方左移的“导入”按钮所在区域，其余区域逐像素一致。两页 Console 均为 0 error、0 warning。
+- 未验收：浏览器组件夹具不替代原生 Tauri WebView / Windows 实机验收；未在桌面应用内实机点击导入并选择文件复核原生文件对话框链路。
+
+---
+
 # 2026-09-17 移除编辑重发的文件恢复复选框
 
 - 需求：删除最后一条用户消息内联编辑器中的“同时恢复本轮及其子 Agent 修改的文件”复选框，并一并移除其背后的文件恢复能力。
