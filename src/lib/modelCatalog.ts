@@ -8,6 +8,12 @@ export function modelIdFromSessionReference(reference: string): string {
   return separator < 0 ? reference : reference.slice(separator + 2);
 }
 
+/** 从会话模型引用还原供应商标识；引用不含分隔符时视为无供应商。 */
+export function providerIdFromSessionReference(reference: string): string | null {
+  const separator = reference.indexOf("::");
+  return separator <= 0 ? null : reference.slice(0, separator);
+}
+
 export interface EffortOption {
   /** 传给当前模型供应商的推理强度标识。 */
   id: string;

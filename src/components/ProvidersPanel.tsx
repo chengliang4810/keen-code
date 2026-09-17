@@ -36,6 +36,8 @@ export interface ProvidersPanelProps {
   locale: Locale;
   /** 供应商配置变化后通知桌面外壳刷新模型列表。 */
   onProviderActivated?: () => void;
+  /** 进入面板时预选中的供应商标识；不存在或为空时回退列表第一项。 */
+  initialProviderId?: string | null;
 }
 
 type FormState = {
@@ -117,6 +119,7 @@ function hostOf(url: string): string {
 export function ProvidersPanel({
   locale,
   onProviderActivated,
+  initialProviderId = null,
 }: ProvidersPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const [list, setList] = useState<api.ProvidersListResult | null>(null);
@@ -201,15 +204,18 @@ export function ProvidersPanel({
       }
       const result = await api.providersList();
       setList(result);
-      if (result.providers[0]) {
-        openEdit(result.providers[0]);
+      const preferred = initialProviderId
+        ? result.providers.find((provider) => provider.id === initialProviderId)
+        : undefined;
+      if (preferred ?? result.providers[0]) {
+        openEdit(preferred ?? result.providers[0]);
       }
     } catch (loadError) {
       setError(localizeUiError(loadError, locale));
     } finally {
       setLoading(false);
     }
-  }, [openEdit]);
+  }, [openEdit, initialProviderId]);
 
   useEffect(() => {
     void reload();

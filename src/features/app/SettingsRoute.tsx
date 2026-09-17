@@ -80,6 +80,8 @@ export interface SettingsRouteSettings {
 export interface SettingsRouteSession {
   projectPath?: string | null;
   onProviderActivated?: () => void;
+  /** 进入模型设置时预选中的供应商标识；普通导航为空。 */
+  providerId?: string | null;
 }
 
 /** 自动归档配置和已归档会话操作。 */

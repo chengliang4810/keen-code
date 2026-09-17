@@ -13,7 +13,7 @@ import type {
   TaskCacheUsage,
 } from "@/lib/api";
 import type { Attachment } from "@/lib/attachments";
-import { findModel, type ModelOption } from "@/lib/modelCatalog";
+import { findModel, providerIdFromSessionReference, type ModelOption } from "@/lib/modelCatalog";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import { Button } from "@/components/ui/button";
@@ -74,7 +74,10 @@ export interface ComposerToolbarProps {
   viewingSessionIdRef: MutableRefObject<string | null>;
   /** 清除当前 Session 的旧上下文用量，等待新模型上报。 */
   invalidateContextUsage: (sessionId: string) => void;
-  navigateSettings: (section?: SettingsSectionId) => void;
+  navigateSettings: (
+    section?: SettingsSectionId,
+    providerId?: string | null,
+  ) => void;
   contextUsageDisplay: ContextUsageDisplay;
   taskCacheUsage: TaskCacheUsage | null;
   draft: string;
@@ -213,7 +216,7 @@ export function ComposerToolbar({
           const activeSessionId = viewingSessionIdRef.current;
           if (activeSessionId) {
             invalidateContextUsage(activeSessionId);
-            modelBySessionRef.current.set(activeSessionId, nextModelId);
+            modelBySessionRef.current.set(activeSessionId, `${providerId}::${nextModelId}`);
             void sessionSetModel({
               sessionId: activeSessionId,
               providerId,
@@ -231,7 +234,19 @@ export function ComposerToolbar({
               );
           }
         }}
-        onAddModel={() => navigateSettings("account")}
+        onAddModel={() => {
+          // 会话内切换的模型可能不属于全局活跃供应商；管理模型入口优先带出该对话实际使用的供应商。
+          const reference = session.sessionId
+            ? modelBySessionRef.current.get(session.sessionId)
+            : undefined;
+          const sessionProviderId = reference
+            ? providerIdFromSessionReference(reference)
+            : null;
+          navigateSettings(
+            "account",
+            sessionProviderId ?? activeCustomProvider?.id ?? null,
+          );
+        }}
       />
 
       <ComposerReasoningMenu

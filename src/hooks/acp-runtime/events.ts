@@ -359,7 +359,7 @@ export function useAcpRuntimeEvents({
         const modelValue = modelOption?.currentValue;
         if (typeof modelValue === "string" && modelValue.length > 0) {
           const modelId = modelIdFromSessionReference(modelValue);
-          modelBySessionRef.current.set(envelope.sessionId, modelId);
+          modelBySessionRef.current.set(envelope.sessionId, modelValue);
           if (viewingSessionIdRef.current === envelope.sessionId &&
             configuredModelsRef.current.some((model) => model.id === modelId)) {
             setModelId(modelId);
@@ -382,11 +382,13 @@ export function useAcpRuntimeEvents({
       const activeLatency = turnLatencyBySessionRef.current.get(envelope.sessionId);
       const completedLatency = activeLatency?.turnId === turnId
         ? activeLatency : null;
+      const sessionModel = modelBySessionRef.current.get(envelope.sessionId);
       patchCompletedTurn(
         view,
         turnId,
         completedLatency,
-        modelBySessionRef.current.get(envelope.sessionId) ?? optimisticUser?.model,
+        (sessionModel ? modelIdFromSessionReference(sessionModel) : sessionModel) ??
+          optimisticUser?.model,
       );
       if (completedLatency && !wasRecovering && !completedLatency.deliveryInterrupted &&
         completedLatency.completedAtMs != null && completedLatency.firstVisibleTokenAtMs === null &&

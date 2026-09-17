@@ -202,6 +202,8 @@ export interface SettingsPageProps {
   onAppUpdateInstall: () => void | Promise<void>;
   /** 自定义供应商切换后刷新桌面端展示状态。 */
   onProviderActivated?: () => void;
+  /** 进入模型设置时预选中的供应商标识；普通导航为空。 */
+  providerId?: string | null;
   /** 当前活动项目路径，供 Skills、Agents、插件和 MCP 查询使用。 */
   projectPath?: string | null;
   /** 最近一次成功持久化的全局自定义指令。 */
@@ -342,6 +344,7 @@ export function SettingsPage({
   onAppUpdateCheck,
   onAppUpdateInstall,
   onProviderActivated,
+  providerId = null,
   projectPath = null,
   customInstructions,
   onCustomInstructionsSave,
@@ -1335,6 +1338,7 @@ export function SettingsPage({
             <ProvidersPanel
               locale={locale}
               onProviderActivated={onProviderActivated}
+              initialProviderId={providerId}
             />
           </div>
         )}

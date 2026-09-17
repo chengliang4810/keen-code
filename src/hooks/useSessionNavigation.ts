@@ -15,7 +15,7 @@ import type {
   SessionContextUsage,
   SessionRow,
 } from "@/features/app/models";
-import type { ModelOption } from "@/lib/modelCatalog";
+import { modelIdFromSessionReference, type ModelOption } from "@/lib/modelCatalog";
 import type { Attachment } from "@/lib/attachments";
 import {
   IDLE_SNAPSHOT,
@@ -401,7 +401,10 @@ export function useSessionNavigation({
         clearOpeningSlot();
         current.runtime.commitWorkspace();
         current.runtime.applyViewProjection(row.id);
-        const sessionModel = current.providers.modelBySessionRef.current.get(row.id);
+        const sessionModelReference = current.providers.modelBySessionRef.current.get(row.id);
+        const sessionModel = sessionModelReference
+          ? modelIdFromSessionReference(sessionModelReference)
+          : undefined;
         if (
           sessionModel &&
           current.providers.configuredModelsRef.current.some(

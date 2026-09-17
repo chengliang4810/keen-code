@@ -256,8 +256,13 @@ export default function App() {
 
   // ContextMenu handles outside click + Escape for sidebar menus.
 
-  const { appView, settingsSection, navigateWorkbench, navigateSettings } =
-    useAppRoute();
+  const {
+    appView,
+    settingsSection,
+    settingsProviderId,
+    navigateWorkbench,
+    navigateSettings,
+  } = useAppRoute();
 
   /** 首次渲染时展示品牌启动页；工作台外壳不等待会话状态。 */
   const [appBooting, setAppBooting] = useState(true);
@@ -1439,6 +1444,7 @@ export default function App() {
           session={{
             projectPath: activeProject?.path ?? null,
             onProviderActivated: handleProviderActivated,
+            providerId: settingsProviderId,
           }}
           archive={{
             autoArchiveConversations,

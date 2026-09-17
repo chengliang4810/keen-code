@@ -12,6 +12,10 @@ export function useAppRoute() {
   const [appView, setAppView] = useState<AppView>("workbench");
   const [settingsSection, setSettingsSection] =
     useState<SettingsSectionId>("general");
+  /** 进入模型设置时预选中的供应商标识；普通导航为 null。 */
+  const [settingsProviderId, setSettingsProviderId] = useState<string | null>(
+    null,
+  );
 
   const navigateWorkbench = useCallback(() => {
     setAppView("workbench");
@@ -25,8 +29,9 @@ export function useAppRoute() {
   }, []);
 
   const navigateSettings = useCallback(
-    (section: SettingsSectionId = "general") => {
+    (section: SettingsSectionId = "general", providerId?: string | null) => {
       setSettingsSection(section);
+      setSettingsProviderId(providerId ?? null);
       setAppView("settings");
       if (typeof window !== "undefined") {
         const hash = buildSettingsHash({ section });
@@ -65,5 +70,11 @@ export function useAppRoute() {
     return () => window.removeEventListener("hashchange", syncFromHash);
   }, []);
 
-  return { appView, settingsSection, navigateWorkbench, navigateSettings };
+  return {
+    appView,
+    settingsSection,
+    settingsProviderId,
+    navigateWorkbench,
+    navigateSettings,
+  };
 }

@@ -59,7 +59,7 @@ export interface AcpRuntimeHistoryOptions {
   invalidateContextUsage: (sessionId: string) => void;
   /** 将恢复出的持久 Plan 模式同步到 Composer 的当前 Session 键。 */
   setPlanModeSessionKey: (sessionKey: string | null) => void;
-  /** 权威 Session 模型缓存；历史恢复与实时配置事件共用。 */
+  /** 权威 Session 模型引用（providerId::modelId）缓存；历史恢复与实时配置事件共用。 */
   modelBySessionRef: Ref<Map<string, string>>;
   /** 仅当前视图恢复完成时更新模型菜单。 */
   setModelId: (modelId: string) => void;
@@ -258,7 +258,7 @@ export function useAcpRuntimeHistory({
           view.plan_mode = mode === "plan";
           const modelValue = loaded.configOptions.find((option) => option.id === "model")?.currentValue;
           if (typeof modelValue === "string" && modelValue.length > 0) {
-            modelBySessionRef.current.set(sessionId, modelIdFromSessionReference(modelValue));
+            modelBySessionRef.current.set(sessionId, modelValue);
           }
           const effortValue = loaded.configOptions.find(
             (option) => option.id === "reasoning_effort",
@@ -302,8 +302,8 @@ export function useAcpRuntimeHistory({
           })).catch(() => {});
           // 缓存属于所有会话；迟到的后台恢复不得改写前台或新草稿菜单。
           if (mayProjectView()) {
-            const model = modelBySessionRef.current.get(sessionId);
-            if (model) setModelId(model);
+            const reference = modelBySessionRef.current.get(sessionId);
+            if (reference) setModelId(modelIdFromSessionReference(reference));
           }
           // 只有最终恢复出的当前 Session 才能改变 Composer；后台恢复不能覆盖
           // 用户当前会话或尚未提交的新草稿的本地模式选择；草稿实体化不是显式导航。
@@ -403,10 +403,7 @@ export function useAcpRuntimeHistory({
           (option) => option.id === "model",
         )?.currentValue;
         if (typeof modelValue === "string" && modelValue.length > 0) {
-          modelBySessionRef.current.set(
-            opened.sessionId,
-            modelIdFromSessionReference(modelValue),
-          );
+          modelBySessionRef.current.set(opened.sessionId, modelValue);
         }
         view.replay.loaded = true;
       }

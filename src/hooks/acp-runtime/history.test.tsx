@@ -172,7 +172,7 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     ];
     apiMocks.sessionLoad.mockResolvedValue(result);
     await harness.replayHistory("session-model", { sessionId: "session-model", epoch: 1 });
-    expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy3");
+    expect(harness.modelBySessionRef.current.get("session-model")).toBe("fix-local::hy3");
     expect(harness.setModelId).toHaveBeenLastCalledWith("hy3");
     expect(
       harness.workspaceRef.current.sessions["session-model"]?.reasoning_effort,
@@ -186,7 +186,7 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     result.configOptions[0].currentValue = "fix-local::hy4-preview";
     pending.resolve(result);
     await recovery;
-    expect(harness.modelBySessionRef.current.get("session-model")).toBe("hy4-preview");
+    expect(harness.modelBySessionRef.current.get("session-model")).toBe("fix-local::hy4-preview");
     expect(harness.setModelId).not.toHaveBeenCalled();
   });
 
@@ -203,7 +203,7 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
       configOptions: [{ id: "model", name: "模型", currentValue: "fix-local::hy3" }],
     });
     await harness.connectSession({ sessionId: null, operationId: "op-new" });
-    expect(harness.modelBySessionRef.current.get("session-new")).toBe("hy3");
+    expect(harness.modelBySessionRef.current.get("session-new")).toBe("fix-local::hy3");
     expect(harness.workspaceRef.current.sessions["session-new"]?.replay.loaded).toBe(true);
   });
   beforeEach(() => {
