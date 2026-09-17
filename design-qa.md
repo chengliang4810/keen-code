@@ -1,3 +1,20 @@
+# 2026-09-17 常驻系统托盘图标与「关闭窗口后保留在系统托盘」设置
+
+- 需求：新增常驻系统托盘图标（macOS 为菜单栏图标）。关闭主窗口后应用不退出，隐藏窗口并移除 macOS Dock 图标；托盘菜单提供「新建对话 / 显示窗口 / 最近 5 个会话 / 退出」；新增设置项控制关闭窗口是隐藏到托盘还是直接退出。
+- 现状：应用没有托盘图标，关闭主窗口即走统一退出入口（`useAppDialog` 的 `onCloseRequested` → `app_request_exit`）；`tauri` 依赖未启用 `tray-icon` feature。
+- 修改（后端）：`src-tauri/Cargo.toml`（tauri 启用 `tray-icon`）；`src-tauri/src/tray.rs`（新增：托盘与菜单构建、菜单项标识→动作映射、`tray_set_menu` 与 `app_close_window` 命令、`show_main_window`/`hide_main_window`、macOS Dock 可见性切换、Windows 左键单击显示窗口）；`src-tauri/src/lib.rs`（注册 `mod tray`、启动时 `tray::install`、注册两个命令、`handle_run_event` 处理 `ExitRequested`（有运行中任务时先恢复窗口再弹确认）与 macOS `Reopen`）；`src-tauri/src/app_settings.rs`（新增 `close_to_tray` 字段、补丁与默认值 true）；`src-tauri/src/app_exit.rs`、`src/lib/api.ts`（删除被 `app_close_window` 取代的 `app_request_exit` 命令与前端封装）；`src-tauri/icons/tray-macos.png`（模板图标：单色 + alpha）、`src-tauri/icons/tray-windows.png`（品牌蓝托盘图标）。
+- 修改（前端）：`src/hooks/useTrayMenu.ts`（新增：按当前界面语言与会话投影推送托盘菜单，启动页结束后才推送以免默认语言覆盖后端按持久化语言生成的兜底菜单；监听 `app://tray-new-chat`、`app://tray-open-session` 回投到既有导航）；`src/App.tsx`（装配 `useTrayMenu`）；`src/hooks/useAppDialog.ts`（窗口关闭改调 `appCloseWindow`，保留 `preventDefault`）；`src/hooks/useAppSettings.ts`、`src/features/app/SettingsRoute.tsx`、`src/components/SettingsPage.tsx`（新增「关闭窗口后保留在系统托盘」开关，位于「保持电脑运行」之后）；`src/i18n/messages.ts`、`src/i18n/zh-tw.ts`（`tray.show`、`tray.quit`、`settings.closeToTray`、`settings.closeToTrayDesc` 三语文案）；`src/components/SettingsPage.test.ts`（新增托盘设置行契约）、`src/lib/appSettingPersistence.test.ts`（设置字面量补字段）。
+- 交互约定：macOS 菜单栏左键单击直接弹菜单（与参考截图一致，菜单首项为「显示窗口」）；Windows 托盘左键单击显示窗口、右键弹菜单。
+- 门禁：`pnpm run typecheck` 通过；`pnpm exec vitest run` 145 文件 / 1429 项通过；`cargo check --manifest-path src-tauri/Cargo.toml -p keencode-desktop` 通过；`cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib` 641 项通过（含 `tray` 3 项）；`cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib --all-targets` 对本次改动无告警。
+- 基线：`d697356559dc1b8a24a08625719c23ab3ee53f97`。工作区并发 WIP 较多，基线取「当前工作区 `src/` 副本 + 仅移除本次新增的设置行（`closeToTray` props 声明、解构与 `settings-anchor-close-to-tray` 行）」，只隔离本次可见差异。基线 `SettingsPage.tsx` SHA-256 `08bad97540439dd848da46247745fb4c4e17ea6ac1718c681ac8bb225efc2efa`，当前 `552512cb817b7cdb0687ddeaa56f875f081910d8a9f771a8f158d3e33f951786`；`tray.rs` `c3a0c1739de5003ea8ae645b5d80906e6be0756635e461ac48253ca6c9956afd`；`useTrayMenu.ts` `d4798f3492f25331fbde01bb9e8a4ca45b8a8844c73ddde14b4cf56548e67343`；`tray-macos.png` `ecd0d69abd94b2275cfa24e50f9ee446b9d51959ffae05daca45f42589ff38d5`；`tray-windows.png` `421cd58709e02801a5881d20599d19b5a539236a4559f44b235dd2a5cfc0c648`。
+- 夹具：`output/playwright/tray-20260917/`。`baseline/` 为当前工作树 `src/` 副本并仅还原新增设置行，`current/src` 符号链接指向工作树；两变体共用 `node_modules`、使用独立 `cacheDir`。`QA_VARIANT=baseline ../../../node_modules/.bin/vite --config vite.config.mts` 与 `QA_VARIANT=current ...` 分别起 `http://127.0.0.1:14421/`、`http://127.0.0.1:14422/`；`node shoot.mjs > geometry.json` 采集几何，`python3 compare.py` 比对。夹具渲染真实 `SettingsPage` 的「通用」分区与合成设置值，不调用模型、不写用户数据。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，1280×900，deviceScaleFactor=1。
+- 几何（baseline→current）：新增行 `#settings-anchor-close-to-tray` 位于 `y=369.19`、`912×79`、开关 `checked`（基线不存在，`trayRowCount` 0→1）；其上方 `#settings-anchor-keep-awake`（278,290.19,912×79）与基线完全相同；其下方 `#settings-anchor-background-agent-limit` 由 `y=369.19` 下移到 `y=448.19`，后续各行整体下移 79px，行高与宽度不变。
+- 像素：RGB 任一通道差值 >16 计入，未掩码。差异 40755/1152000（3.53776%），范围 `[278,389,1190,900)`，即新增行控件与该行下方整体下移的区域；新增行以上区域逐像素一致。两页 Console 均 0 error、0 warning。
+- 未验收：夹具为浏览器组件渲染，不替代原生 Tauri WebView 实机验收；未在 macOS 实机确认「关闭红灯 → 窗口隐藏且 Dock 图标消失 → 点菜单栏图标恢复窗口」，未在 Windows 实机确认「左键单击显示窗口 / 右键弹菜单」；Rust 侧非 macOS 分支（Windows 托盘点击事件、`menu_text` 的 `&` 转义）本机无法编译验证，需由 Windows CI 或实机覆盖。
+
+---
+
 # 2026-09-17 管理模型默认选中该对话供应商 / 移除响应等待超时设置
 
 - 需求：1) 对话框模型菜单点击「管理模型」时，模型设置页默认选中该对话当前使用的供应商（会话内切换的模型可能不属于全局活跃供应商）；2) 移除供应商表单的「响应等待超时」设置，后端固定默认 300 秒。
