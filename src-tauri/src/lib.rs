@@ -30,6 +30,7 @@ mod session_commands;
 mod storage;
 mod task_notifications;
 mod terminal;
+mod tray;
 mod workspace;
 
 use crate::agent_runtime::AgentRuntime;
@@ -515,6 +516,14 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                         window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
                 }
             }
+            // 托盘图标常驻；创建失败不阻断启动，仅记录诊断。
+            if let Err(error) = tray::install(app.handle()) {
+                diagnostics.log(
+                    "warn",
+                    "startup.tray",
+                    format!("创建系统托盘图标失败，应用继续启动：{error}"),
+                );
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -616,6 +625,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::git_show_file,
             workspace::git_commit,
             workspace::git_push,
+            tray::tray_set_menu,
+            tray::app_close_window,
             terminal::terminal_create,
             terminal::terminal_shells_list,
             terminal::terminal_write,
@@ -626,15 +637,24 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
 
 /// 原生退出事件始终经过同一个清理与放行入口。
 fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
-    if let tauri::RunEvent::ExitRequested { api, .. } = event {
-        let exit_state = app.state::<app_exit::ExitState>();
-        if !exit_state.is_approved() {
-            api.prevent_exit();
-            let _ = app_exit::request_exit(app);
-        } else {
-            let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
-            app_exit::run_approved_shutdown(&runtime);
+    match event {
+        tauri::RunEvent::ExitRequested { api, .. } => {
+            let exit_state = app.state::<app_exit::ExitState>();
+            if !exit_state.is_approved() {
+                api.prevent_exit();
+                // 需要用户确认时先恢复窗口，否则确认对话框在托盘常驻状态下不可见。
+                if matches!(app_exit::request_exit(app), Ok(active_count) if active_count > 0) {
+                    tray::show_main_window(app);
+                }
+            } else {
+                let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
+                app_exit::run_approved_shutdown(&runtime);
+            }
         }
+        #[cfg(target_os = "macos")]
+        // Dock 图标点击等重开请求同样恢复主窗口。
+        tauri::RunEvent::Reopen { .. } => tray::show_main_window(app),
+        _ => {}
     }
 }
 

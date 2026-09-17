@@ -105,6 +105,8 @@ pub struct AppSettings {
     pub notification_sound: bool,
     /// 是否阻止系统因用户空闲自动进入睡眠。
     pub keep_computer_awake: bool,
+    /// 关闭主窗口时是隐藏到系统托盘常驻，还是直接退出应用。
+    pub close_to_tray: bool,
     /// 所有对话共享的设备级后台 Agent 并发上限。
     pub background_agent_limit: u16,
     /// 内置终端使用的 CSS 字体族列表。
@@ -183,6 +185,7 @@ impl AppSettings {
             show_thinking_process: true,
             notification_sound: true,
             keep_computer_awake: true,
+            close_to_tray: true,
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_shell: TerminalShell::Auto,
@@ -276,6 +279,9 @@ pub struct AppSettingsPatch {
     /// 更新阻止空闲睡眠开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub keep_computer_awake: Option<bool>,
+    /// 更新关闭主窗口时隐藏到系统托盘还是退出应用。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub close_to_tray: Option<bool>,
     /// 更新所有对话共享的设备级后台 Agent 并发上限。
     #[serde(default, deserialize_with = "deserialize_background_agent_limit")]
     pub background_agent_limit: Option<u16>,
@@ -450,6 +456,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.keep_computer_awake {
         settings.keep_computer_awake = value;
+    }
+    if let Some(value) = patch.close_to_tray {
+        settings.close_to_tray = value;
     }
     if let Some(value) = patch.background_agent_limit {
         settings.background_agent_limit = value;
