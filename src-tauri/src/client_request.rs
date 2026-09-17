@@ -22,11 +22,42 @@ pub trait ClientRequestSink: Send + Sync {
     fn send_client_request(&self, request: AcpClientRequestFrame) -> ClientRequestFuture<'_>;
 }
 
-impl ClientRequestSink for SessionDeliverySender {
-    /// 把请求交给与 Session 更新共享顺序的唯一桌面投递泵。
+/// 在每次发送时解析 Session 当前活跃世代的 Client Request 出口。
+///
+/// 工具表在 Turn 装配时冻结并跨整个 Turn 复用，而 Session 重载会替换投递世代并关闭旧世代。
+/// 因此一次性交互工具（例如 AskUser）不能缓存装配时的世代句柄，否则会向已关闭的 FIFO 投递。
+/// 这里与实时事件泵保持同一契约：只持有装配根弱引用，发送瞬间再解析当时的世代。
+#[derive(Clone)]
+pub(crate) struct SessionDeliverySink {
+    /// 持有投递世代注册表的装配根；Runtime 已回收时视为不可投递。
+    runtime: Weak<AgentRuntime>,
+    /// 该出口唯一允许投递的 Session。
+    session_id: String,
+}
+
+impl SessionDeliverySink {
+    /// 使用装配根弱引用和固定 Session 创建出口。
+    pub(crate) fn new(runtime: Weak<AgentRuntime>, session_id: String) -> Self {
+        Self {
+            runtime,
+            session_id,
+        }
+    }
+}
+
+impl ClientRequestSink for SessionDeliverySink {
+    /// 发送前解析当时活跃的投递世代，避免写入已经被替换的旧 FIFO。
     fn send_client_request(&self, request: AcpClientRequestFrame) -> ClientRequestFuture<'_> {
+        let runtime = self.runtime.clone();
+        let session_id = self.session_id.clone();
         Box::pin(async move {
-            SessionDeliverySender::send_client_request(self, request)
+            let runtime = runtime
+                .upgrade()
+                .ok_or(ClientRequestBridgeError::DeliveryUnavailable)?;
+            let delivery = runtime
+                .session_delivery(&session_id)
+                .map_err(|_| ClientRequestBridgeError::DeliveryUnavailable)?;
+            SessionDeliverySender::send_client_request(&delivery, request)
                 .await
                 .map_err(|_| ClientRequestBridgeError::DeliveryUnavailable)
         })

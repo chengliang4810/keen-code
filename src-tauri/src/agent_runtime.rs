@@ -14,7 +14,7 @@ mod tool_projection;
 use crate::{
     analytics::{AnalyticsRecorder, ModelRetryNotice},
     app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
-    client_request::ClientRequestDisplayGate,
+    client_request::{ClientRequestDisplayGate, SessionDeliverySink},
     elicitation::ElicitationCoordinator,
     providers, storage,
 };
@@ -5971,7 +5971,6 @@ impl AgentRuntime {
         plan_guard: PlanGuard,
         capabilities: AgentCapabilities,
     ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
-        let delivery = self.session_delivery(&execution.session_id)?;
         let project_root = execution.project_root.clone();
         let output_directory = self
             .session_storage_directory(&execution.session_id)?
@@ -6004,11 +6003,16 @@ impl AgentRuntime {
         .map_err(|error| runtime_operation_failed(error))?;
         // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
         if self.elicitations.supports_form() {
+            // 工具表跨整个 Turn 复用，而 Session 重载会替换投递世代；
+            // 因此问答出口只绑定装配根弱引用，在发送瞬间解析当时的世代。
             let question_handler = Arc::new(
                 self.elicitations.handler(
                     AgentSessionId::new(execution.session_id.clone())
                         .map_err(|_| AgentRuntimeError::InvalidSession)?,
-                    Arc::new(delivery.clone()),
+                    Arc::new(SessionDeliverySink::new(
+                        execution.owner.clone(),
+                        execution.session_id.clone(),
+                    )),
                 ),
             );
             tools
@@ -10367,6 +10371,7 @@ mod tests {
         validate_recovered_mailbox_claim, wait_for_turn_started,
     };
     use crate::analytics::ModelRetryNotice;
+    use crate::client_request::{ClientRequestSink, SessionDeliverySink};
     use keencode_acp::schema::{
         ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
         ElicitationCapabilities, ElicitationFormCapabilities, ElicitationFormMode,
@@ -20693,6 +20698,64 @@ mod tests {
         assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
         assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
         assert_eq!(values[2]["envelope"]["deliverySequence"], 1);
+    }
+
+    /// 会话重载替换投递世代后，装配期问答出口必须在发送瞬间解析新世代而不是已关闭的旧 FIFO。
+    #[tokio::test]
+    async fn client_request_sink_resolves_current_generation_at_send_time() {
+        let directory = tempfile::tempdir().expect("应创建测试目录");
+        let emitter = RecordingEmitter::successful();
+        let runtime = Arc::new(
+            AgentRuntime::new(directory.path(), emitter.clone()).expect("测试 Runtime 应创建"),
+        );
+        // 模拟 Turn 装配期冻结的问答出口：创建时尚未建立任何投递世代。
+        let sink = SessionDeliverySink::new(Arc::downgrade(&runtime), "session-a".to_owned());
+        let stale = runtime
+            .attach_session_delivery("session-a")
+            .expect("首个世代应建立");
+        runtime
+            .reset_session_delivery("session-a")
+            .await
+            .expect("Session 重载应替换投递世代");
+
+        // 装配期捕获的世代句柄在重载后必须失效，这正是本次修复要绕开的旧行为。
+        // 旧世代的关闭与 pump 退出之间存在极短竞态，因此只用有界观察确认它不再成功投递。
+        let stale_send = tokio::time::timeout(
+            Duration::from_secs(1),
+            stale.send_client_request(client_request()),
+        )
+        .await;
+        assert!(
+            !matches!(stale_send, Ok(Ok(()))),
+            "已被替换的旧世代不得再接受问答投递"
+        );
+        sink.send_client_request(client_request())
+            .await
+            .expect("问答出口应投递到当时活跃的世代");
+        let values = emitter.snapshot();
+        let last = values.last().expect("问答出口必须产生一次投递");
+        assert_eq!(last["type"], "client_request");
+        assert_eq!(last["request"]["jsonrpc"], "2.0");
+    }
+
+    /// 装配根已回收时问答出口不得再触碰任何投递世代。
+    #[tokio::test]
+    async fn client_request_sink_reports_unavailable_without_runtime() {
+        let directory = tempfile::tempdir().expect("应创建测试目录");
+        let emitter = RecordingEmitter::successful();
+        let sink = {
+            let runtime = Arc::new(
+                AgentRuntime::new(directory.path(), emitter).expect("测试 Runtime 应创建"),
+            );
+            runtime
+                .attach_session_delivery("session-a")
+                .expect("首个世代应建立");
+            SessionDeliverySink::new(Arc::downgrade(&runtime), "session-a".to_owned())
+        };
+        assert!(
+            sink.send_client_request(client_request()).await.is_err(),
+            "装配根已回收时问答必须报告不可投递"
+        );
     }
 
     /// Lag 信号后的旧世代在途事件不得污染新世代 replay，恢复门还必须保留较新的 live。
