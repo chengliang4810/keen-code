@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import * as api from "@/lib/api";
 import { pathExt } from "@/lib/attachments";
+import { copyTextInGesture } from "@/lib/clipboardWrite";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
   isHttpUrl,
@@ -246,8 +247,11 @@ export function FilePathCard({
 
   const copy = async () => {
     try {
-      const abs = resolvedAbs || (await resolveAbsolute());
-      await navigator.clipboard.writeText(abs || path);
+      // 解析真实路径可能要走 IPC；把等待放进手势内的写入，避免手势过期被 WebKit 拒绝。
+      await copyTextInGesture(async () => {
+        if (resolvedAbs) return resolvedAbs;
+        return (await resolveAbsolute()) ?? path;
+      });
     } catch {
       /* ignore */
     }

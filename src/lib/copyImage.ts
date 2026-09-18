@@ -40,31 +40,58 @@ async function blobToPng(blob: Blob): Promise<Blob> {
 }
 
 /**
- * Copy image at `src` (viewable URL) to clipboard as PNG.
+ * 在用户手势的同步路径内发起图片写入。
+ *
+ * `resolveSrc` 在调用时同步执行，其等待被放进 ClipboardItem 的载荷：先 `await`
+ * 解析地址再写入，手势已经过期，WebKit 会拒绝 clipboard.write。
+ *
+ * `releaseSrc` 在载荷用完地址后立即调用，让临时资源（如 blob URL）的寿命与
+ * 载荷一致，无需调用方额外协调写入失败的情况。
  */
-export async function copyImageFromSrc(src: string): Promise<CopyImageResult> {
+async function writeImageInGesture(
+  resolveSrc: () => Promise<string | null>,
+  releaseSrc?: (src: string) => void,
+): Promise<CopyImageResult> {
   if (!canWriteImage()) return { ok: false, reason: "unsupported" };
 
   let reason: "fetch" | "encode" | "write" = "write";
-  // WebKit requires write() during the click; ClipboardItem may receive the pending data.
-  const png = (async () => {
-    let blob: Blob;
+  // ClipboardItem may receive the pending data — write() must run during the click.
+  const png = (async (): Promise<Blob> => {
+    let src: string | null = null;
     try {
-      const res = await fetch(src);
-      if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
-      blob = await res.blob();
-    } catch (error) {
-      reason = "fetch";
-      throw error;
-    }
+      try {
+        src = await resolveSrc();
+      } catch (error) {
+        reason = "fetch";
+        throw error;
+      }
+      if (!src) {
+        reason = "fetch";
+        throw new Error("image source unavailable");
+      }
 
-    try {
-      return await blobToPng(blob);
-    } catch (error) {
-      reason = "encode";
-      throw error;
+      let blob: Blob;
+      try {
+        const res = await fetch(src);
+        if (!res.ok) throw new Error(`image fetch failed: ${res.status}`);
+        blob = await res.blob();
+      } catch (error) {
+        reason = "fetch";
+        throw error;
+      }
+
+      try {
+        return await blobToPng(blob);
+      } catch (error) {
+        reason = "encode";
+        throw error;
+      }
+    } finally {
+      if (src) releaseSrc?.(src);
     }
   })();
+  // write() 可能在载荷就绪前失败，避免派生 Promise 留下未处理的拒绝。
+  void png.catch(() => {});
 
   try {
     await navigator.clipboard.write([
@@ -77,16 +104,22 @@ export async function copyImageFromSrc(src: string): Promise<CopyImageResult> {
 }
 
 /**
+ * Copy image at `src` (viewable URL) to clipboard as PNG.
+ */
+export async function copyImageFromSrc(src: string): Promise<CopyImageResult> {
+  return writeImageInGesture(async () => src);
+}
+
+/**
  * Copy image from a local absolute path (or already-viewable URL).
+ *
+ * 本地路径解析要走 IPC 读文件，解析等待必须发生在手势内的写入载荷里。
  */
 export async function copyImageFromPath(
   pathOrUrl: string,
 ): Promise<CopyImageResult> {
-  const src = await resolveImageSrc(pathOrUrl);
-  if (!src) return { ok: false, reason: "fetch" };
-  try {
-    return await copyImageFromSrc(src);
-  } finally {
-    releaseImageSrc(src);
-  }
+  return writeImageInGesture(
+    () => resolveImageSrc(pathOrUrl),
+    releaseImageSrc,
+  );
 }

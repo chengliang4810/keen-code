@@ -88,4 +88,14 @@ describe("FilePathCard", () => {
     );
     expect(source).not.toContain("Still open with original token");
   });
+
+  it("复制路径把解析等待放进手势内的写入，避免 WebKit 拒绝剪贴板访问", () => {
+    const source = readFileSync(
+      new URL("./FilePathCard.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("copyTextInGesture(");
+    expect(source).not.toContain("navigator.clipboard.writeText");
+  });
 });

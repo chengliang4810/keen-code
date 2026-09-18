@@ -17,10 +17,9 @@ import Zoom from "yet-another-react-lightbox/plugins/zoom";
 import "yet-another-react-lightbox/styles.css";
 import {
   releaseImageSrc,
-  resolveImageSrc,
   resolveImageSrcs,
 } from "@/lib/imageSrc";
-import { copyImageFromSrc } from "@/lib/copyImage";
+import { copyImageFromPath, copyImageFromSrc } from "@/lib/copyImage";
 import { createT, type Locale } from "@/i18n";
 
 export interface ImageSlideInput {
@@ -119,14 +118,9 @@ export function ImageViewerProvider({
     [],
   );
 
+  /** 本地路径解析要走 IPC，交给 copyImageFromPath 放进手势内的写入载荷。 */
   const copyImage = useCallback(async (pathOrUrl: string) => {
-    const src = await resolveImageSrc(pathOrUrl);
-    if (!src) return false;
-    try {
-      return (await copyImageFromSrc(src)).ok;
-    } finally {
-      releaseImageSrc(src);
-    }
+    return (await copyImageFromPath(pathOrUrl)).ok;
   }, []);
 
   const api = useMemo<ImageViewerApi>(

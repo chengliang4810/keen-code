@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
+import { copyTextInGesture } from "@/lib/clipboardWrite";
 import { createT, type Locale } from "@/i18n";
 import { formatTokenCount } from "@/lib/contextUsage";
 import { localizeUiError } from "@/lib/session";
