@@ -2997,7 +2997,7 @@ async fn structured_native_live_sink_preserves_order_for_replay() {
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -3062,7 +3062,7 @@ async fn structured_emulated_live_sink_preserves_tool_event_order_for_replay() {
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -3157,7 +3157,7 @@ async fn structured_native_live_sink_drops_invalid_candidate_before_correction()
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -3207,7 +3207,7 @@ async fn structured_native_live_sink_drops_invalid_candidate_telemetry() {
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
@@ -3338,7 +3338,7 @@ async fn structured_emulated_live_sink_hides_invalid_result_tool_call() {
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<_>>();
     assert!(matches!(
