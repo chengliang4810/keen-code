@@ -2723,7 +2723,12 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
                     steer.sequence, steer.content
                 ));
             }
-            messages.push(Message::text(MessageRole::User, body));
+            // marker 与正文必须留在模型可见的 User 消息里，但整条消息是内部消费
+            // 协议，不能作为用户发言展示。mailbox 分支靠 Developer 角色天然隐藏，
+            // steer 受恢复校验约束必须是 User，只能靠 is_meta 保持投影一致。
+            let mut message = Message::text(MessageRole::User, body);
+            message.is_meta = true;
+            messages.push(message);
         }
         let mut receipts = Vec::with_capacity(2);
         if let Some(through_sequence) = mailbox_through_sequence {
@@ -12943,6 +12948,134 @@ mod tests {
             .len(),
             2
         );
+    }
+
+    /// 用户 Steer 信封是内部消费协议：模型必须看到 marker 水位与引导正文，但它
+    /// 不得作为用户发言出现在对话投影里（回归：首行 JSON 曾原样渲染成用户气泡）。
+    #[tokio::test(flavor = "current_thread")]
+    async fn user_steer_envelope_stays_meta_and_out_of_conversation_projection() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "steer-envelope-meta")
+            .expect("测试 Session 应创建");
+        let collaboration = install_test_collaboration_runtime(&runtime, &session, project.path());
+        let session_id = session.session_id().as_str().to_owned();
+        let root_agent_id = keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效");
+        let turn_id =
+            keencode_agent::TurnId::new("turn-steer-envelope-meta").expect("测试 Turn 标识应有效");
+        collaboration
+            .coordinator
+            .begin_root_turn_with_id(
+                &root_agent_id,
+                turn_id.clone(),
+                "steer 信封投影",
+                PlanGuard::inactive(),
+            )
+            .expect("根 Turn 应启动");
+        let steer = collaboration
+            .coordinator
+            .steer_agent(&root_agent_id, &turn_id, "追加引导正文")
+            .expect("用户 steer 应排队");
+
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [completed_reply("引导已收到")],
+        ));
+        let input = ModelMessage::text(MessageRole::User, "steer 信封投影");
+        let request = TurnRequest::new(
+            keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session 标识应有效"),
+            turn_id.clone(),
+            root_agent_id.clone(),
+            "test-model",
+            vec![input.clone()],
+            PlanGuard::inactive(),
+        );
+        let result = session
+            .bind_agent_runner(
+                AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+                    .with_dynamic_input_source(Arc::new(super::RuntimeDynamicInputSource {
+                        session_id: session_id.clone(),
+                        store: Arc::clone(&collaboration.store),
+                        coordinator: Arc::clone(&collaboration.coordinator),
+                        session: session.clone(),
+                    })),
+            )
+            .run_turn(RuntimeTurnRequest::root(
+                request,
+                vec![input],
+                root_turn_summary("steer 信封投影", None, false),
+            ))
+            .await
+            .expect("带 steer 的 Turn 应完成");
+        assert!(
+            result.is_success(),
+            "带 steer 的 Turn 失败：{:?}",
+            result.error
+        );
+
+        let requests = provider.requests().expect("Provider 请求应读取");
+        assert_eq!(requests.len(), 1, "带 steer 的 Turn 只应发起一次模型请求");
+        assert!(
+            requests[0].messages.iter().any(|message| {
+                message.content.iter().any(|block| {
+                    matches!(
+                        block,
+                        keencode_model::ContentBlock::Text { text }
+                            if text.contains("追加引导正文")
+                                && text.contains(&format!("[sequence={}]", steer.sequence))
+                    )
+                })
+            }),
+            "模型请求必须保留 steer 信封的 marker 水位与引导正文"
+        );
+
+        let stored = session
+            .transcript()
+            .expect("权威 Transcript 应读取")
+            .into_iter()
+            .find(|message| {
+                message.content.iter().any(|part| {
+                    matches!(
+                        part,
+                        keencode_resources::MessagePart::Text { text }
+                            if text.contains("追加引导正文")
+                    )
+                })
+            })
+            .expect("steer 信封应进入权威 Transcript");
+        assert!(
+            stored.is_meta,
+            "steer 信封必须带 is_meta，否则会被投影成用户发言"
+        );
+
+        let state = session.snapshot().expect("Session 快照应读取").state;
+        let record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("steer-envelope-meta").expect("EventId 应有效"),
+            session: state.session_id.clone(),
+            sequence: 2,
+            time_unix_ms: 2,
+            event: SessionEvent::MessageAdded {
+                message: stored.clone(),
+            },
+        };
+        for mode in [
+            AuthoritativeProjectionMode::Live,
+            AuthoritativeProjectionMode::Replay,
+        ] {
+            assert!(
+                map_authoritative_record(&session, &state, &record, mode)
+                    .expect("steer 信封应可投影")
+                    .is_empty(),
+                "steer 信封不得出现在对话界面投影中（{mode:?}）"
+            );
+        }
     }
 
     /// 后续根 Turn 启动前必须在 live Coordinator 中完成动态 claim 对账，避免重复消费。
