@@ -4379,7 +4379,7 @@ pub struct AgentRuntime {
     /// 每个 Session 串行化 Turn 启动屏障，避免 Accepted 先于权威 TurnStarted。
     turn_start_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     /// 每个 Session 串行化标题付费请求；关闭投递时移除，容量只随打开 Session 增长。
-    title_generation_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    title_generation_gates: Mutex<HashMap<String, Arc<TitleGeneration>>>,
     /// 按规范项目根隔离、仅在完整构建成功后原子发布的扩展候选。
     extension_candidates: RwLock<HashMap<PathBuf, Arc<RuntimeExtensionCandidate>>>,
     /// 串行化项目候选发布与 MCP 撤销，避免旧传播覆盖新候选状态。
@@ -4396,6 +4396,12 @@ pub struct AgentRuntime {
     shutdown_error: Mutex<Option<AgentRuntimeError>>,
     /// 防止并发 shutdown 在首次调用尚未记录失败结果时提前返回成功。
     shutdown_gate: AsyncMutex<()>,
+}
+
+#[derive(Default)]
+struct TitleGeneration {
+    gate: tokio::sync::Mutex<()>,
+    cancellation: TurnCancellation,
 }
 
 impl AgentRuntime {
@@ -4970,12 +4976,10 @@ impl AgentRuntime {
         if input.trim().is_empty() {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         let input_sha256 = title_input_sha256(input);
         let gate = {
+            let reset_gate = self.delivery_reset_gate(session_id)?;
+            let _reset_guard = reset_gate.lock().await;
             let mut gates = self
                 .title_generation_gates
                 .lock()
@@ -4983,10 +4987,17 @@ impl AgentRuntime {
             Arc::clone(
                 gates
                     .entry(session_id.to_owned())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+                    .or_insert_with(|| Arc::new(TitleGeneration::default())),
             )
         };
-        let _gate = gate.lock().await;
+        let _gate = gate.gate.lock().await;
+        if gate.cancellation.is_cancelled() {
+            return Err(AgentRuntimeError::SessionUnavailable);
+        }
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         if let Some(title) = session
             .cached_generated_title(operation_id, &input_sha256)
             .map_err(|error| runtime_operation_failed(error))?
@@ -4997,17 +5008,19 @@ impl AgentRuntime {
             .snapshot()
             .map_err(|error| runtime_operation_failed(error))?;
         let provider = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
-        let title = self
-            .generate_isolated_with_provider(
+        let title = tokio::select! {
+            biased;
+            _ = gate.cancellation.cancelled() => return Err(AgentRuntimeError::SessionUnavailable),
+            result = self.generate_isolated_with_provider(
                 provider,
+                session_id,
                 TITLE_SYSTEM_PROMPT,
                 input,
                 TITLE_GENERATION_TIMEOUT_SECS,
                 "title",
                 None,
-            )
-            .await
-            .map_err(|error| runtime_operation_failed(error))?;
+            ) => result.map_err(runtime_operation_failed)?,
+        };
         let title = validate_generated_title(&title)?;
         session
             .cache_generated_title(operation_id, &input_sha256, title)
@@ -6672,14 +6685,24 @@ impl AgentRuntime {
         validate_session_id(session_id)?;
         let reset_gate = self.delivery_reset_gate(session_id)?;
         let _reset_guard = reset_gate.lock().await;
+        self.close_session_delivery_locked(session_id).await
+    }
+
+    /// 调用方持有 delivery_reset_gate，完整关闭时将其延续到 Runtime lease 释放。
+    async fn close_session_delivery_locked(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
         self.turn_start_gates
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .remove(session_id);
-        self.title_generation_gates
+        let title_generation = self.title_generation_gates
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .remove(session_id);
+        if let Some(title_generation) = title_generation {
+            title_generation.cancellation.cancel();
+            // 等待模型 future 退出及 Session 句柄释放，不能靠调度重试等待网络超时。
+            let _title_guard = title_generation.gate.lock().await;
+        }
         if let Some((_, cancel)) = self
             .live_pumps
             .lock()
@@ -6763,7 +6786,9 @@ impl AgentRuntime {
         };
         drop(collaboration);
         self.close_session_mcp(session_id).await;
-        if let Err(error) = self.close_session_delivery(session_id).await {
+        let reset_gate = self.delivery_reset_gate(session_id)?;
+        let _reset_guard = reset_gate.lock().await;
+        if let Err(error) = self.close_session_delivery_locked(session_id).await {
             close_error.get_or_insert(error);
         }
         match self.runtime_manager.close(session_id.to_owned()) {
@@ -6842,7 +6867,9 @@ impl AgentRuntime {
             drop(collaboration);
         }
         self.close_session_mcp(session_id).await;
-        if let Err(error) = self.close_session_delivery(session_id).await {
+        let reset_gate = self.delivery_reset_gate(session_id)?;
+        let _reset_guard = reset_gate.lock().await;
+        if let Err(error) = self.close_session_delivery_locked(session_id).await {
             shutdown_error.get_or_insert(error);
         }
         match self.runtime_manager.close(session_id.to_owned()) {
@@ -19299,6 +19326,54 @@ mod tests {
         assert_eq!(
             validate_generated_title(&"标".repeat(GENERATED_TITLE_MAX_CHARS + 1)),
             Err(AgentRuntimeError::RuntimeOperationFailed)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn title_generation_close_releases_lease_without_caching_stale_result() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, gate, server) =
+            spawn_gated_buffered_responses_server("旧标题", 1, "blocked title");
+        let runtime =
+            runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "title-close-session")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        let title_task = {
+            let runtime = Arc::clone(&runtime);
+            let session_id = session_id.clone();
+            tokio::spawn(async move {
+                runtime.generate_title(&session_id, "blocked-title", "blocked title").await
+            })
+        };
+        gate.wait_for_requests(1).unwrap();
+        let closed = tokio::time::timeout(
+            Duration::from_secs(2),
+            runtime.close_session(&session_id),
+        ).await;
+        // 在放行 HTTP 响应之前重开，确保关闭释放锁不依赖供应商返回。
+        let reopened = runtime.open_or_create_session(
+            project.path(), Some(&session_id), "title-reopen-session",
+        );
+        let cancelled_before_response = title_task.is_finished();
+        gate.release();
+        let title_result = tokio::time::timeout(Duration::from_secs(5), title_task)
+            .await.unwrap().unwrap();
+        // 取消 HTTP 请求后服务端写响应可能收到 BrokenPipe，但线程必须回收。
+        let _response_result = server.join().unwrap();
+        closed.expect("关闭不能等待标题网络超时").expect("关闭应成功");
+        let reopened = reopened.expect("标题未返回时也必须释放 Runtime lease");
+        assert!(cancelled_before_response, "关闭应等待标题任务取消并释放句柄");
+        assert_eq!(title_result, Err(AgentRuntimeError::SessionUnavailable));
+        assert_eq!(
+            reopened
+                .cached_generated_title("blocked-title", &super::title_input_sha256("blocked title"))
+                .unwrap(),
+            None,
+            "旧标题不能写入重开后的会话"
         );
     }
 
