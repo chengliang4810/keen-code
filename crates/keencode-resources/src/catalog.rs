@@ -135,7 +135,30 @@ impl StoredSessionMetadata {
 }
 
 /// 返回最近一条根用户 Turn 的起点时间；子 Agent 续跑不代表新的用户消息。
+///
+/// turns 只插入不删除，且任何 Turn 插入都伴随权威事件追加（last_sequence
+/// 递增）；同一 (session, last_sequence) 的扫描结果恒定。元数据索引在每批
+/// journal append 后都会重写，这里按水位记忆化，避免每次全量扫描 turns。
 fn last_user_message_at(state: &SessionState) -> u64 {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MEMO: OnceLock<Mutex<HashMap<String, (u64, u64)>>> = OnceLock::new();
+    let memo = MEMO.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut memo) = memo.lock() else {
+        return scan_last_user_message_at(state);
+    };
+    let key = state.session_id.as_str().to_owned();
+    if let Some(&(memo_sequence, memo_value)) = memo.get(&key) {
+        if memo_sequence == state.last_sequence {
+            return memo_value;
+        }
+    }
+    let value = scan_last_user_message_at(state);
+    memo.insert(key, (state.last_sequence, value));
+    value
+}
+
+fn scan_last_user_message_at(state: &SessionState) -> u64 {
     state
         .turns
         .values()
