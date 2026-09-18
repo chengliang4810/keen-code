@@ -2,7 +2,7 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { readSource } from "../../test-utils/readCssSource";
 import type { ChatMessage } from "@/lib/session";
-import { ConversationThread } from "./ConversationThread";
+import { ConversationThread, formatRetryCountdown } from "./ConversationThread";
 
 /** 测试用附件操作文案，满足 ConversationThread 的完整输入契约。 */
 const attachLabels = {
@@ -124,24 +124,6 @@ describe("ConversationThread 思考耗时", () => {
     expect(render("failed")).toContain("上下文压缩失败");
   });
 
-  it("水位行以淡色提示渲染用量与阈值，复用通知行形态", () => {
-    const html = renderToString(
-      <ConversationThread
-        locale="zh"
-        messages={[{
-          id: "assistant-water", role: "tool", content: "context_water_level|72|70",
-          marker: "context_water_level",
-        }]}
-        sessionState="ready"
-        attachLabels={attachLabels}
-      />,
-    );
-    expect(html).toContain('data-testid="context-water-level"');
-    expect(html).toContain("上下文用量 72%");
-    expect(html).toContain("70%");
-    expect(html).toContain('class="lobe-chat-compact"');
-  });
-
   it("相邻的已查看图片共用工具行并默认折叠预览", () => {
     const html = renderToString(<ConversationThread locale="zh" sessionState="ready" attachLabels={attachLabels}
       messages={[{ id: "images", role: "assistant", content: "", segments: [1, 2].map((n) => ({
@@ -192,6 +174,26 @@ describe("ConversationThread 思考耗时", () => {
     );
   });
 
+  it("将供应商限额和恢复时间显示为正文而非仅放在提示属性中", () => {
+    const reason = "已达到 5 小时的使用上限。您的限额将在 2026-09-17 19:50:12 重置。";
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{ id: "quota-user", role: "user", content: "继续" }]}
+        sessionState="streaming"
+        retryStatus={{ attempt: 1, maxAttempts: 10, delayMs: 3000, reason }}
+        attachLabels={attachLabels}
+      />,
+    );
+    const visibleText = html.replace(/<[^>]*>/g, "");
+    expect(visibleText).toContain(reason);
+    const css = readSource(new URL("./lobe-chat.css", import.meta.url));
+    const labelRule = css.match(/\.lobe-chat-retry-status__label\s*\{([^}]*)\}/)?.[1];
+    expect(labelRule).toContain("white-space: normal");
+    expect(labelRule).toContain("overflow-wrap: anywhere");
+    expect(labelRule).not.toContain("overflow: hidden");
+  });
+
   it("在当前回合展示下一次请求尝试并在恢复后隐藏", () => {
     const retrying = renderToString(
       <ConversationThread
@@ -216,7 +218,10 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(retrying).toContain("正在进行第 6/10 次请求尝试 · 0.8s");
+    // 倒计时单独标记 aria-hidden，避免实时区域每 100ms 变更被反复播报。
+    expect(retrying).toContain("正在进行第 6/10 次请求尝试");
+    expect(retrying).toContain("· 0.8s");
+    expect(retrying).toContain('<span aria-hidden="true"> · 0.8s</span>');
     expect(retrying).toContain('data-testid="chat-retry-status"');
     expect(retrying).toContain("服务商暂时不可用");
 
@@ -247,19 +252,36 @@ describe("ConversationThread 思考耗时", () => {
     expect(recovered).not.toContain("正在进行第 6/10 次请求尝试");
   });
 
+  it("把剩余重试等待格式化为一位小数秒，到期或非法值不显示", () => {
+    expect(formatRetryCountdown(3_000)).toBe("3.0s");
+    expect(formatRetryCountdown(2_950)).toBe("3.0s");
+    expect(formatRetryCountdown(1_240)).toBe("1.2s");
+    expect(formatRetryCountdown(100)).toBe("0.1s");
+    expect(formatRetryCountdown(0)).toBe("");
+    expect(formatRetryCountdown(-500)).toBe("");
+    expect(formatRetryCountdown(Number.NaN)).toBe("");
+  });
+
   it("恢复 Markdown 无序列表和有序列表的可见标记", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
-    expect(chatCss).toMatch(/\.chat-md ul\s*\{[^}]*list-style:\s*disc\s*;/s);
+    // WebKit 会把列表盒的 padding 区画进选区高亮，并给原生 ::marker 补出不透明
+    // 底块；缩进必须交给 margin，标记自绘且不可选中。
     expect(chatCss).toMatch(
-      /\.chat-md ol\s*\{[^}]*list-style:\s*decimal\s*;/s,
+      /\.chat-md ul,\s*\.chat-md ol\s*\{[^}]*margin:\s*0\.3em 0 0\.72em 1\.55em;[^}]*padding-left:\s*0;[^}]*list-style:\s*none;/s,
     );
-    expect(chatCss).toMatch(/--chat-prose-fs:\s*14px;/);
+    expect(chatCss).toMatch(
+      /\.chat-md ul > li::before\s*\{[^}]*content:\s*"\\2022"\s*;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md ol > li::before\s*\{[^}]*content:\s*counter\(list-item\)\s*"\.";/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md li::before\s*\{[^}]*-webkit-user-select:\s*none;[^}]*user-select:\s*none;/s,
+    );
+    expect(chatCss).toMatch(/--chat-prose-fs:\s*var\(--text-md\);/);
     expect(chatCss).toMatch(
       /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--text-primary\);/,
-    );
-    expect(chatCss).toMatch(
-      /\.chat-md li::marker\s*\{[^}]*color:\s*var\(--chat-prose-text\);/s,
     );
   });
 

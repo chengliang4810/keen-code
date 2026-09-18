@@ -137,6 +137,15 @@ function ContextCompactionNotice({
   );
 }
 
+/** 重试倒计时的刷新间隔；100ms 让一位小数的秒数连续变化。 */
+const RETRY_COUNTDOWN_TICK_MS = 100;
+
+/** 把剩余等待毫秒格式化为一位小数的秒文本；已到期或非法值返回空串。 */
+export function formatRetryCountdown(remainingMs: number): string {
+  if (!Number.isFinite(remainingMs) || remainingMs <= 0) return "";
+  return `${(remainingMs / 1000).toFixed(1)}s`;
+}
+
 /**
  * A retry is a transient part of the current turn, so keep it in the chat
  * timeline rather than the window chrome. The ACP event's attempt is the
@@ -149,28 +158,37 @@ function RetryStatus({
   locale: Locale;
   retryStatus?: ConversationRetryStatus | null;
 }) {
-  const label = retryStatus
-    ? (() => {
-        const tr = createT(locale);
-        const maxAttempts = Number.isFinite(retryStatus.maxAttempts)
-          ? Math.max(1, Math.floor(retryStatus.maxAttempts))
-          : 10;
-        const failedAttempt = Number.isFinite(retryStatus.attempt)
-          ? Math.max(0, Math.floor(retryStatus.attempt))
-          : 0;
-        const nextAttempt = Math.min(failedAttempt + 1, maxAttempts);
-        const attemptLabel = tr("chat.retryingAttempt", {
-          attempt: nextAttempt,
-          max: maxAttempts,
-        });
-        const delaySeconds = Math.max(0, retryStatus.delayMs) / 1000;
-        return delaySeconds > 0
-          ? `${attemptLabel} · ${Number(delaySeconds.toFixed(1))}s`
-          : attemptLabel;
-      })()
+  const delayMs = retryStatus ? Math.max(0, retryStatus.delayMs) : 0;
+  const failedAttempt = retryStatus && Number.isFinite(retryStatus.attempt)
+    ? Math.max(0, Math.floor(retryStatus.attempt))
+    : 0;
+  const [remainingMs, setRemainingMs] = useState(delayMs);
+
+  // 调用方按「失败序号 + 等待时长」重挂载本组件，初始值就是本次的完整等待；
+  // 挂载后按 100ms 刷新剩余时间，父组件重渲染不会重置倒计时。
+  useEffect(() => {
+    if (delayMs <= 0) return;
+    const deadline = Date.now() + delayMs;
+    const timer = window.setInterval(() => {
+      setRemainingMs(Math.max(0, deadline - Date.now()));
+    }, RETRY_COUNTDOWN_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [delayMs]);
+
+  const maxAttempts = retryStatus && Number.isFinite(retryStatus.maxAttempts)
+    ? Math.max(1, Math.floor(retryStatus.maxAttempts))
+    : 10;
+  const attemptLabel = retryStatus
+    ? createT(locale)("chat.retryingAttempt", {
+        attempt: Math.min(failedAttempt + 1, maxAttempts),
+        max: maxAttempts,
+      })
     : "";
+  const countdown = retryStatus ? formatRetryCountdown(remainingMs) : "";
   const reason = retryStatus?.reason.trim() ?? "";
 
+  // 实时区域的可访问名称只随重试事件变化；跳动的秒数单独标记 aria-hidden，
+  // 否则每 100ms 的内容变更会让屏幕阅读器持续播报倒计时。
   return (
     <div
       className="lobe-chat-retry-status"
@@ -178,11 +196,15 @@ function RetryStatus({
       role="status"
       aria-live="polite"
       aria-atomic="true"
-      aria-label={label ? (reason ? `${label}: ${reason}` : label) : undefined}
+      aria-label={attemptLabel ? (reason ? `${attemptLabel}: ${reason}` : attemptLabel) : undefined}
       title={reason || undefined}
     >
-      {label ? (
-        <span className="lobe-chat-retry-status__label">{label}</span>
+      {attemptLabel ? (
+        <span className="lobe-chat-retry-status__label">
+          {attemptLabel}
+          {countdown ? <span aria-hidden="true">{` · ${countdown}`}</span> : null}
+          {reason ? <><br />{reason}</> : null}
+        </span>
       ) : null}
     </div>
   );
@@ -1361,6 +1383,7 @@ export function ConversationThread({
 
           {/* Stable live region for the current turn's retry state. */}
           <RetryStatus
+            key={turnBusy && retryStatus ? `${retryStatus.attempt}:${retryStatus.delayMs}` : "idle"}
             locale={locale}
             retryStatus={turnBusy ? retryStatus : null}
           />
