@@ -422,7 +422,7 @@ const en = {
   "resources.browserAddressPlaceholder": "Enter a URL or a local file path",
   "resources.browserBadAddress": "Enter an http(s) address or a local file path.",
   "resources.browserDesktopOnly": "The built-in browser runs in the desktop app.",
-  "resources.browserNewTab": "New web tab",
+  "resources.browserNewTab": "New web page",
   "resources.web": "Web",
 
   // Catalog labels
@@ -1675,7 +1675,7 @@ const zh: Record<MessageKey, string> = {
   "resources.browserAddressPlaceholder": "输入网址或本地文件路径",
   "resources.browserBadAddress": "请输入 http(s) 网址或本地文件路径。",
   "resources.browserDesktopOnly": "内置浏览器在桌面应用中运行。",
-  "resources.browserNewTab": "新建网页标签",
+  "resources.browserNewTab": "新建网页",
   "resources.web": "网页",
 
   "effort.none": "关闭",

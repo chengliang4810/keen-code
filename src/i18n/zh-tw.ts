@@ -403,7 +403,7 @@ export const zhTW: Record<MessageKey, string> = {
   "resources.browserAddressPlaceholder": "輸入網址或本機檔案路徑",
   "resources.browserBadAddress": "請輸入 http(s) 網址或本機檔案路徑。",
   "resources.browserDesktopOnly": "內建瀏覽器在桌面應用程式中執行。",
-  "resources.browserNewTab": "新增網頁標籤",
+  "resources.browserNewTab": "新增網頁",
   "resources.web": "網頁",
 
   "effort.none": "關閉",
