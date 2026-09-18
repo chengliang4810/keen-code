@@ -39,8 +39,11 @@ const PROVIDER_CONFIG_VERSION: u32 = 1;
 const PROVIDER_EXPORT_SCHEMA: &str = "keencode/providers-export";
 
 /// KeenCode 持久化的自定义供应商记录。
+///
+/// 不设 `deny_unknown_fields`：磁盘配置按版本演进时会出现已移除字段，加载必须
+/// 忽略它们而不是整体失败。被忽略的字段由 {@link unknown_field_warnings} 记录。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ProviderRecord {
     /// 供应商稳定标识。
     id: String,
@@ -54,7 +57,7 @@ struct ProviderRecord {
     api_backend: String,
     /// 已保存的 API Key；None 表示该供应商无认证。
     api_key: Option<String>,
-    /// 每模型手工配置的上下文窗口（token）；空 map 表示未配置。
+    /// 每模型手工配置的上下文窗口（token）；空 map 表示未配置（运行时回退 1M）。
     context_windows: BTreeMap<String, u64>,
     /// 每模型输出预算；未配置时采用 128000。
     #[serde(default)]
@@ -62,15 +65,16 @@ struct ProviderRecord {
     /// 未指定时采用标准 Chat 参数；兼容网关可以显式选择 max_tokens。
     #[serde(default)]
     chat_output_token_field: ChatOutputTokenField,
-    /// 启用 1M 上下文的模型集合；勾选后运行时上下文窗口强制为 1M（最高优先级）。
-    context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
     supports_vision: BTreeMap<String, bool>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
+///
+/// 不设 `deny_unknown_fields`：配置按版本演进后磁盘上会出现已移除字段，
+/// 启动加载必须忽略它们继续运行。被忽略的字段由加载期诊断记录。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ProviderState {
     /// 当前激活的供应商标识。
     #[serde(deserialize_with = "deserialize_required_option")]
@@ -82,9 +86,9 @@ struct ProviderState {
     providers: Vec<ProviderRecord>,
 }
 
-/// 供应商配置文件的严格版本外壳。
+/// 供应商配置文件的版本外壳；schema 与 version 必须显式匹配当前值。
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 struct ProviderFile {
     /// 固定 schema 名称。
     schema: String,
@@ -143,8 +147,6 @@ pub struct CustomProvider {
     pub context_windows: BTreeMap<String, u64>,
     pub max_output_tokens: BTreeMap<String, u32>,
     pub chat_output_token_field: ChatOutputTokenField,
-    /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
-    pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
     pub supports_vision: BTreeMap<String, bool>,
 }
@@ -180,8 +182,6 @@ pub struct ProviderUpsert {
     pub context_windows: BTreeMap<String, u64>,
     pub max_output_tokens: BTreeMap<String, u32>,
     pub chat_output_token_field: ChatOutputTokenField,
-    /// 启用 1M 上下文的模型集合；空 map 表示全部未启用。
-    pub context_1m: BTreeMap<String, bool>,
     /// 每模型是否支持图片输入。
     pub supports_vision: BTreeMap<String, bool>,
     /// 是否只允许创建新记录。
@@ -276,11 +276,12 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
         ..ProviderCapabilities::default()
     };
     for model in &provider.models {
-        let max_context_tokens = if provider.context_1m.get(model).copied().unwrap_or(false) {
-            Some(1_000_000)
-        } else {
-            provider.context_windows.get(model).copied()
-        };
+        // 手工配置的窗口优先；未配置的模型回退默认 1M。
+        let max_context_tokens = provider
+            .context_windows
+            .get(model)
+            .copied()
+            .unwrap_or(1_000_000);
         config.model_capabilities.insert(
             model.clone(),
             ProviderCapabilities {
@@ -299,7 +300,7 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
                         .copied()
                         .unwrap_or(128_000),
                 )),
-                max_context_tokens,
+                max_context_tokens: Some(max_context_tokens),
                 ..ProviderCapabilities::default()
             },
         );
@@ -381,7 +382,6 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         .to_string();
     let context_windows = validate_context_windows(input.context_windows, &models)?;
     let max_output_tokens = validate_max_output_tokens(input.max_output_tokens, &models)?;
-    let context_1m = validate_context_1m(input.context_1m, &models)?;
     let supports_vision = validate_supports_vision(input.supports_vision, &models)?;
     let record = ProviderRecord {
         id: id.clone(),
@@ -393,7 +393,6 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         context_windows,
         max_output_tokens,
         chat_output_token_field: input.chat_output_token_field,
-        context_1m,
         supports_vision,
     };
     if let Some(index) = existing_index {
@@ -745,7 +744,6 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
             context_windows: provider.context_windows,
             max_output_tokens: provider.max_output_tokens,
             chat_output_token_field: provider.chat_output_token_field,
-            context_1m: provider.context_1m,
             supports_vision: provider.supports_vision,
         })
         .collect();
@@ -762,7 +760,11 @@ fn load_state(app: &AppHandle) -> Result<ProviderState> {
     load_state_from_path(&path)
 }
 
-/// 从明确路径严格读取供应商状态；只有文件不存在时才返回当前空状态。
+/// 从明确路径读取供应商状态；只有文件不存在时才返回当前空状态。
+///
+/// 磁盘配置可能来自其他版本：未知或已移除字段、以及指向已删除模型的模型级
+/// 配置一律忽略并记入诊断日志，不能让整份配置无法加载。结构性错误（非 JSON、
+/// schema/版本不符、记录自身非法）仍然失败关闭。
 fn load_state_from_path(path: &Path) -> Result<ProviderState> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -777,13 +779,229 @@ fn load_state_from_path(path: &Path) -> Result<ProviderState> {
         anyhow::bail!("供应商配置路径不是普通文件：{}", path.display());
     }
     let bytes = read_provider_config_bytes(path)?;
-    let file: ProviderFile = serde_json::from_slice(&bytes)
+    let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
-    let state = file
+    let mut warnings = unknown_field_warnings(&value);
+    let file: ProviderFile = serde_json::from_value(value)
+        .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
+    let mut state = file
         .into_state()
         .with_context(|| format!("供应商配置 schema 无效：{}", path.display()))?;
+    warnings.append(&mut normalize_loaded_state(&mut state));
+    for warning in &warnings {
+        // 只记录不阻断：用户需要在日志里看到跳过了什么，而不是启动后无法发消息。
+        tracing::warn!(
+            target: "keencode_diagnostics",
+            component = "providers.load",
+            path = %path.display(),
+            "{warning}"
+        );
+    }
     validate_state(&state)?;
     Ok(state)
+}
+
+/// 当前供应商配置外壳的已知顶层字段。
+const PROVIDER_FILE_KEYS: &[&str] = &[
+    "schema",
+    "version",
+    "activeProviderId",
+    "activeModelId",
+    "providers",
+];
+
+/// 当前供应商记录的已知字段。
+const PROVIDER_RECORD_KEYS: &[&str] = &[
+    "id",
+    "name",
+    "baseUrl",
+    "models",
+    "apiBackend",
+    "apiKey",
+    "contextWindows",
+    "maxOutputTokens",
+    "chatOutputTokenField",
+    "supportsVision",
+];
+
+/// 找出配置中未知或已移除的字段；只报告字段名，不参与解析。
+fn unknown_field_warnings(value: &Value) -> Vec<String> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    let unknown: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !PROVIDER_FILE_KEYS.contains(key))
+        .collect();
+    let mut warnings = Vec::new();
+    if !unknown.is_empty() {
+        warnings.push(format!(
+            "供应商配置包含未知或已移除字段，已忽略：{}",
+            unknown.join(", ")
+        ));
+    }
+    let Some(records) = object.get("providers").and_then(Value::as_array) else {
+        return warnings;
+    };
+    for record in records {
+        let Some(record) = record.as_object() else {
+            continue;
+        };
+        let unknown: Vec<&str> = record
+            .keys()
+            .map(String::as_str)
+            .filter(|key| !PROVIDER_RECORD_KEYS.contains(key))
+            .collect();
+        if !unknown.is_empty() {
+            let id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("<缺少 id>");
+            warnings.push(format!(
+                "供应商 {id} 包含未知或已移除字段，已忽略：{}",
+                unknown.join(", ")
+            ));
+        }
+    }
+    warnings
+}
+
+/// 把磁盘配置归一化为当前唯一结构。
+///
+/// 只做“丢弃已失效配置”的收敛：指向已删除模型的模型级条目、超出合法范围的
+/// 手工值、以及指向已不存在供应商或模型的当前选择。返回值是需要记录的说明。
+fn normalize_loaded_state(state: &mut ProviderState) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for provider in &mut state.providers {
+        let models = &provider.models;
+        let dropped: Vec<String> = provider
+            .context_windows
+            .keys()
+            .filter(|model| !models.iter().any(|item| item == *model))
+            .cloned()
+            .collect();
+        for model in &dropped {
+            provider.context_windows.remove(model);
+        }
+        if !dropped.is_empty() {
+            warnings.push(format!(
+                "供应商 {} 的上下文窗口配置指向已删除模型，已忽略：{}",
+                provider.id,
+                dropped.join(", ")
+            ));
+        }
+
+        let out_of_range: Vec<String> = provider
+            .context_windows
+            .iter()
+            .filter(|(_, window)| !(MIN_CONTEXT_WINDOW..=MAX_CONTEXT_WINDOW).contains(window))
+            .map(|(model, _)| model.clone())
+            .collect();
+        for model in &out_of_range {
+            provider.context_windows.remove(model);
+        }
+        if !out_of_range.is_empty() {
+            warnings.push(format!(
+                "供应商 {} 的上下文窗口超出合法范围，已忽略：{}",
+                provider.id,
+                out_of_range.join(", ")
+            ));
+        }
+
+        let stale_output: Vec<String> = provider
+            .max_output_tokens
+            .iter()
+            .filter(|(model, value)| **value == 0 || !models.iter().any(|item| item == *model))
+            .map(|(model, _)| model.clone())
+            .collect();
+        for model in &stale_output {
+            provider.max_output_tokens.remove(model);
+        }
+        if !stale_output.is_empty() {
+            warnings.push(format!(
+                "供应商 {} 的输出预算配置无效或指向已删除模型，已忽略：{}",
+                provider.id,
+                stale_output.join(", ")
+            ));
+        }
+
+        let stale_vision: Vec<String> = provider
+            .supports_vision
+            .keys()
+            .filter(|model| !models.iter().any(|item| item == *model))
+            .cloned()
+            .collect();
+        for model in &stale_vision {
+            provider.supports_vision.remove(model);
+        }
+        // 缺失的视觉能力按“不支持”补齐，与运行时读取时的默认值一致，
+        // 避免新增模型后整份配置因缺少该字段而无法加载。
+        let missing_vision: Vec<String> = models
+            .iter()
+            .filter(|model| !provider.supports_vision.contains_key(*model))
+            .cloned()
+            .collect();
+        for model in &missing_vision {
+            provider.supports_vision.insert(model.clone(), false);
+        }
+        if !stale_vision.is_empty() || !missing_vision.is_empty() {
+            let mut parts = Vec::new();
+            if !stale_vision.is_empty() {
+                parts.push(format!("已忽略 {}", stale_vision.join(", ")));
+            }
+            if !missing_vision.is_empty() {
+                parts.push(format!("按不支持补齐 {}", missing_vision.join(", ")));
+            }
+            warnings.push(format!(
+                "供应商 {} 的视觉能力配置已收敛：{}",
+                provider.id,
+                parts.join("；")
+            ));
+        }
+    }
+
+    match (
+        state.providers.is_empty(),
+        state.active_provider_id.clone(),
+        state.active_model_id.clone(),
+    ) {
+        (true, None, None) => {}
+        (true, _, _) => {
+            state.active_provider_id = None;
+            state.active_model_id = None;
+            warnings.push("配置没有任何供应商，已清除当前供应商与模型选择".to_owned());
+        }
+        (false, provider_id, model_id) => {
+            let found = provider_id
+                .as_deref()
+                .and_then(|id| state.providers.iter().find(|item| item.id == id));
+            let provider = match found {
+                Some(provider) => provider,
+                None => {
+                    let fallback = &state.providers[0];
+                    warnings.push(format!("当前供应商不存在，已回退为 {}", fallback.id));
+                    state.active_provider_id = Some(fallback.id.clone());
+                    state.active_model_id = fallback.models.first().cloned();
+                    return warnings;
+                }
+            };
+            if model_id
+                .as_deref()
+                .is_some_and(|model| provider.models.iter().any(|item| item == model))
+            {
+                return warnings;
+            }
+            let fallback = provider.models.first().cloned();
+            warnings.push(format!(
+                "当前模型不属于供应商 {}，已回退为 {}",
+                provider.id,
+                fallback.as_deref().unwrap_or("<无可用模型>")
+            ));
+            state.active_model_id = fallback;
+        }
+    }
+    warnings
 }
 
 /// 校验磁盘中的供应商配置必须完整符合当前唯一结构，不做自动修正。
@@ -814,7 +1032,6 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         }
         validate_context_windows(provider.context_windows.clone(), &provider.models)?;
         validate_max_output_tokens(provider.max_output_tokens.clone(), &provider.models)?;
-        validate_context_1m(provider.context_1m.clone(), &provider.models)?;
         validate_supports_vision(provider.supports_vision.clone(), &provider.models)?;
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
             anyhow::bail!("供应商 {} 的协议类型不是规范格式", provider.id);
@@ -880,19 +1097,6 @@ fn validate_max_output_tokens(
         }
     }
     Ok(values)
-}
-
-/// 校验 1M 上下文模型集合：key 必须属于模型列表（值仅 true/false 无需范围校验）。
-fn validate_context_1m(
-    context_1m: BTreeMap<String, bool>,
-    models: &[String],
-) -> Result<BTreeMap<String, bool>> {
-    for model in context_1m.keys() {
-        if !models.iter().any(|item| item == model) {
-            anyhow::bail!("1M 上下文配置的模型 {model} 不在供应商模型列表中");
-        }
-    }
-    Ok(context_1m)
 }
 
 /// 校验视觉能力配置：每个模型都必须显式保存 true 或 false。
@@ -1140,7 +1344,7 @@ mod live_context_tests;
 mod tests {
     use super::{
         ProviderExportFile, ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint,
-        validate_api_key, validate_base_url, validate_catalog_secret_scope, validate_context_1m,
+        validate_api_key, validate_base_url, validate_catalog_secret_scope,
         validate_context_windows, validate_exact_endpoint, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
@@ -1253,7 +1457,6 @@ mod tests {
             "apiKey": "persisted-key",
             "apiBackend": "responses",
             "contextWindows": {},
-            "context1m": {},
             "supportsVision": {"test-model": false}
         });
 
@@ -1271,8 +1474,7 @@ mod tests {
             "models": ["test-model"],
             "apiBackend": "responses",
             "apiKey": null,
-            "contextWindows": {},
-            "context1m": {}
+            "contextWindows": {}
         });
 
         assert!(serde_json::from_value::<ProviderRecord>(value).is_err());
@@ -1289,7 +1491,6 @@ mod tests {
             "apiBackend": "responses",
             "apiKey": null,
             "contextWindows": { "test-model": 128000 },
-            "context1m": {},
             "supportsVision": {"test-model": false}
         });
 
@@ -1313,14 +1514,14 @@ mod tests {
             context_windows.insert("test-model".to_owned(), invalid_window);
             assert!(validate_context_windows(context_windows, &models).is_err());
         }
-
-        let mut context_1m = BTreeMap::new();
-        context_1m.insert("ghost-model".to_owned(), true);
-        assert!(validate_context_1m(context_1m, &models).is_err());
     }
 
+    /// 未知或已移除字段必须被忽略并记录，而不是让整份配置无法加载。
+    ///
+    /// 旧版本写入的字段（如已移除的 `context1m`）会长期留在磁盘上，加载路径
+    /// 必须降级继续运行；字段名进入诊断日志供定位。
     #[test]
-    fn provider_config_rejects_unknown_fields() {
+    fn provider_config_ignores_unknown_fields_with_warnings() {
         let value = serde_json::json!({
             "schema": "keencode/providers",
             "version": 1,
@@ -1335,12 +1536,99 @@ mod tests {
                 "apiBackend": "responses",
                 "apiKey": null,
                 "contextWindows": {},
-                "context1m": {},
                 "supportsVision": {"test-model": false},
-                "expiredProviderField": "ignored"
+                "context1m": {"test-model": true}
             }]
         });
-        assert!(serde_json::from_value::<ProviderFile>(value).is_err());
+
+        let warnings = super::unknown_field_warnings(&value);
+        assert_eq!(
+            warnings.len(),
+            2,
+            "顶层与记录级未知字段各一条：{warnings:?}"
+        );
+        assert!(warnings[0].contains("expiredTopLevelField"));
+        assert!(warnings[1].contains("context1m"));
+
+        let file = serde_json::from_value::<ProviderFile>(value).expect("未知字段必须被忽略");
+        let state = file.into_state().expect("schema 与版本应有效");
+        assert_eq!(state.providers.len(), 1);
+        assert_eq!(state.providers[0].models, vec!["test-model".to_owned()]);
+    }
+
+    /// 配置加载必须收敛已失效的模型级条目，并记录被丢弃的内容。
+    #[test]
+    fn provider_config_normalizes_stale_model_entries() {
+        let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
+            "activeProviderId": "provider",
+            "activeModelId": "removed-model",
+            "providers": [{
+                "id": "provider",
+                "name": "Provider",
+                "baseUrl": "https://api.example.com/v1",
+                "models": ["test-model"],
+                "apiBackend": "responses",
+                "apiKey": null,
+                "contextWindows": {"removed-model": 128000, "test-model": 99},
+                "maxOutputTokens": {"removed-model": 128000, "test-model": 0},
+                "supportsVision": {"removed-model": false}
+            }]
+        });
+
+        let file = serde_json::from_value::<ProviderFile>(value).expect("应接受当前结构");
+        let mut state = file.into_state().expect("schema 与版本应有效");
+        let warnings = super::normalize_loaded_state(&mut state);
+        let provider = &state.providers[0];
+
+        assert!(
+            provider.context_windows.is_empty(),
+            "越界与失效窗口都应丢弃"
+        );
+        assert!(
+            provider.max_output_tokens.is_empty(),
+            "零值与失效预算都应丢弃"
+        );
+        assert_eq!(provider.supports_vision.get("test-model"), Some(&false));
+        assert_eq!(provider.supports_vision.len(), 1, "失效模型键应被丢弃");
+        assert_eq!(state.active_model_id.as_deref(), Some("test-model"));
+        assert!(!warnings.is_empty(), "归一化必须留下可记录说明");
+        assert!(
+            super::validate_state(&state).is_ok(),
+            "归一化后必须能通过校验"
+        );
+    }
+
+    /// 归一化后的配置必须仍受严格校验约束：结构性错误不能借宽容加载蒙混过关。
+    #[test]
+    fn provider_config_still_rejects_structural_errors() {
+        let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
+            "activeProviderId": "provider",
+            "activeModelId": "test-model",
+            "providers": [{
+                "id": "provider",
+                "name": "Provider",
+                "baseUrl": "not-a-url",
+                "models": ["test-model"],
+                "apiBackend": "responses",
+                "apiKey": null,
+                "contextWindows": {},
+                "supportsVision": {"test-model": false}
+            }]
+        });
+
+        let mut state = serde_json::from_value::<ProviderFile>(value)
+            .expect("字段形状仍应可解析")
+            .into_state()
+            .expect("schema 与版本应有效");
+        super::normalize_loaded_state(&mut state);
+        assert!(
+            super::validate_state(&state).is_err(),
+            "非法地址必须失败关闭"
+        );
     }
 
     /// 当前配置缺少 activeModelId 时必须直接拒绝，不能自动补选首个模型。
@@ -1358,7 +1646,6 @@ mod tests {
                 "apiBackend": "responses",
                 "apiKey": null,
                 "contextWindows": {},
-                "context1m": {},
                 "supportsVision": {"test-model": false}
             }]
         });
@@ -1400,7 +1687,6 @@ mod tests {
                 context_windows: BTreeMap::new(),
                 max_output_tokens: BTreeMap::new(),
                 chat_output_token_field: Default::default(),
-                context_1m: BTreeMap::new(),
                 supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
             }],
         };
@@ -1441,7 +1727,6 @@ mod tests {
             context_windows: BTreeMap::new(),
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
-            context_1m: BTreeMap::new(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         };
 
@@ -1475,7 +1760,6 @@ mod tests {
             context_windows: BTreeMap::new(),
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
-            context_1m: BTreeMap::new(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
         }
     }
@@ -1524,10 +1808,10 @@ mod tests {
 
         let duplicated = r#"{"schema":"keencode/providers-export","version":1,"providers":[
             {"id":"a","name":"A","baseUrl":"https://api.example.com/v1","models":["m"],
-             "apiBackend":"responses","apiKey":null,"contextWindows":{},"context1m":{},
+             "apiBackend":"responses","apiKey":null,"contextWindows":{},
              "supportsVision":{"m":false}},
             {"id":"a","name":"A2","baseUrl":"https://api.example.com/v1","models":["m"],
-             "apiBackend":"responses","apiKey":null,"contextWindows":{},"context1m":{},
+             "apiBackend":"responses","apiKey":null,"contextWindows":{},
              "supportsVision":{"m":false}}]}"#;
         assert!(super::parse_provider_import(duplicated).is_err());
     }
@@ -1631,7 +1915,6 @@ mod provider_registry_tests {
             context_windows: [(model.to_owned(), 64_000)].into_iter().collect(),
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
-            context_1m: BTreeMap::new(),
             supports_vision: [(model.to_owned(), true)].into_iter().collect(),
         }
     }
@@ -1784,7 +2067,7 @@ mod provider_registry_tests {
         assert_eq!(config.base_url().as_str(), "http://127.0.0.1:11434/v1/");
     }
 
-    /// 注册表能力按 1M、手工窗口、未配置的优先级生成，且始终保留基础流式与工具能力。
+    /// 注册表能力按手工窗口优先、未配置回退默认 1M 生成，且始终保留基础流式与工具能力。
     #[test]
     fn registry_maps_context_capability_priority_and_default() {
         let mut provider = provider(
@@ -1796,7 +2079,7 @@ mod provider_registry_tests {
         );
         provider.models = vec![
             "manual-model".to_owned(),
-            "million-model".to_owned(),
+            "configured-model".to_owned(),
             "default-model".to_owned(),
         ];
         provider
@@ -1804,8 +2087,7 @@ mod provider_registry_tests {
             .insert("manual-model".to_owned(), 128_000);
         provider
             .context_windows
-            .insert("million-model".to_owned(), 256_000);
-        provider.context_1m.insert("million-model".to_owned(), true);
+            .insert("configured-model".to_owned(), 256_000);
 
         let registry = ProviderRegistry::new();
         replace_runtime_registry(
@@ -1826,17 +2108,17 @@ mod provider_registry_tests {
         assert!(manual.tool_calling);
         assert_eq!(manual.max_context_tokens, Some(128_000));
 
-        let million = registry
-            .resolve("gateway", "million-model")
-            .expect("1M 模型应解析")
-            .capabilities("million-model");
-        assert_eq!(million.max_context_tokens, Some(1_000_000));
+        let configured = registry
+            .resolve("gateway", "configured-model")
+            .expect("手工窗口模型应解析")
+            .capabilities("configured-model");
+        assert_eq!(configured.max_context_tokens, Some(256_000));
 
         let default = registry
             .resolve("gateway", "default-model")
             .expect("未配置窗口模型应解析")
             .capabilities("default-model");
-        assert_eq!(default.max_context_tokens, None);
+        assert_eq!(default.max_context_tokens, Some(1_000_000));
     }
 
     /// 完整替换必须注册全部供应商，并按独立 Provider 与精确模型字段隔离解析。
@@ -2038,7 +2320,7 @@ mod provider_registry_tests {
         assert!(load_state_from_path(&path).unwrap().providers.is_empty());
     }
 
-    /// 损坏、未知字段和非当前版本必须失败关闭，且不得覆盖原配置字节。
+    /// 损坏与非当前版本必须失败关闭，且不得覆盖原配置字节。
     #[test]
     fn invalid_provider_config_is_rejected_without_replacement() {
         let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
@@ -2046,7 +2328,7 @@ mod provider_registry_tests {
         let cases = [
             b"not-json".as_slice(),
             br#"{"schema":"keencode/providers","version":0,"activeProviderId":null,"activeModelId":null,"providers":[]}"#,
-            br#"{"schema":"keencode/providers","version":1,"activeProviderId":null,"activeModelId":null,"providers":[],"unexpected":true}"#,
+            br#"{"schema":"other/schema","version":1,"activeProviderId":null,"activeModelId":null,"providers":[]}"#,
         ];
 
         for (index, original) in cases.into_iter().enumerate() {
@@ -2057,6 +2339,68 @@ mod provider_registry_tests {
             );
             assert_eq!(fs::read(&path).unwrap(), original);
         }
+    }
+
+    /// 含已移除字段的旧配置必须可加载：这是版本演进后的常规启动路径。
+    #[test]
+    fn provider_config_with_removed_fields_loads_and_is_usable() {
+        let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
+        let path = directory.path().join("providers.json");
+        let original = br#"{"schema":"keencode/providers","version":1,
+            "activeProviderId":"provider","activeModelId":"test-model",
+            "removedTopLevel":1,
+            "providers":[{"id":"provider","name":"Provider",
+            "baseUrl":"https://api.example.com/v1","models":["test-model"],
+            "apiBackend":"responses","apiKey":"secret",
+            "contextWindows":{},"removedProviderField":true,
+            "supportsVision":{"test-model":false}}]}"#;
+        fs::write(&path, original).expect("写入含已移除字段的供应商配置");
+
+        let state = load_state_from_path(&path).expect("已移除字段不应阻断加载");
+        assert_eq!(state.providers.len(), 1);
+        assert_eq!(state.providers[0].api_key.as_deref(), Some("secret"));
+        assert_eq!(state.active_model_id.as_deref(), Some("test-model"));
+        assert_eq!(fs::read(&path).unwrap(), original, "加载不得改写原文件");
+    }
+
+    /// 事发形态回归：携带已移除 `context1m` 的多供应商配置必须完整可加载，
+    /// 且加载产物能通过 Runtime 注册映射——这是发送消息链路的前置条件。
+    #[test]
+    fn provider_config_with_removed_context1m_maps_to_runtime_registry() {
+        let directory = tempfile::tempdir().expect("创建供应商配置临时目录");
+        let path = directory.path().join("providers.json");
+        let original = br#"{"schema":"keencode/providers","version":1,
+            "activeProviderId":"zcode","activeModelId":"glm-5.3-flash",
+            "providers":[
+              {"id":"zcode","name":"ZCode","baseUrl":"https://api.example.com/v1",
+               "models":["glm-5.3-flash"],"apiBackend":"chat_completions",
+               "apiKey":null,"contextWindows":{},
+               "maxOutputTokens":{"glm-5.3-flash":131000},
+               "chatOutputTokenField":"max_completion_tokens",
+               "readTimeoutSeconds":500,
+               "context1m":{},
+               "supportsVision":{"glm-5.3-flash":false}},
+              {"id":"router","name":"OpenRouter","baseUrl":"https://api.example.org/v1",
+               "models":["union-alpha"],"apiBackend":"responses",
+               "apiKey":"router-key","contextWindows":{"union-alpha":262144},
+               "chatOutputTokenField":"max_tokens",
+               "context1m":{"union-alpha":true},
+               "supportsVision":{"union-alpha":true}}]}"#;
+        fs::write(&path, original).expect("写入事发形态配置");
+
+        let state = load_state_from_path(&path).expect("context1m 不应阻断加载");
+        assert_eq!(state.providers.len(), 2);
+        assert_eq!(state.active_model_id.as_deref(), Some("glm-5.3-flash"));
+
+        // 加载产物必须能走完 Runtime 注册，验证发送链路真正恢复。
+        let list = super::render_list(state);
+        let registry = ProviderRegistry::new();
+        super::replace_runtime_registry(&registry, &list)
+            .expect("宽容加载的配置应能注册到 Runtime");
+        assert!(
+            registry.resolve("zcode", "glm-5.3-flash").is_ok(),
+            "当前激活模型必须可解析"
+        );
     }
 
     /// 超限配置与目录目标必须在解析或替换前失败，并保持原目标不变。

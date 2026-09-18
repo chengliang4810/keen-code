@@ -149,7 +149,6 @@ async fn live_messages_desktop_lifecycle() {
         base_url: p["baseUrl"].as_str().unwrap().into(),
         api_key: Some(p["apiKey"].as_str().unwrap().into()),
         context_windows: Default::default(),
-        context_1m: [(model.clone(), true)].into_iter().collect(),
         supports_vision: [(model.clone(), true)].into_iter().collect(),
         max_output_tokens: [(model.clone(), 8192)].into_iter().collect(),
     };

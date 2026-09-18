@@ -136,7 +136,6 @@ async fn live_messages_agent_scenarios() {
         api_key: Some(secret.to_owned()),
         context_windows: [(model.clone(), 1_000_000)].into_iter().collect(),
         max_output_tokens: [(model.clone(), 8_192)].into_iter().collect(),
-        context_1m: Default::default(),
         supports_vision: [(model.clone(), true)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();

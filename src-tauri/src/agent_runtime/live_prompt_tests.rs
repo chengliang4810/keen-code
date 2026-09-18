@@ -124,7 +124,6 @@ async fn live_prompt_scope_and_cache() {
         // 合成任务的测试窗口与输出限额，不回写用户配置或声称模型真实上限。
         context_windows: [(model.clone(), 65_536)].into_iter().collect(),
         max_output_tokens: [(model.clone(), 2_048)].into_iter().collect(),
-        context_1m: Default::default(),
         supports_vision: Default::default(),
     };
     let registry = ProviderRegistry::new();

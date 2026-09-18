@@ -82,7 +82,6 @@ pub async fn run() -> anyhow::Result<()> {
             .context_window_tokens
             .map(|n| [(model.clone(), n)].into_iter().collect())
             .unwrap_or_default(),
-        context_1m: Default::default(),
         supports_vision: [(model.clone(), request.supports_vision)]
             .into_iter()
             .collect(),
