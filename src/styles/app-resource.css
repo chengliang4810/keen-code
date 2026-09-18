@@ -230,7 +230,7 @@
   gap: 16px;
   padding: 8px 4px;
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
 }
 
 .shortcuts-list__row:last-child {
@@ -243,7 +243,7 @@
 
 .shortcuts-list__keys {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
   white-space: nowrap;
   padding: 2px 8px;
@@ -310,7 +310,7 @@
 }
 
 .field label {
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -327,7 +327,7 @@
 .conn-bar {
   margin: 0 var(--space-5);
   padding: 6px 0;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
   display: flex;
   gap: 10px;
@@ -482,7 +482,7 @@
   min-width: 240px;
   display: flex;
   flex-direction: column;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-secondary);
   overflow: hidden;
 }
@@ -518,9 +518,10 @@
   background: transparent;
   border: none;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
-  max-width: 200px;
+  /* 触发器展示“供应商/模型”，比纯模型名需要更宽的截断上限。 */
+  max-width: 260px;
   transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
 }
 
@@ -651,6 +652,22 @@
   overscroll-behavior: contain;
 }
 
+/* 模型能力标签（图片输入），与模型名同一行右对齐。 */
+.cmm__badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-size: calc(11px + var(--ui-font-delta));
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
 .cmm__opt {
   display: flex;
   align-items: flex-start;
@@ -659,7 +676,7 @@
   padding: 10px 12px;
   text-align: left;
   border-radius: var(--radius-lg);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -687,7 +704,7 @@
 }
 
 .cmm__opt-title {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 550;
   color: var(--text-primary);
   line-height: 1.3;
@@ -751,7 +768,7 @@
   background: color-mix(in srgb, var(--danger) 10%, var(--bg-elevated));
   border: 1px solid color-mix(in srgb, var(--danger) 28%, var(--border-subtle));
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -770,7 +787,7 @@
 }
 
 .file-media__open-ext {
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
 }
 
 /* ===== Hide native scrollbars by default (system track is hard to clear) =====
@@ -982,7 +999,7 @@ textarea::-webkit-scrollbar-thumb:active,
 .settings-seg--lg .settings-seg__btn {
   height: 34px;
   padding: 0 16px;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 500;
 }
 
@@ -996,7 +1013,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-loading {
   padding: 24px 8px;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1009,7 +1026,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-md);
   background: var(--danger-muted, color-mix(in srgb, var(--danger) 12%, transparent));
   color: var(--danger);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
 }
 
 .prov-split {
@@ -1047,7 +1064,7 @@ textarea::-webkit-scrollbar-thumb:active,
 .prov-rail-empty {
   padding: 20px 12px;
   text-align: center;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1099,7 +1116,7 @@ textarea::-webkit-scrollbar-thumb:active,
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 700;
   background: var(--bg-hover);
   border: 1px solid var(--border-subtle);
@@ -1121,7 +1138,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-item__name {
-  font-size: 13.5px;
+  font-size: calc(13.5px + var(--ui-font-delta));
   font-weight: 600;
   color: var(--text-primary);
   overflow: hidden;
@@ -1130,7 +1147,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-item__sub {
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1151,7 +1168,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border: 1px dashed var(--border-subtle);
   border-radius: var(--radius-lg);
   color: var(--text-tertiary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   padding: 24px;
   text-align: center;
 }
@@ -1165,7 +1182,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-detail__title {
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px + var(--ui-font-delta));
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
@@ -1205,15 +1222,15 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-field__label {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: calc(12px + var(--ui-font-delta));
+  line-height: calc(18px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--text-secondary);
 }
 
 .prov-field__hint {
-  font-size: 12px;
-  line-height: 18px;
+  font-size: calc(12px + var(--ui-font-delta));
+  line-height: calc(18px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1294,7 +1311,7 @@ textarea::-webkit-scrollbar-thumb:active,
   min-height: 36px;
   padding: 6px 8px 6px 12px;
   border-bottom: 1px solid var(--border-subtle);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   color: var(--text-primary);
 }
 
@@ -1318,7 +1335,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-sm);
   background: var(--bg-input);
   color: var(--text-primary);
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   font-variant-numeric: tabular-nums;
 }
 
@@ -1338,7 +1355,7 @@ textarea::-webkit-scrollbar-thumb:active,
   gap: 4px;
   flex-shrink: 0;
   color: var(--text-tertiary);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   cursor: pointer;
   user-select: none;
 }
@@ -1346,7 +1363,7 @@ textarea::-webkit-scrollbar-thumb:active,
 .prov-model-empty {
   padding: 18px 12px;
   text-align: center;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1383,7 +1400,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-md);
   background: var(--bg-hover);
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   cursor: pointer;
 }
 
@@ -1420,13 +1437,13 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-model-picker__name {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-primary);
 }
 
 .prov-model-picker__owner {
   text-align: right;
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1434,7 +1451,7 @@ textarea::-webkit-scrollbar-thumb:active,
   margin-bottom: 10px;
   padding: 8px 10px;
   border-radius: var(--radius-md);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   line-height: 1.4;
   background: var(--bg-hover);
   color: var(--text-secondary);
@@ -1474,7 +1491,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .prov-delete-msg {
   margin: 0;
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -1482,8 +1499,8 @@ textarea::-webkit-scrollbar-thumb:active,
 .btn--sm {
   height: 28px;
   padding: 0 10px;
-  font-size: 12px;
-  line-height: 18px;
+  font-size: calc(12px + var(--ui-font-delta));
+  line-height: calc(18px + var(--ui-font-delta));
   border-radius: var(--radius-full);
 }
 
@@ -1534,13 +1551,13 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp__empty-title {
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .rp__empty-desc {
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   line-height: 1.45;
   color: var(--text-tertiary);
   max-width: 28ch;
@@ -1558,7 +1575,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-tab-picker__title {
-  font-size: 24px;
+  font-size: calc(24px + var(--ui-font-delta));
   font-weight: 650;
   line-height: 1.25;
 }
@@ -1566,7 +1583,7 @@ textarea::-webkit-scrollbar-thumb:active,
 .rp-tab-picker__desc {
   margin-top: 10px;
   color: var(--text-tertiary);
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
 }
 
 .rp-tab-picker__grid {
@@ -1589,7 +1606,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-lg);
   background: var(--bg-hover);
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
   cursor: pointer;
 }
@@ -1614,7 +1631,7 @@ textarea::-webkit-scrollbar-thumb:active,
   justify-content: space-between;
   gap: 8px;
   padding: 8px 12px;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   color: var(--danger);
   background: var(--danger-muted, color-mix(in srgb, var(--danger) 12%, transparent));
   border-bottom: 1px solid var(--border-subtle);
@@ -1669,7 +1686,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 550;
   cursor: pointer;
   white-space: nowrap;
@@ -1733,8 +1750,8 @@ textarea::-webkit-scrollbar-thumb:active,
   padding: 0 4px;
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--accent, var(--change-copied)) 16%, transparent);
-  font-size: 10px;
-  line-height: 16px;
+  font-size: calc(10px + var(--ui-font-delta));
+  line-height: calc(16px + var(--ui-font-delta));
   text-align: center;
 }
 
@@ -1771,7 +1788,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-tabs__hint {
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
   white-space: nowrap;
 }
@@ -1800,7 +1817,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   cursor: pointer;
   flex-shrink: 0;
 }
@@ -1871,7 +1888,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border: 1px solid var(--border-subtle);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   cursor: pointer;
 }
 
@@ -1994,7 +2011,7 @@ textarea::-webkit-scrollbar-thumb:active,
   align-items: center;
   gap: 6px;
   font: inherit;
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   cursor: default;
   white-space: nowrap;
 }
@@ -2077,7 +2094,7 @@ textarea::-webkit-scrollbar-thumb:active,
   justify-content: center;
   gap: 10px;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
 }
 
 .terminal-panel__error {
@@ -2085,7 +2102,7 @@ textarea::-webkit-scrollbar-thumb:active,
   color: var(--danger);
   background: color-mix(in srgb, var(--danger) 10%, var(--terminal-canvas));
   border-bottom: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
 }
 
 .rp-split__preview {
@@ -2138,7 +2155,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 500;
   line-height: 1;
   cursor: pointer;
@@ -2172,7 +2189,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-editor__dirty-label {
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   color: var(--warning);
   white-space: nowrap;
   margin-left: 2px;
@@ -2181,7 +2198,7 @@ textarea::-webkit-scrollbar-thumb:active,
 .rp-editor__banner {
   flex: 0 0 auto;
   padding: 6px 12px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--warning);
   background: var(--warning-muted);
   border-bottom: 1px solid var(--border-subtle);
@@ -2200,7 +2217,7 @@ textarea::-webkit-scrollbar-thumb:active,
   background: transparent;
   color: var(--text-primary);
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   line-height: 1.6;
   tab-size: 2;
   box-sizing: border-box;
@@ -2219,13 +2236,13 @@ textarea::-webkit-scrollbar-thumb:active,
 .rp-tab__dirty {
   margin-left: 2px;
   color: var(--warning);
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   line-height: 1;
 }
 
 .rp-modal-copy {
   margin: 0;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -2276,7 +2293,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .rp-structured-diff [data-diffs] {
   --diffs-font-family: var(--font-mono);
-  --diffs-font-size: 12px;
+  --diffs-font-size: calc(12px + var(--ui-font-delta));
 }
 
 /* 大型 Diff 使用有界原生文本，避免语法树与逐行组件拖慢界面。 */
@@ -2293,7 +2310,7 @@ textarea::-webkit-scrollbar-thumb:active,
   color: var(--text-secondary);
   background: color-mix(in srgb, var(--bg-hover) 55%, var(--bg-card));
   font-family: var(--font-sans);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   line-height: 1.45;
 }
 
@@ -2306,14 +2323,14 @@ textarea::-webkit-scrollbar-thumb:active,
   color: var(--text-primary);
   background: var(--bg-card);
   font: inherit;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   line-height: 1.55;
   tab-size: 2;
   white-space: pre;
 }
 
 .rp-preview__md {
-  font-size: 14.5px;
+  font-size: calc(14.5px + var(--ui-font-delta));
   line-height: 1.65;
   color: var(--text-primary);
 }
@@ -2324,14 +2341,14 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .rp-preview__msg {
   padding: 20px 8px;
-  font-size: 13.5px;
+  font-size: calc(13.5px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
 .rp-preview__meta {
   margin-top: 8px;
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -2417,17 +2434,34 @@ textarea::-webkit-scrollbar-thumb:active,
   background: var(--bg-elevated);
 }
 
-.embedded-browser__url {
+.embedded-browser__address {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: var(--radius-full);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-input, var(--bg-card));
+  color: var(--text-tertiary);
+}
+
+.embedded-browser__address input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: calc(12px + var(--ui-font-delta));
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: var(--text-secondary);
-  user-select: text;
-  -webkit-user-select: text;
+  outline: none;
+}
+
+.embedded-browser__address input::placeholder {
+  color: var(--text-tertiary);
 }
 
 .embedded-browser__host {
@@ -2448,26 +2482,38 @@ textarea::-webkit-scrollbar-thumb:active,
   background: transparent;
 }
 
-.embedded-browser__hint {
-  flex-shrink: 0;
-  padding: 6px 10px;
-  font-size: 11px;
-  color: var(--text-tertiary);
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-}
-
 .embedded-browser__err {
   margin: 8px 0 12px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
   word-break: break-all;
   max-width: 90%;
 }
 
-.embedded-browser--native .embedded-browser__host {
-  /* Leave space for native child webview; don't clip overflow */
-  overflow: hidden;
+/* 网页标签层：所有网页标签常驻挂载，只按激活状态切换显隐。 */
+.rp-web-tabs {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rp-web-tabs.is-hidden {
+  display: none;
+}
+
+.rp-web-tabs__layer {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.rp-web-tabs__layer.is-hidden {
+  display: none;
 }
 
 .rp-changes-list {
@@ -2499,7 +2545,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-changes-section__title {
-  font-size: 10.5px;
+  font-size: calc(10.5px + var(--ui-font-delta));
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2513,9 +2559,9 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--accent, var(--change-copied)) 16%, transparent);
   color: var(--text-secondary);
-  font-size: 10px;
+  font-size: calc(10px + var(--ui-font-delta));
   font-weight: 650;
-  line-height: 16px;
+  line-height: calc(16px + var(--ui-font-delta));
   text-align: center;
 }
 
@@ -2525,14 +2571,14 @@ textarea::-webkit-scrollbar-thumb:active,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: calc(10px + var(--ui-font-delta));
   font-family: var(--font-mono);
   color: var(--text-tertiary);
 }
 
 .rp-changes-section__empty {
   padding: 6px 12px 10px;
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   line-height: 1.4;
   color: var(--text-tertiary);
 }
@@ -2546,7 +2592,7 @@ textarea::-webkit-scrollbar-thumb:active,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 10px;
+  font-size: calc(10px + var(--ui-font-delta));
   font-weight: 700;
   font-family: var(--font-mono);
   background: color-mix(in srgb, var(--bg-hover) 80%, transparent);
@@ -2620,7 +2666,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-changes-row__name {
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 550;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2628,7 +2674,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-changes-row__path {
-  font-size: 10.5px;
+  font-size: calc(10.5px + var(--ui-font-delta));
   font-family: var(--font-mono);
   color: var(--text-tertiary);
   overflow: hidden;
@@ -2637,7 +2683,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-changes-row__kind {
-  font-size: 10.5px;
+  font-size: calc(10.5px + var(--ui-font-delta));
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2670,13 +2716,13 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .rp-changes-empty__title {
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .rp-changes-empty__hint {
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   line-height: 1.5;
   color: var(--text-secondary);
 }
@@ -2716,7 +2762,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   outline: none;
 }
 
@@ -2741,7 +2787,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   text-align: left;
   cursor: pointer;
 }
@@ -2854,13 +2900,13 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .office-preview__status {
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .office-preview__sub {
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
   max-width: 40ch;
   line-height: 1.45;
@@ -2878,7 +2924,7 @@ textarea::-webkit-scrollbar-thumb:active,
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   white-space: pre-wrap;
 }
 
@@ -2907,7 +2953,7 @@ textarea::-webkit-scrollbar-thumb:active,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 550;
   color: var(--text-primary);
 }
@@ -2990,7 +3036,7 @@ textarea::-webkit-scrollbar-thumb:active,
   word-wrap: break-word;
   word-break: break-word;
   line-height: 1.6;
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
 }
 
 /* Headings / paragraphs should wrap fully */
@@ -3061,7 +3107,7 @@ textarea::-webkit-scrollbar-thumb:active,
   border: 1px solid transparent;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   cursor: pointer;
 }
 
@@ -3083,7 +3129,7 @@ textarea::-webkit-scrollbar-thumb:active,
 
 .office-preview__sheet-scroll table {
   border-collapse: collapse;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   min-width: 100%;
   color: var(--text-primary);
 }

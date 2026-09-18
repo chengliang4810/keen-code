@@ -22,6 +22,7 @@ import { createT, type Locale } from "@/i18n";
 import { resolvePreviewSrc } from "@/lib/filePreviewSrc";
 import { HtmlBrowser } from "@/components/HtmlBrowser";
 import { EmbeddedBrowser } from "@/components/EmbeddedBrowser";
+import { browserTabLabel, BLANK_BROWSER_URL } from "@/lib/browserTabs";
 import { MarkdownBody } from "@/components/MarkdownBody";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { FileMediaPlayer } from "@/components/FileMediaPlayer";
@@ -39,6 +40,7 @@ import {
   IconPlus,
   IconSubagent,
   IconTerminal,
+  IconWorld,
 } from "@/components/icons";
 import { OfficeDocumentPreview } from "@/components/OfficeDocumentPreview";
 import { CodePreview } from "@/components/CodePreview";
@@ -409,6 +411,14 @@ export function ResourceViewer({
   const [subagentId, setSubagentId] = useSessionState<string | null>(sessionKey, null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+  /** 所有网页标签；它们常驻挂载，只按激活状态切换显隐。 */
+  const webTabs = useMemo(
+    () => tabs.filter((t) => t.tabKind === "url" && t.url),
+    [tabs],
+  );
+  /** 网页标签层当前是否可见（面板展开、文件模式且激活标签是网页）。 */
+  const webTabVisible =
+    paneActive && sideMode === "files" && activeTab?.tabKind === "url";
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
   const totalChangeBadge = workspaceCount;
   const filteredWorkspace = useMemo(
@@ -1288,22 +1298,20 @@ export function ResourceViewer({
     (url: string, title?: string) => {
       const u = url.trim();
       if (!u) return;
-      const existing = tabs.find((t) => t.tabKind === "url" && t.url === u);
+      // 空白标签不去重：允许同时打开多个待输入的网页标签。
+      const existing =
+        u === BLANK_BROWSER_URL
+          ? undefined
+          : tabs.find((t) => t.tabKind === "url" && t.url === u);
       if (existing) {
         setActiveId(existing.id);
         return;
       }
       const id = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      let name = title || u;
-      try {
-        name = title || new URL(u).hostname || u;
-      } catch {
-        /* keep */
-      }
       const tab: FileTab = {
         id,
         relativePath: u,
-        name,
+        name: title || browserTabLabel(u),
         absolutePath: "",
         preview: null,
         mediaSrc: null,
@@ -1316,6 +1324,46 @@ export function ResourceViewer({
       setActiveId(id);
     },
     [tabs],
+  );
+
+  /** 新建空白网页标签，等待地址栏输入。 */
+  const openBlankWebTab = useCallback(() => {
+    setOpenSingletons((current) =>
+      current.includes("files") ? current : [...current, "files"],
+    );
+    setSideMode("files");
+    const id = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    setTabs((prev) => [
+      {
+        id,
+        relativePath: BLANK_BROWSER_URL,
+        name: tr("resources.browserNewTab"),
+        absolutePath: "",
+        preview: null,
+        mediaSrc: null,
+        error: null,
+        loading: false,
+        url: BLANK_BROWSER_URL,
+        tabKind: "url",
+      },
+      ...prev,
+    ]);
+    setActiveId(id);
+  }, [setActiveId, setTabs, tr]);
+
+  /** 网页标签内导航后同步地址与标签名，保持标签与页面一致。 */
+  const handleBrowserNavigated = useCallback(
+    (tabId: string, url: string, title?: string) => {
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.id !== tabId || tab.tabKind !== "url") return tab;
+          const name = title?.trim() || browserTabLabel(url);
+          if (tab.url === url && tab.name === name) return tab;
+          return { ...tab, url, name, relativePath: url };
+        }),
+      );
+    },
+    [setTabs],
   );
 
   /** 从工具时间线直接定位文件，并在变更面板加载该文件的 Git Diff。 */
@@ -2119,6 +2167,7 @@ export function ResourceViewer({
               <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
               <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
               <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
+              <DropdownMenuItem onSelect={openBlankWebTab}><IconWorld size={14} /> {tr("resources.browserNewTab")}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
@@ -2199,6 +2248,10 @@ export function ResourceViewer({
         <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
           <IconListTree size={20} />
           <span>{tr("trajectory.title")}</span>
+        </Button>
+        <Button type="button" className="rp-tab-picker__item" onClick={openBlankWebTab}>
+          <IconWorld size={20} />
+          <span>{tr("resources.browserNewTab")}</span>
         </Button>
       </div>
     </div>
@@ -2483,6 +2536,38 @@ export function ResourceViewer({
         }
       >
         <div className="rp-split__preview">
+          {/* 网页标签常驻挂载：切换标签只切显隐，页面状态（滚动、表单、路由）保留。 */}
+          {webTabs.length > 0 ? (
+            <div className={"rp-web-tabs" + (webTabVisible ? "" : " is-hidden")}>
+              {webTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  className={
+                    "rp-web-tabs__layer" +
+                    (webTabVisible && tab.id === activeId ? "" : " is-hidden")
+                  }
+                >
+                  <EmbeddedBrowser
+                    tabId={tab.id}
+                    url={tab.url ?? BLANK_BROWSER_URL}
+                    title={tab.name}
+                    locale={locale}
+                    active={webTabVisible && tab.id === activeId}
+                    onNavigated={(url, title) =>
+                      handleBrowserNavigated(tab.id, url, title)
+                    }
+                    onOpenPath={(path) => {
+                      setOpenSingletons((current) =>
+                        current.includes("files") ? current : [...current, "files"],
+                      );
+                      setSideMode("files");
+                      void openAbsoluteFile(path);
+                    }}
+                  />
+                </div>
+              ))}
+            </div>
+          ) : null}
           {diffView?.unified ? (
             <div
               className={
@@ -2562,17 +2647,7 @@ export function ResourceViewer({
             <div className="rp__empty-state">
               <div className="rp__empty-desc">{tr("resources.loading")}</div>
             </div>
-          ) : activeTab.tabKind === "url" && activeTab.url ? (
-            /* Native child Webview over host (GitHub etc. block iframe) */
-            <div className="rp-preview-browser rp-preview-browser--url">
-              <EmbeddedBrowser
-                url={activeTab.url}
-                title={activeTab.name}
-                locale={locale}
-                active
-              />
-            </div>
-          ) : activeTabEditable && activeTab.preview ? (
+          ) : activeTab.tabKind === "url" ? null : activeTabEditable && activeTab.preview ? (
             /* Full-height editor shell (toolbar + textarea / md preview) */
             <div className="rp-preview-code-host rp-preview-editor-host">
               {previewBody}

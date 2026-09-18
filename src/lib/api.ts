@@ -309,6 +309,67 @@ export async function urlOpen(url: string) {
   return invoke<void>("url_open", { url });
 }
 
+/** 内置浏览器网页标签的显示区域（CSS 像素，相对窗口内容区）。 */
+export interface BrowserRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** 创建或复用网页标签的原生子 WebView。 */
+export async function browserOpen(tabId: string, url: string, rect: BrowserRect) {
+  return invoke<void>("browser_open", {
+    tabId,
+    url,
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height,
+  });
+}
+
+/** 更新网页标签子 WebView 的显示区域。 */
+export async function browserBounds(tabId: string, rect: BrowserRect) {
+  return invoke<void>("browser_bounds", {
+    tabId,
+    x: rect.left,
+    y: rect.top,
+    width: rect.width,
+    height: rect.height,
+  });
+}
+
+/** 显示网页标签子 WebView。 */
+export async function browserShow(tabId: string) {
+  return invoke<void>("browser_show", { tabId });
+}
+
+/** 隐藏网页标签子 WebView。 */
+export async function browserHide(tabId: string) {
+  return invoke<void>("browser_hide", { tabId });
+}
+
+/** 关闭网页标签子 WebView。 */
+export async function browserClose(tabId: string) {
+  return invoke<void>("browser_close", { tabId });
+}
+
+/** 在网页标签内导航到新地址。 */
+export async function browserNavigate(tabId: string, url: string) {
+  return invoke<void>("browser_navigate", { tabId, url });
+}
+
+/** 重新加载网页标签当前页面。 */
+export async function browserReload(tabId: string) {
+  return invoke<void>("browser_reload", { tabId });
+}
+
+/** 在网页标签内前进或后退。 */
+export async function browserHistory(tabId: string, direction: "back" | "forward") {
+  return invoke<void>("browser_history", { tabId, direction });
+}
+
 /** Reveal in Finder / Explorer. */
 export async function pathReveal(path: string) {
   return invoke<void>("path_reveal", { path });
