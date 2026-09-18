@@ -48,11 +48,11 @@ pub struct RetryConfig {
 }
 
 impl Default for RetryConfig {
-    /// 返回默认策略：最多 10 次尝试，0.5 秒起步、32 秒封顶的指数退避，全部类别开启。
+    /// 返回默认策略：最多 10 次尝试，3 秒起步、32 秒封顶的指数退避，全部类别开启。
     fn default() -> Self {
         Self {
             max_attempts: 10,
-            base_delay: Duration::from_millis(500),
+            base_delay: Duration::from_millis(3000),
             max_delay: Duration::from_secs(32),
             retry_transport: true,
             retry_http_status: true,

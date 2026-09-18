@@ -662,6 +662,13 @@ const PROVIDER_REQUEST_ID_HEADERS: [&str; 2] = ["x-request-id", "request-id"];
 const RETRY_JITTER_FRACTION: f64 = 0.25;
 /// Provider 报告的 retry_after 建议在重试等待中允许的最大毫秒数。
 const RETRY_AFTER_CAP_MS: u64 = 120 * 1000;
+/// Provider 建议的等待时间超过该毫秒数时，限流视为本次会话内不可恢复。
+///
+/// 突发限流会在秒级恢复，等待后重试有收益；需要等待一分钟以上才能恢复的
+/// 限流已属额度窗口耗尽，继续退避只会让交互式回合长时间没有输出。
+const RETRY_AFTER_HARD_STOP_MS: u64 = 60 * 1000;
+/// 限流错误正文中声明额度窗口重置时刻的关键字；命中即视为耗尽语义。
+const RESET_DEADLINE_KEYWORDS: [&str; 2] = ["reset", "重置"];
 
 /// 从逻辑开始到响应流终态维持一次请求的观测状态。
 struct RequestLifecycle {
@@ -1594,6 +1601,26 @@ fn retry_after_ms(error: &ModelError) -> Option<u64> {
     }
 }
 
+/// 判定一次限流是否已属本次会话内不可恢复，重试只会延长无输出的等待。
+///
+/// 服务器给出建议等待时以建议为准：不超过 [`RETRY_AFTER_HARD_STOP_MS`] 的
+/// 等待说明限流会在短时间内自行恢复，重试有收益。没有建议等待时才读错误
+/// 正文，命中额度窗口重置关键字即视为耗尽——这类限流按定义要等到远端
+/// 声明的时刻才恢复，本次回合内不可能成功。
+///
+/// 该判定是启发式的：既不解析正文中的绝对时刻，也不区分「多久后重置」与
+/// 「窗口已重置」的语义差别。漏判只是退回原有退避重试，误判则让一次本可
+/// 恢复的限流直接失败，因此关键词保持窄口径，只收「重置」语义。
+fn rate_limit_is_exhausted(message: &str, retry_after_ms: Option<u64>) -> bool {
+    if let Some(wait_ms) = retry_after_ms {
+        return wait_ms > RETRY_AFTER_HARD_STOP_MS;
+    }
+    let lowered = message.to_ascii_lowercase();
+    RESET_DEADLINE_KEYWORDS
+        .iter()
+        .any(|keyword| lowered.contains(keyword))
+}
+
 /// 判定一次尚未向下游转发任何事件的失败是否允许自动重试。
 ///
 /// 分类建立在现有 [`ModelError`] 变体与 [`classify_request_error`] 之上：
@@ -1602,9 +1629,11 @@ fn retry_after_ms(error: &ModelError) -> Option<u64> {
 /// HTTP 409 冲突在线上归类为 `InvalidRequest`，仅在失败点确实观察到 409
 /// 状态时重试。取消、上下文超限、认证授权与其他 4xx 一律不重试。
 ///
-/// 与拍板清单「408/409/429/5xx 可重试」相比的两处已接受偏差（均为保守
-/// 方向、继承既有分类器，不在此处扩大或收窄分类）：
+/// 与拍板清单「408/409/429/5xx 可重试」相比的已接受偏差（除额度耗尽外
+/// 均为保守方向、继承既有分类器，不在此处扩大或收窄分类）：
 ///
+/// - 429 携带的额度窗口耗尽语义由 [`rate_limit_is_exhausted`] 收窄为不重试：
+///   远端声明需等到某个时刻才恢复的限流，退避重试只会在整轮内持续无输出。
 /// - HTTP 425 被既有分类器与 429 一同归入 `RateLimited`，会按
 ///   `retry_http_status` 重试。拍板清单未列出 425，但「Too Early」语义上
 ///   同属限速类瞬时失败，多试一次方向保守，故保留既有分类。
@@ -1624,7 +1653,11 @@ fn is_retryable_failure(
         ModelError::StreamInterrupted { retryable, .. } => {
             *retryable && policy.retry_stream_interrupted
         }
-        ModelError::RateLimited { .. } => policy.retry_http_status,
+        ModelError::RateLimited {
+            message,
+            retry_after_ms,
+            ..
+        } => policy.retry_http_status && !rate_limit_is_exhausted(message, *retry_after_ms),
         ModelError::ProviderUnavailable { retryable, .. } => *retryable && policy.retry_http_status,
         ModelError::InvalidRequest { .. } => policy.retry_http_status && http_status == Some(409),
         _ => false,
@@ -1932,7 +1965,7 @@ mod retry_tests {
     #[test]
     fn backoff_sequence_doubles_and_caps_at_max_delay() {
         let policy = RetryConfig::default();
-        let expected_ms = [500, 1000, 2000, 4000, 8000, 16000, 32000, 32000, 32000];
+        let expected_ms = [3000, 6000, 12000, 24000, 32000, 32000, 32000, 32000, 32000];
         for (failed_attempt, expected) in expected_ms.iter().enumerate() {
             let delay = retry_delay(&policy, failed_attempt as u32 + 1, None, 0.0);
             assert_eq!(delay, Duration::from_millis(*expected));
@@ -1992,7 +2025,7 @@ mod retry_tests {
         // 抖动只影响等待下界，不会把延迟推成负数或翻倍以上。
         let policy = RetryConfig::default();
         let delay = retry_delay(&policy, 1, None, f64::MAX);
-        assert_eq!(delay, Duration::from_millis(625));
+        assert_eq!(delay, Duration::from_millis(3750));
     }
 
     /// 种子随尝试序号确定性变化，避免连续重试使用同一抖动比例。
@@ -2062,6 +2095,47 @@ mod retry_tests {
             &ModelError::RateLimited {
                 message: "rate limited".to_owned(),
                 retry_after_ms: Some(1000),
+                status_code: Some(429)
+            },
+            None
+        ));
+        // 额度窗口耗尽型限流不重试：建议等待超过硬停阈值，或正文声明重置时刻。
+        assert!(!retryable(
+            &ModelError::RateLimited {
+                message: "rate limited".to_owned(),
+                retry_after_ms: Some(RETRY_AFTER_HARD_STOP_MS + 1),
+                status_code: Some(429)
+            },
+            None
+        ));
+        assert!(retryable(
+            &ModelError::RateLimited {
+                message: "rate limited".to_owned(),
+                retry_after_ms: Some(RETRY_AFTER_HARD_STOP_MS),
+                status_code: Some(429)
+            },
+            None
+        ));
+        assert!(!retryable(
+            &ModelError::RateLimited {
+                message: "您的使用量已超出频率限制，将在 2026-09-18 13:08:31 UTC+8 重置".to_owned(),
+                retry_after_ms: None,
+                status_code: Some(429)
+            },
+            None
+        ));
+        assert!(!retryable(
+            &ModelError::RateLimited {
+                message: "usage limit reached, resets at 2026-09-18T05:08:31Z".to_owned(),
+                retry_after_ms: None,
+                status_code: Some(429)
+            },
+            None
+        ));
+        assert!(retryable(
+            &ModelError::RateLimited {
+                message: "slow down".to_owned(),
+                retry_after_ms: None,
                 status_code: Some(429)
             },
             None

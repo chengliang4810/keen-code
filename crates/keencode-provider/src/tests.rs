@@ -6305,6 +6305,36 @@ async fn retry_429按retry_after建议等待后重试成功() {
     );
 }
 
+/// 429 正文声明额度窗口重置时刻且无 Retry-After 时只请求一次，不烧满尝试次数。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_额度窗口耗尽型429只请求一次() {
+    let (base_url, server) = spawn_retry_server(vec![raw_http_response(
+        "429 Too Many Requests",
+        "application/json",
+        r#"{"error":{"message":"您的使用量已超出频率限制，将在 2026-09-18 13:08:31 UTC+8 重置，您也可以切换其他模型继续使用。"}}"#,
+    )]);
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client =
+        retry_client(&base_url, quick_retry_policy(10)).with_request_observer(observer.clone());
+    let error = match client.stream(minimal_request()).await {
+        Err(error) => error,
+        Ok(_) => panic!("额度窗口耗尽的 429 不应成功"),
+    };
+    assert!(matches!(
+        error,
+        ModelError::RateLimited {
+            status_code: Some(429),
+            ..
+        }
+    ));
+    // 服务器只提供一个响应，重试会撞上已关闭的监听器；请求数为一即证明未重试。
+    assert_eq!(server.join().unwrap().unwrap().len(), 1);
+    assert_eq!(
+        attempt_observations(&observer.snapshot()),
+        vec![("Started".to_owned(), 1, 10), ("Failed".to_owned(), 1, 10)]
+    );
+}
+
 /// 重试次数耗尽后返回最后一次错误，且每次尝试都有独立观测记录。
 #[tokio::test(flavor = "multi_thread")]
 async fn retry_耗尽后返回最后一次错误并记录全部尝试() {
