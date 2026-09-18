@@ -807,7 +807,8 @@
 
 /* Settings is a document-like surface: expose a quiet native scroll cue. */
 .settings-page__nav-inner,
-.settings-page__content {
+.settings-page__content,
+.prov-rail {
   scrollbar-width: thin !important;
   scrollbar-color: transparent transparent !important;
   -ms-overflow-style: auto !important;
@@ -816,12 +817,15 @@
 .settings-page__nav-inner:hover,
 .settings-page__nav-inner:focus-within,
 .settings-page__content:hover,
-.settings-page__content:focus-within {
+.settings-page__content:focus-within,
+.prov-rail:hover,
+.prov-rail:focus-within {
   scrollbar-color: var(--scrollbar-thumb) transparent !important;
 }
 
 .settings-page__nav-inner::-webkit-scrollbar,
-.settings-page__content::-webkit-scrollbar {
+.settings-page__content::-webkit-scrollbar,
+.prov-rail::-webkit-scrollbar {
   display: block !important;
   width: var(--scrollbar-size) !important;
   height: var(--scrollbar-size) !important;
@@ -829,12 +833,14 @@
 }
 
 .settings-page__nav-inner::-webkit-scrollbar-track,
-.settings-page__content::-webkit-scrollbar-track {
+.settings-page__content::-webkit-scrollbar-track,
+.prov-rail::-webkit-scrollbar-track {
   background: transparent !important;
 }
 
 .settings-page__nav-inner::-webkit-scrollbar-thumb,
-.settings-page__content::-webkit-scrollbar-thumb {
+.settings-page__content::-webkit-scrollbar-thumb,
+.prov-rail::-webkit-scrollbar-thumb {
   border: 1px solid transparent;
   border-radius: var(--radius-full);
   background: transparent;
@@ -844,7 +850,9 @@
 .settings-page__nav-inner:hover::-webkit-scrollbar-thumb,
 .settings-page__nav-inner:focus-within::-webkit-scrollbar-thumb,
 .settings-page__content:hover::-webkit-scrollbar-thumb,
-.settings-page__content:focus-within::-webkit-scrollbar-thumb {
+.settings-page__content:focus-within::-webkit-scrollbar-thumb,
+.prov-rail:hover::-webkit-scrollbar-thumb,
+.prov-rail:focus-within::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   background-clip: padding-box;
 }
@@ -1043,6 +1051,8 @@ textarea::-webkit-scrollbar-thumb:active,
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  /* 定高：供应商数量不再撑高页面，溢出交给 .prov-rail 内部滚动（窄屏断点另有 280px 覆盖）。 */
+  max-height: 560px;
 }
 
 .prov-add-btn {

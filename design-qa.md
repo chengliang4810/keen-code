@@ -979,3 +979,13 @@ historical result: passed; current release: not reverified
 - 测试：`src/components/ProvidersPanel.test.ts` 布局锁定断言由「左栏在新增入口之后提供导入入口」改为「导入入口固定在表单头部右上角」（head 含 `prov.importAll`，rail 不含导入与导出全部入口）。
 - 验证：`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 14 项通过。
 - 未验收：未取得原生桌面同状态前后截图做像素比对（本会话无法驱动原生 Tauri UI；非 Tauri 模式下供应商列表为空，右侧面板仅渲染空态，无法在浏览器夹具复现添加供应商表单状态）。本次为既有控件的位置迁移，未改动颜色、字体、间距等设计令牌。
+
+
+# 2026-09-19 供应商列表定高内部滚动
+
+- 需求：模型设置页供应商数量不限增长，左栏列表随供应商数量无限撑高页面；需要固定高度、溢出时以滚动条滚动的方式查看供应商。
+- 根因：`.prov-rail` 早已具备 `flex: 1; min-height: 0; overflow: auto` 的内部滚动机制，但宽屏布局从未给列容器限高，栅格行高由内容驱动，滚动从未生效；窄屏断点（≤860px）已有 `.prov-split__list { max-height: 280px }` 先例，宽屏缺少同样的约束。
+- 修改：`src/styles/app-resource.css` 宽屏基础 `.prov-split__list` 增加 `max-height: 560px`（窄屏 280px 覆盖保持不变），列表区域高度不再随供应商数量增长；`.prov-rail` 加入设置页静默滚动条例外组（`scrollbar-width: thin`，悬停/聚焦时出现 `--scrollbar-thumb` 细滚动条），与 `.settings-page__nav-inner`、`.settings-page__content` 共用同一组规则。未改动 TSX 结构与设计令牌。
+- 测试：`src/components/ProvidersPanel.test.ts` 新增「供应商列表定高内部滚动，滚动条沿用设置页静默样式」，锁定列容器定高、rail 溢出滚动与滚动条例外组归属。
+- 验证：`pnpm run lint:css` 通过；`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 15 项通过。
+- 未验收：未取得原生桌面同状态前后截图做像素比对（本会话无法驱动原生 Tauri UI）。行为可由 CSS 推导：列表内容超出 560px 定高后 rail 内部滚动，页面高度不再随供应商数量增长；窄屏维持 280px 现状。

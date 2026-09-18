@@ -14,6 +14,18 @@ describe("ProvidersPanel 历史双栏布局", () => {
     expect(source.indexOf('className="prov-split__list"')).toBeLessThan(source.indexOf('className="prov-split__detail"'));
     expect(styles).toMatch(/\.prov-detail\s*\{[^}]*padding: 16px 18px;/);
   });
+
+  it("供应商列表定高内部滚动，滚动条沿用设置页静默样式", () => {
+    const list = styles.match(/\.prov-split__list\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(list).toContain("max-height: 560px");
+    // 全局默认隐藏滚动条，列表加入设置页静默例外组，悬停或聚焦时出现细滚动条。
+    expect(styles).toMatch(/\.prov-rail\s*\{[^}]*scrollbar-width: thin/);
+    expect(styles).toMatch(
+      /\.prov-rail:hover[^{]*\{[^}]*scrollbar-color: var\(--scrollbar-thumb\)/,
+    );
+    // rail 自身保持弹性滚动容器，定高约束落在列容器上。
+    expect(styles).toMatch(/\.prov-rail\s*\{[^}]*overflow: auto;/);
+  });
 });
 const settingsSource = readFileSync(new URL("./SettingsPage.tsx", import.meta.url), "utf8");
 
