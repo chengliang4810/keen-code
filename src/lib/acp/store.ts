@@ -1292,16 +1292,6 @@ function reduceKeenCodeEvent(
       }
       break;
     }
-    case "context_water_level": {
-      // 水位是 transient 轻提示：不改 compacting 状态、不入有序 segments；
-      // 以淡色 system_notification 行进入时间线，复用现有通知渲染通道。
-      view.history.push({
-        role: "tool",
-        content: `context_water_level|${event.waterLevelPercent}|${event.thresholdPercent}`,
-        marker: "context_water_level",
-      });
-      break;
-    }
     case "recovery_state_changed": {
       view.replay.restoring = event.state === "pending" || event.state === "replaying";
       if (event.state === "ready" && view.status === "connecting") {

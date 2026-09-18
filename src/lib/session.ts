@@ -436,21 +436,6 @@ export function parseCompactContent(
   return meta;
 }
 
-/** 解析水位 transient 行 `context_water_level|<level>|<threshold>`。 */
-export function parseWaterLevelContent(
-  content: string,
-): { level: number; threshold: number } | null {
-  const match = /^context_water_level\|(\d{1,3})\|(\d{1,3})$/.exec(content.trim());
-  if (!match) return null;
-  const level = Number(match[1]);
-  const threshold = Number(match[2]);
-  if (!Number.isSafeInteger(level) || level < 0 || level > 100) return null;
-  if (!Number.isSafeInteger(threshold) || threshold < 0 || threshold > 100) {
-    return null;
-  }
-  return { level, threshold };
-}
-
 export interface TurnErrorPayload {
   sessionId?: string;
   messageId?: string;

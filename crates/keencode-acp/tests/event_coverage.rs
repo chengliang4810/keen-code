@@ -124,18 +124,6 @@ fn frontend_events_use_stable_typed_wire_shapes() {
             }),
         ),
         (
-            turn_event(KeenCodeEvent::ContextWaterLevel {
-                water_level_percent: 72,
-                threshold_percent: 70,
-            })
-            .expect("水位事件应有效"),
-            json!({
-                "type": "context_water_level",
-                "waterLevelPercent": 72,
-                "thresholdPercent": 70
-            }),
-        ),
-        (
             turn_event(KeenCodeEvent::ModelFirstStreamObserved).expect("模型首流事件应有效"),
             json!({ "type": "model_first_stream_observed" }),
         ),

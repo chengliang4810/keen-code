@@ -21,7 +21,6 @@ import {
   isToolInlinedInAssistants,
   messageSegments,
   isTurnPromptMessage,
-  parseWaterLevelContent,
   type ChatMessage,
   type ContextCompactMeta,
   type SessionState,
@@ -100,31 +99,6 @@ type ConversationRetryStatus = {
   delayMs: number;
   reason: string;
 };
-
-/** 水位是淡色轻提示：复用 lobe-chat-compact 行形态，不新建组件。 */
-function ContextWaterLevelNotice({
-  level,
-  threshold,
-  locale,
-}: {
-  level: number;
-  threshold: number;
-  locale: Locale;
-}) {
-  const tr = createT(locale);
-  return (
-    <div className="lobe-chat-compact" role="status" data-testid="context-water-level" data-level={level} data-threshold={threshold}>
-      <span className="lobe-chat-compact__icon" aria-hidden>
-        <IconInfo size={15} />
-      </span>
-      <div className="lobe-chat-compact__body">
-        <div className="lobe-chat-compact__detail">
-          {tr("compact.waterLevel", { level, threshold })}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /** 压缩是时间线中的普通状态，详细证据保留在悬停说明中。 */
 function ContextCompactionNotice({
@@ -697,12 +671,10 @@ export function ConversationThread({
           isEndOfTurnMarker(message.marker) ||
           message.marker === "turn_cancelled" ||
           message.marker === "context_compact" ||
-          message.marker === "context_water_level" ||
           message.marker === "system_notification" ||
           message.content?.startsWith("turn_cancelled") ||
           message.content?.startsWith("turn_end|") ||
           message.content?.startsWith("context_compact") ||
-          message.content?.startsWith("context_water_level") ||
           !!message.compactMeta
         );
       }),
@@ -928,22 +900,6 @@ export function ConversationThread({
             ) {
               return wrap(
                 <ContextCompactionNotice key={m.id} meta={m.compactMeta} locale={locale} />,
-              );
-            }
-
-            if (
-              m.marker === "context_water_level" ||
-              (m.role === "tool" && m.content?.startsWith("context_water_level"))
-            ) {
-              const parsed = parseWaterLevelContent(m.content || "");
-              if (!parsed) return null;
-              return wrap(
-                <ContextWaterLevelNotice
-                  key={m.id}
-                  level={parsed.level}
-                  threshold={parsed.threshold}
-                  locale={locale}
-                />,
               );
             }
 

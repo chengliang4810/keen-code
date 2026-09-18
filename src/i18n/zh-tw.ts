@@ -708,7 +708,6 @@ export const zhTW: Record<MessageKey, string> = {
   "compact.bannerManual": "上下文已壓縮",
   "compact.bannerRunning": "上下文壓縮中…",
   "compact.bannerFailed": "上下文壓縮失敗",
-  "compact.waterLevel": "上下文用量 {level}%（閾值 {threshold}%）",
   "compact.tokensRange": "{before} → {after} tokens",
   "compact.summaryToggle": "摘要",
   "context.chipAria": "上下文用量",

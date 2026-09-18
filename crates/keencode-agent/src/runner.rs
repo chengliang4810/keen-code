@@ -1136,65 +1136,6 @@ impl AgentRunner {
         .map_err(commit_sink_run_error)
     }
 
-    /// 上下文水位达到 info 告警阈值（#23）时尽力投递一条 transient 水位事件。
-    ///
-    /// 压缩触发判断之前调用：水位达到阈值且本轮尚未发送过时发送，
-    /// 含水位百分比与阈值，不入权威 journal；水位回落到阈值以下时重置
-    /// 去重标记，下次跨越可再次发送；窗口未知时静默跳过。投递失败只记录
-    /// 调试日志，不阻断主流程（观测通道的尽力语义）。
-    async fn maybe_notify_context_water_level(
-        &self,
-        request: &TurnRequest,
-        active: &mut ActiveTurn,
-        model_request: &ModelRequest,
-        capabilities: &ProviderCapabilities,
-    ) {
-        let Some(level) = self
-            .context
-            .context_water_level_percent(model_request, capabilities)
-        else {
-            return;
-        };
-        // 水位回落到阈值以下即重置，允许下一次跨越时再次提醒。
-        if level < CONTEXT_WATER_LEVEL_INFO_PERCENT {
-            active.water_level_notified = false;
-            return;
-        }
-        if active.water_level_notified {
-            return;
-        }
-        // 任何压缩臂会执行时都不另发水位（防重复：只发压缩事件）。既有 85%
-        // 触发线与预测性触发线任一命中即压缩，任一命中即抑制水位；已发标记
-        // 不置位，压缩后水位重置。
-        if self
-            .context
-            .precompression_target(model_request, capabilities)
-            .is_some()
-        {
-            return;
-        }
-        if !self
-            .context
-            .predictive_precompression_skipped_by_cache(model_request, capabilities)
-            && self
-                .context
-                .predictive_precompression_target(model_request, capabilities)
-                .is_some()
-        {
-            return;
-        }
-        active.water_level_notified = true;
-        let identity = ModelEventIdentity::for_turn(request, active.state.round_count());
-        let event = identity.envelope(AgentStreamEventKind::ContextWaterLevel {
-            water_level_percent: level,
-            threshold_percent: CONTEXT_WATER_LEVEL_INFO_PERCENT,
-        });
-        let timeout = Duration::from_millis(self.limits.event_sink_timeout_ms);
-        if let Err(error) = deliver_event_bounded(&self.event_sink, &event, timeout).await {
-            tracing::debug!("上下文水位事件投递失败（尽力投递，不阻断）：{error}");
-        }
-    }
-
     async fn deliver_context_compaction_event(
         &self,
         request: &TurnRequest,
@@ -1227,10 +1168,6 @@ impl AgentRunner {
     }
 
     /// 发送 Started/Failed 边界并在权威提交成功前保持原 Transcript 不变。
-    ///
-    /// 压缩实际执行的轮次只发压缩事件：调用点在压缩臂之前先发的 transient
-    /// 水位事件（#23）不再重复发送，由
-    /// [`AgentRunner::maybe_notify_context_water_level`] 的去重标记保证。
     async fn compact_context(
         &self,
         request: &TurnRequest,
@@ -2189,17 +2126,6 @@ impl AgentRunner {
                     }
                 }
             }
-            // 水位告警（#23）先于压缩触发判断：跨越 info 阈值且本轮尚未发送
-            // 过时发一条 transient 水位事件；含水位百分比与阈值，不入权威
-            // journal。压缩实际执行的轮次只发压缩事件（防重复）。水位事件丢失
-            // 不阻断主流程（尽力投递）。
-            self.maybe_notify_context_water_level(
-                request,
-                active,
-                &budget_request,
-                &provider_capabilities,
-            )
-            .await;
             if let Some(target_tokens) = self
                 .context
                 .precompression_target(&budget_request, &provider_capabilities)

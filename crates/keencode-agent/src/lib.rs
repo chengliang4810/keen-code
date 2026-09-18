@@ -43,7 +43,7 @@ pub use collaboration::{
     root_turn_prompt_digest,
 };
 pub use context::{
-    AdmissionDecision, CONTEXT_WATER_LEVEL_INFO_PERCENT, ContextCompactionKind,
+    AdmissionDecision, ContextCompactionKind,
     ContextCompactionOutcomeKind, ContextCompressionOutcome, ContextCompressionRecord,
     ContextCompressionTrigger, ContextCompressor, ContextError, ContextFuture, ContextManager,
     ContextPolicy, ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,

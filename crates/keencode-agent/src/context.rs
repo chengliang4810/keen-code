@@ -73,11 +73,6 @@ pub const PREDICTIVE_CACHE_SKIP_HIT_RATE: f64 = 0.7;
 ///（头部空间 = 输入预算 − 当前估算，占输入预算）。
 pub const PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO: f64 = 0.2;
 
-/// 上下文水位（#23）info 告警阈值：水位（估算占输入预算百分比）达到该值且
-/// 本轮尚未发送过时，发一条 transient 水位事件给 UI；水位达到压缩触发线
-/// 时压缩在执行，只发压缩事件不再另发（防重复）。
-pub const CONTEXT_WATER_LEVEL_INFO_PERCENT: u8 = 70;
-
 /// 上下文压缩异步边界使用的对象安全 Future。
 pub type ContextFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -1085,26 +1080,6 @@ impl ContextManager {
         let trigger = percent_of(input_budget, self.policy.trigger_percent);
         (self.estimate_request(request) >= trigger)
             .then(|| percent_of(input_budget, self.policy.target_percent).max(1))
-    }
-
-    /// 返回请求发送前的上下文水位百分比（估算占输入预算），窗口未知时为 `None`。
-    ///
-    /// 水位告警（#23）的唯一口径来源；压缩路径不受影响。
-    pub fn context_water_level_percent(
-        &self,
-        request: &ModelRequest,
-        capabilities: &ProviderCapabilities,
-    ) -> Option<u8> {
-        let input_budget = self.input_budget(request, capabilities)?;
-        if input_budget == 0 {
-            return Some(100);
-        }
-        let estimated = self.estimate_request(request);
-        let percent = estimated
-            .saturating_mul(100)
-            .checked_div(input_budget)
-            .unwrap_or(100);
-        Some(u8::try_from(percent.min(100)).unwrap_or(100))
     }
 
     /// 预测性触发（#17）：当前估算尚未达到既有触发线，但本轮预期增长会
