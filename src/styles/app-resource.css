@@ -1072,6 +1072,7 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-rail-empty {
+  flex-shrink: 0;
   padding: 20px 12px;
   text-align: center;
   font-size: calc(13px + var(--ui-font-delta));
@@ -1079,6 +1080,8 @@ textarea::-webkit-scrollbar-thumb:active,
 }
 
 .prov-item {
+  /* rail 是限高 flex 容器：子项必须保持自然高度，超高时由 rail 滚动，而不是压缩单项。 */
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 6px;

@@ -25,6 +25,9 @@ describe("ProvidersPanel 历史双栏布局", () => {
     );
     // rail 自身保持弹性滚动容器，定高约束落在列容器上。
     expect(styles).toMatch(/\.prov-rail\s*\{[^}]*overflow: auto;/);
+    // rail 子项禁止收缩：定高后超高交给 rail 滚动，而不是把单项压缩塞满。
+    expect(styles).toMatch(/\.prov-item\s*\{[^}]*flex-shrink: 0;/);
+    expect(styles).toMatch(/\.prov-rail-empty\s*\{[^}]*flex-shrink: 0;/);
   });
 });
 const settingsSource = readFileSync(new URL("./SettingsPage.tsx", import.meta.url), "utf8");

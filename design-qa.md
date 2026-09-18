@@ -989,3 +989,5 @@ historical result: passed; current release: not reverified
 - 测试：`src/components/ProvidersPanel.test.ts` 新增「供应商列表定高内部滚动，滚动条沿用设置页静默样式」，锁定列容器定高、rail 溢出滚动与滚动条例外组归属。
 - 验证：`pnpm run lint:css` 通过；`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 15 项通过。
 - 未验收：未取得原生桌面同状态前后截图做像素比对（本会话无法驱动原生 Tauri UI）。行为可由 CSS 推导：列表内容超出 560px 定高后 rail 内部滚动，页面高度不再随供应商数量增长；窄屏维持 280px 现状。
+- 修正（同日真机复验）：真机窗口实际表现为「单项被压缩、无滚动条」而非滚动。根因：`.prov-rail` 在定高下是纵向 flex 容器，`.prov-item` 默认 `flex-shrink: 1`，flex 先把子项压缩到恰好塞满，`overflow: auto` 没有溢出可滚。修复：`.prov-item` 与 `.prov-rail-empty` 增加 `flex-shrink: 0`，子项保持自然高度、超高交给 rail 滚动；布局锁定测试补充 flex-shrink 断言。上一条「行为可由 CSS 推导」的推断有误，滚动行为以本次真机与子项不收缩为前提。
+- 验证：`pnpm run lint:css`、`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 15 项通过。修复已随 Vite HMR 热更新到运行中的开发桌面。
