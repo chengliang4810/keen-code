@@ -33,6 +33,8 @@ const MAX_SELECTED_OUTPUTS: usize = 200;
 const MAX_TRANSCRIPT_CHARS: usize = 60_000;
 const MAX_SUMMARY_CHARS: usize = 12_000;
 const MODEL_TIMEOUT_SECS: u64 = 120;
+/// 全局整合不属于任何单个对话，用固定标识满足端点的会话路由 Header 要求。
+const CONSOLIDATION_SESSION_ID: &str = "keencode-memory-consolidation";
 const MAX_MEMORY_MD_CHARS: usize = 200_000;
 /// 单条提取记忆正文允许的最大 Unicode 字符数。
 const MAX_RAW_MEMORY_CHARS: usize = 60_000;
@@ -371,7 +373,7 @@ impl MemoryService {
             storage_lock: Mutex::new(()),
             generation: AtomicU64::new(0),
             cancellation,
-            enabled: AtomicBool::new(true),
+            enabled: AtomicBool::new(false),
             pending_consolidation: Mutex::new(None),
         }))
     }
@@ -724,6 +726,7 @@ impl MemoryService {
     async fn generate_isolated(
         &self,
         runtime: &AgentRuntime,
+        session_id: &str,
         system_prompt: &str,
         input: &str,
         structured_output: StructuredOutputConfig,
@@ -732,7 +735,7 @@ impl MemoryService {
     ) -> Result<String> {
         self.ensure_generation(generation)?;
         tokio::select! {
-            result = runtime.generate_isolated(system_prompt, input, MODEL_TIMEOUT_SECS, structured_output) => {
+            result = runtime.generate_isolated(session_id, system_prompt, input, MODEL_TIMEOUT_SECS, structured_output) => {
                 let response = result?;
                 self.ensure_generation(generation)?;
                 Ok(response)
@@ -774,6 +777,7 @@ impl MemoryService {
         let response = self
             .generate_isolated(
                 runtime,
+                session_id,
                 &system_prompt,
                 &input,
                 extraction_output_format(),
@@ -828,6 +832,7 @@ impl MemoryService {
             |system_prompt, input| async move {
                 self.generate_isolated(
                     runtime,
+                    CONSOLIDATION_SESSION_ID,
                     &system_prompt,
                     &input,
                     consolidation_output_format(),

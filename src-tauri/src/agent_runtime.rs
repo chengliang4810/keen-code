@@ -4949,12 +4949,14 @@ impl AgentRuntime {
     /// 用当前默认 Provider 执行按指定 Schema 严格校验的无工具记忆模型调用。
     pub async fn generate_isolated(
         &self,
+        session_id: &str,
         system_prompt: &str,
         input: &str,
         timeout_secs: u64,
         structured_output: StructuredOutputConfig,
     ) -> anyhow::Result<String> {
         self.generate_isolated_for_purpose(
+            session_id,
             system_prompt,
             input,
             timeout_secs,
@@ -5030,6 +5032,7 @@ impl AgentRuntime {
     /// 执行不带业务工具的隔离模型调用，并只接受 Runtime 内部固定用途。
     async fn generate_isolated_for_purpose(
         &self,
+        session_id: &str,
         system_prompt: &str,
         input: &str,
         timeout_secs: u64,
@@ -5050,6 +5053,7 @@ impl AgentRuntime {
             .map_err(|error| anyhow!(error))?;
         self.generate_isolated_with_provider(
             provider,
+            session_id,
             system_prompt,
             input,
             timeout_secs,
@@ -5063,6 +5067,7 @@ impl AgentRuntime {
     async fn generate_isolated_with_provider(
         &self,
         provider: ResolvedProvider,
+        session_id: &str,
         system_prompt: &str,
         input: &str,
         timeout_secs: u64,
@@ -5108,6 +5113,11 @@ impl AgentRuntime {
         request
             .metadata
             .insert(REQUEST_METADATA_PURPOSE.to_owned(), purpose.to_owned());
+        // 隔离推理同样按会话注入路由标识，否则要求该 Header 的端点会拒绝请求。
+        request.metadata.insert(
+            REQUEST_METADATA_SESSION_ID.to_owned(),
+            session_id.to_owned(),
+        );
         let (response, structured_output) = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             structured_mode.complete_isolated(&provider, request),
@@ -11404,6 +11414,29 @@ mod tests {
         runtime_with_responses_capabilities(storage_root, base_url, models, None)
     }
 
+    /// 记录 Provider HTTP 边界会话标识与用途的测试观测器。
+    #[derive(Default)]
+    struct SessionRecordingObserver {
+        /// 按同步回调到达顺序保存的 (session_id, purpose)。
+        seen: StdMutex<Vec<(Option<String>, Option<String>)>>,
+    }
+
+    impl SessionRecordingObserver {
+        /// 返回当前全部观测的副本。
+        fn observations(&self) -> Vec<(Option<String>, Option<String>)> {
+            self.seen.lock().expect("观测锁不应损坏").clone()
+        }
+    }
+
+    impl keencode_provider::RequestObserver for SessionRecordingObserver {
+        fn on_request(&self, observation: keencode_provider::RequestObservation) {
+            self.seen
+                .lock()
+                .expect("观测锁不应损坏")
+                .push((observation.session_id, observation.purpose));
+        }
+    }
+
     /// 创建具有明确中立能力快照的测试 Runtime，避免把默认模型能力冒充原生 Schema 支持。
     fn runtime_with_responses_capabilities(
         storage_root: &Path,
@@ -11411,7 +11444,23 @@ mod tests {
         models: &[&str],
         capabilities: Option<ProviderCapabilities>,
     ) -> Arc<AgentRuntime> {
-        let registry = keencode_provider::ProviderRegistry::new();
+        runtime_with_responses_registry(
+            keencode_provider::ProviderRegistry::new(),
+            storage_root,
+            base_url,
+            models,
+            capabilities,
+        )
+    }
+
+    /// 用调用方提供的注册表创建测试 Runtime，以便安装请求观测器断言出站请求事实。
+    fn runtime_with_responses_registry(
+        registry: keencode_provider::ProviderRegistry,
+        storage_root: &Path,
+        base_url: &str,
+        models: &[&str],
+        capabilities: Option<ProviderCapabilities>,
+    ) -> Arc<AgentRuntime> {
         let mut config = ProviderConfig::new_unauthenticated(
             "provider-runtime-test",
             keencode_model::ProviderProtocol::Responses,
@@ -19494,6 +19543,7 @@ mod tests {
                     assert!(
                         runtime
                             .generate_isolated(
+                                "session-isolated-test",
                                 "整合合成事实",
                                 input,
                                 10,
@@ -19564,6 +19614,7 @@ mod tests {
             );
             let result = runtime
                 .generate_isolated(
+                    "session-isolated-test",
                     "只返回约定的合成记忆 JSON",
                     "合成数据",
                     10,
@@ -19627,6 +19678,7 @@ mod tests {
 
         let result = runtime
             .generate_isolated(
+                "session-isolated-test",
                 "只返回约定的合成记忆 JSON",
                 "合成数据",
                 10,
@@ -19763,6 +19815,7 @@ mod tests {
             );
             let result = runtime
                 .generate_isolated(
+                    "session-isolated-test",
                     "通过结果通道提交合成事实",
                     "合成数据",
                     10,
@@ -19826,6 +19879,7 @@ mod tests {
         );
         let error = runtime
             .generate_isolated(
+                "session-isolated-test",
                 "合成系统指令",
                 "合成输入",
                 2,
@@ -19842,6 +19896,63 @@ mod tests {
             listener.accept().unwrap_err().kind(),
             std::io::ErrorKind::WouldBlock
         );
+    }
+
+    /// 隔离推理（记忆与标题）必须把会话标识带到 Provider HTTP 边界。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn isolated_generation_carries_session_identity_to_provider_boundary() {
+        let storage = tempfile::tempdir().expect("应创建记忆测试存储目录");
+        let body = json!({
+            "id": "response-runtime-test", "object": "response", "model": "test-model",
+            "status": "completed",
+            "output": [{
+                "id": "message-runtime-test", "type": "message", "role": "assistant",
+                "content": [{"type": "output_text", "text": r##"{"memoryMd":"# 会话路由记忆"}"##}]
+            }],
+            "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}
+        });
+        let (base_url, server) = spawn_buffered_responses_sequence(vec![body]);
+        let observer = Arc::new(SessionRecordingObserver::default());
+        let runtime = runtime_with_responses_registry(
+            keencode_provider::ProviderRegistry::with_request_observer(observer.clone()),
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities {
+                structured_output: keencode_model::StructuredOutputCapability::Native,
+                ..ProviderCapabilities::default()
+            }),
+        );
+        runtime
+            .generate_isolated(
+                "session-memory-route",
+                "只返回约定的合成记忆 JSON",
+                "合成数据",
+                10,
+                keencode_model::StructuredOutputConfig::new(
+                    "test_memory",
+                    json!({
+                        "type": "object",
+                        "properties": {"memoryMd": {"type": "string"}},
+                        "required": ["memoryMd"],
+                        "additionalProperties": false
+                    }),
+                ),
+            )
+            .await
+            .expect("隔离记忆调用应成功");
+        server
+            .join()
+            .expect("本地模型服务线程不应 panic")
+            .expect("本地模型服务应成功");
+
+        // 端点在缺少该标识时直接拒绝请求，因此每条观测都必须带上本会话标识。
+        let observations = observer.observations();
+        assert!(!observations.is_empty(), "隔离调用必须产生请求观测");
+        for (session_id, purpose) in observations {
+            assert_eq!(session_id.as_deref(), Some("session-memory-route"));
+            assert_eq!(purpose.as_deref(), Some("memory"));
+        }
     }
 
     /// 根 Turn 必须把 Session 持久推理强度写入每次 Provider 请求。
