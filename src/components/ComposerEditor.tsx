@@ -30,6 +30,7 @@ import {
 import {
   detectSlashQuery,
   parseStoredContent,
+  segmentsFromEditorDom,
   serializeStored,
   type DraftSegment,
 } from "@/lib/draftDoc";
@@ -79,39 +80,8 @@ function renderSegmentsInto(el: HTMLElement, segments: DraftSegment[]) {
 }
 
 function serializeDom(el: HTMLElement): string {
-  const segs: DraftSegment[] = [];
-  const walk = (node: Node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const t = node.textContent ?? "";
-      if (t) segs.push({ type: "text", text: t });
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const he = node as HTMLElement;
-    if (he.dataset?.skill) {
-      segs.push({ type: "skill", name: he.dataset.skill });
-      return;
-    }
-    if (he.tagName === "BR") {
-      segs.push({ type: "text", text: "\n" });
-      return;
-    }
-    he.childNodes.forEach(walk);
-  };
-  el.childNodes.forEach(walk);
-  const merged: DraftSegment[] = [];
-  for (const s of segs) {
-    if (s.type === "text") {
-      const last = merged[merged.length - 1];
-      if (last?.type === "text") last.text += s.text;
-      else merged.push({ type: "text", text: s.text });
-    } else {
-      merged.push(s);
-    }
-  }
-  return serializeStored(
-    merged.length ? merged : [{ type: "text", text: "" }],
-  );
+  const segs = segmentsFromEditorDom(el);
+  return serializeStored(segs.length ? segs : [{ type: "text", text: "" }]);
 }
 
 function getTextBeforeCaret(el: HTMLElement): string | null {

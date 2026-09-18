@@ -78,6 +78,78 @@ export function serializeStored(segments: DraftSegment[]): string {
 }
 
 /**
+ * 数字字面量而非 `Node.TEXT_NODE`：本模块是纯规则，必须能在无 DOM 的
+ * Vitest node 环境里直接跑。
+ */
+const TEXT_NODE = 3;
+const ELEMENT_NODE = 1;
+const BREAK_TAG = "BR";
+
+/**
+ * WebKit 的 contenteditable 默认 `defaultParagraphSeparator` 是 `div`，
+ * 换行落在 `<div>` / `<p>` 块边界上（粘贴多行、Enter 分段都是这种形态），
+ * 不是 `<br>`。块边界必须还原成换行，否则正文被粘成一行。
+ */
+const BLOCK_TAGS = new Set(["DIV", "P"]);
+
+/**
+ * 把编辑器 DOM 折叠成草稿段。
+ *
+ * - `<br>` 与块边界都产出 `\n`；
+ * - 块级元素只在它前面已经走过兄弟节点时补换行，首块不额外加空行；
+ * - WebKit 用「只含单个 `<br>` 的块」表示空行，此时不再递归该 `<br>`，
+ *   否则一个空行会被算成两个换行；
+ * - `data-skill` 宿主产出 skill 段，相邻文本段合并以保持与
+ *   {@link parseStoredContent} 一致的规范形式。
+ */
+export function segmentsFromEditorDom(root: Node): DraftSegment[] {
+  const segs: DraftSegment[] = [];
+  let started = false;
+  const walk = (node: Node) => {
+    if (node.nodeType === TEXT_NODE) {
+      const text = node.textContent ?? "";
+      if (text) segs.push({ type: "text", text });
+      return;
+    }
+    if (node.nodeType !== ELEMENT_NODE) return;
+    const he = node as HTMLElement;
+    const skill = he.dataset?.skill;
+    if (skill) {
+      segs.push({ type: "skill", name: skill });
+      return;
+    }
+    if (he.tagName === BREAK_TAG) {
+      segs.push({ type: "text", text: "\n" });
+      return;
+    }
+    if (BLOCK_TAGS.has(he.tagName)) {
+      const emptyLine =
+        he.childNodes.length === 1 && he.childNodes[0]?.nodeName === BREAK_TAG;
+      if (started) segs.push({ type: "text", text: "\n" });
+      if (!emptyLine) he.childNodes.forEach(walk);
+      return;
+    }
+    he.childNodes.forEach(walk);
+  };
+  root.childNodes.forEach((child) => {
+    walk(child);
+    started = true;
+  });
+
+  const merged: DraftSegment[] = [];
+  for (const s of segs) {
+    if (s.type === "text") {
+      const last = merged[merged.length - 1];
+      if (last?.type === "text") last.text += s.text;
+      else merged.push({ type: "text", text: s.text });
+    } else {
+      merged.push(s);
+    }
+  }
+  return merged;
+}
+
+/**
  * Replace `[[skill:name]]` with `/name` in place for one-line previews
  * (queue strip, titles). Keeps surrounding text order — unlike
  * {@link serializeForAgent}, which groups skills first.

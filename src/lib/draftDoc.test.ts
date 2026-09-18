@@ -6,6 +6,7 @@ import {
   isDraftEmpty,
   parseStoredContent,
   previewStoredAsSlash,
+  segmentsFromEditorDom,
   serializeForAgent,
   serializeStored,
   type DraftSegment,
@@ -176,5 +177,100 @@ describe("hydrateDisplayContent", () => {
 
   it("does not preserve removed builtin aliases", () => {
     expect(hydrateDisplayContent("/status")).toBe("[[skill:status]]");
+  });
+});
+
+/**
+ * WebKit 的 contenteditable 默认 `defaultParagraphSeparator` 是 `div`
+ * （已在 WKWebView 实测），粘贴多行与 Enter 分段都落在块边界上。
+ * 这里用最小鸭子类型节点复刻那些 DOM 形态，node 测试环境无 jsdom。
+ */
+describe("segmentsFromEditorDom", () => {
+  type FakeNode = {
+    nodeType: number;
+    textContent?: string;
+    tagName?: string;
+    nodeName?: string;
+    dataset?: { skill?: string };
+    childNodes: FakeNode[];
+  };
+
+  const text = (value: string): FakeNode => ({
+    nodeType: 3,
+    textContent: value,
+    childNodes: [],
+  });
+  const br = (): FakeNode => ({ nodeType: 1, tagName: "BR", nodeName: "BR", childNodes: [] });
+  const el = (tagName: string, childNodes: FakeNode[]): FakeNode => ({
+    nodeType: 1,
+    tagName,
+    nodeName: tagName,
+    childNodes,
+  });
+  const skill = (name: string): FakeNode => ({
+    nodeType: 1,
+    tagName: "SPAN",
+    nodeName: "SPAN",
+    dataset: { skill: name },
+    childNodes: [text(name)],
+  });
+  const root = (childNodes: FakeNode[]): Node =>
+    ({ nodeType: 1, childNodes }) as unknown as Node;
+
+  const stored = (nodes: FakeNode[]) =>
+    serializeStored(segmentsFromEditorDom(root(nodes)));
+
+  it("块边界还原为换行（WKWebView 粘贴多行形态）", () => {
+    expect(
+      stored([
+        text("l1"),
+        el("DIV", [text("l2")]),
+        el("DIV", [text("l3")]),
+      ]),
+    ).toBe("l1\nl2\nl3");
+  });
+
+  it("Enter 分段还原为换行（WKWebView 粘贴后回车形态）", () => {
+    expect(stored([text("a"), el("DIV", [text("b")])])).toBe("a\nb");
+  });
+
+  it("保留 <br> 形态与块内换行", () => {
+    expect(stored([text("a"), br(), text("b")])).toBe("a\nb");
+    expect(
+      stored([el("DIV", [text("a"), br(), text("b")]), el("DIV", [text("c")])]),
+    ).toBe("a\nb\nc");
+  });
+
+  it("空行块只算一个换行", () => {
+    expect(
+      stored([
+        text("a"),
+        el("DIV", [br()]),
+        el("DIV", [text("b")]),
+      ]),
+    ).toBe("a\n\nb");
+    expect(stored([el("DIV", [br()])])).toBe("");
+  });
+
+  it("首块不加多余空行，P 与嵌套块同样处理", () => {
+    expect(stored([el("DIV", [text("only")])])).toBe("only");
+    expect(stored([el("P", [text("a")]), el("P", [text("b")])])).toBe("a\nb");
+    expect(stored([text("a"), el("DIV", [text("b"), el("DIV", [text("c")])])])).toBe(
+      "a\nb\nc",
+    );
+  });
+
+  it("skill 宿主与块边界共存时保持段顺序", () => {
+    const segs = segmentsFromEditorDom(
+      root([skill("x"), el("DIV", [text("body")])]),
+    );
+    expect(segs).toEqual([
+      { type: "skill", name: "x" },
+      { type: "text", text: "\nbody" },
+    ]);
+  });
+
+  it("空编辑器产出空段", () => {
+    expect(segmentsFromEditorDom(root([]))).toEqual([]);
   });
 });
