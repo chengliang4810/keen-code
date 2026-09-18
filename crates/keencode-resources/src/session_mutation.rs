@@ -14,11 +14,11 @@ use crate::atomic::{
     sync_directory,
 };
 use crate::{
-    ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse,
-    JournalConfig, MAX_REPLAY_PAGE_RECORDS, MessageImageSource, MessagePart, MessageRole,
-    RequestId, ResourceError, SessionEvent, SessionEventId, SessionEventRecord, SessionId,
-    SessionJournal, SessionLease, SessionLeaseAcquire, SessionOpen, SessionState, SessionStatus,
-    SubAgentStatus, ToolResultPart, TranscriptRecord, TurnId, TurnStatus, reduce_record,
+    ArtifactLimits, ArtifactMaterialization, ArtifactStore, ArtifactUse, JournalConfig,
+    MAX_REPLAY_PAGE_RECORDS, MessageImageSource, MessagePart, MessageRole, RequestId,
+    ResourceError, SessionEvent, SessionEventId, SessionEventRecord, SessionId, SessionJournal,
+    SessionLease, SessionLeaseAcquire, SessionOpen, SessionState, SessionStatus, SubAgentStatus,
+    ToolResultPart, TranscriptRecord, TurnId, TurnStatus, reduce_record,
 };
 
 /// Session 变更事务记录使用的固定 schema。
@@ -1708,9 +1708,51 @@ fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)
             .filter(|key| is_sha256(key))
             .ok_or_else(|| ResourceError::UnsafePath("Session 变更记录文件名无效".to_owned()))?;
         let path = entry.path();
-        let record = read_record_if_present(&path)?.ok_or_else(|| {
-            ResourceError::SessionMutationRecoveryRequired("事务记录在扫描期间消失".to_owned())
-        })?;
+        let bytes = match read_file_bounded(&path, MAX_MUTATION_RECORD_BYTES) {
+            Ok(BoundedRead::Bytes(bytes)) => bytes,
+            Ok(BoundedRead::TooLarge { actual }) => {
+                return Err(ResourceError::DocumentTooLarge {
+                    actual,
+                    limit: MAX_MUTATION_RECORD_BYTES,
+                });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ResourceError::SessionMutationRecoveryRequired(
+                    "事务记录在扫描期间消失".to_owned(),
+                ));
+            }
+            Err(error) => return Err(ResourceError::io("read_session_mutation_record", error)),
+        };
+        // 过期墓碑不参与恢复语义，也不能阻断会话列表：版本演进后磁盘上会长期
+        // 留存旧版本已完成事务，直接忽略并记录，其余记录照常处理。
+        let record: MutationRecord = match serde_json::from_slice::<MutationRecord>(&bytes) {
+            Ok(record)
+                if record.schema == MUTATION_SCHEMA && record.version == MUTATION_VERSION =>
+            {
+                record
+            }
+            Ok(record) if record.state == MutationState::Completed => {
+                tracing::warn!(
+                    target: "keencode_diagnostics",
+                    component = "session_mutation.scan",
+                    path = %path.display(),
+                    version = record.version,
+                    "忽略过期版本的已完成 Session 变更事务墓碑"
+                );
+                continue;
+            }
+            Ok(record) => {
+                return Err(ResourceError::SessionMutationRecoveryRequired(format!(
+                    "事务记录 schema 或版本无效：operation_id={} version={}",
+                    record.operation_id, record.version
+                )));
+            }
+            Err(error) => {
+                return Err(ResourceError::SessionMutationRecoveryRequired(format!(
+                    "事务记录无法解析：{error}"
+                )));
+            }
+        };
         if operation_key(&record.source_session_id, &record.operation_id) != key {
             return Err(ResourceError::SessionMutationRecoveryRequired(
                 "事务记录文件名与正文身份不一致".to_owned(),
@@ -1940,9 +1982,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        MutationFault, edit_request_sha256, fork_session, inject_mutation_fault, operation_key,
-        prepare_edit_user, read_all_records, recover_session_mutations, root_user_messages,
-        target_root_user_sequence,
+        MUTATION_SCHEMA, MutationFault, edit_request_sha256, fork_session, inject_mutation_fault,
+        operation_key, prepare_edit_user, read_all_records, recover_session_mutations,
+        root_user_messages, sha256_hex, target_root_user_sequence,
     };
     use crate::{
         AgentId, ArtifactLimits, ArtifactMaterialization, ArtifactStore, GeneratedTitleRecord,
@@ -3198,5 +3240,91 @@ mod tests {
             0
         );
         assert!(!temporary.exists());
+    }
+
+    /// 过期版本的已完成事务墓碑必须被忽略，不能阻断会话列表；这是版本演进
+    /// 后的常规磁盘形态（用户数据目录会长期留存旧版本墓碑）。
+    #[test]
+    fn recovery_ignores_stale_version_completed_tombstone() {
+        let root = tempdir().expect("临时目录应创建");
+        let records_root = root.path().join("session-mutations").join("records");
+        fs::create_dir_all(&records_root).expect("事务记录目录应创建");
+        let source_id = "session-0000000000000000000000000000000000000000000000000000000000000000";
+        let operation_id = "session-edit-00000000-0000-0000-0000-000000000000";
+        let key = sha256_hex(format!("{source_id}:{operation_id}").as_bytes());
+        // shape 与当前记录一致，仅 version 停留在旧版本；state 为 completed。
+        let stale_tombstone = format!(
+            r#"{{"schema":"{MUTATION_SCHEMA}","version":2,
+            "operationId":"{operation_id}",
+            "sourceSessionId":"{source_id}",
+            "requestSha256":"{}","kind":{{"type":"edit_user","target_message_id":"m1",
+            "expected_text_sha256":"{}","cutoff_sequence":2,
+            "truncated_log_sha256":"{}","truncated_last_sequence":2}},
+            "targetSessionId":"session-1111111111111111111111111111111111111111111111111111111111111111",
+            "targetTitle":"旧标题","sourceLogSha256":"{}",
+            "sourceLastSequence":3,"targetLogSha256":"{}",
+            "targetLastSequence":2,"targetTimeUnixMs":1,"state":"completed"}}"#,
+            "a".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        );
+        let stale_path = records_root.join(format!("{key}.json"));
+        fs::write(&stale_path, stale_tombstone).expect("过期墓碑应写入");
+
+        assert_eq!(
+            recover_session_mutations(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default(),
+            )
+            .expect("过期墓碑不应阻断会话列表与恢复"),
+            0
+        );
+        // 墓碑保持原样：忽略是读取行为，不是清理行为。
+        assert!(stale_path.exists(), "过期墓碑应保留在磁盘上");
+    }
+
+    /// 过期版本的 Prepared 事务仍必须失败关闭：那是真正未完成的事务，
+    /// 静默丢弃会丢失用户变更。
+    #[test]
+    fn recovery_still_rejects_stale_version_prepared_record() {
+        let root = tempdir().expect("临时目录应创建");
+        let records_root = root.path().join("session-mutations").join("records");
+        fs::create_dir_all(&records_root).expect("事务记录目录应创建");
+        let source_id = "session-0000000000000000000000000000000000000000000000000000000000000000";
+        let operation_id = "session-edit-00000000-0000-0000-0000-000000000000";
+        let key = sha256_hex(format!("{source_id}:{operation_id}").as_bytes());
+        let stale_prepared = format!(
+            r#"{{"schema":"{MUTATION_SCHEMA}","version":2,
+            "operationId":"{operation_id}",
+            "sourceSessionId":"{source_id}",
+            "requestSha256":"{}","kind":{{"type":"edit_user","target_message_id":"m1",
+            "expected_text_sha256":"{}","cutoff_sequence":2,
+            "truncated_log_sha256":"{}","truncated_last_sequence":2}},
+            "targetSessionId":"session-1111111111111111111111111111111111111111111111111111111111111111",
+            "targetTitle":"旧标题","sourceLogSha256":"{}",
+            "sourceLastSequence":3,"targetLogSha256":"{}",
+            "targetLastSequence":2,"targetTimeUnixMs":1,"state":"prepared"}}"#,
+            "a".repeat(64),
+            "d".repeat(64),
+            "e".repeat(64),
+            "b".repeat(64),
+            "c".repeat(64),
+        );
+        fs::write(records_root.join(format!("{key}.json")), stale_prepared)
+            .expect("过期 Prepared 记录应写入");
+
+        let error = recover_session_mutations(
+            root.path(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+        )
+        .expect_err("过期 Prepared 事务必须失败关闭");
+        assert!(
+            matches!(error, ResourceError::SessionMutationRecoveryRequired(_)),
+            "应要求人工恢复，实际：{error}"
+        );
     }
 }
