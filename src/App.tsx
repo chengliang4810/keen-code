@@ -149,8 +149,14 @@ export default function App() {
     }));
   }, []);
 
-  const { themePreference, skin, applyThemeChoice, applySkinChoice } =
-    useThemeAppearance();
+  const {
+    themePreference,
+    skin,
+    uiFontSize,
+    applyThemeChoice,
+    applySkinChoice,
+    applyUiFontSizeChoice,
+  } = useThemeAppearance();
   const [layout, setLayout] = useState(() => loadLayout(localStorage));
   const sidebarRef = useRef<HTMLElement>(null);
   const asideRef = useRef<HTMLElement>(null);

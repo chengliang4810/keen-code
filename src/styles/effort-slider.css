@@ -195,7 +195,7 @@
 
 /* 面板标题：默认主题强调色；最高档换品牌色，快速换金色，融合渐变。 */
 .effort-title {
-  font-size: 17px;
+  font-size: calc(17px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--effort-brand-ink);
   transition: color 200ms var(--ease-out);
@@ -251,7 +251,7 @@
   top: 50%;
   transform: translateY(-50%);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 400;
 }
 

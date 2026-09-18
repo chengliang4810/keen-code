@@ -107,6 +107,10 @@ export interface SettingsRouteAppearance {
   onTheme: (value: ThemePreference) => void;
   skin: ThemeSkinId;
   onSkin: (value: ThemeSkinId) => void;
+  /** 用户选择的界面字号（12–20，默认 14）。 */
+  uiFontSize: number;
+  /** 保存并立即应用界面字号。 */
+  onUiFontSize: (value: number) => void;
   wallpaperUrl?: string | null;
   wallpaperKind?: WallpaperKind | null;
   wallpaperFocus?: WallpaperFocus | null;

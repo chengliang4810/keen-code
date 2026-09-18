@@ -103,7 +103,7 @@
 
 .setup-title {
   margin: 0;
-  font-size: 22px;
+  font-size: calc(22px + var(--ui-font-delta));
   font-weight: 650;
   letter-spacing: -0.02em;
   line-height: var(--leading-tight);
@@ -131,6 +131,6 @@
     border-radius: 28%;
   }
   .setup-title {
-    font-size: 18px;
+    font-size: calc(18px + var(--ui-font-delta));
   }
 }

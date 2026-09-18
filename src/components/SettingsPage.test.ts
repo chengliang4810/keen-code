@@ -94,6 +94,41 @@ describe("SettingsPage 兼容服务设置契约", () => {
   });
 });
 
+describe("SettingsPage 界面字号契约", () => {
+  it("界面字号使用 12–20 的 shadcn 数字输入，失焦保存并校验范围", () => {
+    const start = source.indexOf('id="settings-anchor-ui-font-size"');
+    const end = source.indexOf('id="settings-anchor-terminal-font"', start);
+    const fontSizeSource = source.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(fontSizeSource).toContain("<Input");
+    expect(fontSizeSource).not.toMatch(/<input(?:\s|>)/);
+    expect(fontSizeSource).toContain('id="settings-ui-font-size"');
+    expect(fontSizeSource).toContain('htmlFor="settings-ui-font-size"');
+    expect(fontSizeSource).toContain(
+      'aria-describedby="settings-ui-font-size-desc"',
+    );
+    expect(fontSizeSource).toContain("min={MIN_UI_FONT_SIZE}");
+    expect(fontSizeSource).toContain("max={MAX_UI_FONT_SIZE}");
+    expect(fontSizeSource).toContain("if (!isUiFontSize(value))");
+    expect(fontSizeSource).toContain("onUiFontSize(value)");
+    expect(fontSizeSource).toContain('event.key === "Enter"');
+  });
+
+  it("界面字号控件位于外观分区，且不与主题、皮肤混在同一卡片", () => {
+    const appearanceStart = source.indexOf('{section === "appearance" && (');
+    const themeStart = source.indexOf('id="settings-anchor-theme"');
+    const fontSizeStart = source.indexOf('id="settings-anchor-ui-font-size"');
+    const terminalStart = source.indexOf('id="settings-anchor-terminal-font"');
+
+    expect(appearanceStart).toBeGreaterThanOrEqual(0);
+    expect(themeStart).toBeGreaterThan(appearanceStart);
+    expect(fontSizeStart).toBeGreaterThan(themeStart);
+    expect(terminalStart).toBeGreaterThan(fontSizeStart);
+  });
+});
+
 describe("SettingsPage 主题和皮肤选择契约", () => {
   it("终端字体使用 shadcn Input，并在失焦时保存非空字体族列表", () => {
     const start = source.indexOf('id="settings-anchor-terminal-font"');

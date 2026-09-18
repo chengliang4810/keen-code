@@ -76,11 +76,19 @@
   --font-sans: var(--dsw-font-family);
   /* 显式中文后备字体防止 Windows 代码区域落入宋体。 */
   --font-mono: var(--ds-font-family-code);
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-md: 14px;
-  --text-lg: 16px;
-  --text-xl: 26px;
+  /* 界面字号：全部界面文字尺寸的唯一输入，默认 14px（12–20 由运行时写入）。
+   * --ui-font-delta 是相对 14px 基线的像素增量，文字令牌与硬编码字号按同一
+   * 增量随动，因此层级差值保持不变；图标字形与控件几何不读该变量。 */
+  --ui-font-size: 14px;
+  --ui-font-delta: calc(var(--ui-font-size) - 14px);
+  --text-xs: calc(12px + var(--ui-font-delta));
+  --text-sm: calc(13px + var(--ui-font-delta));
+  --text-md: var(--ui-font-size);
+  --text-lg: calc(16px + var(--ui-font-delta));
+  --text-xl: calc(26px + var(--ui-font-delta));
+  /* Harness 的 Markdown / 回合统计排版令牌按 --dsh-content-font-size 派生，
+   * 其上游未提供写入方；在此接到界面字号，使对话正文与标题层级随之缩放。 */
+  --dsh-content-font-size: var(--ui-font-size);
   --leading-tight: 1.35;
   --leading-normal: 1.5714;
   --motion-fast: 100ms;

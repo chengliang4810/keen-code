@@ -2,6 +2,11 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@/components/ui/slider";
+import {
+  isUiFontSize,
+  MAX_UI_FONT_SIZE,
+  MIN_UI_FONT_SIZE,
+} from "@/lib/uiFontSize";
 /**
  * KeenCode full-page settings shell: left nav + content.
  * Back control returns to the workbench ("返回应用").
@@ -126,6 +131,10 @@ export interface SettingsPageProps {
   skin: ThemeSkinId;
   /** 应用颜色皮肤。 */
   onSkin: (v: ThemeSkinId) => void;
+  /** 用户选择的界面字号（12–20，默认 14）。 */
+  uiFontSize: number;
+  /** 保存并立即应用界面字号。 */
+  onUiFontSize: (v: number) => void;
   /** Custom wallpaper blob: URL (null/undefined = none). */
   wallpaperUrl?: string | null;
   /** Kind of the current wallpaper, to pick <video> vs <img> in the preview. */
@@ -296,6 +305,8 @@ export function SettingsPage({
   onTheme,
   skin,
   onSkin,
+  uiFontSize,
+  onUiFontSize,
   wallpaperUrl = null,
   wallpaperKind = null,
   wallpaperFocus = null,
@@ -1003,6 +1014,47 @@ export function SettingsPage({
                     {t("settings.themeSystem")}
                   </ToggleGroupItem>
                 </ToggleGroup>
+              </div>
+            </div>
+            <div className="settings-card" id="settings-anchor-ui-font-size">
+              <div className="settings-row">
+                <div className="settings-row__text">
+                  <Label
+                    className="settings-row__label"
+                    htmlFor="settings-ui-font-size"
+                  >
+                    {t("settings.uiFontSize")}
+                  </Label>
+                  <div
+                    className="settings-row__desc"
+                    id="settings-ui-font-size-desc"
+                  >
+                    {t("settings.uiFontSizeDesc")}
+                  </div>
+                </div>
+                <Input
+                  key={uiFontSize}
+                  id="settings-ui-font-size"
+                  type="number"
+                  className="settings-input settings-input--compact"
+                  min={MIN_UI_FONT_SIZE}
+                  max={MAX_UI_FONT_SIZE}
+                  step={1}
+                  defaultValue={uiFontSize}
+                  aria-label={t("settings.uiFontSize")}
+                  aria-describedby="settings-ui-font-size-desc"
+                  onBlur={(event) => {
+                    const value = event.currentTarget.valueAsNumber;
+                    if (!isUiFontSize(value)) {
+                      event.currentTarget.value = String(uiFontSize);
+                      return;
+                    }
+                    if (value !== uiFontSize) onUiFontSize(value);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                  }}
+                />
               </div>
             </div>
             <div className="settings-card" id="settings-anchor-terminal-font">

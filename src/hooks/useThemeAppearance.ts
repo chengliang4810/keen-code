@@ -17,6 +17,11 @@ import {
   skinPreferredTheme,
   type ThemeSkinId,
 } from "@/lib/themeSkin";
+import {
+  applyUiFontSizeToDocument,
+  loadUiFontSize,
+  saveUiFontSize,
+} from "@/lib/uiFontSize";
 
 export function useThemeAppearance() {
   const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
@@ -28,11 +33,18 @@ export function useThemeAppearance() {
     [themePreference, systemTheme],
   );
   const [skin, setSkin] = useState<ThemeSkinId>(() => loadSkin(localStorage));
+  const [uiFontSize, setUiFontSize] = useState(() =>
+    loadUiFontSize(localStorage),
+  );
 
   useEffect(() => {
     applyThemeToDocument(theme);
     void applyNativeWindowTheme(themePreference === "system" ? null : theme);
   }, [theme, themePreference]);
+
+  useEffect(() => {
+    applyUiFontSizeToDocument(uiFontSize);
+  }, [uiFontSize]);
 
   useEffect(() => {
     if (themePreference !== "system") return;
@@ -74,5 +86,18 @@ export function useThemeAppearance() {
     if (preferred && preferred !== theme) applyThemeChoice(preferred);
   };
 
-  return { themePreference, skin, applyThemeChoice, applySkinChoice };
+  const applyUiFontSizeChoice = (next: number) => {
+    saveUiFontSize(localStorage, next);
+    applyUiFontSizeToDocument(next);
+    setUiFontSize(next);
+  };
+
+  return {
+    themePreference,
+    skin,
+    uiFontSize,
+    applyThemeChoice,
+    applySkinChoice,
+    applyUiFontSizeChoice,
+  };
 }

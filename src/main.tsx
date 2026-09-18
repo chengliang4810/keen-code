@@ -24,6 +24,7 @@ import {
   installFrontendErrorHandlers,
   reportFrontendError,
 } from "./lib/frontendDiagnostics";
+import { applyUiFontSizeToDocument, loadUiFontSize } from "./lib/uiFontSize";
 import { startupFrontendReady } from "./lib/api";
 
 // React 挂载前注册，确保启动阶段与首次渲染异常也会写入统一诊断日志。
@@ -35,6 +36,8 @@ const bootTheme = resolveTheme(bootPref, getSystemTheme());
 applyThemeToDocument(bootTheme);
 applySkinToDocument(loadSkin(localStorage));
 applyWallpaperScrimToDocument(loadWallpaperScrim(localStorage));
+// 界面字号在首次绘制前生效，避免启动时字号跳变。
+applyUiFontSizeToDocument(loadUiFontSize(localStorage));
 // Native: null = follow OS (required for live system theme); light/dark locks chrome.
 void applyNativeWindowTheme(bootPref === "system" ? null : bootTheme);
 
