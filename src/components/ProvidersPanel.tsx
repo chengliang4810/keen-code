@@ -112,9 +112,12 @@ function hostOf(url: string): string {
 /** 模型上下文窗口默认值：1M。 */
 const DEFAULT_MODEL_CONTEXT_WINDOW = 1_000_000;
 
-/** 接口窗口小于 1M 时采用接口值，否则回退默认 1M。 */
+/** 与后端 MAX_CONTEXT_WINDOW 一致：超出该范围的接口值不可保存。 */
+const MAX_MODEL_CONTEXT_WINDOW = 10_000_000;
+
+/** 接口窗口在合法范围内（<=10M）时采用接口值，否则回退默认 1M。 */
 function effectiveContextWindow(value?: number | null): number {
-  return value && value < DEFAULT_MODEL_CONTEXT_WINDOW
+  return value && value <= MAX_MODEL_CONTEXT_WINDOW
     ? value
     : DEFAULT_MODEL_CONTEXT_WINDOW;
 }

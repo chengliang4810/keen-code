@@ -161,8 +161,9 @@ export function useProviderModels({
             list.activeProviderId === provider.id &&
             list.defaultModel === model,
           source: provider.apiBackend,
-          // 手工配置优先；未配置时与运行时一致回退默认 1M。
-          contextWindow: provider.contextWindows?.[model] ?? 1_000_000,
+          // 手工配置优先；未配置时留空，由模型元数据合并填充，
+          // 不再无条件回退 1M（会把真实窗口降级）。
+          contextWindow: provider.contextWindows?.[model],
           // 供应商视觉配置是权威值，模型菜单据此标注图片输入能力。
           supportsVision: provider.supportsVision[model],
         })),
