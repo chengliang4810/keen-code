@@ -79,7 +79,11 @@ pub fn register_local_tools(
     registry.register(Arc::new(GlobTool::new(environment.clone())))?;
     registry.register(Arc::new(GrepTool::new(environment.clone())))?;
     registry.register(Arc::new(BashTool::new(environment.clone())))?;
-    registry.register(Arc::new(PowerShellTool::new(environment.clone())))?;
+    // PowerShell 仅在 Windows 注册：非 Windows 平台 Bash 已覆盖命令执行，
+    // 条件注册避免工具表多占一条 schema（对齐 claude-code-best 的做法）。
+    if cfg!(windows) {
+        registry.register(Arc::new(PowerShellTool::new(environment.clone())))?;
+    }
     registry.register(Arc::new(GitTool::new(environment)))?;
     Ok(())
 }
@@ -99,10 +103,12 @@ pub fn register_local_tools_with_background(
         environment.clone(),
         background_tasks.clone(),
     )))?;
-    registry.register(Arc::new(PowerShellTool::with_background_tasks(
-        environment.clone(),
-        background_tasks.clone(),
-    )))?;
+    if cfg!(windows) {
+        registry.register(Arc::new(PowerShellTool::with_background_tasks(
+            environment.clone(),
+            background_tasks.clone(),
+        )))?;
+    }
     registry.register(Arc::new(GitTool::new(environment)))?;
     registry.register(Arc::new(TaskOutputTool::new(background_tasks.clone())))?;
     registry.register(Arc::new(TaskStopTool::new(background_tasks)))?;

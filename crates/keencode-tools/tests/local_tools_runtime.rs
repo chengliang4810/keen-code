@@ -311,19 +311,14 @@ async fn local_tools_execute_complete_workflow_in_isolated_directory() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        [
-            "Bash",
-            "Edit",
-            "Git",
-            "Glob",
-            "Grep",
-            "PowerShell",
-            "Read",
-            "Write"
+    let expected: Vec<&str> = if cfg!(windows) {
+        vec![
+            "Bash", "Edit", "Git", "Glob", "Grep", "PowerShell", "Read", "Write",
         ]
-    );
+    } else {
+        vec!["Bash", "Edit", "Git", "Glob", "Grep", "Read", "Write"]
+    };
+    assert_eq!(names, expected);
 
     let write = WriteTool::new(Arc::clone(&environment));
     let write_output = write

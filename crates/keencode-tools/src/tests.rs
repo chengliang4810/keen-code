@@ -168,7 +168,7 @@ fn tool_limits_bound_read_text_and_images() {
     assert!(!error.retryable);
 }
 
-/// 本地工具注册必须提供稳定且不重复的八个名称。
+/// 本地工具注册必须提供稳定且不重复的名称；PowerShell 仅在 Windows 注册。
 #[test]
 fn local_tool_registration_is_stable() {
     let directory = tempdir().expect("应创建临时目录");
@@ -181,19 +181,14 @@ fn local_tool_registration_is_stable() {
         .into_iter()
         .map(|definition| definition.name)
         .collect::<Vec<_>>();
-    assert_eq!(
-        names,
-        [
-            "Bash",
-            "Edit",
-            "Git",
-            "Glob",
-            "Grep",
-            "PowerShell",
-            "Read",
-            "Write"
+    let expected: Vec<&str> = if cfg!(windows) {
+        vec![
+            "Bash", "Edit", "Git", "Glob", "Grep", "PowerShell", "Read", "Write",
         ]
-    );
+    } else {
+        vec!["Bash", "Edit", "Git", "Glob", "Grep", "Read", "Write"]
+    };
+    assert_eq!(names, expected);
 }
 
 /// Write 必须创建父目录、原子写入内容并识别完全相同的重复写入。
