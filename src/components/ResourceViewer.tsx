@@ -411,14 +411,15 @@ export function ResourceViewer({
   const [subagentId, setSubagentId] = useSessionState<string | null>(sessionKey, null);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+  /** 激活标签是网页；网页视图独立于项目文件列表展示。 */
+  const activeTabIsWeb = activeTab?.tabKind === "url";
   /** 所有网页标签；它们常驻挂载，只按激活状态切换显隐。 */
   const webTabs = useMemo(
     () => tabs.filter((t) => t.tabKind === "url" && t.url),
     [tabs],
   );
   /** 网页标签层当前是否可见（面板展开、文件模式且激活标签是网页）。 */
-  const webTabVisible =
-    paneActive && sideMode === "files" && activeTab?.tabKind === "url";
+  const webTabVisible = paneActive && sideMode === "files" && activeTabIsWeb;
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
   const totalChangeBadge = workspaceCount;
   const filteredWorkspace = useMemo(
@@ -2675,6 +2676,8 @@ export function ResourceViewer({
           )}
         </div>
 
+          {/* 网页视图不含项目文件列表；激活网页标签时隐藏文件树与分隔条。 */}
+          {!activeTabIsWeb && (
           <>
             <div
               className="rp-split__resizer"
@@ -2759,6 +2762,7 @@ export function ResourceViewer({
               </OverlayScroll>
             </div>
           </>
+          )}
       </div>
 
       {/* Chrome-style tab context menu */}
