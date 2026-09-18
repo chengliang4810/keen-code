@@ -11,7 +11,7 @@ import { t, type Locale } from "@/i18n";
 const useCommittedLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
 
-/** 把处理耗时格式化为紧凑的分秒文本。 */
+/** 把处理耗时格式化为紧凑的天/小时/分秒文本。 */
 export function formatProcessingDuration(
   durationMs: number,
   locale: Locale,
@@ -21,14 +21,21 @@ export function formatProcessingDuration(
     ? Math.max(0, durationMs)
     : 0;
   const totalSeconds = Math.max(1, Math.floor(safeDurationMs / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const days = Math.floor(totalSeconds / 86_400);
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
   const seconds = totalSeconds % 60;
   if (locale === "zh" || locale === "zh-TW") {
+    const hourUnit = locale === "zh-TW" ? "小時" : "小时";
     const minuteUnit = locale === "zh-TW" ? "分鐘" : "分钟";
+    if (days > 0) return hours > 0 ? `${days}天 ${hours}${hourUnit}` : `${days}天`;
+    if (hours > 0) return minutes > 0 ? `${hours}${hourUnit} ${minutes}${minuteUnit}` : `${hours}${hourUnit}`;
     return minutes > 0
       ? `${minutes}${minuteUnit} ${seconds}秒`
       : `${seconds}秒`;
   }
+  if (days > 0) return hours > 0 ? `${days}d ${hours}h` : `${days}d`;
+  if (hours > 0) return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
   return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 

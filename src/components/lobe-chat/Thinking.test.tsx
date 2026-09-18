@@ -19,9 +19,20 @@ describe("Thinking processing duration", () => {
     expect(formatProcessingDuration(122_900, "zh-TW")).toBe("2分鐘 2秒");
   });
 
+  it("按中文展示小时与天单位的处理时间", () => {
+    expect(formatProcessingDuration(3_660_000, "zh")).toBe("1小时 1分钟");
+    expect(formatProcessingDuration(30_000_000, "zh")).toBe("8小时 20分钟");
+    expect(formatProcessingDuration(90_000_000, "zh")).toBe("1天 1小时");
+    expect(formatProcessingDuration(3_660_000, "zh-TW")).toBe("1小時 1分鐘");
+    expect(formatProcessingDuration(90_000_000, "zh-TW")).toBe("1天 1小時");
+  });
+
   it("按英文紧凑格式展示处理时间", () => {
     expect(formatProcessingDuration(9_800, "en")).toBe("9s");
     expect(formatProcessingDuration(122_900, "en")).toBe("2m 2s");
+    expect(formatProcessingDuration(3_660_000, "en")).toBe("1h 1m");
+    expect(formatProcessingDuration(30_000_000, "en")).toBe("8h 20m");
+    expect(formatProcessingDuration(90_000_000, "en")).toBe("1d 1h");
   });
 
   it("区分工作中与已完成的思考摘要", () => {
