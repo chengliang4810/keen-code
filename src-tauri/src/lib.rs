@@ -5,6 +5,7 @@ mod analytics;
 mod app_exit;
 mod app_settings;
 mod app_updates;
+mod browser;
 mod client_request;
 mod diagnostics;
 mod elicitation;
@@ -628,7 +629,16 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             terminal::terminal_shells_list,
             terminal::terminal_write,
             terminal::terminal_resize,
-            terminal::terminal_close
+            terminal::terminal_close,
+            // ── 右侧面板内置浏览器（原生子 WebView）──
+            browser::browser_open,
+            browser::browser_bounds,
+            browser::browser_show,
+            browser::browser_hide,
+            browser::browser_close,
+            browser::browser_navigate,
+            browser::browser_reload,
+            browser::browser_history
         ])
 }
 

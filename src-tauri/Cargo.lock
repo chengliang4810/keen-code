@@ -2373,6 +2373,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.19",
+ "tracing",
 ]
 
 [[package]]
