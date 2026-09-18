@@ -1104,8 +1104,19 @@ fn prepare_server_configs_allow_empty(
 /// 其余宿主变量（含各类密钥）不透传；用户显式配置的 server.env 始终优先。
 fn is_inheritable_env_name(name: &str) -> bool {
     const EXACT: &[&str] = &[
-        "PATH", "HOME", "USER", "USERNAME", "SHELL", "LANG", "TMPDIR", "TEMP", "TMP", "TERM",
-        "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+        "PATH",
+        "HOME",
+        "USER",
+        "USERNAME",
+        "SHELL",
+        "LANG",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        "TERM",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
     ];
     let upper = name.to_ascii_uppercase();
     EXACT.contains(&upper.as_str()) || name.starts_with("LC_") || name.starts_with("XDG_")
@@ -1120,7 +1131,9 @@ fn stdio_environment(user_env: &[schema::EnvVariable]) -> BTreeMap<String, Strin
         if !is_inheritable_env_name(&name) {
             continue;
         }
-        if user_env.iter().any(|variable| variable.name.eq_ignore_ascii_case(&name))
+        if user_env
+            .iter()
+            .any(|variable| variable.name.eq_ignore_ascii_case(&name))
             || !inherited.insert(name.to_ascii_uppercase())
         {
             continue;
@@ -1718,13 +1731,21 @@ fn extract_id(body: &str) -> Option<&str> {
         let environment = stdio_environment(&[]);
         assert!(!environment.contains_key("ANTHROPIC_API_KEY"));
         assert!(!environment.contains_key("AWS_SECRET_ACCESS_KEY"));
-        assert!(environment.keys().any(|name| name.eq_ignore_ascii_case("PATH")));
+        assert!(
+            environment
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("PATH"))
+        );
     }
 
     #[test]
     fn stdio_environment_defers_to_explicit_user_env() {
         let environment = stdio_environment(&[schema::EnvVariable::new("PATH", "custom-path")]);
-        assert!(!environment.keys().any(|name| name.eq_ignore_ascii_case("PATH")));
+        assert!(
+            !environment
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case("PATH"))
+        );
     }
 
     #[test]
@@ -1744,13 +1765,13 @@ fn extract_id(body: &str) -> Option<&str> {
 
     #[test]
     fn convert_server_config_filters_stdio_env_and_blocks_metadata_urls() {
-        let server = schema::McpServer::Stdio(
-            schema::McpServerStdio::new("mcp", "some-command").env(vec![
+        let server =
+            schema::McpServer::Stdio(schema::McpServerStdio::new("mcp", "some-command").env(vec![
                 schema::EnvVariable::new("PATH", "custom-path"),
                 schema::EnvVariable::new("ANTHROPIC_API_KEY", "explicit"),
-            ]),
-        );
-        let prepared = convert_server_config(server, Path::new("/tmp")).expect("stdio 配置必须可用");
+            ]));
+        let prepared =
+            convert_server_config(server, Path::new("/tmp")).expect("stdio 配置必须可用");
         let McpServerConfig::Stdio(config) = prepared.config else {
             unreachable!("stdio server 必须产出 stdio 配置");
         };
