@@ -2127,8 +2127,8 @@ export function ResourceViewer({
     <>
       <div className="rp-mode-tabs" role="tablist" aria-label={tr("resources.title")}>
         {openSingletons.map((mode) => {
-          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
-          const label = mode === "files" ? tr("changes.files") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
+          const icon = mode === "files" ? (activeTabIsWeb ? <IconWorld size={14} /> : <IconFiles size={14} />) : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
+          const label = mode === "files" ? (activeTabIsWeb ? tr("resources.web") : tr("changes.files")) : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
           return (
             <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
