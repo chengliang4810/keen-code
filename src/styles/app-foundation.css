@@ -3094,7 +3094,8 @@ button.settings-wallpaper__preview:hover:not(:disabled) {
   font-weight: 600;
   white-space: nowrap;
   line-height: calc(24px + var(--ui-font-delta));
-  height: 24px;
+  /* 高度随字号增量同步，避免 20px 档位文字（24px/30px）溢出固定 24px 行盒。 */
+  height: calc(24px + var(--ui-font-delta));
 }
 .settings-stage {
   display: flex;
