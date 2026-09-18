@@ -1172,10 +1172,12 @@
   align-items: center;
   gap: 6px;
   width: 100%;
-  min-height: 24px;
+  min-height: 34px;
   margin: 0;
-  padding: 2px 0;
+  padding: 4px 0 6px;
   border: none;
+  /* 与旧“已工作”状态头一致：标题行下保留全宽分割线。 */
+  border-bottom: 1px solid var(--chat-divider);
   border-radius: 6px;
   background: transparent;
   color: inherit;
