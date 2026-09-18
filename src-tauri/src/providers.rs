@@ -778,7 +778,9 @@ fn load_state_from_path(path: &Path) -> Result<ProviderState> {
     let bytes = read_provider_config_bytes(path)?;
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
-    let mut warnings = unknown_field_warnings(&value);
+    let mut warnings = unknown_field_warnings(&value).map_err(|message| {
+        anyhow::anyhow!("供应商配置无效：{}：{}", message, path.display())
+    })?;
     let file: ProviderFile = serde_json::from_value(value)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
     let mut state = file
@@ -822,15 +824,19 @@ const PROVIDER_RECORD_KEYS: &[&str] = &[
 ];
 
 /// 找出配置中未知或已移除的字段；只报告字段名，不参与解析。
-fn unknown_field_warnings(value: &Value) -> Vec<String> {
+///
+/// 已移除字段按警告忽略；但与已知字段仅大小写不同的键几乎必然是拼写错误
+/// （例如 `apikey` 会让认证静默丢失），这类键返回 Err 阻断加载。
+fn unknown_field_warnings(value: &Value) -> Result<Vec<String>, String> {
     let Some(object) = value.as_object() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
-    let unknown: Vec<&str> = object
-        .keys()
-        .map(String::as_str)
-        .filter(|key| !PROVIDER_FILE_KEYS.contains(key))
-        .collect();
+    let (typo, unknown) = partition_unknown_keys(object.keys().map(String::as_str), PROVIDER_FILE_KEYS);
+    if let Some(typo) = typo.first() {
+        return Err(format!(
+            "供应商配置字段 `{typo}` 与已知字段仅大小写不同，疑似拼写错误；请修正字段名后重试"
+        ));
+    }
     let mut warnings = Vec::new();
     if !unknown.is_empty() {
         warnings.push(format!(
@@ -839,29 +845,51 @@ fn unknown_field_warnings(value: &Value) -> Vec<String> {
         ));
     }
     let Some(records) = object.get("providers").and_then(Value::as_array) else {
-        return warnings;
+        return Ok(warnings);
     };
     for record in records {
         let Some(record) = record.as_object() else {
             continue;
         };
-        let unknown: Vec<&str> = record
-            .keys()
-            .map(String::as_str)
-            .filter(|key| !PROVIDER_RECORD_KEYS.contains(key))
-            .collect();
+        let (typo, unknown) =
+            partition_unknown_keys(record.keys().map(String::as_str), PROVIDER_RECORD_KEYS);
+        let id = record
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("<缺少 id>");
+        if let Some(typo) = typo.first() {
+            return Err(format!(
+                "供应商 {id} 的字段 `{typo}` 与已知字段仅大小写不同，疑似拼写错误；请修正字段名后重试"
+            ));
+        }
         if !unknown.is_empty() {
-            let id = record
-                .get("id")
-                .and_then(Value::as_str)
-                .unwrap_or("<缺少 id>");
             warnings.push(format!(
                 "供应商 {id} 包含未知或已移除字段，已忽略：{}",
                 unknown.join(", ")
             ));
         }
     }
-    warnings
+    Ok(warnings)
+}
+
+/// 把未知键划分为「与已知字段仅大小写不同」与「其余未知/已移除字段」。
+fn partition_unknown_keys<'a>(
+    keys: impl Iterator<Item = &'a str>,
+    known: &[&str],
+) -> (Vec<&'a str>, Vec<&'a str>) {
+    let mut typo = Vec::new();
+    let mut unknown = Vec::new();
+    for key in keys {
+        if known.contains(&key) {
+            continue;
+        }
+        if known.iter().any(|known| known.eq_ignore_ascii_case(key)) {
+            typo.push(key);
+        } else {
+            unknown.push(key);
+        }
+    }
+    (typo, unknown)
 }
 
 /// 把磁盘配置归一化为当前唯一结构。
@@ -1538,7 +1566,8 @@ mod tests {
             }]
         });
 
-        let warnings = super::unknown_field_warnings(&value);
+        let warnings = super::unknown_field_warnings(&value)
+            .expect("未知或已移除字段应按警告忽略，不应阻断加载");
         assert_eq!(
             warnings.len(),
             2,
@@ -1551,6 +1580,31 @@ mod tests {
         let state = file.into_state().expect("schema 与版本应有效");
         assert_eq!(state.providers.len(), 1);
         assert_eq!(state.providers[0].models, vec!["test-model".to_owned()]);
+    }
+
+    /// 与已知字段仅大小写不同的键几乎必然是拼写错误（如 `apikey` 会让
+    /// 认证静默丢失），必须阻断加载而不是忽略。
+    #[test]
+    fn provider_config_rejects_case_only_typo_fields() {
+        let value = serde_json::json!({
+            "schema": "keencode/providers",
+            "version": 1,
+            "activeProviderId": "provider",
+            "activeModelId": "test-model",
+            "providers": [{
+                "id": "provider",
+                "name": "Provider",
+                "baseUrl": "https://api.example.com/v1",
+                "models": ["test-model"],
+                "apiBackend": "responses",
+                "apikey": "real-secret",
+                "contextWindows": {},
+                "supportsVision": {"test-model": false}
+            }]
+        });
+        let error = super::unknown_field_warnings(&value)
+            .expect_err("仅大小写不同的字段名应阻断加载");
+        assert!(error.contains("apikey"), "错误应指出问题字段：{error}");
     }
 
     /// 配置加载必须收敛已失效的模型级条目，并记录被丢弃的内容。
