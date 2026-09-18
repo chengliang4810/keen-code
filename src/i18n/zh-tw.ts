@@ -277,7 +277,6 @@ export const zhTW: Record<MessageKey, string> = {
   "changes.workspace.kind.modified": "已修改",
   "changes.workspace.kind.untracked": "未追蹤",
   "prov.chatOutputTokenField": "Chat 輸出預算欄位",
-  "prov.chatOutputTokenFieldHint": "選擇閘道支援的欄位，請求只傳送所選欄位。",
   "changes.workspace.kind.unknown": "已變更",
 "media.loadError": "應用程式內無法載入此媒體。",
   "media.openExternal": "以系統播放器開啟",

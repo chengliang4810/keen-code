@@ -860,7 +860,6 @@ export function ProvidersPanel({
                         <SelectItem value="max_tokens">max_tokens</SelectItem>
                       </SelectGroup></SelectContent>
                     </Select>
-                    <span className="prov-field__hint">{tr("prov.chatOutputTokenFieldHint")}</span>
                   </div>
                 )}
 
