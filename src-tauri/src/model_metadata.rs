@@ -3,7 +3,8 @@
 //! KeenCode 只维护一份 models.dev 公共目录的本地快照：应用启动时后台检查新鲜度，
 //! 缺失或超过 24 小时才重新下载并原子替换，任何失败都保留现有快照。查询命令只
 //! 读取本地文件，不在请求路径上访问网络；匹配仅按模型标识进行，不依赖自定义
-//! 供应商名称。
+//! 供应商名称。中转站常见的 `:free` 等变体后缀只在目录匹配时截断，用户配置的
+//! 原始模型标识保持原样。
 
 use anyhow::{Context, Result};
 use reqwest::blocking::Client;
@@ -334,12 +335,10 @@ fn read_catalog_bytes(path: &Path) -> Option<Vec<u8>> {
 }
 
 /// 在全部供应商中按精确、前缀精确、尾段精确、尾段规范化四个等级稳定选择模型；
-/// 同分候选按供应商与模型标识字典序取最小，保证结果与遍历顺序无关。
-fn find_catalog_row<'a>(
-    document: &'a Value,
-    model_id: &str,
-) -> Option<(&'a Value, String)> {
-    let mut best: Option<(u8, String, String, &'a Value)> = None;
+/// 同分候选先偏好无冒号变体后缀的键，再按供应商与模型标识字典序取最小，保证
+/// 结果与遍历顺序无关。
+fn find_catalog_row<'a>(document: &'a Value, model_id: &str) -> Option<(&'a Value, String)> {
+    let mut best: Option<((u8, bool, &str, &str), &'a Value)> = None;
     for (provider_key, provider) in document.as_object()? {
         let Some(models) = provider.get("models").and_then(Value::as_object) else {
             continue;
@@ -348,21 +347,21 @@ fn find_catalog_row<'a>(
             let Some(rank) = catalog_match_rank(provider_key, model_key, model_id) else {
                 continue;
             };
-            let better = match &best {
-                None => true,
-                Some((best_rank, best_provider, best_model, _)) => {
-                    rank < *best_rank
-                        || (rank == *best_rank
-                            && (provider_key.as_str(), model_key.as_str())
-                                < (best_provider.as_str(), best_model.as_str()))
-                }
-            };
-            if better {
-                best = Some((rank, provider_key.clone(), model_key.clone(), row));
+            let ordering = (
+                rank,
+                model_key.contains(':'),
+                provider_key.as_str(),
+                model_key.as_str(),
+            );
+            if best
+                .as_ref()
+                .is_none_or(|(best_ordering, _)| ordering < *best_ordering)
+            {
+                best = Some((ordering, row));
             }
         }
     }
-    let (_, provider_key, model_key, row) = best?;
+    let ((_, _, provider_key, model_key), row) = best?;
     Some((row, format!("{provider_key}/{model_key}")))
 }
 
@@ -522,12 +521,14 @@ fn positive_u64(value: Option<&Value>) -> Option<u64> {
 }
 
 /// 返回模型标识匹配等级；数值越小优先级越高。
+/// 全等比较使用原始标识；尾段比较先截断中转站变体后缀，使 `deepseek-v4.1-flash:free`
+/// 与 `deepseek-v4.1-flash` 视为同一基础模型。
 fn model_match_rank(source_id: &str, model_id: &str) -> Option<u8> {
     if source_id == model_id {
         return Some(0);
     }
-    let source_tail = source_id.rsplit('/').next()?;
-    let query_tail = model_id.rsplit('/').next()?;
+    let source_tail = match_tail(source_id)?;
+    let query_tail = match_tail(model_id)?;
     if source_tail == query_tail {
         return Some(1);
     }
@@ -535,6 +536,14 @@ fn model_match_rank(source_id: &str, model_id: &str) -> Option<u8> {
         return Some(2);
     }
     None
+}
+
+/// 返回用于尾段比较的标识：最后一段路径，并从第一个冒号处截断变体后缀；
+/// 截断后为空的尾段无法参与匹配。
+fn match_tail(value: &str) -> Option<&str> {
+    let tail = value.rsplit('/').next()?;
+    let (base, _) = tail.split_once(':').unwrap_or((tail, ""));
+    (!base.is_empty()).then_some(base)
 }
 
 /// 将模型尾段转为分隔符统一的比较键，兼容点号与短横线版本写法且保留版本边界。
@@ -570,7 +579,7 @@ fn validate_model_id(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_catalog_row, find_catalog_row, input_modalities, model_match_rank,
+        apply_catalog_row, find_catalog_row, input_modalities, match_tail, model_match_rank,
         parse_catalog_price, parse_catalog_reasoning, read_catalog_document,
         validate_catalog_bytes, validate_model_id, ModelMetadata, ModelReasoningControl,
     };
@@ -712,6 +721,63 @@ mod tests {
         assert!(validate_model_id("  ").is_err());
         assert!(validate_model_id("a\u{0}b").is_err());
         assert!(validate_model_id("x".repeat(513).as_str()).is_err());
-        assert_eq!(validate_model_id(" claude-sonnet-4-5 ").unwrap(), "claude-sonnet-4-5");
+        assert_eq!(
+            validate_model_id(" claude-sonnet-4-5 ").unwrap(),
+            "claude-sonnet-4-5"
+        );
+    }
+
+    /// 中转站变体后缀（`:free` 等）必须命中基础模型；原始全等与无后缀候选优先。
+    #[test]
+    fn colon_variant_suffix_matches_base_model_with_stable_preference() {
+        let document = json!({
+            "openrouter": { "models": { "deepseek/deepseek-v4.1-flash": { "id": "or" } } },
+            "deepseek": { "models": { "deepseek-v4.1-flash": { "id": "native" } } }
+        });
+        for query in ["deepseek-v4.1-flash:free", "deepseek/deepseek-v4.1-flash:free"] {
+            let (row, matched) = find_catalog_row(&document, query).unwrap();
+            assert_eq!(row["id"], "native", "查询 {query} 应命中基础模型");
+            assert_eq!(matched, "deepseek/deepseek-v4.1-flash");
+        }
+
+        let paired = json!({
+            "paired": { "models": { "m": { "id": "base" }, "m:thinking": { "id": "thinking" } } }
+        });
+        let (row, _) = find_catalog_row(&paired, "m:thinking").unwrap();
+        assert_eq!(row["id"], "thinking");
+        let (row, _) = find_catalog_row(&paired, "m").unwrap();
+        assert_eq!(row["id"], "base");
+
+        let preference = json!({
+            "aaa": { "models": { "m:thinking": { "id": "aaa-thinking" } } },
+            "zzz": { "models": { "m": { "id": "zzz-base" } } }
+        });
+        let (row, matched) = find_catalog_row(&preference, "m:free").unwrap();
+        assert_eq!(row["id"], "zzz-base");
+        assert_eq!(matched, "zzz/m");
+    }
+
+    /// 目录中不存在的模型必须保持无匹配，不得猜测相近标识。
+    #[test]
+    fn absent_model_stays_unmatched() {
+        let document = json!({
+            "openrouter": { "models": { "deepseek/deepseek-v4.1-flash": { "id": "or" } } }
+        });
+        assert!(find_catalog_row(&document, "stealth/union-alpha").is_none());
+    }
+
+    /// 尾段比较在最后一个路径段内从第一个冒号截断，截断后为空的尾段不参与匹配。
+    #[test]
+    fn match_tail_truncates_at_first_colon() {
+        assert_eq!(
+            match_tail("deepseek/deepseek-v4.1-flash:free"),
+            Some("deepseek-v4.1-flash")
+        );
+        assert_eq!(
+            match_tail("anthropic.claude-3-5-sonnet-v1:0"),
+            Some("anthropic.claude-3-5-sonnet-v1")
+        );
+        assert_eq!(match_tail("m"), Some("m"));
+        assert_eq!(match_tail("a/:free"), None);
     }
 }
