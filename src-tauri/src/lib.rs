@@ -457,6 +457,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                 format!("应用启动，日志路径={}", diagnostics.path().display()),
             );
             app.manage(Arc::clone(&diagnostics));
+            // 模型目录快照在后台按需刷新；查询只读本地文件，不阻塞启动。
+            model_metadata::spawn_startup_refresh(app.handle().clone());
             app.manage(app_exit::ExitState::default());
             app.manage(app_updates::PendingUpdate::default());
             let loaded_settings = app_settings::load_for_startup(app.handle())?;
