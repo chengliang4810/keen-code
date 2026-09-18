@@ -3,6 +3,7 @@ import type { Project, SessionRow } from "@/features/app/models";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import { Spinner } from "@/components/ui/spinner";
+import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 import {
   IconArchive,
   IconMore,
@@ -19,7 +20,7 @@ export interface SidebarSessionRowProps extends SidebarSessionActions {
   project: Project | null;
   activeSessionId: string | null;
   working: boolean;
-  completedUnread: boolean;
+  unreadResult: UnreadTerminalResult | null;
   needsInput: boolean;
   variant: SidebarSessionRowVariant;
 }
@@ -41,7 +42,7 @@ export function SidebarSessionRow({
   project,
   activeSessionId,
   working,
-  completedUnread,
+  unreadResult,
   needsInput,
   variant,
 }: SidebarSessionRowProps) {
@@ -71,7 +72,7 @@ export function SidebarSessionRow({
         (session.archived ? " tree-l3--archived" : "") +
         (working ? " tree-l3--working" : "") +
         (needsInput ? " tree-l3--needs-input" : "") +
-        (completedUnread ? " tree-l3--completed-unread" : "")
+        (unreadResult ? " tree-l3--unread-terminal" : "")
       }
       role="button"
       tabIndex={0}
@@ -113,11 +114,24 @@ export function SidebarSessionRow({
         )
       ) : (
         <>
-          {completedUnread ? (
-            <Tip label={tr("sidebar.sessionCompletedUnread")}>
+          {unreadResult ? (
+            <Tip
+              label={
+                unreadResult === "failed"
+                  ? tr("sidebar.sessionFailedUnread")
+                  : tr("sidebar.sessionCompletedUnread")
+              }
+            >
               <span
-                className="tree-l3__status tree-l3__status--completed"
-                aria-label={tr("sidebar.sessionCompletedUnread")}
+                className={
+                  "tree-l3__status tree-l3__status--" +
+                  (unreadResult === "failed" ? "failed" : "completed")
+                }
+                aria-label={
+                  unreadResult === "failed"
+                    ? tr("sidebar.sessionFailedUnread")
+                    : tr("sidebar.sessionCompletedUnread")
+                }
               >
                 <span className="tree-l3__completion-dot" />
               </span>

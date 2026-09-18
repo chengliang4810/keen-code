@@ -18,7 +18,7 @@ import { createT } from "@/i18n";
 import {
   formatTurnErrorBody,
   localizeSystemNotification,
-  isToolInlinedInAssistants,
+  inlinedToolCallIds,
   messageSegments,
   isTurnPromptMessage,
   turnStartedAtForMessages,
@@ -1320,6 +1320,13 @@ export function ConversationThread({
                         }
                         onFirstVisibleToken={observeVisibleToken}
                         latencyTurnId={observedTurnId}
+                      />
+                    ) : null}
+                    {m.turnStatus === "failed" && !m.streaming ? (
+                      <EndOfTurnChip
+                        message={m}
+                        locale={locale}
+                        reasonOverride="error"
                       />
                     ) : null}
                   </div>

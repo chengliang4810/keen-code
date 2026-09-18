@@ -43,7 +43,10 @@ import {
   turnLatencyNow,
   type TurnLatencyState,
 } from "@/lib/turnLatency";
-import { saveCompletedUnreadSessionIds } from "@/lib/sessionCompletion";
+import {
+  saveUnreadTerminalResults,
+  type UnreadTerminalResult,
+} from "@/lib/sessionCompletion";
 import { createAnimationFrameBatcher } from "@/lib/frameBatcher";
 import type { Ref, SetState, ViewProjection } from "./types";
 
@@ -97,12 +100,10 @@ export interface AcpRuntimeEventsOptions {
   setLiveHost: SetState<SessionSnapshot>;
   /** 更新全部 Session 的忙闲投影。 */
   setLiveMap: SetState<SessionLiveMap>;
-  /** 更新当前根 Turn 起始时间。 */
-  setTurnStartedAt: SetState<number | null>;
-  /** 更新当前会话模型选择。 */
-  setModelId: SetState<string>;
-  /** 更新已完成未读 Session 集合。 */
-  setCompletedUnreadIds: SetState<Set<string>>;
+  /** 更新当前会话模型选择；必须保留供应商，否则同名模型会串供应商。 */
+  setSessionModelReference: SetState<string>;
+  /** 更新终态未读 Session 的结果集合。 */
+  setUnreadTerminalResults: SetState<Map<string, UnreadTerminalResult>>;
   /** 把指定 Session 投影到界面的稳定引用。 */
   applyViewProjectionRef: Ref<ViewProjection>;
   /** 刷新当前 Session 的本地缓存用量。 */
@@ -239,9 +240,8 @@ export function useAcpRuntimeEvents({
   setContextUsage,
   setLiveHost,
   setLiveMap,
-  setTurnStartedAt,
-  setModelId,
-  setCompletedUnreadIds,
+  setSessionModelReference,
+  setUnreadTerminalResults,
   applyViewProjectionRef,
   refreshTaskCacheUsage,
   recoverSession,
@@ -365,9 +365,11 @@ export function useAcpRuntimeEvents({
         if (typeof modelValue === "string" && modelValue.length > 0) {
           const modelId = modelIdFromSessionReference(modelValue);
           modelBySessionRef.current.set(envelope.sessionId, modelValue);
+          // 运行时回执是会话实际模型（含供应商）的权威来源，直接交给 Composer，
+          // 不能只取模型 ID，否则同名模型会显示成全局活跃供应商。
           if (viewingSessionIdRef.current === envelope.sessionId &&
             configuredModelsRef.current.some((model) => model.id === modelId)) {
-            setModelId(modelId);
+            setSessionModelReference(modelValue);
           }
         }
       }
@@ -407,19 +409,25 @@ export function useAcpRuntimeEvents({
         }
         if (completedLatency) turnLatencyBySessionRef.current.delete(envelope.sessionId);
       }
-      if (!wasRecovering && envelope.event.type === "turn_completed" &&
+      // 失败与正常结束同样需要离开前台也有迹可循；只有主动取消保持静默。
+      const unreadResult: UnreadTerminalResult | null =
+        envelope.event.type === "turn_completed"
+          ? "completed"
+          : envelope.event.type === "turn_failed"
+            ? "failed"
+            : null;
+      if (!wasRecovering && unreadResult &&
         viewingSessionIdRef.current !== envelope.sessionId) {
-        setCompletedUnreadIds((previous) => {
-          if (previous.has(envelope.sessionId)) return previous;
-          const next = new Set(previous);
-          next.add(envelope.sessionId);
-          saveCompletedUnreadSessionIds(next, localStorage);
+        setUnreadTerminalResults((previous) => {
+          if (previous.get(envelope.sessionId) === unreadResult) return previous;
+          const next = new Map(previous);
+          next.set(envelope.sessionId, unreadResult);
+          saveUnreadTerminalResults(next, localStorage);
           return next;
         });
       }
       updateHostState(envelope.sessionId, "ready");
       if (viewingSessionIdRef.current === envelope.sessionId) {
-        setTurnStartedAt(null);
         if (!wasRecovering) void refreshTaskCacheUsage(envelope.sessionId);
       }
       const pending = pendingAskUserBySessionRef.current.get(envelope.sessionId);
@@ -451,9 +459,6 @@ export function useAcpRuntimeEvents({
         completedTurnIdBySessionRef.current.delete(envelope.sessionId);
         recoverableCompletedTurnIdBySessionRef.current.delete(envelope.sessionId);
         updateHostState(envelope.sessionId, "streaming");
-        if (viewingSessionIdRef.current === envelope.sessionId) {
-          setTurnStartedAt(envelope.occurredAtMs);
-        }
       }
       // 只有本次真正结束活跃根 Turn 的信封才清理 Host、问答及计时状态。
       if (terminalRoot && !reduction.childAgentId) {

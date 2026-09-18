@@ -15,7 +15,7 @@ import type {
   SessionContextUsage,
   SessionRow,
 } from "@/features/app/models";
-import { modelIdFromSessionReference, type ModelOption } from "@/lib/modelCatalog";
+import { formatSessionModelReference, type ModelOption } from "@/lib/modelCatalog";
 import type { Attachment } from "@/lib/attachments";
 import {
   IDLE_SNAPSHOT,
@@ -39,7 +39,10 @@ import {
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
 import { isProjectPathMissing } from "@/lib/projectPath";
-import { saveCompletedUnreadSessionIds } from "@/lib/sessionCompletion";
+import {
+  saveUnreadTerminalResults,
+  type UnreadTerminalResult,
+} from "@/lib/sessionCompletion";
 import {
   restoreDraftNavigation,
   snapshotDraftNavigation,
@@ -95,7 +98,7 @@ export interface SessionNavigationSidebarPort {
   setActiveProject: StateSetter<Project | null>;
   setExpandedProjects: StateSetter<Record<string, boolean>>;
   setHistoryOpen: StateSetter<boolean>;
-  setCompletedUnreadIds: StateSetter<Set<string>>;
+  setUnreadTerminalResults: StateSetter<Map<string, UnreadTerminalResult>>;
   pendingAskUserBySessionRef: Ref<Map<string, AskUserPayload>>;
 }
 
@@ -113,7 +116,8 @@ export interface SessionNavigationComposerPort {
 export interface SessionNavigationProviderModelsPort {
   modelBySessionRef: Ref<Map<string, string>>;
   configuredModelsRef: Ref<ModelOption[]>;
-  setModelId: StateSetter<string>;
+  /** 接收 `providerId::modelId` 引用，保留会话实际供应商。 */
+  setSessionModelReference: StateSetter<string>;
 }
 
 export interface SessionNavigationUiPort {
@@ -283,11 +287,11 @@ export function useSessionNavigation({
           : current.sidebar.projects.find((item) => item.id === row.projectId) ??
             null;
       current.route.navigateWorkbench();
-      current.sidebar.setCompletedUnreadIds((previous) => {
+      current.sidebar.setUnreadTerminalResults((previous) => {
         if (!previous.has(row.id)) return previous;
-        const next = new Set(previous);
+        const next = new Map(previous);
         next.delete(row.id);
-        saveCompletedUnreadSessionIds(next, localStorage);
+        saveUnreadTerminalResults(next, localStorage);
         return next;
       });
 
@@ -401,17 +405,10 @@ export function useSessionNavigation({
         clearOpeningSlot();
         current.runtime.commitWorkspace();
         current.runtime.applyViewProjection(row.id);
+        // 会话模型引用必须原样回填：只回填模型 ID 会让同名模型显示成全局活跃供应商。
         const sessionModelReference = current.providers.modelBySessionRef.current.get(row.id);
-        const sessionModel = sessionModelReference
-          ? modelIdFromSessionReference(sessionModelReference)
-          : undefined;
-        if (
-          sessionModel &&
-          current.providers.configuredModelsRef.current.some(
-            (model) => model.id === sessionModel,
-          )
-        ) {
-          current.providers.setModelId(sessionModel);
+        if (sessionModelReference) {
+          current.providers.setSessionModelReference(sessionModelReference);
         }
         await current.runtime.refreshSessions();
       } catch (cause) {
@@ -474,8 +471,13 @@ export function useSessionNavigation({
       snapshotOutgoingSession();
       viewingSessionIdRef.current = null;
       // 新草稿采用已保存默认值，不能继承上一会话的模型标签。
-      current.providers.setModelId(
-        current.providers.configuredModelsRef.current.find((model) => model.isDefault)?.id ?? "",
+      const defaultModel = current.providers.configuredModelsRef.current.find(
+        (model) => model.isDefault,
+      );
+      current.providers.setSessionModelReference(
+        defaultModel
+          ? formatSessionModelReference(defaultModel.providerId, defaultModel.id)
+          : "",
       );
       openingSessionIdRef.current = null;
       openingSessionEpochRef.current = null;

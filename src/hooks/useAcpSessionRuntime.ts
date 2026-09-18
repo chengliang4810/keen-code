@@ -56,9 +56,8 @@ export function useAcpSessionRuntime(
     setContextUsage,
     setTaskCacheUsage,
     setRetryStatus,
-    setTurnStartedAt,
     setEffort,
-    setModelId,
+    setSessionModelReference,
     setPlanModeSessionKey,
     promptHistoryIndexRef,
     setPromptHistoryIndex,
@@ -66,7 +65,7 @@ export function useAcpSessionRuntime(
     setPromptHistoryFilter,
     setPromptHistoryActive,
     setPromptHistoryFocusFilter,
-    setCompletedUnreadIds,
+    setUnreadTerminalResults,
   } = options;
 
   /** 清除指定 Session 的缓存用量，并同步清空当前可见值。 */
@@ -118,7 +117,7 @@ export function useAcpSessionRuntime(
     invalidateContextUsage,
     setPlanModeSessionKey,
     modelBySessionRef,
-    setModelId,
+    setSessionModelReference,
   });
 
   useAcpRuntimeEvents({
@@ -142,9 +141,8 @@ export function useAcpSessionRuntime(
     setContextUsage,
     setLiveHost,
     setLiveMap,
-    setTurnStartedAt,
-    setModelId,
-    setCompletedUnreadIds,
+    setSessionModelReference,
+    setUnreadTerminalResults,
     applyViewProjectionRef,
     refreshTaskCacheUsage,
     recoverSession,

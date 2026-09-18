@@ -47,6 +47,7 @@ const en = {
   "sidebar.unarchive": "Unarchive",
   "sidebar.sessionWorking": "Working…",
   "sidebar.sessionCompletedUnread": "Completed — click to mark as seen",
+  "sidebar.sessionFailedUnread": "Failed — click to view the error",
   "sidebar.needsUserInput": "Needs input",
 
   // Project / session actions
@@ -531,6 +532,9 @@ const en = {
   "settings.themeSystem": "System",
   "settings.themeLight": "Light",
   "settings.themeDark": "Dark",
+  "settings.uiFontSize": "Interface font size",
+  "settings.uiFontSizeDesc":
+    "Scales the text of the whole interface. Icons and layout sizes are unaffected.",
   "settings.terminalFont": "Terminal font",
   "settings.terminalFontDesc":
     "Use a CSS font-family list. Nerd Font icons require a Nerd Font installed on this computer.",
@@ -1287,6 +1291,9 @@ const zh: Record<MessageKey, string> = {
   "sidebar.addProject": "创建项目",
   "sidebar.projectMoved": "已将「{name}」移动到第 {position} 项，共 {total} 项。",
   "sidebar.collapseAllProjects": "收起全部项目",
+  "sidebar.sort": "对话排序方式",
+  "sidebar.sortByLastUserMessage": "最后用户消息时间",
+  "sidebar.sortByUpdatedAt": "更新时间",
   "sidebar.noProjects": "还没有项目。点击 + 添加本地目录。",
   "sidebar.pathMissing": "路径失效",
   "sidebar.newConversation": "新建对话",
@@ -1302,6 +1309,7 @@ const zh: Record<MessageKey, string> = {
   "sidebar.unarchive": "取消归档",
   "sidebar.sessionWorking": "进行中…",
   "sidebar.sessionCompletedUnread": "已完成，点击后标记为已查看",
+  "sidebar.sessionFailedUnread": "已失败，点击查看错误",
   "sidebar.needsUserInput": "需要用户输入",
 
   "project.reveal": "在 Finder 中显示",
@@ -1769,6 +1777,9 @@ const zh: Record<MessageKey, string> = {
   "settings.themeSystem": "跟随系统",
   "settings.themeLight": "浅色",
   "settings.themeDark": "深色",
+  "settings.uiFontSize": "界面字号",
+  "settings.uiFontSizeDesc":
+    "统一缩放整个界面的文字，图标与布局尺寸不受影响。",
   "settings.terminalFont": "终端字体",
   "settings.terminalFontDesc":
     "填写 CSS 字体族列表。Nerd Font 图标需要此电脑已安装对应字体。",

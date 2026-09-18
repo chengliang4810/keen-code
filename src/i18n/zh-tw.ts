@@ -38,6 +38,7 @@ export const zhTW: Record<MessageKey, string> = {
   "sidebar.unarchive": "取消封存",
   "sidebar.sessionWorking": "進行中…",
   "sidebar.sessionCompletedUnread": "已完成，點擊後標記為已查看",
+  "sidebar.sessionFailedUnread": "已失敗，點擊查看錯誤",
   "sidebar.needsUserInput": "需要使用者輸入",
 
   "project.reveal": "在 Finder 中顯示",
@@ -505,6 +506,9 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.themeSystem": "跟隨系統",
   "settings.themeLight": "淺色",
   "settings.themeDark": "深色",
+  "settings.uiFontSize": "介面字號",
+  "settings.uiFontSizeDesc":
+    "統一縮放整個介面的文字，圖示與版面尺寸不受影響。",
   "settings.terminalFont": "終端字型",
   "settings.terminalFontDesc":
     "填寫 CSS 字型家族清單。Nerd Font 圖示需要此電腦已安裝對應字型。",

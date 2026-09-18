@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  loadCompletedUnreadSessionIds,
-  saveCompletedUnreadSessionIds,
+  loadUnreadTerminalResults,
+  saveUnreadTerminalResults,
   isNormalSessionCompletion,
 } from "./sessionCompletion";
 
@@ -13,7 +13,7 @@ describe("isNormalSessionCompletion", () => {
     expect(isNormalSessionCompletion("max_turn_requests", false)).toBe(false);
   });
 
-  it("持久化并恢复未查看的完成 Session", () => {
+  it("持久化并恢复未查看的终态结果", () => {
     const values = new Map<string, string>();
     const storage = {
       get length() {
@@ -29,10 +29,28 @@ describe("isNormalSessionCompletion", () => {
         values.set(key, value);
       },
     } satisfies Storage;
-    saveCompletedUnreadSessionIds(new Set(["session-a", "session-b"]), storage);
-    expect([...loadCompletedUnreadSessionIds(storage)]).toEqual([
-      "session-a",
-      "session-b",
+    saveUnreadTerminalResults(
+      new Map([
+        ["session-a", "completed" as const],
+        ["session-b", "failed" as const],
+      ]),
+      storage,
+    );
+    expect([...loadUnreadTerminalResults(storage)]).toEqual([
+      ["session-a", "completed"],
+      ["session-b", "failed"],
     ]);
+  });
+
+  it("拒绝非终态结果的持久化内容", () => {
+    const storage = {
+      length: 0,
+      clear: () => {},
+      key: () => null,
+      removeItem: () => {},
+      setItem: () => {},
+      getItem: () => JSON.stringify([["session-a", "cancelled"]]),
+    } satisfies Storage;
+    expect(() => loadUnreadTerminalResults(storage)).toThrow();
   });
 });

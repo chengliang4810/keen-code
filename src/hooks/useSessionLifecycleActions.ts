@@ -249,6 +249,7 @@ export function useSessionLifecycleActions({
         title,
         projectId: source.projectId,
         updatedAt: new Date().toISOString(),
+        lastUserMessageAt: null,
         archived: false,
         pinned: false,
       };

@@ -57,7 +57,10 @@ import {
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
 import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
-import { loadCompletedUnreadSessionIds } from "@/lib/sessionCompletion";
+import {
+  loadUnreadTerminalResults,
+  type UnreadTerminalResult,
+} from "@/lib/sessionCompletion";
 import { createT } from "@/i18n";
 import { appUpdateActionFor } from "@/lib/appUpdate";
 import { isProjectPathMissing } from "@/lib/projectPath";
@@ -166,10 +169,10 @@ export default function App() {
   const [liveHost, setLiveHost] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** 多会话运行状态投影，用于展示后台任务忙碌状态。 */
   const [liveMap, setLiveMap] = useState<SessionLiveMap>({});
-  /** 后台正常完成且尚未由用户打开查看的 Session。 */
-  const [completedUnreadIds, setCompletedUnreadIds] = useState<Set<string>>(
-    () => loadCompletedUnreadSessionIds(localStorage),
-  );
+  /** 后台形成终态但尚未由用户打开查看的 Session 结果。 */
+  const [unreadTerminalResults, setUnreadTerminalResults] = useState<
+    Map<string, UnreadTerminalResult>
+  >(() => loadUnreadTerminalResults(localStorage));
   /** Latest live map for callbacks that must not close over a stale render. */
   const liveMapRef = useRef(liveMap);
   liveMapRef.current = liveMap;
@@ -373,7 +376,8 @@ export default function App() {
   });
   const {
     modelId,
-    setModelId,
+    sessionProviderId,
+    setSessionModelReference,
     effort,
     setEffort,
     configuredModelsRef,
@@ -844,7 +848,7 @@ export default function App() {
     setPromptHistoryFilter,
     setPromptHistoryActive,
     setPromptHistoryFocusFilter,
-    setCompletedUnreadIds,
+    setUnreadTerminalResults,
   });
   composerApplyViewProjectionRef.current = applyViewProjection;
 
@@ -1196,7 +1200,7 @@ export default function App() {
       setActiveProject,
       setExpandedProjects,
       setHistoryOpen,
-      setCompletedUnreadIds,
+      setUnreadTerminalResults,
       pendingAskUserBySessionRef,
     },
     composer: {
@@ -1210,7 +1214,7 @@ export default function App() {
     providers: {
       modelBySessionRef,
       configuredModelsRef,
-      setModelId,
+      setSessionModelReference,
     },
     ui: {
       session,
@@ -1476,6 +1480,8 @@ export default function App() {
             onTheme: applyThemeChoice,
             skin,
             onSkin: applySkinChoice,
+            uiFontSize,
+            onUiFontSize: applyUiFontSizeChoice,
             wallpaperUrl,
             wallpaperKind: wallpaperRecord?.kind ?? null,
             wallpaperFocus: wallpaperRecord?.focus ?? null,
@@ -1531,7 +1537,7 @@ export default function App() {
             setPinnedOpen,
             session,
             busyIds,
-            completedUnreadIds,
+            unreadTerminalResults,
             projects,
             pendingAskUserSessionIds,
             startSidebarDrag,
@@ -1562,7 +1568,7 @@ export default function App() {
             dropSession,
             session,
             busyIds,
-            completedUnreadIds,
+            unreadTerminalResults,
             pendingAskUserSessionIds,
             openProjectMenu,
             relocateProject,
@@ -1573,6 +1579,8 @@ export default function App() {
             applyProjectOrder,
             addProject,
             showToast,
+            sessionSortMode,
+            onSessionSortModeChange: setSessionSortMode,
           }}
           history={{
             orphanSessions,
@@ -1580,7 +1588,7 @@ export default function App() {
             setHistoryOpen,
             session,
             busyIds,
-            completedUnreadIds,
+            unreadTerminalResults,
             pendingAskUserSessionIds,
             startSidebarDrag,
             endSidebarDrag,
@@ -1802,7 +1810,8 @@ export default function App() {
               acpSessionView,
               confirmClearCurrentGoal,
               modelId,
-              setModelId,
+              sessionProviderId,
+              setSessionModelReference,
               availableModels,
               activeCustomProvider,
               refreshProviderRoute,

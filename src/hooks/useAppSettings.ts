@@ -55,7 +55,7 @@ export function useAppSettings({
     useState(true);
   const [customInstructions, setCustomInstructions] = useState("");
   const [memoryFile, setMemoryFile] = useState("");
-  const [localMemories, setLocalMemories] = useState(true);
+  const [localMemories, setLocalMemories] = useState(false);
   const [taskNotifications, setTaskNotifications] = useState(true);
   const [showThinkingProcess, setShowThinkingProcess] = useState(true);
   const [notificationSound, setNotificationSound] = useState(true);

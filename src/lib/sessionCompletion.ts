@@ -1,6 +1,9 @@
-/** 未查看完成状态的当前本地存储键。 */
-export const COMPLETED_UNREAD_SESSION_IDS_KEY =
-  "keencode.completed-unread-session-ids";
+/** 未查看终态结果的当前本地存储键。 */
+export const UNREAD_TERMINAL_RESULTS_KEY =
+  "keencode.unread-terminal-session-results";
+
+/** 后台形成终态但尚未由用户打开查看的回合结果。 */
+export type UnreadTerminalResult = "completed" | "failed";
 
 /** 判断 ACP 回合是否为可清理计划、可标记完成的正常结束。 */
 export function isNormalSessionCompletion(
@@ -10,31 +13,36 @@ export function isNormalSessionCompletion(
   return stopReason === "end_turn" && !hasError;
 }
 
-/** 读取尚未由用户打开查看的正常完成 Session。 */
-export function loadCompletedUnreadSessionIds(
+/** 读取尚未由用户打开查看的终态 Session 结果。 */
+export function loadUnreadTerminalResults(
   storage: Storage | null,
-): Set<string> {
-  if (!storage) return new Set();
-  const raw = storage.getItem(COMPLETED_UNREAD_SESSION_IDS_KEY);
-  if (raw === null) return new Set();
+): Map<string, UnreadTerminalResult> {
+  if (!storage) return new Map();
+  const raw = storage.getItem(UNREAD_TERMINAL_RESULTS_KEY);
+  if (raw === null) return new Map();
   const value = JSON.parse(raw) as unknown;
-  if (
-    !Array.isArray(value) ||
-    value.some((sessionId) => typeof sessionId !== "string" || !sessionId)
-  ) {
-    throw new Error("未查看完成任务状态无效");
+  if (!Array.isArray(value)) throw new Error("未查看终态结果无效");
+  const results = new Map<string, UnreadTerminalResult>();
+  for (const entry of value) {
+    if (
+      !Array.isArray(entry) ||
+      entry.length !== 2 ||
+      typeof entry[0] !== "string" ||
+      !entry[0] ||
+      (entry[1] !== "completed" && entry[1] !== "failed")
+    ) {
+      throw new Error("未查看终态结果无效");
+    }
+    results.set(entry[0], entry[1]);
   }
-  return new Set(value);
+  return results;
 }
 
-/** 保存尚未由用户打开查看的正常完成 Session。 */
-export function saveCompletedUnreadSessionIds(
-  sessionIds: Set<string>,
+/** 保存尚未由用户打开查看的终态 Session 结果。 */
+export function saveUnreadTerminalResults(
+  results: Map<string, UnreadTerminalResult>,
   storage: Storage | null,
 ): void {
   if (!storage) return;
-  storage.setItem(
-    COMPLETED_UNREAD_SESSION_IDS_KEY,
-    JSON.stringify([...sessionIds]),
-  );
+  storage.setItem(UNREAD_TERMINAL_RESULTS_KEY, JSON.stringify([...results]));
 }

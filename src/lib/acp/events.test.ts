@@ -465,6 +465,16 @@ describe("ACP delivery parser", () => {
       }),
       journalSequence: 2,
     })).not.toBeNull();
+    // 机械截断终态是 transient：带 Journal 序号反而必须被拒绝。
+    const truncated = {
+      ...eventEnvelope({ type: "context_compaction_truncated", estimatedTokens: 9 }),
+    };
+    delete (truncated as { journalSequence?: unknown }).journalSequence;
+    expect(parseKeenCodeEventEnvelope(truncated)).not.toBeNull();
+    expect(parseKeenCodeEventEnvelope(eventEnvelope({
+      type: "context_compaction_truncated",
+      estimatedTokens: 9,
+    }))).toBeNull();
   });
 
   it("拒绝事件字段中的越界文本、控制字符和显式空值", () => {
@@ -740,33 +750,6 @@ describe("ACP event semantics", () => {
       sessionUpdate: "plan",
       entries: [],
     }, false)).toBe(false);
-  });
-
-  it("水位事件是 Turn 级 transient 通知，越界百分比和缺失身份直接拒绝", () => {
-    const event: KeenCodeEvent = {
-      type: "context_water_level",
-      waterLevelPercent: 72,
-      thresholdPercent: 70,
-    };
-    expect(isAuthoritativeKeenCodeEvent(event)).toBe(false);
-    expect(isSessionScopedKeenCodeEvent(event)).toBe(false);
-    expect(parseKeenCodeEventEnvelope({
-      ...sessionEventEnvelope(event),
-      turnId: "turn-1",
-      sourceAgentId: "root",
-    })).not.toBeNull();
-    expect(parseKeenCodeEventEnvelope(sessionEventEnvelope(event))).toBeNull();
-    for (const bad of [
-      { ...event, waterLevelPercent: 101 },
-      { ...event, thresholdPercent: -1 },
-      { ...event, waterLevelPercent: 72.5 },
-    ]) {
-      expect(parseKeenCodeEventEnvelope({
-        ...sessionEventEnvelope(bad as KeenCodeEvent),
-        turnId: "turn-1",
-        sourceAgentId: "root",
-      })).toBeNull();
-    }
   });
 
   it("系统通知允许 Session 级或 Turn 级身份，但拒绝部分身份", () => {

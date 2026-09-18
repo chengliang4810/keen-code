@@ -130,13 +130,13 @@ export function MainNotices({
     <>
       {activeProject && isProjectPathMissing(activeProject.pathOk) && (
         <div className="conn-bar">
-          <span style={{ fontSize: 12, opacity: 0.9, marginRight: 8 }}>
+          <span style={{ opacity: 0.9, marginRight: 8 }}>
             {tr("project.pathMissingShort")}
           </span>
           <Button
             type="button"
             className="btn btn--primary"
-            style={{ height: 24, fontSize: 11 }}
+            style={{ height: 24, fontSize: "calc(11px + var(--ui-font-delta))" }}
             onClick={() => void relocateProject(activeProject)}
           >
             {tr("project.relocateToSend")}
@@ -146,9 +146,7 @@ export function MainNotices({
 
       {emptyExistingSession && (
         <div className="conn-bar" role="status">
-          <span style={{ fontSize: 12, opacity: 0.85 }}>
-            {tr("session.empty")}
-          </span>
+          <span style={{ opacity: 0.85 }}>{tr("session.empty")}</span>
         </div>
       )}
 

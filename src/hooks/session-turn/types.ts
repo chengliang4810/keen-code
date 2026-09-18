@@ -120,6 +120,8 @@ export interface SessionTurnRuntimePort {
   replayHistory: (sessionId: string, originView?: ViewFocus) => Promise<void>;
   refreshSessions: (projectId?: string) => Promise<void>;
   applyMessagePrefixTitle: (sessionId: string, userText: string) => void;
+  /** 发送成功后立即推进侧栏排序键，不必等待下一次列表刷新。 */
+  markSessionUserMessage: (sessionId: string, atIso: string) => void;
   applyAutomaticSessionTitle: (
     sessionId: string,
     firstUserMessage: string,
@@ -139,7 +141,6 @@ export interface SessionTurnUiPort {
   setLiveHost: StateSetter<SessionSnapshot>;
   setLiveMap: StateSetter<SessionLiveMap>;
   setRetryStatus: StateSetter<RetryStatus | null>;
-  setTurnStartedAt: StateSetter<number | null>;
   setStreamStall: StateSetter<StreamStallState | null>;
   setLocalError: StateSetter<string | null>;
   setAskUser: StateSetter<AskUserPayload | null>;

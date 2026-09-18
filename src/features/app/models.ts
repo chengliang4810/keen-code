@@ -10,6 +10,8 @@ export interface SessionRow {
   title: string;
   projectId: string | null;
   updatedAt: string;
+  /** 最近一条用户消息时间；从未发送消息时为空。 */
+  lastUserMessageAt: string | null;
   archived: boolean;
   /** Pinned chats float to the top of the sidebar */
   pinned: boolean;

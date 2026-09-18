@@ -15,6 +15,7 @@ import type * as api from "@/lib/api";
 import type { AcpWorkspaceState } from "@/lib/acp/store";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import type { TurnLatencyState } from "@/lib/turnLatency";
+import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 import type { ViewFocus } from "@/lib/viewFocus";
 
 export type Ref<T> = MutableRefObject<T>;
@@ -73,9 +74,9 @@ export interface UseAcpSessionRuntimeOptions {
   setContextUsage: SetState<SessionContextUsage | null>;
   setTaskCacheUsage: SetState<api.TaskCacheUsage | null>;
   setRetryStatus: SetState<RetryStatus | null>;
-  setTurnStartedAt: SetState<number | null>;
   setEffort: SetState<string>;
-  setModelId: SetState<string>;
+  /** 以 `providerId::modelId` 引用更新 Composer 模型，保留会话实际供应商。 */
+  setSessionModelReference: SetState<string>;
   /** 将标准 Session load 恢复的持久 Plan 模式同步到 Composer。 */
   setPlanModeSessionKey: SetState<string | null>;
   promptHistoryIndexRef: Ref<number | null>;
@@ -84,7 +85,7 @@ export interface UseAcpSessionRuntimeOptions {
   setPromptHistoryFilter: SetState<string>;
   setPromptHistoryActive: SetState<number>;
   setPromptHistoryFocusFilter: SetState<boolean>;
-  setCompletedUnreadIds: SetState<Set<string>>;
+  setUnreadTerminalResults: SetState<Map<string, UnreadTerminalResult>>;
 }
 
 export interface UseAcpSessionRuntimeResult {

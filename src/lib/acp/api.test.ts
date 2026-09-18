@@ -299,16 +299,24 @@ describe("ACP Session 标准 API 映射", () => {
           cwd: "D:/two",
           title: "第二个",
           updatedAt: "2026-09-05T00:00:00Z",
+          _meta: { "keencode/lastUserMessageAt": "2026-09-04T00:00:00Z" },
         }],
       });
 
     await expect(sessionsList()).resolves.toEqual([
-      { id: "session-1", cwd: "D:/one", title: null, updatedAt: "" },
+      {
+        id: "session-1",
+        cwd: "D:/one",
+        title: null,
+        updatedAt: "",
+        lastUserMessageAt: null,
+      },
       {
         id: "session-2",
         cwd: "D:/two",
         title: "第二个",
         updatedAt: "2026-09-05T00:00:00Z",
+        lastUserMessageAt: "2026-09-04T00:00:00Z",
       },
     ]);
     expect(clientMocks.acpRequest).toHaveBeenNthCalledWith(

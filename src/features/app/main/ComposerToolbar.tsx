@@ -13,7 +13,12 @@ import type {
   TaskCacheUsage,
 } from "@/lib/api";
 import type { Attachment } from "@/lib/attachments";
-import { findModel, providerIdFromSessionReference, type ModelOption } from "@/lib/modelCatalog";
+import {
+  findActiveModel,
+  formatSessionModelReference,
+  providerIdFromSessionReference,
+  type ModelOption,
+} from "@/lib/modelCatalog";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import { Button } from "@/components/ui/button";
@@ -59,7 +64,9 @@ export interface ComposerToolbarProps {
   acpSessionView: AcpSessionView | null;
   confirmClearCurrentGoal: () => void;
   modelId: string;
-  setModelId: SetState<string>;
+  /** 当前会话实际绑定的供应商；草稿尚未选定或引用缺失时为空。 */
+  sessionProviderId: string | null;
+  setSessionModelReference: SetState<string>;
   availableModels: ModelOption[];
   activeCustomProvider: CustomProvider | null;
   refreshProviderRoute: () => Promise<void>;
@@ -107,7 +114,8 @@ export function ComposerToolbar({
   acpSessionView,
   confirmClearCurrentGoal,
   modelId,
-  setModelId,
+  sessionProviderId,
+  setSessionModelReference,
   availableModels,
   activeCustomProvider,
   refreshProviderRoute,
@@ -140,13 +148,9 @@ export function ComposerToolbar({
   const goalActive = Boolean(
     currentGoalActive || goalModeSessionKey === sessionKey,
   );
-  // 会话实际模型可能不属于当前活跃供应商；与模型菜单一致按 id 兜底，避免思考强度控件消失。
-  const activeModel =
-    availableModels.find(
-      (model) =>
-        model.id === modelId &&
-        (!activeCustomProvider?.id || model.providerId === activeCustomProvider.id),
-    ) ?? findModel(modelId, availableModels);
+  // 会话模型按会话自身供应商解析：同一模型 ID 可能存在于多个供应商，
+  // 只按全局活跃供应商查找会让思考强度控件读错模型能力。
+  const activeModel = findActiveModel(modelId, sessionProviderId, availableModels);
   const currentTaskCacheUsage =
     taskCacheUsage?.sessionId === session.sessionId ? taskCacheUsage : null;
   const hasBody =
@@ -201,18 +205,24 @@ export function ComposerToolbar({
             open ? "model" : current === "model" ? null : current,
           )
         }
-        providerId={activeCustomProvider?.id}
+        providerId={sessionProviderId}
         modelId={modelId}
         models={availableModels}
         labels={{
           model: tr("composer.model"),
+          vision: tr("composer.modelVision"),
           addModel: tr("composer.addModel"),
           manageModels: tr("composer.manageModels"),
         }}
         onModel={(nextModelId, providerId) => {
           if (!isValidModelId(nextModelId, availableModels)) return;
-          setModelId(nextModelId);
-          if (!isTauri() || !providerId) return;
+          if (!providerId) return;
+          // 先落地本地选择：同一模型 ID 可能属于多个供应商，必须连同供应商一起记住，
+          // 否则切换后菜单仍会显示上一个供应商。
+          setSessionModelReference(
+            formatSessionModelReference(providerId, nextModelId),
+          );
+          if (!isTauri()) return;
           const activeSessionId = viewingSessionIdRef.current;
           if (activeSessionId) {
             invalidateContextUsage(activeSessionId);
@@ -239,12 +249,12 @@ export function ComposerToolbar({
           const reference = session.sessionId
             ? modelBySessionRef.current.get(session.sessionId)
             : undefined;
-          const sessionProviderId = reference
+          const referenceProviderId = reference
             ? providerIdFromSessionReference(reference)
             : null;
           navigateSettings(
             "account",
-            sessionProviderId ?? activeCustomProvider?.id ?? null,
+            referenceProviderId ?? sessionProviderId ?? activeCustomProvider?.id ?? null,
           );
         }}
       />
