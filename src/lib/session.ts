@@ -729,6 +729,29 @@ export function isTurnPromptMessage(message: ChatMessage | undefined): boolean {
 }
 
 /**
+ * 界面“工作中”耗时的回合计时起点。
+ *
+ * 会话视图的权威起点优先；新建对话在视图实体化前回退到本回合乐观用户消息
+ * 的本地创建时间，避免连接窗口内回合计时停摆。始终按会话取用，切换对话
+ * 不会串用其它对话的起点。
+ */
+export function turnStartedAtForMessages(
+  viewStartedAt: number | null | undefined,
+  messages: readonly ChatMessage[],
+): number | null {
+  if (viewStartedAt != null) return viewStartedAt;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (!isTurnPromptMessage(message)) continue;
+    const startedAt = message?.createdAt
+      ? Date.parse(message.createdAt)
+      : Number.NaN;
+    return Number.isFinite(startedAt) ? startedAt : null;
+  }
+  return null;
+}
+
+/**
  * Snapshot the thread being navigated away from.
  *
  * Never replaces a populated cache with an empty view: the workbench can be

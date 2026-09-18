@@ -20,12 +20,12 @@ import {
   isSessionBusy,
   isSessionLiveStreaming,
   parseCompactContent,
-  parseWaterLevelContent,
   parseToolStepContent,
   toolStepDisplayTitle,
   presentErrorBanner,
   snapshotOutgoingMessages,
   stripAnsi,
+  turnStartedAtForMessages,
   type ChatMessage,
   type MessageFileChange,
 } from "./session";
@@ -704,14 +704,47 @@ describe("session projection", () => {
 
 });
 
-describe("context water level markers", () => {
-  it("parseWaterLevelContent reads transient water level rows", () => {
-    expect(parseWaterLevelContent("context_water_level|72|70")).toEqual({
-      level: 72,
-      threshold: 70,
-    });
-    expect(parseWaterLevelContent("context_water_level|101|70")).toBeNull();
-    expect(parseWaterLevelContent("context_compact|auto")).toBeNull();
+describe("running turn start anchor", () => {
+  const userMessage = (id: string, iso: string): ChatMessage => ({
+    id,
+    role: "user",
+    content: id,
+    createdAt: iso,
+  });
+  const pendingAssistant: ChatMessage = {
+    id: "a-pending-1",
+    role: "assistant",
+    content: "",
+    streaming: true,
+  };
+
+  it("有权威会话起点时不使用本地回退", () => {
+    expect(
+      turnStartedAtForMessages(1_787_063_943_184, [
+        userMessage("u-1", "2026-09-17T10:00:00.000Z"),
+        pendingAssistant,
+      ]),
+    ).toBe(1_787_063_943_184);
+  });
+
+  it("新建对话在视图实体化前回退到本回合用户消息的发送时间", () => {
+    expect(
+      turnStartedAtForMessages(null, [
+        userMessage("u-1", "2026-09-17T10:00:00.000Z"),
+        userMessage("u-2", "2026-09-17T10:05:00.000Z"),
+        pendingAssistant,
+      ]),
+    ).toBe(Date.parse("2026-09-17T10:05:00.000Z"));
+  });
+
+  it("没有可解析的用户消息时不伪造起点", () => {
+    expect(turnStartedAtForMessages(null, [pendingAssistant])).toBeNull();
+    expect(turnStartedAtForMessages(null, [])).toBeNull();
+    expect(
+      turnStartedAtForMessages(null, [
+        { id: "u-1", role: "user", content: "hi", createdAt: "not-a-date" },
+      ]),
+    ).toBeNull();
   });
 });
 

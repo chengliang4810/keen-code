@@ -181,7 +181,6 @@ function makeOptions(input: {
     setLiveHost: vi.fn(),
     setLiveMap: vi.fn(),
     setRetryStatus: vi.fn(),
-    setTurnStartedAt: vi.fn(),
     setLocalError,
     setPlanModeSessionKey: vi.fn(),
     setUltraModeSessionKey: vi.fn(),
@@ -303,7 +302,6 @@ describe("useSessionSend local error recovery", () => {
     const send = renderSend(fixture.options);
     await expect(send(validSend("new-session-failure"))).resolves.toBe(false);
     expect(session.state).toBe("idle");
-    expect(fixture.options.ui.setTurnStartedAt).toHaveBeenLastCalledWith(null);
     expect(fixture.options.ui.setRetryStatus).toHaveBeenLastCalledWith(null);
     expect(messages.map((message) => message.role)).toEqual(["user"]);
     expect(fixture.options.state.sendInFlightRef.current).toBe(false);

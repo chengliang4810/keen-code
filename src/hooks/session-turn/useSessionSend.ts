@@ -48,7 +48,6 @@ export interface UseSessionSendOptions {
     | "setLiveHost"
     | "setLiveMap"
     | "setRetryStatus"
-    | "setTurnStartedAt"
     | "setLocalError"
     | "setPlanModeSessionKey"
     | "setUltraModeSessionKey"

@@ -504,8 +504,6 @@ export default function App() {
     delayMs: number;
     reason: string;
   } | null>(null);
-  /** Epoch ms when the current agent turn became busy (for elapsed UI). */
-  const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const [resizingAside, setResizingAside] = useState(false);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const { platform, useCustomWindowChrome, windowMaximized, windowFullscreen } =
@@ -837,9 +835,8 @@ export default function App() {
     setContextUsage,
     setTaskCacheUsage,
     setRetryStatus,
-    setTurnStartedAt,
     setEffort,
-    setModelId,
+    setSessionModelReference,
     setPlanModeSessionKey,
     promptHistoryIndexRef,
     setPromptHistoryIndex,
@@ -1127,7 +1124,6 @@ export default function App() {
       setLiveHost,
       setLiveMap,
       setRetryStatus,
-      setTurnStartedAt,
       setStreamStall,
       setLocalError,
       setAskUser,
@@ -1663,7 +1659,7 @@ export default function App() {
             session,
             activeProject,
             showWelcomeCopy,
-            turnStartedAt,
+            turnStartedAt: acpSessionView?.turn_started_at ?? null,
             retryStatus,
             setResourceOpenTarget,
             setAttachments,

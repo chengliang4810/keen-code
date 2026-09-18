@@ -21,6 +21,7 @@ import {
   isToolInlinedInAssistants,
   messageSegments,
   isTurnPromptMessage,
+  turnStartedAtForMessages,
   type ChatMessage,
   type ContextCompactMeta,
   type SessionState,
@@ -574,6 +575,11 @@ export function ConversationThread({
   });
 
   const turnBusy = sessionState === "streaming";
+  /**
+   * 计时锚点：本会话视图的权威起点优先；新建对话在视图实体化前回退到本回合
+   * 用户消息的本地发送时间。按会话取用，切换对话不会串用其它对话的计时。
+   */
+  const turnAnchor = turnStartedAtForMessages(turnStartedAt, messages);
   const lastUserMessageId = useMemo(() => {
     for (let index = messages.length - 1; index >= 0; index -= 1) {
       if (messages[index]?.role === "user") return messages[index]!.id;
@@ -1133,7 +1139,7 @@ export function ConversationThread({
                       <Thinking
                         locale={locale}
                         thinking={!!m.streaming || assistantBusy}
-                        startedAt={assistantBusy ? turnStartedAt : null}
+                        startedAt={assistantBusy ? turnAnchor : null}
                         durationMs={processingDurationMs}
                         statusLabel={(duration, running) =>
                           tr(running ? "chat.workingFor" : "chat.workedFor", {
@@ -1343,7 +1349,7 @@ export function ConversationThread({
               <Thinking
                 locale={locale}
                 thinking
-                startedAt={turnStartedAt}
+                startedAt={turnAnchor}
                 statusLabel={(duration, running) =>
                   tr(running ? "chat.workingFor" : "chat.workedFor", {
                     duration,
