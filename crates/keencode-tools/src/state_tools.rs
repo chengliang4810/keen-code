@@ -190,7 +190,7 @@ impl AgentTool for GoalTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Goal",
-            "Manage the current conversation's single long-term goal with get, create, update, complete, block, or clear. Create only when the user explicitly requests a persistent goal. Its owning task continues while the goal is active; a final response alone does not complete it. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently.",
+            "Manage the current conversation's single long-term goal with get, create, update, complete, block, or clear. Create only when the user explicitly requests a persistent goal. Its owning task continues while the goal is active; a final response alone does not complete it. complete requires concrete evidence covering every goal requirement; block requires a reason explaining what cannot be resolved independently, and only after the same blocking condition has recurred for at least three consecutive goal turns with no meaningful progress available without user input or an external change. Resuming a paused or blocked goal is the user's job; do not attempt to revive it yourself.",
             json!({
                 "type": "object",
                 "properties": {
