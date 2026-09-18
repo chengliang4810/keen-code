@@ -415,10 +415,9 @@ export type KeenCodeEvent =
     }
   | { type: "context_compaction_failed"; failureKind: CompactionFailureKind }
   | {
-      /** 上下文水位 transient 通知，不进入权威 Journal；压缩轮不发送。 */
-      type: "context_water_level";
-      waterLevelPercent: number;
-      thresholdPercent: number;
+      /** 机械截断兜底结束的 transient 终态；只闭合同轮次的 started。 */
+      type: "context_compaction_truncated";
+      estimatedTokens: number;
     }
   | { type: "recovery_state_changed"; state: RecoveryState }
   | {
@@ -1084,14 +1083,9 @@ function isKeenCodeEvent(value: unknown): value is KeenCodeEvent {
       return hasOnlyKeys(value, ["type", "failureKind"]) &&
         (value.failureKind === "model" || value.failureKind === "budget" ||
           value.failureKind === "storage" || value.failureKind === "invalid_result");
-    case "context_water_level":
-      return hasOnlyKeys(value, ["type", "waterLevelPercent", "thresholdPercent"]) &&
-        Number.isSafeInteger(value.waterLevelPercent) &&
-        Number(value.waterLevelPercent) >= 0 &&
-        Number(value.waterLevelPercent) <= 100 &&
-        Number.isSafeInteger(value.thresholdPercent) &&
-        Number(value.thresholdPercent) >= 0 &&
-        Number(value.thresholdPercent) <= 100;
+    case "context_compaction_truncated":
+      return hasOnlyKeys(value, ["type", "estimatedTokens"]) &&
+        isNonNegativeInteger(value.estimatedTokens);
     case "recovery_state_changed":
       return hasOnlyKeys(value, ["type", "state"]) &&
         (value.state === "pending" || value.state === "replaying" ||

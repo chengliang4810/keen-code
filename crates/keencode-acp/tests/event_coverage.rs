@@ -297,15 +297,14 @@ fn event_authority_classification_is_closed() {
     assert!(authoritative.iter().all(|event| !event.is_transient()));
 
     let transient = [
-        KeenCodeEvent::ContextWaterLevel {
-            water_level_percent: 72,
-            threshold_percent: 70,
-        },
         KeenCodeEvent::ContextCompactionStarted {
             estimated_tokens: 10,
         },
         KeenCodeEvent::ContextCompactionFailed {
             failure_kind: CompactionFailureKind::Model,
+        },
+        KeenCodeEvent::ContextCompactionTruncated {
+            estimated_tokens: 10,
         },
         KeenCodeEvent::RecoveryStateChanged {
             state: RecoveryState::Ready,

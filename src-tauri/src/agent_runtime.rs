@@ -9079,6 +9079,17 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
                 },
             }];
         }
+        AgentStreamEventKind::ContextCompactionTruncated { estimated_tokens } => {
+            return vec![DeliveryDraft::KeenCodeEvent {
+                turn_id: Some(event.turn_id().as_str().to_owned()),
+                source_agent_id: Some(event.source_agent_id().as_str().to_owned()),
+                journal_sequence: None,
+                occurred_at_ms,
+                event: KeenCodeEvent::ContextCompactionTruncated {
+                    estimated_tokens: *estimated_tokens,
+                },
+            }];
+        }
         AgentStreamEventKind::ModelEvent {
             event:
                 ModelStreamEvent::DecodeTiming { .. }

@@ -1257,7 +1257,10 @@ function reduceKeenCodeEvent(
       });
       break;
     }
-    case "context_compaction_completed": {
+    case "context_compaction_completed":
+    case "context_compaction_truncated": {
+      // 机械截断没有权威记录，但它同样结束了一次已开始并在时间线中可见的压缩，
+      // 因此与摘要压缩共用原位收尾逻辑，避免留下永不结束的"压缩中"。
       if (!childAgentId) view.compacting = false;
       // 与思考、正文、工具共用同一有序缓冲；实时与重放都保留发生位置。
       const segments = targetSegments(view, childAgentId);

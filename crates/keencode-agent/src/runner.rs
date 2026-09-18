@@ -1541,7 +1541,17 @@ impl AgentRunner {
             Ok(outcome) => {
                 active.messages = outcome.messages.into();
                 model_request.messages = active.messages.clone();
+                let estimated_tokens = outcome.record.estimated_tokens_after;
                 active.compactions.push(outcome.record);
+                // 已发出的 Started 必须配对终态：机械截断不产生权威压缩记录，
+                // 只能用同通道的 transient 终态闭合前端的"压缩中"状态。
+                self.deliver_context_compaction_event(
+                    request,
+                    active.state.round_count(),
+                    AgentStreamEventKind::ContextCompactionTruncated { estimated_tokens },
+                    false,
+                )
+                .await?;
                 Ok(true)
             }
             Err(error) => {

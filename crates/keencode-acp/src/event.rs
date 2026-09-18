@@ -776,16 +776,13 @@ pub enum KeenCodeEvent {
         /// 不包含模型正文的稳定失败分类。
         failure_kind: CompactionFailureKind,
     },
-    /// 上下文水位达到告警阈值的 transient 通知，不进入权威 Journal。
+    /// 机械截断兜底已经结束：早期历史被丢弃但不产生权威压缩记录。
     ///
-    /// 与 ContextCompactionStarted/Failed 同走 transient 实时通道。
-    /// 产品意图：任何实际执行压缩的轮次（预测臂或 Budget 臂）只发压缩事件，
-    /// 不另发本事件，避免重复提醒；该抑制由 keencode-agent runner 侧执行。
-    ContextWaterLevel {
-        /// 发送时点的水位百分比（估算占输入预算），0–100。
-        water_level_percent: u8,
-        /// 本次跨越的告警阈值百分比。
-        threshold_percent: u8,
+    /// 与 ContextCompactionStarted/Failed 同走 transient 实时通道：它只用于
+    /// 配对同轮次已发出的 Started，冷重放与恢复都不依赖该事件。
+    ContextCompactionTruncated {
+        /// 截断后估算的输入 Token。
+        estimated_tokens: u64,
     },
     /// Session 崩溃恢复或重放状态发生变化。
     RecoveryStateChanged {
@@ -937,16 +934,13 @@ enum KeenCodeEventDef {
         /// 不包含模型正文的稳定失败分类。
         failure_kind: CompactionFailureKind,
     },
-    /// 上下文水位达到告警阈值的 transient 通知，不进入权威 Journal。
+    /// 机械截断兜底已经结束：早期历史被丢弃但不产生权威压缩记录。
     ///
-    /// 与 ContextCompactionStarted/Failed 同走 transient 实时通道。
-    /// 产品意图：任何实际执行压缩的轮次（预测臂或 Budget 臂）只发压缩事件，
-    /// 不另发本事件，避免重复提醒；该抑制由 keencode-agent runner 侧执行。
-    ContextWaterLevel {
-        /// 发送时点的水位百分比（估算占输入预算），0–100。
-        water_level_percent: u8,
-        /// 本次跨越的告警阈值百分比。
-        threshold_percent: u8,
+    /// 与 ContextCompactionStarted/Failed 同走 transient 实时通道：它只用于
+    /// 配对同轮次已发出的 Started，冷重放与恢复都不依赖该事件。
+    ContextCompactionTruncated {
+        /// 截断后估算的输入 Token。
+        estimated_tokens: u64,
     },
     /// Session 崩溃恢复或重放状态发生变化。
     RecoveryStateChanged {
@@ -1125,12 +1119,6 @@ impl KeenCodeEvent {
                 replaced_through_sequence,
                 ..
             } if *replaced_through_sequence == 0 => {
-                return Err(AcpBoundaryError::InvalidSemanticValue);
-            }
-            Self::ContextWaterLevel {
-                water_level_percent,
-                threshold_percent,
-            } if *water_level_percent > 100 || *threshold_percent > 100 => {
                 return Err(AcpBoundaryError::InvalidSemanticValue);
             }
             Self::GoalChanged {

@@ -3800,7 +3800,9 @@ async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_
         ],
     ));
     let hook = Arc::new(CompactionProbeHook::new());
+    let event_sink = Arc::new(RecordingContextEventSink::default());
     let runner = AgentRunner::new(provider.clone(), ToolRegistry::new(), RunLimits::default())
+        .with_event_sink(event_sink.clone())
         .with_hook_runtime(runtime_with_hook(hook.clone()));
     let result = runner
         .run_turn(turn_request(many_old_messages(30, 2_000)))
@@ -3811,6 +3813,24 @@ async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_
     let record = &result.compactions[0];
     assert_eq!(record.kind, ContextCompactionKind::MechanicalTruncation);
     assert_eq!(record.trigger, ContextCompressionTrigger::ProviderOverflow);
+    // 兜底的 Started 必须被同通道终态闭合，否则前端会停留在"压缩中"。
+    let events = event_sink.events();
+    let truncated = events
+        .iter()
+        .find_map(|event| match event.kind() {
+            AgentStreamEventKind::ContextCompactionTruncated { estimated_tokens } => {
+                Some(*estimated_tokens)
+            }
+            _ => None,
+        })
+        .expect("机械截断成功必须投递 transient 终态事件");
+    assert_eq!(truncated, record.estimated_tokens_after);
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextCompactionStarted { .. })),
+        "兜底前应发出 Started"
+    );
     assert!(record.summary.is_empty());
     assert!(record.projections.is_empty());
     assert!(record.estimated_tokens_after < record.estimated_tokens_before);

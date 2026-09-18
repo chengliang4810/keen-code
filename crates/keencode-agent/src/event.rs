@@ -683,20 +683,18 @@ pub enum AgentStreamEventKind {
         /// 压缩前完整 Provider 中立请求的估算 Token 数。
         estimated_tokens: u64,
     },
-    /// 上下文水位达到 info 告警阈值（#23）。
-    ///
-    /// 与压缩 Started/Failed 同走 transient 实时通道，不进入权威 journal；
-    /// 压缩实际执行的轮次只发压缩事件，不另发本事件（防重复）。
-    ContextWaterLevel {
-        /// 发送时点的水位百分比（估算占输入预算），0–100。
-        water_level_percent: u8,
-        /// 本次跨越的告警阈值百分比（当前恒为 70）。
-        threshold_percent: u8,
-    },
     /// 上下文压缩失败且原 Transcript 保持不变。
     ContextCompactionFailed {
         /// 不包含模型正文、工具结果或凭据的稳定失败分类。
         failure_kind: ContextCompactionFailureKind,
+    },
+    /// 机械截断兜底已经结束：早期历史被丢弃，但不产生权威压缩记录。
+    ///
+    /// 与 Started/Failed 同走 transient 实时通道；它只负责闭合同一轮次的
+    /// [`AgentStreamEventKind::ContextCompactionStarted`]，冷重放不依赖它。
+    ContextCompactionTruncated {
+        /// 截断后估算的输入 Token。
+        estimated_tokens: u64,
     },
 }
 

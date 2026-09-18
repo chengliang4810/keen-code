@@ -1928,7 +1928,7 @@ async fn replay_round(events: &[AgentStreamEvent], model_round: u32) -> ModelRes
             AgentStreamEventKind::ModelFailure { .. }
             | AgentStreamEventKind::ContextCompactionStarted { .. }
             | AgentStreamEventKind::ContextCompactionFailed { .. }
-            | AgentStreamEventKind::ContextWaterLevel { .. } => None,
+            | AgentStreamEventKind::ContextCompactionTruncated { .. } => None,
         })
         .collect::<Vec<Result<ModelStreamEvent, ModelError>>>();
     let model_stream: ModelStream = Box::pin(stream::iter(items));
