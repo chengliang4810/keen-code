@@ -69,7 +69,7 @@
 
 .main__title {
   margin: 0;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 500;
   letter-spacing: -0.01em;
   color: var(--text-primary);
@@ -102,7 +102,7 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 500;
   flex-shrink: 0;
   overflow: hidden;
@@ -274,7 +274,7 @@
 
 /* Markdown */
 .md-body {
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   line-height: 1.6;
   color: var(--text-primary);
   word-break: break-word;
@@ -343,7 +343,7 @@
   color: var(--text-primary);
   overflow-x: auto;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   line-height: 1.45;
 }
 
@@ -378,7 +378,7 @@
 .md-body table {
   border-collapse: collapse;
   margin: 0.6em 0;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   width: 100%;
   min-width: max-content;
   max-width: none;
@@ -427,7 +427,7 @@
   outline: none;
   background: transparent;
   color: var(--text-primary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-family: inherit;
 }
 
@@ -442,7 +442,7 @@
 
 .chat-find__count {
   flex-shrink: 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   font-variant-numeric: tabular-nums;
   color: var(--text-tertiary);
   min-width: 4.5em;
@@ -579,7 +579,7 @@
   flex: 1;
   min-width: 0;
   margin: 0;
-  font-size: 15px;
+  font-size: calc(15px + var(--ui-font-delta));
   font-weight: 600;
   line-height: 1.4;
   color: var(--text-primary);
@@ -612,14 +612,14 @@
 .ask-user__page {
   min-width: 44px;
   text-align: center;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-variant-numeric: tabular-nums;
   color: var(--text-secondary);
 }
 
 .ask-user__hint {
   margin: -6px 0 0;
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -664,7 +664,7 @@
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-full);
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
 }
 
 .ask-user__opt-copy {
@@ -676,13 +676,13 @@
 }
 
 .ask-user__opt-label {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 550;
   line-height: 1.3;
 }
 
 .ask-user__opt-desc {
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
   line-height: 1.35;
 }
@@ -697,7 +697,7 @@
   border: 0;
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
 }
 
 .ask-user__custom:hover:not(:disabled) { color: var(--text-primary); }
@@ -709,7 +709,7 @@
 }
 
 .ask-user__free-hint {
-  font-size: 11.5px;
+  font-size: calc(11.5px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -724,7 +724,7 @@
   background: var(--bg-input);
   color: var(--text-primary);
   font: inherit;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   line-height: 1.4;
   padding: 8px 10px;
 }
@@ -787,7 +787,7 @@
 
 .stall-banner__btn {
   height: 28px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
 }
 
 /* Error banner — compact summary; full dump behind Details */
@@ -805,7 +805,7 @@
 
 .error-banner__code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   color: var(--danger);
   margin-bottom: 4px;
 }
@@ -818,7 +818,7 @@
 .error-banner__cause {
   margin-top: 4px;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   line-height: 1.45;
 }
 
@@ -832,12 +832,12 @@
 
 .error-banner__primary {
   height: 28px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
 }
 
 .error-banner__secondary {
   height: 28px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
 }
 
 .error-banner__details-btn {
@@ -847,7 +847,7 @@
   padding: 0;
   margin: 0;
   font: inherit;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--danger);
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -861,7 +861,7 @@
 
 .error-banner__reconnect {
   height: 28px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
 }
 
 .error-banner__detail {
@@ -873,7 +873,7 @@
   background: color-mix(in srgb, var(--bg-base) 70%, transparent);
   border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1021,7 +1021,7 @@
   align-items: center;
   gap: 8px;
   min-height: 28px;
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 550;
   line-height: 1.35;
 }
@@ -1061,7 +1061,7 @@
   box-shadow: none;
   color: inherit;
   font: inherit;
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
   white-space: nowrap;
   cursor: pointer;
@@ -1120,21 +1120,21 @@
 .composer-goal__summary strong {
   flex-shrink: 0;
   color: var(--text-primary);
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 650;
 }
 
 .composer-goal__summary span {
   overflow: hidden;
   text-overflow: ellipsis;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 520;
 }
 
 .composer-goal__elapsed {
   min-width: 2.5rem;
   text-align: end;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-variant-numeric: tabular-nums;
 }
 
@@ -1172,7 +1172,7 @@
   border-radius: var(--radius-full);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 600;
   cursor: pointer;
 }
@@ -1371,7 +1371,7 @@ button.composer__context-item {
 
 .cwm__head {
   padding: 6px 10px 4px;
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -1423,7 +1423,7 @@ button.composer__context-item {
 }
 
 .cwm__item-name {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 550;
   color: var(--text-primary);
   line-height: 1.25;
@@ -1435,7 +1435,7 @@ button.composer__context-item {
 
 .cwm__item-meta {
   flex-shrink: 0;
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   font-weight: 500;
   line-height: 1.2;
   color: var(--text-tertiary);
@@ -1445,7 +1445,7 @@ button.composer__context-item {
 .cwm__empty {
   margin: 0;
   padding: 8px 10px 10px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
 }
 
@@ -1468,7 +1468,7 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: transparent;
   color: var(--text-secondary);
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 500;
   line-height: 1.2;
   cursor: pointer;
@@ -1542,7 +1542,7 @@ button.composer__context-item {
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -1557,7 +1557,7 @@ button.composer__context-item {
   background: transparent;
   padding: 2px 6px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--accent);
   cursor: pointer;
 }
@@ -1579,7 +1579,7 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -1595,7 +1595,7 @@ button.composer__context-item {
   background: transparent;
   padding: 2px 8px;
   border-radius: var(--radius-sm);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--accent);
   cursor: pointer;
@@ -1625,7 +1625,7 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: var(--bg-hover);
   border: 1px solid var(--border-subtle);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -1666,7 +1666,7 @@ button.composer__context-item {
   width: auto;
   padding: 0 7px;
   color: var(--accent);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
 }
 
@@ -1734,7 +1734,7 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: var(--bg-hover);
   border: 1px solid var(--border-subtle);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
   overflow: visible;
   box-sizing: border-box;
@@ -1819,7 +1819,7 @@ button.composer__context-item {
   white-space: nowrap;
   text-align: left;
   line-height: 1.2;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 
@@ -1982,7 +1982,7 @@ button.composer__context-item {
 
 .att-card__name {
   max-width: 160px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--text-primary);
   overflow: hidden;
@@ -2080,7 +2080,7 @@ button.composer__context-item {
   padding: 8px 12px;
   box-sizing: border-box;
   color: var(--text-tertiary);
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   text-align: center;
   word-break: break-all;
 }
@@ -2145,7 +2145,7 @@ button.composer__context-item {
   padding: 12px;
   box-sizing: border-box;
   color: var(--text-secondary);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   background: color-mix(in srgb, var(--bg-hover) 80%, var(--ink-black) 20%);
 }
 
@@ -2158,7 +2158,7 @@ button.composer__context-item {
 
 .md-body__video-card__caption {
   padding: 6px 10px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2170,7 +2170,7 @@ button.composer__context-item {
 }
 
 .md-body__video-card__btn {
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--accent);
   background: none;
   border: none;
@@ -2248,7 +2248,7 @@ button.composer__context-item {
 
 .file-path-link__name {
   display: block;
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 550;
   color: var(--chat-link);
   overflow-wrap: anywhere;
@@ -2265,6 +2265,8 @@ button.composer__context-item {
   position: absolute;
   top: 0.6em;
   inset-inline-start: -1.15em;
+  /* 自绘列表标记会缩放 ::before 字号，这里的 em 偏移必须保持条目字号。 */
+  font-size: inherit;
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -2308,7 +2310,7 @@ button.composer__context-item {
 }
 
 .file-path-details__label {
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   font-weight: 550;
   color: var(--text-tertiary);
   text-transform: none;
@@ -2316,7 +2318,7 @@ button.composer__context-item {
 }
 
 .file-path-details__value {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   color: var(--text-primary);
   word-break: break-all;
   white-space: pre-wrap;
@@ -2327,7 +2329,7 @@ button.composer__context-item {
 
 .file-path-details__mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   padding: 8px 10px;
   border-radius: var(--radius-md);
   background: var(--bg-hover);
@@ -2350,8 +2352,8 @@ button.composer__context-item {
   background: transparent;
   color: var(--text-primary);
   font: inherit;
-  font-size: 14px;
-  line-height: 24px;
+  font-size: calc(14px + var(--ui-font-delta));
+  line-height: calc(24px + var(--ui-font-delta));
   overflow-y: auto;
   /* room for floating native thumb (track stays transparent) */
   padding: 4px 8px 0 16px;
@@ -2432,7 +2434,7 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: transparent;
   border: none;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
   max-width: 140px;
   flex-shrink: 0;
@@ -2608,9 +2610,9 @@ button.composer__context-item {
 .composer-plus__section {
   min-height: 26px;
   padding: 6px 10px 2px;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
-  line-height: 18px;
+  line-height: calc(18px + var(--ui-font-delta));
   color: var(--text-tertiary);
   letter-spacing: 0;
   text-transform: none;
@@ -2631,8 +2633,8 @@ button.composer__context-item {
   border-radius: var(--menu-item-radius);
   text-align: left;
   color: var(--text-primary);
-  font-size: 14px;
-  line-height: 22px;
+  font-size: calc(14px + var(--ui-font-delta));
+  line-height: calc(22px + var(--ui-font-delta));
   font-weight: 400;
   background: transparent;
   border: none;
@@ -2713,12 +2715,12 @@ button.composer__context-item {
   height: 36px;
   padding: 0 14px;
   border-radius: var(--radius-full);
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 400;
   border: none;
   background: transparent;
   color: var(--text-primary);
-  line-height: 22px;
+  line-height: calc(22px + var(--ui-font-delta));
   white-space: nowrap;
 }
 
@@ -2789,15 +2791,15 @@ button.composer__context-item {
   gap: 10px;
   margin: 0;
   color: var(--text-primary);
-  font-size: 26px;
-  line-height: 32px;
+  font-size: calc(26px + var(--ui-font-delta));
+  line-height: calc(32px + var(--ui-font-delta));
   font-weight: 500;
   text-align: center;
   pointer-events: auto;
 }
 .composer-welcome .g-icon { flex: none; }
 @media (max-width: 760px), (max-height: 600px) {
-  .composer-welcome { font-size: 22px; }
+  .composer-welcome { font-size: calc(22px + var(--ui-font-delta)); }
   .composer-wrap--welcome { gap: 16px; padding: 16px; }
 }
 
@@ -2815,12 +2817,12 @@ button.composer__context-item {
 }
 .error-boundary-fallback__title {
   margin: 0;
-  font-size: 14px;
+  font-size: calc(14px + var(--ui-font-delta));
   font-weight: 600;
 }
 .error-boundary-fallback__desc {
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-secondary);
 }
 .error-boundary-fallback__actions {
