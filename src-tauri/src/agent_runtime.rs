@@ -5814,7 +5814,9 @@ impl AgentRuntime {
             }))
             .with_tool_catalog_update_source(tool_catalog_updates);
         if is_root {
-            runner = runner.with_goal_controller(execution.persistent_state.clone());
+            runner = runner
+                .with_goal_controller(execution.persistent_state.clone())
+                .with_todo_controller(execution.persistent_state.clone());
         }
         let runner = execution.session.bind_agent_runner_with_usage_sink(
             runner,
