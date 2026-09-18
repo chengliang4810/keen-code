@@ -164,8 +164,11 @@ function RetryStatus({
     : 0;
   const [remainingMs, setRemainingMs] = useState(delayMs);
 
-  // 调用方按「失败序号 + 等待时长」重挂载本组件，初始值就是本次的完整等待；
-  // 挂载后按 100ms 刷新剩余时间，父组件重渲染不会重置倒计时。
+  // 组件不随重试事件重挂载：delayMs 变化即新一次等待，先同步重置剩余时间，
+  // 挂载后按 100ms 刷新，父组件重渲染不会重置倒计时。
+  useEffect(() => {
+    setRemainingMs(delayMs);
+  }, [delayMs]);
   useEffect(() => {
     if (delayMs <= 0) return;
     const deadline = Date.now() + delayMs;
@@ -1392,9 +1395,12 @@ export function ConversationThread({
             </div>
           ) : null}
 
-          {/* Stable live region for the current turn's retry state. */}
+          {/* Stable live region for the current turn's retry state.
+           * key 必须稳定：按 attempt:delayMs 重挂载会重建 aria-live 节点，
+           * 屏幕阅读器对插入即带内容的实时区域不播报。倒计时重置由组件
+           * 内部随 delayMs 变化处理。 */}
           <RetryStatus
-            key={turnBusy && retryStatus ? `${retryStatus.attempt}:${retryStatus.delayMs}` : "idle"}
+            key={turnBusy && retryStatus ? "retry" : "idle"}
             locale={locale}
             retryStatus={turnBusy ? retryStatus : null}
           />
