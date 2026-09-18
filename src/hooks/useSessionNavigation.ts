@@ -441,14 +441,14 @@ export function useSessionNavigation({
         return;
       }
 
-      const leavingSessionId = viewingSessionIdRef.current;
       snapshotOutgoingDraft();
-      const restoredDraft = leavingSessionId
-        ? restoreDraftNavigation(
-            draftNavigationSnapshotRef.current,
-            projectForDraft,
-          )
-        : null;
+      // 无论离开的是历史会话还是草稿视图，都按项目匹配恢复快照；
+      // 草稿视图点「新对话」时若无此恢复，已输入草稿会被清空且快照
+      // 随后被空文本覆盖（数据丢失）。
+      const restoredDraft = restoreDraftNavigation(
+        draftNavigationSnapshotRef.current,
+        projectForDraft,
+      );
       draftKeyRef.current += 1;
       if (restoredDraft && options?.seedDraft === undefined) {
         draftNavigationSnapshotRef.current = {
