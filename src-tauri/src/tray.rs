@@ -283,19 +283,23 @@ pub fn tray_set_menu(app: AppHandle, menu: TrayMenuPayload) -> Result<(), String
 
 #[tauri::command]
 /// 处理主窗口的关闭手势：常驻设置下隐藏到托盘，否则走统一退出入口。
-pub fn app_close_window(app: AppHandle) -> Result<(), String> {
-    if !close_to_tray_enabled(&app) {
+/// 异步命令避免同步设置读取（持锁磁盘 IO）阻塞主线程关闭手势。
+pub async fn app_close_window(app: AppHandle) -> Result<(), String> {
+    let settings = tauri::async_runtime::spawn_blocking({
+        let app = app.clone();
+        move || crate::app_settings::get(&app).map(|settings| settings.close_to_tray)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+    .unwrap_or(false);
+    // 托盘不存在时不能隐藏窗口：非 macOS 平台没有 Dock 图标，
+    // 隐藏会让应用变成无法恢复的隐形进程，因此回退为直接退出。
+    let tray_alive = app.tray_by_id(TRAY_ID).is_some();
+    if !(settings && tray_alive) {
         crate::app_exit::request_exit(&app)?;
         return Ok(());
     }
     hide_main_window(&app)
-}
-
-/// 读取关闭窗口时的常驻策略；设置读取失败按直接退出处理，避免窗口无法关闭。
-fn close_to_tray_enabled(app: &AppHandle) -> bool {
-    crate::app_settings::get(app)
-        .map(|settings| settings.close_to_tray)
-        .unwrap_or(false)
 }
 
 #[cfg(test)]
