@@ -71,6 +71,8 @@ const META_SNAPSHOT: &str = "keencode/snapshot";
 const META_REPLAY: &str = "keencode/replay";
 /// ACP 初始化响应 `_meta` 中的默认 Session cwd。
 const META_DEFAULT_CWD: &str = "keencode/defaultCwd";
+/// ACP `session/list` 每项 `_meta` 中的最近用户消息时间。
+const META_LAST_USER_MESSAGE_AT: &str = "keencode/lastUserMessageAt";
 /// 标准 Session 配置项：Provider 与模型的可逆选择。
 const CONFIG_MODEL_ID: &str = "model";
 /// 未选择实际 Provider/模型时的显式空选择，不代表任何可调用模型。
@@ -1037,14 +1039,26 @@ impl AcpHost {
             }
             let updated_at = crate::session_commands::rfc3339_from_ms(metadata.updated_at_unix_ms)
                 .map_err(|error| internal_failure(error))?;
-            sessions.push(
-                schema::SessionInfo::new(
-                    schema::SessionId::new(metadata.session_id.as_str().to_owned()),
-                    root,
+            let mut info = schema::SessionInfo::new(
+                schema::SessionId::new(metadata.session_id.as_str().to_owned()),
+                root,
+            )
+            .title(Some(metadata.title))
+            .updated_at(Some(updated_at));
+            // 从未发送消息的 Session 不伪造用户消息时间，由客户端回退到更新时间。
+            if metadata.last_user_message_at_unix_ms > 0 {
+                let last_user_message_at = crate::session_commands::rfc3339_from_ms(
+                    metadata.last_user_message_at_unix_ms,
                 )
-                .title(Some(metadata.title))
-                .updated_at(Some(updated_at)),
-            );
+                .map_err(|error| internal_failure(error))?;
+                let mut meta = Map::new();
+                meta.insert(
+                    META_LAST_USER_MESSAGE_AT.to_owned(),
+                    Value::String(last_user_message_at),
+                );
+                info = info.meta(Some(meta));
+            }
+            sessions.push(info);
         }
         if start > sessions.len() {
             return Err(HostFailure::InvalidParams);
