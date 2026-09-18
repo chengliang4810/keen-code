@@ -875,7 +875,10 @@ impl AcpHost {
         Ok(keencode_acp::DeleteSessionResponse::new())
     }
 
-    /// 通过标准配置项显式更新模型绑定或推理强度，拒绝活动会话和未知配置。
+    /// 通过标准配置项显式更新模型绑定或推理强度，拒绝未知配置。
+    ///
+    /// 推理强度只在下一次模型请求读取，运行中会话也可直接修改；模型绑定会改写
+    /// 正在运行 Turn 使用的 Provider，因此仍要求会话空闲。
     async fn handle_set_config_option(
         &self,
         request: schema::SetSessionConfigOptionRequest,
@@ -888,17 +891,17 @@ impl AcpHost {
             .runtime
             .open_or_create_session(&project_root, Some(&session_id), "acp-config")
             .map_err(map_runtime_failure)?;
-        if session
-            .has_active_work()
-            .map_err(|error| internal_failure(error))?
-        {
-            return Err(HostFailure::InvalidParams);
-        }
         let operation_id = operation_id(request.meta.as_ref())?;
         let config_id = request.config_id.0.as_ref();
         let value = request.value.0.as_ref();
         match config_id {
             CONFIG_MODEL_ID => {
+                if session
+                    .has_active_work()
+                    .map_err(|error| internal_failure(error))?
+                {
+                    return Err(HostFailure::InvalidParams);
+                }
                 if value == UNCONFIGURED_MODEL_ID {
                     // `unconfigured` 只是只读配置列表中表达“尚未选择”的占位值，
                     // 不是 Runtime 可执行的 Provider 目标；不为它伪造控制事件或收据。
