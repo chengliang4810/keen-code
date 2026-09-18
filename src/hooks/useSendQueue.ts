@@ -284,16 +284,22 @@ export function useSendQueue({
     writeMap(claimed.byKey);
 
     void (async () => {
-      const ok = await executeSendRef.current({
-        storedDisplay: head.storedDisplay,
-        att: head.attachments,
-        createGoal: head.createGoal,
-        planMode: head.planMode,
-        ultraMode: head.ultraMode,
-        fromQueue: true,
-        requestId: head.id,
-        targetSessionId,
-      });
+      let ok = false;
+      try {
+        ok = await executeSendRef.current({
+          storedDisplay: head.storedDisplay,
+          att: head.attachments,
+          createGoal: head.createGoal,
+          planMode: head.planMode,
+          ultraMode: head.ultraMode,
+          fromQueue: true,
+          requestId: head.id,
+          targetSessionId,
+        });
+      } catch {
+        // 与 ok === false 走同一条重排路径，避免队列头消息在异常时丢失。
+        ok = false;
+      }
       if (ok) return;
       const r = requeueAfterFlushFail(
         sendQueueByKeyRef.current,

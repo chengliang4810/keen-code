@@ -130,21 +130,24 @@ export function useSessionDraftSend({
       return;
     }
     clearComposerAfterSubmit();
-    const sent = await executeSend({
-      storedDisplay,
-      att,
-      createGoal,
-      planMode,
-      ultraMode,
-      targetSessionId: sessionId,
-    });
-    // 直接发送失败时输入框与时间线都已清空：把原文与附件回填输入框，
+    // 直接发送失败或抛异常时输入框与时间线都已清空：把原文与附件回填输入框，
     // 与队列路径保留消息的行为对齐，避免用户文字丢失。
-    if (!sent) {
-      setDraft(storedDisplay);
-      setAttachments(att);
-      if (createGoal) setGoalModeSessionKey(key);
+    try {
+      const sent = await executeSend({
+        storedDisplay,
+        att,
+        createGoal,
+        planMode,
+        ultraMode,
+        targetSessionId: sessionId,
+      });
+      if (sent) return;
+    } catch (cause) {
+      ui.setLocalError(localizeUiError(cause, locale));
     }
+    setDraft(storedDisplay);
+    setAttachments(att);
+    if (createGoal) setGoalModeSessionKey(key);
   }, [
     attachments,
     clearComposerAfterSubmit,

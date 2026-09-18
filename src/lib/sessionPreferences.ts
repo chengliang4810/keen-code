@@ -195,7 +195,14 @@ export function autoArchiveExpiredSessions(
   for (const session of sessions) {
     const current = preferences[session.id] ?? { pinned: false, archived: false };
     if (!current.pinned && !current.archived && Date.parse(session.updatedAt) <= cutoff) {
-      preferences[session.id] = { ...current, archived: true };
+      // 与文件内其他写入路径一致：经校验 + defineProperty 写入，避免
+      // `__proto__` 之类的键触发原型 setter 或不合法标识被持久化。
+      Object.defineProperty(preferences, session.id, {
+        configurable: true,
+        enumerable: true,
+        value: parseSessionPreference(session.id, { ...current, archived: true }),
+        writable: true,
+      });
       changed = true;
     }
   }

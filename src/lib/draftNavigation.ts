@@ -91,7 +91,9 @@ export function restoreDraftNavigation(
   snapshot: DraftNavigationSnapshot | null,
   project: DraftProjectLike | null | undefined,
 ): DraftNavigationSnapshot | null {
-  if (!snapshot || snapshot.projectIdentity !== draftProjectIdentity(project)) {
+  const identity = draftProjectIdentity(project);
+  // 双方都缺少身份时不能视为匹配，否则草稿会跨无标识项目泄漏。
+  if (!snapshot || !identity || snapshot.projectIdentity !== identity) {
     return null;
   }
   return {
