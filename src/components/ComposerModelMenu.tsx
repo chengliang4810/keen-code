@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 /** Composer model menu. */
 
-import { findModel, type ModelOption } from "@/lib/modelCatalog";
+import { findActiveModel, type ModelOption } from "@/lib/modelCatalog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,7 +27,7 @@ import {
 export interface ComposerModelMenuProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** 当前模型所属供应商。 */
+  /** 当前会话实际绑定的供应商；为空时按模型 ID 兜底匹配。 */
   providerId?: string | null;
   modelId: string;
   /** Live selectable models only (from Host catalog). */
@@ -36,6 +36,8 @@ export interface ComposerModelMenuProps {
     model: string;
     addModel: string;
     manageModels: string;
+    /** 模型图片输入能力标签。 */
+    vision: string;
   };
   onModel: (id: string, providerId?: string) => void;
   /** 打开模型设置。 */
@@ -86,17 +88,18 @@ export function ComposerModelMenu({
   onAddModel,
 }: ComposerModelMenuProps) {
   const modelList = models;
-  const activeModel =
-    modelList.find(
-      (model) =>
-        model.id === modelId &&
-        (!providerId || model.providerId === providerId),
-    ) ?? findModel(modelId, modelList);
+  // 同一模型 ID 可能属于多个供应商；必须按会话自身供应商解析，否则触发器会
+  // 显示成全局活跃供应商，与运行时实际使用的路由不一致。
+  const activeModel = findActiveModel(modelId, providerId, modelList);
   const providerGroups = groupComposerModelsByProvider(modelList);
 
+  const activeProviderId = activeModel?.providerId ?? providerId ?? null;
   const modelLabel = activeModel?.label ?? modelId;
-  const triggerText = modelLabel;
-  const title = `${labels.model}: ${modelLabel}`;
+  const providerLabel = activeModel?.providerLabel?.trim();
+  const triggerText = providerLabel
+    ? `${providerLabel}/${modelLabel}`
+    : modelLabel;
+  const title = `${labels.model}: ${triggerText}`;
 
   if (modelList.length === 0) {
     return (
@@ -151,42 +154,59 @@ export function ComposerModelMenu({
       >
         <DropdownMenuLabel>{labels.model}</DropdownMenuLabel>
         <DropdownMenuGroup>
-          {providerGroups.map((provider) => (
-            <DropdownMenuSub key={provider.id}>
-              <DropdownMenuSubTrigger
-                className={
-                  provider.id === providerId ? "cmm__dropdown-active" : undefined
-                }
-              >
-                <span className="truncate">{provider.label}</span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuSubContent className="cmm__dropdown-content cmm__model-list w-56">
-                  <DropdownMenuGroup>
-                    {provider.models.map((model) => {
-                      const selected =
-                        model.id === modelId &&
-                        (!providerId || model.providerId === providerId);
-                      return (
-                        <DropdownMenuItem
-                          key={`${provider.id}:${model.id}`}
-                          className={selected ? "cmm__dropdown-active" : undefined}
-                          onSelect={() => onModel(model.id, model.providerId)}
-                        >
-                          <span className="truncate">{model.label}</span>
-                          {selected ? (
-                            <span className="ml-auto" aria-hidden>
-                              <IconCheck size={16} />
-                            </span>
-                          ) : null}
-                        </DropdownMenuItem>
-                      );
-                    })}
-                  </DropdownMenuGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuPortal>
-            </DropdownMenuSub>
-          ))}
+          {providerGroups.map((provider) => {
+            const providerActive = provider.id === activeProviderId;
+            return (
+              <DropdownMenuSub key={provider.id}>
+                <DropdownMenuSubTrigger
+                  className={
+                    providerActive ? "cmm__dropdown-active" : undefined
+                  }
+                >
+                  <span className="min-w-0 flex-1 truncate">
+                    {provider.label}
+                  </span>
+                  {providerActive ? (
+                    <span aria-hidden>
+                      <IconCheck size={16} />
+                    </span>
+                  ) : null}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuPortal>
+                  <DropdownMenuSubContent className="cmm__dropdown-content cmm__model-list w-56">
+                    <DropdownMenuGroup>
+                      {provider.models.map((model) => {
+                        const selected =
+                          model.id === modelId &&
+                          model.providerId === activeProviderId;
+                        return (
+                          <DropdownMenuItem
+                            key={`${provider.id}:${model.id}`}
+                            className={
+                              selected ? "cmm__dropdown-active" : undefined
+                            }
+                            onSelect={() => onModel(model.id, model.providerId)}
+                          >
+                            <span className="min-w-0 truncate">{model.label}</span>
+                            {model.supportsVision ? (
+                              <span className="cmm__badge">
+                                {labels.vision}
+                              </span>
+                            ) : null}
+                            {selected ? (
+                              <span className="ml-auto" aria-hidden>
+                                <IconCheck size={16} />
+                              </span>
+                            ) : null}
+                          </DropdownMenuItem>
+                        );
+                      })}
+                    </DropdownMenuGroup>
+                  </DropdownMenuSubContent>
+                </DropdownMenuPortal>
+              </DropdownMenuSub>
+            );
+          })}
         </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={onAddModel}>

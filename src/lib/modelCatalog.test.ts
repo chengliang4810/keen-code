@@ -4,10 +4,14 @@ import {
   DEFAULT_EFFORT,
   effortDisplayLabel,
   effortsForModel,
+  findActiveModel,
+  formatSessionModelReference,
   hasConfiguredProviderModel,
+  isBoundSessionModelReference,
   isValidEffort,
   modelIdFromSessionReference,
   pickDefaultEffort,
+  providerIdFromSessionReference,
   reasoningEffortsFromMetadata,
   type ModelOption,
 } from "./modelCatalog";
@@ -17,6 +21,57 @@ it("从 Session 路由引用提取目录模型 ID", () => {
   expect(modelIdFromSessionReference("fix-local::hy4-preview")).toBe("hy4-preview");
   expect(modelIdFromSessionReference("vendor::org/model:latest")).toBe("org/model:latest");
   expect(modelIdFromSessionReference("hy3")).toBe("hy3");
+});
+
+it("Session 路由引用可往返还原供应商与模型", () => {
+  expect(providerIdFromSessionReference("fix-local::hy4-preview")).toBe("fix-local");
+  expect(providerIdFromSessionReference("hy3")).toBeNull();
+  expect(formatSessionModelReference("fix-local", "hy4-preview")).toBe(
+    "fix-local::hy4-preview",
+  );
+  expect(formatSessionModelReference(null, "hy3")).toBe("hy3");
+  expect(formatSessionModelReference("  ", "hy3")).toBe("hy3");
+});
+
+it("Host 的 unconfigured 占位值按未选择处理", () => {
+  expect(isBoundSessionModelReference("unconfigured")).toBe(false);
+  expect(isBoundSessionModelReference("")).toBe(false);
+  expect(isBoundSessionModelReference("   ")).toBe(false);
+  expect(isBoundSessionModelReference("fix-local::hy3")).toBe(true);
+  expect(isBoundSessionModelReference("hy3")).toBe(true);
+});
+
+describe("findActiveModel", () => {
+  /** 同一模型 ID 出现在两个供应商下，模拟多家网关提供同名模型。 */
+  const catalog: ModelOption[] = [
+    {
+      providerId: "workbuddy",
+      providerLabel: "Workbuddy",
+      id: "deepseek-v4.1-flash",
+      label: "deepseek-v4.1-flash",
+    },
+    {
+      providerId: "workbuddy-ai",
+      providerLabel: "WorkBuddyAI",
+      id: "deepseek-v4.1-flash",
+      label: "deepseek-v4.1-flash",
+    },
+  ];
+
+  it("按会话供应商精确匹配同名模型", () => {
+    expect(findActiveModel("deepseek-v4.1-flash", "workbuddy-ai", catalog)?.providerLabel)
+      .toBe("WorkBuddyAI");
+    expect(findActiveModel("deepseek-v4.1-flash", "workbuddy", catalog)?.providerLabel)
+      .toBe("Workbuddy");
+  });
+
+  it("供应商未知时按模型 ID 兜底，供应商已移除模型时不借用同名条目", () => {
+    expect(findActiveModel("deepseek-v4.1-flash", null, catalog)?.providerId).toBe(
+      "workbuddy",
+    );
+    expect(findActiveModel("deepseek-v4.1-flash", "other", catalog)).toBeUndefined();
+    expect(findActiveModel("", "workbuddy", catalog)).toBeUndefined();
+  });
 });
 
 describe("hasConfiguredProviderModel", () => {

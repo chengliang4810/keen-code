@@ -14,6 +14,27 @@ export function providerIdFromSessionReference(reference: string): string | null
   return separator <= 0 ? null : reference.slice(0, separator);
 }
 
+/** 组装会话模型引用 `providerId::modelId`；无供应商时退化为纯模型 ID。 */
+export function formatSessionModelReference(
+  providerId: string | null | undefined,
+  modelId: string,
+): string {
+  const provider = providerId?.trim();
+  return provider ? `${provider}::${modelId}` : modelId;
+}
+
+/**
+ * Host 在 Session 尚未绑定 Provider 时用该占位值表达“尚未选择”。
+ * 它不是可执行的模型标识，界面必须当成未选择处理，不能当作模型名展示。
+ */
+const UNCONFIGURED_MODEL_ID = "unconfigured";
+
+/** 判断会话模型引用是否指向真实选择；空值与占位值都视为尚未选择。 */
+export function isBoundSessionModelReference(reference: string): boolean {
+  const trimmed = reference.trim();
+  return trimmed.length > 0 && trimmed !== UNCONFIGURED_MODEL_ID;
+}
+
 export interface EffortOption {
   /** 传给当前模型供应商的推理强度标识。 */
   id: string;
@@ -45,7 +66,7 @@ export interface ModelOption {
   contextWindow?: number;
   /** 远端目录返回的最大输出 token 数。 */
   maxOutputTokens?: number;
-  /** 远端目录是否明确声明支持图片输入。 */
+  /** 是否支持图片输入：供应商配置为权威值，其次才是远端目录声明。 */
   supportsVision?: boolean;
 }
 
@@ -193,11 +214,33 @@ export function effortDisplayLabel(
 }
 
 /** Find a model in catalog by id. */
-export function findModel(
+function findModel(
   id: string,
   catalog: ModelOption[],
 ): ModelOption | undefined {
   return catalog.find((m) => m.id === id);
+}
+
+/**
+ * 定位 Composer 当前展示的模型条目。
+ *
+ * 同一个模型 ID 可以出现在多个供应商下（例如多家网关都提供 `deepseek-v4.1-flash`），
+ * 因此给出供应商标识时必须精确匹配该供应商，否则会把会话实际使用的供应商
+ * 显示成全局活跃供应商。已知供应商但目录中不再列出该模型时返回空，由调用方
+ * 只显示模型 ID，而不是错误地借用同名的其他供应商条目。
+ */
+export function findActiveModel(
+  modelId: string,
+  providerId: string | null | undefined,
+  catalog: ModelOption[],
+): ModelOption | undefined {
+  if (!modelId) return undefined;
+  if (providerId) {
+    return catalog.find(
+      (model) => model.id === modelId && model.providerId === providerId,
+    );
+  }
+  return findModel(modelId, catalog);
 }
 
 /**
