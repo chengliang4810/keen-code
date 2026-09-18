@@ -36,15 +36,15 @@ use crate::{
     AgentCommitSinkErrorKind, AgentDynamicInputBoundary, AgentDynamicInputReceipt,
     AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent, AgentStreamEventKind,
     AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
-    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, CONTEXT_WATER_LEVEL_INFO_PERCENT,
-    ContextCompactionFailureKind, ContextCompressionOutcome, ContextCompressionRecord,
+    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind, ContextCompressionOutcome, ContextCompressionRecord,
     ContextCompressionTrigger, ContextError, ContextManager, CounterKind, GoalController,
     GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
     MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
     NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
     PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
     PreCompactHookContext, PreCompactHookOutput, PreToolUseContext, ResolvedHookContext,
-    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, ToolCompletionStatus,
+    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, TodoController, TodoItem,
+    TodoStatus, ToolCompletionStatus,
     ToolConcurrency, ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash,
     ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId, TurnPhase, TurnState,
     TurnTransitionError,
@@ -58,6 +58,11 @@ const GOAL_CONTINUATION_INSTRUCTION: &str = "At this runtime boundary, this task
 
 /// 用户编辑目标后显式标明新旧内容，避免模型继续沿用已经失效的计划。
 const GOAL_UPDATED_INSTRUCTION: &str = "The user updated the active goal. Stop following any plan or assumptions that conflict with the current goal. Continue only according to the current goal within the user's authorized scope.";
+
+/// Todo 提醒节奏：连续 N 个模型轮未调用 TodoWrite 后注入提醒。
+const TODO_REMINDER_ROUNDS_SINCE_WRITE: u32 = 10;
+/// 两次 Todo 提醒之间的最小模型轮数；与上游快照 TODO_REMINDER_CONFIG 的 10/10 对齐。
+const TODO_REMINDER_ROUNDS_BETWEEN: u32 = 10;
 
 /// PreToolUse 回调失败时写入配对结果且不回显 Hook 自有文本的固定说明。
 const PRE_HOOK_FAILED_RESULT: &str = "PreToolUse Hook 失败，工具未执行";
@@ -917,6 +922,8 @@ pub struct AgentRunner {
     tool_catalog_updates: Arc<dyn AgentToolCatalogUpdateSource>,
     /// 仅根任务注入；子 Agent 和普通独立 Runner 不承担项目 Goal 续跑。
     goal_controller: Option<Arc<dyn GoalController>>,
+    /// Todo 提醒的唯一状态来源；None 时不注入任何提醒。
+    todo_controller: Option<Arc<dyn TodoController>>,
     /// 按 Provider 到达顺序接收可信实时事件且默认不产生副作用的出口。
     event_sink: Arc<dyn AgentEventSink>,
     /// 在返回前同步确认工具、压缩与 Transcript 权威事实的提交出口。
@@ -941,6 +948,7 @@ impl AgentRunner {
             dynamic_input: Arc::new(NoopAgentDynamicInputSource),
             tool_catalog_updates: Arc::new(NoopAgentToolCatalogUpdateSource),
             goal_controller: None,
+            todo_controller: None,
             event_sink: Arc::new(NoopAgentEventSink),
             commit_sink: Arc::new(NoopAgentCommitSink),
             auto_notify_on_error: true,
@@ -990,6 +998,12 @@ impl AgentRunner {
     /// 给根任务绑定既有 Goal 状态控制器；实际续跑还必须匹配创建 Session 和 Goal ID。
     pub fn with_goal_controller(mut self, controller: Arc<dyn GoalController>) -> Self {
         self.goal_controller = Some(controller);
+        self
+    }
+
+    /// 绑定 Todo 状态控制器，用于长间隔后的 todo_reminder 注入。
+    pub fn with_todo_controller(mut self, controller: Arc<dyn TodoController>) -> Self {
+        self.todo_controller = Some(controller);
         self
     }
 
@@ -1832,9 +1846,10 @@ impl AgentRunner {
             repeated_tool_failure_count: 0,
             tool_failure_reminder_fingerprint: None,
             limit_summary: None,
-            water_level_notified: false,
             goal_id: None,
             last_goal_instruction: None,
+            todo_write_rounds_since: 0,
+            todo_reminder_rounds_since: 0,
         };
         let outcome = self.run_active(&request, &mut active).await;
 
@@ -1991,6 +2006,9 @@ impl AgentRunner {
                 && let Some(goal) = goal.as_ref()
             {
                 self.commit_goal_instruction(request, active, goal)?;
+            }
+            if !summary_only {
+                self.maybe_commit_todo_reminder(request, active)?;
             }
             if active.state.round_count() == 1 {
                 let prompt = active
@@ -3075,6 +3093,47 @@ impl AgentRunner {
         Ok(())
     }
 
+    /// 连续多个模型轮未写 Todo 且列表非空时注入一次对账提醒；空列表不提醒。
+    ///
+    /// 节奏对齐上游快照 TODO_REMINDER_CONFIG 的 10/10：连续 10 个模型轮未发起
+    /// TodoWrite 即提醒，两次提醒至少间隔 10 个模型轮。两点有意偏差：上游按用户
+    /// Turn 跨 Turn 累积计数，这里按模型轮计数且随 ActiveTurn 每 Turn 归零，只覆盖
+    /// 单 Turn 内的长任务；崩溃恢复重建 ActiveTurn 同样归零，可能提前再次提醒。
+    fn maybe_commit_todo_reminder(
+        &self,
+        request: &TurnRequest,
+        active: &mut ActiveTurn,
+    ) -> Result<(), AgentRunError> {
+        let Some(controller) = self.todo_controller.as_ref() else {
+            return Ok(());
+        };
+        if request.plan_guard == PlanGuard::read_only() {
+            return Ok(());
+        }
+        active.todo_write_rounds_since = active.todo_write_rounds_since.saturating_add(1);
+        active.todo_reminder_rounds_since = active.todo_reminder_rounds_since.saturating_add(1);
+        // 计数在本轮采样前自增；达到阈值即连续 10 个模型轮未发起 TodoWrite，
+        // 与上游快照 turnsSinceLastTodoWrite >= 10 的触发点一致。
+        if active.todo_write_rounds_since < TODO_REMINDER_ROUNDS_SINCE_WRITE
+            || active.todo_reminder_rounds_since < TODO_REMINDER_ROUNDS_BETWEEN
+        {
+            return Ok(());
+        }
+        let snapshot = controller.todo_snapshot().map_err(|_| AgentRunError::Internal {
+            message: "无法读取当前 Todo 状态".to_owned(),
+        })?;
+        if snapshot.items.is_empty() {
+            return Ok(());
+        }
+        active.todo_reminder_rounds_since = 0;
+        self.commit_round_messages(
+            request,
+            active,
+            None,
+            vec![todo_reminder_message(&snapshot.items)],
+        )
+    }
+
     /// 原子占用 Hook 字节预算并把上下文按原顺序追加为统一用户消息。
     async fn append_hook_context(
         &self,
@@ -3394,6 +3453,9 @@ impl AgentRunner {
             return Err(AgentRunError::InvalidResponse {
                 message: "模型工具调用数量超过 Round 固定结果容量".to_owned(),
             });
+        }
+        if calls.iter().any(|call| call.name == "TodoWrite") {
+            active.todo_write_rounds_since = 0;
         }
         for call in &calls {
             crate::ToolCallId::new(call.id.clone()).map_err(|error| {
@@ -4665,17 +4727,14 @@ struct ActiveTurn {
     tool_failure_reminder_fingerprint: Option<ToolFailureFingerprint>,
     /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
     limit_summary: Option<AgentRunError>,
-    /// 当前 Turn 内已发送过上下文水位 info 告警（#23）。
-    ///
-    /// 按当前活跃历史只保留一个标记：水位回落到阈值以下时（动态输入注入等
-    /// 场景也会消费该消息）重置，下次跨越阈值可再次发送；压缩实际执行的
-    /// 轮次直接走压缩事件，不置位本标记也不发送水位事件（防重复）。
-    /// 崩溃恢复重建 ActiveTurn 会归零该标记，与空响应重试计数的恢复语义一致。
-    water_level_notified: bool,
     /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
     goal_id: Option<String>,
     /// 上一次实际注入模型上下文的目标正文，用于在续跑边界识别用户编辑。
     last_goal_instruction: Option<GoalInstructionSnapshot>,
+    /// 距模型上次发起 `TodoWrite` 调用的模型轮数；发起即重置，不要求执行成功。
+    todo_write_rounds_since: u32,
+    /// 距上次 Todo 提醒注入的模型轮数。
+    todo_reminder_rounds_since: u32,
 }
 
 /// 只比较会改变任务含义的 Goal 字段；用量与进度变化不构成用户编辑通知。
@@ -4842,6 +4901,32 @@ fn max_output_recovery_message() -> Message {
              请从中断处直接继续，不要重复已有内容，不要道歉。"
         ),
     );
+    message.is_meta = true;
+    message
+}
+
+/// 构造 todo_reminder 注入消息；提醒语义对齐上游快照，正文本地化并附带当前列表。
+fn todo_reminder_message(items: &[TodoItem]) -> Message {
+    let mut list = String::new();
+    for (index, item) in items.iter().enumerate() {
+        let status = match item.status {
+            TodoStatus::Pending => "pending",
+            TodoStatus::InProgress => "in_progress",
+            TodoStatus::Completed => "completed",
+        };
+        list.push_str(&format!("{}. [{}] {}\n", index + 1, status, item.content));
+    }
+    let text = truncate_utf8(
+        &format!(
+            "{TOOL_FAILURE_REMINDER_PREFIX}\n\
+             来源：KeenCode Agent Runtime / TodoReminder\n\n\
+             TodoWrite 已连续多个模型轮未调用。如果当前工作适合跟踪进度，请用 TodoWrite 维护列表；\
+             如果列表已过时、不再匹配当前工作，请更新或清理它；与当前工作无关时可忽略本提醒。\
+             不要向用户提及这条提醒。\n\n当前 Todo 列表：\n{list}"
+        ),
+        MAX_TOOL_FAILURE_REMINDER_BYTES,
+    );
+    let mut message = Message::text(MessageRole::User, text);
     message.is_meta = true;
     message
 }

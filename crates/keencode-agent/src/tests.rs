@@ -8572,3 +8572,177 @@ async fn committed_segments_do_not_rewrite_first_round_snapshot() {
         requests[1].messages.as_slice()
     );
 }
+
+fn todo_reminder_message_count(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|message| {
+            message.is_meta
+                && message.content.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text.contains("TodoReminder"))
+                })
+        })
+        .count()
+}
+
+fn seeded_todo_state() -> Arc<InMemoryRuntimeState> {
+    let state = Arc::new(InMemoryRuntimeState::new(session_id("session-runner")));
+    state
+        .replace_todos(
+            "seed-todo-reminder",
+            vec![TodoItem {
+                content: "待收尾事项".to_owned(),
+                status: TodoStatus::Pending,
+                active_form: "正在收尾".to_owned(),
+            }],
+        )
+        .expect("种子 Todo 应可写入");
+    state
+}
+
+fn record_script(rounds: usize) -> Vec<ScriptedReply> {
+    let mut replies = Vec::new();
+    for index in 0..rounds {
+        let id = format!("t{index}");
+        replies.push(tool_reply(&[(&id, "record", json!({ "value": "x" }))]));
+    }
+    replies.push(text_reply("done"));
+    replies
+}
+
+async fn todo_reminder_request_counts(
+    state: Option<Arc<InMemoryRuntimeState>>,
+    plan_guard: PlanGuard,
+) -> Vec<usize> {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .expect("record 工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        record_script(10),
+    ));
+    let mut agent_runner = runner(provider.clone(), registry);
+    if let Some(state) = state {
+        agent_runner = agent_runner.with_todo_controller(state);
+    }
+    let result = agent_runner.run_turn(turn_request(plan_guard)).await;
+    assert!(result.is_success(), "{:?}", result.error);
+    provider
+        .requests()
+        .unwrap()
+        .iter()
+        .map(|request| todo_reminder_message_count(&request.messages))
+        .collect()
+}
+
+/// 连续 10 个模型轮未发起 TodoWrite 且列表非空时，第 10 轮采样前注入一次提醒。
+#[tokio::test]
+async fn todo_reminder_fires_after_ten_rounds_without_write() {
+    let state = seeded_todo_state();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .expect("record 工具应可注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        record_script(10),
+    ));
+    let result = runner(provider.clone(), registry)
+        .with_todo_controller(state)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    let counts: Vec<usize> = provider
+        .requests()
+        .unwrap()
+        .iter()
+        .map(|request| todo_reminder_message_count(&request.messages))
+        .collect();
+    assert_eq!(counts.len(), 11);
+    assert!(counts[..9].iter().all(|count| *count == 0), "{counts:?}");
+    assert_eq!(counts[9], 1, "{counts:?}");
+    // 提醒进入历史后随请求携带；单请求计数不超过 1 说明窗口内没有第二次注入。
+    assert_eq!(counts.iter().copied().max(), Some(1), "{counts:?}");
+}
+
+/// TodoWrite 调用重置提醒窗口：写入后 9 轮内即使达到提醒间隔也不再注入。
+#[tokio::test]
+async fn todo_write_call_resets_reminder_window() {
+    let state = seeded_todo_state();
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "record",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .expect("record 工具应可注册");
+    // 重置按调用名判定：与真实 TodoWriteTool 同名的合成工具即可驱动窗口重置。
+    registry
+        .register(Arc::new(RecordingTool::new(
+            "TodoWrite",
+            ToolEffect::ReadOnly,
+            ToolConcurrency::Exclusive,
+        )))
+        .expect("TodoWrite 工具应可注册");
+    let call = |id: String, name: &str| tool_reply(&[(&id, name, json!({ "value": "x" }))]);
+    let mut replies: Vec<ScriptedReply> = Vec::new();
+    for i in 0..14 {
+        replies.push(call(format!("t{i}"), "record"));
+    }
+    // 第 10 轮采样前触发唯一提醒；第 15 轮发起 TodoWrite 重置窗口。
+    replies.push(call("todo-write".to_owned(), "TodoWrite"));
+    for i in 15..23 {
+        replies.push(call(format!("t{i}"), "record"));
+    }
+    replies.push(text_reply("done"));
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        replies,
+    ));
+    let result = runner(provider.clone(), registry)
+        .with_todo_controller(state)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    let counts: Vec<usize> = provider
+        .requests()
+        .unwrap()
+        .iter()
+        .map(|request| todo_reminder_message_count(&request.messages))
+        .collect();
+    assert_eq!(counts.len(), 24);
+    assert_eq!(counts[9], 1, "{counts:?}");
+    // 未重置时第 20 轮会二次注入，使该请求计数变为 2。
+    assert_eq!(counts.iter().copied().max(), Some(1), "{counts:?}");
+}
+
+/// 空列表与 Plan 只读模式都不注入提醒。
+#[tokio::test]
+async fn todo_reminder_skips_empty_list_and_read_only_mode() {
+    let empty_state = Arc::new(InMemoryRuntimeState::new(session_id("session-runner")));
+    let empty = todo_reminder_request_counts(Some(empty_state), PlanGuard::inactive()).await;
+    assert!(
+        empty.iter().all(|count| *count == 0),
+        "空列表不应提醒: {empty:?}"
+    );
+
+    let read_only = todo_reminder_request_counts(
+        Some(seeded_todo_state()),
+        PlanGuard::read_only(),
+    )
+    .await;
+    assert!(
+        read_only.iter().all(|count| *count == 0),
+        "只读模式不应提醒: {read_only:?}"
+    );
+}
