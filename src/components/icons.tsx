@@ -9,11 +9,14 @@ import {
   IconAlertTriangle as TbAlertTriangle,
   IconArchive as TbArchive,
   IconArrowLeft as TbArrowLeft,
+  IconArrowRight as TbArrowRight,
   IconArrowUp as TbArrowUp,
   IconDeviceDesktop as TbDeviceDesktop,
   IconSun as TbSun,
   IconMoon as TbMoon,
   IconArrowsMinimize as TbArrowsMinimize,
+  IconArrowsSort as TbArrowsSort,
+  IconMessageCircle as TbMessageCircle,
   IconBolt as TbBolt,
   IconBrain as TbBrain,
   IconGitBranch as TbGitBranch,
@@ -76,6 +79,7 @@ import {
   IconTrash as TbTrash,
   IconUpload as TbUpload,
   IconUser as TbUser,
+  IconWorld as TbWorld,
   IconX as TbX,
 } from "@tabler/icons-react";
 
@@ -199,7 +203,9 @@ export const IconCircleCheck = wrap(TbCircleCheck);
 /** 计划中正在执行的步骤与总进度。 */
 export const IconLoader = wrap(TbLoader2);
 export const IconArrowLeft = wrap(TbArrowLeft);
+export const IconArrowRight = wrap(TbArrowRight);
 export const IconArrowUp = wrap(TbArrowUp);
+export const IconWorld = wrap(TbWorld);
 export const IconDesktop = wrap(TbDeviceDesktop);
 export const IconSun = wrap(TbSun);
 export const IconMoon = wrap(TbMoon);
@@ -209,6 +215,8 @@ export const IconInfo = wrap(TbInfoCircle);
 /** Slash palette / goal mode */
 export const IconTarget = wrap(TbTarget);
 export const IconArrowsMinimize = wrap(TbArrowsMinimize);
+export const IconArrowsSort = wrap(TbArrowsSort);
+export const IconMessageCircle = wrap(TbMessageCircle);
 
 /**
  * Two chevrons facing each other (∨ above ∧) — collapse all project folders.
