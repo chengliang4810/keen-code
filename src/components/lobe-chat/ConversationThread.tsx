@@ -675,6 +675,13 @@ export function ConversationThread({
     !turnBusy;
 
   /**
+   * 已被 Assistant 时间线内联的工具调用集合。
+   *
+   * 一次建集合，避免在消息循环里对每条工具行重复全量扫描。
+   */
+  const inlinedToolIds = useMemo(() => inlinedToolCallIds(messages), [messages]);
+
+  /**
    * 仅保留真实会渲染的消息，避免隐藏工具行占用虚拟高度并制造空白视口。
    * 原始 messages 仍用于工具编织、当前轮判断和附件路径解析。
    */
@@ -685,7 +692,7 @@ export function ConversationThread({
           const toolCallId =
             (message.toolCallId || "").trim() ||
             (message.id.startsWith("tool-") ? message.id.slice(5) : "");
-          if (toolCallId && isToolInlinedInAssistants(messages, toolCallId)) {
+          if (toolCallId && inlinedToolIds.has(toolCallId)) {
             return false;
           }
           const toolSegment = toolSegmentFromMessage(message);
@@ -706,7 +713,7 @@ export function ConversationThread({
           !!message.compactMeta
         );
       }),
-    [messages],
+    [messages, inlinedToolIds],
   );
 
   /**
@@ -875,7 +882,7 @@ export function ConversationThread({
               const tcid =
                 (m.toolCallId || "").trim() ||
                 (m.id.startsWith("tool-") ? m.id.slice(5) : "");
-              if (tcid && isToolInlinedInAssistants(messages, tcid)) {
+              if (tcid && inlinedToolIds.has(tcid)) {
                 return null;
               }
               const toolSeg = toolSegmentFromMessage(m);
@@ -1353,10 +1360,7 @@ export function ConversationThread({
           {/* Tool before any assistant bubble — only if not already a message row. */}
           {liveTool &&
           !activeAssistantId &&
-          !(
-            liveTool.toolCallId &&
-            isToolInlinedInAssistants(messages, liveTool.toolCallId)
-          ) &&
+          !(liveTool.toolCallId && inlinedToolIds.has(liveTool.toolCallId)) &&
           !messages.some(
             (x) =>
               isToolStepMessage(x) &&

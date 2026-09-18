@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionLoadResult } from "@/lib/acp/api";
 import type { KeenCodeEvent, SessionUpdate } from "@/lib/acp/events";
 import { beginLocalSessionTurn, createAcpWorkspaceState } from "@/lib/acp/store";
+import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 import { createTurnLatencyState } from "@/lib/turnLatency";
 import { projectAcpSnapshot } from "@/lib/sessionProjection";
 import { useAcpRuntimeEvents, type AcpRuntimeEventsOptions } from "./events";
@@ -68,9 +69,8 @@ async function harness() {
     setContextUsage: vi.fn(),
     setLiveHost: vi.fn(),
     setLiveMap: vi.fn(),
-    setTurnStartedAt: vi.fn(),
-    setModelId: vi.fn(),
-    setCompletedUnreadIds: vi.fn(),
+    setSessionModelReference: vi.fn(),
+    setUnreadTerminalResults: vi.fn(),
     applyViewProjectionRef: { current: vi.fn() },
     commitWorkspace: vi.fn(),
     refreshTaskCacheUsage: vi.fn().mockResolvedValue(undefined),
@@ -82,13 +82,19 @@ async function harness() {
     options.liveHostRef.current = typeof next === "function"
       ? next(options.liveHostRef.current) : next;
   });
+  /** 未读终态必须经过生产归约，才能验证失败与完成写入的结果。 */
+  const unreadTerminalResults = { current: new Map<string, UnreadTerminalResult>() };
+  options.setUnreadTerminalResults = vi.fn((next) => {
+    unreadTerminalResults.current = typeof next === "function"
+      ? next(unreadTerminalResults.current) : next;
+  });
   let history!: AcpRuntimeHistoryResult;
   let visible!: ReturnType<typeof useAcpRuntimeTurnMetrics>;
   /** 合法 React 上下文提供 Ref/Callback，订阅 effect 在渲染后由测试显式执行。 */
   function Harness() {
     history = useAcpRuntimeHistory({
       modelBySessionRef: options.modelBySessionRef,
-      setModelId: options.setModelId,
+      setSessionModelReference: options.setSessionModelReference,
       acpWorkspaceRef: options.acpWorkspaceRef,
       turnLatencyBySessionRef: options.turnLatencyBySessionRef,
       pendingVisibleTurnBySessionRef: options.pendingVisibleTurnBySessionRef,
@@ -113,7 +119,7 @@ async function harness() {
   }
   await Promise.resolve();
   expect(ports.receive).toBeTypeOf("function");
-  return { options, history, visible };
+  return { options, history, visible, unreadTerminalResults };
 }
 
 /** 向生产订阅回调投递合法信封，并使用可控的前端单调接收时钟。 */
@@ -163,6 +169,12 @@ beforeEach(() => {
   vi.stubGlobal("window", {
     setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout,
     dispatchEvent: vi.fn(),
+  });
+  // 未读终态会写入本地存储；node 环境没有 localStorage，用内存实现替身。
+  const values = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); },
   });
 });
 
@@ -285,7 +297,7 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     expect(message?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
     expect(options.turnLatencyBySessionRef.current.size).toBe(0);
     expect(options.pendingVisibleTurnBySessionRef.current.size).toBe(0);
-    expect(options.setCompletedUnreadIds).not.toHaveBeenCalled();
+    expect(options.setUnreadTerminalResults).not.toHaveBeenCalled();
     expect(options.refreshTaskCacheUsage).not.toHaveBeenCalled();
   });
 
@@ -311,13 +323,11 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     const { options } = await harness();
     deliver(1, { type: "turn_started", rootTurnId: "turn-1" }, 1010);
     deliver(2, textChunk("当前正文"), 1020);
-    vi.mocked(options.setTurnStartedAt).mockClear();
     vi.mocked(options.setLiveMap).mockClear();
     deliver(3, { type: "turn_completed" }, 1100, "turn-old");
     expect(options.acpWorkspaceRef.current.sessions["session-1"]?.active_root_turn_id).toBe("turn-1");
     expect(options.turnLatencyBySessionRef.current.get("session-1")?.firstTokenAtMs).toBe(1020);
     expect(options.activeTurnIdBySessionRef.current.get("session-1")).toBe("turn-1");
-    expect(options.setTurnStartedAt).not.toHaveBeenCalled();
     expect(options.setLiveMap).not.toHaveBeenCalled();
   });
 
@@ -342,5 +352,33 @@ describe("ACP 接收与恢复计时的真实订阅接线", () => {
     deliver(7, { type: "turn_completed" }, 5000);
     expect(options.setLiveMap).not.toHaveBeenCalled();
     expect(completed?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20, totalMs: 20 });
+  });
+
+  it("离开前台的失败与完成终态都产生未读结果", async () => {
+    const { options, unreadTerminalResults } = await harness();
+    options.viewingSessionIdRef.current = "other-session";
+    deliver(1, { type: "turn_started", rootTurnId: "turn-1" }, 1010);
+    deliver(2, {
+      type: "turn_failed",
+      failureKind: "internal",
+      message: "模型调用失败：模型响应协议错误：模型流式响应超过 67108864 字节安全上限",
+    }, 1020);
+    expect(unreadTerminalResults.current.get("session-1")).toBe("failed");
+
+    deliver(3, { type: "turn_started", rootTurnId: "turn-2" }, 1030, "turn-2");
+    deliver(4, { type: "turn_completed" }, 1040, "turn-2");
+    expect(unreadTerminalResults.current.get("session-1")).toBe("completed");
+  });
+
+  it("前台终态与主动取消都不产生未读结果", async () => {
+    const { options, unreadTerminalResults } = await harness();
+    deliver(1, { type: "turn_started", rootTurnId: "turn-1" }, 1010);
+    deliver(2, { type: "turn_failed", failureKind: "internal", message: "模型调用失败" }, 1020);
+    expect(unreadTerminalResults.current.size).toBe(0);
+
+    options.viewingSessionIdRef.current = "other-session";
+    deliver(3, { type: "turn_started", rootTurnId: "turn-2" }, 1030, "turn-2");
+    deliver(4, { type: "turn_cancelled" }, 1040, "turn-2");
+    expect(unreadTerminalResults.current.size).toBe(0);
   });
 });

@@ -1,9 +1,22 @@
 import { createT, type Locale } from "@/i18n";
 
+/** 每轮尾部用量都要格式化，按语言复用格式化器而不是逐次重建 ICU 实例。 */
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+
+function numberFormatter(locale: Locale): Intl.NumberFormat {
+  const resolved = locale === "zh" ? "zh-CN" : locale;
+  let formatter = numberFormatters.get(resolved);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(resolved);
+    numberFormatters.set(resolved, formatter);
+  }
+  return formatter;
+}
+
 /** Harness token-format.ts 的 K/M 缩写规则；未知与超出 JS 精度的计数不显示为零。 */
 export function formatMetricTokens(value: number | null | undefined, locale: Locale, compact: boolean): string | null {
   if (value == null || !Number.isSafeInteger(value) || value < 0) return null;
-  if (!compact) return value.toLocaleString(locale === "zh" ? "zh-CN" : locale);
+  if (!compact) return numberFormatter(locale).format(value);
   const scaled = (count: number) => count >= 100 ? String(Math.round(count)) : String(Math.round(count * 10) / 10);
   if (value < 1_000) return String(value);
   if (value < 1_000_000) return `${scaled(value / 1_000)}K`;

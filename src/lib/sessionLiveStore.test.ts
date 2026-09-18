@@ -141,6 +141,26 @@ describe("sessionLiveStore", () => {
     expect(marked.a!.updatedAt).toBe(101);
   });
 
+  it("内容未变时复用同一 map 与快照，避免后台分片触发重渲染", () => {
+    const first = projectHostIntoLiveMap(
+      {},
+      { sessionId: "a", state: "streaming", streamingMessageId: "m1" },
+      100,
+    );
+    // 同一状态重复投影（后台会话每个流式分片都会走到这里）。
+    const second = projectHostIntoLiveMap(
+      first,
+      { sessionId: "a", state: "streaming", streamingMessageId: "m1" },
+      200,
+    );
+    expect(second).toBe(first);
+    expect(second.a).toBe(first.a);
+    // 状态真正变化时仍必须产出新对象。
+    const third = projectHostIntoLiveMap(second, { sessionId: "a", state: "ready" }, 300);
+    expect(third).not.toBe(second);
+    expect(third.a!.state).toBe("ready");
+  });
+
   it("infers turn progress from journal after last user message", () => {
     const msgs: ChatMessage[] = [
       { id: "u1", role: "user", content: "hi" },

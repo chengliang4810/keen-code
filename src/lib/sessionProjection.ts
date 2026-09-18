@@ -86,6 +86,8 @@ export interface SessionRowView {
   projectId: string | null;
   /** Session 最近更新时间。 */
   updatedAt: string;
+  /** Session 最近一条用户消息时间；从未发送消息时为空。 */
+  lastUserMessageAt: string | null;
   /** Session 是否归档。 */
   archived: boolean;
   /** Session 是否置顶。 */
@@ -140,6 +142,7 @@ export function projectSidebar(
         projectId:
           projectByPath.get(normalizeSessionProjectPath(session.cwd)) ?? null,
         updatedAt: session.updatedAt,
+        lastUserMessageAt: session.lastUserMessageAt,
         archived: preference?.archived ?? false,
         pinned: preference?.pinned ?? false,
       };
@@ -186,11 +189,28 @@ export function projectAcpSnapshot(view: AcpSessionView): SessionSnapshot {
   };
 }
 
+/**
+ * 历史投影缓存：键为历史数组身份。
+ *
+ * store 对 history 只做 push 或整体替换、从不原地修改元素，因此用
+ * 「数组身份 + 长度 + Session」复验命中即可；流式回合的分片写入
+ * live_segments 而非 history，命中后每帧省去全量重投影（实测 13MB
+ * 历史约 40ms 与 4MB 垃圾/帧）。数组被替换时 WeakMap 自动释放。
+ */
+const historyProjectionCache = new WeakMap<
+  AcpHistoryMessage[],
+  { sessionId: string; length: number; result: ChatMessage[] }
+>();
+
 /** 将 ACP 历史消息投影为工作台消息。 */
 export function projectAcpHistory(
   sessionId: string,
   source: AcpHistoryMessage[],
 ): ChatMessage[] {
+  const cached = historyProjectionCache.get(source);
+  if (cached && cached.sessionId === sessionId && cached.length === source.length) {
+    return cached.result;
+  }
   const projected: ChatMessage[] = source.map((message, index) => {
     const role =
       message.role === "assistant" || message.role === "tool"
@@ -246,6 +266,7 @@ export function projectAcpHistory(
       break;
     }
   }
+  historyProjectionCache.set(source, { sessionId, length: source.length, result: projected });
   return projected;
 }
 

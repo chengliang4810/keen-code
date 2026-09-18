@@ -226,20 +226,21 @@ export function resolveToolDisplayTitle(
   return "";
 }
 
-/** True when any assistant in the list already inlines this toolCallId. */
-export function isToolInlinedInAssistants(
-  messages: ChatMessage[],
-  toolCallId: string,
-): boolean {
-  const id = toolCallId.trim();
-  if (!id) return false;
+/**
+ * 收集所有已被 Assistant 时间线内联的 toolCallId。
+ *
+ * 调用方需要逐条判断工具行是否已内联，一次扫描建集合避免在消息循环里
+ * 反复全量查找，把渲染成本从 O(n²) 降到 O(n)。
+ */
+export function inlinedToolCallIds(messages: ChatMessage[]): Set<string> {
+  const ids = new Set<string>();
   for (const m of messages) {
     if (m.role !== "assistant" || !m.segments?.length) continue;
     for (const s of m.segments) {
-      if (s.kind === "tool" && s.toolCallId === id) return true;
+      if (s.kind === "tool" && s.toolCallId) ids.add(s.toolCallId);
     }
   }
-  return false;
+  return ids;
 }
 
 /** Resolve stable toolCallId from a tool_step row. */

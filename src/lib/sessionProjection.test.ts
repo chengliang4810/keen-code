@@ -21,6 +21,7 @@ describe("sessionProjection", () => {
           title: "Demo",
           cwd: "/tmp/demo",
           updatedAt: "2026-08-01T00:00:00Z",
+          lastUserMessageAt: null,
         },
       ],
       {
@@ -57,6 +58,7 @@ describe("sessionProjection", () => {
           title: "Windows 项目",
           cwd: "\\\\?\\D:\\test\\demo",
           updatedAt: "2026-08-30T00:00:00Z",
+          lastUserMessageAt: null,
         },
       ],
       {},
@@ -547,5 +549,24 @@ describe("sessionProjection", () => {
         role: "user",
         content,
       });
+  });
+
+  it("同一历史数组重复投影复用缓存，history 增长或替换后重新投影", () => {
+    const history = [
+      { role: "user" as const, content: "问题" },
+      { role: "assistant" as const, content: "回答", model: "m-1" },
+    ];
+    const first = projectAcpHistory("session-1", history);
+    expect(projectAcpHistory("session-1", history)).toBe(first);
+
+    // push 新消息：数组身份不变但长度变化，必须失效重投影。
+    history.push({ role: "user" as const, content: "追问" });
+    const grown = projectAcpHistory("session-1", history);
+    expect(grown).not.toBe(first);
+    expect(grown.length).toBe(3);
+
+    // 整体替换（历史页回填路径）是新数组身份，同样重新投影。
+    const replaced = [...history];
+    expect(projectAcpHistory("session-1", replaced)).not.toBe(grown);
   });
 });

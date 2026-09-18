@@ -43,20 +43,37 @@ export function emptyLiveSnapshot(
   };
 }
 
+/**
+ * 除 `updatedAt` 外内容是否相同。
+ *
+ * 字段集合按类型推导而不是逐个硬编码，新增字段自动纳入比较。
+ */
+function sameLiveSnapshot(
+  a: SessionLiveSnapshot,
+  b: SessionLiveSnapshot,
+): boolean {
+  for (const key of Object.keys(a) as (keyof SessionLiveSnapshot)[]) {
+    if (key === "updatedAt") continue;
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+}
+
 export function upsertLiveSnapshot(
   map: SessionLiveMap,
   patch: Partial<SessionLiveSnapshot> & { sessionId: string },
   nowMs: number = Date.now(),
 ): SessionLiveMap {
-  const prev = map[patch.sessionId] ?? emptyLiveSnapshot(patch.sessionId, nowMs);
-  return {
-    ...map,
-    [patch.sessionId]: {
-      ...prev,
-      ...patch,
-      updatedAt: nowMs,
-    },
+  const prev = map[patch.sessionId];
+  const next: SessionLiveSnapshot = {
+    ...(prev ?? emptyLiveSnapshot(patch.sessionId, nowMs)),
+    ...patch,
+    updatedAt: nowMs,
   };
+  // 流式分片会反复写入同一状态；内容未变时复用原对象，
+  // 避免后台会话的每个分片都触发一次全树重渲染。
+  if (prev && sameLiveSnapshot(prev, next)) return map;
+  return { ...map, [patch.sessionId]: next };
 }
 
 /** Project Host snapshot into the live map. */

@@ -123,7 +123,7 @@ function createHistoryHarness(
   });
   let hookResult: AcpRuntimeHistoryResult | undefined;
   const modelBySessionRef = { current: new Map<string, string>() };
-  const setModelId = vi.fn();
+  const setSessionModelReference = vi.fn();
 
   /** 在合法 React 渲染上下文中捕获 Hook 返回的恢复入口。 */
   function Harness() {
@@ -137,7 +137,7 @@ function createHistoryHarness(
       invalidateContextUsage,
       setPlanModeSessionKey,
       modelBySessionRef,
-      setModelId,
+      setSessionModelReference,
     });
     return null;
   }
@@ -147,7 +147,7 @@ function createHistoryHarness(
   return {
     ...hookResult,
     modelBySessionRef,
-    setModelId,
+    setSessionModelReference,
     workspaceRef,
     composer,
     events,
@@ -173,12 +173,12 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     apiMocks.sessionLoad.mockResolvedValue(result);
     await harness.replayHistory("session-model", { sessionId: "session-model", epoch: 1 });
     expect(harness.modelBySessionRef.current.get("session-model")).toBe("fix-local::hy3");
-    expect(harness.setModelId).toHaveBeenLastCalledWith("hy3");
+    expect(harness.setSessionModelReference).toHaveBeenLastCalledWith("fix-local::hy3");
     expect(
       harness.workspaceRef.current.sessions["session-model"]?.reasoning_effort,
     ).toBe("high");
 
-    harness.setModelId.mockClear();
+    harness.setSessionModelReference.mockClear();
     const pending = deferred<SessionLoadResult>();
     apiMocks.sessionLoad.mockReturnValue(pending.promise);
     const recovery = harness.recoverSession("session-model", { sessionId: "session-model", epoch: 1 });
@@ -187,7 +187,7 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     pending.resolve(result);
     await recovery;
     expect(harness.modelBySessionRef.current.get("session-model")).toBe("fix-local::hy4-preview");
-    expect(harness.setModelId).not.toHaveBeenCalled();
+    expect(harness.setSessionModelReference).not.toHaveBeenCalled();
   });
 
   it("新建会话从 session/new 响应登记初始模型", async () => {

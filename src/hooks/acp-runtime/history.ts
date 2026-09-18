@@ -10,7 +10,6 @@ import {
   type SessionSnapshot,
 } from "@/lib/acp/api";
 import { ensureAcpSession } from "@/lib/acp/projection";
-import { modelIdFromSessionReference } from "@/lib/modelCatalog";
 import {
   beginSessionRecovery,
   completeSessionRecovery,
@@ -61,8 +60,8 @@ export interface AcpRuntimeHistoryOptions {
   setPlanModeSessionKey: (sessionKey: string | null) => void;
   /** 权威 Session 模型引用（providerId::modelId）缓存；历史恢复与实时配置事件共用。 */
   modelBySessionRef: Ref<Map<string, string>>;
-  /** 仅当前视图恢复完成时更新模型菜单。 */
-  setModelId: (modelId: string) => void;
+  /** 仅当前视图恢复完成时更新模型菜单；必须保留供应商，否则同名模型会串供应商。 */
+  setSessionModelReference: (reference: string) => void;
 }
 
 /** 一次恢复公开的两个入口。 */
@@ -91,7 +90,7 @@ export function useAcpRuntimeHistory({
   invalidateContextUsage,
   setPlanModeSessionKey,
   modelBySessionRef,
-  setModelId,
+  setSessionModelReference,
 }: AcpRuntimeHistoryOptions): AcpRuntimeHistoryResult {
   /** 每个 Session 当前唯一恢复任务。 */
   const recoveryBySessionRef = useRef(new Map<string, Promise<void>>());
@@ -303,7 +302,9 @@ export function useAcpRuntimeHistory({
           // 缓存属于所有会话；迟到的后台恢复不得改写前台或新草稿菜单。
           if (mayProjectView()) {
             const reference = modelBySessionRef.current.get(sessionId);
-            if (reference) setModelId(modelIdFromSessionReference(reference));
+            // 必须把完整引用交给 Composer：只回传模型 ID 会让同名模型显示成
+            // 全局活跃供应商，与会话实际使用的供应商不一致。
+            if (reference) setSessionModelReference(reference);
           }
           // 只有最终恢复出的当前 Session 才能改变 Composer；后台恢复不能覆盖
           // 用户当前会话或尚未提交的新草稿的本地模式选择；草稿实体化不是显式导航。
@@ -347,7 +348,7 @@ export function useAcpRuntimeHistory({
       invalidateContextUsage,
       setPlanModeSessionKey,
       modelBySessionRef,
-      setModelId,
+      setSessionModelReference,
       awaitDelivery,
       startBackfill,
     ],

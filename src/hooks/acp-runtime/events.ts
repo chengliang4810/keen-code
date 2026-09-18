@@ -258,8 +258,11 @@ export function useAcpRuntimeEvents({
       const projectViewing = viewingSessionId !== null &&
         pendingProjectionSessions.has(viewingSessionId);
       pendingProjectionSessions.clear();
+      // 后台 Session 的投影只留在 ref 中，切换会话时由导航路径统一提交；
+      // 只为可见 Session 提交渲染状态，避免并发对话互相触发全树重渲染。
+      if (!projectViewing) return;
       commitWorkspace();
-      if (projectViewing) applyViewProjectionRef.current(viewingSessionId);
+      applyViewProjectionRef.current(viewingSessionId);
     };
     const projectionBatcher = createAnimationFrameBatcher(
       publishScheduled,
@@ -350,6 +353,8 @@ export function useAcpRuntimeEvents({
         contextUsageBySessionRef.current.set(envelope.sessionId, usage);
         if (viewingSessionIdRef.current === envelope.sessionId) {
           setContextUsage(usage);
+          // 每轮用量到达即刷新任务缓存命中率，避免只在 Turn 终态更新。
+          void refreshTaskCacheUsage(envelope.sessionId);
         }
       }
       if (update.sessionUpdate === "config_option_update") {
