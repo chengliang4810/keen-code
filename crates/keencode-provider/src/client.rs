@@ -1242,14 +1242,28 @@ impl Stream for RetryModelStream {
     }
 }
 
+/// 可推进的到期时刻；等待线程与持有者共享同一槽位，推进到期时刻时不重建线程。
+struct DeadlineShared {
+    /// 自 `origin` 起算的到期纳秒数。
+    deadline_nanos: AtomicU64,
+    /// 单调时间原点，用于把到期时刻压缩为可原子读写的计数。
+    origin: Instant,
+}
+
+/// 把时长折算为纳秒计数；超出 u64 的极长时长按上限饱和。
+fn duration_nanos(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// 到期唤醒线程的共享计时原语；退避等待与流空闲看门狗共用。
 ///
 /// Provider 层运行在任意执行器上，无法假设 Tokio 定时器可用；为低频计时
-/// 等待引入外部定时器依赖不值得。线程按短分片睡眠并在持有者被丢弃后
-/// 及时退出，满足空闲资源约束；唤醒只会唤醒已注册的执行器任务。
+/// 等待引入外部定时器依赖不值得。等待线程按短分片睡眠并按共享槽位重算剩余
+/// 时间，在持有者被丢弃后及时退出；持有者推进到期时刻（流持续有事件）时只
+/// 更新共享槽位，因此线程创建次数与并发流数量同阶，而不是与事件数量同阶。
 struct DeadlineTimer {
-    /// 到期时刻。
-    deadline: Instant,
+    /// 到期时刻共享槽位。
+    shared: Arc<DeadlineShared>,
     /// 是否已经注册到期唤醒线程。
     registered: bool,
     /// 持有者被丢弃后通知等待线程提前退出。
@@ -1267,11 +1281,31 @@ impl DeadlineTimer {
 
     /// 创建在指定时刻到期的计时器。
     fn at(deadline: Instant) -> Self {
+        let origin = Instant::now();
         Self {
-            deadline,
+            shared: Arc::new(DeadlineShared {
+                deadline_nanos: AtomicU64::new(duration_nanos(
+                    deadline.saturating_duration_since(origin),
+                )),
+                origin,
+            }),
             registered: false,
             cancelled: None,
         }
+    }
+
+    /// 当前到期时刻。
+    fn deadline(&self) -> Instant {
+        self.shared.origin
+            + Duration::from_nanos(self.shared.deadline_nanos.load(Ordering::Relaxed))
+    }
+
+    /// 把到期时刻推进到当前时刻之后；已注册的等待线程继续服务新的到期时刻。
+    fn defer(&self, delay: Duration) {
+        let now = duration_nanos(self.shared.origin.elapsed());
+        self.shared
+            .deadline_nanos
+            .store(now.saturating_add(duration_nanos(delay)), Ordering::Relaxed);
     }
 
     /// 在指定名称的线程上注册到期唤醒并等待到期。
@@ -1280,12 +1314,14 @@ impl DeadlineTimer {
     /// 必须把 `Ready` 按各自语义收敛：退避等待按零等待放行，流空闲看门狗
     /// 立即按超时切断，任何方向都不会永久挂起。
     fn poll_until(&mut self, context: &mut Context<'_>, thread_name: &str) -> Poll<()> {
+        let deadline = self.deadline();
+        let shared = Arc::clone(&self.shared);
         poll_deadline_wait(
-            self.deadline,
+            deadline,
             &mut self.registered,
             &mut self.cancelled,
             context,
-            |deadline, waker| spawn_deadline_thread(thread_name, deadline, waker),
+            |_, waker| spawn_deadline_thread(thread_name, shared, waker),
         )
     }
 }
@@ -1299,10 +1335,10 @@ impl Drop for DeadlineTimer {
     }
 }
 
-/// 在独立线程上按分片睡眠等待到期并唤醒执行器任务；线程创建失败返回 `None`。
+/// 在独立线程上按分片睡眠等待共享到期时刻并唤醒执行器任务；线程创建失败返回 `None`。
 fn spawn_deadline_thread(
     thread_name: &str,
-    deadline: Instant,
+    shared: Arc<DeadlineShared>,
     waker: Waker,
 ) -> Option<Arc<AtomicBool>> {
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -1310,14 +1346,27 @@ fn spawn_deadline_thread(
     let spawned = std::thread::Builder::new()
         .name(thread_name.to_owned())
         .spawn(move || {
-            while Instant::now() < deadline {
+            // 已唤醒过的到期值；同一个到期时刻只唤醒一次，持有者推进后才再次唤醒。
+            let mut woken_deadline: Option<u64> = None;
+            loop {
                 if thread_cancelled.load(Ordering::Relaxed) {
                     return;
                 }
-                let remaining = deadline.saturating_duration_since(Instant::now());
+                let deadline = shared.deadline_nanos.load(Ordering::Relaxed);
+                let now = duration_nanos(shared.origin.elapsed());
+                if now >= deadline {
+                    if woken_deadline != Some(deadline) {
+                        woken_deadline = Some(deadline);
+                        waker.wake_by_ref();
+                    }
+                    // 到期后不退出：持有者可能刚把到期时刻推进，退出会让新窗口
+                    // 失去唯一唤醒源。等待推进或持有者丢弃计时器。
+                    std::thread::sleep(DeadlineTimer::POLL_INTERVAL);
+                    continue;
+                }
+                let remaining = Duration::from_nanos(deadline - now);
                 std::thread::sleep(remaining.min(DeadlineTimer::POLL_INTERVAL));
             }
-            waker.wake();
         });
     // 线程创建失败时没有注册任何唤醒源；返回 None 让调用方按到期退化。
     spawned.ok().map(|_| cancelled)
@@ -1460,8 +1509,17 @@ impl Stream for IdleWatchdogStream {
         }
         match this.inner.as_mut().poll_next(context) {
             Poll::Ready(item) => {
-                // 事件、错误与流结束都终止当前空闲窗口并取消挂起的计时线程。
-                this.timer = None;
+                // 正常事件只推进空闲窗口，等待线程继续服务新的到期时刻：线程
+                // 创建次数因此与并发流数量同阶，而不是与事件数量同阶。流结束
+                // 或出错才真正终止窗口并取消等待线程。
+                match &item {
+                    Some(Ok(_)) => {
+                        if let Some(timer) = this.timer.as_mut() {
+                            timer.defer(this.idle_timeout);
+                        }
+                    }
+                    _ => this.timer = None,
+                }
                 this.finished = item.is_none();
                 Poll::Ready(item)
             }
@@ -1481,7 +1539,7 @@ impl Stream for IdleWatchdogStream {
                         // 失败分支的 deadline 由本次轮询刚创建、必然尚未
                         // 到达，据此区分两种来源并使用如实的切断文案。
                         this.finished = true;
-                        let message = if Instant::now() >= timer.deadline {
+                        let message = if Instant::now() >= timer.deadline() {
                             format!(
                                 "模型事件流超过 {} ms 未收到任何事件",
                                 this.idle_timeout.as_millis()
@@ -2335,6 +2393,39 @@ mod idle_watchdog_tests {
             !woken.load(Ordering::SeqCst),
             "丢弃后线程必须取消退出而不是睡到期末唤醒"
         );
+    }
+
+    /// 活跃流推进空闲窗口时复用同一等待线程，而不是每批事件重建：
+    /// 推进到期时刻后仍持有同一取消标志，证明没有重新注册线程。
+    #[test]
+    fn deadline_timer_defer_reuses_wait_thread() {
+        let woken = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(RecordingWaker(Arc::clone(&woken))));
+        let mut context = Context::from_waker(&waker);
+        let mut timer = DeadlineTimer::after(Duration::from_secs(3600));
+        assert!(matches!(
+            timer.poll_until(&mut context, "keencode-test-deadline"),
+            Poll::Pending
+        ));
+        let first_flag = timer
+            .cancelled
+            .as_ref()
+            .expect("首次挂起应注册计时线程")
+            .clone();
+        // 模拟活跃流持续到达事件：推进到期时刻不应丢弃计时器。
+        timer.defer(Duration::from_secs(3600));
+        assert!(matches!(
+            timer.poll_until(&mut context, "keencode-test-deadline"),
+            Poll::Pending
+        ));
+        assert!(
+            Arc::ptr_eq(
+                &first_flag,
+                timer.cancelled.as_ref().expect("推进后仍应持有取消标志"),
+            ),
+            "推进空闲窗口不得重建等待线程"
+        );
+        assert!(!woken.load(Ordering::SeqCst), "推进后的期限尚未到达");
     }
 
     /// 永久挂起的内部流在看门狗到期时以可重试流中断结束该尝试。
