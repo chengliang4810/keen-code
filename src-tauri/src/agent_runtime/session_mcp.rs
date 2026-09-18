@@ -1127,6 +1127,12 @@ fn is_inheritable_env_name(name: &str) -> bool {
 fn stdio_environment(user_env: &[schema::EnvVariable]) -> BTreeMap<String, String> {
     let mut environment = BTreeMap::new();
     let mut inherited = HashSet::new();
+    // 登录 Shell PATH 覆盖优先写入：Stdio MCP 常以 npx/uvx 等用户级命令
+    // 启动；用户显式配置的 PATH 仍会在稍后覆盖此值。
+    if let Some(overlay) = keencode_tools::path_overlay() {
+        environment.insert("PATH".to_owned(), overlay.to_string_lossy().into_owned());
+        inherited.insert("PATH".to_owned());
+    }
     for (name, value) in std::env::vars() {
         if !is_inheritable_env_name(&name) {
             continue;

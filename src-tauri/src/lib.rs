@@ -28,6 +28,7 @@ mod plugins;
 mod power_management;
 mod providers;
 mod session_commands;
+mod shell_env;
 mod storage;
 mod task_notifications;
 mod terminal;
@@ -434,6 +435,9 @@ async fn providers_import(
 
 /// 启动 KeenCode 桌面后端。
 pub fn run() {
+    // Finder/Dock 启动的打包应用只继承 launchd 最小 PATH；后台捕获登录
+    // Shell 的 PATH 写入命令工具覆盖，不阻塞窗口启动。
+    shell_env::begin_login_shell_path_capture();
     let app = desktop_builder(Instant::now())
         .build(tauri::generate_context!())
         .expect("构建 KeenCode 失败");

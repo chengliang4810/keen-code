@@ -3510,9 +3510,10 @@ fn executable_available(command: &str) -> bool {
     if expanded.is_absolute() || command.contains('/') || command.contains('\\') {
         return expanded.is_file();
     }
-    let Some(path) = env::var_os("PATH") else {
+    let path = keencode_tools::effective_path();
+    if path.as_os_str().is_empty() {
         return false;
-    };
+    }
     #[cfg(windows)]
     let extensions = env::var_os("PATHEXT")
         .map(|value| {
