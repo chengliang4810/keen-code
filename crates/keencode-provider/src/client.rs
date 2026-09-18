@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -30,6 +31,38 @@ use crate::{
 
 /// 单次模型请求允许携带的图片总数；超过时只保留时间顺序最新的图片。
 const MAX_REQUEST_MEDIA_ITEMS: usize = 100;
+
+/// 要求会话路由 Header 的推理端点主机 allowlist。
+///
+/// OpenCode Go 对缺失 `x-opencode-session` 的推理请求直接返回 400
+/// MissingSessionID（三个协议均已实测），因此必须对该主机注入；其他端点
+/// 保持原线格式，避免未知 Header 被严格网关拒绝，新增条目须以实测确认为前提。
+const SESSION_ROUTING_HEADER_HOSTS: &[&str] = &["opencode.ai"];
+
+/// 会话路由 Header 名称。
+const SESSION_ROUTING_HEADER: &str = "x-opencode-session";
+
+/// 为推理请求装配会话路由 Header；端点在 allowlist 内且请求带有非空会话标识时注入。
+pub(crate) fn apply_session_routing_header(
+    builder: reqwest::RequestBuilder,
+    base_url: &reqwest::Url,
+    metadata: &BTreeMap<String, String>,
+) -> reqwest::RequestBuilder {
+    let Some(host) = base_url.host_str() else {
+        return builder;
+    };
+    if !SESSION_ROUTING_HEADER_HOSTS.contains(&host) {
+        return builder;
+    }
+    let Some(session_id) = metadata
+        .get(REQUEST_METADATA_SESSION_ID)
+        .map(String::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return builder;
+    };
+    builder.header(SESSION_ROUTING_HEADER, session_id)
+}
 
 /// 在不修改 Runtime Transcript 的前提下，静默移除请求快照中最旧的超额图片。
 ///
@@ -1848,7 +1881,12 @@ impl ModelProvider for ProviderClient {
                 collector.begin(request.clone(), client.config.max_event_bytes, body.clone())
             });
             let template = match client.authenticated_request(Method::POST, url) {
-                Ok(template) => template.json(&body),
+                Ok(template) => apply_session_routing_header(
+                    template,
+                    client.config.base_url(),
+                    &request.metadata,
+                )
+                .json(&body),
                 Err(error) => {
                     let error = record_terminal_error(
                         #[cfg(feature = "live-test-trace")]

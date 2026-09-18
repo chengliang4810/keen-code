@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -5148,6 +5148,67 @@ fn catalog_parser_bounds_untrusted_ids_cursors_and_debug_metadata() {
     let debug = format!("{entry:?}");
     assert!(!debug.contains("secret-metadata-value"));
     assert!(debug.contains("untrusted-metadata"));
+}
+
+/// 会话路由 Header 只注入实测要求它的端点主机，值取自请求的会话标识。
+#[test]
+fn session_routing_header_follows_endpoint_allowlist_and_session_metadata() {
+    let session = |value: &str| {
+        BTreeMap::from([(
+            crate::REQUEST_METADATA_SESSION_ID.to_owned(),
+            value.to_owned(),
+        )])
+    };
+    let sent = |base_url: &str, metadata: &BTreeMap<String, String>| {
+        let url = reqwest::Url::parse(base_url).expect("测试端点应可解析");
+        let request = crate::client::apply_session_routing_header(
+            reqwest::Client::new().post(url.clone()),
+            &url,
+            metadata,
+        )
+        .build()
+        .expect("测试请求应可构建");
+        request
+            .headers()
+            .get("x-opencode-session")
+            .map(|value| value.to_str().expect("会话标识应为可见 ASCII").to_owned())
+    };
+
+    // OpenCode Go 对缺失该 Header 的推理请求直接返回 400 MissingSessionID。
+    for endpoint in [
+        "https://opencode.ai/zen/go/v1/chat/completions",
+        "https://opencode.ai/zen/go/v1/responses",
+        "https://opencode.ai/zen/go/v1/messages",
+    ] {
+        assert_eq!(
+            sent(endpoint, &session("session-abc123")).as_deref(),
+            Some("session-abc123")
+        );
+    }
+    // 其他端点保持原线格式，避免未知 Header 被严格网关拒绝。
+    for endpoint in [
+        "https://api.openai.com/v1",
+        "https://api.anthropic.com/v1",
+        "https://api.deepseek.com",
+        "http://127.0.0.1:1234/v1",
+    ] {
+        assert_eq!(sent(endpoint, &session("session-abc123")), None);
+    }
+    // 没有会话标识时不注入空 Header，也不臆造标识。
+    assert_eq!(
+        sent(
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            &BTreeMap::new()
+        ),
+        None
+    );
+    assert_eq!(
+        sent(
+            "https://opencode.ai/zen/go/v1/chat/completions",
+            &session("   ")
+        ),
+        None
+    );
 }
 
 /// 一次本地模型服务收到的请求事实。
