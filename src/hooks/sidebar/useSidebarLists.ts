@@ -70,7 +70,23 @@ export function useSidebarLists({
   onProjectRemoved,
 }: SidebarListsOptions): SidebarListsResult {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [baseSessions, setSessions] = useState<SessionRow[]>([]);
+  // 未进入列表的会话（新建对话首条消息）先在这里推进排序键，
+  // 列表刷新载入该会话后合并，避免排序键在下一次 refreshLists 前推不动。
+  const [pendingUserMessageAt, setPendingUserMessageAt] = useState<
+    Record<string, string>
+  >({});
+  const sessions = useMemo(() => {
+    const entries = Object.entries(pendingUserMessageAt);
+    if (!entries.length) return baseSessions;
+    const byId = new Map(entries);
+    return baseSessions.map((item) => {
+      const at = byId.get(item.id);
+      return at && at > (item.lastUserMessageAt ?? "")
+        ? { ...item, lastUserMessageAt: at, updatedAt: at }
+        : item;
+    });
+  }, [baseSessions, pendingUserMessageAt]);
   const sessionsRef = useRef<SessionRow[]>([]);
   sessionsRef.current = sessions;
   const [expandedProjects, setExpandedProjects] = useState<
@@ -89,10 +105,16 @@ export function useSidebarLists({
   }, []);
   /**
    * 用户发送消息后立即推进本地排序键。等待后端列表刷新会让会话停在原位，
-   * 直到下一次导航才跳动。
+   * 直到下一次导航才跳动。会话尚未进入列表（新建对话首条消息）时记入
+   * pendingUserMessageAt，待列表载入该会话后合并。
    */
   const markSessionUserMessage = useCallback(
     (sessionId: string, atIso: string) => {
+      setPendingUserMessageAt((previous) =>
+        previous[sessionId] && previous[sessionId]! >= atIso
+          ? previous
+          : { ...previous, [sessionId]: atIso },
+      );
       setSessions((previous) =>
         previous.some((item) => item.id === sessionId)
           ? previous.map((item) =>
@@ -105,6 +127,22 @@ export function useSidebarLists({
     },
     [],
   );
+
+  // 列表已带相同或更新的排序键时清掉 pending 条目，避免覆盖表无界增长。
+  useEffect(() => {
+    const stale = Object.entries(pendingUserMessageAt).filter(
+      ([id, at]) =>
+        !sessions.some(
+          (item) => item.id === id && (item.lastUserMessageAt ?? "") < at,
+        ),
+    );
+    if (!stale.length) return;
+    setPendingUserMessageAt((previous) => {
+      const next = { ...previous };
+      for (const [id] of stale) delete next[id];
+      return next;
+    });
+  }, [sessions, pendingUserMessageAt]);
 
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
