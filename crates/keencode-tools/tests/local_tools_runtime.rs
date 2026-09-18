@@ -33,6 +33,42 @@ fn tool_context(call_id: &str) -> ToolContext {
     }
 }
 
+/// 登录 Shell PATH 覆盖必须传导到命令子进程：探针脚本仅通过覆盖 PATH 可见。
+#[cfg(unix)]
+#[tokio::test]
+async fn path_overlay_reaches_command_children() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let directory = tempdir().expect("应创建隔离临时目录");
+    let probe = directory.path().join("keencode-overlay-probe");
+    fs::write(&probe, "#!/bin/sh\necho OVERLAY_PROBE_HIT\n").expect("应写入探针脚本");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("应赋予执行权限");
+
+    let mut entries =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    entries.push(directory.path().to_path_buf());
+    let overlay = std::env::join_paths(entries.iter()).expect("应合并覆盖 PATH");
+    assert!(keencode_tools::set_path_overlay(overlay), "覆盖只需写入一次");
+
+    let request = keencode_tools::BoundedCommandRequest::plugin_shell(
+        None,
+        "keencode-overlay-probe",
+        directory.path(),
+        Duration::from_secs(10),
+        4096,
+    )
+    .expect("应构造探针命令");
+    let output = keencode_tools::run_bounded_command(request)
+        .await
+        .expect("探针命令应执行成功");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        stdout.contains("OVERLAY_PROBE_HIT"),
+        "子进程应通过覆盖 PATH 找到探针脚本，实际 stdout：{stdout}"
+    );
+}
+
 /// 提取工具输出中的唯一文本块。
 fn output_text(output: &keencode_agent::ToolOutput) -> &str {
     let [ToolResultContent::Text { text }] = output.content.as_slice() else {

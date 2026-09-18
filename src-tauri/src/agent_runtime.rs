@@ -6028,6 +6028,8 @@ impl AgentRuntime {
         let output_directory = self
             .session_storage_directory(&execution.session_id)?
             .join("tool-output");
+        // 首个会话构建环境前有界等待后台 PATH 捕获收尾；超时不阻塞会话创建。
+        crate::shell_env::wait_for_capture_applied(Duration::from_secs(4));
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
                 .and_then(|environment| {

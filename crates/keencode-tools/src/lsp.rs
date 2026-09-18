@@ -814,7 +814,18 @@ impl LspProcess {
         project_root: &Path,
         cancellation: &TurnCancellation,
     ) -> Result<Self, LspCallFailure> {
-        let mut command = Command::new(&config.command);
+        let program =
+            crate::path_overlay::resolve_program(std::ffi::OsStr::new(&config.command)).map_err(
+                |error| LspCallFailure {
+                    restartable: true,
+                    error: ToolError::permanent(
+                        "lsp_command_not_found",
+                        format!("无法在有效 PATH 中定位 LSP Server {}：{error}", config.name),
+                    ),
+                    response_code: None,
+                },
+            )?;
+        let mut command = Command::new(&program);
         command
             .args(&config.args)
             .current_dir(&config.current_dir)
@@ -825,6 +836,7 @@ impl LspProcess {
         for (name, value) in &config.environment {
             command.env(name, value);
         }
+        crate::path_overlay::apply_to_tokio_command(&mut command);
         let mut group = command.group();
         group.kill_on_drop(true);
         #[cfg(windows)]

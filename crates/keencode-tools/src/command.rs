@@ -1097,7 +1097,8 @@ fn validate_bounded_command(request: &BoundedCommandRequest) -> Result<(), Bound
 
 /// 以可写标准输入和可读双输出管道启动一个完整进程组。
 fn spawn_bounded_group(request: &BoundedCommandRequest) -> io::Result<ProcessGroupGuard> {
-    let mut command = Command::new(&request.program);
+    let program = crate::path_overlay::resolve_program(&request.program)?;
+    let mut command = Command::new(&program);
     command.args(&request.args);
     #[cfg(windows)]
     if let Some(script) = &request.windows_shell_script {
@@ -1118,6 +1119,7 @@ fn spawn_bounded_group(request: &BoundedCommandRequest) -> io::Result<ProcessGro
     for (name, value) in &request.environment {
         command.env(name, value);
     }
+    crate::path_overlay::apply_to_tokio_command(&mut command);
     spawn_group_command(command)
 }
 
@@ -1384,7 +1386,8 @@ async fn supervise_process(
 
 /// 创建带标准管道、隐藏窗口和完整进程组的子进程。
 pub(crate) fn spawn_group(program: &OsString, spec: &ProcessSpec) -> io::Result<ProcessGroupGuard> {
-    let mut command = Command::new(program);
+    let program = crate::path_overlay::resolve_program(program)?;
+    let mut command = Command::new(&program);
     command
         .args(&spec.args)
         .current_dir(&spec.cwd)
@@ -1395,6 +1398,7 @@ pub(crate) fn spawn_group(program: &OsString, spec: &ProcessSpec) -> io::Result<
     for (name, value) in &spec.environment {
         command.env(name, value);
     }
+    crate::path_overlay::apply_to_tokio_command(&mut command);
     spawn_group_command(command)
 }
 

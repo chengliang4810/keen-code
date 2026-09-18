@@ -1,7 +1,7 @@
 //! 由系统能力层独占管理的真实 Git Worktree lease 生命周期。
 
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -874,7 +874,14 @@ impl GitWorktreeLeaseManager {
     where
         I: IntoIterator<Item = OsString>,
     {
-        let mut command = Command::new("git");
+        let program = crate::path_overlay::resolve_program(OsStr::new("git")).map_err(|error| {
+            GitWorktreeLeaseError::GitCommandFailed {
+                operation,
+                message: truncate_utf8(&format!("无法启动 git：{error}"), MAX_GIT_ERROR_BYTES),
+            }
+        })?;
+        let mut command = Command::new(program);
+        crate::path_overlay::apply_to_std_command(&mut command);
         command
             .arg("-c")
             .arg(config_argument("core.hooksPath", &self.hooks_root))
