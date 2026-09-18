@@ -11,7 +11,10 @@ import type { Project, SessionRow } from "@/features/app/models";
 import * as api from "@/lib/api";
 import {
   loadSessionOrder,
-  orderedByIds,
+  loadSessionSortMode,
+  saveSessionSortMode,
+  sortSessionRows,
+  type SidebarSortMode,
 } from "@/lib/sidebarOrder";
 import {
   loadSessionPreferences,
@@ -44,6 +47,10 @@ export interface SidebarListsResult {
   setVisibleSessionsByProject: SidebarSetState<Record<string, number>>;
   sessionOrder: string[];
   setSessionOrder: SidebarSetState<string[]>;
+  sessionSortMode: SidebarSortMode;
+  setSessionSortMode: (mode: SidebarSortMode) => void;
+  /** 用户发出消息时把该会话的排序键推进到当前时间。 */
+  markSessionUserMessage: (sessionId: string, atIso: string) => void;
   refreshLists: () => Promise<void>;
   loadAllSessions: () => Promise<void>;
   toggleProject: (project: Project) => Promise<void>;
@@ -73,6 +80,31 @@ export function useSidebarLists({
     Record<string, number>
   >({});
   const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrder());
+  const [sessionSortMode, setSessionSortModeState] = useState(() =>
+    loadSessionSortMode(),
+  );
+  const setSessionSortMode = useCallback((mode: SidebarSortMode) => {
+    saveSessionSortMode(mode);
+    setSessionSortModeState(mode);
+  }, []);
+  /**
+   * 用户发送消息后立即推进本地排序键。等待后端列表刷新会让会话停在原位，
+   * 直到下一次导航才跳动。
+   */
+  const markSessionUserMessage = useCallback(
+    (sessionId: string, atIso: string) => {
+      setSessions((previous) =>
+        previous.some((item) => item.id === sessionId)
+          ? previous.map((item) =>
+              item.id === sessionId
+                ? { ...item, lastUserMessageAt: atIso, updatedAt: atIso }
+                : item,
+            )
+          : previous,
+      );
+    },
+    [],
+  );
 
   const projectsRef = useRef(projects);
   projectsRef.current = projects;
@@ -211,26 +243,28 @@ export function useSidebarLists({
 
   const sessionsForProject = useCallback(
     (projectId: string) =>
-      orderedByIds(
+      sortSessionRows(
         sessions.filter(
           (item) =>
             item.projectId === projectId && !item.archived && !item.pinned,
         ),
         sessionOrder,
+        sessionSortMode,
       ),
-    [sessionOrder, sessions],
+    [sessionOrder, sessionSortMode, sessions],
   );
   const pinnedSessions = useMemo(
     () =>
-      orderedByIds(
+      sortSessionRows(
         sessions.filter((item) => item.pinned && !item.archived),
         sessionOrder,
+        sessionSortMode,
       ),
-    [sessionOrder, sessions],
+    [sessionOrder, sessionSortMode, sessions],
   );
   const orphanSessions = useMemo(
     () =>
-      orderedByIds(
+      sortSessionRows(
         sessions.filter(
           (item) =>
             (!item.projectId ||
@@ -239,8 +273,9 @@ export function useSidebarLists({
             !item.pinned,
         ),
         sessionOrder,
+        sessionSortMode,
       ),
-    [projects, sessionOrder, sessions],
+    [projects, sessionOrder, sessionSortMode, sessions],
   );
 
   return {
@@ -255,6 +290,9 @@ export function useSidebarLists({
     setVisibleSessionsByProject,
     sessionOrder,
     setSessionOrder,
+    sessionSortMode,
+    setSessionSortMode,
+    markSessionUserMessage,
     refreshLists,
     loadAllSessions,
     toggleProject,

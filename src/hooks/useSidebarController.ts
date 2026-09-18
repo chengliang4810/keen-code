@@ -10,6 +10,7 @@ import type {
 } from "@/features/app/models";
 import type { SessionSnapshot } from "@/lib/session";
 import type { LayoutPrefs } from "@/lib/layout";
+import type { SidebarSortMode } from "@/lib/sidebarOrder";
 import { useSidebarAutoArchive } from "./sidebar/useSidebarAutoArchive";
 import { useSidebarActions } from "./sidebar/useSidebarActions";
 import { useSidebarDrag } from "./sidebar/useSidebarDrag";
@@ -78,6 +79,10 @@ export interface UseSidebarControllerResult {
   setVisibleSessionsByProject: SidebarSetState<Record<string, number>>;
   sessionOrder: string[];
   setSessionOrder: SidebarSetState<string[]>;
+  sessionSortMode: SidebarSortMode;
+  setSessionSortMode: (mode: SidebarSortMode) => void;
+  /** 用户发出消息时把该会话的排序键推进到当前时间。 */
+  markSessionUserMessage: (sessionId: string, atIso: string) => void;
   projectDropHint: SidebarDropHint | null;
   setProjectDropHint: SidebarSetState<SidebarDropHint | null>;
   projectsOpen: boolean;
@@ -195,6 +200,9 @@ export function useSidebarController({
     setVisibleSessionsByProject,
     sessionOrder,
     setSessionOrder,
+    sessionSortMode,
+    setSessionSortMode,
+    markSessionUserMessage,
     refreshLists,
     loadAllSessions,
     refreshSessions,
@@ -225,6 +233,7 @@ export function useSidebarController({
     sessions,
     sessionOrder,
     setSessionOrder,
+    sessionSortMode,
     refreshProjects,
     setLocalError,
   });
@@ -276,6 +285,9 @@ export function useSidebarController({
     setVisibleSessionsByProject,
     sessionOrder,
     setSessionOrder,
+    sessionSortMode,
+    setSessionSortMode,
+    markSessionUserMessage,
     projectDropHint: drag.projectDropHint,
     setProjectDropHint: drag.setProjectDropHint,
     projectsOpen,

@@ -1,7 +1,7 @@
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import { isProjectPathMissing } from "@/lib/projectPath";
-import { moveId } from "@/lib/sidebarOrder";
+import { moveId, type SidebarSortMode } from "@/lib/sidebarOrder";
 import { SIDEBAR_SESSION_ROW_GAP, SIDEBAR_SESSION_ROW_HEIGHT } from "@/lib/virtualList";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
@@ -16,6 +16,7 @@ import {
   IconNewChat as IconSquarePen,
 } from "@/components/icons";
 import { SidebarSessionRow } from "./SidebarSessionRow";
+import { SidebarSortMenu } from "./SidebarSortMenu";
 import type {
   SidebarAddProject,
   SidebarApplyProjectOrder,
@@ -55,6 +56,9 @@ export interface ProjectTreeProps
   applyProjectOrder: SidebarApplyProjectOrder;
   addProject: SidebarAddProject;
   showToast: SidebarShowToast;
+  /** 会话排序方式；项目、置顶与独立会话共用。 */
+  sessionSortMode: SidebarSortMode;
+  onSessionSortModeChange: (mode: SidebarSortMode) => void;
 }
 
 function moveProjectWithKeyboard(
@@ -115,7 +119,7 @@ export function ProjectTree({
   dropSession,
   session,
   busyIds,
-  completedUnreadIds,
+  unreadTerminalResults,
   pendingAskUserSessionIds,
   openProjectMenu,
   relocateProject,
@@ -126,6 +130,8 @@ export function ProjectTree({
   applyProjectOrder,
   addProject,
   showToast,
+  sessionSortMode,
+  onSessionSortModeChange,
 }: ProjectTreeProps) {
   return (
     <>
@@ -140,6 +146,11 @@ export function ProjectTree({
           <IconChevronDown size={14} className="chevron--disclose" />
         </Button>
         <div className="tree-l1__actions">
+          <SidebarSortMenu
+            tr={tr}
+            mode={sessionSortMode}
+            onModeChange={onSessionSortModeChange}
+          />
           {projects.length > 0 ? (
             <Tip label={tr("sidebar.collapseAllProjects")}>
               <Button
@@ -331,7 +342,7 @@ export function ProjectTree({
                             project={project}
                             activeSessionId={session.sessionId}
                             working={busyIds.has(item.id)}
-                            completedUnread={completedUnreadIds.has(item.id)}
+                            unreadResult={unreadTerminalResults.get(item.id) ?? null}
                             needsInput={pendingAskUserSessionIds.has(item.id)}
                             variant="project"
                           />

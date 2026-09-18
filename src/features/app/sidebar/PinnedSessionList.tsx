@@ -31,7 +31,7 @@ export function PinnedSessionList({
   setPinnedOpen,
   session,
   busyIds,
-  completedUnreadIds,
+  unreadTerminalResults,
   projects,
   pendingAskUserSessionIds,
   startSidebarDrag,
@@ -89,7 +89,7 @@ export function PinnedSessionList({
                 project={project}
                 activeSessionId={session.sessionId}
                 working={busyIds.has(item.id)}
-                completedUnread={completedUnreadIds.has(item.id)}
+                unreadResult={unreadTerminalResults.get(item.id) ?? null}
                 needsInput={pendingAskUserSessionIds.has(item.id)}
                 variant="pinned"
               />

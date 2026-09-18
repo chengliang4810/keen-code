@@ -30,7 +30,7 @@ export function HistorySessionList({
   setHistoryOpen,
   session,
   busyIds,
-  completedUnreadIds,
+  unreadTerminalResults,
   pendingAskUserSessionIds,
   startSidebarDrag,
   endSidebarDrag,
@@ -84,7 +84,7 @@ export function HistorySessionList({
               project={null}
               activeSessionId={session.sessionId}
               working={busyIds.has(item.id)}
-              completedUnread={completedUnreadIds.has(item.id)}
+              unreadResult={unreadTerminalResults.get(item.id) ?? null}
               needsInput={pendingAskUserSessionIds.has(item.id)}
               variant="history"
             />

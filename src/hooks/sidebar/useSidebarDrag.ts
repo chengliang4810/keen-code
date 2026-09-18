@@ -7,7 +7,7 @@ import {
 import type { Project, SessionRow } from "@/features/app/models";
 import * as api from "@/lib/api";
 import { localizeUiError } from "@/lib/session";
-import { moveId, orderedByIds, saveSessionOrder } from "@/lib/sidebarOrder";
+import { moveId, orderedByIds, saveSessionOrder, sortSessionRows, type SidebarSortMode } from "@/lib/sidebarOrder";
 import type {
   SidebarDragKind,
   SidebarDropHint,
@@ -22,6 +22,7 @@ export interface SidebarDragOptions {
   sessions: SessionRow[];
   sessionOrder: string[];
   setSessionOrder: SidebarSetState<string[]>;
+  sessionSortMode: SidebarSortMode;
   refreshProjects: () => Promise<void>;
   setLocalError: SidebarSetState<string | null>;
 }
@@ -57,6 +58,7 @@ export function useSidebarDrag({
   sessions,
   sessionOrder,
   setSessionOrder,
+  sessionSortMode,
   refreshProjects,
   setLocalError,
 }: SidebarDragOptions): SidebarDragResult {
@@ -150,17 +152,20 @@ export function useSidebarDrag({
       const dragged = draggedSidebarItemRef.current;
       if (dragged?.kind !== "session") return;
       const { top, height } = event.currentTarget.getBoundingClientRect();
-      const ids = moveId(
-        orderedByIds(sessions, sessionOrder).map(({ id }) => id),
+      // 只把拖动涉及的两个会话记为固定项，其余继续按所选时间排序。
+      const fixed = new Set([...sessionOrder, dragged.id, targetId]);
+      const moved = moveId(
+        sortSessionRows(sessions, sessionOrder, sessionSortMode).map(({ id }) => id),
         dragged.id,
         targetId,
         event.clientY > top + height / 2,
       );
+      const ids = moved.filter((id) => fixed.has(id));
       draggedSidebarItemRef.current = null;
       setSessionOrder(ids);
       saveSessionOrder(ids);
     },
-    [sessionOrder, sessions, setSessionOrder],
+    [sessionOrder, sessionSortMode, sessions, setSessionOrder],
   );
 
   return {

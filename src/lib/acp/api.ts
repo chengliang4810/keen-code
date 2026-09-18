@@ -92,6 +92,8 @@ export interface SessionListItem {
   cwd: string;
   /** RFC 3339 最近更新时间。 */
   updatedAt: string;
+  /** RFC 3339 最近一条用户消息时间；从未发送消息时为空。 */
+  lastUserMessageAt: string | null;
 }
 
 /** 返回后端诊断日志路径，供启动门禁和错误页展示。 */
@@ -448,7 +450,13 @@ export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
   let cursor: string | undefined;
   do {
     const page = await acpRequest<{
-      sessions: Array<{ sessionId: string; cwd: string; title?: string; updatedAt?: string }>;
+      sessions: Array<{
+        sessionId: string;
+        cwd: string;
+        title?: string;
+        updatedAt?: string;
+        _meta?: Record<string, unknown>;
+      }>;
       nextCursor?: string;
     }>("session/list", { ...(cwd === undefined ? {} : { cwd }), ...(cursor === undefined ? {} : { cursor }) });
     if (!Array.isArray(page.sessions)) throw new Error("ACP Session 列表无效");
@@ -456,7 +464,17 @@ export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
       if (typeof item.sessionId !== "string" || typeof item.cwd !== "string") {
         throw new Error("ACP Session 列表项无效");
       }
-      sessions.push({ id: item.sessionId, cwd: item.cwd, title: item.title ?? null, updatedAt: item.updatedAt ?? "" });
+      const lastUserMessageAt = item._meta?.["keencode/lastUserMessageAt"];
+      if (lastUserMessageAt !== undefined && typeof lastUserMessageAt !== "string") {
+        throw new Error("ACP Session 列表项用户消息时间无效");
+      }
+      sessions.push({
+        id: item.sessionId,
+        cwd: item.cwd,
+        title: item.title ?? null,
+        updatedAt: item.updatedAt ?? "",
+        lastUserMessageAt: lastUserMessageAt ?? null,
+      });
     }
     cursor = page.nextCursor;
     if (cursor !== undefined) {

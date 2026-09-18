@@ -7,6 +7,7 @@ import type {
 import type { MessageKey, Vars } from "@/i18n";
 import type { Project, SessionRow } from "@/features/app/models";
 import type { SessionSnapshot } from "@/lib/session";
+import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 
 export type SidebarTranslator = (key: MessageKey, vars?: Vars) => string;
 export type SidebarSetState<T> = Dispatch<SetStateAction<T>>;
@@ -60,7 +61,7 @@ export interface SidebarSessionActions {
 export interface SidebarSessionStatus {
   session: SessionSnapshot;
   busyIds: Set<string>;
-  completedUnreadIds: Set<string>;
+  unreadTerminalResults: Map<string, UnreadTerminalResult>;
   pendingAskUserSessionIds: Set<string>;
 }
 
