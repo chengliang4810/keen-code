@@ -100,9 +100,61 @@ pub(crate) enum BoundedRead {
     },
 }
 
+/// 以只读方式打开普通文件，并在支持的平台上禁止跟随最终符号链接。
+///
+/// 资源层读取的文件都先经 `ensure_regular_file_or_absent` 拒绝链接，这里的
+/// no-follow 标志负责关闭“检查后、打开前”被替换成链接的竞态。
+fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        // Windows FILE_FLAG_OPEN_REPARSE_POINT，拒绝把最终重解析点当作目标文件跟随。
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // Linux O_NOFOLLOW 与 O_CLOEXEC，避免最终符号链接竞态和句柄泄露到子进程。
+        const O_CLOEXEC: i32 = 0o2_000_000;
+        const O_NOFOLLOW: i32 = 0o400_000;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(O_CLOEXEC | O_NOFOLLOW)
+            .open(path)
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+
+        // macOS O_NOFOLLOW 与 O_CLOEXEC，语义与 Linux 分支一致。
+        const O_CLOEXEC: i32 = 0x0100_0000;
+        const O_NOFOLLOW: i32 = 0x0100;
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(O_CLOEXEC | O_NOFOLLOW)
+            .open(path)
+    }
+
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+    {
+        File::open(path)
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    File::open(path)
+}
+
 /// 从同一已打开句柄检查大小并最多读取 `limit + 1` 字节。
 pub(crate) fn read_file_bounded(path: &Path, limit: u64) -> std::io::Result<BoundedRead> {
-    let file = File::open(path)?;
+    let file = open_regular_file_nofollow(path)?;
     let metadata_len = file.metadata()?.len();
     if metadata_len > limit {
         return Ok(BoundedRead::TooLarge {

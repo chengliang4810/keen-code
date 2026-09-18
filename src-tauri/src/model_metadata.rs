@@ -733,7 +733,8 @@ fn read_cache_bytes(path: &Path) -> Result<Vec<u8>> {
             path.display()
         );
     }
-    let file = fs::File::open(path)
+    // 用 no-follow 句柄读取，避免“检查后、打开前”路径被替换成符号链接。
+    let file = crate::storage::open_readonly_regular_file(path)
         .with_context(|| format!("打开模型元数据缓存失败：{}", path.display()))?;
     let mut bytes = Vec::new();
     file.take((MAX_CACHE_BYTES as u64).saturating_add(1))
