@@ -189,7 +189,7 @@ export function useSessionStop({
         setLocalError(stopPendingMessage);
       }
       // 保持 waiting，直到真实 TurnCancelled/TurnStopped（或等价的 ACP
-      // agent-done）事件到达；这里不能清 streaming 或 turnStartedAt。
+      // agent-done）事件到达；这里不能清 streaming 或本回合计时锚点。
       updateStopLatch({ ...latch, phase: "waiting" });
     }, STOP_LATCH_MS + 50);
 
