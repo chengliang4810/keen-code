@@ -15,17 +15,22 @@ describe("ProvidersPanel 历史双栏布局", () => {
     expect(styles).toMatch(/\.prov-detail\s*\{[^}]*padding: 16px 18px;/);
   });
 
-  it("供应商列表定高内部滚动，滚动条沿用设置页静默样式", () => {
+  it("供应商列表与右栏等高并在内部滚动，滚动条沿用设置页静默样式", () => {
     const list = styles.match(/\.prov-split__list\s*\{([^}]+)\}/)?.[1] ?? "";
-    expect(list).toContain("max-height: 560px");
+    // size containment：列表内容不计入行高，列拉伸到与右侧表单等高，溢出在 rail 内滚动。
+    expect(list).toContain("contain: size");
+    // 窄屏堆叠布局恢复内容高度，保留 280px 上限，避免 containment 把列表塌成 0。
+    expect(styles).toMatch(
+      /\.prov-split__list\s*\{[^}]*contain: none;[^}]*max-height: 280px;/,
+    );
     // 全局默认隐藏滚动条，列表加入设置页静默例外组，悬停或聚焦时出现细滚动条。
     expect(styles).toMatch(/\.prov-rail\s*\{[^}]*scrollbar-width: thin/);
     expect(styles).toMatch(
       /\.prov-rail:hover[^{]*\{[^}]*scrollbar-color: var\(--scrollbar-thumb\)/,
     );
-    // rail 自身保持弹性滚动容器，定高约束落在列容器上。
+    // rail 自身保持弹性滚动容器，高度约束来自栅格行的拉伸。
     expect(styles).toMatch(/\.prov-rail\s*\{[^}]*overflow: auto;/);
-    // rail 子项禁止收缩：定高后超高交给 rail 滚动，而不是把单项压缩塞满。
+    // rail 子项禁止收缩：超高交给 rail 滚动，而不是把单项压缩塞满。
     expect(styles).toMatch(/\.prov-item\s*\{[^}]*flex-shrink: 0;/);
     expect(styles).toMatch(/\.prov-rail-empty\s*\{[^}]*flex-shrink: 0;/);
   });

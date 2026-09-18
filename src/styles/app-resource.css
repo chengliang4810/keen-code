@@ -1051,8 +1051,9 @@ textarea::-webkit-scrollbar-thumb:active,
   flex-direction: column;
   gap: 10px;
   min-width: 0;
-  /* 定高：供应商数量不再撑高页面，溢出交给 .prov-rail 内部滚动（窄屏断点另有 280px 覆盖）。 */
-  max-height: 560px;
+  /* 行高只由右侧表单决定：size containment 让供应商内容不计入行高，列拉伸到与右栏等高，
+     溢出交给 .prov-rail 内部滚动；窄屏断点恢复内容高度并保留 280px 上限。 */
+  contain: size;
 }
 
 .prov-add-btn {
@@ -1523,6 +1524,8 @@ textarea::-webkit-scrollbar-thumb:active,
     min-height: 0;
   }
   .prov-split__list {
+    /* 堆叠布局下列表自身决定高度：恢复内容参与计算，保留 280px 上限，避免 containment 把列表塌成 0。 */
+    contain: none;
     max-height: 280px;
   }
   .prov-form__grid {
