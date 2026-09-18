@@ -906,3 +906,10 @@ historical result: passed; current release: not reverified
 - 基线：提交 `3d88b171` 的 `src/` 和 `public/` 可通过 `git archive 3d88b171 src public` 在隔离目录重建；当前工作区改动在 `src/lib/acp/store.ts`、`src/components/lobe-chat/ConversationThread.tsx` 和文案文件。用户提供的截图仅显示多次“已自动压缩”，没有相同会话状态下的压缩开始帧，不能作为前后像素基线。
 - 已验证：合成事件 `context_compaction_started` → `context_compaction_completed` / `context_compaction_failed` / `turn_cancelled` 的时间线投影测试和组件渲染测试；未取得原生桌面窗口同状态、同视口及 deviceScaleFactor 的前后截图。当前原生计算机控制 API 禁用，不能完成本次原生像素差异检查；浏览器或历史截图不能替代。
 - 待验收：分别用上述基线与当前版本在隔离开发桌面进程运行，保持 macOS、中文、浅色、同视口和 deviceScaleFactor，用同一合成压缩事件序列截图并比较像素；再在真实长会话确认开始提示及时出现、完成后原位更新，且不会每轮反复压缩。
+
+# 2026-09-18 已工作耗时支持小时与天单位
+
+- 需求：「已工作/工作中 {duration}」以及「持续了 {duration}」的耗时在超过 1 小时后仍只显示分钟（如「120分钟」），需要增加小时与天两级单位换算。
+- 修改：`src/components/lobe-chat/Thinking.tsx` 的共享格式化函数 `formatProcessingDuration` 由分/秒两级扩展为天/小时/分/秒四级紧凑展示，三语言（`en`/`zh`/`zh-TW`）分别输出 `1d 1h`、`1天 1小时`、`1天 1小時`；`ConversationThread.tsx` 与 `TimelinePhaseBlock.tsx` 的「工作中/已工作/持续了」标签均复用该函数，一处修改全链路生效。未改动 DOM 结构、CSS 或 i18n 文案。
+- 测试：`src/components/lobe-chat/Thinking.test.tsx` 新增中文/英文天与小时档位断言（`3_660_000ms → 1小时 1分钟 / 1h 1m`，`30_000_000ms → 8小时 20分钟 / 8h 20m`，`90_000_000ms → 1天 1小时 / 1d 1h`，zh-TW 同步覆盖）；`pnpm exec vitest run` 聚焦 3 个相关文件 47 项通过，`pnpm run typecheck` 通过。
+- 未验收：与既往限制一致，未取得原生 macOS WKWebView 同状态前后截图做像素比对；本次仅改文本内容与字符宽度（按钮宽度自适应），无布局/样式/交互变化，浏览器级 SSR 断言与类型检查不足以替代原生桌面验收。
