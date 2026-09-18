@@ -4414,12 +4414,13 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
     );
     assert!(!manager.predictive_precompression_skipped_by_cache(&request, &capabilities));
 
-    // hit_rate = 0.9（54_000 / 60_000），头部空间 (95_904 − 60_000) / 95_904 ≈ 0.374 > 0.2 → 跳过。
+    // hit_rate = 0.9（27_000 / 30_000），锚定基数为 30_000 + 27_000 = 57_000，
+    // 头部空间 (95_904 − 57_000) / 95_904 ≈ 0.406 > 0.2 → 跳过。
     manager.note_model_round_usage(
         &ModelRequest::new("model", messages.clone()),
         &TokenUsage {
-            input_tokens: Some(60_000),
-            cache_read_tokens: Some(54_000),
+            input_tokens: Some(30_000),
+            cache_read_tokens: Some(27_000),
             ..TokenUsage::unknown()
         },
     );
@@ -4427,8 +4428,8 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
 
     // 同一命中率但历史增量把估算推高到逼近预算、头部不足 → 不跳过。
     // FixedEstimator 忽略切片长度：锚点按 1 条消息记录后，message_tokens
-    // 即“锚点之后的新增估算”，30_000 把总量推到 90_000，
-    // 头部 (95_904 − 90_000)/95_904 ≈ 0.06 < 0.2。
+    // 即“锚点之后的新增估算”，30_000 把总量推到 87_000，
+    // 头部 (95_904 − 87_000)/95_904 ≈ 0.09 < 0.2。
     let crowded = ContextManager::new(
         ContextPolicy::default(),
         Arc::new(FixedEstimator {
@@ -4441,8 +4442,8 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
     crowded.note_model_round_usage(
         &ModelRequest::new("model", messages.clone()),
         &TokenUsage {
-            input_tokens: Some(60_000),
-            cache_read_tokens: Some(54_000),
+            input_tokens: Some(30_000),
+            cache_read_tokens: Some(27_000),
             ..TokenUsage::unknown()
         },
     );
@@ -4565,11 +4566,10 @@ fn cache_tool_reply(input_tokens: u64, cache_read_tokens: u64, call_id: &str) ->
 #[tokio::test]
 async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
     // 窗口 94_096、输出上限 16 → 输入预算 94_080，85% 线 79_968。
-    // 首轮工具 Round 锚定 input 60_000、cache_read 56_000（hit_rate ≈ 0.93）；
-    // 次轮估算 = 60_000 + 11_500 = 71_500（75%，不触发既有线）；
-    // 预测 71_500 + 15_016 = 86_516 < 94_080 不触发；头部空间
-    // (94_080 − 71_500) / 94_080 ≈ 0.24 > 0.2 → 即便命中也跳过。
-    // 次轮水位 75% ≥ 70% 且无压缩 → 照常发送一条水位事件。
+    // 首轮工具 Round 锚定 input 30_000 + cache_read 27_000 = 57_000（hit_rate ≈ 0.9）；
+    // 次轮估算 = 57_000 + 11_500 = 68_500（72%，不触发既有线）；
+    // 预测 68_500 + 15_016 = 83_516 < 94_080 不触发；头部空间
+    // (94_080 − 68_500) / 94_080 ≈ 0.27 > 0.2 → 即便命中也跳过。
     let capabilities = ProviderCapabilities {
         max_context_tokens: Some(94_096),
         max_output_tokens: Some(16),
@@ -4578,7 +4578,7 @@ async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
     let provider = Arc::new(ScriptedProvider::new(
         capabilities,
         [
-            cache_tool_reply(60_000, 56_000, "skip-call"),
+            cache_tool_reply(30_000, 27_000, "skip-call"),
             text_reply("最终回答"),
         ],
     ));

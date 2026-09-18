@@ -837,8 +837,9 @@ impl Default for ContextPolicy {
 /// 一轮已确认模型用量形成的估算锚点。
 #[derive(Clone, Copy, Debug)]
 struct RoundUsageAnchor {
-    /// 该轮请求由 Provider 归一化报告的输入 Token（已含缓存读写与请求期注入内容），
-    /// 即“截至该轮请求时点”的真实上下文输入规模。
+    /// 该轮请求的真实上下文输入规模：input_tokens 加 cache_read_tokens（已含
+    /// 缓存读写与请求期注入内容），与桌面悬浮卡的上下文口径一致。
+    /// 部分 Chat 网关把 prompt_tokens 报成非缓存明细，单取 input_tokens 会低估。
     input_tokens: u64,
     /// 产生该用量的请求包含的消息数量；其后追加的消息按逐块规则增量估算。
     message_count: usize,
@@ -955,7 +956,8 @@ impl ContextManager {
     /// 输入用量）或消息前缀已被压缩替换（压缩成功会清除锚点）时，回退为全量
     /// 逐块估算。
     ///
-    /// 口径推演：锚点是上一轮请求时点的 `usage.input_tokens`（已含缓存部分）。
+    /// 口径推演：锚点是上一轮请求时点的 `usage.input_tokens + usage.cache_read_tokens`
+    /// （已含缓存部分）。
     /// 其后新增的消息是该轮响应的 assistant 输出、工具结果与可能的 steer 注入
     /// ——上一轮 output 将作为本轮输入进入上下文，因此必须计入增量估算；不能
     /// 把 usage.output_tokens 直接加到总量上，否则 output 会在“增量 assistant
@@ -986,6 +988,9 @@ impl ContextManager {
         let Some(input_tokens) = usage.input_tokens.filter(|input| *input > 0) else {
             return;
         };
+        // 部分 Chat 网关把 prompt_tokens 报成非缓存明细（cached_tokens 单列）；
+        // 锚定基数加回 cache_read_tokens，与桌面悬浮卡的上下文口径保持一致。
+        let input_tokens = input_tokens.saturating_add(usage.cache_read_tokens.unwrap_or(0));
         let mut anchor = self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
         *anchor = Some(RoundUsageAnchor {
             input_tokens,
