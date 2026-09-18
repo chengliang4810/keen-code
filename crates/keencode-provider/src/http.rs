@@ -316,7 +316,11 @@ pub(crate) fn replay_wire_error_response(status: u16, body: &[u8]) -> ModelError
 
 /// 把 reqwest 错误转换为不含认证信息的传输错误。
 pub(crate) fn transport_error(error: reqwest::Error, api_key: Option<&ApiKey>) -> ModelError {
-    let retryable = error.is_timeout() || error.is_connect() || error.is_body();
+    // 发送阶段失败（对端在响应到达前关闭连接）只携带 request 类别，不满足
+    // timeout/connect/body 判定；此时尚未观察到任何响应字节，静默重试与既有
+    // 传输失败同级，代价至多是一次重复的模型调用。
+    let retryable =
+        error.is_timeout() || error.is_connect() || error.is_body() || error.is_request();
     let category = if error.is_timeout() {
         "timeout"
     } else if error.is_connect() {

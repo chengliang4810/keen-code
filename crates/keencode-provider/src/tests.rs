@@ -6004,6 +6004,40 @@ fn spawn_retry_server(responses: Vec<String>) -> (String, JoinHandle<Result<Vec<
     (format!("http://{address}/v1"), thread)
 }
 
+/// 启动首个连接读取完整请求后立即关闭、随后按顺序服务固定完整响应的本地
+/// 服务；每个连接恰好一次并记录请求行。
+///
+/// 先读完请求再关闭，保证失败点落在等待响应而非写入请求正文，复现真实
+/// 网关给出的「connection closed before message completed」发送阶段失败。
+fn spawn_close_before_response_server(
+    follow_ups: Vec<String>,
+) -> (String, JoinHandle<Result<Vec<String>, String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应能绑定本地提前关闭测试端口");
+    listener
+        .set_nonblocking(true)
+        .expect("应能把本地提前关闭监听器设为非阻塞");
+    let address = listener.local_addr().expect("应能读取本地提前关闭测试地址");
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut request_lines = Vec::new();
+        let mut stream = accept_catalog_request(&listener, deadline)?;
+        let capture = read_model_request(&mut stream)?;
+        request_lines.push(capture.request_line);
+        drop(stream);
+        for response in follow_ups {
+            let mut stream = accept_catalog_request(&listener, deadline)?;
+            let capture = read_model_request(&mut stream)?;
+            request_lines.push(capture.request_line);
+            stream
+                .write_all(response.as_bytes())
+                .and_then(|_| stream.flush())
+                .map_err(|error| format!("写入本地提前关闭后续响应失败：{error}"))?;
+        }
+        Ok(request_lines)
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
 /// 创建带快速退避策略的重试测试客户端；等待时间压缩以保持测试迅捷。
 fn retry_client(base_url: &str, retry: RetryConfig) -> crate::ProviderClient {
     let mut config = ProviderConfig::new_unauthenticated(
@@ -6089,6 +6123,62 @@ async fn retry_可见输出前失败会退避重试且下游只见一次完整�
     assert_eq!(
         logical_observations(&observations),
         vec![("Started".to_owned(), 0, 3), ("Completed".to_owned(), 2, 3)]
+    );
+}
+
+/// 发送阶段失败（对端在响应到达前关闭连接）必须与连接、超时同级静默重试。
+///
+/// 该类失败在 reqwest 中只携带 request 类别，不满足 timeout/connect/body 判定；
+/// 若被当成不可重试，一次瞬时网关抖动就会终止整轮长任务。
+#[tokio::test(flavor = "multi_thread")]
+async fn retry_发送阶段连接中断会退避重试且保留传输类别() {
+    let (base_url, server) = spawn_close_before_response_server(vec![raw_http_response(
+        "200 OK",
+        "text/event-stream",
+        &responses_sse_success(),
+    )]);
+    let observer = Arc::new(RecordingRequestObserver::default());
+    let client =
+        retry_client(&base_url, quick_retry_policy(3)).with_request_observer(observer.clone());
+    let response = collect_model_stream(client.stream(minimal_request()).await.unwrap())
+        .await
+        .expect("发送阶段连接中断应静默重试并形成完整响应");
+    assert_eq!(response.content, vec![ContentBlock::text("KC_OK")]);
+    assert_eq!(
+        server.join().unwrap().unwrap().len(),
+        2,
+        "应发起第二次真实尝试"
+    );
+
+    let observations = observer.snapshot();
+    assert_eq!(
+        attempt_observations(&observations),
+        vec![
+            ("Started".to_owned(), 1, 3),
+            ("Failed".to_owned(), 1, 3),
+            ("Started".to_owned(), 2, 3),
+            ("Completed".to_owned(), 2, 3),
+        ]
+    );
+    let first_failure = observations
+        .iter()
+        .find(|observation| {
+            observation.scope == RequestObservationScope::Attempt
+                && observation.state == RequestObservationState::Failed
+        })
+        .expect("首次尝试应记录失败观测");
+    assert_eq!(
+        first_failure.error_kind,
+        Some(crate::RequestErrorKind::Transport)
+    );
+    assert!(
+        first_failure
+            .error_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("[request]"),
+        "失败点必须落在发送阶段而非连接建立或响应体读取：{:?}",
+        first_failure.error_summary
     );
 }
 
