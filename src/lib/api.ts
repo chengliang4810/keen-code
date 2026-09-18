@@ -1195,8 +1195,6 @@ export interface CustomProvider {
   maxOutputTokens?: Record<string, number>;
   /** Chat 网关接受的输出预算字段；默认采用标准字段。 */
   chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
-  /** 启用 1M 上下文的模型集合；空对象表示全部未启用。 */
-  context1m?: Record<string, boolean>;
   /** 每模型是否支持图片输入。 */
   supportsVision: Record<string, boolean>;
 }
@@ -1221,7 +1219,6 @@ export async function providersUpsert(body: {
   contextWindows?: Record<string, number>;
   maxOutputTokens?: Record<string, number>;
   chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
-  context1m?: Record<string, boolean>;
   supportsVision: Record<string, boolean>;
   createOnly: boolean;
 }) {
@@ -1235,7 +1232,6 @@ export async function providersUpsert(body: {
     contextWindows: body.contextWindows ?? {},
     maxOutputTokens: body.maxOutputTokens ?? {},
     chatOutputTokenField: body.chatOutputTokenField ?? "max_completion_tokens",
-    context1m: body.context1m ?? {},
     supportsVision: body.supportsVision,
     createOnly: body.createOnly,
   });

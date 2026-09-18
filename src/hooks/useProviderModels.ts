@@ -17,11 +17,16 @@ import {
   applyModelMetadata,
   DEFAULT_EFFORT,
   effortsForModel,
+  findActiveModel,
+  formatSessionModelReference,
   hasConfiguredProviderModel,
+  isBoundSessionModelReference,
   isValidEffort,
   isValidModelId,
+  modelIdFromSessionReference,
   pickDefaultEffort,
   pickNewChatModel,
+  providerIdFromSessionReference,
   type ModelOption,
 } from "@/lib/modelCatalog";
 
@@ -40,8 +45,17 @@ export interface UseProviderModelsOptions {
 }
 
 export interface UseProviderModelsResult {
+  /** 当前会话或草稿使用的模型 ID。 */
   modelId: string;
-  setModelId: SetState<string>;
+  /** 当前会话实际绑定的供应商；草稿尚未选定或引用缺失时为空。 */
+  sessionProviderId: string | null;
+  /**
+   * 以 `providerId::modelId` 引用更新 Composer 模型。
+   *
+   * 同一模型 ID 可能同时存在于多个供应商，只保存模型 ID 会让菜单回落成全局活跃
+   * 供应商，因此这里保存完整引用；空引用表示尚未选定。
+   */
+  setSessionModelReference: SetState<string>;
   effort: string;
   setEffort: SetState<string>;
   configuredModels: ModelOption[];
@@ -68,7 +82,24 @@ export function useProviderModels({
   showToast,
 }: UseProviderModelsOptions): UseProviderModelsResult {
   const tr = useMemo(() => createT(locale), [locale]);
-  const [modelId, setModelId] = useState("");
+  /**
+   * 会话模型引用 `providerId::modelId`。同一模型 ID 可能同时存在于多个供应商，
+   * 只保留模型 ID 会让菜单回落成全局活跃供应商，因此这里保存完整引用。
+   */
+  const [sessionModelReference, setSessionModelReference] = useState("");
+  /**
+   * Host 在 Session 尚未绑定 Provider 时返回 `unconfigured` 占位值。该状态由运行时
+   * 回退到全局默认 Provider，因此必须按“未选择”处理，不能当成模型名展示或据它拦截发送。
+   */
+  const boundSessionModelReference = isBoundSessionModelReference(
+    sessionModelReference,
+  )
+    ? sessionModelReference
+    : "";
+  const modelId = modelIdFromSessionReference(boundSessionModelReference);
+  const sessionProviderId = providerIdFromSessionReference(
+    boundSessionModelReference,
+  );
   /** 异步目录刷新只初始化新草稿，不能覆盖已恢复的会话模型。 */
   const currentSessionIdRef = useRef(sessionId);
   currentSessionIdRef.current = sessionId;
@@ -91,26 +122,20 @@ export function useProviderModels({
     () =>
       configuredModels.map((model) => {
         const merged = applyModelMetadata(model, modelMetadataById[model.id]);
-        if (model.contextWindow) {
-          return { ...merged, contextWindow: model.contextWindow };
-        }
-        return merged;
+        return {
+          ...merged,
+          contextWindow: model.contextWindow ?? merged.contextWindow,
+          supportsVision: model.supportsVision ?? merged.supportsVision,
+        };
       }),
     [configuredModels, modelMetadataById],
   );
 
   const activeModel = useMemo(
-    () =>
-      availableModels.find(
-        (model) =>
-          model.id === modelId &&
-          (!activeCustomProvider?.id ||
-            model.providerId === activeCustomProvider.id),
-      ),
-    [activeCustomProvider?.id, availableModels, modelId],
+    () => findActiveModel(modelId, sessionProviderId, availableModels),
+    [availableModels, modelId, sessionProviderId],
   );
-  const modelLabel =
-    availableModels.find((model) => model.id === modelId)?.label ?? modelId;
+  const modelLabel = activeModel?.label ?? modelId;
 
   const refreshProviderRoute = useCallback(async () => {
     if (!api.isTauri()) {
@@ -136,10 +161,10 @@ export function useProviderModels({
             list.activeProviderId === provider.id &&
             list.defaultModel === model,
           source: provider.apiBackend,
-          // 1M 标志优先于手工上下文配置，均优先于公共元数据目录。
-          contextWindow: provider.context1m?.[model]
-            ? 1_000_000
-            : provider.contextWindows?.[model],
+          // 手工配置优先；未配置时与运行时一致回退默认 1M。
+          contextWindow: provider.contextWindows?.[model] ?? 1_000_000,
+          // 供应商视觉配置是权威值，模型菜单据此标注图片输入能力。
+          supportsVision: provider.supportsVision[model],
         })),
       );
       setConfiguredModels(providerModels);
@@ -148,7 +173,14 @@ export function useProviderModels({
         list.defaultModel,
         providerModels,
       );
-      if (!currentSessionIdRef.current) setModelId(defaultModel?.id ?? "");
+      // 草稿的模型引用必须带上供应商，否则菜单会借用同名模型的其他供应商条目。
+      if (!currentSessionIdRef.current) {
+        setSessionModelReference(
+          defaultModel
+            ? formatSessionModelReference(defaultModel.providerId, defaultModel.id)
+            : "",
+        );
+      }
     } catch {
       /* 保留上一次可用路由，避免设置页短暂失败清空当前模型。 */
     }
@@ -219,6 +251,8 @@ export function useProviderModels({
       );
   }, [locale, refreshProviderRoute, showToast, tr]);
 
+  // 发送门槛保持按全局默认供应商判断：会话绑定的供应商被删除时，运行时仍会给出
+  // 明确错误，比在这里静默禁用发送按钮更容易定位。
   const hasConfiguredModel = hasConfiguredProviderModel(
     activeCustomProvider?.id,
     activeCustomModelId,
@@ -227,7 +261,8 @@ export function useProviderModels({
 
   return {
     modelId,
-    setModelId,
+    sessionProviderId,
+    setSessionModelReference,
     effort,
     setEffort,
     configuredModels,

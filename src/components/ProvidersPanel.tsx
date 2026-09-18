@@ -48,8 +48,6 @@ type FormState = {
   /** 手动添加模型的上下文窗口输入（token）；空表示不配置。 */
   contextWindowDraft: string;
   maxOutputTokensDraft: string;
-  /** 手动添加模型的 1M 开关。 */
-  context1mDraft: boolean;
   /** 手动添加模型是否支持图片输入。 */
   supportsVisionDraft: boolean;
   apiKey: string;
@@ -58,8 +56,6 @@ type FormState = {
   /** 每模型手工配置的上下文窗口（token）；缺省表示自动获取或回退默认。 */
   contextWindows: Record<string, number>;
   maxOutputTokens: Record<string, number>;
-  /** 启用 1M 上下文的模型集合；缺省表示不启用。 */
-  context1m: Record<string, boolean>;
   /** 每模型是否支持图片输入。 */
   supportsVision: Record<string, boolean>;
 };
@@ -91,16 +87,14 @@ const emptyForm = (): FormState => ({
   baseUrl: "",
   models: [],
   modelDraft: "",
-  contextWindowDraft: "",
+  contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
   maxOutputTokensDraft: "128000",
-  context1mDraft: false,
   supportsVisionDraft: false,
   apiKey: "",
   apiBackend: "responses",
   chatOutputTokenField: "max_completion_tokens",
   contextWindows: {},
   maxOutputTokens: {},
-  context1m: {},
   supportsVision: {},
 });
 
@@ -111,6 +105,16 @@ function hostOf(url: string): string {
   } catch {
     return url;
   }
+}
+
+/** 模型上下文窗口默认值：1M。 */
+const DEFAULT_MODEL_CONTEXT_WINDOW = 1_000_000;
+
+/** 接口窗口小于 1M 时采用接口值，否则回退默认 1M。 */
+function effectiveContextWindow(value?: number | null): number {
+  return value && value < DEFAULT_MODEL_CONTEXT_WINDOW
+    ? value
+    : DEFAULT_MODEL_CONTEXT_WINDOW;
 }
 
 /** 模型设置主面板。 */
@@ -169,16 +173,14 @@ export function ProvidersPanel({
       baseUrl: provider.baseUrl,
       models: [...provider.models],
       modelDraft: "",
-      contextWindowDraft: "",
+      contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
-      context1mDraft: false,
       supportsVisionDraft: false,
       apiKey: provider.apiKey ?? "",
       apiBackend: provider.apiBackend,
       chatOutputTokenField: provider.chatOutputTokenField ?? "max_completion_tokens",
       contextWindows: { ...provider.contextWindows },
       maxOutputTokens: { ...provider.maxOutputTokens },
-      context1m: { ...provider.context1m },
       supportsVision: { ...provider.supportsVision },
     });
     setHint(null);
@@ -186,7 +188,7 @@ export function ProvidersPanel({
     setRightMode("edit");
   }, []);
 
-  /** 读取供应商列表，并默认选中第一项。 */
+  /** 读取供应商列表；优先选中预选供应商，缺省时回退第一项。 */
   const reload = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -248,7 +250,7 @@ export function ProvidersPanel({
         const [item] = await api.modelMetadataGetMany([form.modelDraft.trim()]);
         if (!cancelled) setForm((current) => ({
           ...current,
-          ...(!draftEdited.current.has("context") ? { contextWindowDraft: String(item?.contextWindow ?? ""), context1mDraft: false } : {}),
+          ...(!draftEdited.current.has("context") ? { contextWindowDraft: String(effectiveContextWindow(item?.contextWindow)) } : {}),
           ...(!draftEdited.current.has("output") ? { maxOutputTokensDraft: String(item?.maxOutputTokens ?? 128000) } : {}),
           ...(!draftEdited.current.has("vision") ? { supportsVisionDraft: item?.supportsVision ?? false } : {}),
         }));
@@ -268,9 +270,8 @@ export function ProvidersPanel({
     setForm((current) => ({
       ...current,
       modelDraft: "",
-      contextWindowDraft: "",
+      contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
-      context1mDraft: false,
       supportsVisionDraft: false,
     }));
     setModelAddOpen(true);
@@ -283,9 +284,10 @@ export function ProvidersPanel({
     setForm((current) => ({
       ...current,
       modelDraft: model,
-      contextWindowDraft: String(remote ? item?.contextWindow ?? "" : current.contextWindows[model] ?? ""),
+      contextWindowDraft: remote
+        ? String(effectiveContextWindow(item?.contextWindow))
+        : String(current.contextWindows[model] ?? DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: String(remote ? item?.maxOutputTokens ?? 128000 : current.maxOutputTokens[model] ?? 128000),
-      context1mDraft: remote ? false : Boolean(current.context1m[model]),
       supportsVisionDraft: remote ? Boolean(item?.supportsVision) : Boolean(current.supportsVision[model]),
     }));
     if (remote) setModelPickerOpen(false);
@@ -305,7 +307,7 @@ export function ProvidersPanel({
     if (modelEditTarget?.remote) {
       setRemoteModels((current) => current.map((item) => item.id === model ? {
         ...item,
-        contextWindow: form.context1mDraft ? 1000000 : Number(form.contextWindowDraft) || null,
+        contextWindow: Number(form.contextWindowDraft) || null,
         maxOutputTokens: Number(form.maxOutputTokensDraft),
         supportsVision: form.supportsVisionDraft,
       } : item));
@@ -320,12 +322,6 @@ export function ProvidersPanel({
       } else {
         delete contextWindows[model];
       }
-      const context1m = { ...current.context1m };
-      if (current.context1mDraft) {
-        context1m[model] = true;
-      } else {
-        delete context1m[model];
-      }
       const supportsVision = {
         ...current.supportsVision,
         [model]: current.supportsVisionDraft,
@@ -336,13 +332,11 @@ export function ProvidersPanel({
           ? current.models
           : [...current.models, model],
         modelDraft: "",
-        contextWindowDraft: "",
+        contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
-        context1mDraft: false,
         supportsVisionDraft: false,
         contextWindows,
         maxOutputTokens: { ...current.maxOutputTokens, [model]: Number(current.maxOutputTokensDraft) },
-        context1m,
         supportsVision,
       };
     });
@@ -357,8 +351,6 @@ export function ProvidersPanel({
       delete contextWindows[model];
       const maxOutputTokens = { ...current.maxOutputTokens };
       delete maxOutputTokens[model];
-      const context1m = { ...current.context1m };
-      delete context1m[model];
       const supportsVision = { ...current.supportsVision };
       delete supportsVision[model];
       return {
@@ -366,7 +358,6 @@ export function ProvidersPanel({
         models: current.models.filter((item) => item !== model),
         contextWindows,
         maxOutputTokens,
-        context1m,
         supportsVision,
       };
     });
@@ -409,7 +400,6 @@ export function ProvidersPanel({
         chatOutputTokenField: form.chatOutputTokenField,
         contextWindows: form.contextWindows,
         maxOutputTokens: Object.fromEntries(form.models.map((model) => [model, form.maxOutputTokens[model] ?? 128000])),
-        context1m: form.context1m,
         supportsVision: form.supportsVision,
         createOnly: !editingId,
       });
@@ -480,7 +470,7 @@ export function ProvidersPanel({
       const models = result.models.map((model) => ({
         id: model.id,
         ownedBy: model.ownedBy,
-        contextWindow: form.context1m[model.id] ? 1000000 : form.contextWindows[model.id] ?? metadata.get(model.id)?.contextWindow ?? model.contextWindow,
+        contextWindow: form.contextWindows[model.id] ?? effectiveContextWindow(metadata.get(model.id)?.contextWindow ?? model.contextWindow),
         maxOutputTokens: form.maxOutputTokens[model.id] ?? metadata.get(model.id)?.maxOutputTokens ?? 128000,
         supportsVision: form.supportsVision[model.id] ?? metadata.get(model.id)?.supportsVision ?? false,
       }));
@@ -522,11 +512,13 @@ export function ProvidersPanel({
     URL.revokeObjectURL(url);
   };
 
-  /** 以 JSON 复制当前编辑供应商的完整配置（含 API Key）。 */
+  /**
+   * 以 JSON 复制当前编辑供应商的完整配置（含 API Key）。
+   * 导出的 IPC 往返在写入发起后完成，避免等待期间手势过期被 WebKit 拒绝。
+   */
   const copyProvider = async (provider: api.CustomProvider) => {
     try {
-      const json = await api.providersExport(provider.id);
-      await navigator.clipboard.writeText(json);
+      await copyTextInGesture(() => api.providersExport(provider.id));
       setHint(tr("prov.copyDone"));
       setHintTone("ok");
     } catch (copyError) {
@@ -623,13 +615,11 @@ export function ProvidersPanel({
     const selected = [...selectedRemoteModels];
     setForm((current) => {
       const contextWindows = { ...current.contextWindows };
-      const context1m = { ...current.context1m };
       const supportsVision = { ...current.supportsVision };
       const maxOutputTokens = { ...current.maxOutputTokens };
       for (const model of remoteModels.filter((item) => selectedRemoteModels.has(item.id))) {
         if (model.contextWindow) contextWindows[model.id] = model.contextWindow;
         else delete contextWindows[model.id];
-        delete context1m[model.id];
         supportsVision[model.id] = model.supportsVision;
         maxOutputTokens[model.id] = model.maxOutputTokens;
       }
@@ -641,7 +631,6 @@ export function ProvidersPanel({
         ],
         contextWindows,
         maxOutputTokens,
-        context1m,
         supportsVision,
       };
     });
@@ -940,9 +929,9 @@ export function ProvidersPanel({
                           {model}
                         </span>
                         {form.supportsVision[model] && <span>{tr("prov.supportsVision")}</span>}
-                        {(form.context1m[model] || form.contextWindows[model]) && (
+                        {form.contextWindows[model] && (
                           <span title={tr("prov.contextWindowFor", { model })}>
-                            {formatTokenCount(form.context1m[model] ? 1000000 : form.contextWindows[model]!)}
+                            {formatTokenCount(form.contextWindows[model])}
                           </span>
                         )}
                         <Button type="button" variant="icon"
@@ -1085,8 +1074,7 @@ export function ProvidersPanel({
                 setForm((current) => ({
                   ...current,
                   modelDraft: event.target.value,
-                  contextWindowDraft: "",
-                  context1mDraft: false,
+                  contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
                   supportsVisionDraft: false,
                   maxOutputTokensDraft: "128000",
                 }));
@@ -1118,23 +1106,6 @@ export function ProvidersPanel({
               onChange={(event) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: event.target.value })); }} />
           </div>
           <div className="prov-model-options">
-            <div className="prov-model-option">
-              <Checkbox
-                id="provider-model-context-1m-draft"
-                className="size-[14px] cursor-pointer"
-                checked={form.context1mDraft}
-                onCheckedChange={(checked) => {
-                  draftEdited.current.add("context");
-                  setForm((current) => ({
-                    ...current,
-                    context1mDraft: checked === true,
-                    contextWindowDraft:
-                      checked === true ? "" : current.contextWindowDraft,
-                  }));
-                }}
-              />
-              <Label htmlFor="provider-model-context-1m-draft">1M</Label>
-            </div>
             <div className="prov-model-option">
               <Checkbox
                 id="provider-model-vision-draft"

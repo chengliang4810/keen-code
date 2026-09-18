@@ -32,7 +32,7 @@ describe("ProvidersPanel 添加模型弹窗", () => {
     const modal = source.slice(source.indexOf("open={modelAddOpen}"), source.indexOf("open={modelPickerOpen}"));
     expect(modal).toContain("data-modal-autofocus");
     expect(modal).toContain("addDraftModel()");
-    for (const field of ["modelDraft", "contextWindowDraft", "context1mDraft", "supportsVisionDraft"]) {
+    for (const field of ["modelDraft", "contextWindowDraft", "supportsVisionDraft"]) {
       expect(modal).toContain(`form.${field}`);
     }
     expect(modal).not.toContain("providersUpsert");

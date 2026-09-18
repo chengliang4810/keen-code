@@ -5,8 +5,8 @@ describe("供应商 API Key 本地持久化契约", () => {
   it("显式传递兼容网关预算字段", async () => {
     const invoke = vi.fn().mockResolvedValue({});
     vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
-    await api.providersUpsert({ id: "gateway", models: ["hy3"], baseUrl: "http://127.0.0.1:1/v1", apiBackend: "chat_completions", supportsVision: {}, createOnly: true, chatOutputTokenField: "max_tokens", });
-    expect(invoke).toHaveBeenCalledWith("providers_upsert", expect.objectContaining({ chatOutputTokenField: "max_tokens", }), undefined);
+    await api.providersUpsert({ id: "gateway", models: ["hy3"], baseUrl: "http://127.0.0.1:1/v1", apiBackend: "chat_completions", supportsVision: {}, createOnly: true, chatOutputTokenField: "max_tokens" });
+    expect(invoke).toHaveBeenCalledWith("providers_upsert", expect.objectContaining({ chatOutputTokenField: "max_tokens" }), undefined);
   });
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -43,7 +43,6 @@ describe("供应商 API Key 本地持久化契约", () => {
         maxOutputTokens: { model: 128000 },
         chatOutputTokenField: "max_completion_tokens",
         supportsVision: { model: false },
-        context1m: {},
         createOnly: true,
       },
       undefined,
