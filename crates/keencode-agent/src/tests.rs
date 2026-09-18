@@ -1702,6 +1702,80 @@ async fn ordinary_tool_calls_keep_terminal_stop_reasons_fail_closed() {
     }
 }
 
+/// 兼容端点用结束原因自报失败时，必须展示上游原因而不是归咎于工具或本地协议。
+#[tokio::test]
+async fn provider_failure_stop_reason_reports_upstream_cause_not_tools() {
+    // 纯文本响应：保留已收到的正文，并把上游原因作为终态错误上报。
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [text_reply_with_stop(
+            "已收到的部分正文",
+            StopReason::Other {
+                reason: "error".to_owned(),
+            },
+        )],
+    ));
+    let result = runner(provider, ToolRegistry::new())
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    match &result.error {
+        Some(AgentRunError::Model(ModelError::ProviderUnavailable { message, .. })) => {
+            assert!(message.contains("error"), "{message}");
+        }
+        other => panic!("应归因为带上游原因的上游错误，实际为 {other:?}"),
+    }
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.messages.len(), 2);
+    assert!(
+        result
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|block| matches!(block, ContentBlock::Text { text } if text == "已收到的部分正文"))
+    );
+
+    // 带完整工具调用：同样按上游失败收尾，绝不进入工具执行或报成工具相关错误。
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [tool_reply_with_stop(
+            &[("call-upstream-error", "record", json!({"value": "write"}))],
+            StopReason::Other {
+                reason: "server_error".to_owned(),
+            },
+        )],
+    ));
+    let tool = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(tool.clone())
+        .expect("上游失败测试工具应可注册");
+    let result = runner(provider, registry)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    match &result.error {
+        Some(AgentRunError::Model(ModelError::ProviderUnavailable { message, .. })) => {
+            assert!(message.contains("server_error"), "{message}");
+            assert!(
+                !message.contains("工具"),
+                "上游失败不得归咎于工具：{message}"
+            );
+        }
+        other => panic!("应有工具调用时仍归因为上游错误，实际为 {other:?}"),
+    }
+    assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
+    assert_eq!(result.state.step_count(), 0);
+    assert_eq!(tool.call_count(), 0);
+    // 分类也必须落在上游故障而不是未知错误，便于前端与 Hook 区分原因。
+    assert_eq!(
+        agent_run_error_category(result.error.as_ref().expect("上游失败应有终态错误")),
+        "server_error"
+    );
+}
+
 /// 悬空或参数 JSON 不完整的工具块在模型流归约阶段失败，绝不能进入执行器。
 #[tokio::test]
 async fn malformed_or_incomplete_tool_blocks_fail_closed_before_execution() {

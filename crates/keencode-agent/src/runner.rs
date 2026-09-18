@@ -4564,7 +4564,14 @@ fn cancelled_model_error() -> ModelError {
 }
 
 /// 把 Provider 已确认的模型终止原因转换为不会丢失语义的 Turn 错误。
+///
+/// 端点自报失败的未知结束原因（如 `finish_reason: "error"`）先归因为带上游
+/// 原因的上游错误：这类响应既不是可执行工具请求，也不是本地协议缺陷，直接按
+/// 工具或协议语义报错会掩盖真实原因。
 fn model_terminal_error(stop_reason: &StopReason) -> Option<AgentRunError> {
+    if let Some(error) = stop_reason.provider_failure_error() {
+        return Some(AgentRunError::Model(error));
+    }
     match stop_reason {
         StopReason::MaxOutputTokens => Some(AgentRunError::ModelOutputLimit),
         StopReason::ContentFilter => Some(AgentRunError::ModelRefusal),
