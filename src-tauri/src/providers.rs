@@ -276,12 +276,9 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
         ..ProviderCapabilities::default()
     };
     for model in &provider.models {
-        // 手工配置的窗口优先；未配置的模型回退默认 1M。
-        let max_context_tokens = provider
-            .context_windows
-            .get(model)
-            .copied()
-            .unwrap_or(1_000_000);
+        // 仅手工配置的窗口进入能力快照；未配置的模型保持未知（None），
+        // 由运行期预算路径按"窗口未知"处理，避免把小窗口模型误判成 1M。
+        let max_context_tokens = provider.context_windows.get(model).copied();
         config.model_capabilities.insert(
             model.clone(),
             ProviderCapabilities {
@@ -300,7 +297,7 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
                         .copied()
                         .unwrap_or(128_000),
                 )),
-                max_context_tokens: Some(max_context_tokens),
+                max_context_tokens,
                 ..ProviderCapabilities::default()
             },
         );
@@ -2067,7 +2064,7 @@ mod provider_registry_tests {
         assert_eq!(config.base_url().as_str(), "http://127.0.0.1:11434/v1/");
     }
 
-    /// 注册表能力按手工窗口优先、未配置回退默认 1M 生成，且始终保留基础流式与工具能力。
+    /// 注册表能力按手工窗口生成；未配置窗口保持未知（None），且始终保留基础流式与工具能力。
     #[test]
     fn registry_maps_context_capability_priority_and_default() {
         let mut provider = provider(
@@ -2118,7 +2115,7 @@ mod provider_registry_tests {
             .resolve("gateway", "default-model")
             .expect("未配置窗口模型应解析")
             .capabilities("default-model");
-        assert_eq!(default.max_context_tokens, Some(1_000_000));
+        assert_eq!(default.max_context_tokens, None);
     }
 
     /// 完整替换必须注册全部供应商，并按独立 Provider 与精确模型字段隔离解析。
