@@ -171,6 +171,7 @@ function makeOptions(input: {
     refreshSessions: async () => undefined,
     applyMessagePrefixTitle: vi.fn(),
     applyAutomaticSessionTitle: async () => undefined,
+    markSessionUserMessage: vi.fn(),
     updateSessionPreference: vi.fn(),
     clearDraftNavigationSnapshot: vi.fn(),
   };
@@ -329,6 +330,11 @@ describe("useSessionSend local error recovery", () => {
       fixture.events.indexOf("api.send:turn-visible"),
     );
     expect(fixture.getLocalError()).toBe(localizeUiError(failure, "zh"));
+    // 发送成功即推进侧栏排序键，不能等下一次列表刷新才让会话上浮。
+    expect(fixture.options.runtime.markSessionUserMessage).toHaveBeenCalledWith(
+      "session-visible",
+      expect.any(String),
+    );
   });
 
   it("后台会话发送不会清除前台错误", async () => {

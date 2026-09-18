@@ -689,6 +689,9 @@ export default function App() {
     setExpandedProjects,
     visibleSessionsByProject,
     setVisibleSessionsByProject,
+    sessionSortMode,
+    setSessionSortMode,
+    markSessionUserMessage,
     projectDropHint,
     setProjectDropHint,
     projectsOpen,
@@ -1106,6 +1109,7 @@ export default function App() {
       refreshSessions,
       applyMessagePrefixTitle,
       applyAutomaticSessionTitle,
+      markSessionUserMessage,
       updateSessionPreference,
       clearDraftNavigationSnapshot: () => {
         draftNavigationSnapshotRef.current = null;

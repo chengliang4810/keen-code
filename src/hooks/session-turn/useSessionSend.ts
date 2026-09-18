@@ -89,6 +89,7 @@ export function useSessionSend({
     currentViewFocus,
     applyMessagePrefixTitle,
     applyAutomaticSessionTitle,
+    markSessionUserMessage,
   } = runtime;
   const {
     setSession,
@@ -400,6 +401,8 @@ export function useSessionSend({
         }
         applyMessagePrefixTitle(resolvedSessionId, optimisticDisplay);
         void applyAutomaticSessionTitle(resolvedSessionId, optimisticDisplay);
+        // 侧栏按最近用户消息排序：本地立即推进排序键，否则要等下一次列表刷新才上浮。
+        markSessionUserMessage(resolvedSessionId, new Date(ts).toISOString());
         if (
           viewingSessionIdRef.current === resolvedSessionId ||
           viewingTarget()
@@ -503,6 +506,7 @@ export function useSessionSend({
       hasConfiguredModel,
       locale,
       liveHostRef,
+      markSessionUserMessage,
       messagesBySessionRef,
       modelLabel,
       patchSessionMessages,
