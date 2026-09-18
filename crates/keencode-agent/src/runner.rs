@@ -1559,13 +1559,27 @@ impl AgentRunner {
                 active.compactions.push(outcome.record);
                 // 已发出的 Started 必须配对终态：机械截断不产生权威压缩记录，
                 // 只能用同通道的 transient 终态闭合前端的"压缩中"状态。
-                self.deliver_context_compaction_event(
-                    request,
-                    active.state.round_count(),
-                    AgentStreamEventKind::ContextCompactionTruncated { estimated_tokens },
-                    false,
-                )
-                .await?;
+                // 截断此刻已生效，终态是纯观测通道，投递失败只记录、不上抛，
+                // 避免 sink 故障把已生效的截断上报成 Turn 失败。
+                if let Err(error) = self
+                    .deliver_context_compaction_event(
+                        request,
+                        active.state.round_count(),
+                        AgentStreamEventKind::ContextCompactionTruncated { estimated_tokens },
+                        false,
+                    )
+                    .await
+                {
+                    if matches!(error, AgentRunError::Cancelled) {
+                        return Err(error);
+                    }
+                    tracing::warn!(
+                        target: "keencode_diagnostics",
+                        component = "agent_runner.compaction",
+                        %error,
+                        "机械截断终态事件投递失败，截断已生效"
+                    );
+                }
                 Ok(true)
             }
             Err(error) => {
