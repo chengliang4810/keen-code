@@ -4,6 +4,7 @@ import {
   buildTimelineUnits,
   isPhaseWorthy,
   phaseTitleModel,
+  splitTrailingContentUnits,
 } from "./timelinePhases";
 
 function tool(
@@ -197,5 +198,55 @@ describe("timelinePhases", () => {
       expect(units[1]!.live).toBe(false);
       expect(units[1]!.tools).toHaveLength(3);
     }
+  });
+});
+
+describe("splitTrailingContentUnits", () => {
+  it("末尾连续 content 归为答案区，其余全部归入工作区", () => {
+    const units = buildTimelineUnits(
+      [
+        { kind: "thought", text: "**定位**" },
+        tool("t1", "Read a"),
+        tool("t2", "Read b"),
+        { kind: "content", text: "第一段。" },
+        { kind: "content", text: "最终结论。" },
+      ],
+      { streaming: false },
+    );
+    const { work, tail } = splitTrailingContentUnits(units);
+    expect(work.map((u) => u.kind)).toEqual(["thought", "phase"]);
+    expect(tail.map((u) => u.kind)).toEqual(["content", "content"]);
+  });
+
+  it("末尾不是 content 时全部算工作区；纯文本回答工作区为空", () => {
+    const allWork = splitTrailingContentUnits(
+      buildTimelineUnits([tool("t1", "Read a"), tool("t2", "Read b")], {
+        streaming: false,
+      }),
+    );
+    expect(allWork.work.map((u) => u.kind)).toEqual(["phase"]);
+    expect(allWork.tail).toEqual([]);
+
+    const pureAnswer = splitTrailingContentUnits(
+      buildTimelineUnits([{ kind: "content", text: "直接回答。" }], {
+        streaming: false,
+      }),
+    );
+    expect(pureAnswer.work).toEqual([]);
+    expect(pureAnswer.tail.map((u) => u.kind)).toEqual(["content"]);
+  });
+
+  it("按位置切分：末尾压缩标记留在工作区，不做内容判断", () => {
+    const { work, tail } = splitTrailingContentUnits(
+      buildTimelineUnits(
+        [
+          { kind: "content", text: "说明。" },
+          { kind: "compaction", meta: { trigger: "auto" } },
+        ],
+        { streaming: false },
+      ),
+    );
+    expect(work.map((u) => u.kind)).toEqual(["content", "compaction"]);
+    expect(tail).toEqual([]);
   });
 });

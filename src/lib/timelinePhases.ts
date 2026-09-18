@@ -192,3 +192,20 @@ export function phaseTitleModel(phase: TimelinePhase): {
     live: phase.live,
   };
 }
+
+/**
+ * Split units into pre-answer work and the trailing answer run.
+ *
+ * The answer is positional: the trailing run of content units at the end of
+ * the timeline. Everything before it folds into one work group once the turn
+ * settles; output order stays identical to the flat projection.
+ */
+export function splitTrailingContentUnits(
+  units: TimelineUnit[],
+): { work: TimelineUnit[]; tail: TimelineUnit[] } {
+  let splitAt = units.length;
+  while (splitAt > 0 && units[splitAt - 1]!.kind === "content") {
+    splitAt -= 1;
+  }
+  return { work: units.slice(0, splitAt), tail: units.slice(splitAt) };
+}

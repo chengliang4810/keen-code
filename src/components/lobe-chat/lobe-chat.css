@@ -1159,6 +1159,63 @@
   transform: rotate(90deg);
 }
 
+/* ── Whole-turn work disclosure ── */
+.lobe-turn-work {
+  width: 100%;
+  max-width: var(--chat-content-max, 48rem);
+  margin: 0;
+  font-size: calc(12px + var(--ui-font-delta));
+  color: var(--chat-text-2);
+}
+.lobe-turn-work__trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 24px;
+  margin: 0;
+  padding: 2px 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: calc(12px + var(--ui-font-delta));
+  cursor: pointer;
+  text-align: left;
+}
+.lobe-turn-work__trigger:hover {
+  background: color-mix(in srgb, var(--chat-border, #888) 12%, transparent);
+  color: var(--chat-text);
+}
+.lobe-turn-work__title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 400;
+  color: var(--chat-text-2);
+}
+.lobe-turn-work__caret {
+  display: inline-flex;
+  align-items: center;
+  color: var(--chat-text-3);
+  flex-shrink: 0;
+  margin-left: auto;
+  transition: transform 0.15s ease;
+}
+.lobe-turn-work__caret.is-open {
+  transform: rotate(90deg);
+}
+.lobe-turn-work__body {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 10px;
+  width: 100%;
+  padding: 2px 0 4px;
+}
+
 /* ── Inline tool steps ── */
 .lobe-timeline-images {
   display: flex;

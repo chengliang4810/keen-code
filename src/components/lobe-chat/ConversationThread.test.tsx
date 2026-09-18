@@ -100,8 +100,10 @@ describe("ConversationThread 思考耗时", () => {
             { kind: "compaction", meta: { trigger: "auto", tokensAfter: 100 } },
             { kind: "content", text: "压缩后输出" },
           ],
+        }, {
+          id: "assistant-live", role: "assistant", content: "", streaming: true, segments: [],
         }]}
-        sessionState="ready"
+        sessionState="streaming"
         attachLabels={attachLabels}
       />,
     );
@@ -111,6 +113,74 @@ describe("ConversationThread 思考耗时", () => {
     expect(html.match(/已工作/g)).toHaveLength(1);
     expect(html).toContain('class="lobe-timeline-tool__row"');
     expect(html).not.toContain('class="lobe-chat-compact"');
+  });
+
+  it("回合结束后，末尾答案之前的工作折进以回合耗时为标题的折叠组", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "work-answer", role: "assistant", content: "过程说明。最终结论。",
+          thinkingDurationMs: 911_000,
+          segments: [
+            { kind: "thought", text: "内部推理过程" },
+            { kind: "tool", toolCallId: "t1", title: "Read a", toolKind: "Read", status: "completed" },
+            { kind: "tool", toolCallId: "t2", title: "Read b", toolKind: "Read", status: "completed" },
+            { kind: "content", text: "过程说明。" },
+            { kind: "tool", toolCallId: "t3", title: "Read c", toolKind: "Read", status: "completed" },
+            { kind: "content", text: "最终结论。" },
+          ],
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(html.match(/data-testid="turn-work-group"/g)).toHaveLength(1);
+    expect(html).toContain("已工作 15分钟 11秒");
+    expect(html).toContain("最终结论。");
+    expect(html).not.toContain("内部推理过程");
+    expect(html).not.toContain("Read a");
+    expect(html).not.toContain("过程说明。");
+    expect(html.match(/已工作/g)).toHaveLength(1);
+  });
+
+  it("回合进行中不折叠，工作单元保持平铺展开", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        sessionState="streaming"
+        attachLabels={attachLabels}
+        messages={[
+          {
+            id: "work-answer", role: "assistant", content: "过程说明。最终结论。",
+            thinkingDurationMs: 911_000,
+            segments: [
+              { kind: "thought", text: "内部推理过程" },
+              { kind: "tool", toolCallId: "t1", title: "Read a", toolKind: "Read", status: "completed" },
+              { kind: "content", text: "过程说明。" },
+            ],
+          },
+          { id: "assistant-live", role: "assistant", content: "", streaming: true, segments: [] },
+        ]}
+      />,
+    );
+    expect(html).not.toContain('data-testid="turn-work-group"');
+    expect(html).toContain("内部推理过程");
+    expect(html).toContain("过程说明。");
+  });
+
+  it("纯文本回答不产生整体折叠组", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{ id: "plain", role: "assistant", content: "直接回答", segments: [{ kind: "content", text: "直接回答" }] }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+    expect(html).not.toContain('data-testid="turn-work-group"');
+    expect(html).not.toContain("已工作");
+    expect(html).toContain("直接回答");
   });
 
   it("压缩开始与失败使用实时状态文案", () => {
@@ -603,13 +673,12 @@ describe("ConversationThread 思考耗时", () => {
 
     expect(html.match(/已工作 8分钟 5秒/g)).toHaveLength(1);
     expect(html.indexOf("已工作 8分钟 5秒")).toBeLessThan(
-      html.indexOf("检查处理时间的渲染来源"),
+      html.indexOf("修复已经完成。"),
     );
-    expect(html.indexOf("已工作 8分钟 5秒")).toBeLessThan(
-      html.indexOf("先检查实现。"),
-    );
-    expect(html).toContain("检查处理时间的渲染来源");
-    expect(html).toContain("验证多段思考的展示结果");
+    // 回合落定后，末尾答案之前的工作单元折进整体折叠组，不再平铺渲染。
+    expect(html).toContain('data-testid="turn-work-group"');
+    expect(html).not.toContain("检查处理时间的渲染来源");
+    expect(html).not.toContain("验证多段思考的展示结果");
   });
 
   it("二次打开 Agent 回合时把工作时间锚定到首条 Assistant 记录顶部", () => {

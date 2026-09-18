@@ -79,8 +79,13 @@ import {
   toolSegmentFromMessage,
 } from "./TimelineToolRow";
 import { TimelinePhaseBlock } from "./TimelinePhaseBlock";
+import { TurnWorkGroup } from "./TurnWorkGroup";
 import { TimelineImageGroup } from "./TimelineImageGroup";
-import { buildTimelineUnits } from "@/lib/timelinePhases";
+import {
+  buildTimelineUnits,
+  splitTrailingContentUnits,
+  type TimelineUnit,
+} from "@/lib/timelinePhases";
 import { isToolSegmentRunning } from "@/lib/toolSegmentStatus";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
@@ -1148,6 +1153,16 @@ export function ConversationThread({
               observedTurnId && (m.streaming || m.turnMetrics != null)
                 ? onFirstVisibleToken
                 : undefined;
+            /**
+             * 回合落定后，末尾答案之前的全部工作单元折进一个以回合耗时为
+             * 标题的折叠组；流式期间保持现有逐单元展开的渲染。
+             */
+            const turnSettled = !m.streaming && !turnBusy;
+            const { work: workUnits, tail: answerUnits } = turnSettled
+              ? splitTrailingContentUnits(timelineUnits)
+              : { work: timelineUnits, tail: [] };
+            const workDurationMs =
+              processingDurationMs ?? m.thinkingDurationMs ?? null;
 
             return wrap(
               <ChatItem
@@ -1167,24 +1182,11 @@ export function ConversationThread({
                     aria-live={m.streaming ? "polite" : undefined}
                     data-find-assistant={isFindCurrent ? "current" : undefined}
                   >
-                    {showProcessingTime ? (
-                      <Thinking
-                        locale={locale}
-                        thinking={!!m.streaming || assistantBusy}
-                        startedAt={assistantBusy ? turnAnchor : null}
-                        durationMs={processingDurationMs}
-                        statusLabel={(duration, running) =>
-                          tr(running ? "chat.workingFor" : "chat.workedFor", {
-                            duration,
-                          })
-                        }
-                      />
-                    ) : null}
                     {(() => {
                       // Running occurrence base across content segments so
                       // find marks stay aligned with message-level match index.
                       let contentOccBase = 0;
-                      return timelineUnits.map((unit) => {
+                      const renderUnit = (unit: TimelineUnit) => {
                         if (unit.kind === "images") {
                           return <TimelineImageGroup key={`${m.id}-images-${unit.si}`} tools={unit.tools} locale={locale} />;
                         }
@@ -1302,7 +1304,42 @@ export function ConversationThread({
                             latencyTurnId={observedTurnId}
                           />
                         );
-                      });
+                      };
+                      return (
+                        <>
+                          {turnSettled &&
+                          workUnits.length > 0 &&
+                          workDurationMs != null ? (
+                            <TurnWorkGroup
+                              durationMs={workDurationMs}
+                              locale={locale}
+                            >
+                              {workUnits.map((unit) => renderUnit(unit))}
+                            </TurnWorkGroup>
+                          ) : (
+                            <>
+                              {showProcessingTime ? (
+                                <Thinking
+                                  locale={locale}
+                                  thinking={!!m.streaming || assistantBusy}
+                                  startedAt={assistantBusy ? turnAnchor : null}
+                                  durationMs={processingDurationMs}
+                                  statusLabel={(duration, running) =>
+                                    tr(
+                                      running
+                                        ? "chat.workingFor"
+                                        : "chat.workedFor",
+                                      { duration },
+                                    )
+                                  }
+                                />
+                              ) : null}
+                              {workUnits.map((unit) => renderUnit(unit))}
+                            </>
+                          )}
+                          {answerUnits.map((unit) => renderUnit(unit))}
+                        </>
+                      );
                     })()}
                     {/* Body-less turn with only attachments */}
                     {!contentSegCount && m.attachments?.length ? (
