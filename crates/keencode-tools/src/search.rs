@@ -2,12 +2,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::thread;
 use std::time::Duration;
 
 use globset::{GlobBuilder, GlobMatcher};
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use keencode_agent::{
     AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
     ToolOutputArtifactSink, TurnCancellation,
@@ -24,6 +27,9 @@ use crate::environment::{
 
 /// 没有显式指定时单次搜索默认最多返回的结果数量。
 const DEFAULT_SEARCH_RESULTS: usize = 1_000;
+
+/// 每次搜索最多四个工作线程；线程仅在搜索期间存在。
+const MAX_SEARCH_THREADS: usize = 4;
 
 /// 按 Git 忽略规则遍历并匹配相对路径 Glob 的工具。
 pub struct GlobTool {
@@ -403,8 +409,7 @@ fn execute_grep(
     let limit = input
         .max_results
         .unwrap_or_else(|| DEFAULT_SEARCH_RESULTS.min(environment.limits().max_search_results));
-    let mut files = collect_search_files(&root, cancellation)?;
-    files.sort();
+    let files = collect_search_files(&root, cancellation)?;
 
     let mut rendered = Vec::new();
     let mut result_count = 0_usize;
@@ -413,87 +418,122 @@ fn execute_grep(
     let mut skipped_unreadable = 0_usize;
     let mut truncated = false;
 
-    for path in files {
-        ensure_not_cancelled(cancellation)?;
-        if result_count == limit {
-            truncated = true;
-            break;
-        }
-        let relative = relative_for_filter(&root, &path, metadata.is_file());
-        if glob
-            .as_ref()
-            .is_some_and(|matcher| !matcher.is_match(&relative))
-        {
-            continue;
-        }
-        let file_metadata = match fs::metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                skipped_unreadable = skipped_unreadable.saturating_add(1);
-                continue;
-            }
-        };
-        if file_metadata.len() > environment.limits().max_search_file_bytes {
-            skipped_large = skipped_large.saturating_add(1);
-            continue;
-        }
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                skipped_unreadable = skipped_unreadable.saturating_add(1);
-                continue;
-            }
-        };
-        if bytes.contains(&0) {
-            skipped_binary = skipped_binary.saturating_add(1);
-            continue;
-        }
-        let text = match std::str::from_utf8(&bytes) {
-            Ok(text) => text.strip_prefix('\u{feff}').unwrap_or(text),
-            Err(_) => {
-                skipped_binary = skipped_binary.saturating_add(1);
-                continue;
-            }
-        };
-        let analysis = analyze_matches(&regex, text, input.multiline);
-        if analysis.match_count == 0 {
-            continue;
-        }
-        let path_display = display_path(&path);
-        match input.output_mode {
-            GrepOutputMode::Content => {
-                let remaining = limit - result_count;
-                let selected = analysis
-                    .matching_lines
-                    .iter()
-                    .copied()
-                    .take(remaining)
-                    .collect::<Vec<_>>();
-                if selected.len() < analysis.matching_lines.len() {
-                    truncated = true;
+    let workers = search_threads().min(files.len().max(1));
+    let stopped = AtomicBool::new(false);
+    thread::scope(|scope| {
+        let stopped = &stopped;
+        let mut receivers = Vec::with_capacity(workers);
+        for worker in 0..workers {
+            // 每个线程最多持有一个尚未消费的文件结果，不积压整库正文。
+            let (sender, receiver) = mpsc::sync_channel(0);
+            receivers.push(receiver);
+            let files = &files;
+            let root = &root;
+            let input = &input;
+            let glob = &glob;
+            let regex = regex.clone();
+            let root_is_file = metadata.is_file();
+            scope.spawn(move || {
+                for path in files.iter().skip(worker).step_by(workers) {
+                    if stopped.load(Ordering::Relaxed) || cancellation.is_cancelled() {
+                        break;
+                    }
+                    let relative = relative_for_filter(root, path, root_is_file);
+                    let result = if glob
+                        .as_ref()
+                        .is_some_and(|matcher| !matcher.is_match(&relative))
+                    {
+                        Ok(FileSearch::Unmatched)
+                    } else {
+                        search_file(
+                            path,
+                            &regex,
+                            input.multiline,
+                            environment.limits().max_search_file_bytes,
+                            cancellation,
+                        )
+                    };
+                    if sender.send(result).is_err() {
+                        break;
+                    }
                 }
-                result_count = result_count.saturating_add(selected.len());
-                rendered.push(render_content(
-                    &path_display,
-                    text,
-                    &selected,
-                    input.context_before,
-                    input.context_after,
-                ));
-            }
-            GrepOutputMode::FilesWithMatches => {
-                rendered.push(path_display);
-                result_count = result_count.saturating_add(1);
-            }
-            GrepOutputMode::Count => {
-                rendered.push(format!("{path_display}:{}", analysis.match_count));
-                result_count = result_count.saturating_add(1);
-            }
+            });
         }
-        if truncated {
-            break;
-        }
-    }
+        let result = (|| {
+            for (index, path) in files.iter().enumerate() {
+                ensure_not_cancelled(cancellation)?;
+                if result_count == limit {
+                    truncated = true;
+                    break;
+                }
+                let found = receivers[index % workers].recv().map_err(|_| {
+                    if cancellation.is_cancelled() {
+                        ToolError::permanent("cancelled", "工具调用已取消")
+                    } else {
+                        ToolError::permanent("search_worker_failed", "搜索工作线程提前退出")
+                    }
+                })??;
+                let (text, analysis) = match found {
+                    FileSearch::Matched { text, analysis } => (text, analysis),
+                    FileSearch::Unmatched => continue,
+                    FileSearch::Binary => {
+                        skipped_binary += 1;
+                        continue;
+                    }
+                    FileSearch::Large => {
+                        skipped_large += 1;
+                        continue;
+                    }
+                    FileSearch::Unreadable => {
+                        skipped_unreadable += 1;
+                        continue;
+                    }
+                };
+                let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+                let path_display = display_path(&path);
+                match input.output_mode {
+                    GrepOutputMode::Content => {
+                        let remaining = limit - result_count;
+                        let selected = analysis
+                            .matching_lines
+                            .iter()
+                            .copied()
+                            .take(remaining)
+                            .collect::<Vec<_>>();
+                        if selected.len() < analysis.matching_lines.len() {
+                            truncated = true;
+                        }
+                        result_count = result_count.saturating_add(selected.len());
+                        rendered.push(render_content(
+                            &path_display,
+                            text,
+                            &selected,
+                            input.context_before,
+                            input.context_after,
+                        ));
+                    }
+                    GrepOutputMode::FilesWithMatches => {
+                        rendered.push(path_display);
+                        result_count = result_count.saturating_add(1);
+                    }
+                    GrepOutputMode::Count => {
+                        rendered.push(format!("{path_display}:{}", analysis.match_count));
+                        result_count = result_count.saturating_add(1);
+                    }
+                }
+                if truncated {
+                    break;
+                }
+            }
+
+            Ok::<(), ToolError>(())
+        })();
+        stopped.store(true, Ordering::Relaxed);
+        // 先断开接收端，再等待线程退出，防止截断或取消时发送端永久阻塞。
+        drop(receivers);
+        result
+    })?;
+    ensure_not_cancelled(cancellation)?;
 
     let mut output = if rendered.is_empty() {
         "未找到匹配内容".to_owned()
@@ -509,6 +549,71 @@ fn execute_grep(
         ));
     }
     Ok(ToolOutput::text(output))
+}
+
+/// 单文件分析结果；跳过原因在有序消费时才计入最终输出。
+enum FileSearch {
+    Matched {
+        text: String,
+        analysis: MatchAnalysis,
+    },
+    Unmatched,
+    Binary,
+    Large,
+    Unreadable,
+}
+
+/// 有界读取防止文件在元数据检查后增长而放大并行内存占用。
+fn search_file(
+    path: &Path,
+    regex: &Regex,
+    multiline: bool,
+    max_bytes: u64,
+    cancellation: &TurnCancellation,
+) -> Result<FileSearch, ToolError> {
+    ensure_not_cancelled(cancellation)?;
+    let Ok(file) = fs::File::open(path) else {
+        return Ok(FileSearch::Unreadable);
+    };
+    let Ok(metadata) = file.metadata() else {
+        return Ok(FileSearch::Unreadable);
+    };
+    if metadata.len() > max_bytes {
+        return Ok(FileSearch::Large);
+    }
+    let mut bytes = Vec::new();
+    if file
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .is_err()
+    {
+        return Ok(FileSearch::Unreadable);
+    }
+    ensure_not_cancelled(cancellation)?;
+    if bytes.len() as u64 > max_bytes {
+        return Ok(FileSearch::Large);
+    }
+    if bytes.contains(&0) {
+        return Ok(FileSearch::Binary);
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        return Ok(FileSearch::Binary);
+    };
+    let analysis = analyze_matches(
+        regex,
+        text.strip_prefix('\u{feff}').unwrap_or(&text),
+        multiline,
+    );
+    ensure_not_cancelled(cancellation)?;
+    if analysis.match_count == 0 {
+        return Ok(FileSearch::Unmatched);
+    }
+    Ok(FileSearch::Matched { text, analysis })
+}
+
+/// 限制多会话搜索时的线程增量。
+fn search_threads() -> usize {
+    thread::available_parallelism().map_or(1, |count| count.get().min(MAX_SEARCH_THREADS))
 }
 
 /// 一个文件内正则匹配次数及涉及的一基行号。
@@ -624,18 +729,31 @@ fn collect_search_files(
             "Grep 搜索路径既不是文件也不是目录",
         ));
     }
+    let files = Mutex::new(Vec::new());
     let mut builder = walk_builder(root);
-    builder.sort_by_file_path(|left, right| left.cmp(right));
-    let mut files = Vec::new();
-    for entry in builder.build() {
-        ensure_not_cancelled(cancellation)?;
-        let Ok(entry) = entry else {
-            continue;
-        };
-        if entry.file_type().is_some_and(|kind| kind.is_file()) {
-            files.push(entry.into_path());
-        }
-    }
+    builder.threads(search_threads());
+    builder.build_parallel().run(|| {
+        let files = &files;
+        Box::new(move |entry| {
+            if cancellation.is_cancelled() {
+                return WalkState::Quit;
+            }
+            if let Ok(entry) = entry {
+                if entry.file_type().is_some_and(|kind| kind.is_file()) {
+                    files
+                        .lock()
+                        .expect("搜索路径收集锁不应损坏")
+                        .push(entry.into_path());
+                }
+            }
+            WalkState::Continue
+        })
+    });
+    ensure_not_cancelled(cancellation)?;
+    let mut files = files
+        .into_inner()
+        .map_err(|_| ToolError::permanent("search_worker_failed", "搜索路径收集锁已损坏"))?;
+    files.sort();
     Ok(files)
 }
 

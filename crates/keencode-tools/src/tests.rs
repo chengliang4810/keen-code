@@ -1073,6 +1073,133 @@ async fn glob_and_grep_respect_gitignore_and_output_modes() {
     assert!(output_text(&counts).contains("b.rs:1"));
 }
 
+/// 并行完成顺序不得改变路径排序、截断结果或截断前的跳过计数。
+#[tokio::test]
+async fn parallel_grep_preserves_order_and_truncation() {
+    let directory = tempdir().expect("应创建临时目录");
+    fs::write(directory.path().join("00.bin"), [0]).expect("应写入二进制文件");
+    for index in (1..=24).rev() {
+        let padding = "padding\n".repeat((25 - index) * 100);
+        fs::write(
+            directory.path().join(format!("{index:02}.txt")),
+            format!("{padding}needle needle\n"),
+        )
+        .expect("应写入不同大小的文件");
+    }
+    fs::write(directory.path().join("99.bin"), [0]).expect("应写入末尾二进制文件");
+    let root = fs::canonicalize(directory.path()).expect("应解析绝对路径");
+    let tool = GrepTool::new(Arc::new(ToolEnvironment::new(&root).expect("环境应有效")));
+    for mode in ["files_with_matches", "count"] {
+        for limit in [1, 7, 24, 25] {
+            let mut expected = (1..=limit.min(24))
+                .map(|index| {
+                    let path = root
+                        .join(format!("{index:02}.txt"))
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    if mode == "count" {
+                        format!("{path}:2")
+                    } else {
+                        path
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            if limit <= 24 {
+                expected.push_str(&format!("\n[结果已截断到 {limit} 项]"));
+            }
+            let binary_count = if limit <= 24 { 1 } else { 2 };
+            expected.push_str(&format!(
+                "\n[跳过：超大文件 0，二进制或非 UTF-8 文件 {binary_count}，不可读取文件 0]"
+            ));
+            for _ in 0..3 {
+                let output = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    tool.execute(
+                        tool_context(),
+                        json!({
+                            "pattern": "needle", "output_mode": mode, "max_results": limit
+                        }),
+                    ),
+                )
+                .await
+                .expect("截断后线程必须退出")
+                .expect("搜索应成功");
+                assert_eq!(output_text(&output), expected);
+            }
+        }
+    }
+}
+
+/// 有界读取保留 BOM、上下文、恰好等于上限的文件，并过滤超限及非文本文件。
+#[tokio::test]
+async fn parallel_grep_preserves_content_and_file_limits() {
+    let directory = tempdir().expect("应创建临时目录");
+    fs::write(
+        directory.path().join("a.txt"),
+        "\u{feff}before\nneedle\nafter\nneedle\n",
+    )
+    .expect("应写入带 BOM 的文件");
+    fs::write(
+        directory.path().join("b.txt"),
+        format!("needle{}", " ".repeat(26)),
+    )
+    .expect("应写入恰好 32 字节文件");
+    fs::write(directory.path().join("c.txt"), "n".repeat(33)).expect("应写入超限文件");
+    fs::write(directory.path().join("d.txt"), [0xff]).expect("应写入非 UTF-8 文件");
+    fs::write(directory.path().join("e.bin"), [0]).expect("应写入被 Glob 排除文件");
+    let root = fs::canonicalize(directory.path()).expect("应解析绝对路径");
+    let environment = Arc::new(
+        ToolEnvironment::with_limits(
+            &root,
+            ToolLimits {
+                max_search_file_bytes: 32,
+                ..ToolLimits::default()
+            },
+        )
+        .expect("环境应有效"),
+    );
+    let tool = GrepTool::new(environment);
+    let output = tool
+        .execute(
+            tool_context(),
+            json!({
+                "pattern": "needle", "glob": "*.txt", "max_results": 1,
+                "context_before": 1, "context_after": 1
+            }),
+        )
+        .await
+        .expect("内容搜索应成功");
+    let path = root.join("a.txt").to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        output_text(&output),
+        format!("{path}\n1-before\n2:needle\n3-after\n[结果已截断到 1 项]")
+    );
+    let output = tool
+        .execute(
+            tool_context(),
+            json!({
+                "pattern": "needle", "glob": "*.txt", "output_mode": "count"
+            }),
+        )
+        .await
+        .expect("计数搜索应成功");
+    let second = root.join("b.txt").to_string_lossy().replace('\\', "/");
+    assert_eq!(
+        output_text(&output),
+        format!(
+            "{path}:2\n{second}:1\n[跳过：超大文件 1，二进制或非 UTF-8 文件 1，不可读取文件 0]"
+        )
+    );
+    let context = tool_context();
+    context.cancellation.cancel();
+    let error = tool
+        .execute(context, json!({"pattern": "needle"}))
+        .await
+        .expect_err("预取消的 Grep 必须失败");
+    assert_eq!(error.code, "cancelled");
+}
+
 /// multiline=true 必须把跨行匹配映射到涉及的全部一基行号。
 #[tokio::test]
 async fn grep_multiline_maps_every_spanned_line() {
