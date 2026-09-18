@@ -214,6 +214,7 @@ function patchCompletedTurn(
   if (!message) return;
   if (latency) message.turnMetrics = mergeTurnLatencySummary(message.turnMetrics, summarizeTurnLatency(latency));
   if (model) message.model = model;
+  view.history_revision += 1;
 }
 
 /**

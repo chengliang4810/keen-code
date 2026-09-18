@@ -170,6 +170,8 @@ export interface AcpSessionView {
   /** Session 当前是否启用 Runtime 强制只读 PlanGuard。 */
   plan_mode: boolean;
   history: AcpHistoryMessage[];
+  /** 每次原地修改既有历史消息（分片追加、指标/模型补写）时递增；投影缓存据此失效。 */
+  history_revision: number;
   /** 两类信封共同使用的投递顺序水位。 */
   delivery: AcpDeliveryProjection;
   /** 已提交终态的 Turn，用于阻止迟到增量改写投影。 */
@@ -216,6 +218,7 @@ export function emptySession(session_id: string): AcpSessionView {
     active_root_turn_id: null,
     plan_mode: false,
     history: [],
+    history_revision: 0,
     delivery: {
       lastSequence: null,
       frozen: false,
@@ -850,6 +853,7 @@ function reduceSessionUpdate(
         ) {
           if (messageId !== undefined) last.messageId = messageId;
           last.content += text;
+          view.history_revision += 1;
         } else if (!sourceAgentId) {
           view.history.push({
             role: "user",

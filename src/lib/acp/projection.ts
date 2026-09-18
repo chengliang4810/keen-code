@@ -29,6 +29,7 @@ export function replaceHistoryTurnMetrics(
     const message = view.history[index];
     if (message?.role === "assistant" && message.turnId === turnMetrics.turnId) {
       message.turnMetrics = mergeTurnLatencySummary(message.turnMetrics, turnMetrics);
+      view.history_revision += 1;
       return true;
     }
   }

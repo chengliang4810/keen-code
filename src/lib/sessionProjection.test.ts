@@ -569,4 +569,27 @@ describe("sessionProjection", () => {
     const replaced = [...history];
     expect(projectAcpHistory("session-1", replaced)).not.toBe(grown);
   });
+
+  it("原地修改既有历史消息时按修订号失效缓存", () => {
+    const view = emptySession("session-1");
+    view.history = [
+      { role: "assistant" as const, turnId: "turn-1", content: "分片一" },
+    ];
+    view.history_revision = 0;
+    const first = projectAcpHistory("session-1", view.history, view.history_revision);
+    expect(
+      projectAcpHistory("session-1", view.history, view.history_revision),
+    ).toBe(first);
+
+    // 分片追加/指标补写等原地修改：数组身份与长度都不变，仅修订号变化。
+    view.history[0]!.content += "分片二";
+    view.history_revision += 1;
+    const reprojected = projectAcpHistory(
+      "session-1",
+      view.history,
+      view.history_revision,
+    );
+    expect(reprojected).not.toBe(first);
+    expect(reprojected[0]?.content).toBe("分片一分片二");
+  });
 });

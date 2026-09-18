@@ -192,23 +192,30 @@ export function projectAcpSnapshot(view: AcpSessionView): SessionSnapshot {
 /**
  * 历史投影缓存：键为历史数组身份。
  *
- * store 对 history 只做 push 或整体替换、从不原地修改元素，因此用
- * 「数组身份 + 长度 + Session」复验命中即可；流式回合的分片写入
+ * store 对 history 的既有元素存在原地修改（分片追加、指标/模型补写），
+ * 这些写入用 `AcpSessionView.history_revision` 递增标记；因此命中条件为
+ * 「数组身份 + 长度 + 修订号 + Session」。流式回合的分片写入
  * live_segments 而非 history，命中后每帧省去全量重投影（实测 13MB
  * 历史约 40ms 与 4MB 垃圾/帧）。数组被替换时 WeakMap 自动释放。
  */
 const historyProjectionCache = new WeakMap<
   AcpHistoryMessage[],
-  { sessionId: string; length: number; result: ChatMessage[] }
+  { sessionId: string; length: number; revision: number; result: ChatMessage[] }
 >();
 
 /** 将 ACP 历史消息投影为工作台消息。 */
 export function projectAcpHistory(
   sessionId: string,
   source: AcpHistoryMessage[],
+  revision = 0,
 ): ChatMessage[] {
   const cached = historyProjectionCache.get(source);
-  if (cached && cached.sessionId === sessionId && cached.length === source.length) {
+  if (
+    cached &&
+    cached.sessionId === sessionId &&
+    cached.length === source.length &&
+    cached.revision === revision
+  ) {
     return cached.result;
   }
   const projected: ChatMessage[] = source.map((message, index) => {
@@ -266,7 +273,12 @@ export function projectAcpHistory(
       break;
     }
   }
-  historyProjectionCache.set(source, { sessionId, length: source.length, result: projected });
+  historyProjectionCache.set(source, {
+    sessionId,
+    length: source.length,
+    revision,
+    result: projected,
+  });
   return projected;
 }
 
@@ -380,7 +392,11 @@ export function projectAcpConversation(
   locale: Locale = "zh",
   keepPendingAssistant = false,
 ): ChatMessage[] {
-  const history = projectAcpHistory(view.session_id, view.history);
+  const history = projectAcpHistory(
+    view.session_id,
+    view.history,
+    view.history_revision,
+  );
   const optimistic = previous.filter((message) => {
     if (
       message.role === "user" &&
