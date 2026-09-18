@@ -189,7 +189,7 @@ impl AppSettings {
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_shell: TerminalShell::Auto,
-            local_memories: true,
+            local_memories: false,
             auto_archive_conversations: true,
             archive_retention_days: 7,
             web_service_url: String::new(),
@@ -752,7 +752,7 @@ mod tests {
         let with_default_memories =
             load_from_content(&serde_json::Value::Object(missing_memories).to_string());
         assert!(with_default_memories.load_error.is_none());
-        assert!(with_default_memories.settings.local_memories);
+        assert!(!with_default_memories.settings.local_memories);
         let empty = load_from_content("{}");
         assert!(empty.load_error.is_some());
         assert_eq!(empty.settings, AppSettings::initial());
@@ -1008,12 +1008,12 @@ mod tests {
 
         let initial = load_before_start(&path).expect("缺失文件应使用首次启动设置");
         assert!(initial.chrome_hardware_acceleration);
-        assert!(initial.local_memories, "本地记忆必须默认开启");
+        assert!(!initial.local_memories, "本地记忆必须默认关闭");
 
         fs::write(&path, "{broken").expect("写入损坏设置");
         let fallback = load_before_start(&path).expect("损坏文件应回退默认设置");
         assert!(fallback.chrome_hardware_acceleration);
-        assert!(fallback.local_memories, "本地记忆必须默认开启");
+        assert!(!fallback.local_memories, "本地记忆必须默认关闭");
 
         let mut settings = AppSettings::initial();
         settings.chrome_hardware_acceleration = false;
