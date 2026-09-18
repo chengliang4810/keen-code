@@ -694,14 +694,20 @@ const PROVIDER_REQUEST_ID_HEADERS: [&str; 2] = ["x-request-id", "request-id"];
 /// 重试等待的对称抖动幅度；实际延迟在指数退避结果上偏移 -25%..+25%。
 const RETRY_JITTER_FRACTION: f64 = 0.25;
 /// Provider 报告的 retry_after 建议在重试等待中允许的最大毫秒数。
-const RETRY_AFTER_CAP_MS: u64 = 120 * 1000;
+/// 与 [`RETRY_AFTER_HARD_STOP_MS`] 对齐：更长的建议等待已经走了不可重试路径，
+/// 封顶取更高值只会变成不可达常量。
+const RETRY_AFTER_CAP_MS: u64 = 60 * 1000;
 /// Provider 建议的等待时间超过该毫秒数时，限流视为本次会话内不可恢复。
 ///
 /// 突发限流会在秒级恢复，等待后重试有收益；需要等待一分钟以上才能恢复的
 /// 限流已属额度窗口耗尽，继续退避只会让交互式回合长时间没有输出。
 const RETRY_AFTER_HARD_STOP_MS: u64 = 60 * 1000;
 /// 限流错误正文中声明额度窗口重置时刻的关键字；命中即视为耗尽语义。
-const RESET_DEADLINE_KEYWORDS: [&str; 2] = ["reset", "重置"];
+/// 中文「重置」不区分介词；英文只收「指向某个重置时刻」的短语，裸 `reset`
+/// 会把 "rate limited, resets in 20 seconds" 这类秒级恢复的突发限流误判为耗尽。
+const RESET_DEADLINE_KEYWORDS: [&str; 3] = ["reset at", "resets at", "重置"];
+/// 与重置关键字同时出现时表示秒级突发限流，不算额度窗口耗尽。
+const TRANSIENT_RESET_EXCLUSION: [&str; 2] = ["resets in", "秒后重置"];
 
 /// 从逻辑开始到响应流终态维持一次请求的观测状态。
 struct RequestLifecycle {
@@ -1707,9 +1713,13 @@ fn rate_limit_is_exhausted(message: &str, retry_after_ms: Option<u64>) -> bool {
         return wait_ms > RETRY_AFTER_HARD_STOP_MS;
     }
     let lowered = message.to_ascii_lowercase();
-    RESET_DEADLINE_KEYWORDS
+    let hits_deadline = RESET_DEADLINE_KEYWORDS
         .iter()
-        .any(|keyword| lowered.contains(keyword))
+        .any(|keyword| lowered.contains(keyword));
+    hits_deadline
+        && !TRANSIENT_RESET_EXCLUSION
+            .iter()
+            .any(|exclusion| lowered.contains(exclusion))
 }
 
 /// 判定一次尚未向下游转发任何事件的失败是否允许自动重试。
@@ -2086,25 +2096,27 @@ mod retry_tests {
 
     /// 服务器 retry_after 建议优先于指数退避，封顶 120 秒后仍叠加抖动。
     #[test]
-    fn retry_after_takes_precedence_and_caps_at_120_seconds() {
+    fn retry_after_takes_precedence_and_caps_at_hard_stop() {
         let policy = RetryConfig::default();
         // 建议值不受尝试次数影响，即使指数退避已经超过建议值。
         for failed_attempt in [1_u32, 5, 9] {
             let delay = retry_delay(&policy, failed_attempt, Some(5000), 0.0);
             assert_eq!(delay, Duration::from_millis(5000));
         }
+        // 封顶与 RETRY_AFTER_HARD_STOP_MS 对齐：更长的建议等待
+        // 已经走不可重试路径，封顶不会放大到 60s 以上。
         assert_eq!(
             retry_delay(&policy, 1, Some(500_000), 0.0),
-            Duration::from_millis(120_000)
+            Duration::from_millis(60_000)
         );
         // 抖动 ±25% 应用于封顶后的建议值。
         assert_eq!(
             retry_delay(&policy, 1, Some(500_000), -RETRY_JITTER_FRACTION),
-            Duration::from_millis(90_000)
+            Duration::from_millis(45_000)
         );
         assert_eq!(
             retry_delay(&policy, 1, Some(500_000), RETRY_JITTER_FRACTION),
-            Duration::from_millis(150_000)
+            Duration::from_millis(75_000)
         );
         // 服务器建议零等待时立即重试。
         assert_eq!(retry_delay(&policy, 1, Some(0), 0.0), Duration::ZERO);
