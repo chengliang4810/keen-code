@@ -4,6 +4,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -693,6 +694,9 @@ const MAX_OBSERVATION_TEXT_CHARS: usize = 1_000;
 const PROVIDER_REQUEST_ID_HEADERS: [&str; 2] = ["x-request-id", "request-id"];
 /// 重试等待的对称抖动幅度；实际延迟在指数退避结果上偏移 -25%..+25%。
 const RETRY_JITTER_FRACTION: f64 = 0.25;
+/// 到期唤醒线程在到期后的事件驱动空闲等待；推进或丢弃会经条件变量立即唤醒，
+/// 该超时只作通知丢失的兜底，避免下游背压时按 50ms 轮询空转。
+const DEADLINE_POST_EXPIRY_IDLE: Duration = Duration::from_secs(60);
 /// Provider 报告的 retry_after 建议在重试等待中允许的最大毫秒数。
 /// 与 [`RETRY_AFTER_HARD_STOP_MS`] 对齐：更长的建议等待已经走了不可重试路径，
 /// 封顶取更高值只会变成不可达常量。
@@ -1287,6 +1291,9 @@ struct DeadlineShared {
     deadline_nanos: AtomicU64,
     /// 单调时间原点，用于把到期时刻压缩为可原子读写的计数。
     origin: Instant,
+    /// 推进到期时刻或丢弃计时器时唤醒等待线程；到期后不再靠轮询空转。
+    notify: Mutex<()>,
+    notify_condvar: Condvar,
 }
 
 /// 把时长折算为纳秒计数；超出 u64 的极长时长按上限饱和。
@@ -1327,6 +1334,8 @@ impl DeadlineTimer {
                     deadline.saturating_duration_since(origin),
                 )),
                 origin,
+                notify: Mutex::new(()),
+                notify_condvar: Condvar::new(),
             }),
             registered: false,
             cancelled: None,
@@ -1345,6 +1354,11 @@ impl DeadlineTimer {
         self.shared
             .deadline_nanos
             .store(now.saturating_add(duration_nanos(delay)), Ordering::Relaxed);
+        // 唤醒可能在长等待中的计时线程，让它立即按新到期时刻重新计算。
+        if let Ok(guard) = self.shared.notify.lock() {
+            let _ = self.shared.notify_condvar.notify_all();
+            drop(guard);
+        }
     }
 
     /// 在指定名称的线程上注册到期唤醒并等待到期。
@@ -1370,6 +1384,11 @@ impl Drop for DeadlineTimer {
     fn drop(&mut self) {
         if let Some(cancelled) = &self.cancelled {
             cancelled.store(true, Ordering::Relaxed);
+            // 通知可能在长等待中的计时线程立即退出。
+            if let Ok(guard) = self.shared.notify.lock() {
+                let _ = self.shared.notify_condvar.notify_all();
+                drop(guard);
+            }
         }
     }
 }
@@ -1399,12 +1418,23 @@ fn spawn_deadline_thread(
                         waker.wake_by_ref();
                     }
                     // 到期后不退出：持有者可能刚把到期时刻推进，退出会让新窗口
-                    // 失去唯一唤醒源。等待推进或持有者丢弃计时器。
-                    std::thread::sleep(DeadlineTimer::POLL_INTERVAL);
+                    // 失去唯一唤醒源。改为事件驱动等待——推进或丢弃会经条件
+                    // 变量唤醒本线程，超时兜底防通知丢失；下游背压停 poll 时
+                    // 不再按 50ms 轮询空转 OS 线程。
+                    if let Ok(guard) = shared.notify.lock() {
+                        let _ = shared.notify_condvar.wait_timeout(
+                            guard,
+                            DEADLINE_POST_EXPIRY_IDLE,
+                        );
+                    }
                     continue;
                 }
                 let remaining = Duration::from_nanos(deadline - now);
-                std::thread::sleep(remaining.min(DeadlineTimer::POLL_INTERVAL));
+                if let Ok(guard) = shared.notify.lock() {
+                    let _ = shared
+                        .notify_condvar
+                        .wait_timeout(guard, remaining.min(DeadlineTimer::POLL_INTERVAL));
+                }
             }
         });
     // 线程创建失败时没有注册任何唤醒源；返回 None 让调用方按到期退化。
