@@ -4414,8 +4414,9 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
     );
     assert!(!manager.predictive_precompression_skipped_by_cache(&request, &capabilities));
 
-    // hit_rate = 0.9（27_000 / 30_000），锚定基数为 30_000 + 27_000 = 57_000，
-    // 头部空间 (95_904 − 57_000) / 95_904 ≈ 0.406 > 0.2 → 跳过。
+    // hit_rate = 0.9（27_000 / 30_000），锚定基数 30_000（cache_read 不重复计入），
+    // 头部空间 (95_904 − 30_000) / 95_904 ≈ 0.687 > 0.2 → 跳过
+    // （锚定基数即归一后的 input_tokens，不重复计入 cache_read）。
     manager.note_model_round_usage(
         &ModelRequest::new("model", messages.clone()),
         &TokenUsage {
@@ -4428,13 +4429,13 @@ fn predictive_cache_guard_skips_only_on_high_hit_rate_with_headroom() {
 
     // 同一命中率但历史增量把估算推高到逼近预算、头部不足 → 不跳过。
     // FixedEstimator 忽略切片长度：锚点按 1 条消息记录后，message_tokens
-    // 即“锚点之后的新增估算”，30_000 把总量推到 87_000，
-    // 头部 (95_904 − 87_000)/95_904 ≈ 0.09 < 0.2。
+    // 即“锚点之后的新增估算”，50_000 把总量推到 80_000，
+    // 头部 (95_904 − 80_000)/95_904 ≈ 0.17 < 0.2。
     let crowded = ContextManager::new(
         ContextPolicy::default(),
         Arc::new(FixedEstimator {
             request_tokens: 0,
-            message_tokens: 30_000,
+            message_tokens: 50_000,
         }),
         Arc::new(RecordingCompressor::new("unused")),
     )
@@ -4566,10 +4567,10 @@ fn cache_tool_reply(input_tokens: u64, cache_read_tokens: u64, call_id: &str) ->
 #[tokio::test]
 async fn runner_predictive_compaction_skipped_on_hot_cache_with_headroom() {
     // 窗口 94_096、输出上限 16 → 输入预算 94_080，85% 线 79_968。
-    // 首轮工具 Round 锚定 input 30_000 + cache_read 27_000 = 57_000（hit_rate ≈ 0.9）；
-    // 次轮估算 = 57_000 + 11_500 = 68_500（72%，不触发既有线）；
-    // 预测 68_500 + 15_016 = 83_516 < 94_080 不触发；头部空间
-    // (94_080 − 68_500) / 94_080 ≈ 0.27 > 0.2 → 即便命中也跳过。
+    // 首轮工具 Round 锚定 input 30_000（hit_rate ≈ 0.9，cache_read 不重复计入）；
+    // 次轮估算 = 30_000 + 11_500 = 41_500（44%，不触发既有线）；
+    // 预测 41_500 + 15_016 = 56_516 < 94_080 不触发；头部空间
+    // (94_080 − 41_500) / 94_080 ≈ 0.56 > 0.2 → 即便命中也跳过。
     let capabilities = ProviderCapabilities {
         max_context_tokens: Some(94_096),
         max_output_tokens: Some(16),

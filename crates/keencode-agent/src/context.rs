@@ -988,9 +988,10 @@ impl ContextManager {
         let Some(input_tokens) = usage.input_tokens.filter(|input| *input > 0) else {
             return;
         };
-        // 部分 Chat 网关把 prompt_tokens 报成非缓存明细（cached_tokens 单列）；
-        // 锚定基数加回 cache_read_tokens，与桌面悬浮卡的上下文口径保持一致。
-        let input_tokens = input_tokens.saturating_add(usage.cache_read_tokens.unwrap_or(0));
+        // input_tokens 由 Adapter 统一归一为包含缓存读写的输入总量
+        // （messages.rs 显式相加、chat_completions/responses 的 prompt_tokens
+        // 本身即合集），此处不得再加 cache_read_tokens，否则高缓存命中会话
+        // 的锚点被双算、压缩线被抬高。
         let mut anchor = self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
         *anchor = Some(RoundUsageAnchor {
             input_tokens,
