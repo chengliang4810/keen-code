@@ -864,7 +864,7 @@ export function ProvidersPanel({
                   </div>
                 )}
 
-                <Label className="prov-field">
+                <Label className="prov-field prov-field--full">
                   <span className="prov-field__label">{tr("prov.apiKey")}</span>
                   <div className="prov-key-row">
                     <Input

@@ -123,3 +123,12 @@ describe("ProvidersPanel 供应商信息导出与导入", () => {
     expect(modal).toContain("tr(\"prov.importWorking\")");
   });
 });
+
+describe("ProvidersPanel 表单字段布局", () => {
+  it("API Key 字段独占表单整行", () => {
+    const apiKeyAt = source.indexOf('tr("prov.apiKey")');
+    const labelAt = source.lastIndexOf("<Label", apiKeyAt);
+    expect(labelAt).toBeGreaterThan(-1);
+    expect(source.slice(labelAt, apiKeyAt)).toContain("prov-field--full");
+  });
+});
