@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::atomic::{prepare_root, sync_directory};
-use crate::{ResourceError, SessionId, SessionState, SessionStatus};
+use crate::{ROOT_AGENT_ID, ResourceError, SessionId, SessionState, SessionStatus};
 use serde::{Deserialize, Serialize};
 
 /// 按稳定标识排序列出当前存储根中的全部 Session 目录。
@@ -106,6 +106,8 @@ pub struct StoredSessionMetadata {
     pub created_at_unix_ms: u64,
     /// 最近一条有效权威事件的 Unix Epoch 毫秒时间。
     pub updated_at_unix_ms: u64,
+    /// 最近一条根用户 Turn 起点的 Unix Epoch 毫秒时间；从未发送消息时为 0。
+    pub last_user_message_at_unix_ms: u64,
     /// 最近一条有效权威事件的 Journal sequence。
     pub last_sequence: u64,
     /// 事件日志是否在首个无效记录处进入只读损坏状态。
@@ -125,8 +127,24 @@ impl StoredSessionMetadata {
             status: state.status.clone(),
             created_at_unix_ms: state.created_at_unix_ms,
             updated_at_unix_ms: state.updated_at_unix_ms,
+            last_user_message_at_unix_ms: last_user_message_at(state),
             last_sequence: state.last_sequence,
             corrupt,
         })
     }
+}
+
+/// 返回最近一条根用户 Turn 的起点时间；子 Agent 续跑不代表新的用户消息。
+fn last_user_message_at(state: &SessionState) -> u64 {
+    state
+        .turns
+        .values()
+        .filter(|turn| {
+            turn.source_agent_id.as_str() == ROOT_AGENT_ID
+                && turn.root_turn_id == turn.turn_id
+                && turn.parent_turn_id.is_none()
+        })
+        .map(|turn| turn.started_at_unix_ms)
+        .max()
+        .unwrap_or(0)
 }
