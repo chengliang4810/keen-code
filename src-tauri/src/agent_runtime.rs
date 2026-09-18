@@ -9581,7 +9581,7 @@ fn map_authoritative_event(
             let event = match reason {
                 TurnStopReason::Cancelled => KeenCodeEvent::TurnCancelled,
                 TurnStopReason::Failed => KeenCodeEvent::TurnFailed {
-                    failure_kind: TurnFailureKind::Internal,
+                    failure_kind: batch_failure_kind(atomic_siblings, turn_id),
                     message: message.clone(),
                 },
                 TurnStopReason::LimitReached => KeenCodeEvent::TurnFailed {
@@ -9898,6 +9898,36 @@ fn map_authoritative_event(
         | SessionEvent::SessionClosed {} => Vec::new(),
     };
     Ok(drafts)
+}
+
+/// 从与 Turn 终态同批提交的 OnError outbox 推导 UI 失败分类。
+///
+/// `TurnStopped` 只携带停止原因，Provider 中立分类由同批 `OnErrorHookQueued` 提供；
+/// 只有 Provider 边界失败属于模型失败，缺失或未知分类保守归为内部错误。
+fn batch_failure_kind(
+    siblings: Option<&[SessionEvent]>,
+    turn_id: &ResourceTurnId,
+) -> TurnFailureKind {
+    let category = siblings.and_then(|events| {
+        events.iter().find_map(|event| match event {
+            SessionEvent::OnErrorHookQueued { invocation } if &invocation.turn_id == turn_id => {
+                Some(invocation.error_category.as_str())
+            }
+            _ => None,
+        })
+    });
+    match category {
+        Some(
+            "authentication_failed"
+            | "billing_error"
+            | "model_not_found"
+            | "rate_limit"
+            | "overloaded"
+            | "invalid_request"
+            | "server_error",
+        ) => TurnFailureKind::Model,
+        _ => TurnFailureKind::Internal,
+    }
 }
 
 /// 回放时隐藏仅为控制面引用保留、但已没有独立真实用户消息的根 Turn 生命周期。
@@ -20390,6 +20420,101 @@ mod tests {
                 assert!(safe.contains("Authorization: Bearer [REDACTED]"));
                 assert!(!safe.contains("acp-turn-secret"));
                 assert!(!safe.contains("nested-acp-turn-secret"));
+            }
+        }
+    }
+
+    /// Provider 边界失败必须保留模型分类；缺失或未知分类保守归为内部错误。
+    #[test]
+    fn turn_stopped_projection_derives_failure_category_from_on_error_outbox() {
+        let storage = tempfile::tempdir().expect("测试目录应创建");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: "failure-category-projection".to_owned(),
+                title: "失败分类投影".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("测试 Session 应创建");
+        for (category, expected) in [("server_error", "model"), ("unknown", "internal")] {
+            let turn_id = ResourceTurnId::new("failure-category-turn").unwrap();
+            let mut state = session.snapshot().expect("Session 快照应读取").state;
+            state.turns.insert(
+                turn_id.clone(),
+                TurnState {
+                    turn_id: turn_id.clone(),
+                    source_agent_id: ResourceAgentId::new("root").unwrap(),
+                    root_turn_id: turn_id.clone(),
+                    parent_turn_id: None,
+                    prompt_summary: "验证失败分类".to_owned(),
+                    started_at_unix_ms: 1,
+                    completed_at_unix_ms: Some(2),
+                    status: TurnStatus::Failed,
+                    stop_reason: Some(TurnStopReason::Failed),
+                    outcome_message: Some("模型调用失败".to_owned()),
+                },
+            );
+            // 根 Turn 生命周期在回放中需要真实用户消息才可见。
+            state.transcript.push(TranscriptRecord::MessageAdded(
+                keencode_resources::SessionMessage {
+                    is_meta: false,
+                    message_id: "failure-category-user".to_owned(),
+                    turn_id: Some(turn_id.clone()),
+                    agent_id: None,
+                    role: keencode_resources::MessageRole::User,
+                    content: vec![keencode_resources::MessagePart::Text {
+                        text: "验证失败分类".to_owned(),
+                    }],
+                },
+            ));
+            let message = "模型调用失败：模型响应协议错误：模型流式响应超过上限";
+            let record = SessionEventRecord {
+                schema: SESSION_EVENT_SCHEMA.to_owned(),
+                version: SESSION_EVENT_VERSION,
+                event_id: SessionEventId::new("failure-category-event").unwrap(),
+                session: state.session_id.clone(),
+                sequence: 2,
+                time_unix_ms: 2,
+                event: SessionEvent::AtomicBatch {
+                    events: vec![
+                        SessionEvent::TurnStopped {
+                            turn_id: turn_id.clone(),
+                            reason: TurnStopReason::Failed,
+                            message: message.to_owned(),
+                        },
+                        SessionEvent::OnErrorHookQueued {
+                            invocation: keencode_resources::OnErrorHookInvocation {
+                                invocation_id: "failure-category-invocation".to_owned(),
+                                turn_id: turn_id.clone(),
+                                source_agent_id: ResourceAgentId::new("root").unwrap(),
+                                terminal_reason: TurnStopReason::Failed,
+                                error_category: category.to_owned(),
+                                error_message: message.to_owned(),
+                            },
+                        },
+                    ],
+                },
+            };
+            for mode in [
+                AuthoritativeProjectionMode::Live,
+                AuthoritativeProjectionMode::Replay,
+            ] {
+                let drafts = map_authoritative_record(&session, &state, &record, mode)
+                    .expect("失败终态应投影");
+                // OnError outbox 只提供分类，不额外产生 UI 事件。
+                assert_eq!(drafts.len(), 1);
+                let delivery = materialize_delivery(
+                    session.session_id().as_str(),
+                    1,
+                    drafts.into_iter().next().unwrap(),
+                )
+                .expect("投递应编码");
+                let json = serde_json::to_value(delivery).expect("投递应序列化");
+                assert_eq!(
+                    json["envelope"]["event"]["failureKind"], expected,
+                    "category={category} mode={mode:?}"
+                );
             }
         }
     }
