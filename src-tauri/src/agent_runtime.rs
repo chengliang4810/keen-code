@@ -5187,28 +5187,51 @@ impl AgentRuntime {
         Ok(provider)
     }
 
-    /// 解析子 Agent 模型；普通模型沿用 Session Provider，复合引用显式选择 Provider。
+    /// 解析子 Agent 模型；用户指定的模型优先，仅在模型不可用时回退主对话模型。
+    /// 视觉等能力差异不自动回退，由主对话在子 Agent 失败后改用 `model: "inherit"` 处理。
     fn resolve_child_agent_provider(
         &self,
         session_provider: Option<&ProviderSnapshot>,
         model_reference: &str,
     ) -> Result<ResolvedProvider, AgentRuntimeError> {
-        if let Some((provider_id, model)) = split_child_agent_model_override(model_reference)? {
-            return self
-                .provider_registry
-                .resolve(provider_id, model)
-                .map_err(|_| AgentRuntimeError::ProviderNotConfigured);
+        let parent = self.resolve_session_provider(session_provider)?;
+        let Some(requested) = self.try_resolve_child_model_reference(session_provider, model_reference)
+        else {
+            return Ok(parent);
+        };
+        let requested = requested.unwrap_or_else(|_| parent.clone());
+        if requested.provider_id() == parent.provider_id() && requested.model() == parent.model() {
+            return Ok(parent);
+        }
+        Ok(requested)
+    }
+
+    /// 尝试按子 Agent 模型引用解析绑定；没有可用解析来源时返回 `None`。
+    fn try_resolve_child_model_reference(
+        &self,
+        session_provider: Option<&ProviderSnapshot>,
+        model_reference: &str,
+    ) -> Option<Result<ResolvedProvider, AgentRuntimeError>> {
+        if let Some((provider_id, model)) = split_child_agent_model_override(model_reference).ok()? {
+            return Some(
+                self.provider_registry
+                    .resolve(provider_id, model)
+                    .map_err(|_| AgentRuntimeError::ProviderNotConfigured),
+            );
         }
         if let Some(provider) = session_provider {
-            return self
-                .provider_registry
-                .resolve(&provider.provider_id, model_reference)
-                .map_err(|_| AgentRuntimeError::ProviderNotConfigured);
+            return Some(
+                self.provider_registry
+                    .resolve(&provider.provider_id, model_reference)
+                    .map_err(|_| AgentRuntimeError::ProviderNotConfigured),
+            );
         }
-        let default = self.resolve_default_provider()?;
-        self.provider_registry
-            .resolve(default.provider_id(), model_reference)
-            .map_err(|_| AgentRuntimeError::ProviderNotConfigured)
+        let default = self.resolve_default_provider().ok()?;
+        Some(
+            self.provider_registry
+                .resolve(default.provider_id(), model_reference)
+                .map_err(|_| AgentRuntimeError::ProviderNotConfigured),
+        )
     }
 
     /// 原子替换 WebFetch 与 WebSearch 的服务配置；为空时后续 Turn 不注册网络工具。
@@ -11579,6 +11602,68 @@ mod tests {
             .expect("复合子 Agent 模型应解析覆盖 Provider");
         assert_eq!(overridden.provider_id(), "provider-b");
         assert_eq!(overridden.model(), "model-b");
+    }
+
+    /// 子 Agent 指定模型被删除时回退主对话模型；可解析的指定模型即使能力不同也保持用户指定。
+    #[test]
+    fn child_agent_model_falls_back_to_session_provider() {
+        let registry = keencode_provider::ProviderRegistry::new();
+        let registration = |provider_id: &str, model: &str, image_input: bool| {
+            let mut config = ProviderConfig::new_unauthenticated(
+                provider_id,
+                keencode_model::ProviderProtocol::Responses,
+                "https://example.com/v1",
+            )
+            .expect("测试 Provider 配置应有效");
+            config.default_capabilities =
+                ProviderCapabilities { image_input, ..ProviderCapabilities::default() };
+            ProviderRegistration::new(
+                config,
+                format!("{provider_id} 测试 Provider"),
+                "test-revision",
+                ProviderModelPolicy::Enumerated {
+                    models: vec![model.to_owned()],
+                },
+            )
+            .expect("测试 Provider 注册项应有效")
+        };
+        registry
+            .replace_all([
+                registration("provider-a", "model-a", true),
+                registration("provider-b", "model-b", true),
+                registration("provider-c", "model-c", false),
+            ])
+            .expect("三 Provider 注册表应替换");
+        let session_provider = provider_snapshot(
+            &registry
+                .resolve("provider-a", "model-a")
+                .expect("Session Provider 应解析"),
+        );
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let runtime = AgentRuntime::new_with_registry(
+            storage.path(),
+            RecordingEmitter::successful(),
+            registry,
+        )
+        .expect("测试 Runtime 应创建");
+
+        let missing = runtime
+            .resolve_child_agent_provider(Some(&session_provider), "provider-b::model-missing")
+            .expect("模型被删除时应回退主对话模型");
+        assert_eq!(missing.provider_id(), "provider-a");
+        assert_eq!(missing.model(), "model-a");
+
+        let no_vision = runtime
+            .resolve_child_agent_provider(Some(&session_provider), "provider-c::model-c")
+            .expect("可解析的用户指定模型应保持");
+        assert_eq!(no_vision.provider_id(), "provider-c");
+        assert_eq!(no_vision.model(), "model-c");
+
+        let vision_override = runtime
+            .resolve_child_agent_provider(Some(&session_provider), "provider-b::model-b")
+            .expect("满足视觉要求的用户指定模型应保留");
+        assert_eq!(vision_override.provider_id(), "provider-b");
+        assert_eq!(vision_override.model(), "model-b");
     }
 
     /// 子 Agent 复合模型引用必须拒绝空段、边界空白和多余分隔符。

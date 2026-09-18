@@ -236,7 +236,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                     },
                     "fork_turns": {
                         "type": "string",
-                        "description": "none, all, or a decimal integer from 1 through 10000; defaults to all. Inherits only completed parent turns, not the running turn. all keeps the parent model configuration and cannot be combined with model or reasoning_effort overrides or a template that overrides the model"
+                        "description": "none, all, or a decimal integer from 1 through 10000; defaults to all. Inherits only completed parent turns, not the running turn"
                     },
                     "agent": {
                         "type": "string",
@@ -244,7 +244,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                         "maxLength": 1024,
                         "description": "Optional stable name from the agent catalog; an explicitly selected unknown or invalid template fails without fallback"
                     },
-                    "model": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Optional configured model identifier in provider_id::model form" },
+                    "model": { "type": "string", "minLength": 1, "maxLength": 256, "description": "Optional configured model identifier in provider_id::model form; takes priority over the agent template model. Use \"inherit\" to force the parent conversation model, which is also the fallback when the requested model is unavailable or when a spawned child fails due to model capability limits" },
                     "reasoning_effort": { "type": "string", "minLength": 1, "maxLength": 64 }
                 },
                 "required": ["task_name", "message", "assignment"],
@@ -274,7 +274,10 @@ impl RuntimeAgentTool for SpawnAgentTool {
             ensure_not_cancelled(&context)?;
             let input = parse_spawn_agent_input(&input)?;
             let mut child_profile = child_profile;
-            if let Some(model) = input.model {
+            // 用户显式指定的模型优先级最高：`inherit` 固定沿用父 Agent 模型，
+            // 其他标识直接覆盖；两种情况都不再接受模板的模型覆盖。
+            let explicit_model = input.model.clone().filter(|model| model != "inherit");
+            if let Some(model) = explicit_model {
                 child_profile.model = model;
             }
             if let Some(reasoning_effort) = input.reasoning_effort {
@@ -287,7 +290,7 @@ impl RuntimeAgentTool for SpawnAgentTool {
                         "当前 Session 没有可用的 Agent 模板候选",
                     )
                 })?;
-                let template = resolver
+                let mut template = resolver
                     .resolve(
                         agent_name,
                         &SpawnAgentTemplateContext {
@@ -302,13 +305,8 @@ impl RuntimeAgentTool for SpawnAgentTool {
                             "指定的 Agent 模板不存在、未启用或不适用于当前项目",
                         )
                     })?;
-                if matches!(&input.context_inheritance, ContextInheritance::All)
-                    && template.model.is_some()
-                {
-                    return Err(ToolError::permanent(
-                        "invalid_input",
-                        "fork_turns=all 必须沿用父 Agent 模型，不能选择带模型覆盖的 Agent 模板",
-                    ));
+                if input.model.is_some() {
+                    template.model = None;
                 }
                 apply_resolved_agent_template(&mut child_profile, template)?
             } else {
@@ -964,14 +962,6 @@ fn parse_spawn_agent_input(input: &Value) -> Result<ParsedSpawnAgentInput, ToolE
                 "agent 不能包含首尾空白或控制字符",
             ));
         }
-    }
-    if context_inheritance == ContextInheritance::All
-        && (input.model.is_some() || input.reasoning_effort.is_some())
-    {
-        return Err(ToolError::permanent(
-            "invalid_input",
-            "fork_turns=all 时必须继承父 Agent 的模型与推理强度",
-        ));
     }
     Ok(ParsedSpawnAgentInput {
         task_name: input.task_name,

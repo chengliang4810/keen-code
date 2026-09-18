@@ -949,9 +949,9 @@ async fn explicit_agent_template_unknown_and_error_do_not_spawn() {
     }
 }
 
-/// 完整历史继承不能通过显式模板绕过父模型冻结规则。
+/// 完整历史继承允许模板模型覆盖；用户显式 `model` 优先级更高。
 #[tokio::test]
-async fn explicit_agent_template_model_override_is_rejected_for_all_history() {
+async fn explicit_agent_template_model_override_applies_for_all_history() {
     let fixture = fixture(2, 2);
     let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
         template: Some(ResolvedSpawnAgentTemplate {
@@ -968,27 +968,32 @@ async fn explicit_agent_template_model_override_is_rejected_for_all_history() {
         fail: false,
     });
     let source = Arc::new(StaticContextSource::default());
-    let error = SpawnAgentTool::new(
-        fixture.coordinator.clone(),
-        profile("all-template-child"),
-        source.clone(),
-    )
-    .with_template_resolver(resolver)
-    .execute(
-        fixture.root_context(),
-        json!({
-            "task_name": "all_template_child",
-            "message": "不得切换模型后继承完整历史",
-            "assignment": "负责完整历史模板验证",
-            "fork_turns": "all",
-            "agent": "other-model"
-        }),
-    )
-    .await
-    .expect_err("完整历史继承不得接受模板模型覆盖");
-    assert_eq!(error.code, "invalid_input");
-    assert_eq!(source.call_count(), 0);
-    assert_eq!(fixture.execution.launch_count(), 1);
+    let output = output_json(
+        SpawnAgentTool::new(
+            fixture.coordinator.clone(),
+            profile("all-template-child"),
+            source.clone(),
+        )
+        .with_template_resolver(resolver)
+        .execute(
+            fixture.root_context(),
+            json!({
+                "task_name": "all_template_child",
+                "message": "切换模型后继承完整历史",
+                "assignment": "负责完整历史模板验证",
+                "fork_turns": "all",
+                "agent": "other-model"
+            }),
+        )
+        .await
+        .expect("完整历史继承应接受模板模型覆盖"),
+    );
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &output));
+    assert_eq!(launch.agent.profile.model, "provider-b::other-model");
+    assert_eq!(source.call_count(), 1);
+    assert_eq!(fixture.execution.launch_count(), 2);
 }
 
 /// `fork_turns=none` 必须完全跳过 Transcript 来源，即使来源当前不可用也能创建空快照。
@@ -1157,33 +1162,85 @@ async fn spawn_agent_context_source_failure_does_not_create_child() {
     assert_eq!(fixture.execution.launch_count(), 1);
 }
 
-/// 完整历史继承必须固定沿用父 Agent 模型配置，不能由模型输入覆盖。
+/// 完整历史继承允许用户显式指定模型：显式 model 优先于模板覆盖，`inherit` 固定沿用父 Agent 模型。
 #[tokio::test]
-async fn spawn_agent_rejects_model_overrides_when_forking_all_turns() {
-    let fixture = fixture(2, 2);
-    let tool = spawn_tool(fixture.coordinator.clone(), profile("all_history_child"));
-    for input in [
-        json!({
-            "task_name": "model_override",
-            "message": "尝试覆盖模型",
-            "assignment": "负责模型覆盖验证",
-            "fork_turns": "all",
-            "model": "other-model"
+async fn spawn_agent_model_priority_with_full_history_inheritance() {
+    let fixture = fixture(4, 4);
+    let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
+        template: Some(ResolvedSpawnAgentTemplate {
+            snapshot: AgentTemplateSnapshot {
+                name: "reviewer".to_owned(),
+                system_prompt: "审查实际变更".to_owned(),
+                max_turns: None,
+                allowed_write_dirs: Vec::new(),
+            },
+            model: Some("provider-a::template-model".to_owned()),
+            tool_names: None,
+            disallowed_tool_names: Vec::new(),
         }),
-        json!({
-            "task_name": "effort_override",
-            "message": "尝试覆盖推理强度",
-            "assignment": "负责推理强度覆盖验证",
-            "reasoning_effort": "high"
-        }),
-    ] {
-        let error = tool
-            .execute(fixture.root_context(), input)
-            .await
-            .expect_err("fork_turns=all 不得覆盖模型配置");
-        assert_eq!(error.code, "invalid_input");
-    }
-    assert_eq!(fixture.execution.launch_count(), 1);
+        fail: false,
+    });
+    let tool = spawn_tool(fixture.coordinator.clone(), profile("all_history_child"))
+        .with_template_resolver(resolver);
+
+    let explicit = output_json(
+        tool.execute(
+            fixture.root_context(),
+            json!({
+                "task_name": "explicit_model",
+                "message": "显式指定模型",
+                "assignment": "负责显式模型验证",
+                "fork_turns": "all",
+                "agent": "reviewer",
+                "model": "provider-b::user-model"
+            }),
+        )
+        .await
+        .expect("显式模型应与完整历史继承兼容"),
+    );
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &explicit));
+    assert_eq!(launch.agent.profile.model, "provider-b::user-model");
+
+    let inherited = output_json(
+        tool.execute(
+            fixture.root_context(),
+            json!({
+                "task_name": "inherit_model",
+                "message": "沿用父模型",
+                "assignment": "负责父模型验证",
+                "fork_turns": "all",
+                "agent": "reviewer",
+                "model": "inherit"
+            }),
+        )
+        .await
+        .expect("inherit 应固定沿用父 Agent 模型"),
+    );
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &inherited));
+    assert_eq!(launch.agent.profile.model, "model-all_history_child");
+
+    let template_only = output_json(
+        tool.execute(
+            fixture.root_context(),
+            json!({
+                "task_name": "template_model",
+                "message": "沿用模板模型",
+                "assignment": "负责模板模型验证",
+                "fork_turns": "all",
+                "agent": "reviewer"
+            }),
+        )
+        .await
+        .expect("未显式指定模型时应应用模板覆盖"),
+    );
+    let launch = fixture
+        .execution
+        .launch(&spawned_turn_id(&fixture, &template_only));
+    assert_eq!(launch.agent.profile.model, "provider-a::template-model");
 }
 
 /// Agent 与 SendMessage 使用同一可信 ToolCall 身份重放时返回首次结果且不重复副作用。
