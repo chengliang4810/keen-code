@@ -96,7 +96,6 @@ export function useSessionSend({
     setLiveHost,
     setLiveMap,
     setRetryStatus,
-    setTurnStartedAt,
     setLocalError,
     setPlanModeSessionKey,
     setUltraModeSessionKey,
@@ -205,7 +204,6 @@ export function useSessionSend({
           appendOptimistic(previous),
         );
       }
-      setTurnStartedAt(ts);
       if (viewingTarget()) {
         setSession((previous) =>
           previous.state === "streaming"
@@ -244,7 +242,6 @@ export function useSessionSend({
           if (viewingTarget()) setMessages((messages) => stripOptimistic(messages));
         }
         if (viewingTarget()) {
-          setTurnStartedAt(null);
           setRetryStatus(null);
           setSession((previous) =>
             previous.state === "streaming"
@@ -520,7 +517,6 @@ export function useSessionSend({
       setPlanModeSessionKey,
       setRetryStatus,
       setSession,
-      setTurnStartedAt,
       setUltraModeSessionKey,
       tr,
       turnLatencyBySessionRef,
