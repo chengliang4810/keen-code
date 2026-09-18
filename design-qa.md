@@ -95,6 +95,22 @@
 
 ---
 
+# 2026-09-17 失败回合可见性（侧边栏终态标记 + 对话流失败标记）
+
+- 问题：会话以 `turn_stopped{reason:"failed"}` 结束时界面没有任何可见痕迹，用户报告“没看到错误，但是自己停止了”。实测失败时若该会话不在前台，侧边栏只是转圈消失。
+- 根因（已用真实 journal 事件跑前端归约 + 投影证实）：`src/hooks/acp-runtime/events.ts` 的终态副作用只对 `turn_completed` 打未读标记，`turn_failed` 只把状态改回 `ready`；且 `turnStatus`/`turnIncomplete`/`turnErrorKind` 全仓无 UI 消费方。对话流内的错误气泡（`turn_failed` → `view.last_error` → `mergeAcpTurnError`）本身是正常的，气泡带完整原文，因此本次不改该链路。
+- 修改：`src/lib/sessionCompletion.ts`（未读状态由 `Set<string>` 改为 `Map<string, "completed"|"failed">`，存储键 `UNREAD_TERMINAL_RESULTS_KEY`，含旧值形状校验）、`src/hooks/acp-runtime/events.ts`（`turn_completed`/`turn_failed` 都产生未读结果，`turn_cancelled` 保持静默）、`src/hooks/acp-runtime/types.ts`、`src/hooks/useAcpSessionRuntime.ts`、`src/hooks/useSessionNavigation.ts`、`src/App.tsx`、`src/features/app/sidebar/{types,PinnedSessionList,HistorySessionList,ProjectTree,SidebarSessionRow}.tsx`（按结果渲染完成点或失败标记）、`src/components/lobe-chat/ConversationThread.tsx`（失败回合在对话流内复用 `EndOfTurnChip` + 既有文案 `endOfTurn.error`）；`src/i18n/messages.ts` 与 `src/i18n/zh-tw.ts`（新增 `sidebar.sessionFailedUnread` 三语言文案）；`src/styles/app-foundation.css`（`.tree-l3--unread-terminal` 取代 `.tree-l3--completed-unread`，新增 `.tree-l3__status--failed`）。未新增依赖或后台活动。
+- 门禁：`pnpm run typecheck` 通过；`pnpm run lint:css` 通过；`pnpm exec vitest run` 144 文件 / 1406 项通过（新增 3 项：未读终态持久化与非法值拒绝、失败/完成终态产生未读结果、前台终态与主动取消不产生未读结果）。
+- 基线：`37218407a6ee8fa494371bc80f31b9463b490c6b`，用 `git archive HEAD src public` 解压到夹具的 `baseline/` 目录。基线 `SidebarSessionRow.tsx` SHA-256 为 `fefdae0c683e42f7f971e9951ab7da2854663526fcb18c15b4f18b01f6bfc5e5`，当前为 `ce09df0e0556b1b483566f3045f5584eb0b86a7b2c6d76c2cc60506eb096a2b5`。
+- 夹具：`output/playwright/failure-visibility-20260917/`。`baseline/` 为基线源码副本，`current/src` 通过符号链接指向工作树 `src/`，两变体共用 `node_modules` 但使用独立 Vite 依赖缓存。`QA_VARIANT=baseline pnpm exec vite --config output/playwright/failure-visibility-20260917/vite.config.mts` 与 `QA_VARIANT=current ...` 分别起 `http://127.0.0.1:14391/`、`http://127.0.0.1:14392/`；`node shoot.mjs` / `node shoot-thread.mjs` 截图与几何采集，`python3 compare.py` 比对。侧边栏夹具用 `?state=plain|completed|failed` 固定状态，仅渲染合成会话行；对话流夹具用合成消息（含一个 `turnStatus:"failed"` 与一个正常回合），两者都不调用模型、不写用户会话。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，侧边栏夹具 420×800、对话流夹具 1024×800，deviceScaleFactor=1。
+- DOM 与几何：侧边栏会话行几何完全不变（x=8、y=8、263×30；`.tree-l3__name` x=18、高 30）。`?state=failed` 下当前版出现 `.tree-l3__status--failed`（x=242、y=11、24×24，`aria-label="已失败，点击查看错误"`、`dotCount=0`），基线版无该元素（`status=null`、`dotCount=0`）；`?state=completed` 下两版均为 `.tree-l3__status--completed`、`dotCount=1`、同一 `aria-label`，行类名由 `tree-l3--completed-unread` 变为 `tree-l3--unread-terminal`。对话流在失败回合后出现 1 个 `[data-testid=end-of-turn]`（`data-reason="error"`、文本“本轮以错误结束”、y=203、高 28.8），基线为 0 个。
+- 像素：RGB 任一通道差值 >16 计入，未掩码。侧边栏 `?state=plain`（对照）与 `?state=completed` 均 0/84000 像素差异，证明改动未影响既有完成标记与普通行；`?state=failed` 差异 444/84000（0.528571%），范围 `[172,16,261,30)`，即新增失败标记所在区域。对话流同状态比较差异 13857/819200（1.691528%），范围 `[68,211,956,442)`；逐行核对确认首个差异行 y=211、chip 顶边 y=203 之上差异像素为 0，差异全部来自新增标记行及其下方随之位移的内容。
+- 两页 Console 均为 0 error、0 warning。
+- 未验收：浏览器组件夹具不替代原生 Tauri WebView / Windows 实机验收；真实会话中经 ACP 投递 `turn_failed` 触发侧边栏标记的端到端流程未在桌面应用内重跑（夹具直接渲染行组件，`latencyRecovery.test.tsx` 覆盖事件到未读结果的归约）。
+
+---
+
 # 2026-09-17 移除编辑重发的文件恢复复选框
 
 - 需求：删除最后一条用户消息内联编辑器中的“同时恢复本轮及其子 Agent 修改的文件”复选框，并一并移除其背后的文件恢复能力。
@@ -907,9 +923,50 @@ historical result: passed; current release: not reverified
 - 已验证：合成事件 `context_compaction_started` → `context_compaction_completed` / `context_compaction_failed` / `turn_cancelled` 的时间线投影测试和组件渲染测试；未取得原生桌面窗口同状态、同视口及 deviceScaleFactor 的前后截图。当前原生计算机控制 API 禁用，不能完成本次原生像素差异检查；浏览器或历史截图不能替代。
 - 待验收：分别用上述基线与当前版本在隔离开发桌面进程运行，保持 macOS、中文、浅色、同视口和 deviceScaleFactor，用同一合成压缩事件序列截图并比较像素；再在真实长会话确认开始提示及时出现、完成后原位更新，且不会每轮反复压缩。
 
+
+# 2026-09-17 供应商限额提示可见性与标题租约释放
+
+- 需求：1) 供应商额度耗尽（如 GLM HTTP 429 / 业务码 1308「已达到 5 小时的使用上限…重置」）时，重试原因必须直接可见，不能只放在悬停 `title` 与无障碍名称里；2) 后台自动标题请求在额度耗尽后长时间重试时，不得继续独占 Session Runtime 租约，否则随后的 `keencode/session/rewind`、`session/load` 会报「Session Runtime 正被另一个进程或句柄占用」，并在前端折叠成 `ACP 请求失败`（-32603）。
+- 根因：`src-tauri/src/acp_host/extensions.rs` 的 `dispatch_generate_title` 把授权句柄 `_session` 持有到标题网络等待结束；`AgentRuntime::generate_title` 也在等待模型前调用 `runtime_manager.get()` 并在整个超时窗口内保持句柄。关闭会话只移除投递世代，不等待标题任务退出，租约因此被占用到标题请求超时。
+- 修改（后端）：`src-tauri/src/acp_host/extensions.rs` 授权校验后立即 `drop` 句柄；`src-tauri/src/agent_runtime.rs` 把 `title_generation_gates` 的值由裸 `Mutex<()>` 改为 `TitleGeneration { gate, cancellation }`，句柄改为在取得 gate 之后获取，标题请求包在 `tokio::select!` 中与 `cancellation.cancelled()` 竞争；`close_session_delivery` 拆出持锁内部函数 `close_session_delivery_locked`，移除标题任务记录后取消并等待 gate 释放；`close_session`/`shutdown_session` 在既有 `delivery_reset_gate` 内完成投递关闭与租约释放，避免关闭期间新请求重新登记。
+- 修改（前端）：`src/components/lobe-chat/ConversationThread.tsx` 的 `RetryStatus` 把限额原因渲染为可见正文（`<br/>` + 原因文本），倒计时单独标记 `aria-hidden`，避免实时区域每 100ms 变更被反复播报；`src/components/lobe-chat/lobe-chat.css` 的 `.lobe-chat-retry-status__label` 由单行省略号改为可换行（`white-space: normal` + `overflow-wrap: anywhere`），长限额文案不再被截断。
+- 回归测试：`src-tauri/src/agent_runtime.rs` 新增 `title_generation_close_releases_lease_without_caching_stale_result`（模型永不返回时 `close_session` 必须在有界时间内成功、重开成功、旧标题不写入缓存）；`src/components/lobe-chat/ConversationThread.test.tsx` 新增「将供应商限额和恢复时间显示为正文」并断言 `__label` 换行规则。
+- 验证：`cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop` 有 641 passed / 0 failed 的一次完整运行；另两次全量运行各命中 1 个既有 flaky（`agent_runtime::tests::shutdown_is_idempotent`、`extensions::runtime_contributor::claude_hook_tests::cancelled_session_start_late_success_cannot_complete_reloaded_candidate`）。前者隔离复跑 30 次失败 2 次，其 `send_command` 回执分支与 HEAD 逐字一致且用例只经过 `SessionDeliverySender`、不经过本次改动路径，判为既有竞态，未纳入本次范围。相关前端 137 项通过，`pnpm run lint:css` 通过；`pnpm run typecheck` 仅余 2 个既有 `closeToTray` 错误（另一会话未完成改动）。
+- 视觉对比：基线取 `output/playwright/provider-limit/before-source.tar.gz`（`src/` 快照，追溯提交 `d60beaa1`）叠加本次两个前端文件，对照为「快照 `src/` + 本次两个文件」；夹具 `output/playwright/provider-limit/{baseline,patched}/fixture-retry.tsx` 只渲染真实 `ConversationThread` 与合成重试状态（`reason` 为上述限额文案），两变体共用 `node_modules`、各自 `cacheDir`，端口 14395/14396，`node shoot-retry.mjs` 截图并采集几何，`python3 compare-retry.py` 比对。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，1024×420，deviceScaleFactor=1。
+- DOM 与几何：基线 `.lobe-chat-retry-status` 可见文本仅为「正在进行第 2/10 次请求尝试 · 3s」，原因只存在于 `title` 与 `aria-label`；对照可见文本包含完整限额文案，标签盒高 17.55 → 35.09px、容器高 24 → 35.09px，两变体 `scrollWidth - clientWidth` 均为 0（无溢出截断）。
+- 像素：RGB 任一通道差值 >16 计入，未掩码。差异 3843/430080（0.893555%），范围 [68,197,472,228)，即重试提示行本身；两页 Console 均 0 error、0 warning。
+- 未验收：浏览器夹具不替代原生 Tauri WKWebView 实机验收；未在真实桌面会话里用额度耗尽的供应商复跑「标题请求挂起 → 关闭/重开会话」端到端链路（Rust 回归测试覆盖同一路径）。提交只包含本次 hunk，工作区另有并发会话 WIP（水位提示移除、`--ui-font-delta` 字号跟随、`batch_failure_kind` 等）未纳入。
+
+
 # 2026-09-18 已工作耗时支持小时与天单位
 
 - 需求：「已工作/工作中 {duration}」以及「持续了 {duration}」的耗时在超过 1 小时后仍只显示分钟（如「120分钟」），需要增加小时与天两级单位换算。
 - 修改：`src/components/lobe-chat/Thinking.tsx` 的共享格式化函数 `formatProcessingDuration` 由分/秒两级扩展为天/小时/分/秒四级紧凑展示，三语言（`en`/`zh`/`zh-TW`）分别输出 `1d 1h`、`1天 1小时`、`1天 1小時`；`ConversationThread.tsx` 与 `TimelinePhaseBlock.tsx` 的「工作中/已工作/持续了」标签均复用该函数，一处修改全链路生效。未改动 DOM 结构、CSS 或 i18n 文案。
 - 测试：`src/components/lobe-chat/Thinking.test.tsx` 新增中文/英文天与小时档位断言（`3_660_000ms → 1小时 1分钟 / 1h 1m`，`30_000_000ms → 8小时 20分钟 / 8h 20m`，`90_000_000ms → 1天 1小时 / 1d 1h`，zh-TW 同步覆盖）；`pnpm exec vitest run` 聚焦 3 个相关文件 47 项通过，`pnpm run typecheck` 通过。
 - 未验收：与既往限制一致，未取得原生 macOS WKWebView 同状态前后截图做像素比对；本次仅改文本内容与字符宽度（按钮宽度自适应），无布局/样式/交互变化，浏览器级 SSR 断言与类型检查不足以替代原生桌面验收。
+
+
+# 2026-09-18 右侧面板内置浏览器（地址栏与多网页标签）
+
+- 需求：右侧面板可直接查看对话里出现的 URL 与本地 HTML 全路径，不切到外部浏览器；需要地址栏，且能同时打开多个网页并切换（首选每个标签各自持有一个网页）。
+- 修改（Rust）：新增 `src-tauri/src/browser.rs`，提供 `browser_open/bounds/show/hide/close/navigate/reload/history` 八个命令，并在 `src-tauri/src/lib.rs` 注册。每个网页标签对应一个独立原生子 WebView（label 前缀 `browser-`），切换标签只切显隐，因此滚动位置、表单内容与前端路由在切换后保留；`browser_open` 为 `async` 命令，避免 Windows 上同步命令内创建 WebView 死锁；导航与标题变化经 `browser://state` 事件回写前端。
+- 修改（前端）：`src/components/EmbeddedBrowser.tsx` 重写为带地址栏的网页标签（后退/前进/刷新/地址栏/外部打开）；`src/lib/browserTabs.ts` 归一化地址栏输入（http(s) 直连、主机名补全协议、本地绝对路径交给文件预览链路、拒绝脚本协议），`src/lib/browserWebview.ts` 按标签串行化命令，`src/hooks/useCoveringOverlay.ts` 按几何遮挡判断原生子 WebView 是否需要让位；`ResourceViewer.tsx` 常驻挂载全部网页标签并新增「新建网页标签」入口；三语言文案与 `app-resource.css` 同步更新。
+- 安全修正（本次引入并已修复）：Tauri 为每个 WebView 注册 `asset://` 协议，且把 `Access-Control-Allow-Origin` 设为该 WebView **创建时**的来源。若直接用目标地址创建子 WebView，远程页面即可读取 `assetProtocol.scope`（当前含 `$HOME/**`）。现改为用 `about:blank` 创建（来源为 `null`）再导航到目标地址，并在 `browser.rs` 注释中记录该约束与原因。
+- 测试：`src/lib/browserTabs.test.ts` 新增 8 项（协议补全、回环地址用 http、本地路径与 `file://` 还原、脚本协议拒绝、标签名派生）；`src-tauri/src/browser.rs` 新增 3 项单元测试（label 派生与非法字符替换、http/https 与空白页放行、`file:`/`javascript:`/`data:`/`ftp:` 拒绝）。
+- 验证：`pnpm run typecheck`、`pnpm run lint:css`、`pnpm exec vitest run`（147 文件 / 1445 用例全通过）、`cargo check`、`cargo test -p keencode-desktop --lib browser::`（3 通过）均通过。
+- 未验收：未取得原生 macOS WKWebView 实机证据。核心风险（原生子 WebView 能否真正创建、与主界面的层叠与坐标是否准确）只能由实机确认，本会话无法驱动原生 UI，且用户已有 KeenCode 实例占用同一 `~/.keencode` 数据目录。实机复现：设置 `KEENCODE_BENCHMARK=1`、`KEENCODE_BENCHMARK_DATA_DIR=<隔离目录>` 后运行 `pnpm dev:desktop`，在右侧面板点「新建网页标签」，验证地址栏导航、多标签切换后页面状态保留、下拉菜单/弹窗出现时网页正确让位，以及 `file:///…/x.html` 由文件预览链路打开。本次未做像素对比，也未量化多网页标签的内存增量。
+
+
+# 2026-09-18 模型选择器显示会话实际供应商
+
+- 问题：首次使用某个模型后，后续切换新模型时新模型已生效，但模型选择器的触发器与下拉勾选仍显示旧供应商。触发场景为首个模型命中供应商限额（HTTP 429）后切换到另一供应商的同名模型。
+- 根因（用本机真实日志与 journal 证实）：Composer 只保存模型 ID，供应商仅在 `session/set_config_option` 成功后写入 `modelBySessionRef`（`providerId::modelId`），随后恢复、`config_option_update` 回执与打开会话等路径都用 `modelIdFromSessionReference(...)` 把引用截断成模型 ID；显示层再按全局活跃供应商（`activeCustomProvider`）解析 `ModelOption`。当同一模型 ID 存在于多个供应商时，显示便回退到全局活跃供应商。本机 `~/.keencode` 复现条件：`workbuddy` 与 `workbuddy-ai` 都提供 `deepseek-v4.1-flash`；会话 `session-621c24e7…` 的 journal 在 10:40:48 → 10:40:53 记录 `provider_snapshot_updated` 由 `de08ae2a…`（Workbuddy）切到 `db970eaf…`（WorkBuddyAI），`model-request-records.jsonl` 同一时刻有 429「您的使用量已超出频率限制…您也可以切换其他模型继续使用」，与用户描述的触发条件一致。
+- 修改（前端，全部落在共享汇聚点）：`src/lib/modelCatalog.ts` 新增 `findActiveModel`（按会话供应商精确匹配；供应商已知但目录不再列出该模型时不再借用同名条目）、`formatSessionModelReference`、`isBoundSessionModelReference`（模块内把 Host 未绑定 Provider 的 `unconfigured` 占位值按“未选择”处理，不当作模型名展示）；`src/hooks/useProviderModels.ts` 状态由 `modelId` 改为完整引用 `sessionModelReference`，对外提供 `sessionProviderId` 与 `setSessionModelReference`；`src/hooks/acp-runtime/{history,events,types}.ts`、`src/hooks/useAcpSessionRuntime.ts`、`src/hooks/useSessionNavigation.ts`、`src/App.tsx` 把端口与调用点统一改为传递完整引用；`src/features/app/main/ComposerToolbar.tsx` 与 `src/components/ComposerModelMenu.tsx` 按会话供应商解析与显示，切换时先落地含供应商的本地引用。未改动 CSS、DOM 结构与运行时协议；发送门槛保持按全局默认供应商判断，避免会话供应商被删除时静默禁用发送按钮。
+- 回归测试：`src/lib/modelCatalog.test.ts` 新增引用往返、同名模型按供应商精确匹配、占位值断言（23 项）；`src/components/ComposerModelMenu.test.tsx` 新增「同名模型属于多个供应商时显示会话自身供应商」；`src/hooks/acp-runtime/history.test.tsx` 断言恢复把完整引用 `fix-local::hy3` 交给 Composer；`src/hooks/useSessionNavigation.test.tsx` 同步断言。
+- 验证：`pnpm run typecheck` 通过；`pnpm exec vitest run` 147 文件 / 1450 用例全通过。
+- 视觉对比：夹具 `output/playwright/model-menu-session-provider-20260918/`。`baseline/ComposerModelMenu.tsx` 由当前源码仅回退本次解析 hunk 生成（基线按其原接线传全局活跃供应商 `workbuddy`），`catalog.ts` 提供两家网关的同名模型目录，两页共用同一份 `src/styles` 与 vite 配置（`pnpm exec vite --config output/playwright/model-menu-session-provider-20260918/vite.config.mts`，`http://127.0.0.1:14391/`），`node shoot.mjs` 截图并采集几何，`python3 compare.py` 比对。
+- 环境：macOS 14.8.7、Chrome for Testing（`chromium-1228`）、中文、浅色，900×640，deviceScaleFactor=1。
+- DOM 与几何：基线触发器为 `Workbuddy/deepseek-v4.1-flash`，下拉中 `Workbuddy` 是当前供应商（`active` 与 `checked` 均为 true），`WorkBuddyAI` 两项均为 false；当前版触发器为 `WorkBuddyAI/deepseek-v4.1-flash`，`WorkBuddyAI` 是当前供应商，`Workbuddy` 两项均为 false。
+- 像素：`baseline-menu.png` 与 `current-menu.png` 同状态比较，RGB 任一通道差值 >16 的像素 11237/576000（1.950868%），差异范围 `[29,32,247,152)`，即触发器与下拉供应商行本身；两页 Console 均 0 error、0 warning。
+- 未验收：浏览器夹具不替代原生 Tauri WKWebView 实机验收；未在真实桌面会话中复跑「首个模型 429 → 切换到另一供应商同名模型」的端到端链路（本机日志已证实该切换序列，前端投影由上述单测覆盖）。夹具首次运行曾因基线页从另一夹具导入数据而重复挂载（下拉出现两组供应商），抽出 `catalog.ts` 后重采。
