@@ -970,3 +970,12 @@ historical result: passed; current release: not reverified
 - DOM 与几何：基线触发器为 `Workbuddy/deepseek-v4.1-flash`，下拉中 `Workbuddy` 是当前供应商（`active` 与 `checked` 均为 true），`WorkBuddyAI` 两项均为 false；当前版触发器为 `WorkBuddyAI/deepseek-v4.1-flash`，`WorkBuddyAI` 是当前供应商，`Workbuddy` 两项均为 false。
 - 像素：`baseline-menu.png` 与 `current-menu.png` 同状态比较，RGB 任一通道差值 >16 的像素 11237/576000（1.950868%），差异范围 `[29,32,247,152)`，即触发器与下拉供应商行本身；两页 Console 均 0 error、0 warning。
 - 未验收：浏览器夹具不替代原生 Tauri WKWebView 实机验收；未在真实桌面会话中复跑「首个模型 429 → 切换到另一供应商同名模型」的端到端链路（本机日志已证实该切换序列，前端投影由上述单测覆盖）。夹具首次运行曾因基线页从另一夹具导入数据而重复挂载（下拉出现两组供应商），抽出 `catalog.ts` 后重采。
+
+
+# 2026-09-19 模型设置导入按钮移至表单头部右上角
+
+- 需求：模型设置页的供应商导入按钮原在左栏「添加提供商」按钮下方，位置错误；应移至右侧添加供应商面板（表单头部）的右上角。
+- 修改：`src/components/ProvidersPanel.tsx` 移除左栏导入按钮及其单按钮行容器；`prov-form__head` 的 `prov-transfer-row` 改为常驻并固定包含导入入口（`IconPush` + `tr("prov.importAll")`），编辑态在其前保留当前供应商的复制与导出；`submitImport` 删除随之不可达的空态分支（导入入口仅存在于表单可见的 create/edit 模式，导入弹窗阻塞背景交互，提交时 `rightMode` 不可能为 `empty`）。未新增 CSS，复用 `prov-form__head` 既有 space-between 布局与 ghost 按钮变体。
+- 测试：`src/components/ProvidersPanel.test.ts` 布局锁定断言由「左栏在新增入口之后提供导入入口」改为「导入入口固定在表单头部右上角」（head 含 `prov.importAll`，rail 不含导入与导出全部入口）。
+- 验证：`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 14 项通过。
+- 未验收：未取得原生桌面同状态前后截图做像素比对（本会话无法驱动原生 Tauri UI；非 Tauri 模式下供应商列表为空，右侧面板仅渲染空态，无法在浏览器夹具复现添加供应商表单状态）。本次为既有控件的位置迁移，未改动颜色、字体、间距等设计令牌。

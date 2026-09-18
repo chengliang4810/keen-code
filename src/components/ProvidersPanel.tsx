@@ -29,6 +29,7 @@ import {
   IconDownload,
   IconEdit,
   IconPlus,
+  IconPush,
   IconRefresh,
   IconTrash,
 } from "@/components/icons";
@@ -571,10 +572,6 @@ export function ProvidersPanel({
         activeProviderId: result.activeProviderId,
       });
       setImportDraft(null);
-      // 空态导入后直接展示首个供应商，避免详情面板与实际保存状态脱节。
-      if (rightMode === "empty" && result.providers[0]) {
-        openEdit(result.providers[0]);
-      }
       setHint(
         tr("prov.importDone", {
           added: result.added,
@@ -673,23 +670,6 @@ export function ProvidersPanel({
             <IconPlus size={16} />
             {tr("prov.new")}
           </Button>
-          {/* 单按钮行容器保留既有 ghost 按钮的尺寸与左对齐，不被列布局拉伸。 */}
-          <div className="prov-transfer-row">
-            <Button
-              type="button"
-              className="btn btn--ghost btn--sm"
-              onClick={() =>
-                setImportDraft({
-                  text: "",
-                  check: { ok: false, error: "json" },
-                  submitting: false,
-                })
-              }
-              disabled={busy}
-            >
-              {tr("prov.importAll")}
-            </Button>
-          </div>
           {/* 表单未展示时（空态）提示只能落在左栏。 */}
           {rightMode === "empty" && hint ? (
             <div
@@ -755,34 +735,52 @@ export function ProvidersPanel({
                 <h3 className="prov-detail__title">
                   {editingId ? tr("prov.editTitle") : tr("prov.addTitle")}
                 </h3>
-                {editingId ? (
-                  <span className="prov-transfer-row">
-                    <Button
-                      type="button"
-                      className="btn btn--ghost btn--sm"
-                      onClick={() => {
-                        const provider = providers.find((item) => item.id === editingId);
-                        if (provider) void copyProvider(provider);
-                      }}
-                      disabled={busy}
-                    >
-                      <IconCopy size={14} />
-                      {tr("prov.copy")}
-                    </Button>
-                    <Button
-                      type="button"
-                      className="btn btn--ghost btn--sm"
-                      onClick={() => {
-                        const provider = providers.find((item) => item.id === editingId);
-                        if (provider) void exportProvider(provider);
-                      }}
-                      disabled={busy}
-                    >
-                      <IconDownload size={14} />
-                      {tr("prov.exportOne")}
-                    </Button>
-                  </span>
-                ) : null}
+                {/* 导入是面板级入口，固定在标题行右上角；编辑态在其前追加当前供应商的复制与导出。 */}
+                <span className="prov-transfer-row">
+                  {editingId ? (
+                    <>
+                      <Button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() => {
+                          const provider = providers.find((item) => item.id === editingId);
+                          if (provider) void copyProvider(provider);
+                        }}
+                        disabled={busy}
+                      >
+                        <IconCopy size={14} />
+                        {tr("prov.copy")}
+                      </Button>
+                      <Button
+                        type="button"
+                        className="btn btn--ghost btn--sm"
+                        onClick={() => {
+                          const provider = providers.find((item) => item.id === editingId);
+                          if (provider) void exportProvider(provider);
+                        }}
+                        disabled={busy}
+                      >
+                        <IconDownload size={14} />
+                        {tr("prov.exportOne")}
+                      </Button>
+                    </>
+                  ) : null}
+                  <Button
+                    type="button"
+                    className="btn btn--ghost btn--sm"
+                    onClick={() =>
+                      setImportDraft({
+                        text: "",
+                        check: { ok: false, error: "json" },
+                        submitting: false,
+                      })
+                    }
+                    disabled={busy}
+                  >
+                    <IconPush size={14} />
+                    {tr("prov.importAll")}
+                  </Button>
+                </span>
               </div>
 
               <div className="prov-form__grid">
