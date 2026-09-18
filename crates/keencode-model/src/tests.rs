@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::{
     ContentBlock, Message, MessageRole, ModelError, ModelProvider, ModelRequest, ModelStreamEvent,
-    OpaqueReasoningState, ProviderCapabilities, ProviderProtocol, ReasoningContent,
+    OpaqueReasoningState, ProviderCapabilities, ProviderProtocol, REDACTED_SECRET, ReasoningContent,
     ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputConfig,
     StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice,
     ToolDefinition, ToolResult, cache_hit_rate,
@@ -206,6 +206,72 @@ fn usage_cache_fields_round_trip_with_camel_case_keys() {
     assert_eq!(value["cacheReadTokens"], json!(800));
     assert_eq!(value["cacheWriteTokens"], json!(200));
     assert_eq!(serde_json::from_value::<TokenUsage>(value).unwrap(), usage);
+}
+
+/// 端点自报失败的结束原因归一为带上游原因的上游错误，中性原因不误判。
+#[test]
+fn stop_reason_provider_failure_normalizes_only_failure_names() {
+    for reason in ["error", "server_error", "internal_error", "FAILED", "failure"] {
+        let error = StopReason::Other {
+            reason: reason.to_owned(),
+        }
+        .provider_failure_error()
+        .expect("失败型结束原因应归因为上游错误");
+        assert!(error.is_retryable());
+        assert!(
+            error
+                .message()
+                .to_ascii_lowercase()
+                .contains(&reason.to_ascii_lowercase()),
+            "{reason}: {}",
+            error.message()
+        );
+    }
+    // 缺少终止原因只是协议信息缺失，正常暂停信号也不是失败，两者都不能被归因。
+    for reason in [
+        "",
+        "   ",
+        "pause_turn",
+        "provider_pause",
+        "missing_finish_reason",
+        "missing_stop_reason",
+        "missing_status",
+        "end_turn",
+    ] {
+        assert_eq!(
+            StopReason::Other {
+                reason: reason.to_owned(),
+            }
+            .provider_failure_error(),
+            None,
+            "{reason} 不应被归因为上游失败"
+        );
+    }
+    for stop_reason in [
+        StopReason::Completed,
+        StopReason::ToolUse,
+        StopReason::MaxOutputTokens,
+        StopReason::ContentFilter,
+        StopReason::Cancelled,
+    ] {
+        assert_eq!(stop_reason.provider_failure_error(), None);
+    }
+}
+
+/// 上游结束原因进入展示文本前必须完成脱敏。
+#[test]
+fn stop_reason_provider_failure_redacts_reason_before_display() {
+    let error = StopReason::Other {
+        reason: "error api_key=super-secret-value".to_owned(),
+    }
+    .provider_failure_error()
+    .expect("含失败词的结束原因应归因为上游错误");
+    assert!(
+        error.message().contains(REDACTED_SECRET),
+        "{}",
+        error.message()
+    );
+    assert!(!error.message().contains("super-secret-value"));
 }
 
 #[test]

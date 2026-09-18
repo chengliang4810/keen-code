@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::ModelError;
+use crate::redaction::redact_error_secrets_bounded;
+
+/// 上游结束原因名进入错误文本前允许保留的最大 UTF-8 字节数。
+const MAX_FAILURE_REASON_BYTES: usize = 256;
+
 /// 一次模型调用归一化后的 Token 用量。
 ///
 /// 每个字段使用 `Option<u64>`：`None` 表示远端没有报告，`Some(0)` 表示远端明确报告为零。
@@ -94,4 +100,44 @@ pub enum StopReason {
         /// 经脱敏并规范化后的原始原因名称。
         reason: String,
     },
+}
+
+impl StopReason {
+    /// 把端点自报失败的结束原因归一为带上游原因的错误。
+    ///
+    /// 部分兼容端点在流式响应的最后一个 chunk 里用 `finish_reason: "error"`
+    /// 之类的原因名报告上游失败：此时 HTTP 状态仍是 200，响应也没有顶层
+    /// `error` 对象。这类原因名是端点的明确失败事实，必须与「缺少终止原因」
+    /// 区分开，后者只是协议信息缺失。按非字母数字边界切词匹配，因此
+    /// `server_error`、`internal_error` 等带前后缀的写法同样命中，而
+    /// `pause_turn` 这类正常信号不会命中。
+    ///
+    /// 中性原因返回 `None`，由调用方按各自语义处理。原因名来自上游，进入展示
+    /// 文本前执行有界脱敏并清理控制字符，避免异常端点借结束原因回显凭据。
+    pub fn provider_failure_error(&self) -> Option<ModelError> {
+        let Self::Other { reason } = self else {
+            return None;
+        };
+        let names_failure = reason
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| {
+                matches!(
+                    token.to_ascii_lowercase().as_str(),
+                    "error" | "failed" | "failure"
+                )
+            });
+        if !names_failure {
+            return None;
+        }
+        let redacted = redact_error_secrets_bounded(reason.trim(), MAX_FAILURE_REASON_BYTES);
+        let display = redacted
+            .chars()
+            .map(|character| if character.is_control() { ' ' } else { character })
+            .collect::<String>();
+        Some(ModelError::ProviderUnavailable {
+            message: format!("上游提前终止响应（结束原因 {display}）"),
+            status_code: None,
+            retryable: true,
+        })
+    }
 }
