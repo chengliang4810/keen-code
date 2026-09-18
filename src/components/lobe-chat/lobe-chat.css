@@ -8,10 +8,11 @@
   --chat-font: var(--font-sans);
   --chat-mono: var(--font-mono);
 
-  --chat-fs: 14px;
-  --chat-prose-fs: 14px;
-  --chat-fs-sm: 13px;
-  --chat-fs-xs: 12px;
+  /* 对话字号跟随界面字号：默认 14px 时与改动前逐像素一致。 */
+  --chat-fs: var(--text-md);
+  --chat-prose-fs: var(--text-md);
+  --chat-fs-sm: var(--text-sm);
+  --chat-fs-xs: var(--text-xs);
   --chat-lh: 1.6;
   --chat-lh-sm: 1.5;
 
@@ -273,8 +274,8 @@
 }
 
 .lobe-chat-action-time {
-  font-size: 11px;
-  line-height: 28px;
+  font-size: calc(11px + var(--ui-font-delta));
+  line-height: calc(28px + var(--ui-font-delta));
   color: var(--chat-text-3, var(--text-tertiary));
   font-variant-numeric: tabular-nums;
   user-select: none;
@@ -372,27 +373,37 @@
   font-size: 1em;
 }
 
-.chat-md ul {
-  list-style: disc;
-}
-.chat-md ol {
-  list-style: decimal;
-  margin: 16px 0;
-  padding-left: 18px;
-}
+/*
+ * 列表标记自绘：WebKit 会把列表盒的 padding 区一并画进选区高亮，并给原生
+ * ::marker 补出不透明底块；在 ::marker 上声明 user-select 也不生效。因此标记
+ * 自绘，缩进改由 margin 承担，标记落在列表盒之外即可保持未被高亮的外观。
+ */
 .chat-md ul,
 .chat-md ol {
-  margin: 0.3em 0 0.72em;
-  padding-left: 1.55em;
+  margin: 0.3em 0 0.72em 1.55em;
+  padding-left: 0;
+  list-style: none;
 }
 .chat-md li {
+  position: relative;
   margin: 6px 0 0;
-  padding-left: 0.2em;
   padding: 0;
 }
-.chat-md li::marker {
+.chat-md li::before {
+  position: absolute;
+  inset-inline-start: -1.35em;
+  top: 0;
   color: var(--chat-prose-text);
+  -webkit-user-select: none;
+  user-select: none;
+}
+.chat-md ul > li::before {
   font-size: 0.85em;
+  content: "\2022";
+}
+.chat-md ol > li::before {
+  font-size: 0.85em;
+  content: counter(list-item) ".";
 }
 
 .chat-md strong {
@@ -465,12 +476,12 @@
 
 .chat-code__lang {
   font-family: var(--chat-mono);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   color: var(--chat-text-3);
   text-transform: lowercase;
   letter-spacing: 0.02em;
   user-select: none;
-  line-height: 18px;
+  line-height: calc(18px + var(--ui-font-delta));
 }
 
 .chat-code__bar-actions {
@@ -489,7 +500,7 @@
   border-radius: 5px;
   background: transparent;
   color: var(--chat-icon-btn);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   line-height: 1;
   cursor: pointer;
 }
@@ -819,7 +830,7 @@
   border-radius: var(--radius-sm);
   background: var(--bg-hover);
   color: var(--text-tertiary);
-  font-size: 10px;
+  font-size: calc(10px + var(--ui-font-delta));
   font-weight: 500;
   line-height: 1.4;
   text-overflow: ellipsis;
@@ -934,15 +945,15 @@
 .lobe-chat-thinking__title {
   flex: none;
   color: var(--chat-text-2);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 600;
-  line-height: 24px;
+  line-height: calc(24px + var(--ui-font-delta));
 }
 
 .lobe-chat-thinking__duration {
   flex: none;
   color: var(--chat-text-3);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
 }
 
 .lobe-chat-thinking__separator {
@@ -961,7 +972,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   color: var(--chat-text-2);
   font-variant-numeric: tabular-nums;
 }
@@ -976,8 +987,8 @@
   overflow: hidden;
   flex: 1 1 auto;
   color: var(--chat-text-3);
-  font-size: 13px;
-  line-height: 24px;
+  font-size: calc(13px + var(--ui-font-delta));
+  line-height: calc(24px + var(--ui-font-delta));
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1028,7 +1039,7 @@
   overscroll-behavior: contain;
   border-left: 1px solid var(--chat-divider);
   color: var(--chat-text-3);
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
@@ -1085,7 +1096,7 @@
   width: 100%;
   max-width: var(--chat-content-max, 48rem);
   margin: 0;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--chat-text-2);
 }
 .lobe-timeline-phase__trigger {
@@ -1100,7 +1111,7 @@
   border-radius: 6px;
   background: transparent;
   color: inherit;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   cursor: pointer;
   text-align: left;
 }
@@ -1161,7 +1172,7 @@
   max-width: var(--chat-content-max, 48rem);
   margin: 0;
   padding: 0;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   color: var(--chat-text-2);
 }
 .lobe-timeline-tool__row {
@@ -1204,7 +1215,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   color: var(--chat-danger, #c44);
 }
 .lobe-timeline-tool__action {
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   font-weight: 500;
   white-space: nowrap;
 }
@@ -1219,7 +1230,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: calc(12.5px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--chat-text-2);
 }
@@ -1235,7 +1246,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   color: var(--chat-text-2);
 }
 .lobe-timeline-tool__meta {
@@ -1243,7 +1254,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   align-items: center;
   gap: 7px;
   color: var(--chat-text-2);
-  font-size: 11px;
+  font-size: calc(11px + var(--ui-font-delta));
   white-space: nowrap;
 }
 .lobe-timeline-tool__meta.is-error {
@@ -1274,7 +1285,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
   background: color-mix(in srgb, var(--chat-text-3) 9%, transparent);
   color: var(--chat-text-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
+  font-size: calc(12px + var(--ui-font-delta));
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -1555,7 +1566,7 @@ button.lobe-timeline-tool__row:hover:not(:disabled) {
 }
 
 .lobe-chat .att-card__name {
-  font-size: 13px;
+  font-size: calc(13px + var(--ui-font-delta));
   font-weight: 500;
   color: var(--chat-text);
   overflow: hidden;
