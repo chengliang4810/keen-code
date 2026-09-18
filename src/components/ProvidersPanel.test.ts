@@ -88,12 +88,17 @@ describe("ProvidersPanel 供应商信息导出与导入", () => {
     expect(head).toContain("editingId ? (");
   });
 
-  it("导入入口固定在表单头部右上角，导入走后端合并而不是本地逐个 upsert", () => {
+  it("新增表单右上角提供导入入口，编辑态不显示；导入走后端合并而不是本地逐个 upsert", () => {
     const head = source.slice(
       source.indexOf('className="prov-form__head"'),
       source.indexOf('className="prov-form__grid"'),
     );
     expect(head).toContain('tr("prov.importAll")');
+    // 导入入口只在新增分支（编辑态三元的 else 侧），编辑态右上角仅为复制与导出。
+    expect(head.indexOf(") : (")).toBeGreaterThan(-1);
+    expect(head.indexOf('tr("prov.importAll")')).toBeGreaterThan(
+      head.indexOf(") : ("),
+    );
     // 左栏不再提供导入，导出全部入口保持移除。
     const rail = source.slice(
       source.indexOf('className="prov-split__list"'),

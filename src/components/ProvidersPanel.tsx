@@ -738,7 +738,7 @@ export function ProvidersPanel({
                 <h3 className="prov-detail__title">
                   {editingId ? tr("prov.editTitle") : tr("prov.addTitle")}
                 </h3>
-                {/* 导入是面板级入口，固定在标题行右上角；编辑态在其前追加当前供应商的复制与导出。 */}
+                {/* 右上角操作随模式切换：新增态提供导入入口，编辑态为当前供应商的复制与导出。 */}
                 <span className="prov-transfer-row">
                   {editingId ? (
                     <>
@@ -767,22 +767,23 @@ export function ProvidersPanel({
                         {tr("prov.exportOne")}
                       </Button>
                     </>
-                  ) : null}
-                  <Button
-                    type="button"
-                    className="btn btn--ghost btn--sm"
-                    onClick={() =>
-                      setImportDraft({
-                        text: "",
-                        check: { ok: false, error: "json" },
-                        submitting: false,
-                      })
-                    }
-                    disabled={busy}
-                  >
-                    <IconPush size={14} />
-                    {tr("prov.importAll")}
-                  </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      className="btn btn--ghost btn--sm"
+                      onClick={() =>
+                        setImportDraft({
+                          text: "",
+                          check: { ok: false, error: "json" },
+                          submitting: false,
+                        })
+                      }
+                      disabled={busy}
+                    >
+                      <IconPush size={14} />
+                      {tr("prov.importAll")}
+                    </Button>
+                  )}
                 </span>
               </div>
 
