@@ -1679,9 +1679,64 @@ fn validate_existing_request(
     Ok(())
 }
 
+/// 完整解析失败时提取的最小墓碑信封：只依赖跨版本稳定的身份字段。
+struct TombstoneEnvelope {
+    operation_key: String,
+    version: u64,
+}
+
+/// 从无法按当前 `MutationRecord` 解析的记录里识别 state=completed 的墓碑。
+///
+/// 记录为 JSON 对象、`state` 为 `"completed"`，且能取到 `operationId` 与
+/// `sourceSessionId` 时视为过期墓碑；其余情况返回 `None`，由调用方按解析
+/// 失败处理。
+fn tombstone_envelope(bytes: &[u8]) -> Option<TombstoneEnvelope> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    if value.get("state").and_then(|state| state.as_str()) != Some("completed") {
+        return None;
+    }
+    let operation_id = value.get("operationId")?.as_str()?;
+    let source_session_id = value.get("sourceSessionId")?.as_str()?;
+    let source_session_id = SessionId::new(source_session_id.to_owned()).ok()?;
+    Some(TombstoneEnvelope {
+        operation_key: operation_key(&source_session_id, operation_id),
+        version: value
+            .get("version")
+            .and_then(|version| version.as_u64())
+            .unwrap_or_default(),
+    })
+}
+
+/// 跳过一个过期版本的已完成墓碑：尽力清理其 staging，失败不阻断恢复。
+fn skip_completed_tombstone(
+    layout: &MutationLayout,
+    path: &Path,
+    operation_key: &str,
+    version: u64,
+) {
+    tracing::warn!(
+        target: "keencode_diagnostics",
+        component = "session_mutation.scan",
+        path = %path.display(),
+        version,
+        "忽略过期版本的已完成 Session 变更事务墓碑并清理其 staging"
+    );
+    if let Err(error) = cleanup_staging(layout, operation_key) {
+        tracing::warn!(
+            target: "keencode_diagnostics",
+            component = "session_mutation.scan",
+            path = %path.display(),
+            %error,
+            "清理过期墓碑 staging 失败"
+        );
+    }
+}
+
 /// 稳定列出并校验全部事务记录，不接受未知目录项。
 fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)>, ResourceError> {
     let mut records = Vec::new();
+    // 墓碑同样计入扫描工作量：只统计待恢复记录会让上限随墓碑数量无限失效。
+    let mut scanned_records = 0usize;
     let mut temporary_files = Vec::new();
     for entry in fs::read_dir(&layout.records_root)
         .map_err(|error| ResourceError::io("list_session_mutation_records", error))?
@@ -1724,7 +1779,10 @@ fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)
             Err(error) => return Err(ResourceError::io("read_session_mutation_record", error)),
         };
         // 过期墓碑不参与恢复语义，也不能阻断会话列表：版本演进后磁盘上会长期
-        // 留存旧版本已完成事务，直接忽略并记录，其余记录照常处理。
+        // 留存旧版本已完成事务，直接忽略、清理其 staging 并记录，其余照常处理。
+        // 反序列化失败时先尝试最小信封：旧版本记录一旦增删字段，
+        // deny_unknown_fields 会让完整解析失败，但 state=completed 的墓碑语义
+        // 与字段演进无关，应按过期墓碑跳过而不是阻断恢复与 session/list。
         let record: MutationRecord = match serde_json::from_slice::<MutationRecord>(&bytes) {
             Ok(record)
                 if record.schema == MUTATION_SCHEMA && record.version == MUTATION_VERSION =>
@@ -1732,12 +1790,12 @@ fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)
                 record
             }
             Ok(record) if record.state == MutationState::Completed => {
-                tracing::warn!(
-                    target: "keencode_diagnostics",
-                    component = "session_mutation.scan",
-                    path = %path.display(),
-                    version = record.version,
-                    "忽略过期版本的已完成 Session 变更事务墓碑"
+                scanned_records += 1;
+                skip_completed_tombstone(
+                    layout,
+                    &path,
+                    &operation_key(&record.source_session_id, &record.operation_id),
+                    u64::from(record.version),
                 );
                 continue;
             }
@@ -1747,22 +1805,30 @@ fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)
                     record.operation_id, record.version
                 )));
             }
-            Err(error) => {
-                return Err(ResourceError::SessionMutationRecoveryRequired(format!(
-                    "事务记录无法解析：{error}"
-                )));
-            }
+            Err(error) => match tombstone_envelope(&bytes) {
+                Some(envelope) => {
+                    scanned_records += 1;
+                    skip_completed_tombstone(layout, &path, &envelope.operation_key, envelope.version);
+                    continue;
+                }
+                None => {
+                    return Err(ResourceError::SessionMutationRecoveryRequired(format!(
+                        "事务记录无法解析：{error}"
+                    )));
+                }
+            },
         };
         if operation_key(&record.source_session_id, &record.operation_id) != key {
             return Err(ResourceError::SessionMutationRecoveryRequired(
                 "事务记录文件名与正文身份不一致".to_owned(),
             ));
         }
+        scanned_records += 1;
         records.push((path, record));
-        if records.len() > MAX_MUTATION_RECORDS {
+        if scanned_records > MAX_MUTATION_RECORDS {
             return Err(ResourceError::StateCollectionLimit {
                 collection: "session_mutation_records",
-                actual: records.len(),
+                actual: scanned_records,
                 limit: MAX_MUTATION_RECORDS,
             });
         }
@@ -3284,6 +3350,40 @@ mod tests {
         );
         // 墓碑保持原样：忽略是读取行为，不是清理行为。
         assert!(stale_path.exists(), "过期墓碑应保留在磁盘上");
+    }
+
+    /// 旧版本记录增删字段后，deny_unknown_fields 会让完整解析失败；
+    /// state=completed 的墓碑语义与字段演进无关，应按最小信封跳过而不是阻断。
+    #[test]
+    fn recovery_ignores_shape_incompatible_completed_tombstone() {
+        let root = tempdir().expect("临时目录应创建");
+        let records_root = root.path().join("session-mutations").join("records");
+        fs::create_dir_all(&records_root).expect("事务记录目录应创建");
+        let source_id = "session-0000000000000000000000000000000000000000000000000000000000000000";
+        let operation_id = "session-edit-00000000-0000-0000-0000-000000000000";
+        let key = sha256_hex(format!("{source_id}:{operation_id}").as_bytes());
+        // 与当前 shape 不兼容：携带未知字段 legacyField。
+        let incompatible = format!(
+            r#"{{"schema":"{MUTATION_SCHEMA}","version":1,
+            "operationId":"{operation_id}",
+            "sourceSessionId":"{source_id}",
+            "legacyField":"removed-in-current-version",
+            "targetSessionId":"session-1111111111111111111111111111111111111111111111111111111111111111",
+            "targetTitle":"旧标题","state":"completed"}}"#,
+        );
+        let incompatible_path = records_root.join(format!("{key}.json"));
+        fs::write(&incompatible_path, incompatible).expect("不兼容墓碑应写入");
+
+        assert_eq!(
+            recover_session_mutations(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default(),
+            )
+            .expect("shape 不兼容的 completed 墓碑不应阻断会话列表与恢复"),
+            0
+        );
+        assert!(incompatible_path.exists(), "过期墓碑应保留在磁盘上");
     }
 
     /// 过期版本的 Prepared 事务仍必须失败关闭：那是真正未完成的事务，
