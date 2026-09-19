@@ -73,10 +73,10 @@ use keencode_runtime::{
     UnstartedTurnTermination, UnstartedTurnTerminationRequest,
 };
 use keencode_tools::{
-    AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus,
-    CompletedTurnContext, GitWorktreeLeaseManager, ResolvedSpawnAgentTemplate,
+    AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus, BashTool,
+    CompletedTurnContext, EditTool, GitWorktreeLeaseManager, ReadTool, ResolvedSpawnAgentTemplate,
     SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver,
-    ToolEnvironment, WebServiceConfig, finalize_child_agent_tool_snapshot,
+    ToolEnvironment, WebServiceConfig, WriteTool, finalize_child_agent_tool_snapshot,
     register_collaboration_tools, register_collaboration_tools_with_template_resolver,
     register_deferred_tools, register_local_tools_with_background, register_state_tools,
     register_web_tools,
@@ -2062,6 +2062,8 @@ struct FrozenAgentPrompt {
     capability_fingerprint: (bool, bool),
     /// 冻结的扩展目录文本；空表示无目录。
     catalog: String,
+    /// 小上下文只发送独立核心提示词，不拼接能力、目录或自定义指令。
+    small_context: bool,
 }
 
 impl FrozenAgentPrompt {
@@ -2069,18 +2071,35 @@ impl FrozenAgentPrompt {
     ///
     /// 会话内安装 MCP、启用技能或扩展热重载属于低频事件，被接受为合法的
     /// prompt cache 失效；重建时记录诊断而不静默漂移。
-    fn refreshed(frozen: &Self, can_spawn: bool, has_skill: bool, catalog: &str) -> Arc<Self> {
+    fn refreshed(
+        frozen: &Self,
+        can_spawn: bool,
+        has_skill: bool,
+        catalog: &str,
+        small_context: bool,
+    ) -> Arc<Self> {
         Arc::new(Self {
             environment: frozen.environment.clone(),
             custom_instructions: frozen.custom_instructions.clone(),
             capabilities: crate::agent_prompt::capabilities(can_spawn, has_skill),
             capability_fingerprint: (can_spawn, has_skill),
-            catalog: catalog.to_owned(),
+            catalog: if small_context {
+                String::new()
+            } else {
+                catalog.to_owned()
+            },
+            small_context,
         })
     }
 
     /// 组装跨 Turn 字节稳定的请求前缀：System 规则、能力说明加冻结指令、目录殿后。
     fn stable_prefix(&self) -> Vec<Message> {
+        if self.small_context {
+            return vec![Message::text(
+                MessageRole::System,
+                self.environment.render_small_context_core(),
+            )];
+        }
         let mut capabilities = self.capabilities.clone();
         if !self.custom_instructions.is_empty() {
             capabilities.push_str("\n\n");
@@ -3877,12 +3896,15 @@ fn commit_goal_turn_elapsed(
         return Ok(());
     }
     let snapshot = persistent_state.goal_snapshot()?;
-    if snapshot.goal.as_ref().is_none_or(|goal| {
-        goal.status != GoalStatus::Active || goal.owner_session_id != session_id
-    }) {
+    if snapshot
+        .goal
+        .as_ref()
+        .is_none_or(|goal| goal.status != GoalStatus::Active || goal.owner_session_id != session_id)
+    {
         return Ok(());
     }
-    let operation_id = goal_usage_operation_id(&[session_id, turn_id, "root", "turn_wall", "0", "0"]);
+    let operation_id =
+        goal_usage_operation_id(&[session_id, turn_id, "root", "turn_wall", "0", "0"]);
     match persistent_state.record_goal_usage(
         &operation_id,
         GoalUsageDelta {
@@ -5276,7 +5298,8 @@ impl AgentRuntime {
         model_reference: &str,
     ) -> Result<ResolvedProvider, AgentRuntimeError> {
         let parent = self.resolve_session_provider(session_provider)?;
-        let Some(requested) = self.try_resolve_child_model_reference(session_provider, model_reference)
+        let Some(requested) =
+            self.try_resolve_child_model_reference(session_provider, model_reference)
         else {
             return Ok(parent);
         };
@@ -5293,7 +5316,9 @@ impl AgentRuntime {
         session_provider: Option<&ProviderSnapshot>,
         model_reference: &str,
     ) -> Option<Result<ResolvedProvider, AgentRuntimeError>> {
-        if let Some((provider_id, model)) = split_child_agent_model_override(model_reference).ok()? {
+        if let Some((provider_id, model)) =
+            split_child_agent_model_override(model_reference).ok()?
+        {
             return Some(
                 self.provider_registry
                     .resolve(provider_id, model)
@@ -5748,6 +5773,9 @@ impl AgentRuntime {
         };
         let mut turn_provider_snapshot = provider_snapshot(&resolved);
         turn_provider_snapshot.reasoning_effort = reasoning_effort.map(reasoning_effort_snapshot);
+        let small_context = crate::agent_prompt::is_small_context(
+            resolved.capabilities(resolved.model()).max_context_tokens,
+        );
 
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
@@ -5799,23 +5827,27 @@ impl AgentRuntime {
         let coordinator = execution
             .coordinator()
             .map_err(|error| runtime_operation_failed(error))?;
-        let (registry, hooks, catalog) = self.assemble_agent_tools(
-            execution,
-            Arc::clone(&coordinator),
-            &launch.agent.profile,
-            launch
-                .agent
-                .agent_template
-                .as_ref()
-                .map(|template| template.name.as_str())
-                .unwrap_or("general-purpose"),
-            launch.plan_guard,
-            launch.capabilities,
-        )?;
-        if is_root {
+        let (registry, hooks, catalog) = if small_context {
+            self.assemble_small_context_tools(execution, &launch.agent.profile)?
+        } else {
+            self.assemble_agent_tools(
+                execution,
+                Arc::clone(&coordinator),
+                &launch.agent.profile,
+                launch
+                    .agent
+                    .agent_template
+                    .as_ref()
+                    .map(|template| template.name.as_str())
+                    .unwrap_or("general-purpose"),
+                launch.plan_guard,
+                launch.capabilities,
+            )?
+        };
+        if is_root && !small_context {
             self.log_extension_diagnostics(execution, &launch.agent.agent_id);
         }
-        let tool_snapshot = runtime_tool_snapshot(&launch.agent.profile, is_root);
+        let tool_snapshot = request_tool_snapshot(&launch.agent.profile, is_root, small_context);
         let tools = registry
             .select_exact(&tool_snapshot)
             .map_err(|error| runtime_operation_failed(error))?;
@@ -5832,19 +5864,22 @@ impl AgentRuntime {
             can_spawn,
             has_skill,
             &catalog,
+            small_context,
         )?;
-        // Memory/Plan/Ultra 等每轮会变的动态上下文与本轮环境一起追加到请求末尾，
-        // 不再插在 System 段之后；前缀（冻结 System 段 + 历史）跨 Turn 字节稳定。
+        // 完整模式把 Memory/Plan 等动态上下文与环境追加到请求末尾；小上下文
+        // 只保留独立核心提示词和普通对话输入。稳定前缀跨 Turn 字节稳定。
         let mut request_context = Vec::new();
-        let mut environment_message = Message::text(
-            MessageRole::User,
-            frozen
-                .environment
-                .render(launch.plan_guard == PlanGuard::read_only()),
-        );
-        environment_message.is_meta = true;
-        request_context.push(environment_message);
-        request_context.extend(turn_context);
+        if !small_context {
+            let mut environment_message = Message::text(
+                MessageRole::User,
+                frozen
+                    .environment
+                    .render(launch.plan_guard == PlanGuard::read_only()),
+            );
+            environment_message.is_meta = true;
+            request_context.push(environment_message);
+            request_context.extend(turn_context);
+        }
         // 会话稳定缓存路由键只在端点 allowlist 内装配；键值随 Session 而非 Turn 漂移。
         let prompt_cache_key =
             prompt_cache_key_for_endpoint(resolved.base_url(), &execution.session_id);
@@ -5905,8 +5940,6 @@ impl AgentRuntime {
         {
             limits.max_rounds = Some(max_turns);
         }
-        let (_, tool_catalog_updates) =
-            self.session_mcp_bindings(&execution.session_id, &execution.project_root)?;
         let mut runner = AgentRunner::new(provider, tools, limits)
             .with_context_manager(context)
             .with_hook_runtime(hooks)
@@ -5915,8 +5948,12 @@ impl AgentRuntime {
                 session_id: execution.session_id.clone(),
                 coordinator,
                 session: execution.session.clone(),
-            }))
-            .with_tool_catalog_update_source(tool_catalog_updates);
+            }));
+        if !small_context {
+            let (_, tool_catalog_updates) =
+                self.session_mcp_bindings(&execution.session_id, &execution.project_root)?;
+            runner = runner.with_tool_catalog_update_source(tool_catalog_updates);
+        }
         if is_root {
             runner = runner
                 .with_goal_controller(execution.persistent_state.clone())
@@ -5999,13 +6036,17 @@ impl AgentRuntime {
         can_spawn: bool,
         has_skill: bool,
         catalog: &str,
+        small_context: bool,
     ) -> Result<Arc<FrozenAgentPrompt>, AgentRuntimeError> {
         let mut state = execution
             .state
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
         if let Some(frozen) = state.frozen_prompts.get(agent_id) {
-            if frozen.capability_fingerprint == (can_spawn, has_skill) && frozen.catalog == catalog
+            let effective_catalog = if small_context { "" } else { catalog };
+            if frozen.capability_fingerprint == (can_spawn, has_skill)
+                && frozen.catalog == effective_catalog
+                && frozen.small_context == small_context
             {
                 return Ok(Arc::clone(frozen));
             }
@@ -6015,7 +6056,8 @@ impl AgentRuntime {
                 agent_id = %agent_id,
                 "agent capability context changed; rebuilding frozen prompt capability section"
             );
-            let rebuilt = FrozenAgentPrompt::refreshed(frozen, can_spawn, has_skill, catalog);
+            let rebuilt =
+                FrozenAgentPrompt::refreshed(frozen, can_spawn, has_skill, catalog, small_context);
             state
                 .frozen_prompts
                 .insert(agent_id.clone(), Arc::clone(&rebuilt));
@@ -6038,7 +6080,12 @@ impl AgentRuntime {
             custom_instructions,
             capabilities: crate::agent_prompt::capabilities(can_spawn, has_skill),
             capability_fingerprint: (can_spawn, has_skill),
-            catalog: catalog.to_owned(),
+            catalog: if small_context {
+                String::new()
+            } else {
+                catalog.to_owned()
+            },
+            small_context,
         });
         // root 条目跨整个 Session 保留；越过软上限时先按 root 与活跃 Agent 收缩，
         // 保证单会话内冻结条目数有界（详见 FROZEN_PROMPT_SOFT_LIMIT 的取舍说明）。
@@ -6248,6 +6295,36 @@ impl AgentRuntime {
             tools
         };
         Ok((tools, hooks, catalog))
+    }
+
+    /// 小上下文只构造四个核心工具，不发现或初始化扩展、MCP、Skills 与协作工具。
+    fn assemble_small_context_tools(
+        &self,
+        execution: &RuntimeAgentExecution,
+        profile: &AgentProfile,
+    ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
+        let output_directory = self
+            .session_storage_directory(&execution.session_id)?
+            .join("tool-output");
+        crate::shell_env::wait_for_capture_applied(Duration::from_secs(4));
+        let environment = Arc::new(
+            ToolEnvironment::new(&profile.cwd)
+                .and_then(|environment| environment.with_artifact_directory(output_directory))
+                .map(|environment| {
+                    environment.with_file_mutation_recorder(Arc::new(
+                        file_changes::RuntimeFileMutationRecorder::new(execution.session.clone()),
+                    ))
+                })
+                .map_err(runtime_operation_failed)?,
+        );
+        let mut tools = ToolRegistry::new();
+        tools
+            .register(Arc::new(ReadTool::new(Arc::clone(&environment))))
+            .and_then(|_| tools.register(Arc::new(EditTool::new(Arc::clone(&environment)))))
+            .and_then(|_| tools.register(Arc::new(WriteTool::new(Arc::clone(&environment)))))
+            .and_then(|_| tools.register(Arc::new(BashTool::new(environment))))
+            .map_err(runtime_operation_failed)?;
+        Ok((tools, HookRuntime::empty(), String::new()))
     }
 
     /// 测试专用：不创建协作 Session，只冻结本地、Web 与扩展候选工具。
@@ -6807,12 +6884,16 @@ impl AgentRuntime {
     }
 
     /// 调用方持有 delivery_reset_gate，完整关闭时将其延续到 Runtime lease 释放。
-    async fn close_session_delivery_locked(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
+    async fn close_session_delivery_locked(
+        &self,
+        session_id: &str,
+    ) -> Result<(), AgentRuntimeError> {
         self.turn_start_gates
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .remove(session_id);
-        let title_generation = self.title_generation_gates
+        let title_generation = self
+            .title_generation_gates
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .remove(session_id);
@@ -10474,6 +10555,21 @@ fn runtime_tool_snapshot(profile: &AgentProfile, is_root: bool) -> Vec<String> {
     tool_snapshot
 }
 
+/// 小上下文请求严格暴露四个核心工具，不继承 Profile、扩展或子 Agent 通信工具。
+fn request_tool_snapshot(
+    profile: &AgentProfile,
+    is_root: bool,
+    small_context: bool,
+) -> Vec<String> {
+    if small_context {
+        return ["Read", "Edit", "Write", "Bash"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+    }
+    runtime_tool_snapshot(profile, is_root)
+}
+
 /// 校验桌面投递只接受资源层合法 Session 标识。
 fn validate_session_id(session_id: &str) -> Result<(), AgentRuntimeError> {
     keencode_resources::SessionId::new(session_id.to_owned())
@@ -10541,8 +10637,8 @@ mod tests {
         map_authoritative_record, map_authoritative_record_with_projection, materialize_delivery,
         parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
         provider_supports_reasoning_continuation, recovered_authoritative_turn_outcomes,
-        release_runtime_turn_state, root_task_terminal_notice, root_turn_summary,
-        runtime_tool_snapshot, should_retry_runtime_turn_completion,
+        release_runtime_turn_state, request_tool_snapshot, root_task_terminal_notice,
+        root_turn_summary, runtime_tool_snapshot, should_retry_runtime_turn_completion,
         split_child_agent_model_override, validate_generated_title,
         validate_recovered_mailbox_claim, wait_for_turn_started,
     };
@@ -11698,8 +11794,10 @@ mod tests {
                 "https://example.com/v1",
             )
             .expect("测试 Provider 配置应有效");
-            config.default_capabilities =
-                ProviderCapabilities { image_input, ..ProviderCapabilities::default() };
+            config.default_capabilities = ProviderCapabilities {
+                image_input,
+                ..ProviderCapabilities::default()
+            };
             ProviderRegistration::new(
                 config,
                 format!("{provider_id} 测试 Provider"),
@@ -14602,6 +14700,14 @@ mod tests {
             ]
         );
         assert_eq!(runtime_tool_snapshot(&profile, true), profile.tool_snapshot);
+        assert_eq!(
+            request_tool_snapshot(&profile, true, true),
+            ["Read", "Edit", "Write", "Bash"]
+        );
+        assert_eq!(
+            request_tool_snapshot(&profile, false, true),
+            ["Read", "Edit", "Write", "Bash"]
+        );
     }
 
     /// 回收本地模型服务并返回唯一捕获的请求正文。
@@ -16715,6 +16821,7 @@ mod tests {
             capabilities: crate::agent_prompt::capabilities(true, true),
             capability_fingerprint: (true, true),
             catalog: "旧目录".to_owned(),
+            small_context: false,
         };
         let prefix = frozen.stable_prefix();
         assert_eq!(prefix.len(), 3);
@@ -16737,7 +16844,7 @@ mod tests {
             ModelMessage::text(MessageRole::Developer, "旧目录")
         );
 
-        let rebuilt = super::FrozenAgentPrompt::refreshed(&frozen, false, true, "新目录");
+        let rebuilt = super::FrozenAgentPrompt::refreshed(&frozen, false, true, "新目录", false);
         assert_eq!(rebuilt.capability_fingerprint, (false, true));
         assert_eq!(
             rebuilt.capabilities,
@@ -16748,11 +16855,21 @@ mod tests {
         assert_eq!(rebuilt.environment, frozen.environment);
         // 目录为空时稳定前缀不含目录消息。
         assert_eq!(
-            super::FrozenAgentPrompt::refreshed(&frozen, false, true, "")
+            super::FrozenAgentPrompt::refreshed(&frozen, false, true, "", false)
                 .stable_prefix()
                 .len(),
             2
         );
+
+        let small = super::FrozenAgentPrompt::refreshed(&frozen, false, false, "忽略目录", true);
+        let small_prefix = small.stable_prefix();
+        assert_eq!(small_prefix.len(), 1);
+        let keencode_model::ContentBlock::Text { text } = &small_prefix[0].content[0] else {
+            panic!("小上下文提示词应为文本");
+        };
+        assert!(text.contains("expert coding assistant in KeenCode"));
+        assert!(!text.contains("冻结指令"));
+        assert!(small.catalog.is_empty());
     }
 
     /// frozen_prompts 软上限收缩：root、活跃 Agent 与即将插入的 Agent 保留，
@@ -16770,6 +16887,7 @@ mod tests {
                 capabilities: String::new(),
                 capability_fingerprint: (false, false),
                 catalog: String::new(),
+                small_context: false,
             })
         };
         let agent_id =
@@ -18968,6 +19086,23 @@ mod tests {
         assert_eq!(new_request["model"], "model-b");
         assert_eq!(new_request["max_output_tokens"], 4096);
         assert!(new_request.to_string().contains("old complete"));
+        let new_input = new_request["input"].as_array().unwrap();
+        assert_eq!(
+            new_input[0]["content"][0]["text"],
+            crate::agent_prompt::EnvironmentSnapshot::freeze(
+                &project.path().canonicalize().unwrap(),
+                &chrono::Local::now().fixed_offset(),
+            )
+            .render_small_context_core()
+        );
+        assert!(!new_request.to_string().contains(crate::agent_prompt::core()));
+        let tool_names = new_request["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(tool_names, ["Bash", "Edit", "Read", "Write"]);
         assert_eq!(
             session
                 .snapshot()
@@ -19584,8 +19719,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         let (base_url, gate, server) =
             spawn_gated_buffered_responses_server("旧标题", 1, "blocked title");
-        let runtime =
-            runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
         let session = runtime
             .open_or_create_session(project.path(), None, "title-close-session")
             .unwrap();
@@ -19595,31 +19729,43 @@ mod tests {
             let runtime = Arc::clone(&runtime);
             let session_id = session_id.clone();
             tokio::spawn(async move {
-                runtime.generate_title(&session_id, "blocked-title", "blocked title").await
+                runtime
+                    .generate_title(&session_id, "blocked-title", "blocked title")
+                    .await
             })
         };
         gate.wait_for_requests(1).unwrap();
-        let closed = tokio::time::timeout(
-            Duration::from_secs(2),
-            runtime.close_session(&session_id),
-        ).await;
+        let closed =
+            tokio::time::timeout(Duration::from_secs(2), runtime.close_session(&session_id)).await;
         // 在放行 HTTP 响应之前重开，确保关闭释放锁不依赖供应商返回。
         let reopened = runtime.open_or_create_session(
-            project.path(), Some(&session_id), "title-reopen-session",
+            project.path(),
+            Some(&session_id),
+            "title-reopen-session",
         );
         let cancelled_before_response = title_task.is_finished();
         gate.release();
         let title_result = tokio::time::timeout(Duration::from_secs(5), title_task)
-            .await.unwrap().unwrap();
+            .await
+            .unwrap()
+            .unwrap();
         // 取消 HTTP 请求后服务端写响应可能收到 BrokenPipe，但线程必须回收。
         let _response_result = server.join().unwrap();
-        closed.expect("关闭不能等待标题网络超时").expect("关闭应成功");
+        closed
+            .expect("关闭不能等待标题网络超时")
+            .expect("关闭应成功");
         let reopened = reopened.expect("标题未返回时也必须释放 Runtime lease");
-        assert!(cancelled_before_response, "关闭应等待标题任务取消并释放句柄");
+        assert!(
+            cancelled_before_response,
+            "关闭应等待标题任务取消并释放句柄"
+        );
         assert_eq!(title_result, Err(AgentRuntimeError::SessionUnavailable));
         assert_eq!(
             reopened
-                .cached_generated_title("blocked-title", &super::title_input_sha256("blocked title"))
+                .cached_generated_title(
+                    "blocked-title",
+                    &super::title_input_sha256("blocked title")
+                )
                 .unwrap(),
             None,
             "旧标题不能写入重开后的会话"

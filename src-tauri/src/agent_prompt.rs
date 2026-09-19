@@ -8,6 +8,11 @@ const MAX_OS_VERSION_LEN: usize = 128;
 
 static DETECTED_OS_VERSION: OnceLock<String> = OnceLock::new();
 
+/// 小于该窗口的模型使用独立精简提示词和四个核心工具。
+pub(crate) const SMALL_CONTEXT_WINDOW_THRESHOLD: u64 = 100_000;
+
+const SMALL_CONTEXT_CORE: &str = include_str!("../prompts/small-context-core.md");
+
 /// 通用行为规则按职责分段并固定顺序；只编译嵌入文本，不依赖外部模板引擎。
 const CORE: [&str; 6] = [
     include_str!("../prompts/sections/01_intro.md"),
@@ -22,6 +27,14 @@ const CORE: [&str; 6] = [
 pub(crate) fn core() -> &'static str {
     static TEXT: OnceLock<String> = OnceLock::new();
     TEXT.get_or_init(|| CORE.map(str::trim).join("\n\n"))
+}
+
+/// 判断 Provider 明确声明的上下文窗口是否属于小上下文。
+///
+/// 未声明窗口按 Provider 的 200K 默认值处理；恰好 100,000 token 不属于“10 万以下”。
+pub(crate) fn is_small_context(context_window: Option<u64>) -> bool {
+    context_window.unwrap_or(crate::providers::DEFAULT_CONTEXT_WINDOW_TOKENS)
+        < SMALL_CONTEXT_WINDOW_THRESHOLD
 }
 
 /// 按本次真实工具表注入能力说明，避免向子 Agent 宣称它能继续委派。
@@ -114,6 +127,13 @@ impl EnvironmentSnapshot {
             ),
         ];
         render_environment(include_str!("../prompts/sections/07_env.md"), &values)
+    }
+
+    /// 渲染小上下文独立核心提示词；除冻结 cwd 外不拼接其他静态段落。
+    pub(crate) fn render_small_context_core(&self) -> String {
+        render_environment(SMALL_CONTEXT_CORE, &[("cwd", self.cwd_text.as_str())])
+            .trim()
+            .to_owned()
     }
 }
 
@@ -246,6 +266,23 @@ mod tests {
         assert!(core().contains("Write for a person, not a console."));
         assert!(core().contains("Avoid cheerleading, motivational language"));
         assert!(core().contains("Do not exceed roughly 50-70 lines"));
+    }
+
+    #[test]
+    fn small_context_boundary_and_prompt_are_exact() {
+        assert!(is_small_context(Some(99_999)));
+        assert!(!is_small_context(Some(100_000)));
+        assert!(!is_small_context(Some(100_001)));
+        assert!(!is_small_context(None));
+
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-20T01:30:00+08:00").unwrap();
+        let text = EnvironmentSnapshot::freeze(Path::new("/tmp/project"), &now)
+            .render_small_context_core();
+        assert!(text.starts_with("You are an expert coding assistant in KeenCode."));
+        assert!(text.contains("Current working directory: \"/tmp/project\""));
+        assert!(!text.contains("{{cwd}}"));
+        assert!(!text.contains("# SubAgent Delegation"));
+        assert!(!text.contains("Current mode:"));
     }
 
     /// 能力说明只能随真实工具存在而启用，子 Agent 不收到创建教程。
