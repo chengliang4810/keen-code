@@ -91,9 +91,11 @@ const MAX_TOOL_FAILURE_REMINDER_BYTES: usize = 64 * 1_024;
 
 /// 单个 Turn 内 MaxOutputTokens 截断后允许的最大有界续跑次数。
 ///
-/// 第 3 次截断不再续跑，按既有 ModelOutputLimit 终态结束；该预算与上下文
-/// 超限强制压缩、空响应重试和配置输出上限降级三个一次性预算互相独立。
-const MAX_OUTPUT_TOKEN_RECOVERY_LIMIT: u32 = 2;
+/// 低输出预算端点可能需要多个连续分段才能完成长报告；两次恢复在 2K 输出预算下
+/// 仍会让约 6K 以上的合法纯文本稳定失败。八次恢复允许最多九个分段，同时继续由
+/// Turn 的模型 Round、Token 和时间预算提供更外层硬边界。该预算与上下文超限强制
+/// 压缩、空响应重试和配置输出上限降级三个一次性预算互相独立。
+const MAX_OUTPUT_TOKEN_RECOVERY_LIMIT: u32 = 8;
 
 /// 每个权威事件同步提交时允许的总尝试次数；所有重投复用同一事件对象和稳定身份。
 const AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS: usize = 2;

@@ -7140,17 +7140,21 @@ async fn max_output_truncation_recovers_with_instruction_and_completes() {
     assert_eq!(messages, &result.messages[2..3]);
 }
 
-/// 连续 3 次纯文本截断：前 2 次各注入一条续跑指令，第 3 次预算耗尽后
-/// 保持既有 ModelOutputLimit 终态，截断部分响应仍照常提交。
+/// 连续 9 次纯文本截断：前 8 次各注入一条续跑指令，第 9 次预算耗尽后
+/// 保持 ModelOutputLimit 终态。低输出预算下允许长报告分段完成，但恢复仍有硬上限。
 #[tokio::test]
-async fn max_output_truncation_recovers_at_most_twice_then_terminal() {
+async fn max_output_truncation_recovers_at_most_eight_times_then_terminal() {
+    let replies = (1..=9)
+        .map(|index| {
+            text_reply_with_stop(
+                &format!("第 {index} 段"),
+                StopReason::MaxOutputTokens,
+            )
+        })
+        .collect::<Vec<_>>();
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
-        [
-            text_reply_with_stop("第一段", StopReason::MaxOutputTokens),
-            text_reply_with_stop("第二段", StopReason::MaxOutputTokens),
-            text_reply_with_stop("第三段", StopReason::MaxOutputTokens),
-        ],
+        replies,
     ));
     let sink = Arc::new(MaxOutputRecoveryProbe::new());
     let result = runner(provider.clone(), ToolRegistry::new())
@@ -7163,17 +7167,17 @@ async fn max_output_truncation_recovers_at_most_twice_then_terminal() {
         result.state.terminal_reason(),
         Some(TerminalReason::ModelOutputLimit)
     );
-    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 3);
-    // 初始 user → 三段截断 assistant，中间各夹一条续跑指令。
-    assert_eq!(result.messages.len(), 6);
-    assert!(matches!(result.messages[2].role, MessageRole::User));
-    assert!(result.messages[2].is_meta);
-    assert!(matches!(result.messages[4].role, MessageRole::User));
-    assert!(result.messages[4].is_meta);
-    assert!(matches!(result.messages[5].role, MessageRole::Assistant));
-    // 三个 Round 各自独立记账。
+    assert_eq!(provider.requests().expect("请求快照应可读取").len(), 9);
+    // 初始 user + 9 段截断 assistant + 8 条续跑指令。
+    assert_eq!(result.messages.len(), 18);
+    for message_index in (2..17).step_by(2) {
+        assert!(matches!(result.messages[message_index].role, MessageRole::User));
+        assert!(result.messages[message_index].is_meta);
+    }
+    assert!(matches!(result.messages[17].role, MessageRole::Assistant));
+    // 九个 Round 各自独立记账。
     let usages = sink.usages();
-    assert_eq!(usages.len(), 3);
+    assert_eq!(usages.len(), 9);
     for (index, usage) in usages.iter().enumerate() {
         assert_eq!(usage.model_round(), (index + 1) as u32);
         assert_eq!(usage.call_attempt(), (index + 1) as u32);
