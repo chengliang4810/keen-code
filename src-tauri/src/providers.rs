@@ -35,6 +35,8 @@ const PROVIDER_CREDENTIAL_REVISION_DOMAIN: &[u8] =
 const PROVIDER_CONFIG_SCHEMA: &str = "keencode/providers";
 /// 当前供应商配置文件的固定格式版本。
 const PROVIDER_CONFIG_VERSION: u32 = 1;
+/// 模型未填写上下文窗口时采用的保守默认值。
+pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
 /// 供应商导出文档的固定 schema 名称；导入同时接受完整配置文件 schema。
 const PROVIDER_EXPORT_SCHEMA: &str = "keencode/providers-export";
 
@@ -57,7 +59,7 @@ struct ProviderRecord {
     api_backend: String,
     /// 已保存的 API Key；None 表示该供应商无认证。
     api_key: Option<String>,
-    /// 每模型手工配置的上下文窗口（token）；空 map 表示未配置（运行时回退 1M）。
+    /// 每模型手工配置的上下文窗口（token）；缺项在运行时回退 200K。
     context_windows: BTreeMap<String, u64>,
     /// 每模型输出预算；未配置时采用 128000。
     #[serde(default)]
@@ -276,9 +278,11 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
         ..ProviderCapabilities::default()
     };
     for model in &provider.models {
-        // 仅手工配置的窗口进入能力快照；未配置的模型保持未知（None），
-        // 由运行期预算路径按"窗口未知"处理，避免把小窗口模型误判成 1M。
-        let max_context_tokens = provider.context_windows.get(model).copied();
+        let max_context_tokens = provider
+            .context_windows
+            .get(model)
+            .copied()
+            .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
         config.model_capabilities.insert(
             model.clone(),
             ProviderCapabilities {
@@ -297,7 +301,7 @@ pub(crate) fn runtime_provider_config(provider: &CustomProvider) -> Result<Runti
                         .copied()
                         .unwrap_or(128_000),
                 )),
-                max_context_tokens,
+                max_context_tokens: Some(max_context_tokens),
                 ..ProviderCapabilities::default()
             },
         );
@@ -778,9 +782,8 @@ fn load_state_from_path(path: &Path) -> Result<ProviderState> {
     let bytes = read_provider_config_bytes(path)?;
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
-    let mut warnings = unknown_field_warnings(&value).map_err(|message| {
-        anyhow::anyhow!("供应商配置无效：{}：{}", message, path.display())
-    })?;
+    let mut warnings = unknown_field_warnings(&value)
+        .map_err(|message| anyhow::anyhow!("供应商配置无效：{}：{}", message, path.display()))?;
     let file: ProviderFile = serde_json::from_value(value)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
     let mut state = file
@@ -831,7 +834,8 @@ fn unknown_field_warnings(value: &Value) -> Result<Vec<String>, String> {
     let Some(object) = value.as_object() else {
         return Ok(Vec::new());
     };
-    let (typo, unknown) = partition_unknown_keys(object.keys().map(String::as_str), PROVIDER_FILE_KEYS);
+    let (typo, unknown) =
+        partition_unknown_keys(object.keys().map(String::as_str), PROVIDER_FILE_KEYS);
     if let Some(typo) = typo.first() {
         return Err(format!(
             "供应商配置字段 `{typo}` 与已知字段仅大小写不同，疑似拼写错误；请修正字段名后重试"
@@ -1602,8 +1606,8 @@ mod tests {
                 "supportsVision": {"test-model": false}
             }]
         });
-        let error = super::unknown_field_warnings(&value)
-            .expect_err("仅大小写不同的字段名应阻断加载");
+        let error =
+            super::unknown_field_warnings(&value).expect_err("仅大小写不同的字段名应阻断加载");
         assert!(error.contains("apikey"), "错误应指出问题字段：{error}");
     }
 
@@ -2118,7 +2122,7 @@ mod provider_registry_tests {
         assert_eq!(config.base_url().as_str(), "http://127.0.0.1:11434/v1/");
     }
 
-    /// 注册表能力按手工窗口生成；未配置窗口保持未知（None），且始终保留基础流式与工具能力。
+    /// 注册表能力按手工窗口生成；未配置窗口回退 200K，且始终保留基础流式与工具能力。
     #[test]
     fn registry_maps_context_capability_priority_and_default() {
         let mut provider = provider(
@@ -2169,7 +2173,10 @@ mod provider_registry_tests {
             .resolve("gateway", "default-model")
             .expect("未配置窗口模型应解析")
             .capabilities("default-model");
-        assert_eq!(default.max_context_tokens, None);
+        assert_eq!(
+            default.max_context_tokens,
+            Some(super::DEFAULT_CONTEXT_WINDOW_TOKENS)
+        );
     }
 
     /// 完整替换必须注册全部供应商，并按独立 Provider 与精确模型字段隔离解析。

@@ -47,7 +47,7 @@ type FormState = {
   baseUrl: string;
   models: string[];
   modelDraft: string;
-  /** 手动添加模型的上下文窗口输入（token）；空表示不配置。 */
+  /** 手动添加模型的上下文窗口输入（token）；未填写时保存流程使用 200K 默认值。 */
   contextWindowDraft: string;
   maxOutputTokensDraft: string;
   /** 手动添加模型是否支持图片输入。 */
@@ -109,13 +109,13 @@ function hostOf(url: string): string {
   }
 }
 
-/** 模型上下文窗口默认值：1M。 */
-const DEFAULT_MODEL_CONTEXT_WINDOW = 1_000_000;
+/** 模型上下文窗口默认值：200K。 */
+const DEFAULT_MODEL_CONTEXT_WINDOW = 200_000;
 
 /** 与后端 MAX_CONTEXT_WINDOW 一致：超出该范围的接口值不可保存。 */
 const MAX_MODEL_CONTEXT_WINDOW = 10_000_000;
 
-/** 接口窗口在合法范围内（<=10M）时采用接口值，否则回退默认 1M。 */
+/** 接口窗口在合法范围内（<=10M）时采用接口值，否则回退默认 200K。 */
 function effectiveContextWindow(value?: number | null): number {
   return value && value <= MAX_MODEL_CONTEXT_WINDOW
     ? value
@@ -1095,6 +1095,7 @@ export function ProvidersPanel({
               min={1024}
               max={10000000}
               step="any"
+              required
               inputMode="numeric"
               value={form.contextWindowDraft}
               onChange={(event) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: event.target.value })); }}
