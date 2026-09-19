@@ -385,9 +385,11 @@ export const MarkdownChat = memo(function MarkdownChat({
       if (!block) {
         return <code className="chat-md__inline-code">{paint(c)}</code>;
       }
+      const lang = match?.[1] || "text";
       return (
         <CodeBlock
-          language={match?.[1] || "text"}
+          language={lang}
+          langLabel={lang === "text" ? tr("chat.codeLangText") : lang}
           wrapLabel={tr("chat.codeWrap")}
           unwrapLabel={tr("chat.codeUnwrap")}
           copyLabel={tr("message.copy")}

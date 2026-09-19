@@ -354,11 +354,10 @@
 
 .md-body__code-inline {
   font-family: var(--font-mono);
-  font-size: 0.9em;
-  padding: 1px 5px;
+  font-size: var(--text-sm);
+  padding: 2px 6px;
   border-radius: var(--radius-xs);
   background: var(--bg-code);
-  border: 1px solid var(--border-subtle);
   color: var(--text-primary);
 }
 

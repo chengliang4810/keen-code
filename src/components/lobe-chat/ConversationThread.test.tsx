@@ -341,7 +341,7 @@ describe("ConversationThread 思考耗时", () => {
       /\.chat-md ul,\s*\.chat-md ol\s*\{[^}]*margin:\s*0\.3em 0 0\.72em 1\.55em;[^}]*padding-left:\s*0;[^}]*list-style:\s*none;/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md ul > li::before\s*\{[^}]*content:\s*"\\2022"\s*;/s,
+      /\.chat-md ul > li::before\s*\{[^}]*content:\s*"";[^}]*border-radius:\s*50%;/s,
     );
     expect(chatCss).toMatch(
       /\.chat-md ol > li::before\s*\{[^}]*content:\s*counter\(list-item\)\s*"\.";/s,
@@ -350,6 +350,9 @@ describe("ConversationThread 思考耗时", () => {
       /\.chat-md li::before\s*\{[^}]*-webkit-user-select:\s*none;[^}]*user-select:\s*none;/s,
     );
     expect(chatCss).toMatch(/--chat-prose-fs:\s*var\(--text-md\);/);
+    expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-family:\s*var\(--chat-font\);/s);
+    expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-weight:\s*var\(--font-ui-weight\);/s);
+    expect(chatCss).not.toMatch(/\.chat-md\s*\{[^}]*font:\s*var\(--dsw-font-markdown-base\);/s);
     expect(chatCss).toMatch(
       /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--text-primary\);/,
     );
@@ -765,7 +768,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(source).toContain('event.key === "Escape"');
     expect(source).toContain("event.metaKey || event.ctrlKey");
     expect(source).toContain('className="btn btn--solid"');
-    expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*24px;/s);
+    expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*var\(--radius-2xl\);/s);
   });
 
   it("用户消息复制逻辑同时接入文档事件和正文选择边界", () => {

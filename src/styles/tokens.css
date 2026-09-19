@@ -2,6 +2,12 @@
  * deepseek-ai/deepseek-harness @ d347e703908d0406b7a7ef80e3a0e594d86b2215。
  * Copyright (c) 2026 DeepSeek. MIT；完整许可见 THIRD_PARTY_NOTICES.md。
  * KeenCode 保留自己的品牌、语义化令牌及深浅色切换入口。
+ *
+ * Codex 规范对齐（2026-09-19，依据 DESIGN.md 反编译实测值）：字体栈、430 正文字重、
+ * 像素字号阶梯（12/13/14/16/28）、行高（1.25/1.5）、圆角阶梯（基础值 ×1.25）、
+ * 过渡时长 150ms 与 cubic-bezier(0.4,0,0.2,1)。有意差异：保留中文后备字体
+ * （防 Windows 宋体，等宽栈因此不写裸 monospace 结尾）、保留 KeenCode 品牌色板、
+ * 窗口与标题栏壳层几何不变。
  */
 @import "./harness/base.css";
 @import "./harness/design-platform.css";
@@ -22,7 +28,6 @@
   /* Directory / URL accents (attach chips, file path icons) */
   --dir-accent: #329664;
   --dir-accent-soft: #50b478;
-  --url-accent: #60a5fa;
   /* Extensions panel badges */
   --ext-plugin: #c49bff;
   --ext-disabled: #9aa0a6;
@@ -54,17 +59,18 @@
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 20px;
+  /* 圆角阶梯对齐 Codex（基础值 ×1.25 缩放）：2.5/5/7.5/10/12.5，输入框 28。 */
   --radius-window: 16px;
-  --radius-composer: 22px;
-  --radius-lg: 12px;
+  --radius-composer: 28px;
+  --radius-lg: 12.5px;
   /* Harness 消息统计胶囊的原始圆角。 */
   --radius-stat: 28px;
-  --radius-md: 8px;
-  --radius-sm: 6px;
-  --radius-xs: 4px;
-  --radius-2xs: 2px;
+  --radius-md: 10px;
+  --radius-sm: 7.5px;
+  --radius-xs: 5px;
+  --radius-2xs: 2.5px;
   --radius-full: 9999px;
-  --radius-settings: 32px;
+  --radius-settings: 30px;
   --sidebar-width: 280px;
   --content-max-width: 920px;
   --aside-width: 360px;
@@ -73,6 +79,18 @@
   --control-height: 36px;
   --titlebar-safe-left: 96px;
   --sidebar-leading-icon-center: 26px;
+  /* Codex 桌面端实测字体栈（覆盖 Harness 基线）：正文以 -apple-system-body 命中
+   * macOS SF Pro；等宽栈为 Codex ui-monospace 系，中文后备沿用项目决策。 */
+  --dsw-font-family: -apple-system-body, ui-sans-serif, -apple-system, system-ui,
+    'Segoe UI', 'Helvetica', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'Apple Color Emoji', 'Arial', sans-serif, 'Segoe UI Emoji', 'Segoe UI Symbol';
+  --ds-font-family-code: ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas,
+    'Liberation Mono', 'PingFang SC', 'Microsoft YaHei';
+  /* Codex 正文可变字重：Windows 固定字重字体就近取整，与 Codex 行为一致。 */
+  --font-ui-weight: 430;
+  /* Codex 全局过渡默认 150ms（覆盖 Harness 0.2s/0.1s 基线）。 */
+  --ds-transition-duration: 0.15s;
+  --ds-transition-duration-fast: 0.15s;
   --font-sans: var(--dsw-font-family);
   /* 显式中文后备字体防止 Windows 代码区域落入宋体。 */
   --font-mono: var(--ds-font-family-code);
@@ -85,13 +103,13 @@
   --text-sm: calc(13px + var(--ui-font-delta));
   --text-md: var(--ui-font-size);
   --text-lg: calc(16px + var(--ui-font-delta));
-  --text-xl: calc(26px + var(--ui-font-delta));
+  --text-xl: calc(28px + var(--ui-font-delta));
   /* Harness 的 Markdown / 回合统计排版令牌按 --dsh-content-font-size 派生，
    * 其上游未提供写入方；在此接到界面字号，使对话正文与标题层级随之缩放。 */
   --dsh-content-font-size: var(--ui-font-size);
-  --leading-tight: 1.35;
-  --leading-normal: 1.5714;
-  --motion-fast: 100ms;
+  --leading-tight: 1.25;
+  --leading-normal: 1.5;
+  --motion-fast: 150ms;
   --motion-enter: 200ms;
   --ease-out: cubic-bezier(0.4, 0, 0.2, 1);
   --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
@@ -163,8 +181,8 @@
   --menu-item-pad-x: 10px;
   --menu-item-radius: 10px;
   --menu-item-gap: 8px;
-  --menu-font: 14px;
-  --menu-font-weight: 400;
+  --menu-font: 13px;
+  --menu-font-weight: 430;
   --menu-icon: 16px;
   --menu-sep-margin-y: 4px;
   --menu-sep-margin-x: 2px;
@@ -181,7 +199,7 @@
   --menu-context-item-radius: 10px;
   --menu-context-item-gap: 8px;
   --menu-max-width: min(360px, calc(100vw - 16px));
-  --modal-radius: 24px;
+  --modal-radius: 15px;
   --modal-pad-x: 24px;
   --modal-pad-y: 22px;
   --modal-gap: 20px;
@@ -195,6 +213,29 @@
 
 [data-theme="light"] { color-scheme: light; }
 [data-theme="dark"] { color-scheme: dark; }
+
+/* Codex 色板对齐（2026-09-19，依据 DESIGN.md 双重解析终值）：
+ * 中性灰正文 + alpha 气泡/边框体系，覆盖 Harness 蓝调色板的核心语义值。
+ * dark 侧令牌原定义在 [data-theme="dark"] 块，需以同特异性覆盖。 */
+:root {
+  --dsw-alias-label-primary: #282828;
+  --dsw-alias-label-secondary: #5d5d5d;
+  --dsw-alias-label-tertiary: #8f8f8f;
+  --dsw-specific-bubble: color-mix(in oklab, #0d0d0d 5%, transparent);
+  --dsw-alias-markdown-code-block: #f9f9f9;
+  --dsw-alias-border-l1: color-mix(in oklab, #0d0d0d 10%, transparent);
+  --dsw-alias-border-l3: color-mix(in oklab, #0d0d0d 15%, transparent);
+}
+
+[data-theme="dark"] {
+  --dsw-alias-label-primary: #dcdcdc;
+  --dsw-alias-label-secondary: #afafaf;
+  --dsw-alias-label-tertiary: #8f8f8f;
+  --dsw-specific-bubble: color-mix(in oklab, #ffffff 8%, transparent);
+  --dsw-alias-markdown-code-block: #131313;
+  --dsw-alias-border-l1: color-mix(in oklab, #ffffff 12%, transparent);
+  --dsw-alias-border-l3: color-mix(in oklab, #ffffff 20%, transparent);
+}
 
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-fast: 0ms; --motion-enter: 0ms; }

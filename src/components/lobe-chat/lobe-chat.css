@@ -13,7 +13,7 @@
   --chat-prose-fs: var(--text-md);
   --chat-fs-sm: var(--text-sm);
   --chat-fs-xs: var(--text-xs);
-  --chat-lh: 1.6;
+  --chat-lh: 1.5;
   --chat-lh-sm: 1.5;
 
   --chat-r: 6px;
@@ -186,13 +186,13 @@
 
 /* User bubble — a quiet marker, not a competing card. */
 .lobe-chat-bubble {
-  max-width: min(100%, 36rem);
+  max-width: min(100%, 456px);
   padding: 10px 16px;
-  border-radius: 22px;
+  border-radius: var(--radius-2xl);
   background: var(--chat-bubble);
   color: var(--chat-text);
   font-size: var(--chat-fs);
-  line-height: 22px;
+  line-height: var(--leading-normal);
   white-space: pre-wrap;
   word-break: break-word;
   border: none;
@@ -207,7 +207,7 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  border-radius: 24px;
+  border-radius: var(--radius-2xl);
   background: var(--chat-bubble);
 }
 
@@ -321,12 +321,15 @@
 
 /* ── Markdown body ── */
 .chat-md {
+  /* 不使用 Harness 的 font 简写：它会把 Codex 的 430 可变字重重置为 400。 */
+  font-family: var(--chat-font);
+  font-weight: var(--font-ui-weight);
   font-size: var(--chat-prose-fs);
   line-height: var(--chat-lh);
+  letter-spacing: 0;
   color: var(--chat-prose-text);
   word-break: break-word;
   min-width: 0;
-  font: var(--dsw-font-markdown-base);
 }
 
 .chat-md > *:first-child {
@@ -351,22 +354,18 @@
   font-weight: 600;
   line-height: 1.35;
   color: var(--chat-prose-text);
-  letter-spacing: -0.01em;
-  font: var(--dsw-font-markdown-h4);
+  letter-spacing: 0;
 }
 .chat-md h1 {
-  font-size: 1.25em;
-  font: var(--dsw-font-markdown-h1);
+  font-size: 1.5em;
   margin: 32px 0 16px;
 }
 .chat-md h2 {
-  font-size: 1.12em;
-  font: var(--dsw-font-markdown-h2);
+  font-size: 1.25em;
   margin: 32px 0 16px;
 }
 .chat-md h3 {
-  font-size: 1.05em;
-  font: var(--dsw-font-markdown-h3);
+  font-size: 1.15em;
   margin: 32px 0 16px;
 }
 .chat-md h4 {
@@ -386,7 +385,7 @@
 }
 .chat-md li {
   position: relative;
-  margin: 6px 0 0;
+  margin: 0;
   padding: 0;
 }
 .chat-md li::before {
@@ -397,13 +396,35 @@
   -webkit-user-select: none;
   user-select: none;
 }
+/* 无序标记按嵌套层级还原原生 disc/circle/square 形态：\2022 字符墨迹
+ * 偏小且各层同形，改用 CSS 绘制。top 8px 使圆点在 21px 首行行盒内居中。 */
 .chat-md ul > li::before {
-  font-size: 0.85em;
-  content: "\2022";
+  content: "";
+  inset-inline-start: -0.95em;
+  top: 8px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.chat-md ul > li ul > li::before {
+  content: "";
+  background: transparent;
+  border: 1px solid currentColor;
+  box-sizing: border-box;
+}
+.chat-md ul > li ul > li ul > li::before {
+  content: "";
+  background: currentColor;
+  border: none;
+  border-radius: 0;
 }
 .chat-md ol > li::before {
-  font-size: 0.85em;
   content: counter(list-item) ".";
+}
+/* 任务列表：复选框本身就是标记，隐藏圆点。 */
+.chat-md li.task-list-item::before {
+  content: none;
 }
 
 .chat-md strong {
@@ -419,8 +440,18 @@
   padding-left: 14px;
 }
 
+/* 引用文字与竖线对齐：清除继承的段落外边距，否则 p 的 16px margin-top
+ * 会把首行推离竖线顶端。 */
+.chat-md blockquote > p {
+  margin: 0;
+}
+
 .chat-md hr {
-  display: none;
+  display: block;
+  height: 1px;
+  margin: 24px 0;
+  border: none;
+  background: var(--chat-divider);
 }
 
 .chat-md__link {
@@ -439,12 +470,12 @@
 .chat-md__inline-code,
 .chat-md :not(pre) > code {
   display: inline;
-  padding: 0.12em 0.45em;
-  border-radius: 4px;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
   background: var(--chat-inline-code-bg);
   border: 0;
   font-family: var(--chat-mono);
-  font-size: 0.9em;
+  font-size: var(--text-sm);
   color: var(--chat-inline-code-fg);
   box-shadow: none;
   outline: none;
@@ -452,9 +483,11 @@
 
 /* ── Code / path block (theme-aware chrome) ── */
 .chat-code {
-  margin: 16px 0;
-  border-radius: 12px;
+  /* Codex 代码块容器：上下 4px（--spacing），紧凑贴排；同底色 + 1px 描边。 */
+  margin: var(--spacing) 0;
+  border-radius: var(--radius-lg);
   background: var(--chat-code-bg);
+  border: 1px solid var(--border-subtle);
   border: 0;
   color: var(--chat-code-fg);
   overflow: hidden;
@@ -468,18 +501,19 @@
   gap: 12px;
   min-height: 30px;
   padding: 9px 14px;
-  background: var(--dsw-alias-markdown-code-block-banner);
+  background: transparent;
   border-bottom: none;
   color: var(--chat-text-2);
   font: 11px/18px var(--font-sans);
 }
 
 .chat-code__lang {
-  font-family: var(--chat-mono);
-  font-size: calc(11px + var(--ui-font-delta));
-  color: var(--chat-text-3);
-  text-transform: lowercase;
-  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--chat-code-fg);
   user-select: none;
   line-height: calc(18px + var(--ui-font-delta));
 }
@@ -512,11 +546,13 @@
 
 .chat-code__pre {
   margin: 0;
-  padding: 16px;
+  /* Codex 实测：pre 内边距 8px（--spacing × 2）、行高 20px（--spacing × 5）。
+   * 头部栏到代码首行的距离由这里决定，16px 会比 Codex 大一倍。 */
+  padding: 8px;
   overflow-x: auto;
   font-family: var(--chat-mono);
   font-size: var(--chat-fs-sm);
-  line-height: 1.55;
+  line-height: calc(var(--spacing) * 5);
   /* Explicit fg — never inherit a muted/wrong parent color */
   color: var(--chat-code-fg) !important;
   background: var(--bg-code);
@@ -526,7 +562,6 @@
   outline: none;
   white-space: pre;
   -webkit-text-fill-color: var(--chat-code-fg);
-  font: var(--dsw-font-markdown-code-block);
 }
 
 .chat-code__pre.is-wrap {

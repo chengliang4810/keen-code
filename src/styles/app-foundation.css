@@ -17,7 +17,7 @@ body,
   font-family: var(--font-sans);
   font-size: var(--text-md);
   line-height: var(--leading-normal);
-  -webkit-font-smoothing: antialiased;
+  font-weight: var(--font-ui-weight);
 }
 
 /* Checkbox 的边框、背景及状态色由共享组件管理，避免未分层重置覆盖 utilities 层。 */

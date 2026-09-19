@@ -105,7 +105,7 @@ describe("界面字号令牌接线", () => {
       /--ui-font-delta:\s*calc\(var\(--ui-font-size\)\s*-\s*14px\);/,
     );
     expect(tokens).toMatch(/--text-md:\s*var\(--ui-font-size\);/);
-    for (const base of ["12", "13", "16", "26"]) {
+    for (const base of ["12", "13", "16", "28"]) {
       expect(tokens).toContain(`calc(${base}px + var(--ui-font-delta))`);
     }
   });

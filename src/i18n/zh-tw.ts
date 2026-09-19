@@ -1198,6 +1198,7 @@ export const zhTW: Record<MessageKey, string> = {
   "chat.system.mcpDisabled": "MCP 伺服器 {name} 已停用。",
   "chat.system.mcpUninitialized": "MCP 伺服器 {name} 尚未初始化。",
   "chat.scrollBottom": "回到最新",
+  "chat.codeLangText": "純文字",
   "chat.codeWrap": "啟用自動換行",
   "chat.codeUnwrap": "取消自動換行",
   "sidebar.newSession": "新增對話",
