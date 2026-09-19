@@ -5,6 +5,8 @@
 
 import {
   createContext,
+  lazy,
+  Suspense,
   useCallback,
   useContext,
   useEffect,
@@ -12,15 +14,14 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import Lightbox from "yet-another-react-lightbox";
-import Zoom from "yet-another-react-lightbox/plugins/zoom";
-import "yet-another-react-lightbox/styles.css";
 import {
   releaseImageSrc,
   resolveImageSrcs,
 } from "@/lib/imageSrc";
 import { copyImageFromPath, copyImageFromSrc } from "@/lib/copyImage";
 import { createT, type Locale } from "@/i18n";
+
+const ImageLightbox = lazy(() => import("@/components/ImageLightbox"));
 
 export interface ImageSlideInput {
   /** Local absolute path or already-viewable URL. */
@@ -153,43 +154,29 @@ export function ImageViewerProvider({
   return (
     <ImageViewerContext.Provider value={api}>
       {children}
-      <Lightbox
-        open={isOpen}
-        close={close}
-        index={index}
-        slides={slides.map((s) => ({
-          src: s.src,
-          alt: s.alt ?? s.title,
-          title: s.title,
-        }))}
-        on={{
-          view: ({ index: i }) => setIndex(i),
-          // Keep Blob URLs alive until the closing animation has finished.
-          exited: () => setSlides([]),
-        }}
-        plugins={[Zoom]}
-        zoom={{
-          maxZoomPixelRatio: 4,
-          scrollToZoom: true,
-        }}
-        carousel={{
-          finite: slides.length <= 1,
-          preload: 2,
-        }}
-        controller={{
-          closeOnBackdropClick: true,
-        }}
-        styles={{
-          container: { backgroundColor: "rgba(0, 0, 0, 0.92)" },
-        }}
-        labels={{
-          Next: tr("image.next"),
-          Previous: tr("image.prev"),
-          Close: tr("image.close"),
-          "Zoom in": tr("image.zoomIn"),
-          "Zoom out": tr("image.zoomOut"),
-        }}
-      />
+      {slides.length > 0 ? (
+        <Suspense fallback={null}>
+          <ImageLightbox
+            open={isOpen}
+            onClose={close}
+            index={index}
+            slides={slides.map((s) => ({
+              src: s.src,
+              alt: s.alt ?? s.title,
+              title: s.title,
+            }))}
+            onView={setIndex}
+            onExited={() => setSlides([])}
+            labels={{
+              next: tr("image.next"),
+              previous: tr("image.prev"),
+              close: tr("image.close"),
+              zoomIn: tr("image.zoomIn"),
+              zoomOut: tr("image.zoomOut"),
+            }}
+          />
+        </Suspense>
+      ) : null}
     </ImageViewerContext.Provider>
   );
 }

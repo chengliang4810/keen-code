@@ -1,14 +1,27 @@
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useState,
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+} from "react";
 import type { SessionSnapshot, ChatMessage } from "@/lib/session";
 import type { AcpSessionView, AcpSubagentInfo } from "@/lib/acp/store";
 import type { Locale } from "@/i18n";
-import {
-  ResourceViewer,
-  type ResourceOpenTarget,
-  type ResourceViewerProps,
+import type {
+  ResourceOpenTarget,
+  ResourceViewerProps,
 } from "@/components/ResourceViewer";
 import type { Project } from "@/features/app/models";
 import { saveLayout, type LayoutPrefs } from "@/lib/layout";
+
+const ResourceViewer = lazy(() =>
+  import("@/components/ResourceViewer").then((module) => ({
+    default: module.ResourceViewer,
+  })),
+);
 
 export interface ResourceAsideProps {
   asideRef: RefObject<HTMLElement | null>;
@@ -55,37 +68,47 @@ export function ResourceAside({
   modelLabel,
   loadTrajectoryMessages,
 }: ResourceAsideProps) {
+  const [hasOpened, setHasOpened] = useState(!layout.asideCollapsed);
+
+  useEffect(() => {
+    if (!layout.asideCollapsed) setHasOpened(true);
+  }, [layout.asideCollapsed]);
+
+  const shouldMountViewer = hasOpened || !layout.asideCollapsed;
+
   return (
-        <aside
-          ref={asideRef}
-          className={
-            (layout.asideCollapsed ? "aside aside--hidden" : "aside") +
-            (resizingAside ? " is-resizing" : "")
-          }
-          aria-hidden={layout.asideCollapsed}
-          style={
-            !layout.asideCollapsed
-              ? {
-                  width: layout.asideWidth,
-                  minWidth: layout.asideWidth,
-                  maxWidth: layout.asideWidth,
-                }
-              : undefined
-          }
-        >
-          {!layout.asideCollapsed && (
-            <div
-              className="aside-resizer"
-              role="separator"
-              aria-orientation="vertical"
-              aria-label="Resize files pane"
-              onPointerDown={(e) => {
-                e.preventDefault();
-                setResizingAside(true);
-              }}
-            />
-          )}
-          <div className="aside__inner">
+    <aside
+      ref={asideRef}
+      className={
+        (layout.asideCollapsed ? "aside aside--hidden" : "aside") +
+        (resizingAside ? " is-resizing" : "")
+      }
+      aria-hidden={layout.asideCollapsed}
+      style={
+        !layout.asideCollapsed
+          ? {
+              width: layout.asideWidth,
+              minWidth: layout.asideWidth,
+              maxWidth: layout.asideWidth,
+            }
+          : undefined
+      }
+    >
+      {!layout.asideCollapsed && (
+        <div
+          className="aside-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize files pane"
+          onPointerDown={(e) => {
+            e.preventDefault();
+            setResizingAside(true);
+          }}
+        />
+      )}
+      <div className="aside__inner">
+        {shouldMountViewer ? (
+          <Suspense fallback={null}>
             <ResourceViewer
               sessionKey={session.sessionId ?? "__draft__"}
               projectPath={activeProject?.path ?? null}
@@ -116,7 +139,9 @@ export function ResourceAside({
               subagentModelLabels={subagentModelLabels}
               onLoadTrajectoryMessages={loadTrajectoryMessages}
             />
-          </div>
-        </aside>
+          </Suspense>
+        ) : null}
+      </div>
+    </aside>
   );
 }
