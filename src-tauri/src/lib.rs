@@ -3,6 +3,8 @@ mod agent_prompt;
 pub mod agent_runtime;
 mod analytics;
 mod app_exit;
+#[cfg(target_os = "macos")]
+mod app_menu;
 mod app_settings;
 mod app_updates;
 mod browser;
@@ -212,6 +214,11 @@ async fn settings_set(
     match app_settings::set(&app, settings) {
         Ok(saved) => {
             memories.set_enabled(saved.local_memories);
+            if saved.interface_language != previous.interface_language {
+                // macOS 应用菜单是原生界面，语言变化后必须重建才能跟随界面语言。
+                #[cfg(target_os = "macos")]
+                app_menu::apply(&app, saved.interface_language);
+            }
             if saved.local_memories
                 && (saved.interface_language != previous.interface_language
                     || !previous.local_memories)
@@ -456,10 +463,14 @@ pub fn run() {
 
 /// 共享正式桌面装配，原生测试只在独立测试进程中断开受控记录器通道。
 fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_updater::Builder::new().build());
+    // 应用菜单栏是 macOS 专属界面；其他平台保持无菜单栏的原有工作台布局。
+    #[cfg(target_os = "macos")]
+    let builder = builder.on_menu_event(app_menu::handle_menu_event);
+    builder
         .setup(move |app| {
             use tauri::Manager;
             let diagnostics = diagnostics::Diagnostics::init(app.handle(), startup_started_at);
@@ -487,6 +498,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                 diagnostics.log("warn", "startup.settings", warning);
             }
             let current_settings = loaded_settings.settings;
+            #[cfg(target_os = "macos")]
+            app_menu::apply(app.handle(), current_settings.interface_language);
             diagnostics.startup_phase("settings_ready");
             let power_management = Arc::new(power_management::PowerManagement::new());
             if let Err(error) =
