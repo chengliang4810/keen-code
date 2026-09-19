@@ -35,6 +35,7 @@ describe("ComposerGoalProgress", () => {
 
     expect(html).toContain("已暂停的目标");
     expect(html).toContain("测试目标模式 UI：保持目标处于进行中");
+    expect(html).toContain("composer-goal__elapsed");
     expect(html).toContain("15s");
     expect(html).toContain("编辑目标");
     expect(html).toContain("清除目标");

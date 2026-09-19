@@ -78,6 +78,7 @@ export function ComposerContextBar({
         }
       />
       <ComposerGoalProgress
+        key={`composer-goal-${session.sessionId ?? "draft"}`}
         locale={locale}
         goal={
           acpSessionView?.session_id === session.sessionId

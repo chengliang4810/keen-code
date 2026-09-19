@@ -2021,7 +2021,11 @@ struct RecoveredDynamicInputClaim {
     mailbox_messages: Vec<RunnerMailboxMessage>,
 }
 
-/// 把 Runner 已完成模型 Round 的明确用量同步累计到项目级 Goal。
+/// 把 Runner 已完成模型 Round 的明确 Token 用量同步累计到项目级 Goal。
+///
+/// 时间不走模型 Round：Round 之间的工具执行、子 Agent 等待与排队间隙同样是
+/// 目标的真实执行时长，统一由根回合终态的 `commit_goal_turn_elapsed` 按墙钟
+/// 一次性累计，避免按 Round 累计造成漏记或重复计数。
 struct RuntimeGoalUsageSink {
     /// 当前唯一根 Runtime Session 标识。
     session_id: String,
@@ -3787,7 +3791,7 @@ fn validate_dynamic_input_claim(
 }
 
 impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
-    /// 仅累计 Goal 所属 Session（含其子 Agent）的用量，其他项目对话不消耗该预算。
+    /// 仅累计 Goal 所属 Session（含其子 Agent）的 Token 用量，其他项目对话不消耗该预算。
     fn commit(&self, usage: &ModelRoundUsage) -> Result<(), AgentCommitSinkError> {
         if usage.session_id().as_str() != self.session_id {
             return Err(AgentCommitSinkError::rejected(
@@ -3809,7 +3813,6 @@ impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
                 .zip(reported.output_tokens)
                 .and_then(|(input, output)| input.checked_add(output))
         });
-        let elapsed_seconds = usage.elapsed_millis().div_ceil(1_000).max(1);
         let operation_id = goal_usage_operation_id(&[
             usage.session_id().as_str(),
             usage.turn_id().as_str(),
@@ -3822,7 +3825,8 @@ impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
             &operation_id,
             GoalUsageDelta {
                 tokens: tokens.unwrap_or(0),
-                elapsed_seconds,
+                // 执行时长由根回合终态按墙钟统一累计，Round 只贡献 Token。
+                elapsed_seconds: 0,
             },
         ) {
             Ok(change) => {
@@ -3854,6 +3858,57 @@ impl RuntimeModelRoundUsageSink for RuntimeGoalUsageSink {
                 AgentCommitSinkError::indeterminate("项目 Goal 用量提交结果不确定"),
             ),
         }
+    }
+}
+
+/// 根回合终态时把整段墙钟执行时长累计进项目 Goal。
+///
+/// 回合墙钟覆盖模型 Round 之间的工具执行、子 Agent 等待与排队间隙，是目标
+/// 的真实执行时长；模型 Round 用量因此只提交 Token。相同 Turn 的重复提交
+/// 按幂等操作标识去重，失败只向调用方返回错误用于诊断，不影响回合终态。
+fn commit_goal_turn_elapsed(
+    session_id: &str,
+    persistent_state: &PersistentAgentState,
+    owner: &Weak<AgentRuntime>,
+    turn_id: &str,
+    elapsed_seconds: u64,
+) -> Result<(), RuntimeStateError> {
+    if elapsed_seconds == 0 {
+        return Ok(());
+    }
+    let snapshot = persistent_state.goal_snapshot()?;
+    if snapshot.goal.as_ref().is_none_or(|goal| {
+        goal.status != GoalStatus::Active || goal.owner_session_id != session_id
+    }) {
+        return Ok(());
+    }
+    let operation_id = goal_usage_operation_id(&[session_id, turn_id, "root", "turn_wall", "0", "0"]);
+    match persistent_state.record_goal_usage(
+        &operation_id,
+        GoalUsageDelta {
+            tokens: 0,
+            elapsed_seconds,
+        },
+    ) {
+        Ok(change) => {
+            if change.changed
+                && let Some(owner) = owner.upgrade()
+            {
+                owner.publish_goal_changed(
+                    session_id,
+                    change.current.goal.as_ref().map(|goal| goal.id.clone()),
+                    change.current.revision,
+                    change
+                        .current
+                        .goal
+                        .as_ref()
+                        .map(|goal| goal_status_name(goal.status).to_owned()),
+                );
+            }
+            Ok(())
+        }
+        Err(RuntimeStateError::NotFound { .. } | RuntimeStateError::Terminal { .. }) => Ok(()),
+        Err(error) => Err(error),
     }
 }
 
@@ -3905,6 +3960,7 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                 };
             }
         };
+        let turn_started_unix_ms;
         {
             let mut state = match self.state.lock() {
                 Ok(state) => state,
@@ -3932,19 +3988,24 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                 return AgentTurnStartResult::AlreadyAccepted;
             }
             state.accepted_turns.insert(launch.turn_id.clone());
+            turn_started_unix_ms = unix_time_ms();
             state.running_turns.insert(
                 launch.turn_id.clone(),
                 ManagedRuntimeTurn {
                     agent_id: launch.agent.agent_id.clone(),
                     agent_depth: launch.agent.depth,
                     summary,
-                    started_at_unix_ms: unix_time_ms(),
+                    started_at_unix_ms: turn_started_unix_ms,
                     started: Instant::now(),
                     cancellation: launch.cancellation.clone(),
                     terminal_outcome: None,
                 },
             );
         }
+        let goal_elapsed_session = self.session_id.clone();
+        let goal_elapsed_state = Arc::clone(&self.persistent_state);
+        let goal_elapsed_owner = Weak::clone(&self.owner);
+        let goal_elapsed_root_turn = launch.parent_turn_id.is_none();
         let completion = prepared_root.map(|prepared| prepared.completion);
         let coordinator = match self.coordinator() {
             Ok(coordinator) => coordinator,
@@ -4060,6 +4121,26 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                     attempts,
                     "Agent Turn 终态回传未收敛，已保留持久恢复事实"
                 );
+            }
+            if goal_elapsed_root_turn {
+                let elapsed_seconds = unix_time_ms()
+                    .saturating_sub(turn_started_unix_ms)
+                    .div_ceil(1_000)
+                    .max(1);
+                if let Err(error) = commit_goal_turn_elapsed(
+                    &goal_elapsed_session,
+                    &goal_elapsed_state,
+                    &goal_elapsed_owner,
+                    turn_id.as_str(),
+                    elapsed_seconds,
+                ) {
+                    tracing::warn!(
+                        target: "agent_runtime",
+                        turn_id = %turn_id,
+                        error = %error,
+                        "Goal 回合墙钟时长累计失败"
+                    );
+                }
             }
             // 只有 Coordinator 已确认终态时才释放 accepted 标记；失败路径保留它，
             // 防止同一 Turn 在当前进程内因持久终态尚未确认而再次执行。
@@ -10454,7 +10535,7 @@ mod tests {
         RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
         RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
         authoritative_recovered_turn_outcome, background_task_completion_event,
-        clear_historical_reasoning_state, complete_runtime_turn,
+        clear_historical_reasoning_state, commit_goal_turn_elapsed, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
         map_authoritative_record, map_authoritative_record_with_projection, materialize_delivery,
@@ -22337,7 +22418,8 @@ mod tests {
             .goal
             .expect("活跃 Goal 应保留");
         assert_eq!(goal.tokens_used, 35 + 47);
-        assert_eq!(goal.time_used_seconds, 3);
+        // 执行时长改由根回合终态按墙钟统一累计，模型 Round 只贡献 Token。
+        assert_eq!(goal.time_used_seconds, 0);
 
         let state = session.snapshot().expect("Session 快照应读取").state;
         assert_eq!(state.model_rounds.len(), 1);
@@ -22355,6 +22437,77 @@ mod tests {
             1,
             "失败调用不得写入 Transcript 段"
         );
+    }
+
+    /// 根回合墙钟只在归属 Session 的活跃 Goal 上累计，相同 Turn 幂等，跨 Session 跳过。
+    #[tokio::test]
+    async fn goal_turn_elapsed_commits_wall_time_for_owner_active_goal() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let session = RuntimeSession::create_session(
+            RuntimeConfig::new(storage.path()),
+            CreateSessionRequest {
+                session_id: format!("session-{}", "c".repeat(64)),
+                title: "Goal 回合墙钟测试".to_owned(),
+                project_root: storage.path().display().to_string(),
+            },
+        )
+        .expect("Session 应创建");
+        let persistent_state =
+            Arc::new(PersistentAgentState::open(session.clone()).expect("Goal 持久控制器应创建"));
+        persistent_state
+            .create_goal(
+                "goal-turn-wall",
+                GoalDraft {
+                    title: "验证回合墙钟".to_owned(),
+                    objective: "回合结束后按墙钟累计执行时长".to_owned(),
+                    description: None,
+                    token_budget: None,
+                    progress_percent: None,
+                },
+            )
+            .expect("活跃 Goal 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let no_owner = std::sync::Weak::new();
+
+        commit_goal_turn_elapsed(
+            &session_id,
+            persistent_state.as_ref(),
+            &no_owner,
+            "turn-wall-1",
+            17 * 60 + 33,
+        )
+        .expect("根回合墙钟应累计");
+        // 相同 Turn 的重复提交按幂等操作标识去重，不得重复累计。
+        commit_goal_turn_elapsed(
+            &session_id,
+            persistent_state.as_ref(),
+            &no_owner,
+            "turn-wall-1",
+            17 * 60 + 33,
+        )
+        .expect("相同 Turn 的重复提交应幂等");
+        let goal = persistent_state
+            .goal_snapshot()
+            .expect("Goal 快照应读取")
+            .goal
+            .expect("活跃 Goal 应保留");
+        assert_eq!(goal.time_used_seconds, 17 * 60 + 33);
+
+        // 非归属 Session 的时长不消耗当前 Goal。
+        commit_goal_turn_elapsed(
+            "other-session",
+            persistent_state.as_ref(),
+            &no_owner,
+            "turn-wall-2",
+            60,
+        )
+        .expect("非归属 Session 的提交应直接跳过");
+        let goal = persistent_state
+            .goal_snapshot()
+            .expect("Goal 快照应读取")
+            .goal
+            .expect("活跃 Goal 应保留");
+        assert_eq!(goal.time_used_seconds, 17 * 60 + 33);
     }
 
     /// Journal 追加结果不确定时，Store pending 必须保留，随后同一 Turn 重试才可清理。

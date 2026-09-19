@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpGoalProjection } from "@/lib/acp/store";
 import {
@@ -90,18 +90,28 @@ export function ComposerGoalProgress({
   const [elapsed, setElapsed] = useState(() =>
     goalElapsedSeconds(current, readStoredGoalElapsed(current?.id)),
   );
+  // 本机累计只增不减：goal_changed 触发的投影刷新不得把显示拉回较小的持久值。
+  const elapsedRef = useRef(elapsed);
+  const trackedGoalIdRef = useRef(current?.id ?? null);
 
   // 仅在当前目标真实执行时每秒刷新一次，空闲时不产生后台活动。
   useEffect(() => {
-    const stored = readStoredGoalElapsed(current?.id);
-    const base = goalElapsedSeconds(current, stored);
+    const seed = goalElapsedSeconds(current, readStoredGoalElapsed(current?.id));
+    if (trackedGoalIdRef.current !== (current?.id ?? null)) {
+      trackedGoalIdRef.current = current?.id ?? null;
+      elapsedRef.current = seed;
+    } else {
+      elapsedRef.current = Math.max(elapsedRef.current, seed);
+    }
     const startedAt = Date.now();
+    const anchor = elapsedRef.current;
     const updateElapsed = () => {
-      const next = running
-        ? base + Math.floor(Math.max(0, Date.now() - startedAt) / 1000)
-        : base;
-      setElapsed(next);
-      if (current) storeGoalElapsed(current.id, next);
+      if (running) {
+        const next = anchor + Math.floor(Math.max(0, Date.now() - startedAt) / 1000);
+        if (next > elapsedRef.current) elapsedRef.current = next;
+      }
+      setElapsed(elapsedRef.current);
+      if (current) storeGoalElapsed(current.id, elapsedRef.current);
     };
     updateElapsed();
     if (!current || current.status !== "active" || !running) return;
@@ -139,12 +149,12 @@ export function ComposerGoalProgress({
     <div className={`composer-goal composer-goal--${current.status === "paused" || (current.status === "active" && !running) ? "paused" : current.status}`}>
       <IconTarget size={17} />
       <div className="composer-goal__summary" title={objective}>
-        <strong>{statusLabel}:</strong>
+        <strong>{statusLabel}</strong>
         <span>{objective}</span>
+        <span className="composer-goal__elapsed">
+          · {formatGoalElapsed(elapsed)}
+        </span>
       </div>
-      <span className="composer-goal__elapsed">
-        {formatGoalElapsed(elapsed)}
-      </span>
       {current.status === "active" || current.status === "paused" ? (
         <Button
           type="button"
