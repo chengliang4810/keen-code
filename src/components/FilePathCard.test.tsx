@@ -61,7 +61,7 @@ describe("FilePathCard", () => {
       /\.file-path-link__name\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s,
     );
     expect(css).toMatch(
-      /\.chat-md ul > li:has\(\.file-path-link\)::before\s*\{[^}]*top:\s*0\.6em;[^}]*width:\s*5px;[^}]*height:\s*5px;/s,
+      /\.chat-md ul > li:has\(\.file-path-link\)::before\s*\{[^}]*top:\s*8px;[^}]*width:\s*5px;[^}]*height:\s*5px;/s,
     );
   });
 

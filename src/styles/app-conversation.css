@@ -2242,10 +2242,6 @@ button.composer__context-item {
   flex-shrink: 0;
 }
 
-.file-path-link--url .file-path-link__icon {
-  color: var(--url-accent);
-}
-
 .file-path-link--dir .file-path-link__icon {
   color: var(--dir-accent);
 }
@@ -2272,16 +2268,27 @@ button.composer__context-item {
 
 .chat-md ul > li:has(.file-path-link)::before {
   position: absolute;
-  top: 0.6em;
-  inset-inline-start: -1.15em;
-  /* 自绘列表标记会缩放 ::before 字号，这里的 em 偏移必须保持条目字号。 */
+  /* 与通用列表标记同一几何（top 8px / -0.95em），保证横向、纵向都对齐。 */
+  top: 8px;
+  inset-inline-start: -0.95em;
   font-size: inherit;
   width: 5px;
   height: 5px;
   border-radius: 50%;
   background: var(--chat-prose-text);
   content: "";
-  transform: translateY(-50%);
+}
+
+/* 链接图标按字号取 1em 并块化：16px 基线对齐的 svg 会撑高行盒，
+ * 使文字基线下移、列表圆点错位。 */
+.file-path-link__icon svg {
+  display: block;
+  width: 1em;
+  height: 1em;
+}
+
+.file-path-link--url .file-path-link__icon {
+  color: var(--chat-link);
 }
 
 /* Path never shown on link */
