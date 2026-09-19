@@ -106,6 +106,11 @@ export function diagnosticsRecord(component: string, message: string): Promise<v
   return invoke<void>("diagnostics_record", { component, message });
 }
 
+/** 将聚合后的前端性能数据以 info 级别写入本地诊断日志。 */
+export function performanceRecord(component: string, message: string): Promise<void> {
+  return invoke<void>("performance_record", { component, message });
+}
+
 export async function sessionConnect(args: {
   projectPath?: string;
   sessionId?: string | null;

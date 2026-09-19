@@ -18,7 +18,9 @@ export async function invoke<T>(
   try {
     return await tauriInvoke<T>(command, args);
   } catch (error) {
-    if (command !== "diagnostics_record") reportFrontendError(`frontend.ipc.${command}`, error);
+    if (command !== "diagnostics_record" && command !== "performance_record") {
+      reportFrontendError(`frontend.ipc.${command}`, error);
+    }
     throw error;
   }
 }

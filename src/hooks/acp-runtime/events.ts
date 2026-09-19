@@ -48,6 +48,12 @@ import {
   type UnreadTerminalResult,
 } from "@/lib/sessionCompletion";
 import { createAnimationFrameBatcher } from "@/lib/frameBatcher";
+import {
+  beginFrontendTurnPerformance,
+  completeFrontendTurnPerformance,
+  recordFrontendDelivery,
+  recordFrontendProjection,
+} from "@/lib/frontendPerformance";
 import type { Ref, SetState, ViewProjection } from "./types";
 
 /** 前端内部转发已经严格解析的 KeenCode 生命周期事件。 */
@@ -254,6 +260,7 @@ export function useAcpRuntimeEvents({
     let unlisten: (() => void) | null = null;
     const pendingProjectionSessions = new Set<string>();
     const publishScheduled = () => {
+      const started = performance.now();
       if (disposed) return;
       const viewingSessionId = viewingSessionIdRef.current;
       const projectViewing = viewingSessionId !== null &&
@@ -264,6 +271,7 @@ export function useAcpRuntimeEvents({
       if (!projectViewing) return;
       commitWorkspace();
       applyViewProjectionRef.current(viewingSessionId);
+      recordFrontendProjection(viewingSessionId, performance.now() - started);
     };
     const projectionBatcher = createAnimationFrameBatcher(
       publishScheduled,
@@ -457,6 +465,7 @@ export function useAcpRuntimeEvents({
       if (event.type === "turn_started" && !reduction.childAgentId &&
         event.parentTurnId === undefined && envelope.turnId) {
         activeTurnIdBySessionRef.current.set(envelope.sessionId, envelope.turnId);
+        beginFrontendTurnPerformance(envelope.sessionId, envelope.turnId);
         completedTurnIdBySessionRef.current.delete(envelope.sessionId);
         recoverableCompletedTurnIdBySessionRef.current.delete(envelope.sessionId);
         updateHostState(envelope.sessionId, "streaming");
@@ -470,6 +479,9 @@ export function useAcpRuntimeEvents({
           hadVisibleMainText,
           optimisticUser,
         );
+        if (envelope.turnId) {
+          completeFrontendTurnPerformance(envelope.sessionId, envelope.turnId);
+        }
       }
       if (event.type === "goal_changed") {
         void goalGet(envelope.sessionId).then((result) => {
@@ -534,6 +546,7 @@ export function useAcpRuntimeEvents({
       }
       if (delivery.type === "session_update") {
         const envelope = delivery.envelope;
+        recordFrontendDelivery(envelope.sessionId);
         const view = ensureAcpSession(acpWorkspaceRef.current, envelope.sessionId);
         const wasRecovering = view.replay.throughDeliverySequence === null
           ? view.replay.restoring
@@ -572,6 +585,7 @@ export function useAcpRuntimeEvents({
         return;
       }
       const envelope = delivery.envelope;
+      recordFrontendDelivery(envelope.sessionId);
       const view = ensureAcpSession(acpWorkspaceRef.current, envelope.sessionId);
       // load响应和WebView事件回调可能跨队列到达；恢复标志已清除时，已确认
       // Journal水位以内仍是历史投递，不能补造实时耗时、未读或缓存刷新副作用。

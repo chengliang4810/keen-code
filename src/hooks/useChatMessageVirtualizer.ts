@@ -38,6 +38,7 @@ import {
   type ChatVirtualWindow,
 } from "@/lib/chatVirtualList";
 import { markProgrammaticStickScroll } from "@/lib/stickToBottom";
+import { recordVirtualizerWork } from "@/lib/frontendPerformance";
 
 export type UseChatMessageVirtualizerArgs = {
   /** 消息总数。 */
@@ -178,6 +179,7 @@ export function useChatMessageVirtualizer(
 
   /** 立即根据当前视口、行高和吸底状态重算窗口。 */
   const recomputeNow = useCallback(() => {
+    const started = performance.now();
     if (!virtualized) {
       setWin((prev) => {
         const next = full(itemCount);
@@ -188,11 +190,13 @@ export function useChatMessageVirtualizer(
           ? prev
           : next;
       });
+      recordVirtualizerWork(conversationKey, performance.now() - started);
       return;
     }
     const el = viewportRef.current;
     if (!el) {
       setWin(full(itemCount));
+      recordVirtualizerWork(conversationKey, performance.now() - started);
       return;
     }
     const pin = !!isPinnedRef.current;
@@ -233,7 +237,8 @@ export function useChatMessageVirtualizer(
       }
       return next;
     });
-  }, [virtualized, itemCount, viewportRef, isPinnedRef, getHeight, getOffsets]);
+    recordVirtualizerWork(conversationKey, performance.now() - started);
+  }, [virtualized, itemCount, viewportRef, isPinnedRef, getHeight, getOffsets, conversationKey]);
 
   /** 合并密集测量后延迟重算窗口。 */
   const recompute = useCallback(() => {
@@ -317,11 +322,15 @@ export function useChatMessageVirtualizer(
   /** 提交一行的实测高度，并在需要时修正阅读锚点。 */
   const commitRowHeight = useCallback(
     (index: number, el: HTMLElement) => {
+      const started = performance.now();
       if (!virtualized) return;
       const key = getKeyRef.current(index);
       const nextH = Math.round(el.getBoundingClientRect().height);
       const prevH = heightsRef.current.get(key);
-      if (!shouldCommitRowHeight(prevH, nextH)) return;
+      if (!shouldCommitRowHeight(prevH, nextH)) {
+        recordVirtualizerWork(conversationKey, performance.now() - started, true);
+        return;
+      }
 
       const pin = !!isPinnedRef.current;
       const viewport = viewportRef.current;
@@ -362,8 +371,9 @@ export function useChatMessageVirtualizer(
           }
         });
       }
+      recordVirtualizerWork(conversationKey, performance.now() - started, true);
     },
-    [virtualized, getOffsets, isPinnedRef, viewportRef, recompute],
+    [virtualized, getOffsets, isPinnedRef, viewportRef, recompute, conversationKey],
   );
 
   /**

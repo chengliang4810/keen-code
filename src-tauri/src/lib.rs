@@ -95,6 +95,16 @@ fn diagnostics_record(
     diagnostics.error(&component, message);
 }
 
+/// 记录前端聚合后的性能数据；正常观测不得污染错误级诊断。
+#[tauri::command]
+fn performance_record(
+    component: String,
+    message: String,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) {
+    diagnostics.log("info", &component, message);
+}
+
 /// 前端完成首次绘制后报告可交互时间点。
 #[tauri::command]
 fn startup_frontend_ready(diagnostics: State<'_, Arc<diagnostics::Diagnostics>>) {
@@ -536,6 +546,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             settings_set,
             diagnostics_log_path,
             diagnostics_record,
+            performance_record,
             startup_frontend_ready,
             app_exit::app_confirm_exit,
             app_updates::app_update_info,

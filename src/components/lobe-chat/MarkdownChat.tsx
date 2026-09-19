@@ -452,6 +452,7 @@ export const MarkdownChat = memo(function MarkdownChat({
         streaming={streaming}
         components={components}
         disabled={!!qFind}
+        turnId={latencyTurnId}
       />
     </div>
   );
