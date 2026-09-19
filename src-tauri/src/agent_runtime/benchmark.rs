@@ -38,6 +38,8 @@ struct Request {
     model: String,
     base_url: String,
     api_backend: String,
+    #[serde(default)]
+    chat_output_token_field: keencode_provider::ChatOutputTokenField,
     tool_allowlist: Option<Vec<String>>,
     timeout_ms: u64,
     context_window_tokens: Option<u64>,
@@ -68,7 +70,7 @@ pub async fn run() -> anyhow::Result<()> {
     let max_output_tokens = request.max_output_tokens.unwrap_or(8192);
     anyhow::ensure!(max_output_tokens > 0, "maxOutputTokens must be positive");
     let provider = providers::CustomProvider {
-        chat_output_token_field: Default::default(),
+        chat_output_token_field: request.chat_output_token_field,
         id: "benchmark".into(),
         name: "Benchmark".into(),
         models: vec![model.clone()],
