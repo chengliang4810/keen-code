@@ -97,6 +97,16 @@ vYYYYMMDD-abcdef0
 - 只有用户配置的模型服务、MCP Server、插件来源或任务主动访问的地址会产生网络请求。
 - 项目不默认启用遥测或上传用户代码。
 
+## Benchmark 入口
+
+`keencode-bench` 仅供基准测试和 harness 适配器使用，不随默认桌面构建编译。构建时必须显式开启 `benchmark` feature：
+
+```bash
+cargo build --manifest-path src-tauri/Cargo.toml --example keencode-bench --features benchmark
+```
+
+产物位于 `target/debug/examples/keencode-bench`。该入口通过标准输入读取 JSON 请求，协议定义见 [`src-tauri/src/agent_runtime/benchmark.rs`](src-tauri/src/agent_runtime/benchmark.rs)。
+
 ## 许可证
 
 KeenCode 自有代码采用 [MIT License](LICENSE)。第三方依赖继续遵循各自许可证，根许可证不对第三方代码重新授权。
