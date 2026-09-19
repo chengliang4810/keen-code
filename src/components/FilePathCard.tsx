@@ -188,7 +188,13 @@ export function FilePathCard({
 
   const openInPanel = async () => {
     if (isUrl) {
-      onOpenInPanel?.({ type: "url", url: path, title: name });
+      // 聊天/面板宿主：URL 在右侧面板的网页标签中打开。
+      if (onOpenInPanel) {
+        onOpenInPanel({ type: "url", url: path, title: name });
+        return;
+      }
+      // 无面板宿主的复用场景：回退系统浏览器。
+      await openExternal();
       return;
     }
     // Resolve before open so the panel never flashes the raw relative path.
@@ -331,7 +337,7 @@ export function FilePathCard({
           <Button
             type="button"
             className="file-path-link__main"
-            onClick={() => void (isUrl ? openExternal() : openInPanel())}
+            onClick={() => void openInPanel()}
             disabled={busy}
           >
             <span className="file-path-link__icon" aria-hidden>

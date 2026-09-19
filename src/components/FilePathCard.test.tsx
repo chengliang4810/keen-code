@@ -65,14 +65,16 @@ describe("FilePathCard", () => {
     );
   });
 
-  it("通过桌面命令使用系统默认浏览器打开 URL", () => {
+  it("URL 主点击在右侧面板打开，无面板宿主时回退系统浏览器", () => {
     const source = readFileSync(
       new URL("./FilePathCard.tsx", import.meta.url),
       "utf8",
     );
 
+    expect(source).toContain("onClick={() => void openInPanel()}");
+    expect(source).toContain("onOpenInPanel({ type: \"url\", url: path, title: name })");
+    expect(source).toContain("await openExternal();");
     expect(source).toContain("await api.urlOpen(path)");
-    expect(source).toContain("isUrl ? openExternal() : openInPanel()");
     expect(source).not.toContain("window.open(path");
   });
 
