@@ -46,9 +46,9 @@ pub struct ToolLimits {
     pub max_mutation_file_bytes: u64,
     /// `Read` 可内联返回的单张图片最大字节数。
     pub max_image_bytes: u64,
-    /// Shell 与 Git 未指定超时时采用的默认毫秒数。
+    /// Shell 未指定超时时采用的默认毫秒数。
     pub default_command_timeout_ms: u64,
-    /// Shell 与 Git 允许请求的最大超时毫秒数。
+    /// Shell 允许请求的最大超时毫秒数。
     pub max_command_timeout_ms: u64,
     /// 每个标准输出流的原始内容预览预算，不含截断标记和完整输出路径。
     pub max_command_preview_bytes: usize,

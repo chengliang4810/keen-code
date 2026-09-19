@@ -4018,7 +4018,7 @@ mod tests {
         );
         assert_eq!(
             reviewer.disallowed_tool_names,
-            ["spawn_agent", "Bash", "PowerShell", "Git", "Write", "Edit"]
+            ["spawn_agent", "Bash", "PowerShell", "Write", "Edit"]
         );
         assert!(
             reviewer

@@ -22,7 +22,7 @@ use keencode_model::{
 use keencode_tools::BashTool;
 #[cfg(windows)]
 use keencode_tools::PowerShellTool;
-use keencode_tools::{EditTool, GitTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool};
+use keencode_tools::{EditTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 
@@ -397,14 +397,6 @@ async fn plan_guard_blocks_mutations_without_side_effects_or_processes() {
         )))
         .expect("平台 Shell 应注册");
 
-    let git_executions = Arc::new(AtomicUsize::new(0));
-    registry
-        .register(Arc::new(CountingTool::new(
-            Arc::new(GitTool::new(Arc::clone(&environment))),
-            Arc::clone(&git_executions),
-        )))
-        .expect("Git 应注册");
-
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
         [
@@ -431,14 +423,6 @@ async fn plan_guard_blocks_mutations_without_side_effects_or_processes() {
                     shell_name,
                     json!({
                         "command": shell_command,
-                        "cwd": external_path.to_string_lossy()
-                    }),
-                ),
-                (
-                    "plan-git",
-                    "Git",
-                    json!({
-                        "args": ["init", "--quiet"],
                         "cwd": external_path.to_string_lossy()
                     }),
                 ),
@@ -500,11 +484,6 @@ async fn plan_guard_blocks_mutations_without_side_effects_or_processes() {
         0,
         "Shell execute 不应进入"
     );
-    assert_eq!(
-        git_executions.load(Ordering::SeqCst),
-        0,
-        "Git execute 不应进入"
-    );
     assert!(
         read_executions.load(Ordering::SeqCst) > 0,
         "Read 应实际执行"
@@ -529,7 +508,7 @@ async fn plan_guard_blocks_mutations_without_side_effects_or_processes() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(tool_results.len(), 7, "每个模型工具调用都应有配对结果");
+    assert_eq!(tool_results.len(), 6, "每个模型工具调用都应有配对结果");
     for call_id in ["plan-read", "plan-glob", "plan-grep"] {
         let result = tool_results
             .iter()
@@ -537,7 +516,7 @@ async fn plan_guard_blocks_mutations_without_side_effects_or_processes() {
             .unwrap_or_else(|| panic!("缺少只读工具 {call_id} 的结果"));
         assert!(!result.is_error, "只读工具 {call_id} 不应执行失败");
     }
-    for call_id in ["plan-write", "plan-edit", "plan-shell", "plan-git"] {
+    for call_id in ["plan-write", "plan-edit", "plan-shell"] {
         let result = tool_results
             .iter()
             .find(|result| result.tool_call_id == call_id)

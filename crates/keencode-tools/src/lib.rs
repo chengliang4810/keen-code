@@ -32,8 +32,8 @@ pub use collaboration_tools::{
     register_collaboration_tools_with_template_resolver, retain_child_agent_task_tool_snapshot,
 };
 pub use command::{
-    BashTool, BoundedCommandError, BoundedCommandOutput, BoundedCommandRequest, GitTool,
-    PowerShellTool, run_bounded_command,
+    BashTool, BoundedCommandError, BoundedCommandOutput, BoundedCommandRequest, PowerShellTool,
+    run_bounded_command,
 };
 pub use deferred::{
     DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, SearchExtraTools,
@@ -89,7 +89,6 @@ pub fn register_local_tools(
     if cfg!(windows) {
         registry.register(Arc::new(PowerShellTool::new(environment.clone())))?;
     }
-    registry.register(Arc::new(GitTool::new(environment)))?;
     Ok(())
 }
 
@@ -114,7 +113,6 @@ pub fn register_local_tools_with_background(
             background_tasks.clone(),
         )))?;
     }
-    registry.register(Arc::new(GitTool::new(environment)))?;
     registry.register(Arc::new(TaskOutputTool::new(background_tasks.clone())))?;
     registry.register(Arc::new(TaskStopTool::new(background_tasks)))?;
     Ok(())

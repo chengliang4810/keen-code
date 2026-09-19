@@ -16,7 +16,7 @@ use serde_json::json;
 use tempfile::tempdir;
 
 use crate::{
-    BoundedCommandRequest, EditTool, FileMutationRecorder, GitTool, GlobTool, GrepTool,
+    BoundedCommandRequest, EditTool, FileMutationRecorder, GlobTool, GrepTool,
     PreparedFileMutation, ReadTool, ToolEnvironment, ToolLimits, WriteTool, register_local_tools,
     run_bounded_command,
 };
@@ -183,10 +183,23 @@ fn local_tool_registration_is_stable() {
         .collect::<Vec<_>>();
     let expected: Vec<&str> = if cfg!(windows) {
         vec![
-            "Bash", "Edit", "Git", "Glob", "Grep", "PowerShell", "Read", "Write",
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "PowerShell",
+            "Read",
+            "Write",
         ]
     } else {
-        vec!["Bash", "Edit", "Git", "Glob", "Grep", "Read", "Write"]
+        vec![
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "Read",
+            "Write",
+        ]
     };
     assert_eq!(names, expected);
 }
@@ -1229,135 +1242,6 @@ async fn cancelled_search_returns_stable_error() {
     assert_eq!(error.code, "cancelled");
 }
 
-/// Git 只读分类允许只读调研，未知或变更子命令必须由 Plan 边界保守拦截。
-#[test]
-fn git_effect_classification_is_conservative() {
-    let directory = tempdir().expect("应创建临时目录");
-    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
-    let tool = GitTool::new(environment);
-
-    assert_eq!(
-        tool.effect(&json!({ "args": ["status", "--short"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["--no-pager", "diff", "--stat"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["diff", "--ext-diff"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["diff", "--output=pwned.txt"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["cat-file", "--filters", "HEAD:file"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["blame", "--textconv", "file"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["remote", "show", "origin"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["remote", "show", "--no-query", "origin"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({
-            "args": ["-c", "alias.status=!touch pwned", "status"]
-        })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["--version"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["branch"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["tag", "--list", "release-*"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["worktree", "list", "--porcelain"] })),
-        Ok(ToolEffect::ReadOnly)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["commit", "-m", "message"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["branch", "new-branch"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    assert_eq!(
-        tool.effect(&json!({ "args": ["unknown-alias"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-}
-
-/// Git 工具必须通过参数数组初始化真实仓库并读取可审查状态。
-#[tokio::test]
-async fn git_tool_runs_real_repository_commands() {
-    let directory = tempdir().expect("应创建临时目录");
-    let environment = Arc::new(
-        ToolEnvironment::new(directory.path())
-            .expect("工具环境应有效")
-            .with_artifact_directory(directory.path().join("artifacts"))
-            .expect("输出目录应有效"),
-    );
-    let tool = GitTool::new(environment);
-
-    let initialized = tool
-        .execute(tool_context(), json!({ "args": ["init", "--quiet"] }))
-        .await
-        .expect("Git init 应成功");
-    assert!(output_text(&initialized).contains("退出码 0"));
-    fs::write(directory.path().join("untracked.txt"), "content").expect("应写入未跟踪文件");
-    let status = tool
-        .execute(
-            tool_context(),
-            json!({ "args": ["status", "--short", "--untracked-files=all"] }),
-        )
-        .await
-        .expect("Git status 应成功");
-    assert!(output_text(&status).contains("?? untracked.txt"));
-}
-
-/// Git 也必须在共享失败报告层保留超长诊断，而不是交给中央校验整体替换。
-#[tokio::test]
-async fn git_failure_report_is_bounded_and_keeps_full_diagnostics() {
-    let directory = tempdir().unwrap();
-    let artifacts = directory.path().join("artifacts");
-    let environment = Arc::new(
-        ToolEnvironment::new(directory.path())
-            .unwrap()
-            .with_artifact_directory(&artifacts)
-            .unwrap(),
-    );
-    let argument = format!("unknown-command-{}-end", "x".repeat(5_000));
-    let error = GitTool::new(environment)
-        .execute(tool_context(), json!({ "args": [argument] }))
-        .await
-        .unwrap_err();
-    assert_eq!(error.code, "command_failed");
-    assert!(error.message.len() <= keencode_agent::TOOL_OUTPUT_LIMITS.max_tool_error_message_bytes);
-    let path = error
-        .message
-        .lines()
-        .find_map(|line| line.strip_prefix("stderr 完整输出："))
-        .unwrap();
-    assert!(fs::read_to_string(path).unwrap().contains(&argument));
-}
-
 /// Windows PowerShell 必须保留 UTF-8 stdout、stderr 和真实非零退出码。
 #[cfg(windows)]
 #[tokio::test]
@@ -1897,7 +1781,6 @@ fn command_tools_declare_self_managed_timeout() {
             AgentTool::timeout(&BashTool::new(environment.clone())),
             None
         );
-        assert_eq!(AgentTool::timeout(&GitTool::new(environment)), None);
     }
     #[cfg(windows)]
     {
@@ -1905,7 +1788,6 @@ fn command_tools_declare_self_managed_timeout() {
             AgentTool::timeout(&PowerShellTool::new(environment.clone())),
             None
         );
-        assert_eq!(AgentTool::timeout(&GitTool::new(environment)), None);
     }
 }
 

@@ -11,7 +11,6 @@ fn agents_tool_catalog_lists_template_support_tools() {
         vec![
             "Bash",
             "PowerShell",
-            "Git",
             "Write",
             "Edit",
             "Read",

@@ -834,7 +834,7 @@ mod tests {
         let AgentTools::List(tools) = &plan.document.tools else {
             panic!("内置 plan 应使用显式只读工具集");
         };
-        for forbidden in ["Agent", "Bash", "PowerShell", "Git", "Write", "Edit"] {
+        for forbidden in ["Agent", "Bash", "PowerShell", "Write", "Edit"] {
             assert!(!tools.iter().any(|tool| tool == forbidden), "{forbidden}");
         }
         assert_eq!(tools, &["Read", "Glob", "Grep"]);

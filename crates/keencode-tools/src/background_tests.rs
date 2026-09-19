@@ -258,10 +258,17 @@ fn background_registration_exposes_real_task_tools() {
         .map(|definition| definition.name.as_str())
         .collect::<Vec<_>>();
     let mut expected: Vec<&str> = vec![
-        "Bash", "Edit", "Git", "Glob", "Grep", "Read", "TaskOutput", "TaskStop", "Write",
+        "Bash",
+        "Edit",
+        "Glob",
+        "Grep",
+        "Read",
+        "TaskOutput",
+        "TaskStop",
+        "Write",
     ];
     if cfg!(windows) {
-        expected.insert(5, "PowerShell");
+        expected.insert(4, "PowerShell");
     }
     assert_eq!(names, expected);
     let shell = definitions

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use keencode_agent::{
     AgentId, AgentRunner, AgentTool, PlanGuard, RunLimits, SessionId, ToolCallId, ToolContext,
-    ToolEffect, ToolRegistry, TurnCancellation, TurnId, TurnRequest,
+    ToolRegistry, TurnCancellation, TurnId, TurnRequest,
 };
 use keencode_model::{
     ContentBlock, ImageSource, Message, MessageRole, ModelStreamEvent, ProviderCapabilities,
@@ -16,7 +16,7 @@ use keencode_tools::BashTool;
 #[cfg(windows)]
 use keencode_tools::PowerShellTool;
 use keencode_tools::{
-    EditTool, GitTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool,
+    EditTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool,
     register_local_tools,
 };
 use serde_json::json;
@@ -49,7 +49,10 @@ async fn path_overlay_reaches_command_children() {
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
     entries.push(directory.path().to_path_buf());
     let overlay = std::env::join_paths(entries.iter()).expect("应合并覆盖 PATH");
-    assert!(keencode_tools::set_path_overlay(overlay), "覆盖只需写入一次");
+    assert!(
+        keencode_tools::set_path_overlay(overlay),
+        "覆盖只需写入一次"
+    );
 
     let request = keencode_tools::BoundedCommandRequest::plugin_shell(
         None,
@@ -349,10 +352,16 @@ async fn local_tools_execute_complete_workflow_in_isolated_directory() {
         .collect::<Vec<_>>();
     let expected: Vec<&str> = if cfg!(windows) {
         vec![
-            "Bash", "Edit", "Git", "Glob", "Grep", "PowerShell", "Read", "Write",
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "PowerShell",
+            "Read",
+            "Write",
         ]
     } else {
-        vec!["Bash", "Edit", "Git", "Glob", "Grep", "Read", "Write"]
+        vec!["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
     };
     assert_eq!(names, expected);
 
@@ -433,25 +442,6 @@ async fn local_tools_execute_complete_workflow_in_isolated_directory() {
         .expect("Bash 应在项目目录中完成命令");
     assert!(output_text(&shell_output).contains("shell-ok"));
 
-    let git = GitTool::new(environment);
-    assert_eq!(
-        git.effect(&json!({ "args": ["init", "--quiet"] })),
-        Ok(ToolEffect::ChangesState)
-    );
-    git.execute(
-        tool_context("call-git-init"),
-        json!({ "args": ["init", "--quiet"] }),
-    )
-    .await
-    .expect("Git 应初始化隔离临时仓库");
-    let status = git
-        .execute(
-            tool_context("call-git-status"),
-            json!({ "args": ["status", "--short", "--untracked-files=all"] }),
-        )
-        .await
-        .expect("Git status 应读取隔离临时仓库");
-    assert!(output_text(&status).contains("?? src/main.rs"));
 }
 
 /// 真实 Read 图片结果必须经 Agent Runner 完整进入第二轮 Provider 中立请求。

@@ -1049,7 +1049,6 @@ pub fn agents_tool_catalog() -> Result<AgentToolCatalog, String> {
     let mut tools = [
         "Bash",
         "PowerShell",
-        "Git",
         "Write",
         "Edit",
         "Read",
