@@ -924,7 +924,7 @@ fn normalize_loaded_state(state: &mut ProviderState) -> Vec<String> {
         let out_of_range: Vec<String> = provider
             .context_windows
             .iter()
-            .filter(|(_, window)| !(MIN_CONTEXT_WINDOW..=MAX_CONTEXT_WINDOW).contains(window))
+            .filter(|(_, window)| !(MIN_CONTEXT_WINDOW..=MAX_CONTEXT_WINDOW).contains(*window))
             .map(|(model, _)| model.clone())
             .collect();
         for model in &out_of_range {
