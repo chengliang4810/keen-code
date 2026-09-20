@@ -22,6 +22,7 @@ use crate::context::{
     context_error_without_summary_usage, post_compaction_read_hint_message,
 };
 use crate::event::AgentToolRoundBinding;
+use crate::progress::ReadOnlyProgressObserver;
 use crate::structured_output::{
     STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputCorrectionBudget, StructuredOutputMode,
 };
@@ -33,21 +34,20 @@ use crate::tool::{
 };
 use crate::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
-    AgentCommitSinkErrorKind, AgentDynamicInputBoundary, AgentDynamicInputReceipt,
-    AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent, AgentStreamEventKind,
-    AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
-    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind, ContextCompressionOutcome, ContextCompressionRecord,
-    ContextCompressionTrigger, ContextError, ContextManager, CounterKind, GoalController,
-    GoalRecord, GoalStatus, HookError, HookInvocationContext, HookRuntime,
-    MicroAppliedThenFullFailure, ModelCallPurpose, ModelRoundCompletion, ModelRoundUsage,
-    NoopAgentCommitSink, NoopAgentEventSink, OnErrorHookContext, PlanGuard, PlanGuardError,
-    PostCompactHookContext, PostHookOutputBudget, PostToolUseContext, PostToolUseFailureContext,
-    PreCompactHookContext, PreCompactHookOutput, PreToolUseContext, ResolvedHookContext,
-    ResolvedStopHook, SessionId, StopHookContext, TerminalReason, TodoController, TodoItem,
-    TodoStatus, ToolCompletionStatus,
-    ToolConcurrency, ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash,
-    ToolOutputErrorCode, ToolRegistry, TurnCancellation, TurnId, TurnPhase, TurnState,
-    TurnTransitionError,
+    AgentCommitSinkErrorKind, AgentDynamicInputBoundary, AgentDynamicInputKind,
+    AgentDynamicInputReceipt, AgentEventDeliveryError, AgentEventSink, AgentId, AgentStreamEvent,
+    AgentStreamEventKind, AgentTool, AgentToolRoundPreflight, AgentToolRoundPreflightError,
+    AgentToolRoundPreflightErrorKind, AgentToolRoundReservation, ContextCompactionFailureKind,
+    ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger, ContextError,
+    ContextManager, CounterKind, GoalController, GoalRecord, GoalStatus, HookError,
+    HookInvocationContext, HookRuntime, MicroAppliedThenFullFailure, ModelCallPurpose,
+    ModelRoundCompletion, ModelRoundUsage, NoopAgentCommitSink, NoopAgentEventSink,
+    OnErrorHookContext, PlanGuard, PlanGuardError, PostCompactHookContext, PostHookOutputBudget,
+    PostToolUseContext, PostToolUseFailureContext, PreCompactHookContext, PreCompactHookOutput,
+    PreToolUseContext, ResolvedHookContext, ResolvedStopHook, SessionId, StopHookContext,
+    TerminalReason, TodoController, TodoItem, TodoStatus, ToolCompletionStatus, ToolConcurrency,
+    ToolContext, ToolEffect, ToolHookFailureKind, ToolInputHash, ToolOutputErrorCode, ToolRegistry,
+    TurnCancellation, TurnId, TurnPhase, TurnState, TurnTransitionError,
 };
 
 /// 显式运行上限耗尽后只允许一次无工具总结，不注入剩余次数倒计时。
@@ -1736,6 +1736,13 @@ impl AgentRunner {
         let acknowledgement = acknowledgement.ok_or_else(|| AgentRunError::DynamicInput {
             message: "非空动态输入批次缺少确认回执".to_owned(),
         })?;
+        // 用户 Steer 改变了模型当前的工作方向；只有在动态输入已经可靠确认后
+        // 才清除只读结果观察，避免一条未持久化的消息误重置进度状态。没有持久
+        // 回执的嵌入测试消息同样是当前模型的新用户输入，也应允许重新开始观察。
+        let resets_read_only_progress = receipts.is_empty()
+            || receipts
+                .iter()
+                .any(|receipt| receipt.kind() == AgentDynamicInputKind::UserSteer);
         if receipts
             .iter()
             .any(|receipt| receipt.through_sequence() == 0)
@@ -1792,7 +1799,12 @@ impl AgentRunner {
         let mut last_error = None;
         for _ in 0..DYNAMIC_INPUT_ACKNOWLEDGEMENT_ATTEMPTS {
             match acknowledgement.acknowledge() {
-                Ok(()) => return Ok(true),
+                Ok(()) => {
+                    if resets_read_only_progress {
+                        active.read_only_progress.reset();
+                    }
+                    return Ok(true);
+                }
                 Err(error) => last_error = Some(error),
             }
         }
@@ -1861,6 +1873,7 @@ impl AgentRunner {
             last_tool_failure: None,
             repeated_tool_failure_count: 0,
             tool_failure_reminder_fingerprint: None,
+            read_only_progress: ReadOnlyProgressObserver::new(),
             limit_summary: None,
             goal_id: None,
             last_goal_instruction: None,
@@ -2887,6 +2900,7 @@ impl AgentRunner {
                 round_permit,
                 hook_context_bytes,
                 failure_reminders,
+                progress_reminders,
                 lifecycle_fully_committed,
             } = batch;
             if !lifecycle_fully_committed {
@@ -2911,6 +2925,7 @@ impl AgentRunner {
                     .map(ResolvedHookContext::into_message),
             );
             committed.extend(failure_reminders);
+            committed.extend(progress_reminders);
             if terminal_error.is_none() {
                 if let Some(error) = summary_error {
                     active.limit_summary = Some(error);
@@ -3135,9 +3150,11 @@ impl AgentRunner {
         {
             return Ok(());
         }
-        let snapshot = controller.todo_snapshot().map_err(|_| AgentRunError::Internal {
-            message: "无法读取当前 Todo 状态".to_owned(),
-        })?;
+        let snapshot = controller
+            .todo_snapshot()
+            .map_err(|_| AgentRunError::Internal {
+                message: "无法读取当前 Todo 状态".to_owned(),
+            })?;
         if snapshot.items.is_empty() {
             return Ok(());
         }
@@ -3722,6 +3739,7 @@ impl AgentRunner {
         let mut summary_error = None;
         let mut completion_error = None;
         let mut failure_reminders = Vec::new();
+        let mut progress_reminders = Vec::new();
         let mut prospective_hook_context_bytes = preflight_hook_context_bytes;
         let mut hook_budget_failed = false;
         let mut round_output_budget = ToolRoundOutputBudget::new(prepared.len());
@@ -3733,6 +3751,9 @@ impl AgentRunner {
                     let index = prepared[cursor].index;
                     let result =
                         normalize_immediate_round_result(result.clone(), &mut round_output_budget)?;
+                    // 失败、拒绝或无效工具结果结束当前只读观察段；下一次相同读取
+                    // 不能把这次异常之前的历史当作连续成功证据。
+                    active.reset_read_only_progress();
                     results[index] = Some(result.clone());
                     result_budget_charged[index] = true;
                     if let Err(error) = self.emit_tool_completed(
@@ -3881,6 +3902,18 @@ impl AgentRunner {
                                         }
                                         batch_cancellation.cancel();
                                     }
+                                    // 指纹使用工具真实归约的成功结果，而不是随后为
+                                    // Round 聚合容量生成的截断投影；这样不同的大结果
+                                    // 不会因共享同一截断预览而被误认为重复。
+                                    if effect == ToolEffect::ReadOnly
+                                        && matches!(
+                                            raw.observation.as_ref(),
+                                            Some(ToolExecutionObservation::Succeeded)
+                                        )
+                                        && let Some(call) = prepared[index].execution_call()
+                                    {
+                                        active.observe_read_only_success(call, &raw.result);
+                                    }
                                     let post = if !batch_aborted
                                         && completion_error.is_none()
                                         && terminal_error.is_none()
@@ -3905,6 +3938,9 @@ impl AgentRunner {
                                         raw.enforce_round_budget(effect, &mut round_output_budget)?;
                                         Vec::new()
                                     };
+                                    if should_reset_read_only_progress(&raw, effect) {
+                                        active.reset_read_only_progress();
+                                    }
                                     results[index] = Some(raw.result.clone());
                                     result_budget_charged[index] = true;
                                     if !round_permit.recovery_retained() {
@@ -3952,6 +3988,7 @@ impl AgentRunner {
                                     // Ok(raw)+terminal_error），属于基础设施失败，仍取消
                                     // 段内兄弟并终止 Turn。
                                     segment_cancellation.cancel();
+                                    active.reset_read_only_progress();
                                     let result = normalize_immediate_round_result(
                                         interrupted_tool_result(&prepared[index], &error),
                                         &mut round_output_budget,
@@ -4019,6 +4056,17 @@ impl AgentRunner {
                                     message: "已执行工具缺少冻结副作用分类".to_owned(),
                                 }
                             })?;
+                            // 进度指纹基于真实工具结果，避免 Round 聚合截断制造
+                            // 不同大结果的同指纹假象。
+                            if effect == ToolEffect::ReadOnly
+                                && matches!(
+                                    raw.observation.as_ref(),
+                                    Some(ToolExecutionObservation::Succeeded)
+                                )
+                                && let Some(call) = prepared[cursor].execution_call()
+                            {
+                                active.observe_read_only_success(call, &raw.result);
+                            }
                             let post = finalize_tool_before_completion(
                                 request,
                                 &prepared[cursor],
@@ -4033,6 +4081,9 @@ impl AgentRunner {
                                 },
                             )
                             .await?;
+                            if should_reset_read_only_progress(&raw, effect) {
+                                active.reset_read_only_progress();
+                            }
                             results[index] = Some(raw.result.clone());
                             result_budget_charged[index] = true;
                             if let Err(error) = self.emit_tool_completed(
@@ -4064,6 +4115,7 @@ impl AgentRunner {
                             }
                         }
                         Err(error) => {
+                            active.reset_read_only_progress();
                             let result = normalize_immediate_round_result(
                                 interrupted_tool_result(&prepared[cursor], &error),
                                 &mut round_output_budget,
@@ -4164,6 +4216,9 @@ impl AgentRunner {
                 .map(Option::unwrap_or_default)
                 .collect()
         };
+        if let Some(reminder) = active.take_read_only_progress_reminder() {
+            progress_reminders.push(reminder);
+        }
         Ok(ToolBatchResult {
             results,
             post_context,
@@ -4176,6 +4231,7 @@ impl AgentRunner {
                 prospective_hook_context_bytes
             },
             failure_reminders,
+            progress_reminders,
             lifecycle_fully_committed,
         })
     }
@@ -4741,6 +4797,11 @@ struct ActiveTurn {
     /// 崩溃恢复（Indeterminate 提交后重建 ActiveTurn）会把计数与该标记归零，可能对
     /// 同一指纹再次提醒；这是恢复语义的既定行为，不视为重复提醒缺陷。
     tool_failure_reminder_fingerprint: Option<ToolFailureFingerprint>,
+    /// 当前 Turn 内只读工具成功结果的有界进度观察器。
+    ///
+    /// 只读调用不会因为重复而被跳过或终止；观察器只在没有新结果证据时注入一次
+    /// 可持久化提醒。用户 Steer 在动态输入确认后清除该状态。
+    read_only_progress: ReadOnlyProgressObserver,
     /// 显式总量上限触发后等待执行唯一无工具总结 Round 的原始错误。
     limit_summary: Option<AgentRunError>,
     /// 首次绑定后保持不变，防止同项目 Goal 被替换时旧任务接管新目标。
@@ -4801,6 +4862,21 @@ impl ActiveTurn {
                     message: "模型调用尝试序号溢出".to_owned(),
                 })?;
         Ok(attempt)
+    }
+
+    /// 观察一次真实完成的只读成功结果，并在达到无进展阈值时返回一次提醒。
+    fn observe_read_only_success(&mut self, call: &ToolCall, result: &ToolResult) {
+        self.read_only_progress.observe(call, result);
+    }
+
+    /// 清除只读成功观察段；写操作、失败结果和用户 Steer 都必须重新开始观察。
+    fn reset_read_only_progress(&mut self) {
+        self.read_only_progress.reset();
+    }
+
+    /// 取出当前工具批次结束时仍然有效的一次性只读进度提醒。
+    fn take_read_only_progress_reminder(&mut self) -> Option<Message> {
+        self.read_only_progress.take_reminder()
     }
 
     /// 按观察顺序（并行批次为完成顺序）更新真实工具失败计数，并返回一次性提醒与熔断反馈。
@@ -4959,6 +5035,20 @@ enum ToolExecutionObservation {
         /// ToolError 提供的稳定错误码。
         error_code: String,
     },
+}
+
+/// 判断一次已归约工具结果是否应结束当前只读成功观察段。
+///
+/// 写操作、真实工具失败和 Hook/取消等终止错误都可能改变下一次读取的含义；
+/// 清除旧段只影响提醒状态，不跳过当前调用，也不改变工具结果历史。
+fn should_reset_read_only_progress(raw: &RawExecutedTool, effect: ToolEffect) -> bool {
+    effect == ToolEffect::ChangesState
+        || raw.failure.is_some()
+        || raw.terminal_error.is_some()
+        || matches!(
+            raw.observation.as_ref(),
+            Some(ToolExecutionObservation::Failed { .. })
+        )
 }
 
 /// 一次已完整归约的 Provider 响应及其单调时钟墙钟耗时。
@@ -5173,6 +5263,8 @@ struct ToolBatchResult {
     hook_context_bytes: usize,
     /// 本批观察到的同指纹重复失败一次性运行时提醒消息。
     failure_reminders: Vec<Message>,
+    /// 本批观察到的重复成功只读结果一次性进度提醒消息。
+    progress_reminders: Vec<Message>,
     /// `true` 表示全部已请求工具的唯一终态均已由 Sink 确认，允许提交 Round。
     lifecycle_fully_committed: bool,
 }

@@ -14,6 +14,7 @@ mod event;
 mod hook;
 mod ids;
 mod plan_guard;
+mod progress;
 mod runner;
 mod state;
 mod structured_output;
@@ -43,10 +44,10 @@ pub use collaboration::{
     root_turn_prompt_digest,
 };
 pub use context::{
-    AdmissionDecision, ContextCompactionKind,
-    ContextCompactionOutcomeKind, ContextCompressionOutcome, ContextCompressionRecord,
-    ContextCompressionTrigger, ContextCompressor, ContextError, ContextFuture, ContextManager,
-    ContextPolicy, ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,
+    AdmissionDecision, ContextCompactionKind, ContextCompactionOutcomeKind,
+    ContextCompressionOutcome, ContextCompressionRecord, ContextCompressionTrigger,
+    ContextCompressor, ContextError, ContextFuture, ContextManager, ContextPolicy,
+    ContextSummaryCallResult, ContextSummaryModelUsage, ContextSummaryOutcome,
     ContextSummaryRequest, ContextTokenEstimator, InitialRequestBudgetBreakdown,
     JsonContextTokenEstimator, MICRO_COMPACT_POLICY_VERSION, MicroAppliedThenFullFailure,
     PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO, PREDICTIVE_CACHE_SKIP_HIT_RATE,
@@ -107,6 +108,9 @@ mod context_tests;
 
 #[cfg(test)]
 mod hook_tests;
+
+#[cfg(test)]
+mod progress_tests;
 
 #[cfg(test)]
 mod stream_tests;
