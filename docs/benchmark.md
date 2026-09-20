@@ -44,7 +44,61 @@ cargo run --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
 - 成功、失败和超时都会尝试关闭 Runtime，取消根/子 Agent 并回收后台 Shell。清理另有最多 5 秒的异步等待时间；清理失败或超时不会输出成功结果。
 - 异步定时器无法强行中断同步操作系统调用。自动化调用者仍应设置外层进程期限，并在强制终止时回收进程树；不要把 `timeoutMs` 当作操作系统级硬时限。
 - 退出码：`0` 表示执行与清理成功，`124` 表示工作或清理超时，其他错误为 `1`。清理错误不会掩盖已经发生的工作超时。
-- 成功后 stdout 输出包含 `model`、`logPath` 的 JSON；错误说明进入 stderr。ACP 投递记录保存在 `storage/acp.jsonl`，会话事件路径由 `logPath` 返回。
+- 成功后 stdout 输出包含模型、状态、耗时及证据路径的 JSON；错误说明进入 stderr。Runner 通过严格 ACP JSON-RPC 边界依次发送 `initialize`、`session/new`、`session/set_config_option` 和 `session/prompt`，不直接调用 Runtime 的 Session/Turn 控制方法。
+
+每次运行固定保留四类证据：`runtime.log` 是经过统一脱敏与限长出口的完整 tracing 日志，`acp-requests.jsonl` 是进入无窗口 ACP Host 的请求/响应记录，`acp.jsonl` 是桌面投递事件，Session 目录内的 `events.jsonl` 是权威 Journal。成功结果分别通过 `runtimeLogPath`、`acpRequestPath`、`acpDeliveryPath` 和 `journalPath` 返回。
+
+## 批量执行
+
+先构建一次 Runner，随后由批量脚本为每题启动独立进程。最大并发被硬限制为 6；任何一题失败或超时都不会中止其他题，`summary.json` 会在每题结束后原子更新。
+
+```sh
+cargo build --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
+  --features benchmark --example keencode-bench
+KEENCODE_BENCH_API_KEY=... pnpm benchmark:batch -- /absolute/path/manifest.json
+```
+
+```json
+{
+  "outputDirectory": "/absolute/path/new-results",
+  "concurrency": 6,
+  "defaults": {
+    "model": "configured-model",
+    "baseUrl": "https://example.invalid/v1",
+    "apiBackend": "messages",
+    "timeoutMs": 1800000,
+    "maxOutputTokens": 8192
+  },
+  "tasks": [
+    {
+      "id": "suite-task-001",
+      "cwd": "/absolute/path/disposable-task-001",
+      "prompts": ["完成题目要求并运行测试。"]
+    }
+  ]
+}
+```
+
+每题目录包含脱敏后的请求、进程 stdout/stderr、结构化结果以及完整 Runtime 存储。API Key 只从环境继承，不进入 manifest、请求快照或结果。
+
+Terminal-Bench 的 Linux 环境不能运行 macOS Runner。通过 BuildKit 导出只用于评测的 Linux 二进制，不生成或修改桌面发行物：
+
+```sh
+docker build --file scripts/benchmark-linux.Dockerfile \
+  --target export --output type=local,dest=/absolute/path/linux-runner .
+```
+
+Harbor 通过 `scripts.harbor_keencode_agent:KeenCodeAgent` 上传并运行该二进制。从仓库根目录执行时需设置 `PYTHONPATH=$PWD`，使 Harbor 的 Python 环境可以导入本地适配器。适配器要求 `KEENCODE_BENCH_RUNNER`、`KEENCODE_BENCH_API_KEY`、`KEENCODE_BENCH_BASE_URL` 和 `KEENCODE_BENCH_MODEL`；模型凭据仅作为单次进程环境变量传入，不写入容器内请求文件。
+
+```sh
+PYTHONPATH=$PWD harbor run -y \
+  --path /absolute/path/to/task-or-dataset \
+  --agent scripts.harbor_keencode_agent:KeenCodeAgent \
+  --n-concurrent 6 \
+  --jobs-dir /absolute/path/to/new-harbor-results
+```
+
+适配器会把 Harbor 环境已有的 CA bundle 与 Runner 一起上传，避免极简题目镜像因缺少系统证书而无法创建 HTTPS 客户端；它不会通过包管理器修改题目镜像。
 
 ## 验证
 

@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+.vscode
+node_modules
+src-tauri/target
+target
+tmp
+benchmark-*.json

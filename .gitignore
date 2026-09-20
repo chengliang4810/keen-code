@@ -58,6 +58,8 @@ temp/
 *.tsbuildinfo
 
 # Local tool state & test artifacts
+__pycache__/
+*.py[cod]
 /.keencode/
 /agent-acp/
 /coverage/
