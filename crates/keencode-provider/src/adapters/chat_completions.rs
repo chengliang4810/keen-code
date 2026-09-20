@@ -2,13 +2,19 @@ use std::collections::{BTreeMap, VecDeque};
 
 use keencode_model::{
     ContentBlock, ImageSource, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
-    ReasoningEffort, ResponseMetadata, StopReason, TokenUsage, ToolChoice, ToolResultContent,
+    OpaqueReasoningState, ReasoningEffort, ResponseMetadata, StopReason, TokenUsage, ToolChoice,
+    ToolResultContent,
 };
 use serde_json::{Map, Value, json};
 
 use crate::{
     REQUEST_METADATA_PROMPT_CACHE_KEY, http::classify_in_band_provider_error, sse::SseFrame,
 };
+
+/// Chat Completions 原生推理字段的不透明续传状态编码名。
+const CHAT_REASONING_STATE_KIND: &str = "chat-reasoning-state-v1";
+/// 单次响应可保留的 Chat 推理续传上限；HTTP 响应上限之外再限制跨 chunk 的累积。
+const MAX_CHAT_REASONING_STATE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Chat Completions 流中一个正在拼接的工具调用。
 #[derive(Debug)]
@@ -29,6 +35,11 @@ pub(crate) struct ChatCompletionsAdapter {
     next_content_index: u32,
     text_index: Option<u32>,
     reasoning_index: Option<u32>,
+    /// 推理字段累积后的不透明状态总量是否仍在上限内。
+    reasoning_state_replayable: bool,
+    /// 只由本 Adapter 实际收到的协议字段填充；通用 Reasoning 文本没有这些状态时不回放。
+    chat_reasoning_content: Option<String>,
+    chat_reasoning: Option<String>,
     /// 是否已经观察到安全拒绝字段。
     saw_refusal: bool,
     tools: BTreeMap<u32, PendingToolCall>,
@@ -45,6 +56,9 @@ impl ChatCompletionsAdapter {
             next_content_index: 0,
             text_index: None,
             reasoning_index: None,
+            reasoning_state_replayable: true,
+            chat_reasoning_content: None,
+            chat_reasoning: None,
             saw_refusal: false,
             tools: BTreeMap::new(),
         }
@@ -245,6 +259,9 @@ impl ChatCompletionsAdapter {
                 self.decode_complete_tool_call(tool_call, &mut events)?;
             }
         }
+        if let Some(event) = self.take_reasoning_continuation_event()? {
+            events.push(event);
+        }
         if let Some(usage) = response.get("usage") {
             events.push(ModelStreamEvent::Usage {
                 usage: decode_usage(usage),
@@ -361,6 +378,9 @@ impl ChatCompletionsAdapter {
             .finish_reason
             .take()
             .ok_or_else(|| protocol_error("Chat Completions 在 finish_reason 前收到 [DONE]"))?;
+        if let Some(event) = self.take_reasoning_continuation_event()? {
+            output.push_back(event);
+        }
         output.push_back(ModelStreamEvent::MessageEnd { stop_reason });
         self.ended = true;
         Ok(())
@@ -378,6 +398,7 @@ impl ChatCompletionsAdapter {
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
             {
+                self.remember_reasoning_text(field, text)?;
                 let index = self.reasoning_content_index()?;
                 output.push(ModelStreamEvent::ReasoningDelta {
                     index,
@@ -401,6 +422,70 @@ impl ChatCompletionsAdapter {
             }
         }
         Ok(())
+    }
+
+    /// 保存协议字段本身，而不是把任意通用推理文本升级为续传状态。
+    fn remember_reasoning_text(&mut self, field: &str, text: &str) -> Result<(), ModelError> {
+        if !self.reasoning_state_replayable {
+            return Ok(());
+        }
+        let current = match field {
+            "reasoning_content" => self.chat_reasoning_content.as_ref().map_or(0, String::len),
+            "reasoning" => self.chat_reasoning.as_ref().map_or(0, String::len),
+            _ => return Ok(()),
+        };
+        let other = match field {
+            "reasoning_content" => self.chat_reasoning.as_ref().map_or(0, String::len),
+            "reasoning" => self.chat_reasoning_content.as_ref().map_or(0, String::len),
+            _ => 0,
+        };
+        if current.saturating_add(other).saturating_add(text.len()) > MAX_CHAT_REASONING_STATE_BYTES
+        {
+            self.reasoning_state_replayable = false;
+            self.chat_reasoning_content = None;
+            self.chat_reasoning = None;
+            return Err(protocol_error(format!(
+                "Chat 推理续传状态超过 {} 字节上限",
+                MAX_CHAT_REASONING_STATE_BYTES
+            )));
+        }
+        let target = match field {
+            "reasoning_content" => &mut self.chat_reasoning_content,
+            "reasoning" => &mut self.chat_reasoning,
+            _ => return Ok(()),
+        };
+        target.get_or_insert_with(String::new).push_str(text);
+        Ok(())
+    }
+
+    /// 仅在响应已确认结束后生成续传事件；流中断时不会产生伪完整状态。
+    fn take_reasoning_continuation_event(
+        &mut self,
+    ) -> Result<Option<ModelStreamEvent>, ModelError> {
+        if !self.reasoning_state_replayable {
+            return Ok(None);
+        }
+        let mut data = Map::new();
+        if let Some(text) = self.chat_reasoning_content.take() {
+            if !text.is_empty() {
+                data.insert("reasoning_content".to_owned(), Value::String(text));
+            }
+        }
+        if let Some(text) = self.chat_reasoning.take() {
+            if !text.is_empty() {
+                data.insert("reasoning".to_owned(), Value::String(text));
+            }
+        }
+        if data.is_empty() {
+            return Ok(None);
+        }
+        let continuation =
+            OpaqueReasoningState::new(CHAT_REASONING_STATE_KIND, Value::Object(data));
+        continuation.validate()?;
+        Ok(Some(ModelStreamEvent::ReasoningContinuation {
+            index: self.reasoning_content_index()?,
+            continuation,
+        }))
     }
 
     /// 解析 Structured Output 安全拒绝字段并标记非正常完成原因。
@@ -706,14 +791,43 @@ fn encode_chat_message(role: MessageRole, blocks: &[ContentBlock]) -> Result<Val
     Ok(json!({ "role": role, "content": content }))
 }
 
-/// 编码 Chat assistant 文本和工具调用；推理文本不作为普通历史重放。
+/// 编码 Chat assistant 文本、协议推理续传和工具调用。
 fn encode_assistant_message(blocks: &[ContentBlock]) -> Result<Value, ModelError> {
     let mut text = String::new();
     let mut tool_calls = Vec::new();
+    let mut reasoning_content = None;
+    let mut reasoning = None;
     for block in blocks {
         match block {
             ContentBlock::Text { text: part } => text.push_str(part),
-            ContentBlock::Reasoning { .. } => {}
+            ContentBlock::Reasoning { reasoning: content } => {
+                let Some(state) = content.continuation.as_ref() else {
+                    continue;
+                };
+                if state.kind != CHAT_REASONING_STATE_KIND {
+                    // 续传状态按协议隔离；Responses/Messages opaque 不能落入 Chat wire。
+                    continue;
+                }
+                let Some(state) = state.data.as_object() else {
+                    continue;
+                };
+                if let Some(value) = state
+                    .get("reasoning_content")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    reasoning_content
+                        .get_or_insert_with(String::new)
+                        .push_str(value);
+                }
+                if let Some(value) = state
+                    .get("reasoning")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    reasoning.get_or_insert_with(String::new).push_str(value);
+                }
+            }
             ContentBlock::ToolCall { tool_call } => tool_calls.push(json!({
                 "id": tool_call.id,
                 "type": "function",
@@ -741,6 +855,15 @@ fn encode_assistant_message(blocks: &[ContentBlock]) -> Result<Value, ModelError
     );
     if !tool_calls.is_empty() {
         message.insert("tool_calls".to_owned(), Value::Array(tool_calls));
+    }
+    if let Some(reasoning_content) = reasoning_content.filter(|value| !value.is_empty()) {
+        message.insert(
+            "reasoning_content".to_owned(),
+            Value::String(reasoning_content),
+        );
+    }
+    if let Some(reasoning) = reasoning.filter(|value| !value.is_empty()) {
+        message.insert("reasoning".to_owned(), Value::String(reasoning));
     }
     Ok(Value::Object(message))
 }
@@ -924,3 +1047,7 @@ fn protocol_error(message: impl Into<String>) -> ModelError {
         message: message.into(),
     }
 }
+
+#[cfg(test)]
+#[path = "chat_completions_tests.rs"]
+mod chat_completions_tests;
