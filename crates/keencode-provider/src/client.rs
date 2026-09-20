@@ -1772,6 +1772,8 @@ fn rate_limit_is_exhausted(message: &str, retry_after_ms: Option<u64>) -> bool {
 ///   `retryable: false` 的 `ProviderUnavailable`，走不可重试路径。这些
 ///   状态码表达服务器不支持或拒绝当前请求形态，重试无收益，故沿用
 ///   既有分类器而不为「5xx 全重试」新增特判。
+/// - 520-524、527 等 Cloudflare 源站瞬时状态已由分类器归为
+///   `retryable: true` 的 `ProviderUnavailable`，这里随开关放行自动重试。
 fn is_retryable_failure(
     error: &ModelError,
     http_status: Option<u16>,

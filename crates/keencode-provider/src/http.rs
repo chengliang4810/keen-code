@@ -233,11 +233,16 @@ fn classify_http_error_with_api_key(
             retryable: true,
         },
         400 | 409 | 422 => ModelError::InvalidRequest { message },
-        500 | 502 | 503 | 504 => ModelError::ProviderUnavailable {
-            message,
-            status_code: Some(status),
-            retryable: true,
-        },
+        // 500/502/503/504 与 Cloudflare 源站瞬时错误 520、521、522、523、524、
+        // 527 都表示远端源站或网关当前不可用，重试有实际收益；525/526 描述
+        // TLS 握手与证书校验失败，通常不是瞬时源站故障，维持不可重试。
+        500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 527 => {
+            ModelError::ProviderUnavailable {
+                message,
+                status_code: Some(status),
+                retryable: true,
+            }
+        }
         _ => ModelError::ProviderUnavailable {
             message,
             status_code: Some(status),
