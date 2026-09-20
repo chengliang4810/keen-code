@@ -156,7 +156,7 @@ pub(crate) async fn fetch_model_catalog(
                 response,
                 client.config().api_key(),
                 client.config().max_event_bytes,
-                #[cfg(feature = "live-test-trace")]
+                #[cfg(feature = "io-trace")]
                 None,
             )
             .await;

@@ -5249,7 +5249,7 @@ fn spawn_model_server_with_headers(
 }
 
 /// 启动声明指定正文长度的本地 HTTP 服务，用于精确模拟完整响应或传输中断。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 fn spawn_model_server_with_declared_length(
     content_type: &'static str,
     response_body: Vec<u8>,
@@ -5609,7 +5609,7 @@ async fn provider_registry_传播请求observer到解析后的真实client() {
 }
 
 /// 验证完整响应路径同时保留统一请求和实际缓冲线级正文。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_complete_精确捕获缓冲请求及响应() {
     let response_body = json!({
@@ -5673,7 +5673,7 @@ async fn traced_complete_精确捕获缓冲请求及响应() {
 }
 
 /// 验证增量响应路径同时保留统一请求和实际流式线级正文。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_stream_精确捕获流式请求及响应() {
     let frames = [
@@ -5741,7 +5741,7 @@ async fn traced_stream_精确捕获流式请求及响应() {
 }
 
 /// 验证缓冲正文完整读到 EOF 后，即使 JSON 解析失败也保留真实 EOF 事实。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_buffered_json解析失败仍记录已观察eof() {
     let response_body = "{not-valid-json".to_owned();
@@ -5774,7 +5774,7 @@ async fn traced_buffered_json解析失败仍记录已观察eof() {
 }
 
 /// 验证增量 SSE Adapter 在下一次 HTTP 读取前失败时不能推断远端 EOF。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_stream_adapter提前失败不记录eof() {
     let response_body = concat!(
@@ -5813,7 +5813,7 @@ async fn traced_stream_adapter提前失败不记录eof() {
 }
 
 /// 验证 SSE 连接真实到达 EOF 后，缺少协议终态不会抹去已经观察到的传输事实。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_stream_远端eof早于协议终态仍记录eof() {
     let response_body = concat!(
@@ -5850,7 +5850,7 @@ async fn traced_stream_远端eof早于协议终态仍记录eof() {
 }
 
 /// 验证 HTTP 正文在声明长度前断开时只记录传输错误，不能声称观察到 EOF。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_buffered_传输中断不记录eof() {
     let response_body = br#"{"id":"partial"}"#.to_vec();
@@ -5887,7 +5887,7 @@ async fn traced_buffered_传输中断不记录eof() {
 }
 
 /// 验证响应超过运行时读取上限时不能把大小限制误记为远端 EOF。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_buffered_响应大小限制不记录eof() {
     let response_body = json!({
@@ -5927,7 +5927,7 @@ async fn traced_buffered_响应大小限制不记录eof() {
 }
 
 /// 验证本地丢弃尚未消费的 SSE 流时不会声称远端响应已经结束。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_stream_本地丢弃不记录eof() {
     let response_body = concat!(
@@ -5962,7 +5962,7 @@ async fn traced_stream_本地丢弃不记录eof() {
 }
 
 /// 验证证据捕获上限与传输 EOF 相互独立，完整大响应允许两项同时为真。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 #[tokio::test(flavor = "multi_thread")]
 async fn traced_buffered_捕获截断与已观察eof可并存() {
     let response_body = json!({

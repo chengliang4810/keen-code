@@ -22,7 +22,7 @@ use crate::config::{ProviderConfig, ProviderConfigError, RetryConfig};
 use crate::http::{
     decode_error_response, decode_success_response, redact_model_error, transport_error,
 };
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 use crate::trace::{WireTraceCollector, WireTraceSink};
 use crate::{
     REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
@@ -434,10 +434,10 @@ mod request_media_limit_tests {
 /// 在线调用失败时把已经脱敏的统一错误同时绑定到当前线级交换。
 #[inline]
 fn record_terminal_error(
-    #[cfg(feature = "live-test-trace")] trace: Option<&WireTraceSink>,
+    #[cfg(feature = "io-trace")] trace: Option<&WireTraceSink>,
     error: ModelError,
 ) -> ModelError {
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     if let Some(trace) = trace {
         trace.record_terminal_error(&error);
     }
@@ -452,7 +452,7 @@ pub struct ProviderClient {
     /// 可选的生产请求观测器，只接收不含正文和凭据的短元数据。
     observer: Option<Arc<dyn RequestObserver>>,
     /// 显式启用时收集不含认证 Header 的线级证据。
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     trace: Option<WireTraceCollector>,
 }
 
@@ -463,7 +463,7 @@ impl fmt::Debug for ProviderClient {
         debug
             .field("config", &self.config)
             .field("observer_enabled", &self.observer.is_some());
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         debug.field("trace_enabled", &self.trace.is_some());
         debug.finish()
     }
@@ -492,13 +492,13 @@ impl ProviderClient {
             config: Arc::new(config),
             http,
             observer: None,
-            #[cfg(feature = "live-test-trace")]
+            #[cfg(feature = "io-trace")]
             trace: None,
         })
     }
 
     /// 创建显式启用线级证据收集的客户端与独立收集器。
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     pub fn new_traced(
         config: ProviderConfig,
     ) -> Result<(Self, WireTraceCollector), ProviderConfigError> {
@@ -573,7 +573,7 @@ impl ProviderClient {
     async fn perform_attempt(
         &self,
         request_builder: reqwest::RequestBuilder,
-        #[cfg(feature = "live-test-trace")] trace: Option<WireTraceSink>,
+        #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
     ) -> Result<AttemptStream, AttemptFailure> {
         let mut adapter = Adapter::new(self.config.protocol);
         adapter.configure_chat_output_tokens(self.config.chat_output_token_field);
@@ -582,7 +582,7 @@ impl ProviderClient {
             Err(error) => {
                 let error = transport_error(error, self.config.api_key());
                 let error = record_terminal_error(
-                    #[cfg(feature = "live-test-trace")]
+                    #[cfg(feature = "io-trace")]
                     trace.as_ref(),
                     error,
                 );
@@ -590,7 +590,7 @@ impl ProviderClient {
             }
         };
         let head = capture_attempt_head(&response, self.config.api_key());
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         if let Some(trace) = &trace {
             let content_type = response
                 .headers()
@@ -604,12 +604,12 @@ impl ProviderClient {
                 response,
                 self.config.api_key(),
                 self.config.max_event_bytes,
-                #[cfg(feature = "live-test-trace")]
+                #[cfg(feature = "io-trace")]
                 trace.clone(),
             )
             .await;
             let error = record_terminal_error(
-                #[cfg(feature = "live-test-trace")]
+                #[cfg(feature = "io-trace")]
                 trace.as_ref(),
                 error,
             );
@@ -628,7 +628,7 @@ impl ProviderClient {
             adapter,
             self.config.max_event_bytes,
             self.config.max_response_bytes,
-            #[cfg(feature = "live-test-trace")]
+            #[cfg(feature = "io-trace")]
             trace.clone(),
         )
         .await
@@ -637,7 +637,7 @@ impl ProviderClient {
             Err(error) => {
                 let error = redact_model_error(error, self.config.api_key());
                 let error = record_terminal_error(
-                    #[cfg(feature = "live-test-trace")]
+                    #[cfg(feature = "io-trace")]
                     trace.as_ref(),
                     error,
                 );
@@ -648,13 +648,13 @@ impl ProviderClient {
             }
         };
         let api_key = self.config.api_key().cloned();
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         let stream_trace = trace;
         let stream: ModelStream = Box::pin(stream.map(move |item| {
             item.map_err(|error| redact_model_error(error, api_key.as_ref()))
                 .map_err(|error| {
                     record_terminal_error(
-                        #[cfg(feature = "live-test-trace")]
+                        #[cfg(feature = "io-trace")]
                         stream_trace.as_ref(),
                         error,
                     )
@@ -1082,7 +1082,7 @@ struct RetryModelStream {
     /// 首次构造的认证请求模板；每次尝试通过 `try_clone` 复用同一协议正文。
     template: reqwest::RequestBuilder,
     /// 可选的线级证据捕获槽位；同一逻辑请求的多次尝试聚合记录在同一交换内。
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     trace: Option<WireTraceSink>,
     /// 尚未形成终态的请求生命周期。
     lifecycle: Option<RequestLifecycle>,
@@ -1150,13 +1150,13 @@ impl RetryModelStream {
             return Some(error);
         };
         let client = self.client.clone();
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         let trace = self.trace.clone();
         self.pending_attempt = Some(Box::pin(async move {
             client
                 .perform_attempt(
                     builder,
-                    #[cfg(feature = "live-test-trace")]
+                    #[cfg(feature = "io-trace")]
                     trace,
                 )
                 .await
@@ -1914,7 +1914,7 @@ impl ModelProvider for ProviderClient {
                     return Err(error);
                 }
             };
-            #[cfg(feature = "live-test-trace")]
+            #[cfg(feature = "io-trace")]
             let trace = client.trace.as_ref().map(|collector| {
                 // 同一逻辑请求的多次尝试聚合记录在同一交换内：响应正文按到达
                 // 顺序追加，响应头与终态以最后一次捕获为准。
@@ -1929,7 +1929,7 @@ impl ModelProvider for ProviderClient {
                 .json(&body),
                 Err(error) => {
                     let error = record_terminal_error(
-                        #[cfg(feature = "live-test-trace")]
+                        #[cfg(feature = "io-trace")]
                         trace.as_ref(),
                         error,
                     );
@@ -1958,7 +1958,7 @@ impl ModelProvider for ProviderClient {
                 match client
                     .perform_attempt(
                         builder,
-                        #[cfg(feature = "live-test-trace")]
+                        #[cfg(feature = "io-trace")]
                         trace.clone(),
                     )
                     .await
@@ -2007,7 +2007,7 @@ impl ModelProvider for ProviderClient {
             Ok(Box::pin(RetryModelStream {
                 client,
                 template,
-                #[cfg(feature = "live-test-trace")]
+                #[cfg(feature = "io-trace")]
                 trace,
                 lifecycle,
                 inner: Some(attempted.stream),

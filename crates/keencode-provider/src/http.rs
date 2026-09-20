@@ -5,7 +5,7 @@ use futures_util::stream;
 use keencode_model::{
     ModelError, ModelStream, ModelStreamEvent, REDACTED_SECRET, redact_error_secrets_bounded,
 };
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 use keencode_model::{ModelResponse, ProviderProtocol, collect_model_stream};
 use reqwest::Response;
 use reqwest::header::RETRY_AFTER;
@@ -14,7 +14,7 @@ use serde_json::Value;
 use crate::adapters::Adapter;
 use crate::config::ApiKey;
 use crate::sse::SseDecoder;
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 use crate::trace::WireTraceSink;
 
 /// 进入错误分类与结构化脱敏前允许保留的原始 UTF-8 字节数。
@@ -28,7 +28,7 @@ pub(crate) async fn decode_success_response(
     adapter: Adapter,
     max_event_bytes: usize,
     max_response_bytes: usize,
-    #[cfg(feature = "live-test-trace")] trace: Option<WireTraceSink>,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
 ) -> Result<ModelStream, ModelError> {
     let content_type = response
         .headers()
@@ -42,7 +42,7 @@ pub(crate) async fn decode_success_response(
             adapter,
             max_event_bytes,
             max_response_bytes,
-            #[cfg(feature = "live-test-trace")]
+            #[cfg(feature = "io-trace")]
             trace,
         ));
     }
@@ -50,7 +50,7 @@ pub(crate) async fn decode_success_response(
     let body = read_limited(
         response,
         max_response_bytes,
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         trace.as_ref(),
     )
     .await?;
@@ -71,7 +71,7 @@ pub(crate) async fn decode_error_response(
     response: Response,
     api_key: Option<&ApiKey>,
     max_bytes: usize,
-    #[cfg(feature = "live-test-trace")] trace: Option<WireTraceSink>,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
 ) -> ModelError {
     let status = response.status().as_u16();
     let retry_after_ms = response
@@ -83,7 +83,7 @@ pub(crate) async fn decode_error_response(
     let body = match read_limited(
         response,
         max_bytes,
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         trace.as_ref(),
     )
     .await
@@ -308,7 +308,7 @@ fn without_in_band_status(error: ModelError) -> ModelError {
 }
 
 /// 用已经脱敏并持久化的错误正文重新执行当前 HTTP 错误分类器。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 pub(crate) fn replay_wire_error_response(status: u16, body: &[u8]) -> ModelError {
     let (message, code) = provider_error_fields(body);
     classify_http_error(status, None, message, code.as_deref())
@@ -461,7 +461,7 @@ struct SseStreamState {
     wire_bytes: usize,
     max_response_bytes: usize,
     /// 仅真实兼容性测试启用的线级响应证据捕获槽位。
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     trace: Option<WireTraceSink>,
     eof: bool,
 }
@@ -472,7 +472,7 @@ fn stream_sse(
     adapter: Adapter,
     max_event_bytes: usize,
     max_response_bytes: usize,
-    #[cfg(feature = "live-test-trace")] trace: Option<WireTraceSink>,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
 ) -> ModelStream {
     let state = SseStreamState {
         response,
@@ -482,7 +482,7 @@ fn stream_sse(
         deferred_error: None,
         wire_bytes: 0,
         max_response_bytes,
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         trace,
         eof: false,
     };
@@ -513,7 +513,7 @@ fn stream_sse(
                             ),
                         });
                     }
-                    #[cfg(feature = "live-test-trace")]
+                    #[cfg(feature = "io-trace")]
                     if let Some(trace) = &state.trace {
                         trace.append_response_body(&chunk);
                     }
@@ -523,7 +523,7 @@ fn stream_sse(
                     }
                 }
                 Ok(None) => {
-                    #[cfg(feature = "live-test-trace")]
+                    #[cfg(feature = "io-trace")]
                     if let Some(trace) = &state.trace {
                         trace.record_response_body_eof();
                     }
@@ -563,7 +563,7 @@ fn decode_buffered_sse(
 }
 
 /// 使用捕获的 UTF-8 JSON 或 SSE 正文离线重放目标协议 Adapter。
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 pub(crate) async fn replay_wire_response(
     protocol: ProviderProtocol,
     content_type: &str,
@@ -592,7 +592,7 @@ pub(crate) async fn replay_wire_response(
 async fn read_limited(
     mut response: Response,
     max_bytes: usize,
-    #[cfg(feature = "live-test-trace")] trace: Option<&WireTraceSink>,
+    #[cfg(feature = "io-trace")] trace: Option<&WireTraceSink>,
 ) -> Result<Vec<u8>, ModelError> {
     let mut body = Vec::new();
     while let Some(chunk) = response
@@ -611,13 +611,13 @@ async fn read_limited(
                 message: format!("模型 HTTP 响应超过 {max_bytes} 字节安全上限"),
             });
         }
-        #[cfg(feature = "live-test-trace")]
+        #[cfg(feature = "io-trace")]
         if let Some(trace) = trace {
             trace.append_response_body(&chunk);
         }
         body.extend_from_slice(&chunk);
     }
-    #[cfg(feature = "live-test-trace")]
+    #[cfg(feature = "io-trace")]
     if let Some(trace) = trace {
         trace.record_response_body_eof();
     }

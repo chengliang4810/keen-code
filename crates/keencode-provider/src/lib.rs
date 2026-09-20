@@ -15,7 +15,7 @@ mod http;
 mod observation;
 mod registry;
 mod sse;
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 mod trace;
 
 pub use catalog::{ModelCatalog, ModelCatalogEntry, ModelCatalogFailure};
@@ -33,7 +33,7 @@ pub use registry::{
     ProviderModelPolicy, ProviderRegistration, ProviderRegistrationSummary, ProviderRegistry,
     ProviderRegistryError, ProviderRegistrySnapshot, ResolvedProvider,
 };
-#[cfg(feature = "live-test-trace")]
+#[cfg(feature = "io-trace")]
 pub use trace::{
     WireExchange, WireTraceCollector, encode_wire_request, replay_wire_error_response,
     replay_wire_response,
