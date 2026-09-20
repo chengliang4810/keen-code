@@ -654,6 +654,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::git_commit,
             workspace::git_push,
             tray::tray_set_menu,
+            tray::tray_set_badge,
             tray::app_close_window,
             terminal::terminal_create,
             terminal::terminal_shells_list,

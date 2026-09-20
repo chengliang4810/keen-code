@@ -46,6 +46,11 @@ export async function traySetMenu(menu: TrayMenuPayload) {
   return invoke<void>("tray_set_menu", { menu });
 }
 
+/** 把后台未读任务数量投影到 macOS Dock 图标角标；0 表示移除角标。 */
+export async function traySetBadge(count: number) {
+  return invoke<void>("tray_set_badge", { count });
+}
+
 /** Agent Runtime 当前登记且仍在运行的普通后台任务类别。 */
 export type BackgroundTaskKind = "shell" | "agent";
 

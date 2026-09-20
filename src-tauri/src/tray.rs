@@ -3,6 +3,7 @@
 //! 托盘图标在启动时创建并常驻，菜单项由前端按当前界面语言投影后推送，
 //! 菜单里的会话列表同样来自前端已确定标题、归档状态的可展示会话投影。
 //! 窗口关闭时按设置隐藏窗口并移除 macOS Dock 图标，应用继续在后台运行。
+//! macOS Dock 图标上的未读数量角标同样由前端投影推送。
 
 use serde::{Deserialize, Serialize};
 #[cfg(not(target_os = "macos"))]
@@ -182,6 +183,30 @@ fn set_dock_visibility(app: &AppHandle, visible: bool) {
     let _ = (app, visible);
 }
 
+/// 未读数量到 Dock 角标取值的映射；0 表示没有未读，必须移除角标。
+fn dock_badge_value(count: u32) -> Option<i64> {
+    (count > 0).then_some(i64::from(count))
+}
+
+/// 把后台未读任务数量写入 macOS Dock 图标角标；其他平台没有等价概念。
+fn set_dock_badge(app: &AppHandle, count: u32) -> Result<(), String> {
+    let badge = dock_badge_value(count);
+    #[cfg(target_os = "macos")]
+    {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "主窗口不存在".to_owned())?;
+        window
+            .set_badge_count(badge)
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (app, badge);
+        Ok(())
+    }
+}
+
 /// 按前端投影构造托盘菜单。
 fn build_menu(app: &AppHandle, payload: &TrayMenuPayload) -> tauri::Result<Menu<tauri::Wry>> {
     let mut builder = MenuBuilder::new(app)
@@ -282,6 +307,12 @@ pub fn tray_set_menu(app: AppHandle, menu: TrayMenuPayload) -> Result<(), String
 }
 
 #[tauri::command]
+/// 把后台未读任务数量投影到 macOS Dock 图标角标。
+pub fn tray_set_badge(app: AppHandle, count: u32) -> Result<(), String> {
+    set_dock_badge(&app, count)
+}
+
+#[tauri::command]
 /// 处理主窗口的关闭手势：常驻设置下隐藏到托盘，否则走统一退出入口。
 /// 异步命令避免同步设置读取（持锁磁盘 IO）阻塞主线程关闭手势。
 pub async fn app_close_window(app: AppHandle) -> Result<(), String> {
@@ -324,6 +355,14 @@ mod tests {
         assert_eq!(classify_menu_id("tray:unknown"), None);
         assert_eq!(classify_menu_id(MENU_SESSION_PREFIX), None);
         assert_eq!(classify_menu_id(""), None);
+    }
+
+    /// 没有未读时必须移除角标，有未读时按数量显示。
+    #[test]
+    fn maps_unread_count_to_dock_badge() {
+        assert_eq!(dock_badge_value(0), None);
+        assert_eq!(dock_badge_value(1), Some(1));
+        assert_eq!(dock_badge_value(12), Some(12));
     }
 
     /// 前端投影的字段名与界面 camelCase 契约一致。

@@ -22,6 +22,7 @@ import { useSessionTurn } from "@/hooks/useSessionTurn";
 import { useComposerController } from "@/hooks/useComposerController";
 import { useSidebarController } from "@/hooks/useSidebarController";
 import { useTrayMenu } from "@/hooks/useTrayMenu";
+import { useUnreadTerminalResults } from "@/hooks/useUnreadTerminalResults";
 import {
   useSessionNavigation,
   type SessionNavigationNewChat,
@@ -57,10 +58,6 @@ import {
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
 import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
-import {
-  loadUnreadTerminalResults,
-  type UnreadTerminalResult,
-} from "@/lib/sessionCompletion";
 import { createT } from "@/i18n";
 import { appUpdateActionFor } from "@/lib/appUpdate";
 import { isProjectPathMissing } from "@/lib/projectPath";
@@ -169,10 +166,6 @@ export default function App() {
   const [liveHost, setLiveHost] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** 多会话运行状态投影，用于展示后台任务忙碌状态。 */
   const [liveMap, setLiveMap] = useState<SessionLiveMap>({});
-  /** 后台形成终态但尚未由用户打开查看的 Session 结果。 */
-  const [unreadTerminalResults, setUnreadTerminalResults] = useState<
-    Map<string, UnreadTerminalResult>
-  >(() => loadUnreadTerminalResults(localStorage));
   /** Latest live map for callbacks that must not close over a stale render. */
   const liveMapRef = useRef(liveMap);
   liveMapRef.current = liveMap;
@@ -276,6 +269,9 @@ export default function App() {
 
   /** 首次渲染时展示品牌启动页；工作台外壳不等待会话状态。 */
   const [appBooting, setAppBooting] = useState(true);
+  /** 后台终态未读结果：侧栏标记与 Dock 角标共用同一份状态。 */
+  const { unreadTerminalResults, setUnreadTerminalResults } =
+    useUnreadTerminalResults(appBooting);
   const [toast, setToast] = useState<string | null>(null);
   const showToast = useCallback((msg: string, ms = 3200) => {
     setToast(msg);

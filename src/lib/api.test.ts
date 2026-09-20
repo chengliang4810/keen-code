@@ -135,6 +135,18 @@ describe("后台任务 handler 注册契约", () => {
       "session_get_state",
     ]) expect(handlerSource).not.toContain(handler);
   });
+
+  it("托盘菜单与 Dock 角标命令都已注册", () => {
+    const source = readTauriEntrySource();
+    const handlerStart = source.indexOf(
+      ".invoke_handler(tauri::generate_handler![",
+    );
+    const handlerEnd = source.indexOf("])", handlerStart);
+    const handlerSource = source.slice(handlerStart, handlerEnd);
+
+    expect(handlerSource).toContain("tray::tray_set_menu");
+    expect(handlerSource).toContain("tray::tray_set_badge");
+  });
 });
 
 describe("后台任务 IPC", () => {

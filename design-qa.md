@@ -1,3 +1,21 @@
+# 2026-09-20 macOS Dock 图标未读数量角标
+
+- 需求：后台形成终态且尚未查看的任务，在 macOS Dock 图标右上角显示未读数量，形态与常见桌面应用的红色数字角标一致；数量归零时角标消失。
+- 现状：`unreadTerminalResults` 已存在，只投影到侧栏会话行（`tree-l3--unread-terminal`），没有投影到桌面外壳；Tauri 未使用任何角标 API。
+- 修改（后端）：`src-tauri/src/tray.rs`（新增 `dock_badge_value`：0→`None` 表示移除角标、其余按数量映射；新增 `set_dock_badge`，macOS 走 `WebviewWindow::set_badge_count`，非 macOS 保持空操作；新增 `tray_set_badge` 命令）；`src-tauri/src/lib.rs`（注册 `tray::tray_set_badge`）。
+- 修改（前端）：`src/hooks/useUnreadTerminalResults.ts`（新增：持有后台终态未读结果，并把 `size` 投影到 Dock 角标；启动页结束前与浏览器预览下不推送，同一数量不重复写入，推送失败允许下次变更重试）；`src/App.tsx`（未读状态声明由装配层移入该 Hook，侧栏标记与 Dock 角标共用同一份状态；装配层由 1998 行降到 1994 行）；`src/lib/api.ts`（新增 `traySetBadge`）。
+- 平台语义：`set_badge_count` 在 macOS 映射为 `NSApp.dockTile.setBadgeLabel`，即本次需求的数字角标；Windows 由 Tauri 声明为不支持（需改用 `set_overlay_icon`），因此该命令在 Windows 为空操作，行为与改动前一致。
+- 口径：只统计后台已完成/失败的未读任务（与侧栏未读标记同一集合），不含 `pendingAskUserSessionIds` 的等待输入会话。
+- 已知边界：关闭窗口隐藏到托盘时 `hide_main_window` 会移除 Dock 图标，角标随之不可见；本次按既有隐藏行为保持不变，未改为「有未读时保留 Dock 图标」。
+- 门禁：`pnpm run typecheck` 通过；`pnpm exec vitest run` 149 文件 / 1465 项通过（含新增 `useUnreadTerminalResults.test.tsx` 3 项、`api.test.ts` 新增托盘命令注册契约 1 项）；`cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib tray::` 4 项通过（含新增 `maps_unread_count_to_dock_badge`）；`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check` 通过；`git diff --check` 通过。
+- 门禁例外：`cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop --all-targets` 报 6 处告警（`shell_env.rs`、`agent_runtime.rs`、`memories.rs`、`model_metadata.rs`、`plugins/command.rs`），均为工作区既有改动，本次 `tray.rs` 无告警。`cargo test --lib` 有 3 项失败：`agent_prompt::tests::complete_core_preserves_order_and_content`、`extensions::agent_catalog::tests::all_builtin_agents_are_available_and_configurable` 由工作区并发进行的 `src-tauri/prompts/` 重写引起（测试断言的英文原句已被改写、`explore.md` 被压缩到 1000 字符以下）；`extensions::runtime_contributor::tests::post_tool_exit_two_injects_stderr_feedback` 单独重跑通过，为偶发。三者均不涉及本次改动文件。
+- 门禁例外（前端）：`pnpm test` 在 `scripts/clean-room-source-gate.mjs` 阶段失败，命中本文件与工作区既有的未跟踪产物、prompts 重写文件及供应商示例标识；该阶段之前的前端脚本测试全部通过，前端 vitest 已单独跑通。
+- 基线：`1a1e0e6230b099de8eab45ad00685942e6b8ac88`。基线 `App.tsx` 1998 行，当前 1994 行；`App.contract.test.ts` 的「App.tsx 保持为小型装配层（<2000 行）」守卫在未收敛前会失败，本次通过把未读状态移入 Hook 满足其意图，未调整阈值。
+- 源码哈希：`tray.rs` `cd3721bdc81cba743787b7832fbdd8860b289db1d014b8ec0ca8a0091691b098`；`lib.rs` `72dd1d43153900b70a93cde0c006db34a6efced600c87683e8510a9785eafe70`；`api.ts` `301b158482de253c4a0b92f839b5890b8fd8fae22d745cde7e29d75b770d3f94`；`useUnreadTerminalResults.ts` `19ca560cc97eca901a11a7d8cb73ce114ec875588602abd8af5bd824269655d7`；`App.tsx` `0b62edf9080594e5b61674c19dc8f86fbecfae4844c1f6a611d17b64d0eb0814`。
+- 未验收：本次改动是原生 Dock 外壳行为，浏览器夹具无法呈现，因此未采集截图与像素差；未在 macOS 实机确认「后台任务结束 → Dock 角标出现 → 打开该会话 → 角标消失」的端到端往返，也未确认角标与「关闭窗口隐藏到托盘」组合下的实际观感。Windows 分支（`set_dock_badge` 空操作）本机无法编译验证，需由 Windows CI 或实机覆盖。
+
+---
+
 # 2026-09-17 常驻系统托盘图标与「关闭窗口后保留在系统托盘」设置
 
 - 需求：新增常驻系统托盘图标（macOS 为菜单栏图标）。关闭主窗口后应用不退出，隐藏窗口并移除 macOS Dock 图标；托盘菜单提供「新建对话 / 显示窗口 / 最近 5 个会话 / 退出」；新增设置项控制关闭窗口是隐藏到托盘还是直接退出。
