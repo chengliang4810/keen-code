@@ -78,4 +78,6 @@ __pycache__/
 
 # Local agent tooling and retired vendor checkout residue
 /.claude/
+/.zcode/
+/result.json
 /vendor/
