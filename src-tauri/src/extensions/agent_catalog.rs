@@ -29,6 +29,8 @@ pub(super) struct ParsedAgentDocument {
     pub description: String,
     /// 可选的 `provider_id::model_id` 精确模型覆盖。
     pub model: Option<String>,
+    /// 可选的推理强度覆盖；为空时继承父 Agent。
+    pub reasoning_effort: Option<String>,
     /// 工具继承或显式过滤规则。
     pub tools: AgentTools,
     /// 从允许工具中排除的名称。
@@ -155,6 +157,14 @@ fn parse_agent_document_with_models(
         Some(alias @ ("sonnet" | "opus" | "haiku")) => aliases.get(alias).cloned(),
         Some(model) => Some(normalize_model_reference(model)?),
     };
+    let reasoning_effort = optional_scalar(&fields, "effort")?
+        .map(|value| match value.trim() {
+            value @ ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max") => {
+                Ok(value.to_owned())
+            }
+            _ => Err("effort 必须是 none、minimal、low、medium、high、xhigh 或 max".to_owned()),
+        })
+        .transpose()?;
     let tools = match fields.get("tools") {
         None => AgentTools::Inherit,
         Some(value) => {
@@ -193,6 +203,7 @@ fn parse_agent_document_with_models(
         name,
         description,
         model,
+        reasoning_effort,
         tools,
         disallowed_tools,
         max_turns,
@@ -204,11 +215,12 @@ fn parse_agent_document_with_models(
 /// 拒绝 KeenCode 唯一 Agent Schema 之外的字段，避免拼写错误被静默忽略。
 fn validate_agent_field_names(fields: &BTreeMap<String, AgentFieldValue>) -> Result<(), String> {
     /// 当前唯一 Agent 前置元数据 Schema 允许的字段。
-    const ALLOWED_FIELDS: [&str; 8] = [
+    const ALLOWED_FIELDS: [&str; 9] = [
         "name",
         "color",
         "description",
         "model",
+        "effort",
         "tools",
         "disallowedTools",
         "maxTurns",
@@ -655,7 +667,11 @@ fn parse_string_list(
     let values = match value {
         AgentFieldValue::List(values) => values.clone(),
         AgentFieldValue::Scalar(value) if value.trim().is_empty() => Vec::new(),
-        AgentFieldValue::Scalar(_) => return Err(format!("字段 {label} 必须是字符串列表")),
+        // Claude/Codex 插件 Agent 普遍使用 `tools: Read, Write, Bash`。
+        // 这里只在已声明为列表的字段边界解析逗号，普通标量仍保持原文。
+        AgentFieldValue::Scalar(value) => {
+            value.split(',').map(str::trim).map(str::to_owned).collect()
+        }
     };
     if values.len() > maximum {
         return Err(format!("字段 {label} 超过 {maximum} 个条目"));
@@ -719,6 +735,7 @@ mod tests {
              name: reviewer\n\
              description: Review changes\n\
              model: \"provider-a::model-a\"\n\
+             effort: high\n\
              tools: [\"Read\", \"Grep\", \"Bash\"]\n\
              disallowedTools: [\"Bash\", \"Write\"]\n\
              maxTurns: 17\n\
@@ -731,6 +748,7 @@ mod tests {
         assert_eq!(document.name.as_deref(), Some("reviewer"));
         assert_eq!(document.description, "Review changes");
         assert_eq!(document.model.as_deref(), Some("provider-a::model-a"));
+        assert_eq!(document.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
             document.tools,
             AgentTools::List(vec![
@@ -765,6 +783,35 @@ mod tests {
                 "非 canonical 定义必须被拒绝：{content}"
             );
         }
+    }
+
+    /// 推理强度只接受 Runtime 当前支持的规范值。
+    #[test]
+    fn parser_rejects_unknown_reasoning_effort() {
+        assert!(
+            parse_agent_document("---\ndescription: invalid effort\neffort: maximum\n---\nInspect")
+                .is_err()
+        );
+    }
+
+    /// 插件生态常用的逗号工具列表必须归一为规范工具数组。
+    #[test]
+    fn parser_accepts_comma_separated_tool_list() {
+        let document = parse_agent_document(
+            "---\nname: reviewer\ndescription: Review changes\ntools: Read, Write, Bash\nmodel: inherit\neffort: medium\nmaxTurns: 24\n---\nInspect",
+        )
+        .expect("逗号工具列表应可解析");
+
+        assert_eq!(
+            document.tools,
+            AgentTools::List(vec![
+                "Read".to_owned(),
+                "Write".to_owned(),
+                "Bash".to_owned(),
+            ])
+        );
+        assert_eq!(document.reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(document.max_turns, Some(24));
     }
 
     /// Agent 定义必须拒绝越界、平台前缀、空段和零轮次。

@@ -527,6 +527,8 @@ pub struct AgentDetail {
     pub path: Option<String>,
     /// 模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 provider。
     pub model: Option<String>,
+    /// 推理强度覆盖；None 表示继承父 Agent。
+    pub reasoning_effort: Option<String>,
     /// 允许使用的任务工具；None 表示继承主智能体全部任务工具。
     /// 固定通信工具不持久化在该字段中。
     pub tools: Option<Vec<String>>,
@@ -1130,6 +1132,7 @@ pub fn agent_detail(
             .model
             .as_deref()
             .and_then(normalize_model_reference_for_ui),
+        reasoning_effort: entry.document.reasoning_effort.clone(),
         tools,
         disallowed_tools: entry.document.disallowed_tools.clone(),
         max_turns: entry.document.max_turns,

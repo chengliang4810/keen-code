@@ -79,6 +79,8 @@ pub struct ResolvedSpawnAgentTemplate {
     pub snapshot: AgentTemplateSnapshot,
     /// 模板可选的精确模型覆盖。
     pub model: Option<String>,
+    /// 模板可选的推理强度覆盖。
+    pub reasoning_effort: Option<String>,
     /// 模板显式工具集合；为空表示继承父 Agent 的冻结工具表。
     pub tool_names: Option<Vec<String>>,
     /// 从继承或显式集合中移除的工具名称。
@@ -982,6 +984,19 @@ fn apply_resolved_agent_template(
     if let Some(model) = template.model {
         validate_required_text(&model, 1_024, "Agent 模板 model")?;
         profile.model = model;
+    }
+    if let Some(reasoning_effort) = template.reasoning_effort {
+        validate_required_text(&reasoning_effort, 64, "Agent 模板 effort")?;
+        if !matches!(
+            reasoning_effort.as_str(),
+            "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
+        ) {
+            return Err(ToolError::permanent(
+                "agent_template_invalid",
+                "Agent 模板 effort 不受支持",
+            ));
+        }
+        profile.reasoning_effort = Some(reasoning_effort);
     }
     let inherited = profile
         .tool_snapshot

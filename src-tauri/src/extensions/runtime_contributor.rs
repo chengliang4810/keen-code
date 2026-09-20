@@ -577,6 +577,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
             name: entry.name.clone(),
             system_prompt: entry.document.system_prompt.clone(),
             model: entry.document.model.clone(),
+            reasoning_effort: entry.document.reasoning_effort.clone(),
             tool_names,
             disallowed_tool_names: entry.document.disallowed_tools.clone(),
             max_turns: entry.document.max_turns,
@@ -2690,6 +2691,7 @@ fn hash_agent_entry(digest: &mut Sha256, entry: &AgentCatalogEntry) {
     hash_optional_fingerprint_text(digest, entry.document.name.as_deref());
     hash_fingerprint_text(digest, &entry.document.description);
     hash_optional_fingerprint_text(digest, entry.document.model.as_deref());
+    hash_optional_fingerprint_text(digest, entry.document.reasoning_effort.as_deref());
     match &entry.document.tools {
         AgentTools::Inherit => digest.update([0]),
         AgentTools::None => digest.update([1]),
@@ -3300,6 +3302,7 @@ mod tests {
                 name: Some("reviewer".to_owned()),
                 description: "检查改动".to_owned(),
                 model: Some("provider::model".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
                 tools: AgentTools::List(vec!["Read".to_owned()]),
                 disallowed_tools: vec!["Write".to_owned()],
                 max_turns: Some(8),

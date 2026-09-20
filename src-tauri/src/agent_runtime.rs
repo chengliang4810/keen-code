@@ -635,6 +635,8 @@ pub struct RuntimeAgentTemplate {
     pub system_prompt: String,
     /// 可选的精确模型覆盖。
     pub model: Option<String>,
+    /// 可选的推理强度覆盖。
+    pub reasoning_effort: Option<String>,
     /// 模板允许暴露的统一工具名称；`None` 表示继承父工具快照。
     pub tool_names: Option<Vec<String>>,
     /// 从继承或显式工具集合中移除的统一工具名称。
@@ -751,6 +753,7 @@ impl SpawnAgentTemplateResolver for RuntimeSpawnAgentTemplateResolver {
                 allowed_write_dirs: template.allowed_write_dirs,
             },
             model: template.model,
+            reasoning_effort: template.reasoning_effort,
             tool_names: template.tool_names,
             disallowed_tool_names: template.disallowed_tool_names,
         }))
@@ -15665,6 +15668,7 @@ mod tests {
                 name: name.to_owned(),
                 system_prompt: "审查实际变更".to_owned(),
                 model: Some("provider-a::model-a".to_owned()),
+                reasoning_effort: Some("high".to_owned()),
                 tool_names: Some(vec!["Read".to_owned()]),
                 disallowed_tool_names: Vec::new(),
                 max_turns: Some(4),

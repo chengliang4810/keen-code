@@ -783,6 +783,7 @@ async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
         template: Some(ResolvedSpawnAgentTemplate {
             snapshot: template_snapshot.clone(),
             model: Some("provider-a::review-model".to_owned()),
+            reasoning_effort: Some("high".to_owned()),
             tool_names: None,
             disallowed_tool_names: vec!["SendMessage".to_owned()],
         }),
@@ -812,6 +813,10 @@ async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
     let launch = fixture.execution.launch(&child_turn_id);
     assert_eq!(launch.agent.agent_template, Some(template_snapshot.clone()));
     assert_eq!(launch.agent.profile.model, "provider-a::review-model");
+    assert_eq!(
+        launch.agent.profile.reasoning_effort.as_deref(),
+        Some("high")
+    );
     assert_eq!(
         launch.agent.profile.tool_snapshot,
         vec![
@@ -867,6 +872,7 @@ async fn explicit_agent_template_cannot_restore_root_only_tools() {
                 allowed_write_dirs: Vec::new(),
             },
             model: None,
+            reasoning_effort: None,
             tool_names: Some(vec![
                 "Read".to_owned(),
                 "AskUser".to_owned(),
@@ -962,6 +968,7 @@ async fn explicit_agent_template_model_override_applies_for_all_history() {
                 allowed_write_dirs: Vec::new(),
             },
             model: Some("provider-b::other-model".to_owned()),
+            reasoning_effort: None,
             tool_names: None,
             disallowed_tool_names: Vec::new(),
         }),
@@ -1175,6 +1182,7 @@ async fn spawn_agent_model_priority_with_full_history_inheritance() {
                 allowed_write_dirs: Vec::new(),
             },
             model: Some("provider-a::template-model".to_owned()),
+            reasoning_effort: None,
             tool_names: None,
             disallowed_tool_names: Vec::new(),
         }),
