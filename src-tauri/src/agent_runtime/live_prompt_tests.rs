@@ -167,7 +167,7 @@ async fn live_prompt_scope_and_cache() {
     synthetic_request.max_output_tokens = Some(1_024);
     let make_bound = |read_only| {
         let mut environment_message = Message::text(
-            MessageRole::User,
+            MessageRole::Developer,
             crate::agent_prompt::EnvironmentSnapshot::freeze(
                 directory.path(),
                 &chrono::Local::now().fixed_offset(),

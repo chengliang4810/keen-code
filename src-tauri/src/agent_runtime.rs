@@ -512,7 +512,7 @@ impl Drop for LifecycleStartAttempt {
 /// 启动根 Turn 时由命令层显式传入、只在模型请求期装配的行为上下文。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RootTurnOptions {
-    /// Memory、Plan 或 Ultra 等本轮动态开发者上下文；以 is_meta 用户消息追加到请求末尾，不写入 Session Transcript。
+    /// Memory、Plan 或 Ultra 等本轮背景；以 is_meta 用户消息放在历史之前，不写入 Session Transcript。
     pub developer_context: Option<String>,
     /// 本轮开始前必须原子写入 Session 快照的 Plan 模式状态。
     pub plan_enabled: bool,
@@ -1952,7 +1952,7 @@ struct PreparedRootTurn {
     reasoning_effort: Option<ReasoningEffortSnapshot>,
     /// 本根 Turn 新增且必须进入权威 Transcript 的消息，例如用户输入。
     input_messages: Vec<Message>,
-    /// Memory、Plan 或 Ultra 等只在 Provider 请求末尾追加的 is_meta 消息；不得进入权威 Transcript。
+    /// Memory、Plan 或 Ultra 等只在 Provider 历史之前装配的 is_meta 消息；不得进入权威 Transcript。
     request_context: Vec<Message>,
     /// Runtime TurnStarted 使用的稳定用户输入摘要。
     summary: String,
@@ -5866,12 +5866,12 @@ impl AgentRuntime {
             &catalog,
             small_context,
         )?;
-        // 完整模式把 Memory/Plan 等动态上下文与环境追加到请求末尾；小上下文
-        // 只保留独立核心提示词和普通对话输入。稳定前缀跨 Turn 字节稳定。
+        // 完整模式把 Memory/Plan 等动态上下文与环境放在历史之前；小上下文
+        // 只保留独立核心提示词、普通对话输入及必要恢复说明。稳定前缀跨 Turn 字节稳定。
         let mut request_context = Vec::new();
         if !small_context {
             let mut environment_message = Message::text(
-                MessageRole::User,
+                MessageRole::Developer,
                 frozen
                     .environment
                     .render(launch.plan_guard == PlanGuard::read_only()),
@@ -6456,7 +6456,7 @@ impl AgentRuntime {
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
         if let Some(context) = normalized_developer_context {
-            // Memory/Plan/Ultra 每轮会变，追加到请求末尾而不是插在 System 段之后；
+            // Memory/Plan/Ultra 保留原有用户级权限，放在真实对话历史之前；
             // is_meta 用户消息不进入权威 Transcript，与既有 request-only 语义一致。
             let mut message = Message::text(MessageRole::User, context);
             message.is_meta = true;
@@ -7866,7 +7866,7 @@ struct TurnBoundProvider {
     prompt_cache_key: Option<String>,
     /// 会话冻结的稳定前缀（System 规则、能力说明、指令与目录）；不参与 Runtime Journal。
     stable_prefix: Arc<Vec<Message>>,
-    /// 仅本轮动态上下文（环境与 Memory/Plan/Ultra），追加到请求末尾；不参与 Runtime Journal。
+    /// 仅本轮动态上下文（环境与 Memory/Plan/Ultra），位于历史之前；不参与 Runtime Journal。
     request_context: Arc<Vec<Message>>,
 }
 
@@ -7896,7 +7896,7 @@ impl TurnBoundProvider {
         self
     }
 
-    /// 设置本轮追加到请求末尾的动态上下文；调用方输入和 Runtime Transcript 保持不变。
+    /// 设置本轮历史之前的动态上下文；调用方输入和 Runtime Transcript 保持不变。
     fn with_request_context(mut self, request_context: Vec<Message>) -> Self {
         self.request_context = Arc::new(request_context);
         self
@@ -7904,14 +7904,21 @@ impl TurnBoundProvider {
 
     /// 发送和预算共用同一装配规则；预算只需构造新增消息，不复制完整历史。
     ///
-    /// 稳定前缀拼接在头部，动态上下文追加在末尾：请求因此形如
-    /// `[冻结 System 段…] + [transcript 历史…] + [本轮动态上下文]`，
-    /// 前两项跨 Turn 字节稳定，末尾消息以 is_meta 用户身份注入。
+    /// 环境与背景不能排在工具结果后面充当新的用户输入。
+    /// 只复制有界前缀，历史分段仍共享；背景消息保持原有角色。
     fn inject_context(&self, request: &mut ModelRequest) {
-        request.set_request_message_context(
-            Arc::clone(&self.stable_prefix),
-            Arc::clone(&self.request_context),
-        );
+        let prefix = if self.request_context.is_empty() {
+            Arc::clone(&self.stable_prefix)
+        } else {
+            Arc::new(
+                self.stable_prefix
+                    .iter()
+                    .chain(self.request_context.iter())
+                    .cloned()
+                    .collect(),
+            )
+        };
+        request.set_request_message_context(prefix, Arc::new(Vec::new()));
     }
 }
 
@@ -15925,7 +15932,7 @@ mod tests {
         );
     }
 
-    /// 同一原始请求的重复发送只注入一份规则；动态上下文只追加在末尾，压缩保持独立。
+    /// 重复发送只注入一份规则；动态背景在用户任务之前，压缩保持独立。
     #[tokio::test]
     async fn agent_prompt_provider_boundary_is_complete_and_request_only() {
         let scripted = Arc::new(ScriptedProvider::new(
@@ -15989,16 +15996,19 @@ mod tests {
                 crate::agent_prompt::capabilities(true, true)
             )
         );
-        // 动态上下文位于请求末尾而不是 System 段之后，前缀保持字节稳定。
+        // 背景不伪装为最新输入，真实任务保持末尾。
         let expected_root_prefix = stable_agent_prefix(true, true, "");
         assert_eq!(
             &requests[0].messages[..expected_root_prefix.len() + 1],
             &expected_root_prefix
                 .into_iter()
-                .chain([ModelMessage::text(MessageRole::User, "task")])
+                .chain([dynamic.clone()])
                 .collect::<Vec<_>>()[..]
         );
-        assert_eq!(requests[0].messages.last(), Some(&dynamic));
+        assert_eq!(
+            requests[0].messages.last(),
+            Some(&ModelMessage::text(MessageRole::User, "task"))
+        );
         assert_eq!(
             requests[2].messages[1],
             ModelMessage::text(
@@ -16010,6 +16020,56 @@ mod tests {
             requests[3].messages.as_slice(),
             &[ModelMessage::text(MessageRole::User, "task")]
         );
+    }
+
+    #[test]
+    fn agent_prompt_background_never_becomes_a_new_user_turn_after_tools() {
+        let bound = TurnBoundProvider::new(
+            Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), [])),
+            "session",
+            "turn",
+            "root",
+        )
+        .with_stable_prefix(vec![ModelMessage::text(MessageRole::System, "rules")])
+        .with_request_context(vec![
+            ModelMessage::text(MessageRole::Developer, "environment"),
+            ModelMessage::text(MessageRole::User, "retrieved background"),
+        ]);
+        let mut request = ModelRequest::new(
+            "model",
+            vec![ModelMessage::text(MessageRole::User, "investigate")],
+        );
+        for round in 0..3 {
+            let id = format!("read-{round}");
+            request.append_messages(vec![
+                ModelMessage::new(
+                    MessageRole::Assistant,
+                    vec![keencode_model::ContentBlock::ToolCall {
+                        tool_call: keencode_model::ToolCall::new(
+                            &id,
+                            "Read",
+                            serde_json::json!({"path":"evidence.txt"}),
+                        ),
+                    }],
+                ),
+                ModelMessage::new(
+                    MessageRole::Tool,
+                    vec![keencode_model::ContentBlock::ToolResult {
+                        tool_result: keencode_model::ToolResult::text(&id, "same evidence", false),
+                    }],
+                ),
+            ]);
+            let original = request.messages.clone();
+            let mut outgoing = request.clone();
+            bound.inject_context(&mut outgoing);
+            bound.inject_context(&mut outgoing);
+            assert_eq!(outgoing.messages.len(), original.len() + 3);
+            assert_eq!(outgoing.messages[1].role, MessageRole::Developer);
+            assert_eq!(outgoing.messages[2].role, MessageRole::User);
+            assert_eq!(&outgoing.messages[3..], original.as_slice());
+            assert_eq!(outgoing.messages.last().unwrap().role, MessageRole::Tool);
+            assert_eq!(request.messages, original);
+        }
     }
 
     /// #24 桌面真实装配边界：前后缀注入与跨 Round 追加都不得深拷贝历史正文。
@@ -16037,7 +16097,7 @@ mod tests {
             [completed_reply("first"), completed_reply("second")],
         ));
         let stable_prefix = stable_agent_prefix(true, true, "");
-        let prefix_len = stable_prefix.len();
+        let prefix_len = stable_prefix.len() + 1;
         let mut dynamic = ModelMessage::text(MessageRole::User, "dynamic");
         dynamic.is_meta = true;
         let bound = TurnBoundProvider::new(scripted.clone(), "session", "turn", "root")
@@ -16261,7 +16321,7 @@ mod tests {
             .expect("Responses 请求应包含 input 数组");
         assert_eq!(input[0]["role"], "developer");
         assert_eq!(input[0]["content"][0]["text"], crate::agent_prompt::core());
-        // Memory/Plan/Ultra 挪位后以 is_meta 用户消息追加到请求末尾。
+        // Memory/Plan/Ultra 保留用户角色，但位于真实对话历史之前。
         assert!(input.iter().any(|message| {
             message["role"] == "user" && message["content"][0]["text"] == dynamic_context
         }));
@@ -16308,8 +16368,8 @@ mod tests {
             input
                 .last()
                 .and_then(|message| message["content"][0]["text"].as_str()),
-            Some(dynamic_context),
-            "本轮动态上下文必须是请求的最后一个输入项"
+            Some("检查动态上下文持久化边界"),
+            "真实用户任务必须位于背景之后"
         );
         let environment = input[position("<env>")]["content"][0]["text"]
             .as_str()
@@ -16474,7 +16534,7 @@ mod tests {
             .expect("新会话指令测试投递应关闭");
     }
 
-    /// 同一 Session 连续三轮：冻结 System 段与历史前缀逐字节稳定，动态上下文只出现在末尾。
+    /// 同一 Session 连续三轮：冻结规则与历史不改写，动态背景放在真实输入之前。
     #[tokio::test(flavor = "multi_thread")]
     async fn session_prefix_is_byte_stable_across_turns() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
@@ -16507,7 +16567,7 @@ mod tests {
                     "turn-prefix-stable-second",
                     "前缀稳定第二轮",
                     RootTurnOptions {
-                        // 模拟 Memory/Plan 在两轮之间变化：只允许影响末尾动态消息。
+                        // 模拟 Memory/Plan 在两轮之间变化，不应改写既有历史。
                         developer_context: Some("本轮动态记忆标记".to_owned()),
                         plan_enabled: false,
                     },
@@ -16559,24 +16619,35 @@ mod tests {
         let first = input(&requests[0]);
         let second = input(&requests[1]);
         let third = input(&requests[2]);
-        // 每轮末尾的动态消息：环境始终存在，第二轮多一条 Memory/Plan/Ultra。
+        // 环境始终存在，第二轮多一条 Memory/Plan/Ultra，但最新输入仍是任务。
         assert!(env_text(first).contains("Current mode: Normal"));
-        assert!(
-            second
-                .last()
-                .and_then(|message| message["content"][0]["text"].as_str())
-                .is_some_and(|text| text == "本轮动态记忆标记")
-        );
-        // 前缀逐字节稳定：后一轮的输入开头等于前一轮去掉末尾动态消息的完整输入。
-        let first_stable = &first[..first.len() - 1];
+        let background_index = second
+            .iter()
+            .position(|message| message["content"][0]["text"] == "本轮动态记忆标记")
+            .expect("本轮背景必须存在");
+        let first_task_index = second
+            .iter()
+            .position(|message| message["content"][0]["text"] == "前缀稳定第一轮")
+            .unwrap();
+        assert!(background_index < first_task_index);
         assert_eq!(
-            items_json(&second[..first_stable.len()]),
-            items_json(first_stable)
+            second.last().unwrap()["content"][0]["text"],
+            "前缀稳定第二轮"
         );
-        let second_stable = &second[..second.len() - 2];
+        let second_without_background = second
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != background_index)
+            .map(|(_, message)| message.clone())
+            .collect::<Vec<_>>();
+        // 剔除本轮新增背景后，已有规则和历史逐字节保留。
         assert_eq!(
-            items_json(&third[..second_stable.len()]),
-            items_json(second_stable)
+            items_json(&second_without_background[..first.len()]),
+            items_json(first)
+        );
+        assert_eq!(
+            items_json(&third[..second_without_background.len()]),
+            items_json(&second_without_background)
         );
         // 环境消息来自会话冻结快照：三轮正文逐字节相同，跨轮不重取时钟。
         assert_eq!(env_text(first), env_text(second));
@@ -16699,14 +16770,16 @@ mod tests {
                 .contains("rs-tool-prefix"),
             "轮内工具 Round 请求应回放 reasoning item"
         );
-        // 前缀逐字节稳定：第 2 轮请求去掉末尾动态消息后，开头必须与第 1 轮
-        // 工具 Round 请求去掉末尾动态消息的部分逐字节一致（第 1 轮最终 assistant
-        // 消息作为新增历史恰好落在对齐窗口之后）。
-        let tool_round_stable_len = tool_round_input.len() - 1;
+        // 本轮背景改变缓存前缀，但不能改写已有推理、工具调用及工具结果。
         let second_input = input(&requests[2]);
+        let second_without_background = second_input
+            .iter()
+            .filter(|message| message["content"][0]["text"] != "本轮工具轮动态记忆标记")
+            .cloned()
+            .collect::<Vec<_>>();
         assert_eq!(
-            items_json(&second_input[..tool_round_stable_len]),
-            items_json(&tool_round_input[..tool_round_stable_len]),
+            items_json(&second_without_background[..tool_round_input.len()]),
+            items_json(tool_round_input),
         );
         assert!(
             items_json(second_input)
