@@ -136,8 +136,13 @@ export function useSessionSend({
           : sessionId;
       const cacheKey = sendTargetId ?? "__draft__";
       const originView = currentViewFocus();
+      let latencySessionId: string | null = null;
       const viewingTarget = () =>
-        isViewingSendTarget(originView, currentViewFocus(), sendTargetId);
+        isViewingSendTarget(
+          originView,
+          currentViewFocus(),
+          latencySessionId ?? sendTargetId,
+        );
       const agentBody = serializeForAgent(segments);
       // Goal 参数失败不应创建本地 Turn 或留下尚未发送的乐观气泡。
       let goalDraft: ReturnType<typeof buildGoalDraft> | undefined;
@@ -269,7 +274,6 @@ export function useSessionSend({
         });
       };
 
-      let latencySessionId: string | null = null;
       let transportFailureHandled = false;
       const handleTransportFailure = (cause: unknown) => {
         if (transportFailureHandled) return;

@@ -164,7 +164,7 @@ function makeOptions(input: {
     commitWorkspace: vi.fn(),
     patchSessionMessages: vi.fn(),
     currentViewFocus: () => ({
-      sessionId: visibleSessionId,
+      sessionId: viewingSessionIdRef.current,
       epoch: 1,
     }),
     replayHistory: async () => undefined,
@@ -409,5 +409,26 @@ describe("useSessionSend local error recovery", () => {
     await expect(send(validSend("turn-reselected"))).resolves.toBe(true);
     expect(fixture.getLocalError()).toBeNull();
     expect(fixture.api.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("草稿物化后 Prompt 启动失败仍在新会话显示错误", async () => {
+    const fixture = makeOptions({ visibleSessionId: null, targetSessionId: null });
+    const failure = new AcpRpcError(-32603);
+    fixture.options.ensureConnected = async () => {
+      const sessionId = "session-materialized";
+      fixture.options.runtime.viewingSessionIdRef.current = sessionId;
+      const view = emptySession(sessionId);
+      view.replay.loaded = true;
+      fixture.options.runtime.acpWorkspaceRef.current.sessions[sessionId] = view;
+      return sessionId;
+    };
+    fixture.api.send.mockImplementationOnce(() => ({
+      started: Promise.reject(failure),
+      completed: Promise.resolve({ stopReason: "end_turn" }),
+    }));
+
+    await expect(renderSend(fixture.options)(validSend("turn-materialized"))).resolves.toBe(false);
+
+    expect(fixture.getLocalError()).toBe("操作失败，请重试。");
   });
 });
