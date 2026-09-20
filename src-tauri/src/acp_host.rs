@@ -33,6 +33,8 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tracing::Instrument;
 
+#[cfg(feature = "benchmark")]
+pub(crate) mod benchmark;
 mod extensions;
 mod file_changes;
 mod mcp_oauth;
@@ -1047,10 +1049,9 @@ impl AcpHost {
             .updated_at(Some(updated_at));
             // 从未发送消息的 Session 不伪造用户消息时间，由客户端回退到更新时间。
             if metadata.last_user_message_at_unix_ms > 0 {
-                let last_user_message_at = crate::session_commands::rfc3339_from_ms(
-                    metadata.last_user_message_at_unix_ms,
-                )
-                .map_err(|error| internal_failure(error))?;
+                let last_user_message_at =
+                    crate::session_commands::rfc3339_from_ms(metadata.last_user_message_at_unix_ms)
+                        .map_err(|error| internal_failure(error))?;
                 let mut meta = Map::new();
                 meta.insert(
                     META_LAST_USER_MESSAGE_AT.to_owned(),

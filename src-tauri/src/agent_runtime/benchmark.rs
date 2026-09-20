@@ -1,6 +1,7 @@
 //! 显式启用的开发评测入口，复用桌面装配，不启动窗口或加载个人扩展。
 use super::*;
 use std::io::{Read, Write};
+use std::time::Instant;
 
 const CLEANUP_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -50,6 +51,7 @@ struct Request {
 
 /// 从 stdin 读取一次隔离评测请求；凭据仅从环境读取，stdout 输出结果 JSON。
 pub async fn run() -> anyhow::Result<()> {
+    let started_at = Instant::now();
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
     let request: Request = serde_json::from_str(&input)?;
@@ -66,6 +68,11 @@ pub async fn run() -> anyhow::Result<()> {
     );
     // 每次运行必须是新目录，防止误复用个人会话或旧评测历史。
     std::fs::create_dir(&request.storage)?;
+    let runtime_log_path = request.storage.join("runtime.log");
+    let diagnostics =
+        crate::diagnostics::Diagnostics::init_benchmark(runtime_log_path.clone(), started_at)?;
+    diagnostics.install_benchmark();
+    diagnostics.log("info", "benchmark", "评测进程开始");
     let model = request.model;
     let max_output_tokens = request.max_output_tokens.unwrap_or(8192);
     anyhow::ensure!(max_output_tokens > 0, "maxOutputTokens must be positive");
@@ -107,31 +114,79 @@ pub async fn run() -> anyhow::Result<()> {
     let mut runtime = AgentRuntime::new_with_registry(&request.storage, emitter, registry)?;
     runtime.benchmark_tool_allowlist = request.tool_allowlist;
     let runtime = Arc::new(runtime);
+    let acp_request_path = request.storage.join("acp-requests.jsonl");
+    let acp = crate::acp_host::benchmark::BenchmarkAcpHost::new(
+        Arc::clone(&runtime),
+        request.cwd.clone(),
+        "benchmark".to_owned(),
+        model.clone(),
+        std::fs::File::create(&acp_request_path)?,
+    )
+    .map_err(anyhow::Error::msg)?;
     let work = async {
-        let session = runtime.open_or_create_session(&request.cwd, None, "benchmark")?;
-        let id = session.session_id().as_str();
-        runtime.set_session_model(id, "benchmark-model", "benchmark", &model)?;
+        acp_call(
+            &acp,
+            "benchmark-initialize",
+            "initialize",
+            json!({"protocolVersion": 1, "clientCapabilities": {}}),
+        )
+        .await?;
+        let created = acp_call(
+            &acp,
+            "benchmark-new",
+            "session/new",
+            json!({
+                "cwd": request.cwd,
+                "mcpServers": [],
+                "_meta": {"keencode/operationId": "benchmark-new"}
+            }),
+        )
+        .await?;
+        let id = created
+            .get("sessionId")
+            .and_then(Value::as_str)
+            .context("ACP session/new response missing sessionId")?
+            .to_owned();
+        acp_call(
+            &acp,
+            "benchmark-model",
+            "session/set_config_option",
+            json!({
+                "sessionId": id,
+                "configId": "model",
+                "value": format!("benchmark::{model}"),
+                "_meta": {"keencode/operationId": "benchmark-model"}
+            }),
+        )
+        .await?;
         for (index, prompt) in request.prompts.iter().enumerate() {
             if tokio::time::Instant::now() >= deadline {
                 return Err(BenchmarkTimeout.into());
             }
             let turn_id = format!("benchmark-{index}");
-            runtime
-                .start_root_turn(id, &turn_id, prompt, RootTurnOptions::default())
-                .await?;
-            while runtime.session_has_active_work(id)? {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-            let snapshot = session.snapshot()?;
-            anyhow::ensure!(
-                snapshot.state.turns[&ResourceTurnId::new(&turn_id)?].status
-                    == TurnStatus::Completed,
-                "benchmark turn did not complete"
-            );
+            acp_call(
+                &acp,
+                &turn_id,
+                "session/prompt",
+                json!({
+                    "sessionId": id,
+                    "prompt": [{"type": "text", "text": prompt}],
+                    "_meta": {"keencode/turnId": turn_id}
+                }),
+            )
+            .await?;
         }
-        Ok(
-            json!({"model":model,"logPath":runtime.session_storage_directory(id)?.join("events.jsonl")}),
-        )
+        let journal_path = runtime.session_storage_directory(&id)?.join("events.jsonl");
+        Ok(json!({
+            "model": model,
+            "sessionId": id,
+            "status": "completed",
+            "elapsedMs": started_at.elapsed().as_millis(),
+            "journalPath": journal_path,
+            "acpDeliveryPath": request.storage.join("acp.jsonl"),
+            "acpRequestPath": acp_request_path,
+            "runtimeLogPath": runtime_log_path,
+        }))
     };
     let result = complete_benchmark(deadline, CLEANUP_TIMEOUT, work, async {
         // shutdown 同时取消根/子 Agent 和后台 Shell，也覆盖启动屏障尚未完成的情况。
@@ -141,8 +196,28 @@ pub async fn run() -> anyhow::Result<()> {
             .context("benchmark shutdown failed")
     })
     .await?;
+    diagnostics.log("info", "benchmark", "评测进程完成并已清理 Runtime");
     println!("{result}");
     Ok(())
+}
+
+async fn acp_call(
+    host: &crate::acp_host::benchmark::BenchmarkAcpHost,
+    id: &str,
+    method: &str,
+    params: Value,
+) -> anyhow::Result<Value> {
+    let response = host
+        .dispatch(json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}))
+        .await
+        .map_err(anyhow::Error::msg)?;
+    if let Some(error) = response.get("error") {
+        anyhow::bail!("ACP {method} failed: {error}");
+    }
+    response
+        .get("result")
+        .cloned()
+        .context("ACP response missing result")
 }
 
 /// 工作期限涵盖启动及执行；失败或超时也必须尝试有界清理，清理失败不能输出成功。
@@ -265,16 +340,14 @@ mod tests {
                 .into_iter()
                 .map(|tool| tool.name)
                 .collect::<Vec<_>>();
+            let child_snapshot = runtime_tool_snapshot(&profile, false);
             assert!(
                 !child_names
                     .iter()
                     .any(|name| name == "spawn_agent" || name == "Goal")
             );
-            assert!(
-                child_names
-                    .iter()
-                    .all(|name| profile.tool_snapshot.contains(name))
-            );
+            assert!(child_names.iter().all(|name| child_snapshot.contains(name)));
+            assert_eq!(child_names.len(), child_snapshot.len());
             assert_eq!(child_names.contains(&"Read".to_owned()), !root.is_empty());
             runtime.shutdown().await.unwrap();
         }

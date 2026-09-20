@@ -72,9 +72,26 @@ impl Diagnostics {
         })
     }
 
+    /// 为不启动 Tauri 窗口的开发评测进程创建独立诊断日志。
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn init_benchmark(
+        path: PathBuf,
+        startup_started_at: Instant,
+    ) -> std::io::Result<Arc<Self>> {
+        let log_dir = path.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "日志路径缺少父目录")
+        })?;
+        let file = open_log_file(log_dir, &path)?;
+        Ok(Arc::new(Self {
+            path,
+            file: Mutex::new(file),
+            startup_started_at,
+        }))
+    }
+
     /// 接管后台 tracing 和 Rust panic；所有写入复用同一脱敏、限长出口。
     pub fn install(self: &Arc<Self>) {
-        if let Err(error) = self.subscriber().try_init() {
+        if let Err(error) = self.subscriber(false).try_init() {
             self.error("diagnostics.install", error.to_string());
         }
         let sink = Arc::clone(self);
@@ -88,7 +105,24 @@ impl Diagnostics {
         }));
     }
 
-    fn subscriber(self: &Arc<Self>) -> impl tracing::Subscriber + Send + Sync {
+    /// 评测进程保留全部 tracing 级别，仍统一经过脱敏与单条长度限制。
+    #[cfg(feature = "benchmark")]
+    pub(crate) fn install_benchmark(self: &Arc<Self>) {
+        if let Err(error) = self.subscriber(true).try_init() {
+            self.error("diagnostics.install", error.to_string());
+        }
+        let sink = Arc::clone(self);
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            sink.error(
+                "runtime.panic",
+                format!("{info}\n{}", std::backtrace::Backtrace::force_capture()),
+            );
+            previous(info);
+        }));
+    }
+
+    fn subscriber(self: &Arc<Self>, include_all: bool) -> impl tracing::Subscriber + Send + Sync {
         let sink = Arc::clone(self);
         let layer = tracing_subscriber::fmt::layer()
             .without_time()
@@ -99,8 +133,9 @@ impl Diagnostics {
                 sink: Arc::clone(&sink),
                 bytes: Vec::new(),
             });
-        let filter = tracing_subscriber::filter::filter_fn(|metadata| {
-            *metadata.level() <= tracing::Level::WARN
+        let filter = tracing_subscriber::filter::filter_fn(move |metadata| {
+            include_all
+                || *metadata.level() <= tracing::Level::WARN
                 || metadata.target() == "keencode_diagnostics"
                 // 运行时观测白名单：keencode-agent 运行时（如每轮提示词缓存
                 // 用量的 debug 观测日志）对问题定位有产品价值，按 target
@@ -310,7 +345,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.log");
         let sink = test_sink(&path);
-        tracing::subscriber::with_default(sink.subscriber(), || {
+        tracing::subscriber::with_default(sink.subscriber(false), || {
             let span = tracing::info_span!(target: "keencode_diagnostics", "acp.request", request_id = "request-test", session_id = "session-test");
             let _entered = span.enter();
             tracing::info!(target: "keencode_diagnostics", "request started");
@@ -331,7 +366,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("diagnostics.log");
         let sink = test_sink(&path);
-        tracing::subscriber::with_default(sink.subscriber(), || {
+        tracing::subscriber::with_default(sink.subscriber(false), || {
             tracing::debug!(target: "keencode_agent::runner", "模型轮次提示词缓存用量已提交");
             tracing::debug!(target: "hyper::client", "third-party noisy debug");
             tracing::trace!(target: "keencode_agent::runner", "trace stays out");
