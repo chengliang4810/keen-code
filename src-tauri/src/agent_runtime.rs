@@ -19095,7 +19095,11 @@ mod tests {
             )
             .render_small_context_core()
         );
-        assert!(!new_request.to_string().contains(crate::agent_prompt::core()));
+        assert!(
+            !new_request
+                .to_string()
+                .contains(crate::agent_prompt::core())
+        );
         let tool_names = new_request["tools"]
             .as_array()
             .unwrap()

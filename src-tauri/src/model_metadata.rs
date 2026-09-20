@@ -244,7 +244,12 @@ fn trigger_refresh_if_needed(path: &Path) {
 /// 返回快照文件的年龄秒数；文件缺失或时间不可读时返回空。
 fn catalog_age_seconds(path: &Path) -> Option<u64> {
     let modified = fs::metadata(path).ok()?.modified().ok()?;
-    Some(SystemTime::now().duration_since(modified).unwrap_or_default().as_secs())
+    Some(
+        SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or_default()
+            .as_secs(),
+    )
 }
 
 /// 下载新目录，完整校验通过后原子替换旧快照；失败时旧文件保持原样。
@@ -293,8 +298,8 @@ fn build_client() -> Result<Client> {
 
 /// 下载内容必须先通过完整 JSON 解析与顶层结构校验，坏文档不得替换有效快照。
 fn validate_catalog_bytes(bytes: &[u8]) -> Result<()> {
-    let document = serde_json::from_slice::<Value>(bytes)
-        .context("models.dev 目录不是有效 JSON")?;
+    let document =
+        serde_json::from_slice::<Value>(bytes).context("models.dev 目录不是有效 JSON")?;
     if !document.is_object() {
         anyhow::bail!("models.dev 目录顶层不是 JSON 对象");
     }
@@ -579,9 +584,9 @@ fn validate_model_id(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_catalog_row, find_catalog_row, input_modalities, match_tail, model_match_rank,
-        parse_catalog_price, parse_catalog_reasoning, read_catalog_document,
-        validate_catalog_bytes, validate_model_id, ModelMetadata, ModelReasoningControl,
+        ModelMetadata, ModelReasoningControl, apply_catalog_row, find_catalog_row,
+        input_modalities, match_tail, model_match_rank, parse_catalog_price,
+        parse_catalog_reasoning, read_catalog_document, validate_catalog_bytes, validate_model_id,
     };
     use serde_json::json;
     use std::fs;
@@ -734,7 +739,10 @@ mod tests {
             "openrouter": { "models": { "deepseek/deepseek-v4.1-flash": { "id": "or" } } },
             "deepseek": { "models": { "deepseek-v4.1-flash": { "id": "native" } } }
         });
-        for query in ["deepseek-v4.1-flash:free", "deepseek/deepseek-v4.1-flash:free"] {
+        for query in [
+            "deepseek-v4.1-flash:free",
+            "deepseek/deepseek-v4.1-flash:free",
+        ] {
             let (row, matched) = find_catalog_row(&document, query).unwrap();
             assert_eq!(row["id"], "native", "查询 {query} 应命中基础模型");
             assert_eq!(matched, "deepseek/deepseek-v4.1-flash");

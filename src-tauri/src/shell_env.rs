@@ -99,8 +99,7 @@ fn capture_and_store_overlay() -> bool {
     if !should_capture_login_shell(&current) {
         return false;
     }
-    let captured =
-        capture_login_shell_path_with_timeout(CAPTURE_TIMEOUT).unwrap_or_default();
+    let captured = capture_login_shell_path_with_timeout(CAPTURE_TIMEOUT).unwrap_or_default();
     let static_extra = static_path_entries();
     let merged = merge_path_entries(&captured, &current, &static_extra);
     if merged == current {
@@ -174,7 +173,10 @@ fn static_path_entries_for(home: Option<&std::path::Path>) -> Vec<std::path::Pat
         candidates.push(home.join(".local/bin"));
         candidates.push(home.join("bin"));
     }
-    candidates.into_iter().filter(|path| path.is_dir()).collect()
+    candidates
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -195,9 +197,7 @@ fn login_shell() -> Option<std::ffi::OsString> {
 }
 
 #[cfg(not(windows))]
-fn capture_login_shell_path_with_timeout(
-    timeout: Duration,
-) -> Option<Vec<std::path::PathBuf>> {
+fn capture_login_shell_path_with_timeout(timeout: Duration) -> Option<Vec<std::path::PathBuf>> {
     let shell = login_shell()?;
     let stdout_path = capture_temp_file_path()?;
     let script = format!("printf '%s\\n' {ENV_MARKER}; env -0");
@@ -292,7 +292,9 @@ fn is_valid_env_key(key: &[u8]) -> bool {
         return false;
     };
     (first.is_ascii_alphabetic() || *first == b'_')
-        && rest.iter().all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        && rest
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
 }
 
 #[cfg(not(windows))]
@@ -354,7 +356,8 @@ mod tests {
 
     #[test]
     fn static_entries_include_existing_home_dirs() {
-        let home = std::env::temp_dir().join(format!("keencode-static-test-{}", std::process::id()));
+        let home =
+            std::env::temp_dir().join(format!("keencode-static-test-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".cargo/bin")).expect("应创建临时目录");
         let result = static_path_entries_for(Some(&home));
         let _ = std::fs::remove_dir_all(&home);
@@ -365,11 +368,19 @@ mod tests {
     #[test]
     fn capture_gate_matches_launchd_minimal_path() {
         assert!(should_capture_login_shell(&entries(&[
-            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
         ])));
         assert!(!should_capture_login_shell(&entries(&[
-            "/opt/homebrew/bin", "/Users/u/.nvm/versions/node/v24/bin", "/usr/local/bin",
-            "/usr/bin", "/bin", "/usr/sbin", "/sbin",
+            "/opt/homebrew/bin",
+            "/Users/u/.nvm/versions/node/v24/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
         ])));
     }
 
@@ -378,7 +389,11 @@ mod tests {
     fn login_shell_capture_includes_system_paths() {
         let captured = capture_login_shell_path_with_timeout(Duration::from_secs(20))
             .expect("macOS 登录 Shell 应能捕获 PATH");
-        let joined = captured.iter().map(|path| path.to_string_lossy().to_owned()).collect::<Vec<_>>().join(":");
+        let joined = captured
+            .iter()
+            .map(|path| path.to_string_lossy().to_owned())
+            .collect::<Vec<_>>()
+            .join(":");
         assert!(joined.contains("/usr/bin"), "实际捕获：{joined}");
         assert!(joined.contains("/bin"), "实际捕获：{joined}");
     }

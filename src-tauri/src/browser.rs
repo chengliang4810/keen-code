@@ -92,13 +92,7 @@ fn apply_bounds(
         .map_err(|error| format!("设置浏览器区域失败：{error}"))
 }
 
-fn emit_state(
-    app: &AppHandle,
-    tab_id: &str,
-    url: &str,
-    title: Option<String>,
-    kind: &'static str,
-) {
+fn emit_state(app: &AppHandle, tab_id: &str, url: &str, title: Option<String>, kind: &'static str) {
     let _ = app.emit_to(
         MAIN_WINDOW,
         BROWSER_STATE_EVENT,

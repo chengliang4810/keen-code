@@ -117,8 +117,8 @@ mod tests {
 
     #[test]
     fn set_path_overlay_is_once_and_effective() {
-        let mut entries =
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+        let mut entries = std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+            .collect::<Vec<_>>();
         entries.push(std::env::temp_dir().join("keencode-overlay-unit-marker"));
         let overlay = std::env::join_paths(entries.iter()).unwrap();
         assert!(set_path_overlay(overlay.clone()));

@@ -233,8 +233,10 @@ async fn dispatch_generate_title(
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
     let operation_id = request_operation_id(request.meta.as_ref())?;
     // 授权句柄不能跨越标题网络等待，否则关闭会话后仍会持有独占 lease。
-    drop(open_authorized_session(&host.runtime, &host.app, &request.session_id)
-        .map_err(|_| HostFailure::ResourceNotFound)?);
+    drop(
+        open_authorized_session(&host.runtime, &host.app, &request.session_id)
+            .map_err(|_| HostFailure::ResourceNotFound)?,
+    );
     let title = host
         .runtime
         .generate_title(&request.session_id, &operation_id, &request.user_message)
