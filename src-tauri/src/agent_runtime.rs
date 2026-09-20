@@ -1,6 +1,7 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
 mod history_load;
 pub(crate) use history_load::HistoryLoadRequest;
+mod interruption_context;
 mod session_mcp;
 pub(crate) use session_mcp::{SessionMcpError, SuspendedSessionMcp};
 
@@ -5879,6 +5880,17 @@ impl AgentRuntime {
             environment_message.is_meta = true;
             request_context.push(environment_message);
             request_context.extend(turn_context);
+        }
+        // 上一条非正常终态只作为本轮请求期 Developer 上下文重建；权威工具结果、
+        // 外部副作用和终态事实继续由 Journal 历史提供，当前用户输入仍排在 marker 后。
+        let previous_stop_notice = execution
+            .session
+            .read_state(|state| {
+                interruption_context::previous_turn_stop_notice(state, &source_resource_id)
+            })
+            .map_err(|error| runtime_operation_failed(error))?;
+        if let Some(notice) = previous_stop_notice {
+            request_context.push(notice);
         }
         // 会话稳定缓存路由键只在端点 allowlist 内装配；键值随 Session 而非 Turn 漂移。
         let prompt_cache_key =
@@ -14347,6 +14359,158 @@ mod tests {
             .close_session(&session_id)
             .await
             .expect("根取消测试 Session 应关闭");
+    }
+
+    /// 真实取消经冷恢复后只在下一次请求注入一次性上下文；正常完成后不重放旧原因。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn runtime_previous_interruption_notice_is_request_only_and_expires_after_success() {
+        let storage = tempfile::tempdir().expect("应创建中断恢复测试存储目录");
+        let project = tempfile::tempdir().expect("应创建中断恢复测试项目目录");
+        let first_prompt = "冷恢复前取消这条根任务";
+        let second_prompt = "冷恢复后继续上一条根任务";
+        let third_prompt = "正常完成后开始下一条根任务";
+        let (base_url, mut gates, server) = spawn_gated_buffered_responses_server_with_texts(
+            "本地模型完成响应",
+            3,
+            &[first_prompt],
+        );
+        let first_gate = gates.pop().expect("取消测试应有首轮闸门");
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "runtime-interruption-notice")
+            .expect("中断恢复测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let first_turn_id = "turn-interruption-notice-first";
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    first_turn_id,
+                    first_prompt,
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("首轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        first_gate
+            .wait_for_requests(1)
+            .expect("首轮请求应到达本地 Provider");
+        assert!(matches!(
+            runtime.cancel_turn(&session_id, first_turn_id),
+            Ok(keencode_runtime::TurnCancellationOutcome::Requested)
+        ));
+        first_gate.release();
+        wait_for_session_idle(&runtime, &session_id).await;
+        let cancelled_snapshot = session.snapshot().expect("取消后的快照应读取");
+        let cancelled_turn = cancelled_snapshot
+            .state
+            .turns
+            .get(&ResourceTurnId::new(first_turn_id).expect("首轮 Turn 标识应有效"))
+            .expect("首轮 Turn 应存在");
+        assert_eq!(cancelled_turn.status, TurnStatus::Cancelled);
+        assert_eq!(cancelled_turn.stop_reason, Some(TurnStopReason::Cancelled));
+
+        // 关闭后重新打开同一 Session，验证模型可见状态来自 Journal 而非进程内缓存。
+        runtime
+            .close_session(&session_id)
+            .await
+            .expect("中断恢复测试首个 Runtime 应关闭");
+        drop(session);
+        drop(runtime);
+        let recovered_runtime =
+            runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let recovered_session = recovered_runtime
+            .open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "runtime-interruption-notice-reopen",
+            )
+            .expect("中断恢复测试 Session 应冷重开");
+        let second_turn_id = "turn-interruption-notice-second";
+        assert_eq!(
+            recovered_runtime
+                .start_root_turn(
+                    &session_id,
+                    second_turn_id,
+                    second_prompt,
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("冷恢复后的根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&recovered_runtime, &session_id).await;
+        let second_snapshot = recovered_session.snapshot().expect("第二轮完成快照应读取");
+        let second_turn = second_snapshot
+            .state
+            .turns
+            .get(&ResourceTurnId::new(second_turn_id).expect("第二轮 Turn 标识应有效"))
+            .expect("第二轮 Turn 应存在");
+        assert_eq!(second_turn.status, TurnStatus::Completed);
+
+        let third_turn_id = "turn-interruption-notice-third";
+        assert_eq!(
+            recovered_runtime
+                .start_root_turn(
+                    &session_id,
+                    third_turn_id,
+                    third_prompt,
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("第三轮根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&recovered_runtime, &session_id).await;
+        let requests = server
+            .join()
+            .expect("中断恢复测试本地服务线程不应 panic")
+            .expect("中断恢复测试本地服务应成功");
+        assert_eq!(requests.len(), 3);
+        let has_previous_stop_marker = |request: &Value| {
+            request["input"].as_array().is_some_and(|messages| {
+                messages.iter().any(|message| {
+                    message["content"].as_array().is_some_and(|content| {
+                        content.iter().any(|part| {
+                            part["text"]
+                                .as_str()
+                                .is_some_and(|text| text.contains("keencode/previous-turn-stop/v1"))
+                        })
+                    })
+                })
+            })
+        };
+        let first_request = requests
+            .iter()
+            .find(|request| request_contains_user_text(request, first_prompt))
+            .expect("应捕获首轮请求");
+        let second_request = requests
+            .iter()
+            .find(|request| request_contains_user_text(request, second_prompt))
+            .expect("应捕获第二轮请求");
+        let third_request = requests
+            .iter()
+            .find(|request| request_contains_user_text(request, third_prompt))
+            .expect("应捕获第三轮请求");
+        assert!(!has_previous_stop_marker(first_request));
+        assert!(has_previous_stop_marker(second_request));
+        assert!(!has_previous_stop_marker(third_request));
+
+        let persisted = serde_json::to_string(
+            &recovered_session
+                .transcript()
+                .expect("冷恢复后的权威 Transcript 应读取"),
+        )
+        .expect("权威 Transcript 应可序列化");
+        assert!(persisted.contains(first_prompt));
+        assert!(persisted.contains(second_prompt));
+        assert!(persisted.contains(third_prompt));
+        assert!(!persisted.contains("keencode/previous-turn-stop/v1"));
+        recovered_runtime
+            .close_session(&session_id)
+            .await
+            .expect("中断恢复测试最终 Runtime 应关闭");
     }
 
     /// 真实子 Agent 经本地 Responses Provider 进入请求后取消，必须持久化 Interrupted 且不污染根 Turn。
