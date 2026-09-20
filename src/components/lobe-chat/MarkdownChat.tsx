@@ -360,6 +360,27 @@ export const MarkdownChat = memo(function MarkdownChat({
     a: ({ href, children: c }) => {
       const text = reactNodeText(c).trim();
       const hrefStr = typeof href === "string" ? href : "";
+      if (isHttpUrl(hrefStr)) {
+        return (
+          <a
+            className="chat-md__link"
+            href={hrefStr}
+            target="_blank"
+            rel="noreferrer noopener"
+            onClick={(event) => {
+              if (!onOpenResourceRef.current) return;
+              event.preventDefault();
+              onOpenResourceRef.current({
+                type: "url",
+                url: hrefStr,
+                title: text || undefined,
+              });
+            }}
+          >
+            {paint(c)}
+          </a>
+        );
+      }
       const card =
         (hrefStr && renderPathOrUrl(hrefStr, text)) ||
         (text && text !== hrefStr ? renderPathOrUrl(text) : null);

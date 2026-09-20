@@ -109,6 +109,25 @@ describe("MarkdownChat streaming", () => {
 
 
 describe("MarkdownChat URL punctuation", () => {
+  it("将对话中的网页链接渲染为无图标的普通超链接", () => {
+    const html = renderToString(
+      <MarkdownChat>{"[Node.js](https://nodejs.org)"}</MarkdownChat>,
+    );
+
+    expect(html).toContain('class="chat-md__link"');
+    expect(html).toContain('href="https://nodejs.org"');
+    expect(html).toContain(">Node.js</a>");
+    expect(html).not.toContain("file-path-link");
+
+    const source = readFileSync(
+      new URL("./MarkdownChat.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("event.preventDefault()");
+    expect(source).toContain('type: "url"');
+    expect(source).toContain("url: hrefStr");
+  });
+
   it("also fixes resource Markdown without changing Chinese paths or inline code", () => {
     const html = renderToString(
       <MarkdownBody>{"访问 https://example.com/中文?q=测试）：以及 `http://localhost:3000）：`"}</MarkdownBody>,

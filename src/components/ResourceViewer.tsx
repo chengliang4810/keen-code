@@ -1,5 +1,8 @@
-import { Textarea } from "@/components/ui/textarea";
+import { Textarea } from "@appica/ui-react/textarea";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@appica/ui-react/tabs";
+import { Toolbar, ToolbarButton } from "@appica/ui-react/toolbar";
+import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { projectSubagentConversation } from "@/lib/sessionProjection";
 /** 右侧资源工作台：多标签、预览、文件树与系统打开菜单。 */
 
@@ -74,7 +77,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@appica/ui-react/dropdown-menu";
 import type { MessageKey } from "@/i18n";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
@@ -177,6 +180,7 @@ export interface ResourceViewerProps {
 /** 资源侧栏首版可见模式。 */
 type SideMode =
   | "files"
+  | "web"
   | "changes"
   | "terminal"
   | "trajectory"
@@ -419,7 +423,14 @@ export function ResourceViewer({
     [tabs],
   );
   /** 网页标签层当前是否可见（面板展开、文件模式且激活标签是网页）。 */
-  const webTabVisible = paneActive && sideMode === "files" && activeTabIsWeb;
+  const webTabVisible = paneActive && sideMode === "web" && activeTabIsWeb;
+  const visibleResourceTabs = useMemo(
+    () =>
+      sideMode === "web"
+        ? tabs.filter((tab) => tab.tabKind === "url")
+        : tabs.filter((tab) => tab.tabKind !== "url"),
+    [sideMode, tabs],
+  );
   const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
   const totalChangeBadge = workspaceCount;
   const filteredWorkspace = useMemo(
@@ -1330,9 +1341,9 @@ export function ResourceViewer({
   /** 新建空白网页标签，等待地址栏输入。 */
   const openBlankWebTab = useCallback(() => {
     setOpenSingletons((current) =>
-      current.includes("files") ? current : [...current, "files"],
+      current.includes("web") ? current : [...current, "web"],
     );
-    setSideMode("files");
+    setSideMode("web");
     const id = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     setTabs((prev) => [
       {
@@ -1406,8 +1417,8 @@ export function ResourceViewer({
       setSideMode("files");
       void openAbsoluteFile(openRequest.path, openRequest.title);
     } else if (openRequest.type === "url") {
-      setOpenSingletons((current) => current.includes("files") ? current : [...current, "files"]);
-      setSideMode("files");
+      setOpenSingletons((current) => current.includes("web") ? current : [...current, "web"]);
+      setSideMode("web");
       openUrl(openRequest.url, openRequest.title);
     } else if (openRequest.type === "changes") {
       setOpenSingletons((current) => current.includes("changes") ? current : [...current, "changes"]);
@@ -1566,6 +1577,7 @@ export function ResourceViewer({
             <Tip label={n.relativePath}>
               <Button
                 type="button"
+                variant={active ? "soft" : "ghost"}
                 className={
                   "rp-tree__row" +
                   (active ? " is-active" : "") +
@@ -1620,6 +1632,7 @@ export function ResourceViewer({
         >
           <Button
             type="button"
+            variant={active ? "soft" : "ghost"}
             className="rp-changes-row__main"
             title={abs || entry.path}
             disabled={directoryLoading}
@@ -1661,7 +1674,7 @@ export function ResourceViewer({
             <Tip label={tr("changes.reveal")}>
               <Button
                 type="button"
-                className="chrome-btn"
+                variant="ghost" size="icon-md"
                 onClick={(event) => {
                   event.stopPropagation();
                   void revealChangePath(abs || entry.path);
@@ -1673,7 +1686,7 @@ export function ResourceViewer({
             <Tip label={tr("changes.copyPath")}>
               <Button
                 type="button"
-                className="chrome-btn"
+                variant="ghost" size="icon-md"
                 onClick={(event) => {
                   event.stopPropagation();
                   void copyChangePath(abs || entry.path);
@@ -1714,7 +1727,7 @@ export function ResourceViewer({
           <div className="rp-changes-empty__actions">
             <Button
               type="button"
-              className="rp-tool-btn"
+              variant="outline" size="md"
               onClick={() => void revealChangePath(diffView.path)}
             >
               <IconFolder size={14} />
@@ -1722,7 +1735,7 @@ export function ResourceViewer({
             </Button>
             <Button
               type="button"
-              className="rp-tool-btn"
+              variant="outline" size="md"
               onClick={() => void copyChangePath(diffView.path)}
             >
               <IconCopy size={14} />
@@ -1774,9 +1787,8 @@ export function ResourceViewer({
       const dirty = isResourceDraftDirty(draftText, activeTab.baselineText);
       return (
         <div className="rp-editor">
-          <div
+          <Toolbar
             className="rp-editor__toolbar"
-            role="toolbar"
             aria-label={tr("resources.editorToolbar")}
           >
             {isMarkdown ? (
@@ -1787,64 +1799,76 @@ export function ResourceViewer({
                     : tr("resources.editMode")
                 }
               >
-                <Button
-                  type="button"
-                  className={
-                    "rp-editor__tool-btn" +
-                    (activeTab.editMode ? " is-on" : "")
+                <ToolbarButton
+                  render={
+                    <Button
+                      type="button"
+                      variant={activeTab.editMode ? "soft" : "ghost"}
+                      size="icon-md"
+                      className={
+                        "rp-editor__tool-btn" +
+                        (activeTab.editMode ? " is-on" : "")
+                      }
+                      disabled={!!activeTab.saving}
+                      onClick={toggleActiveEditMode}
+                      aria-pressed={!!activeTab.editMode}
+                      aria-label={
+                        activeTab.editMode
+                          ? tr("resources.previewMode")
+                          : tr("resources.editMode")
+                      }
+                    >
+                      <IconEdit size={14} />
+                      <span className="rp-editor__tool-btn-label">
+                        {activeTab.editMode
+                          ? tr("resources.previewMode")
+                          : tr("resources.editMode")}
+                      </span>
+                    </Button>
                   }
-                  disabled={!!activeTab.saving}
-                  onClick={toggleActiveEditMode}
-                  aria-pressed={!!activeTab.editMode}
-                  aria-label={
-                    activeTab.editMode
-                      ? tr("resources.previewMode")
-                      : tr("resources.editMode")
-                  }
-                >
-                  <IconEdit size={14} />
-                  <span className="rp-editor__tool-btn-label">
-                    {activeTab.editMode
-                      ? tr("resources.previewMode")
-                      : tr("resources.editMode")}
-                  </span>
-                </Button>
+                />
               </Tip>
             ) : null}
             <div className="rp-editor__toolbar-spacer" />
             {dirty ? (
               <Tip label={tr("resources.revert")}>
-                <Button
-                  type="button"
-                  className="rp-editor__tool-btn"
-                  disabled={!!activeTab.saving}
-                  onClick={() => revertActiveDraft()}
-                >
-                  {tr("resources.revert")}
-                </Button>
+                <ToolbarButton
+                  render={
+                    <Button
+                      type="button"
+                      variant="ghost" size="md"
+                      disabled={!!activeTab.saving}
+                      onClick={() => revertActiveDraft()}
+                    >
+                      {tr("resources.revert")}
+                    </Button>
+                  }
+                />
               </Tip>
             ) : null}
             <Tip label={tr("resources.save")}>
-              <Button
-                type="button"
-                className={
-                  "rp-editor__tool-btn rp-editor__tool-btn--save" +
-                  (dirty ? " is-dirty" : "")
+              <ToolbarButton
+                render={
+                  <Button
+                    type="button"
+                    variant={dirty ? "primary" : "ghost"}
+                    size="md"
+                    disabled={!!activeTab.saving || !dirty}
+                    onClick={() => void saveActiveFile()}
+                  >
+                    {activeTab.saving
+                      ? tr("resources.saving")
+                      : tr("resources.save")}
+                  </Button>
                 }
-                disabled={!!activeTab.saving || !dirty}
-                onClick={() => void saveActiveFile()}
-              >
-                {activeTab.saving
-                  ? tr("resources.saving")
-                  : tr("resources.save")}
-              </Button>
+              />
             </Tip>
             {dirty ? (
               <span className="rp-editor__dirty-label" role="status">
                 {tr("resources.unsaved")}
               </span>
             ) : null}
-          </div>
+          </Toolbar>
           {preview.truncated ? (
             <div className="rp-editor__banner" role="status">
               {tr("resources.truncated")}
@@ -2041,6 +2065,11 @@ export function ResourceViewer({
 
   const openSingleton = (mode: SingletonSideMode) => {
     setOpenSingletons((current) => current.includes(mode) ? current : [...current, mode]);
+    if (mode === "files") {
+      setActiveId(tabs.find((tab) => tab.tabKind !== "url")?.id ?? null);
+    } else if (mode === "web") {
+      setActiveId(tabs.find((tab) => tab.tabKind === "url")?.id ?? null);
+    }
     setSideMode(mode);
   };
   const openTerminal = () => {
@@ -2058,7 +2087,7 @@ export function ResourceViewer({
   const focusRemainingMode = (excluded: string) => {
     const singleton = openSingletons.find((mode) => mode !== excluded);
     if (singleton) {
-      setSideMode(singleton);
+      openSingleton(singleton);
       return;
     }
     const terminal = terminalTabs.find((tab) => tab.id !== excluded);
@@ -2109,7 +2138,7 @@ export function ResourceViewer({
   };
   const focusModeTabByKey = (key: string) => {
     const [kind, id] = key.split(":", 2);
-    if (kind === "singleton") setSideMode(id as SingletonSideMode);
+    if (kind === "singleton") openSingleton(id as SingletonSideMode);
     else if (kind === "terminal") { setTerminalActiveId(id); setSideMode("terminal"); }
     else { setSubagentId(id); setSideMode("subagent"); }
   };
@@ -2122,57 +2151,73 @@ export function ResourceViewer({
     }
   };
   const hasModeTabs = openSingletons.length > 0 || terminalTabs.length > 0 || subagents.some((agent) => openSubagentIds.includes(agent.agent_id));
+  const activeModeTabKey =
+    sideMode === "terminal" && terminalActiveId
+      ? `terminal:${terminalActiveId}`
+      : sideMode === "subagent" && subagentId
+        ? `subagent:${subagentId}`
+        : sideMode
+          ? `singleton:${sideMode}`
+          : "";
 
   const modeTabs = (
     <>
-      <div className="rp-mode-tabs" role="tablist" aria-label={tr("resources.title")}>
+      <Tabs
+        value={activeModeTabKey}
+        onValueChange={focusModeTabByKey}
+        variant="line"
+        size="md"
+        className="rp-mode-tabs-root"
+      >
+      <TabsList className="rp-mode-tabs" aria-label={tr("resources.title")}>
         {openSingletons.map((mode) => {
-          const icon = mode === "files" ? (activeTabIsWeb ? <IconWorld size={14} /> : <IconFiles size={14} />) : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
-          const label = mode === "files" ? (activeTabIsWeb ? tr("resources.web") : tr("changes.files")) : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
+          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "web" ? <IconWorld size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
+          const label = mode === "files" ? tr("changes.files") : mode === "web" ? tr("resources.web") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
           return (
-            <Button key={mode} type="button" role="tab" aria-selected={sideMode === mode} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onClick={() => setSideMode(mode)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
+            <TabsTrigger key={mode} value={`singleton:${mode}`} render={<div />} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
               {mode === "changes" && totalChangeBadge > 0 ? <span className="rp-mode-tab__count">{totalChangeBadge > 99 ? "99+" : totalChangeBadge}</span> : null}
-              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeModeTab(mode); } }}><IconClose size={11} /></span>
-            </Button>
+              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }}><IconClose size={11} /></Button>
+            </TabsTrigger>
           );
         })}
         {terminalTabs.map((tab) => {
           const selected = sideMode === "terminal" && terminalActiveId === tab.id;
           return (
-            <Button key={tab.id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => { setTerminalActiveId(tab.id); setSideMode("terminal"); }} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
+            <TabsTrigger key={tab.id} value={`terminal:${tab.id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
               <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
-              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeTerminalTab(tab.id); } }}><IconClose size={11} /></span>
-            </Button>
+              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }}><IconClose size={11} /></Button>
+            </TabsTrigger>
           );
         })}
         {openSubagents.map((agent) => {
           const selected = sideMode === "subagent" && subagentId === agent.agent_id;
           const displayName = agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name;
           return (
-            <Button key={agent.agent_id} type="button" role="tab" aria-selected={selected} className={"rp-mode-tab" + (selected ? " is-active" : "")} onClick={() => openSubagent(agent.agent_id)} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `subagent:${agent.agent_id}` }); }}>
+            <TabsTrigger key={agent.agent_id} value={`subagent:${agent.agent_id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `subagent:${agent.agent_id}` }); }}>
               <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} className="rp-mode-tab__agent-avatar" /><span className="rp-mode-tab__label">{displayName}</span>
-              <span className="rp-mode-tab__close" role="button" tabIndex={0} title={tr("resources.tabClose")} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.stopPropagation(); closeSubagentTab(agent.agent_id); } }}><IconClose size={11} /></span>
-            </Button>
+              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }}><IconClose size={11} /></Button>
+            </TabsTrigger>
           );
         })}
         {hasModeTabs ? (
           <DropdownMenu>
-            <DropdownMenuTrigger asChild><Button type="button" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")}><IconPlus size={15} /></Button></DropdownMenuTrigger>
+            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-md" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")} />}><IconPlus size={15} /></DropdownMenuTrigger>
             <DropdownMenuContent
               align="end"
               sideOffset={6}
               className="ext-agent-model__menu"
             >
-              <DropdownMenuItem onSelect={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
-              <DropdownMenuItem disabled={!projectPath} onSelect={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
-              <DropdownMenuItem onSelect={openBlankWebTab}><IconWorld size={14} /> {tr("resources.browserNewTab")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
+              <DropdownMenuItem disabled={!projectPath} onClick={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
+              <DropdownMenuItem onClick={openBlankWebTab}><IconWorld size={14} /> {tr("resources.browserNewTab")}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : null}
-      </div>
+      </TabsList>
+      </Tabs>
       {(() => {
         const index = modeTabMenu ? modeTabKeys.indexOf(modeTabMenu.key) : -1;
         const key = modeTabMenu?.key ?? "";
@@ -2183,7 +2228,7 @@ export function ResourceViewer({
           { id: "close-left", label: tr("resources.tabCloseLeft"), disabled: index <= 0, onClick: () => closeModeTabKeys(modeTabKeys.slice(0, index), key) },
           { id: "close-all", label: tr("resources.tabCloseAll"), onClick: () => closeModeTabKeys(modeTabKeys) },
         ];
-        return <ContextMenu open={!!modeTabMenu} x={modeTabMenu?.x ?? 0} y={modeTabMenu?.y ?? 0} onClose={() => setModeTabMenu(null)} items={items} className="rp-tab-menu" />;
+        return <ContextMenu open={!!modeTabMenu} x={modeTabMenu?.x ?? 0} y={modeTabMenu?.y ?? 0} onClose={() => setModeTabMenu(null)} items={items} />;
       })()}
     </>
   );
@@ -2234,23 +2279,23 @@ export function ResourceViewer({
       <div className="rp-tab-picker__title">{tr("resources.openTab")}</div>
       <div className="rp-tab-picker__desc">{tr("resources.openTabHint")}</div>
       <div className="rp-tab-picker__grid">
-        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
+        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
           <IconFiles size={20} />
           <span>{tr("changes.files")}</span>
         </Button>
-        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
+        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
           <IconFileDiff size={20} />
           <span>{tr("changes.title")}</span>
         </Button>
-        <Button type="button" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
+        <Button type="button" variant="outline" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
           <IconTerminal size={20} />
           <span>{tr("terminal.new")}</span>
         </Button>
-        <Button type="button" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
+        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
           <IconListTree size={20} />
           <span>{tr("trajectory.title")}</span>
         </Button>
-        <Button type="button" className="rp-tab-picker__item" onClick={openBlankWebTab}>
+        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={openBlankWebTab}>
           <IconWorld size={20} />
           <span>{tr("resources.browserNewTab")}</span>
         </Button>
@@ -2335,20 +2380,23 @@ export function ResourceViewer({
 
       {tabPicker}
 
-      {sideMode === "files" ? (
+      {sideMode === "files" || sideMode === "web" ? (
         <div className="rp-file-tabs">
-          <div
+          <Tabs
+            value={activeId ?? ""}
+            onValueChange={setActiveId}
+            variant="line"
+            size="md"
             className="rp-tabs"
-            role="tablist"
-            aria-label={tr("resources.files")}
           >
           <div className="rp-tabs__scroll">
-            {tabs.length === 0 ? (
+            <TabsList aria-label={tr("resources.files")}>
+            {visibleResourceTabs.length === 0 ? (
               <div className="rp-tabs__placeholder">
                 <span className="rp-tabs__hint">{tr("resources.emptyPreview")}</span>
               </div>
             ) : (
-              tabs.map((t) => {
+              visibleResourceTabs.map((t) => {
                 const active = t.id === activeId;
                 return (
                   <Tip
@@ -2359,17 +2407,15 @@ export function ResourceViewer({
                         : `${t.name}\n${t.relativePath || ""}`
                     }
                   >
-                    <Button
-                      type="button"
-                      role="tab"
-                      aria-selected={active}
+                    <TabsTrigger
+                      value={t.id}
+                      render={<div />}
                       title={t.relativePath || t.name}
                       className={
                         "rp-tab" +
                         (active ? " is-active" : " is-inactive") +
                         (t.tabKind === "url" ? " rp-tab--url" : "")
                       }
-                      onClick={() => setActiveId(t.id)}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
@@ -2390,57 +2436,45 @@ export function ResourceViewer({
                           : t.name}
                       </span>
                       {active ? (
-                          <span
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-md"
                             className="rp-tab__x"
-                            role="button"
-                            tabIndex={0}
                             title={tr("resources.tabClose")}
+                            aria-label={tr("resources.tabClose")}
+                            onPointerDown={(e) => e.stopPropagation()}
                             onClick={(e) => {
                               e.stopPropagation();
                               closeTab(t.id);
                             }}
-                            onKeyDown={(e) => {
-                              if (e.key === "Enter" || e.key === " ") {
-                                e.stopPropagation();
-                                closeTab(t.id);
-                              }
-                            }}
                           >
                             ×
-                          </span>
+                          </Button>
                       ) : isResourceDraftDirty(t.draftText, t.baselineText) ? (
                         <span className="rp-tab__dirty" aria-hidden>
                           •
                         </span>
                       ) : null}
-                    </Button>
+                    </TabsTrigger>
                   </Tip>
                 );
               })
             )}
+            </TabsList>
           </div>
-          </div>
+          </Tabs>
         </div>
       ) : null}
 
       {error && (
-        <div className="rp__error" role="alert">
-          {error}
-          <Tip label={tr("common.dismiss")}>
-            <Button
-              type="button"
-              className="chrome-btn"
-              onClick={() => setError(null)}
-            >
-              <IconClose size={12} />
-            </Button>
-          </Tip>
-        </div>
+        <Alert variant="error" layout="inline">
+          <AlertDescription>{error}</AlertDescription>
+          <AlertAction><Tip label={tr("common.dismiss")}><Button type="button" variant="ghost" size="icon-md" onClick={() => setError(null)}><IconClose size={12} /></Button></Tip></AlertAction>
+        </Alert>
       )}
       {activeTab?.error && (
-        <div className="rp__error" role="alert">
-          {activeTab.error}
-        </div>
+        <Alert variant="error"><AlertDescription>{activeTab.error}</AlertDescription></Alert>
       )}
 
       <TerminalPanel
@@ -2580,7 +2614,7 @@ export function ResourceViewer({
               <div className="rp-change-preview__toolbar">
                 <Button
                   type="button"
-                  className="rp-tool-btn"
+                  variant="outline" size="md"
                   onClick={() =>
                     openCurrentChangeFile(diffView.path, diffView.name)
                   }
@@ -2609,7 +2643,7 @@ export function ResourceViewer({
                 <div className="rp-change-preview__toolbar">
                   <Button
                     type="button"
-                    className="rp-tool-btn"
+                    variant="outline" size="md"
                     onClick={() =>
                       openCurrentChangeFile(diffView.path, diffView.name)
                     }
@@ -2811,7 +2845,6 @@ export function ResourceViewer({
             y={tabMenu?.y ?? 0}
             onClose={() => setTabMenu(null)}
             items={items}
-            className="rp-tab-menu"
           />
         );
       })()}
@@ -2820,13 +2853,13 @@ export function ResourceViewer({
         open={!!conflictTabId}
         onClose={() => setConflictTabId(null)}
         title={tr("resources.conflictTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               onClick={() => {
                 setConflictTabId(null);
                 void reloadActiveFile();
@@ -2836,7 +2869,7 @@ export function ResourceViewer({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               onClick={() => {
                 setConflictTabId(null);
                 void saveActiveFile({ force: true });
@@ -2854,20 +2887,20 @@ export function ResourceViewer({
         open={!!discardTabId}
         onClose={() => setDiscardTabId(null)}
         title={tr("resources.discardTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               onClick={() => setDiscardTabId(null)}
             >
               {tr("common.cancel")}
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               onClick={() => {
                 const id = discardTabId;
                 setDiscardTabId(null);
