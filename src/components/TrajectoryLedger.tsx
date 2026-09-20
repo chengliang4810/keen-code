@@ -434,6 +434,7 @@ export function TrajectoryLedger({
       >
         <Button
           type="button"
+          variant="ghost"
           className="rp-traj-row__main"
           aria-expanded={expanded}
           onClick={() => toggleRecord(record.key)}
@@ -498,7 +499,7 @@ export function TrajectoryLedger({
         <div className="rp__empty-desc">{tr("trajectory.loadFailed")}</div>
         <Button
           type="button"
-          className="btn btn--ghost"
+          variant="ghost"
           onClick={() => setReloadNonce((n) => n + 1)}
         >
           {tr("trajectory.retry")}
@@ -526,6 +527,7 @@ export function TrajectoryLedger({
             item.type === "turn-header" ? (
               <Button
                 type="button"
+                variant="ghost"
                 className="rp-traj-turn"
                 key={`turn-${item.turn}`}
                 aria-expanded={!item.collapsed}
@@ -584,6 +586,8 @@ export function TrajectoryLedger({
         >
           <Button
             type="button"
+            variant={allTurnsCollapsed ? "soft" : "ghost"}
+            size="icon-md"
             className={
               "rp-traj-tool-btn" + (allTurnsCollapsed ? " is-on" : "")
             }
@@ -601,6 +605,8 @@ export function TrajectoryLedger({
           <Tip label={tr("trajectory.refresh")}>
             <Button
               type="button"
+              variant="ghost"
+              size="icon-md"
               className="rp-traj-tool-btn"
               onClick={() => setReloadNonce((n) => n + 1)}
               aria-label={tr("trajectory.refresh")}

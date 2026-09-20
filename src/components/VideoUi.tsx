@@ -265,6 +265,7 @@ export const VideoUi = memo(function VideoUi({
               {localPath && (
                 <Button
                   type="button"
+                  variant="outline"
                   className="md-body__video-card__btn"
                   onClick={() => void openExternal()}
                 >

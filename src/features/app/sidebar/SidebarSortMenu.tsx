@@ -2,11 +2,12 @@ import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
-  DropdownMenuLabel,
+  DropdownMenuGroup,
+  DropdownMenuGroupLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@appica/ui-react/dropdown-menu";
 import { Tip } from "@/components/ui/tooltip";
 import { IconArrowsSort, IconClock, IconMessageCircle } from "@/components/icons";
 import type { SidebarSortMode } from "@/lib/sidebarOrder";
@@ -27,14 +28,14 @@ export function SidebarSortMenu({
   return (
     <DropdownMenu>
       <Tip label={tr("sidebar.sort")}>
-        <DropdownMenuTrigger asChild>
-          <Button
+        <DropdownMenuTrigger render={<Button
             type="button"
+            variant="ghost"
+            size="icon-md"
             className="tree-l1__action"
             aria-label={tr("sidebar.sort")}
-          >
+          />}>
             <IconArrowsSort size={15} />
-          </Button>
         </DropdownMenuTrigger>
       </Tip>
       <DropdownMenuContent
@@ -42,20 +43,22 @@ export function SidebarSortMenu({
         align="end"
         sideOffset={6}
       >
-        <DropdownMenuLabel>{tr("sidebar.sort")}</DropdownMenuLabel>
-        <DropdownMenuRadioGroup
-          value={mode}
-          onValueChange={(value) => onModeChange(value as SidebarSortMode)}
-        >
-          <DropdownMenuRadioItem value="lastUserMessage">
-            <IconMessageCircle size={15} />
-            <span>{tr("sidebar.sortByLastUserMessage")}</span>
-          </DropdownMenuRadioItem>
-          <DropdownMenuRadioItem value="updatedAt">
-            <IconClock size={15} />
-            <span>{tr("sidebar.sortByUpdatedAt")}</span>
-          </DropdownMenuRadioItem>
-        </DropdownMenuRadioGroup>
+        <DropdownMenuGroup>
+          <DropdownMenuGroupLabel>{tr("sidebar.sort")}</DropdownMenuGroupLabel>
+          <DropdownMenuRadioGroup
+            value={mode}
+            onValueChange={(value) => onModeChange(value as SidebarSortMode)}
+          >
+            <DropdownMenuRadioItem value="lastUserMessage">
+              <IconMessageCircle size={15} />
+              <span>{tr("sidebar.sortByLastUserMessage")}</span>
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="updatedAt">
+              <IconClock size={15} />
+              <span>{tr("sidebar.sortByUpdatedAt")}</span>
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+        </DropdownMenuGroup>
       </DropdownMenuContent>
     </DropdownMenu>
   );

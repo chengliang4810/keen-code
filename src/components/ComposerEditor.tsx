@@ -151,6 +151,7 @@ export type ComposerEditorProps = {
   value: string;
   onChange: (stored: string) => void;
   disabled?: boolean;
+  ariaLabel: string;
   placeholder?: string;
   className?: string;
   onKeyDown?: (e: KeyboardEvent<HTMLDivElement>) => void;
@@ -174,6 +175,7 @@ export function ComposerEditor({
   value,
   onChange,
   disabled,
+  ariaLabel,
   placeholder,
   className,
   onKeyDown,
@@ -443,6 +445,7 @@ export function ComposerEditor({
         contentEditable={!disabled}
         role="textbox"
         aria-multiline
+        aria-label={ariaLabel}
         aria-placeholder={placeholder}
         data-placeholder={placeholder}
         suppressContentEditableWarning

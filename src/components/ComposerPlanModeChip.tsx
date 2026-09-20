@@ -29,6 +29,7 @@ export function ComposerPlanModeChip({
   return (
     <Button
       type="button"
+      variant={active ? "soft" : "ghost"}
       className={
         active ? "composer-plan-chip composer-plan-chip--active" : "composer-plan-chip"
       }

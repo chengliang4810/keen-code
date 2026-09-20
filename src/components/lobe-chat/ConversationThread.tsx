@@ -15,6 +15,7 @@ import {
 } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
+import { Alert, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
 import {
   formatTurnErrorBody,
   localizeSystemNotification,
@@ -43,8 +44,8 @@ import {
   IconRename,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@appica/ui-react/textarea";
+import { Spinner } from "@appica/ui-react/spinner";
 import { formatMessageTime } from "@/lib/messageTime";
 import { formatTokenCount } from "@/lib/contextUsage";
 import { useStickToBottom } from "@/hooks/useStickToBottom";
@@ -350,7 +351,7 @@ function UserPlainOrSkills({
     <span className="user-msg-body">
       {segs.map((s, i) =>
         s.type === "skill" ? (
-          <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="sm" />
+          <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="md" />
         ) : findQuery?.trim() && s.text ? (
           <HighlightedText
             key={`t-${i}`}
@@ -421,7 +422,7 @@ function UserMessageEditor({
       <div className="lobe-chat-user-editor__actions">
         <Button
           type="button"
-          className="btn btn--ghost"
+          variant="ghost"
           disabled={submitting}
           onClick={onCancel}
         >
@@ -429,7 +430,7 @@ function UserMessageEditor({
         </Button>
         <Button
           type="button"
-          className="btn btn--solid"
+          variant="primary"
           disabled={!canSend}
           onClick={() => void submit()}
         >
@@ -845,7 +846,7 @@ export function ConversationThread({
           {/* 会话恢复窗口没有可显示的历史，用 Spinner 占位避免整块空白。 */}
           {empty && suppressEmptyCopy && sessionState === "connecting" ? (
             <div className="lobe-chat-empty" data-slot="lobe-chat-restoring">
-              <Spinner size={18} />
+              <Spinner currentColor className="text-lg" />
             </div>
           ) : null}
 
@@ -916,7 +917,8 @@ export function ConversationThread({
             ) {
               const level = m.systemNotificationLevel || "info";
               return wrap(
-                <div
+                <Alert
+                  variant={level === "error" ? "error" : level === "warning" ? "warning" : "info"}
                   key={m.id}
                   className="lobe-chat-compact"
                   role={level === "error" ? "alert" : "status"}
@@ -931,7 +933,7 @@ export function ConversationThread({
                       {localizeSystemNotification(m.content, locale)}
                     </div>
                   </div>
-                </div>,
+                </Alert>,
               );
             }
 
@@ -1065,21 +1067,19 @@ export function ConversationThread({
               const isFindHit = !!findHitMessageIds?.has(m.id);
               const isFindCurrent = findActive?.messageId === m.id;
               return wrap(
-                <div
+                <Alert
+                  variant="error"
                   key={m.id}
                   className={
                     "lobe-chat-error" +
                     (isFindHit ? " lobe-chat-item--find-hit" : "") +
                     (isFindCurrent ? " lobe-chat-item--find-current" : "")
                   }
-                  role="alert"
                   data-testid="chat-turn-error"
                   data-message-id={m.id}
                 >
-                  <div className="lobe-chat-error__label">
-                    {tr("chat.turnFailed")}
-                  </div>
-                  <div className="lobe-chat-error__body">
+                  <AlertTitle>{tr("chat.turnFailed")}</AlertTitle>
+                  <AlertDescription className="lobe-chat-error__body">
                     {findQuery.trim() ? (
                       <HighlightedText
                         text={friendly}
@@ -1093,8 +1093,8 @@ export function ConversationThread({
                     ) : (
                       friendly
                     )}
-                  </div>
-                </div>
+                  </AlertDescription>
+                </Alert>
               );
             }
 

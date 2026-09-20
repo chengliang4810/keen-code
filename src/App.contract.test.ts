@@ -579,7 +579,7 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     );
   });
 
-  it("无置顶或无项目任务时不渲染对应栏目，并在搜索下提供技能和插件入口", () => {
+  it("无置顶或无项目任务时不渲染对应栏目，侧栏只保留高频任务入口", () => {
     const pinnedSource = readSource(
       "./features/app/sidebar/PinnedSessionList.tsx",
     );
@@ -592,12 +592,25 @@ describe("左侧栏空栏目与快捷入口契约", () => {
 
     expect(pinnedSource).toContain("if (pinnedSessions.length === 0) return null");
     expect(historySource).toContain("if (orphanSessions.length === 0) return null");
-    expect(navigationSource).toContain('navigateSettings("skills")');
-    expect(navigationSource).toContain('navigateSettings("market")');
-    expect(navigationSource).toContain('tr("sidebar.skills")');
-    expect(navigationSource).toContain('tr("sidebar.plugins")');
+    expect(navigationSource).not.toContain("navigateSettings");
+    expect(navigationSource).not.toContain('tr("sidebar.skills")');
+    expect(navigationSource).not.toContain('tr("sidebar.plugins")');
     expect(pinnedSource).not.toContain("pinnedOpen && pinnedSessions.length > 0");
     expect(historySource).not.toContain("historyOpen && orphanSessions.length > 0");
+  });
+
+  it("工作台主导航、分组标题和底部设置入口使用一致的文字档位", () => {
+    const pinnedSource = readSource("./features/app/sidebar/PinnedSessionList.tsx");
+    const historySource = readSource("./features/app/sidebar/HistorySessionList.tsx");
+    const projectSource = readSource("./features/app/sidebar/ProjectTree.tsx");
+    const navigationSource = readSource("./features/app/sidebar/SidebarNav.tsx");
+    const userMenuSource = readSource("./components/UserMenu.tsx");
+
+    expect(navigationSource.match(/size="md"/g)).toHaveLength(2);
+    expect(pinnedSource).toContain('size="md"');
+    expect(historySource).toContain('size="md"');
+    expect(projectSource).toContain('size="md"');
+    expect(userMenuSource).toContain('size="md"');
   });
 });
 
@@ -648,18 +661,16 @@ describe("App 会话空态对齐契约", () => {
 });
 
 describe("App 搜索面板布局契约", () => {
-  it("通过 body portal 居中覆盖工作台，不作为底部弹性布局项", () => {
+  it("由 Appica Dialog 提供居中 Portal、焦点管理与模态交互", () => {
     const searchSource = readSource(
       "./features/app/overlays/SessionSearchPortal.tsx",
     );
     const cssSource = readSource("./styles/app.css");
 
-    expect(searchSource).toContain("createPortal(");
-    expect(searchSource).toContain('className="overlay search-overlay"');
-    expect(searchSource).toContain("document.body");
-    expect(cssSource).toMatch(
-      /\.search-overlay\s*\{[^}]*position:\s*fixed;[^}]*align-items:\s*center;[^}]*justify-content:\s*center;/s,
-    );
+    expect(searchSource).toContain('from "@appica/ui-react/dialog"');
+    expect(searchSource).toContain("<DialogContent");
+    expect(searchSource).toContain('viewportProps={{ className: "search-overlay" }}');
+    expect(searchSource).not.toContain("createPortal(");
     expect(cssSource).toMatch(/\.search-panel\s*\{[^}]*margin:\s*0;/s);
     expect(cssSource).not.toContain(".overlay:has(> .search-panel)");
   });

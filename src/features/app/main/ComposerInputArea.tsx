@@ -1,6 +1,4 @@
-import { createPortal } from "react-dom";
 import type {
-  CSSProperties,
   Dispatch,
   KeyboardEvent as ReactKeyboardEvent,
   MutableRefObject,
@@ -11,7 +9,7 @@ import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { ChatMessage, SessionSnapshot } from "@/lib/session";
 import type { Attachment } from "@/lib/attachments";
 import type { ComposerPlusEntry } from "@/components/ComposerPlusPanel";
-import type { FloatingPos } from "@/lib/floatingMenu";
+import { Popover, PopoverContent } from "@appica/ui-react/popover";
 import type { SlashItem } from "@/lib/slashCatalog";
 import type { PromptHistoryEntry } from "@/lib/composerPromptHistory";
 import { ComposerEditor } from "@/components/ComposerEditor";
@@ -52,15 +50,9 @@ export interface ComposerInputAreaProps {
   liveSlash: { present: boolean; query: string; start: number; end: number };
   slashFilterQuery: string;
   skillsLoading: boolean;
-  composerPlusPos: FloatingPos | null;
-  composerPlusStyle?: CSSProperties;
-  composerPlusPanelRef: RefObject<HTMLDivElement | null>;
   resolveSlashTitle: (item: SlashItem) => string;
   resolveSlashDescription: (item: SlashItem) => string;
   promptHistoryOpen: boolean;
-  promptHistoryPos: FloatingPos | null;
-  promptHistoryStyle?: CSSProperties;
-  promptHistoryPanelRef: RefObject<HTMLDivElement | null>;
   promptHistoryEntries: PromptHistoryEntry[];
   promptHistoryActive: number;
   setPromptHistoryActive: SetState<number>;
@@ -109,15 +101,9 @@ export function ComposerInputArea({
   liveSlash,
   slashFilterQuery,
   skillsLoading,
-  composerPlusPos,
-  composerPlusStyle,
-  composerPlusPanelRef,
   resolveSlashTitle,
   resolveSlashDescription,
   promptHistoryOpen,
-  promptHistoryPos,
-  promptHistoryStyle,
-  promptHistoryPanelRef,
   promptHistoryEntries,
   promptHistoryActive,
   setPromptHistoryActive,
@@ -309,11 +295,22 @@ export function ComposerInputArea({
 
   return (
     <>
-      {composerMenuOpen && composerPlusPos && typeof document !== "undefined"
-        ? createPortal(
+      <Popover
+        open={composerMenuOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) closeComposerMenu();
+        }}
+      >
+        <PopoverContent
+          anchor={composerInputRef}
+          side="top"
+          align="start"
+          sideOffset={4}
+          arrow={false}
+          className="w-(--anchor-width) max-w-none p-0"
+        >
             <ComposerPlusPanel
               open
-              panelRef={composerPlusPanelRef}
               locale={locale}
               entries={composerMenuEntries}
               filterQuery={liveSlash.present ? slashFilterQuery : undefined}
@@ -324,16 +321,25 @@ export function ComposerInputArea({
               onSelectSlash={applySlashItem}
               resolveTitle={resolveSlashTitle}
               resolveDescription={resolveSlashDescription}
-              style={{ ...composerPlusStyle, zIndex: 10050 }}
-            />,
-            document.body,
-          )
-        : null}
-      {promptHistoryOpen && promptHistoryPos && typeof document !== "undefined"
-        ? createPortal(
+            />
+        </PopoverContent>
+      </Popover>
+      <Popover
+        open={promptHistoryOpen}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) closePromptHistory();
+        }}
+      >
+        <PopoverContent
+          anchor={composerInputRef}
+          side="top"
+          align="start"
+          sideOffset={8}
+          arrow={false}
+          className="w-(--anchor-width) max-w-none p-0"
+        >
             <PromptHistoryPanel
               open
-              panelRef={promptHistoryPanelRef}
               entries={promptHistoryEntries}
               query={promptHistoryFilter}
               activeIndex={promptHistoryActive}
@@ -358,16 +364,15 @@ export function ComposerInputArea({
               }}
               onSelect={(entry) => applyPromptHistoryEntry(entry)}
               onClose={closePromptHistory}
-              style={{ ...promptHistoryStyle, zIndex: 10050 }}
-            />,
-            document.body,
-          )
-        : null}
+            />
+        </PopoverContent>
+      </Popover>
       <ComposerEditor
         editorRef={composerInputRef}
         className="composer__input"
         value={draft}
         disabled={!canType(session.state)}
+        ariaLabel={tr("composer.inputLabel")}
         placeholder={tr("composer.placeholder")}
         onChange={handleDraftChange}
         onSlashQueryChange={onSlashQueryChange}

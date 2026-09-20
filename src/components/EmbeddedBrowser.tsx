@@ -13,7 +13,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Input } from "@appica/ui-react/input";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Tip } from "@/components/ui/tooltip";
 import {
   IconArrowLeft,
@@ -273,7 +274,7 @@ export function EmbeddedBrowser({
       <Tip label={tr("resources.browserBack")}>
         <Button
           type="button"
-          className="chrome-btn"
+          variant="ghost" size="icon-md"
           disabled={!ready}
           onClick={() => run(browserHistory(tabId, "back"))}
         >
@@ -283,7 +284,7 @@ export function EmbeddedBrowser({
       <Tip label={tr("resources.browserForward")}>
         <Button
           type="button"
-          className="chrome-btn"
+          variant="ghost" size="icon-md"
           disabled={!ready}
           onClick={() => run(browserHistory(tabId, "forward"))}
         >
@@ -293,7 +294,7 @@ export function EmbeddedBrowser({
       <Tip label={tr("resources.browserReload")}>
         <Button
           type="button"
-          className="chrome-btn"
+          variant="ghost" size="icon-md"
           disabled={!ready}
           onClick={() => run(reloadBrowserWebview(tabId))}
         >
@@ -326,7 +327,7 @@ export function EmbeddedBrowser({
       <Tip label={tr("resources.openExternal")}>
         <Button
           type="button"
-          className="chrome-btn"
+          variant="ghost" size="icon-md"
           disabled={!ready}
           onClick={openExternal}
         >
@@ -358,9 +359,7 @@ export function EmbeddedBrowser({
         aria-label={title || url}
       >
         {error ? (
-          <div className="rp-preview__msg" role="alert">
-            <p className="embedded-browser__err">{error}</p>
-          </div>
+          <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert>
         ) : ready ? (
           <div className="embedded-browser__host-fill" aria-hidden />
         ) : (

@@ -1,8 +1,10 @@
-import { Textarea } from "@/components/ui/textarea";
+import { Textarea } from "@appica/ui-react/textarea";
 import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { Switch } from "@/components/ui/switch";
+import { Card } from "@appica/ui-react/card";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 
 /** 与后端设置校验保持一致，避免提交必然失败的固定提示词。 */
 export const CUSTOM_INSTRUCTIONS_MAX_CHARS = 12_000;
@@ -102,9 +104,10 @@ export function PersonalizationSettingsPanel({
             id="settings-custom-instructions-description"
           >
             {t("settings.personalization.description")} {" "}
-            <Button
-              type="button"
-              className="settings-personalization__learn-more"
+      <Button
+        type="button"
+        variant="ghost"
+        className="settings-personalization__learn-more"
               aria-expanded={helpOpen}
               aria-controls="settings-custom-instructions-help"
               onClick={() => setHelpOpen((open) => !open)}
@@ -143,9 +146,7 @@ export function PersonalizationSettingsPanel({
       />
 
       {saveError ? (
-        <p className="settings-personalization__error" role="alert">
-          {t("settings.personalization.saveFailed")}
-        </p>
+        <Alert variant="error"><AlertDescription>{t("settings.personalization.saveFailed")}</AlertDescription></Alert>
       ) : null}
     </section>
 
@@ -161,7 +162,7 @@ export function PersonalizationSettingsPanel({
         </div>
       </div>
 
-      <div className="settings-card settings-personalization__memory-card">
+      <Card className="settings-personalization__memory-card">
         <div className="settings-row">
           <div className="settings-row__text">
             <div className="settings-row__label">
@@ -172,11 +173,10 @@ export function PersonalizationSettingsPanel({
             </div>
           </div>
           <Switch
-            type="button"
             checked={localMemories}
             aria-label={t("settings.personalization.enableMemories")}
             disabled={memoryBusy}
-            className={"ext-switch" + (localMemories ? " is-on" : "")}
+            size="md"
             onClick={(event) => event.stopPropagation()}
             onCheckedChange={async (value) => {
               setMemoryBusy(true);
@@ -199,7 +199,7 @@ export function PersonalizationSettingsPanel({
           </div>
           <Button
             type="button"
-            className="btn btn--danger btn--sm"
+            variant="destructive" size="md"
             disabled={memoryBusy}
             onClick={async () => {
               if (!window.confirm(t("settings.personalization.deleteMemoriesConfirm"))) return;
@@ -219,7 +219,7 @@ export function PersonalizationSettingsPanel({
             {t("settings.personalization.deleteMemories")}
           </Button>
         </div>
-      </div>
+      </Card>
 
       {localMemories ? (
         <Textarea
@@ -239,9 +239,7 @@ export function PersonalizationSettingsPanel({
         />
       ) : null}
       {memoryError ? (
-        <p className="settings-personalization__error" role="alert">
-          {t("settings.personalization.memoriesFailed")}
-        </p>
+        <Alert variant="error"><AlertDescription>{t("settings.personalization.memoriesFailed")}</AlertDescription></Alert>
       ) : null}
     </section>
     </div>

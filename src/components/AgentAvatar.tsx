@@ -1,6 +1,7 @@
 import { Blobatar } from "@blobatar/react";
 import { happy, sad } from "blobatar/expression";
 import "blobatar/motion.css";
+import { Avatar, AvatarBadge } from "@appica/ui-react/avatar";
 import {
   agentNicknameSeed,
   type AgentNicknameRef,
@@ -25,27 +26,16 @@ export function AgentAvatar({
 
   if (status === "running") {
     return (
-      <Blobatar
-        name={seed}
-        size={size}
-        animate="always"
-        className={className}
-        aria-hidden="true"
-        focusable="false"
-      />
+      <Avatar size={size} className={className} aria-hidden="true">
+        <Blobatar name={seed} size={size} animate="always" focusable="false" />
+        <AvatarBadge animate />
+      </Avatar>
     );
   }
 
   return (
-    <Blobatar
-      name={seed}
-      size={size}
-      expression={
-        status === "done" ? happy : status === "failed" ? sad : undefined
-      }
-      className={className}
-      alt=""
-      draggable={false}
-    />
+    <Avatar size={size} className={className} aria-hidden="true">
+      <Blobatar name={seed} size={size} expression={status === "done" ? happy : status === "failed" ? sad : undefined} alt="" draggable={false} />
+    </Avatar>
   );
 }

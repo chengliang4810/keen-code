@@ -16,6 +16,8 @@ export function BackBottom({
     <Tip label={label}>
       <Button
         type="button"
+        variant="soft"
+        size="icon-md"
         className={cn("lobe-chat-back-bottom", visible && "is-visible")}
         aria-label={label}
         onClick={onClick}

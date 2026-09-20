@@ -4,6 +4,7 @@ import { isProjectPathMissing } from "@/lib/projectPath";
 import { moveId, type SidebarSortMode } from "@/lib/sidebarOrder";
 import { SIDEBAR_SESSION_ROW_GAP, SIDEBAR_SESSION_ROW_HEIGHT } from "@/lib/virtualList";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
 import { Tip } from "@/components/ui/tooltip";
 import { VirtualList } from "@/components/VirtualList";
 import {
@@ -138,6 +139,8 @@ export function ProjectTree({
       <div className="tree-l1" style={{ marginTop: 8 }}>
         <Button
           type="button"
+          variant="ghost"
+          size="md"
           className="tree-l1__head"
           onClick={() => setProjectsOpen((value) => !value)}
           aria-expanded={projectsOpen}
@@ -155,6 +158,8 @@ export function ProjectTree({
             <Tip label={tr("sidebar.collapseAllProjects")}>
               <Button
                 type="button"
+                variant="ghost"
+                size="icon-md"
                 className="tree-l1__action"
                 aria-label={tr("sidebar.collapseAllProjects")}
                 onClick={(event) => {
@@ -173,6 +178,8 @@ export function ProjectTree({
           <Tip label={tr("sidebar.addProject")}>
             <Button
               type="button"
+              variant="ghost"
+              size="icon-md"
               className="tree-l1__action"
               aria-label={tr("sidebar.addProject")}
               onClick={() => void addProject()}
@@ -201,6 +208,7 @@ export function ProjectTree({
 
             return (
               <div key={project.id} className="tree-project">
+                {/* This draggable row owns nested action buttons, so Button would create invalid nesting. */}
                 <div
                   draggable
                   onDragStart={(event) =>
@@ -269,15 +277,15 @@ export function ProjectTree({
                     <span className="tree-l2__name">{project.name}</span>
                   </Tip>
                   {pathMissing ? (
-                    <span className="project-row__badge project-row__badge--path-missing">
+                    <Badge size="xs" variant="error">
                       {tr("sidebar.pathMissing")}
-                    </span>
+                    </Badge>
                   ) : null}
                   <span className="tree-l2__actions">
                     <Tip label={tr("sidebar.newConversation")}>
                       <Button
                         type="button"
-                        className="tree-icon-btn"
+                        variant="ghost" size="icon-md" className="tree-icon-btn"
                         disabled={pathMissing}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -290,7 +298,7 @@ export function ProjectTree({
                     <Tip label={tr("sidebar.menu")}>
                       <Button
                         type="button"
-                        className="tree-icon-btn"
+                        variant="ghost" size="icon-md" className="tree-icon-btn"
                         onClick={(event) => openProjectMenu(event, project)}
                       >
                         <IconMore size={14} />
@@ -304,6 +312,7 @@ export function ProjectTree({
                     {pathMissing ? (
                       <Button
                         type="button"
+                        variant="ghost"
                         className="tree-l3 tree-l3--hint"
                         onClick={(event) => {
                           event.stopPropagation();
@@ -352,6 +361,8 @@ export function ProjectTree({
                     {projectSessions.length > visibleSessionCount ? (
                       <Button
                         type="button"
+                        variant="ghost"
+                        size="md"
                         className="tree-l3-more"
                         onClick={() =>
                           setVisibleSessionsByProject((counts) => ({

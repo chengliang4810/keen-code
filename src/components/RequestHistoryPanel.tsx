@@ -1,6 +1,23 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { Badge } from "@appica/ui-react/badge";
+import { Card } from "@appica/ui-react/card";
+import { Field, FieldLabel } from "@appica/ui-react/field";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@appica/ui-react/table";
+import {
+  Pagination,
+  PaginationItem,
+  PaginationLink,
+  PaginationList,
+} from "@appica/ui-react/pagination";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   requestRecordsList,
@@ -19,7 +36,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@appica/ui-react/select";
 
 export const REQUEST_HISTORY_PAGE_SIZE = 20;
 
@@ -105,7 +122,7 @@ const EMPTY_FILTERS: RequestHistoryFilters = {
   to: "",
 };
 
-// Radix Select reserves an empty string for clearing the current value. Encode
+// Appica Select reserves an empty string for clearing the current value. Encode
 // every real option so the dedicated "all" value cannot collide with a model
 // or status returned by the backend.
 export type RequestHistorySelectKind = "model" | "status";
@@ -212,11 +229,6 @@ export function formatSafeRequestEndpoint(
   } catch {
     return value.split(/[?#]/, 1)[0] || missing;
   }
-}
-
-function statusClass(status: string): string {
-  const normalized = status.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-");
-  return normalized ? `request-history-status--${normalized}` : "";
 }
 
 export function formatRequestHistoryStatus(
@@ -531,38 +543,40 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
 
   return (
     <div className="request-history" id="settings-anchor-requests" aria-busy={loading}>
-      <div className="request-history__filters-card">
+      <Card className="request-history__filters-card">
         <div className="request-history__filters-heading">
           <h2>{labels.filters}</h2>
           <div className="request-history__filter-actions">
             <Button
               type="button"
+              variant="ghost"
               className="request-history__clear"
               disabled={loading}
               onClick={() => setRefreshVersion((current) => current + 1)}
             >
               {loading ? labels.refreshing : labels.refresh}
             </Button>
-            <Button type="button" className="request-history__clear" onClick={clearFilters}>
+            <Button type="button" variant="ghost" className="request-history__clear" onClick={clearFilters}>
               {labels.clearFilters}
             </Button>
           </div>
         </div>
         <div className="request-history__filters">
-          <Label>
-            <span>{labels.model}</span>
+          <Field>
+            <FieldLabel>{labels.model}</FieldLabel>
             <Select
               value={
                 filters.model
                   ? encodeRequestHistorySelectValue("model", filters.model)
                   : ALL_MODELS_VALUE
               }
-              onValueChange={(value) =>
+              onValueChange={(value) => {
+                if (typeof value !== "string") return;
                 updateFilter(
                   "model",
                   decodeRequestHistorySelectValue("model", value),
-                )
-              }
+                );
+              }}
             >
               <SelectTrigger
                 className="request-history__filter-select"
@@ -584,21 +598,22 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </Label>
-          <Label>
-            <span>{labels.status}</span>
+          </Field>
+          <Field>
+            <FieldLabel>{labels.status}</FieldLabel>
             <Select
               value={
                 filters.status
                   ? encodeRequestHistorySelectValue("status", filters.status)
                   : ALL_STATUSES_VALUE
               }
-              onValueChange={(value) =>
+              onValueChange={(value) => {
+                if (typeof value !== "string") return;
                 updateFilter(
                   "status",
                   decodeRequestHistorySelectValue("status", value),
-                )
-              }
+                );
+              }}
             >
               <SelectTrigger
                 className="request-history__filter-select"
@@ -620,19 +635,19 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 </SelectGroup>
               </SelectContent>
             </Select>
-          </Label>
-          <Label>
-            <span>{labels.from}</span>
+          </Field>
+          <Field>
+            <FieldLabel>{labels.from}</FieldLabel>
             <Input type="date" value={filters.from} onChange={(event) => updateFilter("from", event.target.value)} />
-          </Label>
-          <Label>
-            <span>{labels.to}</span>
+          </Field>
+          <Field>
+            <FieldLabel>{labels.to}</FieldLabel>
             <Input type="date" value={filters.to} onChange={(event) => updateFilter("to", event.target.value)} />
-          </Label>
+          </Field>
         </div>
-      </div>
+      </Card>
 
-      {error ? <div className="request-history__error" role="alert">{labels.error}: {error}</div> : null}
+      {error ? <Alert variant="error"><AlertDescription>{labels.error}: {error}</AlertDescription></Alert> : null}
 
       {loading && !page ? (
         <div className="analytics-empty">{labels.loading}</div>
@@ -640,55 +655,62 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         <div className="analytics-empty">{labels.empty}</div>
       ) : (
         <div className="request-history__table-wrap">
-          <table className="request-history__table">
-            <thead>
-              <tr>
-                <th>{labels.time}</th>
-                <th>{labels.model}</th>
-                <th>{labels.provider}</th>
-                <th>{labels.requestMode}</th>
-                <th>{labels.status}</th>
-                <th>{labels.attempt}</th>
-                <th>{labels.duration}</th>
-                <th>{labels.tokens}</th>
-                <th>{labels.details}</th>
-              </tr>
-            </thead>
-            <tbody>
+          <Table size="md" hoverableRows className="min-w-[55rem]">
+            <TableHeader>
+              <TableRow>
+                <TableHead>{labels.time}</TableHead>
+                <TableHead>{labels.model}</TableHead>
+                <TableHead>{labels.provider}</TableHead>
+                <TableHead>{labels.requestMode}</TableHead>
+                <TableHead>{labels.status}</TableHead>
+                <TableHead>{labels.attempt}</TableHead>
+                <TableHead>{labels.duration}</TableHead>
+                <TableHead>{labels.tokens}</TableHead>
+                <TableHead>{labels.details}</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {currentPage.records.map((record) => (
-                <tr key={record.id}>
-                  <td>{formatRequestHistoryTime(record.requestedAtMs, locale, labels.notReported)}</td>
-                  <td className="request-history__model">{record.model}</td>
-                  <td>{displayValue(record.provider, labels.notReported)}</td>
-                  <td>{formatRequestHistoryMode(record.requestMode, labels)}</td>
-                  <td><span className={`request-history__status ${statusClass(record.status)}`}>{formatRequestHistoryStatus(displayValue(record.status, labels.notReported), labels)}</span></td>
-                  <td>{record.attempt}/{Math.max(1, record.maxAttempts)}</td>
-                  <td>{Math.max(0, record.durationMs).toLocaleString(locale)} ms</td>
-                  <td>{formatRequestHistoryTokens(record, labels.notReported)}</td>
-                  <td>
+                <TableRow key={record.id}>
+                  <TableCell>{formatRequestHistoryTime(record.requestedAtMs, locale, labels.notReported)}</TableCell>
+                  <TableCell className="request-history__model">{record.model}</TableCell>
+                  <TableCell>{displayValue(record.provider, labels.notReported)}</TableCell>
+                  <TableCell>{formatRequestHistoryMode(record.requestMode, labels)}</TableCell>
+                  <TableCell><Badge size="xs" variant={record.status === "success" ? "success" : record.status === "running" ? "info" : record.status === "cancelled" ? "warning" : "error"}>{formatRequestHistoryStatus(displayValue(record.status, labels.notReported), labels)}</Badge></TableCell>
+                  <TableCell>{record.attempt}/{Math.max(1, record.maxAttempts)}</TableCell>
+                  <TableCell>{Math.max(0, record.durationMs).toLocaleString(locale)} ms</TableCell>
+                  <TableCell>{formatRequestHistoryTokens(record, labels.notReported)}</TableCell>
+                  <TableCell>
                     <Button
                       type="button"
-                      className="request-history__details-trigger"
+                      variant="ghost"
+                      size="md"
                       aria-haspopup="dialog"
                       aria-label={`${labels.details}: ${record.model}`}
                       onClick={() => setSelectedRecord(record)}
                     >
                       {labels.details}
                     </Button>
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       )}
 
       <div className="request-history__pagination">
         <span>{labels.range.replace("{from}", String(first)).replace("{to}", String(last)).replace("{total}", String(currentPage.total))}</span>
-        <div>
-          <Button type="button" disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</Button>
-          <Button type="button" disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</Button>
-        </div>
+        <Pagination size="md" aria-label={labels.range.replace("{from}", String(first)).replace("{to}", String(last)).replace("{total}", String(currentPage.total))}>
+          <PaginationList>
+            <PaginationItem>
+              <PaginationLink render={<Button type="button" variant="ghost" />} disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</PaginationLink>
+            </PaginationItem>
+            <PaginationItem>
+              <PaginationLink render={<Button type="button" variant="ghost" />} disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</PaginationLink>
+            </PaginationItem>
+          </PaginationList>
+        </Pagination>
       </div>
 
       <GlassModal
@@ -697,12 +719,12 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         title={labels.details}
         titleId="request-history-details-title"
         closeLabel={labels.close}
-        size="lg"
+        size="md"
         className="request-history__details-modal"
         bodyClassName="request-history__details-modal-body"
         wrapBody
         footer={
-          <Button type="button" className="btn btn--solid" onClick={closeDetails}>
+          <Button type="button" variant="primary" onClick={closeDetails}>
             {labels.close}
           </Button>
         }

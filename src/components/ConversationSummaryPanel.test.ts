@@ -303,7 +303,7 @@ describe("ConversationSummaryPanel helpers", () => {
     expect(css).toContain(
       ".summary-panel__agent-entry:focus-within .summary-panel__agent-stop",
     );
-    expect(css).toContain(".summary-panel__agent-stop:focus-visible");
+    expect(source).toMatch(/variant="ghost"[\s\S]*size="icon-md"[\s\S]*className="summary-panel__agent-stop"/);
     expect(css).toMatch(
       /@media \(hover: none\)[\s\S]*\.summary-panel__agent-stop/,
     );

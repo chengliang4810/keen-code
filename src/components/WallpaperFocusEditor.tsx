@@ -1,6 +1,5 @@
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
-import { Slider } from "@/components/ui/slider";
+import { Slider } from "@appica/ui-react/slider";
 /**
  * Visual wallpaper focus editor — window-aspect crop frame over full media.
  * For video: dual-handle timeline to pick an in/out clip (no re-encode).
@@ -549,7 +548,7 @@ export function WallpaperFocusEditor({
       open={open}
       onClose={onClose}
       title={labels.title}
-      size="lg"
+      size="md"
       className="wallpaper-focus-modal"
       bodyClassName="wallpaper-focus-modal__body"
       wrapBody
@@ -557,16 +556,16 @@ export function WallpaperFocusEditor({
       closeOnOverlay={false}
       footer={
         <>
-          <Button type="button" className="btn btn--ghost" onClick={onReset}>
+          <Button type="button" variant="ghost" onClick={onReset}>
             {labels.reset}
           </Button>
           <div className="wallpaper-focus-modal__footer-spacer" />
-          <Button type="button" className="btn btn--ghost" onClick={onClose}>
+          <Button type="button" variant="ghost" onClick={onClose}>
             {labels.cancel}
           </Button>
           <Button
             type="button"
-            className="btn btn--solid"
+            variant="primary"
             onClick={onConfirm}
             disabled={!mediaSize || (kind === "video" && !(duration > 0))}
           >
@@ -663,6 +662,8 @@ export function WallpaperFocusEditor({
             <Button
               ref={startHandleRef}
               type="button"
+              variant="outline"
+              size="icon-md"
               className="wallpaper-clip__handle wallpaper-clip__handle--start"
               style={{ left: `${startPct}%` }}
               aria-label={labels.clipStart}
@@ -671,6 +672,8 @@ export function WallpaperFocusEditor({
             <Button
               ref={endHandleRef}
               type="button"
+              variant="outline"
+              size="icon-md"
               className="wallpaper-clip__handle wallpaper-clip__handle--end"
               style={{ left: `${endPct}%` }}
               aria-label={labels.clipEnd}
@@ -681,22 +684,26 @@ export function WallpaperFocusEditor({
       ) : null}
 
       <div className="wallpaper-focus-zoom">
-        <Label className="wallpaper-focus-zoom__label" htmlFor="wp-focus-zoom">
+        <label className="wallpaper-focus-zoom__label" htmlFor="wp-focus-zoom">
           {labels.zoom}
-        </Label>
+        </label>
         <Slider
           id="wp-focus-zoom"
           className="wallpaper-focus-zoom__range"
           min={1}
           max={WALLPAPER_FOCUS_MAX_ZOOM}
           step={0.05}
-          value={[focus.zoom]}
+          value={focus.zoom}
+          thumbAriaLabel={labels.zoom}
+          tooltipVisibility="never"
           disabled={!mediaSize}
           aria-valuemin={1}
           aria-valuemax={WALLPAPER_FOCUS_MAX_ZOOM}
           aria-valuenow={Number(focus.zoom.toFixed(2))}
           aria-label={labels.zoom}
-          onValueChange={([value]) => onZoomSlider(value)}
+          onValueChange={(value) => {
+            if (typeof value === "number") onZoomSlider(value);
+          }}
         />
         <span className="wallpaper-focus-zoom__value" aria-hidden>
           {focus.zoom.toFixed(1)}×

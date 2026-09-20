@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState } from "react";
 import { isTauri } from "@/lib/api";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 
 export interface HtmlBrowserProps {
   title?: string;
@@ -92,9 +93,7 @@ export function HtmlBrowser({
   if (error || !doc) {
     return (
       <div className={"rp-preview-browser rp-preview-browser--msg " + className}>
-        <div className="rp-preview__msg" role="alert">
-          {error || tr("resources.htmlEmpty")}
-        </div>
+        <Alert variant="error"><AlertDescription>{error || tr("resources.htmlEmpty")}</AlertDescription></Alert>
       </div>
     );
   }

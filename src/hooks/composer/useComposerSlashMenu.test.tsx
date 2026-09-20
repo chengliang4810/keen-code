@@ -2,16 +2,12 @@ import { renderToString } from "react-dom/server";
 import { expect, it, vi } from "vitest";
 import { useComposerSlashMenu, type ComposerSlashMenuController } from "./useComposerSlashMenu";
 
-vi.mock("@/lib/floatingMenu", () => ({ useFloatingMenu: () => ({ pos: null, style: undefined }) }));
-
 it("编辑器事件直接更新查询，关闭后同一查询不重开，改变查询后恢复", () => {
   let menu!: ComposerSlashMenuController;
   function Harness() {
     menu = useComposerSlashMenu({
       locale: "zh", api: { isTauri: () => false } as never, projectPath: null,
-      setDraft: vi.fn(), onAction: vi.fn(), composerInputRef: { current: null },
-      composerShellRef: { current: null }, composerPlusTriggerRef: { current: null },
-      composerPlusPanelRef: { current: null },
+      setDraft: vi.fn(), onAction: vi.fn(),
     });
     return null;
   }

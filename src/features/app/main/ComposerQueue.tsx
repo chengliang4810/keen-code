@@ -4,13 +4,13 @@ import type { QueuedSend } from "@/lib/sendQueue";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SessionTurnResult } from "@/hooks/useSessionTurn";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
+import { Textarea } from "@appica/ui-react/textarea";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@appica/ui-react/dropdown-menu";
 import {
   IconClock,
   IconMore,
@@ -79,6 +79,7 @@ export function ComposerQueue({
         </span>
         <Button
           type="button"
+          variant="ghost"
           className="composer__queue-clear"
           disabled={
             sendQueue.steeringIds.size > 0 || sendQueue.editingIds.size > 0
@@ -95,6 +96,7 @@ export function ComposerQueue({
           </span>
           <Button
             type="button"
+            variant="outline"
             className="composer__queue-hold-retry"
             onClick={sendQueue.resumeFlush}
           >
@@ -129,14 +131,14 @@ export function ComposerQueue({
                 <div className="composer__queue-editor-actions">
                   <Button
                     type="button"
-                    className="btn btn--ghost btn--sm"
+                    variant="ghost" size="md"
                     onClick={closeEditor}
                   >
                     {tr("common.cancel")}
                   </Button>
                   <Button
                     type="button"
-                    className="btn btn--solid btn--sm"
+                    variant="primary" size="md"
                     disabled={
                       !editingValue.trim() && item.attachments.length === 0
                     }
@@ -172,6 +174,7 @@ export function ComposerQueue({
                 </span>
                 <Button
                   type="button"
+                  variant="ghost"
                   className="composer__queue-steer"
                   disabled={
                     session.state !== "streaming" ||
@@ -192,6 +195,8 @@ export function ComposerQueue({
                 </Button>
                 <Button
                   type="button"
+                  variant="ghost"
+                  size="icon-md"
                   className="composer__queue-remove"
                   aria-label={tr("composer.queueRemove")}
                   disabled={
@@ -203,22 +208,22 @@ export function ComposerQueue({
                   <IconTrash size={13} />
                 </Button>
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <Button
+                  <DropdownMenuTrigger render={<Button
                       type="button"
+                      variant="ghost"
+                      size="icon-md"
                       className="composer__queue-more"
                       aria-label={tr("message.edit")}
                       disabled={
                         sendQueue.steeringIds.has(item.id) ||
                         sendQueue.editingIds.has(item.id)
                       }
-                    >
+                    />}>
                       <IconMore size={14} />
-                    </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end">
                     <DropdownMenuItem
-                      onSelect={() => {
+                      onClick={() => {
                         sendQueue.beginEditItem(item.id);
                         setEditingId(item.id);
                         setEditingValue(item.storedDisplay);

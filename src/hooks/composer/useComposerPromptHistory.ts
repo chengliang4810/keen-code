@@ -4,11 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type RefObject,
 } from "react";
 import { createT, type Locale } from "@/i18n";
-import { useFloatingMenu, type FloatingPos } from "@/lib/floatingMenu";
 import {
   collectUserPromptHistory,
   filterPromptHistory,
@@ -28,7 +26,6 @@ export interface UseComposerPromptHistoryOptions {
   feedback: ComposerFeedbackPort;
   closeComposerMenu: () => void;
   composerInputRef: RefObject<HTMLDivElement | null>;
-  composerShellRef: RefObject<HTMLDivElement | null>;
 }
 
 export interface ComposerPromptHistoryController {
@@ -46,7 +43,6 @@ export interface ComposerPromptHistoryController {
   promptHistoryFocusFilter: boolean;
   setPromptHistoryFocusFilter: StateSetter<boolean>;
   promptHistoryEntries: PromptHistoryEntry[];
-  promptHistoryPanelRef: Ref<HTMLDivElement | null>;
   closePromptHistory: () => void;
   openPromptHistory: (options?: {
     focusFilter?: boolean;
@@ -56,8 +52,6 @@ export interface ComposerPromptHistoryController {
     entry: PromptHistoryEntry,
     options?: { close?: boolean; listIndex?: number },
   ) => void;
-  promptHistoryPos: FloatingPos | null;
-  promptHistoryStyle: CSSProperties | undefined;
 }
 
 /** Owns prompt-history state, keyboard selection, and its floating panel. */
@@ -68,7 +62,6 @@ export function useComposerPromptHistory({
   feedback,
   closeComposerMenu,
   composerInputRef,
-  composerShellRef,
 }: UseComposerPromptHistoryOptions): ComposerPromptHistoryController {
   const tr = useMemo(() => createT(locale), [locale]);
   const messagesRef = useRef(messages);
@@ -94,7 +87,6 @@ export function useComposerPromptHistory({
     () => filterPromptHistory(sessionPromptHistory, promptHistoryFilter),
     [promptHistoryFilter, sessionPromptHistory],
   );
-  const promptHistoryPanelRef = useRef<HTMLDivElement | null>(null);
 
   const closePromptHistory = useCallback(() => {
     setPromptHistoryOpen(false);
@@ -173,21 +165,6 @@ export function useComposerPromptHistory({
     setPromptHistoryActive(0);
   }, [promptHistoryFilter, promptHistoryOpen]);
 
-  const { pos: promptHistoryPos, style: promptHistoryStyle } = useFloatingMenu({
-    open: promptHistoryOpen,
-    triggerRef: composerShellRef,
-    panelRef: promptHistoryPanelRef,
-    roots: [composerShellRef, composerInputRef, promptHistoryPanelRef],
-    onClose: closePromptHistory,
-    placement: "up",
-    fitContent: false,
-    matchTriggerWidth: true,
-    minWidth: 280,
-    estHeight: 280,
-    gap: 8,
-    deps: [promptHistoryFilter, promptHistoryEntries.length],
-  });
-
   return {
     handleDraftChange,
     promptHistoryIndex,
@@ -203,11 +180,8 @@ export function useComposerPromptHistory({
     promptHistoryFocusFilter,
     setPromptHistoryFocusFilter,
     promptHistoryEntries,
-    promptHistoryPanelRef,
     closePromptHistory,
     openPromptHistory,
     applyPromptHistoryEntry,
-    promptHistoryPos,
-    promptHistoryStyle,
   };
 }

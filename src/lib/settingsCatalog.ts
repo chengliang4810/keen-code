@@ -48,7 +48,7 @@ export function isSettingsSectionId(
 }
 
 /** 设置侧栏分组。 */
-export type SettingsNavGroup = "core" | "extensions" | "archive" | "data";
+export type SettingsNavGroup = "core" | "agent" | "extensions" | "archive" | "data";
 
 /** 设置侧栏分组顺序与名称。 */
 export const SETTINGS_NAV_GROUPS: readonly {
@@ -56,6 +56,7 @@ export const SETTINGS_NAV_GROUPS: readonly {
   labelKey: MessageKey;
 }[] = [
   { id: "core", labelKey: "settings.group.core" },
+  { id: "agent", labelKey: "settings.group.agent" },
   { id: "extensions", labelKey: "settings.group.extensions" },
   { id: "archive", labelKey: "settings.group.archive" },
   { id: "data", labelKey: "settings.group.data" },
@@ -112,7 +113,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     id: "personalization",
     icon: "personalization",
     labelKey: "settings.nav.personalization",
-    group: "extensions",
+    group: "agent",
   },
   {
     id: "skills",
@@ -130,7 +131,7 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     id: "agents",
     icon: "agents",
     labelKey: "agents.title",
-    group: "extensions",
+    group: "agent",
   },
   {
     id: "market",

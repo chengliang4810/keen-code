@@ -1,5 +1,4 @@
 import type { RefObject } from "react";
-import type { SettingsSectionId } from "@/lib/settingsCatalog";
 import type {
   SidebarNewChat,
   SidebarTranslator,
@@ -7,9 +6,7 @@ import type {
 import { Button } from "@/components/ui/button";
 import {
   IconNewChat,
-  IconPuzzle,
   IconSearch,
-  IconSkills,
 } from "@/components/icons";
 
 export interface SidebarNavProps {
@@ -17,7 +14,6 @@ export interface SidebarNavProps {
   newChat: SidebarNewChat;
   openSearch: () => void;
   searchTriggerRef: RefObject<HTMLButtonElement | null>;
-  navigateSettings: (section?: SettingsSectionId) => void;
 }
 
 export function SidebarNav({
@@ -25,12 +21,13 @@ export function SidebarNav({
   newChat,
   openSearch,
   searchTriggerRef,
-  navigateSettings,
 }: SidebarNavProps) {
   return (
     <div className="sidebar-nav">
       <Button
         type="button"
+        variant="ghost"
+        size="md"
         className="nav-new"
         onClick={() => void newChat(null)}
       >
@@ -42,6 +39,8 @@ export function SidebarNav({
       <Button
         ref={searchTriggerRef}
         type="button"
+        variant="ghost"
+        size="md"
         className="nav-new"
         onClick={openSearch}
       >
@@ -49,26 +48,6 @@ export function SidebarNav({
           <IconSearch size={18} />
         </span>
         {tr("sidebar.search")}
-      </Button>
-      <Button
-        type="button"
-        className="nav-new"
-        onClick={() => navigateSettings("skills")}
-      >
-        <span className="nav-item__icon">
-          <IconSkills size={18} />
-        </span>
-        {tr("sidebar.skills")}
-      </Button>
-      <Button
-        type="button"
-        className="nav-new"
-        onClick={() => navigateSettings("market")}
-      >
-        <span className="nav-item__icon">
-          <IconPuzzle size={18} />
-        </span>
-        {tr("sidebar.plugins")}
       </Button>
     </div>
   );

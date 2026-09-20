@@ -96,6 +96,7 @@ export function SubagentRow({
   return (
     <Button
       type="button"
+      variant="ghost"
       className={`summary-panel__agent-row${className ? ` ${className}` : ""}`}
       onClick={onClick}
     >

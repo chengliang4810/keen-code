@@ -9,14 +9,11 @@ import { Button } from "@/components/ui/button";
 import {
   useEffect,
   useRef,
-  type CSSProperties,
   type ReactNode,
-  type Ref,
 } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import type { SlashItem } from "@/lib/slashCatalog";
-import { mergeRefs } from "@/lib/reactRefs";
 import {
   IconActivity,
   IconAttach,
@@ -150,8 +147,6 @@ export function uploadMatchesQuery(
 export function ComposerPlusPanel({
   open,
   locale,
-  style,
-  panelRef,
   entries,
   filterQuery,
   skillsLoading,
@@ -164,8 +159,6 @@ export function ComposerPlusPanel({
 }: {
   open: boolean;
   locale: Locale;
-  style?: CSSProperties;
-  panelRef?: Ref<HTMLDivElement | null>;
   /** Sole list of selectable items — same array the host uses for keyboard. */
   entries: ComposerPlusEntry[];
   /** Live filter string, used to select the filtered empty-state copy. */
@@ -180,8 +173,6 @@ export function ComposerPlusPanel({
 }) {
   const tr = createT(locale);
   const listRef = useRef<HTMLDivElement | null>(null);
-
-  const setRefs = mergeRefs(listRef, panelRef);
 
   const rows = buildComposerPlusRows(entries, {
     add: tr("composer.add"),
@@ -222,14 +213,9 @@ export function ComposerPlusPanel({
 
   return (
     <div
-      ref={setRefs}
+      ref={listRef}
       className="menu-panel composer-plus composer-plus--portal"
-      role="listbox"
-      aria-activedescendant={
-        entries[activeIndex] ? `plus-opt-${activeIndex}` : undefined
-      }
       data-filter-query={q}
-      style={style}
     >
       {skillsLoading && entries.length === 0 && (
         <div
@@ -262,8 +248,8 @@ export function ComposerPlusPanel({
               key={`upload-${navIndex}`}
               id={`plus-opt-${navIndex}`}
               type="button"
-              role="option"
-              aria-selected={active}
+              variant={active ? "soft" : "ghost"}
+              data-active={active || undefined}
               data-plus-idx={navIndex}
               className={
                 "composer-plus__item" + (active ? " is-active" : "")
@@ -297,8 +283,8 @@ export function ComposerPlusPanel({
             key={`${entry.id}#${navIndex}`}
             id={`plus-opt-${navIndex}`}
             type="button"
-            role="option"
-            aria-selected={active}
+            variant={active ? "soft" : "ghost"}
+            data-active={active || undefined}
             data-plus-idx={navIndex}
             className={
               "composer-plus__item" + (active ? " is-active" : "")

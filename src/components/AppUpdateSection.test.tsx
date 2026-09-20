@@ -26,14 +26,17 @@ describe("AppUpdateSection", () => {
       "utf8",
     );
 
-    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).toContain('from "@appica/ui-react/select"');
     expect(source).not.toMatch(/<select(?:\s|>)/);
     expect(source.match(/<SelectGroup>/g)?.length).toBe(1);
     expect(source.match(/<SelectItem\b/g)?.length).toBe(3);
     expect(source).toContain('t("settings.updateSourceAuto")');
     expect(source).toContain('t("settings.updateSourceGithub")');
     expect(source).toContain('t("settings.updateSourceChinaMirror")');
-    expect(source).toContain("if (isAppUpdateDownloadSource(value))");
+    expect(source).toContain(
+      'typeof value === "string" && isAppUpdateDownloadSource(value)',
+    );
+    expect(source).toMatch(/<Button[\s\S]*?size="md"/);
   });
 
   it("shows the current state after a successful check", () => {

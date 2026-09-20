@@ -391,6 +391,7 @@ export function ImageUi({
         ) : resolvedSrc ? (
           layout === "thumbnail" ? (
             <Button
+              variant="ghost"
               className="att-card__btn att-card__btn--image"
               aria-label={`${labels.viewImage}: ${alt}`}
               onClick={(e) => { e.stopPropagation(); openViewer(); }}

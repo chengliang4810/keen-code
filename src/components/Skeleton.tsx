@@ -1,7 +1,4 @@
-/**
- * 列表内容加载骨架 —— 形状贴合 .ext-item 卡片行（名称 + 描述两行）。
- * 用于替换"正在加载…"文字行：加载期间保持版面结构稳定。
- */
+import { Skeleton } from "@appica/ui-react/skeleton";
 
 export function SkeletonList({
   rows = 3,
@@ -15,9 +12,9 @@ export function SkeletonList({
     <ul className="ext-skeleton" role="status" aria-label={label}>
       {Array.from({ length: rows }, (_, index) => (
         <li key={index} className="ext-skeleton__item">
-          <span className="ext-skeleton__bar ext-skeleton__bar--name" />
-          <span className="ext-skeleton__bar ext-skeleton__bar--w90" />
-          <span className="ext-skeleton__bar ext-skeleton__bar--w55" />
+          <Skeleton className="ext-skeleton__bar ext-skeleton__bar--name" />
+          <Skeleton className="ext-skeleton__bar ext-skeleton__bar--w90" />
+          <Skeleton className="ext-skeleton__bar ext-skeleton__bar--w55" />
         </li>
       ))}
     </ul>

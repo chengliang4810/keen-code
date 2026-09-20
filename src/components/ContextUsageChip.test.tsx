@@ -1,4 +1,5 @@
 import { renderToString } from "react-dom/server";
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   ContextUsageChip,
@@ -61,5 +62,16 @@ describe("ContextUsageChip", () => {
     expect(formatTaskCacheHitRate(null)).toBe("—");
     expect(formatTaskCacheHitRate(-0.1)).toBe("—");
     expect(formatTaskCacheHitRate(1.01)).toBe("—");
+  });
+
+  it("悬浮看板继承 Appica 反色提示层前景色", () => {
+    const css = readFileSync(
+      new URL("../styles/app-conversation.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(/\.context-usage-tip\s*\{/);
+    expect(css).toMatch(/\.context-usage-board__value\s*\{[^}]*color:\s*inherit;/s);
+    expect(css).not.toMatch(/\.context-usage-board__(?:label|value)\s*\{[^}]*color:\s*var\(--text-/s);
   });
 });

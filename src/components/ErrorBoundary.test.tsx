@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createElement, isValidElement } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { Alert } from "@appica/ui-react/alert";
 
 describe("ErrorBoundary", () => {
   it("getDerivedStateFromError 把异常转为兜底状态", () => {
@@ -17,12 +18,7 @@ describe("ErrorBoundary", () => {
     const rendered = boundary.render();
     expect(isValidElement(rendered)).toBe(true);
     if (!isValidElement(rendered)) return;
-    expect(rendered.type).toBe("div");
-    // children 属性名本身含 "child" 子串，只校验文本节点。
-    const title = (
-      rendered.props as { children: { props: { children: unknown } }[] }
-    ).children[0].props.children as unknown[];
-    expect(title).toEqual(["会话时间线", "渲染失败，已阻止整窗崩溃。"]);
+    expect(rendered.type).toBe(Alert);
     const html = JSON.stringify(rendered);
     expect(html).toContain("会话时间线");
     expect(html).toContain("重试");

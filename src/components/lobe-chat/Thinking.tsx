@@ -180,6 +180,7 @@ export function Thinking({
       ) : null}
       <Button
         type="button"
+        variant="ghost"
         className={cn("lobe-chat-thinking__trigger", open && "is-open")}
         aria-expanded={open}
         onClick={toggle}

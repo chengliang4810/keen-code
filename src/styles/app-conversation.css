@@ -92,32 +92,10 @@
    Height / radius / icon metrics match .chrome-btn (28×28) so it sits
    evenly next to pane toggles in main__top-actions and rp-chrome__actions. */
 .open-loc {
-  --open-loc-h: 28px;
   position: relative;
   display: inline-flex;
   align-items: stretch;
-  height: var(--open-loc-h);
-  box-sizing: border-box;
-  border-radius: var(--radius-sm, 6px); /* same as .chrome-btn */
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-  font-size: calc(12.5px + var(--ui-font-delta));
-  font-weight: 500;
   flex-shrink: 0;
-  overflow: hidden;
-  box-shadow: none; /* avoid extra visual bulk vs flat chrome-btn */
-}
-
-.open-loc:hover,
-.open-loc.is-open {
-  border-color: var(--border-strong);
-  background: var(--bg-active);
-}
-
-.open-loc.is-disabled {
-  opacity: 0.45;
-  pointer-events: none;
 }
 
 .open-loc__main {
@@ -125,20 +103,8 @@
   align-items: center;
   gap: 6px; /* match chrome / chip internal gaps */
   padding: 0 8px 0 8px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-weight: 500;
   white-space: nowrap;
-  cursor: pointer;
   min-width: 0;
-  height: 100%;
-  box-sizing: border-box;
-}
-
-.open-loc__main:hover {
-  background: var(--icon-tile-bg);
 }
 
 .open-loc__app-ico {
@@ -148,7 +114,6 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-xs);
   overflow: hidden;
 }
 
@@ -157,12 +122,11 @@
   height: 16px;
   object-fit: contain;
   display: block;
-  border-radius: var(--radius-xs);
 }
 
 .open-loc__label {
   line-height: 1;
-  letter-spacing: -0.01em;
+  letter-spacing: 0;
 }
 
 .open-loc__caret {
@@ -170,18 +134,6 @@
   align-items: center;
   justify-content: center;
   width: 22px;
-  height: 100%;
-  padding: 0 6px 0 2px;
-  border: 0;
-  background: transparent;
-  color: var(--text-tertiary);
-  cursor: pointer;
-  box-sizing: border-box;
-}
-
-.open-loc__caret:hover {
-  color: var(--text-primary);
-  background: var(--icon-tile-bg);
 }
 
 .open-loc--compact {
@@ -196,13 +148,6 @@
 .open-loc--compact .open-loc__caret {
   width: 20px;
   padding: 0 4px 0 0;
-}
-
-.open-loc-menu {
-  z-index: 10050;
-  display: flex;
-  flex-direction: column;
-  gap: var(--menu-gap);
 }
 
 .main__top-actions {
@@ -461,28 +406,7 @@
 }
 
 .chat-find__btn {
-  appearance: none;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  padding: 0;
-}
-
-.chat-find__btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.chat-find__btn:disabled {
-  opacity: 0.35;
-  cursor: default;
+  flex-shrink: 0;
 }
 
 .chat-find__btn--close {
@@ -591,23 +515,6 @@
   gap: 2px;
 }
 
-.ask-user__icon-btn {
-  width: 30px;
-  height: 30px;
-  padding: 0;
-  border: 0;
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-}
-
-.ask-user__icon-btn:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.ask-user__icon-btn:disabled { opacity: 0.3; }
-
 .ask-user__page {
   min-width: 44px;
   text-align: center;
@@ -631,26 +538,8 @@
 .ask-user__opt {
   width: 100%;
   text-align: left;
-  border: 1px solid transparent;
-  background: transparent;
-  color: var(--text-primary);
-  border-radius: var(--radius-window);
-  padding: 9px 10px;
-  display: flex;
-  align-items: center;
+  justify-content: flex-start;
   gap: 10px;
-  transition:
-    background var(--motion-fast) var(--ease-out),
-    border-color var(--motion-fast) var(--ease-out);
-}
-
-.ask-user__opt:hover:not(:disabled) {
-  background: var(--bg-hover);
-}
-
-.ask-user__opt--active {
-  border-color: var(--border-subtle);
-  background: var(--bg-hover);
 }
 
 .ask-user__index {
@@ -691,15 +580,7 @@
 .ask-user__custom {
   justify-content: flex-start;
   gap: 10px;
-  min-height: 38px;
-  padding: 5px 10px;
-  border: 0;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: calc(13px + var(--ui-font-delta));
 }
-
-.ask-user__custom:hover:not(:disabled) { color: var(--text-primary); }
 
 .ask-user__free {
   display: flex;
@@ -749,134 +630,6 @@
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border-subtle));
   background: var(--danger-muted);
   box-sizing: border-box;
-}
-
-/* Stream stall banner (I06) — soft warning; keep waiting is primary */
-.stall-banner--soft {
-  border-color: color-mix(in srgb, var(--warning) 55%, transparent);
-  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elevated, var(--ink-on-paper)));
-}
-
-.stall-banner {
-  margin: 0 var(--space-5) var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--warning-muted);
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 12px;
-}
-
-/* Prefer warning palette even when combined with error-banner utility classes. */
-.stall-banner.error-banner {
-  background: var(--warning-muted);
-  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
-}
-
-.stall-banner__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-}
-
-.stall-banner__btn {
-  height: 28px;
-  font-size: calc(12px + var(--ui-font-delta));
-}
-
-/* Error banner — compact summary; full dump behind Details */
-.error-banner {
-  margin: 0 var(--space-5) var(--space-2);
-  padding: var(--space-3);
-  border-radius: var(--radius-md);
-  background: var(--danger-muted);
-  border: 1px solid var(--danger);
-  font-size: var(--text-sm);
-  line-height: 1.45;
-  -webkit-user-select: text;
-  user-select: text;
-}
-
-.error-banner__code {
-  font-family: var(--font-mono);
-  font-size: calc(11px + var(--ui-font-delta));
-  color: var(--danger);
-  margin-bottom: 4px;
-}
-
-.error-banner__summary {
-  color: var(--text-primary);
-  font-weight: 600;
-}
-
-.error-banner__cause {
-  margin-top: 4px;
-  color: var(--text-secondary);
-  font-size: calc(12.5px + var(--ui-font-delta));
-  line-height: 1.45;
-}
-
-.error-banner__actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.error-banner__primary {
-  height: 28px;
-  font-size: calc(12px + var(--ui-font-delta));
-}
-
-.error-banner__secondary {
-  height: 28px;
-  font-size: calc(12px + var(--ui-font-delta));
-}
-
-.error-banner__details-btn {
-  appearance: none;
-  border: none;
-  background: transparent;
-  padding: 0;
-  margin: 0;
-  font: inherit;
-  font-size: calc(12px + var(--ui-font-delta));
-  color: var(--danger);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-  opacity: 0.9;
-}
-
-.error-banner__details-btn:hover {
-  opacity: 1;
-}
-
-.error-banner__reconnect {
-  height: 28px;
-  font-size: calc(12px + var(--ui-font-delta));
-}
-
-.error-banner__detail {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  max-height: 160px;
-  overflow: auto;
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--bg-base) 70%, transparent);
-  border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent);
-  font-family: var(--font-mono);
-  font-size: calc(11px + var(--ui-font-delta));
-  line-height: 1.4;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--text-secondary);
 }
 
 /* Composer — floating over chat; messages scroll underneath */
@@ -1047,28 +800,9 @@
 }
 
 .composer-todo__step {
-  appearance: none;
-  display: inline-flex;
   align-self: center;
-  align-items: center;
-  justify-content: center;
   min-height: 38px;
-  padding: 0 17px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--bg-elevated) 92%, transparent);
-  box-shadow: none;
-  color: inherit;
-  font: inherit;
-  font-size: calc(14px + var(--ui-font-delta));
-  font-weight: 600;
   white-space: nowrap;
-  cursor: pointer;
-}
-
-.composer-todo__step:hover,
-.composer-todo__step:focus-visible {
-  border-color: color-mix(in srgb, var(--text-secondary) 45%, transparent);
 }
 
 .composer-todo__progress {
@@ -1148,49 +882,13 @@
 }
 
 .composer-goal__action {
-  appearance: none;
-  display: inline-flex;
-  width: 28px;
-  height: 28px;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: 0;
-  border-radius: 50%;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-}
-
-.composer-goal__action:hover,
-.composer-goal__action:focus-visible {
-  background: color-mix(in srgb, var(--text-secondary) 10%, transparent);
-  color: var(--text-primary);
+  flex-shrink: 0;
 }
 
 .composer-goal-chip,
 .composer-plan-chip {
-  appearance: none;
   pointer-events: auto;
-  display: inline-flex;
-  height: 30px;
-  align-items: center;
   gap: 6px;
-  padding: 0 9px 0 4px;
-  border: 0;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: calc(13px + var(--ui-font-delta));
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.composer-goal-chip:hover,
-.composer-goal-chip:focus-visible,
-.composer-plan-chip:hover,
-.composer-plan-chip:focus-visible {
-  background: color-mix(in srgb, var(--text-secondary) 16%, transparent);
 }
 
 .composer-goal-chip__icon,
@@ -1206,8 +904,6 @@
 .composer-goal-chip__icon--clear,
 .composer-plan-chip__icon--clear {
   display: none;
-  background: color-mix(in srgb, var(--text-primary) 64%, transparent);
-  color: var(--bg-elevated);
 }
 
 .composer-goal-chip:hover .composer-goal-chip__icon--target,
@@ -1222,30 +918,6 @@
 .composer-plan-chip--active:hover .composer-plan-chip__icon--clear,
 .composer-plan-chip--active:focus-visible .composer-plan-chip__icon--clear {
   display: inline-flex;
-}
-
-/* 计划模式开关：默认与 goal chip 同形；激活态用 info 令牌持续提示。 */
-.composer-plan-chip--active {
-  background: var(--info-muted);
-  color: var(--info);
-}
-
-.composer-plan-chip--active:hover,
-.composer-plan-chip--active:focus-visible {
-  background: color-mix(in srgb, var(--info) 24%, var(--info-muted));
-}
-
-.composer-plan-chip:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.composer-plan-chip:disabled:hover {
-  background: transparent;
-}
-
-.composer-plan-chip--active:disabled:hover {
-  background: var(--info-muted);
 }
 
 .composer-plan-chip:disabled:hover .composer-plan-chip__icon--plan,
@@ -1562,22 +1234,7 @@ button.composer__context-item {
 }
 
 .composer__queue-clear {
-  border: none;
-  background: transparent;
-  padding: 2px 6px;
-  border-radius: var(--radius-sm);
-  font-size: calc(12px + var(--ui-font-delta));
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.composer__queue-clear:hover {
-  background: var(--bg-hover);
-}
-
-.composer__queue-clear:disabled {
-  cursor: default;
-  opacity: 0.5;
+  margin-left: auto;
 }
 
 .composer__queue-hold {
@@ -1600,18 +1257,6 @@ button.composer__context-item {
 
 .composer__queue-hold-retry {
   flex: 0 0 auto;
-  border: none;
-  background: transparent;
-  padding: 2px 8px;
-  border-radius: var(--radius-sm);
-  font-size: calc(12px + var(--ui-font-delta));
-  font-weight: 500;
-  color: var(--accent);
-  cursor: pointer;
-}
-
-.composer__queue-hold-retry:hover {
-  background: var(--bg-hover);
 }
 
 .composer__queue-list {
@@ -1659,38 +1304,10 @@ button.composer__context-item {
 .composer__queue-remove,
 .composer__queue-more {
   flex: 0 0 auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
 }
 
 .composer__queue-steer {
   width: auto;
-  padding: 0 7px;
-  color: var(--accent);
-  font-size: calc(12px + var(--ui-font-delta));
-  font-weight: 500;
-}
-
-.composer__queue-steer:hover:not(:disabled),
-.composer__queue-remove:hover:not(:disabled),
-.composer__queue-more:hover:not(:disabled) {
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-}
-
-.composer__queue-steer:disabled,
-.composer__queue-remove:disabled,
-.composer__queue-more:disabled {
-  cursor: default;
-  opacity: 0.5;
 }
 
 .composer__queue-editor {
@@ -1769,12 +1386,7 @@ button.composer__context-item {
   align-items: center;
   min-width: 0;
   height: 100%;
-  border-radius: var(--radius-sm);
   overflow: hidden;
-  color: inherit;
-  background: transparent;
-  border: none;
-  cursor: pointer;
   box-sizing: border-box;
 }
 
@@ -1836,10 +1448,6 @@ button.composer__context-item {
   color: var(--text-primary);
 }
 
-/*
- * Remove control: solid dark disc at top-right, half outside the card.
- * Avoid --bg-active — near-transparent and “vanishes” on hover.
- */
 .attach-chip__x {
   --x-size: 16px;
   position: absolute;
@@ -1847,21 +1455,13 @@ button.composer__context-item {
   right: calc(var(--x-size) / -2);
   width: var(--x-size);
   height: var(--x-size);
-  border-radius: 50%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  background: color-mix(in srgb, var(--ink-black) 72%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ink-on-media) 28%, transparent);
-  color: var(--ink-on-media);
   opacity: 1;
-  transition:
-    opacity 0.12s var(--ease-out),
-    background 0.12s var(--ease-out),
-    transform 0.12s var(--ease-out);
+  transition: opacity var(--motion-fast) var(--ease-out);
   z-index: 2;
-  box-shadow: 0 1px 3px color-mix(in srgb, var(--ink-black) 35%, transparent);
 }
 
 .attach-chip:hover .attach-chip__x,
@@ -1871,13 +1471,6 @@ button.composer__context-item {
   opacity: 1;
 }
 
-.attach-chip__x:hover,
-.attach-chip__x:focus-visible {
-  background: color-mix(in srgb, var(--ink-black) 90%, transparent);
-  color: var(--ink-on-media);
-  transform: scale(1.06);
-}
-
 /* Message attachment cards */
 .att-card {
   --attach-h: 36px;
@@ -1885,11 +1478,6 @@ button.composer__context-item {
   position: relative;
   height: var(--attach-h);
   min-height: var(--attach-h);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
-  overflow: hidden;
-  box-shadow: 0 1px 0 color-mix(in srgb, var(--ink-black) 0.03%, transparent);
   box-sizing: border-box;
 }
 
@@ -1904,21 +1492,12 @@ button.composer__context-item {
   flex: 0 1 auto;
 }
 
-.att-card--dir {
-  border-color: color-mix(in srgb, var(--dir-accent-soft) 30%, transparent);
-  background: color-mix(in srgb, color-mix(in srgb, var(--dir-accent-soft) 8%, transparent) 100%, var(--bg-elevated));
-}
-
 .att-card__btn {
   display: flex;
   align-items: center;
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: transparent;
-  border: none;
-  color: inherit;
-  cursor: pointer;
   box-sizing: border-box;
 }
 
@@ -1934,49 +1513,6 @@ button.composer__context-item {
 .att-card__btn--image {
   padding: 0;
   justify-content: center;
-}
-
-.att-card__btn:hover {
-  background: var(--bg-hover);
-}
-
-.att-card__btn--image:hover {
-  background: transparent;
-  filter: brightness(0.96);
-}
-
-.att-card__thumb {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  background: var(--bg-hover);
-}
-
-.att-card__thumb--placeholder {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  height: 100%;
-  color: var(--text-tertiary);
-}
-
-.att-card__icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  flex-shrink: 0;
-}
-
-.att-card--dir .att-card__icon {
-  color: var(--dir-accent);
-  background: color-mix(in srgb, var(--dir-accent-soft) 12%, transparent);
 }
 
 .att-card__meta {
@@ -2179,12 +1715,7 @@ button.composer__context-item {
 }
 
 .md-body__video-card__btn {
-  font-size: calc(12px + var(--ui-font-delta));
-  color: var(--accent);
-  background: none;
-  border: none;
-  padding: 0;
-  cursor: pointer;
+  flex-shrink: 0;
 }
 
 /* Streamdown / markdown may wrap replaced code/link in p — keep block */
@@ -2206,30 +1737,8 @@ button.composer__context-item {
   /* Use the text baseline, not the leading SVG baseline, in prose. */
   align-items: baseline;
   max-width: 100%;
-  padding: 0;
-  color: var(--chat-link);
-  background: transparent;
-  border: 0;
   vertical-align: baseline;
   text-align: start;
-  cursor: pointer;
-}
-
-.file-path-link__main:hover {
-  color: var(--chat-link-hover);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-}
-
-.file-path-link__main:focus-visible {
-  outline: 2px solid var(--chat-link);
-  outline-offset: 2px;
-  border-radius: var(--radius-xs);
-}
-
-.file-path-link__main:disabled {
-  cursor: default;
-  opacity: 1;
 }
 
 .file-path-link__icon {
@@ -2435,9 +1944,14 @@ button.composer__context-item {
   order: 14;
 }
 
-.composer__row > .icon-btn--primary,
-.composer__row > .icon-btn--danger {
+.composer__row > .composer__submit {
   order: 15;
+  flex-shrink: 0;
+}
+
+.composer-plus-trigger,
+.composer__submit {
+  border-radius: var(--radius-full);
 }
 
 /* Flat chips (project etc.) — no capsule border, hover wash only */
@@ -2507,7 +2021,7 @@ button.composer__context-item {
   flex-shrink: 0;
 }
 
-.ui-tip.context-usage-tip {
+.context-usage-tip {
   min-width: 208px;
   padding: 8px 10px;
   overflow: visible;
@@ -2527,11 +2041,11 @@ button.composer__context-item {
 }
 
 .context-usage-board__label {
-  color: var(--text-secondary);
+  color: color-mix(in srgb, currentColor 72%, transparent);
 }
 
 .context-usage-board__value {
-  color: var(--text-primary);
+  color: inherit;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
@@ -2543,63 +2057,8 @@ button.composer__context-item {
   min-width: 8px;
 }
 
-.icon-btn {
-  box-sizing: border-box;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  margin: 0;
-  border: none;
-  border-radius: var(--radius-full);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-secondary);
-  background: var(--bg-hover);
-  flex-shrink: 0;
-  line-height: 0;
-  appearance: none;
-  -webkit-appearance: none;
-}
-
-.icon-btn:hover:not(:disabled) {
-  color: var(--text-primary);
-  background: var(--bg-active);
-}
-
-.icon-btn--plus {
-  background: var(--dsw-specific-selector);
-  color: var(--text-primary);
-  width: 28px;
-  height: 28px;
-}
-
-.icon-btn--plus.is-open {
-  background: var(--bg-active);
+.composer-plus-trigger.is-open {
   transform: rotate(45deg);
-}
-
-/* Fixed solid colors — never use transparent --bg-app (icons were disappearing) */
-.icon-btn--primary {
-  background: var(--dsw-alias-button-info-fill);
-  color: var(--ink-on-media);
-  width: 34px;
-  height: 34px;
-  transform: translateY(-2px);
-}
-
-.icon-btn--primary:hover:not(:disabled) {
-  background: var(--dsw-alias-button-info-hover);
-  color: var(--ink-on-media);
-}
-
-.icon-btn--primary:disabled {
-  opacity: 0.4;
-}
-
-.icon-btn--danger {
-  background: var(--danger-muted);
-  color: var(--danger);
 }
 
 /* Harness ui-input-trigger/MenuView：与输入卡片同宽，行高至少 40px，上限 320px。 */
@@ -2645,25 +2104,10 @@ button.composer__context-item {
   gap: 8px;
   width: 100%;
   min-height: 40px;
-  padding: 8px 10px;
-  border-radius: var(--menu-item-radius);
   text-align: left;
-  color: var(--text-primary);
-  font-size: calc(14px + var(--ui-font-delta));
-  line-height: calc(22px + var(--ui-font-delta));
-  font-weight: 400;
-  background: transparent;
-  border: none;
-  cursor: pointer;
   box-sizing: border-box;
   white-space: nowrap;
   overflow: hidden;
-}
-
-.composer-plus__item:hover:not(:disabled):not(.composer-plus__item--muted),
-.composer-plus__item.is-active:not(:disabled):not(.composer-plus__item--muted) {
-  background: var(--menu-hover);
-  color: var(--text-primary);
 }
 
 .composer-plus__item:hover:not(:disabled):not(.composer-plus__item--muted)
@@ -2674,8 +2118,6 @@ button.composer__context-item {
 }
 
 .composer-plus__item--muted {
-  cursor: default;
-  opacity: 0.6;
   pointer-events: none;
 }
 
@@ -2715,90 +2157,6 @@ button.composer__context-item {
   color: var(--text-tertiary);
 }
 
-.composer-plus__item:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-/* Buttons
- * Always pair `.btn` with a variant (`btn--solid` / `btn--ghost` /
- * `btn--primary` / `btn--danger`). Bare `.btn` is layout-only. */
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  height: 36px;
-  padding: 0 14px;
-  border-radius: var(--radius-full);
-  font-size: calc(14px + var(--ui-font-delta));
-  font-weight: 400;
-  border: none;
-  background: transparent;
-  color: var(--text-primary);
-  line-height: calc(22px + var(--ui-font-delta));
-  white-space: nowrap;
-}
-
-/* Harness 主按钮使用黑白反差色；信息操作才使用蓝色强调色。 */
-.btn--primary {
-  background: var(--primary);
-  color: var(--primary-fg);
-  border-color: transparent;
-}
-
-.btn--primary:hover:not(:disabled) {
-  background: var(--primary-hover);
-  color: var(--primary-fg);
-  filter: none;
-}
-
-.btn--primary:disabled {
-  opacity: 0.4;
-}
-
-/** Neutral solid CTA — inverted text/bg (settings / providers / modal OK). */
-.btn--solid {
-  background: var(--primary);
-  color: var(--primary-fg);
-  border: 1px solid transparent;
-}
-
-.btn--solid:hover:not(:disabled):not([aria-disabled="true"]) {
-  background: var(--primary-hover);
-  color: var(--primary-fg);
-}
-
-.btn--solid:disabled,
-.btn--solid[aria-disabled="true"] {
-  opacity: 0.4;
-}
-
-.btn--ghost {
-  border: 0.5px solid var(--border-strong);
-  color: var(--text-primary);
-  background: transparent;
-}
-
-.btn--ghost:hover:not(:disabled) {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.btn--ghost:disabled {
-  opacity: 0.4;
-}
-
-.btn--danger {
-  background: var(--danger-muted);
-  color: var(--danger);
-  border: 1px solid transparent;
-}
-
-.btn--danger:hover:not(:disabled) {
-  filter: brightness(1.05);
-}
-
 /* 标题与输入框在同一正常流中居中，长草稿不会与欢迎标题重叠。 */
 .composer-welcome {
   display: flex;
@@ -2821,25 +2179,7 @@ button.composer__context-item {
 
 /* 渲染异常兜底卡片：单个面板崩溃时就地提示重试/重载，阻止整窗白屏。 */
 .error-boundary-fallback {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
   margin: 12px;
-  padding: 16px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  background: var(--bg-elevated);
-  color: var(--text-primary);
-}
-.error-boundary-fallback__title {
-  margin: 0;
-  font-size: calc(14px + var(--ui-font-delta));
-  font-weight: 600;
-}
-.error-boundary-fallback__desc {
-  margin: 0;
-  font-size: calc(12px + var(--ui-font-delta));
-  color: var(--text-secondary);
 }
 .error-boundary-fallback__actions {
   display: flex;

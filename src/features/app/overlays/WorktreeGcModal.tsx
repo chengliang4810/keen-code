@@ -2,8 +2,8 @@ import type { Dispatch, SetStateAction } from "react";
 import * as api from "@/lib/api";
 import { GlassModal } from "@/components/GlassModal";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
+import { Checkbox } from "@appica/ui-react/checkbox";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import type { SetState, Translator } from "./types";
 
 export interface WorktreeGcModalProps {
@@ -50,7 +50,7 @@ export function WorktreeGcModal({
         reset();
       }}
       title={tr("composer.worktreeGcTitle")}
-      size="sm"
+      size="md"
       closeLabel={tr("common.close")}
       closeOnOverlay={!busy}
       showClose={!busy}
@@ -59,7 +59,7 @@ export function WorktreeGcModal({
         <>
           <Button
             type="button"
-            className="btn btn--ghost"
+            variant="ghost"
             disabled={busy}
             onClick={reset}
           >
@@ -67,7 +67,7 @@ export function WorktreeGcModal({
           </Button>
           <Button
             type="button"
-            className="btn btn--solid"
+            variant="primary"
             disabled={busy || previewBusy}
             onClick={() => void submit()}
           >
@@ -88,9 +88,9 @@ export function WorktreeGcModal({
             onCheckedChange={(checked) => setForce(checked === true)}
             aria-labelledby="worktree-gc-force-label"
           />
-          <Label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
+          <label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
             {tr("composer.worktreeGcForce")}
-          </Label>
+          </label>
         </div>
         <div className="wt-gc__preview-head">
           {tr("composer.worktreeGcPreview")}
@@ -124,9 +124,7 @@ export function WorktreeGcModal({
           </p>
         )}
         {error ? (
-          <p className="wt-gc__error" role="alert">
-            {error}
-          </p>
+          <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert>
         ) : null}
       </div>
     </GlassModal>

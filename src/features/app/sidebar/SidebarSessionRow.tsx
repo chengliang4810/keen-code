@@ -2,7 +2,8 @@ import type { MouseEvent as ReactMouseEvent } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
-import { Spinner } from "@/components/ui/spinner";
+import { Spinner } from "@appica/ui-react/spinner";
+import { Badge } from "@appica/ui-react/badge";
 import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 import {
   IconArchive,
@@ -59,6 +60,7 @@ export function SidebarSessionRow({
     : tr("session.pin");
 
   return (
+    // The row contains nested action buttons, so it cannot use Button without invalid nested controls.
     <div
       draggable
       onDragStart={(event) => startSidebarDrag(event, "session", session.id)}
@@ -79,7 +81,10 @@ export function SidebarSessionRow({
       onClick={() => void openSession(session, project)}
       onContextMenu={(event) => openSessionMenu(event, session)}
       onKeyDown={(event) => {
-        if (event.key === "Enter") void openSession(session, project);
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          void openSession(session, project);
+        }
       }}
     >
       <span className="tree-l3__title">
@@ -94,21 +99,21 @@ export function SidebarSessionRow({
         ) : null}
         <span className="tree-l3__name">{session.title || "Untitled"}</span>
         {needsInput ? (
-          <span className="tree-l3__input-badge">
+          <Badge size="xs" variant="warning">
             {tr("sidebar.needsUserInput")}
-          </span>
+          </Badge>
         ) : null}
       </span>
       {working ? (
         isPinnedSection ? (
-          <Spinner size={14} className="tree-l3__spinner" />
+          <Spinner currentColor className="tree-l3__spinner text-sm" />
         ) : (
           <Tip label={tr("sidebar.sessionWorking")}>
             <span
               className="tree-l3__status"
               aria-label={tr("sidebar.sessionWorking")}
             >
-              <Spinner size={14} className="tree-l3__spinner" />
+              <Spinner currentColor className="tree-l3__spinner text-sm" />
             </span>
           </Tip>
         )
@@ -141,7 +146,7 @@ export function SidebarSessionRow({
             <Tip label={pinLabel}>
               <Button
                 type="button"
-                className="tree-icon-btn"
+                variant="ghost" size="icon-md" className="tree-icon-btn"
                 onClick={(event) => {
                   stopPropagation(event);
                   void pinSession(session, !session.pinned);
@@ -157,7 +162,7 @@ export function SidebarSessionRow({
             <Tip label={archiveLabel}>
               <Button
                 type="button"
-                className="tree-icon-btn"
+                variant="ghost" size="icon-md" className="tree-icon-btn"
                 onClick={(event) => {
                   stopPropagation(event);
                   void archiveSession(session, !session.archived);
@@ -169,7 +174,7 @@ export function SidebarSessionRow({
             {variant === "history" ? (
               <Button
                 type="button"
-                className="tree-icon-btn"
+                variant="ghost" size="icon-md" className="tree-icon-btn"
                 onClick={(event) => openSessionMenu(event, session)}
               >
                 <IconMore size={13} />
@@ -178,7 +183,7 @@ export function SidebarSessionRow({
               <Tip label={tr("sidebar.menu")}>
                 <Button
                   type="button"
-                  className="tree-icon-btn"
+                  variant="ghost" size="icon-md" className="tree-icon-btn"
                   onClick={(event) => openSessionMenu(event, session)}
                 >
                   <IconMore size={13} />

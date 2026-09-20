@@ -1,6 +1,8 @@
 import { Button } from "@/components/ui/button";
+import { Progress } from "@appica/ui-react/progress";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { useMemo } from "react";
-import { Spinner } from "@/components/ui/spinner";
+import { Spinner } from "@appica/ui-react/spinner";
 import { createT, type Locale } from "@/i18n";
 import type { AppUpdateStatus } from "@/lib/api";
 import {
@@ -62,7 +64,7 @@ export function AppUpdateProgress({
   return (
     <div className="app-update-progress" role="status" aria-live="polite">
       <div className="app-update-progress__status">
-        {showSpinner ? <Spinner size={18} /> : null}
+        {showSpinner ? <Spinner currentColor className="text-lg" /> : null}
         <span>{message}</span>
       </div>
       {source ? (
@@ -73,19 +75,11 @@ export function AppUpdateProgress({
 
       {showDownloadProgress ? (
         <>
-          <div
+          <Progress
             className={`app-update-progress__track${percent === null ? " is-indeterminate" : ""}`}
-            role="progressbar"
+            value={percent}
             aria-label={t("settings.updateDownloadProgress")}
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent ?? undefined}
-          >
-            <div
-              className="app-update-progress__bar"
-              style={percent === null ? undefined : { width: `${percent}%` }}
-            />
-          </div>
+          />
           <div className="app-update-progress__detail">
             {total && percent !== null
               ? t("settings.updateProgressKnown", {
@@ -102,9 +96,7 @@ export function AppUpdateProgress({
       ) : null}
 
       {failure ? (
-        <div className="app-update-progress__error" role="alert">
-          {failure}
-        </div>
+        <Alert variant="error"><AlertDescription>{failure}</AlertDescription></Alert>
       ) : null}
 
       {state === "failed" || state === "ready" ? (
@@ -112,13 +104,13 @@ export function AppUpdateProgress({
           {state === "failed" ? (
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               onClick={() => void onRetry()}
             >
               {t("settings.updateRetry")}
             </Button>
           ) : (
-            <Button type="button" className="btn btn--solid" onClick={onInstall}>
+            <Button type="button" variant="primary" onClick={onInstall}>
               {t("settings.updateInstall")}
             </Button>
           )}

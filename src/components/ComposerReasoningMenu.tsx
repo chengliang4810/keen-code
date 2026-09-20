@@ -4,9 +4,8 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@appica/ui-react/dropdown-menu";
 import { EffortSlider } from "@/components/ui/effort-slider";
-import { Label } from "@/components/ui/label";
 import { Tip } from "@/components/ui/tooltip";
 import {
   effortDisplayLabel,
@@ -87,12 +86,13 @@ export function ComposerReasoningMenu({
   const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
 
   const trigger = (
-    <DropdownMenuTrigger asChild>
-      <Button
+    <DropdownMenuTrigger render={<Button
         type="button"
+        variant="ghost"
         className="cmm__trigger"
         aria-label={`${labels.reasoning}: ${currentLabel}`}
-      >
+        title={`${labels.reasoning}: ${currentLabel}`}
+      />}>
         <span className="cmm__icon" aria-hidden>
           <IconBrain size={14} />
         </span>
@@ -102,14 +102,13 @@ export function ComposerReasoningMenu({
         <span className="cmm__chev" aria-hidden>
           <IconChevronDown size={12} />
         </span>
-      </Button>
     </DropdownMenuTrigger>
   );
 
   return (
     <DropdownMenu open={open} onOpenChange={onOpenChange}>
       <div className={`cmm cmm--reasoning ${open ? "is-open" : ""}`}>
-        <Tip label={`${labels.reasoning}: ${currentLabel}`}>{trigger}</Tip>
+        {trigger}
       </div>
       <DropdownMenuContent
         className="cmm__dropdown-content w-80 p-4"
@@ -119,17 +118,19 @@ export function ComposerReasoningMenu({
         <div className="grid gap-4">
           {/* 上游 EffortSliderCard 布局：左上名称、中央大标题、右上快速按钮。 */}
           <div className="effort-panel__head">
-            <Label
+            <label
               htmlFor="composer-reasoning-effort"
               className="effort-panel__model"
             >
               {labels.reasoning}
-            </Label>
+            </label>
             <span className={effortTitleClass(isMax, ultra)}>{currentLabel}</span>
             <Tip label={labels.ultra}>
               <Button
                 type="button"
-                className={`effort-panel__fast ${ultra ? "is-on" : ""}`}
+                className="effort-panel__fast"
+                variant={ultra ? "primary" : "ghost"}
+                size="icon-md"
                 aria-pressed={ultra}
                 aria-label={labels.ultra}
                 onClick={() => onUltra(!ultra)}

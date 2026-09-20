@@ -3,7 +3,7 @@ import { Fragment } from "react";
 import { createT, type Locale } from "@/i18n";
 import { IconClock, IconDatabase } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Popover, PopoverContent, PopoverTrigger } from "@appica/ui-react/popover";
 import type { TurnLatencySummary } from "@/lib/turnLatency";
 import { formatMetricTokens, formatTurnLatency, formatRunDuration, formatTokensPerSecond } from "@/lib/turnMetricsPresentation";
 import "@/styles/turn-metrics.css";
@@ -31,16 +31,14 @@ export function TurnMetrics({ summary, locale, durationMs }: {
     <span className="lobe-turn-metrics" data-testid="turn-metrics">
       <Popover>
         <span className="ui-stat-root">
-          <PopoverTrigger asChild>
-            <Button variant="stat" aria-label={tr("chat.turnMetrics.usage")}>
+          <PopoverTrigger render={<Button variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.usage")} />}>
               <IconDatabase size={15} />
               <span className="ui-stat-label">{tr("chat.turnMetrics.usageValue", {
                 value: formatMetricTokens(total, locale, true) ?? "—",
               })}</span>
-            </Button>
           </PopoverTrigger>
         </span>
-        <PopoverContent side="top" aria-label={tr("chat.turnMetrics.usage")}>
+        <PopoverContent className="ui-stat-popover" side="top" arrow={false} aria-label={tr("chat.turnMetrics.usage")}>
           <div className="ui-stat-title">
             <span className="ui-stat-title-label"><IconDatabase size={14} />{tr("chat.turnMetrics.usage")}</span>
             <span>{tokenLabel(total)}</span>
@@ -56,14 +54,12 @@ export function TurnMetrics({ summary, locale, durationMs }: {
       </Popover>
       <Popover>
         <span className="ui-stat-root">
-          <PopoverTrigger asChild>
-            <Button variant="stat" aria-label={tr("chat.turnMetrics.time")}>
+          <PopoverTrigger render={<Button variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.time")} />}>
               <IconClock size={15} />
               <span className="ui-stat-label">{tr("chat.turnMetrics.timeValue", { value: runMs == null ? "—" : runLabel })}</span>
-            </Button>
           </PopoverTrigger>
         </span>
-        <PopoverContent side="top" aria-label={tr("chat.turnMetrics.time")}>
+        <PopoverContent className="ui-stat-popover" side="top" arrow={false} aria-label={tr("chat.turnMetrics.time")}>
           <div className="ui-stat-title">
             <span className="ui-stat-title-label"><IconClock size={14} />{tr("chat.turnMetrics.time")}</span>
           </div>

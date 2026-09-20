@@ -215,10 +215,10 @@ export function OfficeDocumentPreview({
           <pre className="office-preview__fallback">{textFallback}</pre>
         ) : null}
         <div className="office-preview__actions">
-          <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
+          <Button type="button" variant="primary" onClick={() => void openExternal()}>
             {tr("office.openExternal")}
           </Button>
-          <Button type="button" className="btn btn--ghost" onClick={() => void pathReveal(absolutePath)}>
+          <Button type="button" variant="ghost" onClick={() => void pathReveal(absolutePath)}>
             {tr("resources.revealFolder")}
           </Button>
         </div>
@@ -245,7 +245,7 @@ export function OfficeDocumentPreview({
             <div className="office-preview__bar-actions">
               <Button
                 type="button"
-                className="btn btn--ghost btn--sm"
+                variant="ghost" size="md"
                 onClick={() => void openExternal()}
               >
                 {tr("office.openExternal")}
@@ -270,7 +270,7 @@ export function OfficeDocumentPreview({
         <pre className="office-preview__fallback">{textFallback}</pre>
       ) : null}
       <div className="office-preview__actions">
-        <Button type="button" className="btn btn--solid" onClick={() => void openExternal()}>
+        <Button type="button" variant="primary" onClick={() => void openExternal()}>
           {tr("office.openExternal")}
         </Button>
       </div>

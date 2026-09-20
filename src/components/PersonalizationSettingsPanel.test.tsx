@@ -1,8 +1,19 @@
+import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 import { PersonalizationSettingsPanel } from "./PersonalizationSettingsPanel";
 
 describe("PersonalizationSettingsPanel", () => {
+  it("设置行的开关和按钮统一使用中号尺寸", () => {
+    const source = readFileSync(
+      new URL("./PersonalizationSettingsPanel.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toMatch(/<Switch[\s\S]*?size="md"/);
+    expect(source).toMatch(/variant="destructive" size="md"/);
+  });
+
   it("展示全局自定义指令编辑区，不显示保存按钮", () => {
     const html = renderToString(
       <PersonalizationSettingsPanel

@@ -47,6 +47,8 @@ export function HistorySessionList({
       <div className="tree-l1" style={{ marginTop: 8 }}>
         <Button
           type="button"
+          variant="ghost"
+          size="md"
           className="tree-l1__head"
           onClick={() => setHistoryOpen((value) => !value)}
           aria-expanded={historyOpen}

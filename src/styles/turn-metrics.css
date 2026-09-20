@@ -1,6 +1,6 @@
 /* Adapted from DeepSeek Harness d347e703, TurnUsagePanel.module.css.
  * Copyright (c) 2026 DeepSeek. MIT; see THIRD_PARTY_NOTICES.md.
- * Portal 定位与碰撞处理交由 shadcn/Radix，尺寸和视觉令牌复用参考源码。 */
+ * Portal 定位与碰撞处理交由 Appica UI，尺寸和视觉令牌复用参考源码。 */
 /* Icon-row Turn-usage pill (data icon + turn total) plus its click-open
    Turn-details dialog (menu surface: r12, elevation-prominent —
    ContextMeter's panel skin). */
@@ -17,25 +17,13 @@
   margin-left: -6px;
 }
 
-/* Same pill rules as the sibling `.action` icon buttons (28px hit height,
-   15px glyph, tertiary → secondary on hover with the interactive hover
-   background), widened to carry the turn-total label. */
 .ui-button--stat {
   display: inline-flex;
   align-items: center;
   gap: 4px;
   min-width: 0;
-  height: calc(28px + var(--dsh-content-font-delta, 0px));
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--radius-stat);
-  background: transparent;
-  color: var(--dsw-alias-label-tertiary);
-  font-size: var(--dsh-content-font-size-secondary, 13px);
   font-variant-numeric: tabular-nums;
-  line-height: calc(24px + var(--dsh-content-font-delta, 0px));
   white-space: nowrap;
-  cursor: pointer;
 }
 
 /* A narrow column trims the label to an ellipsis instead of overflowing the
@@ -52,12 +40,6 @@
   flex: none;
 }
 
-.ui-button--stat:hover,
-.ui-button--stat[aria-expanded='true'] {
-  background: var(--dsw-alias-interactive-bg-hover);
-  color: var(--dsw-alias-label-secondary);
-}
-
 /* Narrow viewport: the pills collapse to bare icons with the sibling
    `.action` geometry (28px circle, 6px padding, centered glyph); the
    label-padding rebate no longer applies, so the pair keeps the row's plain
@@ -66,7 +48,6 @@
   .ui-button--stat {
     justify-content: center;
     width: calc(28px + var(--dsh-content-font-delta, 0px));
-    padding: 6px;
   }
 
   .ui-button--stat .ui-stat-label {
@@ -78,7 +59,7 @@
   }
 }
 
-/* Portal 的定位和 12px 窗口边距由 Radix 管理，面板保持 Harness 层级与尺寸。 */
+/* Portal 定位和窗口边距由 Appica UI 管理，面板保持 Harness 层级与尺寸。 */
 .ui-stat-popover {
   z-index: 1100;
   box-sizing: border-box;
@@ -170,7 +151,7 @@
   gap: 8px;
 }
 .ui-stat-popover {
-  max-height: var(--radix-popover-content-available-height);
+  max-height: var(--available-height);
   overflow-y: auto;
 }
 .ui-stat-note {

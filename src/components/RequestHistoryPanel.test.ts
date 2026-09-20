@@ -60,7 +60,7 @@ describe("RequestHistoryPanel query projection", () => {
       "utf8",
     );
 
-    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).toContain('from "@appica/ui-react/select"');
     expect(source).not.toMatch(/<select(?:\s|>)/);
     expect(source.match(/<SelectGroup>/g)?.length).toBe(2);
     expect(source).toContain('aria-label={labels.model}');

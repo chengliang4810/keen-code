@@ -11,6 +11,12 @@ import type {
 import type { StreamStallState } from "@/hooks/useSessionTurn";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import { Button } from "@/components/ui/button";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@appica/ui-react/alert";
 import { ChatFindBar } from "@/components/ChatFindBar";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import {
@@ -129,56 +135,57 @@ export function MainNotices({
   return (
     <>
       {activeProject && isProjectPathMissing(activeProject.pathOk) && (
-        <div className="conn-bar">
-          <span style={{ opacity: 0.9, marginRight: 8 }}>
+        <Alert variant="warning" layout="inline" className="mx-5 mb-2">
+          <AlertDescription>
             {tr("project.pathMissingShort")}
-          </span>
-          <Button
-            type="button"
-            className="btn btn--primary"
-            style={{ height: 24, fontSize: "calc(11px + var(--ui-font-delta))" }}
-            onClick={() => void relocateProject(activeProject)}
-          >
-            {tr("project.relocateToSend")}
-          </Button>
-        </div>
+          </AlertDescription>
+          <AlertAction>
+            <Button
+              type="button"
+              variant="primary"
+              size="md"
+              onClick={() => void relocateProject(activeProject)}
+            >
+              {tr("project.relocateToSend")}
+            </Button>
+          </AlertAction>
+        </Alert>
       )}
 
       {emptyExistingSession && (
-        <div className="conn-bar" role="status">
-          <span style={{ opacity: 0.85 }}>{tr("session.empty")}</span>
-        </div>
+        <Alert className="mx-5 mb-2">
+          <AlertDescription>{tr("session.empty")}</AlertDescription>
+        </Alert>
       )}
 
       {streamStall && stallTier && stallMessage ? (
-        <div
-          className={
-            `stall-banner error-banner${
-              stallTier === "maybe_done" || stallTier === "post_output"
-                ? " stall-banner--soft"
-                : ""
-            }`
+        <Alert
+          className="mx-5 mb-2"
+          variant={
+            stallTier === "maybe_done" || stallTier === "post_output"
+              ? "warning"
+              : "error"
           }
-          role="status"
         >
-          <div className="error-banner__code">STREAM_STALL</div>
-          <div className="error-banner__summary">{stallMessage}</div>
-          <div className="error-banner__cause">
+          <AlertTitle>STREAM_STALL: {stallMessage}</AlertTitle>
+          <AlertDescription>
             {tr("error.deck.stall.cause", {
               seconds: String(streamStall.stallSeconds),
             })}
-          </div>
-          <div className="stall-banner__actions error-banner__actions">
+          </AlertDescription>
+          <AlertAction>
             <Button
               type="button"
-              className="btn btn--primary stall-banner__btn"
+              variant="ghost"
+              size="md"
               onClick={() => setStreamStall(null)}
             >
               {tr("agent.streamStallKeepWaiting")}
             </Button>
             <Button
               type="button"
-              className="btn btn--ghost stall-banner__btn"
+              variant="ghost"
+              size="md"
               onClick={() => {
                 setStreamStall(null);
                 void stop();
@@ -186,8 +193,8 @@ export function MainNotices({
             >
               {tr("agent.streamStallEndTurn")}
             </Button>
-          </div>
-        </div>
+          </AlertAction>
+        </Alert>
       ) : null}
 
       {showChatFind && (
@@ -216,19 +223,20 @@ export function MainNotices({
       )}
 
       {errorBanner && !hasChatTurnError && (
-        <div className="error-banner" role="alert">
-          {errorBanner.code ? (
-            <div className="error-banner__code">{errorBanner.code}</div>
-          ) : null}
-          <div className="error-banner__summary">{errorBanner.summary}</div>
+        <Alert variant="error" className="mx-5 mb-2">
+          <AlertTitle>
+            {errorBanner.code ? `${errorBanner.code}: ` : ""}
+            {errorBanner.summary}
+          </AlertTitle>
           {errorBanner.cause ? (
-            <div className="error-banner__cause">{errorBanner.cause}</div>
+            <AlertDescription>{errorBanner.cause}</AlertDescription>
           ) : null}
-          <div className="error-banner__actions">
+          <AlertAction>
             {errorBanner.primary ? (
               <Button
                 type="button"
-                className="btn btn--primary error-banner__primary"
+                variant="primary"
+                size="md"
                 disabled={
                   connecting && errorBanner.primary.id === "reconnect"
                 }
@@ -240,7 +248,8 @@ export function MainNotices({
             {errorBanner.secondary ? (
               <Button
                 type="button"
-                className="btn btn--ghost error-banner__secondary"
+                variant="ghost"
+                size="md"
                 disabled={
                   connecting && errorBanner.secondary.id === "reconnect"
                 }
@@ -253,7 +262,8 @@ export function MainNotices({
               (errorBanner.reconnectHint || session.state === "disconnected") ? (
               <Button
                 type="button"
-                className="btn btn--ghost error-banner__reconnect"
+                variant="ghost"
+                size="md"
                 disabled={connecting}
                 onClick={() => {
                   setLocalError(null);
@@ -269,7 +279,8 @@ export function MainNotices({
             {errorBanner.detail ? (
               <Button
                 type="button"
-                className="error-banner__details-btn"
+                variant="ghost"
+                size="md"
                 aria-expanded={errorDetailOpen}
                 onClick={() => setErrorDetailOpen((value) => !value)}
               >
@@ -278,11 +289,15 @@ export function MainNotices({
                   : tr("error.details")}
               </Button>
             ) : null}
-          </div>
+          </AlertAction>
           {errorBanner.detail && errorDetailOpen ? (
-            <pre className="error-banner__detail">{errorBanner.detail}</pre>
+            <AlertDescription>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono">
+                {errorBanner.detail}
+              </pre>
+            </AlertDescription>
           ) : null}
-        </div>
+        </Alert>
       )}
     </>
   );

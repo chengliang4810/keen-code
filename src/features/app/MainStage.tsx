@@ -1,9 +1,11 @@
+import { useToastManager } from "@appica/ui-react/toast";
 import type {
   CSSProperties,
   Dispatch,
   RefObject,
   SetStateAction,
 } from "react";
+import { useEffect } from "react";
 import type { MessageKey, Vars } from "@/i18n";
 import type { LayoutPrefs } from "@/lib/layout";
 import type { AskUserPanelProps } from "./main/AskUserPanel";
@@ -79,6 +81,7 @@ export function MainStage({
   askUser,
   composer,
 }: MainStageProps) {
+  const toastManager = useToastManager();
   const {
     layout,
     setLayout,
@@ -91,6 +94,9 @@ export function MainStage({
   const welcomeSession = composer.context.welcomeSession;
   const conversationWidthRef = useConversationWidth();
   const summaryOpen = conversation.summaryOpen;
+  useEffect(() => {
+    if (toast) toastManager.add({ title: toast, timeout: 2000 });
+  }, [toast, toastManager]);
   return (
     <main
       ref={conversationWidthRef}
@@ -100,8 +106,6 @@ export function MainStage({
         (layout.asideCollapsed ? " main--aside-hidden" : "")
       }
     >
-      {toast ? <div className="app-toast" role="status">{toast}</div> : null}
-
       <MainHeader {...header} layout={layout} setLayout={setLayout} />
       <MainNotices {...notices} />
 

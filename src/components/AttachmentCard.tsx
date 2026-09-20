@@ -1,4 +1,6 @@
 import { Button } from "@/components/ui/button";
+import { Card } from "@appica/ui-react/card";
+import { Thumbnail } from "@appica/ui-react/thumbnail";
 /**
  * File / folder card for chat history and composer.
  * Images: square thumb, click → lightbox, context menu includes copy image.
@@ -223,6 +225,7 @@ export function AttachmentCard({
         >
           <Button
             type="button"
+            variant="ghost"
             className="attach-chip__main"
             onClick={onPrimaryClick}
           >
@@ -251,6 +254,8 @@ export function AttachmentCard({
             <Tip label={labels.remove}>
               <Button
                 type="button"
+                variant="ghost"
+                size="icon-md"
                 className="attach-chip__x"
                 aria-label={labels.remove}
                 onClick={() => onRemove(attachment)}
@@ -261,6 +266,8 @@ export function AttachmentCard({
           ) : onRemove ? (
             <Button
               type="button"
+              variant="ghost"
+              size="icon-md"
               className="attach-chip__x"
               aria-label={labels.remove}
               onClick={() => onRemove(attachment)}
@@ -282,8 +289,10 @@ export function AttachmentCard({
 
   return (
     <Tip label={attachment.path}>
-    <div
-      ref={rootRef}
+    <Card
+      inset={false}
+      contentProps={{ className: "p-0" }}
+      render={<div ref={rootRef} />}
       className={
         "att-card" +
         (attachment.isDir ? " att-card--dir" : "") +
@@ -297,32 +306,33 @@ export function AttachmentCard({
     >
       <Button
         type="button"
+        variant="ghost"
+        size="md"
         className={"att-card__btn" + (isImg ? " att-card__btn--image" : "")}
         onClick={onPrimaryClick}
       >
         {isImg ? (
           thumbSrc ? (
-            <img
-              className="att-card__thumb"
+            <Thumbnail
+              size={36}
               src={thumbSrc}
               alt={attachment.name}
-              draggable={false}
-              onError={() => void recoverThumbnail()}
+              onLoadingStatusChange={(status) => { if (status === "error") void recoverThumbnail(); }}
             />
           ) : (
-            <span className="att-card__thumb att-card__thumb--placeholder">
+            <Thumbnail size={36} variant="icon-soft">
               <IconPaperclip size={18} />
-            </span>
+            </Thumbnail>
           )
         ) : (
           <>
-            <span className="att-card__icon" aria-hidden>
+            <Thumbnail size={20} variant={attachment.isDir ? "icon-primary" : "icon-soft"} aria-hidden>
               {attachment.isDir ? (
                 <IconFolder size={14} />
               ) : (
                 <IconFileText size={14} />
               )}
-            </span>
+            </Thumbnail>
             <span className="att-card__meta">
               <span className="att-card__name">
                 {attachment.name}
@@ -338,7 +348,7 @@ export function AttachmentCard({
         onClose={() => setMenu(null)}
         items={menuItems}
       />
-    </div>
+    </Card>
     </Tip>
   );
 }

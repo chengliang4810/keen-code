@@ -1,18 +1,17 @@
-import { Input } from "@/components/ui/input";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
 /**
  * 当前 Session 的提示词历史选择器。
  * Newest-first list + optional fuzzy filter; Enter/click selects into composer.
  */
 
-import { useEffect, useRef, type CSSProperties, type Ref } from "react";
+import { useEffect, useRef } from "react";
 import {
   promptHistoryListPreview,
   type PromptHistoryEntry,
 } from "@/lib/composerPromptHistory";
 import { previewStoredAsSlash } from "@/lib/draftDoc";
 import { IconClock } from "@/components/icons";
-import { mergeRefs } from "@/lib/reactRefs";
 
 export type PromptHistoryPanelLabels = {
   title: string;
@@ -34,8 +33,6 @@ export type PromptHistoryPanelProps = {
   onActiveIndexChange: (i: number) => void;
   onSelect: (entry: PromptHistoryEntry) => void;
   onClose: () => void;
-  style?: CSSProperties;
-  panelRef?: Ref<HTMLDivElement | null>;
 };
 
 export function PromptHistoryPanel({
@@ -49,13 +46,9 @@ export function PromptHistoryPanel({
   onActiveIndexChange,
   onSelect,
   onClose,
-  style,
-  panelRef,
 }: PromptHistoryPanelProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const filterRef = useRef<HTMLInputElement | null>(null);
-
-  const setRefs = mergeRefs(listRef, panelRef);
 
   useEffect(() => {
     if (!open || !focusFilter) return;
@@ -81,10 +74,8 @@ export function PromptHistoryPanel({
   return (
     <div
       className="menu-panel prompt-history"
-      role="listbox"
       aria-label={labels.aria}
-      style={style}
-      ref={setRefs}
+      ref={listRef}
       data-testid="prompt-history-panel"
     >
       <div className="prompt-history__head">
@@ -147,8 +138,8 @@ export function PromptHistoryPanel({
               <Button
                 key={`${entry.historyIndex}:${i}`}
                 type="button"
-                role="option"
-                aria-selected={active}
+                variant={active ? "soft" : "ghost"}
+                data-active={active || undefined}
                 data-ph-idx={i}
                 className={
                   "prompt-history__item" + (active ? " is-active" : "")

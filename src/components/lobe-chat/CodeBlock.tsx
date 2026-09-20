@@ -1,10 +1,12 @@
+import { CopyButton } from "@appica/ui-react/copy-button";
 import { Button } from "@/components/ui/button";
+import { Toggle } from "@appica/ui-react/toggle";
 /**
  * Path / code block — soft chrome with a label, wrapping, and copy action.
  */
 
 import { useMemo, useState, type ReactNode } from "react";
-import { IconCheck, IconCode, IconCopy } from "@/components/icons";
+import { IconCode } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { highlightChatCode } from "@/lib/chatCodeHighlight";
 import { cn } from "@/lib/utils";
@@ -39,23 +41,12 @@ export function CodeBlock({
   highlight?: boolean;
 }) {
   const [wrap, setWrap] = useState(false);
-  const [copied, setCopied] = useState(false);
   const lang = (language || "text").replace(/^language-/, "") || "text";
   const text = extractText(children).replace(/^\n+|\n+$/g, "");
   const highlightedHtml = useMemo(
     () => (highlight ? highlightChatCode(text, lang) : null),
     [highlight, lang, text],
   );
-
-  const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    } catch {
-      /* ignore */
-    }
-  };
 
   return (
     <div className="chat-code">
@@ -66,28 +57,20 @@ export function CodeBlock({
         </span>
         <div className="chat-code__bar-actions">
           <Tip label={wrap ? unwrapLabel : wrapLabel}>
-            <Button
-              type="button"
-              className={cn("chat-code__btn", wrap && "is-on")}
+            <Toggle
               aria-label={wrap ? unwrapLabel : wrapLabel}
-              aria-pressed={wrap}
-              onClick={() => setWrap((v) => !v)}
-            >
-              <span className="chat-code__wrap-icon" aria-hidden>
-                ↵
-              </span>
-            </Button>
+              pressed={wrap}
+              onPressedChange={setWrap}
+              render={
+                <Button variant="ghost" size="icon-md">
+                  <span className="chat-code__wrap-icon" aria-hidden>
+                    ↵
+                  </span>
+                </Button>
+              }
+            />
           </Tip>
-          <Tip label={copied ? "OK" : copyLabel}>
-            <Button
-              type="button"
-              className={cn("chat-code__btn", copied && "is-copied")}
-              aria-label={copyLabel}
-              onClick={() => void onCopy()}
-            >
-              {copied ? <IconCheck size={14} /> : <IconCopy size={14} />}
-            </Button>
-          </Tip>
+          <CopyButton value={text} label={copyLabel} copiedLabel="OK" timeout={1200} />
         </div>
       </div>
       <pre className={cn("chat-code__pre", wrap && "is-wrap")}>

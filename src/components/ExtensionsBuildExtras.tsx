@@ -1,7 +1,9 @@
+import { Card } from "@appica/ui-react/card";
 import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
+import { Alert, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
 import { Tip } from "@/components/ui/tooltip";
 /** 设置 → 扩展：浏览和管理 KeenCode 本地插件市场。 */
 
@@ -304,7 +306,7 @@ export function ExtensionsBuildExtras({
           <PluginCompatibilitySettings locale={locale} />
           <Button
             type="button"
-            className="btn btn--ghost ext-bulk-btn"
+            variant="ghost" className="ext-bulk-btn"
             disabled={loading || busy !== null}
             onClick={() => void refreshCatalog()}
           >
@@ -318,7 +320,7 @@ export function ExtensionsBuildExtras({
           <Tip label={tr("ext.market.sourcesTitle")}>
             <Button
               type="button"
-              className="icon-btn"
+              variant="ghost" size="icon-md"
               aria-label={tr("ext.market.sourcesTitle")}
               onClick={() => setSourcesOpen(true)}
             >
@@ -328,7 +330,7 @@ export function ExtensionsBuildExtras({
           <Tip label={tr("ext.market.addLabel")}>
             <Button
               type="button"
-              className="icon-btn"
+              variant="ghost" size="icon-md"
               aria-label={tr("ext.market.addLabel")}
               onClick={() => setAddSourceOpen(true)}
             >
@@ -339,13 +341,13 @@ export function ExtensionsBuildExtras({
       </h2>
 
       {error ? (
-        <div className="ext-alert ext-alert--error" role="alert">
-          <div className="ext-alert__title">{tr("ext.market.error")}</div>
-          <p className="ext-alert__body">{error}</p>
-        </div>
+        <Alert variant="error">
+          <AlertTitle>{tr("ext.market.error")}</AlertTitle>
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       ) : null}
 
-      <div className="settings-card ext-card ext-market-catalog">
+      <Card className="ext-card ext-market-catalog">
         <div className="ext-market-browse">
           <div
             className="ext-plugin-filters"
@@ -353,6 +355,7 @@ export function ExtensionsBuildExtras({
           >
             <Button
               type="button"
+              variant={marketFilter === "__all__" ? "soft" : "ghost"}
               aria-pressed={marketFilter === "__all__"}
               className={
                 "ext-plugin-filter" +
@@ -366,6 +369,7 @@ export function ExtensionsBuildExtras({
               <Button
                 key={source.name}
                 type="button"
+                variant={marketFilter === source.name ? "soft" : "ghost"}
                 aria-pressed={marketFilter === source.name}
                 className={
                   "ext-plugin-filter" +
@@ -377,9 +381,9 @@ export function ExtensionsBuildExtras({
               </Button>
             ))}
           </div>
-          <Label className="sr-only" htmlFor="ext-market-search">
+          <label className="sr-only" htmlFor="ext-market-search">
             {tr("ext.market.searchPlaceholder")}
-          </Label>
+          </label>
           <Input
             id="ext-market-search"
             type="search"
@@ -410,11 +414,11 @@ export function ExtensionsBuildExtras({
                   <div className="ext-market-plugin__content">
                     <div className="ext-item__head">
                       <span className="ext-item__name">{plugin.name}</span>
-                      <span className="ext-badge ext-badge--plugin">
+                      <Badge size="xs" variant="secondary">
                         {plugin.marketplace}
-                      </span>
+                      </Badge>
                       {plugin.installed ? (
-                        <span className="ext-badge">{tr("ext.market.installed")}</span>
+                        <Badge size="xs" variant="success">{tr("ext.market.installed")}</Badge>
                       ) : null}
                     </div>
                     {plugin.description ? (
@@ -432,7 +436,7 @@ export function ExtensionsBuildExtras({
                   <div className="ext-item__actions">
                     <Button
                       type="button"
-                      className="btn btn--solid btn--sm"
+                      variant="primary" size="md"
                       disabled={busy !== null || (plugin.installed && !onManagePlugins)}
                       onClick={() => plugin.installed ? onManagePlugins?.() : setInstallTarget(plugin)}
                     >
@@ -456,7 +460,7 @@ export function ExtensionsBuildExtras({
           >
             <Button
               type="button"
-              className="btn btn--ghost btn--sm"
+              variant="ghost" size="md"
               disabled={currentPage === 0}
               onClick={() => setPageIndex((page) => Math.max(0, page - 1))}
             >
@@ -470,7 +474,7 @@ export function ExtensionsBuildExtras({
             </span>
             <Button
               type="button"
-              className="btn btn--ghost btn--sm"
+              variant="ghost" size="md"
               disabled={currentPage >= pageCount - 1}
               onClick={() =>
                 setPageIndex((page) => Math.min(pageCount - 1, page + 1))
@@ -481,7 +485,7 @@ export function ExtensionsBuildExtras({
           </nav>
         ) : null}
 
-      </div>
+      </Card>
 
       <GlassModal
         open={sourcesOpen}
@@ -494,7 +498,7 @@ export function ExtensionsBuildExtras({
         <div className="ext-folder-actions">
           <Button
             type="button"
-            className="btn btn--ghost btn--sm"
+            variant="ghost" size="md"
             disabled={loading || busy !== null}
             onClick={() => void refreshSources(null)}
           >
@@ -521,7 +525,7 @@ export function ExtensionsBuildExtras({
                 <div className="ext-item__actions">
                   <Button
                     type="button"
-                    className="btn btn--ghost btn--sm"
+                    variant="ghost" size="md"
                     disabled={busy !== null}
                     onClick={() => void refreshSources(source.name)}
                   >
@@ -534,7 +538,7 @@ export function ExtensionsBuildExtras({
                   </Button>
                   <Button
                     type="button"
-                    className="btn btn--ghost btn--sm ext-item__danger"
+                    variant="destructive" size="md"
                     disabled={busy !== null}
                     onClick={() => setRemoveSource(source)}
                   >
@@ -554,14 +558,14 @@ export function ExtensionsBuildExtras({
           if (busy === null) setAddSourceOpen(false);
         }}
         title={tr("ext.market.addLabel")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         wrapBody
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={busy !== null}
               onClick={() => setAddSourceOpen(false)}
             >
@@ -569,7 +573,7 @@ export function ExtensionsBuildExtras({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               disabled={busy !== null || !addSource.trim()}
               onClick={() => void addMarketplace()}
             >
@@ -579,12 +583,12 @@ export function ExtensionsBuildExtras({
         }
       >
         <div className="ext-plugin-install">
-          <Label
+          <label
             className="ext-plugin-install__label"
             htmlFor="ext-market-source"
           >
             {tr("ext.market.addLabel")}
-          </Label>
+          </label>
           <Input
             id="ext-market-source"
             type="text"
@@ -611,13 +615,13 @@ export function ExtensionsBuildExtras({
           if (busy === null) setRemoveSource(null);
         }}
         title={tr("ext.market.removeTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={busy !== null}
               onClick={() => setRemoveSource(null)}
             >
@@ -625,7 +629,7 @@ export function ExtensionsBuildExtras({
             </Button>
             <Button
               type="button"
-              className="btn btn--danger"
+              variant="destructive"
               disabled={busy !== null}
               onClick={() => void confirmRemoveSource()}
             >
@@ -645,13 +649,13 @@ export function ExtensionsBuildExtras({
           if (busy === null) setInstallTarget(null);
         }}
         title={tr("ext.market.installTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={busy !== null}
               onClick={() => setInstallTarget(null)}
             >
@@ -659,7 +663,7 @@ export function ExtensionsBuildExtras({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               disabled={busy !== null}
               onClick={() => void confirmInstall()}
             >

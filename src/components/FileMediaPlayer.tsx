@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 /**
  * Local media preview via Plyr + Tauri asset:// URL.
  * Creates the media element imperatively so Plyr does not fight React DOM.
@@ -192,24 +193,18 @@ export function FileMediaPlayer({
     >
       <div ref={hostRef} className="file-media__host" />
       {error && (
-        <div className="file-media__error" role="alert">
-          <p>{loadError}</p>
+        <Alert variant="error" layout="inline">
+          <AlertDescription>{loadError}</AlertDescription>
           {absolutePath && (
-            <Button
-              type="button"
-              className="btn btn--primary file-media__open-ext"
-              onClick={() => void openExternal()}
-            >
-              {openExternalLabel}
-            </Button>
+            <AlertAction><Button type="button" variant="primary" onClick={() => void openExternal()}>{openExternalLabel}</Button></AlertAction>
           )}
-        </div>
+        </Alert>
       )}
       {!error && absolutePath && kind === "video" && (
         <div className="file-media__toolbar">
           <Button
             type="button"
-            className="btn btn--ghost file-media__open-ext"
+            variant="ghost" className="file-media__open-ext"
             onClick={() => void openExternal()}
           >
             {openExternalLabel}

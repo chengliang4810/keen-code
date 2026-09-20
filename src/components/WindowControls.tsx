@@ -74,6 +74,8 @@ export function WindowControls({ visible, labels }: Props) {
       <Tip label={labels.minimize}>
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="window-controls__btn"
           aria-label={labels.minimize}
           onClick={(e) => {
@@ -87,6 +89,8 @@ export function WindowControls({ visible, labels }: Props) {
       <Tip label={maximized ? labels.restore : labels.maximize}>
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="window-controls__btn"
           aria-label={maximized ? labels.restore : labels.maximize}
           onClick={(e) => {
@@ -100,6 +104,8 @@ export function WindowControls({ visible, labels }: Props) {
       <Tip label={labels.close}>
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="window-controls__btn window-controls__btn--close"
           aria-label={labels.close}
           onClick={(e) => {

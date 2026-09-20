@@ -32,6 +32,7 @@ export function TurnWorkGroup({
     >
       <Button
         type="button"
+        variant="ghost"
         className="lobe-turn-work__trigger"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}

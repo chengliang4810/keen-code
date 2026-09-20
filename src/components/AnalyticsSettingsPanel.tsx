@@ -1,3 +1,4 @@
+import { Card } from "@appica/ui-react/card";
 import { useEffect, useMemo, useState } from "react";
 import {
   usageStatsGet,
@@ -154,7 +155,7 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
         <div className="analytics-kpi"><span>{labels.totalRequests}</span><strong>{stats.totalRequests.toLocaleString()}</strong></div>
         <div className="analytics-kpi"><span>{labels.totalTokens}</span><strong>{formatTokenCount(stats.totalTokens)}</strong></div>
       </div>
-      <section className="analytics-chart-card">
+      <Card render={<section />} className="analytics-chart">
         <div className="analytics-chart-heading">
           <h3>{labels.activityHeatmap}</h3>
           <div className="analytics-heat-legend"><span>{labels.less}</span>{[0, 1, 2, 3, 4].map((level) => <i key={level} data-level={level} />)}<span>{labels.more}</span></div>
@@ -172,8 +173,8 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
             );
           })}
         </div>
-      </section>
-      <section className="analytics-chart-card">
+      </Card>
+      <Card render={<section />} className="analytics-chart">
         <h3>{labels.tokenTrend}</h3>
         <div className="analytics-token-trend" role="img" aria-label={labels.tokenTrend}>
           <div className="analytics-trend-bars">
@@ -200,8 +201,8 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
         <div className="analytics-model-legend">
           {usageView.models.map((model, index) => <span key={model.model}><i style={{ background: MODEL_COLORS[index % MODEL_COLORS.length] }} />{model.model}</span>)}
         </div>
-      </section>
-      <section className="analytics-chart-card">
+      </Card>
+      <Card render={<section />} className="analytics-chart">
         <h3>{labels.modelUsage}</h3>
         <div className="analytics-model-usage">
           <div className="analytics-donut" aria-label={labels.modelUsage}>
@@ -226,7 +227,7 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
             ))}
           </div>
         </div>
-      </section>
+      </Card>
     </div>
   );
 }

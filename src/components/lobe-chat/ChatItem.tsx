@@ -4,6 +4,7 @@
 
 import type { ReactNode } from "react";
 import { cn } from "@/lib/utils";
+import { Avatar, AvatarBadge, AvatarFallback, AvatarImage } from "@appica/ui-react/avatar";
 
 export function ChatItem({
   id,
@@ -58,14 +59,11 @@ export function ChatItem({
       {(showAvatar || showTitle || timeLabel) && (
         <div className="lobe-chat-item__header">
           {showAvatar ? (
-            <div className="lobe-chat-item__avatar" aria-hidden>
-              {avatar?.avatar ? (
-                <img src={avatar.avatar} alt="" />
-              ) : (
-                initial
-              )}
-              {loading ? <span className="lobe-chat-item__avatar-loading" /> : null}
-            </div>
+            <Avatar size="md" aria-hidden>
+              {avatar?.avatar ? <AvatarImage src={avatar.avatar} alt="" /> : null}
+              <AvatarFallback>{initial}</AvatarFallback>
+              {loading ? <AvatarBadge animate /> : null}
+            </Avatar>
           ) : null}
           {showTitle && title ? (
             <span className="lobe-chat-item__title">{title}</span>

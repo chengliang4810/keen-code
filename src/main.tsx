@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { Toaster, ToastProvider } from "@appica/ui-react/toast";
 import App from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/tokens.css";
@@ -65,9 +66,12 @@ createRoot(document.getElementById("root")!, {
   },
 }).render(
   <StrictMode>
-    <ErrorBoundary scope="应用">
-      <App />
-    </ErrorBoundary>
+    <ToastProvider timeout={2000}>
+      <ErrorBoundary scope="应用">
+        <App />
+      </ErrorBoundary>
+      <Toaster position="top-center" timeout={2000} />
+    </ToastProvider>
   </StrictMode>,
 );
 

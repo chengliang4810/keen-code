@@ -2,6 +2,7 @@ import type { MessageKey } from "@/i18n";
 import { shortcutsForPlatform } from "@/lib/shortcuts";
 import { GlassModal } from "@/components/GlassModal";
 import { Button } from "@/components/ui/button";
+import { Kbd } from "@appica/ui-react/kbd";
 import type { SetState, Translator } from "./types";
 
 export interface ShortcutsModalProps {
@@ -30,7 +31,7 @@ export function ShortcutsModal({
       footer={
         <Button
           type="button"
-          className="btn btn--ghost"
+          variant="ghost"
           onClick={() => setOpen(false)}
         >
           {tr("shortcuts.close")}
@@ -43,7 +44,7 @@ export function ShortcutsModal({
             <span className="shortcuts-list__label">
               {tr(row.labelKey as MessageKey)}
             </span>
-            <kbd className="shortcuts-list__keys">{row.keys}</kbd>
+            <Kbd size="md">{row.keys}</Kbd>
           </li>
         ))}
       </ul>

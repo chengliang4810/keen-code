@@ -4,10 +4,7 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
-  type RefObject,
 } from "react";
-import { useFloatingMenu, type FloatingPos } from "@/lib/floatingMenu";
 import { applySkillAtSlash } from "@/lib/draftDoc";
 import {
   buildSlashCatalog,
@@ -48,10 +45,6 @@ export interface UseComposerSlashMenuOptions {
   projectPath: string | null;
   setDraft: StateSetter<string>;
   onAction: (action: string) => void;
-  composerInputRef: RefObject<HTMLDivElement | null>;
-  composerShellRef: RefObject<HTMLDivElement | null>;
-  composerPlusTriggerRef: RefObject<HTMLButtonElement | null>;
-  composerPlusPanelRef: RefObject<HTMLDivElement | null>;
 }
 
 export interface ComposerSlashMenuController {
@@ -72,9 +65,6 @@ export interface ComposerSlashMenuController {
   onSlashQueryChange: (query: SlashQuery | null) => void;
   closeComposerMenu: () => void;
   applySlashItem: (item: SlashItem) => void;
-  composerPlusPos: FloatingPos | null;
-  composerPlusStyle: CSSProperties | undefined;
-  composerPlusPanelRef: RefObject<HTMLDivElement | null>;
 }
 
 /** Owns slash detection, skill loading, palette state, filtering, and placement. */
@@ -84,10 +74,6 @@ export function useComposerSlashMenu({
   projectPath,
   setDraft,
   onAction,
-  composerInputRef,
-  composerShellRef,
-  composerPlusTriggerRef,
-  composerPlusPanelRef,
 }: UseComposerSlashMenuOptions): ComposerSlashMenuController {
   const tr = useMemo(() => createT(locale), [locale]);
   const apiRef = useRef(api);
@@ -274,21 +260,6 @@ export function useComposerSlashMenu({
     );
   }, [composerMenuEntries.length]);
 
-  const { pos: composerPlusPos, style: composerPlusStyle } = useFloatingMenu({
-    open: composerMenuOpen,
-    triggerRef: composerShellRef,
-    panelRef: composerPlusPanelRef,
-    roots: [composerPlusTriggerRef, composerShellRef, composerInputRef],
-    onClose: closeComposerMenu,
-    placement: "up",
-    fitContent: false,
-    matchTriggerWidth: true,
-    minWidth: 280,
-    estHeight: 220,
-    gap: 4,
-    deps: [slashFilterQuery, composerMenuEntries.length],
-  });
-
   return {
     skillsLoading,
     liveSlash,
@@ -307,8 +278,5 @@ export function useComposerSlashMenu({
     onSlashQueryChange,
     closeComposerMenu,
     applySlashItem,
-    composerPlusPos,
-    composerPlusStyle,
-    composerPlusPanelRef,
   };
 }

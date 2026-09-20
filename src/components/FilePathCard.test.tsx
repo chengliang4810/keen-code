@@ -37,26 +37,20 @@ describe("FilePathCard", () => {
     expect(fileHtml).toContain(
       'class="file-path-link__name">plugin.json</span>',
     );
-    expect(fileHtml).not.toContain("disabled");
+    expect(fileHtml).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/);
   });
 
-  it("使用聊天主题色并保留清晰的键盘焦点", () => {
+  it("保留行内路径布局并由 Appica Button 管理视觉状态", () => {
     const css = readCssSource(new URL("../styles/app.css", import.meta.url));
     const linkRule = css.match(/\.file-path-link__main\s*\{([^}]*)\}/)?.[1];
     const wrapperRule = css.match(/\.file-path-link\s*\{([^}]*)\}/)?.[1];
-    const focusRule = css.match(
-      /\.file-path-link__main:focus-visible\s*\{([^}]*)\}/,
-    )?.[1];
-
-    expect(linkRule).toMatch(/color:\s*var\(--chat-link\)/);
-    expect(linkRule).toMatch(/background:\s*transparent/);
-    expect(linkRule).toMatch(/border:\s*0/);
     expect(wrapperRule).toMatch(/display:\s*inline-block/);
     expect(linkRule).toMatch(/display:\s*inline-flex/);
     expect(linkRule).toMatch(/align-items:\s*baseline/);
     expect(css).toMatch(/\.file-path-link__icon\s*\{[^}]*align-self:\s*center;/s);
     expect(linkRule).toMatch(/vertical-align:\s*baseline/);
-    expect(focusRule).toMatch(/outline:/);
+    expect(linkRule).not.toMatch(/(?:color|background|border|outline):/);
+    expect(css).not.toMatch(/\.file-path-link__main:(?:hover|focus-visible|disabled)/);
     expect(css).toMatch(
       /\.file-path-link__name\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s,
     );

@@ -1,4 +1,6 @@
 import * as React from "react";
+import { Button } from "@/components/ui/button";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
 import { reportFrontendError } from "@/lib/frontendDiagnostics";
 
 /**
@@ -43,25 +45,25 @@ export class ErrorBoundary extends React.Component<
   render() {
     if (this.state.error) {
       return (
-        <div
-          role="alert"
+        <Alert
+          variant="error"
           className={`error-boundary-fallback ${this.props.className ?? ""}`}
         >
-          <p className="error-boundary-fallback__title">
+          <AlertTitle>
             {this.props.scope}渲染失败，已阻止整窗崩溃。
-          </p>
-          <p className="error-boundary-fallback__desc">
+          </AlertTitle>
+          <AlertDescription>
             错误详情已写入诊断日志，重试或重载可恢复。
-          </p>
-          <div className="error-boundary-fallback__actions">
-            <button type="button" className="btn btn--solid" onClick={this.handleRetry}>
+          </AlertDescription>
+          <AlertAction className="error-boundary-fallback__actions">
+            <Button type="button" variant="primary" onClick={this.handleRetry}>
               重试
-            </button>
-            <button type="button" className="btn btn--ghost" onClick={this.handleReload}>
+            </Button>
+            <Button type="button" variant="ghost" onClick={this.handleReload}>
               重载窗口
-            </button>
-          </div>
-        </div>
+            </Button>
+          </AlertAction>
+        </Alert>
       );
     }
     return this.props.children;

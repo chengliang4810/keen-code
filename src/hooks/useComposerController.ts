@@ -4,13 +4,11 @@ import {
   useMemo,
   useRef,
   useState,
-  type CSSProperties,
   type Dispatch,
   type MutableRefObject,
   type RefObject,
   type SetStateAction,
 } from "react";
-import type { FloatingPos } from "@/lib/floatingMenu";
 import type { Locale } from "@/i18n";
 import type { AppDialog, Project, SessionContextUsage } from "@/features/app/models";
 import type { AcpSessionView, AcpWorkspaceState } from "@/lib/acp/store";
@@ -224,7 +222,6 @@ export interface ComposerController {
   promptHistoryFocusFilter: boolean;
   setPromptHistoryFocusFilter: StateSetter<boolean>;
   promptHistoryEntries: PromptHistoryEntry[];
-  promptHistoryPanelRef: Ref<HTMLDivElement | null>;
   closePromptHistory: () => void;
   openPromptHistory: (options?: {
     focusFilter?: boolean;
@@ -238,11 +235,6 @@ export interface ComposerController {
   composerShellRef: Ref<HTMLDivElement | null>;
   composerWrapRef: Ref<HTMLDivElement | null>;
   composerPlusTriggerRef: Ref<HTMLButtonElement | null>;
-  composerPlusPanelRef: Ref<HTMLDivElement | null>;
-  composerPlusPos: FloatingPos | null;
-  composerPlusStyle: CSSProperties | undefined;
-  promptHistoryPos: FloatingPos | null;
-  promptHistoryStyle: CSSProperties | undefined;
   composerFloatPad: number;
   /** 输入区独立高度，用于将问答卡片定位在停止按钮上方。 */
   composerHeight: number;
@@ -298,7 +290,6 @@ export function useComposerController({
   const composerShellRef = useRef<HTMLDivElement | null>(null);
   const composerWrapRef = useRef<HTMLDivElement | null>(null);
   const composerPlusTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const composerPlusPanelRef = useRef<HTMLDivElement | null>(null);
   const pendingComposerFocusRef = useRef(false);
 
   const modes = useComposerModes({
@@ -352,10 +343,6 @@ export function useComposerController({
     projectPath: session.activeProject?.path ?? null,
     setDraft,
     onAction: handleSlashAction,
-    composerInputRef,
-    composerShellRef,
-    composerPlusTriggerRef,
-    composerPlusPanelRef,
   });
   const attachments = useComposerAttachments({
     locale,
@@ -371,7 +358,6 @@ export function useComposerController({
     feedback,
     closeComposerMenu: slash.closeComposerMenu,
     composerInputRef,
-    composerShellRef,
   });
 
   const requestComposerFocus = useCallback(() => {
@@ -516,7 +502,6 @@ export function useComposerController({
     promptHistoryFocusFilter: promptHistory.promptHistoryFocusFilter,
     setPromptHistoryFocusFilter: promptHistory.setPromptHistoryFocusFilter,
     promptHistoryEntries: promptHistory.promptHistoryEntries,
-    promptHistoryPanelRef: promptHistory.promptHistoryPanelRef,
     closePromptHistory: promptHistory.closePromptHistory,
     openPromptHistory: promptHistory.openPromptHistory,
     applyPromptHistoryEntry: promptHistory.applyPromptHistoryEntry,
@@ -524,11 +509,6 @@ export function useComposerController({
     composerShellRef,
     composerWrapRef,
     composerPlusTriggerRef,
-    composerPlusPanelRef,
-    composerPlusPos: slash.composerPlusPos,
-    composerPlusStyle: slash.composerPlusStyle,
-    promptHistoryPos: promptHistory.promptHistoryPos,
-    promptHistoryStyle: promptHistory.promptHistoryStyle,
     composerFloatPad,
     composerHeight,
     requestComposerFocus,

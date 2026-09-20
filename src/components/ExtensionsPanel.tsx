@@ -1,7 +1,9 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@appica/ui-react/input";
+import { Textarea } from "@appica/ui-react/textarea";
 import { Button } from "@/components/ui/button";
+import { Tabs, TabsList, TabsTrigger } from "@appica/ui-react/tabs";
+import { Card } from "@appica/ui-react/card";
+import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
@@ -59,9 +61,16 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
+} from "@appica/ui-react/select";
+import { Checkbox } from "@appica/ui-react/checkbox";
 import { Switch } from "@/components/ui/switch";
+import { Badge, type BadgeProps } from "@appica/ui-react/badge";
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from "@appica/ui-react/alert";
 
 export type ExtensionsTabId = "market" | "plugins" | "skills" | "mcp";
 
@@ -73,6 +82,8 @@ export interface ExtensionsPanelProps {
   activeTab?: ExtensionsTabId;
   /** 切换扩展页签。 */
   onTabChange?: (tab: ExtensionsTabId) => void;
+  /** 从已安装插件空状态进入插件市场。 */
+  onOpenMarketplace?: () => void;
 }
 
 /** MCP OAuth 前端长流程的当前阶段。 */
@@ -104,6 +115,17 @@ export interface McpRuntimeDetailsProps {
   server: McpServerView;
   /** 优先展示的 OAuth 或系统浏览器错误。 */
   error?: string | null;
+}
+
+function extensionBadgeVariant(
+  tone: string,
+): BadgeProps["variant"] {
+  if (tone === "ok" || tone === "enabled") return "success";
+  if (tone === "fail" || tone === "disabled") return "error";
+  if (tone === "project") return "info";
+  if (tone === "user") return "primary-outline";
+  if (tone === "plugin" || tone === "invocable") return "secondary";
+  return "soft";
 }
 
 /** 返回 MCP 连接状态的本地化文案。 */
@@ -201,28 +223,24 @@ export function McpRuntimeDetails({
       className="ext-item__meta ext-mcp-runtime"
       data-mcp-status={server.runtimeStatus}
     >
-      <span className={`ext-badge ext-badge--${tone}`}>
+      <Badge size="xs" variant={extensionBadgeVariant(tone)}>
         {mcpRuntimeStatusLabel(tr, server.runtimeStatus)}
-      </span>
-      <span className="ext-badge ext-badge--muted">
+      </Badge>
+      <Badge size="xs" variant="soft">
         {tr("ext.mcp.transport", { transport: server.transport })}
-      </span>
+      </Badge>
       <span>{tr("ext.mcp.toolsCount", { count: server.toolsCount })}</span>
       {server.oauthStatus === "authorized" ? (
-        <span className="ext-badge ext-badge--ok">
+        <Badge size="xs" variant="success">
           {tr("ext.mcp.oauth.authorized")}
-        </span>
+        </Badge>
       ) : null}
       {mcpNeedsAuthorization(server.oauthStatus) ? (
-        <span className="ext-badge ext-badge--fail">
+        <Badge size="xs" variant="error">
           {tr("ext.mcp.oauth.needsAuthorization")}
-        </span>
+        </Badge>
       ) : null}
-      {error ? (
-        <span className="ext-mcp-runtime__error" role="alert">
-          {error}
-        </span>
-      ) : null}
+      {error ? <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert> : null}
     </div>
   );
 }
@@ -232,6 +250,7 @@ export function ExtensionsPanel({
   projectPath = null,
   activeTab = "market",
   onTabChange,
+  onOpenMarketplace,
 }: ExtensionsPanelProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   /** 当前页面使用的规范化项目路径；无项目时固定为 null。 */
@@ -929,14 +948,14 @@ export function ExtensionsPanel({
       <p className="settings-page__lead">{tr("ext.lead")}</p>
 
       {onTabChange ? (
-        <div
+        <Tabs
+          value={tab}
+          onValueChange={(value) => onTabChange(value as ExtensionsTabId)}
           className="settings-account-tabs settings-page__tabs"
-          role="tablist"
-          aria-label={tr("settings.nav.extensions")}
         >
-          <div
-            className="settings-seg settings-seg--lg settings-page__tabs-seg"
-            role="presentation"
+          <TabsList
+            className="settings-page__tabs-seg"
+            aria-label={tr("settings.nav.extensions")}
           >
             {(
               [
@@ -946,57 +965,52 @@ export function ExtensionsPanel({
                 ["mcp", "ext.mcp.title"],
               ] as const
             ).map(([id, key]) => (
-              <Button
+              <TabsTrigger
                 key={id}
-                type="button"
-                role="tab"
-                className={"settings-seg__btn" + (tab === id ? " is-on" : "")}
-                aria-selected={tab === id}
-                onClick={(e) => {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  onTabChange(id);
-                }}
+                value={id}
               >
                 {tr(key)}
-              </Button>
+              </TabsTrigger>
             ))}
-          </div>
-        </div>
+          </TabsList>
+        </Tabs>
       ) : null}
 
       {pathHint && (
-        <p className="ext-alert ext-alert--warn" role="status">
-          {pathHint}
-        </p>
+        <Alert variant="warning">
+          <AlertDescription>{pathHint}</AlertDescription>
+        </Alert>
       )}
 
       {actionError && (
-        <div className="ext-alert ext-alert--error" role="alert">
-          <div className="ext-alert__title">
+        <Alert variant="error">
+          <AlertTitle>
             {actionErrorSource === "mcp"
               ? tr("ext.mcp.actionError")
               : tr("ext.plugins.actionError")}
-          </div>
-          <p className="ext-alert__body">{actionError}</p>
-          <Button
-            type="button"
-            className="btn btn--ghost ext-alert__cta"
-            onClick={() => {
-              setActionError(null);
-              setActionErrorSource(null);
-            }}
-          >
-            {tr("common.close")}
-          </Button>
-        </div>
+          </AlertTitle>
+          <AlertDescription>{actionError}</AlertDescription>
+          <AlertAction>
+            <Button
+              type="button"
+              variant="ghost"
+              size="md"
+              onClick={() => {
+                setActionError(null);
+                setActionErrorSource(null);
+              }}
+            >
+              {tr("common.close")}
+            </Button>
+          </AlertAction>
+        </Alert>
       )}
 
       {bannerError && (
-        <div className="ext-alert ext-alert--warn" role="alert">
-          <div className="ext-alert__title">{tr("ext.error.title")}</div>
-          <p className="ext-alert__body">{bannerError}</p>
-        </div>
+        <Alert variant="warning">
+          <AlertTitle>{tr("ext.error.title")}</AlertTitle>
+          <AlertDescription>{bannerError}</AlertDescription>
+        </Alert>
       )}
 
       {tab === "market" && (
@@ -1021,7 +1035,7 @@ export function ExtensionsPanel({
         {!loading && plugins.length > 0 ? (
           <Button
             type="button"
-            className="btn btn--ghost ext-bulk-btn"
+            variant="ghost" className="ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey}
             onClick={() => updateAllPlugins()}
           >
@@ -1031,13 +1045,14 @@ export function ExtensionsPanel({
           </Button>
         ) : null}
       </h2>
-      <div className="settings-card ext-card">
+      <Card className="ext-card">
         {!loading && plugins.length > 0 ? (
-          <div
+          <Tabs
+            value={pluginFilter}
+            onValueChange={(value) => setPluginFilter(value as PluginFilter)}
             className="ext-plugin-filters"
-            role="tablist"
-            aria-label={tr("ext.plugins.filterLabel")}
           >
+            <TabsList aria-label={tr("ext.plugins.filterLabel")}>
             {(
               [
                 ["all", "ext.plugins.filter.all"],
@@ -1045,20 +1060,16 @@ export function ExtensionsPanel({
                 ["disabled", "ext.plugins.filter.disabled"],
               ] as const
             ).map(([id, key]) => (
-              <Button
+              <TabsTrigger
                 key={id}
-                type="button"
-                role="tab"
-                aria-selected={pluginFilter === id}
-                className={
-                  "ext-plugin-filter" + (pluginFilter === id ? " is-active" : "")
-                }
-                onClick={() => setPluginFilter(id)}
+                value={id}
+                className="ext-plugin-filter"
               >
                 {tr(key)}
-              </Button>
+              </TabsTrigger>
             ))}
-          </div>
+            </TabsList>
+          </Tabs>
         ) : null}
         {loading && (
           <SkeletonList rows={4} label={tr("ext.plugins.loading")} />
@@ -1068,6 +1079,16 @@ export function ExtensionsPanel({
             <p className="ext-empty-cta__text">
               {tr("ext.plugins.empty")}
             </p>
+            {onOpenMarketplace ? (
+              <Button
+                type="button"
+                variant="primary"
+                size="md"
+                onClick={onOpenMarketplace}
+              >
+                {tr("ext.plugins.browseMarket")}
+              </Button>
+            ) : null}
           </div>
         )}
         {!loading && plugins.length > 0 && visiblePlugins.length === 0 && (
@@ -1093,15 +1114,15 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{p.name}</strong>
-                    <span className={`ext-badge ext-badge--plugin-${tone}`}>
+                    <Badge size="xs" variant={extensionBadgeVariant(tone)}>
                       {p.enabled
                         ? tr("ext.plugins.status.enabled")
                         : tr("ext.plugins.status.disabled")}
-                    </span>
+                    </Badge>
                     {p.version ? (
-                      <span className="ext-badge ext-badge--muted">
+                      <Badge size="xs" variant="soft">
                         v{String(p.version).replace(/^v/i, "")}
-                      </span>
+                      </Badge>
                     ) : null}
                   </div>
                   {provides ? (
@@ -1123,7 +1144,7 @@ export function ExtensionsPanel({
                     ) : null}
                     <Button
                       type="button"
-                      className="ext-path-btn"
+                      variant="ghost" size="md" className="ext-path-btn"
                       title={p.path}
                       onClick={() => void reveal(p.path)}
                     >
@@ -1134,7 +1155,7 @@ export function ExtensionsPanel({
                   <div className="ext-item__actions">
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       disabled={busy || !!actionBusy}
                       onClick={() => togglePlugin(p)}
                     >
@@ -1146,7 +1167,7 @@ export function ExtensionsPanel({
                     </Button>
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       disabled={busy || !!actionBusy}
                       onClick={() => updatePlugin(p)}
                     >
@@ -1156,7 +1177,7 @@ export function ExtensionsPanel({
                     </Button>
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       disabled={busy || !!actionBusy}
                       onClick={() => void showDetails(p)}
                     >
@@ -1164,7 +1185,7 @@ export function ExtensionsPanel({
                     </Button>
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       disabled={busy || !!actionBusy || configLoading}
                       onClick={() => void openPluginConfig(p)}
                     >
@@ -1172,7 +1193,7 @@ export function ExtensionsPanel({
                     </Button>
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm ext-item__danger"
+                      variant="destructive" size="md"
                       disabled={busy || !!actionBusy}
                       onClick={() => setUninstallTarget(p)}
                     >
@@ -1185,7 +1206,7 @@ export function ExtensionsPanel({
             })}
           </ul>
         )}
-      </div>
+      </Card>
       </>
       )}
 
@@ -1199,7 +1220,7 @@ export function ExtensionsPanel({
           <span className="ext-count">{skills.length}</span>
         ) : null}
       </h2>
-      <div className="settings-card ext-card">
+      <Card className="ext-card">
         {loading && (
           <p className="ext-empty">{tr("ext.skills.loading")}</p>
         )}
@@ -1217,13 +1238,13 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
-                    <span className={`ext-badge ext-badge--${tone}`}>
+                    <Badge size="xs" variant={extensionBadgeVariant(tone)}>
                       {s.source}
-                    </span>
+                    </Badge>
                     {s.userInvocable ? (
-                      <span className="ext-badge ext-badge--invocable">
+                      <Badge size="xs" variant="secondary">
                         {tr("ext.skills.invocable")}
-                      </span>
+                      </Badge>
                     ) : null}
                   </div>
                   {s.description ? (
@@ -1233,7 +1254,7 @@ export function ExtensionsPanel({
                     <span>{skillMetaLine(s)}</span>
                     <Button
                       type="button"
-                      className="ext-path-btn"
+                      variant="ghost" size="md" className="ext-path-btn"
                       title={s.path}
                       onClick={() => void reveal(s.path)}
                     >
@@ -1246,7 +1267,7 @@ export function ExtensionsPanel({
             })}
           </ul>
         )}
-      </div>
+      </Card>
       </>
       )}
 
@@ -1260,16 +1281,17 @@ export function ExtensionsPanel({
           <span className="ext-count">{mcpRows.length}</span>
         ) : null}
         {mcpRuntime ? (
-          <span
-            className={`ext-badge ext-badge--${mcpRuntimePhaseTone(mcpRuntime.initPhase)}`}
+          <Badge
+            size="xs"
+            variant={extensionBadgeVariant(mcpRuntimePhaseTone(mcpRuntime.initPhase))}
           >
             {mcpRuntimePhaseLabel(tr, mcpRuntime.initPhase)}
-          </span>
+          </Badge>
         ) : null}
         <span className="ext-h2-actions">
           <Button
             type="button"
-            className="btn btn--ghost ext-bulk-btn"
+            variant="ghost" className="ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey || !!mcpOauthFlow}
             onClick={() => void runDoctor(null)}
           >
@@ -1278,7 +1300,7 @@ export function ExtensionsPanel({
           </Button>
           <Button
             type="button"
-            className="btn btn--ghost ext-bulk-btn"
+            variant="ghost" className="ext-bulk-btn"
             disabled={
               !!actionBusy || !!busyKey || !!mcpOauthFlow || !api.isTauri()
             }
@@ -1290,7 +1312,7 @@ export function ExtensionsPanel({
           {!loading && servers.length > 0 && mcpOffCount > 0 ? (
             <Button
               type="button"
-              className="btn btn--ghost ext-bulk-btn"
+              variant="ghost" className="ext-bulk-btn"
               disabled={!!busyKey || !!actionBusy || !!mcpOauthFlow}
               onClick={() => void enableAllMcp()}
             >
@@ -1299,7 +1321,7 @@ export function ExtensionsPanel({
           ) : null}
         </span>
       </h2>
-      <div className="settings-card ext-card">
+      <Card className="ext-card">
         {loading && <p className="ext-empty">{tr("ext.mcp.loading")}</p>}
         {!loading && mcpRows.length === 0 && (
           <p className="ext-empty">{tr("ext.mcp.empty")}</p>
@@ -1322,9 +1344,9 @@ export function ExtensionsPanel({
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
                     {s.source === "plugin" ? (
-                      <span className="ext-badge ext-badge--muted">
+                      <Badge size="xs" variant="soft">
                         {tr("agents.source.plugin")}
-                      </span>
+                      </Badge>
                     ) : null}
                     {s.source === "user" ? (
                       <ExtensionToggle
@@ -1353,7 +1375,7 @@ export function ExtensionsPanel({
                       {looksLikePath(s.target) ? (
                         <Button
                           type="button"
-                          className="ext-path-btn"
+                          variant="ghost" size="md" className="ext-path-btn"
                           title={s.target}
                           onClick={() => void reveal(s.target)}
                         >
@@ -1368,7 +1390,7 @@ export function ExtensionsPanel({
                     (!oauthFlow || oauthFlow.phase === "starting") ? (
                       <Button
                         type="button"
-                        className="btn btn--primary btn--sm"
+                        variant="primary" size="md"
                         disabled={
                           !!mcpOauthFlow || !!actionBusy || !!busyKey || !on
                         }
@@ -1384,7 +1406,7 @@ export function ExtensionsPanel({
                     ) : null}
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       disabled={
                         !!actionBusy || doctorLoading || !!mcpOauthFlow
                       }
@@ -1396,7 +1418,7 @@ export function ExtensionsPanel({
                     {s.source === "user" && s.config ? (
                       <Button
                         type="button"
-                        className="btn btn--ghost btn--sm ext-item__danger"
+                        variant="destructive" size="md"
                         disabled={rmBusy || !!actionBusy || !!mcpOauthFlow}
                         onClick={() => setRemoveTarget(s.config)}
                       >
@@ -1410,12 +1432,12 @@ export function ExtensionsPanel({
                     ) : null}
                     {oauthFlow && oauthFlow.phase !== "starting" ? (
                       <div className="ext-mcp-oauth-callback">
-                        <Label
+                        <label
                           className="ext-mcp-oauth-callback__label"
                           htmlFor={`ext-mcp-oauth-callback-${s.name}`}
                         >
                           {tr("ext.mcp.oauthCallback.label")}
-                        </Label>
+                        </label>
                         <div className="ext-mcp-oauth-callback__row">
                           <Input
                             id={`ext-mcp-oauth-callback-${s.name}`}
@@ -1437,7 +1459,7 @@ export function ExtensionsPanel({
                           />
                           <Button
                             type="button"
-                            className="btn btn--primary btn--sm"
+                            variant="primary" size="md"
                             disabled={
                               oauthFlow.phase !== "awaiting_callback" ||
                               !oauthFlow.callbackInput.trim()
@@ -1452,7 +1474,7 @@ export function ExtensionsPanel({
                           </Button>
                           <Button
                             type="button"
-                            className="btn btn--ghost btn--sm"
+                            variant="ghost" size="md"
                             disabled={oauthFlow.phase !== "awaiting_callback"}
                             onClick={() => void cancelMcpOauth(s.name)}
                           >
@@ -1465,7 +1487,7 @@ export function ExtensionsPanel({
                           <span>{tr("ext.mcp.oauthCallback.hint")}</span>
                           <Button
                             type="button"
-                            className="ext-path-btn"
+                            variant="ghost" size="md" className="ext-path-btn"
                             disabled={!oauthFlow.authorizationUrl}
                             onClick={() =>
                               void reopenMcpOauthAuthorization(s.name)
@@ -1482,7 +1504,7 @@ export function ExtensionsPanel({
             })}
           </ul>
         )}
-      </div>
+      </Card>
       </>
       )}
 
@@ -1492,13 +1514,13 @@ export function ExtensionsPanel({
           if (!actionBusy) setUninstallTarget(null);
         }}
         title={tr("ext.plugins.uninstallTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={!!actionBusy}
               onClick={() => setUninstallTarget(null)}
             >
@@ -1506,7 +1528,7 @@ export function ExtensionsPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--danger"
+              variant="destructive"
               disabled={!!actionBusy}
               onClick={() => void confirmUninstall()}
             >
@@ -1531,13 +1553,13 @@ export function ExtensionsPanel({
         open={detailsOpen}
         onClose={() => setDetailsOpen(false)}
         title={tr("ext.plugins.detailsTitle", { name: detailsTitle })}
-        size="lg"
+        size="md"
         closeLabel={tr("common.close")}
         wrapBody
         footer={
           <Button
             type="button"
-            className="btn btn--ghost"
+            variant="ghost"
             onClick={() => setDetailsOpen(false)}
           >
             {tr("common.close")}
@@ -1557,14 +1579,14 @@ export function ExtensionsPanel({
         title={tr("ext.plugins.configureTitle", {
           name: configTarget?.name ?? "",
         })}
-        size="lg"
+        size="md"
         closeLabel={tr("common.close")}
         wrapBody
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={configSaving}
               onClick={closePluginConfig}
             >
@@ -1572,7 +1594,7 @@ export function ExtensionsPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               disabled={configLoading || configSaving || !configResult}
               onClick={() => void savePluginConfig()}
             >
@@ -1586,9 +1608,9 @@ export function ExtensionsPanel({
         {configLoading ? (
           <p className="ext-empty">{tr("ext.plugins.configLoading")}</p>
         ) : configError ? (
-          <div className="ext-alert ext-alert--error" role="alert">
-            <p className="ext-alert__body">{configError}</p>
-          </div>
+          <Alert variant="error">
+            <AlertDescription>{configError}</AlertDescription>
+          </Alert>
         ) : configResult && configResult.fields.length === 0 ? (
           <p className="ext-empty">{tr("ext.plugins.configEmpty")}</p>
         ) : configResult ? (
@@ -1633,7 +1655,7 @@ export function ExtensionsPanel({
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={actionBusy === "mcp:add"}
               onClick={() => setAddOpen(false)}
             >
@@ -1641,7 +1663,7 @@ export function ExtensionsPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               disabled={
                 actionBusy === "mcp:add" ||
                 (addMode === "json"
@@ -1664,31 +1686,28 @@ export function ExtensionsPanel({
             void submitAdd();
           }}
         >
-          <div className="settings-seg" role="tablist" aria-label={tr("ext.mcp.addMode")}>
-            <Button
-              type="button"
-              role="tab"
-              className={"settings-seg__btn" + (addMode === "form" ? " is-on" : "")}
-              aria-selected={addMode === "form"}
-              onClick={() => setAddMode("form")}
+          <Tabs
+            value={addMode}
+            onValueChange={(value) => setAddMode(value as "form" | "json")}
+          >
+            <TabsList aria-label={tr("ext.mcp.addMode")}>
+            <TabsTrigger
+              value="form"
               disabled={actionBusy === "mcp:add"}
             >
               {tr("ext.mcp.addModeForm")}
-            </Button>
-            <Button
-              type="button"
-              role="tab"
-              className={"settings-seg__btn" + (addMode === "json" ? " is-on" : "")}
-              aria-selected={addMode === "json"}
-              onClick={() => setAddMode("json")}
+            </TabsTrigger>
+            <TabsTrigger
+              value="json"
               disabled={actionBusy === "mcp:add"}
             >
               {tr("ext.mcp.addModeJson")}
-            </Button>
-          </div>
+            </TabsTrigger>
+            </TabsList>
+          </Tabs>
           {addMode === "json" ? (
-            <Label className="field">
-              <span>{tr("ext.mcp.jsonLabel")}</span>
+            <Field>
+              <FieldLabel>{tr("ext.mcp.jsonLabel")}</FieldLabel>
               <Textarea
                 className="app-dialog__input ext-env-textarea"
                 value={addJson}
@@ -1698,12 +1717,12 @@ export function ExtensionsPanel({
                 spellCheck={false}
                 disabled={actionBusy === "mcp:add"}
               />
-              <span className="ext-field-hint">{tr("ext.mcp.jsonHint")}</span>
-            </Label>
+              <FieldDescription>{tr("ext.mcp.jsonHint")}</FieldDescription>
+            </Field>
           ) : (
             <>
-              <Label className="field">
-                <span>{tr("ext.mcp.name")}</span>
+              <Field>
+                <FieldLabel>{tr("ext.mcp.name")}</FieldLabel>
                 <Input
                   className="app-dialog__input"
                   value={addName}
@@ -1713,9 +1732,9 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-              </Label>
-              <Label className="field">
-                <span>{tr("ext.mcp.command")}</span>
+              </Field>
+              <Field>
+                <FieldLabel>{tr("ext.mcp.command")}</FieldLabel>
                 <Input
                   className="app-dialog__input"
                   value={addCommand}
@@ -1725,9 +1744,9 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-              </Label>
-              <Label className="field">
-                <span>{tr("ext.mcp.args")}</span>
+              </Field>
+              <Field>
+                <FieldLabel>{tr("ext.mcp.args")}</FieldLabel>
                 <Input
                   className="app-dialog__input"
                   value={addArgs}
@@ -1737,10 +1756,10 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-                <span className="ext-field-hint">{tr("ext.mcp.argsHint")}</span>
-              </Label>
-              <Label className="field">
-                <span>{tr("ext.mcp.env")}</span>
+                <FieldDescription>{tr("ext.mcp.argsHint")}</FieldDescription>
+              </Field>
+              <Field>
+                <FieldLabel>{tr("ext.mcp.env")}</FieldLabel>
                 <Textarea
                   className="app-dialog__input ext-env-textarea"
                   value={addEnv}
@@ -1750,8 +1769,8 @@ export function ExtensionsPanel({
                   spellCheck={false}
                   disabled={actionBusy === "mcp:add"}
                 />
-                <span className="ext-field-hint">{tr("ext.mcp.envHint")}</span>
-              </Label>
+                <FieldDescription>{tr("ext.mcp.envHint")}</FieldDescription>
+              </Field>
             </>
           )}
         </form>
@@ -1763,13 +1782,13 @@ export function ExtensionsPanel({
           if (!actionBusy) setRemoveTarget(null);
         }}
         title={tr("ext.mcp.removeTitle")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={!!actionBusy}
               onClick={() => setRemoveTarget(null)}
             >
@@ -1777,7 +1796,7 @@ export function ExtensionsPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--danger"
+              variant="destructive"
               disabled={!!actionBusy}
               onClick={() => void confirmRemoveMcp()}
             >
@@ -1803,14 +1822,14 @@ export function ExtensionsPanel({
             ? `${tr("ext.mcp.doctorTitle")} · ${doctorFocus}`
             : tr("ext.mcp.doctorTitle")
         }
-        size="lg"
+        size="md"
         closeLabel={tr("common.close")}
         wrapBody
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={doctorLoading}
               onClick={() => void runDoctor(doctorFocus)}
             >
@@ -1819,7 +1838,7 @@ export function ExtensionsPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={doctorLoading}
               onClick={() => setDoctorOpen(false)}
             >
@@ -1832,9 +1851,9 @@ export function ExtensionsPanel({
           <p className="ext-empty">{tr("ext.mcp.doctorRunning")}</p>
         )}
         {!doctorLoading && doctorError && (
-          <div className="ext-alert ext-alert--error" role="alert">
-            <p className="ext-alert__body">{doctorError}</p>
-          </div>
+          <Alert variant="error">
+            <AlertDescription>{doctorError}</AlertDescription>
+          </Alert>
         )}
         {!doctorLoading && doctorReport && (
           <div className="ext-doctor">
@@ -1854,9 +1873,9 @@ export function ExtensionsPanel({
                   {doctorReport.sources.map((src) => (
                     <li key={src.path}>
                       <code>{src.path}</code>
-                      <span className="ext-badge ext-badge--muted">
+                      <Badge size="xs" variant="soft">
                         {src.status} · {src.serverCount}
-                      </span>
+                      </Badge>
                     </li>
                   ))}
                 </ul>
@@ -1877,21 +1896,17 @@ export function ExtensionsPanel({
                   >
                     <div className="ext-item__head">
                       <strong className="ext-item__name">{s.name}</strong>
-                      <span
-                        className={
-                          "ext-badge " +
-                          (s.healthy
-                            ? "ext-badge--ok"
-                            : "ext-badge--fail")
-                        }
+                      <Badge
+                        size="xs"
+                        variant={s.healthy ? "success" : "error"}
                       >
                         {s.healthy
                           ? tr("ext.mcp.doctorHealthy")
                           : tr("ext.mcp.doctorUnhealthy")}
-                      </span>
-                      <span className="ext-badge ext-badge--muted">
+                      </Badge>
+                      <Badge size="xs" variant="soft">
                         {s.transport}
-                      </span>
+                      </Badge>
                     </div>
                     {s.target ? (
                       <p className="ext-item__desc" title={s.target}>
@@ -2247,7 +2262,7 @@ function PluginUserConfigEditor({
           spellCheck={false}
         />
         {pathField ? (
-          <Button type="button" className="btn btn--ghost btn--sm" onClick={onPickPath}>
+          <Button type="button" variant="ghost" size="md" onClick={onPickPath}>
             {tr("ext.plugins.configChoosePath")}
           </Button>
         ) : null}
@@ -2257,19 +2272,19 @@ function PluginUserConfigEditor({
 
   const arrayValue = Array.isArray(value) ? value : [];
   return (
-    <div className="field" id={fieldId}>
-      <span id={labelId}>
+    <Field id={fieldId}>
+      <FieldLabel id={labelId}>
         {label}
         {field.required ? " *" : ""}
         <span className="ext-plugin-config__type"> · {typeLabel}</span>
         {field.sensitive ? (
           <span className="ext-plugin-config__sensitive"> · {tr("ext.plugins.configSensitive")}</span>
         ) : null}
-      </span>
+      </FieldLabel>
       {field.description ? (
-        <span id={descriptionId} className="ext-field-hint">
+        <FieldDescription id={descriptionId}>
           {field.description}
-        </span>
+        </FieldDescription>
       ) : null}
       {field.multiple && field.valueType === "select" && enumValues.length > 0 ? (
         renderSelect(arrayValue, true)
@@ -2288,7 +2303,7 @@ function PluginUserConfigEditor({
               )}
               <Button
                 type="button"
-                className="btn btn--ghost btn--sm"
+                variant="ghost" size="md"
                 onClick={() => onChange(arrayValue.filter((_, itemIndex) => itemIndex !== index))}
                 aria-label={tr("ext.plugins.configRemoveValue")}
               >
@@ -2298,7 +2313,7 @@ function PluginUserConfigEditor({
           ))}
           <Button
             type="button"
-            className="btn btn--ghost btn--sm"
+            variant="ghost" size="md"
             onClick={() => onChange([...arrayValue, field.valueType === "boolean" ? false : ""])}
           >
             {tr("ext.plugins.configAddValue")}
@@ -2308,14 +2323,14 @@ function PluginUserConfigEditor({
         renderScalar(value, onChange)
       )}
       {hasBounds ? (
-        <span id={boundsId} className="ext-field-hint">
+        <FieldDescription id={boundsId}>
           {tr("ext.plugins.configBounds", {
             min: field.min == null ? "−∞" : field.min,
             max: field.max == null ? "+∞" : field.max,
           })}
-        </span>
+        </FieldDescription>
       ) : null}
-    </div>
+    </Field>
   );
 }
 
@@ -2353,20 +2368,14 @@ function ExtensionToggle({
   onChange: (next: boolean) => void;
 }) {
   return (
-    <span
-      className={"ext-switch inline-block" + (checked ? " is-on" : "")}
-      style={disabled ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
-    >
-      <Switch
-        checked={checked}
-        aria-label={label}
-        title={label}
-        disabled={disabled}
-        className="absolute inset-0 h-full w-full !border-0 !bg-transparent !shadow-none [&_[data-slot=switch-thumb]]:hidden"
-        onCheckedChange={onChange}
-      />
-      <span className="ext-switch__thumb pointer-events-none" aria-hidden />
-    </span>
+    <Switch
+      checked={checked}
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      size="md"
+      onCheckedChange={onChange}
+    />
   );
 }
 

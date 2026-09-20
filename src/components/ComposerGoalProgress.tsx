@@ -158,6 +158,8 @@ export function ComposerGoalProgress({
       {current.status === "active" || current.status === "paused" ? (
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="composer-goal__action"
           aria-label={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
           title={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
@@ -168,6 +170,8 @@ export function ComposerGoalProgress({
       ) : null}
       <Button
         type="button"
+        variant="ghost"
+        size="icon-md"
         className="composer-goal__action"
         aria-label={zh ? "编辑目标" : "Edit goal"}
         title={zh ? "编辑目标" : "Edit goal"}
@@ -177,6 +181,8 @@ export function ComposerGoalProgress({
       </Button>
       <Button
         type="button"
+        variant="ghost"
+        size="icon-md"
         className="composer-goal__action"
         aria-label={zh ? "清除目标" : "Clear goal"}
         title={zh ? "清除目标" : "Clear goal"}
@@ -195,6 +201,7 @@ export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
   return (
     <Button
       type="button"
+      variant="soft"
       className="composer-goal-chip"
       aria-label={clearLabel}
       title={clearLabel}

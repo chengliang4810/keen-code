@@ -49,6 +49,8 @@ export function PinnedSessionList({
       <div className="tree-l1">
         <Button
           type="button"
+          variant="ghost"
+          size="md"
           className="tree-l1__head"
           onClick={() => setPinnedOpen((value) => !value)}
           aria-expanded={pinnedOpen}

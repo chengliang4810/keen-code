@@ -1,7 +1,8 @@
 import { GlassModal } from "@/components/GlassModal";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@appica/ui-react/input";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { Field, FieldLabel } from "@appica/ui-react/field";
 import type { SetState, Translator } from "./types";
 
 export interface WorktreeCreateModalProps {
@@ -46,7 +47,7 @@ export function WorktreeCreateModal({
           ? tr("composer.worktreeNewChatTitle")
           : tr("composer.worktreeNewTitle")
       }
-      size="sm"
+      size="md"
       closeLabel={tr("common.close")}
       closeOnOverlay={!busy}
       showClose={!busy}
@@ -55,7 +56,7 @@ export function WorktreeCreateModal({
         <>
           <Button
             type="button"
-            className="btn btn--ghost"
+            variant="ghost"
             disabled={busy}
             onClick={() => setOpen(false)}
           >
@@ -63,7 +64,7 @@ export function WorktreeCreateModal({
           </Button>
           <Button
             type="button"
-            className="btn btn--solid"
+            variant="primary"
             disabled={busy || !name.trim()}
             onClick={() => void submit()}
           >
@@ -88,10 +89,10 @@ export function WorktreeCreateModal({
             ? tr("composer.worktreeNewChatHint")
             : tr("composer.worktreeNewHint")}
         </p>
-        <Label className="wt-create__field">
-          <span className="wt-create__label">
+        <Field>
+          <FieldLabel>
             {tr("composer.worktreeName")}
-          </span>
+          </FieldLabel>
           <Input
             className="settings-input"
             value={name}
@@ -105,11 +106,11 @@ export function WorktreeCreateModal({
             disabled={busy}
             spellCheck={false}
           />
-        </Label>
-        <Label className="wt-create__field">
-          <span className="wt-create__label">
+        </Field>
+        <Field>
+          <FieldLabel>
             {tr("composer.worktreeRef")}
-          </span>
+          </FieldLabel>
           <Input
             className="settings-input"
             value={refName}
@@ -122,16 +123,14 @@ export function WorktreeCreateModal({
             disabled={busy}
             spellCheck={false}
           />
-        </Label>
+        </Field>
         {previewPath ? (
           <p className="wt-create__preview">
             {tr("composer.worktreePathPreview", { path: previewPath })}
           </p>
         ) : null}
         {error ? (
-          <p className="wt-create__error" role="alert">
-            {error}
-          </p>
+          <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert>
         ) : null}
       </form>
     </GlassModal>

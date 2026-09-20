@@ -33,7 +33,7 @@ export function AppUpdateModal({
       open={open}
       onClose={() => setOpen(false)}
       title={tr("settings.updateTitle")}
-      size="sm"
+      size="md"
       closeLabel={tr("common.close")}
       closeOnOverlay={false}
       wrapBody

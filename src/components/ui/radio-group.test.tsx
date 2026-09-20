@@ -1,21 +1,19 @@
 import { renderToStaticMarkup } from "react-dom/server"
 import { describe, expect, it } from "vitest"
 
-import { RadioGroup, RadioGroupItem } from "./radio-group"
+import { RadioGroup } from "@appica/ui-react/radio-group"
+import { Radio } from "@appica/ui-react/radio"
 
-describe("RadioGroupItem", () => {
-  it("preserves custom card content alongside the Radix indicator", () => {
+describe("Radio", () => {
+  it("renders Appica checked state and indicator", () => {
     const html = renderToStaticMarkup(
       <RadioGroup defaultValue="rose">
-        <RadioGroupItem value="rose">
-          <span className="skin-swatch" />
-          <span>玫瑰</span>
-        </RadioGroupItem>
+        <Radio value="rose" aria-label="玫瑰" />
       </RadioGroup>,
     )
 
-    expect(html).toContain('class="skin-swatch"')
-    expect(html).toContain("玫瑰")
-    expect(html).toContain('data-slot="radio-group-indicator"')
+    expect(html).toContain('data-slot="radio"')
+    expect(html).toContain('data-checked=""')
+    expect(html).toContain('data-slot="radio-indicator"')
   })
 })

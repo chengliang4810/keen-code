@@ -41,13 +41,13 @@ describe("UserMenu", () => {
     expect(html).not.toContain('disabled=""');
   });
 
-  it("更新按钮默认只显示图标，不绘制外层方框", () => {
+  it("更新按钮只保留布局，视觉由 Appica Button 管理", () => {
     const css = readCssSource(new URL("../styles/app.css", import.meta.url));
     const rule = css.match(/\.sidebar-update-action\s*\{([^}]*)\}/)?.[1] ?? "";
 
-    expect(rule).toContain("border: 0");
-    expect(rule).toContain("background: transparent");
-    expect(rule).not.toContain("accent-muted");
+    expect(rule).toContain("width: 32px");
+    expect(rule).toContain("height: 32px");
+    expect(rule).not.toMatch(/(?:border|background|color|outline):/);
   });
 
   it("开始更新后禁用重复点击", () => {

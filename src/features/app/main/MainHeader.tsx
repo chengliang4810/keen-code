@@ -77,7 +77,9 @@ export function MainHeader({
             <Tip label={tr("main.leftPaneShow")}>
               <Button
                 type="button"
-                className="chrome-btn chrome-btn--traffic main__pane-toggle"
+                variant="ghost"
+                size="icon-md"
+                className="main__pane-toggle"
                 aria-label={tr("main.leftPaneShow")}
                 onClick={() =>
                   setLayout((currentLayout) => {
@@ -93,7 +95,8 @@ export function MainHeader({
             <Tip label={tr("sidebar.newSession")}>
               <Button
                 type="button"
-                className="chrome-btn chrome-btn--traffic"
+                variant="ghost"
+                size="icon-md"
                 aria-label={tr("sidebar.newSession")}
                 onClick={() => void newChat(null)}
               >
@@ -113,7 +116,9 @@ export function MainHeader({
               <Tip label={tr("session.menu")}>
                 <Button
                   type="button"
-                  className="chrome-btn main__title-menu"
+                  variant="ghost"
+                  size="icon-md"
+                  className="main__title-menu"
                   onClick={(event) => openSessionMenu(event, current)}
                 >
                   <IconMore size={16} />
@@ -136,6 +141,8 @@ export function MainHeader({
             <Button
               ref={summaryTriggerRef}
               type="button"
+              variant={summaryOpen ? "soft" : "ghost"}
+              size="icon-md"
               className={
                 "chrome-btn main__pane-toggle" +
                 (summaryOpen ? " is-on" : "")
@@ -155,6 +162,8 @@ export function MainHeader({
           >
             <Button
               type="button"
+              variant={!layout.asideCollapsed ? "soft" : "ghost"}
+              size="icon-md"
               className={
                 "chrome-btn main__pane-toggle" +
                 (!layout.asideCollapsed ? " is-on" : "")

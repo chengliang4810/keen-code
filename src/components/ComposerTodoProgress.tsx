@@ -97,6 +97,7 @@ export function ComposerTodoProgress({
       </ol>
       <Button
         type="button"
+        variant="ghost"
         className="composer-todo__step"
         aria-expanded={open}
         onMouseEnter={() => setOpen(true)}

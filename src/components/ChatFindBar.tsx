@@ -1,4 +1,4 @@
-import { Input } from "@/components/ui/input";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
 /**
  * In-conversation find bar (Cmd/Ctrl+F).
@@ -110,6 +110,8 @@ export function ChatFindBar({
       <div className="chat-find__actions">
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="chat-find__btn"
           aria-label={labels.prev}
           title={labels.prev}
@@ -123,6 +125,8 @@ export function ChatFindBar({
         </Button>
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="chat-find__btn"
           aria-label={labels.next}
           title={labels.next}
@@ -133,6 +137,8 @@ export function ChatFindBar({
         </Button>
         <Button
           type="button"
+          variant="ghost"
+          size="icon-md"
           className="chat-find__btn chat-find__btn--close"
           aria-label={labels.close}
           title={labels.close}

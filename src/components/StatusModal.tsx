@@ -50,7 +50,7 @@ export function StatusModal({
       size="md"
       className="status-modal"
       footer={
-        <Button type="button" className="btn btn--solid" onClick={onClose}>
+        <Button type="button" variant="primary" onClick={onClose}>
           {tr("common.close")}
         </Button>
       }

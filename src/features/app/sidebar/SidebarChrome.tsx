@@ -50,7 +50,9 @@ export function SidebarChrome({
         <Tip label={tr("main.leftPaneHide")}>
           <Button
             type="button"
-            className="chrome-btn chrome-btn--traffic main__pane-toggle"
+            variant="ghost"
+            size="icon-md"
+            className="main__pane-toggle"
             aria-label={tr("main.leftPaneHide")}
             onClick={() =>
               setLayout((current) => {

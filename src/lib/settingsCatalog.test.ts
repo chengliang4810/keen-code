@@ -36,9 +36,10 @@ describe("settingsCatalog", () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
-  it("按基础设置、Agent能力和使用数据三个稳定分组组织入口", () => {
+  it("将 Agent 能力与扩展管理分组，降低单组导航密度", () => {
     expect(SETTINGS_NAV_GROUPS.map((group) => group.id)).toEqual([
       "core",
+      "agent",
       "extensions",
       "archive",
       "data",
@@ -54,14 +55,8 @@ describe("settingsCatalog", () => {
       ),
     ).toEqual({
       core: ["general", "appearance", "account"],
-      extensions: [
-        "personalization",
-        "skills",
-        "plugins",
-        "agents",
-        "market",
-        "mcp",
-      ],
+      agent: ["personalization", "agents"],
+      extensions: ["skills", "plugins", "market", "mcp"],
       archive: ["archive", "archived"],
       data: ["requests", "analytics"],
     });

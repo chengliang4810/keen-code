@@ -1,4 +1,5 @@
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
 /**
  * Inline tool step on the assistant timeline (stream order).
  * Quiet red mark on failure; no bottom activity dump.
@@ -444,9 +445,9 @@ function SubagentTimelineCard({
         {status === "running" ? (
           <span className="lobe-subagent-card__running-dot" />
         ) : status === "done" ? (
-          <span className="lobe-subagent-card__complete-badge">
+          <Badge size="xs" variant="success" aria-label={statusLabel}>
             <IconCheck size={9} />
-          </span>
+          </Badge>
         ) : null}
       </span>
       <span className="lobe-subagent-card__identity">
@@ -478,7 +479,7 @@ function SubagentTimelineCard({
   return agent && onClick ? (
     <Button
       type="button"
-      className="btn btn--ghost lobe-subagent-card"
+      variant="ghost" className="lobe-subagent-card"
       onClick={onClick}
       {...commonProps}
     >
@@ -830,6 +831,7 @@ export function TimelineToolRow({
     >
       <Button
         type="button"
+        variant="ghost"
         className="lobe-timeline-tool__row"
         aria-expanded={hasDetail ? open : undefined}
         disabled={!hasDetail && !(editTool && resolvedPath && onOpenResource)}

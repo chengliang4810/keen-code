@@ -1,6 +1,8 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription, AlertIcon } from "@appica/ui-react/alert";
+import { FieldError } from "@appica/ui-react/field";
+import { Separator } from "@appica/ui-react/separator";
 import {
   useCallback,
   useEffect,
@@ -26,7 +28,7 @@ import {
 import { createT, type Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import * as api from "@/lib/api";
-import { Checkbox } from "@/components/ui/checkbox";
+import { Checkbox } from "@appica/ui-react/checkbox";
 import { SubagentRow } from "@/components/SubagentRow";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { GlassModal } from "@/components/GlassModal";
@@ -36,7 +38,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
+} from "@appica/ui-react/dropdown-menu";
 import { SearchField } from "@/components/SearchField";
 
 type GitAction = "commit" | "commit-push" | "push";
@@ -523,7 +525,8 @@ export function ConversationSummaryPanel({
         <strong className="summary-panel__title">{tr("summary.title")}</strong>
         <Button
           type="button"
-          className="summary-panel__icon-btn"
+          variant="ghost"
+          size="icon-md"
           aria-label={tr("common.close")}
           onClick={onClose}
         >
@@ -537,6 +540,7 @@ export function ConversationSummaryPanel({
               <div className="summary-panel__git">
                 <Button
               type="button"
+              variant="ghost"
               className="summary-panel__row"
               disabled={!git?.available}
               onClick={onOpenChanges}
@@ -554,13 +558,13 @@ export function ConversationSummaryPanel({
                 </Button>
 
                 <DropdownMenu open={branchMenuOpen} onOpenChange={setBranchMenuOpen}>
-                  <DropdownMenuTrigger asChild>
-                    <Button
+                  <DropdownMenuTrigger render={<Button
                       type="button"
+                      variant="ghost"
                       className="summary-panel__row"
                       disabled={!git?.available || Boolean(branchBusy)}
                       aria-label={tr("summary.branches.open")}
-                    >
+                    />}>
               <span className="summary-panel__row-icon">
                 <IconGitBranch size={18} />
               </span>
@@ -572,7 +576,6 @@ export function ConversationSummaryPanel({
                   ? git.branch || tr("summary.branchUnavailable")
                   : "—"}
               </code>
-                    </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent
                     side="left"
@@ -598,9 +601,9 @@ export function ConversationSummaryPanel({
                         <DropdownMenuItem
                           key={branch}
                           disabled={Boolean(branchBusy)}
-                          onSelect={(event) => {
-                            if (branch === git.branch) return event.preventDefault();
-                            void checkoutBranch(branch);
+                          closeOnClick={branch !== git.branch}
+                          onClick={() => {
+                            if (branch !== git.branch) void checkoutBranch(branch);
                           }}
                         >
                           <IconGitBranch size={17} />
@@ -620,7 +623,7 @@ export function ConversationSummaryPanel({
                     </div>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem
-                      onSelect={() => {
+                      onClick={() => {
                         setBranchMenuOpen(false);
                         setCreateBranchOpen(true);
                       }}
@@ -633,6 +636,7 @@ export function ConversationSummaryPanel({
 
                 <Button
               type="button"
+              variant={gitFormOpen ? "soft" : "ghost"}
               className={
                 "summary-panel__row" + (gitFormOpen ? " is-active" : "")
               }
@@ -658,7 +662,7 @@ export function ConversationSummaryPanel({
 
                 {gitFormOpen ? (
               <section className="summary-panel__git-form">
-                <Label className="summary-panel__commit-field">
+                <label className="summary-panel__commit-field">
                   <span className="sr-only">
                     {tr("summary.git.message")}
                   </span>
@@ -669,7 +673,7 @@ export function ConversationSummaryPanel({
                     onChange={(event) => setCommitMessage(event.target.value)}
                     onKeyDown={handleCommitKeyDown}
                   />
-                </Label>
+                </label>
                 <div className="summary-panel__checkbox">
                   <Checkbox
                     id="summary-panel-include-unstaged"
@@ -680,9 +684,9 @@ export function ConversationSummaryPanel({
                       setIncludeUnstaged(checked === true)
                     }
                   />
-                  <Label htmlFor="summary-panel-include-unstaged">
+                  <label htmlFor="summary-panel-include-unstaged">
                     {tr("summary.git.includeUnstaged")}
-                  </Label>
+                  </label>
                   <span className="summary-panel__diff-stat">
                     <span className="is-addition">+{git?.additions ?? 0}</span>
                     <span className="is-deletion">−{git?.deletions ?? 0}</span>
@@ -691,6 +695,7 @@ export function ConversationSummaryPanel({
                 <div className="summary-panel__git-actions">
                   <Button
                     type="button"
+                    variant="primary"
                     disabled={Boolean(gitAction) || !git?.files.length}
                     onClick={() => void runGitAction("commit")}
                   >
@@ -703,6 +708,7 @@ export function ConversationSummaryPanel({
                   </Button>
                   <Button
                     type="button"
+                    variant="outline"
                     disabled={Boolean(gitAction) || !git?.files.length}
                     onClick={() => void runGitAction("commit-push")}
                   >
@@ -715,6 +721,7 @@ export function ConversationSummaryPanel({
                   </Button>
                   <Button
                     type="button"
+                    variant="outline"
                     disabled={Boolean(gitAction) || !git?.available}
                     onClick={() => void runGitAction("push")}
                   >
@@ -730,20 +737,10 @@ export function ConversationSummaryPanel({
                 ) : null}
 
                 {gitFeedback ? (
-              <div
-                className={
-                  "summary-panel__notice" +
-                  (gitFeedback.kind === "error" ? " is-error" : "")
-                }
-                role="status"
-              >
-                {gitFeedback.kind === "error" ? (
-                  <IconAlertTriangle size={14} />
-                ) : (
-                  <IconCheck size={14} />
-                )}
-                <span>{gitFeedback.message}</span>
-              </div>
+                  <Alert variant={gitFeedback.kind === "error" ? "error" : "success"} role="status">
+                    <AlertIcon>{gitFeedback.kind === "error" ? <IconAlertTriangle size={14} /> : <IconCheck size={14} />}</AlertIcon>
+                    <AlertDescription>{gitFeedback.message}</AlertDescription>
+                  </Alert>
                 ) : null}
               </div>
             ) : null}
@@ -753,7 +750,7 @@ export function ConversationSummaryPanel({
                 className="summary-panel__shells"
                 aria-labelledby="summary-panel-shells-title"
               >
-                {git ? <div className="summary-panel__divider" /> : null}
+                {git ? <Separator /> : null}
                 <div
                   className="summary-panel__shell-heading"
                   id="summary-panel-shells-title"
@@ -779,6 +776,8 @@ export function ConversationSummaryPanel({
                         </span>
                         <Button
                           type="button"
+                          variant="ghost"
+                          size="icon-md"
                           className="summary-panel__shell-stop"
                           aria-label={tr("summary.backgroundShells.stop")}
                           aria-busy={stopping}
@@ -799,10 +798,7 @@ export function ConversationSummaryPanel({
                   })}
                 </div>
                 {shellTaskError ? (
-                  <div className="summary-panel__notice is-error" role="alert">
-                    <IconAlertTriangle size={14} />
-                    <span>{shellTaskError}</span>
-                  </div>
+                  <Alert variant="error"><AlertIcon><IconAlertTriangle size={14} /></AlertIcon><AlertDescription>{shellTaskError}</AlertDescription></Alert>
                 ) : null}
               </section>
             ) : null}
@@ -810,7 +806,7 @@ export function ConversationSummaryPanel({
             {summarySubagents.length > 0 ? (
               <section className="summary-panel__agent-summary">
                 {git || shellTasks.length > 0 ? (
-                  <div className="summary-panel__divider" />
+                  <Separator />
                 ) : null}
                 <div className="summary-panel__section-title">
                   {tr("summary.subagents.title")}
@@ -842,6 +838,8 @@ export function ConversationSummaryPanel({
                           {task ? (
                             <Button
                               type="button"
+                              variant="ghost"
+                              size="icon-md"
                               className="summary-panel__agent-stop"
                               aria-label={tr("summary.subagents.stop", {
                                 name: agent.task_title || agent.agent_name,
@@ -870,14 +868,12 @@ export function ConversationSummaryPanel({
                   )}
                 </div>
                 {agentTaskError ? (
-                  <div className="summary-panel__notice is-error" role="alert">
-                    <IconAlertTriangle size={14} />
-                    <span>{agentTaskError}</span>
-                  </div>
+                  <Alert variant="error"><AlertIcon><IconAlertTriangle size={14} /></AlertIcon><AlertDescription>{agentTaskError}</AlertDescription></Alert>
                 ) : null}
                 {groupedSubagents.done.length ? (
                   <Button
                     type="button"
+                    variant="ghost"
                     className="summary-panel__completed"
                     onClick={() => {
                       onOpenSubagentList();
@@ -924,17 +920,18 @@ export function ConversationSummaryPanel({
       <GlassModal
         open={createBranchOpen}
         title={tr("summary.branches.createTitle")}
-        size="sm"
+        size="md"
         overlayClassName="summary-panel__branch-surface"
         closeLabel={tr("common.close")}
         onClose={() => !branchBusy && setCreateBranchOpen(false)}
         footer={
           <>
-            <Button type="button" onClick={() => setCreateBranchOpen(false)}>
+            <Button type="button" variant="ghost" onClick={() => setCreateBranchOpen(false)}>
               {tr("common.cancel")}
             </Button>
             <Button
               type="button"
+              variant="primary"
               disabled={newBranchInvalid || Boolean(branchBusy)}
               onClick={() => void checkoutBranch(newBranchName.trim(), true)}
             >
@@ -943,7 +940,7 @@ export function ConversationSummaryPanel({
           </>
         }
       >
-        <Label className="summary-panel__create-branch-field">
+        <label className="summary-panel__create-branch-field">
           <span>{tr("summary.branches.name")}</span>
           <Input
             data-modal-autofocus
@@ -961,12 +958,8 @@ export function ConversationSummaryPanel({
               }
             }}
           />
-          {newBranchInvalid ? (
-            <small role="alert">{tr("summary.branches.invalid")}</small>
-          ) : branchError ? (
-            <small role="alert">{branchError}</small>
-          ) : null}
-        </Label>
+          {newBranchInvalid ? <FieldError>{tr("summary.branches.invalid")}</FieldError> : branchError ? <FieldError>{branchError}</FieldError> : null}
+        </label>
       </GlassModal>
     </aside>
   );

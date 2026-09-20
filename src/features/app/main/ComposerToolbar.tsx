@@ -155,6 +155,16 @@ export function ComposerToolbar({
     taskCacheUsage?.sessionId === session.sessionId ? taskCacheUsage : null;
   const hasBody =
     !isDraftEmpty(parseStoredContent(draft)) || attachments.length > 0;
+  const canQueue = shouldEnqueueSend(session.state, connecting);
+  const sendDisabled =
+    !hasConfiguredModel || (!effectiveCanSend && !canQueue) || !hasBody;
+  const sendLabel = !hasConfiguredModel
+    ? tr("composer.sendNeedsModel")
+    : !hasBody
+      ? tr("composer.sendNeedsContent")
+      : !effectiveCanSend && !canQueue
+        ? tr("composer.sendUnavailable")
+        : tr("composer.send");
 
   return (
     <div className="composer__row">
@@ -162,10 +172,9 @@ export function ComposerToolbar({
         <Button
           ref={composerPlusTriggerRef}
           type="button"
-          className={
-            "icon-btn icon-btn--plus" +
-            (composerMenuOpen ? " is-open" : "")
-          }
+          variant="soft"
+          size="icon-md"
+          className={composerMenuOpen ? "composer-plus-trigger is-open" : "composer-plus-trigger"}
           aria-label={tr("composer.add")}
           onClick={() => {
             if (composerMenuOpen) closeComposerMenu();
@@ -320,11 +329,11 @@ export function ComposerToolbar({
       {effectiveCanStop ? (
         hasConfiguredModel &&
         hasBody &&
-        shouldEnqueueSend(session.state, connecting) ? (
+        canQueue ? (
           <Tip label={tr("composer.send")}>
             <Button
               type="button"
-              className="icon-btn icon-btn--primary"
+              variant="primary" size="icon-md" className="composer__submit"
               onClick={() => void send()}
               aria-label={tr("composer.send")}
             >
@@ -335,7 +344,7 @@ export function ComposerToolbar({
           <Tip label={tr("composer.stop")}>
             <Button
               type="button"
-              className="icon-btn icon-btn--danger"
+              variant="destructive" size="icon-md" className="composer__submit"
               onClick={() => void stop()}
               aria-label={tr("composer.stop")}
             >
@@ -344,18 +353,14 @@ export function ComposerToolbar({
           </Tip>
         )
       ) : (
-        <Tip label={tr("composer.send")}>
+        <Tip label={sendLabel}>
           <Button
             type="button"
-            className="icon-btn icon-btn--primary"
-            disabled={
-              !hasConfiguredModel ||
-              (!effectiveCanSend &&
-                !shouldEnqueueSend(session.state, connecting)) ||
-              !hasBody
-            }
+            variant="primary" size="icon-md" className="composer__submit"
+            disabled={sendDisabled}
             onClick={() => void send()}
-            aria-label={tr("composer.send")}
+            aria-label={sendLabel}
+            title={sendLabel}
           >
             <IconArrowUp size={16} />
           </Button>

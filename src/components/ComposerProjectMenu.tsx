@@ -1,18 +1,23 @@
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@appica/ui-react/dropdown-menu";
 /**
  * Composer project chip — pick / add folder.
  * Git worktrees live in {@link ComposerWorktreeMenu} (branch chip).
  */
 
-import { useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
-import {
-  IconCheck,
-  IconFolder,
-  IconPlus,
-} from "@/components/icons";
+import { useRef, useState } from "react";
+import { IconFolder, IconPlus } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
-import { useFloatingMenu } from "@/lib/floatingMenu";
 
 export type ProjectOption = {
   id: string;
@@ -46,22 +51,7 @@ export function ComposerProjectMenu({
   onAdd,
 }: Props) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
-
-  const { pos, style: popStyle } = useFloatingMenu({
-    open,
-    triggerRef,
-    panelRef: popRef,
-    roots: [rootRef],
-    onClose: () => setOpen(false),
-    placement: "auto",
-    fitContent: true,
-    minWidth: 240,
-    estHeight: LIST_HEIGHT + 52,
-    gap: 8,
-  });
 
   const label = activeProject?.name ?? labels.pickProject;
   const activeMissing = activeProject?.pathOk === false;
@@ -72,14 +62,11 @@ export function ComposerProjectMenu({
     : activeProject?.path || labels.pickProject;
 
   return (
-    <div
-      ref={rootRef}
-      className={`cpm cpm--context${open ? " is-open" : ""}`}
-    >
-      <Tip label={tip} disabled={open}>
-        <Button
-          ref={triggerRef}
-          type="button"
+    <div className={`cpm cpm--context${open ? " is-open" : ""}`}>
+      <DropdownMenu open={open} onOpenChange={setOpen} size="md">
+        <Tip label={tip} disabled={open}>
+          <DropdownMenuTrigger
+            ref={triggerRef}
           className={
             "composer__context-item composer__context-item--project" +
             (open ? " is-open" : "") +
@@ -87,90 +74,70 @@ export function ComposerProjectMenu({
             (activeMissing ? " is-path-missing" : "")
           }
           disabled={disabled}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
+            render={<Button type="button" variant="ghost" />}
         >
           <IconFolder size={14} />
           <span className="composer__context-label">
             {label}
           </span>
-        </Button>
-      </Tip>
-      {open &&
-        pos &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <div
-            ref={popRef}
-            className="cmm__pop cmm__pop--portal cpm__pop"
-            role="menu"
-            aria-label={labels.pickProject}
-            style={popStyle as CSSProperties}
-          >
-            <div
-              className="cpm__list"
-              style={{ height: LIST_HEIGHT }}
-              role="group"
-              aria-label={labels.pickProject}
+          </DropdownMenuTrigger>
+        </Tip>
+        <DropdownMenuContent
+          className="cmm__pop cmm__pop--portal cpm__pop"
+          side="top"
+          align="start"
+          sideOffset={8}
+        >
+          <DropdownMenuGroup>
+            <DropdownMenuRadioGroup
+              value={activeProject?.id ?? ""}
+              onValueChange={(projectId) => {
+                const project = projects.find((candidate) => candidate.id === projectId);
+                if (project) onSelect(project);
+              }}
             >
+              <div className="cpm__list" style={{ height: LIST_HEIGHT }}>
               {projects.map((p) => {
-                const active = activeProject?.id === p.id;
                 const missing = p.pathOk === false;
                 return (
-                  <Button
+                    <DropdownMenuRadioItem
                     key={p.id}
-                    type="button"
-                    role="menuitem"
                     className={
-                      "cmm__opt cpm__item" +
-                      (active ? " is-active" : "") +
+                        "cmm__opt cpm__item" +
                       (missing ? " cpm__item--path-missing" : "")
                     }
+                      value={p.id}
                     title={
                       missing && labels.pathMissing
                         ? `${labels.pathMissing}: ${p.path}`
                         : p.path
                     }
-                    onClick={() => {
-                      onSelect(p);
-                      setOpen(false);
-                    }}
                   >
                     <span className="cmm__opt-main">
                       <span className="cmm__opt-title">{p.name}</span>
                       {missing && labels.pathMissing ? (
-                        <span className="cpm__path-badge">
+                        <Badge size="xs" variant="error">
                           {labels.pathMissing}
-                        </span>
+                        </Badge>
                       ) : null}
                     </span>
-                    {active ? (
-                      <span className="cmm__opt-check" aria-hidden>
-                        <IconCheck size={16} />
-                      </span>
-                    ) : null}
-                  </Button>
+                    </DropdownMenuRadioItem>
                 );
               })}
-            </div>
-            <div className="cpm__actions">
-              <Button
-                type="button"
-                role="menuitem"
-                className="cpm__action cpm__action--add"
-                onClick={() => {
-                  setOpen(false);
-                  onAdd(triggerRef.current);
-                }}
-              >
-                <IconPlus size={14} aria-hidden />
-                <span>{labels.addProject}</span>
-              </Button>
-            </div>
-          </div>,
-          document.body,
-        )}
+              </div>
+            </DropdownMenuRadioGroup>
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onClick={() => {
+              onAdd(triggerRef.current);
+            }}
+          >
+            <IconPlus size={14} aria-hidden />
+            <span>{labels.addProject}</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

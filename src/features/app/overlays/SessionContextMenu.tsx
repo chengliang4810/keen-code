@@ -146,7 +146,6 @@ export function SessionContextMenu({
       y={menu?.y ?? 0}
       onClose={() => setMenu(null)}
       items={items}
-      estimatedHeight={240}
     />
   );
 }

@@ -130,6 +130,7 @@ export function TimelinePhaseBlock({
     >
       <Button
         type="button"
+        variant="ghost"
         className="lobe-timeline-phase__trigger"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}

@@ -1,12 +1,20 @@
 import { Button } from "@/components/ui/button";
+import { ButtonGroup } from "@appica/ui-react/button-group";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@appica/ui-react/dropdown-menu";
 /**
  * “打开位置”分段按钮：主按钮执行当前目标，展开按钮切换系统打开方式。
  */
 
-import { useCallback, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useCallback, useState } from "react";
 import * as api from "@/lib/api";
-import { useFloatingMenu } from "@/lib/floatingMenu";
 import {
   IconChevronDown,
   IconCopy,
@@ -69,19 +77,6 @@ export function OpenLocationButton({
   disabled = false,
 }: OpenLocationButtonProps) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-
-  const { pos, style } = useFloatingMenu({
-    open,
-    triggerRef: rootRef,
-    panelRef,
-    onClose: () => setOpen(false),
-    placement: "down",
-    fitContent: true,
-    estHeight: 340,
-    gap: 6,
-  });
 
   const active = normalizeTarget(target, platform);
 
@@ -107,90 +102,23 @@ export function OpenLocationButton({
 
   const finderTarget = platform === "win" ? "explorer" : "finder";
 
-  const menu =
-    open && pos && typeof document !== "undefined"
-      ? createPortal(
-          <div
-            ref={panelRef}
-            className="menu-panel open-loc-menu"
-            role="menu"
-            style={style}
-          >
-            <Button
-              type="button"
-              role="menuitem"
-              className={
-                "open-loc-menu__item" +
-                (active === "finder" || active === "explorer"
-                  ? " is-active"
-                  : "")
-              }
-              onClick={() => {
-                setOpen(false);
-                void openWith(finderTarget, true);
-              }}
-            >
-              <span className="open-loc-menu__ico" aria-hidden>
-                <IconFolder size={16} />
-              </span>
-              <span>{labels.finder}</span>
-            </Button>
-            <Button
-              type="button"
-              role="menuitem"
-              className={
-                "open-loc-menu__item" +
-                (active === "system" ? " is-active" : "")
-              }
-              onClick={() => {
-                setOpen(false);
-                void openWith("system", true);
-              }}
-            >
-              <span className="open-loc-menu__ico" aria-hidden>
-                <IconExternalLink size={16} />
-              </span>
-              <span>{labels.systemDefault}</span>
-            </Button>
-            <div className="open-loc-menu__sep" aria-hidden />
-            <Button
-              type="button"
-              role="menuitem"
-              className="open-loc-menu__item"
-              onClick={() => {
-                setOpen(false);
-                if (!path) return;
-                void navigator.clipboard
-                  .writeText(path)
-                  .then(() => onCopied?.())
-                  .catch((e) => onOpenError?.(String(e)));
-              }}
-            >
-              <span className="open-loc-menu__ico" aria-hidden>
-                <IconCopy size={16} />
-              </span>
-              <span>{labels.copyPath}</span>
-            </Button>
-          </div>,
-          document.body,
-        )
-      : null;
-
   return (
-    <div
-      ref={rootRef}
+    <ButtonGroup
+      variant="outline"
+      size="md"
+      disabled={disabled}
       className={
         "open-loc" +
         (open ? " is-open" : "") +
         (compact ? " open-loc--compact" : "") +
-        (disabled ? " is-disabled" : "") +
         (className ? ` ${className}` : "")
       }
     >
       <Tip label={labels.openHint} disabled={disabled}>
-        <Button
-          type="button"
-          className="open-loc__main"
+      <Button
+        type="button"
+        variant="outline"
+        className="open-loc__main"
           disabled={disabled}
           onClick={() => void openWith(active, false)}
         >
@@ -206,19 +134,52 @@ export function OpenLocationButton({
           )}
         </Button>
       </Tip>
-      <Tip label={labels.openMenu} disabled={disabled}>
-        <Button
-          type="button"
-          className="open-loc__caret"
-          disabled={disabled}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-        >
-          <IconChevronDown size={12} className="chevron" />
-        </Button>
-      </Tip>
-      {menu}
-    </div>
+      <DropdownMenu open={open} onOpenChange={setOpen} size="md">
+        <Tip label={labels.openMenu} disabled={disabled}>
+          <DropdownMenuTrigger
+            className="open-loc__caret"
+            disabled={disabled}
+            render={<Button type="button" variant="outline" size="icon-md" />}
+          >
+            <IconChevronDown size={12} className="chevron" />
+          </DropdownMenuTrigger>
+        </Tip>
+        <DropdownMenuContent align="end" sideOffset={6}>
+          <DropdownMenuRadioGroup
+            value={active}
+            onValueChange={(value) => {
+              void openWith(value as OpenLocationTarget, true);
+            }}
+          >
+            <DropdownMenuRadioItem value={finderTarget}>
+              <span data-icon="start" aria-hidden>
+                <IconFolder size={16} />
+              </span>
+              <span>{labels.finder}</span>
+            </DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="system">
+              <span data-icon="start" aria-hidden>
+                <IconExternalLink size={16} />
+              </span>
+              <span>{labels.systemDefault}</span>
+            </DropdownMenuRadioItem>
+          </DropdownMenuRadioGroup>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem
+            onClick={() => {
+              void navigator.clipboard
+                .writeText(path)
+                .then(() => onCopied?.())
+                .catch((error) => onOpenError?.(String(error)));
+            }}
+          >
+            <span data-icon="start" aria-hidden>
+              <IconCopy size={16} />
+            </span>
+            <span>{labels.copyPath}</span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </ButtonGroup>
   );
 }

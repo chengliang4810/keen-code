@@ -1,7 +1,10 @@
-import { Label } from "@/components/ui/label";
+import { Card } from "@appica/ui-react/card";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { NumberField } from "@appica/ui-react/number-field";
+import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Slider } from "@/components/ui/slider";
+import { Input } from "@appica/ui-react/input";
+import { Slider } from "@appica/ui-react/slider";
 import {
   isUiFontSize,
   MAX_UI_FONT_SIZE,
@@ -90,16 +93,18 @@ import {
   SelectContent,
   SelectGroup,
   SelectItem,
-  SelectLabel,
+  SelectGroupLabel,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@appica/ui-react/select";
 import { Switch } from "@/components/ui/switch";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@/components/ui/toggle-group";
+  ColorSwatchPicker,
+  ColorSwatchPickerItem,
+} from "@appica/ui-react/color-swatch-picker";
+import { formatColor } from "@appica/ui-react/color";
+import { ToggleGroup } from "@appica/ui-react/toggle-group";
+import { Toggle } from "@appica/ui-react/toggle";
 import {
   SETTINGS_NAV,
   SETTINGS_NAV_GROUPS,
@@ -115,6 +120,11 @@ export type { SettingsSectionId } from "@/lib/settingsCatalog";
 const SOURCE_REPOSITORY_URL = "https://github.com/chengliang4810/keen-code";
 const MIN_BACKGROUND_AGENT_LIMIT = 1;
 const MAX_BACKGROUND_AGENT_LIMIT = 999;
+const INTERFACE_LANGUAGE_LABELS: Record<Locale, string> = {
+  zh: "中文简体",
+  "zh-TW": "中文繁體",
+  en: "English",
+};
 
 export interface SettingsPageProps {
   section: SettingsSectionId;
@@ -282,12 +292,11 @@ function SettingsSwitch({
 }) {
   return (
     <Switch
-      type="button"
       checked={checked}
       aria-label={ariaLabel}
       title={ariaLabel}
       disabled={disabled}
-      className={"ext-switch" + (checked ? " is-on" : "")}
+      size="md"
       onCheckedChange={(value) => onChange(value === true)}
       onClick={(event) => event.stopPropagation()}
       onPointerDown={(event) => event.stopPropagation()}
@@ -492,22 +501,20 @@ export function SettingsPage({
   }, [onRestoreArchivedSession, restoringSessionId]);
 
   const renderNavItem = (n: (typeof SETTINGS_NAV)[number]) => (
-    <a
+    <NavigationItem key={n.id}>
+    <NavigationLink
       key={n.id}
       href={buildSettingsHash({ section: n.id })}
-      aria-current={section === n.id ? "page" : undefined}
-      className={
-        "settings-page__nav-item" +
-        (section === n.id ? " is-active" : "")
-      }
+      value={n.id}
       onClick={(event) => {
         event.preventDefault();
         openSection(n.id);
       }}
     >
-      <NavIcon name={n.icon} size={18} />
+      <NavIcon name={n.icon} size={18} data-icon="start" />
       <span className="settings-page__nav-label">{t(n.labelKey)}</span>
-    </a>
+    </NavigationLink>
+    </NavigationItem>
   );
 
   return (
@@ -531,6 +538,8 @@ export function SettingsPage({
         <div className="settings-page__nav-header">
           <Button
             type="button"
+            variant="ghost"
+            size="md"
             className="settings-page__back"
             onClick={onBack}
           >
@@ -541,6 +550,7 @@ export function SettingsPage({
         <div className="settings-page__mobile-nav">
           <Button
             type="button"
+            variant="ghost"
             className="settings-page__mobile-back"
             onClick={onBack}
           >
@@ -550,19 +560,19 @@ export function SettingsPage({
           <Select
             value={section}
             onValueChange={(value) => {
-              if (isSettingsSectionId(value)) openSection(value);
+              if (typeof value === "string" && isSettingsSectionId(value)) openSection(value);
             }}
           >
             <SelectTrigger
               className="settings-input settings-page__mobile-select"
               aria-label={t("settings.navigation")}
             >
-              <SelectValue />
+              <SelectValue>{() => title}</SelectValue>
             </SelectTrigger>
             <SelectContent>
               {navGroups.map((group) => (
                 <SelectGroup key={group.id}>
-                  <SelectLabel>{t(group.labelKey)}</SelectLabel>
+                  <SelectGroupLabel>{t(group.labelKey)}</SelectGroupLabel>
                   {group.items.map((item) => (
                     <SelectItem key={item.id} value={item.id}>
                       {t(item.labelKey)}
@@ -578,9 +588,13 @@ export function SettingsPage({
             </SelectContent>
           </Select>
         </div>
-        <nav
+        <Navigation
           className="settings-page__nav-inner"
           aria-label={t("settings.navigation")}
+          orientation="vertical"
+          variant="pill"
+          size="md"
+          activeLink={section}
         >
           {navGroups.map((group) =>
             group.items.length > 0 ? (
@@ -596,12 +610,12 @@ export function SettingsPage({
                 >
                   {t(group.labelKey)}
                 </div>
-                {group.items.map(renderNavItem)}
+                <NavigationList>{group.items.map(renderNavItem)}</NavigationList>
               </div>
             ) : null,
           )}
-          {standaloneNav.map(renderNavItem)}
-        </nav>
+          <NavigationList>{standaloneNav.map(renderNavItem)}</NavigationList>
+        </Navigation>
       </aside>
 
       <div className="settings-page__content">
@@ -620,7 +634,7 @@ export function SettingsPage({
               <h2 className="settings-page__h2">
                 {t("settings.general.system")}
               </h2>
-              <div className="settings-card">
+              <Card >
                 <div
                   className="settings-row"
                   id="settings-anchor-interface-language"
@@ -636,20 +650,26 @@ export function SettingsPage({
                   <Select
                     value={locale}
                     onValueChange={(value) => {
-                      if (isLocale(value)) onLocaleChange(value);
+                      if (typeof value === "string" && isLocale(value)) onLocaleChange(value);
                     }}
                   >
                     <SelectTrigger
                       className="settings-input settings-input--compact"
                       aria-label={t("settings.interfaceLanguage")}
                     >
-                      <SelectValue />
+                      <SelectValue>
+                        {() => INTERFACE_LANGUAGE_LABELS[locale]}
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
-                        <SelectItem value="zh">简体中文</SelectItem>
-                        <SelectItem value="zh-TW">繁體中文</SelectItem>
-                        <SelectItem value="en">English</SelectItem>
+                        {Object.entries(INTERFACE_LANGUAGE_LABELS).map(
+                          ([value, label]) => (
+                            <SelectItem key={value} value={value}>
+                              {label}
+                            </SelectItem>
+                          ),
+                        )}
                       </SelectGroup>
                     </SelectContent>
                   </Select>
@@ -719,32 +739,25 @@ export function SettingsPage({
                       {t("settings.backgroundAgentLimitDesc")}
                     </div>
                   </div>
-                  <Input
+                  <NumberField
                     key={backgroundAgentLimit}
-                    type="number"
-                    className="settings-input settings-input--compact"
+                    size="md"
                     min={MIN_BACKGROUND_AGENT_LIMIT}
                     max={MAX_BACKGROUND_AGENT_LIMIT}
                     step={1}
                     defaultValue={backgroundAgentLimit}
                     aria-label={t("settings.backgroundAgentLimit")}
                     aria-describedby="settings-background-agent-limit-desc"
-                    onBlur={(event) => {
-                      const value = event.currentTarget.valueAsNumber;
+                    onValueCommitted={(value) => {
                       if (
+                        value == null ||
                         !Number.isInteger(value) ||
                         value < MIN_BACKGROUND_AGENT_LIMIT ||
                         value > MAX_BACKGROUND_AGENT_LIMIT
-                      ) {
-                        event.currentTarget.value = String(backgroundAgentLimit);
-                        return;
-                      }
+                      ) return;
                       if (value !== backgroundAgentLimit) {
                         onBackgroundAgentLimit(value);
                       }
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") event.currentTarget.blur();
                     }}
                   />
                 </div>
@@ -753,12 +766,12 @@ export function SettingsPage({
                   id="settings-anchor-web-service-url"
                 >
                   <div className="settings-row__text">
-                    <Label
+                    <label
                       className="settings-row__label"
                       htmlFor="settings-web-service-url"
                     >
                       {t("settings.webServiceUrl")}
-                    </Label>
+                    </label>
                     <div
                       className="settings-row__desc"
                       id="settings-web-service-url-desc"
@@ -799,14 +812,14 @@ export function SettingsPage({
                     <div className="settings-project-directory__actions">
                       <Button
                         type="button"
-                        className="btn btn--ghost btn--sm"
+                        variant="ghost" size="md"
                         onClick={() => void onProjectDirectoryReset()}
                       >
                         {t("settings.projectDirectoryReset")}
                       </Button>
                       <Button
                         type="button"
-                        className="btn btn--solid btn--sm"
+                        variant="primary" size="md"
                         onClick={() => void onProjectDirectoryChoose()}
                       >
                         {t("settings.projectDirectoryChoose")}
@@ -814,12 +827,12 @@ export function SettingsPage({
                     </div>
                   </div>
                 </div>
-              </div>
+              </Card>
 
               <h2 className="settings-page__h2">
                 {t("settings.general.notifications")}
               </h2>
-              <div className="settings-card">
+              <Card >
                 <div
                   className="settings-row"
                   id="settings-anchor-task-notifications"
@@ -877,13 +890,13 @@ export function SettingsPage({
                     ariaLabel={t("settings.showThinkingProcess")}
                   />
                 </div>
-              </div>
+              </Card>
 
             </>
           )}
 
           {section === "archive" && (
-            <div className="settings-card">
+            <Card >
               <div className="settings-row" id="settings-anchor-auto-archive">
                 <div className="settings-row__text">
                   <div className="settings-row__label">{t("settings.archive.auto")}</div>
@@ -917,7 +930,7 @@ export function SettingsPage({
                   </SelectContent>
                 </Select>
               </div>
-            </div>
+            </Card>
           )}
 
         {section === "archived" && (
@@ -932,7 +945,7 @@ export function SettingsPage({
               aria-label={t("settings.archived.search")}
               onChange={(event) => setArchivedQuery(event.target.value)}
             />
-            <div className="settings-card settings-archived__list">
+            <Card className="settings-archived__list">
               {visibleArchivedSessions.length === 0 ? (
                 <div className="settings-archived__empty">
                   {archivedSessions.length === 0
@@ -955,7 +968,7 @@ export function SettingsPage({
                   <div className="settings-archived__actions">
                     <Button
                       type="button"
-                      className="btn btn--solid btn--sm"
+                      variant="primary" size="md"
                       disabled={restoringSessionId !== null}
                       onClick={() => void restoreArchivedSession(archivedSession.id)}
                     >
@@ -965,7 +978,7 @@ export function SettingsPage({
                     </Button>
                     <Button
                       type="button"
-                      className="btn btn--danger btn--sm"
+                      variant="destructive" size="md"
                       disabled={restoringSessionId !== null}
                       onClick={() => onDeleteArchivedSession?.(archivedSession.id)}
                     >
@@ -974,14 +987,17 @@ export function SettingsPage({
                   </div>
                 </div>
               ))}
-            </div>
+            </Card>
           </>
         )}
 
         {section === "appearance" && (
           <>
-            <div className="settings-card" id="settings-anchor-theme">
-              <div className="settings-row settings-row--stack">
+            <Card>
+              <div
+                className="settings-row settings-row--stack"
+                id="settings-anchor-theme"
+              >
                 <div className="settings-row__text">
                   <div className="settings-row__label">
                     <IconAppearance size={16} />
@@ -992,39 +1008,36 @@ export function SettingsPage({
                   </div>
                 </div>
                 <ToggleGroup
-                  type="single"
-                  value={themePreference}
+                  className="ui-toggle-appearance-group"
+                  value={[themePreference]}
                   aria-label={t("settings.theme")}
-                  variant="appearance"
-                  spacing={8}
                   onValueChange={(value) => {
-                    if (isThemePreference(value)) onTheme(value);
+                    const next = value[0];
+                    if (isThemePreference(next)) onTheme(next);
                   }}
                 >
-                  <ToggleGroupItem value="light">
+                  <Toggle value="light" render={<Button variant="outline" className="ui-toggle-appearance" />}>
                     <IconSun size={20} />
                     {t("settings.themeLight")}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="dark">
+                  </Toggle>
+                  <Toggle value="dark" render={<Button variant="outline" className="ui-toggle-appearance" />}>
                     <IconMoon size={20} />
                     {t("settings.themeDark")}
-                  </ToggleGroupItem>
-                  <ToggleGroupItem value="system">
+                  </Toggle>
+                  <Toggle value="system" render={<Button variant="outline" className="ui-toggle-appearance" />}>
                     <IconDesktop size={20} />
                     {t("settings.themeSystem")}
-                  </ToggleGroupItem>
+                  </Toggle>
                 </ToggleGroup>
               </div>
-            </div>
-            <div className="settings-card" id="settings-anchor-ui-font-size">
-              <div className="settings-row">
+              <div className="settings-row" id="settings-anchor-ui-font-size">
                 <div className="settings-row__text">
-                  <Label
+                  <label
                     className="settings-row__label"
                     htmlFor="settings-ui-font-size"
                   >
                     {t("settings.uiFontSize")}
-                  </Label>
+                  </label>
                   <div
                     className="settings-row__desc"
                     id="settings-ui-font-size-desc"
@@ -1032,37 +1045,30 @@ export function SettingsPage({
                     {t("settings.uiFontSizeDesc")}
                   </div>
                 </div>
-                <Input
+                <NumberField
                   key={uiFontSize}
                   id="settings-ui-font-size"
-                  type="number"
-                  className="settings-input settings-input--compact"
+                  size="md"
                   min={MIN_UI_FONT_SIZE}
                   max={MAX_UI_FONT_SIZE}
                   step={1}
                   defaultValue={uiFontSize}
                   aria-label={t("settings.uiFontSize")}
                   aria-describedby="settings-ui-font-size-desc"
-                  onBlur={(event) => {
-                    const value = event.currentTarget.valueAsNumber;
-                    if (!isUiFontSize(value)) {
-                      event.currentTarget.value = String(uiFontSize);
-                      return;
-                    }
+                  onValueCommitted={(value) => {
+                    if (value == null || !isUiFontSize(value)) return;
                     if (value !== uiFontSize) onUiFontSize(value);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") event.currentTarget.blur();
                   }}
                 />
               </div>
-            </div>
-            <div className="settings-card" id="settings-anchor-terminal-font">
-              <div className="settings-row settings-row--stack">
+              <div
+                className="settings-row settings-row--stack"
+                id="settings-anchor-terminal-font"
+              >
                 <div className="settings-row__text">
-                  <Label className="settings-row__label" htmlFor="settings-terminal-font">
+                  <label className="settings-row__label" htmlFor="settings-terminal-font">
                     {t("settings.terminalFont")}
-                  </Label>
+                  </label>
                   <div className="settings-row__desc" id="settings-terminal-font-desc">
                     {t("settings.terminalFontDesc")}
                   </div>
@@ -1087,9 +1093,7 @@ export function SettingsPage({
                   }}
                 />
               </div>
-            </div>
-            {terminalShellOptions.length > 0 && (
-              <div className="settings-card">
+              {terminalShellOptions.length > 0 && (
                 <div className="settings-row">
                   <div className="settings-row__text">
                     <div className="settings-row__label">
@@ -1123,11 +1127,11 @@ export function SettingsPage({
                     </SelectContent>
                   </Select>
                 </div>
-              </div>
-            )}
+              )}
+            </Card>
             <div className="settings-appearance-duo">
-              <div
-                className="settings-card settings-card--appearance-col"
+              <Card
+                className="settings-appearance-card"
                 id="settings-anchor-skin"
               >
                 <div className="settings-row settings-row--stack">
@@ -1139,41 +1143,36 @@ export function SettingsPage({
                       {t("settings.skinDesc")}
                     </div>
                   </div>
-                  <RadioGroup
-                    value={skin}
+                  <ColorSwatchPicker
+                    value={THEME_SKINS.find((pack) => pack.id === skin)?.swatch}
                     aria-label={t("settings.skin")}
                     className="settings-skin-grid"
                     onValueChange={(value) => {
-                      if (isThemeSkinId(value)) onSkin(value);
+                      const selected = THEME_SKINS.find(
+                        (pack) => pack.swatch.toLowerCase() === formatColor(value, "hex").toLowerCase(),
+                      );
+                      if (selected && isThemeSkinId(selected.id)) onSkin(selected.id);
                     }}
+                    size="xl"
                   >
                     {THEME_SKINS.map((pack) => {
                       const label = t(
                         `settings.skin.${pack.id}` as "settings.skin.default",
                       );
                       return (
-                        <RadioGroupItem
+                        <ColorSwatchPickerItem
                           key={pack.id}
-                          value={pack.id}
-                          className="settings-skin-card"
-                        >
-                          <span
-                            className="settings-skin-card__swatch"
-                            style={{
-                              background: `linear-gradient(135deg, ${pack.swatch} 0%, ${pack.swatchAlt} 100%)`,
-                            }}
-                            aria-hidden
-                          />
-                          <span className="settings-skin-card__name">{label}</span>
-                        </RadioGroupItem>
+                          color={pack.swatch}
+                          colorName={label}
+                        />
                       );
                     })}
-                  </RadioGroup>
+                  </ColorSwatchPicker>
                 </div>
-              </div>
+              </Card>
                 {onWallpaper ? (
-                  <div
-                    className="settings-card settings-card--appearance-col"
+                  <Card
+                    className="settings-appearance-card"
                     id="settings-anchor-wallpaper"
                   >
                     <div className="settings-row settings-row--stack">
@@ -1229,7 +1228,7 @@ export function SettingsPage({
                               <div className="settings-wallpaper__hover">
                                 <Button
                                   type="button"
-                                  className="btn btn--solid btn--sm"
+                                  variant="primary" size="md"
                                   disabled={wallpaperBusy}
                                   onClick={() =>
                                     wallpaperInputRef.current?.click()
@@ -1240,7 +1239,7 @@ export function SettingsPage({
                                 {onWallpaperAdjust ? (
                                   <Button
                                     type="button"
-                                    className="btn btn--solid btn--sm"
+                                    variant="primary" size="md"
                                     disabled={wallpaperBusy}
                                     onClick={() => setWallpaperFocusOpen(true)}
                                   >
@@ -1251,7 +1250,7 @@ export function SettingsPage({
                               </div>
                               <Button
                                 type="button"
-                                className="settings-wallpaper__clear btn btn--ghost btn--sm"
+                                variant="ghost" size="md" className="settings-wallpaper__clear"
                                 disabled={wallpaperBusy}
                                 onClick={() => {
                                   setWallpaperError(null);
@@ -1265,6 +1264,7 @@ export function SettingsPage({
                           ) : (
                             <Button
                               type="button"
+                              variant="outline"
                               className={
                                 "settings-wallpaper__preview" +
                                 (wallpaperBusy
@@ -1318,12 +1318,12 @@ export function SettingsPage({
                         {wallpaperUrl && onWallpaperScrim && onWallpaperBlur ? (
                           <div className="settings-wallpaper__scrim">
                             <div className="settings-wallpaper__scrim-head">
-                              <Label
+                              <label
                                 className="settings-wallpaper__scrim-label"
                                 htmlFor="settings-wallpaper-scrim"
                               >
                                 {t("settings.wallpaperVisibility")}
-                              </Label>
+                              </label>
                               <span
                                 className="settings-wallpaper__scrim-value"
                                 aria-hidden
@@ -1337,22 +1337,25 @@ export function SettingsPage({
                               min={0}
                               max={100}
                               step={1}
-                              value={[100 - wallpaperScrim]}
+                              value={100 - wallpaperScrim}
+                              thumbAriaLabel={t("settings.wallpaperVisibility")}
+                              tooltipVisibility="never"
                               aria-valuemin={0}
                               aria-valuemax={100}
                               aria-valuenow={100 - Math.round(wallpaperScrim)}
                               aria-label={t("settings.wallpaperVisibility")}
-                              onValueChange={([value]) => {
+                              onValueChange={(value) => {
+                                if (typeof value !== "number") return;
                                 onWallpaperScrim(100 - value);
                               }}
                             />
                             <div className="settings-wallpaper__scrim-head">
-                              <Label
+                              <label
                                 className="settings-wallpaper__scrim-label"
                                 htmlFor="settings-wallpaper-blur"
                               >
                                 {t("settings.wallpaperBlur")}
-                              </Label>
+                              </label>
                               <span
                                 className="settings-wallpaper__scrim-value"
                                 aria-hidden
@@ -1366,11 +1369,13 @@ export function SettingsPage({
                               min={0}
                               max={24}
                               step={1}
-                              value={[wallpaperBlur]}
+                              value={wallpaperBlur}
+                              thumbAriaLabel={t("settings.wallpaperBlur")}
+                              tooltipVisibility="never"
                               aria-label={t("settings.wallpaperBlur")}
-                              onValueChange={([value]) =>
-                                onWallpaperBlur(value)
-                              }
+                              onValueChange={(value) => {
+                                if (typeof value === "number") onWallpaperBlur(value);
+                              }}
                             />
                             <p className="settings-wallpaper__scrim-hint">
                               {t("settings.wallpaperScrimDesc")}
@@ -1378,7 +1383,7 @@ export function SettingsPage({
                             {onWallpaperAppearanceReset ? (
                               <Button
                                 type="button"
-                                className="btn btn--ghost btn--sm"
+                                variant="ghost" size="md"
                                 onClick={onWallpaperAppearanceReset}
                               >
                                 {t("settings.wallpaperAppearanceReset")}
@@ -1386,17 +1391,10 @@ export function SettingsPage({
                             ) : null}
                           </div>
                         ) : null}
-                        {wallpaperError ? (
-                          <p
-                            className="settings-wallpaper__error"
-                            role="alert"
-                          >
-                            {wallpaperError}
-                          </p>
-                        ) : null}
+                        {wallpaperError ? <Alert variant="error"><AlertDescription>{wallpaperError}</AlertDescription></Alert> : null}
                       </div>
                     </div>
-                  </div>
+                  </Card>
                 ) : null}
             </div>
           </>
@@ -1531,6 +1529,7 @@ export function SettingsPage({
             locale={locale}
             projectPath={projectPath}
             activeTab={section}
+            onOpenMarketplace={() => onSection("market")}
           />
         )}
 
@@ -1539,8 +1538,8 @@ export function SettingsPage({
         )}
 
         {section === "about" && (
-          <div
-            className="settings-card"
+          <Card
+
             id="settings-anchor-about"
           >
             <div className="settings-row settings-row--stack">
@@ -1589,6 +1588,7 @@ export function SettingsPage({
                     </div>
                     <Button
                       type="button"
+                      variant="ghost"
                       className="settings-about__source-link"
                       onClick={() => {
                         if (isTauri()) {
@@ -1622,7 +1622,7 @@ export function SettingsPage({
                 />
               </div>
             </div>
-          </div>
+          </Card>
         )}
       </main>
       </div>

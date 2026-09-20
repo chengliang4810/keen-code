@@ -10,7 +10,7 @@ const options = [
 ] as const
 
 describe("MultiSelect", () => {
-  it("renders a labelled shadcn trigger and drops unknown or duplicate values", () => {
+  it("renders a labelled Appica multi-select and drops unknown or duplicate values", () => {
     const html = renderToStaticMarkup(
       <MultiSelect
         options={options}
@@ -22,7 +22,7 @@ describe("MultiSelect", () => {
       />,
     )
 
-    expect(html).toContain('data-slot="multi-select-trigger"')
+    expect(html).toContain('data-slot="select-trigger"')
     expect(html).toContain('aria-label="工具"')
     expect(html).toContain('aria-describedby="tools-help"')
     expect(html).toContain('aria-expanded="false"')

@@ -1,9 +1,13 @@
-import { createPortal } from "react-dom";
 import type { RefObject } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import type { SessionSearchHits } from "@/lib/sessionSearch";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle,
+} from "@appica/ui-react/dialog";
+import { Input } from "@appica/ui-react/input";
 import {
   IconClose,
   IconFolder,
@@ -55,16 +59,21 @@ export function SessionSearchPortal({
   setProjectsOpen,
   setExpandedProjects,
 }: SessionSearchPortalProps) {
-  if (!open || typeof document === "undefined") return null;
-
-  return createPortal(
-    <div className="overlay search-overlay" onClick={() => setOpen(false)}>
-      <div
+  return (
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!nextOpen) setOpen(false);
+      }}
+    >
+      <DialogContent
+        frame={false}
+        closeButton={false}
         className="search-panel"
-        onClick={(event) => event.stopPropagation()}
-        role="dialog"
-        aria-label={tr("sidebar.search")}
+        viewportProps={{ className: "search-overlay" }}
+        finalFocus={returnFocusRef}
       >
+        <DialogTitle className="sr-only">{tr("sidebar.search")}</DialogTitle>
         <div className="search-panel__head">
           <IconSearch size={16} />
           <Input
@@ -76,7 +85,7 @@ export function SessionSearchPortal({
           />
           <Button
             type="button"
-            className="icon-btn modal-close"
+            variant="ghost" size="icon-md" className="modal-close"
             onClick={() => setOpen(false)}
             aria-label={tr("common.close")}
           >
@@ -92,6 +101,7 @@ export function SessionSearchPortal({
               <Button
                 key={project.id}
                 type="button"
+                variant="ghost"
                 className="search-panel__row"
                 onClick={() => {
                   setOpen(false);
@@ -129,6 +139,7 @@ export function SessionSearchPortal({
             <Button
               key={hit.id}
               type="button"
+              variant="ghost"
               className="search-panel__row"
               onClick={() => {
                 setOpen(false);
@@ -148,6 +159,7 @@ export function SessionSearchPortal({
         <div className="search-panel__foot">
           <Button
             type="button"
+            variant="ghost"
             className="search-panel__row"
             onClick={() => {
               setOpen(false);
@@ -161,6 +173,7 @@ export function SessionSearchPortal({
           </Button>
           <Button
             type="button"
+            variant="ghost"
             className="search-panel__row"
             onClick={() => {
               setOpen(false);
@@ -173,8 +186,7 @@ export function SessionSearchPortal({
             </span>
           </Button>
         </div>
-      </div>
-    </div>,
-    document.body,
+      </DialogContent>
+    </Dialog>
   );
 }

@@ -38,7 +38,7 @@ describe("McpRuntimeDetails", () => {
     expect(html).toContain("Transport: streamable-http");
     expect(html).toContain("4 tools");
     expect(html).toContain("OAuth authorized");
-    expect(html).toContain("ext-badge--ok");
+    expect(html).toContain('data-slot="badge"');
   });
 
   it("展示授权需求与逐 Server 错误", () => {
@@ -67,7 +67,7 @@ describe("McpRuntimeDetails", () => {
     expect(html).toContain("需要 OAuth 授权");
     expect(html).toContain("浏览器打开失败");
     expect(html).toContain("role=\"alert\"");
-    expect(html).toContain("ext-badge--fail");
+    expect(html).toContain('data-slot="badge"');
   });
 });
 
@@ -115,6 +115,8 @@ describe("Plugin marketplace boundaries", () => {
     expect(source).toContain('{tab === "plugins" && (');
     expect(source).toContain("<ExtensionsBuildExtras");
     expect(source).toContain('onManagePlugins={onTabChange ? () => onTabChange("plugins") : undefined}');
+    expect(source).toContain("onClick={onOpenMarketplace}");
+    expect(source).toContain('tr("ext.plugins.browseMarket")');
   });
 
   it("扩展查询统一携带当前项目路径", () => {

@@ -1,99 +1,65 @@
-/* 思考强度滑块：胶囊轨道 + 档位点 + 玻璃旋钮 + Canvas 动效。
- *
- * 对照 Droppy Code 的 EffortSlider 视觉移植。行为层复用 shadcn/Radix Slider
- * 的键盘与指针语义（其 thumb 边界偏移公式与自绘轨道的 stop 定位等价），这里
- * 只重做视觉层。颜色一律取自 tokens.css 的 --effort-* 令牌；画布动效通过
- * getComputedStyle 读同一组令牌，保证 DOM 与画布同色。
- */
-
 .effort-slider {
-  /* Radix Root 渲染为 span；不显式块化则宽高塌陷，绝对定位的内部拿不到尺寸。 */
-  display: block;
-  position: relative;
-  height: var(--effort-slider-knob);
-  width: 100%;
-  /* 面板内容宽约 288px，旋钮等比缩小（上游 42/480，此处 36/288）。 */
   --effort-slider-track-h: 28px;
   --effort-slider-knob: 36px;
+
+  position: relative;
+  display: block;
+  width: 100%;
+  height: var(--effort-slider-knob);
 }
 
-/* Radix Root：铺满容器，本身不画任何东西。 */
-.effort-slider__root {
+.effort-slider__input {
   position: absolute;
+  z-index: 2;
   inset: 0;
-  touch-action: none;
+  opacity: 0;
 }
 
-.effort-slider__root[data-disabled] {
-  opacity: 0.5;
-}
-
-/* 胶囊轨道。 */
 .effort-slider__track {
   position: absolute;
   top: 50%;
-  left: 0;
   right: 0;
+  left: 0;
   height: var(--effort-slider-track-h);
-  transform: translateY(-50%);
+  overflow: visible;
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);
+  transform: translateY(-50%);
 }
 
-/* 裁剪层：填充与画布在这里裁成胶囊；旋钮挂在轨道外，不被裁剪。 */
 .effort-slider__clip {
   position: absolute;
   inset: 0;
-  border-radius: var(--radius-full);
   overflow: hidden;
+  border-radius: var(--radius-full);
 }
 
-/* 填充层：宽度由 JS 按当前档位写入（与 Radix thumb 定位同一公式），不使用
- * Range 元素，因为填充要延伸到旋钮外缘而不是中心。plain 用品牌暗色，与
- * 强度面板的整体色系一致，不复用蓝色的业务 accent。 */
 .effort-slider__fill {
   position: absolute;
-  top: 0;
-  bottom: 0;
+  inset-block: 0;
   left: 0;
   border-radius: var(--radius-full);
   background: var(--effort-brand);
-  transition: width 200ms var(--ease-out), background 200ms var(--ease-out);
+  transition: width var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
 }
 
-/* 最高档：品牌填充。 */
-.effort-slider--supercharged .effort-slider__fill,
-.effort-slider--fusion .effort-slider__fill {
-  background: var(--effort-brand);
-}
-
-/* 快速：金色填充。 */
 .effort-slider--fast .effort-slider__fill {
   background: var(--effort-fast-ink);
 }
 
-/* 融合：品牌色到快速色的渐变，接缝由画布在其上重绘。 */
 .effort-slider--fusion .effort-slider__fill {
-  background: linear-gradient(
-    90deg,
-    var(--effort-brand) 0%,
-    var(--effort-brand) 55%,
-    var(--effort-fast-ink) 100%
-  );
+  background: linear-gradient(90deg, var(--effort-brand) 0%, var(--effort-brand) 55%, var(--effort-fast-ink) 100%);
 }
 
-/* 动效画布叠在填充上，按填充宽度裁剪。canvas 是替换元素，top/bottom 不会
- * 拉伸它，必须用 height:100% 才被裁进 28px 的填充；否则按属性高溢出下缘。 */
 .effort-slider__effect {
   position: absolute;
   inset: 0;
+  display: block;
   width: 100%;
   height: 100%;
-  display: block;
   pointer-events: none;
 }
 
-/* 档位点。 */
 .effort-slider__stop {
   position: absolute;
   top: 50%;
@@ -102,7 +68,7 @@
   border-radius: var(--radius-full);
   background: color-mix(in srgb, var(--text-primary) 32%, transparent);
   transform: translate(-50%, -50%);
-  transition: background 200ms var(--ease-out);
+  transition: background var(--motion-fast) var(--ease-out);
 }
 
 .effort-slider__stop--passed {
@@ -114,51 +80,32 @@
   background: color-mix(in srgb, var(--ink-black) 35%, transparent);
 }
 
-/* 旋钮：外层由 JS 定位，内层做玻璃近似。Radix 包裹层的 top 恒为 0，
- * 因此用根高的一半（21px）作为 thumb 的 top，配合 translate 居中到轨道中线。 */
 .effort-slider__thumb {
   position: absolute;
-  top: calc(var(--effort-slider-knob) / 2);
+  z-index: 1;
+  top: 50%;
   width: var(--effort-slider-knob);
   height: var(--effort-slider-knob);
-  transform: translate(-50%, -50%);
   border-radius: var(--radius-full);
-  /* 玻璃近似：背后内容模糊提亮 + 内侧高光与暗边，模拟 Liquid Glass 的
-   * 折射观感。没有 macOS 26 的真实折射，边缘色散不再模拟；不用
-   * brightness，它会把底下的填充色一起放大。 */
-  background:
-    linear-gradient(
-      135deg,
-      color-mix(in srgb, var(--ink-on-media) 34%, transparent) 0%,
-      color-mix(in srgb, var(--ink-on-media) 10%, transparent) 45%,
-      color-mix(in srgb, var(--ink-black) 10%, transparent) 100%
-    );
-  backdrop-filter: blur(8px) saturate(1.15);
-  -webkit-backdrop-filter: blur(8px) saturate(1.15);
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--ink-on-media) 34%, transparent) 0%,
+    color-mix(in srgb, var(--ink-on-media) 10%, transparent) 45%,
+    color-mix(in srgb, var(--ink-black) 10%, transparent) 100%
+  );
   box-shadow:
     inset 0 1px 0 color-mix(in srgb, var(--ink-on-media) 45%, transparent),
     inset 0 0 0 1px color-mix(in srgb, var(--ink-on-media) 18%, transparent),
     0 2px 8px color-mix(in srgb, var(--ink-black) 35%, transparent);
-  outline: none;
-  cursor: grab;
+  transform: translate(-50%, -50%);
+  backdrop-filter: blur(8px) saturate(1.15);
+  transition: left var(--motion-fast) var(--ease-out);
+  -webkit-backdrop-filter: blur(8px) saturate(1.15);
 }
 
-.effort-slider__thumb:active {
-  cursor: grabbing;
-  /* 拖动时轻微放大，对应上游的 scaleEffect(1.06)。 */
-  scale: 1.06;
-}
-
-.effort-slider__thumb:focus-visible {
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, var(--ink-on-media) 45%, transparent),
-    inset 0 0 0 1px color-mix(in srgb, var(--ink-on-media) 18%, transparent),
-    0 0 0 2px var(--border-focus);
-}
-
-/* 拖动进行中（由 JS 加上）：放大并压住宽度过渡，跟手。 */
-.effort-slider--dragging .effort-slider__thumb {
-  scale: 1.06;
+.effort-slider:focus-within .effort-slider__thumb {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .effort-slider--dragging .effort-slider__fill,
@@ -166,14 +113,13 @@
   transition: none;
 }
 
-/* 触觉近似：档位切换时旋钮短暂下沉。 */
 @keyframes effort-knob-settle {
   0% { scale: 1.06; }
   100% { scale: 1; }
 }
 
 .effort-slider__thumb.is-settling {
-  animation: effort-knob-settle 220ms var(--ease-out);
+  animation: effort-knob-settle var(--motion-fast) var(--ease-out);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -186,73 +132,12 @@
   .effort-slider__thumb.is-settling {
     animation: none;
   }
-
-  .effort-slider__thumb:active,
-  .effort-slider--dragging .effort-slider__thumb {
-    scale: 1;
-  }
 }
 
-/* 面板标题：默认主题强调色；最高档换品牌色，快速换金色，融合渐变。 */
 .effort-title {
   font-size: calc(17px + var(--ui-font-delta));
   font-weight: 500;
-  color: var(--effort-brand-ink);
-  transition: color 200ms var(--ease-out);
-}
-
-/* 面板头部：左上快速按钮、中央标题、右上名称，对应上游 EffortSliderCard。 */
-.effort-panel__head {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 30px;
-}
-
-.effort-panel__head .effort-title {
-  /* 标题自身居中：父级 flex 居中的是「标题 + 右侧 Label」整体，会偏。 */
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  white-space: nowrap;
-}
-
-.effort-panel__fast {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--text-tertiary);
-  transition: background var(--motion-fast) var(--ease-out), color var(--motion-fast) var(--ease-out);
-}
-
-.effort-panel__fast:hover {
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-}
-
-.effort-panel__fast.is-on {
-  background: color-mix(in srgb, var(--effort-fast) 18%, transparent);
-  color: var(--effort-fast-ink);
-}
-
-.effort-panel__model {
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  color: var(--text-secondary);
-  font-size: calc(13px + var(--ui-font-delta));
-  font-weight: 400;
+  color: var(--text-primary);
 }
 
 .effort-title--plain {
@@ -268,16 +153,39 @@
 }
 
 .effort-title--fusion {
-  background: linear-gradient(90deg, var(--effort-brand-ink), var(--effort-fast-ink));
-  -webkit-background-clip: text;
-  background-clip: text;
   color: transparent;
+  background: linear-gradient(90deg, var(--effort-brand-ink), var(--effort-fast-ink));
+  background-clip: text;
+  -webkit-background-clip: text;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .effort-title,
-  .effort-panel__fast,
-  .effort-panel__model {
-    transition: none;
-  }
+.effort-panel__head {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+}
+
+.effort-panel__head .effort-title {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.effort-panel__fast {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.effort-panel__model {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary);
+  font-size: calc(13px + var(--ui-font-delta));
 }

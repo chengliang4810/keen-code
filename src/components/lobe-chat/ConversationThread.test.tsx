@@ -437,7 +437,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("你好，我是 KeenCode。");
   });
 
-  it("失败 Turn 重放后展示无图标耗时和分割线", () => {
+  it("失败 Turn 重放后展示无图标耗时并由 Appica 管理触发器视觉", () => {
     const html = renderToString(
       <ConversationThread
         locale="zh"
@@ -461,9 +461,11 @@ describe("ConversationThread 思考耗时", () => {
     expect(html).toContain("已工作 1分钟 41秒");
     expect(html).not.toContain("lobe-chat-thinking__status-icon");
     expect(html).not.toContain("lobe-chat-thinking__status-chevron");
-    expect(css).toMatch(
-      /\.lobe-chat-thinking__trigger--status\s*\{[^}]*border-bottom:\s*1px solid var\(--chat-divider\);/s,
-    );
+    const statusRule = css.match(
+      /\.lobe-chat-thinking__trigger--status\s*\{([^}]*)\}/,
+    )?.[1];
+    expect(statusRule).toMatch(/min-height:\s*34px/);
+    expect(statusRule).not.toMatch(/(?:border|background|color|outline):/);
   });
 
   it("已完成回复忽略正文后仅含标点的尾随 reasoning", () => {
@@ -767,7 +769,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(source).toContain("onSend(value.trim())");
     expect(source).toContain('event.key === "Escape"');
     expect(source).toContain("event.metaKey || event.ctrlKey");
-    expect(source).toContain('className="btn btn--solid"');
+    expect(source).toContain('variant="primary"');
     expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*var\(--radius-2xl\);/s);
   });
 
@@ -862,9 +864,10 @@ describe("ConversationThread 思考耗时", () => {
   it("用户消息图片卡片在资源协议失败时回退二进制预览", () => {
     const source = readSource(new URL("../AttachmentCard.tsx", import.meta.url));
     const cardImage =
-      source.match(/<img\s+className="att-card__thumb"[\s\S]*?\/>/)?.[0] ?? "";
+      source.match(/<Thumbnail[\s\S]*?onLoadingStatusChange[\s\S]*?\/>/)?.[0] ?? "";
 
-    expect(cardImage).toContain("onError={() => void recoverThumbnail()}");
+    expect(cardImage).toContain('onLoadingStatusChange={(status) => {');
+    expect(cardImage).toContain('if (status === "error") void recoverThumbnail();');
     expect(source).toContain("await resolveImageSrc(attachment.path)");
   });
 });

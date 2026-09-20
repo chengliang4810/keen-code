@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { SearchField } from "./SearchField";
 
 describe("SearchField", () => {
-  it("保留业务容器类名并把输入属性透传给 shadcn Input", () => {
+  it("保留业务容器类名并把输入属性透传给 Appica Input", () => {
     const markup = renderToStaticMarkup(
       <SearchField
         containerClassName="resource-search"

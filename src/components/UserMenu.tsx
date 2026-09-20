@@ -27,6 +27,8 @@ export function UserMenu({
       <div className="user-menu__actions">
         <Button
           type="button"
+          variant="ghost"
+          size="md"
           className="sidebar-footer-action"
           onClick={onSettings}
           title={labels.settings}
@@ -38,6 +40,8 @@ export function UserMenu({
         {updateAvailable ? (
           <Button
             type="button"
+            variant="ghost"
+            size="icon-md"
             className="sidebar-update-action"
             onClick={onUpdate}
             disabled={updateBusy}

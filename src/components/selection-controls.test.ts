@@ -17,14 +17,13 @@ function collectSourceFiles(directory: string): string[] {
 }
 
 describe("选择控件统一契约", () => {
-  it("按钮重置不覆盖 Checkbox 的边框、背景与状态色", () => {
+  it("不使用全局按钮重置覆盖 Appica 控件视觉", () => {
     const foundation = readFileSync(
       new URL("../styles/app-foundation.css", componentsRoot),
       "utf8",
     );
-    expect(foundation).toMatch(/button:where\(:not\(\[data-slot="checkbox"\]\)\),\s*input,\s*textarea\s*\{/);
-    expect(foundation).toMatch(/button:where\(:not\(\[data-slot="checkbox"\]\)\)\s*\{[^}]*border: none;[^}]*background: transparent;/);
     expect(foundation).not.toMatch(/(?:^|\n)button\s*\{[^}]*(?:border|background|color):/);
+    expect(foundation).not.toContain("button:where(");
   });
 
   const sources = collectSourceFiles(fileURLToPath(componentsRoot));
@@ -50,7 +49,7 @@ describe("选择控件统一契约", () => {
     expect(appSource).not.toMatch(/type=["']checkbox["']/);
   });
 
-  it("统一选择原语来自项目的 shadcn/Radix 封装", () => {
+  it("统一选择原语直接来自 Appica UI 子路径", () => {
     const settings = readFileSync(
       new URL("./SettingsPage.tsx", componentsRoot),
       "utf8",
@@ -60,11 +59,11 @@ describe("选择控件统一契约", () => {
       "utf8",
     );
 
-    expect(settings).toContain("@/components/ui/select");
-    expect(settings).toContain("@/components/ui/toggle-group");
-    expect(settings).toContain("@/components/ui/radio-group");
-    expect(agents).toContain("@/components/ui/select");
-    expect(agents).toContain("@/components/ui/radio-group");
-    expect(agents).toContain("@/components/ui/checkbox");
+    expect(settings).toContain("@appica/ui-react/select");
+    expect(settings).toContain("@appica/ui-react/toggle-group");
+    expect(settings).toContain("@appica/ui-react/color-swatch-picker");
+    expect(agents).toContain("@appica/ui-react/select");
+    expect(agents).toContain("@appica/ui-react/checkbox");
+    expect(agents).toContain("@/components/ui/switch");
   });
 });

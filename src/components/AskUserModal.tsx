@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Textarea } from "@appica/ui-react/textarea";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
 
 export type AskUserLabels = {
@@ -102,16 +101,16 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
       <header className="ask-user__header">
         <h2 ref={headingRef} tabIndex={-1} className="ask-user__prompt">{question.question}</h2>
         <div className="ask-user__nav">
-          <Button type="button" className="ask-user__icon-btn" disabled={busy || currentPage === 0}
+          <Button type="button" variant="ghost" size="icon-md" disabled={busy || currentPage === 0}
             aria-label="Previous question" onClick={() => goTo(currentPage - 1)}>
             <IconChevronLeft size={17} />
           </Button>
           <span className="ask-user__page" aria-live="polite">{currentPage + 1} / {questions.length}</span>
-          <Button type="button" className="ask-user__icon-btn" disabled={busy || currentPage === questions.length - 1}
+          <Button type="button" variant="ghost" size="icon-md" disabled={busy || currentPage === questions.length - 1}
             aria-label={labels.next} onClick={() => goTo(currentPage + 1)}>
             <IconChevronRight size={17} />
           </Button>
-          <Button type="button" className="ask-user__icon-btn" disabled={busy}
+          <Button type="button" variant="ghost" size="icon-md" disabled={busy}
             aria-label={labels.close} onClick={() => void cancel()}>
             <IconClose size={18} />
           </Button>
@@ -124,6 +123,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
           const active = chosen.includes(option.id);
           return (
             <Button key={option.id} type="button"
+              variant={active ? "soft" : "outline"}
               className={`ask-user__opt${active ? " ask-user__opt--active" : ""}`}
               disabled={busy} aria-pressed={active} onClick={() => choose(option.id)}>
               <span className="ask-user__index">{index + 1}</span>
@@ -139,7 +139,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
 
       {question.allowCustomAnswer !== false &&
       (editingText || question.options.length === 0) ? (
-        <Label className="ask-user__free">
+        <label className="ask-user__free">
           <span className="sr-only">{labels.otherPlaceholder}</span>
           <Textarea className="ask-user__textarea" rows={2} autoFocus
             value={freeText[question.id] || ""} disabled={busy}
@@ -148,17 +148,17 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
               setFreeText((previous) => ({ ...previous, [question.id]: event.target.value }));
               setSelected((previous) => ({ ...previous, [question.id]: [] }));
             }} />
-        </Label>
+        </label>
       ) : question.allowCustomAnswer !== false ? (
-        <Button type="button" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
+        <Button type="button" variant="ghost" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
           <span className="ask-user__index"><IconRename size={15} /></span>
           <span>{labels.freeTextHint}</span>
         </Button>
       ) : null}
 
       <footer className="ask-user__footer">
-        <Button type="button" className="btn btn--ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>
-        <Button type="button" className="btn btn--solid" disabled={busy || !canSubmit} onClick={() => void submit()}>{labels.submit}</Button>
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>
+        <Button type="button" variant="primary" disabled={busy || !canSubmit} onClick={() => void submit()}>{labels.submit}</Button>
       </footer>
     </section>
   );

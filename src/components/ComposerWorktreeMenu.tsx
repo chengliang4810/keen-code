@@ -1,19 +1,27 @@
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuGroupLabel,
+  DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@appica/ui-react/dropdown-menu";
 /**
  * Composer branch / worktree chip — switch linked worktrees, create, GC.
  * Lives next to the project picker on the new-session context bar.
  */
 
-import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useRef, useState } from "react";
 import {
-  IconCheck,
   IconGitBranch,
   IconPlus,
   IconTrash,
 } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
-import { useFloatingMenu } from "@/lib/floatingMenu";
 import { pathsEqual, worktreeLabel } from "@/lib/gitWorktree";
 import type { GitWorktreeEntry } from "@/lib/api";
 
@@ -74,9 +82,6 @@ export function ComposerWorktreeMenu({
   onOpen,
 }: Props) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const popRef = useRef<HTMLDivElement>(null);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
 
@@ -88,32 +93,8 @@ export function ComposerWorktreeMenu({
       ? labels.worktreesLoading || "…"
       : "—";
 
-  // Fixed size estimate so first paint matches final layout (avoids open flash).
-  const listCount = Math.max(worktrees.length, 1);
-  const estHeight = Math.min(
-    420,
-    44 + Math.min(LIST_MAX_H, listCount * 36 + 8) + 3 * 36 + 16,
-  );
   // Soft-refresh loading should not re-anchor / dim when we already have rows.
   const showLoading = worktreesLoading && worktrees.length === 0;
-
-  const { pos, style: popStyle } = useFloatingMenu({
-    open,
-    triggerRef,
-    panelRef: popRef,
-    roots: [rootRef],
-    onClose: () => setOpen(false),
-    // Welcome composer is vertically centered — auto picks up/down so the menu fits.
-    placement: "auto",
-    // Fixed width: fitContent + label measure caused first-open width "squeeze" flash.
-    fitContent: false,
-    width: 288,
-    minWidth: 288,
-    estHeight,
-    gap: 8,
-    // Only re-anchor when row count changes, not on soft-refresh loading toggles.
-    deps: [worktrees.length],
-  });
 
   useEffect(() => {
     if (!open) return;
@@ -127,15 +108,13 @@ export function ComposerWorktreeMenu({
 
   return (
     <div
-      ref={rootRef}
       className={
         `cwm${open ? " is-open" : ""}` + (isContext ? " cwm--context" : "")
       }
     >
-      <Tip label={tip} disabled={open}>
-        <Button
-          ref={triggerRef}
-          type="button"
+      <DropdownMenu open={open} onOpenChange={setOpen} size="md">
+        <Tip label={tip} disabled={open}>
+          <DropdownMenuTrigger
           className={
             isContext
               ? "composer__context-item composer__context-item--branch" +
@@ -146,10 +125,8 @@ export function ComposerWorktreeMenu({
                 (showLoading ? " is-loading" : "")
           }
           disabled={disabled}
-          aria-haspopup="menu"
-          aria-expanded={open}
           aria-label={labels.worktreeTip}
-          onClick={() => setOpen((v) => !v)}
+            render={<Button type="button" variant="ghost" />}
         >
           <IconGitBranch size={14} aria-hidden />
           <span
@@ -157,22 +134,27 @@ export function ComposerWorktreeMenu({
           >
             {branchLabel}
           </span>
-        </Button>
-      </Tip>
-      {open &&
-        pos &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <div
-            ref={popRef}
-            className="cmm__pop cmm__pop--portal cwm__pop"
-            role="menu"
-            aria-label={labels.worktrees}
-            style={popStyle as CSSProperties}
-          >
-            <div className="cwm__head">{labels.worktrees}</div>
+          </DropdownMenuTrigger>
+        </Tip>
+        <DropdownMenuContent
+          className="cmm__pop cmm__pop--portal cwm__pop"
+          side="top"
+          align="start"
+          sideOffset={8}
+        >
+          <DropdownMenuGroup>
+            <DropdownMenuGroupLabel className="cwm__head">
+              {labels.worktrees}
+            </DropdownMenuGroupLabel>
             {worktrees.length > 0 ? (
-              <ul
+              <DropdownMenuRadioGroup
+                value={current?.path ?? ""}
+                onValueChange={(path) => {
+                  const selected = worktrees.find((candidate) => candidate.path === path);
+                  if (selected && !pathsEqual(selected.path, activePath)) onSwitch(selected);
+                }}
+              >
+                <div
                 className={"cwm__list" + (showLoading ? " is-loading" : "")}
                 aria-busy={showLoading || undefined}
                 style={{ maxHeight: LIST_MAX_H }}
@@ -188,20 +170,13 @@ export function ComposerWorktreeMenu({
                     .filter(Boolean)
                     .join(" · ");
                   return (
-                    <li key={wt.path} className="cwm__row">
-                      <Button
-                        type="button"
-                        role="menuitem"
+                    <div key={wt.path} className="cwm__row">
+                      <DropdownMenuRadioItem
                         className={
                           "cmm__opt cwm__item" + (isCurrent ? " is-active" : "")
                         }
+                        value={wt.path}
                         title={wt.path}
-                        disabled={isCurrent}
-                        onClick={() => {
-                          if (isCurrent) return;
-                          setOpen(false);
-                          onSwitch(wt);
-                        }}
                       >
                         <span className="cwm__item-main">
                           <span className="cwm__item-name">{name}</span>
@@ -209,16 +184,12 @@ export function ComposerWorktreeMenu({
                             <span className="cwm__item-meta">{meta}</span>
                           ) : null}
                         </span>
-                        {isCurrent ? (
-                          <span className="cmm__opt-check" aria-hidden>
-                            <IconCheck size={16} />
-                          </span>
-                        ) : null}
-                      </Button>
-                    </li>
+                      </DropdownMenuRadioItem>
+                    </div>
                   );
                 })}
-              </ul>
+                </div>
+              </DropdownMenuRadioGroup>
             ) : (
               <p className="cwm__empty">
                 {worktreesReason?.trim()
@@ -226,48 +197,33 @@ export function ComposerWorktreeMenu({
                   : labels.worktreesEmpty}
               </p>
             )}
-
-            <div className="cwm__actions">
-              <Button
-                type="button"
-                role="menuitem"
+          </DropdownMenuGroup>
+          <DropdownMenuSeparator />
+          <div className="cwm__actions">
+              <DropdownMenuItem
                 className="cwm__action"
-                onClick={() => {
-                  setOpen(false);
-                  onCreate();
-                }}
+                onClick={onCreate}
               >
                 <IconPlus size={14} aria-hidden />
                 <span>{labels.worktreeNew}</span>
-              </Button>
-              <Button
-                type="button"
-                role="menuitem"
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 className="cwm__action"
-                onClick={() => {
-                  setOpen(false);
-                  onCreateAndChat();
-                }}
+                onClick={onCreateAndChat}
               >
                 <IconPlus size={14} aria-hidden />
                 <span>{labels.worktreeNewChat}</span>
-              </Button>
-              <Button
-                type="button"
-                role="menuitem"
+              </DropdownMenuItem>
+              <DropdownMenuItem
                 className="cwm__action cwm__action--muted"
-                onClick={() => {
-                  setOpen(false);
-                  onGc();
-                }}
+                onClick={onGc}
               >
                 <IconTrash size={14} aria-hidden />
                 <span>{labels.worktreeGc}</span>
-              </Button>
+              </DropdownMenuItem>
             </div>
-          </div>,
-          document.body,
-        )}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

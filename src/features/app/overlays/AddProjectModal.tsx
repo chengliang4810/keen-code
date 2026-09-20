@@ -5,9 +5,10 @@ import { pathBasename } from "@/lib/filePath";
 import { projectPathPreview } from "@/features/app/models";
 import type { AddProjectIntent } from "@/hooks/useProjectDialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Spinner } from "@/components/ui/spinner";
+import { Input } from "@appica/ui-react/input";
+import { Spinner } from "@appica/ui-react/spinner";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import { GlassModal } from "@/components/GlassModal";
 import { IconFolder, IconFolderPlus } from "@/components/icons";
 import type { SetState, Translator } from "./types";
@@ -66,7 +67,7 @@ export function AddProjectModal({
       onClose={close}
       title={tr("addProject.title")}
       titleId="add-project-title"
-      size="lg"
+      size="md"
       className="add-project-modal"
       overlayClassName="add-project-overlay"
       closeLabel={tr("common.close")}
@@ -78,7 +79,7 @@ export function AddProjectModal({
         <>
           <Button
             type="button"
-            className="btn btn--ghost"
+            variant="ghost"
             disabled={busy}
             onClick={close}
           >
@@ -87,10 +88,10 @@ export function AddProjectModal({
           <Button
             type="submit"
             form="add-project-form"
-            className="btn btn--solid"
+            variant="primary"
             disabled={busy}
           >
-            {busy ? <Spinner size={14} /> : null}
+            {busy ? <Spinner currentColor className="text-sm" /> : null}
             {busy ? tr("addProject.adding") : tr("addProject.submit")}
           </Button>
         </>
@@ -104,10 +105,10 @@ export function AddProjectModal({
           void submit();
         }}
       >
-        <div className="add-project-field">
-          <Label htmlFor="add-project-name" className="prov-field__label">
+        <Field className="add-project-field">
+          <FieldLabel htmlFor="add-project-name">
             {tr("addProject.name")}
-          </Label>
+          </FieldLabel>
           <div className="add-project-name-control">
             <IconFolder size={17} />
             <Input
@@ -132,18 +133,20 @@ export function AddProjectModal({
               }}
             />
           </div>
-        </div>
+        </Field>
 
-        <div className="add-project-field">
-          <Label htmlFor="add-project-source" className="prov-field__label">
+        <Field className="add-project-field">
+          <FieldLabel htmlFor="add-project-source">
             {tr("addProject.sourceFolder")}
-          </Label>
+          </FieldLabel>
           <Button
             ref={dropRef}
             id="add-project-source"
             type="button"
+            variant="outline"
+            size="md"
             className={
-              "cpm__action add-project-drop" +
+              "add-project-drop" +
               (dragZone === "project" ? " is-active" : "")
             }
             disabled={busy}
@@ -163,7 +166,7 @@ export function AddProjectModal({
             ) : null}
           </Button>
           {!path && projectDirectory ? (
-            <div className="add-project-default-path settings-row__desc">
+            <FieldDescription className="add-project-default-path">
               <span>
                 {tr("addProject.defaultLocation", {
                   path: projectPathPreview(
@@ -174,23 +177,19 @@ export function AddProjectModal({
               </span>
               <Button
                 type="button"
-                className="add-project-default-path__settings btn btn--ghost btn--sm"
+                variant="ghost" size="md" className="add-project-default-path__settings"
                 onClick={openProjectDirectorySettings}
               >
                 {tr("addProject.changeDefaultLocation")}
               </Button>
-            </div>
+            </FieldDescription>
           ) : null}
-        </div>
+        </Field>
 
         {error ? (
-          <p
-            id="add-project-error"
-            className="ext-alert ext-alert--error"
-            role="alert"
-          >
-            {error}
-          </p>
+          <Alert id="add-project-error" variant="error">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         ) : null}
       </form>
     </GlassModal>

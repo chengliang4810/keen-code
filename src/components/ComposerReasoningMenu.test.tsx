@@ -57,7 +57,7 @@ describe("ComposerReasoningMenu", () => {
     expect(html).toContain(">中<");
   });
 
-  it("面板使用 EffortSlider 胶囊滑块，Ultra 是左上角亮起按钮", () => {
+  it("面板使用 Appica Slider，Ultra 使用 Appica Button 状态变体", () => {
     const source = readFileSync(
       new URL("./ComposerReasoningMenu.tsx", import.meta.url),
       "utf8",
@@ -66,7 +66,8 @@ describe("ComposerReasoningMenu", () => {
     expect(source).toContain("<EffortSlider");
     expect(source).not.toContain("<Slider ");
     expect(source).toContain("fast={ultra}");
-    expect(source).toContain('className={`effort-panel__fast ${ultra ? "is-on" : ""}`}');
+    expect(source).toContain('variant={ultra ? "primary" : "ghost"}');
+    expect(source).toContain('size="icon-md"');
     expect(source).toContain("aria-pressed={ultra}");
     expect(source).toContain("onUltra(!ultra)");
     // 描述行与 Switch 已移除。

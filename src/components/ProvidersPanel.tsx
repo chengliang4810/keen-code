@@ -1,6 +1,10 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Card } from "@appica/ui-react/card";
+import { Input } from "@appica/ui-react/input";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
+import { NumberField } from "@appica/ui-react/number-field";
+import { Avatar, AvatarFallback } from "@appica/ui-react/avatar";
+import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 模型设置：管理自定义模型供应商及其模型列表。 */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -21,8 +25,8 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
+} from "@appica/ui-react/select";
+import { Checkbox } from "@appica/ui-react/checkbox";
 import { GlassModal } from "@/components/GlassModal";
 import {
   IconCopy,
@@ -650,23 +654,17 @@ export function ProvidersPanel({
   return (
     <div className="prov-panel" data-testid="providers-panel">
       {error && (
-        <div className="prov-alert" role="alert">
-          <span>{error}</span>
-          <Button
-            type="button"
-            className="btn btn--ghost btn--sm"
-            onClick={() => setError(null)}
-          >
-            {tr("common.dismiss")}
-          </Button>
-        </div>
+        <Alert variant="error" layout="inline">
+          <AlertDescription>{error}</AlertDescription>
+          <AlertAction><Button type="button" variant="ghost" size="md" onClick={() => setError(null)}>{tr("common.dismiss")}</Button></AlertAction>
+        </Alert>
       )}
 
       <div className="prov-split">
         <aside className="prov-split__list">
           <Button
             type="button"
-            className="btn btn--solid prov-add-btn"
+            variant="primary" className="prov-add-btn"
             onClick={openCreate}
             disabled={busy}
           >
@@ -695,14 +693,13 @@ export function ProvidersPanel({
                   (selection === provider.id ? " is-selected" : "")
                 }
               >
-                <Button
-                  type="button"
-                  className="prov-item__main"
+            <Button
+              type="button"
+              variant="ghost"
+              className="prov-item__main"
                   onClick={() => openEdit(provider)}
                 >
-                  <span className="prov-item__avatar" aria-hidden>
-                    {(provider.name || provider.id).slice(0, 1).toUpperCase()}
-                  </span>
+                  <Avatar size="md" aria-hidden><AvatarFallback>{(provider.name || provider.id).slice(0, 1).toUpperCase()}</AvatarFallback></Avatar>
                   <span className="prov-item__text">
                     <span className="prov-item__name">
                       {provider.name || provider.id}
@@ -730,9 +727,11 @@ export function ProvidersPanel({
           )}
 
           {(rightMode === "create" || rightMode === "edit") && (
-            <div
-              className="prov-detail settings-card prov-form"
+            <Card
+              className="prov-detail prov-form"
+              contentProps={{ className: "prov-detail__content" }}
               data-testid="provider-form"
+              inset={false}
             >
               <div className="prov-form__head">
                 <h3 className="prov-detail__title">
@@ -744,7 +743,7 @@ export function ProvidersPanel({
                     <>
                       <Button
                         type="button"
-                        className="btn btn--ghost btn--sm"
+                        variant="ghost" size="md"
                         onClick={() => {
                           const provider = providers.find((item) => item.id === editingId);
                           if (provider) void copyProvider(provider);
@@ -756,7 +755,7 @@ export function ProvidersPanel({
                       </Button>
                       <Button
                         type="button"
-                        className="btn btn--ghost btn--sm"
+                        variant="ghost" size="md"
                         onClick={() => {
                           const provider = providers.find((item) => item.id === editingId);
                           if (provider) void exportProvider(provider);
@@ -770,7 +769,7 @@ export function ProvidersPanel({
                   ) : (
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       onClick={() =>
                         setImportDraft({
                           text: "",
@@ -788,8 +787,8 @@ export function ProvidersPanel({
               </div>
 
               <div className="prov-form__grid">
-                <Label className="prov-field">
-                  <span className="prov-field__label">{tr("prov.name")}</span>
+                <Field>
+                  <FieldLabel>{tr("prov.name")}</FieldLabel>
                   <Input
                     className="settings-input"
                     value={form.name}
@@ -802,10 +801,10 @@ export function ProvidersPanel({
                     placeholder={tr("prov.namePh")}
                     autoComplete="off"
                   />
-                </Label>
+                </Field>
 
-                <Label className="prov-field prov-field--full">
-                  <span className="prov-field__label">{tr("prov.baseUrl")}</span>
+                <Field className="prov-field--full">
+                  <FieldLabel>{tr("prov.baseUrl")}</FieldLabel>
                   <Input
                     className="settings-input"
                     value={form.baseUrl}
@@ -819,18 +818,19 @@ export function ProvidersPanel({
                     autoComplete="off"
                     spellCheck={false}
                   />
-                </Label>
+                </Field>
 
-                <div className="prov-field">
-                  <span className="prov-field__label">{tr("prov.protocol")}</span>
+                <Field>
+                  <FieldLabel>{tr("prov.protocol")}</FieldLabel>
                   <Select
                     value={form.apiBackend}
-                    onValueChange={(value) =>
+                    onValueChange={(value) => {
+                      if (typeof value !== "string") return;
                       setForm((current) => ({
                         ...current,
                         apiBackend: value,
-                      }))
-                    }
+                      }));
+                    }}
                   >
                     <SelectTrigger
                       className="settings-input"
@@ -848,11 +848,11 @@ export function ProvidersPanel({
                       </SelectGroup>
                     </SelectContent>
                   </Select>
-                </div>
+                </Field>
 
                 {form.apiBackend === "chat_completions" && (
-                  <div className="prov-field">
-                    <span className="prov-field__label">{tr("prov.chatOutputTokenField")}</span>
+                  <Field>
+                    <FieldLabel>{tr("prov.chatOutputTokenField")}</FieldLabel>
                     <Select value={form.chatOutputTokenField} onValueChange={(value) => setForm((current) => ({ ...current, chatOutputTokenField: value as FormState["chatOutputTokenField"] }))}>
                       <SelectTrigger className="settings-input" aria-label={tr("prov.chatOutputTokenField")}><SelectValue /></SelectTrigger>
                       <SelectContent><SelectGroup>
@@ -860,11 +860,11 @@ export function ProvidersPanel({
                         <SelectItem value="max_tokens">max_tokens</SelectItem>
                       </SelectGroup></SelectContent>
                     </Select>
-                  </div>
+                  </Field>
                 )}
 
-                <Label className="prov-field prov-field--full">
-                  <span className="prov-field__label">{tr("prov.apiKey")}</span>
+                <Field className="prov-field--full">
+                  <FieldLabel>{tr("prov.apiKey")}</FieldLabel>
                   <div className="prov-key-row">
                     <Input
                       className="settings-input"
@@ -882,29 +882,28 @@ export function ProvidersPanel({
                     />
                     <Button
                       type="button"
-                      className="btn btn--ghost btn--sm"
+                      variant="ghost" size="md"
                       onClick={toggleKeyVisibility}
                     >
                       {showKey ? tr("prov.keyHide") : tr("prov.keyShow")}
                     </Button>
                   </div>
-                  <span className="prov-field__hint">
+                  <FieldDescription>
                     {tr("prov.keyStorageHint")}
-                  </span>
-                </Label>
+                  </FieldDescription>
+                </Field>
 
-                <div className="prov-field prov-field--full">
-                  <span className="prov-field__label-row prov-model-toolbar">
-                    <span className="prov-field__label">
+                <Field className="prov-field--full">
+                  <div className="prov-field__label-row prov-model-toolbar">
+                    <FieldLabel>
                       {tr("prov.modelList")}
-                    </span>
+                    </FieldLabel>
                     <span className="prov-model-actions">
                       <Button
                         type="button"
-                        className={
-                          "btn btn--ghost btn--sm prov-fetch-button" +
-                          (fetchingModels ? " is-loading" : "")
-                        }
+                        variant="ghost"
+                        size="md"
+                        className={fetchingModels ? "prov-fetch-button is-loading" : "prov-fetch-button"}
                         onClick={() => void fetchModels()}
                         disabled={busy}
                       >
@@ -915,7 +914,7 @@ export function ProvidersPanel({
                       </Button>
                       <Button
                         type="button"
-                        className="btn btn--ghost btn--sm"
+                        variant="ghost" size="md"
                         onClick={openAddModel}
                         disabled={busy}
                       >
@@ -923,7 +922,7 @@ export function ProvidersPanel({
                         {tr("prov.addModel")}
                       </Button>
                     </span>
-                  </span>
+                  </div>
                   <div className="prov-model-list" role="list">
                     {form.models.map((model) => (
                       <div className="prov-model-row" role="listitem" key={model}>
@@ -936,14 +935,14 @@ export function ProvidersPanel({
                             {formatTokenCount(form.contextWindows[model])}
                           </span>
                         )}
-                        <Button type="button" variant="icon"
+                        <Button type="button" variant="ghost" size="icon-md" className="tree-icon-btn"
                           aria-label={`${tr("prov.editModel")} ${model}`}
                           onClick={() => openModelEditor(model)}>
                           <IconEdit size={14} />
                         </Button>
                         <Button
                           type="button"
-                          className="tree-icon-btn"
+                          variant="ghost" size="icon-md" className="tree-icon-btn"
                           onClick={() => removeModel(model)}
                           aria-label={tr("prov.removeModel", { model })}
                         >
@@ -957,7 +956,7 @@ export function ProvidersPanel({
                       </div>
                     )}
                   </div>
-                </div>
+                </Field>
               </div>
 
               {hint && (
@@ -979,7 +978,7 @@ export function ProvidersPanel({
                 {editingId && (
                   <Button
                     type="button"
-                    className="btn btn--danger"
+                    variant="destructive"
                     disabled={busy}
                     onClick={() =>
                       setDeleteTarget({
@@ -996,7 +995,7 @@ export function ProvidersPanel({
                   {rightMode === "create" && providers[0] ? (
                     <Button
                       type="button"
-                      className="btn btn--ghost"
+                      variant="ghost"
                       onClick={() => openEdit(providers[0]!)}
                       disabled={busy}
                     >
@@ -1005,7 +1004,7 @@ export function ProvidersPanel({
                   ) : null}
                   <Button
                     type="button"
-                    className="btn btn--solid"
+                    variant="primary"
                     onClick={() => void save()}
                     disabled={busy}
                   >
@@ -1023,7 +1022,7 @@ export function ProvidersPanel({
                   </Button>
                 </div>
               </div>
-            </div>
+            </Card>
           )}
         </section>
       </div>
@@ -1038,14 +1037,14 @@ export function ProvidersPanel({
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               onClick={closeModelEditor}
             >
               {tr("common.cancel")}
             </Button>
             <Button
               type="submit"
-              className="btn btn--solid"
+              variant="primary"
               form="provider-add-model-form"
               disabled={busy || loadingMetadata || !form.modelDraft.trim()}
             >
@@ -1062,8 +1061,8 @@ export function ProvidersPanel({
             addDraftModel();
           }}
         >
-          <div className="prov-field">
-            <Label htmlFor="provider-model-name-draft">{tr("prov.modelId")}</Label>
+          <Field>
+            <FieldLabel htmlFor="provider-model-name-draft">{tr("prov.modelId")}</FieldLabel>
             <Input
               id="provider-model-name-draft"
               className="settings-input"
@@ -1085,29 +1084,27 @@ export function ProvidersPanel({
               autoComplete="off"
               spellCheck={false}
             />
-          </div>
-          <div className="prov-field">
-            <Label htmlFor="provider-model-context-draft">{tr("prov.contextWindow")}</Label>
-            <Input
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="provider-model-context-draft">{tr("prov.contextWindow")}</FieldLabel>
+            <NumberField
               id="provider-model-context-draft"
-              className="settings-input"
-              type="number"
               min={1024}
               max={10000000}
               step="any"
               required
-              inputMode="numeric"
-              value={form.contextWindowDraft}
-              onChange={(event) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: event.target.value })); }}
+              inputProps={{ inputMode: "numeric" }}
+              value={form.contextWindowDraft ? Number(form.contextWindowDraft) : null}
+              onValueChange={(value) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: value == null ? "" : String(value) })); }}
               placeholder={tr("prov.contextWindowPh")}
             />
-          </div>
-          <div className="prov-field">
-            <Label htmlFor="provider-model-output-draft">{tr("prov.maxOutputTokens")}</Label>
-            <Input variant="settings" id="provider-model-output-draft" type="number" min={1} max={4294967295} step={1} required
-              value={form.maxOutputTokensDraft}
-              onChange={(event) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: event.target.value })); }} />
-          </div>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="provider-model-output-draft">{tr("prov.maxOutputTokens")}</FieldLabel>
+            <NumberField id="provider-model-output-draft" min={1} max={4294967295} step={1} required
+              value={form.maxOutputTokensDraft ? Number(form.maxOutputTokensDraft) : null}
+              onValueChange={(value) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: value == null ? "" : String(value) })); }} />
+          </Field>
           <div className="prov-model-options">
             <div className="prov-model-option">
               <Checkbox
@@ -1119,10 +1116,10 @@ export function ProvidersPanel({
                   setForm((current) => ({ ...current, supportsVisionDraft: checked === true }));
                 }}
               />
-              <Label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</Label>
+              <label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</label>
             </div>
           </div>
-          <p className="prov-field__hint">{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</p>
+          <FieldDescription>{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</FieldDescription>
         </form>
       </GlassModal>
 
@@ -1136,14 +1133,14 @@ export function ProvidersPanel({
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               onClick={() => setModelPickerOpen(false)}
             >
               {tr("common.cancel")}
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               onClick={applyRemoteModels}
               disabled={fetchingModels || selectedRemoteModels.size === 0 || remoteModels.some((model) => selectedRemoteModels.has(model.id) && (!Number.isInteger(model.maxOutputTokens) || model.maxOutputTokens < 1 || model.maxOutputTokens > 4294967295 || (model.contextWindow != null && (!Number.isInteger(model.contextWindow) || model.contextWindow < 1024 || model.contextWindow > 10000000))))}
             >
@@ -1170,11 +1167,11 @@ export function ProvidersPanel({
                 }
                 onCheckedChange={toggleAllRemoteModels}
               />
-              <Label htmlFor="provider-remote-model-select-all">
+              <label htmlFor="provider-remote-model-select-all">
                 {selectedRemoteModels.size === remoteModels.length
                   ? tr("prov.deselectAll")
                   : tr("prov.selectAll")}
-              </Label>
+              </label>
               <span className="prov-model-picker__count">
                 {selectedRemoteModels.size}/{remoteModels.length}
               </span>
@@ -1192,16 +1189,16 @@ export function ProvidersPanel({
                     aria-label={model.id}
                     onCheckedChange={() => toggleRemoteModel(model.id)}
                   />
-                  <Label
+                  <label
                     className="prov-model-picker__name"
                     htmlFor={`provider-remote-model-${encodeURIComponent(model.id)}`}
                   >
                     {model.id}
-                  </Label>
+                  </label>
                   <div className="flex items-center justify-end gap-2">
                     {model.supportsVision && <span>{tr("prov.supportsVision")}</span>}
                     {model.contextWindow != null && <span title={tr("prov.contextWindowFor", { model: model.id })}>{formatTokenCount(model.contextWindow)}</span>}
-                    <Button type="button" variant="icon"
+                    <Button type="button" variant="ghost" size="icon-md" className="tree-icon-btn"
                       aria-label={`${tr("prov.editModel")} ${model.id}`}
                       onClick={() => openModelEditor(model.id, true)}>
                       <IconEdit size={14} />
@@ -1230,7 +1227,7 @@ export function ProvidersPanel({
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               disabled={importDraft?.submitting}
               onClick={() => setImportDraft(null)}
             >
@@ -1238,7 +1235,7 @@ export function ProvidersPanel({
             </Button>
             <Button
               type="button"
-              className="btn btn--solid"
+              variant="primary"
               disabled={!importDraft || !importDraft.check.ok || importDraft.submitting}
               onClick={() => void submitImport()}
             >
@@ -1253,7 +1250,7 @@ export function ProvidersPanel({
         <div className="prov-transfer-row">
           <Button
             type="button"
-            className="btn btn--ghost"
+            variant="ghost"
             onClick={() => void pickImportFile()}
             disabled={importDraft?.submitting}
           >
@@ -1267,9 +1264,7 @@ export function ProvidersPanel({
               {tr("prov.importParsed", { n: importDraft.check.count })}
             </p>
           ) : (
-            <p className="prov-form__hint is-err" role="alert">
-              {importErrorLabel(importDraft.check.error)}
-            </p>
+            <Alert variant="error"><AlertDescription>{importErrorLabel(importDraft.check.error)}</AlertDescription></Alert>
           )
         ) : null}
       </GlassModal>
@@ -1278,20 +1273,20 @@ export function ProvidersPanel({
         open={!!deleteTarget}
         onClose={() => setDeleteTarget(null)}
         title={tr("prov.delete")}
-        size="sm"
+        size="md"
         closeLabel={tr("common.close")}
         footer={
           <>
             <Button
               type="button"
-              className="btn btn--ghost"
+              variant="ghost"
               onClick={() => setDeleteTarget(null)}
             >
               {tr("common.cancel")}
             </Button>
             <Button
               type="button"
-              className="btn btn--danger"
+              variant="destructive"
               onClick={() => void confirmRemove()}
             >
               {tr("prov.delete")}

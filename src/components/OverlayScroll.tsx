@@ -1,19 +1,5 @@
-/**
- * Custom overlay scrollbar: native bars fully hidden; floating thumb only
- * (no track). Appears on hover / while scrolling when content overflows.
- */
-
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-  type ReactNode,
-  type Ref,
-  type UIEvent,
-} from "react";
-import { assignRef } from "@/lib/reactRefs";
+import { ScrollArea } from "@appica/ui-react/scroll-area";
+import type { CSSProperties, ReactNode, Ref, UIEvent } from "react";
 
 type OverlayScrollProps = {
   children: ReactNode;
@@ -35,120 +21,20 @@ export function OverlayScroll({
   onScroll,
   viewportRef: viewportRefProp,
 }: OverlayScrollProps) {
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const hideTimer = useRef<number | null>(null);
-  const measureFrame = useRef(0);
-
-  const setViewportNode = useCallback(
-    (node: HTMLDivElement | null) => {
-      viewportRef.current = node;
-      assignRef(viewportRefProp, node);
-    },
-    [viewportRefProp],
-  );
-  const [thumb, setThumb] = useState({
-    top: 0,
-    height: 0,
-    needed: false,
-  });
-  const [active, setActive] = useState(false);
-
-  const measure = useCallback(() => {
-    const el = viewportRef.current;
-    if (!el) return;
-    const { scrollTop, scrollHeight, clientHeight } = el;
-    const needed = scrollHeight > clientHeight + 1;
-    if (!needed) {
-      setThumb((t) => (t.needed ? { top: 0, height: 0, needed: false } : t));
-      return;
-    }
-    const inset = 6; // top/bottom padding inside rail
-    const track = Math.max(clientHeight - inset * 2, 1);
-    const ratio = clientHeight / scrollHeight;
-    const height = Math.max(28, Math.round(track * ratio));
-    const maxTop = track - height;
-    const top =
-      maxTop <= 0
-        ? inset
-        : Math.round((scrollTop / (scrollHeight - clientHeight)) * maxTop) +
-          inset;
-    setThumb((current) =>
-      current.top === top && current.height === height && current.needed
-        ? current
-        : { top, height, needed: true },
-    );
-  }, []);
-
-  const scheduleMeasure = useCallback(() => {
-    if (measureFrame.current) return;
-    measureFrame.current = requestAnimationFrame(() => {
-      measureFrame.current = 0;
-      measure();
-    });
-  }, [measure]);
-
-  useEffect(() => {
-    measure();
-    const el = viewportRef.current;
-    if (!el) return;
-    const ro = new ResizeObserver(scheduleMeasure);
-    ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
-    window.addEventListener("resize", measure);
-    return () => {
-      if (measureFrame.current) cancelAnimationFrame(measureFrame.current);
-      ro.disconnect();
-      window.removeEventListener("resize", measure);
-    };
-  }, [measure, scheduleMeasure, children]);
-
-  const flash = () => {
-    setActive(true);
-    if (hideTimer.current) window.clearTimeout(hideTimer.current);
-    hideTimer.current = window.setTimeout(() => setActive(false), 900);
-  };
-
-  const handleScroll = (e: UIEvent<HTMLDivElement>) => {
-    scheduleMeasure();
-    flash();
-    onScroll?.(e);
-  };
-
   return (
-    <div
-      className={
-        "overlay-scroll" +
-        (active ? " is-scrolling" : "") +
-        (className ? ` ${className}` : "")
-      }
+    <ScrollArea
+      className={"overlay-scroll" + (className ? ` ${className}` : "")}
       style={style}
-      onMouseEnter={() => {
-        measure();
-        setActive(true);
-      }}
-      onMouseLeave={() => {
-        if (hideTimer.current) window.clearTimeout(hideTimer.current);
-        setActive(false);
+      scrollbarVisibility="auto"
+      viewportProps={{
+        ref: viewportRefProp,
+        className:
+          "overlay-scroll__viewport" +
+          (viewportClassName ? ` ${viewportClassName}` : ""),
+        onScroll,
       }}
     >
-      <div
-        ref={setViewportNode}
-        className={
-          "overlay-scroll__viewport" +
-          (viewportClassName ? ` ${viewportClassName}` : "")
-        }
-        onScroll={handleScroll}
-      >
-        {children}
-      </div>
-      {thumb.needed && (
-        <div className="overlay-scroll__rail" aria-hidden>
-          <div
-            className="overlay-scroll__thumb"
-            style={{ top: thumb.top, height: thumb.height }}
-          />
-        </div>
-      )}
-    </div>
+      {children}
+    </ScrollArea>
   );
 }

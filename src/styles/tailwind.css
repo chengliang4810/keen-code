@@ -1,6 +1,8 @@
 /* Progressive Tailwind layer — maps to existing design tokens in tokens.css */
 @import "tailwindcss" source(none);
+@import "@appica/ui-react/styles.css";
 @source "../";
+@source "../../node_modules/@appica/ui-react/dist";
 
 @theme inline {
   --font-sans: var(--font-sans);

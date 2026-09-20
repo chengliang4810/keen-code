@@ -7,7 +7,6 @@ import { Button } from "@/components/ui/button";
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { createPortal } from "react-dom";
 import * as api from "@/lib/api";
 import { pathExt } from "@/lib/attachments";
 import { copyTextInGesture } from "@/lib/clipboardWrite";
@@ -17,7 +16,6 @@ import {
   normalizePathToken,
 } from "@/lib/pathRefs";
 import {
-  IconClose,
   IconCopy,
   IconExternalLink,
   IconFileText,
@@ -25,6 +23,7 @@ import {
   IconInfo,
 } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
+import { GlassModal } from "@/components/GlassModal";
 import { Tip } from "@/components/ui/tooltip";
 
 export type FilePathCardKind = "file" | "url" | "dir";
@@ -334,9 +333,10 @@ export function FilePathCard({
         }}
       >
         <Tip label={isUrl ? path : name}>
-          <Button
-            type="button"
-            className="file-path-link__main"
+      <Button
+        type="button"
+        variant="ghost"
+        className="file-path-link__main"
             onClick={() => void openInPanel()}
             disabled={busy}
           >
@@ -364,37 +364,35 @@ export function FilePathCard({
         items={menuItems}
       />
 
-      {detailsOpen &&
-        typeof document !== "undefined" &&
-        createPortal(
-          <div
-            className="overlay file-path-details-overlay"
-            role="presentation"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setDetailsOpen(false);
-            }}
-          >
-            <div
-              className="modal file-path-details"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="file-path-details-title"
-              onMouseDown={(e) => e.stopPropagation()}
+      <GlassModal
+        open={detailsOpen}
+        onClose={() => setDetailsOpen(false)}
+        title={labels.detailsTitle || labels.details || "Details"}
+        closeLabel={labels.detailsClose || "Close"}
+        className="file-path-details"
+        overlayClassName="file-path-details-overlay"
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                void copy();
+              }}
             >
-              <header className="modal-head file-path-details__head">
-                <h2 id="file-path-details-title" className="modal-title">
-                  {labels.detailsTitle || labels.details || "Details"}
-                </h2>
-                <Button
-                  type="button"
-                  className="icon-btn modal-close"
-                  aria-label={labels.detailsClose || "Close"}
-                  onClick={() => setDetailsOpen(false)}
-                >
-                  <IconClose size={16} />
-                </Button>
-              </header>
-              <div className="file-path-details__body">
+              {labels.copyPath}
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              onClick={() => setDetailsOpen(false)}
+            >
+              {labels.detailsClose || "Close"}
+            </Button>
+          </>
+        }
+      >
+        <div className="file-path-details__body">
                 <div className="file-path-details__row">
                   <span className="file-path-details__label">
                     {labels.detailsName || "Name"}
@@ -442,29 +440,8 @@ export function FilePathCard({
                     </span>
                   </div>
                 ) : null}
-              </div>
-              <div className="modal-actions file-path-details__actions">
-                <Button
-                  type="button"
-                  className="btn btn--ghost"
-                  onClick={() => {
-                    void copy();
-                  }}
-                >
-                  {labels.copyPath}
-                </Button>
-                <Button
-                  type="button"
-                  className="btn btn--primary"
-                  onClick={() => setDetailsOpen(false)}
-                >
-                  {labels.detailsClose || "Close"}
-                </Button>
-              </div>
-            </div>
-          </div>,
-          document.body,
-        )}
+        </div>
+      </GlassModal>
     </>
   );
 }

@@ -1,10 +1,11 @@
-import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+} from "@appica/ui-react/collapsible";
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import type { AppUpdateDownloadSource, AppUpdateStatus } from "@/lib/api";
@@ -16,7 +17,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
+} from "@appica/ui-react/select";
 
 export type AppUpdateBusy = "checking" | "installing" | null;
 
@@ -72,25 +73,23 @@ export function AppUpdateSection({
   return (
     <div className="settings-about__update-block">
       <div className="settings-about__update-source">
-        <div>
-          <Label
+        <Field>
+          <FieldLabel
             id="app-update-download-source-label"
-            className="settings-about__update-title"
             htmlFor="app-update-download-source"
           >
             {t("settings.updateSource")}
-          </Label>
-          <div
-            className="settings-row__desc"
+          </FieldLabel>
+          <FieldDescription
             id="app-update-download-source-description"
           >
             {t("settings.updateSourceDesc")}
-          </div>
-        </div>
+          </FieldDescription>
+        </Field>
         <Select
           value={downloadSourcePreference}
           onValueChange={(value) => {
-            if (isAppUpdateDownloadSource(value)) {
+            if (typeof value === "string" && isAppUpdateDownloadSource(value)) {
               onDownloadSourcePreferenceChange(value);
             }
           }}
@@ -121,15 +120,13 @@ export function AppUpdateSection({
           </div>
           <div className="settings-row__desc">{description}</div>
           {visibleError ? (
-            <div className="settings-about__update-error" role="alert">
-              {visibleError}
-            </div>
+            <Alert variant="error"><AlertDescription>{visibleError}</AlertDescription></Alert>
           ) : null}
           {updateAvailable && status?.notes ? (
             <Collapsible className="settings-about__update-notes">
               <CollapsibleTrigger>{t("settings.updateNotes")}</CollapsibleTrigger>
               <CollapsibleContent
-                forceMount
+                keepMounted
                 className="settings-about__update-notes-content"
               >
                 <p>{status.notes}</p>
@@ -139,7 +136,8 @@ export function AppUpdateSection({
         </div>
         <Button
           type="button"
-          className={`btn ${updateAvailable ? "btn--solid" : "btn--ghost"} btn--sm`}
+          variant={updateAvailable ? "primary" : "ghost"}
+          size="md"
           disabled={busy !== null}
           onClick={() => {
             void (action === "check" || action === "retry"

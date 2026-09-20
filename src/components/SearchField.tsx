@@ -1,8 +1,8 @@
 import type { ComponentProps } from "react";
 import { IconSearch } from "@/components/icons";
-import { Input } from "@/components/ui/input";
+import { Input } from "@appica/ui-react/input";
 
-/** 带统一搜索图标容器的 shadcn Input 组合属性。 */
+/** 带统一搜索图标容器的 Appica Input 组合属性。 */
 export interface SearchFieldProps extends ComponentProps<typeof Input> {
   /** 保留各业务域现有布局钩子的外层类名。 */
   containerClassName: string;

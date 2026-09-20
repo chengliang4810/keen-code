@@ -3,7 +3,7 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+} from "@appica/ui-react/collapsible";
 import type { Locale } from "@/i18n";
 import type {
   AcpArtifactReference,
@@ -125,7 +125,7 @@ function ArtifactRow({
       {artifact.path && onOpenPath ? (
         <Button
           type="button"
-          className="chrome-btn"
+          variant="ghost" size="icon-md"
           title={labels.open}
           aria-label={`${labels.open}: ${artifact.path}`}
           onClick={() => onOpenPath(artifact.path!)}
@@ -168,7 +168,7 @@ function ResultItem({
             {onOpenPath ? (
               <Button
                 type="button"
-                className="chrome-btn"
+                variant="ghost" size="icon-md"
                 title={labels.open}
                 aria-label={`${labels.open}: ${item.path}`}
                 onClick={() => onOpenPath(item.path)}
@@ -201,7 +201,7 @@ function ResultItem({
           {onOpenPath ? (
             <Button
               type="button"
-              className="chrome-btn"
+              variant="ghost" size="icon-md"
               title={labels.open}
               aria-label={`${labels.open}: ${item.path}`}
               onClick={() => onOpenPath(item.path)}

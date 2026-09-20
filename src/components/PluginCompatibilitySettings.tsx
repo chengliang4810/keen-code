@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { GlassModal } from "@/components/GlassModal";
 import { AgentModelSelect } from "@/components/AgentsPanel";
 import * as api from "@/lib/api";
@@ -12,7 +13,7 @@ export function PluginCompatibilitySettings({ locale }: { locale: Locale }) {
   const [open, setOpen] = useState(false);
   const tr = createT(locale);
   return <>
-    <Button className="btn btn--ghost btn--sm" onClick={() => setOpen(true)}>
+    <Button variant="ghost" size="md" onClick={() => setOpen(true)}>
       {tr("ext.compatibility.title")}
     </Button>
     {open ? <CompatibilityDialog locale={locale} onClose={() => setOpen(false)} /> : null}
@@ -46,11 +47,11 @@ function CompatibilityDialog({ locale, onClose }: { locale: Locale; onClose: () 
   };
   return <GlassModal open onClose={() => { if (!saving) onClose(); }} title={tr("ext.compatibility.title")}
     closeLabel={tr("common.close")} footer={<>
-      <Button className="btn btn--ghost" disabled={saving} onClick={onClose}>{tr("common.cancel")}</Button>
-      <Button className="btn btn--primary" disabled={!ready || saving} onClick={() => void save()}>{tr("common.save")}</Button>
+      <Button variant="ghost" disabled={saving} onClick={onClose}>{tr("common.cancel")}</Button>
+      <Button variant="primary" disabled={!ready || saving} onClick={() => void save()}>{tr("common.save")}</Button>
     </>}>
     <p>{tr("ext.compatibility.description")}</p>
-    {error ? <p role="alert">{error}</p> : null}
+    {error ? <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert> : null}
     <div className="flex flex-col gap-4" aria-busy={loading || saving}>
       {ALIASES.map(alias => <div key={alias} className="flex items-center justify-between gap-4">
         <span>{alias}</span>
