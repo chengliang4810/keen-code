@@ -3,13 +3,10 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import * as api from "@/lib/api";
 import {
-  AGENT_MODEL_SESSION_VALUE,
   AgentDetailView,
   AgentModelPicker,
   AgentModelSelect,
   agentToolsPayload,
-  decodeAgentModelSelectValue,
-  encodeAgentModelSelectValue,
 } from "./AgentsPanel";
 
 describe("agentToolsPayload", () => {
@@ -38,19 +35,27 @@ describe("子智能体工具选择控件", () => {
     expect(source).toContain('maxTurns: maxTurns.trim() ? Number(maxTurns) : null');
   });
 
-  it("使用可复用的 Radix RadioGroup 与 Checkbox，并保留受控状态和可访问名称", () => {
+  it("使用 Appica Select 与 Checkbox，并保留受控状态和可访问名称", () => {
     const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain('from "@/components/ui/radio-group"');
-    expect(source).toContain('from "@/components/ui/checkbox"');
-    expect(source).toContain("<RadioGroup");
-    expect(source).toContain("<RadioGroupItem");
+    expect(source).toContain('from "@appica/ui-react/checkbox"');
+    expect(source).toContain('className="ext-agent-tools-select"');
+    expect(source).toContain('<SelectItem value="all">');
+    expect(source).toContain('<SelectItem value="specific">');
     expect(source).toContain("<Checkbox");
     expect(source).toContain("onValueChange");
     expect(source).toContain("onCheckedChange");
     expect(source).toContain('aria-label={tr("agents.tools")}');
     expect(source).not.toMatch(/type=["']radio["']/);
     expect(source).not.toMatch(/type=["']checkbox["']/);
+  });
+
+  it("注入 AGENTS.md 开关默认启用且仅维护创建表单 UI 状态", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+
+    expect(source).toContain("const [injectAgentsMd, setInjectAgentsMd] = useState(true)");
+    expect(source).toContain('tr("agents.injectAgentsMd")');
+    expect(source).toContain("checked={injectAgentsMd}");
   });
 });
 
@@ -187,14 +192,13 @@ describe("AgentModelPicker", () => {
     { providerId: "p2", providerLabel: "Provider Two", models: ["m-c"] },
   ];
 
-  it("使用分组 Select 取代原生 select，并保留可访问名称", () => {
+  it("复用供应商二级模型菜单，并保留可访问名称", () => {
     const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
 
-    expect(source).toContain('from "@/components/ui/select"');
+    expect(source).toContain('from "@/components/ProviderModelMenu"');
     expect(source).not.toMatch(/<select(?:\s|>)/);
-    expect(source).toContain("<SelectGroup>");
-    expect(source).toContain("<SelectLabel>");
-    expect(source).toContain('aria-label={tr("agents.model.assign")}');
+    expect(source).toContain("<AgentModelSelect");
+    expect(source).toContain('label={tr("agents.model.assign")}');
   });
 
   it("默认跟随会话 Provider，并按供应商分组列出模型", () => {
@@ -208,8 +212,18 @@ describe("AgentModelPicker", () => {
     );
 
     expect(html).toContain('id="agent-model"');
-    expect(html).toContain('role="combobox"');
     expect(html).toContain("指定模型");
+    expect(html).toMatch(/<button[\s\S]*?跟随当前会话[\s\S]*?<\/button>/);
+  });
+
+  it("模型子菜单限制高度并在内部滚动", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../styles/app-features.css", import.meta.url), "utf8");
+
+    expect(source).toContain('modelContentClassName="ext-agent-model__menu w-56"');
+    expect(styles).toMatch(
+      /\.ext-agent-model__menu\s*\{[^}]*max-height:[^}]*overflow-y:\s*auto;/s,
+    );
   });
 
   it("选中模型时以 providerId::model 作为下拉值", () => {
@@ -222,23 +236,7 @@ describe("AgentModelPicker", () => {
       />,
     );
 
-    expect(html).toContain('role="combobox"');
     expect(html).toContain("Model");
-  });
-
-  it("用非空会话 sentinel 编码空值，并拒绝不在当前目录中的模型", () => {
-    expect(encodeAgentModelSelectValue("", providerGroups)).toBe(
-      AGENT_MODEL_SESSION_VALUE,
-    );
-    expect(decodeAgentModelSelectValue(AGENT_MODEL_SESSION_VALUE, providerGroups)).toBe("");
-
-    const encoded = encodeAgentModelSelectValue("p1::m-a", providerGroups);
-    expect(encoded).not.toBe("");
-    expect(decodeAgentModelSelectValue(encoded, providerGroups)).toBe("p1::m-a");
-    expect(encodeAgentModelSelectValue("p9::unknown", providerGroups)).toBe(
-      AGENT_MODEL_SESSION_VALUE,
-    );
-    expect(decodeAgentModelSelectValue("agent-model:option:p9:unknown", providerGroups)).toBeNull();
   });
 });
 
@@ -283,6 +281,39 @@ describe("AgentModelSelect", () => {
 
     expect(html).toContain("Follow current session");
     expect(html).not.toContain("provider-a::missing-model");
+  });
+});
+
+describe("AgentsPanel 列表布局", () => {
+  it("使用图标、信息区和右侧操作区组成统一列表行", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../styles/app-features.css", import.meta.url), "utf8");
+
+    expect(source).toContain('className="ext-list ext-agent-list"');
+    expect(source).toContain('className="ext-item ext-agent-row"');
+    expect(source).toContain('className="ext-agent-row__icon"');
+    expect(source).toContain('className="ext-agent-row__content"');
+    expect(source).toContain('className="ext-agent-row__controls"');
+    expect(source).toContain("<IconSubagent");
+    expect(styles).toMatch(
+      /\.ext-list > \.ext-agent-row\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*48px minmax\(0, 1fr\) auto;/,
+    );
+  });
+
+  it("创建表单使用宽面板、三列概要和全宽工具区", () => {
+    const source = readFileSync(new URL("./AgentsPanel.tsx", import.meta.url), "utf8");
+    const styles = readFileSync(new URL("../styles/app-features.css", import.meta.url), "utf8");
+
+    expect(source).toContain('className="ext-agent-create-modal"');
+    expect(source).toContain('className="ext-agent-create"');
+    expect(source).toContain('className="ext-agent-create__name"');
+    expect(source).toContain('className="ext-agent-create__model"');
+    expect(source).toContain('className="ext-agent-create__turns"');
+    expect(source).toContain('className="ext-agent-create__tools"');
+    expect(source).toContain('className="ext-agent-create__prompt"');
+    expect(styles).toMatch(
+      /\.ext-agent-create\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1\.5fr\)[\s\S]*?minmax\(220px, 1fr\)[\s\S]*?minmax\(160px, 0\.65fr\);/,
+    );
   });
 });
 

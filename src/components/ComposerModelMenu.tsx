@@ -1,26 +1,10 @@
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
 /** Composer model menu. */
 
 import { findActiveModel, type ModelOption } from "@/lib/modelCatalog";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuPortal,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { Tip } from "@/components/ui/tooltip";
-import {
-  IconCheck,
-  IconChevronDown,
-  IconPlus,
-} from "@/components/icons";
+import { IconPlus } from "@/components/icons";
+import { ProviderModelMenu } from "@/components/ProviderModelMenu";
 
 /* ---------- Model ---------- */
 
@@ -99,13 +83,12 @@ export function ComposerModelMenu({
   const triggerText = providerLabel
     ? `${providerLabel}/${modelLabel}`
     : modelLabel;
-  const title = `${labels.model}: ${triggerText}`;
-
   if (modelList.length === 0) {
     return (
       <div className="cmm cmm--model cmm--model-empty">
         <Button
           type="button"
+          variant="ghost"
           className="cmm__trigger"
           aria-label={labels.addModel}
           title={labels.addModel}
@@ -122,97 +105,43 @@ export function ComposerModelMenu({
     );
   }
 
-  const trigger = (
-    <DropdownMenuTrigger asChild>
-      <Button
-        type="button"
-        className="cmm__trigger"
-        aria-label={labels.model}
-      >
-        <span className="cmm__trigger-text cmm__trigger-text--full">
-          {triggerText}
-        </span>
-        <span className="cmm__trigger-text cmm__trigger-text--short">
-          {modelLabel}
-        </span>
-        <span className="cmm__chev" aria-hidden>
-          <IconChevronDown size={12} />
-        </span>
-      </Button>
-    </DropdownMenuTrigger>
-  );
-
   return (
-    <DropdownMenu open={open} onOpenChange={onOpenChange}>
-      <div className={`cmm cmm--model ${open ? "is-open" : ""}`}>
-        <Tip label={title}>{trigger}</Tip>
-      </div>
-      <DropdownMenuContent
-        className="cmm__dropdown-content w-56"
-        align="start"
-        sideOffset={8}
-      >
-        <DropdownMenuLabel>{labels.model}</DropdownMenuLabel>
-        <DropdownMenuGroup>
-          {providerGroups.map((provider) => {
-            const providerActive = provider.id === activeProviderId;
-            return (
-              <DropdownMenuSub key={provider.id}>
-                <DropdownMenuSubTrigger
-                  className={
-                    providerActive ? "cmm__dropdown-active" : undefined
-                  }
-                >
-                  <span className="min-w-0 flex-1 truncate">
-                    {provider.label}
-                  </span>
-                  {providerActive ? (
-                    <span aria-hidden>
-                      <IconCheck size={16} />
-                    </span>
-                  ) : null}
-                </DropdownMenuSubTrigger>
-                <DropdownMenuPortal>
-                  <DropdownMenuSubContent className="cmm__dropdown-content cmm__model-list w-56">
-                    <DropdownMenuGroup>
-                      {provider.models.map((model) => {
-                        const selected =
-                          model.id === modelId &&
-                          model.providerId === activeProviderId;
-                        return (
-                          <DropdownMenuItem
-                            key={`${provider.id}:${model.id}`}
-                            className={
-                              selected ? "cmm__dropdown-active" : undefined
-                            }
-                            onSelect={() => onModel(model.id, model.providerId)}
-                          >
-                            <span className="min-w-0 truncate">{model.label}</span>
-                            {model.supportsVision ? (
-                              <span className="cmm__badge">
-                                {labels.vision}
-                              </span>
-                            ) : null}
-                            {selected ? (
-                              <span className="ml-auto" aria-hidden>
-                                <IconCheck size={16} />
-                              </span>
-                            ) : null}
-                          </DropdownMenuItem>
-                        );
-                      })}
-                    </DropdownMenuGroup>
-                  </DropdownMenuSubContent>
-                </DropdownMenuPortal>
-              </DropdownMenuSub>
-            );
-          })}
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onAddModel}>
-          <span className="truncate">{labels.manageModels}</span>
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <ProviderModelMenu
+      open={open}
+      onOpenChange={onOpenChange}
+      groups={providerGroups.map((provider) => ({
+        id: provider.id,
+        label: provider.label,
+        models: provider.models.map((model) => ({
+          id: model.id,
+          label: model.label,
+          suffix: model.supportsVision ? (
+            <Badge size="xs" variant="soft">{labels.vision}</Badge>
+          ) : undefined,
+        })),
+      }))}
+      selectedProviderId={activeProviderId}
+      selectedModelId={modelId}
+      triggerLabel={labels.model}
+      triggerTitle={`${labels.model}: ${triggerText}`}
+      triggerVariant="ghost"
+      triggerWrapperClassName={`cmm cmm--model ${open ? "is-open" : ""}`}
+      triggerClassName="cmm__trigger"
+      triggerContent={
+        <>
+          <span className="cmm__trigger-text cmm__trigger-text--full">
+            {triggerText}
+          </span>
+          <span className="cmm__trigger-text cmm__trigger-text--short">
+            {modelLabel}
+          </span>
+        </>
+      }
+      contentClassName="cmm__dropdown-content w-56"
+      modelContentClassName="cmm__dropdown-content cmm__model-list w-56"
+      sideOffset={8}
+      footerAction={{ label: labels.manageModels, onSelect: onAddModel }}
+      onModelSelect={(nextProviderId, nextModelId) => onModel(nextModelId, nextProviderId)}
+    />
   );
 }

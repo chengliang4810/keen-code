@@ -217,12 +217,10 @@ describe("ComposerModelMenu", () => {
     );
 
     // 仅对声明支持图片输入的模型渲染标签。
-    expect(source).toMatch(
-      /\{model\.supportsVision \? \([\s\S]*?labels\.vision[\s\S]*?\) : null\}/,
-    );
+    expect(source).toMatch(/suffix: model\.supportsVision \? \([\s\S]*?labels\.vision/);
     // 当前供应商与当前模型都在列表中可见。
-    expect(source).toContain("provider.id === activeProviderId");
-    expect(source).toContain("model.providerId === activeProviderId");
+    expect(source).toContain("selectedProviderId={activeProviderId}");
+    expect(source).toContain("selectedModelId={modelId}");
   });
 
   it("触发器不显示模型图标，模型子菜单限高滚动且不再承载推理强度", () => {

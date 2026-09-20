@@ -1,7 +1,11 @@
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@appica/ui-react/input";
+import { Textarea } from "@appica/ui-react/textarea";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@appica/ui-react/badge";
+import { Alert, AlertDescription } from "@appica/ui-react/alert";
+import { Card } from "@appica/ui-react/card";
+import { NumberField } from "@appica/ui-react/number-field";
+import { Field, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 子智能体：查看内置定义并管理 KeenCode 全局定义。 */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -10,38 +14,25 @@ import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
 import {
-  IconCheck,
-  IconChevronDown,
   IconFolder,
   IconPlus,
+  IconSubagent,
   IconTrash,
   IconUser,
 } from "@/components/icons";
 import { SkeletonList } from "@/components/Skeleton";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuPortal,
-  DropdownMenuSeparator,
-  DropdownMenuSub,
-  DropdownMenuSubContent,
-  DropdownMenuSubTrigger,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Select,
   SelectContent,
   SelectGroup,
   SelectItem,
-  SelectLabel,
   SelectTrigger,
   SelectValue,
-} from "@/components/ui/select";
-import { Checkbox } from "@/components/ui/checkbox";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+} from "@appica/ui-react/select";
+import { Checkbox } from "@appica/ui-react/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { shortPathLabel } from "@/lib/extensionsUi";
+import { ProviderModelMenu } from "@/components/ProviderModelMenu";
 
 export interface AgentsPanelProps {
   locale: Locale;
@@ -63,14 +54,6 @@ type AgentProviderGroup = {
   models: string[];
 };
 
-/** Radix Select reserves an empty string, so the session-following option uses a stable sentinel. */
-export const AGENT_MODEL_SESSION_VALUE = "agent-model:session";
-const AGENT_MODEL_OPTION_PREFIX = "agent-model:option:";
-
-function encodeAgentModelOption(providerId: string, model: string): string {
-  return `${AGENT_MODEL_OPTION_PREFIX}${encodeURIComponent(providerId)}:${encodeURIComponent(model)}`;
-}
-
 /** 设置页只接受 `providerId::model`，定义中的其他模型值不作为覆盖展示。 */
 function normalizeAgentModelReference(value: string): string | null {
   const trimmed = value.trim();
@@ -86,37 +69,11 @@ function normalizeAgentModelReference(value: string): string | null {
 function findAgentModelOption(
   value: string,
   providerGroups: ReadonlyArray<AgentProviderGroup>,
-): { providerId: string; model: string; selectValue: string } | null {
+): { providerId: string; model: string } | null {
   for (const group of providerGroups) {
     for (const model of group.models) {
-      const selectValue = encodeAgentModelOption(group.providerId, model);
       if (value === `${group.providerId}::${model}`) {
-        return { providerId: group.providerId, model, selectValue };
-      }
-    }
-  }
-  return null;
-}
-
-/** Encode a persisted model override only when it belongs to the current provider/model catalog. */
-export function encodeAgentModelSelectValue(
-  value: string,
-  providerGroups: ReadonlyArray<AgentProviderGroup>,
-): string {
-  if (!value) return AGENT_MODEL_SESSION_VALUE;
-  return findAgentModelOption(value, providerGroups)?.selectValue ?? AGENT_MODEL_SESSION_VALUE;
-}
-
-/** Decode a Radix value and reject values that are not present in the current catalog. */
-export function decodeAgentModelSelectValue(
-  value: string,
-  providerGroups: ReadonlyArray<AgentProviderGroup>,
-): string | null {
-  if (value === AGENT_MODEL_SESSION_VALUE) return "";
-  for (const group of providerGroups) {
-    for (const model of group.models) {
-      if (value === encodeAgentModelOption(group.providerId, model)) {
-        return `${group.providerId}::${model}`;
+        return { providerId: group.providerId, model };
       }
     }
   }
@@ -137,13 +94,13 @@ export function AgentDetailView({
     <div className="ext-agent-detail" data-testid="agent-detail">
       <div className="ext-item__head">
         <strong className="ext-item__name">{detail.name}</strong>
-        <span className={`ext-badge ext-badge--${detail.source === "global" ? "user" : "muted"}`}>
+        <Badge size="xs" variant={detail.source === "global" ? "primary-outline" : "soft"}>
           {detail.source === "global"
             ? tr("agents.source.global")
             : detail.source === "plugin"
               ? tr("agents.source.plugin")
               : tr("agents.source.builtin")}
-        </span>
+        </Badge>
       </div>
       <p className="ext-item__desc">{detail.description}</p>
       {model || detail.maxTurns || detail.path ? (
@@ -194,45 +151,19 @@ export function AgentModelPicker({
   onChange: (value: string) => void;
 }) {
   const tr = createT(locale);
-  const selectValue = encodeAgentModelSelectValue(value, providerGroups);
   return (
     <>
-      <Label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</Label>
-      <Select
-        value={selectValue}
-        onValueChange={(nextValue) => {
-          const decodedValue = decodeAgentModelSelectValue(nextValue, providerGroups);
-          if (decodedValue !== null) onChange(decodedValue);
-        }}
-      >
-        <SelectTrigger
-          id="agent-model"
-          className="settings-input"
-          aria-label={tr("agents.model.assign")}
-        >
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectGroup>
-            <SelectItem value={AGENT_MODEL_SESSION_VALUE}>
-              {tr("agents.model.followSession")}
-            </SelectItem>
-          </SelectGroup>
-          {providerGroups.map((group) => (
-            <SelectGroup key={group.providerId}>
-              <SelectLabel>{group.providerLabel}</SelectLabel>
-              {group.models.map((model) => (
-                <SelectItem
-                  key={`${group.providerId}::${model}`}
-                  value={encodeAgentModelOption(group.providerId, model)}
-                >
-                  {model}
-                </SelectItem>
-              ))}
-            </SelectGroup>
-          ))}
-        </SelectContent>
-      </Select>
+      <label className="ext-plugin-install__label" htmlFor="agent-model">{tr("agents.model.assign")}</label>
+      <AgentModelSelect
+        locale={locale}
+        value={value}
+        providerGroups={providerGroups}
+        id="agent-model"
+        className="settings-input"
+        align="start"
+        label={tr("agents.model.assign")}
+        onSelect={onChange}
+      />
     </>
   );
 }
@@ -243,6 +174,9 @@ export function AgentModelSelect({
   value,
   providerGroups,
   disabled,
+  id,
+  className = "ext-agent-model__trigger",
+  align = "end",
   label: accessibleLabel,
   onSelect,
 }: {
@@ -250,6 +184,9 @@ export function AgentModelSelect({
   value: string | null;
   providerGroups: ReadonlyArray<AgentProviderGroup>;
   disabled?: boolean;
+  id?: string;
+  className?: string;
+  align?: "start" | "center" | "end";
   label?: string;
   onSelect: (value: string) => void;
 }) {
@@ -257,69 +194,30 @@ export function AgentModelSelect({
   const selectedModel = value ? findAgentModelOption(value, providerGroups) : null;
   const label = selectedModel?.model ?? tr("agents.model.followSession");
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          className="ext-agent-model__trigger"
-          disabled={disabled}
-          aria-label={accessibleLabel ?? tr("agents.model")}
-          title={selectedModel ? value! : tr("agents.model.followSession")}
-        >
-          <span className="ext-agent-model__trigger-text">{label}</span>
-          <IconChevronDown size={12} className="chevron" />
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent
-        align="end"
-        sideOffset={6}
-        className="ext-agent-model__menu w-56"
-      >
-        <DropdownMenuGroup>
-          <DropdownMenuItem onSelect={() => onSelect("")}>
-            <span className="truncate">{tr("agents.model.followSession")}</span>
-            {!selectedModel ? (
-              <span className="ml-auto" aria-hidden>
-                <IconCheck size={16} />
-              </span>
-            ) : null}
-          </DropdownMenuItem>
-        </DropdownMenuGroup>
-        <DropdownMenuSeparator />
-        <DropdownMenuGroup>
-          {providerGroups.map((group) => (
-            <DropdownMenuSub key={group.providerId}>
-              <DropdownMenuSubTrigger>
-                <span className="truncate">{group.providerLabel}</span>
-              </DropdownMenuSubTrigger>
-              <DropdownMenuPortal>
-                <DropdownMenuSubContent className="ext-agent-model__menu w-56">
-                  <DropdownMenuGroup>
-                    {group.models.map((model) => {
-                      const selected = selectedModel?.providerId === group.providerId
-                        && selectedModel.model === model;
-                      return (
-                        <DropdownMenuItem
-                          key={model}
-                          onSelect={() => onSelect(`${group.providerId}::${model}`)}
-                        >
-                          <span className="truncate">{model}</span>
-                          {selected ? (
-                            <span className="ml-auto" aria-hidden>
-                              <IconCheck size={16} />
-                            </span>
-                          ) : null}
-                        </DropdownMenuItem>
-                      );
-                    })}
-                  </DropdownMenuGroup>
-                </DropdownMenuSubContent>
-              </DropdownMenuPortal>
-            </DropdownMenuSub>
-          ))}
-        </DropdownMenuGroup>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <ProviderModelMenu
+      groups={providerGroups.map((group) => ({
+        id: group.providerId,
+        label: group.providerLabel,
+        models: group.models.map((model) => ({ id: model, label: model })),
+      }))}
+      selectedProviderId={selectedModel?.providerId}
+      selectedModelId={selectedModel?.model}
+      triggerId={id}
+      triggerClassName={className}
+      triggerContent={<span className="ext-agent-model__trigger-text">{label}</span>}
+      triggerLabel={accessibleLabel ?? tr("agents.model")}
+      triggerTitle={selectedModel ? value! : tr("agents.model.followSession")}
+      disabled={disabled}
+      align={align}
+      contentClassName="ext-agent-model__menu w-56"
+      modelContentClassName="ext-agent-model__menu w-56"
+      emptyOption={{
+        label: tr("agents.model.followSession"),
+        selected: !selectedModel,
+        onSelect: () => onSelect(""),
+      }}
+      onModelSelect={(providerId, modelId) => onSelect(`${providerId}::${modelId}`)}
+    />
   );
 }
 
@@ -337,6 +235,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
   const [description, setDescription] = useState("");
   const [prompt, setPrompt] = useState("");
   const [toolsMode, setToolsMode] = useState<"all" | "specific">("all");
+  const [injectAgentsMd, setInjectAgentsMd] = useState(true);
   const [selectedTools, setSelectedTools] = useState<Set<string>>(new Set());
   const [catalog, setCatalog] = useState<string[]>([]);
   const [maxTurns, setMaxTurns] = useState("");
@@ -426,6 +325,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
     setDescription("");
     setPrompt("");
     setToolsMode("all");
+    setInjectAgentsMd(true);
     setSelectedTools(new Set());
     setMaxTurns("");
     setCreateModel("");
@@ -450,6 +350,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
       setDescription("");
       setPrompt("");
       setToolsMode("all");
+      setInjectAgentsMd(true);
       setSelectedTools(new Set());
       setMaxTurns("");
       setCreateModel("");
@@ -509,14 +410,14 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
   return (
     <div className="ext-panel" data-testid="agents-panel">
       <p className="settings-page__lead">{tr("agents.lead")}</p>
-      {error ? <p className="ext-alert ext-alert--error" role="alert">{error}</p> : null}
+      {error ? <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert> : null}
       <h2 className="settings-page__h2" id="settings-anchor-agents">
         <IconUser size={15} />
         {tr("agents.title")}
         {!loading ? <span className="ext-count">{agents.length}</span> : null}
         <Button
           type="button"
-          className="btn btn--solid settings-page__h2-action"
+          variant="primary" className="settings-page__h2-action"
           disabled={busy || !api.isTauri()}
           onClick={() => void openCreate()}
         >
@@ -524,40 +425,45 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
           <span>{tr("agents.add")}</span>
         </Button>
       </h2>
-      <div className="settings-card ext-card">
+      <Card inset={false} className="ext-card ext-agent-card">
         {loading && <SkeletonList rows={3} label={tr("agents.loading")} />}
         {!loading && agents.length === 0 ? <p className="ext-empty">{tr("agents.empty")}</p> : null}
         {!loading && agents.length > 0 ? (
-          <ul className="ext-list">
+          <ul className="ext-list ext-agent-list">
             {agents.map((agent) => (
-              <li key={`${agent.source}:${agent.name}`} className="ext-item">
-                <div className="ext-item__body">
-                  <div className="ext-item__main">
+              <li key={`${agent.source}:${agent.name}`} className="ext-item ext-agent-row">
+                <span className="ext-agent-row__icon" aria-hidden="true">
+                  <IconSubagent size={20} />
+                </span>
+                <div className="ext-agent-row__content">
+                  <div className="ext-agent-row__heading">
                     <Button
                       type="button"
+                      variant="ghost"
+                      size="md"
                       className="ext-item__head-btn"
                       title={tr("agents.detail.view")}
                       onClick={() => void openDetail(agent)}
                     >
                       <strong className="ext-item__name">{agent.name}</strong>
-                      <span className={`ext-badge ext-badge--${agent.source === "global" ? "user" : "muted"}`}>
-                        {agent.source === "global"
-                          ? tr("agents.source.global")
-                          : agent.source === "plugin"
-                            ? tr("agents.source.plugin")
-                            : tr("agents.source.builtin")}
-                      </span>
                     </Button>
-                    <p className="ext-item__desc">{agent.description}</p>
-                    {agent.path ? (
-                      <div className="ext-item__meta">
-                        <Button type="button" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
-                          <IconFolder size={13} />
-                          <span>{shortPathLabel(agent.path, 48)}</span>
-                        </Button>
-                      </div>
-                    ) : null}
+                    <Badge size="xs" variant={agent.source === "global" ? "primary-outline" : "soft"}>
+                      {agent.source === "global"
+                        ? tr("agents.source.global")
+                        : agent.source === "plugin"
+                          ? tr("agents.source.plugin")
+                          : tr("agents.source.builtin")}
+                    </Badge>
                   </div>
+                  <p className="ext-item__desc">{agent.description}</p>
+                  {agent.path ? (
+                    <Button type="button" variant="ghost" size="md" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
+                      <IconFolder size={13} />
+                      <span>{shortPathLabel(agent.path, 48)}</span>
+                    </Button>
+                  ) : null}
+                </div>
+                <div className="ext-agent-row__controls">
                   {agent.source === "global" || agent.source === "builtin" ? (
                     <div className="ext-item__model">
                       <AgentModelSelect
@@ -569,88 +475,110 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
                       />
                     </div>
                   ) : null}
-                </div>
-                {agent.source === "global" ? (
-                  <div className="ext-item__actions">
-                    <Button type="button" className="btn btn--ghost btn--sm ext-item__danger" disabled={busy} onClick={() => setRemoveTarget(agent)}>
-                      <IconTrash size={13} />
-                      <span>{tr("agents.remove")}</span>
+                  {agent.source === "global" ? (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-md"
+                      title={tr("agents.remove")}
+                      aria-label={tr("agents.remove")}
+                      disabled={busy}
+                      onClick={() => setRemoveTarget(agent)}
+                    >
+                      <IconTrash size={15} />
                     </Button>
-                  </div>
-                ) : null}
+                  ) : null}
+                </div>
               </li>
             ))}
           </ul>
         ) : null}
-      </div>
+      </Card>
 
-      <GlassModal open={createOpen} title={tr("agents.addTitle")} onClose={closeCreate}>
-        <div className="ext-modal-form">
-          <Label className="ext-plugin-install__label" htmlFor="agent-name">{tr("agents.name")}</Label>
-          <Input id="agent-name" className="settings-input" value={name} placeholder="code-reviewer" onChange={(event) => setName(event.target.value)} />
-          <Label className="ext-plugin-install__label" htmlFor="agent-description">{tr("agents.description")}</Label>
-          <Input id="agent-description" className="settings-input" value={description} onChange={(event) => setDescription(event.target.value)} />
-          <Label className="ext-plugin-install__label" htmlFor="agent-prompt">{tr("agents.prompt")}</Label>
-          <Textarea id="agent-prompt" className="settings-input ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
-          <span className="ext-plugin-install__label">{tr("agents.tools")}</span>
-          <RadioGroup
-            className="ext-tools-mode"
-            name="agent-tools-mode"
-            value={toolsMode}
-            aria-label={tr("agents.tools")}
-            onValueChange={(value) => {
-              if (value === "all" || value === "specific") setToolsMode(value);
-            }}
-          >
-            <div className="ext-tools-mode__option">
-              <RadioGroupItem
-                id="agent-tools-all"
-                value="all"
-                aria-label={tr("agents.tools.all")}
-              />
-              <Label className="ext-tools-mode__text" htmlFor="agent-tools-all">
-                <span>{tr("agents.tools.all")}</span>
-                <span className="ext-tools-mode__hint">{tr("agents.tools.allHint")}</span>
-              </Label>
+      <GlassModal
+        open={createOpen}
+        title={tr("agents.addTitle")}
+        className="ext-agent-create-modal"
+        bodyClassName="ext-agent-create-modal__body"
+        wrapBody
+        onClose={closeCreate}
+        footer={
+          <>
+            <Button type="button" variant="ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</Button>
+            <Button type="button" variant="primary" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</Button>
+          </>
+        }
+      >
+        <div className="ext-agent-create">
+          <Field className="ext-agent-create__name">
+            <FieldLabel htmlFor="agent-name">{tr("agents.name")}</FieldLabel>
+            <Input data-modal-autofocus id="agent-name" value={name} placeholder="code-reviewer" onChange={(event) => setName(event.target.value)} />
+          </Field>
+          <div className="ext-agent-create__model">
+            <AgentModelPicker locale={locale} value={createModel} providerGroups={providerGroups} onChange={setCreateModel} />
+          </div>
+          <Field className="ext-agent-create__turns">
+            <FieldLabel htmlFor="agent-max-turns">{tr("agents.maxTurns")}</FieldLabel>
+            <NumberField id="agent-max-turns" min={1} value={maxTurns ? Number(maxTurns) : null} onValueChange={(value) => setMaxTurns(value == null ? "" : String(value))} />
+          </Field>
+          <Field className="ext-agent-create__description">
+            <FieldLabel htmlFor="agent-description">{tr("agents.description")}</FieldLabel>
+            <Input id="agent-description" value={description} onChange={(event) => setDescription(event.target.value)} />
+          </Field>
+          <section className="ext-agent-create__tools" aria-labelledby="agent-tools-label">
+            <span className="ext-plugin-install__label" id="agent-tools-label">{tr("agents.tools")}</span>
+            <Select
+              value={toolsMode}
+              onValueChange={(value) => {
+                if (typeof value === "string" && (value === "all" || value === "specific")) {
+                  setToolsMode(value);
+                }
+              }}
+            >
+              <SelectTrigger className="ext-agent-tools-select" aria-label={tr("agents.tools")}>
+                <SelectValue>
+                  {() => toolsMode === "all" ? tr("agents.tools.all") : tr("agents.tools.specific")}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="all">{tr("agents.tools.all")}</SelectItem>
+                  <SelectItem value="specific">{tr("agents.tools.specific")}</SelectItem>
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+            <span className="ext-tools-mode__hint">
+              {toolsMode === "all" ? tr("agents.tools.allHint") : tr("agents.tools.specificHint")}
+            </span>
+            {toolsMode === "specific" ? (
+              <div className="ext-tools-picker" role="list" aria-label={tr("agents.tools.specific")}>
+                {catalog.map((tool, index) => {
+                  const toolId = `agent-tool-${index}`;
+                  return (
+                    <div className="ext-tools-picker__row" role="listitem" key={tool}>
+                      <Checkbox id={toolId} checked={selectedTools.has(tool)} aria-label={tool} onCheckedChange={(checked) => setToolChecked(tool, checked === true)} />
+                      <label htmlFor={toolId}>{tool}</label>
+                    </div>
+                  );
+                })}
+                {catalog.length === 0 ? <p className="ext-empty">{tr("agents.tools.empty")}</p> : null}
+              </div>
+            ) : null}
+          </section>
+          <Field className="ext-agent-create__prompt">
+            <FieldLabel htmlFor="agent-prompt">{tr("agents.prompt")}</FieldLabel>
+            <Textarea id="agent-prompt" className="ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+          </Field>
+          <div className="ext-agent-create__agents-md">
+            <div>
+              <strong>{tr("agents.injectAgentsMd")}</strong>
+              <span>{tr("agents.injectAgentsMdHint")}</span>
             </div>
-            <div className="ext-tools-mode__option">
-              <RadioGroupItem
-                id="agent-tools-specific"
-                value="specific"
-                aria-label={tr("agents.tools.specific")}
-              />
-              <Label className="ext-tools-mode__text" htmlFor="agent-tools-specific">
-                {tr("agents.tools.specific")}
-              </Label>
-            </div>
-          </RadioGroup>
-          {toolsMode === "specific" ? (
-            <div className="ext-tools-picker" role="list" aria-label={tr("agents.tools.specific")}>
-              {catalog.map((tool, index) => {
-                const toolId = `agent-tool-${index}`;
-                return (
-                  <div className="ext-tools-picker__row" role="listitem" key={tool}>
-                    <Checkbox
-                      id={toolId}
-                      checked={selectedTools.has(tool)}
-                      aria-label={tool}
-                      onCheckedChange={(checked) => setToolChecked(tool, checked === true)}
-                    />
-                    <Label htmlFor={toolId}>{tool}</Label>
-                  </div>
-                );
-              })}
-              {catalog.length === 0 ? (
-                <p className="ext-empty">{tr("agents.tools.empty")}</p>
-              ) : null}
-            </div>
-          ) : null}
-          <Label className="ext-plugin-install__label" htmlFor="agent-max-turns">{tr("agents.maxTurns")}</Label>
-          <Input id="agent-max-turns" className="settings-input" type="number" min={1} value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
-          <AgentModelPicker locale={locale} value={createModel} providerGroups={providerGroups} onChange={setCreateModel} />
-          <div className="ext-item__actions">
-            <Button type="button" className="btn btn--ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</Button>
-            <Button type="button" className="btn btn--solid" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</Button>
+            <Switch
+              checked={injectAgentsMd}
+              aria-label={tr("agents.injectAgentsMd")}
+              onCheckedChange={(checked) => setInjectAgentsMd(checked === true)}
+            />
           </div>
         </div>
       </GlassModal>
@@ -662,8 +590,8 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
       <GlassModal open={!!removeTarget} title={tr("agents.removeTitle")} onClose={() => !busy && setRemoveTarget(null)}>
         <p>{tr("agents.removeConfirm", { name: removeTarget?.name ?? "" })}</p>
         <div className="ext-item__actions">
-          <Button type="button" className="btn btn--ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
-          <Button type="button" className="btn btn--solid" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
+          <Button type="button" variant="ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
+          <Button type="button" variant="primary" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
         </div>
       </GlassModal>
     </div>
