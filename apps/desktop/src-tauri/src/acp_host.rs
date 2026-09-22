@@ -4,7 +4,8 @@
 //! Journal 归约与桌面实时投递仍由 [`AgentRuntime`] 和其下游组件负责。
 
 use crate::agent_runtime::{
-    AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome, unix_time_ms,
+    AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome, TaskNoticeKind,
+    TaskTerminalNotice, unix_time_ms,
 };
 use crate::session_commands::{
     PLAN_MODE_CONTRACT_EN, ULTRA_MODE_CONTRACT_EN, authorize_stored_session_root,
@@ -26,7 +27,6 @@ use keencode_runtime::{
     OperationStatus, OperationTerminal, PromptAdmissionRequest, RuntimeError, RuntimeEventPayload,
     RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeSession, RuntimeSnapshot,
 };
-use keencode_tools::BackgroundTaskCompletion;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -312,23 +312,35 @@ const TASK_NOTIFICATION_CONNECTION: &str = "keencode-task-notification-pump";
 
 /// 把一次后台任务终态格式化为 ZCode 风格的 task-notification 文本。
 /// 该文本会作为合成用户输入开启（或排队进入）主对话的一个模型轮。
-pub(crate) fn format_task_notification_text(completion: &BackgroundTaskCompletion) -> String {
+pub(crate) fn format_task_notification_text(notice: &TaskTerminalNotice) -> String {
     let mut lines = Vec::with_capacity(8);
     lines.push("<task-notification>".to_owned());
-    lines.push(format!("<task-id>{}</task-id>", completion.task_id));
-    lines.push(format!("<status>{}</status>", completion.status.as_str()));
+    lines.push(format!("<task-id>{}</task-id>", notice.task_id));
     lines.push(format!(
-        "<duration-ms>{}</duration-ms>",
-        completion.duration_ms
+        "<kind>{}</kind>",
+        match notice.kind {
+            TaskNoticeKind::Shell => "shell",
+            TaskNoticeKind::Agent => "agent",
+        }
     ));
-    if !completion.summary.is_empty() {
-        lines.push(format!("<summary>{}</summary>", completion.summary));
+    if let Some(agent_id) = &notice.agent_id {
+        lines.push(format!("<agent-id>{agent_id}</agent-id>"));
+    }
+    lines.push(format!("<status>{}</status>", notice.status_text));
+    lines.push(format!("<duration-ms>{}</duration-ms>", notice.duration_ms));
+    if let Some(summary) = &notice.summary {
+        lines.push(format!("<summary>{summary}</summary>"));
     }
     lines.push("</task-notification>".to_owned());
-    lines.push(
-        "后台任务已结束：可用 TaskOutput(task_id) 读取增量输出；如需继续处理请直接行动，不要轮询。"
-            .to_owned(),
-    );
+    lines.push(match notice.kind {
+        TaskNoticeKind::Shell => {
+            "后台任务已结束：可用 TaskOutput(task_id) 读取增量输出；如需继续处理请直接行动，不要轮询。"
+                .to_owned()
+        }
+        TaskNoticeKind::Agent => {
+            "子代理已完成：权威结果已进入你的 mailbox，请读取结果并继续推进任务；如需继续与其协作可使用 send_message 或 followup_task。".to_owned()
+        }
+    });
     lines.join("\n")
 }
 
@@ -338,50 +350,50 @@ pub(crate) fn format_task_notification_text(completion: &BackgroundTaskCompletio
 /// （next 优先级语义），EOF 即退出。
 async fn run_task_notification_pump(
     host: Arc<AcpHost>,
-    rx: tokio::sync::broadcast::Receiver<(String, BackgroundTaskCompletion)>,
+    rx: tokio::sync::broadcast::Receiver<TaskTerminalNotice>,
 ) {
     let mut receiver = rx;
     let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
-        let (session_id, completion) = match receiver.recv().await {
-            Ok(pair) => pair,
+        let notice = match receiver.recv().await {
+            Ok(notice) => notice,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
         };
-        let dedup_key = format!("{}:{}", session_id, completion.task_id);
+        let dedup_key = format!("{}:{}", notice.session_id, notice.task_id);
         if !notified.insert(dedup_key) {
             continue;
         }
-        let text = format_task_notification_text(&completion);
+        let text = format_task_notification_text(&notice);
         let unix_ms = unix_time_ms();
         let operation_id = match OperationId::new(format!(
             "task-notify-{}-{}-{unix_ms}",
-            session_id, completion.task_id
+            notice.session_id, notice.task_id
         )) {
             Ok(id) => id,
             Err(error) => {
-                tracing::error!(session_id, task_id = %completion.task_id, %error, "invalid notification operation id");
+                tracing::error!(session_id = %notice.session_id, task_id = %notice.task_id, %error, "invalid notification operation id");
                 continue;
             }
         };
-        let turn_id = format!("turn-notify-{}-{unix_ms}", completion.task_id);
+        let turn_id = format!("turn-notify-{}-{unix_ms}", notice.task_id);
         let connection_id = match keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION) {
             Ok(id) => id,
             Err(_) => break,
         };
-        let project_root = match authorized_metadata(&host.runtime, &host.app, &session_id)
+        let project_root = match authorized_metadata(&host.runtime, &host.app, &notice.session_id)
             .map(|(_, root)| root)
         {
             Ok(root) => root,
             Err(_) => {
-                tracing::error!(session_id, task_id = %completion.task_id, "cannot authorize notification session");
+                tracing::error!(session_id = %notice.session_id, task_id = %notice.task_id, "cannot authorize notification session");
                 continue;
             }
         };
-        let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, false);
+        let payload_digest = prompt_payload_digest(&notice.session_id, &turn_id, &text, false);
         let request = PromptDriveRequest {
             connection_id,
-            session_id: session_id.clone(),
+            session_id: notice.session_id.clone(),
             operation_id,
             turn_id,
             text,
@@ -392,15 +404,15 @@ async fn run_task_notification_pump(
         };
         if let Err(failure) = host.admit_prompt(request).await {
             tracing::error!(
-                session_id,
-                task_id = %completion.task_id,
+                session_id = %notice.session_id,
+                task_id = %notice.task_id,
                 ?failure,
                 "failed to admit task notification prompt"
             );
         } else {
             tracing::info!(
-                session_id,
-                task_id = %completion.task_id,
+                session_id = %notice.session_id,
+                task_id = %notice.task_id,
                 "task notification prompt admitted"
             );
         }
@@ -2667,20 +2679,22 @@ mod session_control_tests {
 #[cfg(test)]
 mod task_notification_tests {
     use super::*;
-    use keencode_tools::BackgroundTaskStatus;
 
     #[test]
-    fn formats_succeeded_completion_with_dedupable_fields() {
-        let completion = BackgroundTaskCompletion {
+    fn formats_shell_completion_with_dedupable_fields() {
+        let notice = TaskTerminalNotice {
             session_id: "session-1".to_owned(),
             task_id: "task-7".to_owned(),
-            status: BackgroundTaskStatus::Succeeded,
+            kind: TaskNoticeKind::Shell,
+            status_text: "succeeded",
             duration_ms: 4_200,
-            summary: "npm test: 12 passed".to_owned(),
+            summary: Some("npm test: 12 passed".to_owned()),
+            agent_id: None,
         };
-        let text = format_task_notification_text(&completion);
+        let text = format_task_notification_text(&notice);
         assert!(text.contains("<task-notification>"));
         assert!(text.contains("<task-id>task-7</task-id>"));
+        assert!(text.contains("<kind>shell</kind>"));
         assert!(text.contains("<status>succeeded</status>"));
         assert!(text.contains("<duration-ms>4200</duration-ms>"));
         assert!(text.contains("<summary>npm test: 12 passed</summary>"));
@@ -2689,17 +2703,21 @@ mod task_notification_tests {
     }
 
     #[test]
-    fn failed_completion_states_the_status_without_synthetic_exit_code() {
-        let completion = BackgroundTaskCompletion {
+    fn formats_agent_completion_with_mailbox_guidance() {
+        let notice = TaskTerminalNotice {
             session_id: "session-1".to_owned(),
-            task_id: "task-8".to_owned(),
-            status: BackgroundTaskStatus::Failed,
+            task_id: "turn-9".to_owned(),
+            kind: TaskNoticeKind::Agent,
+            status_text: "failed",
             duration_ms: 900,
-            summary: String::new(),
+            summary: None,
+            agent_id: Some("agent-3".to_owned()),
         };
-        let text = format_task_notification_text(&completion);
+        let text = format_task_notification_text(&notice);
+        assert!(text.contains("<kind>agent</kind>"));
+        assert!(text.contains("<agent-id>agent-3</agent-id>"));
         assert!(text.contains("<status>failed</status>"));
-        assert!(!text.contains("exit-code"), "不得伪造真实退出码：{text}");
         assert!(!text.contains("<summary>"), "空摘要不得输出空标签：{text}");
+        assert!(text.contains("mailbox"));
     }
 }

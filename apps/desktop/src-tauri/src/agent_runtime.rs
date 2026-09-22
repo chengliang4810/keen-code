@@ -4474,6 +4474,34 @@ pub trait ClientRequestRouter: Send + Sync {
 }
 
 /// 自研 Runtime 的进程内唯一桌面装配根。
+/// 跨层转发的任务终态通知：后台 Shell 与子代理共用同一注入通道。
+#[derive(Clone, Debug)]
+pub struct TaskTerminalNotice {
+    /// 任务所属的根 Session。
+    pub session_id: String,
+    /// 稳定任务标识（Shell 任务 id 或子代理 Turn id）。
+    pub task_id: String,
+    /// 任务类别。
+    pub kind: TaskNoticeKind,
+    /// 已归一的状态文本（succeeded/failed/cancelled）。
+    pub status_text: &'static str,
+    /// 从启动到终态的持续毫秒数。
+    pub duration_ms: u64,
+    /// 有界结果摘要；可能为空。
+    pub summary: Option<String>,
+    /// 子代理任务的 Agent 标识。
+    pub agent_id: Option<String>,
+}
+
+/// 任务终态通知的类别。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskNoticeKind {
+    /// 后台 Shell 命令。
+    Shell,
+    /// 子代理回合。
+    Agent,
+}
+
 pub struct AgentRuntime {
     /// 三种厂商协议共享的原子热替换 Provider 注册表。
     provider_registry: ProviderRegistry,
@@ -4533,9 +4561,9 @@ pub struct AgentRuntime {
     shutdown_error: Mutex<Option<AgentRuntimeError>>,
     /// 防止并发 shutdown 在首次调用尚未记录失败结果时提前返回成功。
     shutdown_gate: AsyncMutex<()>,
-    /// 全局后台任务完成中继：把每个 Session 泵捕获的终态转发给上层
-    /// （AcpHost 通知泵），用于把任务完成注入主对话。
-    task_notification_tx: tokio::sync::broadcast::Sender<(String, BackgroundTaskCompletion)>,
+    /// 全局后台任务完成中继：把每个 Session 泵捕获的终态（后台 Shell 与
+    /// 子代理）转发给上层（AcpHost 通知泵），用于把任务完成注入主对话。
+    task_notification_tx: tokio::sync::broadcast::Sender<TaskTerminalNotice>,
 }
 
 #[derive(Default)]
@@ -4810,7 +4838,7 @@ impl AgentRuntime {
     /// 订阅全局后台任务完成中继；上层（AcpHost 通知泵）把终态注入主对话。
     pub fn subscribe_task_completions(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<(String, BackgroundTaskCompletion)> {
+    ) -> tokio::sync::broadcast::Receiver<TaskTerminalNotice> {
         self.task_notification_tx.subscribe()
     }
 
@@ -9151,9 +9179,15 @@ async fn run_background_task_completion_pump(
         };
         // 完成中继：上层 AcpHost 通知泵把终态格式化为 task-notification 并
         // 注入主对话；无订阅者时静默丢弃。
-        let _ = runtime
-            .task_notification_tx
-            .send((session_id.clone(), completion.clone()));
+        let _ = runtime.task_notification_tx.send(TaskTerminalNotice {
+            session_id: session_id.clone(),
+            task_id: completion.task_id.clone(),
+            kind: TaskNoticeKind::Shell,
+            status_text: completion.status.as_str(),
+            duration_ms: completion.duration_ms,
+            summary: Some(completion.summary.clone()).filter(|summary| !summary.is_empty()),
+            agent_id: None,
+        });
         let Some(event) = background_task_completion_event(&completion) else {
             continue;
         };
@@ -9519,6 +9553,47 @@ async fn run_runtime_event_pump(
                         runtime.observability.as_deref(),
                     );
                     terminal_notice = root_task_terminal_notice(&snapshot.state, &record.event);
+                    // 子代理终态 → 主对话通知中继（ZCode 语义）：父会话空闲时
+                    // 由通知泉开启读取 mailbox 的新模型轮。
+                    if let SessionEvent::SubAgentStatusChanged {
+                        agent_id,
+                        turn_id: Some(sub_turn_id),
+                        status,
+                        result_summary,
+                    } = &record.event
+                        && matches!(
+                            status,
+                            SubAgentStatus::Completed
+                                | SubAgentStatus::Failed
+                                | SubAgentStatus::Interrupted
+                                | SubAgentStatus::Stopped
+                        )
+                    {
+                        let duration_ms = snapshot
+                            .state
+                            .turns
+                            .get(sub_turn_id)
+                            .and_then(|turn| {
+                                turn.completed_at_unix_ms.map(|completed| {
+                                    completed.saturating_sub(turn.started_at_unix_ms)
+                                })
+                            })
+                            .unwrap_or(0);
+                        let status_text = match status {
+                            SubAgentStatus::Completed => "succeeded",
+                            SubAgentStatus::Failed => "failed",
+                            _ => "cancelled",
+                        };
+                        let _ = runtime.task_notification_tx.send(TaskTerminalNotice {
+                            session_id: session_id.clone(),
+                            task_id: sub_turn_id.as_str().to_owned(),
+                            kind: TaskNoticeKind::Agent,
+                            status_text,
+                            duration_ms,
+                            summary: result_summary.clone().filter(|summary| !summary.is_empty()),
+                            agent_id: Some(agent_id.as_str().to_owned()),
+                        });
+                    }
                     match map_authoritative_record_with_projection(
                         &session,
                         &snapshot.state,
