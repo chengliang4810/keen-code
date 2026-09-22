@@ -1211,3 +1211,13 @@ export function presentErrorBanner(
     deck: null,
   };
 }
+
+/**
+ * task-notification 合成输入的哨兵：ZCode 语义下的 model-only 消息——
+ * 模型必须看到它，用户界面不渲染它。
+ */
+export const MODEL_ONLY_TASK_NOTIFICATION_PREFIX = "<task-notification>";
+
+export function isModelOnlySyntheticInput(content: string): boolean {
+  return content.trimStart().startsWith(MODEL_ONLY_TASK_NOTIFICATION_PREFIX);
+}

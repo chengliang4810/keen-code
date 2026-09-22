@@ -16,6 +16,7 @@ import {
   type MessageSegment,
   type SessionSnapshot,
   type SessionState,
+  isModelOnlySyntheticInput,
 } from "./session";
 import type {
   AcpHistoryMessage,
@@ -361,8 +362,16 @@ export function projectAcpHistory(
   ) {
     return cached.result;
   }
-  const projected: ChatMessage[] = source.map((message, index) => {
-    const role =
+  const projected: ChatMessage[] = source
+    .filter(
+      (message) =>
+        !(
+          message.role === "user" &&
+          isModelOnlySyntheticInput(message.content)
+        ),
+    )
+    .map((message, index) => {
+      const role =
       message.role === "assistant" || message.role === "tool"
         ? message.role
         : "user";

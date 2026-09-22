@@ -2,6 +2,9 @@ import { useEffect } from "react";
 import { resolveHostMode } from "@/components/host/hostMode";
 import * as api from "@/lib/api";
 import { modelIdFromSessionReference } from "@/lib/modelCatalog";
+import {
+  isModelOnlySyntheticInput,
+} from "@/lib/session";
 import type {
   AskUserPayload,
   ChatMessage,
@@ -205,7 +208,9 @@ export function appendOptimisticUser(
     (item) => item.role === "user" && item.content === optimistic.content,
   );
   if (!persisted) {
-    view.history.push({ role: "user", content: optimistic.content });
+    if (!isModelOnlySyntheticInput(optimistic.content)) {
+      view.history.push({ role: "user", content: optimistic.content });
+    }
   }
   return optimistic;
 }

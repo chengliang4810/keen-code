@@ -655,3 +655,22 @@ describe("sessionProjection", () => {
     expect(projectAcpLiveMessage(view)?.thought).toBe("替换");
   });
 });
+
+describe("task-notification model-only 可见性", () => {
+  it("历史投影不渲染 task-notification 合成输入，保留普通消息与助手回复", () => {
+    const history: AcpHistoryMessage[] = [
+      {
+        role: "user",
+        content: "<task-notification>\n<task-id>task-1</task-id>\n<status>succeeded</status>\n</task-notification>",
+      },
+      { role: "assistant", content: "继续处理中" },
+      { role: "user", content: "普通用户消息" },
+    ];
+    const result = projectAcpHistory("session-1", history);
+    expect(
+      result.some((m) => m.role === "user" && m.content.includes("task-notification")),
+    ).toBe(false);
+    expect(result.some((m) => m.role === "assistant")).toBe(true);
+    expect(result.some((m) => m.role === "user" && m.content === "普通用户消息")).toBe(true);
+  });
+});

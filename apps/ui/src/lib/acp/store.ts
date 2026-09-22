@@ -16,6 +16,7 @@ import {
   type MessageToolSegment,
   type MessageFileChange,
   type MessageSegment,
+  isModelOnlySyntheticInput,
 } from "../session";
 import {
   createTurnLatencyState,
@@ -774,10 +775,14 @@ export function commitLiveTurnToHistory(
     lastHistoryMessage?.role === "user"
       ? parseAttachmentsFromContent(lastHistoryMessage.content).text.trim()
       : null;
-  if (userContent &&
+  // task-notification 合成输入为 model-only：进入模型上下文但不渲染。
+  if (
+    userContent &&
+    !isModelOnlySyntheticInput(userContent) &&
     !(lastHistoryMessage?.role === "user" &&
       (lastHistoryMessage.content === userContent ||
-        lastHistoryDisplayContent === userContent))) {
+        lastHistoryDisplayContent === userContent))
+  ) {
     view.history.push({ role: "user", content: userContent });
   }
   const segments = compactMessageSegments(view.live_segments);
