@@ -467,8 +467,8 @@ pub fn publish_discovery(
     builder.prefix(".keencode-host-discovery-");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        builder.mode(0o600);
+        use std::os::unix::fs::PermissionsExt;
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
     let mut temporary = builder
         .tempfile_in(data_root)
