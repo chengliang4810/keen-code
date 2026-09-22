@@ -227,14 +227,24 @@ pub fn terminal_create(
         .spawn_command(command)
         .map_err(|error| terminal_error("启动系统 Shell 失败", error))?;
     drop(pair.slave);
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| terminal_error("打开终端输入失败", error))?;
-    let mut reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| terminal_error("打开终端输出失败", error))?;
+    // take_writer / try_clone_reader 失败时，已启动的 shell 子进程必须就地
+    // 收割，否则每次失败都会泄漏一个进程与句柄。
+    let writer = match pair.master.take_writer() {
+        Ok(writer) => writer,
+        Err(error) => {
+            let mut child = child;
+            reap_child(&mut child);
+            return Err(terminal_error("打开终端输入失败", error));
+        }
+    };
+    let mut reader = match pair.master.try_clone_reader() {
+        Ok(reader) => reader,
+        Err(error) => {
+            let mut child = child;
+            reap_child(&mut child);
+            return Err(terminal_error("打开终端输出失败", error));
+        }
+    };
 
     // entry API 原子判定存在性：并发创建同一 id 时后来者报错，
     // 其已启动的 PTY 子进程必须就地收割，不能随局部变量泄漏。
