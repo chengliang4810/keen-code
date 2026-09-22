@@ -145,6 +145,32 @@ pub(crate) trait AcpHostBridge: Send + Sync + 'static {
 
 /// 全局唯一的当前进程 ACP bridge。
 static ACP_HOST: OnceLock<Arc<dyn AcpHostBridge>> = OnceLock::new();
+/// workflow 命令使用的具体宿主句柄；与 ACP_HOST 同时安装。
+static WORKFLOW_HOST: OnceLock<Arc<AcpHost>> = OnceLock::new();
+
+/// 返回 workflow 运行器使用的具体宿主句柄。
+pub(crate) fn workflow_host() -> Option<Arc<AcpHost>> {
+    WORKFLOW_HOST.get().cloned()
+}
+
+/// /workflow 命令的顺序运行入口：逐步以 detached Prompt 执行，任一步骤
+/// 未正常完成即中止。前端通过该命令发起并等待最终报告。
+#[tauri::command]
+pub(crate) async fn workflow_start(
+    session_id: String,
+    workflow_id: String,
+    steps: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
+    if steps.is_empty() {
+        return Err("workflow 至少需要一个步骤".to_owned());
+    }
+    let outcomes = host
+        .run_workflow(&session_id, &workflow_id, steps)
+        .await
+        .map_err(|failure| format!("{failure:?}"))?;
+    serde_json::to_value(outcomes).map_err(|error| error.to_string())
+}
 
 /// 记录 Session 加载阶段耗时；慢路径提升为 warn，便于在用户感知卡顿前发现回归。
 fn record_session_load_phase(session_id: &str, phase: &str, elapsed: Duration) {
@@ -186,7 +212,7 @@ struct ConnectionState {
 
 /// 协议方法执行失败时使用的固定安全错误分类。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HostFailure {
+pub(crate) enum HostFailure {
     /// JSON-RPC 信封或方法名不符合规范。
     InvalidRequest,
     /// 请求参数不符合当前实现能力或值域。
@@ -294,6 +320,7 @@ pub(crate) fn install(
         event_sinks: Mutex::new(BTreeMap::new()),
         self_ref: self_ref.clone(),
     });
+    let _ = WORKFLOW_HOST.set(Arc::clone(&host));
     ACP_HOST
         .set(Arc::clone(&host) as Arc<dyn AcpHostBridge>)
         .map_err(|_| "ACP Host 已经初始化".to_owned())?;
@@ -309,6 +336,51 @@ pub(crate) fn install(
 
 /// 后台任务通知泉使用的固定连接标识；只用于 admission 归属，不代表真实连接。
 const TASK_NOTIFICATION_CONNECTION: &str = "keencode-task-notification-pump";
+/// /workflow 斜杠命令前缀。
+const WORKFLOW_COMMAND_PREFIX: &str = "/workflow";
+
+/// 解析 /workflow 后面的步骤规格：`{"steps":["a","b"]}` 或 `["a","b"]`。
+fn parse_workflow_steps(spec: &str) -> Result<Vec<String>, HostFailure> {
+    let trimmed = spec.trim();
+    let value: serde_json::Value =
+        serde_json::from_str(trimmed).map_err(|_error| HostFailure::InvalidParams)?;
+    let raw_steps = match &value {
+        serde_json::Value::Array(items) => items.clone(),
+        serde_json::Value::Object(object) => object
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .ok_or(HostFailure::InvalidParams)?,
+        _ => return Err(HostFailure::InvalidParams),
+    };
+    let mut steps = Vec::with_capacity(raw_steps.len());
+    for item in raw_steps {
+        let Some(prompt) = item.as_str() else {
+            return Err(HostFailure::InvalidParams);
+        };
+        if prompt.trim().is_empty() {
+            return Err(HostFailure::InvalidParams);
+        }
+        steps.push(prompt.to_owned());
+    }
+    if steps.is_empty() {
+        return Err(HostFailure::InvalidParams);
+    }
+    Ok(steps)
+}
+
+/// 顺序工作流步骤的执行结果。
+#[derive(serde::Serialize)]
+pub(crate) struct WorkflowStepOutcome {
+    /// 步骤序号（从 0 开始）。
+    pub step_index: usize,
+    /// 该步 operation 标识。
+    pub operation_id: String,
+    /// 该步根 Turn 标识。
+    pub turn_id: String,
+    /// 归一化结束原因；Cancelled/Failed 时为诊断值。
+    pub stop_reason: Option<schema::StopReason>,
+}
 
 /// 把一次后台任务终态格式化为 ZCode 风格的 task-notification 文本。
 /// 该文本会作为合成用户输入开启（或排队进入）主对话的一个模型轮。
@@ -1225,6 +1297,22 @@ impl AcpHost {
     ) -> Result<schema::PromptResponse, HostFailure> {
         let session_id = request.session_id.0.as_ref().to_owned();
         let text = prompt_text(request.prompt)?;
+        // /workflow 斜杠命令：后续文本是 {"steps":[...]} 或直接字符串数组。
+        if let Some(spec) = text.strip_prefix(WORKFLOW_COMMAND_PREFIX) {
+            let steps = parse_workflow_steps(spec)?;
+            let workflow_id = format!("{:x}", unix_time_ms());
+            let outcomes = self.run_workflow(&session_id, &workflow_id, steps).await?;
+            let report = serde_json::json!({
+                "workflowId": workflow_id,
+                "steps": outcomes,
+            });
+            let mut meta = Map::new();
+            meta.insert(
+                "keencode/workflow".to_owned(),
+                serde_json::Value::String(serde_json::to_string(&report).unwrap_or_default()),
+            );
+            return Ok(schema::PromptResponse::new(schema::StopReason::EndTurn).meta(Some(meta)));
+        }
         let turn_id = prompt_turn_id(request.meta.as_ref())?;
         let ultra_mode = meta_bool(request.meta.as_ref(), META_ULTRA_MODE)?;
         let detached = meta_bool(request.meta.as_ref(), META_DETACHED)?;
@@ -1459,6 +1547,74 @@ impl AcpHost {
             }
             notified.await;
         }
+    }
+
+    /// 顺序执行一个 /workflow 的全部步骤。
+    ///
+    /// 每个步骤都是一个真实的 detached Prompt 回合：写权威 Journal、在会话中
+    /// 可见、可取消；后续步骤天然继承同一会话的历史上下文。任一步骤未正常
+    /// 完成即中止剩余步骤。
+    pub(crate) async fn run_workflow(
+        self: &Arc<Self>,
+        session_id: &str,
+        workflow_id: &str,
+        steps: Vec<String>,
+    ) -> Result<Vec<WorkflowStepOutcome>, HostFailure> {
+        let (_, project_root) = authorized_metadata(&self.runtime, &self.app, session_id)
+            .map_err(|_| HostFailure::ResourceNotFound)?;
+        let connection_id = keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION)
+            .map_err(|_| HostFailure::InvalidParams)?;
+        let mut outcomes = Vec::new();
+        for (index, prompt) in steps.into_iter().enumerate() {
+            let unix_ms = unix_time_ms();
+            let operation_id =
+                OperationId::new(format!("workflow-{workflow_id}-{index}-{unix_ms}"))
+                    .map_err(|_| HostFailure::InvalidParams)?;
+            let turn_id = format!("turn-workflow-{workflow_id}-{index}-{unix_ms}");
+            let payload_digest = prompt_payload_digest(session_id, &turn_id, &prompt, false);
+            let admitted = self
+                .admit_prompt(PromptDriveRequest {
+                    connection_id: connection_id.clone(),
+                    session_id: session_id.to_owned(),
+                    operation_id: operation_id.clone(),
+                    turn_id,
+                    text: prompt,
+                    project_root: project_root.clone(),
+                    payload_digest,
+                    ultra_mode: false,
+                    detached: true,
+                })
+                .await?;
+            let terminal_status = self
+                .wait_for_operation_terminal(&admitted.operation_id)
+                .await?;
+            let executed_turn_id = terminal_status
+                .execution
+                .as_ref()
+                .map(|identity| identity.turn_id.clone())
+                .ok_or(HostFailure::Internal)?;
+            let session = self
+                .runtime
+                .open_or_create_session(&project_root, Some(session_id), "workflow-step")
+                .map_err(map_runtime_failure)?;
+            let stop_reason = self
+                .snapshot_terminal(&session, executed_turn_id.as_str())
+                .ok()
+                .flatten()
+                .and_then(|terminal| prompt_stop_reason(&terminal).ok());
+            let finished_cleanly = terminal_status.state.is_terminal()
+                && stop_reason == Some(schema::StopReason::EndTurn);
+            outcomes.push(WorkflowStepOutcome {
+                step_index: index,
+                operation_id: admitted.operation_id.as_str().to_owned(),
+                turn_id: executed_turn_id.clone(),
+                stop_reason,
+            });
+            if !finished_cleanly {
+                break;
+            }
+        }
+        Ok(outcomes)
     }
 
     /// 等到后台 driver 写入终态；连接 future 被取消不影响 driver 自身。
