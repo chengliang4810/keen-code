@@ -2057,15 +2057,41 @@ fn largest_fitting_summary_output(
     best
 }
 
+/// 单条消息按「序列化 JSON 文本」口径的输入 token 估算值。
+fn summary_message_input_tokens(message: &Message) -> Result<u64, ContextError> {
+    let serialized =
+        serde_json::to_string(message).map_err(|error| ContextError::CompressionFailed {
+            message: format!("序列化待压缩消息失败：{error}"),
+        })?;
+    Ok(serialized_json_tokens(&serialized))
+}
+
+/// summary 请求的常量请求开销：developer 指令消息、承载候选 JSON 的 user
+/// 消息外壳（消息开销 + 数组括号/逗号）与请求级固定开销，全部单列。
+///
+/// A2-1：summary 估算口径从「把整个候选再序列化为一段 JSON 文本估算」改为
+/// 「逐消息序列化 JSON + 常量包装」，使候选估算可以按前缀和增量进行。
+fn summary_constant_request_tokens() -> Result<u64, ContextError> {
+    let developer = estimate_message_tokens(std::iter::once(&Message::text(
+        MessageRole::Developer,
+        SUMMARIZER_INSTRUCTION,
+    )));
+    let user_shell = PER_MESSAGE_OVERHEAD_TOKENS.saturating_add(4);
+    Ok(developer
+        .saturating_add(user_shell)
+        .saturating_add(PER_REQUEST_OVERHEAD_TOKENS))
+}
+
 /// 判断一个摘要请求输入与输出保留量是否同时落在已知 Provider 窗口内。
-fn summary_request_fits(
-    model: &str,
-    messages: &[Message],
-    budget: SummaryBudget,
-) -> Result<bool, ContextError> {
-    let request =
-        build_summary_model_request(model.to_owned(), messages, budget.max_output_tokens)?;
-    let estimated_input_tokens = JsonContextTokenEstimator.estimate_request(&request);
+///
+/// A2-1：估算口径改为「逐消息序列化 JSON + 常量请求开销」，不再把整个候选
+/// 序列化为一段 JSON 文本——旧口径的 O(n²) 串行化正是分块规划的性能瓶颈。
+fn summary_request_fits(messages: &[Message], budget: SummaryBudget) -> Result<bool, ContextError> {
+    let mut estimated_input_tokens = summary_constant_request_tokens()?;
+    for message in messages {
+        estimated_input_tokens =
+            estimated_input_tokens.saturating_add(summary_message_input_tokens(message)?);
+    }
     Ok(estimated_input_tokens <= budget.max_input_tokens
         && estimated_input_tokens.saturating_add(u64::from(budget.max_output_tokens))
             <= budget.max_context_tokens)
@@ -2098,7 +2124,7 @@ fn split_source_chunks(
         // 逐单元检查取消：估算为 O(n²) 纯 CPU，长会话在此窗口取消应立即生效。
         check_cancelled()?;
         let candidate = &messages[chunk_start..unit.end];
-        if summary_request_fits(model, candidate, budget)? {
+        if summary_request_fits(candidate, budget)? {
             continue;
         }
         if chunk_start == unit.start {
@@ -2106,7 +2132,7 @@ fn split_source_chunks(
             // 长度逐级收缩；投影后放得下则以该单元自成一块继续分块，仍放
             // 不下才是真正的 CompressionRequestTooLarge。
             if let Some(projected) =
-                force_project_single_unit(model, &messages[unit.start..unit.end], budget)?
+                force_project_single_unit(&messages[unit.start..unit.end], budget)?
             {
                 chunks.push(projected);
                 chunk_start = unit.end;
@@ -2127,8 +2153,8 @@ fn split_source_chunks(
         chunks.push(messages[chunk_start..unit.start].to_vec());
         chunk_start = unit.start;
         let unit_only = &messages[unit.start..unit.end];
-        if !summary_request_fits(model, unit_only, budget)? {
-            if let Some(projected) = force_project_single_unit(model, unit_only, budget)? {
+        if !summary_request_fits(unit_only, budget)? {
+            if let Some(projected) = force_project_single_unit(unit_only, budget)? {
                 chunks.push(projected);
                 chunk_start = unit.end;
                 continue;
@@ -2155,7 +2181,6 @@ fn split_source_chunks(
 /// `summary_request_fits` 即返回投影后消息。文本不含可投影 ToolResult 或
 /// 各级保留长度仍放不下时返回 `None`，由调用方按原口径报错。
 fn force_project_single_unit(
-    model: &str,
     unit_messages: &[Message],
     budget: SummaryBudget,
 ) -> Result<Option<Vec<Message>>, ContextError> {
@@ -2170,7 +2195,7 @@ fn force_project_single_unit(
         .min(max_text_chars / 2 - 8);
     while keep >= MICRO_PROJECTION_HEAD_CHARS.min(MICRO_PROJECTION_TAIL_CHARS) {
         let projected = force_project_unit_messages(unit_messages, keep);
-        if summary_request_fits(model, &projected, budget)? {
+        if summary_request_fits(&projected, budget)? {
             return Ok(Some(projected));
         }
         keep /= 2;
@@ -2191,7 +2216,7 @@ fn split_generated_summary_chunks(
         check_cancelled()?;
         let mut candidate = current.clone();
         candidate.push(message.clone());
-        if summary_request_fits(model, &candidate, budget)? {
+        if summary_request_fits(&candidate, budget)? {
             current = candidate;
             continue;
         }
@@ -2210,7 +2235,7 @@ fn split_generated_summary_chunks(
         }
         chunks.push(current);
         current = vec![message];
-        if !summary_request_fits(model, &current, budget)? {
+        if !summary_request_fits(&current, budget)? {
             let request =
                 build_summary_model_request(model.to_owned(), &current, budget.max_output_tokens)?;
             return Err(ContextError::CompressionRequestTooLarge {
