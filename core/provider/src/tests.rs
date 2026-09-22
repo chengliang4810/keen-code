@@ -2673,15 +2673,23 @@ fn chat_generic_error_and_unknown_frame_remain_protocol_error() {
         .expect_err("普通 buffered Chat 错误必须失败");
     assert!(matches!(buffered, ModelError::Protocol { .. }));
 
-    for raw in [
-        "data: {\"error\":{\"code\":\"invalid_request_error\",\"message\":\"synthetic provider rejection\"}}\n\n",
-        "data: {\"type\":\"chat.future.unknown\",\"message\":\"maximum context length is synthetic\"}\n\n",
-    ] {
-        assert!(matches!(
-            malformed_sse_error(ProviderProtocol::ChatCompletions, raw),
-            ModelError::Protocol { .. }
-        ));
-    }
+    assert!(matches!(
+        malformed_sse_error(
+            ProviderProtocol::ChatCompletions,
+            "data: {\"error\":{\"code\":\"invalid_request_error\",\"message\":\"synthetic provider rejection\"}}\n\n"
+        ),
+        ModelError::Protocol { .. }
+    ));
+    // 未知 chat 帧不再报错：被当作空 chunk 忽略；EOF 收尾仍是普通 Protocol
+    // 错误，不会误分类为上下文超限。
+    let unknown_frame = "data: {\"type\":\"chat.future.unknown\",\"message\":\"maximum context length is synthetic\"}\n\n";
+    let unknown_error = interrupted_sse_error(ProviderProtocol::ChatCompletions, unknown_frame);
+    // 外层 finish_stream 把缺终态统一映射为 StreamInterrupted；关键是不落在
+    // ContextLengthExceeded 等上下文超限分类上。
+    assert!(matches!(
+        unknown_error,
+        ModelError::StreamInterrupted { .. }
+    ));
 }
 
 #[test]
@@ -3725,9 +3733,10 @@ fn chat_sse_collects_text_and_requires_finish_reason() {
     assert_eq!(response.usage.total_tokens, Some(5));
 }
 
-/// 空字符串不是结束信号；正文仍须完整收集，缺少真实终态时仍报错。
+/// 空字符串不是结束信号；正文仍须完整收集。不发 finish_reason 的网关直接
+/// 发 [DONE] 时按 rig 语义视为完成（默认 Completed 收尾），EOF 截断仍报错。
 #[test]
-fn chat_sse_empty_finish_reason_keeps_stream_open() {
+fn chat_sse_empty_finish_reason_and_done_completes_with_default_stop() {
     let frames = [
         json!({"choices":[{"index":0,"delta":{"content":"K"},"finish_reason":""}]}),
         json!({"choices":[{"index":0,"delta":{"content":"C"},"finish_reason":""}]}),
@@ -3736,12 +3745,18 @@ fn chat_sse_empty_finish_reason_keeps_stream_open() {
         .iter()
         .map(|frame| format!("data: {frame}\n\n"))
         .collect();
-    let unfinished = format!("{raw}data: [DONE]\n\n");
-    assert!(
-        malformed_sse_error(ProviderProtocol::ChatCompletions, &unfinished)
-            .to_string()
-            .contains("finish_reason")
-    );
+    let truncated_error = interrupted_sse_error(ProviderProtocol::ChatCompletions, &raw);
+    assert!(truncated_error.to_string().contains("finish_reason"));
+    let done_completes = format!("{raw}data: [DONE]\n\n");
+    let response = collect_events(decode_sse(
+        ProviderProtocol::ChatCompletions,
+        &[done_completes.as_bytes()],
+    ));
+    assert_eq!(response.stop_reason, StopReason::Completed);
+    assert!(matches!(
+        response.content.as_slice(),
+        [keencode_model::ContentBlock::Text { text }] if text == "KC"
+    ));
     let completed = format!(
         "{raw}data: {}\n\ndata: [DONE]\n\n",
         json!({

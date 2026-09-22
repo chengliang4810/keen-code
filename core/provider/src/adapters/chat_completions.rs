@@ -21,6 +21,9 @@ const MAX_CHAT_REASONING_STATE_BYTES: usize = 4 * 1024 * 1024;
 struct PendingToolCall {
     content_index: u32,
     id: Option<String>,
+    /// true 表示 `id` 是为不发 id 的网关（Mistral/llama.cpp 系）合成的占位值；
+    /// 真实 id 在工具开始前到达时仍可覆盖。
+    id_synthetic: bool,
     name: Option<String>,
     started: bool,
 }
@@ -287,6 +290,8 @@ impl ChatCompletionsAdapter {
         } else if self.finish_reason.is_some() {
             self.emit_message_end(output)
         } else {
+            // EOF 截断（连接中断、无 [DONE]）仍是错误；显式 [DONE] 的兜底
+            // 在 [DONE] 处理分支里完成。
             Err(protocol_error(
                 "Chat Completions SSE 在 finish_reason 之前关闭",
             ))
@@ -308,10 +313,12 @@ impl ChatCompletionsAdapter {
             self.started = true;
         }
         let usage = response.get("usage").filter(|usage| !usage.is_null());
+        // 只在末尾发 usage、不带 choices 的网关：缺失按空数组处理。
+        let empty_choices = Vec::new();
         let choices = response
             .get("choices")
             .and_then(Value::as_array)
-            .ok_or_else(|| protocol_error("Chat Completions chunk 缺少 choices"))?;
+            .unwrap_or(&empty_choices);
         if self.finish_reason.is_some()
             && !choices.is_empty()
             && !(usage.is_some() && is_inert_usage_choice(choices))
@@ -374,10 +381,9 @@ impl ChatCompletionsAdapter {
         &mut self,
         output: &mut VecDeque<ModelStreamEvent>,
     ) -> Result<(), ModelError> {
-        let stop_reason = self
-            .finish_reason
-            .take()
-            .ok_or_else(|| protocol_error("Chat Completions 在 finish_reason 前收到 [DONE]"))?;
+        // 不发 finish_reason 的草率网关直接发 [DONE]：rig 同款把 [DONE] 视为
+        // 完成依据，按默认 stop 收尾而不是让整条流失败。
+        let stop_reason = self.finish_reason.take().unwrap_or(StopReason::Completed);
         if let Some(event) = self.take_reasoning_continuation_event()? {
             output.push_back(event);
         }
@@ -569,7 +575,13 @@ impl ChatCompletionsAdapter {
         let object = value
             .as_object()
             .ok_or_else(|| protocol_error("Chat tool_call delta 必须是对象"))?;
-        let wire_index = required_u32(object, "index")?;
+        // Mistral/llama.cpp 等网关不发 index（单工具流）；与 rig 一致按缺省 0。
+        let wire_index = match object.get("index").and_then(Value::as_u64) {
+            Some(value) => {
+                u32::try_from(value).map_err(|_| protocol_error("Chat tool_call index 溢出"))?
+            }
+            None => 0,
+        };
         if let std::collections::btree_map::Entry::Vacant(entry) = self.tools.entry(wire_index) {
             let content_index = self.next_content_index;
             self.next_content_index = self
@@ -579,6 +591,7 @@ impl ChatCompletionsAdapter {
             entry.insert(PendingToolCall {
                 content_index,
                 id: None,
+                id_synthetic: false,
                 name: None,
                 started: false,
             });
@@ -592,10 +605,16 @@ impl ChatCompletionsAdapter {
             .and_then(Value::as_str)
             .filter(|id| !id.is_empty())
         {
-            if pending.id.as_deref().is_some_and(|existing| existing != id) {
+            let replaced_synthetic = pending.id_synthetic && !pending.started;
+            if pending.id.as_deref().is_some_and(|existing| existing != id) && !replaced_synthetic {
                 return Err(protocol_error("Chat 工具调用 ID 在流中发生变化"));
             }
-            pending.id = Some(id.to_owned());
+            if replaced_synthetic {
+                pending.id = Some(id.to_owned());
+                pending.id_synthetic = false;
+            } else if pending.id.is_none() {
+                pending.id = Some(id.to_owned());
+            }
         }
         if let Some(name) = object
             .get("function")
@@ -612,15 +631,25 @@ impl ChatCompletionsAdapter {
             }
             pending.name = Some(name.to_owned());
         }
-        if !pending.started {
-            if let (Some(id), Some(name)) = (pending.id.clone(), pending.name.clone()) {
-                output.push_back(ModelStreamEvent::ToolCallStart {
-                    index: pending.content_index,
-                    id,
-                    name,
-                });
-                pending.started = true;
-            }
+        if !pending.started
+            && let Some(name) = pending.name.clone()
+        {
+            // 不发 id 的网关：在 name 齐全开始工具调用时合成占位 id。
+            let id = match pending.id.clone() {
+                Some(id) => id,
+                None => {
+                    let synthetic = format!("chat_tool_call_synth_{}", wire_index);
+                    pending.id = Some(synthetic.clone());
+                    pending.id_synthetic = true;
+                    synthetic
+                }
+            };
+            output.push_back(ModelStreamEvent::ToolCallStart {
+                index: pending.content_index,
+                id,
+                name,
+            });
+            pending.started = true;
         }
         if let Some(arguments) = object
             .get("function")
@@ -629,7 +658,8 @@ impl ChatCompletionsAdapter {
             .filter(|arguments| !arguments.is_empty())
         {
             if !pending.started {
-                return Err(protocol_error("Chat 工具参数早于完整调用 ID 和名称"));
+                // 参数早于 id/name 齐全：跳过该增量，等开始后再收，不中断整条流。
+                return Ok(());
             }
             output.push_back(ModelStreamEvent::ToolCallArgumentsDelta {
                 index: pending.content_index,
@@ -676,9 +706,9 @@ impl ChatCompletionsAdapter {
     fn finish_tools(&mut self, output: &mut VecDeque<ModelStreamEvent>) -> Result<(), ModelError> {
         for pending in self.tools.values() {
             if !pending.started {
-                return Err(protocol_error(
-                    "Chat 响应结束时存在缺少 ID 或名称的工具调用",
-                ));
+                // 始终没拿到 name 的调用无法行动：按 rig 语义静默丢弃，
+                // 不让整条已完成的流失败。
+                continue;
             }
             output.push_back(ModelStreamEvent::ToolCallEnd {
                 index: pending.content_index,
@@ -1018,14 +1048,6 @@ fn required_str<'a>(value: &'a Map<String, Value>, field: &str) -> Result<&'a st
 }
 
 /// 从 JSON 对象读取可转换为 u32 的必需整数。
-fn required_u32(value: &Map<String, Value>, field: &str) -> Result<u32, ModelError> {
-    let number = value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| protocol_error(format!("Chat 字段 {field} 必须是非负整数")))?;
-    u32::try_from(number).map_err(|_| protocol_error(format!("Chat 字段 {field} 超过 u32 范围")))
-}
-
 /// 读取 Runtime 写入且非空的会话稳定缓存路由键；未写入或为空时不进线格式。
 fn prompt_cache_key(metadata: &BTreeMap<String, String>) -> Option<&str> {
     metadata
