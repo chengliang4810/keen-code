@@ -40,6 +40,9 @@ pub(super) struct StreamableHttpTransport {
 
 #[derive(Clone)]
 struct HttpRuntime {
+    /// 服务端请求（sampling/roots/ping）响应 POST 的有界超时；防止 GET 监听
+    /// 任务被挂起不回的服务端永久阻塞。
+    request_timeout: Duration,
     client: Client,
     endpoint: Url,
     headers: HeaderMap,
@@ -125,6 +128,7 @@ impl StreamableHttpTransport {
         let (notifications, _) = broadcast::channel(options.notification_capacity);
         Ok(Self {
             runtime: HttpRuntime {
+                request_timeout: options.request_timeout,
                 client,
                 endpoint,
                 headers,
@@ -821,18 +825,29 @@ impl HttpRuntime {
         let (builder, auth) = self
             .request_builder(reqwest::Method::POST, &session, None, false)
             .await?;
-        let response = builder
-            .header(CONTENT_TYPE, "application/json")
-            .header(ACCEPT, "application/json, text/event-stream")
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| {
-                McpError::Transport(format!(
-                    "发送 MCP 服务端请求响应失败：{}",
-                    error.without_url()
-                ))
-            })?;
+        // 该 POST 运行在 GET 监听任务内：服务端若挂起不回，会永久阻塞通知
+        // 通道。与整体请求超时对齐，超时按传输失败处理并可重连。
+        let response = tokio::time::timeout(
+            self.request_timeout,
+            builder
+                .header(CONTENT_TYPE, "application/json")
+                .header(ACCEPT, "application/json, text/event-stream")
+                .body(body)
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            McpError::Transport(format!(
+                "发送 MCP 服务端请求响应超时（{}ms）",
+                self.request_timeout.as_millis()
+            ))
+        })?
+        .map_err(|error| {
+            McpError::Transport(format!(
+                "发送 MCP 服务端请求响应失败：{}",
+                error.without_url()
+            ))
+        })?;
         if response.status() == StatusCode::UNAUTHORIZED {
             let outcome = self
                 .handle_unauthorized(&session, auth.binding, response)
@@ -1283,6 +1298,7 @@ mod tests {
     fn stale_get_expiry_cannot_clear_new_session_generation() {
         let (notifications, _) = broadcast::channel(1);
         let runtime = HttpRuntime {
+            request_timeout: std::time::Duration::from_secs(10),
             client: Client::new(),
             endpoint: Url::parse("http://127.0.0.1/mcp").expect("测试 URL 应有效"),
             headers: reqwest::header::HeaderMap::new(),
