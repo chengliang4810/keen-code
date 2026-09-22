@@ -386,6 +386,8 @@ const EXACT_ALLOWLIST = new Map([
   ["apps/desktop/src-tauri/prompts/agents/general-purpose.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ["apps/desktop/src-tauri/prompts/agents/verification.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "用户明确要求恢复内置网络服务、上游代理提示词及官方插件市场" }],
   ...["apps/desktop/src-tauri/prompts/agents/SOURCE.md", "apps/desktop/src-tauri/prompts/agents/UPSTREAM-LICENSE.txt"].map(path => [path, { ruleIds: new Set([...LEGAL_ATTRIBUTION_RULE_IDS, SOURCE_RULE_IDS.proprietaryPluginRepository]), purpose: "保留用户指定上游的来源和完整版权许可声明" }]),
+  ["apps/desktop/src-tauri/prompts/README.md", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct]), purpose: "来源说明文档：记录用户指定上游的基线与提炼规则，本身即是披露证据" }],
+  ["core/tools/src/lib.rs", { ruleIds: new Set([SOURCE_RULE_IDS.externalProduct]), purpose: "注释提及对齐用户指定上游的注册做法，不含上游源码" }],
   [
     ".gitignore",
     {
