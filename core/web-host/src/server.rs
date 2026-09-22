@@ -6,6 +6,7 @@
 
 use crate::{WebError, WebHost};
 use axum::Router;
+use axum::serve::IncomingStream;
 use axum::serve::Listener;
 use std::fmt;
 use std::io;
@@ -130,6 +131,20 @@ impl Listener for LimitedListener {
     }
 }
 
+/// ConnectInfo extension 的本地包装：`SocketAddr` 与 `IncomingStream` 都是
+/// 外部类型，直接实现 `Connected` 会触发孤儿规则，故用 newtype 承载对端地址。
+/// 登录失败限流按对端地址分桶依赖这个 extension。
+#[derive(Clone, Copy, Debug)]
+pub struct PeerConnectInfo(pub SocketAddr);
+
+impl axum::extract::connect_info::Connected<IncomingStream<'_, LimitedListener>>
+    for PeerConnectInfo
+{
+    fn connect_info(stream: IncomingStream<'_, LimitedListener>) -> Self {
+        Self(*stream.remote_addr())
+    }
+}
+
 fn is_retryable_accept_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -183,9 +198,14 @@ impl WebServerOwner {
             let shutdown = async move {
                 let _ = shutdown_rx.await;
             };
-            let result = axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown)
-                .await;
+            let result = axum::serve(
+                listener,
+                // 必须注入 ConnectInfo：登录失败限流按对端地址分桶，缺少该
+                // extension 时所有请求都会退化为同一个 "unknown-peer" 全局限流。
+                router.into_make_service_with_connect_info::<PeerConnectInfo>(),
+            )
+            .with_graceful_shutdown(shutdown)
+            .await;
             if result.is_err() {
                 task_host.server_failed();
             }

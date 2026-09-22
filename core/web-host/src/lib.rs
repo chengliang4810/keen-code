@@ -6,7 +6,7 @@
 
 use axum::body::Body;
 use axum::extract::{
-    ConnectInfo, Extension, OriginalUri, Path as AxumPath, State, WebSocketUpgrade,
+    Extension, OriginalUri, Path as AxumPath, State, WebSocketUpgrade,
     ws::rejection::WebSocketUpgradeRejection,
 };
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
@@ -42,7 +42,7 @@ pub use host_business::{
     HostBusinessRouter, HostConnectionContext, HostWsAdapter, HostWsConnection, OutboundEnvelope,
     OutboundEvent, OutboundGap, SnapshotCursor, SnapshotEnvelope, SnapshotReason, SnapshotRequest,
 };
-pub use server::{DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, WebServerOwner};
+pub use server::{DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT, PeerConnectInfo, WebServerOwner};
 
 /// 浏览器登录后使用的 HttpOnly Cookie 名称。
 pub const SESSION_COOKIE_NAME: &str = "keencode_session";
@@ -2101,9 +2101,9 @@ fn build_router(
         .with_state(state)
 }
 
-fn rate_key(peer: Option<Extension<ConnectInfo<SocketAddr>>>) -> String {
-    // 只读取服务器注入的 ConnectInfo，不接受客户端可伪造的普通请求头。
-    peer.map(|Extension(ConnectInfo(address))| address.to_string())
+fn rate_key(peer: Option<Extension<crate::PeerConnectInfo>>) -> String {
+    // 只读取服务器注入的对端地址 extension，不接受客户端可伪造的普通请求头。
+    peer.map(|Extension(PeerConnectInfo(address))| address.to_string())
         .unwrap_or_else(|| "unknown-peer".to_owned())
 }
 
@@ -2129,7 +2129,7 @@ fn require_session(
 async fn login_handler(
     State(state): State<Arc<WebState>>,
     headers: HeaderMap,
-    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    peer: Option<Extension<crate::PeerConnectInfo>>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Response, ApiError> {
     require_host(&state, &headers, false)?;
