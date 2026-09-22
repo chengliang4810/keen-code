@@ -2573,8 +2573,13 @@ async fn business_websocket_loop(
     connection: HostWsConnection,
 ) {
     let connection_id = connection.context().connection_id.clone();
-    let (mut sender, mut receiver) = socket.split();
+    // dispatcher 响应与出站事件共用同一条 socket：写端用互斥锁串行化，
+    // 使入站 dispatch 可以放到后台任务而不会与出站排水交叉写坏帧。
+    let (raw_sender, mut receiver) = socket.split();
+    let sender = std::sync::Arc::new(tokio::sync::Mutex::new(raw_sender));
     if sender
+        .lock()
+        .await
         .send(axum::extract::ws::Message::Text(
             r#"{"type":"ready","transport":"websocket","protocol":"acp"}"#.into(),
         ))
@@ -2584,7 +2589,12 @@ async fn business_websocket_loop(
         adapter.disconnect(&connection_id);
         return;
     }
+    // 后台 dispatch 任务写 socket 失败时置位；主循环在下轮 select 后退出。
+    let send_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     loop {
+        if send_failed.load(std::sync::atomic::Ordering::Relaxed) {
+            break;
+        }
         tokio::select! {
             inbound = receiver.next() => {
                 let Some(Ok(message)) = inbound else { break };
@@ -2592,7 +2602,7 @@ async fn business_websocket_loop(
                     axum::extract::ws::Message::Text(value) => value.as_bytes().to_vec(),
                     axum::extract::ws::Message::Binary(value) => value.to_vec(),
                     axum::extract::ws::Message::Ping(value) => {
-                        if sender.send(axum::extract::ws::Message::Pong(value)).await.is_err() {
+                        if sender.lock().await.send(axum::extract::ws::Message::Pong(value)).await.is_err() {
                             break;
                         }
                         continue;
@@ -2600,19 +2610,30 @@ async fn business_websocket_loop(
                     axum::extract::ws::Message::Close(_) => break,
                     axum::extract::ws::Message::Pong(_) => continue,
                 };
-                match adapter.dispatch_acp(&connection_id, &raw).await {
-                    Ok(Some(response)) => {
-                        if send_business_bytes(&mut sender, response).await.is_err() {
-                            break;
+                // 关键：dispatch 不再内联 await（长 session/prompt 会让 select
+                // 卡在入站分支、出站队列撑爆后清空已缓冲事件）。放到后台任务，
+                // 主循环继续排水 outbound；响应经写锁串行回发。
+                let dispatch_adapter = std::sync::Arc::clone(&adapter);
+                let dispatch_connection = connection_id.clone();
+                let dispatch_sender = std::sync::Arc::clone(&sender);
+                let dispatch_failed = std::sync::Arc::clone(&send_failed);
+                tokio::spawn(async move {
+                    match dispatch_adapter.dispatch_acp(&dispatch_connection, &raw).await {
+                        Ok(Some(response)) => {
+                            let mut writer = dispatch_sender.lock().await;
+                            if send_business_bytes(&mut writer, response).await.is_err() {
+                                dispatch_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            let mut writer = dispatch_sender.lock().await;
+                            if writer.send(business_error_message(error)).await.is_err() {
+                                dispatch_failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
                         }
                     }
-                    Ok(None) => {}
-                    Err(error) => {
-                        if sender.send(business_error_message(error)).await.is_err() {
-                            break;
-                        }
-                    }
-                }
+                });
             }
             outbound = connection.recv() => {
                 let Some(outbound) = outbound else { break };
@@ -2641,7 +2662,7 @@ async fn business_websocket_loop(
                         }
                     },
                 };
-                if sender.send(message).await.is_err() {
+                if sender.lock().await.send(message).await.is_err() {
                     break;
                 }
             }
