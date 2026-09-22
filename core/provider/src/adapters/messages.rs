@@ -406,6 +406,7 @@ impl MessagesAdapter {
             // server_tool_use、web_search_tool_result、document 等服务端块：
             // 按 rig 语义跳过整个块，不让流失败。
             other => {
+                let _ = other;
                 self.ignored_blocks.insert(index);
                 return Ok(());
             }
