@@ -1,6 +1,6 @@
 # 小上下文核心提示词（中文确认稿）
 
-> 本文件是中文对照稿。运行时使用 `src-tauri/prompts/small-context-core.md` 中的英文正式稿。
+> 本文件是中文对照稿。运行时使用 `apps/desktop/src-tauri/prompts/small-context-core.md` 中的英文正式稿。
 >
 > 当 Provider 明确声明的上下文窗口小于 100,000 token 时启用；100,000 及以上、或未声明窗口时不启用。参考 `earendil-works/pi` 当前默认提示词的精简结构。删除了 Pi 产品说明、文档索引、Skills 和扩展说明，仅保留 KeenCode 小上下文执行所需内容。
 

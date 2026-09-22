@@ -108,15 +108,15 @@ StopFailure 命令输入遵循官方字段：`error` 为 matcher 使用的稳定
 ## 验证入口
 
 ```sh
-cargo test --manifest-path Cargo.toml -p keencode-agent -p keencode-skills -p keencode-tools
-cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib
+cargo test -p keencode-agent -p keencode-skills -p keencode-tools
+cargo test -p keencode-desktop --lib
 ```
 
 本机 superpowers 6.3.0 的专用只读源码探针（脚本内容需先审阅；测试项目为临时目录）：
 
 ```sh
 KEENCODE_PLUGIN_COMPAT_ROOT=/absolute/path/to/superpowers \
-  cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --lib \
+  cargo test -p keencode-desktop --lib \
   installed_superpowers_session_start_contract -- --ignored
 ```
 

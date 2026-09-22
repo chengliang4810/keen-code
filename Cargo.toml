@@ -2,32 +2,44 @@
 resolver = "3"
 members = [
     # 标准 ACP Schema、严格方法解码、扩展事件与客户端请求边界。
-    "crates/keencode-acp",
+    "core/acp",
     # 独立本地 ACP Client 与非交互命令行入口。
-    "crates/keencode-cli",
-    # 终端界面预留 crate；当前只声明边界，不包含 TUI 实现。
+    "core/cli",
     # 本机 Host 提供的认证 Web、资源和移动端传输安全边界。
-    "crates/keencode-web",
-    "crates/keencode-agent",
-    "crates/keencode-model",
-    "crates/keencode-provider",
-    "crates/keencode-provider-live-test",
+    "core/web-host",
+    "core/agent",
+    "core/model",
+    "core/provider",
     # Provider 中立 MCP 客户端核心与安全传输。
-    "crates/keencode-mcp",
+    "core/mcp",
     # 安全发现并按需读取本地 Skills。
-    "crates/keencode-skills",
+    "core/skills",
     # 全新 Session 事件日志、快照、Artifact、Memory 与 Goal 持久化核心。
-    "crates/keencode-resources",
+    "core/resources",
     # 组合 Session 独占租约、权威日志、Artifact 与 Agent 提交出口。
-    "crates/keencode-runtime",
-    "crates/keencode-tools",
-]
-exclude = [
-    # 桌面包使用独立锁文件，不纳入核心 crate workspace。
-    "src-tauri",
+    "core/runtime",
+    "core/tools",
+    # 原生桌面宿主：窗口、托盘、命令、事件与本地系统能力。
+    "apps/desktop/src-tauri",
+    # 真实模型兼容性探测与报告；仅按需运行，不参与默认构建。
+    "tooling/provider-live-test",
 ]
 
 [workspace.package]
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
+
+# 发布策略只在此处生效：成员清单中的 [profile.*] 会被忽略。
+[profile.release]
+# 放开并行代码单元换取链接并行度；体积影响以出包实测为准。
+codegen-units = 16
+# thin LTO 保留跨 crate 内联，避免 fat LTO 在链接期对全图做单线程全局优化。
+lto = "thin"
+# 以体积优化作为首版发布默认值。
+opt-level = "s"
+# Hook Runtime 在隔离工作线程中用 catch_unwind 把回调 panic 归一为可恢复错误；
+# 发布构建必须保留展开语义，否则 panic 会直接终止整个桌面进程。
+panic = "unwind"
+# 去除发布二进制符号。
+strip = true

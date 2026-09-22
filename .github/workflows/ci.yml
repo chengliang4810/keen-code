@@ -65,28 +65,22 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      - name: Cache Rust workspaces
+      - name: Cache Rust workspace
         uses: Swatinem/rust-cache@v2
         with:
-          # 根 workspace 使用 target；独立 Tauri workspace 使用 src-tauri/target。
-          workspaces: |
-            . -> target
-            src-tauri -> src-tauri/target
+          # 统一 workspace 后，核心 crate 与桌面包共享根 target 目录。
+          workspaces: . -> target
 
-      - name: Format root workspace
+      # 桌面构建脚本在编译期校验 tauri.conf.json 的 bundle.resources（apps/ui/dist）。
+      # 该目录是前端构建产物且被 gitignore，纯 Rust 检查只需保证目录存在。
+      - name: Ensure frontend dist placeholder
+        run: mkdir -p apps/ui/dist
+
+      - name: Format workspace
         run: cargo fmt --all -- --check
-      - name: Lint root workspace
+      - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: Test root workspace
+      - name: Test workspace
         run: cargo test --workspace --all-targets
-      - name: Test root workspace doctests
+      - name: Test workspace doctests
         run: cargo test --workspace --doc
-
-      - name: Format Tauri workspace
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - name: Lint Tauri workspace
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-      - name: Test Tauri workspace
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-      - name: Test Tauri workspace doctests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --workspace --doc

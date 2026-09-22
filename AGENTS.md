@@ -14,33 +14,35 @@
 
 KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite 6 前端，Tauri 2 桌面外壳，进程内自研 Rust Agent 运行时。浏览器开发服务器只用于前端开发，不能代替原生桌面验收。
 
+仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` 内含 `src-tauri/` 桌面宿主、`cli/` 命令行）、`core/`（共享 Rust 库，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
+
 | 改动内容 | 优先检查的位置 |
 | --- | --- |
-| 应用装配、顶层路由、跨域协调 | `src/App.tsx`、`src/features/app/` |
-| 会话发送、停止、队列、导航 | `src/hooks/useSessionTurn.ts`、`src/hooks/session-turn/`、`src/hooks/useSessionNavigation.ts` |
-| ACP 客户端、事件、历史与界面投影 | `src/lib/acp/`、`src/hooks/useAcpSessionRuntime.ts`、`src/hooks/acp-runtime/` |
-| 业务视图与聊天渲染 | `src/components/`、`src/components/lobe-chat/` |
-| 通用控件、样式与翻译 | `src/components/ui/`、`src/styles/`、`src/i18n/` |
-| 前端纯规则 | `src/lib/`；测试通常与实现同目录 |
-| Tauri 命令注册与桌面集成 | `src-tauri/src/lib.rs` 及同目录业务模块 |
-| 桌面会话接入、历史加载、工具投影 | `src-tauri/src/agent_runtime.rs`、`src-tauri/src/agent_runtime/` |
-| ACP 方法、事件与协议契约 | `crates/keencode-acp/` |
-| Agent Loop、上下文、取消、Plan 守卫、协作 | `crates/keencode-agent/` |
-| Provider 中立消息、请求、流与错误类型 | `crates/keencode-model/` |
-| 模型协议适配与供应商接入 | `crates/keencode-provider/`；协议参考在 `docs/protocols/` |
-| 会话生命周期、发布与恢复 | `crates/keencode-runtime/` |
-| 会话日志、快照、Artifact、Memory、Goal 持久化 | `crates/keencode-resources/` |
-| 工具定义与执行 | `crates/keencode-tools/` |
-| MCP 与 Skills 核心 | `crates/keencode-mcp/`、`crates/keencode-skills/` |
-| 插件与扩展桌面接入 | `src-tauri/src/extensions/`、`src-tauri/src/plugins/` 及对应 `.rs` 入口 |
-| 产品内系统提示词与子 Agent 模板 | `src-tauri/prompts/`；先读其中的 `README.md` |
-| 构建、发布、性能与验收 | `package.json`、`.github/workflows/`、`scripts/`、`design-qa.md`、`docs/benchmark.md` |
+| 应用装配、顶层路由、跨域协调 | `apps/ui/src/App.tsx`、`apps/ui/src/features/app/` |
+| 会话发送、停止、队列、导航 | `apps/ui/src/hooks/useSessionTurn.ts`、`apps/ui/src/hooks/session-turn/`、`apps/ui/src/hooks/useSessionNavigation.ts` |
+| ACP 客户端、事件、历史与界面投影 | `apps/ui/src/lib/acp/`、`apps/ui/src/hooks/useAcpSessionRuntime.ts`、`apps/ui/src/hooks/acp-runtime/` |
+| 业务视图与聊天渲染 | `apps/ui/src/components/`、`apps/ui/src/components/lobe-chat/` |
+| 通用控件、样式与翻译 | `apps/ui/src/components/ui/`、`apps/ui/src/styles/`、`apps/ui/src/i18n/` |
+| 前端纯规则 | `apps/ui/src/lib/`；测试通常与实现同目录 |
+| Tauri 命令注册与桌面集成 | `apps/desktop/src-tauri/src/lib.rs` 及同目录业务模块 |
+| 桌面会话接入、历史加载、工具投影 | `apps/desktop/src-tauri/src/agent_runtime.rs`、`apps/desktop/src-tauri/src/agent_runtime/` |
+| ACP 方法、事件与协议契约 | `core/acp/` |
+| Agent Loop、上下文、取消、Plan 守卫、协作 | `core/agent/` |
+| Provider 中立消息、请求、流与错误类型 | `core/model/` |
+| 模型协议适配与供应商接入 | `core/provider/`；协议参考在 `docs/protocols/` |
+| 会话生命周期、发布与恢复 | `core/runtime/` |
+| 会话日志、快照、Artifact、Memory、Goal 持久化 | `core/resources/` |
+| 工具定义与执行 | `core/tools/` |
+| MCP 与 Skills 核心 | `core/mcp/`、`core/skills/` |
+| 插件与扩展桌面接入 | `apps/desktop/src-tauri/src/extensions/`、`apps/desktop/src-tauri/src/plugins/` 及对应 `.rs` 入口 |
+| 产品内系统提示词与子 Agent 模板 | `apps/desktop/src-tauri/prompts/`；先读其中的 `README.md` |
+| 构建、发布、性能与验收 | `package.json`、`.github/workflows/`、`tooling/scripts/`、`design-qa.md`、`docs/benchmark.md` |
 
 ## 架构硬约束
 
 ### 前端职责
 
-- `App.tsx` 只做壳层装配、顶层路由和跨业务域协调。单域状态与副作用放对应 hook，纯规则放 `src/lib/`，完整视图放 `src/components/` 或现有业务模块。
+- `App.tsx` 只做壳层装配、顶层路由和跨业务域协调。单域状态与副作用放对应 hook，纯规则放 `apps/ui/src/lib/`，完整视图放 `apps/ui/src/components/` 或现有业务模块。
 - 不以“之后再拆”为由往 `App.tsx` 增加业务规则、协议解析或持久化流程。拆分只覆盖本次涉及的业务，不引入全局状态框架、万能 Context 或只转发 props 的包装层。
 - Rust 后端持有权威会话状态；前端只生成可丢弃的界面投影。不要在前端建立第二套会话协议或独立持久化事实源。
 
@@ -64,8 +66,8 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 
 ## 界面修改
 
-- 直接复用当前 `src/`、`public/` 的组件、DOM、CSS、设计令牌和资源，不根据截图重写近似实现。
-- 可见交互控件使用 `src/components/ui/` 中的 shadcn/ui 组件。业务代码不新增原生 `button`、`input`、`textarea`、`select`、`dialog`，也不重复实现已有控件；缺失时先查询当前版本文档，优先组合已有组件或使用正常包依赖，遵守下文的源码来源边界。
+- 直接复用当前 `apps/ui/src/`、`apps/ui/public/` 的组件、DOM、CSS、设计令牌和资源，不根据截图重写近似实现。
+- 可见交互控件使用 `apps/ui/src/components/ui/` 中的 shadcn/ui 组件。业务代码不新增原生 `button`、`input`、`textarea`、`select`、`dialog`，也不重复实现已有控件；缺失时先查询当前版本文档，优先组合已有组件或使用正常包依赖，遵守下文的源码来源边界。
 - 原生控件仅限 UI 组件底层、浏览器要求的隐藏控件，以及 `contenteditable`、媒体等无等价组件的宿主；在代码中解释原因，不另建可见控件样式。
 - 使用组件既有变体、尺寸和语义化令牌。业务 `className` 只负责必要布局与产品结构，不覆盖控件颜色、字体、边框、圆角和交互状态。
 - 后端或协议调整不得无意改变界面。品牌或文案变化保留原盒模型与层级，并记录有意差异。
@@ -87,25 +89,23 @@ pnpm dev           # 仅前端开发
 | 改动范围 | 必要验证 |
 | --- | --- |
 | 仅文档或 Agent 规则 | 引用路径、命令与结构检查，`git diff --check`；不启动无关构建 |
-| 前端逻辑或组件 | `pnpm run typecheck`，`pnpm exec vitest run <测试文件路径>` |
+| 前端逻辑或组件 | `pnpm run typecheck`，`pnpm exec vitest run --root apps/ui <apps/ui 内测试文件路径>` |
 | 样式 | 上述相关检查，加 `pnpm run lint:css` 与界面基线比较 |
 | 完整前端验证 | `pnpm test`、`pnpm build`；`pnpm test` 包含脚本测试、clean-room 检查与 Vitest |
-| 核心 Rust crate | `cargo test --manifest-path Cargo.toml -p <包名>` |
-| Tauri 后端 | `cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop` |
-| 跨 crate 或公共协议 | 检查所有受影响的包；涉及桌面接入时另跑 Tauri 后端测试 |
+| 核心 Rust crate | `cargo test -p <包名>` |
+| Tauri 后端 | `cargo test -p keencode-desktop` |
+| 跨 crate 或公共协议 | 检查所有受影响的包；涉及桌面接入时另跑 `cargo test -p keencode-desktop` |
 
-**两个 Rust 工作区必须区分**：根 `Cargo.toml` 管理 `crates/`，显式排除了 `src-tauri`；桌面包有独立锁文件。根目录的 `cargo test --workspace` 不验证桌面包，前端检查也不能代替 Rust 测试。
+**唯一的 Rust workspace**：根 `Cargo.toml` 统一管理 `core/`、`apps/desktop/src-tauri` 和 `tooling/provider-live-test`，共享一份 `Cargo.lock` 与根 `target/`。前端检查不能代替 Rust 测试；首次构建桌面端或执行 `cargo check` 前需要 `apps/ui/dist` 存在（`pnpm build` 或 `mkdir -p apps/ui/dist`），因为 Tauri 构建脚本在编译期校验打包资源。
 
-Rust 修改还需对涉及的工作区做格式检查和 lint：
+Rust 修改还需做格式检查和 lint：
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy -p <核心包名> --all-targets -- -D warnings
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+cargo clippy -p <包名> --all-targets -- -D warnings
 ```
 
-仅执行涉及的工作区命令；完整 CI 的 workspace、all-targets 和 doctest 矩阵见 `.github/workflows/ci.yml`。真实模型测试入口在 `crates/keencode-provider-live-test/`，不要把需要凭据和网络的测试当作离线单测。
+完整 CI 的 workspace、all-targets 和 doctest 矩阵见 `.github/workflows/ci.yml`。真实模型测试入口在 `tooling/provider-live-test/`，不要把需要凭据和网络的测试当作离线单测。
 
 ## 依赖与参考项目边界
 

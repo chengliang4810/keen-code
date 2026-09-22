@@ -14,7 +14,7 @@
 先通过自己的秘密管理方式设置 `KEENCODE_BENCH_API_KEY`，再执行：
 
 ```sh
-cargo run --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
+cargo run --manifest-path apps/desktop/src-tauri/Cargo.toml -p keencode-desktop \
   --features benchmark --example keencode-bench < /absolute/path/request.json
 ```
 
@@ -53,7 +53,7 @@ cargo run --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
 先构建一次 Runner，随后由批量脚本为每题启动独立进程。最大并发被硬限制为 6；任何一题失败或超时都不会中止其他题，`summary.json` 会在每题结束后原子更新。
 
 ```sh
-cargo build --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml -p keencode-desktop \
   --features benchmark --example keencode-bench
 KEENCODE_BENCH_API_KEY=... pnpm benchmark:batch -- /absolute/path/manifest.json
 ```
@@ -84,7 +84,7 @@ KEENCODE_BENCH_API_KEY=... pnpm benchmark:batch -- /absolute/path/manifest.json
 Terminal-Bench 的 Linux 环境不能运行 macOS Runner。通过 BuildKit 导出只用于评测的 Linux 二进制，不生成或修改桌面发行物：
 
 ```sh
-docker build --file scripts/benchmark-linux.Dockerfile \
+docker build --file tooling/scripts/benchmark-linux.Dockerfile \
   --target export --output type=local,dest=/absolute/path/linux-runner .
 ```
 
@@ -103,9 +103,9 @@ PYTHONPATH=$PWD harbor run -y \
 ## 验证
 
 ```sh
-cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
+cargo test -p keencode-desktop \
   --features benchmark agent_runtime::benchmark --lib
-cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop \
+cargo clippy -p keencode-desktop \
   --features benchmark --example keencode-bench -- -D warnings
 ```
 

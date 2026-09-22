@@ -1,12 +1,12 @@
 {
   "ignoreFiles": [
     "**/node_modules/**",
-    "src/styles/tokens.css",
-    "src/styles/skins.css",
-    "src/styles/code-preview.css",
-    "src/styles/ui-governance.css",
-    "src/components/lobe-chat/lobe-chat.css",
-    "src/styles/harness/**"
+    "apps/ui/src/styles/tokens.css",
+    "apps/ui/src/styles/skins.css",
+    "apps/ui/src/styles/code-preview.css",
+    "apps/ui/src/styles/ui-governance.css",
+    "apps/ui/src/components/lobe-chat/lobe-chat.css",
+    "apps/ui/src/styles/harness/**"
   ],
   "rules": {
     "declaration-property-value-allowed-list": {

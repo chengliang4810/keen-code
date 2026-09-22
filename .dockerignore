@@ -3,7 +3,7 @@
 .idea
 .vscode
 node_modules
-src-tauri/target
+apps/desktop/src-tauri/target
 target
 tmp
 benchmark-*.json

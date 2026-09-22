@@ -23,11 +23,11 @@ KeenCode 是本地优先的桌面 AI 编码工具。界面首先服务于重复�
 
 | 范围 | Source of Truth | 约束 |
 |---|---|---|
-| 颜色、字体、间距、圆角、动效 | `src/styles/tokens.css`、`src/styles/harness/`、`src/styles/skins.css` | 业务 CSS 消费语义令牌，不在组件内复制一套颜色或字号 |
-| 样式层叠顺序 | `src/main.tsx`、`src/styles/app.css` | `app.css` 的模块导入顺序保持稳定；治理兜底放在 `ui-governance.css` |
-| 页面结构与交互 | `src/App.tsx`、`src/features/app/`、`src/components/` | 本文不能替代组件、路由、状态和协议契约 |
-| 原生能力 | `src-tauri/src/`、`src/lib/tauri.ts`、`src/lib/api.ts` | 浏览器渲染通过不代表 Tauri 原生门禁通过 |
-| 图标 | `src/components/icons.tsx`、`@tabler/icons-react` | 新图标先加入稳定的本地导出，不引入第二套图标库 |
+| 颜色、字体、间距、圆角、动效 | `apps/ui/src/styles/tokens.css`、`apps/ui/src/styles/harness/`、`apps/ui/src/styles/skins.css` | 业务 CSS 消费语义令牌，不在组件内复制一套颜色或字号 |
+| 样式层叠顺序 | `apps/ui/src/main.tsx`、`apps/ui/src/styles/app.css` | `app.css` 的模块导入顺序保持稳定；治理兜底放在 `ui-governance.css` |
+| 页面结构与交互 | `apps/ui/src/App.tsx`、`apps/ui/src/features/app/`、`apps/ui/src/components/` | 本文不能替代组件、路由、状态和协议契约 |
+| 原生能力 | `apps/desktop/src-tauri/src/`、`apps/ui/src/lib/tauri.ts`、`apps/ui/src/lib/api.ts` | 浏览器渲染通过不代表 Tauri 原生门禁通过 |
+| 图标 | `apps/ui/src/components/icons.tsx`、`@tabler/icons-react` | 新图标先加入稳定的本地导出，不引入第二套图标库 |
 | 许可证与外部适配 | `THIRD_PARTY_NOTICES.md`、对应源码目录 | 适配代码保留来源和许可证；产品规范与外部产品规范分离 |
 
 `DESIGN.md` 只规定目标、语义和验收规则。组件的最终尺寸、可见状态和宿主限制以当前代码和测试为准；发现文档与代码不一致时，先核对代码、测试和清单，再更新本文。
@@ -54,9 +54,9 @@ KeenCode 是本地优先的桌面 AI 编码工具。界面首先服务于重复�
 | 窗口拖拽、标题栏、托盘 | 原生门禁，必须在对应系统验收 | 不可验证 | 不适用 |
 | 主题与界面语言 | 当前 UI 逻辑 | 可用于组件和布局验证 | 必须保留同一语义，不复用桌面专属控件 |
 
-`src/lib/tauri.ts` 在非 Tauri 环境不能提供真实 `invoke`。设置中的 Web Service URL 是模型或服务配置，不是本机 Web Host 地址。Web 启动壳通过同源 `BrowserWebHostTransport` 使用 Token 登录、HttpOnly Cookie 和 WebSocket/ACP；移动启动壳仍只消费注入的 `HostTransportAdapter`，其会话权限、事件重连和资源授权仍属于 Rust/Host adapter 边界。
+`apps/ui/src/lib/tauri.ts` 在非 Tauri 环境不能提供真实 `invoke`。设置中的 Web Service URL 是模型或服务配置，不是本机 Web Host 地址。Web 启动壳通过同源 `BrowserWebHostTransport` 使用 Token 登录、HttpOnly Cookie 和 WebSocket/ACP；移动启动壳仍只消费注入的 `HostTransportAdapter`，其会话权限、事件重连和资源授权仍属于 Rust/Host adapter 边界。
 
-`src/main.tsx` 解析显式 `hostMode`（query、注入全局或 Vite 配置），并维护 `data-host-mode="desktop" | "web" | "mobile-remote"`；未显式指定时保持 Desktop 行为。
+`apps/ui/src/main.tsx` 解析显式 `hostMode`（query、注入全局或 Vite 配置），并维护 `data-host-mode="desktop" | "web" | "mobile-remote"`；未显式指定时保持 Desktop 行为。
 
 ## 4. 版式与页面骨架
 
@@ -132,14 +132,14 @@ UI 默认使用系统字体栈 `var(--font-sans)`，当前由 `tokens.css` 提�
 
 | 组件或能力 | 当前来源 | 所有权边界 |
 |---|---|---|
-| Button | `src/components/ui/button.tsx` 的 KeenCode 本地实现 | 复用已授权的 ZCode 几何和语义变体；`icon-*` 是本地语义尺寸，不透传为 Appica 尺寸 |
-| Switch、Tooltip、Input、Select、Tabs、Card、DropdownMenu 等 | `src/components/ui/` 对 `@appica/ui-react` 的本地包装或组合 | Appica 原语固定使用 `size="md"` / `inputSize="md"`；仅 Avatar、Thumbnail 允许官方精确像素尺寸，业务层不绕过包装层重做外观 |
-| 图标 | `src/components/icons.tsx` + `@tabler/icons-react` | 通过本地稳定名称导出；不手写重复 SVG、不混用第二套图标库 |
+| Button | `apps/ui/src/components/ui/button.tsx` 的 KeenCode 本地实现 | 复用已授权的 ZCode 几何和语义变体；`icon-*` 是本地语义尺寸，不透传为 Appica 尺寸 |
+| Switch、Tooltip、Input、Select、Tabs、Card、DropdownMenu 等 | `apps/ui/src/components/ui/` 对 `@appica/ui-react` 的本地包装或组合 | Appica 原语固定使用 `size="md"` / `inputSize="md"`；仅 Avatar、Thumbnail 允许官方精确像素尺寸，业务层不绕过包装层重做外观 |
+| 图标 | `apps/ui/src/components/icons.tsx` + `@tabler/icons-react` | 通过本地稳定名称导出；不手写重复 SVG、不混用第二套图标库 |
 | 编辑宿主 | 原生 `textarea`、`contenteditable` | 仅用于编辑和输入宿主；可见外观由现有业务样式管理，并解释浏览器必要性 |
 | 终端、Diff、Markdown、Office | xterm、`@pierre/diffs`、React Markdown、`docx-preview` 等已声明依赖 | 内容渲染属于内容例外，不把内容字体规则外溢到普通 UI |
 | 颜色、表面和排版 token | KeenCode `tokens.css`、已声明的 Harness 适配与 ZCode UI 样式 | 产品语义由 KeenCode 维护；第三方归属保留在 `THIRD_PARTY_NOTICES.md` 与 `LICENSES/` |
 
-业务代码不得新增可见的原生 `button`、`input`、`textarea`、`select` 或 `dialog` 来绕过现有组件。浏览器要求的隐藏控件、`contenteditable`、媒体和编辑器宿主除外。新增组件前先搜索 `src/components/ui/`、`@appica/ui-react` 和现有业务组件。
+业务代码不得新增可见的原生 `button`、`input`、`textarea`、`select` 或 `dialog` 来绕过现有组件。浏览器要求的隐藏控件、`contenteditable`、媒体和编辑器宿主除外。新增组件前先搜索 `apps/ui/src/components/ui/`、`@appica/ui-react` 和现有业务组件。
 
 ### 6.2 修改和归属规则
 
@@ -240,7 +240,7 @@ UI 默认使用系统字体栈 `var(--font-sans)`，当前由 `tokens.css` 提�
 
 ## 12. 当前实现与验收边界
 
-本次统一接入已经形成一条共享 Host/ACP 核心路径：Desktop、Web、Agent CLI 使用同一套 Session、operation、lease、admission、事件投递和恢复契约；TUI 仅保留 `crates/keencode-tui` 目录和协议边界，不宣称已有 TUI 界面。Web 由本机 KeenCode Host 提供，不由开发服务器或独立 SaaS 服务提供。
+本次统一接入已经形成一条共享 Host/ACP 核心路径：Desktop、Web、Agent CLI 使用同一套 Session、operation、lease、admission、事件投递和恢复契约；TUI 仅保留 `core/tui` 目录和协议边界，不宣称已有 TUI 界面。Web 由本机 KeenCode Host 提供，不由开发服务器或独立 SaaS 服务提供。
 
 当前产品约束如下：
 

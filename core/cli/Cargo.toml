@@ -1,0 +1,45 @@
+[package]
+# 独立 Rust Client 与非交互 CLI；不依赖 Tauri 或桌面包。
+name = "keencode-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "keencode_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "keencode"
+path = "src/main.rs"
+
+[dependencies]
+# ACP 只用于复用稳定协议边界和事件类型，不在 CLI 中实现第二套会话语义。
+keencode-acp = { path = "../acp" }
+# Headless Host 复用与 Desktop 相同的 Provider 中立 Agent Loop。
+keencode-agent = { path = "../agent" }
+# 复用跨 Desktop/headless 的 Host ownership、discovery 和 admission 事实源。
+keencode-runtime = { path = "../runtime" }
+# headless 只从显式环境变量构造临时 Provider，凭据不会写入 Session 或 discovery。
+keencode-provider = { path = "../provider" }
+# 读取 Runtime 的无凭据 Provider Snapshot 和根 Agent 标识。
+keencode-resources = { path = "../resources" }
+keencode-model = { path = "../model" }
+# Headless 与 Desktop 复用同一套文件、搜索和命令工具实现，避免只向模型暴露空表。
+keencode-tools = { path = "../tools" }
+# Headless Web 控制面复用同一套 HTTP/WS transport，不在 CLI 中复制 Web 协议。
+keencode-web = { path = "../web-host" }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.143"
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+# 只在 headless 输出模型正文前清理显式环境凭据的临时内存副本。
+zeroize = "1.8.2"
+
+[target.'cfg(windows)'.dependencies]
+# 命名管道创建后收紧到当前用户的 DACL；Unix 不编译该依赖。
+windows-acl = "0.3.0"
+
+[dev-dependencies]
+tempfile = "3"

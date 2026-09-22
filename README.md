@@ -61,7 +61,7 @@ corepack pnpm@10.14.0 dev:desktop
 corepack pnpm@10.14.0 typecheck
 corepack pnpm@10.14.0 test
 corepack pnpm@10.14.0 build
-(cd src-tauri && cargo test)
+(cd apps/desktop/src-tauri && cargo test)
 ```
 
 生成本机安装包：
@@ -88,7 +88,7 @@ vYYYYMMDD-abcdef0
 
 例如：`v20260730-49ad19b`。安装包内部使用可排序的三段数字版本，以满足更新比较以及 macOS、Windows 原生版本字段要求；界面始终展示对外 Release 标签。
 
-发布流程见 [.github/workflows/release.yml](.github/workflows/release.yml)，版本规则见 [scripts/release-version.mjs](scripts/release-version.mjs)。
+发布流程见 [.github/workflows/release.yml](.github/workflows/release.yml)，版本规则见 [tooling/scripts/release-version.mjs](tooling/scripts/release-version.mjs)。
 
 ## 数据与隐私
 
@@ -102,10 +102,10 @@ vYYYYMMDD-abcdef0
 `keencode-bench` 仅供基准测试和 harness 适配器使用，不随默认桌面构建编译。构建时必须显式开启 `benchmark` feature：
 
 ```bash
-cargo build --manifest-path src-tauri/Cargo.toml --example keencode-bench --features benchmark
+cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --example keencode-bench --features benchmark
 ```
 
-产物位于 `target/debug/examples/keencode-bench`。该入口通过标准输入读取 JSON 请求，协议定义见 [`src-tauri/src/agent_runtime/benchmark.rs`](src-tauri/src/agent_runtime/benchmark.rs)。
+产物位于 `target/debug/examples/keencode-bench`。该入口通过标准输入读取 JSON 请求，协议定义见 [`apps/desktop/src-tauri/src/agent_runtime/benchmark.rs`](apps/desktop/src-tauri/src/agent_runtime/benchmark.rs)。
 
 ## 许可证
 

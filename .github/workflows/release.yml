@@ -59,19 +59,11 @@ jobs:
       - name: Rust workspace clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Tauri crate format
-        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-      - name: Tauri crate check
-        run: cargo check --manifest-path src-tauri/Cargo.toml --all-targets
-      - name: Tauri crate tests
-        run: cargo test --manifest-path src-tauri/Cargo.toml --all-targets
-      - name: Tauri crate clippy
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-
+      # 统一 workspace 后 --workspace 已覆盖桌面 crate；此处只补验基准特性。
       - name: Benchmark feature checks
         run: |
-          cargo test --manifest-path src-tauri/Cargo.toml -p keencode-desktop --features benchmark agent_runtime::benchmark --lib
-          cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop --features benchmark --example keencode-bench -- -D warnings
+          cargo test -p keencode-desktop --features benchmark agent_runtime::benchmark --lib
+          cargo clippy -p keencode-desktop --features benchmark --example keencode-bench -- -D warnings
 
   prepare:
     runs-on: ubuntu-latest
@@ -88,7 +80,7 @@ jobs:
         id: version
         env:
           KEENCODE_COMMIT_SHA: ${{ github.sha }}
-        run: node scripts/release-version.mjs
+        run: node tooling/scripts/release-version.mjs
 
       - name: Verify updater signing secret
         env:
@@ -157,14 +149,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri
+          workspaces: .
 
       - run: corepack pnpm@10.14.0 install --frozen-lockfile
 
       - name: Write release-only Tauri config
         shell: bash
         run: >-
-          node scripts/release-version.mjs --write-tauri-config
+          node tooling/scripts/release-version.mjs --write-tauri-config
           .github/tauri.release.conf.json
           "${{ needs.prepare.outputs.app_version }}"
 
@@ -176,6 +168,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
+          projectPath: apps/desktop
           releaseId: ${{ needs.prepare.outputs.release_id }}
           releaseBody: |
             本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
@@ -184,11 +177,11 @@ jobs:
           uploadUpdaterJson: true
           updaterJsonPreferNsis: true
           releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_${{ matrix.asset_label }}[ext]
-          args: ${{ matrix.args }} --config .github/tauri.release.conf.json
+          args: ${{ matrix.args }} --config ../../.github/tauri.release.conf.json
 
       # Tauri 构建完成后确认安装包资源目录仍携带完整许可证和第三方 NOTICE。
       - name: 校验安装包许可证资源
-        run: node scripts/verify-bundle-resources.mjs --target src-tauri/target
+        run: node tooling/scripts/verify-bundle-resources.mjs --target target
 
       # 记录每个平台实际生成的文件包摘要，供发布审计和后续下载校验使用。
       - name: 生成安装包 SHA-256 与大小报告
@@ -200,9 +193,9 @@ jobs:
           node --input-type=module <<'NODE'
           import { appendFileSync, lstatSync, statSync, writeFileSync } from "node:fs";
           import { relative, resolve } from "node:path";
-          import { findBundleArtifacts, sha256File } from "./scripts/verify-bundle-resources.mjs";
+          import { findBundleArtifacts, sha256File } from "./tooling/scripts/verify-bundle-resources.mjs";
 
-          const targetRoot = resolve("src-tauri/target");
+          const targetRoot = resolve("target");
           const artifacts = findBundleArtifacts(targetRoot).filter(({ path }) => {
             // .app 是未压缩的目录 bundle；Release 上传的是其中的归档或磁盘映像。
             return lstatSync(path).isFile();
@@ -277,7 +270,7 @@ jobs:
           gh release view "$RELEASE_TAG" \
             --repo "$GITHUB_REPOSITORY" \
             --json assets > "$assets"
-          node scripts/release-version.mjs \
+          node tooling/scripts/release-version.mjs \
             --finalize-updater-manifest \
             "$manifest" "$RELEASE_TAG" "$assets" "$GITHUB_REPOSITORY"
           gh release upload "$RELEASE_TAG" "$manifest" \

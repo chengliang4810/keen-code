@@ -4,15 +4,15 @@
 
 ## 直接复用的源码
 
-`src/styles/harness/` 中的 `base.css`、`design-platform.css`、`gradient-shadow-text.css` 来自参考仓库的 `packages/client/ui-theme/src/styles/`。只将 `body` 主题宿主转换为 KeenCode 的 `:root` / `[data-theme="dark"]`，字体栈、色值、排版变量、阴影数值保持原样。
+`apps/ui/src/styles/harness/` 中的 `base.css`、`design-platform.css`、`gradient-shadow-text.css` 来自参考仓库的 `packages/client/ui-theme/src/styles/`。只将 `body` 主题宿主转换为 KeenCode 的 `:root` / `[data-theme="dark"]`，字体栈、色值、排版变量、阴影数值保持原样。
 
-`src/styles/tokens.css` 将 KeenCode 原有语义令牌映射到这些 `--dsw-*` 变量，因此工作台、设置、菜单、弹窗、消息、资源面板和首次配置页共用同一套深浅色表面。
+`apps/ui/src/styles/tokens.css` 将 KeenCode 原有语义令牌映射到这些 `--dsw-*` 变量，因此工作台、设置、菜单、弹窗、消息、资源面板和首次配置页共用同一套深浅色表面。
 
 重建命令（参考源码目录必须检出固定提交）：
 
 ```powershell
-node scripts/sync-harness-theme.mjs <deepseek-harness源码目录>
-git diff -- src/styles/harness
+node tooling/scripts/sync-harness-theme.mjs <deepseek-harness源码目录>
+git diff -- apps/ui/src/styles/harness
 ```
 
 脚本通过 `git show <固定提交>:<路径>` 读取原文件，不会把参考工作树的未提交变更混入主题。版权和完整 MIT 许可保存在根目录 `THIRD_PARTY_NOTICES.md`。
