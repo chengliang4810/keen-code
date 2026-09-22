@@ -1,3 +1,122 @@
+# Design QA Index
+
+> 当前规范：`DESIGN.md`。本索引只导航验收范围，不替代历史记录中的具体证据。
+> 更新时间：2026-09-22
+
+## 当前页面与分区
+
+### Workbench
+
+- `Sidebar`：置顶会话、项目树、项目会话、历史/孤立会话、搜索、排序、归档、置顶、拖放。
+- `MainStage`：标题栏、通知/错误/重试/查找、ConversationStage、AskUser、Composer 上下文、队列、附件、输入区和工具栏。
+- `ResourceViewer`：`files`、`web`、`changes`、`terminal`、`trajectory`、`agents`、`subagent`。
+
+### Settings
+
+`general`、`appearance`、`account`、`personalization`、`skills`、`plugins`、`agents`、`market`、`mcp`、`archive`、`archived`、`requests`、`analytics`、`observability`、`about`。
+
+### 独立组件展示入口
+
+- `src/components/design-system/DesignSystemShowcase.tsx`：保持独立导出，不接入业务路由，集中展示 Desktop、Web 登录、Mobile Remote 和 Observability 的状态矩阵。
+- `src/components/host/`：Web 登录与移动远程壳只接收 `hostMode`、状态和回调，不直接调用 Tauri；移动远程壳不展示本地路径或 Terminal。
+- `src/components/host/HostStartupShell.tsx`：由 `src/main.tsx` 接入顶层启动路径；Desktop 原样渲染 `App`，Web/Mobile 只消费注入的 `HostTransportAdapter`。
+- `src/components/ObservabilityPanel.tsx`：观测面板的稳定导入入口；`ObservabilityPanelView` 可接收脱敏 fixture 做静态状态展示。
+
+## 视口与主题矩阵
+
+每次可见 UI 修改至少覆盖与变更相关的状态；完整基线应优先使用相同浏览器、device scale factor 和夹具数据：
+
+| 维度 | 最小矩阵 |
+|---|---|
+| Desktop | 1280×820 |
+| Web/小桌面 | 1024×768 |
+| 窄屏 | 680×820 |
+| Mobile 宽度 | 390×844 |
+| 主题 | Light、Dark、System |
+| 语言 | 中文、English；涉及繁体文案时增加 `zh-TW` |
+| 状态 | 空、加载、运行、排队、等待输入、失败、已完成/未读、长文本 |
+
+## 宿主边界
+
+- 浏览器/Vite 夹具只验证 React、CSS、部分交互和注入状态；不证明本地 Agent、文件、Git、Terminal 或 Tauri command 可用。
+- 当前产品主宿主是 Tauri Desktop；`src/lib/tauri.ts` 在非 Tauri 环境不能提供真实 `invoke`。
+- Web Service URL 是服务配置，不是本机 Web Host 地址。
+- `?hostMode=web`、`?hostMode=mobile-remote` 或注入的 `VITE_KEENCODE_HOST_MODE` 才会启用对应启动壳；缺省值保持 Desktop。
+- 当前工作树的 Web 启动路径使用同源 `BrowserWebHostTransport` 完成 Token 登录、WebSocket/ACP 请求和事件投影；移动远程端到端连接仍需宿主实现与验收。
+- 以下项目必须标为原生未验证：Windows WebView2、macOS WebKit、Linux WebKitGTK、无装饰窗口、标题栏拖拽、DPI、中文 IME、Terminal、Embedded Browser、tray、真实移动设备远程连接。
+
+## 组件、资源与所有权检查
+
+- 基础控件优先来自 `@appica/ui-react` 或 `src/components/ui/` 本地包装。
+- 图标来自 `src/components/icons.tsx` 与 `@tabler/icons-react`；没有新增第二套图标库或手写重复 SVG。
+- 原生 `textarea` / `contenteditable` 只作为编辑宿主；代码、Diff、Markdown、Terminal、Office 视图是内容排版例外。
+- 新图片、字体、脚本和外部依赖要检查来源、许可证、体积、CSP 和离线失败行为。
+- 外部研究位于 `docs/research/archive/`，不作为当前基线；第三方适配归属查看 `THIRD_PARTY_NOTICES.md`。
+
+## 性能测量入口
+
+不要用未经采样的数字声称流式刷新、P95、CPU 或 RSS 改善。需要记录环境、视口、主题、语言、会话数和事件量，并关注：首个可交互窗口、首个可见 token、事件到 DOM 更新的中位数/P95/最大值、长任务、空闲/活跃 CPU 与 RSS、输入延迟和滚动稳定性。
+
+## 推荐验证命令
+
+```powershell
+pnpm run typecheck
+pnpm run lint:css
+pnpm run check:design-system
+pnpm exec vitest run src/components/SettingsPage.test.ts src/components/lobe-chat/ConversationThread.test.tsx
+git diff --check
+```
+
+## 2026-09-22 共享控件真实 computed-style 验收
+
+- 夹具：`output/playwright/shared-controls-computed-20260922/`。`index.html` / `fixture.tsx` 直接挂载当前 `src/components/ui/` 的 Button、Input、Select、Switch、Tabs、Dialog、Tooltip wrapper，并导入生产样式链；不调用 Tauri、Host、模型或用户数据。
+- 复现：先从仓库根目录启动 `pnpm.cmd exec vite --host 127.0.0.1 --port 14461 --strictPort`，再执行 `python output/playwright/shared-controls-computed-20260922/capture.py --url http://127.0.0.1:14461/output/playwright/shared-controls-computed-20260922/index.html`。使用已安装的 Python Playwright 与 Chromium，固定 1280×900、deviceScaleFactor=1；`--strict` 会把 ZCode 基线几何偏差作为失败退出。
+- 覆盖：浅色/深色主题分别读取 body、primary Button、Input、Select trigger、Switch、Tabs 的 `getComputedStyle`；真实点击 Select 展开、Tabs 切换、Dialog 打开/ESC 关闭、Tooltip 悬停和键盘焦点；每个主题均保存基础态、Select 展开、Dialog 展开和 Tooltip 展开截图，结果写入 `computed-styles.json`。
+- 当前证据：颜色桥接及交互态通过。截图为 `shared-controls-light.png`、`shared-controls-dark.png` 及同名 `-select-open.png`、`-dialog-open.png`、`-tooltip-open.png`；浅色 body/Button/Input 分别为 `rgb(248, 248, 248)` / `rgb(0, 0, 0)` / `rgb(255, 255, 255)`，深色分别为 `rgb(22, 22, 22)` / `rgb(255, 255, 255)` / `rgb(43, 43, 43)`。
+- 修正与复验：Appica 的 `h-7` / `rounded-md` 使用 rem，在 KeenCode 14px 根字号下实际折算为 `24.5px / 12.25px`。本地 wrapper 保留 Appica `md` 状态语义，并通过 `--control-height-compact`、`--control-radius-compact`、`--control-height-tabs` 末端几何类锁定 ZCode 的实际屏幕尺寸。`--strict` 复验后浅色和深色的 Button/Input/Select 均为 `28px × 10px`，Tabs 为 `32px`，两组 `deviations` 均为空，结果 `ok:true`；不能再用 utility 类名替代 computed-style 证据。
+- 宿主边界：这是浏览器渲染层验收，不证明 Windows WebView2、Tauri Dialog portal、DPI 或无装饰窗口行为；原生桌面仍需单独验收。
+
+## 2026-09-22 Appica 主题桥接单一来源
+
+- `ui-governance.css` 是 Appica 无前缀 role token 的唯一 KeenCode 权威来源，并位于 Appica Tailwind 样式之后加载；`tokens.css` 只保留 KeenCode/ZCode 产品语义和前缀 token，不再重复声明同名 role token。
+- 浅色桥接固定 Zai Light 的 `#f8f8f8 / #282828 / #000000` 主层级，深色桥接固定 Zai Dark 的 `#161616 / #363636 / #ffffff` 主层级；产品皮肤继续独立拥有 `--accent` 与 `--border-focus`，不会被 Appica 桥接覆盖。
+- `themeTokens.test.ts` 逐项检查浅深主题 role 完整性、单一声明位置、加载顺序、ZCode 表面值及皮肤所有权。全量 Vitest 178 个文件、1630 项通过，类型、CSS、设计系统门禁和生产构建同步通过。
+
+---
+
+# 2026-09-22 草稿欢迎态与 Composer 视觉对齐
+
+- 修改范围：`MainStage` 草稿欢迎态增加按时间段本地化问候和 KeenCode 品牌标记；欢迎态使用约 `29dvh` 安全上间距与可伸缩尾部；项目/worktree 上下文栏与输入区共用一个 Composer surface；项目触发器改为 pill；模型控件在 Composer container query 下按宽度显示供应商、模型名或图标，窄屏工具栏保持单行。
+- 验证：`pnpm.cmd run typecheck`、`pnpm.cmd run lint:css`、`pnpm.cmd run check:design-system`、`pnpm.cmd run build` 通过；相关 Vitest（i18n、Button、App contract、Composer model/reasoning）合并运行 62 项通过；`git diff --check` 通过。生产构建仅保留既有 Tauri 动态导入和大 chunk 警告。
+- 浏览器/桌面边界：本地 Vite `127.0.0.1:1421` 已被既有进程占用，未重复启动；当前 `cua` 返回无可用浏览器且 `nodeRepl.fetch` 失败，因此未采集 1440×900、1024×768、680×820、390×844 的截图、DOM 几何或 Console。未启动 Tauri 原生窗口，Windows WebView2、DPI、中文 IME 和真实项目菜单交互仍未验收。
+- 后续复现：恢复浏览器连接器后，在空草稿态固定中文/英文、浅色/深色和上述视口，确认问候语、共享 surface、项目 pill、模型/思考图标降级和无横向溢出；再用 `pnpm.cmd run dev:desktop` 复核原生窗口。
+
+---
+
+# 2026-09-21 Web/Mobile Remote 浏览器验收准备
+
+- 页面与环境：Windows，本地 Vite 由 PID `15236` 监听 `127.0.0.1:1421`，命令为 `vite --host 127.0.0.1 --port 1421`。待验收 URL 为 `http://127.0.0.1:1421/?host=web` 与 `http://127.0.0.1:1421/?host=mobile-remote`；未启动或伪造 KeenCode Host，不使用合成 transport 冒充已认证连接。
+- 目标矩阵：登录页覆盖 1024×768 与 390×844；Mobile Remote 覆盖未授权、离线/重连、附件选择/上传/预览/移除，检查中文长文件名、软键盘安全区、横向溢出和浅深主题。真实连接态还需固定端口 Host、用户 Token 与认证 Cookie。
+- 静态几何：`host-mode.css` 在 `<=480px` 对 Mobile Remote 的统一 Button 施加 `44px` 最小宽高；会话行已有 `52px` 最小高度。附件列表固定独占 Composer 一行，长文件名省略、图片预览固定 `40×40`，输入仍使用 Appica `Textarea` 且移动字号治理由 `ui-governance.css` 提供。
+- 代码级验证：附件上传使用同源 `/api/uploads`、双提交 CSRF 和 HttpOnly Session Cookie；预览仅使用 `/api/resources/{resourceId}`；发送使用标准 ACP `resource_link`。`pnpm.cmd exec vitest run` 为 161 个文件、1520 项测试通过；`typecheck`、`lint:css`、`check:design-system`、生产构建与 `git diff --check` 通过。
+- 浏览器连接器阻断：调用 `createBrowserTab("iab", ...)` 返回 `Browser is not available: iab`；随后 `cua.getState()` 返回 `browsers: []` 且错误为 `Browsers: Error: nodeRepl.fetch request failed`。因此本轮无法取得可信浏览器截图、Console、实际 DOM 几何或执行断网/恢复交互，未创建截图文件，也不以历史截图替代。
+- 复现：保持上述 Vite 服务运行，恢复任一 Browser connector 后打开两个待验收 URL；固定 `deviceScaleFactor=1`，分别设置 1024×768、680×820、390×844，保存到 `output/design-qa/web-mobile-host-20260921/`。未认证状态不得出现会话数据；真实 Host 验收需登录后上传一张图片和一个普通文件，确认预览 URL 同源、移除不发送、断网进入离线、恢复后重新订阅且任务不被取消。
+
+---
+
+# 2026-09-21 运行时观测设置面板
+
+- 需求：提供本地有界的运行时指标、Trace/TTFT、启动阶段、WebView 资源摘要、Crash 摘要、实时事件刷新和脱敏 JSON 导出入口。
+- 修改：新增 `src/components/RuntimeObservabilityPanel.tsx` 与 `src/styles/observability.css`；设置目录新增 `observability` 分区；三语文案进入 `src/i18n/messages.ts` 与 `src/i18n/zh-tw.ts`。面板复用既有 `Button`、`Card`、`Alert` 和 Tabler 图标，不新增可见原生控件。
+- 宿主链路：`src/lib/observability.ts` 调用 `diagnostics_snapshot`、`diagnostics_export`、`diagnostics_metric_record`、`diagnostics_resource_record`、`diagnostics_trace_record`；Tauri 端在 `src-tauri/src/lib.rs` 注册命令并通过专用线程转发 `keencode://observability`。观测 retention 会钳制到生产上限，实时订阅者也有固定上限；日志队列丢弃数写入 `diagnostics.dropped_logs` 计数器。
+- 验证：`pnpm.cmd run typecheck`、`pnpm.cmd run lint:css`、`pnpm.cmd run build`、`cargo fmt --manifest-path src-tauri/Cargo.toml -- --check`、`cargo check --manifest-path src-tauri/Cargo.toml -p keencode-desktop`、目标 Vitest（观测、前端性能、设置目录、i18n）和 Tauri diagnostics 测试（22 项）通过；`git diff --check` 通过。
+- 全量门禁例外：`pnpm.cmd test` 的既有 `release-version.test.mjs` 需要 `gh`/WSL 且当前环境缺失；当前单独 `vitest run` 为 155 个文件、1493 项测试，其中 4 项失败，集中在工作树既有的 App 行数/浮层契约和宿主按钮尺寸契约；`cargo clippy --manifest-path src-tauri/Cargo.toml -p keencode-desktop --all-targets -- -D warnings` 仍被工作树既有的 `agent_runtime`、`memories`、`model_metadata`、插件模块告警阻断，观测模块自身告警已清除。
+- 未验收：本次没有可复建的既有观测面板基线，也未启动 Tauri 原生窗口采集截图；Windows WebView2、真实进程 CPU/RSS 采集及桌面端端到端命令调用仍需原生环境覆盖。资源面板对系统 CPU/RSS 的空值显示是有意的未知状态，不代表零值。
+
+历史记录从下方的日期标题继续阅读；不要删除或重写历史证据来替换当前索引。
+
+---
+
 # 2026-09-20 macOS Dock 图标未读数量角标
 
 - 需求：后台形成终态且尚未查看的任务，在 macOS Dock 图标右上角显示未读数量，形态与常见桌面应用的红色数字角标一致；数量归零时角标消失。
@@ -70,7 +189,7 @@
 - 需求：新增「界面字号」设置（12–20px，默认 14px），整个界面文字随其缩放；侧栏项目名称、对话名称与对话正文使用同一套字号视觉层级。
 - 现状：KeenCode 原先没有界面字号设置，字号散落在 5 档 `--text-*` 令牌与 289 处硬编码 px 中；`src/styles/harness/gradient-shadow-text.css` 的 `--dsh-content-font-size` 已被 19 处 Markdown/回合统计令牌引用，但全仓没有任何写入方，长期停在 14px 回退。
 - 修改：`src/lib/uiFontSize.ts`（新增：范围校验、持久化、写入根元素 `--ui-font-size`）、`src/lib/uiFontSize.test.ts`（新增）；`src/styles/tokens.css`（`--ui-font-delta` = 字号 − 14px，`--text-xs/sm/md/lg/xl` 全部改为 `calc(基线 + var(--ui-font-delta))`，并把 `--dsh-content-font-size` 接到 `--ui-font-size`，激活原有 Harness 排版令牌）；`src/styles/app-conversation.css`、`app-features.css`、`app-foundation.css`、`app-resource.css`、`setup-wizard.css`、`effort-slider.css`、`src/components/lobe-chat/lobe-chat.css`（280 处 `font-size` 与同规则块内 26 处配对 `line-height` 换算为 `calc(Npx + var(--ui-font-delta))`；对话变量 `--chat-fs`/`--chat-prose-fs`/`--chat-fs-sm`/`--chat-fs-xs` 改为引用 `--text-md`/`--text-sm`/`--text-xs`）；`src/hooks/useThemeAppearance.ts`（新增 `uiFontSize` 状态与 `applyUiFontSizeChoice`）、`src/main.tsx`（首次绘制前应用，避免启动跳变）；`src/components/SettingsPage.tsx`、`src/features/app/SettingsRoute.tsx`、`src/App.tsx`（外观分区新增 12–20 数字输入，失焦保存，复用 `.settings-input--compact` 行形态）；`src/i18n/messages.ts`、`src/i18n/zh-tw.ts`（`settings.uiFontSize`、`settings.uiFontSizeDesc` 三语文案）；`src/components/SettingsPage.test.ts`、`src/components/lobe-chat/ConversationThread.test.tsx`（契约断言同步）。未新增依赖、样式类、后台活动或网络请求。
-- 保持固定（不随界面字号）：图标字形尺寸（`.nav-item__icon` 18px、`.skill-chip__icon/glyph` 11px、`.cmm__chev` 10px、`.rp-kind*` 8–10px、`.rp-tab__x` 14px 共 8 处跳过），代码预览（`code-preview.css`）、终端（`TerminalPanel` xterm `fontSize: 12`）与布局几何（`height`/`padding`/`gap`）同样不变——与 ZCode 语义一致：字号只缩放文字，图标与布局尺寸不受影响。`src/styles/harness/gradient-shadow-text.css` 的 `--dsw-font-*` 尺寸令牌（20 处，含 small/code 密集次级文本）按该文件原有注释保持固定。转换后全仓 CSS 硬编码 `font-size` 由 311 处降至 31 处，剩余项均为上述图标字形、代码预览、Harness 尺寸令牌与 `tokens.css` 的基线定义。
+- 保持固定（不随界面字号）：图标字形尺寸（`.nav-item__icon` 当前按 ZCode 基线为 16px、`.skill-chip__icon/glyph` 11px、`.cmm__chev` 10px、`.rp-kind*` 8–10px、`.rp-tab__x` 14px 共 8 处跳过），代码预览（`code-preview.css`）、终端（`TerminalPanel` xterm `fontSize: 12`）与布局几何（`height`/`padding`/`gap`）同样不变——与 ZCode 语义一致：字号只缩放文字，图标与布局尺寸不受影响。`src/styles/harness/gradient-shadow-text.css` 的 `--dsw-font-*` 尺寸令牌（20 处，含 small/code 密集次级文本）按该文件原有注释保持固定。转换后全仓 CSS 硬编码 `font-size` 由 311 处降至 31 处，剩余项均为上述图标字形、代码预览、Harness 尺寸令牌与 `tokens.css` 的基线定义。
 - 门禁：`pnpm run typecheck` 通过（仅余 `src/lib/sidebarOrder.test.ts` 报错，属另一会话未完成改动，非本次范围）；`pnpm exec vitest run` 145 文件 / 1425 项全部通过（含本次新增 `uiFontSize.test.ts` 11 项、`SettingsPage.test.ts` 新增 2 项、`ConversationThread.test.tsx` 断言更新）；`pnpm run lint:css` 通过。
 - 门禁例外：`pnpm test` 在 `scripts/clean-room-source-gate.mjs` 阶段失败，报错文件为 `result.json`、`src-tauri/prompts/README.md`、`src-tauri/src/providers.rs`（外部产品名与供应商示例标识），均为工作区既有未跟踪/并发产物，与本次改动无关；本次未改 `src-tauri/`，故未运行 Rust 测试。
 - 基线：`f12ae5296b9ce8fa2dd1222d425c6245b0629953`。基线 `src/styles/tokens.css` SHA-256 为 `b1abc43750f123ae1899e712ecb1caaabdb2ddc41c94180f55ecc0a0bb1d5c82`，当前为 `6e49b348c809bfe67171846ba64e0be6dd5a844452b1b964d13123885a938220`；`app-foundation.css` 当前 `4acb9c5213199bf8f535ae0b6ccc29524d8ecffce4a9845c82d25c8bb91f4423`；`app-conversation.css` 当前 `ee272f1299a2c8551327835e6fb9bd4f14c571fdac77920b0bdea5beb269bb8a`；`lobe-chat.css` 当前 `f0f02d565ba427af6192e6b5fdde78f5570e16ed16b9f0c592f910c31e756e11`；`uiFontSize.ts` `dba221107a77c6efcd1e78e9ca94fa97182e300880cfdf68bc0a1027d3f8d924`；`SettingsPage.tsx` `a217843fcb383078f5e9bc4953697a33371070e395b994b43db981d69204005d`；`turn-metrics.css` 当前 `6cae694e41171c929158dcaa3510db1a4495831e9c1717faede3eab22b8e2612`。
@@ -1014,3 +1133,177 @@ historical result: passed; current release: not reverified
 - 修正三（用户反馈）：编辑态右上角不应出现导入按钮。改为随模式切换：新增态右上角为导入（`IconPush` + `prov.importAll`），编辑态右上角仅为当前供应商的复制与导出；布局锁定测试改为断言导入位于编辑态三元分支的 else 侧。编辑态需要导入时经「添加提供商」进入新增态。`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 15 项通过。
 - 修正四（用户反馈）：API Key 字段由半行改为整行，加 `prov-field--full`（与 Base URL 同款栅格机制 `grid-column: 1 / -1`），独占一行；窄屏单列断点不受影响。布局锁定测试新增「表单字段布局」断言。`pnpm run typecheck` 通过；`pnpm exec vitest run src/components/ProvidersPanel.test.ts` 2 文件 16 项通过。
 - 修正五（用户反馈）：移除「Chat 输出预算字段」下方的独立说明文字，`prov.chatOutputTokenFieldHint` 三语言文案（en/zh/zh-TW）同步删除，字段仅保留下拉本身。残留引用检查为 0；`pnpm run typecheck`、`src/i18n/messages.test.ts` 9 项、`ProvidersPanel` 相关 2 文件 16 项测试通过。
+
+
+# 2026-09-21 Headless Web 与移动端真实 Host 验收
+
+- 环境：Windows、Playwright Chromium、浅色主题；由 `target/debug/keencode.exe` 使用隔离数据根启动真实 headless Host，固定监听 `127.0.0.1:32124`，静态资源来自生产 `dist/`，未使用 Vite IPC 模拟。
+- 覆盖：固定 Token 登录、HttpOnly/CSRF Cookie、WebSocket ACP、刷新后 Cookie 会话恢复、Session 列表、发送失败恢复、附件上传与预览、Web stop 后连接关闭及 30 秒 idle 退出。浏览器控制台均为 0 error。
+- 验收中修复：headless `web start` 只改状态但未监听端口；登录成功响应与前端契约不一致；刷新后未恢复有效 Cookie 会话；桌面远程工作台根容器收缩为内容宽度。相关实现和测试均已同步更新。
+- 截图：`output/playwright/real-host-web-1440x900.png`、`output/playwright/real-host-mobile-390x844.png`、`output/playwright/real-host-mobile-attachment.png`。桌面远程容器实测宽度 1440px，手机视口 390×844；触摸按钮与 Composer 无重叠。
+- 真实模型：通过自定义 OpenAI Chat Completions 兼容供应商完成隔离冒烟测试，输出 `PASS isolated real-model smoke` 与 `E2E PASS`；API Key 仅存在于测试进程内存，测试结束后清除。首次误输入到普通终端的旧 Key 已要求立即撤销，不作为验收凭据使用。
+
+# 2026-09-21 ZCode 桌面视觉基线迁移
+
+- 来源：`D:/projects/ZCode/packages/ui/src/styles.css`、`WorkspaceShellLayout.tsx`、`WorkspaceSidebar.tsx`、`prompt-editor/ChatPromptEditor.tsx`、`v4/ConversationComposer.tsx`、`v4/ConversationRowView.tsx` 与相邻 UI 文件。ZCode 根许可证为 Apache-2.0；归属记录位于 `THIRD_PARTY_NOTICES.md`，完整许可证保存为 `LICENSES/ZCode-Apache-2.0.txt`。
+- 本轮实现：深色主题桥接到 ZCode Zai Dark 色阶；侧栏默认/最小宽度改为 264px，标题与拖动区改为 48px，导航入口改为 32px；Composer 改为 672px 最大宽度、16px 圆角、1px 边框、12px 内边距、40–160px 输入高度、20px 行高和 28px 圆角矩形操作按钮；停止按钮使用中性表面。消息正文列收敛到 56rem，正文行高 1.75，用户消息宽度 36rem，工具/思考区使用 16px 节奏及 240px 详情上限。
+- 有意差异：保留 KeenCode 的 Tauri/ACP 业务接线、Goal/Plan/队列/附件、现有消息虚拟化和 Windows WebView2 合成边界；未直接替换为 ZCode 的 sticky Composer 或 turn-unit 虚拟列表，避免改变滚动和运行时语义。
+- 验证：`pnpm run typecheck`、`pnpm run lint:css`、`pnpm exec vitest run src/lib/layout.test.ts src/lib/theme.test.ts src/components/SettingsPage.test.ts src/components/lobe-chat/ConversationThread.test.tsx` 均通过，共覆盖 67 项第一轮测试与 57 项布局回归；`git diff --check` 无空白错误，仅有工作树既存 CRLF 提示。
+- 原生验收缺口：开发桌面进程持续运行并已接收 Vite HMR，但本轮 Computer Use 返回 `native computer APIs are disabled` 且应用清单为空，无法取得当前版本的原生窗口截图。历史截图和浏览器页面不能替代本轮原生验收，因此此项保持未完成。
+
+## 2026-09-21 ZCode 全局控件、设置页与移动布局收口
+
+- 共享控件：业务层的 Input、Select、Tabs、Switch、Card、Dialog、DropdownMenu 与 Tooltip 已统一经 `src/components/ui/` 引入；Appica/Base UI 只保留为本地 wrapper 的交互底层。默认尺寸按 ZCode 收敛为 Input/Select 28px、Tabs 32px、Switch 32x18px（小号 28x16px）。
+- 设置页：采用 48px 页头、268px 桌面导航、1023px 以下 68px 图标导航、896px 内容列和独立内容表面；Card、Dialog、Popover 使用同一组 ZCode 语义表面。
+- 移动端：760px 以下侧栏改为覆盖抽屉，资源栏改为右侧覆盖面板，主区保持全宽；首次进入 390px 视口默认收起侧栏。Composer 使用安全区和可视视口高度，软键盘不再通过固定布局高度遮住输入区。
+- 浏览器截图：`out/zcode-parity-current-1440.png`、`out/zcode-parity-current-dark-1440.png`、`out/zcode-parity-mobile-closed.png`。环境为 Windows、Playwright Chromium、deviceScaleFactor=1；视口分别为 1440x900 和 390x844。390px 截图确认主区宽度不再被 264px 侧栏挤压，欢迎标题、项目选择器和 Composer 均完整可见且无横向溢出。
+- 验证：`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、`pnpm build` 通过；全量 Vitest 162 个文件、1530 项测试全部通过。业务层目标 Appica 直接导入扫描为 0，仅本地 wrapper 保留底层依赖。
+- 未验收：Computer Use 当前仍无法枚举原生应用，以上截图来自同一 Vite 前端，不替代 Windows WebView2 原生窗口截图与逐像素 ZCode 对照。原生能力恢复后仍需覆盖桌面浅色/深色、设置页、长会话、菜单/弹窗与手机远程 Web 状态。
+
+## 2026-09-22 ZCode 工作台与当前 Windows WebView2 原生验收
+
+- 当前源码范围：深色首次启动、顶部 Logo/后退/前进/新会话、264px 侧栏、会话导航历史、Composer 40–160px 输入区及前后控制簇、结构化附件与 Mention、Markdown/代码块/Mermaid、Web 完整工作台和 Web 项目只读边界。
+- 原生环境：Windows 11、DPI 144（150%）；使用 `KEENCODE_BENCHMARK=1` 与隔离数据目录 `out/native-ui-qa-data` 运行当前 `pnpm dev:desktop`。进程 PID 33724，启动时间 `2026-09-22 03:40:44`；EXE 最后写入 `03:39:15`。日志记录 `agent_runtime_ready`、`host_ready` 和 `frontend_interactive`，确认截图对应本次工作树构建而非旧进程。
+- 原生截图：`C:/Users/chengliang/.codex/visualizations/2026/09/22/keen-code-native-qa/keencode-dev-isolated-dpi-aware.png`。Win32 DPI-aware `PrintWindow` 捕获为 1942×1243 物理像素，客户区 1920×1230；Logo、导航、窗口控制、侧栏底部、欢迎标题和 Composer 均完整，无右侧或底部裁切。
+- 当时截图取色：KeenCode 主区 `#161616`、侧栏与 Composer `#2B2B2B`；该记录只描述当时画面，后续源码复核确认 ZCode 的权威 `--color-sidebar` 为 `#161616`，卡片、输入框和菜单才是 `#2B2B2B`，侧栏已按后续「顶部项目上下文与深色侧栏修正」条目更正。此前低 DPI 截图出现的标题和 Composer 裁切属于 DPI 虚拟化捕获伪影。
+- 静态与构建验证：`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、生产 `pnpm run build` 通过；Vitest 172 个文件、1585 项测试通过；App 装配层门禁恢复为小于 2000 行。`pnpm test` 仅在 WSL release-version shell 夹具失败：测试进程未继承模拟 `gh` 函数且把 `$RUNNER_TEMP` 解析为空，其他 Node 门禁已单独通过。
+- 本次原生采证后的对齐：消息 Markdown h1/h2/h3 按 ZCode `text-ui-xl/lg/base` 收敛为 18/16/14px；Composer 原子 Mention 补齐前后 Backspace/Delete、嵌套节点与 IME 边界测试；侧栏增加使用真实 archive action 的“当前对话 / 已归档对话”切换和恢复。最终 Vitest 为 173 个文件、1590 项全部通过，生产构建与 CSS/设计系统门禁继续通过。
+- 未完成范围：隔离数据目录没有长会话，因此本次原生截图未覆盖 Thinking、工具详情、代码块、Mermaid、浅色主题、附件 hover/focus 和 390px 手机浏览器。当前协议也没有消息级 retry/fork/feedback，不能用无行为按钮模拟 ZCode；移动端仍按既定远程控制壳范围，不等同完整桌面工作台。
+
+## 2026-09-22 ZCode 工作台第二轮原生复验
+
+- 当前源码变化：会话态 Composer 已进入消息滚动视口末尾的 sticky dock；欢迎空态 Composer 保持原舞台布局。展开侧栏顶部删除重复的新建按钮，折叠态仍由主标题栏提供新建入口。侧栏会话行在 hover/focus 时移除时间占位并让操作簇进入 flex 流，标题不会被绝对定位按钮覆盖。
+- 消息与输入：Markdown 正文使用 `line-height: 1.75` 和 `letter-spacing: 0.025em`；Mention 使用结构化 `@` 文件/目录/插件、`#` 会话、`$` Skill，并按类型分组；最新有效 Assistant footer 固定为时间、复制、Fork、TurnMetrics，Fork 连接现有 `session/fork`，不为流式、失败、取消或草稿状态显示假操作。
+- 原生环境：沿用 Windows 11、DPI 144（150%）、隔离数据目录 `out/native-ui-qa-data` 和 PID 33724 的开发桌面。最新 DPI-aware `PrintWindow` 截图为 `C:/Users/chengliang/.codex/visualizations/2026/09/22/keen-code-native-qa/keencode-after-hmr-layout-dpi-aware.png`，物理窗口 1942x1243、客户区 1920x1230，进程 `Responding=True`。
+- 原生结论：旧截图顶部新建图标所在物理区域 `x=199..213, y=31..44` 有 76 个亮色像素，最新截图为 0，证明重复入口已移除。空态 Composer 可见边框为 `x=664..1673, y=636..861`（1010x226）；与修改前同区域逐像素比较差异为 0，证明 sticky 改造没有改变欢迎空态布局。
+- 静态验证：`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、生产构建通过；全量 Vitest 174 个文件、1595 项通过。该阶段 Appica 门禁仍保留 Avatar/Thumbnail 像素例外；此历史规则已在后续“最终颜色、排版与 Appica md 原生复验”中被无例外 `md` 规则取代。
+- 剩余证据缺口：隔离目录仍没有项目和长会话，本轮不能从原生窗口验证 sticky Composer 到达长列表尾部、Thinking、工具详情、代码块、Mermaid、Assistant footer/Fork、浅色主题和附件交互；这些状态不得用空态截图推断为已验收。日志另记录一条 React `useEffect` 依赖数组长度变化错误，当前窗口未崩溃，但需在最终原生验收前修复并确认控制台干净。
+
+### 消息细节与浅色主题桥接
+
+- 浅色共享控件补齐 Appica 语义变量映射，`foreground/background/border/primary` 及其层级均由 KeenCode 的 Zai Light 中性灰令牌提供，不再回落到组件库默认蓝灰色板；深浅主题由同一契约测试锁定。
+- 历史消息图片、媒体和文件附件统一为 ZCode 的 48px 轨道，内部文件图标保持 36px；选择器限定在 `.lobe-chat`，Composer 既有 48px 附件契约不受影响。
+- 消息代码块默认隐藏行号，代码字号为 14px，上下外边距 16px，header 为 `8px 12px` 且默认只显示语言，复制成功状态保持 2000ms；行级 focus/mark 元数据仍保留，Mermaid 预览不受影响。
+- 收起的流式 Thinking 不再每秒更新；重新展开按原始开始时间补算耗时。空白 reasoning segment 不再和 quiet-thinking 重复显示，折叠内容在 transition end 或最迟 300ms 后卸载，避免长 reasoning DOM 滞留。
+- 原生日志中的 React Hook 依赖长度警告已定位为 HMR 复用修改前 7 项依赖状态与当前 5 项静态依赖数组的开发期过渡警告；当前源码没有动态长度依赖数组，不用占位依赖掩盖。完整刷新或重启开发进程后需要复核该警告不再出现。
+- 当前定向验证：主题 14 项、代码块 7 项、Thinking/Conversation 54 项及附件契约通过；CSS、类型和设计系统门禁在本轮合并后统一复跑。长会话视觉状态仍需真实原生数据验收。
+
+### 长会话、工具工作组与侧栏动作
+
+- Thinking 运行态改用与 ZCode 同语义的 `animated-gradient-text`，4 秒文字渐变只作用于标题/状态文本，不再用覆盖整行的伪元素扫光。摘要规范化 CRLF 和空行后显示最后一个非空完整行，并在独立滚动视口中保持最新 token 可见；窄屏正文通过内层容器稳定裁切。
+- 工具行新增 `read/edit/execute/search/agent/changes/other` renderer 映射，映射只消费现有 `toolKind`、真实 `fileChanges` 和子 Agent 数据；DOM 暴露原始 kind、renderer 与 status。连续工作项间距统一为 ZCode 的 16px，命令使用等宽字体，changes 强化真实文件名，不伪造 KeenCode 协议中不存在的状态。
+- 长会话历史前插从“严格连续前缀高度”改为稳定 key 可见行锚点：记录首个可见行相对视口偏移，允许过滤旧行或非严格前插；首帧用估算高度补偿，ResizeObserver 获得实测高度后按相同 key 二次校正。候选有界，2 万行测试覆盖解析规模。
+- 侧栏会话行把 Pin 操作移到左侧 16px 状态槽：静止时显示运行、未读或置顶状态，hover/focus 时由 Pin 操作接管；右侧只保留归档和菜单，时间元数据在交互时让位。该结构与 ZCode task row 的 leading-slot/action-group 模型一致，同时保留 KeenCode 已有状态语义。
+- 验证：TypeScript、CSS、设计系统门禁和生产构建通过；长会话、性能、Thinking、Markdown、工具行、Conversation 与侧栏定向测试共 158 项通过。生产构建仍只有既存的 Tauri 动静态导入与大 chunk 警告。
+- 未完成原生证据：当前隔离数据仍没有长会话，无法在 Windows WebView2 中直接拍摄 Thinking 渐变、工具 renderer、代码块、附件、侧栏会话 hover 和前插锚点。前插行为目前由纯规则及性能测试证明，真实滚动坐标和动画视觉仍需带完整 Journal 的原生会话复验。
+
+### 隔离长会话原生夹具接线复核
+
+- 环境：Windows 11、WebView2、当前 debug 桌面；夹具根位于系统临时目录，模型端为仅监听 `127.0.0.1` 的确定性 OpenAI Chat Completions mock，固定测试 Token 仅存在于临时进程环境。未读取 `~/.keencode`、未使用真实供应商凭据、未写入仓库数据。
+- 生成路径：正式 `keencode-bench` 入口依次执行 ACP `initialize`、`session/new`、`session/set_config_option` 和 96 次 `session/prompt`，产生 96 回合、290 条权威 Journal 事件，Session 为 `session-a00f84301520ceead624b7b6b2869f934f8f5598f3ced63ca79167dd4aaf9ba0`。
+- 接线结论：桌面 Host 的 `session/list` 能从该数据根读取 1 个 Session；侧栏项目树另由 `projects.json` 驱动，benchmark 生成的 `project-locations` 不能替代 UI 项目登记。补入严格 `keencode/projects` v1 元数据后，`ipc.projects_list` 从 `count=0` 变为 `count=1`，原生窗口显示 `workspace` 项目。
+- 原生证据：`C:/Users/chengliang/AppData/Local/Temp/keencode-zcode-ui-9172cb729e37425c9cf67560f3f3c19e/native-long-session-with-project.png`。该图只证明当前桌面读取隔离项目登记和深色壳层，不证明项目已展开或长会话内容已渲染。
+- 本轮回归：`src/App.contract.test.ts`、侧栏层级/项目树、Thinking、工具行、Conversation、长会话锚点和主题桥接共 9 个文件、190 项测试通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system` 通过。
+- 仍未完成：当前会话未能通过可用的原生自动化接口展开项目并打开 Session，因此 Thinking、工具详情、代码块、附件、sticky Composer 和真实滚动坐标仍未取得 Windows WebView2 截图。不能以 Journal 条数、Host `session/list` 或项目已显示替代这些视觉验收。
+
+### 顶部项目上下文与深色侧栏修正
+
+- 顶部项目图标由静态提示改为真实下拉入口，展示项目名、完整路径和现有 worktree 分支，并复用当前项目绑定能力切换已登记项目；没有增加无行为按钮。长会话标题补齐 760/560/420px 响应式最大宽度。
+- 核对 `D:/projects/ZCode/packages/ui/src/styles.css` 后，深色 `--color-sidebar` 的权威值为 `#161616`，而卡片、输入框和菜单为 `#2b2b2b`。KeenCode 已将深色 `--dsw-specific-sidebar-fill` 修正为 `#161616`，并用主题契约测试锁定侧栏与抬升表面的层级差异。
+- 验证：全量 Vitest 177 个文件、1625 项通过；随后顶部上下文定向测试与 App 合约共 43 项通过，主题定向 15 项通过。`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、生产构建和 `git diff --check` 通过；构建仅保留既有 Tauri 动静态导入与大 chunk 警告。
+- 未完成：该批次尚未取得项目下拉打开态、长标题窄窗和修正后深色侧栏的 Windows WebView2 截图；长会话内容状态仍沿用上一节的原生证据缺口。
+
+### 会话行、消息节奏、Composer 与移动远程壳收口
+
+- 会话行：运行、未读、置顶、待回答与时间统一进入右侧 metadata 槽；桌面 hover/focus/menu-open 时由 Pin、归档和菜单动作接管，隐藏动作不再进入 Tab 顺序。无 hover 设备只常驻一个 44px overflow 入口，避免三个触摸按钮挤压 264px 侧栏标题。
+- 消息：相邻 user -> assistant 不再叠加两份 20px 间距，实际组间距收敛为 20px；Thinking 的 Brain 图标收敛为 16px，与 leading slot 一致。独立 Assistant、timeline、footer/action 的既有内部节奏保持不变。
+- Composer：placeholder 与正文统一从 0/0、20px 行高起排；普通文件附件增加扩展名或 MIME 类型副标题；添加按钮改为 ghost + 16px Plus 且打开时不旋转。工具栏使用 ResizeObserver 和实际宽度按优先级压缩，文件拖拽接入既有本地路径/浏览器 File 附件链路并显示 drop 状态。
+- 响应式：标题栏与右侧 action 建立稳定 slot 和 no-drag 边界；header、消息列和 Composer 改用命名 container query，右侧资源面板打开后按实际可用宽度收缩。移动 sticky Composer 删除重复的 20px 顶部空隙。
+- Mobile Remote：复用吸底状态，用户上滑后流式输出不再强制拉回底部，并提供回到底部入口；独立远程根壳挂载 visual viewport，同步安全区；会话抽屉增加 backdrop、outside click 和 Escape 关闭。
+- 验证：全量 Vitest 179 个文件、1642 项通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、设计门禁 Node 测试 9/9、生产构建和 `git diff --check` 通过。构建仍只有既存的 Tauri 动静态导入与大 chunk 警告。
+- 原生状态：以 `KEENCODE_BENCHMARK=1` 和系统临时隔离数据根启动当前 debug 桌面，日志记录 `agent_runtime_ready`、`host_ready`、`frontend_interactive`，证明当前工作树可进入原生前端。Computer Use 连续返回应用清单为空及浏览器连接失败，未能取得可信的当前窗口截图；本轮原生视觉、真实 iOS/Android 软键盘与长会话状态仍属于未完成门禁，不能用静态测试替代。
+
+### 主题、共享控件与 Composer surface 最终收口
+
+- 主题桥接：Tailwind `hover` 与 `ring` 分别映射到产品 `--bg-hover` 和 `--focus-ring`；Dialog、Popover 使用 ZCode 对应的 overlay/popover 边界语义。删除全局 `::selection` 覆盖，仅保留终端独立选择态，避免普通文本与 Portal 被终端色板污染。
+- 终端与状态色：xterm 不再在 TSX 中硬编码深色背景、前景、光标和选区，改为读取浅深主题变量并在 `data-theme` 变化时刷新现有终端。Git added/deleted/modified/renamed、文件 kind 与目录强调色均按 ZCode 的浅深主题分别定义。
+- 共享控件：Tabs 的 Appica 内层 padding 被归零并锁定 32px 轨道；Card 默认关闭 inset；Dialog 关闭 frame 并收敛为单层 16px padding；DropdownMenu 收敛为 128px 最小宽度与 4px 内边距；Tooltip 延迟为 0。设置页 breadcrumb 改为 ChevronRight，正文滚动区启用稳定 scrollbar gutter。
+- Composer surface：会话态 sticky dock 不再额外增加顶部 12px；56rem/72rem 内容上限扣除左右 32px dock padding。带上下文的草稿态使用 `background-subtle`、无显式边框和 ZCode `shadow-xl/5` 对应语义，不再呈现白色有边框的嵌套卡片。
+- Appica 尺寸：该阶段 `AGENTS.md` 曾允许 Avatar、Thumbnail 使用精确像素尺寸；当前规则已在后续“最终颜色、排版与 Appica md 原生复验”中收紧为所有 Appica 原语和本地 wrapper 无例外显式固定 `size="md"` / `inputSize="md"`。
+- 自动化证据：主题契约、共享控件、Composer surface 与设计系统门禁均有定向测试。最终全量 Vitest 为 179 个文件、1653 项全部通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、设计门禁 Node 测试 9/9、生产构建和 `git diff --check` 通过。生产构建仅保留既有的 Tauri 动静态导入与大 chunk 警告。
+- 未完成视觉证据：当前隔离桌面进程仍持续记录 `frontend_interactive`，但 Computer Use 本轮再次返回 `apps: []` 且浏览器连接失败，无法检查 computed geometry 或获取可信 Windows WebView2 截图。深浅主题、长会话、Thinking、工具、代码块、附件、hover/focus、sticky Composer 和真实 iOS/Android 安全区仍需外部实机验收。
+
+### 浏览器实测与侧栏密度复核
+
+- 环境：Windows、Playwright Chromium、`http://127.0.0.1:1421` 当前开发前端；桌面视口 1440×900，移动视口 390×844，deviceScaleFactor=1。Console 在工作台、设置页和移动侧栏流程中均为 0 error、0 warning。
+- 截图：`output/playwright/zcode-final-current-1440.png`、`output/playwright/zcode-final-current-light-1440.png`、`output/playwright/zcode-final-current-mobile-dark-clean.png`、`output/playwright/zcode-final-settings-dark-card-fixed.png`。桌面深浅主题均完整显示侧栏、窗口控制、欢迎标题和 Composer；移动关闭态标题与 Composer 无横向溢出。
+- 移动交互：390px 下从折叠标题栏打开侧栏后，点击右侧遮罩区域使 `aside.sidebar[aria-hidden]` 从 `false` 变为 `true`，证明 outside-click 路径实际工作；自动点击遮罩元素中心会落在侧栏下方并被拦截，因此验收使用真实可见遮罩区域坐标，不把定位器中心失败误判为产品故障。
+- Card 修正：设置页实测暴露出 Appica `card` 外层和 `card-content` 同时绘制边框，形成卡片套卡片。共享 wrapper 已固定 `frame=false`，外层只承担布局和文字语义，边框、背景、gap 与 padding 归入单一 content surface；修正截图中系统设置卡只保留一层圆角边界。
+- 侧栏密度：项目会话默认显示与“显示更多”批次由 5 条提升到 ZCode 的 20 条；右侧 metadata 槽不再固定预留 72px。长标题使用 24px 末端渐隐，持续悬停 1 秒后按 40px/s 循环展示完整标题，并在 reduced-motion 下禁用运动。
+- 有意约束：等待用户输入 Badge 继续使用 Appica `size="md"`。ZCode 的 20px 胶囊与项目新增的“所有 Appica 原语统一 md”强制规则冲突，本轮不通过 `sm` 或业务 CSS 覆盖绕过该规则。
+- 证据边界：上述为真实浏览器渲染和交互，不替代 Windows WebView2 原生窗口、长会话内容或 iOS/Android 软键盘实机验收。
+
+### ZCode 最终视觉差异收口
+
+### 共享控件、消息排版与 Composer 队列最终复核
+
+- 共享控件按 ZCode 当前源码补齐 Button、Input、Select、Textarea、Tabs、Switch、Dialog 与 DropdownMenu 的默认 `md` 几何、焦点和状态语义；所有 Appica 原语继续显式固定 `size="md"` / `inputSize="md"`，`DSG005` 门禁未发现例外。
+- 消息排版补齐文件链接图标、自定义链接文本、普通链接下划线、历史附件的媒体/文件布局、完成态 Thinking 折叠行为和 Assistant 操作顺序；无详情工具行不再伪装为 disabled Button。
+- Composer 空态改用 KeenCode 现有 Logo 和正常 flex 流；有草稿或附件时运行态保持 Send，仅空草稿时显示 Stop。队列增加真实的拖拽排序和 Send now，后者复用现有 flush/Host 仲裁路径，不创建前端伪 pause 状态。
+- 修复被误替换为 ZCode 生产产物的根 `index.html`，恢复 KeenCode 的 Vite 入口、品牌元数据和 `/src/main.tsx` 加载；生产构建重新通过。
+- 浏览器证据：Windows Playwright Chromium、deviceScaleFactor=1；`output/playwright/zcode-parity-final-dark-1440.png`、`output/playwright/zcode-parity-final-light-1440.png`、`output/playwright/zcode-parity-final-mobile-dark-390.png`，视口分别为 1440x900 与 390x844。Console 为 0 error、0 warning，欢迎标题、Composer、窗口控制和移动窄屏均无裁切或横向溢出。
+- 合并后验证：全量 Vitest 182 个文件、1672 项通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、`pnpm run build` 和 `git diff --check` 通过。构建只保留 Tauri 动静态导入与大 chunk 的既有警告。
+- 证据边界：本轮浏览器截图不能替代 Windows WebView2；真实长会话中的 Thinking、工具详情、代码块、附件、队列拖拽和 sticky Composer 仍缺当前原生窗口交互证据，iOS/Android 软键盘也尚未实机复核。
+
+### 当前 Windows WebView2 原生空态复验
+
+- 环境：Windows 11、当前 `src-tauri/target/debug/keencode-desktop.exe`，使用 `KEENCODE_BENCHMARK=1`、隔离数据目录 `out/native-ui-final-data-2` 和隔离 WebView2 数据目录 `out/native-ui-final-webview-2`；进程 PID 36564，窗口标题 KeenCode，`Responding=True`。
+- 启动证据：开发进程记录 `backend_setup`、`settings_ready`、`agent_runtime_ready` 和 `host_ready`；WebView2 CDP 目标标题为 KeenCode，URL 为 `http://127.0.0.1:1421/`。页面 `readyState=complete`，`#root` 已挂载，视口为 1280x820，`data-theme=dark`，`--bg-app=#161616`。
+- 原生 WebView 截图：`output/playwright/zcode-parity-native-cdp.png`。截图直接来自该 Tauri 窗口的 WebView2 CDP surface，覆盖深色侧栏、窗口控制、欢迎标题、Logo 和 Composer；内容无裁切、重叠或横向溢出。
+- 控制台证据：启用 CDP `Runtime`、`Log` 和 `Page` 后执行忽略缓存的真实 reload，采集到 5 条 Console/Log 事件，Runtime exception、console error 和 Log error 均为 0。
+- 发现并排除的旧进程问题：复验前的旧桌面进程仍停留在早期 Vite 404 页面，已按 PID 停止并使用当前源码和独立数据根重启；浏览器 200 响应没有被误当作旧原生窗口可用的证据。
+- 剩余范围：该隔离数据根为空，因此此截图只证明当前原生空态与 Composer surface。真实长会话、工具、附件、队列拖拽、sticky Composer、浅色原生主题以及手机实机仍需独立证据。
+
+### Appica Toast 原生黑屏回归修复
+
+- 复现：使用已有隔离长会话数据根打开项目时，夹具的 `session/list` 路径过滤返回 `-32602`。业务错误提示触发 Appica Toast 后，`useToastManager()` 的 manager 引用变化使 `MainStage` effect 重复调用 `add`，最终出现 `Maximum update depth exceeded`，React 根树卸载并留下纯色空白窗口。
+- 修复：`MainStage` 使用 `publishedToastRef` 按业务提示去重；提示清空后重置哨兵，因此相同文案可以在后续独立错误中再次显示，同时 manager 引用变化不会重复入队。
+- 原生复验：重载当前 Tauri WebView2 后再次打开 `workspace`，底层 `session/list` 仍按夹具现状返回 `-32602`，但应用根节点保持挂载且窗口不再空白；`keencode-desktop.crash.jsonl` 没有新增 React uncaught 记录。截图为 `output/playwright/zcode-parity-native-long-project-open-fixed.png`。
+- 自动化：新增 App 装配契约覆盖 Toast 去重条件；全量 Vitest 182 个文件、1673 项通过，`pnpm run typecheck`、生产构建和相关 `git diff --check` 通过。构建仅保留既有 Tauri 动静态导入和大 chunk 警告。
+- 边界：旧夹具的项目过滤错误仍阻止长会话实际展开，不能以“未黑屏”替代长会话视觉验收；该问题需要继续沿 Host 项目授权/路径规范化链路定位。
+- Composer：带上下文状态恢复 ZCode 的双层 surface，外层保留 `background-subtle` 与 `shadow-xl/5`，内层输入框继续保留边框、输入背景和自身阴影；此前“单层 surface”的阶段性记录已被源码复核纠正。
+- 消息：有序列表改回 ZCode 的 `decimal inside`，无序列表使用 `disc outside` 与 20px 缩进；代码块标题复用现有文件类型解析显示图标；工具摘要使用自然宽度 `inline-flex`，运行态由动作文字渐变表达，不再重复显示右侧“运行中”。浅色用户气泡按 ZCode 收敛为 3% 黑色表面，深色保持 5% 白色表面。
+- 主题与原生表面：最终样式层中和 Appica 的全局 selection 与 outline，组件自身 focus ring 保持可见；Input/Select 不再清除 Appica 焦点环。主窗口和 `browser-*` 子 WebView 在主题应用及创建后同步 `--bg-app`，Rust 启动阶段不再固定写入深色背景。
+- 侧栏：普通会话行改为 32px，运行/未读/错误状态保留在左侧状态槽，待回答 Badge 位于标题行且不随 hover/focus 消失；置顶区为始终展开的静态标题。归档视图继续显示置顶区，归档行使用 48px 双行布局并接入现有 `session/delete` 永久删除链路。390px 移动抽屉按 ZCode 限制为视口 50%。
+- 浏览器证据：Windows Playwright Chromium、deviceScaleFactor=1，桌面 1440x900 与移动 390x844。截图为 `output/playwright/zcode-parity-final-dark-1440.png`、`output/playwright/zcode-parity-final-light-1440.png`、`output/playwright/zcode-parity-final-mobile-dark-390.png`、`output/playwright/zcode-parity-final-mobile-sidebar-390.png`；控制台 0 error、0 warning。
+- 自动化验证：全量 Vitest 181 个文件、1661 项通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system` 和生产构建通过。构建仅保留既有 Tauri 动静态导入与大 chunk 警告。
+- 仍未替代的证据：Computer Use 仍返回空应用清单，无法对本轮主题原生背景同步和完整长会话状态做 Windows WebView2 自动化截图；真实 iOS/Android 软键盘与安全区也仍需实机验收。
+
+### 当前格式长会话与 sticky Composer 原生复验
+
+- 夹具：使用当前 `keencode-bench` 和本机确定性 OpenAI Chat mock 生成 40 回合、122 条 Journal 事件的新格式 Session；隔离数据根位于系统临时目录，不读取或修改用户真实数据。旧夹具不再作为“无旧数据兼容”项目的验收依据。
+- 接线修正：首次 `session/list` 的索引扫描识别到 1 个 Session，但授权结果为空。根因不是 Host 或页面回归，而是手工夹具的 `projects.json` 使用反斜杠路径；产品正常持久化格式为前端斜杠规范路径。仅修正隔离夹具后，`session/list` 返回该 Session，项目树显示并可打开长会话。
+- Host 证据：原生日志记录 `session_load_total=61ms`、`journal_bytes=115975`、`event_records=122`、`transcript_records=80`、`turns=40`、`model_rounds=40`；历史分页完成后页面实际渲染标题、列表、代码块、用量和用时。根文档 `scrollWidth=clientWidth=1280`，没有页面级横向溢出。
+- 原生截图：`output/playwright/zcode-parity-native-long-session-current-2.png` 记录 Windows WebView2 的长会话首屏。截图暴露离底时消息会从 sticky Composer 的透明 padding 中透出，不能以“组件已 sticky”视为完成。
+- 遮罩修复：消息层按 ZCode 当前实现，在离底阅读时相对滚动视口应用 96px 透明区与 24px 渐隐区；遮罩只作用于消息层，Composer 和“回到底部”按钮保持可见可点，贴底后立即移除遮罩，避免最后一条消息被无意义淡出。修复后的原生截图为 `output/playwright/zcode-parity-native-long-session-mask-fixed.png`。
+- 运行证据：WebView2 CDP 通过真实 `Input.dispatchMouseEvent(mouseWheel)` 使滚动位置从底部移动到 `15893.33`；消息层计算得到 `linear-gradient(... black 643px, transparent 667px ...)`、`mask-size: 100% 763px`，截图中 Composer 下方不再透出后续消息。
+- 自动化：`ConversationThread` 定向测试 49 项、`pnpm run typecheck`、`pnpm run lint:css` 和 `pnpm run check:design-system` 通过；契约测试锁定消息层 ref、滚动监听、96/24px 参数、WebKit mask 和贴底清除路径。
+- 证据边界：这次已补齐 Windows WebView2 长会话、Markdown、虚拟化、sticky Composer、滚轮离底和无横向溢出证据；夹具不含工具、附件和问答，因此这些原生状态仍由既有组件测试覆盖。真实 iOS/Android 软键盘、安全区和前后台恢复仍未实机验收，不能据此标记整体 UI 目标完成。
+
+### 最终颜色、排版与 Appica md 原生复验
+
+- Appica 尺寸规则收紧：`AGENTS.md` 规定所有 `@appica/ui-react/*` 原语和本地 wrapper 的 `size` / `inputSize` 无例外显式使用 `md`；Avatar、Thumbnail、CopyButton 不再允许像素尺寸或省略尺寸。`DSG005` 同步检查缺失、非 `md` 字面量和表达式尺寸，Node 门禁测试 10/10 通过。
+- 主题 role bridge：Appica 的 primary、secondary、destructive foreground 分别映射到产品语义 token，输入聚焦边界与 ZCode Zai 主题的 `border-hover` 语义一致；主窗口仍通过 `data-theme`、`.dark`、`.theme-zai-*`、`color-scheme` 与 `--bg-app` 同步原生 WebView 背景。
+- 消息排版：Markdown 水平线恢复；strong、普通链接、表格字号、单元格间距、换行、表头和 hover 状态按 ZCode 当前源码调整。主审核进一步删除表格旧的 `1.5` 行高覆盖，并采用 `border-separate`、`border-spacing: 0`、`w-max min-w-full` 对应盒模型，使表格继承正文 `1.75` 行高。
+- 侧栏：外壳固定 `overflow: hidden`，唯一滚动所有者为内部 Appica `OverlayScroll` viewport，避免双滚动条和侧栏滚动位置分叉。
+- Windows WebView2：当前 debug 桌面、隔离数据根、1280x820 CSS 视口。深色截图为 `output/playwright/zcode-parity-native-final-long-dark-20260922.png`，浅色截图为 `output/playwright/zcode-parity-native-final-long-light-20260922.png`；两种主题下 `scrollWidth=clientWidth=1280`、ErrorBoundary 数量为 0，浅色 `--bg-app=#f8f8f8`。复验后已将隔离桌面恢复为深色主题并保持运行。
+- 自动化：全量 Vitest 182 个文件、1678 项通过；`pnpm run typecheck`、`pnpm run lint:css`、`pnpm run check:design-system`、`pnpm run build` 和 `git diff --check` 通过。生产构建只保留现有 Tauri 动静态导入及大 chunk 警告。
+- 证据边界：当前长会话夹具没有表格、工具详情、附件和问答，不能用这两张截图替代这些状态的原生视觉证据；真实 iOS/Android 中文 IME、软键盘、安全区、前后台恢复和断网重订阅仍未实机验证，因此整体目标保持未完成。
+
+### Composer 弹层、移动模拟与富状态原生复验
+
+- Composer 弹层：Appica Popover 继续负责定位，`.composer-plus--portal` 保持正常流测量；plus、mention 和 prompt history 三类面板在 Popover 内容盒内统一 `width: 100%`，避免通用菜单的 `max-content` 使弹层窄于输入框。Windows WebView2 实测 plus 面板约 `645.33px`、输入框约 `646.67px`，差异来自 content-box 与 border-box，不是横向溢出；定向测试锁定三类面板宽度规则。
+- 移动模拟：同一 Windows WebView2 通过 CDP 模拟 `390x844` CSS 视口，截图为 `output/playwright/zcode-parity-webview2-emulated-mobile-long-390x844.png` 与 `output/playwright/zcode-parity-webview2-emulated-mobile-long-closed-390x844.png`。根文档没有横向溢出；侧栏关闭后 Composer 几何约为 `x=12px`、`width=366px`、底边 `830px`。该证据只证明 WebView2 的窄视口响应式，不等同于 iOS/Android 实机、中文 IME、软键盘或安全区验收。
+- 富状态夹具：使用隔离数据根 `C:/Users/chengliang/AppData/Local/Temp/keencode-zcode-ui-rich-20260922-a` 写入当前格式 Journal 序号 `124-129`，包含图片附件、Read 工具请求/开始/完成、Reasoning、工具结果、Markdown 表格、代码块与 Turn 完成。原生 DOM 确认 1 个 Markdown 表格、1 个 `data-testid="timeline-tool"` 且状态为 `completed`、1 个 `att-card--image` 附件卡和可见 sticky Composer。
+- 富状态截图：`out/native-rich-webview2-20260922.png` 清晰覆盖表格、代码块和 Composer；`out/native-rich-webview2-tool-visible-20260922.png` 覆盖已展开的“已读取 native-rich-fixture.png”工具状态。附件卡资源链和 DOM 已确认，但程序化滚动后吸底逻辑会将卡片移出视口，现有附件截图不能作为附件视觉证据。
+- 当前门禁：工具、表格、代码块与 sticky Composer 已有 Windows WebView2 证据；附件可见截图、AskUser 原生状态和真实 iOS/Android 中文 IME、软键盘、安全区、前后台恢复、断网重订阅仍未完成，不能据此标记整体 UI 对齐完成。

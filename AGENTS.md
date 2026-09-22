@@ -109,11 +109,10 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
 ## 依赖与参考项目边界
 
-- 允许通过 npm/pnpm、Cargo 正常声明和使用第三方依赖，遵守其许可证；优先复用已有依赖，不将依赖源码复制进业务目录或以 vendoring 方式内置第三方实现。
-- 开源项目仅用于参考学习架构、协议、交互行为和技术取舍。先提炼需求与约束，再基于 KeenCode 的现有架构独立实现；不直接复制、移植、翻译或局部改写上游实现，包括业务代码、组件、CSS 和作为产品行为实现的提示词模板。
-- 改名、替换品牌、调整选择器、转换语言或删除来源注释，都不构成独立实现。参考记录应说明学到了什么及本项目的设计取舍，不以“参考”掩盖源码复制。
-- 现有 UI 复用与 shadcn CLI 约定不构成复制外部源码的豁免。使用现有仓库组件；需要新增能力时先检查是否能组合已有组件或通过正常包依赖实现，不直接导入外部组件源码。
-- 发现历史复制内容时，明确记录来源、使用位置和影响范围，按任务范围用正常依赖或独立实现替换。替换完成并确认归属要求前，保留必要许可证与版权声明；不得仅删除声明、放宽来源检查或修改名称来宣称已清理。
+- 允许通过 npm/pnpm、Cargo 正常声明和使用第三方依赖，遵守其许可证；优先复用已有依赖。
+- 经用户明确授权，KeenCode 前端可以直接复用 Apache-2.0 许可的 ZCode UI 组件与 CSS，以 ZCode 作为桌面和 Web 界面的视觉基线；复用范围不扩展到协议、运行时、提示词、凭据或产品数据。
+- 复制或改编第三方源码时，必须核对许可证，保留必要的版权与许可证文本，并在 `THIRD_PARTY_NOTICES.md`、`DESIGN.md` 或对应源码附近记录来源和影响范围。不得通过改名、删除声明或放宽门禁隐藏来源。
+- 其他未获明确授权的外部项目仍仅用于参考；需要引入其源码时必须先确认许可与归属要求。
 - `pnpm run check:clean-room` 仅检查部分来源名称与参考描述，不能证明源码原创，也不能把所有关键词命中认定为复制。来源判断需要结合文件内容、引入历史和实际引用。
 
 ## 实现与交付标准
@@ -125,3 +124,31 @@ cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 - 关键行为变更增加能保护行为的测试，避免只复述实现。失败时修复原因，不跳过检查、削弱断言或屏蔽诊断来制造通过。
 - 完成前审查 `git diff` 和 `git diff --check`。报告改了什么、验证结果及未验证范围，不把尝试执行当作通过。
 - 仅在用户要求时提交或推送。获准提交后按功能点拆分，提交信息使用中英双语，只暂存本次相关改动；不擅自 amend、重写历史或绕过 hooks。
+
+
+## Appica UI（强制规则）
+
+Appica UI component index (fetch before using a component you haven't used before):
+https://appica.dev/ui/react/llms.txt
+
+- Tailwind CSS v4 only. Do NOT create a `tailwind.config.js` - v4 config lives in CSS via `@theme`.
+  If the project is on v3, convert unsupported syntax rather than downgrading the components.
+- Scan the library for class names or everything renders unstyled: `@source '../node_modules/@appica/ui-react/dist';`
+  in the stylesheet that imports Tailwind. The path is relative to that stylesheet - count the `../`
+  needed to reach the project root. A bare package name resolves to nothing and fails silently.
+- React 19 is a hard requirement. No `forwardRef` - `ref` is a plain prop.
+- Import from the subpath, one component per import:
+  `import { Button } from '@appica/ui-react/button'`.
+- **尺寸统一**：所有直接使用或由本地 wrapper 封装的 `@appica/ui-react/*` 原语，其 `size` 与 `inputSize` 必须统一并显式写为 `md`，分别使用 `size="md"` 或 `inputSize="md"`；不得省略尺寸、使用其他尺寸变体、传入像素表达式，或通过样式覆盖模拟其他尺寸。KeenCode 的本地 UI wrapper 内部同样必须传 `md`，wrapper 自身的语义尺寸不应透传为 Appica 的非 `md` 尺寸。
+- 该尺寸规则适用于业务层直接使用和本地封装的 Appica 组件；提交前运行 `pnpm run check:design-system`，由 `DSG005` 门禁阻止未批准的尺寸变体。图标的像素 `size` 不属于 Appica 组件尺寸规则。
+- Never write hex colors, px radii, or duration literals. Use the role-based tokens:
+  `bg-background-muted`, `text-foreground-intense`, `border-border-strong`, `var(--radius-md)`.
+  Full list: https://appica.dev/ui/docs/react/colors.md
+- Never write hue-based utilities (`bg-gray-100`, `text-slate-600`). The palette is organized by
+  role, not hue.
+- Prefer v4 variant syntax (`*:`, `**:`, `data-*:`, `not-*:`) over `[&_...]` arbitrary selectors.
+- For a link styled as a button, put `buttonVariants(...)` on the `<a>` - never `<Button render={<a/>}>`.
+- Put `className` overrides on the wrapper component, not on the JSX passed to `render`.
+- Do not hand-roll a component that exists in the library. Check the component list first:
+  https://appica.dev/llms.txt
+- Every documentation page is served as clean markdown at `<url>.md` - fetch that, not the HTML.
