@@ -45,7 +45,9 @@ struct TerminalExited {
 }
 
 struct TerminalSession {
-    writer: Box<dyn Write + Send>,
+    /// 写句柄按会话独立加锁：写入期间不持有 sessions 全局锁，单会话
+    /// 输入缓冲满（子进程停读）时不会拖死其他终端与主线程。
+    writer: std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>>,
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
 }
@@ -230,7 +232,7 @@ pub fn terminal_create(
     // take_writer / try_clone_reader 失败时，已启动的 shell 子进程必须就地
     // 收割，否则每次失败都会泄漏一个进程与句柄。
     let writer = match pair.master.take_writer() {
-        Ok(writer) => writer,
+        Ok(writer) => std::sync::Arc::new(std::sync::Mutex::new(writer)),
         Err(error) => {
             let mut child = child;
             reap_child(&mut child);
@@ -326,14 +328,19 @@ pub async fn terminal_write(
     // 输入缓冲满（子进程停读）时只拖慢本次写入，不冻结 UI 与其他终端。
     let manager = manager.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut sessions = manager.sessions.lock();
-        let session = sessions
-            .get_mut(&id)
-            .ok_or_else(|| "终端不存在或已经退出".to_owned())?;
-        session
-            .writer
+        // 只在拿取句柄时持有 sessions 锁；阻塞写使用会话独立写锁，
+        // 其他终端与 close/resize 不再被单会话卡死的写拖住。
+        let writer = {
+            let sessions = manager.sessions.lock();
+            sessions
+                .get(&id)
+                .map(|session| std::sync::Arc::clone(&session.writer))
+                .ok_or_else(|| "终端不存在或已经退出".to_owned())?
+        };
+        let mut writer = writer.lock().map_err(|_| "终端写入器被占用".to_owned())?;
+        writer
             .write_all(&data)
-            .and_then(|_| session.writer.flush())
+            .and_then(|_| writer.flush())
             .map_err(|error| terminal_error("写入终端失败", error))
     })
     .await
