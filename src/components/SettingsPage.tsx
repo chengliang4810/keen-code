@@ -1,9 +1,9 @@
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { NumberField } from "@appica/ui-react/number-field";
 import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
 import { Button } from "@/components/ui/button";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Slider } from "@appica/ui-react/slider";
 import {
   isUiFontSize,
@@ -28,6 +28,7 @@ import {
   IconArrowLeft,
   IconArchive,
   IconCrop,
+  IconChevronRight,
   IconDesktop,
   IconSun,
   IconMoon,
@@ -71,6 +72,8 @@ import { AgentsPanel } from "@/components/AgentsPanel";
 import { AnalyticsSettingsPanel } from "@/components/AnalyticsSettingsPanel";
 import { RequestHistoryPanel } from "@/components/RequestHistoryPanel";
 import { PersonalizationSettingsPanel } from "@/components/PersonalizationSettingsPanel";
+import { RuntimeObservabilityPanel } from "@/components/RuntimeObservabilityPanel";
+import { WebHostSettingsPanel } from "@/components/WebHostSettingsPanel";
 import {
   AppUpdateSection,
   type AppUpdateBusy,
@@ -80,6 +83,7 @@ import type {
   AppUpdateStatus,
   TerminalShell,
   TerminalShellOption,
+  WebHostSettings,
 } from "@/lib/api";
 import {
   createT,
@@ -96,7 +100,7 @@ import {
   SelectGroupLabel,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import {
   ColorSwatchPicker,
@@ -205,6 +209,9 @@ export interface SettingsPageProps {
   /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。 */
   webServiceUrl: string;
   onWebServiceUrl: (value: string) => void;
+  /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
+  webHostSettings: WebHostSettings;
+  onWebHostSettings: (value: WebHostSettings) => void;
   /** 当前持久化的已归档对话。 */
   archivedSessions?: readonly ArchivedSessionItem[];
   /** 将指定对话恢复到工作台。 */
@@ -270,7 +277,7 @@ function NavIcon({
   if (name === "requests") return <IconList size={size} />;
   if (name === "info") return <IconInfo size={size} />;
   if (name === "personalization") return <IconSummary size={size} />;
-  if (name === "analytics") return <IconActivity size={size} />;
+  if (name === "analytics" || name === "observability") return <IconActivity size={size} />;
   return <IconSettings size={size} />;
 }
 
@@ -357,6 +364,8 @@ export function SettingsPage({
   onArchiveRetentionDays,
   webServiceUrl,
   onWebServiceUrl,
+  webHostSettings,
+  onWebHostSettings,
   archivedSessions = [],
   onRestoreArchivedSession,
   onDeleteArchivedSession,
@@ -504,6 +513,7 @@ export function SettingsPage({
     <NavigationItem key={n.id}>
     <NavigationLink
       key={n.id}
+      size="md"
       href={buildSettingsHash({ section: n.id })}
       value={n.id}
       onClick={(event) => {
@@ -619,7 +629,23 @@ export function SettingsPage({
       </aside>
 
       <div className="settings-page__content">
-        <main className="settings-page__main" id="settings-main" tabIndex={-1}>
+        <div className="settings-page__content-frame">
+          {/* 顶栏同时承担拖动区与当前设置路径，正文滚动不影响窗口操作区。 */}
+          <div
+            className="settings-page__header"
+            data-tauri-drag-region
+            aria-label={t("settings.navigation")}
+          >
+            <span className="settings-page__breadcrumb-root">
+              {t("settings.title")}
+            </span>
+            <span className="settings-page__breadcrumb-separator" aria-hidden="true">
+              <IconChevronRight size={14} />
+            </span>
+            <span className="settings-page__breadcrumb-current">{title}</span>
+          </div>
+          <main className="settings-page__main" id="settings-main" tabIndex={-1}>
+            <div className="settings-page__body">
           <div className="settings-page__heading">
             <span className="settings-page__title-icon" aria-hidden="true">
               <NavIcon name={sectionNav.icon} size={20} />
@@ -828,6 +854,15 @@ export function SettingsPage({
                   </div>
                 </div>
               </Card>
+
+              <h2 className="settings-page__h2" id="settings-anchor-web-host">
+                {t("settings.webHost.title")}
+              </h2>
+              <WebHostSettingsPanel
+                locale={locale}
+                settings={webHostSettings}
+                onSettingsChange={onWebHostSettings}
+              />
 
               <h2 className="settings-page__h2">
                 {t("settings.general.notifications")}
@@ -1153,7 +1188,7 @@ export function SettingsPage({
                       );
                       if (selected && isThemeSkinId(selected.id)) onSkin(selected.id);
                     }}
-                    size="xl"
+                    size="md"
                   >
                     {THEME_SKINS.map((pack) => {
                       const label = t(
@@ -1453,6 +1488,52 @@ export function SettingsPage({
           </div>
         )}
 
+        {section === "observability" && (
+          <RuntimeObservabilityPanel
+            labels={{
+              title: t("settings.observability.title"),
+              description: t("settings.observability.description"),
+              refresh: t("settings.observability.refresh"),
+              refreshing: t("settings.observability.refreshing"),
+              export: t("settings.observability.export"),
+              exporting: t("settings.observability.exporting"),
+              loading: t("settings.observability.loading"),
+              unavailable: t("settings.observability.unavailable"),
+              events: t("settings.observability.events"),
+              traces: t("settings.observability.traces"),
+              ttftP50: t("settings.observability.ttftP50"),
+              ttftP95: t("settings.observability.ttftP95"),
+              resources: t("settings.observability.resources"),
+              crashes: t("settings.observability.crashes"),
+              dropped: t("settings.observability.dropped"),
+              startup: t("settings.observability.startup"),
+              latestResource: t("settings.observability.latestResource"),
+              latestTrace: t("settings.observability.latestTrace"),
+              latestCrash: t("settings.observability.latestCrash"),
+              noData: t("settings.observability.noData"),
+              noCrashes: t("settings.observability.noCrashes"),
+              noResources: t("settings.observability.noResources"),
+              noStartup: t("settings.observability.noStartup"),
+              metric: t("settings.observability.metric"),
+              count: t("settings.observability.count"),
+              average: t("settings.observability.average"),
+              range: t("settings.observability.range"),
+              cpu: t("settings.observability.cpu"),
+              processMemory: t("settings.observability.processMemory"),
+              privateMemory: t("settings.observability.privateMemory"),
+              processCount: t("settings.observability.processCount"),
+              frontendMemory: t("settings.observability.frontendMemory"),
+              domNodes: t("settings.observability.domNodes"),
+              eventLoopLag: t("settings.observability.eventLoopLag"),
+              longTasks: t("settings.observability.longTasks"),
+              phase: t("settings.observability.phase"),
+              elapsed: t("settings.observability.elapsed"),
+              status: t("settings.observability.status"),
+              time: t("settings.observability.time"),
+            }}
+          />
+        )}
+
         {section === "requests" && (
           <RequestHistoryPanel
             locale={locale}
@@ -1624,7 +1705,9 @@ export function SettingsPage({
             </div>
           </Card>
         )}
-      </main>
+            </div>
+          </main>
+        </div>
       </div>
 
     </div>

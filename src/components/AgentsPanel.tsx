@@ -1,9 +1,9 @@
-import { Input } from "@appica/ui-react/input";
-import { Textarea } from "@appica/ui-react/textarea";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { NumberField } from "@appica/ui-react/number-field";
 import { Field, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 子智能体：查看内置定义并管理 KeenCode 全局定义。 */
@@ -28,7 +28,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { shortPathLabel } from "@/lib/extensionsUi";
@@ -94,7 +94,7 @@ export function AgentDetailView({
     <div className="ext-agent-detail" data-testid="agent-detail">
       <div className="ext-item__head">
         <strong className="ext-item__name">{detail.name}</strong>
-        <Badge size="xs" variant={detail.source === "global" ? "primary-outline" : "soft"}>
+        <Badge size="md" variant={detail.source === "global" ? "primary-outline" : "soft"}>
           {detail.source === "global"
             ? tr("agents.source.global")
             : detail.source === "plugin"
@@ -447,7 +447,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
                     >
                       <strong className="ext-item__name">{agent.name}</strong>
                     </Button>
-                    <Badge size="xs" variant={agent.source === "global" ? "primary-outline" : "soft"}>
+                    <Badge size="md" variant={agent.source === "global" ? "primary-outline" : "soft"}>
                       {agent.source === "global"
                         ? tr("agents.source.global")
                         : agent.source === "plugin"
@@ -519,7 +519,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
           </div>
           <Field className="ext-agent-create__turns">
             <FieldLabel htmlFor="agent-max-turns">{tr("agents.maxTurns")}</FieldLabel>
-            <NumberField id="agent-max-turns" min={1} value={maxTurns ? Number(maxTurns) : null} onValueChange={(value) => setMaxTurns(value == null ? "" : String(value))} />
+            <NumberField size="md" id="agent-max-turns" min={1} value={maxTurns ? Number(maxTurns) : null} onValueChange={(value) => setMaxTurns(value == null ? "" : String(value))} />
           </Field>
           <Field className="ext-agent-create__description">
             <FieldLabel htmlFor="agent-description">{tr("agents.description")}</FieldLabel>
@@ -567,7 +567,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
           </section>
           <Field className="ext-agent-create__prompt">
             <FieldLabel htmlFor="agent-prompt">{tr("agents.prompt")}</FieldLabel>
-            <Textarea id="agent-prompt" className="ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
+            <Textarea inputSize="md" id="agent-prompt" className="ext-agent-textarea" rows={7} value={prompt} onChange={(event) => setPrompt(event.target.value)} />
           </Field>
           <div className="ext-agent-create__agents-md">
             <div>

@@ -5,7 +5,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "./select";
 
 export type MultiSelectOption = {
   value: string;

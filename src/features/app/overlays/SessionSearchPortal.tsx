@@ -6,8 +6,8 @@ import {
   Dialog,
   DialogContent,
   DialogTitle,
-} from "@appica/ui-react/dialog";
-import { Input } from "@appica/ui-react/input";
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   IconClose,
   IconFolder,
@@ -32,6 +32,8 @@ export interface SessionSearchPortalProps {
   returnFocusRef: RefObject<HTMLElement | null>;
   hits: SessionSearchHits;
   projects: Project[];
+  /** Web Host 项目只读，不显示添加项目入口。 */
+  canWriteProjects: boolean;
   sessions: SessionRow[];
   activeProject: Project | null;
   openSession: OpenSessionAction;
@@ -51,6 +53,7 @@ export function SessionSearchPortal({
   returnFocusRef,
   hits,
   projects,
+  canWriteProjects,
   sessions,
   activeProject,
   openSession,
@@ -122,7 +125,7 @@ export function SessionSearchPortal({
         ) : null}
         <div className="search-panel__section">{tr("search.chats")}</div>
         {hits.matchedSessions.length === 0 ? (
-          <div className="sidebar-empty" style={{ padding: 12 }}>
+          <div className="sidebar-empty sidebar-empty--search-empty">
             {tr("search.noMatches")}
           </div>
         ) : null}
@@ -171,20 +174,22 @@ export function SessionSearchPortal({
               {tr("search.newChat")}
             </span>
           </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            className="search-panel__row"
-            onClick={() => {
-              setOpen(false);
-              void addProject(returnFocusRef.current);
-            }}
-          >
-            <IconFolder size={15} />
-            <span className="search-panel__title">
-              {tr("sidebar.addProject")}
-            </span>
-          </Button>
+          {canWriteProjects ? (
+            <Button
+              type="button"
+              variant="ghost"
+              className="search-panel__row"
+              onClick={() => {
+                setOpen(false);
+                void addProject(returnFocusRef.current);
+              }}
+            >
+              <IconFolder size={15} />
+              <span className="search-panel__title">
+                {tr("sidebar.addProject")}
+              </span>
+            </Button>
+          ) : null}
         </div>
       </DialogContent>
     </Dialog>

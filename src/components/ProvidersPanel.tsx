@@ -1,5 +1,5 @@
-import { Card } from "@appica/ui-react/card";
-import { Input } from "@appica/ui-react/input";
+import { Card } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { NumberField } from "@appica/ui-react/number-field";
@@ -25,7 +25,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { GlassModal } from "@/components/GlassModal";
 import {
@@ -1088,6 +1088,7 @@ export function ProvidersPanel({
           <Field>
             <FieldLabel htmlFor="provider-model-context-draft">{tr("prov.contextWindow")}</FieldLabel>
             <NumberField
+              size="md"
               id="provider-model-context-draft"
               min={1024}
               max={10000000}
@@ -1101,7 +1102,7 @@ export function ProvidersPanel({
           </Field>
           <Field>
             <FieldLabel htmlFor="provider-model-output-draft">{tr("prov.maxOutputTokens")}</FieldLabel>
-            <NumberField id="provider-model-output-draft" min={1} max={4294967295} step={1} required
+            <NumberField size="md" id="provider-model-output-draft" min={1} max={4294967295} step={1} required
               value={form.maxOutputTokensDraft ? Number(form.maxOutputTokensDraft) : null}
               onValueChange={(value) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: value == null ? "" : String(value) })); }} />
           </Field>

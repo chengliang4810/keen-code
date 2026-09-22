@@ -1,10 +1,40 @@
 import type { ReactElement, ReactNode } from "react";
 import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
+  Tooltip as AppicaTooltip,
+  TooltipContent as AppicaTooltipContent,
+  TooltipProvider as AppicaTooltipProvider,
+  TooltipTrigger as AppicaTooltipTrigger,
+  type TooltipContentProps as AppicaTooltipContentProps,
+  type TooltipProviderProps as AppicaTooltipProviderProps,
+  type TooltipProps as AppicaTooltipProps,
+  type TooltipTriggerProps as AppicaTooltipTriggerProps,
 } from "@appica/ui-react/tooltip";
+
+import { cn } from "@/lib/utils";
+
+export function TooltipProvider({ delay = 0, ...props }: AppicaTooltipProviderProps) {
+  return <AppicaTooltipProvider delay={delay} {...props} />;
+}
+
+export function Tooltip(props: AppicaTooltipProps) {
+  return <AppicaTooltip {...props} />;
+}
+
+export function TooltipTrigger(props: AppicaTooltipTriggerProps) {
+  return <AppicaTooltipTrigger {...props} />;
+}
+
+export function TooltipContent({ className, ...props }: AppicaTooltipContentProps) {
+  return (
+    <AppicaTooltipContent
+      className={cn(
+        "rounded-lg border border-border bg-tooltip px-3 py-1.5 text-xs text-tooltip-foreground shadow-md",
+        className,
+      )}
+      {...props}
+    />
+  );
+}
 
 export type TipPlacement = "top" | "bottom";
 
@@ -13,7 +43,7 @@ export function Tip({
   label,
   children,
   placement = "top",
-  delayMs = 420,
+  delayMs = 0,
   disabled = false,
   className,
 }: {

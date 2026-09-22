@@ -92,7 +92,7 @@ html[data-wallpaper="1"] .main {
   box-shadow: none !important;
 }
 
-html[data-wallpaper="1"] .composer-wrap--float {
+html[data-wallpaper="1"] .composer-wrap--sticky {
   background: transparent;
 }
 

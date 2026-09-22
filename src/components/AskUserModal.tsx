@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@appica/ui-react/textarea";
+import { Textarea } from "@/components/ui/textarea";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
 
 export type AskUserLabels = {
@@ -141,7 +141,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
       (editingText || question.options.length === 0) ? (
         <label className="ask-user__free">
           <span className="sr-only">{labels.otherPlaceholder}</span>
-          <Textarea className="ask-user__textarea" rows={2} autoFocus
+          <Textarea inputSize="md" className="ask-user__textarea" rows={2} autoFocus
             value={freeText[question.id] || ""} disabled={busy}
             placeholder={labels.otherPlaceholder}
             onChange={(event) => {

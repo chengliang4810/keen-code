@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { Thumbnail } from "@appica/ui-react/thumbnail";
 /**
  * File / folder card for chat history and composer.
@@ -9,7 +9,7 @@ import { Thumbnail } from "@appica/ui-react/thumbnail";
 
 import { useEffect, useRef, useState } from "react";
 import type { Attachment } from "@/lib/attachments";
-import { isImagePath } from "@/lib/attachments";
+import { isImageAttachment, isRemoteAttachment, pathExt } from "@/lib/attachments";
 import * as api from "@/lib/api";
 import {
   releaseImageSrc,
@@ -25,6 +25,7 @@ import {
   IconFileText,
   IconFolder,
   IconPaperclip,
+  IconRefresh,
 } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
@@ -37,6 +38,9 @@ export interface AttachmentCardLabels {
   addToComposer: string;
   remove?: string;
   viewImage?: string;
+  retry?: string;
+  uploading?: string;
+  failed?: string;
 }
 
 interface AttachmentCardProps {
@@ -46,6 +50,7 @@ interface AttachmentCardProps {
   variant?: "card" | "chip";
   onAddToComposer?: (a: Attachment) => void;
   onRemove?: (a: Attachment) => void;
+  onRetry?: (a: Attachment) => void;
   /**
    * Sibling image paths for lightbox prev/next.
    * When omitted, only the current image is shown.
@@ -59,12 +64,34 @@ export function AttachmentCard({
   variant = "card",
   onAddToComposer,
   onRemove,
+  onRetry,
   galleryPaths,
 }: AttachmentCardProps) {
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
-  const isImg = !attachment.isDir && isImagePath(attachment.path);
+  const isImg = isImageAttachment(attachment);
+  const remote = isRemoteAttachment(attachment);
+  const displayRef = remote
+    ? attachment.previewUrl ?? attachment.path
+    : attachment.path;
+  const uploadStatus = attachment.uploadStatus ?? "ready";
+  const uploadLabel =
+    uploadStatus === "uploading"
+      ? labels.uploading ?? "Uploading"
+      : uploadStatus === "failed"
+        ? labels.failed ?? "Upload failed"
+        : null;
+  // 普通文件副标题优先使用扩展名；无扩展名时回落到 MIME 的子类型，便于远程附件识别。
+  const fileTypeLabel = (() => {
+    if (attachment.isDir || isImg) return null;
+    const extension = pathExt(attachment.name || attachment.path);
+    if (extension) return extension.toUpperCase();
+    const mime = attachment.contentType?.split(";", 1)[0]?.trim();
+    return mime ? (mime.split("/").pop() || mime).toUpperCase() : null;
+  })();
   const [thumbSrc, setThumbSrc] = useState<string | null>(() =>
-    isImg ? resolveImageSrcSync(attachment.path) : null,
+    isImg
+      ? resolveImageSrcSync(remote ? attachment.previewUrl ?? "" : attachment.path)
+      : null,
   );
   const fallbackSrcRef = useRef<string | null>(null);
   const fallbackLoadingRef = useRef(false);
@@ -81,21 +108,27 @@ export function AttachmentCard({
       return;
     }
     // Sync resolve + cache: avoid empty→thumb height flash in the thread.
-    setThumbSrc(resolveImageSrcSync(attachment.path));
+    setThumbSrc(
+      resolveImageSrcSync(remote ? attachment.previewUrl ?? "" : attachment.path),
+    );
     return () => {
       if (fallbackSrcRef.current) releaseImageSrc(fallbackSrcRef.current);
       fallbackSrcRef.current = null;
     };
-  }, [attachment.path, isImg]);
+  }, [attachment.path, attachment.previewUrl, isImg, remote]);
 
   const recoverThumbnail = async () => {
     if (
       !isImg ||
-      !api.isTauri() ||
+      (!api.isTauri() && !remote) ||
       fallbackLoadingRef.current ||
       fallbackSrcRef.current
-    )
+  )
       return;
+    if (remote) {
+      setThumbSrc(attachment.previewUrl ?? null);
+      return;
+    }
     fallbackLoadingRef.current = true;
     try {
       const src = await resolveImageSrc(attachment.path);
@@ -118,7 +151,13 @@ export function AttachmentCard({
 
   const openPath = async () => {
     try {
-      if (api.isTauri()) await api.pathOpen(attachment.path);
+      if (remote) {
+        if (attachment.previewUrl && typeof window !== "undefined") {
+          window.open(attachment.previewUrl, "_blank", "noopener,noreferrer");
+        }
+      } else if (api.isTauri()) {
+        await api.pathOpen(attachment.path);
+      }
     } catch (e) {
       console.error(e);
     }
@@ -126,7 +165,7 @@ export function AttachmentCard({
 
   const revealPath = async () => {
     try {
-      if (api.isTauri()) await api.pathReveal(attachment.path);
+      if (!remote && api.isTauri()) await api.pathReveal(attachment.path);
     } catch (e) {
       console.error(e);
     }
@@ -134,22 +173,22 @@ export function AttachmentCard({
 
   const copyPath = async () => {
     try {
-      await navigator.clipboard.writeText(attachment.path);
+      await navigator.clipboard.writeText(displayRef);
     } catch {
       /* ignore */
     }
   };
 
   const copyImage = async () => {
-    await copyImageFromPath(attachment.path);
+    if (!remote) await copyImageFromPath(attachment.path);
   };
 
   const openInViewer = () => {
     const gallery =
       galleryPaths && galleryPaths.length > 0
         ? galleryPaths
-        : [attachment.path];
-    const idx = Math.max(0, gallery.indexOf(attachment.path));
+        : [displayRef];
+    const idx = Math.max(0, gallery.indexOf(displayRef));
     viewer.open(
       gallery.map((p) => ({ src: p, title: p.split(/[/\\]/).pop() })),
       idx,
@@ -180,7 +219,7 @@ export function AttachmentCard({
       },
     },
   ];
-  if (isImg) {
+  if (isImg && !remote) {
     menuItems.push({
       id: "copy-image",
       label: labels.copyImage,
@@ -209,13 +248,14 @@ export function AttachmentCard({
 
   if (variant === "chip") {
     return (
-      <Tip label={attachment.path}>
+      <Tip label={displayRef}>
         <span
           ref={rootRef as unknown as React.RefObject<HTMLSpanElement>}
           className={
             "attach-chip" +
             (attachment.isDir ? " attach-chip--dir" : "") +
-            (isImg ? " attach-chip--image" : "")
+            (isImg ? " attach-chip--image" : "") +
+            (uploadStatus !== "ready" ? ` attach-chip--${uploadStatus}` : "")
           }
           onContextMenu={(e) => {
             e.preventDefault();
@@ -246,16 +286,46 @@ export function AttachmentCard({
                     <IconFileText size={14} />
                   )}
                 </span>
-                <span className="attach-chip__name">{attachment.name}</span>
+                <span className="attach-chip__meta">
+                  <span className="attach-chip__name">{attachment.name}</span>
+                  {fileTypeLabel ? (
+                    <span className="attach-chip__type">{fileTypeLabel}</span>
+                  ) : null}
+                </span>
               </>
             )}
           </Button>
+          {uploadStatus !== "ready" ? (
+            <span
+              className="attach-chip__status"
+              role={uploadStatus === "failed" ? "alert" : "status"}
+              aria-label={uploadLabel ?? undefined}
+            >
+              {uploadStatus === "uploading"
+                ? `${Math.round((attachment.uploadProgress ?? 0) * 100)}%`
+                : uploadLabel}
+            </span>
+          ) : null}
+          {uploadStatus === "failed" && onRetry ? (
+            <Tip label={labels.retry ?? "Retry"}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                className="attach-chip__retry"
+                aria-label={labels.retry ?? "Retry"}
+                onClick={() => onRetry(attachment)}
+              >
+                <IconRefresh size={12} />
+              </Button>
+            </Tip>
+          ) : null}
           {onRemove && labels.remove ? (
             <Tip label={labels.remove}>
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-md"
+                size="icon-xs"
                 className="attach-chip__x"
                 aria-label={labels.remove}
                 onClick={() => onRemove(attachment)}
@@ -267,7 +337,7 @@ export function AttachmentCard({
             <Button
               type="button"
               variant="ghost"
-              size="icon-md"
+              size="icon-xs"
               className="attach-chip__x"
               aria-label={labels.remove}
               onClick={() => onRemove(attachment)}
@@ -288,7 +358,7 @@ export function AttachmentCard({
   }
 
   return (
-    <Tip label={attachment.path}>
+    <Tip label={displayRef}>
     <Card
       inset={false}
       contentProps={{ className: "p-0" }}
@@ -296,7 +366,8 @@ export function AttachmentCard({
       className={
         "att-card" +
         (attachment.isDir ? " att-card--dir" : "") +
-        (isImg ? " att-card--image" : "")
+        (isImg ? " att-card--image" : "") +
+        (uploadStatus !== "ready" ? ` att-card--${uploadStatus}` : "")
       }
       onContextMenu={(e) => {
         e.preventDefault();
@@ -314,19 +385,19 @@ export function AttachmentCard({
         {isImg ? (
           thumbSrc ? (
             <Thumbnail
-              size={36}
+              size="md"
               src={thumbSrc}
               alt={attachment.name}
               onLoadingStatusChange={(status) => { if (status === "error") void recoverThumbnail(); }}
             />
           ) : (
-            <Thumbnail size={36} variant="icon-soft">
+            <Thumbnail size="md" variant="icon-soft">
               <IconPaperclip size={18} />
             </Thumbnail>
           )
         ) : (
           <>
-            <Thumbnail size={20} variant={attachment.isDir ? "icon-primary" : "icon-soft"} aria-hidden>
+            <Thumbnail size="md" variant={attachment.isDir ? "icon-primary" : "icon-soft"} aria-hidden>
               {attachment.isDir ? (
                 <IconFolder size={14} />
               ) : (
@@ -337,10 +408,35 @@ export function AttachmentCard({
               <span className="att-card__name">
                 {attachment.name}
               </span>
+              {fileTypeLabel ? (
+                <span className="att-card__type">{fileTypeLabel}</span>
+              ) : null}
             </span>
           </>
         )}
       </Button>
+      {uploadStatus !== "ready" ? (
+        <div
+          className="att-card__status"
+          role={uploadStatus === "failed" ? "alert" : "status"}
+          aria-label={uploadLabel ?? undefined}
+        >
+          {uploadStatus === "uploading"
+            ? `${Math.round((attachment.uploadProgress ?? 0) * 100)}%`
+            : uploadLabel}
+          {uploadStatus === "failed" && onRetry ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-xs"
+              aria-label={labels.retry ?? "Retry"}
+              onClick={() => onRetry(attachment)}
+            >
+              <IconRefresh size={12} />
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
       <ContextMenu
         open={!!menu}
         x={menu?.x ?? 0}

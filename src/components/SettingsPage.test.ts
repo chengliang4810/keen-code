@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const source = readFileSync(new URL("./SettingsPage.tsx", import.meta.url), "utf8");
+const shellStyles = readFileSync(
+  new URL("../styles/settings-shell.css", import.meta.url),
+  "utf8",
+);
 
 describe("SettingsPage Select 契约", () => {
   it("界面语言使用分组 Select，而不是原生下拉", () => {
@@ -14,7 +18,7 @@ describe("SettingsPage Select 契约", () => {
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(source).toContain('from "@appica/ui-react/select"');
+    expect(source).toContain('from "@/components/ui/select"');
     expect(languageSource).not.toMatch(/<select(?:\s|>)/);
     expect(languageSource.match(/<SelectGroup>/g)?.length).toBe(1);
     expect(languageSource).toContain("Object.entries(INTERFACE_LANGUAGE_LABELS)");
@@ -144,6 +148,83 @@ describe("SettingsPage 兼容服务设置契约", () => {
     expect(webServiceSource).toContain("onWebServiceUrl(value)");
     expect(webServiceSource).toContain('event.key === "Enter"');
     expect(webServiceSource).not.toMatch(/<input(?:\s|>)/);
+  });
+});
+
+describe("SettingsPage ZCode 壳层契约", () => {
+  it("正文使用独立的 48px 头部、滚动主区和 896px 内容列", () => {
+    expect(source).toContain('className="settings-page__content-frame"');
+    expect(source).toContain('className="settings-page__header"');
+    expect(source).toContain('className="settings-page__breadcrumb-root"');
+    expect(source).toContain('className="settings-page__breadcrumb-current"');
+    expect(source).toContain('{t("settings.title")}');
+    expect(shellStyles).toMatch(
+      /@media \(min-width: 1024px\)[\s\S]*?\.settings-page__title\s*\{[^}]*font-size:\s*30px;[^}]*line-height:\s*36px;/,
+    );
+    expect(source).toContain('className="settings-page__body"');
+    expect(shellStyles).toMatch(
+      /\.settings-page__header\s*\{[\s\S]*?flex:\s*0 0 48px;[\s\S]*?height:\s*48px;/,
+    );
+    expect(shellStyles).toMatch(
+      /\.settings-page__body\s*\{[\s\S]*?max-width:\s*896px;/,
+    );
+    expect(source).toContain("IconChevronRight");
+    expect(source).toMatch(
+      /settings-page__breadcrumb-separator[\s\S]*?<IconChevronRight\s+size=\{14\}/,
+    );
+    expect(source).not.toMatch(
+      /settings-page__breadcrumb-separator[\s\S]*?>\s*\/\s*</,
+    );
+    expect(shellStyles).toMatch(
+      /\.settings-page__main\s*\{[\s\S]*?scrollbar-gutter:\s*stable;/,
+    );
+    const headerBlock = shellStyles.match(/\.settings-page__header\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(headerBlock).not.toContain("border-bottom");
+  });
+
+  it("导航使用 ZCode 的 268px 桌面栏和 68px 窄屏图标栏", () => {
+    expect(shellStyles).toMatch(
+      /\.settings-page__nav\s*\{[\s\S]*?width:\s*268px;[\s\S]*?min-width:\s*268px;[\s\S]*?max-width:\s*268px;/,
+    );
+    expect(shellStyles).toMatch(
+      /@media \(max-width:\s*1023px\)[\s\S]*?\.settings-page__nav,[\s\S]*?width:\s*68px;[\s\S]*?min-width:\s*68px;[\s\S]*?max-width:\s*68px;/,
+    );
+    expect(shellStyles).toMatch(
+      /@media \(max-width:\s*1023px\)[\s\S]*?\.settings-page__nav-inner \[data-slot="navigation-link"\][\s\S]*?width:\s*40px;[\s\S]*?height:\s*40px;/,
+    );
+  });
+
+  it("设置卡片和弹层使用语义化 ZCode 表面令牌", () => {
+    expect(shellStyles).toMatch(
+      /\.settings-page__body > \[data-slot="card"\][\s\S]*?background:\s*var\(--bg-card\);[\s\S]*?box-shadow:\s*none;/,
+    );
+    expect(shellStyles).toMatch(
+      /\[data-slot="dialog-popup"\][\s\S]*?background:\s*var\(--bg-elevated\);[\s\S]*?box-shadow:\s*var\(--shadow-pop\);/,
+    );
+    expect(shellStyles).toMatch(
+      /\[data-slot="popover-content"\][\s\S]*?background:\s*var\(--bg-elevated\);[\s\S]*?box-shadow:\s*var\(--shadow-pop\);/,
+    );
+  });
+});
+
+describe("Desktop Web Host 设置契约", () => {
+  it("在常规设置中接入独立面板，不把 Token 放入普通设置输入", () => {
+    const panelSource = readFileSync(
+      new URL("./WebHostSettingsPanel.tsx", import.meta.url),
+      "utf8",
+    );
+
+    expect(source).toContain("WebHostSettingsPanel");
+    expect(source).toContain('id="settings-anchor-web-host"');
+    expect(panelSource).toContain("webHostStatus()");
+    expect(panelSource).toContain("webHostStart(settings.port)");
+    expect(panelSource).toContain("webHostStop()");
+    expect(panelSource).toContain("webHostSetToken(value)");
+    expect(panelSource).toContain('type="password"');
+    expect(panelSource).toContain('id="settings-web-host-bind"');
+    expect(panelSource).toContain("onSettingsChange({ ...settings, enabled })");
+    expect(panelSource).not.toContain('settingsSet({ token');
+    expect(panelSource).not.toMatch(/<input(?:\s|>)/);
   });
 });
 

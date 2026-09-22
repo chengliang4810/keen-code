@@ -1,4 +1,4 @@
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertIcon } from "@appica/ui-react/alert";
 import { FieldError } from "@appica/ui-react/field";
@@ -38,7 +38,7 @@ import {
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 import { SearchField } from "@/components/SearchField";
 
 type GitAction = "commit" | "commit-push" | "push";

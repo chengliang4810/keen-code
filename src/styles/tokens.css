@@ -1,13 +1,10 @@
-/* DeepSeek Harness 设计系统适配：颜色、字体、圆角和表面层级来自
- * deepseek-ai/deepseek-harness @ d347e703908d0406b7a7ef80e3a0e594d86b2215。
- * Copyright (c) 2026 DeepSeek. MIT；完整许可见 THIRD_PARTY_NOTICES.md。
- * KeenCode 保留自己的品牌、语义化令牌及深浅色切换入口。
+/*
+ * KeenCode 产品令牌。
+ * 基础层包含经许可的 DeepSeek Harness 适配，归属见 THIRD_PARTY_NOTICES.md。
+ * 语义别名、品牌色板、宿主几何、主题切换和产品行为由 KeenCode 维护。
  *
- * Codex 规范对齐（2026-09-19，依据 DESIGN.md 反编译实测值）：字体栈、430 正文字重、
- * 像素字号阶梯（12/13/14/16/28）、行高（1.25/1.5）、圆角阶梯（基础值 ×1.25）、
- * 过渡时长 150ms 与 cubic-bezier(0.4,0,0.2,1)。有意差异：保留中文后备字体
- * （防 Windows 宋体，等宽栈因此不写裸 monospace 结尾）、保留 KeenCode 品牌色板、
- * 窗口与标题栏壳层几何不变。
+ * 下方字体栈、中文 fallback、间距、圆角和动效是当前产品决策，不能描述为
+ * 任何外部产品的精确设计系统或实现契约。
  */
 @import "./harness/base.css";
 @import "./harness/design-platform.css";
@@ -15,19 +12,21 @@
 
 :root {
   color-scheme: dark;
-  /* ---- Feature palettes (theme-invariant; both themes inherit) ---- */
-  /* Git change kinds (badges) + file kind marks */
-  --change-new: #3d9a5f;
-  --change-new-ink: #2f8a52;
-  --change-deleted: #d45454;
-  --change-typechange: #c9a227;
-  --change-copied: #6c8cff;
-  --change-conflict: #e67e22;
-  --kind-git: #e07040;
-  --kind-img: #8b6ccf;
-  /* Directory / URL accents (attach chips, file path icons) */
-  --dir-accent: #329664;
-  --dir-accent-soft: #50b478;
+  /* ---- Feature palettes (ZCode Zai light defaults; dark overrides below) ---- */
+  /* Git change kinds (badges) + file kind marks. */
+  --change-added: #1e8a3e;
+  --change-new: #1e8a3e;
+  --change-new-ink: #1e8a3e;
+  --change-deleted: #e03131;
+  --change-typechange: #e07b00;
+  --change-renamed: #0b7fff;
+  --change-copied: #0b7fff;
+  --change-conflict: #e07b00;
+  --kind-git: #e07b00;
+  --kind-img: #7453b0;
+  /* Directory / URL accents (ZCode file-node foreground, attach chips, path icons). */
+  --dir-accent: #1a70b8;
+  --dir-accent-soft: #1a70b8;
   /* Extensions panel badges */
   --ext-plugin: #c49bff;
   --ext-disabled: #9aa0a6;
@@ -42,7 +41,14 @@
   --paper-canvas: #ffffff;
   --ink-on-paper: #1a1a1a;
   --icon-tile-bg: rgba(127, 127, 127, 0.08);
-  --terminal-canvas: #0d0d0d;
+  /* xterm theme inputs; TerminalPanel resolves these variables at runtime. */
+  --terminal-bg: #f8f8f8;
+  --terminal-fg: #282828;
+  --terminal-cursor: #0d0d0d;
+  --terminal-cursor-accent: #f8f8f8;
+  --terminal-selection: rgba(11, 127, 255, 0.22);
+  --terminal-selection-inactive: rgba(13, 13, 13, 0.1);
+  --terminal-canvas: var(--terminal-bg);
   --surface-tint-light: #eef0f3;
   --ext-warn: #e0b44a;
   /* 思考强度滑块的品牌色与“快速”色。轨道与旋钮在深浅主题下都使用这组固定值，
@@ -52,6 +58,15 @@
   --effort-fast: #ffd65c;
   --effort-fast-ink: #eda821;
   --effort-spark: #ffffff;
+  /* Analytics 使用固定的可区分色板；业务组件只引用语义变量。 */
+  --analytics-model-1: #1683f8;
+  --analytics-model-2: #209447;
+  --analytics-model-3: #9567ec;
+  --analytics-model-4: #ed3434;
+  --analytics-model-5: #e78000;
+  --analytics-model-6: #0ba6a6;
+  --analytics-model-7: #e85ca3;
+  --analytics-model-8: #64748b;
 
 
   --space-1: 4px;
@@ -59,9 +74,13 @@
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 20px;
-  /* 圆角阶梯对齐 Codex（基础值 ×1.25 缩放）：2.5/5/7.5/10/12.5，输入框 28。 */
+  /* ZCode composer uses a 16px shell radius; the remaining radii stay semantic. */
   --radius-window: 16px;
-  --radius-composer: 28px;
+  --radius-composer: 16px;
+  /* ZCode conversation frame 的平台圆角；不复用通用 radius-sm/md。 */
+  --radius-workspace-win: 5px;
+  --radius-workspace-mac: 6px;
+  --radius-workspace-other: 12px;
   --radius-lg: 12.5px;
   /* Harness 消息统计胶囊的原始圆角。 */
   --radius-stat: 28px;
@@ -71,24 +90,27 @@
   --radius-2xs: 2.5px;
   --radius-full: 9999px;
   --radius-settings: 30px;
-  --sidebar-width: 280px;
+  --sidebar-width: 264px;
   --content-max-width: 920px;
   --aside-width: 360px;
-  /* 桌面保留 40px 原生拖动区；侧栏使用 Harness 独立的品牌行几何。 */
-  --titlebar-height: 40px;
+  /* ZCode desktop shell keeps a 48px drag/header band. */
+  --titlebar-height: 48px;
   --control-height: 36px;
   --titlebar-safe-left: 96px;
   --sidebar-leading-icon-center: 26px;
-  /* Codex 桌面端实测字体栈（覆盖 Harness 基线）：正文以 -apple-system-body 命中
-   * macOS SF Pro；等宽栈为 Codex ui-monospace 系，中文后备沿用项目决策。 */
+  /* 共享控件的 ZCode md 几何；不使用 rem，避免随 UI 根字号折算。 */
+  --control-height-compact: 28px;
+  --control-height-tabs: 32px;
+  --control-radius-compact: 10px;
+  /* 跨平台 UI 字体栈：优先系统字体，显式保留中文 fallback。 */
   --dsw-font-family: -apple-system-body, ui-sans-serif, -apple-system, system-ui,
     'Segoe UI', 'Helvetica', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
     'Apple Color Emoji', 'Arial', sans-serif, 'Segoe UI Emoji', 'Segoe UI Symbol';
   --ds-font-family-code: ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas,
     'Liberation Mono', 'PingFang SC', 'Microsoft YaHei';
-  /* Codex 正文可变字重：Windows 固定字重字体就近取整，与 Codex 行为一致。 */
+  /* UI 正文权重；Windows 非可变字体会由浏览器就近取整。 */
   --font-ui-weight: 430;
-  /* Codex 全局过渡默认 150ms（覆盖 Harness 0.2s/0.1s 基线）。 */
+  /* KeenCode 全局过渡默认 150ms。 */
   --ds-transition-duration: 0.15s;
   --ds-transition-duration-fast: 0.15s;
   --font-sans: var(--dsw-font-family);
@@ -124,11 +146,13 @@
   --bg-input: var(--dsw-specific-input-major);
   --bg-code: var(--dsw-alias-markdown-code-block);
   --bg-user-bubble: var(--dsw-specific-bubble);
-  --bg-overlay: var(--dsw-alias-bg-mask-1);
+  /* ZCode portal backdrops use a fixed black/60 scrim in both themes. */
+  --bg-overlay: rgba(0, 0, 0, 0.6);
   --bg-hover: var(--dsw-alias-interactive-bg-hover);
   --bg-active: var(--dsw-specific-sidebar-nav-item-active);
   --border-subtle: var(--dsw-alias-border-l1);
-  --border-strong: var(--dsw-alias-border-l3);
+  /* Dialogs use the popover border role; both portal border roles resolve to 10%. */
+  --border-popover: var(--border-subtle);
   --border-focus: var(--dsw-alias-state-business-primary);
   --text-primary: var(--dsw-alias-label-primary);
   --text-secondary: var(--dsw-alias-label-secondary);
@@ -136,21 +160,14 @@
   --text-caption: var(--dsw-alias-label-caption);
   --text-inverse: var(--dsw-alias-label-primary-foreground);
   /* 主操作用黑白对比，链接与状态使用蓝色，两个语义不可混用。 */
-  --primary: var(--dsw-alias-button-primary-fill);
   --primary-hover: var(--dsw-alias-button-primary-hover);
   --primary-fg: var(--dsw-alias-label-primary-foreground);
   --accent: var(--dsw-alias-state-business-primary);
   --accent-hover: var(--dsw-alias-button-info-hover);
   --accent-muted: var(--dsw-alias-state-business-tertiary);
   --accent-fg: var(--dsw-static-neutral-00);
-  --success: var(--dsw-alias-state-success-primary);
-  --success-muted: var(--dsw-alias-state-success-tertiary);
-  --warning: var(--dsw-alias-state-warn-primary);
-  --warning-muted: var(--dsw-alias-state-warn-tertiary);
   --danger: var(--dsw-alias-state-error-primary);
   --danger-muted: var(--dsw-alias-interactive-bg-hover-danger);
-  --info: var(--accent);
-  --info-muted: var(--accent-muted);
   --todo-progress: var(--accent);
   --scrollbar-size: 8px;
   --scrollbar-thumb-width: 6px;
@@ -167,6 +184,10 @@
   --glass-saturate: 1;
   --glass-shadow: var(--dsw-elevation-prominent);
   --shadow-composer: var(--dsw-elevation-soft);
+  /* ZCode shadow-xl/5：仅用于带上下文的草稿 surface，普通 Composer 不复用。 */
+  --shadow-composer-context:
+    0 20px 25px -5px color-mix(in srgb, var(--ink-black) 5%, transparent),
+    0 8px 10px -6px color-mix(in srgb, var(--ink-black) 5%, transparent);
   --shadow-pop: var(--glass-shadow);
   --menu-surface: var(--glass-surface);
   --menu-surface-solid: var(--glass-surface-solid);
@@ -214,27 +235,102 @@
 [data-theme="light"] { color-scheme: light; }
 [data-theme="dark"] { color-scheme: dark; }
 
-/* Codex 色板对齐（2026-09-19，依据 DESIGN.md 双重解析终值）：
- * 中性灰正文 + alpha 气泡/边框体系，覆盖 Harness 蓝调色板的核心语义值。
- * dark 侧令牌原定义在 [data-theme="dark"] 块，需以同特异性覆盖。 */
+/* KeenCode 中性灰正文与 alpha 表面体系；dark 侧令牌以同特异性覆盖。 */
 :root {
   --dsw-alias-label-primary: #282828;
   --dsw-alias-label-secondary: #5d5d5d;
   --dsw-alias-label-tertiary: #8f8f8f;
-  --dsw-specific-bubble: color-mix(in oklab, #0d0d0d 5%, transparent);
+  --dsw-specific-bubble: color-mix(in oklab, #0d0d0d 3%, transparent);
+  /* ZCode Zai Light surface palette, copied from styles.css. */
+  --dsw-alias-bg-base: #f8f8f8;
+  --dsw-alias-bg-layer-1: #ffffff;
+  --dsw-alias-bg-layer-2: #ffffff;
+  --dsw-alias-bg-layer-3: #ececee;
+  --dsw-alias-bg-module-platform: #ffffff;
+  --dsw-specific-sidebar-fill: #f0f0f0;
+  --dsw-specific-input-major: #ffffff;
+  --dsw-specific-menu: #ffffff;
+  --dsw-specific-sidebar-nav-item-active: rgba(13, 13, 13, 0.05);
+  --dsw-specific-sidebar-nav-item-hover: rgba(13, 13, 13, 0.05);
+  --dsw-alias-label-primary-foreground: #ffffff;
+  --dsw-alias-button-primary-fill: #000000;
+  --dsw-alias-button-primary-hover: #191919;
+  --dsw-alias-interactive-bg-hover: rgba(13, 13, 13, 0.05);
+  --dsw-alias-interactive-bg-active: rgba(13, 13, 13, 0.1);
+  --dsw-alias-state-business-primary: #0b7fff;
+  --dsw-alias-state-business-tertiary: #ebf4ff;
+  --dsw-alias-state-success-primary: #1e8a3e;
+  --dsw-alias-state-warn-primary: #e07b00;
+  --dsw-alias-state-error-primary: #e03131;
+  --dsw-alias-toast-bg: #ffffff;
+  --dsw-alias-tooltip-bg: #f0f0f0;
   --dsw-alias-markdown-code-block: #f9f9f9;
   --dsw-alias-border-l1: color-mix(in oklab, #0d0d0d 10%, transparent);
+  --dsw-alias-border-l2: color-mix(in oklab, #0d0d0d 10%, transparent);
   --dsw-alias-border-l3: color-mix(in oklab, #0d0d0d 15%, transparent);
+
 }
 
 [data-theme="dark"] {
-  --dsw-alias-label-primary: #dcdcdc;
-  --dsw-alias-label-secondary: #afafaf;
-  --dsw-alias-label-tertiary: #8f8f8f;
-  --dsw-specific-bubble: color-mix(in oklab, #ffffff 8%, transparent);
-  --dsw-alias-markdown-code-block: #131313;
-  --dsw-alias-border-l1: color-mix(in oklab, #ffffff 12%, transparent);
-  --dsw-alias-border-l3: color-mix(in oklab, #ffffff 20%, transparent);
+  /*
+   * ZCode Zai Dark palette, Apache-2.0.
+   * Source: D:/projects/ZCode/packages/ui/src/styles.css (.theme-zai-dark).
+   * KeenCode keeps its own semantic names so existing components share the
+   * same contrast hierarchy without importing ZCode component code.
+   */
+  --bg-overlay: rgba(0, 0, 0, 0.6);
+  --border-popover: var(--border-subtle);
+  --change-added: #46bf72;
+  --change-new: #46bf72;
+  --change-new-ink: #46bf72;
+  --change-deleted: #ff5c5c;
+  --change-typechange: #ff8a30;
+  --change-renamed: #4099ff;
+  --change-copied: #4099ff;
+  --change-conflict: #ff8a30;
+  --kind-git: #ff8a30;
+  --kind-img: #bda5e6;
+  --dir-accent: #8fc5ef;
+  --dir-accent-soft: #8fc5ef;
+  --terminal-bg: #161616;
+  --terminal-fg: #d4d4d4;
+  --terminal-cursor: #f8f8f8;
+  --terminal-cursor-accent: #161616;
+  --terminal-selection: rgba(64, 153, 255, 0.28);
+  --terminal-selection-inactive: rgba(255, 255, 255, 0.1);
+  --terminal-canvas: var(--terminal-bg);
+  --dsw-alias-bg-base: #161616;
+  --dsw-alias-bg-layer-1: #202020;
+  --dsw-alias-bg-layer-2: #2b2b2b;
+  --dsw-alias-bg-layer-3: #363636;
+  --dsw-alias-bg-module-platform: #2b2b2b;
+  --dsw-specific-sidebar-fill: #161616;
+  --dsw-specific-input-major: #2b2b2b;
+  --dsw-specific-menu: #2b2b2b;
+  --dsw-specific-sidebar-nav-item-active: rgba(255, 255, 255, 0.1);
+  --dsw-specific-sidebar-nav-item-hover: rgba(255, 255, 255, 0.05);
+  --dsw-alias-label-primary: #d4d4d4;
+  --dsw-alias-label-secondary: color-mix(in oklab, #d4d4d4 60%, transparent);
+  --dsw-alias-label-tertiary: color-mix(in oklab, #d4d4d4 30%, transparent);
+  --dsw-alias-label-caption: color-mix(in oklab, #d4d4d4 30%, transparent);
+  --dsw-alias-label-primary-foreground: #000000;
+  --dsw-alias-button-primary-fill: #ffffff;
+  --dsw-alias-button-primary-hover: #f8f8f8;
+  --dsw-alias-interactive-bg-hover: rgba(255, 255, 255, 0.05);
+  --dsw-alias-interactive-bg-active: rgba(255, 255, 255, 0.1);
+  --dsw-specific-bubble: rgba(255, 255, 255, 0.05);
+  --dsw-alias-markdown-code-block: #202020;
+  --dsw-alias-border-l1: rgba(255, 255, 255, 0.1);
+  --dsw-alias-border-l2: rgba(255, 255, 255, 0.1);
+  --dsw-alias-border-l3: rgba(255, 255, 255, 0.15);
+  --dsw-alias-state-business-primary: #4099ff;
+  --dsw-alias-state-business-tertiary: #001d3d;
+  --dsw-alias-state-success-primary: #46bf72;
+  --dsw-alias-state-warn-primary: #ff8a30;
+  --dsw-alias-state-error-primary: #ff5c5c;
+  --dsw-alias-toast-bg: #2b2b2b;
+  --dsw-alias-tooltip-bg: #2b2b2b;
+
 }
 
 @media (prefers-reduced-motion: reduce) {

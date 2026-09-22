@@ -26,7 +26,7 @@ export function AgentAvatar({
 
   if (status === "running") {
     return (
-      <Avatar size={size} className={className} aria-hidden="true">
+      <Avatar size="md" className={className} aria-hidden="true">
         <Blobatar name={seed} size={size} animate="always" focusable="false" />
         <AvatarBadge animate />
       </Avatar>
@@ -34,7 +34,7 @@ export function AgentAvatar({
   }
 
   return (
-    <Avatar size={size} className={className} aria-hidden="true">
+    <Avatar size="md" className={className} aria-hidden="true">
       <Blobatar name={seed} size={size} expression={status === "done" ? happy : status === "failed" ? sad : undefined} alt="" draggable={false} />
     </Avatar>
   );

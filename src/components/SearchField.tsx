@@ -1,6 +1,6 @@
 import type { ComponentProps } from "react";
 import { IconSearch } from "@/components/icons";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 
 /** 带统一搜索图标容器的 Appica Input 组合属性。 */
 export interface SearchFieldProps extends ComponentProps<typeof Input> {

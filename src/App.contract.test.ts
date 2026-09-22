@@ -198,9 +198,6 @@ describe("App 当前会话投影隔离契约", () => {
     expect(cssSource).toMatch(
       /@container \(min-width: 860px\)[\s\S]*?\.main__stage--summary-open > \.lobe-chat[\s\S]*?width: calc\(100% - 352px\);/,
     );
-    expect(cssSource).toMatch(
-      /\.main__stage--summary-open > \.composer-wrap--float,[\s\S]*?right: 352px;/,
-    );
     expect(cssSource).toContain(
       "transition: width var(--motion-enter) var(--ease-out)",
     );
@@ -210,6 +207,15 @@ describe("App 当前会话投影隔离契约", () => {
     expect(cssSource).toMatch(
       /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.summary-panel[\s\S]*?animation: none;/,
     );
+  });
+
+  it("同一条提示不会因 Appica Toast manager 引用变化而重复入队", () => {
+    const source = readSource("./features/app/MainStage.tsx");
+
+    expect(source).toContain("const publishedToastRef = useRef<string | null>(null)");
+    expect(source).toContain("if (publishedToastRef.current === toast) return");
+    expect(source).toContain("publishedToastRef.current = toast");
+    expect(source).toContain("toastManager.add({ title: toast, timeout: 2000 })");
   });
 
   it("摘要使用轻量工具卡片层级", () => {
@@ -251,6 +257,33 @@ describe("App 当前会话投影隔离契约", () => {
     );
     expect(conversationStageSource).toContain(
       "dismissOnOutsidePress={!layout.asideCollapsed}",
+    );
+  });
+});
+
+describe("App 会话 Fork 契约", () => {
+  it("只从真实 SessionRow 绑定回调并贯穿 MainStage 到 ConversationThread", () => {
+    const appSource = readSource("./App.tsx");
+    const mainStageSource = readSource("./features/app/MainStage.tsx");
+    const conversationStageSource = readSource(
+      "./features/app/main/ConversationStage.tsx",
+    );
+
+    expect(appSource).toContain(
+      "sessions.find((item) => item.id === session.sessionId)",
+    );
+    expect(appSource).toContain("onForkCurrentSession:");
+    expect(appSource).toContain("confirmForkSession(currentForkSession)");
+    expect(mainStageSource).toContain(
+      "export type ConversationRegionProps = Omit<",
+    );
+    expect(mainStageSource).toContain("<ConversationStage");
+    expect(mainStageSource).toContain("{...conversation}");
+    expect(conversationStageSource).toContain(
+      "onForkCurrentSession?: () => void;",
+    );
+    expect(conversationStageSource).toContain(
+      "onForkCurrentSession={onForkCurrentSession}",
     );
   });
 });
@@ -441,6 +474,21 @@ describe("App 启动工作台契约", () => {
     expect(appSource).not.toContain("appGate");
     expect(appSource).not.toContain("@/components/RuntimeGate");
   });
+
+  it("展开项目使用 Host 权威 Session 列表，不回传客户端路径作为过滤条件", () => {
+    const sidebarSource = readSource("./hooks/sidebar/useSidebarLists.ts");
+    const toggleStart = sidebarSource.indexOf("const toggleProject = useCallback");
+    const toggleEnd = sidebarSource.indexOf("const refreshSessions", toggleStart);
+    const toggleSource = sidebarSource.slice(toggleStart, toggleEnd);
+
+    expect(toggleStart).toBeGreaterThanOrEqual(0);
+    expect(toggleEnd).toBeGreaterThan(toggleStart);
+    expect(toggleSource).toContain("const rows = await sessionsList()");
+    expect(toggleSource).not.toContain("sessionsList(checked.path)");
+    expect(toggleSource).toContain(
+      "projectSidebar(rows, loadSessionPreferences(), [checked])",
+    );
+  });
 });
 
 describe("App 顶栏布局契约", () => {
@@ -454,6 +502,35 @@ describe("App 顶栏布局契约", () => {
       ".platform-win .main--aside-hidden .main__top",
     );
     expect(cssSource).not.toMatch(/\.platform-win \.main__top,\r?\n/);
+  });
+
+  it("主会话顶栏沿用 ZCode 的 48px 分区结构，资源栏开关不影响桌面 frame", () => {
+    const headerSource = readSource("./features/app/main/MainHeader.tsx");
+    const stageSource = readSource("./features/app/MainStage.tsx");
+    const cssSource = readSource("./styles/app-conversation.css");
+
+    expect(headerSource).toContain('className="main__title-row"');
+    expect(headerSource).toContain('className="main__top-actions"');
+    expect(stageSource).toContain('"main main--frame"');
+    expect(cssSource).toMatch(
+      /\.main__top\s*\{[\s\S]*?height: var\(--titlebar-height, 48px\);[\s\S]*?padding: 8px;[\s\S]*?border-bottom: 1px solid var\(--border-subtle\);/,
+    );
+    expect(cssSource).toMatch(
+      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame\s*\{[\s\S]*?margin: 4px 4px 4px 0;[\s\S]*?border: 1px solid var\(--border-subtle\);[\s\S]*?overflow: hidden;/,
+    );
+    expect(cssSource).toMatch(
+      /\.platform-win \.main\.main--frame,[\s\S]*?border-radius: var\(--radius-workspace-win\);/,
+    );
+    expect(cssSource).toMatch(
+      /\.platform-mac \.main\.main--frame\s*\{[\s\S]*?border-radius: var\(--radius-workspace-mac\);/,
+    );
+    expect(cssSource).toMatch(
+      /\.platform-other \.main\.main--frame\s*\{[\s\S]*?border-radius: var\(--radius-workspace-other\);/,
+    );
+    expect(cssSource).toMatch(
+      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame[\s\S]*?\}/,
+    );
+    expect(cssSource).toContain("@media (min-width: 761px)");
   });
 });
 
@@ -491,7 +568,8 @@ describe("App 自动更新入口契约", () => {
 
 describe("应用级浮层视图边界契约", () => {
   it("更新浮层跨视图挂载，而对话快捷键面板只在工作台挂载", () => {
-    const appSource = readSource("./App.tsx");
+    // Node 在 Windows 上按原始字节读取时会保留 CRLF，契约只关心 JSX 结构。
+    const appSource = readSource("./App.tsx").replace(/\r\n/g, "\n");
     // 工作台分支以三元表达式的 else 片段结束；只有更新浮层挂在该分支之外。
     const branchClose = "</>\n      )}";
     const branchEnd = appSource.indexOf(branchClose);
@@ -555,15 +633,15 @@ describe("输入指令候选面板契约", () => {
 });
 
 describe("左侧栏空栏目与快捷入口契约", () => {
-  it("项目会话默认显示 5 个并按 5 个追加", () => {
+  it("项目会话默认显示 20 个并按 20 个追加", () => {
     const projectSource = readSource("./features/app/sidebar/ProjectTree.tsx");
     const sidebarSource = readSource("./hooks/sidebar/useSidebarActions.ts");
 
-    expect(projectSource).toContain("visibleSessionsByProject[project.id] ?? 5");
+    expect(projectSource).toContain("visibleSessionsByProject[project.id] ?? 20");
     expect(projectSource).toMatch(
       /projectSessions\.slice\(\s*0,\s*visibleSessionCount,\s*\)/,
     );
-    expect(projectSource).toContain("[project.id]: visibleSessionCount + 5");
+    expect(projectSource).toContain("[project.id]: visibleSessionCount + 20");
     expect(sidebarSource).toContain("filter(([id]) => id !== project.id)");
   });
 
@@ -592,9 +670,9 @@ describe("左侧栏空栏目与快捷入口契约", () => {
 
     expect(pinnedSource).toContain("if (pinnedSessions.length === 0) return null");
     expect(historySource).toContain("if (orphanSessions.length === 0) return null");
-    expect(navigationSource).not.toContain("navigateSettings");
+    expect(navigationSource).toContain("openPluginMarketplace");
     expect(navigationSource).not.toContain('tr("sidebar.skills")');
-    expect(navigationSource).not.toContain('tr("sidebar.plugins")');
+    expect(navigationSource).toContain('tr("sidebar.plugins")');
     expect(pinnedSource).not.toContain("pinnedOpen && pinnedSessions.length > 0");
     expect(historySource).not.toContain("historyOpen && orphanSessions.length > 0");
   });
@@ -606,8 +684,10 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     const navigationSource = readSource("./features/app/sidebar/SidebarNav.tsx");
     const userMenuSource = readSource("./components/UserMenu.tsx");
 
-    expect(navigationSource.match(/size="md"/g)).toHaveLength(2);
-    expect(pinnedSource).toContain('size="md"');
+    expect(navigationSource.match(/size="md"/g)).toHaveLength(4);
+    // ZCode 的置顶区是始终展开的静态标题，不使用可交互 Appica 控件。
+    expect(pinnedSource).toContain('role="heading"');
+    expect(pinnedSource).not.toContain("setPinnedOpen(");
     expect(historySource).toContain('size="md"');
     expect(projectSource).toContain('size="md"');
     expect(userMenuSource).toContain('size="md"');
@@ -667,7 +747,7 @@ describe("App 搜索面板布局契约", () => {
     );
     const cssSource = readSource("./styles/app.css");
 
-    expect(searchSource).toContain('from "@appica/ui-react/dialog"');
+    expect(searchSource).toContain('from "@/components/ui/dialog"');
     expect(searchSource).toContain("<DialogContent");
     expect(searchSource).toContain('viewportProps={{ className: "search-overlay" }}');
     expect(searchSource).not.toContain("createPortal(");

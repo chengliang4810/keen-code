@@ -1,10 +1,9 @@
 import type { Project, SessionRow } from "@/features/app/models";
-import { Button } from "@/components/ui/button";
 import { VirtualList } from "@/components/VirtualList";
-import { IconChevronDown } from "@/components/icons";
 import {
   SIDEBAR_SESSION_ROW_GAP,
   SIDEBAR_SESSION_ROW_HEIGHT,
+  SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
 } from "@/lib/virtualList";
 import { SidebarSessionRow } from "./SidebarSessionRow";
 import type {
@@ -27,8 +26,6 @@ export interface PinnedSessionListProps
 export function PinnedSessionList({
   tr,
   pinnedSessions,
-  pinnedOpen,
-  setPinnedOpen,
   session,
   busyIds,
   unreadTerminalResults,
@@ -47,58 +44,52 @@ export function PinnedSessionList({
   return (
     <>
       <div className="tree-l1">
-        <Button
-          type="button"
-          variant="ghost"
-          size="md"
-          className="tree-l1__head"
-          onClick={() => setPinnedOpen((value) => !value)}
-          aria-expanded={pinnedOpen}
-        >
+        <div className="tree-l1__head" role="heading" aria-level={2}>
           <span className="tree-l1__label">{tr("sidebar.pinned")}</span>
-          <IconChevronDown size={14} className="chevron--disclose" />
-        </Button>
+        </div>
       </div>
-      {pinnedOpen ? (
-        <VirtualList
-          className="tree-orphan-list"
-          items={pinnedSessions}
-          getKey={(item) => item.id}
-          rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
-          gap={SIDEBAR_SESSION_ROW_GAP}
-          scrollToKey={
-            session.sessionId &&
-            pinnedSessions.some((item) => item.id === session.sessionId)
-              ? session.sessionId
-              : null
-          }
-          renderItem={(item) => {
-            const project = item.projectId
-              ? projects.find((candidate) => candidate.id === item.projectId) ??
-                null
-              : null;
-            return (
-              <SidebarSessionRow
-                tr={tr}
-                startSidebarDrag={startSidebarDrag}
-                endSidebarDrag={endSidebarDrag}
-                dropSession={dropSession}
-                openSession={openSession}
-                openSessionMenu={openSessionMenu}
-                archiveSession={archiveSession}
-                pinSession={pinSession}
-                session={item}
-                project={project}
-                activeSessionId={session.sessionId}
-                working={busyIds.has(item.id)}
-                unreadResult={unreadTerminalResults.get(item.id) ?? null}
-                needsInput={pendingAskUserSessionIds.has(item.id)}
-                variant="pinned"
-              />
-            );
-          }}
-        />
-      ) : null}
+      <VirtualList
+        className="tree-orphan-list"
+        items={pinnedSessions}
+        getKey={(item) => item.id}
+        rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
+        touchRowHeight={SIDEBAR_TOUCH_SESSION_ROW_HEIGHT}
+        gap={SIDEBAR_SESSION_ROW_GAP}
+        scrollToKey={
+          session.sessionId &&
+          pinnedSessions.some((item) => item.id === session.sessionId)
+            ? session.sessionId
+            : null
+        }
+        renderItem={(item) => {
+          const project = item.projectId
+            ? projects.find((candidate) => candidate.id === item.projectId) ??
+              null
+            : null;
+          return (
+            <SidebarSessionRow
+              tr={tr}
+              startSidebarDrag={startSidebarDrag}
+              endSidebarDrag={endSidebarDrag}
+              dropSession={dropSession}
+              openSession={openSession}
+              openSessionMenu={openSessionMenu}
+              archiveSession={archiveSession}
+              pinSession={pinSession}
+              session={item}
+              project={project}
+              activeSessionId={session.sessionId}
+              working={busyIds.has(item.id)}
+              loading={
+                session.sessionId === item.id && session.state === "connecting"
+              }
+              unreadResult={unreadTerminalResults.get(item.id) ?? null}
+              needsInput={pendingAskUserSessionIds.has(item.id)}
+              variant="pinned"
+            />
+          );
+        }}
+      />
     </>
   );
 }

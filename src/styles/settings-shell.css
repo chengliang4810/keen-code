@@ -1,0 +1,393 @@
+/*
+ * KeenCode settings shell aligned with ZCode's Apache-2.0 settings layout.
+ * The source product uses a 48px drag/header band, a 268px desktop rail,
+ * and a 68px icon rail below the lg breakpoint. Product behavior remains in
+ * SettingsPage.tsx; this file only owns the shell geometry and surfaces.
+ */
+
+.settings-page {
+  background: var(--bg-main);
+}
+
+.settings-page__chrome {
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+}
+
+.settings-page__nav {
+  width: 268px;
+  min-width: 268px;
+  max-width: 268px;
+  padding-top: 48px;
+  background: var(--bg-sidebar);
+}
+
+.settings-page__nav-header {
+  padding: 12px 8px;
+}
+
+.settings-page__back {
+  height: 32px;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 10px;
+  border-radius: var(--radius-lg);
+  color: var(--text-secondary);
+}
+
+.settings-page__back:hover,
+.settings-page__back:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-page__nav-inner {
+  gap: 16px;
+  padding: 0 8px 12px;
+}
+
+.settings-page__nav-group {
+  gap: 4px;
+}
+
+.settings-page__group-label {
+  margin: 0;
+  padding: 0 10px 4px;
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 20px;
+}
+
+.settings-page__nav-inner [data-slot="navigation-list"] {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.settings-page__nav-inner [data-slot="navigation-link"] {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 32px;
+  min-height: 32px;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: var(--radius-lg);
+  color: var(--text-secondary);
+  font-size: var(--text-md);
+  line-height: 20px;
+  transition: background-color var(--motion-fast) var(--ease-out),
+    color var(--motion-fast) var(--ease-out);
+}
+
+.settings-page__nav-inner [data-slot="navigation-link"]:hover,
+.settings-page__nav-inner [data-slot="navigation-link"]:focus-visible,
+.settings-page__nav-inner [data-slot="navigation-link"][data-active] {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.settings-page__nav-inner [data-slot="navigation-link"] > svg,
+.settings-page__nav-inner [data-slot="navigation-link"] > [data-icon="start"] {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.settings-page__content {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  padding: 4px 4px 4px 0;
+  background: var(--bg-main);
+}
+
+.settings-page__content-frame {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  background: var(--bg-main);
+}
+
+.settings-page__header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 48px;
+  height: 48px;
+  min-height: 48px;
+  min-width: 0;
+  padding: 0 16px;
+  background: var(--bg-main);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm);
+  line-height: 20px;
+  -webkit-app-region: drag;
+  app-region: drag;
+}
+
+.settings-page__breadcrumb-root,
+.settings-page__breadcrumb-separator {
+  flex: 0 0 auto;
+}
+
+.settings-page__breadcrumb-current {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-page__main {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: 0;
+  margin: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 0;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.settings-page__body {
+  width: 100%;
+  max-width: 896px;
+  min-width: 0;
+  margin: 0 auto;
+  padding: 0 16px 32px;
+}
+
+.settings-page__heading {
+  min-height: 32px;
+  margin: 0 0 32px;
+  gap: 8px;
+}
+
+.settings-page__title {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 32px;
+  color: var(--text-primary);
+}
+
+@media (min-width: 1024px) {
+  .settings-page__title {
+    font-size: 30px;
+    line-height: 36px;
+  }
+}
+
+.settings-page__h2 {
+  margin: 0 0 12px;
+  font-size: var(--text-lg);
+  font-weight: 500;
+  line-height: 24px;
+  color: var(--text-primary);
+}
+
+.settings-page__body > .settings-page__h2:not(:first-child) {
+  margin-top: 32px;
+}
+
+.settings-page__body > [data-slot="card"],
+.settings-page__body .settings-appearance-duo > [data-slot="card"] {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xl);
+  background: var(--bg-card);
+  box-shadow: none;
+}
+
+.settings-page__body > [data-slot="card"] + [data-slot="card"],
+.settings-page__body > [data-slot="card"] + .settings-appearance-duo {
+  margin-top: 14px;
+}
+
+.settings-page__body > .ext-agent-card > [data-slot="card-content"] {
+  padding: 0;
+}
+
+.settings-page__body > [data-slot="card"] > [data-slot="card-content"],
+.settings-page__body .settings-appearance-duo > [data-slot="card"] > [data-slot="card-content"] {
+  padding: 0;
+  border-color: var(--border-subtle);
+  background: var(--bg-card);
+}
+
+.settings-page__body .settings-row {
+  min-height: 0;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border-subtle);
+  border-bottom: 0;
+}
+
+.settings-page__body [data-slot="card-content"] > .settings-row:first-child {
+  border-top: 0;
+}
+
+.settings-page__body .settings-row__label {
+  font-size: var(--text-md);
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.settings-page__body .settings-row__desc {
+  margin-top: 4px;
+  font-size: var(--text-md);
+  line-height: 24px;
+  color: var(--text-secondary);
+}
+
+/* Appica portals are kept behaviorally intact but use ZCode's solid surfaces. */
+[data-slot="dialog-backdrop"] {
+  background: var(--bg-overlay);
+  backdrop-filter: blur(8px);
+}
+
+[data-slot="dialog-popup"] {
+  border: 1px solid var(--border-popover);
+  border-radius: var(--radius-xl);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+[data-slot="dialog-content"] {
+  background: var(--bg-elevated);
+  border-radius: inherit;
+}
+
+[data-slot="popover-content"] {
+  min-width: 200px;
+  max-width: 320px;
+  gap: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+@media (min-width: 1024px) {
+  .settings-page__body {
+    padding-right: 32px;
+    padding-left: 32px;
+    padding-bottom: 40px;
+  }
+}
+
+/* ZCode collapses the settings navigation to an icon rail below lg. */
+@media (max-width: 1023px) {
+  .settings-page {
+    flex-direction: row;
+  }
+
+  .settings-page__nav,
+  .platform-mac .settings-page__nav,
+  .platform-win .settings-page__nav,
+  .platform-other .settings-page__nav {
+    width: 68px;
+    min-width: 68px;
+    max-width: 68px;
+    flex: 0 0 68px;
+    padding-top: 48px;
+    border-right: 0;
+    border-bottom: 0;
+    box-shadow: none;
+  }
+
+  .settings-page__nav-header {
+    padding: 12px 8px;
+  }
+
+  .settings-page__back {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    padding: 0;
+    justify-content: center;
+  }
+
+  .settings-page__back > span,
+  .settings-page__nav-label,
+  .settings-page__group-label {
+    display: none;
+  }
+
+  .settings-page__nav-inner {
+    display: flex;
+    gap: 16px;
+    padding: 0 8px 12px;
+  }
+
+  .settings-page__nav-group {
+    align-items: center;
+  }
+
+  .settings-page__nav-inner [data-slot="navigation-list"] {
+    align-items: center;
+    gap: 4px;
+  }
+
+  .settings-page__nav-inner [data-slot="navigation-link"] {
+    width: 40px;
+    height: 40px;
+    min-height: 40px;
+    justify-content: center;
+    padding: 0;
+    border-radius: var(--radius-lg);
+  }
+
+  .settings-page__mobile-nav {
+    display: none !important;
+  }
+
+  .settings-page__content,
+  .platform-mac .settings-page__content {
+    padding: 4px;
+  }
+
+  .settings-page__body,
+  .platform-mac .settings-page__body {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+}
+
+@media (max-width: 460px) {
+  .settings-page__content,
+  .platform-mac .settings-page__content {
+    padding: 2px;
+  }
+
+  .settings-page__body,
+  .platform-mac .settings-page__body {
+    padding-right: 12px;
+    padding-left: 12px;
+  }
+
+  .settings-page__title {
+    font-size: 22px;
+    line-height: 30px;
+  }
+
+  .settings-page__body .settings-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-page__nav-inner [data-slot="navigation-link"] {
+    transition: none;
+  }
+}

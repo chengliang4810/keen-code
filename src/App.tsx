@@ -23,22 +23,19 @@ import { useComposerController } from "@/hooks/useComposerController";
 import { useSidebarController } from "@/hooks/useSidebarController";
 import { useTrayMenu } from "@/hooks/useTrayMenu";
 import { useUnreadTerminalResults } from "@/hooks/useUnreadTerminalResults";
-import {
-  useSessionNavigation,
-  type SessionNavigationNewChat,
-  type SessionNavigationOpenSession,
-} from "@/hooks/useSessionNavigation";
+import { useSessionNavigation, type SessionNavigationNewChat, type SessionNavigationOpenSession } from "@/hooks/useSessionNavigation";
 import { useWorkbenchDragResize } from "@/hooks/useWorkbenchDragResize";
+import { useFrontendObservability } from "@/hooks/useFrontendObservability";
+import { useVisualViewportLayout } from "@/hooks/useVisualViewportLayout";
+import { pruneUnprotectedSessionMessageCache } from "@/hooks/acp-runtime/messageCache";
 import { useProjectDialog } from "@/hooks/useProjectDialog";
 import { useWorktrees } from "@/hooks/useWorktrees";
-import {
-  acpSessionApi,
-  useSessionLifecycleActions,
-} from "@/hooks/useSessionLifecycleActions";
+import { acpSessionApi, useSessionLifecycleActions } from "@/hooks/useSessionLifecycleActions";
 import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
   DEFAULT_LAYOUT,
-  loadLayout,
+  type SidebarResizeStart,
+  loadInitialLayout,
 } from "@/lib/layout";
 import type { DragZone } from "@/lib/dragZone";
 import {
@@ -63,6 +60,7 @@ import { appUpdateActionFor } from "@/lib/appUpdate";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import { type ResourceOpenTarget } from "@/components/ResourceViewer";
 import { type TurnLatencyState } from "@/lib/turnLatency";
+import { canWriteProjects } from "@/lib/hostCapabilities";
 import type {
   DraftNavigationLocation,
   DraftNavigationSnapshot,
@@ -91,12 +89,10 @@ import { ShortcutsModal } from "@/features/app/overlays/ShortcutsModal";
 import { WorktreeCreateModal } from "@/features/app/overlays/WorktreeCreateModal";
 import { WorktreeGcModal } from "@/features/app/overlays/WorktreeGcModal";
 import { StatusModal } from "@/components/StatusModal";
-import type {
-  Project,
-  SessionContextUsage,
-} from "@/features/app/models";
-
+import type { Project, SessionContextUsage } from "@/features/app/models";
 export default function App() {
+  const projectWritesAllowed = canWriteProjects(api.isTauri());
+  useVisualViewportLayout();
   /** ACP 原生事件归约出的工作区投影（事件监听直接改 ref 内的 view）。 */
   const acpWorkspaceRef = useRef<AcpWorkspaceState>(createAcpWorkspaceState());
   /** 渲染用工作区状态：每次 commit 生成新对象，驱动派生视图与重渲染。 */
@@ -148,7 +144,6 @@ export default function App() {
       ),
     }));
   }, []);
-
   const {
     themePreference,
     skin,
@@ -157,10 +152,10 @@ export default function App() {
     applySkinChoice,
     applyUiFontSizeChoice,
   } = useThemeAppearance();
-  const [layout, setLayout] = useState(() => loadLayout(localStorage));
+  const [layout, setLayout] = useState(() => loadInitialLayout(localStorage, window.innerWidth));
   const sidebarRef = useRef<HTMLElement>(null);
+  const sidebarResizeStartRef = useRef<SidebarResizeStart | null>(null);
   const asideRef = useRef<HTMLElement>(null);
-
   const [session, setSession] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
   /** Host live agent (may differ from the session currently viewed in the UI). */
   const [liveHost, setLiveHost] = useState<SessionSnapshot>(IDLE_SNAPSHOT);
@@ -251,14 +246,11 @@ export default function App() {
   } = useAppDialog();
   const askUserWrapRef = useRef<HTMLDivElement>(null);
   /** Desktop Connect panel (AC7) — close does not stop host. */
-
   /** While openSession loads, do not let session.sessionId effect clobber viewing id. */
   const openingSessionIdRef = useRef<string | null>(null);
   /** Distinguishes two overlapping opens of the same Session. */
   const openingSessionEpochRef = useRef<number | null>(null);
-
   // ContextMenu handles outside click + Escape for sidebar menus.
-
   const {
     appView,
     settingsSection,
@@ -266,7 +258,7 @@ export default function App() {
     navigateWorkbench,
     navigateSettings,
   } = useAppRoute();
-
+  useFrontendObservability({ appView, settingsSection });
   /** 首次渲染时展示品牌启动页；工作台外壳不等待会话状态。 */
   const [appBooting, setAppBooting] = useState(true);
   /** 后台终态未读结果：侧栏标记与 Dock 角标共用同一份状态。 */
@@ -364,7 +356,6 @@ export default function App() {
     check: checkAppUpdate,
     install: installAppUpdate,
   } = useAppUpdate(appBooting, locale);
-
   const providerModels = useProviderModels({
     sessionId: session.sessionId,
     locale,
@@ -372,8 +363,10 @@ export default function App() {
   });
   const {
     modelId,
+    sessionModelReference,
     sessionProviderId,
     setSessionModelReference,
+    applyHostConfigOptions,
     effort,
     setEffort,
     configuredModelsRef,
@@ -388,7 +381,6 @@ export default function App() {
     isValidEffort,
     isValidModelId,
   } = providerModels;
-
   /** Composer 修改思考强度时同步工作区视图；投影恢复以视图值为准，避免旧值顶回。 */
   const composerSetEffort = useCallback(
     (next: SetStateAction<string>) => {
@@ -402,7 +394,6 @@ export default function App() {
     },
     [setEffort],
   );
-
   const [subagentModelLabels, setSubagentModelLabels] = useState<
     Record<string, string>
   >({});
@@ -508,7 +499,6 @@ export default function App() {
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const { platform, useCustomWindowChrome, windowMaximized, windowFullscreen } =
     useWindowChrome();
-
   /** Composer 业务边界：草稿、附件、Slash、历史、模式和目标均由该控制器管理。 */
   const composerApplyViewProjectionRef = useRef<
     (sessionId: string | null) => void
@@ -566,8 +556,6 @@ export default function App() {
       newChat: () => navigationActionsRef.current.newChat(),
       exportActiveSession: () => exportActiveSessionMdRef.current(),
     },
-    askUserWrapRef,
-    askUserKey: askUser?.rpcId ?? null,
   });
   const {
     draft,
@@ -579,6 +567,7 @@ export default function App() {
     addAttachmentsFromPaths,
     addPastedFiles,
     pickComposerFiles,
+    retryAttachment,
     skillsLoading,
     liveSlash,
     slashFilterQuery,
@@ -614,7 +603,6 @@ export default function App() {
     composerShellRef,
     composerWrapRef,
     composerPlusTriggerRef,
-    composerFloatPad,
     composerHeight,
     requestComposerFocus,
     contextUsageDisplay,
@@ -631,9 +619,9 @@ export default function App() {
     pauseCurrentGoal,
     resumeCurrentGoal,
   } = composer;
-
   const sidebar = useSidebarController({
     locale,
+    canWriteProjects: projectWritesAllowed,
     currentSessionId: session.sessionId,
     activeProject,
     setActiveProject,
@@ -688,6 +676,7 @@ export default function App() {
     visibleSessionsByProject,
     setVisibleSessionsByProject,
     sessionSortMode,
+    sessionOrder,
     setSessionSortMode,
     markSessionUserMessage,
     projectDropHint,
@@ -732,11 +721,9 @@ export default function App() {
     applyMessagePrefixTitle,
     applyAutomaticSessionTitle,
   } = sidebar;
-
   const dropQueuedSessionsRef = useRef<(sessionIds: Iterable<string>) => void>(
     () => {},
   );
-
   // Global shortcuts use refs so the listener stays mounted while handlers change.
   const shortcutHandlersRef = useRef({
     newChat: () => {},
@@ -782,7 +769,6 @@ export default function App() {
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
   }, [appBooting, appView, openSearch]);
-
   const {
     applyViewProjection,
     applyViewProjectionRef,
@@ -818,6 +804,7 @@ export default function App() {
     sessionsRef,
     sendInFlightRef,
     configuredModelsRef,
+    applyHostConfigOptions,
     clearPendingAskUserRef,
     pendingAskUserBySessionRef,
     setPendingAskUserSessionIds,
@@ -841,7 +828,6 @@ export default function App() {
     setUnreadTerminalResults,
   });
   composerApplyViewProjectionRef.current = applyViewProjection;
-
   /**
    * 多会话忙碌标识，用于侧栏运行中状态。
    * Uses liveMap projection + liveHost fallback. Excludes connecting.
@@ -887,7 +873,6 @@ export default function App() {
     applyAutomaticSessionTitle,
     applyMessagePrefixTitle,
   ]);
-
   /**
    * 切换工作目录。ACP Session 的工作目录不可变，已有会话时进入目标项目的新草稿。
    */
@@ -927,7 +912,6 @@ export default function App() {
     },
     [locale, session.sessionId, showToast, tr],
   );
-
   /** 添加项目后刷新列表，并按调用场景选中项目或绑定当前任务。 */
   const finalizeAddedProject = useCallback(
     async (
@@ -953,7 +937,6 @@ export default function App() {
     },
     [bindSessionProject, showToast, tr],
   );
-
   const finalizeProjectDialog = useCallback(
     async (project: Project, intent: { bindSession: boolean }) => {
       await finalizeAddedProject(project, { bindSession: intent.bindSession });
@@ -981,6 +964,7 @@ export default function App() {
     addProject,
   } = useProjectDialog({
     projects,
+    canWriteProjects: projectWritesAllowed,
     activeSession: session,
     finalizeAddedProject: finalizeProjectDialog,
     navigateSettings,
@@ -1034,7 +1018,6 @@ export default function App() {
     submitWorktreeGc,
     switchToWorktree,
   } = worktrees;
-
   useWorkbenchDragResize({
     isTauri: api.isTauri,
     platform,
@@ -1043,6 +1026,7 @@ export default function App() {
     setDragZone,
     selectAddProjectSourceFromPaths,
     sidebarRef,
+    sidebarResizeStartRef,
     asideRef,
     layout,
     setLayout,
@@ -1051,7 +1035,6 @@ export default function App() {
     resizingAside,
     setResizingAside,
   });
-
   /**
    * openSession 会先切换 messages、等 connect/replay 完成才更新 session 快照；
    * 空态与欢迎态必须对齐 viewingSessionIdRef，否则加载窗口会把目标会话
@@ -1080,12 +1063,14 @@ export default function App() {
     modelLabel,
     effort,
     hasConfiguredModel,
+    modelReference: sessionModelReference,
     goalModeSessionKey,
     planModeSessionKey,
     ultraModeSessionKey,
     api: {
       isTauri: api.isTauri,
       connect: connectSession,
+      setModel: acpSessionApi.setModel,
       setEffort: acpSessionApi.setEffort,
       send: acpSessionApi.send,
       stop: acpSessionApi.stop,
@@ -1160,6 +1145,10 @@ export default function App() {
     steerQueuedItem,
   } = sessionTurn;
   dropQueuedSessionsRef.current = sendQueue.dropSessions;
+  useEffect(() => {
+    pruneUnprotectedSessionMessageCache(messagesBySessionRef.current, busyIds,
+      sendQueue.queuedSessionIds, session.sessionId, pendingAskUserSessionIds);
+  }, [busyIds, pendingAskUserSessionIds, sendQueue.queuedSessionIds, session.sessionId]);
   const sessionNavigation = useSessionNavigation({
     locale,
     navigationRefs: {
@@ -1186,6 +1175,7 @@ export default function App() {
     },
     sidebar: {
       projects,
+      sessions,
       activeProject,
       setActiveProject,
       setExpandedProjects,
@@ -1223,7 +1213,14 @@ export default function App() {
     newChat: sessionNavigation.newChat,
     openSession: sessionNavigation.openSession,
   };
-  const { openSession, newChat } = sessionNavigation;
+  const {
+    openSession,
+    newChat,
+    canGoBack,
+    canGoForward,
+    goBack,
+    goForward,
+  } = sessionNavigation;
   // 托盘菜单跨侧栏会话投影与导航，属于跨业务域协调，因此在这里装配。
   useTrayMenu({
     locale,
@@ -1288,7 +1285,6 @@ export default function App() {
       void loadAllSessions();
     }
   }, [appView, settingsSection, loadAllSessions]);
-
   const {
     confirmForkSession,
     exportActiveSessionMd,
@@ -1296,6 +1292,7 @@ export default function App() {
     restoreArchivedSession,
     deleteArchivedSession,
   } = sessionLifecycle;
+  const currentForkSession = session.sessionId ? sessions.find((item) => item.id === session.sessionId) : undefined;
   exportActiveSessionMdRef.current = exportActiveSessionMd;
   shortcutHandlersRef.current = {
     newChat: () => {
@@ -1308,7 +1305,6 @@ export default function App() {
       openChatFind();
     },
   };
-
   const availableUpdateVersion =
     appUpdateStatus?.latestRelease ?? appUpdateStatus?.latestVersion ?? "";
   const appUpdateAction = appUpdateActionFor(appUpdateStatus);
@@ -1348,7 +1344,6 @@ export default function App() {
   useEffect(() => {
     setErrorDetailOpen(false);
   }, [errorBanner?.code, errorBanner?.summary, errorBanner?.detail]);
-
   // T15: announce stream start/end once (avoid token-level noise).
   useEffect(() => {
     const streaming =
@@ -1364,7 +1359,6 @@ export default function App() {
     }
     wasStreamingRef.current = streaming;
   }, [session.state, messages, tr]);
-
   /** T04 错误卡片操作：重连、打开设置或关闭。 */
   const runErrorBannerAction = useCallback(
     (action: NonNullable<ErrorBannerView["primary"]>) => {
@@ -1399,7 +1393,6 @@ export default function App() {
     },
     [ensureConnected, navigateSettings, stop],
   );
-
   return (
     <ImageViewerProvider locale={locale}>
     <div
@@ -1420,7 +1413,6 @@ export default function App() {
           close: tr("window.close"),
         }}
       />
-
       {wallpaperUrl && wallpaperRecord ? (
         <WallpaperMediaLayer
           url={wallpaperUrl}
@@ -1435,7 +1427,6 @@ export default function App() {
           onIntrinsicSize={applyWallpaperMediaSize}
         />
       ) : null}
-
       {appBooting ? (
         <StartupScreen useCustomWindowChrome={useCustomWindowChrome} />
       ) : appView === "settings" ? (
@@ -1512,12 +1503,17 @@ export default function App() {
           chrome={{
             setLayout,
             setResizingSidebar,
+            sidebarResizeStartRef,
+            canGoBack,
+            canGoForward,
+            goBack, goForward,
             useCustomWindowChrome,
             toggleMaximizeFromTitlebar,
           }}
           navigation={{
             newChat,
             openSearch,
+            openPluginMarketplace: () => navigateSettings("market"),
             searchTriggerRef,
           }}
           pinned={{
@@ -1539,6 +1535,7 @@ export default function App() {
           }}
           projectTree={{
             projects,
+            canWriteProjects: projectWritesAllowed,
             projectsOpen,
             setProjectsOpen,
             expandedProjects,
@@ -1587,6 +1584,11 @@ export default function App() {
             archiveSession,
             pinSession,
           }}
+          archive={{ sessions,
+            sessionOrder, sessionSortMode,
+            loadAllSessions,
+            deleteArchivedSession,
+          }}
           user={{
             labels: {
               settings: tr("sidebar.settings"),
@@ -1605,7 +1607,6 @@ export default function App() {
             setLayout,
             toast,
             tr,
-            composerFloatPad,
             composerHeight,
             streamA11yNote,
           }}
@@ -1614,16 +1615,25 @@ export default function App() {
             toggleMaximizeFromTitlebar,
             tr,
             sessions,
+            activeProject,
+            projects,
+            gitWorktrees,
+            bindSessionProject,
             session,
             summaryOpen,
             summaryTriggerRef,
             setSummaryOpen,
             openSessionMenu,
             newChat,
+            canGoBack,
+            canGoForward,
+            goBack,
+            goForward,
           }}
           notices={{
             tr,
             activeProject,
+            canWriteProjects: projectWritesAllowed,
             relocateProject,
             emptyExistingSession,
             streamStall,
@@ -1661,6 +1671,7 @@ export default function App() {
             setResourceOpenTarget,
             setAttachments,
             editAndResendLastUserMessage,
+            onForkCurrentSession: currentForkSession ? () => confirmForkSession(currentForkSession) : undefined,
             attachLabels,
             showChatFind,
             chatFindQuery,
@@ -1692,6 +1703,7 @@ export default function App() {
               session,
               activeProject,
               projects,
+              canWriteProjects: projectWritesAllowed,
               acpSessionView,
               welcomeSession,
               bindSessionProject,
@@ -1733,6 +1745,7 @@ export default function App() {
               attachments,
               attachLabels,
               setAttachments,
+              retryAttachment,
             },
             input: {
               locale,
@@ -1743,6 +1756,9 @@ export default function App() {
               setDraft,
               handleDraftChange,
               attachments,
+              mentionSessions: sessions,
+              loadMentionPlugins: () =>
+                api.pluginsList(activeProject?.path ?? null).then((result) => result.plugins),
               addPastedFiles,
               addAttachmentsFromPaths,
               pickComposerFiles,
@@ -1844,7 +1860,7 @@ export default function App() {
           loadTrajectoryMessages={loadTrajectoryMessages}
         />
       </div>
-      <AddProjectModal
+      {projectWritesAllowed ? <AddProjectModal
         tr={tr}
         intent={addProjectIntent}
         name={addProjectName}
@@ -1864,7 +1880,7 @@ export default function App() {
         pickDirectory={pickAddProjectDirectory}
         reset={resetAddProject}
         navigateSettings={navigateSettings}
-      />
+      /> : null}
       <WorktreeCreateModal
         tr={tr}
         open={worktreeCreateOpen}
@@ -1926,6 +1942,7 @@ export default function App() {
         returnFocusRef={searchReturnFocusRef}
         hits={searchHits}
         projects={projects}
+        canWriteProjects={projectWritesAllowed}
         sessions={sessions}
         activeProject={activeProject}
         openSession={openSession}
@@ -1940,6 +1957,7 @@ export default function App() {
         menu={ctxMenu}
         setMenu={setCtxMenu}
         projects={projects}
+        canWriteProjects={projectWritesAllowed}
         sessions={sessions}
         setLocalError={setLocalError}
         relocateProject={relocateProject}
@@ -1950,8 +1968,7 @@ export default function App() {
         viewTrajectory={viewTrajectory}
         copySessionId={copySessionId}
       />
-      <span hidden data-layout-default={JSON.stringify(DEFAULT_LAYOUT)} />
-      </>
+      <span hidden data-layout-default={JSON.stringify(DEFAULT_LAYOUT)} /></>
       )}
       {/* 更新浮层与当前视图无关：设置页同样需要显示更新进度和安装确认。 */}
       <AppUpdateModal

@@ -59,10 +59,10 @@ describe("选择控件统一契约", () => {
       "utf8",
     );
 
-    expect(settings).toContain("@appica/ui-react/select");
+    expect(settings).toContain("@/components/ui/select");
     expect(settings).toContain("@appica/ui-react/toggle-group");
     expect(settings).toContain("@appica/ui-react/color-swatch-picker");
-    expect(agents).toContain("@appica/ui-react/select");
+    expect(agents).toContain("@/components/ui/select");
     expect(agents).toContain("@appica/ui-react/checkbox");
     expect(agents).toContain("@/components/ui/switch");
   });

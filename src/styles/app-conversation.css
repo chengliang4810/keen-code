@@ -12,19 +12,46 @@
   --content-max-width: clamp(680px, calc(var(--conversation-column-width, 0px) * 0.64), 920px);
 }
 
+/* ZCode 桌面会话列始终保留独立 frame；窄视口由媒体查询恢复无框全宽布局。 */
+@media (min-width: 761px) {
+  .main.main--frame {
+    margin: 4px 4px 4px 0;
+    border: 1px solid var(--border-subtle);
+    overflow: hidden;
+  }
+
+  /* 沿用 ZCode window chrome 的平台圆角；conversation frame 不使用通用产品圆角。 */
+  .platform-win .main.main--frame,
+  .has-custom-chrome .main.main--frame {
+    border-radius: var(--radius-workspace-win);
+  }
+
+  .platform-mac .main.main--frame {
+    border-radius: var(--radius-workspace-mac);
+  }
+
+  .platform-other .main.main--frame {
+    border-radius: var(--radius-workspace-other);
+  }
+}
+
 /* Center title bar — same height as sidebar-chrome + rv__head so dividers align */
 .main__top {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: var(--titlebar-height, 40px);
-  min-height: var(--titlebar-height, 40px);
-  max-height: var(--titlebar-height, 40px);
-  padding: 0 12px 0 14px;
-  border-bottom: none;
+  height: var(--titlebar-height, 48px);
+  min-height: var(--titlebar-height, 48px);
+  max-height: var(--titlebar-height, 48px);
+  padding: 8px;
+  border-bottom: 1px solid var(--border-subtle);
   gap: var(--space-2);
+  overflow: hidden;
   flex-shrink: 0;
   box-sizing: border-box;
+  /* 标题的收缩基于实际 header 宽度，右侧面板打开时仍保持可用空间。 */
+  container-type: inline-size;
+  container-name: main-header;
 }
 
 .platform-win .settings-page__chrome,
@@ -61,22 +88,161 @@
 .main__title-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  flex: 1;
+  /* 标题区按内容占宽，空白区域留给外层标题栏拖动。 */
+  flex: 0 1 auto;
+  max-width: 100%;
   height: 100%;
+  overflow: hidden;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
+}
+
+.main__brand-button,
+.main__task-nav-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding-inline: 0;
+}
+
+.main__task-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.main__new-task-button {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding-inline: 0;
+}
+
+@container main-header (max-width: 760px) {
+  .main__task-nav {
+    display: none;
+  }
 }
 
 .main__title {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(25rem, 42cqw);
   margin: 0;
-  font-size: calc(13px + var(--ui-font-delta));
-  font-weight: 500;
-  letter-spacing: -0.01em;
+  font-size: calc(14px + var(--ui-font-delta));
+  font-weight: 600;
+  letter-spacing: 0;
   color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   line-height: 1.2;
+}
+
+.main__project-context {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  color: var(--text-secondary);
+  border-radius: var(--radius-md);
+  flex-shrink: 0;
+}
+
+.main__project-context:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.main__project-context-popover {
+  width: min(24rem, calc(100vw - 2rem));
+  max-width: calc(100vw - 2rem);
+  padding: var(--space-2);
+}
+
+.main__project-context-summary {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2) var(--space-2);
+}
+
+.main__project-context-name,
+.main__project-context-branch {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.main__project-context-name strong,
+.main__project-context-branch span,
+.main__project-context-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.main__project-context-name strong {
+  color: var(--text-primary);
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+.main__project-context-path {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.main__project-context-branch {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.main__project-context-missing {
+  color: var(--danger);
+  font-size: var(--text-xs);
+}
+
+.main__project-context-option {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.main__project-context-option-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.main__project-context-option-name,
+.main__project-context-option-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.main__project-context-option-name {
+  font-weight: 500;
+}
+
+.main__project-context-option-path {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
 }
 
 .main__title-menu {
@@ -86,6 +252,24 @@
 .main__title-row:hover .main__title-menu,
 .main__title-menu:focus-visible {
   opacity: 1;
+}
+
+@container main-header (max-width: 760px) {
+  .main__title {
+    max-width: min(50cqw, 25rem);
+  }
+}
+
+@container main-header (max-width: 560px) {
+  .main__title {
+    max-width: 30cqw;
+  }
+}
+
+@container main-header (max-width: 420px) {
+  .main__title {
+    max-width: 22cqw;
+  }
 }
 
 /* ===== KeenCode open-location split control =====
@@ -156,7 +340,8 @@
   gap: 4px;
   align-items: center;
   flex-shrink: 0;
-  height: 100%;
+  -webkit-app-region: no-drag;
+  app-region: no-drag;
 }
 
 .main__top-actions .open-loc,
@@ -164,7 +349,7 @@
   margin: 0;
 }
 
-/* Chat stage: full-height scroll + floating composer over it */
+/* Chat stage: full-height scroll with the session composer docked in its viewport. */
 .main__stage {
   position: relative;
   flex: 1;
@@ -173,7 +358,9 @@
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  /* 消息列和会话态 Composer 共用舞台宽度查询，随右侧栏实际收缩。 */
   container-type: inline-size;
+  container-name: conversation-stage;
 }
 
 /* The conversation transcript fills the stage. */
@@ -184,10 +371,7 @@
   transition: width var(--motion-enter) var(--ease-out);
 }
 
-/*
- * Windows WebView2 在滚动层与绝对定位输入区重叠时，可能在同一帧中交替
- * 合成新旧纹理。固定两者的合成边界，避免滚轮滚动时整块工作区闪烁。
- */
+/* Windows WebView2 的滚动层保持独立合成边界，降低滚轮滚动时的纹理闪烁。 */
 .platform-win .main__stage {
   isolation: isolate;
 }
@@ -195,16 +379,6 @@
 .platform-win .main__stage .lobe-chat__scroll {
   contain: paint;
   transform: translateZ(0);
-}
-
-.platform-win .composer-wrap--float {
-  transform: translateZ(0);
-  backface-visibility: hidden;
-}
-
-/* Leave room for the floating composer below the transcript list. */
-.main__stage .lobe-chat__inner {
-  padding-bottom: calc(var(--composer-float-pad, 168px) + 12px);
 }
 
 /* Welcome: composer is centered, not bottom-docked — no extra chat pad */
@@ -632,7 +806,7 @@
   box-sizing: border-box;
 }
 
-/* Composer — floating over chat; messages scroll underneath */
+/* Composer — session dock is supplied inside ConversationThread's scroll viewport. */
 .composer-wrap {
   padding: 12px 16px 16px;
   position: relative;
@@ -640,51 +814,52 @@
   justify-content: center;
 }
 
-.composer-wrap--float {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 20;
-  /* Pass scroll through the fade; only the card captures pointer */
+.composer-wrap--sticky {
+  width: 100%;
+  box-sizing: border-box;
   pointer-events: none;
-  padding: 24px 16px 14px;
+  padding: 0 16px 16px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 10px;
-  background: linear-gradient(
-    to top,
-    var(--bg-main) 0%,
-    color-mix(in srgb, var(--bg-main) 92%, transparent) 42%,
-    color-mix(in srgb, var(--bg-main) 55%, transparent) 72%,
-    transparent 100%
-  );
-  transition: right var(--motion-enter) var(--ease-out);
 }
 
-/* Empty / new session: welcome copy + composer vertically centered in the stage */
+/* ZCode renders the queue as a sibling panel above the input shell. Its
+   bottom padding is deliberately reclaimed so queued rows visually join the
+   rounded composer surface instead of creating a second card inside it. */
+.composer-wrap--sticky:has(> .composer__queue) {
+  gap: 0;
+}
+
+/* Empty / new session: welcome copy + composer share the stage's flex flow. */
 .composer-wrap--welcome {
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  box-sizing: border-box;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 24px;
   padding: 0 16px;
-  /* Full-area overlay — no bottom fade while centered */
+  pointer-events: auto;
   background: transparent;
+}
+
+/* A fresh draft has no transcript content; let the welcome flex column own the stage. */
+.main__stage:has(.composer-wrap--welcome) > .lobe-chat {
+  display: none;
 }
 
 .composer-wrap--welcome .composer {
   width: 100%;
-  border: none;
+  border: 1px solid var(--border-subtle);
   background: var(--bg-input);
-  padding: 10px 0 0;
+  padding: 12px;
   gap: 12px;
-  max-width: calc(var(--content-max-width) + 32px);
+  max-width: 672px;
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
   box-shadow: var(--dsw-elevation-soft);
 }
@@ -698,28 +873,33 @@
 .composer-stack {
   pointer-events: none;
   width: 100%;
-  max-width: calc(var(--content-max-width) + 32px);
+  /* ZCode 的 72rem 包含 dock 的左右 16px 内边距，surface 需扣除 32px。 */
+  max-width: min(100%, calc(72rem - 32px));
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 12px;
 }
 
+@container conversation-stage (min-width: 864px) {
+  .composer-stack {
+    max-width: min(calc(100% - 6rem), calc(56rem - 32px));
+  }
+}
+
+@container conversation-stage (min-width: 1280px) {
+  .composer-stack {
+    max-width: min(calc(100% - 24rem), calc(72rem - 32px));
+  }
+}
+
 .composer-stack--with-context {
-  max-width: calc(var(--content-max-width) + 32px);
+  max-width: inherit;
+  gap: 0;
   padding: 0;
-  border: 0;
   border-radius: var(--radius-composer);
-  background: transparent;
-  box-shadow: none;
-}
-
-[data-theme="light"] .composer-stack--with-context {
-  background: transparent;
-}
-
-.composer-stack--with-context .composer {
-  border-radius: var(--radius-composer);
+  background: var(--background-subtle);
+  box-shadow: var(--shadow-composer-context);
 }
 
 .composer-stack .composer {
@@ -936,7 +1116,7 @@
   }
 }
 
-@media (max-width: 660px) {
+@container conversation-stage (max-width: 660px) {
   .composer-goal {
     grid-template-columns: 18px minmax(0, 1fr) 28px;
   }
@@ -952,11 +1132,12 @@
   pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 0;
   flex-wrap: wrap;
   min-height: 28px;
-  padding: 0 8px;
+  padding: 6px;
   border: 0;
+  border-radius: 0;
   background: transparent;
   box-shadow: none;
   color: var(--text-primary);
@@ -967,10 +1148,10 @@
   align-items: center;
   gap: 6px;
   height: 28px;
-  max-width: min(200px, 42vw);
-  padding: 0 8px;
+  max-width: min(15rem, 42vw);
+  padding: 0 8px 0 12px;
   border: none;
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-full);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -987,7 +1168,8 @@ button.composer__context-item {
 }
 
 .composer__context-item:hover:not(:disabled),
-.composer__context-item.is-open {
+.composer__context-item.is-open,
+.composer__context-item:focus-visible {
   background: var(--bg-hover);
   color: var(--text-primary);
 }
@@ -1069,6 +1251,7 @@ button.composer__context-item {
   overflow-y: auto;
   min-height: 0;
   overscroll-behavior: contain;
+  max-height: 200px;
 }
 
 .cwm__list.is-loading {
@@ -1179,44 +1362,78 @@ button.composer__context-item {
   flex-shrink: 0;
 }
 
-.composer-wrap--float .composer {
+.composer-wrap--sticky .composer,
+.composer-wrap--welcome .composer {
   pointer-events: auto;
   box-shadow: var(--dsw-elevation-soft);
 }
 
-.composer-wrap--welcome .composer-stack--with-context .composer {
-  box-shadow: var(--dsw-elevation-soft);
+/* ZCode 的 centered Composer 连同项目上下文栏共用 max-w-2xl（672px）。 */
+.composer-wrap--welcome .composer-stack--with-context {
+  width: 100%;
+  max-width: 672px;
 }
 
 .composer {
   position: relative;
   width: 100%;
-  max-width: calc(var(--content-max-width) + 32px);
-  border: none;
+  max-width: none;
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
   background: var(--bg-input);
   border-radius: var(--radius-composer);
-  padding: 10px 0 0;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   box-shadow: var(--dsw-elevation-soft);
   transition:
     border-color var(--motion-enter) var(--ease-out),
-    box-shadow var(--motion-enter) var(--ease-out),
-    transform var(--motion-enter) var(--ease-out);
+    background-color var(--motion-enter) var(--ease-out);
   /* Size container for compact chips. */
   container-type: inline-size;
   container-name: composer;
   --dsw-elevation-stroke-color: var(--dsw-alias-border-l2);
 }
 
+.composer:hover {
+  border-color: var(--border-strong);
+}
+
+.composer:focus-within {
+  border-color: var(--border-focus);
+  background: var(--bg-input);
+}
+
 .composer__queue {
   display: flex;
   flex-direction: column;
   gap: 6px;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: min(100%, calc(72rem - 32px));
   padding: 4px 4px 2px;
-  border-bottom: 1px solid var(--border-subtle);
-  margin-bottom: 4px;
+  border: 1px solid var(--border-subtle);
+  border-bottom: 0;
+  border-radius: var(--radius-composer) var(--radius-composer) 0 0;
+  background: var(--bg-elevated);
+  box-shadow: var(--dsw-elevation-soft);
+  margin: 0 auto -28px;
+  padding-bottom: 30px;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+@container conversation-stage (min-width: 864px) {
+  .composer-wrap--sticky > .composer__queue {
+    max-width: min(calc(100% - 6rem), calc(56rem - 32px));
+  }
+}
+
+@container conversation-stage (min-width: 1280px) {
+  .composer-wrap--sticky > .composer__queue {
+    max-width: min(calc(100% - 24rem), calc(72rem - 32px));
+  }
 }
 
 .composer__queue-head {
@@ -1301,13 +1518,37 @@ button.composer__context-item {
 }
 
 .composer__queue-steer,
+.composer__queue-send-now,
+.composer__queue-drag,
 .composer__queue-remove,
 .composer__queue-more {
   flex: 0 0 auto;
 }
 
+.composer__queue-drag {
+  cursor: grab;
+  color: var(--text-tertiary);
+}
+
+.composer__queue-drag:active {
+  cursor: grabbing;
+}
+
 .composer__queue-steer {
   width: auto;
+}
+
+.composer__queue-send-now {
+  width: auto;
+}
+
+.composer__queue-item--dragging {
+  opacity: 0.65;
+}
+
+.composer__queue-item--drop-target {
+  border-color: var(--border-focus);
+  background: var(--bg-input);
 }
 
 .composer__queue-editor {
@@ -1334,23 +1575,23 @@ button.composer__context-item {
   flex-wrap: wrap;
   align-items: center;
   /* Slight top pad so half-out delete disc isn't clipped by the frame */
-  gap: 10px;
-  padding: 4px 4px 0 16px;
+  gap: 8px;
+  padding: 0;
   overflow: visible;
 }
 
 /* With attachments, tighten top inset so chips sit closer to the outer border */
 .composer:has(.composer__attachments) {
-  padding-top: 8px;
+  padding-top: 12px;
 }
 
 /*
  * Composer attachments
- * - Image: 80×80 preview
- * - File / folder: fixed height 36px, width hugs name (max-width capped)
+ * - Image: 48×48 preview
+ * - File / folder: fixed height 48px, width hugs name (max-width capped)
  */
 .attach-chip {
-  --attach-h: 36px;
+  --attach-h: 48px;
   --attach-file-max-w: 220px;
   position: relative;
   display: inline-flex;
@@ -1374,7 +1615,7 @@ button.composer__context-item {
 
 /* Image chip: square */
 .attach-chip--image {
-  --attach-h: 80px;
+  --attach-h: 48px;
   width: var(--attach-h);
   max-width: var(--attach-h);
   flex: 0 0 var(--attach-h);
@@ -1390,14 +1631,25 @@ button.composer__context-item {
   box-sizing: border-box;
 }
 
+.attach-chip__meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  overflow: hidden;
+}
+
 /* File row: icon + name */
 .attach-chip:not(.attach-chip--image) .attach-chip__main {
   flex-direction: row;
   justify-content: flex-start;
-  gap: 6px;
+  gap: 8px;
   width: auto;
   max-width: 100%;
-  padding: 0 10px 0 8px;
+  padding: 6px 24px 6px 6px;
 }
 
 .attach-chip--image .attach-chip__main {
@@ -1448,18 +1700,31 @@ button.composer__context-item {
   color: var(--text-primary);
 }
 
+.attach-chip__type,
+.att-card__type {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: calc(10px + var(--ui-font-delta));
+  line-height: calc(12px + var(--ui-font-delta));
+  text-transform: uppercase;
+}
+
 .attach-chip__x {
-  --x-size: 16px;
+  --x-size: 20px;
   position: absolute;
-  top: calc(var(--x-size) / -2);
-  right: calc(var(--x-size) / -2);
+  top: 2px;
+  right: 2px;
   width: var(--x-size);
   height: var(--x-size);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  opacity: 1;
+  opacity: 0;
   transition: opacity var(--motion-fast) var(--ease-out);
   z-index: 2;
 }
@@ -1469,6 +1734,12 @@ button.composer__context-item {
 .attach-chip__x:hover,
 .attach-chip__x:focus-visible {
   opacity: 1;
+}
+
+@media (hover: none) {
+  .attach-chip__x {
+    opacity: 1;
+  }
 }
 
 /* Message attachment cards */
@@ -1535,6 +1806,36 @@ button.composer__context-item {
   white-space: nowrap;
   line-height: 1.2;
   text-align: left;
+}
+
+.att-card--uploading {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
+}
+
+.att-card--failed {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--border-subtle));
+}
+
+.att-card__status {
+  position: absolute;
+  right: 4px;
+  bottom: 2px;
+  left: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  min-height: 16px;
+  padding: 1px 3px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1;
+}
+
+.att-card--failed .att-card__status {
+  color: var(--danger);
 }
 
 /* Path available via tooltip */
@@ -1739,6 +2040,9 @@ button.composer__context-item {
   max-width: 100%;
   vertical-align: baseline;
   text-align: start;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 4px;
 }
 
 .file-path-link__icon {
@@ -1867,9 +2171,11 @@ button.composer__context-item {
 }
 
 .composer__input {
-  width: calc(100% - 4px);
-  min-height: 52px;
-  max-height: 336px; /* Harness 默认 14 行，每行 24px */
+  width: 100%;
+  /* 与 ZCode LexicalChatInput 对齐：输入区最小 40px、滚动上限 160px，
+     contenteditable 增长及 IME 提交后仍保持稳定。 */
+  min-height: 40px;
+  max-height: 160px;
   resize: none;
   border: none !important;
   outline: none !important;
@@ -1878,13 +2184,13 @@ button.composer__context-item {
   color: var(--text-primary);
   font: inherit;
   font-size: calc(14px + var(--ui-font-delta));
-  line-height: calc(24px + var(--ui-font-delta));
+  line-height: calc(20px + var(--ui-font-delta));
   overflow-y: auto;
   /* room for floating native thumb (track stays transparent) */
-  padding: 4px 8px 0 16px;
+  padding: 0;
   field-sizing: content;
   caret-color: var(--accent);
-  margin-right: 4px;
+  margin: 0;
 }
 
 /* If any rich HTML still lands, strip visual styles (skill chips keep own classes). */
@@ -1894,7 +2200,7 @@ button.composer__context-item {
 .composer__input em,
 .composer__input u,
 .composer__input s,
-.composer__input span:not([data-skill]):not(.skill-chip):not(.skill-chip__name):not(.skill-chip__glyph),
+.composer__input span:not([data-skill]):not(.skill-chip):not(.skill-chip__name):not(.skill-chip__glyph):not(.composer-mention),
 .composer__input font,
 .composer__input a {
   font: inherit !important;
@@ -1913,45 +2219,54 @@ button.composer__context-item {
 
 .composer__row {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 12px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   min-height: 32px;
   /* Do not use overflow-x:auto here — it clips absolute/portaled popovers
      and was hiding the model menu (only a bottom shadow was visible). */
   overflow: visible;
-  padding: 2px 8px 6px;
+  padding: 0;
 }
 
-/* 桌面端右侧操作顺序：上下文用量、模型、思考程度、发送。 */
-.composer__row > .cmm:not(.cmm--model):not(.cmm--reasoning) {
-  order: 1;
+.composer__leading-actions,
+.composer__trailing-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
 }
 
-.composer__row > .composer__spacer {
-  order: 10;
+/* ZCode ChatPromptEditor keeps leading actions flexible and pins the
+   model/thought/usage/send cluster to the trailing edge. */
+.composer__leading-actions {
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
-.composer__row > .ctx-chip {
-  order: 12;
+.composer__trailing-actions {
+  flex: 0 1 auto;
+  justify-content: flex-end;
+  overflow: visible;
 }
 
-.composer__row > .cmm--model {
-  order: 13;
+.composer__leading-actions > * {
+  flex-shrink: 0;
 }
 
-.composer__row > .cmm--reasoning {
-  order: 14;
+.composer__trailing-actions > .cmm--model {
+  flex: 0 1 auto;
 }
 
-.composer__row > .composer__submit {
-  order: 15;
+.composer__trailing-actions > .cmm--reasoning,
+.composer__trailing-actions > .ctx-chip,
+.composer__trailing-actions > .composer__submit {
   flex-shrink: 0;
 }
 
 .composer-plus-trigger,
 .composer__submit {
-  border-radius: var(--radius-full);
+  border-radius: var(--radius-lg);
 }
 
 /* Flat chips (project etc.) — no capsule border, hover wash only */
@@ -2058,13 +2373,14 @@ button.composer__context-item {
 }
 
 .composer-plus-trigger.is-open {
-  transform: rotate(45deg);
+  transform: none;
 }
 
 /* Harness ui-input-trigger/MenuView：与输入卡片同宽，行高至少 40px，上限 320px。 */
 .composer-plus {
   z-index: 10000;
   /* Beat .menu-panel width:max-content / max-width:360 without clobbering inline width */
+  width: 100% !important;
   max-width: calc(100vw - 16px) !important;
   min-width: 0;
   max-height: min(320px, calc(100vh - 24px));
@@ -2078,8 +2394,26 @@ button.composer__context-item {
   box-sizing: border-box;
 }
 
+/* Appica Popover owns the portal positioner. Keeping the menu in normal flow
+   lets the positioner measure its height and place it above the composer. */
 .composer-plus--portal {
-  position: fixed;
+  position: static;
+}
+
+/* @ mention 候选与输入框等宽，但候选很多时只在面板内部滚动。 */
+.composer-mention-panel {
+  width: 100% !important;
+  max-height: min(320px, calc(100vh - 24px));
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+}
+
+/* Appica Popover 的外壳按输入框宽度定位，历史面板也必须填满外壳，
+   避免通用 .prompt-history 的 max-content 覆盖弹层宽度。 */
+.prompt-history {
+  width: 100% !important;
 }
 
 .composer-plus__section {
@@ -2157,31 +2491,115 @@ button.composer__context-item {
   color: var(--text-tertiary);
 }
 
-/* 标题与输入框在同一正常流中居中，长草稿不会与欢迎标题重叠。 */
+/* 欢迎标记与问候语在正常流中排列，长本地化文案不会与输入框重叠。 */
 .composer-welcome {
   display: flex;
+  width: 100%;
+  max-width: 672px;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
+  gap: 12px;
   margin: 0;
   color: var(--text-primary);
-  font-size: calc(26px + var(--ui-font-delta));
-  line-height: calc(32px + var(--ui-font-delta));
-  font-weight: 500;
   text-align: center;
   pointer-events: auto;
 }
-.composer-welcome .g-icon { flex: none; }
-@media (max-width: 760px), (max-height: 600px) {
-  .composer-welcome { font-size: calc(22px + var(--ui-font-delta)); }
+.composer-welcome__logo {
+  display: block;
+  width: 48px;
+  height: 48px;
+  object-fit: contain;
+}
+.composer-welcome h1 {
+  max-width: 100%;
+  margin: 0;
+  padding: 0 16px;
+  font-size: calc(28px + var(--ui-font-delta));
+  line-height: 1.2;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+@container conversation-stage (max-width: 760px) {
   .composer-wrap--welcome { gap: 16px; padding: 16px; }
+  .composer-welcome { gap: 10px; }
+  .composer-welcome__logo { width: 40px; height: 40px; }
+  .composer-welcome h1 { font-size: calc(22px + var(--ui-font-delta)); }
+}
+
+@media (max-height: 600px) {
+  .composer-wrap--welcome { gap: 16px; }
+  .composer-welcome { gap: 10px; }
+  .composer-welcome__logo { width: 40px; height: 40px; }
+  .composer-welcome h1 { font-size: calc(22px + var(--ui-font-delta)); }
 }
 
 /* 渲染异常兜底卡片：单个面板崩溃时就地提示重试/重载，阻止整窗白屏。 */
 .error-boundary-fallback {
   margin: 12px;
+  padding: 20px 24px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-lg);
+  color: var(--text-primary);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-main));
+}
+.error-boundary-fallback__title,
+.error-boundary-fallback__description {
+  display: block;
+  margin: 0;
+}
+.error-boundary-fallback__description {
+  margin-top: 8px;
+  color: var(--text-secondary);
+}
+
+.attach-chip--uploading {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-muted) 48%, var(--bg-hover));
+}
+
+.attach-chip--failed {
+  border-color: color-mix(in srgb, var(--danger) 58%, var(--border-subtle));
+  background: color-mix(in srgb, var(--danger-muted) 48%, var(--bg-hover));
+}
+
+.attach-chip__status {
+  position: absolute;
+  right: 6px;
+  bottom: 3px;
+  left: 6px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.attach-chip--failed .attach-chip__status {
+  color: var(--danger);
+}
+
+.attach-chip--image .attach-chip__status {
+  right: 2px;
+  bottom: 2px;
+  left: 2px;
+  padding: 2px;
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--bg-app) 82%, transparent);
+  text-align: center;
+}
+
+.attach-chip__retry {
+  position: absolute;
+  top: 2px;
+  right: 22px;
+  z-index: 2;
 }
 .error-boundary-fallback__actions {
   display: flex;
   gap: 8px;
+  margin-top: 16px;
 }

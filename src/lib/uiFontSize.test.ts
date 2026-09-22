@@ -137,7 +137,8 @@ describe("界面字号令牌接线", () => {
     );
     // 图标规则块内不得出现随字号缩放的 calc。
     const block = appCss.match(/^\.nav-item__icon \{([^}]*)\}/m)?.[1] ?? "";
-    expect(block).toContain("width: 18px;");
+    expect(block).toContain("width: 16px;");
+    expect(block).toContain("font-size: 16px;");
     expect(block).not.toContain("--ui-font-delta");
   });
 });

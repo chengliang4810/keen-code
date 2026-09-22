@@ -1,5 +1,5 @@
-import { Card } from "@appica/ui-react/card";
-import { useEffect, useMemo, useState } from "react";
+import { Card } from "@/components/ui/card";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
   usageStatsGet,
   type DailyUsageStat,
@@ -30,7 +30,16 @@ type Props = {
   };
 };
 
-const MODEL_COLORS = ["#1683f8", "#209447", "#9567ec", "#ed3434", "#e78000", "#0ba6a6", "#e85ca3", "#64748b"];
+const MODEL_COLORS = [
+  "var(--analytics-model-1)",
+  "var(--analytics-model-2)",
+  "var(--analytics-model-3)",
+  "var(--analytics-model-4)",
+  "var(--analytics-model-5)",
+  "var(--analytics-model-6)",
+  "var(--analytics-model-7)",
+  "var(--analytics-model-8)",
+] as const;
 
 export function localDateKey(date: Date): string {
   const year = date.getFullYear();
@@ -180,11 +189,24 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
           <div className="analytics-trend-bars">
             {usageView.trendDays.map(({ date, dateKey, stat }) => (
               <div className="analytics-trend-day" key={dateKey} title={`${date.toLocaleDateString()}: ${(stat?.totalTokens ?? 0).toLocaleString()} Tokens`}>
-                <div className="analytics-trend-stack" style={{ height: `${Math.max(stat?.totalTokens ? 2 : 0, ((stat?.totalTokens ?? 0) / usageView.maxDayTokens) * 100)}%` }}>
+                <div
+                  className="analytics-trend-stack"
+                  style={{
+                    "--analytics-trend-height": `${Math.max(stat?.totalTokens ? 2 : 0, ((stat?.totalTokens ?? 0) / usageView.maxDayTokens) * 100)}%`,
+                  } as CSSProperties}
+                >
                   {usageView.models.map((model, modelIndex) => {
                     const tokens = stat?.modelTokens[model.model] ?? 0;
                     if (!tokens || !stat?.totalTokens) return null;
-                    return <i key={model.model} style={{ background: MODEL_COLORS[modelIndex % MODEL_COLORS.length], height: `${(tokens / stat.totalTokens) * 100}%` }} />;
+                    return (
+                      <i
+                        key={model.model}
+                        style={{
+                          "--analytics-model-color": MODEL_COLORS[modelIndex % MODEL_COLORS.length],
+                          "--analytics-segment-height": `${(tokens / stat.totalTokens) * 100}%`,
+                        } as CSSProperties}
+                      />
+                    );
                   })}
                 </div>
               </div>
@@ -199,7 +221,12 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
           </div>
         </div>
         <div className="analytics-model-legend">
-          {usageView.models.map((model, index) => <span key={model.model}><i style={{ background: MODEL_COLORS[index % MODEL_COLORS.length] }} />{model.model}</span>)}
+          {usageView.models.map((model, index) => (
+            <span key={model.model}>
+              <i style={{ "--analytics-model-color": MODEL_COLORS[index % MODEL_COLORS.length] } as CSSProperties} />
+              {model.model}
+            </span>
+          ))}
         </div>
       </Card>
       <Card render={<section />} className="analytics-chart">
@@ -212,7 +239,18 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
                 const length = analyticsModelPercent(item.totalTokens, stats.totalTokens) * 289.03;
                 const offset = donutOffset;
                 donutOffset += length;
-                return <circle key={item.model} className="analytics-donut__segment" cx="60" cy="60" r="46" stroke={MODEL_COLORS[index % MODEL_COLORS.length]} strokeDasharray={`${Math.max(0, length - 1.4)} 289.03`} strokeDashoffset={-offset} />;
+                return (
+                  <circle
+                    key={item.model}
+                    className="analytics-donut__segment"
+                    cx="60"
+                    cy="60"
+                    r="46"
+                    style={{ "--analytics-model-color": MODEL_COLORS[index % MODEL_COLORS.length] } as CSSProperties}
+                    strokeDasharray={`${Math.max(0, length - 1.4)} 289.03`}
+                    strokeDashoffset={-offset}
+                  />
+                );
               })}
             </svg>
             <div><strong>{formatTokenCount(stats.totalTokens)}</strong><span>tokens</span></div>
@@ -220,7 +258,7 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
           <div className="analytics-model-breakdown">
             {usageView.models.map((item, index) => (
               <div key={item.model}>
-                <i style={{ background: MODEL_COLORS[index % MODEL_COLORS.length] }} />
+                <i style={{ "--analytics-model-color": MODEL_COLORS[index % MODEL_COLORS.length] } as CSSProperties} />
                 <span><strong>{item.model}</strong><small>{formatTokenCount(item.totalTokens)} tokens</small></span>
                 <b>{(analyticsModelPercent(item.totalTokens, stats.totalTokens) * 100).toFixed(1)}%</b>
               </div>

@@ -88,6 +88,14 @@ describe("MarkdownChat streaming", () => {
     expect(settledHtml).toContain("hljs-number");
   });
 
+  it("keeps Markdown horizontal rules in the message flow", () => {
+    const html = renderToString(
+      <MarkdownChat>{"第一段\n\n---\n\n第二段"}</MarkdownChat>,
+    );
+
+    expect(html).toContain("<hr");
+  });
+
   it("publishes the latest live reasoning line without mounting a second markdown buffer", () => {
     const html = renderToString(
       <Thinking
@@ -126,6 +134,20 @@ describe("MarkdownChat URL punctuation", () => {
     expect(source).toContain("event.preventDefault()");
     expect(source).toContain('type: "url"');
     expect(source).toContain("url: hrefStr");
+  });
+
+  it("保留 Markdown 网页链接的自定义显示文本", () => {
+    const html = renderToString(
+      <MarkdownChat>
+        {"[插件配置](https://github.com/example/repo/blob/main/plugin.json)"}
+      </MarkdownChat>,
+    );
+
+    expect(html).toContain(
+      'href="https://github.com/example/repo/blob/main/plugin.json"',
+    );
+    expect(html).toContain(">插件配置</a>");
+    expect(html).not.toContain(">plugin.json</a>");
   });
 
   it("also fixes resource Markdown without changing Chinese paths or inline code", () => {

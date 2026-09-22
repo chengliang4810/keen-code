@@ -2,7 +2,11 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import { moveId, type SidebarSortMode } from "@/lib/sidebarOrder";
-import { SIDEBAR_SESSION_ROW_GAP, SIDEBAR_SESSION_ROW_HEIGHT } from "@/lib/virtualList";
+import {
+  SIDEBAR_SESSION_ROW_GAP,
+  SIDEBAR_SESSION_ROW_HEIGHT,
+  SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
+} from "@/lib/virtualList";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Tip } from "@/components/ui/tooltip";
@@ -39,6 +43,8 @@ export interface ProjectTreeProps
     SidebarSessionStatus {
   tr: SidebarTranslator;
   projects: Project[];
+  /** Web Host 只允许选择和展开 Session cwd 项目投影。 */
+  canWriteProjects: boolean;
   projectsOpen: boolean;
   setProjectsOpen: SidebarSetState<boolean>;
   toggleProject: (project: Project) => Promise<void>;
@@ -102,6 +108,7 @@ function moveProjectWithKeyboard(
 export function ProjectTree({
   tr,
   projects,
+  canWriteProjects,
   projectsOpen,
   setProjectsOpen,
   expandedProjects,
@@ -136,7 +143,7 @@ export function ProjectTree({
 }: ProjectTreeProps) {
   return (
     <>
-      <div className="tree-l1" style={{ marginTop: 8 }}>
+      <div className="tree-l1 tree-l1--top-spaced">
         <Button
           type="button"
           variant="ghost"
@@ -159,7 +166,7 @@ export function ProjectTree({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-md"
+                size="icon-sm"
                 className="tree-l1__action"
                 aria-label={tr("sidebar.collapseAllProjects")}
                 onClick={(event) => {
@@ -175,18 +182,20 @@ export function ProjectTree({
               </Button>
             </Tip>
           ) : null}
-          <Tip label={tr("sidebar.addProject")}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-md"
-              className="tree-l1__action"
-              aria-label={tr("sidebar.addProject")}
-              onClick={() => void addProject()}
-            >
-              <IconPlus size={15} />
-            </Button>
-          </Tip>
+          {canWriteProjects ? (
+            <Tip label={tr("sidebar.addProject")}>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                className="tree-l1__action"
+                aria-label={tr("sidebar.addProject")}
+                onClick={() => void addProject()}
+              >
+                <IconPlus size={15} />
+              </Button>
+            </Tip>
+          ) : null}
         </div>
       </div>
 
@@ -199,7 +208,7 @@ export function ProjectTree({
             const open = expandedProjects[project.id] === true;
             const projectSessions = sessionsForProject(project.id);
             const visibleSessionCount =
-              visibleSessionsByProject[project.id] ?? 5;
+              visibleSessionsByProject[project.id] ?? 20;
             const visibleSessions = projectSessions.slice(
               0,
               visibleSessionCount,
@@ -210,25 +219,31 @@ export function ProjectTree({
               <div key={project.id} className="tree-project">
                 {/* This draggable row owns nested action buttons, so Button would create invalid nesting. */}
                 <div
-                  draggable
-                  onDragStart={(event) =>
-                    startSidebarDrag(event, "project", project.id)
-                  }
-                  onDragEnd={endSidebarDrag}
-                  onDragOver={(event) => dragOverProject(event, project.id)}
-                  onDragLeave={(event) => {
-                    if (
-                      !event.currentTarget.contains(
-                        event.relatedTarget as Node | null,
-                      )
-                    ) {
-                      setProjectDropHint(null);
-                    }
-                  }}
-                  onDrop={(event) => dropProject(event, project.id)}
+                  draggable={canWriteProjects}
+                  onDragStart={canWriteProjects
+                    ? (event) => startSidebarDrag(event, "project", project.id)
+                    : undefined}
+                  onDragEnd={canWriteProjects ? endSidebarDrag : undefined}
+                  onDragOver={canWriteProjects
+                    ? (event) => dragOverProject(event, project.id)
+                    : undefined}
+                  onDragLeave={canWriteProjects
+                    ? (event) => {
+                        if (
+                          !event.currentTarget.contains(
+                            event.relatedTarget as Node | null,
+                          )
+                        ) {
+                          setProjectDropHint(null);
+                        }
+                      }
+                    : undefined}
+                  onDrop={canWriteProjects
+                    ? (event) => dropProject(event, project.id)
+                    : undefined}
                   className={
                     "tree-l2" +
-                    (projectDropHint?.id === project.id
+                    (canWriteProjects && projectDropHint?.id === project.id
                       ? projectDropHint.after
                         ? " tree-l2--drop-after"
                         : " tree-l2--drop-before"
@@ -238,12 +253,15 @@ export function ProjectTree({
                   role="button"
                   tabIndex={0}
                   aria-expanded={open}
-                  aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown"
+                  aria-keyshortcuts={canWriteProjects ? "Alt+ArrowUp Alt+ArrowDown" : undefined}
                   onClick={() => void toggleProject(project)}
-                  onContextMenu={(event) => openProjectMenu(event, project)}
+                  onContextMenu={(event) => {
+                    event.preventDefault();
+                    if (canWriteProjects) openProjectMenu(event, project);
+                  }}
                   onKeyDown={(event) => {
                     if (
-                      moveProjectWithKeyboard(
+                      canWriteProjects && moveProjectWithKeyboard(
                         event,
                         project,
                         projects,
@@ -277,7 +295,7 @@ export function ProjectTree({
                     <span className="tree-l2__name">{project.name}</span>
                   </Tip>
                   {pathMissing ? (
-                    <Badge size="xs" variant="error">
+                    <Badge size="md" variant="error">
                       {tr("sidebar.pathMissing")}
                     </Badge>
                   ) : null}
@@ -285,7 +303,7 @@ export function ProjectTree({
                     <Tip label={tr("sidebar.newConversation")}>
                       <Button
                         type="button"
-                        variant="ghost" size="icon-md" className="tree-icon-btn"
+                        variant="ghost" size="icon-sm" className="tree-icon-btn"
                         disabled={pathMissing}
                         onClick={(event) => {
                           event.stopPropagation();
@@ -295,21 +313,23 @@ export function ProjectTree({
                         <IconSquarePen size={14} />
                       </Button>
                     </Tip>
-                    <Tip label={tr("sidebar.menu")}>
-                      <Button
-                        type="button"
-                        variant="ghost" size="icon-md" className="tree-icon-btn"
-                        onClick={(event) => openProjectMenu(event, project)}
-                      >
-                        <IconMore size={14} />
-                      </Button>
-                    </Tip>
+                    {canWriteProjects ? (
+                      <Tip label={tr("sidebar.menu")}>
+                        <Button
+                          type="button"
+                          variant="ghost" size="icon-sm" className="tree-icon-btn"
+                          onClick={(event) => openProjectMenu(event, project)}
+                        >
+                          <IconMore size={14} />
+                        </Button>
+                      </Tip>
+                    ) : null}
                   </span>
                 </div>
 
                 {open ? (
                   <div className="tree-l3-list-wrap">
-                    {pathMissing ? (
+                    {canWriteProjects && pathMissing ? (
                       <Button
                         type="button"
                         variant="ghost"
@@ -328,6 +348,7 @@ export function ProjectTree({
                         items={visibleSessions}
                         getKey={(item) => item.id}
                         rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
+                        touchRowHeight={SIDEBAR_TOUCH_SESSION_ROW_HEIGHT}
                         gap={SIDEBAR_SESSION_ROW_GAP}
                         scrollToKey={
                           session.sessionId &&
@@ -351,6 +372,7 @@ export function ProjectTree({
                             project={project}
                             activeSessionId={session.sessionId}
                             working={busyIds.has(item.id)}
+                            loading={session.sessionId === item.id && session.state === "connecting"}
                             unreadResult={unreadTerminalResults.get(item.id) ?? null}
                             needsInput={pendingAskUserSessionIds.has(item.id)}
                             variant="project"
@@ -367,7 +389,7 @@ export function ProjectTree({
                         onClick={() =>
                           setVisibleSessionsByProject((counts) => ({
                             ...counts,
-                            [project.id]: visibleSessionCount + 5,
+                            [project.id]: visibleSessionCount + 20,
                           }))
                         }
                       >
@@ -376,8 +398,7 @@ export function ProjectTree({
                     ) : null}
                     {projectSessions.length === 0 ? (
                       <div
-                        className="sidebar-empty"
-                        style={{ padding: "4px 10px" }}
+                        className="sidebar-empty sidebar-empty--compact"
                       >
                         {tr("sidebar.noChats")}
                       </div>

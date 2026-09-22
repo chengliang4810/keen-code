@@ -5,7 +5,7 @@ import type {
   RefObject,
   SetStateAction,
 } from "react";
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { MessageKey, Vars } from "@/i18n";
 import type { LayoutPrefs } from "@/lib/layout";
 import type { AskUserPanelProps } from "./main/AskUserPanel";
@@ -31,12 +31,70 @@ import { useConversationWidth } from "@/hooks/useConversationWidth";
 type SetState<T> = Dispatch<SetStateAction<T>>;
 type Translator = (key: MessageKey, vars?: Vars) => string;
 
+// 时间段边界与文案目录一一对应，避免欢迎态跨午夜后继续显示旧问候。
+const WELCOME_GREETING_BOUNDARIES = [5, 9, 12, 14, 18, 23] as const;
+type WelcomeGreetingKey =
+  | "main.greeting.morningEarly"
+  | "main.greeting.morning"
+  | "main.greeting.noon"
+  | "main.greeting.afternoon"
+  | "main.greeting.evening"
+  | "main.greeting.lateNight";
+
+// 问候只在六个时间段切换；计时器到达下一个边界后立即重新计算本地时间。
+function getWelcomeGreetingKey(date: Date = new Date()): WelcomeGreetingKey {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 9) return "main.greeting.morningEarly";
+  if (hour >= 9 && hour < 12) return "main.greeting.morning";
+  if (hour >= 12 && hour < 14) return "main.greeting.noon";
+  if (hour >= 14 && hour < 18) return "main.greeting.afternoon";
+  if (hour >= 18 && hour < 23) return "main.greeting.evening";
+  return "main.greeting.lateNight";
+}
+
+function getNextWelcomeGreetingDelayMs(date: Date = new Date()): number {
+  const nextBoundary = WELCOME_GREETING_BOUNDARIES.map((hour) => {
+    const candidate = new Date(date);
+    candidate.setHours(hour, 0, 0, 0);
+    return candidate;
+  }).find((candidate) => candidate.getTime() > date.getTime());
+
+  if (nextBoundary) return Math.max(1, nextBoundary.getTime() - date.getTime());
+
+  const tomorrow = new Date(date);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  tomorrow.setHours(WELCOME_GREETING_BOUNDARIES[0], 0, 0, 0);
+  return Math.max(1, tomorrow.getTime() - date.getTime());
+}
+
+function WelcomeCopy({ tr }: { tr: Translator }) {
+  const [greetingDate, setGreetingDate] = useState(() => new Date());
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setGreetingDate(new Date());
+    }, getNextWelcomeGreetingDelayMs(greetingDate));
+    return () => window.clearTimeout(timer);
+  }, [greetingDate]);
+
+  return (
+    <div className="composer-welcome" data-testid="composer-welcome">
+      <img
+        className="composer-welcome__logo"
+        src="/logo.png"
+        alt=""
+        aria-hidden="true"
+      />
+      <h1>{tr(getWelcomeGreetingKey(greetingDate))}</h1>
+    </div>
+  );
+}
+
 export interface MainStageFrameProps {
   layout: LayoutPrefs;
   setLayout: SetState<LayoutPrefs>;
   toast: string | null;
   tr: Translator;
-  composerFloatPad: number;
   /** 输入区自身高度，不含上方问答卡片。 */
   composerHeight: number;
   streamA11yNote: string;
@@ -82,26 +140,66 @@ export function MainStage({
   composer,
 }: MainStageProps) {
   const toastManager = useToastManager();
+  /** Appica manager 发布后可能改变引用；同一条业务提示只允许入队一次。 */
+  const publishedToastRef = useRef<string | null>(null);
   const {
     layout,
     setLayout,
     toast,
     tr,
-    composerFloatPad,
     composerHeight,
     streamA11yNote,
   } = stage;
   const welcomeSession = composer.context.welcomeSession;
   const conversationWidthRef = useConversationWidth();
   const summaryOpen = conversation.summaryOpen;
+  /** 会话态 composer 由 ConversationThread 挂载到同一滚动视口；草稿态仍留在舞台中居中。 */
+  const composerDock = (
+    <div
+      ref={composer.wrapRef}
+      className={
+        "composer-wrap " +
+        (welcomeSession ? "composer-wrap--welcome" : "composer-wrap--sticky")
+      }
+    >
+      {welcomeSession && conversation.showWelcomeCopy ? (
+        <WelcomeCopy tr={tr} />
+      ) : null}
+      <ComposerQueue {...composer.queue} />
+      <div
+        className={
+          "composer-stack" +
+          (welcomeSession ? " composer-stack--with-context" : "")
+        }
+      >
+        <ComposerContextBar {...composer.context} />
+        <div
+          inert={Boolean(askUser.askUser)}
+          ref={composer.shellRef}
+          className="composer"
+        >
+          <ComposerAttachments {...composer.attachments} />
+          <ComposerInputArea {...composer.input} />
+          <ComposerToolbar {...composer.toolbar} />
+        </div>
+      </div>
+    </div>
+  );
   useEffect(() => {
-    if (toast) toastManager.add({ title: toast, timeout: 2000 });
+    if (!toast) {
+      publishedToastRef.current = null;
+      return;
+    }
+    if (publishedToastRef.current === toast) return;
+    publishedToastRef.current = toast;
+    toastManager.add({ title: toast, timeout: 2000 });
   }, [toast, toastManager]);
   return (
     <main
       ref={conversationWidthRef}
       className={
-        "main" +
+        // 桌面无论资源栏是否展开都保留 ZCode conversation frame，窄视口由 CSS 去除桌面框体。
+        "main main--frame" +
         (layout.sidebarCollapsed ? " main--sidebar-hidden" : "") +
         (layout.asideCollapsed ? " main--aside-hidden" : "")
       }
@@ -115,7 +213,6 @@ export function MainStage({
           (summaryOpen ? " main__stage--summary-open" : "")
         }
         style={{
-          ["--composer-float-pad" as string]: `${composerFloatPad}px`,
           ["--composer-height" as string]: `${composerHeight}px`,
         } as CSSProperties}
       >
@@ -126,40 +223,10 @@ export function MainStage({
           {...conversation}
           layout={layout}
           setLayout={setLayout}
+          bottomDock={welcomeSession ? null : composerDock}
         />
         <AskUserPanel {...askUser} />
-
-        <div
-          ref={composer.wrapRef}
-          className={
-            "composer-wrap composer-wrap--float" +
-            (welcomeSession ? " composer-wrap--welcome" : "")
-          }
-        >
-          {welcomeSession && conversation.showWelcomeCopy ? (
-            <h1 className="composer-welcome">
-              <span>{tr("main.startTitle")}</span>
-            </h1>
-          ) : null}
-          <div
-            className={
-              "composer-stack" +
-              (welcomeSession ? " composer-stack--with-context" : "")
-            }
-          >
-            <ComposerContextBar {...composer.context} />
-            <div
-              inert={Boolean(askUser.askUser)}
-              ref={composer.shellRef}
-              className="composer"
-            >
-              <ComposerQueue {...composer.queue} />
-              <ComposerAttachments {...composer.attachments} />
-              <ComposerInputArea {...composer.input} />
-              <ComposerToolbar {...composer.toolbar} />
-            </div>
-          </div>
-        </div>
+        {welcomeSession ? composerDock : null}
       </div>
     </main>
   );

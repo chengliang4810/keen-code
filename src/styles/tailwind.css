@@ -7,6 +7,8 @@
 @theme inline {
   --font-sans: var(--font-sans);
   --font-mono: var(--font-mono);
+  --text-ui-base: var(--text-md);
+  --text-ui-base--line-height: var(--leading-normal);
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);
   --radius-lg: var(--radius-lg);
@@ -18,17 +20,26 @@
   --color-popover-foreground: var(--text-primary);
   --color-muted: var(--bg-hover);
   --color-muted-foreground: var(--text-secondary);
+  --color-hover: var(--bg-hover);
   --color-border: var(--border-subtle);
+  --color-popover-border: var(--border-popover);
   --color-input: var(--bg-input);
-  --color-ring: var(--border-focus);
+  --color-input-focused: var(--bg-input);
+  --color-input-border: var(--border-subtle);
+  --color-input-border-hover: var(--border-strong);
+  --color-input-border-focused: var(--border-strong);
+  --color-ring: var(--focus-ring);
+  --color-tooltip: var(--tooltip);
+  --color-tooltip-foreground: var(--tooltip-foreground);
   --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-fg);
-  --color-secondary: var(--bg-elevated);
-  --color-secondary-foreground: var(--text-primary);
-  --color-accent: var(--accent);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  /* ZCode's accent is a selected/ask surface; product links continue to use --accent. */
+  --color-accent: var(--accent-muted);
   --color-accent-foreground: var(--accent-fg, var(--text-inverse));
   --color-destructive: var(--danger);
-  --color-destructive-foreground: #fff;
+  --color-destructive-foreground: var(--error-foreground);
 }
 
 /* Streaming status highlight disabled — plain text only. */

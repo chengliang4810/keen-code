@@ -13,7 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Tip } from "@/components/ui/tooltip";
 import {

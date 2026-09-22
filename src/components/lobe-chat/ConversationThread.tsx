@@ -39,12 +39,18 @@ import { AttachmentCard } from "@/components/AttachmentCard";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 import {
+  IconBox,
   IconArrowsMinimize,
+  IconFileText,
+  IconFolder,
+  IconFork,
   IconInfo,
+  IconMessageCircle,
+  IconPuzzle,
   IconRename,
 } from "@/components/icons";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@appica/ui-react/textarea";
+import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@appica/ui-react/spinner";
 import { formatMessageTime } from "@/lib/messageTime";
 import { formatTokenCount } from "@/lib/contextUsage";
@@ -55,6 +61,7 @@ import {
   MessageActionButton,
   MessageCopyButton,
 } from "./MessageAction";
+import { UserMessageBody } from "./UserMessageBody";
 import { ChatItem } from "./ChatItem";
 import { MarkdownChat } from "./MarkdownChat";
 import { Thinking } from "./Thinking";
@@ -66,6 +73,11 @@ import { SkillChip } from "@/components/SkillChip";
 import { HighlightedText } from "@/components/HighlightedText";
 import { findChatMatches } from "@/lib/chatFind";
 import { hydrateDisplayContent, parseStoredContent } from "@/lib/draftDoc";
+import {
+  composerMentionTriggerForKind,
+  type ComposerMention,
+  type ComposerMentionKind,
+} from "@/lib/composerMentions";
 import {
   LiveToolText,
 } from "./AgentActivity";
@@ -90,6 +102,11 @@ import {
 import { isToolSegmentRunning } from "@/lib/toolSegmentStatus";
 import { writeUserMessageSelectionToClipboard } from "./userMessageCopy";
 import "./lobe-chat.css";
+
+/** 离底阅读时，Composer 透明留白对应的消息完全透明高度。 */
+const COMPOSER_MESSAGE_MASK_TRANSPARENT_HEIGHT_PX = 96;
+/** 消息进入 Composer 遮挡区前的渐隐距离。 */
+const COMPOSER_MESSAGE_MASK_FADE_PX = 24;
 
 type AttachLabels = {
   open: string;
@@ -332,7 +349,7 @@ function UserPlainOrSkills({
 }) {
   const hydrated = hydrateDisplayContent(content);
   const segs = parseStoredContent(hydrated);
-  if (!segs.some((s) => s.type === "skill")) {
+  if (!segs.some((s) => s.type === "skill" || s.type === "mention")) {
     return (
       <span className="user-msg-body">
         {findQuery?.trim() ? (
@@ -352,6 +369,8 @@ function UserPlainOrSkills({
       {segs.map((s, i) =>
         s.type === "skill" ? (
           <SkillChip key={`sk-${i}-${s.name}`} name={s.name} size="md" />
+        ) : s.type === "mention" ? (
+          <MentionChip key={`mention-${i}-${s.mention.id}`} mention={s.mention} />
         ) : findQuery?.trim() && s.text ? (
           <HighlightedText
             key={`t-${i}`}
@@ -363,6 +382,38 @@ function UserPlainOrSkills({
           <span key={`t-${i}`}>{s.text}</span>
         ),
       )}
+    </span>
+  );
+}
+
+function messageMentionIcon(kind: ComposerMentionKind) {
+  switch (kind) {
+    case "file":
+      return <IconFileText size={14} />;
+    case "directory":
+      return <IconFolder size={14} />;
+    case "session":
+      return <IconMessageCircle size={14} />;
+    case "plugin":
+      return <IconBox size={14} />;
+    case "skill":
+      return <IconPuzzle size={14} />;
+  }
+}
+
+function MentionChip({ mention }: { mention: ComposerMention }) {
+  const trigger = composerMentionTriggerForKind(mention.kind);
+  return (
+    <span
+      className={`message-mention message-mention--${mention.kind}`}
+      data-mention-kind={mention.kind}
+      title={mention.description || mention.value}
+      aria-label={`${trigger}${mention.label}`}
+    >
+      <span className="message-mention__icon" aria-hidden>
+        {messageMentionIcon(mention.kind)}
+      </span>
+      <span className="message-mention__label">{trigger}{mention.label}</span>
     </span>
   );
 }
@@ -404,6 +455,7 @@ function UserMessageEditor({
   return (
     <div className="lobe-chat-user-editor" data-testid="user-message-editor">
       <Textarea
+        inputSize="md"
         ref={textareaRef}
         value={value}
         aria-label={tr("message.editInput")}
@@ -487,10 +539,14 @@ export interface ConversationThreadProps {
     message: ChatMessage,
     content: string,
   ) => Promise<boolean>;
+  /** 对当前会话的最新已完成回合执行真实 Fork。 */
+  onForkCurrentSession?: () => void;
   /** 当前会话中的子智能体，用于替换 Agent 工具调用行。 */
   subagents?: AcpSubagentInfo[];
   /** 关闭后已结束的思考过程内容块不再显示；思考进行中始终实时显示。 */
   showThinkingProcess?: boolean;
+  /** 会话态 Composer；挂载到滚动内容末尾的 sticky dock 内。 */
+  bottomDock?: ReactNode;
 }
 
 /** 将回合耗时锚定到同一用户回合的首条 Assistant 记录。 */
@@ -533,8 +589,10 @@ export function ConversationThread({
   onFirstVisibleToken,
   activeTurnId,
   onEditLastUserMessage,
+  onForkCurrentSession,
   subagents = [],
   showThinkingProcess = true,
+  bottomDock,
 }: ConversationThreadProps) {
   const tr = useMemo(() => createT(locale), [locale]);
   const chatRootRef = useRef<HTMLDivElement>(null);
@@ -598,12 +656,88 @@ export function ConversationThread({
     isPinnedRef,
     showBack,
   } = useStickToBottom({
-    conversationKey: sessionKey ?? "chat",
+    conversationKey: sessionKey ?? null,
     forceStickKey,
     escapeStickKey: findActive
       ? `${findActive.messageId}:${findActive.occurrence}`
       : null,
+    contentReadyKey: messages.length > 0
+      ? `${messages.length}:${messages[0]?.id ?? ""}:${messages[messages.length - 1]?.id ?? ""}`
+      : null,
   });
+  const messageLayerRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * ZCode 的 sticky Composer 外层保留透明 padding 以容纳焦点环和返回按钮；
+   * 用户离底阅读时只裁剪消息层，防止后续消息从该透明留白中透出。
+   */
+  const syncComposerMessageMask = useCallback(() => {
+    const viewport = scrollRef.current;
+    const messageLayer = messageLayerRef.current;
+    if (!viewport || !messageLayer) return;
+
+    const distanceToBottom =
+      viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight;
+    if (distanceToBottom <= 2) {
+      messageLayer.style.maskImage = "none";
+      messageLayer.style.webkitMaskImage = "none";
+      messageLayer.style.removeProperty("mask-position");
+      messageLayer.style.removeProperty("-webkit-mask-position");
+      messageLayer.style.removeProperty("mask-size");
+      messageLayer.style.removeProperty("-webkit-mask-size");
+      return;
+    }
+
+    const transparentStart = Math.max(
+      0,
+      viewport.clientHeight - COMPOSER_MESSAGE_MASK_TRANSPARENT_HEIGHT_PX,
+    );
+    const opaqueEnd = Math.max(
+      0,
+      transparentStart - COMPOSER_MESSAGE_MASK_FADE_PX,
+    );
+    const viewportTopInLayer = Math.max(
+      0,
+      viewport.scrollTop - messageLayer.offsetTop,
+    );
+    const maskImage = `linear-gradient(to bottom, black 0, black ${opaqueEnd}px, transparent ${transparentStart}px, transparent 100%)`;
+    const maskPosition = `0 ${viewportTopInLayer}px`;
+    const maskSize = `100% ${viewport.clientHeight}px`;
+
+    messageLayer.style.maskImage = maskImage;
+    messageLayer.style.webkitMaskImage = maskImage;
+    messageLayer.style.maskPosition = maskPosition;
+    messageLayer.style.webkitMaskPosition = maskPosition;
+    messageLayer.style.maskSize = maskSize;
+    messageLayer.style.webkitMaskSize = maskSize;
+  }, [scrollRef]);
+
+  useEffect(() => {
+    const viewport = scrollRef.current;
+    const messageLayer = messageLayerRef.current;
+    if (!viewport || !messageLayer || !bottomDock) return;
+
+    let frame = 0;
+    const scheduleSync = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(syncComposerMessageMask);
+    };
+    viewport.addEventListener("scroll", scheduleSync, { passive: true });
+    const observer = typeof ResizeObserver === "function"
+      ? new ResizeObserver(scheduleSync)
+      : null;
+    observer?.observe(viewport);
+    observer?.observe(messageLayer);
+    scheduleSync();
+
+    return () => {
+      viewport.removeEventListener("scroll", scheduleSync);
+      observer?.disconnect();
+      window.cancelAnimationFrame(frame);
+      messageLayer.style.maskImage = "none";
+      messageLayer.style.webkitMaskImage = "none";
+    };
+  }, [bottomDock, messages.length, scrollRef, syncComposerMessageMask]);
 
   const turnBusy = sessionState === "streaming";
   /**
@@ -656,6 +790,30 @@ export function ConversationThread({
     }
     return turnBusy ? lastAssistantId : null;
   }, [messages, turnBusy]);
+
+  /** 只允许当前最后一个用户回合中的最新已完成 Assistant 显示 Fork。 */
+  const latestCompletedAssistantId = useMemo(() => {
+    let lastUser = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (isTurnPromptMessage(messages[i])) {
+        lastUser = i;
+        break;
+      }
+    }
+    for (let i = messages.length - 1; i > lastUser; i--) {
+      const message = messages[i]!;
+      if (
+        message.role === "assistant" &&
+        !message.isError &&
+        !message.streaming &&
+        message.turnStatus !== "failed" &&
+        message.turnStatus !== "cancelled"
+      ) {
+        return message.id;
+      }
+    }
+    return null;
+  }, [messages]);
 
   const hasStreamingAssistant = messages.some(
     (m) => m.role === "assistant" && m.streaming,
@@ -835,7 +993,8 @@ export function ConversationThread({
         ref={scrollRef}
         className="lobe-chat__scroll"
       >
-        <div ref={contentRef} className="lobe-chat__inner">
+        <div ref={contentRef} className="lobe-chat__scroll-content">
+          <div ref={messageLayerRef} className="lobe-chat__inner">
           {empty && !suppressEmptyCopy ? (
             <div className="lobe-chat-empty">
               <h3 className="lobe-chat-empty__title">{tr("main.startTitle")}</h3>
@@ -954,7 +1113,12 @@ export function ConversationThread({
             }
 
             if (m.role === "user") {
-              const timeLabel = formatMessageTime(m.createdAt, locale);
+              const mediaAttachments = (m.attachments ?? []).filter(
+                (attachment) => !attachment.isDir && isImagePath(attachment.path),
+              );
+              const fileAttachments = (m.attachments ?? []).filter(
+                (attachment) => attachment.isDir || !isImagePath(attachment.path),
+              );
               const isFindHit = !!findHitMessageIds?.has(m.id);
               const isFindCurrent = findActive?.messageId === m.id;
               const isEditing = editingUserMessageId === m.id;
@@ -987,17 +1151,28 @@ export function ConversationThread({
                   }
                   message={
                     <div className="lobe-chat-user-stack">
-                      {m.attachments && m.attachments.length > 0 ? (
-                        <div className="lobe-chat-atts lobe-chat-atts--user">
-                          {m.attachments.map((a) => (
+                      {mediaAttachments.length > 0 ? (
+                        <div className="lobe-chat-atts lobe-chat-atts--user lobe-chat-atts--user-media">
+                          {mediaAttachments.map((a) => (
                             <AttachmentCard
                               key={a.path}
                               attachment={a}
                               variant="card"
                               labels={attachLabels}
-                              galleryPaths={m.attachments
-                                ?.filter((x) => !x.isDir && isImagePath(x.path))
-                                .map((x) => x.path)}
+                              galleryPaths={mediaAttachments.map((x) => x.path)}
+                              onAddToComposer={onAddAttachmentToComposer}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                      {fileAttachments.length > 0 ? (
+                        <div className="lobe-chat-atts lobe-chat-atts--user lobe-chat-atts--user-files">
+                          {fileAttachments.map((a) => (
+                            <AttachmentCard
+                              key={a.path}
+                              attachment={a}
+                              variant="card"
+                              labels={attachLabels}
                               onAddToComposer={onAddAttachmentToComposer}
                             />
                           ))}
@@ -1017,24 +1192,27 @@ export function ConversationThread({
                           className="lobe-chat-bubble"
                           data-message-marker={m.marker}
                         >
-                          <UserPlainOrSkills
-                            content={m.content}
-                            findQuery={findQuery}
-                            findActiveOccurrence={
-                              isFindCurrent
-                                ? (findActive?.occurrence ?? null)
-                                : null
-                            }
-                          />
+                          <UserMessageBody
+                            contentKey={`${m.id}:${m.content}`}
+                            expandLabel={tr("message.expand")}
+                            collapseLabel={tr("message.collapse")}
+                          >
+                            <UserPlainOrSkills
+                              content={m.content}
+                              findQuery={findQuery}
+                              findActiveOccurrence={
+                                isFindCurrent
+                                  ? (findActive?.occurrence ?? null)
+                                  : null
+                              }
+                            />
+                          </UserMessageBody>
                         </div>
                       ) : null}
                     </div>
                   }
                   actions={
                     <>
-                      {timeLabel ? (
-                        <span className="lobe-chat-action-time">{timeLabel}</span>
-                      ) : null}
                       {m.content.trim() ? (
                         <MessageCopyButton
                           text={m.content}
@@ -1126,6 +1304,9 @@ export function ConversationThread({
                 return !isComposerStateTool(segment);
               }
               if (segment.kind === "thought") {
+                if (!segment.text.trim()) {
+                  return false;
+                }
                 // 隐藏的思考不产生 DOM，因此不能继续阻断相邻工具聚合；
                 // 只有流式中仍在推进的末段思考保持可见。
                 if (!showThinkingProcess) {
@@ -1146,7 +1327,13 @@ export function ConversationThread({
             const showProcessingTime =
               !!m.streaming || assistantBusy || processingDurationMs != null;
             const hasAssistantContent = !!m.content.trim();
+            const assistantTimeLabel = formatMessageTime(m.createdAt, locale);
             const showTurnMetrics = !m.streaming;
+            const showFork =
+              !turnBusy &&
+              !m.streaming &&
+              m.id === latestCompletedAssistantId &&
+              !!onForkCurrentSession;
             const observedTurnId =
               m.turnMetrics?.turnId ?? (m.streaming ? activeTurnId : undefined);
             const observeVisibleToken =
@@ -1377,7 +1564,12 @@ export function ConversationThread({
                   ) : null
                 }
                 actions={
-                  !m.streaming && (hasAssistantContent || showTurnMetrics) ? (
+                  !m.streaming &&
+                  (hasAssistantContent ||
+                    contentSegCount > 0 ||
+                    !!m.attachments?.length ||
+                    !!assistantTimeLabel ||
+                    showTurnMetrics) ? (
                     <>
                       {hasAssistantContent ? (
                         <MessageCopyButton
@@ -1386,8 +1578,21 @@ export function ConversationThread({
                           copiedLabel={tr("message.copied")}
                         />
                       ) : null}
+                      {showFork ? (
+                        <MessageActionButton
+                          label={tr("session.fork")}
+                          onClick={onForkCurrentSession}
+                        >
+                          <IconFork size={15} />
+                        </MessageActionButton>
+                      ) : null}
                       {showTurnMetrics ? (
                         <TurnMetrics summary={m.turnMetrics} durationMs={m.thinkingDurationMs} locale={locale} />
+                      ) : null}
+                      {assistantTimeLabel ? (
+                        <span className="lobe-chat-action-time">
+                          {assistantTimeLabel}
+                        </span>
                       ) : null}
                     </>
                   ) : null
@@ -1443,14 +1648,31 @@ export function ConversationThread({
           />
 
           {/* Plan UI lives only in PlanStatusBar (top) + ResourceViewer Plan mode. */}
+          </div>
+          {bottomDock ? (
+            <div
+              className="lobe-chat__composer-dock"
+              data-composer-dock
+            >
+              <div className="lobe-chat__composer-dock-content">
+                <BackBottom
+                  visible={showBack}
+                  label={tr("chat.scrollBottom")}
+                  onClick={() => scrollToBottom("smooth")}
+                />
+                {bottomDock}
+              </div>
+            </div>
+          ) : null}
         </div>
       </div>
-
-      <BackBottom
-        visible={showBack}
-        label={tr("chat.scrollBottom")}
-        onClick={() => scrollToBottom("smooth")}
-      />
+      {!bottomDock ? (
+        <BackBottom
+          visible={showBack}
+          label={tr("chat.scrollBottom")}
+          onClick={() => scrollToBottom("smooth")}
+        />
+      ) : null}
     </div>
     </ErrorBoundary>
   );

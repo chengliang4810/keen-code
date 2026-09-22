@@ -1,0 +1,497 @@
+/*
+ * KeenCode UI 治理层。
+ * 这里只放低风险的跨页面不变量；产品表面、控件变体和宿主专属壳层
+ * 仍由各自的归属文件维护。
+ */
+:root {
+  --ui-focus-ring: 0 0 0 2px var(--bg-main), 0 0 0 4px var(--border-focus);
+  --ui-touch-target: 32px;
+  --ui-touch-target-touch: 44px;
+  --ui-touch-target-touch-plus-12: 56px;
+  --ui-mobile-inline-padding: 12px;
+}
+
+/* Appica 的 md utility 使用 rem；产品正文根字号为 14px 时会把 h-7 折成
+ * 24.5px。共享 wrapper 使用这些末端几何类锁定 ZCode 的实际屏幕尺寸，
+ * 不改变根字号，也不绕过 Appica 的 md 状态语义。 */
+.keencode-control-md {
+  height: var(--control-height-compact);
+  min-height: var(--control-height-compact);
+  border-radius: var(--control-radius-compact);
+}
+
+.keencode-tabs-list-md {
+  height: var(--control-height-tabs);
+}
+
+/* 桌面侧栏在窄视口变成覆盖抽屉，避免固定 264px 参与主区 flex 计算。 */
+.sidebar-mobile-backdrop {
+  display: none;
+}
+
+/*
+ * Appica styles load before this file and define the same unprefixed role
+ * variables. This file is the sole KeenCode authority for those roles: the
+ * bridge is kept after the Appica import so package defaults cannot win by
+ * cascade. Product-only skin variables (`--accent`, `--border-focus`) remain
+ * owned by tokens.css/skins.css and are intentionally not redeclared here.
+ */
+[data-theme="light"] {
+  --foreground: #282828;
+  --foreground-subtle: color-mix(in oklab, #282828 60%, transparent);
+  --foreground-subtlest: color-mix(in oklab, #282828 40%, transparent);
+  --foreground-muted: color-mix(in oklab, #282828 60%, transparent);
+  --foreground-strong: #282828;
+  --foreground-emphasis: #0d0d0d;
+  --foreground-intense: #0d0d0d;
+  --foreground-inverse: #ffffff;
+  --background: #f8f8f8;
+  --background-subtle: rgba(13, 13, 13, 0.03);
+  --background-muted: rgba(13, 13, 13, 0.05);
+  --background-strong: #ececee;
+  --background-inverse: #0d0d0d;
+  --border: rgba(13, 13, 13, 0.1);
+  --border-muted: rgba(13, 13, 13, 0.1);
+  --border-strong: rgba(13, 13, 13, 0.15);
+  --border-emphasis: rgba(13, 13, 13, 0.2);
+  --border-intense: rgba(13, 13, 13, 0.3);
+  --border-inverse: #ffffff;
+  --border-overlay: rgba(13, 13, 13, 0.1);
+  --border-subtle: var(--border);
+  --primary: #000000;
+  --primary-subtle: rgba(13, 13, 13, 0.05);
+  --primary-soft: #e6e6e6;
+  --primary-muted: #282828;
+  --primary-strong: #000000;
+  --primary-foreground: #ffffff;
+  --secondary: #e6e6e6;
+  --secondary-subtle: rgba(13, 13, 13, 0.05);
+  --secondary-soft: rgba(13, 13, 13, 0.1);
+  --secondary-muted: #8f8f8f;
+  --secondary-strong: #5d5d5d;
+  --secondary-emphasis: #282828;
+  --secondary-intense: #0d0d0d;
+  --secondary-foreground: #282828;
+  --error: #e03131;
+  --error-subtle: rgba(224, 49, 49, 0.1);
+  --error-soft: rgba(224, 49, 49, 0.2);
+  --error-muted: #e03131;
+  --error-strong: #e03131;
+  --error-emphasis: #e03131;
+  --error-intense: #b42323;
+  --error-foreground: #ffffff;
+  --success: #1e8a3e;
+  --success-subtle: rgba(30, 138, 62, 0.1);
+  --success-soft: rgba(30, 138, 62, 0.2);
+  --success-muted: #1e8a3e;
+  --success-strong: #1e8a3e;
+  --success-emphasis: #1e8a3e;
+  --success-intense: #166b32;
+  --success-foreground: #ffffff;
+  --warning: #e07b00;
+  --warning-subtle: rgba(224, 123, 0, 0.1);
+  --warning-soft: rgba(224, 123, 0, 0.2);
+  --warning-muted: #e07b00;
+  --warning-strong: #e07b00;
+  --warning-emphasis: #e07b00;
+  --warning-intense: #a85c00;
+  --warning-foreground: #ffffff;
+  --info: #0b7fff;
+  --info-subtle: rgba(11, 127, 255, 0.1);
+  --info-soft: rgba(11, 127, 255, 0.2);
+  --info-muted: #0b7fff;
+  --info-strong: #0066dd;
+  --info-emphasis: #0066dd;
+  --info-intense: #0052b3;
+  --info-foreground: #ffffff;
+  --focus-ring: rgba(11, 127, 255, 0.28);
+  --focus-ring-input: rgba(11, 127, 255, 0.28);
+  --focus-ring-primary: rgba(11, 127, 255, 0.28);
+  --focus-ring-secondary: rgba(11, 127, 255, 0.2);
+  --focus-ring-error: rgba(224, 49, 49, 0.25);
+  --focus-ring-success: rgba(30, 138, 62, 0.25);
+  --focus-ring-warning: rgba(224, 123, 0, 0.25);
+  --focus-ring-info: rgba(11, 127, 255, 0.25);
+  --focus-ring-light: rgba(255, 255, 255, 0.25);
+  --selection-color: rgba(13, 13, 13, 0.1);
+  --tooltip: #f0f0f0;
+  --tooltip-foreground: #0d0d0d;
+}
+
+:root:not([data-theme="light"]),
+[data-theme="dark"] {
+  --foreground: #d4d4d4;
+  --foreground-subtle: color-mix(in oklab, #d4d4d4 60%, transparent);
+  --foreground-subtlest: color-mix(in oklab, #d4d4d4 30%, transparent);
+  --foreground-muted: color-mix(in oklab, #d4d4d4 60%, transparent);
+  --foreground-strong: #d4d4d4;
+  --foreground-emphasis: #f8f8f8;
+  --foreground-intense: #ffffff;
+  --foreground-inverse: #000000;
+  --background: #161616;
+  --background-subtle: rgba(255, 255, 255, 0.05);
+  --background-muted: rgba(255, 255, 255, 0.1);
+  --background-strong: #363636;
+  --background-inverse: #ffffff;
+  --border: rgba(255, 255, 255, 0.1);
+  --border-muted: rgba(255, 255, 255, 0.1);
+  --border-strong: rgba(255, 255, 255, 0.15);
+  --border-emphasis: rgba(255, 255, 255, 0.2);
+  --border-intense: rgba(255, 255, 255, 0.3);
+  --border-inverse: #161616;
+  --border-overlay: rgba(255, 255, 255, 0.1);
+  --border-subtle: var(--border);
+  --primary: #ffffff;
+  --primary-subtle: rgba(255, 255, 255, 0.1);
+  --primary-soft: #363636;
+  --primary-muted: #d4d4d4;
+  --primary-strong: #ffffff;
+  --primary-foreground: #000000;
+  --secondary: #363636;
+  --secondary-subtle: rgba(255, 255, 255, 0.05);
+  --secondary-soft: rgba(255, 255, 255, 0.1);
+  --secondary-muted: #747474;
+  --secondary-strong: #adadad;
+  --secondary-emphasis: #d4d4d4;
+  --secondary-intense: #f8f8f8;
+  --secondary-foreground: #d4d4d4;
+  --error: #ff5c5c;
+  --error-subtle: rgba(255, 92, 92, 0.1);
+  --error-soft: rgba(255, 92, 92, 0.2);
+  --error-muted: #ff5c5c;
+  --error-strong: #ff5c5c;
+  --error-emphasis: #ff5c5c;
+  --error-intense: #ff9999;
+  --error-foreground: #ffffff;
+  --success: #46bf72;
+  --success-subtle: rgba(70, 191, 114, 0.1);
+  --success-soft: rgba(70, 191, 114, 0.2);
+  --success-muted: #46bf72;
+  --success-strong: #46bf72;
+  --success-emphasis: #46bf72;
+  --success-intense: #87d9a4;
+  --success-foreground: #000000;
+  --warning: #ff8a30;
+  --warning-subtle: rgba(255, 138, 48, 0.1);
+  --warning-soft: rgba(255, 138, 48, 0.2);
+  --warning-muted: #ff8a30;
+  --warning-strong: #ff8a30;
+  --warning-emphasis: #ff8a30;
+  --warning-intense: #ffb26b;
+  --warning-foreground: #000000;
+  --info: #4099ff;
+  --info-subtle: rgba(64, 153, 255, 0.1);
+  --info-soft: rgba(64, 153, 255, 0.2);
+  --info-muted: #4099ff;
+  --info-strong: #80beff;
+  --info-emphasis: #80beff;
+  --info-intense: #a8d0ff;
+  --info-foreground: #000000;
+  --focus-ring: rgba(64, 153, 255, 0.32);
+  --focus-ring-input: rgba(64, 153, 255, 0.32);
+  --focus-ring-primary: rgba(64, 153, 255, 0.32);
+  --focus-ring-secondary: rgba(64, 153, 255, 0.24);
+  --focus-ring-error: rgba(255, 92, 92, 0.35);
+  --focus-ring-success: rgba(70, 191, 114, 0.35);
+  --focus-ring-warning: rgba(255, 138, 48, 0.35);
+  --focus-ring-info: rgba(64, 153, 255, 0.35);
+  --focus-ring-light: rgba(255, 255, 255, 0.25);
+  --selection-color: rgba(255, 255, 255, 0.1);
+  --tooltip: #2b2b2b;
+  --tooltip-foreground: #f8f8f8;
+}
+
+/* UI 控件继承产品字体，并统一字距；不在这里覆盖控件尺寸。 */
+:where(
+    button,
+    input,
+    select,
+    textarea,
+    [role="button"],
+    [role="tab"],
+    [role="menuitem"],
+    [role="option"]
+  ) {
+  font-family: inherit;
+  letter-spacing: 0;
+}
+
+/* Appica's motion switch stays on the md preset for state/keyboard behavior;
+ * apply ZCode's 28/32px tracks without letting the animated thumb overflow
+ * the compact track. */
+.keencode-switch[data-size="md"] {
+  height: 18px;
+  width: 32px;
+}
+
+.keencode-switch[data-size="md"] [data-slot="switch-thumb"] {
+  width: 16px !important;
+  height: 16px !important;
+  background: var(--primary-foreground);
+}
+
+.keencode-switch [data-slot="switch-thumb"] > svg {
+  display: none;
+}
+
+/*
+ * Appica 基础层会给全局文本加选中底色，并通过 `focus-visible:outline-3`
+ * 给所有元素加焦点轮廓。普通文本回退到浏览器/产品默认选中表现，终端
+ * 选中仍由 xterm 运行时主题独立维护；焦点 ring 只由具体组件自己的
+ * focus-visible utility 提供。
+ */
+::selection {
+  background-color: revert;
+  color: revert;
+}
+
+:where(*):focus-visible {
+  outline: none;
+}
+
+/* Flex 子项先允许收缩，再对长文本做截断或换行。 */
+:where(
+    .workbench,
+    .main,
+    .main__stage,
+    .sidebar,
+    .aside,
+    .aside__inner,
+    .settings-page,
+    .settings-page__nav,
+    .settings-page__content,
+    .settings-page__main,
+    .rp,
+    .rp-chrome,
+    .composer,
+    .composer__row
+  ) {
+  min-width: 0;
+}
+
+:where(
+    .workbench,
+    .main,
+    .main__stage,
+    .sidebar,
+    .aside,
+    .aside__inner,
+    .settings-page,
+    .settings-page__nav,
+    .settings-page__content,
+    .settings-page__main,
+    .rp,
+    .composer
+  ) {
+  min-height: 0;
+}
+
+/* 长名称在所属表面内换行，不把分栏撑宽。 */
+:where(
+    .settings-page__title,
+    .settings-page__lead,
+    .settings-row__label,
+    .settings-row__hint,
+    .rp-tab__name,
+    .rp-mode-tab__label,
+    .composer__context-label,
+    .composer__queue-title,
+    .composer__queue-text
+  ) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* 由主要滚动宿主负责溢出，避免页面级横向滚动。 */
+:where(.app-shell, .workbench, .main, .sidebar, .aside, .rp) {
+  overflow-x: hidden;
+}
+
+@media (max-width: 760px) {
+  .app-shell {
+    height: var(--visual-viewport-height, 100%);
+    max-height: var(--visual-viewport-height, 100%);
+  }
+
+  /*
+   * 这里用绝对定位保留原有 DOM/会话状态，不把移动端另做一套侧栏。
+   * 侧栏打开时覆盖主区，关闭时完全不占位；390px 下主区因此始终为全宽。
+   */
+  .workbench {
+    position: relative;
+    isolation: isolate;
+  }
+
+  .sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    width: min(var(--sidebar-width, 264px), 50%) !important;
+    min-width: min(var(--sidebar-width, 264px), 50%) !important;
+    max-width: 50% !important;
+    box-shadow: 12px 0 32px rgba(0, 0, 0, 0.28);
+    transform: translateX(0);
+    transition:
+      transform var(--motion-enter) var(--ease-out),
+      box-shadow var(--motion-enter) var(--ease-out);
+  }
+
+  .sidebar--hidden {
+    transform: translateX(-102%);
+    box-shadow: none;
+  }
+
+  .sidebar-mobile-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 39;
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.42);
+    cursor: default;
+    opacity: 1;
+  }
+
+  .main {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    flex: 1 1 100%;
+  }
+
+  /* 资源栏同样不应在手机上挤压会话；其已有关闭按钮负责退出覆盖层。 */
+  .aside:not(.aside--hidden) {
+    position: absolute;
+    inset: 0 0 0 auto;
+    z-index: 38;
+    width: min(var(--aside-width, 360px), calc(100% - 48px)) !important;
+    min-width: min(var(--aside-width, 360px), calc(100% - 48px)) !important;
+    max-width: min(var(--aside-width, 360px), calc(100% - 48px)) !important;
+    box-shadow: -12px 0 32px rgba(0, 0, 0, 0.24);
+  }
+
+  .main__top {
+    padding-left: max(12px, calc(12px + env(safe-area-inset-left, 0px)));
+    padding-right: max(12px, calc(12px + env(safe-area-inset-right, 0px)));
+  }
+
+  .composer-wrap--sticky {
+    width: 100%;
+    box-sizing: border-box;
+    /* 最后一条消息自身保留 20px 节奏，sticky dock 不再重复增加顶部空隙。 */
+    padding-top: 0;
+    padding-right: max(12px, calc(12px + env(safe-area-inset-right, 0px)));
+    padding-bottom: max(14px, calc(14px + env(safe-area-inset-bottom, 0px)));
+    padding-left: max(12px, calc(12px + env(safe-area-inset-left, 0px)));
+  }
+
+  .composer-stack,
+  .composer-wrap--welcome .composer-stack--with-context {
+    width: 100%;
+    max-width: 672px;
+  }
+
+  .composer-wrap--sticky .composer {
+    max-width: none;
+  }
+
+  .composer__row {
+    /* 模型/思考菜单由 Composer container query 退化为图标，工具栏保持单行。 */
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+
+  .composer__spacer {
+    flex: 1 1 8px;
+    min-width: 0;
+  }
+
+  .rp-mode-tabs,
+  .rp-tabs__scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .rp-mode-tab__label,
+  .rp-tab__name {
+    max-width: 18ch;
+  }
+}
+
+@media (max-width: 680px) {
+  /* 16px 可避免 iOS WebKit 聚焦文本输入框时自动缩放。 */
+  .composer__input,
+  .composer__queue-editor textarea,
+  .settings-page input,
+  .settings-page textarea,
+  .settings-page select {
+    font-size: max(16px, var(--text-md));
+  }
+
+  .settings-page__main {
+    min-width: 0;
+    padding-inline: clamp(var(--ui-mobile-inline-padding), 4vw, 20px);
+  }
+
+  .settings-page__main > [data-slot="card"],
+  .settings-appearance-duo > [data-slot="card"] {
+    min-width: 0;
+  }
+}
+
+/* 动态视口高度由 useVisualViewportLayout 在软键盘出现时更新。 */
+@supports (height: 100dvh) {
+  html,
+  body,
+  #root {
+    min-height: 100dvh;
+  }
+}
+
+@media (max-width: 460px) {
+  .composer__row {
+    gap: var(--space-2);
+  }
+
+  .composer__context-bar {
+    flex-wrap: wrap;
+  }
+
+  .settings-page__mobile-back,
+  .settings-page__mobile-select {
+    min-height: var(--ui-touch-target-touch);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :where(.app-shell, .app-shell *) {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (forced-colors: active) {
+  :where(
+      .app-shell a,
+      .app-shell button,
+      .app-shell input,
+      .app-shell select,
+      .app-shell textarea,
+      .app-shell [contenteditable="true"],
+      .app-shell [role="button"],
+      .app-shell [role="tab"],
+      .app-shell [role="menuitem"],
+      .app-shell [role="option"]
+    ):focus-visible {
+    outline: 2px solid CanvasText;
+    box-shadow: none;
+  }
+}

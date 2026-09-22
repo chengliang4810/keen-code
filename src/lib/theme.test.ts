@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_RESOLVED_THEME,
   DEFAULT_THEME_PREFERENCE,
+  applyThemeToDocument,
   getSystemTheme,
   loadThemePreference,
   parseThemePreference,
@@ -29,9 +30,9 @@ function memoryStorage(initial: Record<string, string> = {}): ThemeStorage & {
 }
 
 describe("theme preference + resolve", () => {
-  it("defaults preference to system", () => {
-    expect(DEFAULT_THEME_PREFERENCE).toBe("system");
-    expect(parseThemePreference(null)).toBe("system");
+  it("defaults preference to Zai dark", () => {
+    expect(DEFAULT_THEME_PREFERENCE).toBe("dark");
+    expect(parseThemePreference(null)).toBe("dark");
     expect(() => parseThemePreference("nope")).toThrow("主题偏好格式无效");
     expect(() => parseThemePreference(undefined)).toThrow("主题偏好格式无效");
     expect(() => parseThemePreference("")).toThrow("主题偏好格式无效");
@@ -71,9 +72,51 @@ describe("theme preference + resolve", () => {
     expect(toggleTheme("light")).toBe("dark");
   });
 
-  it("empty storage loads system preference", () => {
+  it("同步 Appica 与 ZCode 的主题作用域", () => {
+    const attributes = new Map<string, string>();
+    const classes = new Set<string>();
+    const root = {
+      setAttribute(name: string, value: string) {
+        attributes.set(name, value);
+      },
+      classList: {
+        add(name: string) {
+          classes.add(name);
+        },
+        remove(name: string) {
+          classes.delete(name);
+        },
+        toggle(name: string, force?: boolean) {
+          const next = force ?? !classes.has(name);
+          if (next) classes.add(name);
+          else classes.delete(name);
+          return next;
+        },
+        contains(name: string) {
+          return classes.has(name);
+        },
+      },
+      style: {},
+    } as unknown as HTMLElement;
+
+    applyThemeToDocument("dark", root);
+    expect(attributes.get("data-theme")).toBe("dark");
+    expect(root.classList.contains("dark")).toBe(true);
+    expect(root.classList.contains("theme-zai-dark")).toBe(true);
+    expect(root.classList.contains("theme-zai-light")).toBe(false);
+    expect(root.style.colorScheme).toBe("dark");
+
+    applyThemeToDocument("light", root);
+    expect(attributes.get("data-theme")).toBe("light");
+    expect(root.classList.contains("dark")).toBe(false);
+    expect(root.classList.contains("theme-zai-dark")).toBe(false);
+    expect(root.classList.contains("theme-zai-light")).toBe(true);
+    expect(root.style.colorScheme).toBe("light");
+  });
+
+  it("empty storage loads the Zai dark preference", () => {
     const storage = memoryStorage();
-    expect(loadThemePreference(storage)).toBe("system");
+    expect(loadThemePreference(storage)).toBe("dark");
   });
 
   it("loads an explicit light preference", () => {

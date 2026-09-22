@@ -4,26 +4,60 @@ import type {
   MutableRefObject,
   RefObject,
   SetStateAction,
+  DragEvent as ReactDragEvent,
 } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { ChatMessage, SessionSnapshot } from "@/lib/session";
-import type { Attachment } from "@/lib/attachments";
+import type { SessionRow } from "@/features/app/models";
+import { hasUnreadyAttachments, type Attachment } from "@/lib/attachments";
 import type { ComposerPlusEntry } from "@/components/ComposerPlusPanel";
 import { Popover, PopoverContent } from "@appica/ui-react/popover";
 import type { SlashItem } from "@/lib/slashCatalog";
 import type { PromptHistoryEntry } from "@/lib/composerPromptHistory";
 import { ComposerEditor } from "@/components/ComposerEditor";
+import { ComposerMentionPanel } from "@/components/ComposerMentionPanel";
 import {
   ComposerPlusPanel,
 } from "@/components/ComposerPlusPanel";
 import { PromptHistoryPanel } from "@/components/PromptHistoryPanel";
 import { canType } from "@/lib/session";
-import { isDraftEmpty, parseStoredContent } from "@/lib/draftDoc";
+import {
+  collectFilesFromDataTransfer,
+  collectLocalPathsFromDataTransfer,
+} from "@/lib/clipboardPaste";
+import {
+  isDraftEmpty,
+  parseStoredContent,
+  segmentsFromEditorDom,
+  serializeStored,
+} from "@/lib/draftDoc";
 import {
   collectUserPromptHistory,
   shouldHandlePromptHistoryKey,
   stepPromptHistory,
 } from "@/lib/composerPromptHistory";
+import {
+  buildComposerMentionMarkdown,
+  filterComposerMentions,
+  insertComposerMentionAtCaret,
+  type ComposerMention,
+  type ComposerMentionQuery,
+} from "@/lib/composerMentions";
+import type { PluginDto } from "@/lib/api";
+
+// 拖拽阶段只允许文件/本地 URI 进入附件流程，避免普通文本拖拽触发覆盖层或阻止编辑器默认行为。
+function hasFileDropPayload(data: DataTransfer | null | undefined): boolean {
+  if (!data) return false;
+  if (data.files?.length) return true;
+  const types = Array.from(data.types ?? []);
+  if (types.some((type) => type === "Files" || type === "text/uri-list")) {
+    return true;
+  }
+  return Array.from(data.items ?? []).some(
+    (item) => item.kind === "file" || item.type.startsWith("image/"),
+  );
+}
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
 type Translator = (key: MessageKey, vars?: Vars) => string;
@@ -37,8 +71,10 @@ export interface ComposerInputAreaProps {
   setDraft: SetState<string>;
   handleDraftChange: (value: string) => void;
   attachments: Attachment[];
+  mentionSessions?: SessionRow[];
+  loadMentionPlugins?: () => Promise<PluginDto[]>;
   addPastedFiles: (files: File[]) => Promise<void>;
-  addAttachmentsFromPaths: (paths: string[]) => Promise<void>;
+  addAttachmentsFromPaths: (paths: string[]) => Promise<boolean>;
   pickComposerFiles: () => Promise<void>;
   composerInputRef: RefObject<HTMLDivElement | null>;
   composerMenuOpen: boolean;
@@ -91,6 +127,8 @@ export function ComposerInputArea({
   addPastedFiles,
   addAttachmentsFromPaths,
   pickComposerFiles,
+  mentionSessions,
+  loadMentionPlugins,
   composerInputRef,
   composerMenuOpen,
   composerMenuEntries,
@@ -121,12 +159,216 @@ export function ComposerInputArea({
   send,
   hasConfiguredModel,
 }: ComposerInputAreaProps) {
+  const [mentionQuery, setMentionQuery] = useState<ComposerMentionQuery | null>(null);
+  const [mentionActiveIndex, setMentionActiveIndex] = useState(0);
+  const [mentionPlugins, setMentionPlugins] = useState<PluginDto[]>([]);
+  const [mentionPluginsLoading, setMentionPluginsLoading] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const mentionPluginsLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (
+      !mentionQuery ||
+      mentionQuery.trigger !== "@" ||
+      mentionPluginsLoadedRef.current ||
+      !loadMentionPlugins
+    ) {
+      return;
+    }
+    mentionPluginsLoadedRef.current = true;
+    setMentionPluginsLoading(true);
+    void loadMentionPlugins()
+      .then((plugins) => setMentionPlugins(plugins.filter((plugin) => plugin.enabled)))
+      .catch(() => setMentionPlugins([]))
+      .finally(() => setMentionPluginsLoading(false));
+  }, [loadMentionPlugins, mentionQuery]);
+
+  const mentionEntries = useMemo(() => {
+    const byId = new Map<string, ComposerMention>();
+    const add = (mention: ComposerMention) => {
+      if (!byId.has(mention.id)) byId.set(mention.id, mention);
+    };
+    for (const attachment of attachments) {
+      if (attachment.uploadStatus === "uploading" || attachment.uploadStatus === "failed") {
+        continue;
+      }
+      const kind = attachment.isDir ? "directory" : "file";
+      add({
+        id: `${kind}:${attachment.path}`,
+        kind,
+        label: attachment.name,
+        value: attachment.source === "remote"
+          ? attachment.previewUrl ?? attachment.resourceId ?? attachment.path
+          : attachment.path,
+        markdown: buildComposerMentionMarkdown(
+          kind,
+          attachment.name,
+          attachment.source === "remote"
+            ? attachment.previewUrl ?? attachment.resourceId ?? attachment.path
+            : attachment.path,
+        ),
+        description: attachment.source === "remote"
+          ? attachment.previewUrl ?? attachment.resourceId ?? attachment.path
+          : attachment.path,
+        data: { path: attachment.path },
+      });
+    }
+    for (const item of mentionSessions ?? []) {
+      if (!item.id) continue;
+      add({
+        id: `session:${item.id}`,
+        kind: "session",
+        label: item.title || item.id,
+        value: item.id,
+        markdown: buildComposerMentionMarkdown("session", item.title || item.id, item.id),
+        description: item.id,
+        data: { sessionId: item.id },
+      });
+    }
+    if (session.sessionId && !byId.has(`session:${session.sessionId}`)) {
+      add({
+        id: `session:${session.sessionId}`,
+        kind: "session",
+        label: session.title || session.sessionId,
+        value: session.sessionId,
+        markdown: buildComposerMentionMarkdown(
+          "session",
+          session.title || session.sessionId,
+          session.sessionId,
+        ),
+        description: session.projectPath ?? session.sessionId,
+        data: { sessionId: session.sessionId },
+      });
+    }
+    for (const plugin of mentionPlugins) {
+      const pluginId = plugin.marketplace ? `${plugin.name}@${plugin.marketplace}` : plugin.name;
+      add({
+        id: `plugin:${pluginId}`,
+        kind: "plugin",
+        label: plugin.name,
+        value: pluginId,
+        markdown: buildComposerMentionMarkdown("plugin", plugin.name, pluginId),
+        description: plugin.marketplace ?? plugin.path,
+        data: { pluginId },
+      });
+    }
+    for (const entry of composerMenuEntries) {
+      if (entry.kind !== "slash" || entry.item.kind !== "skill") continue;
+      const label = resolveSlashTitle(entry.item);
+      add({
+        id: `skill:${entry.item.name}`,
+        kind: "skill",
+        label,
+        value: entry.item.name,
+        markdown: buildComposerMentionMarkdown("skill", entry.item.name, entry.item.name),
+        description: resolveSlashDescription(entry.item),
+        data: { skillName: entry.item.name },
+      });
+    }
+
+    const order: Record<ComposerMention["kind"], number> = {
+      file: 0,
+      directory: 1,
+      plugin: 2,
+      session: 0,
+      skill: 0,
+    };
+    if (!mentionQuery) return [];
+    return filterComposerMentions([...byId.values()], mentionQuery)
+      .sort((left, right) => order[left.kind] - order[right.kind] || left.label.localeCompare(right.label));
+  }, [
+    attachments,
+    composerMenuEntries,
+    mentionPlugins,
+    mentionQuery,
+    mentionSessions,
+    resolveSlashDescription,
+    resolveSlashTitle,
+    session.projectPath,
+    session.sessionId,
+    session.title,
+  ]);
+
+  useEffect(() => {
+    setMentionActiveIndex((index) =>
+      mentionEntries.length ? Math.min(index, mentionEntries.length - 1) : 0,
+    );
+  }, [mentionEntries.length]);
+
+  const selectMention = (mention: ComposerMention) => {
+    const editor = composerInputRef.current;
+    if (!editor || !insertComposerMentionAtCaret(editor, mention)) return;
+    handleDraftChange(serializeStored(segmentsFromEditorDom(editor)));
+    setMentionQuery(null);
+  };
+
+  const handleEditorDragEnter = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDropPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    setIsDraggingFiles(true);
+  };
+
+  const handleEditorDragOver = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDropPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDraggingFiles(true);
+  };
+
+  const handleEditorDragLeave = (event: ReactDragEvent<HTMLDivElement>) => {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+      return;
+    }
+    setIsDraggingFiles(false);
+  };
+
+  const handleEditorDrop = (event: ReactDragEvent<HTMLDivElement>) => {
+    if (!hasFileDropPayload(event.dataTransfer)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setIsDraggingFiles(false);
+
+    const paths = collectLocalPathsFromDataTransfer(event.dataTransfer);
+    if (paths.length) {
+      void addAttachmentsFromPaths(paths);
+      return;
+    }
+    const files = collectFilesFromDataTransfer(event.dataTransfer);
+    if (files.length) void addPastedFiles(files);
+  };
+
   const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (
       event.nativeEvent.isComposing ||
       (event.nativeEvent as KeyboardEvent).keyCode === 229
     ) {
       return;
+    }
+
+    if (mentionQuery) {
+      const count = mentionEntries.length;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        if (count) setMentionActiveIndex((index) => (index + 1) % count);
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        if (count) setMentionActiveIndex((index) => (index - 1 + count) % count);
+        return;
+      }
+      if ((event.key === "Enter" || event.key === "Tab") && count > 0) {
+        event.preventDefault();
+        const mention = mentionEntries[Math.min(mentionActiveIndex, count - 1)];
+        if (mention) selectMention(mention);
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setMentionQuery(null);
+        return;
+      }
     }
 
     if (composerMenuOpen) {
@@ -278,11 +520,20 @@ export function ComposerInputArea({
       }
     }
 
-    if (event.key === "Enter" && !event.shiftKey) {
+    // 与 ZCode Lexical composer 保持一致：Ctrl/Meta+Enter 让位给换行，避免
+    // 中文输入法确认后的修饰键组合误提交；IME 组合态已在函数开头直接放行。
+    if (
+      event.key === "Enter" &&
+      !event.shiftKey &&
+      !event.ctrlKey &&
+      !event.metaKey
+    ) {
       event.preventDefault();
       const hasBody =
         !isDraftEmpty(parseStoredContent(draft)) || attachments.length > 0;
-      if (hasBody && hasConfiguredModel) void send();
+      if (hasBody && hasConfiguredModel && !hasUnreadyAttachments(attachments)) {
+        void send();
+      }
     }
     if (event.key === "Escape") {
       if (promptHistoryOpenRef.current) {
@@ -296,6 +547,38 @@ export function ComposerInputArea({
   return (
     <>
       <Popover
+        open={mentionQuery !== null}
+        onOpenChange={(open) => {
+          if (!open) setMentionQuery(null);
+        }}
+      >
+        <PopoverContent
+          anchor={composerInputRef}
+          side="top"
+          align="start"
+          sideOffset={0}
+          arrow={false}
+          className="w-(--anchor-width) !max-w-none p-0"
+        >
+          <ComposerMentionPanel
+            entries={mentionEntries}
+            activeIndex={mentionActiveIndex}
+            onActiveIndexChange={setMentionActiveIndex}
+            onSelect={selectMention}
+            groupLabels={{
+              file: tr("attach.typeFile"),
+              directory: tr("attach.typeDir"),
+              session: tr("sidebar.otherSessions"),
+              plugin: tr("sidebar.plugins"),
+              skill: tr("composer.skills"),
+            }}
+            loading={mentionPluginsLoading}
+            emptyLabel={tr("composer.mentionEmpty")}
+            loadingLabel={tr("composer.mentionLoading")}
+          />
+        </PopoverContent>
+      </Popover>
+      <Popover
         open={composerMenuOpen}
         onOpenChange={(nextOpen) => {
           if (!nextOpen) closeComposerMenu();
@@ -305,9 +588,9 @@ export function ComposerInputArea({
           anchor={composerInputRef}
           side="top"
           align="start"
-          sideOffset={4}
+          sideOffset={0}
           arrow={false}
-          className="w-(--anchor-width) max-w-none p-0"
+          className="w-(--anchor-width) !max-w-none p-0"
         >
             <ComposerPlusPanel
               open
@@ -334,9 +617,9 @@ export function ComposerInputArea({
           anchor={composerInputRef}
           side="top"
           align="start"
-          sideOffset={8}
+          sideOffset={0}
           arrow={false}
-          className="w-(--anchor-width) max-w-none p-0"
+          className="w-(--anchor-width) !max-w-none p-0"
         >
             <PromptHistoryPanel
               open
@@ -367,19 +650,36 @@ export function ComposerInputArea({
             />
         </PopoverContent>
       </Popover>
-      <ComposerEditor
-        editorRef={composerInputRef}
-        className="composer__input"
-        value={draft}
-        disabled={!canType(session.state)}
-        ariaLabel={tr("composer.inputLabel")}
-        placeholder={tr("composer.placeholder")}
-        onChange={handleDraftChange}
-        onSlashQueryChange={onSlashQueryChange}
-        onPasteFiles={(files) => void addPastedFiles(files)}
-        onPastePaths={(paths) => void addAttachmentsFromPaths(paths)}
-        onKeyDown={onKeyDown}
-      />
+      <div
+        className={
+          "composer-editor-dropzone" +
+          (isDraggingFiles ? " composer-editor-dropzone--active" : "")
+        }
+      >
+        <ComposerEditor
+          editorRef={composerInputRef}
+          className="composer__input"
+          value={draft}
+          disabled={!canType(session.state)}
+          ariaLabel={tr("composer.inputLabel")}
+          placeholder={tr("composer.placeholder")}
+          onChange={handleDraftChange}
+          onSlashQueryChange={onSlashQueryChange}
+          onMentionQueryChange={setMentionQuery}
+          onPasteFiles={(files) => void addPastedFiles(files)}
+          onPastePaths={(paths) => void addAttachmentsFromPaths(paths)}
+          onDragEnter={handleEditorDragEnter}
+          onDragOver={handleEditorDragOver}
+          onDragLeave={handleEditorDragLeave}
+          onDrop={handleEditorDrop}
+          onKeyDown={onKeyDown}
+        />
+        {isDraggingFiles ? (
+          <div className="composer-editor-dropzone__hint" aria-live="polite">
+            {tr("composer.addFilesHint")}
+          </div>
+        ) : null}
+      </div>
     </>
   );
 }

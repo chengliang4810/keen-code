@@ -7,6 +7,7 @@ import {
   subagentForTool,
   TimelineToolDetailBody,
   TimelineToolRow,
+  timelineToolRenderer,
 } from "./TimelineToolRow";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
 
@@ -284,6 +285,118 @@ describe("TimelineToolRow", () => {
       /\.lobe-timeline-rail--subagent\s*\{[^}]*flex:\s*0 0 min\(100%, 208px\);[^}]*width:\s*min\(100%, 208px\);/s,
     );
   });
+
+  it("工具摘要使用 ZCode 的自然宽度并让长路径让位给耗时", () => {
+    const css = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(
+      /\.lobe-timeline-tool\s*\{[^}]*display:\s*flex;[^}]*flex-direction:\s*column;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-timeline-tool__row\s*\{[^}]*display:\s*inline-flex;[^}]*align-self:\s*flex-start;[^}]*max-width:\s*100%;[^}]*width:\s*auto;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-timeline-tool__primary\s*\{[^}]*flex:\s*1 1 auto;[^}]*overflow:\s*hidden;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-timeline-tool__meta\s*\{[^}]*margin-inline-start:\s*auto;/s,
+    );
+  });
+
+  it("连续工作项使用 16px 节奏并保留 renderer 语义锚点", () => {
+    const css = readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(
+      /\.lobe-chat-assistant-timeline\s*\{[^}]*gap:\s*16px;/s,
+    );
+    expect(css).toMatch(
+      /\.lobe-turn-work__body\s*\{[^}]*gap:\s*16px;/s,
+    );
+
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        tool: {
+          kind: "tool",
+          toolCallId: "renderer-read",
+          title: "Read",
+          toolKind: "read",
+          status: "completed",
+          input: JSON.stringify({ file_path: "src/App.tsx" }),
+        },
+      }),
+    );
+    expect(html).toContain('data-tool-renderer="read"');
+    expect(html).toContain('data-tool-kind="read"');
+  });
+
+  it.each([
+    ["read", "Read", "read"],
+    ["edit", "Edit", "edit"],
+    ["execute", "Bash", "execute"],
+    ["search", "Grep", "search"],
+    ["agent", "spawn_agent", "agent"],
+    ["changes", "Write", "changes"],
+  ] as const)("%s 使用明确的 timeline renderer", (expected, title, toolKind) => {
+    const tool = {
+      kind: "tool" as const,
+      toolCallId: `renderer-${expected}`,
+      title,
+      toolKind,
+      status: "completed",
+      ...(expected === "changes"
+        ? {
+            fileChanges: [
+              { path: "src/App.tsx", oldText: "old", newText: "new" },
+            ],
+          }
+        : {}),
+    };
+
+    expect(timelineToolRenderer(tool)).toBe(expected);
+    const html = renderToString(
+      React.createElement(TimelineToolRow, { locale: "zh", tool }),
+    );
+    if (expected === "agent") {
+      expect(html).toContain('data-tool-renderer="agent"');
+    } else {
+      expect(html).toContain(`data-tool-renderer="${expected}"`);
+    }
+  });
+
+  it("changes renderer 只使用真实文件快照并保留 Diff 打开入口", () => {
+    const opened: string[] = [];
+    const html = renderToString(
+      React.createElement(TimelineToolRow, {
+        locale: "zh",
+        onOpenResource: (target: { type: string; path?: string }) => {
+          if (target.path) opened.push(target.path);
+        },
+        tool: {
+          kind: "tool",
+          toolCallId: "renderer-changes",
+          title: "Write",
+          toolKind: "changes",
+          status: "completed",
+          fileChanges: [
+            { path: "src/App.tsx", oldText: "old", newText: "new" },
+          ],
+        },
+      }),
+    );
+
+    expect(html).toContain('data-tool-renderer="changes"');
+    expect(html).toContain("App.tsx");
+    expect(html).toContain("已修改");
+    expect(opened).toHaveLength(0);
+  });
+
   it("计划工具不进入对话工具时间线", () => {
     const html = renderToString(
       React.createElement(TimelineToolRow, {
@@ -568,8 +681,8 @@ describe("TimelineToolRow", () => {
     expect(html).toContain("已搜索");
     expect(html).toContain("missing_symbol");
     expect(html).not.toContain("No matches found.");
-    expect(html).toContain('disabled=""');
-    expect(html).not.toContain("aria-expanded");
+    expect(html).not.toContain('disabled=""');
+    expect(html).not.toContain('aria-expanded="');
   });
 
   it("成功工具默认只显示紧凑证据摘要", () => {
@@ -602,7 +715,7 @@ describe("TimelineToolRow", () => {
     expect(html).toContain("README.md");
     expect(html).not.toContain(">完成<");
     expect(html).toContain("118ms");
-    expect(html).toContain('disabled=""');
+    expect(html).not.toContain('disabled=""');
     expect(html).not.toContain("结构化结果");
   });
 
@@ -656,7 +769,10 @@ describe("TimelineToolRow", () => {
       }),
     );
 
-    expect(html).toContain(">运行中<");
+    expect(html).toContain("animated-gradient-text");
+    expect(html).not.toContain(">运行中<");
+    expect(html).toContain('data-tool-status="running"');
+    expect(html).toContain("pnpm test");
   });
 
   it.each([
@@ -694,7 +810,7 @@ describe("TimelineToolRow", () => {
     expect(html).not.toContain("不应展开显示的原始工具结果");
     expect(html).not.toContain("private-input");
     expect(html).not.toContain("已执行");
-    expect(html).toContain('disabled=""');
+    expect(html).not.toContain('disabled=""');
   });
 
   it.each(["pending", "in_progress", "completed", "failed"] as const)("插件模板 %s 状态使用名称摘要，不回退到正文", (status) => {

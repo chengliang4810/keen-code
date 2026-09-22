@@ -9,7 +9,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 /**
  * Composer branch / worktree chip — switch linked worktrees, create, GC.
  * Lives next to the project picker on the new-session context bar.
@@ -64,8 +64,6 @@ type Props = {
   onGc: () => void;
   onOpen?: () => void;
 };
-
-const LIST_MAX_H = 200;
 
 export function ComposerWorktreeMenu({
   activePath,
@@ -126,7 +124,7 @@ export function ComposerWorktreeMenu({
           }
           disabled={disabled}
           aria-label={labels.worktreeTip}
-            render={<Button type="button" variant="ghost" />}
+            render={<Button type="button" variant="ghost" size="md" />}
         >
           <IconGitBranch size={14} aria-hidden />
           <span
@@ -157,7 +155,6 @@ export function ComposerWorktreeMenu({
                 <div
                 className={"cwm__list" + (showLoading ? " is-loading" : "")}
                 aria-busy={showLoading || undefined}
-                style={{ maxHeight: LIST_MAX_H }}
               >
                 {worktrees.map((wt) => {
                   const isCurrent = pathsEqual(wt.path, activePath);

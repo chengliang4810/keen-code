@@ -1,9 +1,9 @@
-import { Textarea } from "@appica/ui-react/textarea";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { Switch } from "@/components/ui/switch";
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 
 /** 与后端设置校验保持一致，避免提交必然失败的固定提示词。 */
@@ -128,6 +128,7 @@ export function PersonalizationSettingsPanel({
       ) : null}
 
       <Textarea
+        inputSize="md"
         className="settings-personalization__textarea"
         value={draft}
         maxLength={CUSTOM_INSTRUCTIONS_MAX_CHARS}
@@ -223,6 +224,7 @@ export function PersonalizationSettingsPanel({
 
       {localMemories ? (
         <Textarea
+          inputSize="md"
           className="settings-personalization__textarea"
           value={memoryDraft}
           maxLength={MEMORY_MD_MAX_CHARS}

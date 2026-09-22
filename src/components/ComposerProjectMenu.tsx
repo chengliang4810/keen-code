@@ -9,7 +9,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 /**
  * Composer project chip — pick / add folder.
  * Git worktrees live in {@link ComposerWorktreeMenu} (branch chip).
@@ -35,17 +35,18 @@ type Props = {
     /** Badge when project folder is missing on disk. */
     pathMissing?: string;
   };
+  /** Web Host 项目来自 Session cwd，只保留选择，不显示添加入口。 */
+  canAddProject?: boolean;
   disabled?: boolean;
   onSelect: (project: ProjectOption) => void;
   onAdd: (returnFocus: HTMLButtonElement | null) => void;
 };
 
-const LIST_HEIGHT = 220;
-
 export function ComposerProjectMenu({
   activeProject,
   projects,
   labels,
+  canAddProject = true,
   disabled,
   onSelect,
   onAdd,
@@ -74,7 +75,7 @@ export function ComposerProjectMenu({
             (activeMissing ? " is-path-missing" : "")
           }
           disabled={disabled}
-            render={<Button type="button" variant="ghost" />}
+            render={<Button type="button" variant="ghost" size="md" />}
         >
           <IconFolder size={14} />
           <span className="composer__context-label">
@@ -96,7 +97,7 @@ export function ComposerProjectMenu({
                 if (project) onSelect(project);
               }}
             >
-              <div className="cpm__list" style={{ height: LIST_HEIGHT }}>
+              <div className="cpm__list">
               {projects.map((p) => {
                 const missing = p.pathOk === false;
                 return (
@@ -116,7 +117,7 @@ export function ComposerProjectMenu({
                     <span className="cmm__opt-main">
                       <span className="cmm__opt-title">{p.name}</span>
                       {missing && labels.pathMissing ? (
-                        <Badge size="xs" variant="error">
+                        <Badge size="md" variant="error">
                           {labels.pathMissing}
                         </Badge>
                       ) : null}
@@ -127,15 +128,19 @@ export function ComposerProjectMenu({
               </div>
             </DropdownMenuRadioGroup>
           </DropdownMenuGroup>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem
-            onClick={() => {
-              onAdd(triggerRef.current);
-            }}
-          >
-            <IconPlus size={14} aria-hidden />
-            <span>{labels.addProject}</span>
-          </DropdownMenuItem>
+          {canAddProject ? (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                onClick={() => {
+                  onAdd(triggerRef.current);
+                }}
+              >
+                <IconPlus size={14} aria-hidden />
+                <span>{labels.addProject}</span>
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
     </div>

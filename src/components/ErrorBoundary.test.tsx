@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createElement, isValidElement } from "react";
 import { ErrorBoundary } from "./ErrorBoundary";
-import { Alert } from "@appica/ui-react/alert";
 
 describe("ErrorBoundary", () => {
   it("getDerivedStateFromError 把异常转为兜底状态", () => {
@@ -17,8 +16,9 @@ describe("ErrorBoundary", () => {
     boundary.state = { error: new Error("boom") };
     const rendered = boundary.render();
     expect(isValidElement(rendered)).toBe(true);
-    if (!isValidElement(rendered)) return;
-    expect(rendered.type).toBe(Alert);
+    if (!isValidElement<{ role?: string }>(rendered)) return;
+    expect(rendered.type).toBe("div");
+    expect(rendered.props.role).toBe("alert");
     const html = JSON.stringify(rendered);
     expect(html).toContain("会话时间线");
     expect(html).toContain("重试");

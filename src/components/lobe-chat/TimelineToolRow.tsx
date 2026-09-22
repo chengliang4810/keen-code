@@ -1,5 +1,10 @@
 import { Button } from "@/components/ui/button";
 import { Badge } from "@appica/ui-react/badge";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@appica/ui-react/collapsible";
 /**
  * Inline tool step on the assistant timeline (stream order).
  * Quiet red mark on failure; no bottom activity dump.
@@ -164,7 +169,9 @@ type TimelineToolCategory =
   | "read"
   | "search"
   | "edit"
+  | "changes"
   | "command"
+  | "agent"
   | "ask-user"
   | "tool-search"
   | "skill-load"
@@ -219,6 +226,23 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     if (value === "wait_agent") {
       return "wait-agent";
     }
+    if (
+      value === "changes" ||
+      value === "change" ||
+      value === "changes_group" ||
+      value === "change_group"
+    ) {
+      return "changes";
+    }
+    if (
+      value === "agent" ||
+      value === "spawn_agent" ||
+      value === "send_message" ||
+      value === "followup_task" ||
+      value === "interrupt_agent"
+    ) {
+      return "agent";
+    }
     if (value.includes("folder_operations")) {
       return "folder";
     }
@@ -249,8 +273,52 @@ function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
     return "other";
   };
 
+  // 显式 renderer kind 是协议投影提供的稳定身份；仅在它不是 changes/agent
+  // 等专用类别时才让具体标题覆盖通用 ACP kind（如 folder_operations/edit）。
+  const kindCategory = categoryFor(kind);
+  if (kindCategory === "changes" || kindCategory === "agent") {
+    return kindCategory;
+  }
   const titleCategory = categoryFor(title);
   return titleCategory === "other" ? categoryFor(kind) : titleCategory;
+}
+
+/**
+ * 将 ACP 工具身份收敛到时间线 renderer 的稳定呈现类型。
+ *
+ * 这只是 UI 投影：原始 `toolKind`、标题、状态和文件快照仍由调用方保留，
+ * renderer 只据已有证据选择图标、摘要和可展开行为，不虚构工具结果。
+ */
+export type TimelineToolRenderer =
+  | "read"
+  | "edit"
+  | "execute"
+  | "search"
+  | "agent"
+  | "changes"
+  | "other";
+
+export function timelineToolRenderer(
+  tool: MessageToolSegment,
+): TimelineToolRenderer {
+  const category = timelineToolCategory(tool);
+  if (category === "changes" || (tool.fileChanges?.length ?? 0) > 0) {
+    return "changes";
+  }
+  switch (category) {
+    case "read":
+      return "read";
+    case "edit":
+      return "edit";
+    case "command":
+      return "execute";
+    case "search":
+      return "search";
+    case "agent":
+      return "agent";
+    default:
+      return "other";
+  }
 }
 
 /** 判断是否是计划/Todo 更新工具。 */
@@ -445,7 +513,7 @@ function SubagentTimelineCard({
         {status === "running" ? (
           <span className="lobe-subagent-card__running-dot" />
         ) : status === "done" ? (
-          <Badge size="xs" variant="success" aria-label={statusLabel}>
+          <Badge size="md" variant="success" aria-label={statusLabel}>
             <IconCheck size={9} />
           </Badge>
         ) : null}
@@ -482,6 +550,8 @@ function SubagentTimelineCard({
       variant="ghost" className="lobe-subagent-card"
       onClick={onClick}
       {...commonProps}
+      data-tool-renderer="agent"
+      data-tool-kind={tool.toolKind || tool.title}
     >
       {content}
       <IconChevronRight
@@ -495,6 +565,8 @@ function SubagentTimelineCard({
       className="lobe-subagent-card"
       role="status"
       {...commonProps}
+      data-tool-renderer="agent"
+      data-tool-kind={tool.toolKind || tool.title}
     >
       {content}
     </div>
@@ -577,6 +649,24 @@ function toolAction(tool: MessageToolSegment, locale: Locale): string {
         ? "Edit"
         : "Edited";
   }
+  if (category === "changes") {
+    return locale === "zh"
+      ? running
+        ? "修改"
+        : "已修改"
+      : running
+        ? "Change"
+        : "Changed";
+  }
+  if (category === "agent") {
+    return locale === "zh"
+      ? running
+        ? "运行 Agent"
+        : "已运行 Agent"
+      : running
+        ? "Run agent"
+        : "Ran agent";
+  }
   if (category === "command") {
     return locale === "zh"
       ? running
@@ -615,6 +705,10 @@ function ToolEvidenceIcon({ tool }: { tool: MessageToolSegment }) {
       return <IconSearch size={17} />;
     case "edit":
       return <IconEdit size={17} />;
+    case "changes":
+      return <IconEdit size={17} />;
+    case "agent":
+      return <IconUser size={17} />;
     default:
       return <IconCode size={17} />;
   }
@@ -694,12 +788,14 @@ export function TimelineToolRow({
   const running = isToolSegmentRunning(tool);
   const inputFields = parseToolInput(tool.input);
   const category = timelineToolCategory(tool);
+  const renderer = timelineToolRenderer(tool);
   const planTool = isPlanTool(tool);
   const composerStateTool = planTool || isGoalTool(tool);
   const folderTool = category === "folder";
   const searchTool = category === "search";
   const readTool = category === "read" && !planTool;
-  const editTool = category === "edit" && !planTool;
+  const changesTool = renderer === "changes";
+  const editTool = (category === "edit" || changesTool) && !planTool;
   const commandTool = category === "command";
   const askUserTool = category === "ask-user";
   const toolSearchTool = category === "tool-search";
@@ -817,26 +913,96 @@ export function TimelineToolRow({
     );
   }
 
+  const rowContent = (
+    <>
+      <span className="lobe-timeline-tool__icon" aria-hidden>
+        <ToolEvidenceIcon tool={tool} />
+      </span>
+      <span
+        className={
+          "lobe-timeline-tool__action" +
+          (running ? " animated-gradient-text" : "")
+        }
+      >
+        {action}
+      </span>
+      <span
+        className="lobe-timeline-tool__primary"
+        title={resolvedPath || summary}
+      >
+        <span
+          className={
+            "lobe-timeline-tool__name" + (failed ? " is-error" : "")
+          }
+        >
+          {pathTail || summary}
+        </span>
+        {pathTail && pathTail !== summary ? (
+          <span className="lobe-timeline-tool__path">{summary}</span>
+        ) : null}
+      </span>
+      {duration ? (
+        <span
+          className={"lobe-timeline-tool__meta" + (failed ? " is-error" : "")}
+        >
+          <span>{duration}</span>
+        </span>
+      ) : null}
+      {hasDetail ? (
+        <span
+          className={
+            "lobe-timeline-tool__chevron" + (open ? " is-open" : "")
+          }
+          aria-hidden
+        >
+          <IconChevronDown size={14} />
+        </span>
+      ) : null}
+    </>
+  );
+  const opensResource = Boolean(editTool && resolvedPath && onOpenResource);
+
   return (
-    <div
+    <Collapsible
+      open={hasDetail ? open : false}
+      onOpenChange={(nextOpen) => {
+        if (hasDetail) setOpen(nextOpen);
+      }}
       className={
         "lobe-timeline-tool" +
+        ` is-renderer-${renderer}` +
         (failed ? " is-error" : "") +
         (running ? " is-running" : "")
       }
       role="status"
       aria-label={`${action} ${summary} ${statusLabel}`}
       data-tool-id={tool.toolCallId}
+      data-tool-kind={tool.toolKind || tool.title}
+      data-tool-renderer={renderer}
+      data-tool-status={
+        running
+          ? "running"
+          : cancelled
+            ? "cancelled"
+            : failed
+              ? "failed"
+              : "completed"
+      }
       data-testid="timeline-tool"
     >
-      <Button
-        type="button"
-        variant="ghost"
-        className="lobe-timeline-tool__row"
-        aria-expanded={hasDetail ? open : undefined}
-        disabled={!hasDetail && !(editTool && resolvedPath && onOpenResource)}
-        onClick={() => {
-          if (editTool && resolvedPath && onOpenResource) {
+      {hasDetail || opensResource ? (
+        <CollapsibleTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="md"
+              className="lobe-timeline-tool__row"
+            />
+          }
+          onClick={(event) => {
+            if (!opensResource || !resolvedPath || !onOpenResource) return;
+            event.preventDefault();
             onOpenResource({
               type: "changes",
               path: resolvedPath,
@@ -844,57 +1010,20 @@ export function TimelineToolRow({
                 ? { fileChanges: tool.fileChanges }
                 : {}),
             });
-            return;
-          }
-          if (hasDetail) setOpen((value) => !value);
-        }}
-      >
-        <span className="lobe-timeline-tool__icon" aria-hidden>
-          <ToolEvidenceIcon tool={tool} />
-        </span>
-        <span className="lobe-timeline-tool__action">
-          {action}
-        </span>
-        <span
-          className="lobe-timeline-tool__primary"
-          title={resolvedPath || summary}
+          }}
         >
-          <span
-            className={
-              "lobe-timeline-tool__name" + (failed ? " is-error" : "")
-            }
-          >
-            {pathTail || summary}
-          </span>
-          {pathTail && pathTail !== summary ? (
-            <span className="lobe-timeline-tool__path">{summary}</span>
-          ) : null}
-        </span>
-        {running || duration ? (
-          <span
-            className={
-              "lobe-timeline-tool__meta" +
-              (failed ? " is-error" : "") +
-              (running ? " is-running" : "")
-            }
-          >
-            {running ? (locale === "zh" ? "运行中" : "Running") : null}
-            {duration ? <span>{duration}</span> : null}
-          </span>
-        ) : null}
-        {hasDetail ? (
-          <span
-            className={
-              "lobe-timeline-tool__chevron" + (open ? " is-open" : "")
-            }
-            aria-hidden
-          >
-            <IconChevronDown size={14} />
-          </span>
-        ) : null}
-      </Button>
-      {open && hasDetail ? (
-        <div className="lobe-timeline-tool__detail">
+          {rowContent}
+        </CollapsibleTrigger>
+      ) : (
+        <div className="lobe-timeline-tool__row">
+          {rowContent}
+        </div>
+      )}
+      {hasDetail ? (
+        <CollapsibleContent
+          className="lobe-timeline-tool__detail-shell"
+        >
+          <div className="lobe-timeline-tool__detail">
           <TimelineToolDetailBody
             tool={tool}
             locale={locale}
@@ -905,9 +1034,10 @@ export function TimelineToolRow({
             commandTool={commandTool}
             rawAllowed={hasGenericDetail}
           />
-        </div>
+          </div>
+        </CollapsibleContent>
       ) : null}
-    </div>
+    </Collapsible>
   );
 }
 

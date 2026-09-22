@@ -18,6 +18,8 @@ export interface ComposerContextBarProps {
   session: SessionSnapshot;
   activeProject: Project | null;
   projects: Project[];
+  /** Web Host 项目是只读投影，不提供添加项目入口。 */
+  canWriteProjects: boolean;
   acpSessionView: AcpSessionView | null;
   welcomeSession: boolean;
   bindSessionProject: (
@@ -48,6 +50,7 @@ export function ComposerContextBar({
   session,
   activeProject,
   projects,
+  canWriteProjects,
   acpSessionView,
   welcomeSession,
   bindSessionProject,
@@ -99,6 +102,7 @@ export function ComposerContextBar({
           <ComposerProjectMenu
             activeProject={activeProject}
             projects={projects}
+            canAddProject={canWriteProjects}
             labels={{
               pickProject: tr("composer.pickProject"),
               addProject: tr("composer.addProject"),

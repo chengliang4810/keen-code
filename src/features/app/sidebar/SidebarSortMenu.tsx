@@ -7,7 +7,7 @@ import {
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 import { Tip } from "@/components/ui/tooltip";
 import { IconArrowsSort, IconClock, IconMessageCircle } from "@/components/icons";
 import type { SidebarSortMode } from "@/lib/sidebarOrder";
@@ -31,7 +31,7 @@ export function SidebarSortMenu({
         <DropdownMenuTrigger render={<Button
             type="button"
             variant="ghost"
-            size="icon-md"
+            size="icon-sm"
             className="tree-l1__action"
             aria-label={tr("sidebar.sort")}
           />}>

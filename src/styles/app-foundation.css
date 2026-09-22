@@ -79,11 +79,8 @@ textarea {
 }
 
 /* ==========================================================================
- * Feedback details — selection tint, tactile press, numeric alignment
+ * Feedback details — tactile press, numeric alignment
  * ========================================================================== */
-::selection {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
-}
 
 /* Ring percentage stays steady while counting */
 .context-ring__value {
@@ -334,9 +331,11 @@ textarea,
  */
 .sidebar {
   position: relative;
-  width: var(--sidebar-width, 260px);
-  min-width: var(--sidebar-width, 260px);
-  max-width: var(--sidebar-width, 260px);
+  width: var(--sidebar-width, 264px);
+  min-width: var(--sidebar-width, 264px);
+  max-width: var(--sidebar-width, 264px);
+  /* ZCode keeps the outer rail clipped; only the inner viewport owns scrolling. */
+  overflow: hidden;
   background: var(--bg-sidebar);
   border-right: 0.5px solid var(--border-strong);
   box-shadow: none;
@@ -360,7 +359,7 @@ textarea,
 .sidebar-resizer,
 .aside-resizer,
 .rp-split__resizer {
-  width: 5px;
+  width: 4px;
   cursor: col-resize;
   touch-action: none;
 }
@@ -429,18 +428,18 @@ textarea,
   pointer-events: none;
 }
 
-/* SidebarRoot：顶部 6px，logoRow 高 60px，行后 8px；拆分宿主仍保持相同几何。 */
+/* ZCode desktop sidebar: a fixed 48px drag band followed by dense navigation. */
 .sidebar-chrome {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 60px;
-  min-height: 60px;
-  max-height: 60px;
-  padding: 8px 12px 8px 16px;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
+  padding: 0 12px 0 16px;
   /* Traffic lights + control width — must clear red/yellow/green entirely */
   padding-left: var(--titlebar-safe-left, 96px);
-  margin: 6px 0 8px;
+  margin: 0;
   user-select: none;
   flex-shrink: 0;
   box-sizing: border-box;
@@ -485,6 +484,21 @@ textarea,
   display: none;
 }
 
+.sidebar-chrome__task-nav {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-shrink: 0;
+}
+
+.sidebar-chrome__icon-button,
+.sidebar-chrome > .main__pane-toggle {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding-inline: 0;
+}
+
 .sidebar__scroll {
   flex: 1;
   min-height: 0;
@@ -513,44 +527,76 @@ textarea,
 .tree-l1 {
   display: flex;
   align-items: center;
-  gap: 2px;
-  margin-top: 6px;
-  margin-bottom: 2px;
+  gap: 4px;
+  margin-top: 8px;
+  margin-bottom: 0;
   min-height: 28px;
-  padding-right: 2px;
+  padding-inline: 0;
+}
+
+.tree-l1--top-spaced {
+  margin-top: var(--space-2);
 }
 
 .tree-l1__head {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 6px;
+  gap: 4px;
   flex: 1;
   min-width: 0;
   height: 28px;
-  padding-inline: 7px;
+  padding-inline: 10px;
   text-align: left;
+  background: transparent;
+  border-radius: var(--radius-md);
+}
+
+.tree-l1__head:hover,
+.tree-l1__head[aria-expanded="true"] {
+  background: transparent;
 }
 
 .tree-l1__label {
   flex: 0 1 auto;
-  /* 侧栏分组文字需达到普通正文可读对比度，图标继续保留弱层级。 */
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
 }
 
 .tree-l1__actions {
   display: flex;
   align-items: center;
   gap: 0;
+  padding-inline-end: 6px;
   flex-shrink: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--motion-fast) var(--ease-out);
 }
 
 .tree-l1__action {
   flex-shrink: 0;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+}
+
+.tree-l1:hover .tree-l1__actions,
+.tree-l1:focus-within .tree-l1__actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none), (pointer: coarse) {
+  .tree-l1__actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .tree-project {
-  margin-bottom: 2px;
+  margin-bottom: 8px;
 }
 
 .tree-l2 {
@@ -562,8 +608,8 @@ textarea,
   min-height: 32px;
   max-height: 32px;
   box-sizing: border-box;
-  padding: 0 5px 0 7px;
-  border-radius: var(--radius-sm);
+  padding: 0 4px 0 10px;
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: var(--text-md);
   cursor: pointer;
@@ -612,7 +658,7 @@ textarea,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
+  width: 16px;
   opacity: 0.9;
   flex-shrink: 0;
 }
@@ -630,12 +676,7 @@ textarea,
   gap: 4px;
 }
 
-.tree-l3__pin {
-  flex-shrink: 0;
-  opacity: 0.85;
-}
-
-/* Always reserve action slot width — opacity only on hover (no height/width jump) */
+/* 静止时操作层脱离文档流，避免吞掉标题宽度；交互时再回到行尾布局。 */
 .tree-l2__actions,
 .tree-l3__actions {
   display: inline-flex;
@@ -652,28 +693,52 @@ textarea,
   transition: opacity var(--motion-fast) var(--ease-out);
 }
 
-/* pin + archive + menu */
-.tree-l3__actions--triple {
+.tree-l3__actions--with-pin {
   width: 72px;
   min-width: 72px;
+}
+
+.tree-l3__actions--with-delete {
+  width: 96px;
+  min-width: 96px;
 }
 
 .tree-l2:hover .tree-l2__actions,
 .tree-l2:focus-within .tree-l2__actions,
 .tree-l3:hover .tree-l3__actions,
 .tree-l3:focus-within .tree-l3__actions,
-.tree-l3--active .tree-l3__actions {
+.tree-l3--actions-visible .tree-l3__actions,
+.tree-l3--menu-open .tree-l3__actions {
+  position: static;
   opacity: 1;
   pointer-events: auto;
 }
 
 .tree-icon-btn {
   flex-shrink: 0;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--radius-sm);
+}
+
+.tree-l3__actions {
+  position: absolute;
+  right: 4px;
+  top: 4px;
+  z-index: 1;
+  background: transparent;
+  border-radius: 0;
+}
+
+.tree-l3--active .tree-l3__actions {
+  background: transparent;
 }
 
 /* Keep the empty state outside the windowed task list. */
 .tree-l3-list-wrap {
-  padding: 1px 0 5px 10px;
+  padding: 4px 0 0;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -682,7 +747,7 @@ textarea,
 .tree-l3-list {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 2px;
 }
 
 .tree-l3-more {
@@ -693,7 +758,7 @@ textarea,
 .tree-orphan-list {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 2px;
 }
 
 .virtual-list__spacer {
@@ -702,16 +767,17 @@ textarea,
 }
 
 .tree-l3 {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   width: 100%;
-  height: 30px;
-  min-height: 30px;
-  max-height: 30px;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
   box-sizing: border-box;
-  padding: 0 5px 0 10px;
-  border-radius: var(--radius-sm);
+  padding: 0 4px 0 10px;
+  border-radius: var(--radius-md);
   color: var(--text-secondary);
   font-size: var(--text-md);
   cursor: pointer;
@@ -724,24 +790,27 @@ textarea,
 }
 
 .tree-l3--active {
-  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+  background: var(--bg-active);
   color: var(--text-primary);
 }
 
 .tree-l3--archived {
   opacity: 0.55;
+  height: 48px;
+  min-height: 48px;
+  max-height: 48px;
 }
 
 .tree-l3--orphan {
   margin-left: 0;
-  padding-left: 8px;
+  padding-left: 10px;
 }
 
 .tree-l3--hint {
   font-size: calc(12px + var(--ui-font-delta));
   color: var(--warning);
-  height: 28px;
-  min-height: 28px;
+  height: 32px;
+  min-height: 32px;
 }
 
 .tree-l3__title {
@@ -751,42 +820,104 @@ textarea,
   align-items: center;
   gap: 5px;
   overflow: hidden;
-  line-height: 30px;
+  line-height: 32px;
+}
+
+.tree-l3__title-line {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+}
+
+.tree-l3--archived .tree-l3__title {
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 0;
+  line-height: 1.2;
+}
+
+.tree-l3--archived .tree-l3__title-line {
+  height: 26px;
+  line-height: 26px;
+}
+
+.tree-l3__archive-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: 16px;
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.tree-l3__archive-workspace {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-l3__archive-time {
+  flex-shrink: 0;
+}
+
+/* A fixed leading slot keeps titles aligned while a session changes state. */
+.tree-l3__leading {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  min-width: 16px;
+  height: 24px;
+  flex-shrink: 0;
 }
 
 .tree-l3__kind {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  flex-shrink: 0;
   color: var(--text-tertiary);
   opacity: 0.9;
 }
 
-.tree-l3__name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  /* 任务标题使用主文字层级，项目名继续保持次级以突出对话。 */
-  color: var(--text-primary);
-  font-weight: 450;
+.tree-l3__pinned-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-tertiary);
 }
 
-/* 当前任务只使用轻量底色和正文常规字重，避免与正文竞争。 */
-.tree-l3--active .tree-l3__name {
-  font-weight: 500;
+.tree-l3__pin-action {
+  display: none;
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+  border-radius: var(--radius-xs);
 }
 
-/* In-progress session: always-visible spinner on the right (replaces hover actions). */
+.tree-l3__actions--with-pin .tree-l3__pin-action {
+  display: inline-flex;
+}
+
+.tree-l3--archived .tree-l3__actions {
+  top: 12px;
+}
+
+/* 状态固定在左侧 leading 槽；交互时只隐藏非状态 metadata。 */
 .tree-l3__status {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 24px;
-  min-width: 24px;
-  height: 24px;
-  margin-left: auto;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
   flex-shrink: 0;
   color: var(--text-secondary);
 }
@@ -804,33 +935,152 @@ textarea,
 }
 
 .tree-l3__completion-dot {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
   border-radius: var(--radius-full);
   background: currentColor;
 }
 
-/* 未读终态标记常驻；悬浮时让位给原有会话操作按钮。 */
+/* 未读状态保留行语义类，并由 leading 槽持续显示。 */
 .tree-l3--unread-terminal {
   position: relative;
-}
-
-.tree-l3--unread-terminal .tree-l3__actions {
-  position: absolute;
-  right: 6px;
-  background: var(--bg-hover);
-}
-
-.tree-l3--unread-terminal:hover .tree-l3__status--completed,
-.tree-l3--unread-terminal:hover .tree-l3__status--failed,
-.tree-l3--unread-terminal:focus-within .tree-l3__status--completed,
-.tree-l3--unread-terminal:focus-within .tree-l3__status--failed {
-  opacity: 0;
 }
 
 .tree-l3--working .tree-l3__title {
   color: var(--text-primary);
 }
+
+.tree-l3__trailing {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.tree-l3__meta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.tree-l3__time {
+  flex-shrink: 0;
+}
+
+.tree-l3:hover .tree-l3__meta,
+.tree-l3:focus-within .tree-l3__meta,
+.tree-l3--metadata-suppressed .tree-l3__meta,
+.tree-l3--menu-open .tree-l3__meta {
+  display: none;
+}
+
+/* 保留旧的 pin-action 选择器作为尺寸兼容层；会话行实际将它挂在右侧动作簇内。 */
+.tree-l3__actions--with-pin .tree-l3__pin-action {
+  display: inline-flex;
+}
+
+/* ZCode keeps row actions reachable on touch devices because there is no hover state. */
+/* Match VirtualList: narrow viewports and touch-capable devices share row geometry. */
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .tree-l2,
+  .tree-l3 {
+    height: var(--ui-touch-target-touch);
+    min-height: var(--ui-touch-target-touch);
+    max-height: var(--ui-touch-target-touch);
+  }
+
+  .tree-l2__actions,
+  .tree-l3__actions {
+    position: static;
+    height: var(--ui-touch-target-touch);
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .tree-l2__actions {
+    width: auto;
+    min-width: var(--ui-touch-target-touch);
+  }
+
+  /* Keep the existing two-action project-row contract as the base selector. */
+  .tree-l3__actions {
+    width: calc(var(--ui-touch-target-touch) * 2);
+    min-width: calc(var(--ui-touch-target-touch) * 2);
+  }
+
+  /* Touch rows mount only the overflow/menu action; Pin and archive stay in the context menu. */
+  .tree-l3__actions:not(.tree-l3__actions--with-pin) {
+    width: var(--ui-touch-target-touch);
+    min-width: var(--ui-touch-target-touch);
+  }
+
+  .tree-l3__actions--with-delete {
+    width: calc(var(--ui-touch-target-touch) * 2);
+    min-width: calc(var(--ui-touch-target-touch) * 2);
+  }
+
+  .tree-icon-btn {
+    width: var(--ui-touch-target-touch);
+    min-width: var(--ui-touch-target-touch);
+    height: var(--ui-touch-target-touch);
+  }
+
+  .tree-l3__trailing {
+    min-width: var(--ui-touch-target-touch);
+  }
+
+  .tree-l3__title {
+    line-height: var(--ui-touch-target-touch);
+  }
+
+  .tree-l3--archived {
+    height: var(--ui-touch-target-touch-plus-12);
+    min-height: var(--ui-touch-target-touch-plus-12);
+    max-height: var(--ui-touch-target-touch-plus-12);
+  }
+
+  .tree-l3--archived .tree-l3__title {
+    line-height: 1.2;
+  }
+
+  .tree-l3--archived .tree-l3__title-line {
+    height: 28px;
+    line-height: 28px;
+  }
+
+  .tree-l3__pin-action {
+    display: inline-flex;
+    width: var(--ui-touch-target-touch);
+    min-width: var(--ui-touch-target-touch);
+    height: var(--ui-touch-target-touch);
+  }
+}
+
+.tree-l3__name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* 任务标题使用主文字层级，项目名继续保持次级以突出对话。 */
+  color: var(--text-primary);
+  font-weight: 450;
+}
+
+/* 当前任务只使用轻量底色和正文常规字重，避免与正文竞争。 */
+.tree-l3--active .tree-l3__name {
+  font-weight: 500;
+}
+
 
 /* 搜索面板由全屏遮罩居中承载，不参与工作台弹性布局。 */
 .search-panel {
@@ -999,17 +1249,56 @@ textarea,
 }
 
 .sidebar-empty {
-  padding: 12px 10px;
+  padding: 8px 12px;
   font-size: calc(12px + var(--ui-font-delta));
   color: var(--text-tertiary);
   line-height: 1.45;
 }
 
+.task-title-overflow-text {
+  display: block;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.task-title-overflow-text--overflowing {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+}
+
+.task-title-marquee-track {
+  display: inline-flex;
+  width: max-content;
+  min-width: max-content;
+  align-items: center;
+  gap: 24px;
+}
+
+.task-title-marquee-track > span {
+  flex-shrink: 0;
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .task-title-marquee:hover .task-title-marquee-track {
+    will-change: transform;
+  }
+}
+
+.sidebar-empty--compact {
+  padding: 8px 12px;
+}
+
+.sidebar-empty--search-empty {
+  padding: var(--space-3);
+}
+
 /* 仅提升左侧栏空状态，避免影响搜索面板复用的空状态样式。 */
 .sidebar .sidebar-empty {
-  font-size: var(--text-xs);
+  font-size: var(--text-md);
   color: var(--text-secondary);
-  line-height: 18px;
+  line-height: 20px;
 }
 
 /* Primary actions under logo (new session / search) */
@@ -1017,16 +1306,27 @@ textarea,
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 0 8px 12px;
+  padding: 12px 8px;
   flex-shrink: 0;
 }
 
 .sidebar-nav .nav-new {
   width: 100%;
-  height: 38px;
-  padding-inline: 7px;
+  height: 32px;
+  padding-inline: 10px;
   margin: 0;
   justify-content: flex-start;
+  border-radius: var(--radius-md);
+}
+
+.sidebar-nav .nav-new[aria-pressed="true"] {
+  background: var(--bg-active);
+}
+
+.platform-win .sidebar-nav,
+.platform-other .sidebar-nav,
+.has-custom-chrome .sidebar-nav {
+  padding-block: 8px;
 }
 
 .nav-new {
@@ -1038,10 +1338,10 @@ textarea,
 }
 
 .nav-item__icon {
-  width: 18px;
+  width: 16px;
   text-align: center;
   opacity: 0.85;
-  font-size: 18px;
+  font-size: 16px;
 }
 
 /* Footer account row — solid separator and inset hover. */
@@ -1049,7 +1349,7 @@ textarea,
   position: relative;
   flex-shrink: 0;
   margin-top: 0;
-  padding: 6px 8px 10px;
+  padding: 8px 12px 16px 16px;
   border-top: none;
 }
 
@@ -1060,7 +1360,7 @@ textarea,
 .user-menu__actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
 }
 
 .sidebar-footer-action {
@@ -1071,7 +1371,7 @@ textarea,
   width: 100%;
   min-width: 0;
   height: 32px;
-  padding-inline: 7px;
+  padding-inline: 8px;
 }
 
 .user-menu__actions .sidebar-footer-action {
@@ -1143,6 +1443,7 @@ textarea,
   overflow-y: auto;
   flex-shrink: 0;
   overscroll-behavior: contain;
+  height: 220px;
 }
 .cpm__pop .cpm__item {
   align-items: center;
@@ -1480,6 +1781,73 @@ textarea,
   line-height: calc(20px + var(--ui-font-delta));
   color: var(--text-secondary);
   text-wrap: pretty;
+}
+
+.web-host-settings__status,
+.web-host-settings__token {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.web-host-settings__status {
+  justify-content: flex-end;
+}
+
+.web-host-settings__status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: var(--radius-full);
+  background: var(--text-tertiary);
+}
+
+.web-host-settings__status[data-state="running"] .web-host-settings__status-dot {
+  background: var(--success);
+}
+
+.web-host-settings__status[data-state="failed"] .web-host-settings__status-dot {
+  background: var(--danger);
+}
+
+.web-host-settings__status[data-state="stopping"] .web-host-settings__status-dot {
+  background: var(--warning);
+}
+
+.web-host-settings__url,
+.web-host-settings__connections,
+.web-host-settings__token-version,
+.web-host-settings__saved,
+.web-host-settings__error {
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+
+.web-host-settings__url,
+.web-host-settings__connections,
+.web-host-settings__token-version,
+.web-host-settings__saved {
+  color: var(--text-secondary);
+}
+
+.web-host-settings__token > [data-slot="input"] {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.web-host-settings__saved {
+  color: var(--success);
+}
+
+.web-host-settings__token-version {
+  padding-top: 12px;
+}
+
+.web-host-settings__error {
+  padding-top: 12px;
+  color: var(--danger);
 }
 
 .settings-project-directory {
@@ -1882,6 +2250,12 @@ textarea,
 
   .settings-row:not(.settings-row--stack) > .settings-seg .settings-seg__btn {
     flex: 1;
+  }
+
+  .web-host-settings__status,
+  .web-host-settings__token {
+    justify-content: flex-start;
+    width: 100%;
   }
 
   .settings-archived__actions {
@@ -2332,9 +2706,11 @@ textarea,
 .sidebar-brand {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  flex: 1;
-  min-width: 0;
+  flex: 0 0 28px;
+  width: 28px;
+  min-width: 28px;
+  justify-content: center;
+  padding-inline: 0;
   color: var(--text-primary);
   font-size: calc(18px + var(--ui-font-delta));
   font-weight: 600;
@@ -2342,6 +2718,18 @@ textarea,
   line-height: calc(24px + var(--ui-font-delta));
   /* 高度随字号增量同步，避免 20px 档位文字（24px/30px）溢出固定 24px 行盒。 */
   height: calc(24px + var(--ui-font-delta));
+}
+
+.sidebar-brand__logo {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
+}
+
+@media (max-width: 760px) {
+  .sidebar-chrome__task-nav {
+    display: none;
+  }
 }
 .settings-stage {
   display: flex;

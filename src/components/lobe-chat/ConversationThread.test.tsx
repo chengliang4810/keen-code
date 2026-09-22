@@ -2,6 +2,10 @@ import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { readSource } from "../../test-utils/readCssSource";
 import type { ChatMessage } from "@/lib/session";
+import {
+  buildComposerMentionMarkdown,
+  encodeComposerMention,
+} from "@/lib/composerMentions";
 import { ConversationThread, formatRetryCountdown } from "./ConversationThread";
 
 /** 测试用附件操作文案，满足 ConversationThread 的完整输入契约。 */
@@ -15,6 +19,28 @@ const attachLabels = {
 };
 
 describe("ConversationThread 思考耗时", () => {
+  it("流式空 reasoning segment 不再额外渲染思考状态行", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "assistant-empty-thought",
+            role: "assistant",
+            content: "",
+            streaming: true,
+            segments: [{ kind: "thought", text: "   " }],
+          },
+        ]}
+        sessionState="streaming"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html.match(/data-variant="processing"/g) ?? []).toHaveLength(1);
+    expect(html).not.toContain('data-variant="think"');
+  });
+
   it("关闭显示思考过程后，已结束的思考块不再渲染，思考中仍实时显示", () => {
     const settled: ChatMessage[] = [{ id: "a", role: "assistant", content: "完成", segments: [
       { kind: "thought", text: "内部检查推理" },
@@ -40,7 +66,8 @@ describe("ConversationThread 思考耗时", () => {
         attachLabels={attachLabels}
       />,
     );
-    expect(on).toContain("内部检查推理");
+    expect(on).toContain('data-variant="think"');
+    expect(on).not.toContain("内部检查推理");
 
     const live = renderToString(
       <ConversationThread
@@ -165,7 +192,9 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
     expect(html).not.toContain('data-testid="turn-work-group"');
-    expect(html).toContain("内部推理过程");
+    expect(html).toContain('data-variant="think"');
+    expect(html).not.toContain("内部推理过程");
+    expect(html).toContain('data-testid="timeline-tool"');
     expect(html).toContain("过程说明。");
   });
 
@@ -332,23 +361,33 @@ describe("ConversationThread 思考耗时", () => {
     expect(formatRetryCountdown(Number.NaN)).toBe("");
   });
 
-  it("恢复 Markdown 无序列表和有序列表的可见标记", () => {
+  it("Markdown 列表对齐 ZCode 的原生 marker、缩进和换行语义", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
-    // WebKit 会把列表盒的 padding 区画进选区高亮，并给原生 ::marker 补出不透明
-    // 底块；缩进必须交给 margin，标记自绘且不可选中。
     expect(chatCss).toMatch(
-      /\.chat-md ul,\s*\.chat-md ol\s*\{[^}]*margin:\s*0\.3em 0 0\.72em 1\.55em;[^}]*padding-left:\s*0;[^}]*list-style:\s*none;/s,
+      /\.chat-md ul\s*\{[^}]*margin:\s*12px 0;[^}]*padding-left:\s*20px;[^}]*list-style:\s*disc outside;/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md ul > li::before\s*\{[^}]*content:\s*"";[^}]*border-radius:\s*50%;/s,
+      /\.chat-md ol\s*\{[^}]*margin:\s*12px 0;[^}]*padding-left:\s*0;[^}]*list-style:\s*decimal inside;/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md ol > li::before\s*\{[^}]*content:\s*counter\(list-item\)\s*"\.";/s,
+      /\.chat-md ul::marker,\s*\.chat-md ol::marker\s*\{[^}]*color:\s*var\(--foreground-subtlest,\s*var\(--text-tertiary\)\);/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md li::before\s*\{[^}]*-webkit-user-select:\s*none;[^}]*user-select:\s*none;/s,
+      /\.chat-md li\s*\{[^}]*padding-left:\s*4px;/s,
     );
+    expect(chatCss).toMatch(
+      /\.chat-md li > p\s*\{[^}]*display:\s*inline;[^}]*margin:\s*0;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md ul > li \+ li,\s*\.chat-md ol > li \+ li\s*\{[^}]*margin-top:\s*6px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md ul ul,\s*\.chat-md ul ol,\s*\.chat-md ol ul,\s*\.chat-md ol ol\s*\{[^}]*margin-block:\s*6px;/s,
+    );
+    expect(chatCss).not.toContain("grid-template-columns: max-content minmax(0, 1fr)");
+    expect(chatCss).not.toContain("counter(chat-ordered-item)");
+    expect(chatCss).not.toMatch(/\.chat-md li::before/);
     expect(chatCss).toMatch(/--chat-prose-fs:\s*var\(--text-md\);/);
     expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-family:\s*var\(--chat-font\);/s);
     expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-weight:\s*var\(--font-ui-weight\);/s);
@@ -358,11 +397,165 @@ describe("ConversationThread 思考耗时", () => {
     );
   });
 
+  it("Markdown 标题字号对齐 ZCode 的 18/16/14px token，并保留标题行高", () => {
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
+
+    expect(chatCss).toMatch(
+      /--chat-prose-heading-xl:\s*calc\(18px \+ var\(--ui-font-delta\)\);/,
+    );
+    expect(chatCss).toMatch(
+      /--chat-prose-heading-lg:\s*var\(--text-lg\);/,
+    );
+    expect(chatCss).toMatch(
+      /--chat-prose-heading-base:\s*var\(--text-md\);/,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\);[^}]*line-height:\s*calc\(30px \+ var\(--ui-font-delta\)\);/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\);[^}]*line-height:\s*calc\(28px \+ var\(--ui-font-delta\)\);/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\);[^}]*line-height:\s*calc\(26px \+ var\(--ui-font-delta\)\);/s,
+    );
+  });
+
+  it("Markdown 正文使用 ZCode 的 unitless 行高和 tracking-wide，表格继承正文行高", () => {
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
+
+    expect(chatCss).toMatch(
+      /\.chat-md\s*\{[^}]*font-size:\s*var\(--chat-prose-fs\);[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0\.025em;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-code__pre\s*\{[^}]*line-height:\s*calc\(var\(--spacing\) \* 5\);/s,
+    );
+    const tableRule = chatCss.match(/\.chat-md table\s*\{([^}]*)\}/s)?.[1] ?? "";
+    expect(tableRule).toContain("border-collapse: separate;");
+    expect(tableRule).toContain("border-spacing: 0;");
+    expect(tableRule).toContain("width: max-content;");
+    expect(tableRule).toContain("min-width: 100%;");
+    expect(tableRule).not.toContain("line-height:");
+  });
+
+  it("历史媒体附件使用 80px 尺寸，文件附件使用紧凑 pill 且不污染 Composer", () => {
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
+    const composerCss = readSource(
+      new URL("../../styles/app-conversation.css", import.meta.url),
+    );
+
+    expect(chatCss).toMatch(
+      /\.lobe-chat \.att-card--image\s*\{[^}]*width:\s*80px;[^}]*height:\s*80px;[^}]*min-height:\s*80px;[^}]*flex:\s*0 0 80px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat \.att-card:not\(\.att-card--image\)\s*\{[^}]*height:\s*auto;[^}]*min-height:\s*0;[^}]*border:\s*0;[^}]*border-radius:\s*var\(--radius-full\);/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat \.att-card:not\(\.att-card--image\) \.att-card__btn\s*\{[^}]*padding:\s*6px 12px;[^}]*min-height:\s*0;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat \.att-card__icon\s*\{[^}]*width:\s*36px;[^}]*height:\s*36px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat \.att-card__btn--image,\s*\.lobe-chat \.att-card__thumb\s*\{[^}]*width:\s*80px;[^}]*height:\s*80px;[^}]*min-height:\s*80px;/s,
+    );
+
+    // lobe-chat.css must only override history cards; Composer chips keep their own 48px contract.
+    expect(chatCss).not.toMatch(/(?:^|\n)\s*\.att-card(?:[.:#\[]|\s|\{)/);
+    expect(chatCss).not.toContain("attach-chip");
+    expect(composerCss).toMatch(
+      /\.attach-chip\s*\{[^}]*--attach-h:\s*48px;/s,
+    );
+    expect(composerCss).toMatch(
+      /\.attach-chip--image\s*\{[^}]*width:\s*var\(--attach-h\);[^}]*max-width:\s*var\(--attach-h\);/s,
+    );
+  });
+
   it("将助手消息操作区放在左下角", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(
       /\.lobe-chat-item--assistant \.lobe-chat-item__actions\s*\{[^}]*justify-content:\s*flex-start\s*;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item:hover \.lobe-chat-item__actions,\s*\.lobe-chat-item:focus-within \.lobe-chat-item__actions\s*\{/s,
+    );
+    expect(chatCss).toMatch(
+      /@media \(hover: none\)\s*\{[\s\S]*?\.lobe-chat-item__actions\s*\{[^}]*opacity:\s*1;/s,
+    );
+  });
+
+  it("用户到助手只复用一个 20px 组间距，且不改变独立行与内容内间距", () => {
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
+
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item\s*\{[^}]*padding:\s*56px 16px 20px;[^}]*gap:\s*0;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item--assistant\s*\{[^}]*padding-top:\s*20px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item--user\s*\+\s*\.lobe-chat-item--assistant,[\s\S]*?padding-top:\s*0;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item__body\s*\{[^}]*gap:\s*20px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-item__actions\s*\{[^}]*margin-top:\s*4px;/s,
+    );
+    expect(chatCss).toMatch(
+      /\.lobe-chat-assistant-timeline\s*\{[^}]*gap:\s*16px;/s,
+    );
+  });
+
+  it("消息列和 Composer 按 conversation-stage 容器宽度响应，移动 sticky 不增加顶部空隙", () => {
+    const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
+    const conversationCss = readSource(
+      new URL("../../styles/app-conversation.css", import.meta.url),
+    );
+    const governanceCss = readSource(
+      new URL("../../styles/ui-governance.css", import.meta.url),
+    );
+
+    expect(conversationCss).toMatch(
+      /\.main__stage\s*\{[\s\S]*?container-type:\s*inline-size;[\s\S]*?container-name:\s*conversation-stage;/,
+    );
+    expect(chatCss).toContain(
+      "@container conversation-stage (min-width: 864px)",
+    );
+    expect(chatCss).toContain(
+      "@container conversation-stage (min-width: 1280px)",
+    );
+    expect(conversationCss).toContain(
+      "@container conversation-stage (min-width: 864px)",
+    );
+    expect(conversationCss).toContain(
+      "@container conversation-stage (min-width: 1280px)",
+    );
+    expect(conversationCss).toMatch(
+      /@container conversation-stage \(max-width: 660px\)[\s\S]*?\.composer-goal\s*\{[^}]*grid-template-columns:/s,
+    );
+    expect(conversationCss).not.toMatch(
+      /@media \(max-width: 660px\)[\s\S]*?\.composer-goal\s*\{[^}]*grid-template-columns:/s,
+    );
+    expect(conversationCss).toMatch(
+      /@container conversation-stage \(max-width: 760px\)[\s\S]*?\.composer-wrap--welcome\s*\{/s,
+    );
+    expect(governanceCss).toMatch(
+      /@media \(max-width: 760px\)[\s\S]*?\.composer-wrap--sticky\s*\{[\s\S]*?padding-top:\s*0;/s,
+    );
+  });
+
+  it("离底阅读时只对消息层应用与 Composer 留白对齐的动态遮罩", () => {
+    const source = readSource(new URL("./ConversationThread.tsx", import.meta.url));
+
+    expect(source).toContain("COMPOSER_MESSAGE_MASK_TRANSPARENT_HEIGHT_PX = 96");
+    expect(source).toContain("COMPOSER_MESSAGE_MASK_FADE_PX = 24");
+    expect(source).toContain('ref={messageLayerRef} className="lobe-chat__inner"');
+    expect(source).toContain("viewport.addEventListener(\"scroll\", scheduleSync");
+    expect(source).toContain("messageLayer.style.maskImage = maskImage");
+    expect(source).toContain("messageLayer.style.webkitMaskImage = maskImage");
+    expect(source).toMatch(
+      /if \(distanceToBottom <= 2\) \{[\s\S]*?messageLayer\.style\.maskImage = "none";/,
     );
   });
 
@@ -491,7 +684,8 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("先分析请求");
+    expect(html.match(/data-variant="think"/g) ?? []).toHaveLength(1);
+    expect(html).not.toContain("先分析请求");
     expect(html).not.toContain("思考中…");
     expect(html).toContain("思考过程");
   });
@@ -520,8 +714,9 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
-    expect(html).toContain("第一段分析");
-    expect(html).toContain("第二段分析");
+    expect(html.match(/data-variant="think"/g) ?? []).toHaveLength(2);
+    expect(html).not.toContain("第一段分析");
+    expect(html).not.toContain("第二段分析");
   });
 
   it("完成后最新轮次也遵循悬浮显示用量和用时入口", () => {
@@ -566,6 +761,203 @@ describe("ConversationThread 思考耗时", () => {
     );
 
 
+  });
+
+  it("完成轮次的 footer 始终位于多段 Assistant 内容的末尾", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "assistant-tail-actions",
+          role: "assistant",
+          content: "阶段结果最终答案",
+          createdAt: "2026-09-22T12:34:56.000Z",
+          segments: [
+            { kind: "thought", text: "先检查实现" },
+            { kind: "tool", toolCallId: "tail-tool", title: "Read", status: "completed" },
+            { kind: "content", text: "阶段结果" },
+            { kind: "thought", text: "再验证结果" },
+            { kind: "content", text: "最终答案" },
+          ],
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    const footer = html.indexOf('class="lobe-chat-item__actions"');
+    expect(footer).toBeGreaterThan(html.indexOf("最终答案"));
+    expect(footer).toBeGreaterThan(html.indexOf('data-testid="turn-work-group"'));
+    expect(html).toContain('data-testid="turn-metrics"');
+    expect(html).toContain('class="lobe-chat-action-time"');
+  });
+
+  it("仅附件的完成 Assistant 也保留位于附件之后的 footer", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "assistant-only-attachment",
+          role: "assistant",
+          content: "",
+          attachments: [{ path: "C:\\work\\report.md", name: "report.md", isDir: false }],
+          createdAt: "2026-09-22T12:34:56.000Z",
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    const attachment = html.indexOf("report.md");
+    const footer = html.indexOf('class="lobe-chat-item__actions"');
+    expect(attachment).toBeGreaterThanOrEqual(0);
+    expect(footer).toBeGreaterThan(attachment);
+    expect(html).toContain('data-testid="turn-metrics"');
+  });
+
+  it("独立 tool-before-assistant 行不吞掉后续 Assistant footer", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          {
+            id: "tool-before-assistant",
+            role: "tool",
+            content: "",
+            marker: "tool_step",
+            toolCallId: "before-tool",
+            toolKind: "Read",
+            toolStatus: "completed",
+            toolDetail: "README.md",
+          },
+          {
+            id: "assistant-after-tool",
+            role: "assistant",
+            content: "工具之后的回答",
+            createdAt: "2026-09-22T12:34:56.000Z",
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    const tool = html.indexOf("README.md");
+    const answer = html.indexOf("工具之后的回答");
+    const footer = html.indexOf('class="lobe-chat-item__actions"');
+    expect(tool).toBeGreaterThanOrEqual(0);
+    expect(tool).toBeLessThan(answer);
+    expect(footer).toBeGreaterThan(answer);
+  });
+
+  it("只在最新已完成 Assistant 的 footer 提供 Fork，并保持复制、Fork、指标、时间顺序", () => {
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[
+          { id: "user-latest", role: "user", content: "继续检查" },
+          {
+            id: "assistant-older",
+            role: "assistant",
+            content: "中间结果",
+            createdAt: "2026-09-22T12:33:56.000Z",
+          },
+          {
+            id: "assistant-latest",
+            role: "assistant",
+            content: "最终回答",
+            createdAt: "2026-09-22T12:34:56.000Z",
+            turnMetrics: {
+              turnId: "turn-latest",
+              sendAcknowledgementMs: 16,
+              timeToFirstSseMs: 540,
+              timeToFirstTokenMs: 610,
+              timeToFirstVisibleTokenMs: 610,
+              totalMs: 8_300,
+              inputTokens: 4_000,
+              outputTokens: null,
+              totalTokens: null,
+              reasoningTokens: 300,
+              cacheReadTokens: 3_000,
+              cacheCreationTokens: 0,
+            },
+          },
+        ]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+        onForkCurrentSession={() => {}}
+      />,
+    );
+
+    expect(html.match(/aria-label="分叉会话"/g)).toHaveLength(1);
+    const latestFooter = html.lastIndexOf('class="lobe-chat-item__actions"');
+    const latestAnswer = html.lastIndexOf("最终回答");
+    const latestCopy = html.indexOf('aria-label="复制"', latestFooter);
+    const latestFork = html.indexOf('aria-label="分叉会话"', latestCopy);
+    const latestMetrics = html.indexOf('data-testid="turn-metrics"', latestFork);
+    const latestTime = html.indexOf('class="lobe-chat-action-time"', latestMetrics);
+
+    expect(latestFooter).toBeGreaterThan(latestAnswer);
+    expect(latestCopy).toBeGreaterThan(latestFooter);
+    expect(latestFork).toBeGreaterThan(latestCopy);
+    expect(latestMetrics).toBeGreaterThan(latestFork);
+    expect(latestTime).toBeGreaterThan(latestMetrics);
+  });
+
+  it("流式、失败或取消的 Assistant，以及缺少真实回调时不显示 Fork", () => {
+    const render = (
+      message: ChatMessage,
+      onForkCurrentSession?: () => void,
+      sessionState: "ready" | "streaming" = "ready",
+    ) =>
+      renderToString(
+        <ConversationThread
+          locale="zh"
+          messages={[message]}
+          sessionState={sessionState}
+          attachLabels={attachLabels}
+          onForkCurrentSession={onForkCurrentSession}
+        />,
+      );
+
+    expect(
+      render(
+        {
+          id: "assistant-streaming-fork",
+          role: "assistant",
+          content: "正在输出",
+          streaming: true,
+        },
+        () => {},
+        "streaming",
+      ),
+    ).not.toContain('aria-label="分叉会话"');
+    expect(
+      render(
+        {
+          id: "assistant-failed-fork",
+          role: "assistant",
+          content: "失败",
+          turnStatus: "failed",
+        },
+        () => {},
+      ),
+    ).not.toContain('aria-label="分叉会话"');
+    expect(
+      render({
+        id: "assistant-cancelled-fork",
+        role: "assistant",
+        content: "取消",
+        turnStatus: "cancelled",
+      }, () => {}),
+    ).not.toContain('aria-label="分叉会话"');
+    expect(
+      render({
+        id: "assistant-without-fork",
+        role: "assistant",
+        content: "没有回调",
+      }),
+    ).not.toContain('aria-label="分叉会话"');
   });
 
   it("流式期间不展示尚未固化的 footer 指标", () => {
@@ -734,9 +1126,49 @@ describe("ConversationThread 思考耗时", () => {
       />,
     );
 
+    expect(html).toContain('<div class="lobe-chat-bubble">');
+    expect(html).toContain('class="lobe-chat-user-body__content"');
     expect(html).toContain(
-      '<div class="lobe-chat-bubble"><span class="user-msg-body">以及本地/远程模型连接能力</span></div>',
+      '<span class="user-msg-body">以及本地/远程模型连接能力</span>',
     );
+  });
+
+  it("历史消息 Mention 使用独立的 inline token，并保留 ComposerMentionKind 语义", () => {
+    const mention = {
+      id: "file:README.md",
+      kind: "file" as const,
+      label: "README.md",
+      value: "/work/README.md",
+      markdown: buildComposerMentionMarkdown("file", "README.md", "/work/README.md"),
+      data: { path: "/work/README.md" },
+    };
+    const html = renderToString(
+      <ConversationThread
+        locale="zh"
+        messages={[{
+          id: "user-mention",
+          role: "user",
+          content: `请查看 ${encodeComposerMention(mention)}`,
+        }]}
+        sessionState="ready"
+        attachLabels={attachLabels}
+      />,
+    );
+
+    expect(html).toContain('class="message-mention message-mention--file"');
+    expect(html).toContain('data-mention-kind="file"');
+    expect(html).toContain('class="message-mention__icon"');
+    expect(html).toContain("@README.md");
+    expect(html).not.toContain("composer-mention--message");
+  });
+
+  it("消息 Mention 和用户附件容器遵循消息层的 typography 与 max-w-xl", () => {
+    const source = readSource(new URL("./ConversationThread.tsx", import.meta.url));
+    const css = readSource(new URL("./lobe-chat.css", import.meta.url));
+    expect(source).toContain("messageMentionIcon");
+    expect(source).toContain("type ComposerMentionKind");
+    expect(css).toMatch(/\.message-mention\s*\{[^}]*font-weight:\s*500;[^}]*line-height:\s*calc\(24px/s);
+    expect(css).toMatch(/\.lobe-chat-atts--user\s*\{[^}]*max-width:\s*min\(100%,\s*36rem\)/s);
   });
 
   it("仅在空闲状态为最后一条用户消息提供编辑重发入口", () => {
@@ -770,7 +1202,7 @@ describe("ConversationThread 思考耗时", () => {
     expect(source).toContain('event.key === "Escape"');
     expect(source).toContain("event.metaKey || event.ctrlKey");
     expect(source).toContain('variant="primary"');
-    expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*var\(--radius-2xl\);/s);
+    expect(css).toMatch(/\.lobe-chat-user-editor\s*\{[^}]*border-radius:\s*var\(--radius-lg\);/s);
   });
 
   it("用户消息复制逻辑同时接入文档事件和正文选择边界", () => {

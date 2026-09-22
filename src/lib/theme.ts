@@ -1,8 +1,10 @@
 /**
  * Theme preference + resolved light/dark for the document.
  * Preference is durable (`system` | `light` | `dark`); DOM always gets a
- * concrete `data-theme="light|dark"`. Default preference is follow system.
+ * concrete `data-theme="light|dark"`. New installs default to Zai dark.
  */
+
+import { syncNativeThemeSurfaces } from "./nativeTheme";
 
 export type Theme = "dark" | "light";
 /** User-facing choice including follow-OS. */
@@ -11,8 +13,8 @@ export type ThemePreference = "system" | Theme;
 export const THEME_STORAGE_KEY = "keencode.theme";
 /** Fallback when OS scheme cannot be read (tests / SSR). */
 export const DEFAULT_RESOLVED_THEME: Theme = "dark";
-/** New installs / empty storage → follow system. */
-export const DEFAULT_THEME_PREFERENCE: ThemePreference = "system";
+/** New installs / empty storage → ZCode-compatible Zai dark. */
+export const DEFAULT_THEME_PREFERENCE: ThemePreference = "dark";
 
 export function isTheme(value: unknown): value is Theme {
   return value === "dark" || value === "light";
@@ -69,6 +71,32 @@ export function applyThemeToDocument(
   root: HTMLElement = document.documentElement,
 ): void {
   root.setAttribute("data-theme", theme);
+  // Appica 使用 Tailwind 的 `.dark` 作用域，而 KeenCode 的产品样式使用
+  // `data-theme`。两者必须同步，否则深色背景会叠加浅色控件前景色。
+  root.classList.toggle("dark", theme === "dark");
+  // 与 ZCode 的 Zai 主题作用域保持一致，第三方浮层和复制过来的样式均可
+  // 直接消费同一套类名，不需要在业务组件中重复判断主题。
+  root.classList.toggle("theme-zai-dark", theme === "dark");
+  root.classList.toggle("theme-zai-light", theme === "light");
+  root.style.colorScheme = theme;
+
+  const ownerDocument = root.ownerDocument;
+  if (ownerDocument && root === ownerDocument.documentElement) {
+    const syncMeta = (name: "color-scheme" | "theme-color", content: string) => {
+      let meta = ownerDocument.querySelector<HTMLMetaElement>(`meta[name="${name}"]`);
+      if (!meta) {
+        meta = ownerDocument.createElement("meta");
+        meta.name = name;
+        ownerDocument.head.append(meta);
+      }
+      meta.content = content;
+    };
+    syncMeta("color-scheme", theme);
+    const background = getComputedStyle(root)
+      .getPropertyValue("--bg-main")
+      .trim();
+    if (background) syncMeta("theme-color", background);
+  }
   root.classList.add("theme-switching");
   if (typeof requestAnimationFrame === "function") {
     requestAnimationFrame(() => {
@@ -90,17 +118,18 @@ export function applyThemeToDocument(
 export async function applyNativeWindowTheme(
   theme: Theme | null,
 ): Promise<void> {
+  const isTauri =
+    typeof window !== "undefined" &&
+    ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
+  if (!isTauri) return;
   try {
-    const isTauri =
-      typeof window !== "undefined" &&
-      ("__TAURI_INTERNALS__" in window || "__TAURI__" in window);
-    if (!isTauri) return;
     const { setTheme } = await import("@tauri-apps/api/app");
     // Tauri: null/undefined = follow system theme
     await setTheme(theme);
   } catch {
-    /* Native theme sync failed; the CSS theme remains authoritative. */
+    /* Native appearance sync failed; the CSS theme remains authoritative. */
   }
+  await syncNativeThemeSurfaces();
 }
 
 /**
@@ -127,6 +156,9 @@ export async function applyThemePreference(
       system = getSystemTheme();
     }
     applyThemeToDocument(system);
+    // 解锁原生主题后，系统值可能跨过一帧才生效；此时重新读取 CSS 底色，
+    // 确保主窗口和已存在的嵌入浏览器不会继续使用切换前的颜色。
+    await syncNativeThemeSurfaces();
     options?.onResolved?.(system, system);
     return system;
   }

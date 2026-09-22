@@ -11,6 +11,10 @@
   /* 对话字号跟随界面字号：默认 14px 时与改动前逐像素一致。 */
   --chat-fs: var(--text-md);
   --chat-prose-fs: var(--text-md);
+  /* 对齐 ZCode MessageResponse 的 text-ui-xl/lg/base：18/16/14px。 */
+  --chat-prose-heading-xl: calc(18px + var(--ui-font-delta));
+  --chat-prose-heading-lg: var(--text-lg);
+  --chat-prose-heading-base: var(--text-md);
   --chat-fs-sm: var(--text-sm);
   --chat-fs-xs: var(--text-xs);
   --chat-lh: 1.5;
@@ -112,23 +116,42 @@
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   /* We manage stick-to-bottom ourselves; browser anchoring fights
    * programmatic scrollTop during stream growth and feels like bounce. */
   overflow-anchor: none;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(128, 128, 128, 0.35) transparent;
+}
+
+.lobe-chat__scroll-content {
+  width: 100%;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 
 .lobe-chat__inner {
   box-sizing: border-box;
   width: 100%;
-  max-width: var(--content-max-width, 44rem);
+  max-width: min(100%, 72rem);
   margin: 0 auto;
-  padding: 16px 16px 28px;
+  padding: 0 0 28px;
   display: flex;
   flex-direction: column;
   gap: 0;
+}
+
+/* ZCode 的会话列在中等桌面保留 3rem 两侧空间，大屏为状态面板让位。 */
+@container conversation-stage (min-width: 864px) {
+  .lobe-chat__inner {
+    max-width: min(calc(100% - 6rem), 56rem);
+  }
+}
+
+@container conversation-stage (min-width: 1280px) {
+  .lobe-chat__inner {
+    max-width: min(calc(100% - 24rem), 72rem);
+  }
 }
 
 /* ── Message rows ── */
@@ -136,14 +159,41 @@
   position: relative;
   display: flex;
   flex-direction: column;
+  width: 100%;
   max-width: 100%;
-  padding-block: 8px;
-  gap: 6px;
+  padding: 56px 16px 20px;
+  gap: 0;
+  box-sizing: border-box;
 }
 
 .lobe-chat-item--user {
   align-items: flex-end;
-  padding-inline-start: 0;
+  padding-inline-start: 16px;
+}
+
+.lobe-chat-item--assistant {
+  padding-top: 20px;
+}
+
+/* 用户行的底部 20px 已经承担相邻 Assistant 的组间距；独立 Assistant
+ * 和连续 Assistant 行仍保留自己的顶部 20px。虚拟列表用外层测量容器，
+ * 因此同步覆盖该 DOM 形态。 */
+.lobe-chat-item--user + .lobe-chat-item--assistant,
+.lobe-chat__inner
+  > [data-virtual-message-index]:has(> .lobe-chat-item--user)
+  + [data-virtual-message-index]
+  > .lobe-chat-item--assistant {
+  padding-top: 0;
+}
+
+@container conversation-stage (min-width: 864px) {
+  .lobe-chat-item {
+    padding-inline: 24px;
+  }
+
+  .lobe-chat-item--user {
+    padding-inline-start: 24px;
+  }
 }
 
 /*
@@ -174,7 +224,7 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 20px;
   max-width: 100%;
   min-width: 0;
   overflow: hidden;
@@ -184,19 +234,133 @@
   width: 100%;
 }
 
-/* User bubble — a quiet marker, not a competing card. */
+/* ZCode user row: surface bubble with a deliberately clipped top-right corner. */
 .lobe-chat-bubble {
-  max-width: min(100%, 456px);
-  padding: 10px 16px;
-  border-radius: var(--radius-2xl);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-xs);
   background: var(--chat-bubble);
   color: var(--chat-text);
   font-size: var(--chat-fs);
   line-height: var(--leading-normal);
   white-space: pre-wrap;
   word-break: break-word;
-  border: none;
   box-shadow: none;
+}
+
+@container conversation-stage (min-width: 624px) {
+  .lobe-chat-bubble {
+    max-width: 36rem;
+  }
+}
+
+.lobe-chat-user-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 历史消息中的 Mention 是正文内联 token；不要继承 Composer 的胶囊按钮外观。 */
+.message-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 0 5px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+  color: var(--chat-text);
+  font-weight: 500;
+  line-height: calc(24px + var(--ui-font-delta));
+  vertical-align: middle;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.message-mention__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: var(--chat-text-2);
+}
+
+.message-mention__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.message-mention--file .message-mention__icon {
+  color: var(--accent);
+}
+
+.message-mention--directory .message-mention__icon {
+  color: var(--success);
+}
+
+.message-mention--session .message-mention__icon {
+  color: var(--warning);
+}
+
+.message-mention--plugin .message-mention__icon {
+  color: var(--info);
+}
+
+.message-mention--skill .message-mention__icon {
+  color: var(--accent);
+}
+
+.lobe-chat-user-body__content {
+  min-width: 0;
+  max-height: 120px;
+  overflow: hidden;
+  transition: max-height var(--motion-enter) var(--ease-out);
+}
+
+.lobe-chat-user-body__content.is-expanded {
+  max-height: var(--user-message-content-height);
+}
+
+.lobe-chat-user-body__content.is-collapsed {
+  mask-image: linear-gradient(
+    to bottom,
+    var(--text-primary) 0%,
+    var(--text-primary) 70%,
+    transparent 100%
+  );
+}
+
+.lobe-chat-user-body__toggle {
+  position: absolute;
+  inset: auto 0 0;
+  display: flex;
+  justify-content: center;
+}
+
+.lobe-chat-user-body__toggle.is-expanded {
+  position: static;
+  padding-top: 8px;
+}
+
+.lobe-chat-user-body__toggle [data-slot="button"] {
+  border-radius: var(--radius-full);
+  background: var(--bg-main);
+  box-shadow: var(--shadow-sm);
+}
+
+.lobe-chat-user-body__toggle svg {
+  transition: transform var(--motion-enter) var(--ease-out);
+}
+
+.lobe-chat-user-body__toggle svg.is-expanded {
+  transform: rotate(180deg);
 }
 
 .lobe-chat-user-editor {
@@ -207,7 +371,9 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  border-radius: var(--radius-2xl);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  border-top-right-radius: var(--radius-xs);
   background: var(--chat-bubble);
 }
 
@@ -242,6 +408,7 @@
   gap: 2px;
   max-width: 100%;
   min-width: 0;
+  margin-top: 4px;
   opacity: 0;
   pointer-events: none;
   transition: opacity 160ms ease;
@@ -296,8 +463,9 @@
   font-family: var(--chat-font);
   font-weight: var(--font-ui-weight);
   font-size: var(--chat-prose-fs);
-  line-height: var(--chat-lh);
-  letter-spacing: 0;
+  /* 对齐 ZCode MessageResponse：正文使用 unitless 行高，字号变化时保持比例。 */
+  line-height: 1.75;
+  letter-spacing: 0.025em;
   color: var(--chat-prose-text);
   word-break: break-word;
   min-width: 0;
@@ -311,7 +479,7 @@
 }
 
 .chat-md p {
-  margin: 16px 0;
+  margin: 12px 0;
 }
 .chat-md p:last-child {
   margin-bottom: 0;
@@ -320,101 +488,100 @@
 .chat-md h1,
 .chat-md h2,
 .chat-md h3,
-.chat-md h4 {
-  margin: 16px 0;
+.chat-md h4,
+.chat-md h5,
+.chat-md h6 {
+  margin: 24px 0 16px;
   font-weight: 600;
-  line-height: 1.35;
   color: var(--chat-prose-text);
   letter-spacing: 0;
 }
 .chat-md h1 {
-  font-size: 1.5em;
-  margin: 32px 0 16px;
+  font-size: var(--chat-prose-heading-xl);
+  line-height: calc(30px + var(--ui-font-delta));
 }
 .chat-md h2 {
-  font-size: 1.25em;
-  margin: 32px 0 16px;
+  font-size: var(--chat-prose-heading-lg);
+  line-height: calc(28px + var(--ui-font-delta));
 }
 .chat-md h3 {
-  font-size: 1.15em;
-  margin: 32px 0 16px;
+  font-size: var(--chat-prose-heading-base);
+  line-height: calc(26px + var(--ui-font-delta));
 }
 .chat-md h4 {
-  font-size: 1em;
+  font-size: var(--chat-prose-fs);
+  line-height: calc(24px + var(--ui-font-delta));
+}
+.chat-md h5 {
+  font-size: var(--chat-prose-fs);
+  font-weight: 500;
+  line-height: calc(24px + var(--ui-font-delta));
+}
+.chat-md h6 {
+  font-size: var(--chat-prose-fs);
+  font-weight: 400;
+  line-height: calc(24px + var(--ui-font-delta));
 }
 
-/*
- * 列表标记自绘：WebKit 会把列表盒的 padding 区一并画进选区高亮，并给原生
- * ::marker 补出不透明底块；在 ::marker 上声明 user-select 也不生效。因此标记
- * 自绘，缩进改由 margin 承担，标记落在列表盒之外即可保持未被高亮的外观。
- */
-.chat-md ul,
+/* Markdown lists follow ZCode's native marker and wrapping semantics. */
+.chat-md ul {
+  margin: 12px 0;
+  padding-left: 20px;
+  list-style: disc outside;
+}
+
 .chat-md ol {
-  margin: 0.3em 0 0.72em 1.55em;
+  margin: 12px 0;
   padding-left: 0;
-  list-style: none;
+  list-style: decimal inside;
 }
+
+.chat-md ul::marker,
+.chat-md ol::marker {
+  color: var(--foreground-subtlest, var(--text-tertiary));
+}
+
 .chat-md li {
-  position: relative;
+  padding-left: 4px;
+}
+
+.chat-md li > p {
+  display: inline;
   margin: 0;
-  padding: 0;
 }
-.chat-md li::before {
-  position: absolute;
-  inset-inline-start: -1.35em;
-  top: 0;
-  color: var(--chat-prose-text);
-  -webkit-user-select: none;
-  user-select: none;
+
+.chat-md ul > li + li,
+.chat-md ol > li + li {
+  margin-top: 6px;
 }
-/* 无序标记按嵌套层级还原原生 disc/circle/square 形态：\2022 字符墨迹
- * 偏小且各层同形，改用 CSS 绘制。top 8px 使圆点在 21px 首行行盒内居中。 */
-.chat-md ul > li::before {
-  content: "";
-  inset-inline-start: -0.95em;
-  top: 8px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-}
-.chat-md ul > li ul > li::before {
-  content: "";
-  background: transparent;
-  border: 1px solid currentColor;
-  box-sizing: border-box;
-}
-.chat-md ul > li ul > li ul > li::before {
-  content: "";
-  background: currentColor;
-  border: none;
-  border-radius: 0;
-}
-.chat-md ol > li::before {
-  content: counter(list-item) ".";
-}
-/* 任务列表：复选框本身就是标记，隐藏圆点。 */
-.chat-md li.task-list-item::before {
-  content: none;
+
+.chat-md ul ul,
+.chat-md ul ol,
+.chat-md ol ul,
+.chat-md ol ol {
+  margin-block: 6px;
 }
 
 .chat-md strong {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--chat-prose-text);
 }
 
 .chat-md blockquote {
-  margin: 16px 0 0;
-  padding: 0.1em 0 0.1em 0.85em;
-  border-left: 2px solid var(--text-caption);
+  margin: 16px 0;
+  padding: 0 0 0 12px;
+  border-left: 2px solid var(--border-subtle);
   color: var(--chat-text-2);
-  padding-left: 14px;
 }
 
 /* 引用文字与竖线对齐：清除继承的段落外边距，否则 p 的 16px margin-top
  * 会把首行推离竖线顶端。 */
 .chat-md blockquote > p {
   margin: 0;
+}
+
+.chat-md blockquote > p + p {
+  margin-top: 8px;
 }
 
 .chat-md hr {
@@ -427,12 +594,15 @@
 
 .chat-md__link {
   color: var(--chat-link);
+  font-weight: 500;
   text-decoration: none;
+  text-decoration-style: dotted;
+  text-underline-offset: 4px;
 }
 .chat-md__link:hover {
   color: var(--chat-link-hover);
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-decoration-style: dotted;
 }
 
 /* File path / name links (blue + doc icon) */
@@ -441,8 +611,9 @@
 .chat-md__inline-code,
 .chat-md :not(pre) > code {
   display: inline;
+  margin-inline: 2px;
   padding: 2px 6px;
-  border-radius: var(--radius-xs);
+  border-radius: var(--radius-md);
   background: var(--chat-inline-code-bg);
   border: 0;
   font-family: var(--chat-mono);
@@ -454,12 +625,11 @@
 
 /* ── Code / path block (theme-aware chrome) ── */
 .chat-code {
-  /* Codex 代码块容器：上下 4px（--spacing），紧凑贴排；同底色 + 1px 描边。 */
-  margin: var(--spacing) 0;
+  /* ZCode 代码面板使用 rounded-xl 语义，消息上下保持 16px 外边距。 */
+  margin: 16px 0;
   border-radius: var(--radius-lg);
   background: var(--chat-code-bg);
   border: 1px solid var(--border-subtle);
-  border: 0;
   color: var(--chat-code-fg);
   overflow: hidden;
   box-shadow: none;
@@ -471,7 +641,7 @@
   justify-content: space-between;
   gap: 12px;
   min-height: 30px;
-  padding: 9px 14px;
+  padding: 8px 12px;
   background: transparent;
   border-bottom: none;
   color: var(--chat-text-2);
@@ -481,12 +651,28 @@
 .chat-code__lang {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
+  flex: 1 1 auto;
   gap: 6px;
   font-size: var(--text-sm);
   font-weight: 600;
   color: var(--chat-code-fg);
   user-select: none;
   line-height: calc(18px + var(--ui-font-delta));
+}
+
+.chat-code__icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.chat-code__language-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--chat-text-3);
+  font-weight: 500;
 }
 
 .chat-code__bar-actions {
@@ -499,10 +685,11 @@
   margin: 0;
   /* Codex 实测：pre 内边距 8px（--spacing × 2）、行高 20px（--spacing × 5）。
    * 头部栏到代码首行的距离由这里决定，16px 会比 Codex 大一倍。 */
-  padding: 8px;
-  overflow-x: auto;
+  padding: 8px 0;
+  overflow: auto;
   font-family: var(--chat-mono);
-  font-size: var(--chat-fs-sm);
+  /* 代码字号跟随界面基线，默认是 14px；行距保持 20px 便于扫描。 */
+  font-size: var(--chat-fs);
   line-height: calc(var(--spacing) * 5);
   /* Explicit fg — never inherit a muted/wrong parent color */
   color: var(--chat-code-fg) !important;
@@ -521,6 +708,8 @@
 }
 
 .chat-code__pre code {
+  display: block;
+  min-width: max-content;
   font: inherit;
   color: var(--chat-code-fg) !important;
   -webkit-text-fill-color: var(--chat-code-fg);
@@ -528,6 +717,150 @@
   border: none;
   padding: 0;
   white-space: inherit;
+}
+
+.chat-code__line {
+  position: relative;
+  display: block;
+  min-height: calc(var(--spacing) * 5);
+  padding: 0 12px;
+  color: inherit;
+  white-space: inherit;
+}
+
+.chat-code__line-content {
+  display: inline;
+  white-space: inherit;
+}
+
+.chat-code__line.is-focused {
+  background: color-mix(in srgb, var(--chat-link) 10%, transparent);
+}
+
+.chat-code__line.is-marked {
+  background: color-mix(in srgb, var(--chat-danger) 10%, transparent);
+}
+
+.chat-code__line.is-focused.is-marked {
+  background: color-mix(in srgb, var(--chat-danger) 14%, transparent);
+}
+
+.chat-code__pre.is-wrap,
+.chat-code__pre.is-wrap code {
+  min-width: 0;
+}
+
+.chat-code__pre.is-wrap .chat-code__line {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.chat-code__pre.is-wrap .chat-code__line-content {
+  white-space: pre-wrap;
+}
+
+.chat-mermaid {
+  min-width: 0;
+  background: var(--chat-code-bg);
+  color: var(--chat-code-fg);
+}
+
+.chat-mermaid__loading {
+  padding: 8px 14px 0;
+  color: var(--chat-text-3);
+  font-size: var(--chat-fs-sm);
+}
+
+.chat-mermaid__source {
+  max-height: 240px;
+}
+
+.chat-mermaid__svg {
+  display: flex;
+  min-height: 140px;
+  max-height: 420px;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  overflow: auto;
+}
+
+.chat-mermaid__svg > svg {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.chat-diagram-dialog {
+  width: min(96vw, 72rem);
+  max-width: none;
+  height: min(90vh, 56rem);
+  max-height: 90vh;
+}
+
+.chat-diagram-dialog__header {
+  flex: 0 0 auto;
+}
+
+.chat-diagram-dialog__body {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.chat-diagram-dialog__viewport {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--chat-code-bg);
+}
+
+.chat-diagram-dialog__canvas {
+  display: flex;
+  min-width: min-content;
+  min-height: min-content;
+  align-items: center;
+  justify-content: center;
+  transform: scale(var(--chat-diagram-scale, 1));
+  transform-origin: center;
+  transition: transform var(--motion-enter) var(--ease-out);
+}
+
+.chat-diagram-dialog__canvas > svg {
+  display: block;
+  width: auto;
+  max-width: none;
+  height: auto;
+}
+
+.chat-diagram-dialog__controls {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  align-self: center;
+  gap: 2px;
+  color: var(--chat-text-2);
+}
+
+.chat-diagram-dialog__zoom {
+  min-width: 48px;
+  color: var(--chat-text-2);
+  font-size: var(--chat-fs-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.chat-diagram-dialog__hint {
+  margin-inline-start: 4px;
+  color: var(--chat-text-3);
 }
 
 /* Settled fences only: compact syntax tokens from highlight.js output. */
@@ -630,37 +963,41 @@
   overflow-y: hidden;
   -webkit-overflow-scrolling: touch;
   border: 1px solid var(--chat-code-border);
-  border-radius: var(--chat-r);
+  border-radius: var(--radius-lg);
   background: var(--chat-code-bg);
 }
 
 .chat-md table {
-  border-collapse: collapse;
-  /* Fill container when content is narrow; grow when content is wide */
-  width: 100%;
-  min-width: max-content;
+  border-collapse: separate;
+  border-spacing: 0;
+  /* 对齐 ZCode 的 w-max min-w-full：窄内容铺满，宽内容由外层横向滚动。 */
+  width: max-content;
+  min-width: 100%;
   max-width: none;
   margin: 0;
-  font-size: var(--chat-fs-sm);
-  line-height: var(--chat-lh-sm);
+  font-size: var(--chat-fs);
   table-layout: auto;
 }
 
 .chat-md th,
 .chat-md td {
   border-bottom: 1px solid var(--chat-divider);
-  padding: 8px 14px;
+  padding: 8px 12px;
   text-align: left;
   vertical-align: top;
   color: var(--chat-text);
-  white-space: nowrap;
-  word-break: normal;
-  overflow-wrap: normal;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .chat-md th {
-  background: rgba(128, 128, 128, 0.08);
-  font-weight: 600;
+  color: var(--chat-text-3);
+  font-weight: 400;
+}
+
+.chat-md tbody tr:hover {
+  background: color-mix(in srgb, var(--bg-hover) 20%, transparent);
 }
 
 .chat-md tbody tr:last-child td {
@@ -694,7 +1031,8 @@
   display: flex;
   flex-wrap: wrap;
   align-items: start;
-  gap: 10px;
+  /* 连续工作项对齐 ZCode ConversationTurnGroup 的 gap-4（16px）。 */
+  gap: 16px;
   min-width: 0;
   width: 100%;
 }
@@ -713,13 +1051,6 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-}
-
-/* 连续工具证据行保持 4px 节奏，推理与正文区块仍沿用 14px 间距。 */
-.lobe-chat-assistant-timeline
-  > .lobe-timeline-rail--tool:not(.lobe-timeline-rail--subagent)
-  + .lobe-timeline-rail--tool:not(.lobe-timeline-rail--subagent) {
-  margin-top: -7px;
 }
 
 .lobe-timeline-rail--subagent {
@@ -866,15 +1197,36 @@
 .lobe-chat-thinking__trigger {
   position: relative;
   overflow: hidden;
+  box-sizing: border-box;
   display: flex;
   align-items: center;
+  align-self: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
+  height: 24px;
+  margin: 0;
+  gap: 8px;
+  line-height: 24px;
+  text-align: left;
+}
+
+/* Appica Collapsible 负责高度过渡；面板本身保持零宽度约束，避免长 reasoning
+ * 在 flex 行中把消息列撑开。内容节点在关闭动画结束后才由 Thinking 卸载。 */
+.lobe-chat-thinking__content {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  height: 24px;
-  margin: 0;
-  line-height: 24px;
-  text-align: left;
+}
+
+/* 间距放在内容节点内部，收起时由 Collapsible 高度动画一起裁切，避免窄屏末帧跳动。 */
+.lobe-chat-thinking__content-inner {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding-top: 12px;
 }
 
 .lobe-chat-thinking__trigger--status {
@@ -908,29 +1260,34 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 6px;
+  width: 16px;
+  height: 16px;
+  margin-right: 0;
   color: var(--chat-text-3);
 }
 
 .lobe-chat-thinking__icon {
   color: var(--chat-text-3);
-  transform: translateX(-3px);
+  transform: none;
 }
 
 .lobe-chat-thinking__title {
   flex: none;
   color: var(--chat-text-2);
-  font-size: calc(13px + var(--ui-font-delta));
-  font-weight: 600;
-  line-height: calc(24px + var(--ui-font-delta));
+  font-size: var(--chat-fs);
+  font-weight: 500;
+  line-height: 24px;
+}
+
+.lobe-chat-thinking__title-text {
+  display: inline-block;
+  white-space: nowrap;
 }
 
 .lobe-chat-thinking__duration {
   flex: none;
   color: var(--chat-text-3);
-  font-size: calc(13px + var(--ui-font-delta));
+  font-size: var(--chat-fs);
 }
 
 .lobe-chat-thinking__separator {
@@ -960,12 +1317,14 @@
 }
 
 .lobe-chat-thinking__summary {
+  display: block;
+  box-sizing: border-box;
   min-width: 0;
   overflow: hidden;
   flex: 1 1 auto;
   color: var(--chat-text-3);
-  font-size: calc(13px + var(--ui-font-delta));
-  line-height: calc(24px + var(--ui-font-delta));
+  font-size: var(--chat-fs);
+  line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -974,45 +1333,84 @@
   text-overflow: clip;
 }
 
+.lobe-chat-thinking__summary-text {
+  display: inline;
+}
+
+/* The inner line owns its intrinsic width so scrollLeft reveals the newest token. */
+.lobe-chat-thinking__summary[data-follow-end] .lobe-chat-thinking__summary-text {
+  display: inline-block;
+  min-width: max-content;
+}
+
 .lobe-chat-thinking__caret {
   flex: none;
   display: inline-flex;
-  margin-left: 10px;
+  margin-left: 0;
+  opacity: 0;
+  transition:
+    opacity var(--motion-enter) var(--ease-out),
+    transform var(--motion-enter) var(--ease-out);
   color: var(--chat-text-3);
 }
 
-.lobe-chat-thinking[data-variant="think"][data-state="running"]
-  .lobe-chat-thinking__trigger::after {
-  content: "";
-  position: absolute;
-  inset-block: 0;
-  left: 0;
-  width: 300px;
-  background: linear-gradient(
-    90deg,
-    transparent 0%,
-    color-mix(in srgb, var(--bg-main) 60%, transparent) 55%,
-    transparent 100%
-  );
-  animation: lobe-reasoning-row-sweep 2.6s ease-out infinite;
-  pointer-events: none;
+.lobe-chat-thinking__trigger:hover .lobe-chat-thinking__caret,
+.lobe-chat-thinking__trigger:focus-visible .lobe-chat-thinking__caret,
+.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__caret {
+  opacity: 1;
 }
 
-@keyframes lobe-reasoning-row-sweep {
+.lobe-chat-thinking__trigger.is-open .lobe-chat-thinking__caret {
+  transform: rotate(90deg);
+}
+
+/* ZCode reasoning 的运行态扫光作用在文字本身，不覆盖摘要和展开按钮。 */
+.animated-gradient-text {
+  display: inline-block;
+  background: linear-gradient(
+    90deg,
+    var(--animated-gradient-text-strong, var(--chat-text, var(--text-primary))) 0%,
+    var(--animated-gradient-text-strong, var(--chat-text, var(--text-primary))) 34%,
+    var(--animated-gradient-text-soft, color-mix(in srgb, var(--chat-text, var(--text-primary)) 22%, transparent))
+      50%,
+    var(--animated-gradient-text-strong, var(--chat-text, var(--text-primary))) 66%,
+    var(--animated-gradient-text-strong, var(--chat-text, var(--text-primary))) 100%
+  );
+  background-size: 300% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  animation: gradient-flow 4s linear infinite;
+  will-change: background-position;
+  transform: translateZ(0);
+  backface-visibility: hidden;
+}
+
+@keyframes gradient-flow {
   0% {
-    left: -300px;
+    background-position: 100% 0;
   }
-  90%,
+
+  50% {
+    background-position: 0% 0;
+  }
+
   100% {
-    left: 100%;
+    background-position: 0% 0;
   }
 }
 
 .lobe-chat-thinking__body {
-  max-height: 40vh;
-  margin: 8px 0 0 8px;
-  padding: 0 0 0 28px;
-  overflow-y: auto;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  max-height: 240px;
+  margin: 0;
+  padding: 0 0 0 14px;
+  overflow: auto;
+  scrollbar-gutter: stable;
   overscroll-behavior: contain;
   border-left: 1px solid var(--chat-divider);
   color: var(--chat-text-3);
@@ -1030,12 +1428,11 @@
   padding-inline: 0;
 }
 .lobe-timeline-rail .lobe-chat-thinking__body {
-  padding-left: 28px;
+  padding-left: 14px;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lobe-chat-thinking[data-variant="think"][data-state="running"]
-    .lobe-chat-thinking__trigger::after {
+  .animated-gradient-text {
     animation: none;
   }
 }
@@ -1166,7 +1563,7 @@
   display: flex;
   flex-direction: column;
   align-items: start;
-  gap: 10px;
+  gap: 16px;
   width: 100%;
   padding: 2px 0 4px;
 }
@@ -1180,6 +1577,8 @@
 }
 
 .lobe-timeline-tool {
+  display: flex;
+  flex-direction: column;
   width: 100%;
   max-width: var(--chat-content-max, 48rem);
   margin: 0;
@@ -1188,12 +1587,17 @@
   color: var(--chat-text-2);
 }
 .lobe-timeline-tool__row {
-  display: grid;
-  grid-template-columns: 18px auto minmax(0, 1fr) auto auto;
+  display: inline-flex;
+  align-self: flex-start;
   align-items: center;
-  gap: 7px;
-  width: 100%;
-  min-height: 26px;
+  box-sizing: border-box;
+  gap: 8px;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  width: auto;
+  padding-inline: 0;
+  justify-content: flex-start;
   text-align: left;
 }
 .lobe-timeline-tool__icon {
@@ -1202,22 +1606,54 @@
   justify-content: center;
   color: var(--chat-text-2);
 }
+
+/* ToolCallBlock 按 renderer 给摘要首部稳定的视觉锚点；颜色只表达类别，
+ * 不替代 ACP status，失败色仍由 is-error 统一接管。 */
+.lobe-timeline-tool[data-tool-renderer="read"] .lobe-timeline-tool__icon,
+.lobe-timeline-tool[data-tool-renderer="search"] .lobe-timeline-tool__icon {
+  color: var(--chat-link);
+}
+
+.lobe-timeline-tool[data-tool-renderer="execute"] .lobe-timeline-tool__name {
+  font-family: var(--chat-mono);
+  font-size: var(--chat-fs-sm);
+}
+
+.lobe-timeline-tool[data-tool-renderer="edit"] .lobe-timeline-tool__icon,
+.lobe-timeline-tool[data-tool-renderer="changes"] .lobe-timeline-tool__icon {
+  color: var(--chat-text-2);
+}
+
+.lobe-timeline-tool[data-tool-renderer="changes"] .lobe-timeline-tool__name {
+  font-weight: 600;
+}
+
+.lobe-timeline-tool[data-tool-renderer="agent"] .lobe-timeline-tool__icon {
+  color: var(--chat-link);
+}
 .lobe-timeline-tool.is-running .lobe-timeline-tool__icon,
 .lobe-timeline-tool__action {
   color: var(--chat-text-2);
+}
+.lobe-timeline-tool__action.animated-gradient-text {
+  color: transparent;
+  -webkit-text-fill-color: transparent;
 }
 .lobe-timeline-tool.is-error .lobe-timeline-tool__icon {
   color: var(--chat-danger, #c44);
 }
 .lobe-timeline-tool__action {
-  font-size: calc(12px + var(--ui-font-delta));
+  flex: 0 0 auto;
+  font-size: var(--chat-fs);
   font-weight: 500;
   white-space: nowrap;
 }
 .lobe-timeline-tool__primary {
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
   align-items: baseline;
+  overflow: hidden;
   gap: 8px;
 }
 .lobe-timeline-tool__name {
@@ -1225,7 +1661,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: calc(12.5px + var(--ui-font-delta));
+  font-size: var(--chat-fs);
   font-weight: 500;
   color: var(--chat-text-2);
 }
@@ -1247,36 +1683,47 @@
 .lobe-timeline-tool__meta {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   gap: 7px;
+  margin-inline-start: auto;
   color: var(--chat-text-2);
-  font-size: calc(11px + var(--ui-font-delta));
+  font-size: var(--chat-fs-sm);
   white-space: nowrap;
 }
 .lobe-timeline-tool__meta.is-error {
   color: var(--chat-danger, #c44);
 }
-.lobe-timeline-tool__meta.is-running {
-  color: var(--chat-link);
-}
 .lobe-timeline-tool__chevron {
   display: inline-flex;
   color: var(--chat-text-3);
-  transition: transform 0.15s ease;
+  opacity: 0;
+  transition:
+    opacity var(--motion-enter) var(--ease-out),
+    transform var(--motion-enter) var(--ease-out);
+}
+.lobe-timeline-tool__row:hover .lobe-timeline-tool__chevron,
+.lobe-timeline-tool__row:focus-visible .lobe-timeline-tool__chevron,
+.lobe-timeline-tool__chevron.is-open {
+  opacity: 1;
 }
 .lobe-timeline-tool__chevron.is-open {
-  transform: rotate(180deg);
+  transform: rotate(90deg);
+}
+.lobe-timeline-tool__detail-shell[data-closed] {
+  pointer-events: none;
 }
 .lobe-timeline-tool__detail {
-  margin: 2px 0 6px 9px;
-  padding: 3px 0 3px 29px;
+  margin: 8px 0 0 24px;
+  padding: 0 0 0 14px;
   border-left: 1px solid color-mix(in srgb, var(--chat-text-3) 32%, transparent);
 }
 .lobe-timeline-tool__code {
-  max-height: 280px;
+  max-height: 240px;
   margin: 4px 0;
   padding: 10px 12px;
   overflow: auto;
-  border-radius: 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--chat-text-3) 9%, transparent);
   color: var(--chat-text-2);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -1293,6 +1740,10 @@
   border: 0;
   box-shadow: none;
   background: transparent;
+}
+
+.lobe-timeline-tool + .lobe-timeline-tool {
+  margin-top: 4px;
 }
 /* ── Mid-stream tool text (plain one line under reply, replace-only) ── */
 .lobe-chat-tool-text {
@@ -1423,23 +1874,40 @@
   line-height: var(--chat-lh-sm);
 }
 
-/* ── Back bottom ──
- * Sit above the floating composer (App sets --composer-float-pad from
- * measured shell height). Centered so narrow panes don't overlap the
- * composer card / side controls.
- */
+/* ── Sticky composer dock ── */
+.lobe-chat__composer-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  display: flex;
+  width: 100%;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.lobe-chat__composer-dock-content {
+  position: relative;
+  z-index: 10;
+  width: 100%;
+  pointer-events: auto;
+}
+
+/* ── Back bottom ── */
 .lobe-chat-back-bottom {
   pointer-events: none;
   position: absolute;
   z-index: 50;
   left: 50%;
-  inset-block-end: calc(var(--composer-float-pad, 168px) - 4px);
+  inset-block-end: 12px;
   inset-inline-end: auto;
   transform: translateX(-50%) translateY(10px);
   opacity: 0;
   transition:
     opacity 180ms ease,
     transform 180ms ease;
+}
+.lobe-chat__composer-dock-content > .lobe-chat-back-bottom {
+  inset-block-end: calc(100% + 8px);
 }
 .lobe-chat-back-bottom.is-visible {
   pointer-events: all;
@@ -1457,14 +1925,14 @@
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 10px;
+  gap: 8px;
   max-width: 100%;
 }
 
 .lobe-chat-atts {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   max-width: min(100%, 360px);
 }
@@ -1472,14 +1940,16 @@
 .lobe-chat-atts--user {
   justify-content: flex-end;
   margin: 0;
+  /* 用户消息附件与 ZCode max-w-xl 对齐，移动端仍由 100% 约束。 */
+  max-width: min(100%, 36rem);
 }
 
-/* Image / file / folder cards: ~64px (ref red-box) */
+/* Historical media attachments use ZCode's 80px thumbnail track. */
 .lobe-chat .att-card--image {
-  width: 64px;
-  height: 64px;
-  min-height: 64px;
-  flex: 0 0 64px;
+  width: 80px;
+  height: 80px;
+  min-height: 80px;
+  flex: 0 0 80px;
   border-radius: 12px;
   border: 1px solid var(--chat-card-border);
   overflow: hidden;
@@ -1489,22 +1959,24 @@
   display: flex;
   align-items: center;
   flex: 0 1 auto;
-  min-width: 120px;
+  width: max-content;
+  min-width: 0;
   max-width: 220px;
-  min-height: 64px;
-  border-radius: 12px;
-  border: 1px solid var(--chat-card-border);
-  background: var(--chat-card);
+  height: auto;
+  min-height: 0;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--chat-card-hover);
   box-shadow: none;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .lobe-chat .att-card:not(.att-card--image) .att-card__btn {
   flex: 1;
   min-width: 0;
-  gap: 10px;
-  padding: 10px 12px;
-  min-height: 64px;
+  gap: 6px;
+  padding: 6px 12px;
+  min-height: 0;
 }
 
 .lobe-chat .att-card__icon {
@@ -1538,7 +2010,7 @@
 
 .lobe-chat .att-card__btn--image,
 .lobe-chat .att-card__thumb {
-  width: 64px;
-  height: 64px;
-  min-height: 64px;
+  width: 80px;
+  height: 80px;
+  min-height: 80px;
 }

@@ -1,8 +1,8 @@
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Badge } from "@appica/ui-react/badge";
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { Field, FieldLabel } from "@appica/ui-react/field";
 import {
   Table,
@@ -36,7 +36,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 
 export const REQUEST_HISTORY_PAGE_SIZE = 20;
 
@@ -676,7 +676,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                   <TableCell className="request-history__model">{record.model}</TableCell>
                   <TableCell>{displayValue(record.provider, labels.notReported)}</TableCell>
                   <TableCell>{formatRequestHistoryMode(record.requestMode, labels)}</TableCell>
-                  <TableCell><Badge size="xs" variant={record.status === "success" ? "success" : record.status === "running" ? "info" : record.status === "cancelled" ? "warning" : "error"}>{formatRequestHistoryStatus(displayValue(record.status, labels.notReported), labels)}</Badge></TableCell>
+                  <TableCell><Badge size="md" variant={record.status === "success" ? "success" : record.status === "running" ? "info" : record.status === "cancelled" ? "warning" : "error"}>{formatRequestHistoryStatus(displayValue(record.status, labels.notReported), labels)}</Badge></TableCell>
                   <TableCell>{record.attempt}/{Math.max(1, record.maxAttempts)}</TableCell>
                   <TableCell>{Math.max(0, record.durationMs).toLocaleString(locale)} ms</TableCell>
                   <TableCell>{formatRequestHistoryTokens(record, labels.notReported)}</TableCell>

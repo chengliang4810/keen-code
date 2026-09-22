@@ -34,6 +34,8 @@ type EnsureConnected = (
 export interface MainNoticesProps {
   tr: Translator;
   activeProject: Project | null;
+  /** Web Host 项目是只读投影，不能显示本地目录重定位入口。 */
+  canWriteProjects: boolean;
   relocateProject: (project: Project) => void | Promise<void>;
   emptyExistingSession: boolean;
   streamStall: StreamStallState | null;
@@ -72,6 +74,7 @@ export interface MainNoticesProps {
 export function MainNotices({
   tr,
   activeProject,
+  canWriteProjects,
   relocateProject,
   emptyExistingSession,
   streamStall,
@@ -134,7 +137,7 @@ export function MainNotices({
 
   return (
     <>
-      {activeProject && isProjectPathMissing(activeProject.pathOk) && (
+      {canWriteProjects && activeProject && isProjectPathMissing(activeProject.pathOk) && (
         <Alert variant="warning" layout="inline" className="mx-5 mb-2">
           <AlertDescription>
             {tr("project.pathMissingShort")}

@@ -8,7 +8,7 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 /**
  * “打开位置”分段按钮：主按钮执行当前目标，展开按钮切换系统打开方式。
  */

@@ -4,7 +4,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 import { EffortSlider } from "@/components/ui/effort-slider";
 import { Tip } from "@/components/ui/tooltip";
 import {
@@ -86,9 +86,10 @@ export function ComposerReasoningMenu({
   const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
 
   const trigger = (
-    <DropdownMenuTrigger render={<Button
+      <DropdownMenuTrigger render={<Button
         type="button"
         variant="ghost"
+        size="md"
         className="cmm__trigger"
         aria-label={`${labels.reasoning}: ${currentLabel}`}
         title={`${labels.reasoning}: ${currentLabel}`}

@@ -40,6 +40,26 @@ describe("FilePathCard", () => {
     expect(fileHtml).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/);
   });
 
+  it("Markdown 自定义链接文本覆盖显示名，但文件类型图标仍依据真实路径", () => {
+    const fileUrl = "https://github.com/example/keencode-plugins/blob/main/demo/plugin.json";
+    const html = renderToString(
+      <FilePathCard
+        path={fileUrl}
+        displayName="插件配置"
+        kind="url"
+        labels={labels}
+      />,
+    );
+
+    expect(html).toContain('class="file-path-link__name">插件配置</span>');
+    expect(html).not.toContain('class="file-path-link__name">plugin.json</span>');
+    const source = readFileSync(
+      new URL("./FilePathCard.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("<FileTypeIcon name={path} size={16} />");
+  });
+
   it("保留行内路径布局并由 Appica Button 管理视觉状态", () => {
     const css = readCssSource(new URL("../styles/app.css", import.meta.url));
     const linkRule = css.match(/\.file-path-link__main\s*\{([^}]*)\}/)?.[1];

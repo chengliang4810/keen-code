@@ -3,7 +3,7 @@ import { Badge } from "@appica/ui-react/badge";
 /** Composer model menu. */
 
 import { findActiveModel, type ModelOption } from "@/lib/modelCatalog";
-import { IconPlus } from "@/components/icons";
+import { IconCode, IconPlus } from "@/components/icons";
 import { ProviderModelMenu } from "@/components/ProviderModelMenu";
 
 /* ---------- Model ---------- */
@@ -89,6 +89,7 @@ export function ComposerModelMenu({
         <Button
           type="button"
           variant="ghost"
+          size="md"
           className="cmm__trigger"
           aria-label={labels.addModel}
           title={labels.addModel}
@@ -116,7 +117,7 @@ export function ComposerModelMenu({
           id: model.id,
           label: model.label,
           suffix: model.supportsVision ? (
-            <Badge size="xs" variant="soft">{labels.vision}</Badge>
+            <Badge size="md" variant="soft">{labels.vision}</Badge>
           ) : undefined,
         })),
       }))}
@@ -129,8 +130,16 @@ export function ComposerModelMenu({
       triggerClassName="cmm__trigger"
       triggerContent={
         <>
+          <span className="cmm__icon cmm__model-icon" aria-hidden>
+            <IconCode size={14} />
+          </span>
+          {providerLabel ? (
+            <span className="cmm__trigger-text cmm__trigger-text--provider">
+              {providerLabel}/
+            </span>
+          ) : null}
           <span className="cmm__trigger-text cmm__trigger-text--full">
-            {triggerText}
+            {modelLabel}
           </span>
           <span className="cmm__trigger-text cmm__trigger-text--short">
             {modelLabel}

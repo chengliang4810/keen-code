@@ -1,6 +1,6 @@
 import { GlassModal } from "@/components/GlassModal";
 import { Button } from "@/components/ui/button";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldLabel } from "@appica/ui-react/field";
 import type { SetState, Translator } from "./types";

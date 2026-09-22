@@ -342,8 +342,9 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  min-width: 0;
   /* 触发器展示“供应商/模型”，比纯模型名需要更宽的截断上限。 */
-  max-width: 260px;
+  max-width: var(--composer-model-max-width, 260px);
 }
 
 .cmm__icon {
@@ -357,9 +358,20 @@
 }
 
 .cmm__trigger-text {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cmm__trigger-text--provider {
+  flex-shrink: 1;
+  max-width: 10rem;
+  color: var(--text-tertiary);
+}
+
+.cmm__model-icon {
+  display: none;
 }
 
 /* Dual labels: full for wide, short for medium, none for icon-only */
@@ -377,6 +389,12 @@
 
 /* Medium: short label */
 @container composer (max-width: 520px) {
+  .cmm__model-icon {
+    display: inline-flex;
+  }
+  .cmm__trigger-text--provider {
+    display: none;
+  }
   .cmm__trigger-text--full {
     display: none;
   }
@@ -384,7 +402,7 @@
     display: inline;
   }
   .cmm__trigger {
-    max-width: 120px;
+    max-width: var(--composer-model-max-width, 260px);
     padding: 0 8px 0 7px;
   }
   .chip .chip__label {
@@ -395,15 +413,91 @@
     padding: 0 8px;
     justify-content: center;
   }
+
+  /* ZCode collapses mode/thought labels before the model label disappears. */
+  .cmm--reasoning .cmm__trigger-text--full,
+  .cmm--reasoning .cmm__chev {
+    display: none;
+  }
+  .cmm--reasoning .cmm__trigger {
+    width: 28px;
+    max-width: 28px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .composer-goal-chip,
+  .composer-plan-chip {
+    width: 28px;
+    max-width: 28px;
+    padding: 0;
+    justify-content: center;
+    gap: 0;
+  }
+  .composer-goal-chip > span:last-child,
+  .composer-plan-chip > span:last-child {
+    display: none;
+  }
+}
+
+/* ResizeObserver-driven fit states for widths between the container breakpoints. */
+.composer__row .composer-goal-chip[data-composer-compact="true"],
+.composer__row .composer-plan-chip[data-composer-compact="true"] {
+  width: 28px;
+  max-width: 28px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.composer__row .composer-goal-chip[data-composer-compact="true"] > span:last-child,
+.composer__row .composer-plan-chip[data-composer-compact="true"] > span:last-child,
+.composer__row .cmm--reasoning[data-composer-compact="true"] .cmm__trigger-text--full,
+.composer__row .cmm--reasoning[data-composer-compact="true"] .cmm__chev {
+  display: none;
+}
+
+.composer__row .cmm--reasoning[data-composer-compact="true"] .cmm__trigger {
+  width: 28px;
+  max-width: 28px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.composer__row .ctx-chip[data-composer-compact="true"] {
+  display: none;
+}
+
+.composer__row .cmm--model[data-composer-compact="true"] .cmm__trigger-text--provider,
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__trigger-text--provider,
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__trigger-text--full,
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__trigger-text--short,
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__trigger > .chevron {
+  display: none;
+}
+
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__trigger {
+  width: 28px;
+  max-width: 28px;
+  padding: 0;
+  justify-content: center;
+  gap: 0;
+}
+
+.composer__row[data-composer-model-icon="true"] .cmm--model .cmm__model-icon {
+  display: inline-flex;
 }
 
 /* Narrow: icon only */
 @container composer (max-width: 380px) {
+  .cmm__trigger-text--provider,
   .cmm__trigger-text--full,
   .cmm__trigger-text--short {
     display: none;
   }
-  .cmm__chev {
+  .cmm__chev,
+  .cmm__trigger > .chevron {
     display: none;
   }
   .cmm__trigger {
@@ -544,127 +638,56 @@
   font-size: calc(12.5px + var(--ui-font-delta));
 }
 
-/* ===== Hide native scrollbars by default (system track is hard to clear) =====
-   Primary panes use <OverlayScroll> floating thumbs.
-   Textareas use a local native exception below (cannot wrap OverlayScroll). */
-*:not(textarea) {
-  scrollbar-width: none !important; /* Firefox */
-  -ms-overflow-style: none !important;
+/* Native scrollbars follow ZCode's global surface: transparent track and the
+   semantic border color as the thumb. Specialized canvases hide their own
+   viewport below when a second scrollbar would duplicate app chrome. */
+* {
+  scrollbar-width: auto;
+  scrollbar-color: var(--border-subtle) transparent;
 }
 
-*:not(textarea)::-webkit-scrollbar {
-  display: none !important;
-  width: 0 !important;
-  height: 0 !important;
-  background: transparent !important;
+*::-webkit-scrollbar {
+  width: 14px;
+  height: 14px;
 }
 
-/* Settings is a document-like surface: expose a quiet native scroll cue. */
-.settings-page__nav-inner,
-.settings-page__content,
-.prov-rail {
-  scrollbar-width: thin !important;
-  scrollbar-color: transparent transparent !important;
-  -ms-overflow-style: auto !important;
-}
-
-.settings-page__nav-inner:hover,
-.settings-page__nav-inner:focus-within,
-.settings-page__content:hover,
-.settings-page__content:focus-within,
-.prov-rail:hover,
-.prov-rail:focus-within {
-  scrollbar-color: var(--scrollbar-thumb) transparent !important;
-}
-
-.settings-page__nav-inner::-webkit-scrollbar,
-.settings-page__content::-webkit-scrollbar,
-.prov-rail::-webkit-scrollbar {
-  display: block !important;
-  width: var(--scrollbar-size) !important;
-  height: var(--scrollbar-size) !important;
-  background: transparent !important;
-}
-
-.settings-page__nav-inner::-webkit-scrollbar-track,
-.settings-page__content::-webkit-scrollbar-track,
-.prov-rail::-webkit-scrollbar-track {
-  background: transparent !important;
-}
-
-.settings-page__nav-inner::-webkit-scrollbar-thumb,
-.settings-page__content::-webkit-scrollbar-thumb,
-.prov-rail::-webkit-scrollbar-thumb {
-  border: 1px solid transparent;
-  border-radius: var(--radius-full);
+*::-webkit-scrollbar-track {
   background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  min-height: 32px;
+  min-width: 32px;
+  border: 3px solid transparent;
+  border-radius: var(--radius-full);
+  background: var(--border-subtle);
   background-clip: padding-box;
 }
 
-.settings-page__nav-inner:hover::-webkit-scrollbar-thumb,
-.settings-page__nav-inner:focus-within::-webkit-scrollbar-thumb,
-.settings-page__content:hover::-webkit-scrollbar-thumb,
-.settings-page__content:focus-within::-webkit-scrollbar-thumb,
-.prov-rail:hover::-webkit-scrollbar-thumb,
-.prov-rail:focus-within::-webkit-scrollbar-thumb {
-  background: var(--scrollbar-thumb);
-  background-clip: padding-box;
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
-/* --- Textarea / composer input: native scroll, thumb-only look --- */
-.composer__input {
-  scrollbar-width: thin !important;
-  scrollbar-color: transparent transparent !important;
-  -ms-overflow-style: auto !important;
+/* xterm owns terminal scrolling; do not expose a second native scrollbar. */
+.terminal-instance .xterm-viewport {
+  scrollbar-width: none;
 }
 
-.composer__input:hover,
-.composer__input:focus,
-.composer__input:focus-visible {
-  scrollbar-color: var(--scrollbar-thumb) transparent !important;
+.terminal-instance .xterm-viewport::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
-.composer__input::-webkit-scrollbar {
-  display: block !important;
-  width: var(--scrollbar-size, 8px) !important;
-  height: var(--scrollbar-size, 8px) !important;
-  background: transparent !important;
-  background-color: transparent !important;
+/* Resource preview surfaces with fixed-format content do not need native scrolling. */
+[data-zcode-pptx-render-surface] * {
+  scrollbar-width: none;
 }
 
-.composer__input::-webkit-scrollbar-track,
-.composer__input::-webkit-scrollbar-track-piece,
-.composer__input::-webkit-scrollbar-corner {
-  background: transparent !important;
-  background-color: transparent !important;
-  border: none !important;
-  box-shadow: none !important;
-}
-
-.composer__input::-webkit-scrollbar-button {
-  display: none !important;
-  width: 0 !important;
-  height: 0 !important;
-}
-
-.composer__input::-webkit-scrollbar-thumb {
-  background-color: transparent !important;
-  border: 2px solid transparent !important;
-  border-radius: var(--radius-full) !important;
-  background-clip: padding-box !important;
-  min-height: 28px;
-}
-
-.composer__input:hover::-webkit-scrollbar-thumb,
-.composer__input:focus::-webkit-scrollbar-thumb {
-  background-color: var(--scrollbar-thumb) !important;
-  background-clip: padding-box !important;
-}
-
-.composer__input:hover::-webkit-scrollbar-thumb:hover,
-.composer__input:focus::-webkit-scrollbar-thumb:hover,
-.composer__input::-webkit-scrollbar-thumb:active {
-  background-color: var(--scrollbar-thumb-hover) !important;
+[data-zcode-pptx-render-surface] *::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 .overlay-scroll {
@@ -1347,7 +1370,7 @@
   height: 16px;
   padding: 0 4px;
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent, var(--change-copied)) 16%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--change-renamed)) 16%, transparent);
   font-size: calc(10px + var(--ui-font-delta));
   line-height: calc(16px + var(--ui-font-delta));
   text-align: center;
@@ -1525,7 +1548,7 @@
   display: none;
   flex-direction: column;
   overflow: hidden;
-  background: var(--terminal-canvas);
+  background: var(--terminal-bg);
 }
 
 .terminal-panel.is-active {
@@ -2071,7 +2094,7 @@
   height: 16px;
   padding: 0 5px;
   border-radius: var(--radius-full);
-  background: color-mix(in srgb, var(--accent, var(--change-copied)) 16%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--change-renamed)) 16%, transparent);
   color: var(--text-secondary);
   font-size: calc(10px + var(--ui-font-delta));
   font-weight: 650;
@@ -2121,8 +2144,8 @@
 
 .rp-changes-badge--added,
 .rp-changes-badge--untracked {
-  color: var(--change-new);
-  background: color-mix(in srgb, var(--change-new) 16%, transparent);
+  color: var(--change-added);
+  background: color-mix(in srgb, var(--change-added) 16%, transparent);
 }
 
 .rp-changes-badge--deleted {
@@ -2132,8 +2155,8 @@
 
 .rp-changes-badge--renamed,
 .rp-changes-badge--copied {
-  color: var(--change-copied);
-  background: color-mix(in srgb, var(--change-copied) 16%, transparent);
+  color: var(--change-renamed);
+  background: color-mix(in srgb, var(--change-renamed) 16%, transparent);
 }
 
 .rp-changes-badge--conflict {
@@ -2153,7 +2176,7 @@
 }
 
 .rp-changes-row.is-active {
-  background: color-mix(in srgb, var(--accent, var(--change-copied)) 14%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--change-renamed)) 14%, transparent);
 }
 
 .rp-changes-row__main {
@@ -2328,17 +2351,17 @@
 }
 
 .rp-kind--dir {
-  color: var(--text-secondary);
+  color: var(--dir-accent);
 }
 
 .rp-kind--md {
-  background: color-mix(in srgb, var(--change-new) 22%, transparent);
-  color: var(--change-new-ink);
+  background: color-mix(in srgb, var(--change-added) 22%, transparent);
+  color: var(--change-added);
 }
 
 .rp-kind--code {
-  background: color-mix(in srgb, var(--change-copied) 18%, transparent);
-  color: var(--accent, var(--change-copied));
+  background: color-mix(in srgb, var(--change-renamed) 18%, transparent);
+  color: var(--accent, var(--change-renamed));
   font-size: 8px;
 }
 

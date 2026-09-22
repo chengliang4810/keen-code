@@ -14,6 +14,7 @@ import {
   useState,
   type ClipboardEvent,
   type CompositionEvent,
+  type DragEventHandler,
   type FormEvent,
   type KeyboardEvent,
   type Ref,
@@ -34,6 +35,13 @@ import {
   serializeStored,
   type DraftSegment,
 } from "@/lib/draftDoc";
+import {
+  composerMentionTriggerForKind,
+  detectComposerMentionQuery,
+  encodeComposerMention,
+  removeComposerMentionAtCaret,
+  type ComposerMentionQuery,
+} from "@/lib/composerMentions";
 
 function clearNode(el: HTMLElement) {
   while (el.firstChild) el.removeChild(el.firstChild);
@@ -68,13 +76,31 @@ function makeSkillChipEl(name: string): HTMLElement {
   return wrap;
 }
 
+function makeMentionChipEl(mention: Extract<DraftSegment, { type: "mention" }>["mention"]): HTMLElement {
+  const wrap = document.createElement("span");
+  wrap.className = `composer-mention composer-mention--${mention.kind}`;
+  wrap.contentEditable = "false";
+  wrap.dataset.composerMention = encodeComposerMention(mention);
+  // 结构化数据由 draftDoc 通过 token 解码；这里同时保留可读属性便于 WebView
+  // 辅助技术和调试查看，不依赖可见文本反推 mention 身份。
+  wrap.dataset.mentionId = mention.id;
+  wrap.dataset.mentionKind = mention.kind;
+  wrap.dataset.mentionValue = mention.value;
+  const visibleTrigger = composerMentionTriggerForKind(mention.kind);
+  wrap.setAttribute("aria-label", `${visibleTrigger}${mention.label}`);
+  wrap.textContent = `${visibleTrigger}${mention.label}`;
+  return wrap;
+}
+
 function renderSegmentsInto(el: HTMLElement, segments: DraftSegment[]) {
   clearNode(el);
   for (const seg of segments) {
     if (seg.type === "text") {
       appendTextWithBreaks(el, seg.text);
-    } else {
+    } else if (seg.type === "skill") {
       el.appendChild(makeSkillChipEl(seg.name));
+    } else {
+      el.appendChild(makeMentionChipEl(seg.mention));
     }
   }
 }
@@ -158,9 +184,16 @@ export type ComposerEditorProps = {
   onSlashQueryChange?: (
     q: { start: number; query: string; end: number } | null,
   ) => void;
+  onMentionQueryChange?: (
+    q: ComposerMentionQuery | null,
+  ) => void;
   editorRef?: Ref<HTMLDivElement | null>;
   onPasteFiles?: (files: File[]) => void;
   onPastePaths?: (paths: string[]) => void;
+  onDragEnter?: DragEventHandler<HTMLDivElement>;
+  onDragOver?: DragEventHandler<HTMLDivElement>;
+  onDragLeave?: DragEventHandler<HTMLDivElement>;
+  onDrop?: DragEventHandler<HTMLDivElement>;
   /**
    * When the paste event looks like media but has no File objects (and async
    * Clipboard API also fails), parent should try native OS clipboard.
@@ -180,9 +213,14 @@ export function ComposerEditor({
   className,
   onKeyDown,
   onSlashQueryChange,
+  onMentionQueryChange,
   editorRef,
   onPasteFiles,
   onPastePaths,
+  onDragEnter,
+  onDragOver,
+  onDragLeave,
+  onDrop,
   onPasteMediaFallback,
 }: ComposerEditorProps) {
   const elRef = useRef<HTMLDivElement | null>(null);
@@ -206,7 +244,7 @@ export function ComposerEditor({
   const resize = useCallback(() => {
     const el = elRef.current;
     if (!el) return;
-    // 与 Harness 的输入宿主一致：自然排版，CSS 控制最小高度和 336px 滚动上限。
+    // 与 ZCode LexicalChatInput 一致：自然排版，CSS 控制 40px 最小高度和 160px 滚动上限。
     el.style.height = "auto";
   }, []);
 
@@ -229,6 +267,16 @@ export function ComposerEditor({
     const end = fromFull ? full.length : (beforeCaret?.length ?? full.length);
     onSlashQueryChange({ start: q.start, query: q.query, end });
   }, [onSlashQueryChange]);
+
+  const emitMention = useCallback(() => {
+    const el = elRef.current;
+    if (!el || !onMentionQueryChange) return;
+    const beforeCaret = getTextBeforeCaret(el);
+    const query = beforeCaret
+      ? detectComposerMentionQuery(beforeCaret)
+      : null;
+    onMentionQueryChange(query);
+  }, [onMentionQueryChange]);
 
   const syncDomEmpty = useCallback((el: HTMLElement) => {
     const stored = serializeDom(el);
@@ -258,9 +306,10 @@ export function ComposerEditor({
         onChange(stored);
       }
       emitSlash();
+      emitMention();
       resize();
     },
-    [onChange, emitSlash, resize, syncDomEmpty],
+    [onChange, emitMention, emitSlash, resize, syncDomEmpty],
   );
 
   useLayoutEffect(() => {
@@ -283,6 +332,7 @@ export function ComposerEditor({
       placeCaretAtEnd(el);
       resize();
       emitSlash();
+      emitMention();
       return;
     }
     renderSegmentsInto(el, parseStoredContent(value));
@@ -290,7 +340,8 @@ export function ComposerEditor({
     resize();
     // 外部草稿更新会重建 Observer，不能依赖旧 Observer 通知菜单。
     emitSlash();
-  }, [value, resize, emitSlash]);
+    emitMention();
+  }, [value, resize, emitMention, emitSlash]);
 
   const onInput = (e: FormEvent<HTMLDivElement>) => {
     // Hide placeholder as soon as the DOM has glyphs (incl. IME preedit).
@@ -298,6 +349,7 @@ export function ComposerEditor({
     if (composing.current) {
       // Live pinyin in DOM — update slash filter without committing draft yet.
       emitSlash();
+      emitMention();
       resize();
       return;
     }
@@ -385,6 +437,7 @@ export function ComposerEditor({
       if (!elRef.current) return;
       if (composing.current) {
         emitSlash();
+        emitMention();
         return;
       }
       const live = serializeDom(el);
@@ -392,6 +445,7 @@ export function ComposerEditor({
         commitFromDom(el);
       } else {
         emitSlash();
+        emitMention();
       }
     };
     const schedule = () => {
@@ -410,7 +464,7 @@ export function ComposerEditor({
       mo.disconnect();
       if (raf) cancelAnimationFrame(raf);
     };
-  }, [commitFromDom, emitSlash, value]);
+  }, [commitFromDom, emitMention, emitSlash, value]);
 
   const valueEmpty =
     !value.trim() ||
@@ -457,15 +511,26 @@ export function ComposerEditor({
         }}
         onInput={onInput}
         onPaste={onPaste}
+        onDragEnter={onDragEnter}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
         onKeyUp={() => {
-          if (!composing.current) emitSlash();
+          if (!composing.current) {
+            emitSlash();
+            emitMention();
+          }
         }}
-        onClick={() => emitSlash()}
+        onClick={() => {
+          emitSlash();
+          emitMention();
+        }}
         onCompositionStart={() => {
           composing.current = true;
         }}
         onCompositionUpdate={() => {
           emitSlash();
+          emitMention();
         }}
         onCompositionEnd={(e: CompositionEvent<HTMLDivElement>) => {
           flushAfterIme(e.currentTarget);
@@ -473,6 +538,17 @@ export function ComposerEditor({
         onKeyDown={(e) => {
           const ne = e.nativeEvent;
           if (ne.isComposing || ne.keyCode === 229 || composing.current) {
+            return;
+          }
+          if (
+            (e.key === "Backspace" || e.key === "Delete") &&
+            removeComposerMentionAtCaret(
+              e.currentTarget,
+              e.key === "Backspace" ? "backward" : "forward",
+            )
+          ) {
+            e.preventDefault();
+            commitFromDom(e.currentTarget);
             return;
           }
           onKeyDown?.(e);

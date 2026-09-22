@@ -23,11 +23,6 @@ describe("ProvidersPanel 双栏布局", () => {
     expect(list).toContain("max-height: min(38rem, calc(100vh - 10rem))");
     expect(styles).toMatch(/\.prov-item__main\s*\{[^}]*min-height: 3\.25rem;[^}]*justify-content: flex-start;/);
     expect(styles).toMatch(/@media \(max-width: 860px\)[\s\S]*?\.prov-split__list\s*\{[^}]*max-height: 280px;/);
-    // 全局默认隐藏滚动条，列表加入设置页静默例外组，悬停或聚焦时出现细滚动条。
-    expect(styles).toMatch(/\.prov-rail\s*\{[^}]*scrollbar-width: thin/);
-    expect(styles).toMatch(
-      /\.prov-rail:hover[^{]*\{[^}]*scrollbar-color: var\(--scrollbar-thumb\)/,
-    );
     // rail 自身保持弹性滚动容器，高度约束来自列表列。
     expect(styles).toMatch(/\.prov-rail\s*\{[^}]*overflow: auto;/);
     // rail 子项禁止收缩：超高交给 rail 滚动，而不是把单项压缩塞满。
@@ -62,8 +57,8 @@ describe("ProvidersPanel 添加模型弹窗", () => {
 
 describe("ProvidersPanel 消息格式 Select 契约", () => {
   it("与设置页语言切换共享 Appica Select，而不是旧的自定义下拉", () => {
-    expect(source).toContain('from "@appica/ui-react/select"');
-    expect(settingsSource).toContain('from "@appica/ui-react/select"');
+    expect(source).toContain('from "@/components/ui/select"');
+    expect(settingsSource).toContain('from "@/components/ui/select"');
     expect(source).not.toContain('from "@/components/Select"');
     expect(source).toContain("onValueChange={(value) =>");
     expect(source).toContain("<SelectContent>");

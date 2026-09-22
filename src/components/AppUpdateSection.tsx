@@ -17,7 +17,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 
 export type AppUpdateBusy = "checking" | "installing" | null;
 

@@ -3,6 +3,7 @@ import type {
   MutableRefObject,
   RefObject,
   SetStateAction,
+  ReactNode,
 } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpSubagentInfo } from "@/lib/acp/store";
@@ -37,6 +38,8 @@ export interface ConversationStageProps {
     message: ChatMessage,
     content: string,
   ) => Promise<boolean>;
+  /** 当前会话最新已完成回合的真实 Fork 操作。 */
+  onForkCurrentSession?: () => void;
   attachLabels: ComposerController["attachmentLabels"];
   showChatFind: boolean;
   chatFindQuery: string;
@@ -46,6 +49,8 @@ export interface ConversationStageProps {
   activeTurnIdBySessionRef: MutableRefObject<Map<string, string>>;
   displayedSubagents: AcpSubagentInfo[];
   showThinkingProcess: boolean;
+  /** 会话态输入区挂载到 ConversationThread 滚动视口内的 sticky dock。 */
+  bottomDock?: ReactNode;
   summaryOpen: boolean;
   summaryTriggerRef: RefObject<HTMLButtonElement | null>;
   closeSummary: () => void;
@@ -64,6 +69,7 @@ export function ConversationStage({
   setResourceOpenTarget,
   setAttachments,
   editAndResendLastUserMessage,
+  onForkCurrentSession,
   attachLabels,
   showChatFind,
   chatFindQuery,
@@ -73,6 +79,7 @@ export function ConversationStage({
   activeTurnIdBySessionRef,
   displayedSubagents,
   showThinkingProcess,
+  bottomDock,
   summaryOpen,
   summaryTriggerRef,
   closeSummary,
@@ -113,6 +120,8 @@ export function ConversationStage({
           setAttachments((previous) => mergeAttachments(previous, [attachment]))
         }
         onEditLastUserMessage={editAndResendLastUserMessage}
+        onForkCurrentSession={onForkCurrentSession}
+        bottomDock={bottomDock}
         attachLabels={attachLabels}
         findQuery={showChatFind ? chatFindQuery : ""}
         findHitMessageIds={showChatFind ? chatFindHitIds : undefined}

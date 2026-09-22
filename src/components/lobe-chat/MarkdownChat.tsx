@@ -212,6 +212,7 @@ export const MarkdownChat = memo(function MarkdownChat({
       return (
         <FilePathCard
           path={url}
+          displayName={linkText && linkText !== rawIn ? linkText : undefined}
           kind="url"
           projectPath={projectPath}
           labels={fileLabels}
@@ -314,6 +315,7 @@ export const MarkdownChat = memo(function MarkdownChat({
     return (
       <FilePathCard
         path={pathToken}
+        displayName={linkText && linkText !== rawIn ? linkText : undefined}
         absolutePath={
           resolved && isAbsoluteFsPath(resolved) ? resolved : undefined
         }
@@ -414,6 +416,14 @@ export const MarkdownChat = memo(function MarkdownChat({
           wrapLabel={tr("chat.codeWrap")}
           unwrapLabel={tr("chat.codeUnwrap")}
           copyLabel={tr("message.copy")}
+          previewLabel={tr("chat.codePreview")}
+          previewTitle={tr("chat.codePreviewTitle")}
+          previewDescription={tr("chat.codePreviewDescription")}
+          previewLoading={tr("chat.codePreviewLoading")}
+          previewCloseLabel={tr("common.close")}
+          previewZoomInLabel={tr("chat.codePreviewZoomIn")}
+          previewZoomOutLabel={tr("chat.codePreviewZoomOut")}
+          previewResetLabel={tr("chat.codePreviewReset")}
           highlight={!streaming}
         >
           {c as ReactNode}
@@ -425,7 +435,7 @@ export const MarkdownChat = memo(function MarkdownChat({
         <table>{c}</table>
       </div>
     ),
-    hr: () => null,
+    hr: () => <hr />,
     img: ({ src, alt }) => {
       if (!src || typeof src !== "string") return null;
       const card = renderPathOrUrl(

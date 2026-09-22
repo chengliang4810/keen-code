@@ -383,19 +383,89 @@
   max-width: 12rem;
 }
 
+/* 结构化 @ 引用在编辑器和用户消息中共用同一套原子外观。 */
+.composer-mention {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 0 7px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  font-size: calc(12px + var(--ui-font-delta));
+  line-height: calc(18px + var(--ui-font-delta));
+  vertical-align: middle;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.composer-mention--file {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border-subtle));
+  background: color-mix(in srgb, var(--accent-muted) 50%, var(--bg-hover));
+}
+
+.composer-mention--directory {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--border-subtle));
+  background: color-mix(in srgb, var(--success-muted) 55%, var(--bg-hover));
+}
+
+.composer-mention--session {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--border-subtle));
+  background: color-mix(in srgb, var(--warning-muted) 50%, var(--bg-hover));
+}
+
+.composer-mention--plugin {
+  border-color: color-mix(in srgb, var(--info) 38%, var(--border-subtle));
+  background: color-mix(in srgb, var(--info-muted) 50%, var(--bg-hover));
+}
+
+.composer-mention--skill {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border-subtle));
+}
+
 /* Contenteditable composer */
 .composer-editor-wrap {
   position: relative;
   width: 100%;
 }
+
+.composer-editor-dropzone {
+  position: relative;
+  min-width: 0;
+  border-radius: var(--radius-md);
+}
+
+.composer-editor-dropzone--active {
+  outline: 1px dashed var(--accent);
+  outline-offset: 4px;
+  background: color-mix(in srgb, var(--accent-muted) 35%, transparent);
+}
+
+.composer-editor-dropzone__hint {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--bg-input) 78%, var(--accent-muted));
+  color: var(--text-primary);
+  font-size: calc(12px + var(--ui-font-delta));
+  line-height: calc(20px + var(--ui-font-delta));
+  pointer-events: none;
+}
+
 .composer-editor__placeholder {
   position: absolute;
-  left: 16px;
-  top: 4px;
-  right: 12px;
+  left: 0;
+  top: 0;
+  right: 0;
   color: var(--text-secondary);
   font-size: calc(14px + var(--ui-font-delta));
-  line-height: calc(24px + var(--ui-font-delta));
+  line-height: calc(20px + var(--ui-font-delta));
   pointer-events: none;
   white-space: pre-wrap;
   /* Sit fully behind editor ink; never paint over typed glyphs */
@@ -409,8 +479,8 @@
 div.composer__input {
   white-space: pre-wrap;
   word-break: break-word;
-  min-height: 28px;
-  max-height: 336px;
+  min-height: 40px;
+  max-height: 160px;
   outline: none;
 }
 div.composer__input:empty::before {
@@ -1481,7 +1551,6 @@ div.composer__input:empty::before {
     width: calc(100% - 352px);
   }
 
-  .main__stage--summary-open > .composer-wrap--float,
   .main__stage--summary-open > .ask-user-wrap {
     right: 352px;
   }
@@ -1489,7 +1558,7 @@ div.composer__input:empty::before {
 
 @media (prefers-reduced-motion: reduce) {
   .main__stage > .lobe-chat,
-  .composer-wrap--float,
+  .composer-wrap--sticky,
   .ask-user-wrap {
     transition: none;
   }
@@ -2214,6 +2283,7 @@ div.composer__input:empty::before {
 
 .analytics-trend-stack {
   width: 100%;
+  height: var(--analytics-trend-height, 0%);
   max-height: 100%;
   display: flex;
   flex-direction: column;
@@ -2225,6 +2295,8 @@ div.composer__input:empty::before {
 
 .analytics-trend-stack i {
   width: 100%;
+  height: var(--analytics-segment-height, 0%);
+  background: var(--analytics-model-color);
 }
 
 .analytics-trend-axis span {
@@ -2257,6 +2329,7 @@ div.composer__input:empty::before {
   width: 8px;
   height: 8px;
   border-radius: var(--radius-2xs);
+  background: var(--analytics-model-color);
 }
 
 .analytics-model-usage {
@@ -2286,6 +2359,7 @@ div.composer__input:empty::before {
 
 .analytics-donut__segment {
   fill: none;
+  stroke: var(--analytics-model-color);
   stroke-width: 12;
 }
 
@@ -2562,7 +2636,3 @@ div.composer__input:empty::before {
 .settings-personalization__memory-card {
   margin-top: 16px;
 }
-
-/* ── Sidebar: session awaiting user input ─────────────────────────────── */
-
-.composer-wrap--welcome div.composer__input { min-height: 52px; }

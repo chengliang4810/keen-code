@@ -26,6 +26,8 @@ export interface SessionContextMenuProps {
   menu: ContextMenuState;
   setMenu: SetState<ContextMenuState>;
   projects: Project[];
+  /** Web Host 不允许项目写操作，也不开放本地路径 reveal。 */
+  canWriteProjects: boolean;
   sessions: SessionRow[];
   setLocalError: SetState<string | null>;
   relocateProject: ProjectAction;
@@ -43,6 +45,7 @@ export function SessionContextMenu({
   menu,
   setMenu,
   projects,
+  canWriteProjects,
   sessions,
   setLocalError,
   relocateProject,
@@ -55,6 +58,7 @@ export function SessionContextMenu({
 }: SessionContextMenuProps) {
   const items = useMemo<ContextMenuItem[]>(() => {
     if (menu?.kind === "project") {
+      if (!canWriteProjects) return [];
       const project = projects.find((candidate) => candidate.id === menu.id);
       if (!project) return [];
       return [
@@ -126,6 +130,7 @@ export function SessionContextMenu({
   }, [
     confirmForkSession,
     copySessionId,
+    canWriteProjects,
     locale,
     menu,
     projects,

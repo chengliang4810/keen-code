@@ -5,7 +5,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
-} from "@appica/ui-react/dialog";
+} from "@/components/ui/dialog";
 import { useId, useRef, type ReactNode, type RefObject } from "react";
 
 export type GlassModalSize = "sm" | "md" | "lg";

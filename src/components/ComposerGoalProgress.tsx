@@ -202,6 +202,7 @@ export function ComposerGoalChip({ locale, onClear }: ComposerGoalChipProps) {
     <Button
       type="button"
       variant="soft"
+      size="md"
       className="composer-goal-chip"
       aria-label={clearLabel}
       title={clearLabel}

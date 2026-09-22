@@ -1,4 +1,4 @@
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 /**
  * In-conversation find bar (Cmd/Ctrl+F).

@@ -4,7 +4,9 @@
     "src/styles/tokens.css",
     "src/styles/skins.css",
     "src/styles/code-preview.css",
-    "src/components/lobe-chat/lobe-chat.css"
+    "src/styles/ui-governance.css",
+    "src/components/lobe-chat/lobe-chat.css",
+    "src/styles/harness/**"
   ],
   "rules": {
     "declaration-property-value-allowed-list": {

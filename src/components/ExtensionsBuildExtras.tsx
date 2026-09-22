@@ -1,6 +1,6 @@
-import { Card } from "@appica/ui-react/card";
+import { Card } from "@/components/ui/card";
 import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
@@ -414,11 +414,11 @@ export function ExtensionsBuildExtras({
                   <div className="ext-market-plugin__content">
                     <div className="ext-item__head">
                       <span className="ext-item__name">{plugin.name}</span>
-                      <Badge size="xs" variant="secondary">
+                      <Badge size="md" variant="secondary">
                         {plugin.marketplace}
                       </Badge>
                       {plugin.installed ? (
-                        <Badge size="xs" variant="success">{tr("ext.market.installed")}</Badge>
+                        <Badge size="md" variant="success">{tr("ext.market.installed")}</Badge>
                       ) : null}
                     </div>
                     {plugin.description ? (

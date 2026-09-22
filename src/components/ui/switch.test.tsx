@@ -12,7 +12,7 @@ describe("Switch", () => {
     expect(html).toContain('data-slot="switch"')
     expect(html).toContain('data-slot="switch-thumb"')
     expect(html).toContain('data-checked=""')
-    expect(html).toContain("h-5 w-9.5")
+    expect(html).toContain("h-[18px] w-8")
     expect(html).toContain("data-checked:bg-primary")
   })
 
@@ -22,7 +22,7 @@ describe("Switch", () => {
     )
 
     expect(html).toContain('data-unchecked=""')
-    expect(html).toContain("h-4 w-7.5")
+    expect(html).toContain("h-4 w-7")
   })
 
   it("keeps a semantic accessible state", () => {

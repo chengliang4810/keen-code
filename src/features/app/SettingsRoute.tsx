@@ -4,6 +4,7 @@ import type {
   AppUpdateStatus,
   TerminalShell,
   TerminalShellOption,
+  WebHostSettings,
 } from "@/lib/api";
 import type { Locale } from "@/i18n";
 import type { ThemePreference } from "@/lib/theme";
@@ -77,6 +78,9 @@ export interface SettingsRouteSettings {
   webServiceUrl: string;
   /** 持久化兼容服务基础 URL；空字符串用于关闭网络工具。 */
   onWebServiceUrl: (value: string) => void;
+  /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
+  webHostSettings: WebHostSettings;
+  onWebHostSettings: (value: WebHostSettings) => void;
 }
 
 /** 设置页中依赖当前工作区/供应商状态的会话上下文。 */

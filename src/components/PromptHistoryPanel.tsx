@@ -1,4 +1,4 @@
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 /**
  * 当前 Session 的提示词历史选择器。

@@ -11,7 +11,7 @@ import {
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 
 export interface ProviderModelMenuItem {
   id: string;
@@ -36,6 +36,8 @@ interface ProviderModelMenuProps {
   triggerClassName?: string;
   triggerWrapperClassName?: string;
   triggerVariant?: ButtonProps["variant"];
+  /** Composer 触发器统一使用 Appica 的 md 控件几何，避免菜单触发器高度漂移。 */
+  triggerSize?: ButtonProps["size"];
   disabled?: boolean;
   align?: "start" | "center" | "end";
   sideOffset?: number;
@@ -67,6 +69,7 @@ export function ProviderModelMenu({
   triggerClassName,
   triggerWrapperClassName,
   triggerVariant = "outline",
+  triggerSize = "md",
   disabled,
   align = "start",
   sideOffset = 6,
@@ -85,6 +88,7 @@ export function ProviderModelMenu({
           id={triggerId}
           type="button"
           variant={triggerVariant}
+          size={triggerSize}
           className={triggerClassName}
           disabled={disabled}
           aria-label={triggerLabel}
@@ -98,7 +102,7 @@ export function ProviderModelMenu({
   );
 
   return (
-    <DropdownMenu size="lg" open={open} onOpenChange={onOpenChange}>
+    <DropdownMenu size="md" open={open} onOpenChange={onOpenChange}>
       {triggerWrapperClassName ? (
         <div className={triggerWrapperClassName}>{trigger}</div>
       ) : trigger}

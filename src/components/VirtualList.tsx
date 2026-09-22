@@ -17,6 +17,9 @@ import {
 import {
   computeVirtualWindow,
   scrollTopForIndex,
+  shouldUseSidebarTouchLayout,
+  SIDEBAR_TOUCH_BREAKPOINT,
+  SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
   SIDEBAR_VIRTUALIZE_THRESHOLD,
   type VirtualWindow,
 } from "@/lib/virtualList";
@@ -26,6 +29,8 @@ export type VirtualListProps<T> = {
   getKey: (item: T, index: number) => string;
   renderItem: (item: T, index: number) => ReactNode;
   rowHeight: number;
+  /** Optional touch-row height; defaults to the sidebar's 44px target. */
+  touchRowHeight?: number;
   /** Flex gap between rows. Default 0. */
   gap?: number;
   overscan?: number;
@@ -77,11 +82,26 @@ const fullWindow = (count: number): VirtualWindow => ({
   totalHeight: 0,
 });
 
+function readSidebarTouchLayout(): boolean {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
+    return false;
+  }
+  return shouldUseSidebarTouchLayout(
+    window.innerWidth,
+    window.matchMedia("(hover: none)").matches,
+    window.matchMedia("(pointer: coarse)").matches,
+  );
+}
+
 export function VirtualList<T>({
   items,
   getKey,
   renderItem,
   rowHeight,
+  touchRowHeight = SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
   gap = 0,
   overscan,
   threshold = SIDEBAR_VIRTUALIZE_THRESHOLD,
@@ -93,8 +113,35 @@ export function VirtualList<T>({
   const scrollParentRef = useRef<HTMLElement | null>(null);
   const count = items.length;
   const shouldVirtualize = count >= threshold;
+  const [touchLayout, setTouchLayout] = useState(() => {
+    return readSidebarTouchLayout();
+  });
+  const effectiveRowHeight = touchLayout
+    ? Math.max(rowHeight, touchRowHeight)
+    : rowHeight;
 
   const [win, setWin] = useState<VirtualWindow>(() => fullWindow(count));
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const mediaQueries = [
+      window.matchMedia(`(max-width: ${SIDEBAR_TOUCH_BREAKPOINT}px)`),
+      window.matchMedia("(hover: none)"),
+      window.matchMedia("(pointer: coarse)"),
+    ];
+    const sync = () => setTouchLayout(readSidebarTouchLayout());
+    sync();
+    for (const media of mediaQueries) {
+      if (media.addEventListener) media.addEventListener("change", sync);
+      else media.addListener(sync);
+    }
+    return () => {
+      for (const media of mediaQueries) {
+        if (media.removeEventListener) media.removeEventListener("change", sync);
+        else media.removeListener(sync);
+      }
+    };
+  }, []);
 
   const recompute = useCallback(() => {
     const root = rootRef.current;
@@ -123,14 +170,14 @@ export function VirtualList<T>({
     const scrollOffset = parentRect.top - rootRect.top;
     const next = computeVirtualWindow({
       itemCount: count,
-      rowHeight,
+      rowHeight: effectiveRowHeight,
       gap,
       scrollOffset,
       viewportHeight: scrollParent.clientHeight,
       overscan,
     });
     setWin((prev) => (windowsEqual(prev, next) ? prev : next));
-  }, [count, rowHeight, gap, overscan, shouldVirtualize]);
+  }, [count, effectiveRowHeight, gap, overscan, shouldVirtualize]);
 
   useEffect(() => {
     if (!shouldVirtualize) {
@@ -189,7 +236,7 @@ export function VirtualList<T>({
 
     const nextTop = scrollTopForIndex(index, {
       itemCount: count,
-      rowHeight,
+      rowHeight: effectiveRowHeight,
       gap,
       viewportHeight: scrollParent.clientHeight,
       currentScrollTop: scrollParent.scrollTop,
@@ -202,7 +249,7 @@ export function VirtualList<T>({
     recompute();
     // scrollToKey-driven only (not every items identity change while scrolling).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scrollToKey, count, rowHeight, gap]);
+  }, [scrollToKey, count, effectiveRowHeight, gap]);
 
   if (!shouldVirtualize) {
     // Same structure as a plain mapped list — no spacers, no extra wrappers.

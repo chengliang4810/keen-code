@@ -49,6 +49,6 @@ export function MessageCopyButton({
   copiedLabel?: string;
 }) {
   return (
-    <CopyButton value={text} label={copyLabel} copiedLabel={copiedLabel} timeout={1200} />
+    <CopyButton size="md" value={text} label={copyLabel} copiedLabel={copiedLabel} timeout={1200} />
   );
 }

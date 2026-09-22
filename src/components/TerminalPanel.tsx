@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ITheme } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import * as api from "@/lib/api";
 import { IconTerminal } from "@/components/icons";
@@ -27,6 +27,36 @@ type TerminalExited = { id: string };
 
 const DEFAULT_TERMINAL_FONT_FAMILY =
   'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace';
+
+/**
+ * xterm 需要已经解析的颜色字符串，不能直接消费 `var(...)`。
+ * 颜色仍由 tokens.css 按 data-theme 提供；这里仅读取当前计算值，避免
+ * 终端主题在 TSX 内形成第二套色板。
+ */
+function readTerminalTheme(): ITheme {
+  const style =
+    typeof document === "undefined"
+      ? null
+      : getComputedStyle(document.documentElement);
+  const read = (name: string, fallback: string): string | undefined => {
+    const value = style?.getPropertyValue(name).trim();
+    if (value) return value;
+    const fallbackValue = style?.getPropertyValue(fallback).trim();
+    return fallbackValue || undefined;
+  };
+
+  return {
+    background: read("--terminal-bg", "--bg-main"),
+    foreground: read("--terminal-fg", "--text-primary"),
+    cursor: read("--terminal-cursor", "--text-primary"),
+    cursorAccent: read("--terminal-cursor-accent", "--terminal-bg"),
+    selectionBackground: read("--terminal-selection", "--accent-muted"),
+    selectionInactiveBackground: read(
+      "--terminal-selection-inactive",
+      "--bg-hover",
+    ),
+  };
+}
 
 export function TerminalPanel({
   sessionKey,
@@ -75,6 +105,23 @@ export function TerminalPanel({
       .terminalResize(id, runtime.terminal.cols, runtime.terminal.rows)
       .catch(() => {});
   }, []);
+
+  const syncTerminalTheme = useCallback(() => {
+    const theme = readTerminalTheme();
+    for (const runtime of runtimes.current.values()) {
+      runtime.terminal.options.theme = theme;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof MutationObserver === "undefined") return;
+    const observer = new MutationObserver(syncTerminalTheme);
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
+    return () => observer.disconnect();
+  }, [syncTerminalTheme]);
 
   useEffect(() => {
     if (!api.isTauri()) return;
@@ -158,12 +205,7 @@ export function TerminalPanel({
       fontSize: 12,
       lineHeight: 1.2,
       scrollback: 5000,
-      theme: {
-        background: "#0d0d0d",
-        foreground: "#d8d8d8",
-        cursor: "#d8d8d8",
-        selectionBackground: "#4d69a855",
-      },
+      theme: readTerminalTheme(),
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);

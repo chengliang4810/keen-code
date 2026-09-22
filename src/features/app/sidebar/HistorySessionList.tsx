@@ -5,6 +5,7 @@ import { IconChevronDown } from "@/components/icons";
 import {
   SIDEBAR_SESSION_ROW_GAP,
   SIDEBAR_SESSION_ROW_HEIGHT,
+  SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
 } from "@/lib/virtualList";
 import { SidebarSessionRow } from "./SidebarSessionRow";
 import type {
@@ -44,7 +45,7 @@ export function HistorySessionList({
 
   return (
     <>
-      <div className="tree-l1" style={{ marginTop: 8 }}>
+      <div className="tree-l1 tree-l1--top-spaced">
         <Button
           type="button"
           variant="ghost"
@@ -65,6 +66,7 @@ export function HistorySessionList({
           items={orphanSessions}
           getKey={(item) => item.id}
           rowHeight={SIDEBAR_SESSION_ROW_HEIGHT}
+          touchRowHeight={SIDEBAR_TOUCH_SESSION_ROW_HEIGHT}
           gap={SIDEBAR_SESSION_ROW_GAP}
           scrollToKey={
             session.sessionId &&
@@ -86,6 +88,7 @@ export function HistorySessionList({
               project={null}
               activeSessionId={session.sessionId}
               working={busyIds.has(item.id)}
+              loading={session.sessionId === item.id && session.state === "connecting"}
               unreadResult={unreadTerminalResults.get(item.id) ?? null}
               needsInput={pendingAskUserSessionIds.has(item.id)}
               variant="history"

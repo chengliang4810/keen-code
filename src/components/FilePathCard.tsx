@@ -16,15 +16,21 @@ import {
   normalizePathToken,
 } from "@/lib/pathRefs";
 import {
+  IconActivity,
+  IconCode,
   IconCopy,
+  IconDatabase,
   IconExternalLink,
+  IconFileDiff,
   IconFileText,
   IconFolder,
   IconInfo,
+  IconTerminal,
 } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import { GlassModal } from "@/components/GlassModal";
 import { Tip } from "@/components/ui/tooltip";
+import { resolveCodeBlockDescriptor } from "@/components/lobe-chat/codeBlockMeta";
 
 export type FilePathCardKind = "file" | "url" | "dir";
 
@@ -51,6 +57,8 @@ export interface FilePathCardLabels {
 export interface FilePathCardProps {
   /** Absolute path, relative display path, or URL. */
   path: string;
+  /** Markdown link text; defaults to the path basename when omitted. */
+  displayName?: string;
   /**
    * Optional absolute path hint. Only used as a search token if it is absolute;
    * host still verifies existence (fake monorepo joins are discarded).
@@ -96,8 +104,34 @@ function urlFileName(raw: string): string | null {
   }
 }
 
+function FileTypeIcon({ name, size = 16 }: { name: string; size?: number }) {
+  const baseName = pathBasename(name).toLowerCase();
+  const language =
+    baseName === "dockerfile" || baseName === "makefile"
+      ? baseName
+      : pathExt(baseName) || "text";
+  const iconKind = resolveCodeBlockDescriptor(language).iconKind;
+
+  switch (iconKind) {
+    case "data":
+      return <IconDatabase size={size} />;
+    case "diff":
+      return <IconFileDiff size={size} />;
+    case "diagram":
+      return <IconActivity size={size} />;
+    case "shell":
+      return <IconTerminal size={size} />;
+    case "code":
+      return <IconCode size={size} />;
+    case "document":
+    default:
+      return <IconFileText size={size} />;
+  }
+}
+
 export function FilePathCard({
   path,
+  displayName,
   absolutePath,
   kind = "file",
   projectPath,
@@ -112,7 +146,8 @@ export function FilePathCard({
   const [resolvedAbs, setResolvedAbs] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const isUrl = kind === "url" || isHttpUrl(path);
-  const name = isUrl ? urlFileName(path) || path : pathBasename(path);
+  const name =
+    displayName?.trim() || (isUrl ? urlFileName(path) || path : pathBasename(path));
 
   /**
    * Resolve a real on-disk absolute path.
@@ -277,7 +312,7 @@ export function FilePathCard({
     {
       id: "open-panel",
       label: labels.openInPanel || labels.open,
-      icon: <IconFileText size={16} />,
+      icon: <FileTypeIcon name={path} size={16} />,
       onClick: () => {
         void openInPanel();
       },
@@ -346,7 +381,7 @@ export function FilePathCard({
               ) : isUrl ? (
                 <IconExternalLink size={16} />
               ) : (
-                <IconFileText size={16} />
+                <FileTypeIcon name={path} size={16} />
               )}
             </span>
             <span className="file-path-link__meta">

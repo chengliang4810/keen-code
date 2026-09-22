@@ -5,7 +5,7 @@ import { pathBasename } from "@/lib/filePath";
 import { projectPathPreview } from "@/features/app/models";
 import type { AddProjectIntent } from "@/hooks/useProjectDialog";
 import { Button } from "@/components/ui/button";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { Spinner } from "@appica/ui-react/spinner";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";

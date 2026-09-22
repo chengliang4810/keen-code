@@ -1,8 +1,8 @@
-import { Input } from "@appica/ui-react/input";
-import { Textarea } from "@appica/ui-react/textarea";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@appica/ui-react/tabs";
-import { Card } from "@appica/ui-react/card";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Card } from "@/components/ui/card";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 扩展：管理 Skills、MCP 与 KeenCode 本地插件。 */
 
@@ -61,7 +61,7 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-} from "@appica/ui-react/select";
+} from "@/components/ui/select";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { Switch } from "@/components/ui/switch";
 import { Badge, type BadgeProps } from "@appica/ui-react/badge";
@@ -223,20 +223,20 @@ export function McpRuntimeDetails({
       className="ext-item__meta ext-mcp-runtime"
       data-mcp-status={server.runtimeStatus}
     >
-      <Badge size="xs" variant={extensionBadgeVariant(tone)}>
+      <Badge size="md" variant={extensionBadgeVariant(tone)}>
         {mcpRuntimeStatusLabel(tr, server.runtimeStatus)}
       </Badge>
-      <Badge size="xs" variant="soft">
+      <Badge size="md" variant="soft">
         {tr("ext.mcp.transport", { transport: server.transport })}
       </Badge>
       <span>{tr("ext.mcp.toolsCount", { count: server.toolsCount })}</span>
       {server.oauthStatus === "authorized" ? (
-        <Badge size="xs" variant="success">
+      <Badge size="md" variant="success">
           {tr("ext.mcp.oauth.authorized")}
         </Badge>
       ) : null}
       {mcpNeedsAuthorization(server.oauthStatus) ? (
-        <Badge size="xs" variant="error">
+      <Badge size="md" variant="error">
           {tr("ext.mcp.oauth.needsAuthorization")}
         </Badge>
       ) : null}
@@ -1114,13 +1114,13 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{p.name}</strong>
-                    <Badge size="xs" variant={extensionBadgeVariant(tone)}>
+                    <Badge size="md" variant={extensionBadgeVariant(tone)}>
                       {p.enabled
                         ? tr("ext.plugins.status.enabled")
                         : tr("ext.plugins.status.disabled")}
                     </Badge>
                     {p.version ? (
-                      <Badge size="xs" variant="soft">
+                      <Badge size="md" variant="soft">
                         v{String(p.version).replace(/^v/i, "")}
                       </Badge>
                     ) : null}
@@ -1238,11 +1238,11 @@ export function ExtensionsPanel({
                 >
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
-                    <Badge size="xs" variant={extensionBadgeVariant(tone)}>
+                      <Badge size="md" variant={extensionBadgeVariant(tone)}>
                       {s.source}
                     </Badge>
                     {s.userInvocable ? (
-                      <Badge size="xs" variant="secondary">
+                      <Badge size="md" variant="secondary">
                         {tr("ext.skills.invocable")}
                       </Badge>
                     ) : null}
@@ -1282,7 +1282,7 @@ export function ExtensionsPanel({
         ) : null}
         {mcpRuntime ? (
           <Badge
-            size="xs"
+            size="md"
             variant={extensionBadgeVariant(mcpRuntimePhaseTone(mcpRuntime.initPhase))}
           >
             {mcpRuntimePhaseLabel(tr, mcpRuntime.initPhase)}
@@ -1344,7 +1344,7 @@ export function ExtensionsPanel({
                   <div className="ext-item__head">
                     <strong className="ext-item__name">{s.name}</strong>
                     {s.source === "plugin" ? (
-                      <Badge size="xs" variant="soft">
+                      <Badge size="md" variant="soft">
                         {tr("agents.source.plugin")}
                       </Badge>
                     ) : null}
@@ -1709,6 +1709,7 @@ export function ExtensionsPanel({
             <Field>
               <FieldLabel>{tr("ext.mcp.jsonLabel")}</FieldLabel>
               <Textarea
+                inputSize="md"
                 className="app-dialog__input ext-env-textarea"
                 value={addJson}
                 onChange={(e) => setAddJson(e.target.value)}
@@ -1761,6 +1762,7 @@ export function ExtensionsPanel({
               <Field>
                 <FieldLabel>{tr("ext.mcp.env")}</FieldLabel>
                 <Textarea
+                  inputSize="md"
                   className="app-dialog__input ext-env-textarea"
                   value={addEnv}
                   onChange={(e) => setAddEnv(e.target.value)}
@@ -1873,7 +1875,7 @@ export function ExtensionsPanel({
                   {doctorReport.sources.map((src) => (
                     <li key={src.path}>
                       <code>{src.path}</code>
-                      <Badge size="xs" variant="soft">
+                      <Badge size="md" variant="soft">
                         {src.status} · {src.serverCount}
                       </Badge>
                     </li>
@@ -1897,14 +1899,14 @@ export function ExtensionsPanel({
                     <div className="ext-item__head">
                       <strong className="ext-item__name">{s.name}</strong>
                       <Badge
-                        size="xs"
+                        size="md"
                         variant={s.healthy ? "success" : "error"}
                       >
                         {s.healthy
                           ? tr("ext.mcp.doctorHealthy")
                           : tr("ext.mcp.doctorUnhealthy")}
                       </Badge>
-                      <Badge size="xs" variant="soft">
+                      <Badge size="md" variant="soft">
                         {s.transport}
                       </Badge>
                     </div>

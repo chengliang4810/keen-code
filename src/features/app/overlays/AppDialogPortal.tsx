@@ -1,7 +1,7 @@
 import type { FormEvent, RefObject } from "react";
 import type { AppDialog } from "@/features/app/models";
 import { Button } from "@/components/ui/button";
-import { Input } from "@appica/ui-react/input";
+import { Input } from "@/components/ui/input";
 import { GlassModal } from "@/components/GlassModal";
 import type { SetState, Translator } from "./types";
 

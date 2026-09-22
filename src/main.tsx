@@ -2,6 +2,11 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { Toaster, ToastProvider } from "@appica/ui-react/toast";
 import App from "./App";
+import {
+  getInjectedHostTransportAdapter,
+  HostStartupShell,
+  resolveHostMode,
+} from "./components/host";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/tokens.css";
 import "./styles/skins.css";
@@ -23,15 +28,20 @@ import {
 } from "./lib/themeSkin";
 import {
   installFrontendErrorHandlers,
+  reportFrontendCrash,
   reportFrontendError,
 } from "./lib/frontendDiagnostics";
 import { applyUiFontSizeToDocument, loadUiFontSize } from "./lib/uiFontSize";
 import { startupFrontendReady } from "./lib/api";
 
+const bootHostMode = resolveHostMode();
+const bootHostTransport = getInjectedHostTransportAdapter();
+document.documentElement.dataset.hostMode = bootHostMode;
+
 // React 挂载前注册，确保启动阶段与首次渲染异常也会写入统一诊断日志。
 installFrontendErrorHandlers();
 
-// Apply persisted theme preference (default: system) before first React paint.
+// Apply persisted theme preference (default: Zai dark) before first React paint.
 const bootPref = loadThemePreference(localStorage);
 const bootTheme = resolveTheme(bootPref, getSystemTheme());
 applyThemeToDocument(bootTheme);
@@ -45,7 +55,7 @@ void applyNativeWindowTheme(bootPref === "system" ? null : bootTheme);
 createRoot(document.getElementById("root")!, {
   /** 记录逃逸出 React 树并可能导致空白页的异常。 */
   onUncaughtError: (error, errorInfo) => {
-    reportFrontendError(
+    reportFrontendCrash(
       "frontend.react_uncaught",
       `${error instanceof Error ? error.stack || error.message : String(error)}\ncomponentStack=${errorInfo.componentStack ?? ""}`,
     );
@@ -68,7 +78,9 @@ createRoot(document.getElementById("root")!, {
   <StrictMode>
     <ToastProvider timeout={2000}>
       <ErrorBoundary scope="应用">
-        <App />
+        <HostStartupShell hostMode={bootHostMode} transport={bootHostTransport}>
+          <App />
+        </HostStartupShell>
       </ErrorBoundary>
       <Toaster position="top-center" timeout={2000} />
     </ToastProvider>
@@ -76,8 +88,10 @@ createRoot(document.getElementById("root")!, {
 );
 
 // 两帧后 DOM 已完成首次提交与一次实际绘制；失败不影响应用启动。
-requestAnimationFrame(() => {
+if (bootHostMode === "desktop") {
   requestAnimationFrame(() => {
-    void startupFrontendReady().catch(() => {});
+    requestAnimationFrame(() => {
+      void startupFrontendReady().catch(() => {});
+    });
   });
-});
+}

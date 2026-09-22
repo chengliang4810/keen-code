@@ -1,6 +1,6 @@
-import { Textarea } from "@appica/ui-react/textarea";
+import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@appica/ui-react/tabs";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toolbar, ToolbarButton } from "@appica/ui-react/toolbar";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { projectSubagentConversation } from "@/lib/sessionProjection";
@@ -77,7 +77,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "@appica/ui-react/dropdown-menu";
+} from "@/components/ui/dropdown-menu";
 import type { MessageKey } from "@/i18n";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import {
@@ -1876,6 +1876,7 @@ export function ResourceViewer({
           ) : null}
           {showEditor ? (
             <Textarea
+              inputSize="md"
               className="rp-editor__textarea"
               value={draftText}
               spellCheck={preview.kind === "text"}

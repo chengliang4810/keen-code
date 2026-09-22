@@ -26,7 +26,7 @@ describe("AppUpdateSection", () => {
       "utf8",
     );
 
-    expect(source).toContain('from "@appica/ui-react/select"');
+    expect(source).toContain('from "@/components/ui/select"');
     expect(source).not.toMatch(/<select(?:\s|>)/);
     expect(source.match(/<SelectGroup>/g)?.length).toBe(1);
     expect(source.match(/<SelectItem\b/g)?.length).toBe(3);
