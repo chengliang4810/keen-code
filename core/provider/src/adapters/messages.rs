@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use keencode_model::{
     ContentBlock, ImageSource, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
@@ -32,6 +32,9 @@ pub(crate) struct MessagesAdapter {
     stop_reason: Option<StopReason>,
     /// 按远端内容块序号记录尚未结束的内容，防止缺失或重复 stop 被静默接受。
     active_blocks: BTreeMap<u32, ActiveContentBlock>,
+    /// 收到未知类型（如 server_tool_use、web_search_tool_result）的内容块序号：
+    /// 按 rig 语义跳过其开始/增量/结束，而不是让整条流失败。
+    ignored_blocks: BTreeSet<u32>,
     tool_calls: BTreeMap<u32, String>,
     thinking_signatures: BTreeMap<u32, String>,
     /// 本次 SSE 响应是否打开过普通文本内容块。
@@ -51,6 +54,7 @@ impl MessagesAdapter {
             ended: false,
             stop_reason: None,
             active_blocks: BTreeMap::new(),
+            ignored_blocks: BTreeSet::new(),
             tool_calls: BTreeMap::new(),
             thinking_signatures: BTreeMap::new(),
             saw_text_block: false,
@@ -358,10 +362,12 @@ impl MessagesAdapter {
         if self.started {
             return Err(protocol_error("Messages SSE 重复 message_start"));
         }
-        let message = value
-            .get("message")
-            .and_then(Value::as_object)
-            .ok_or_else(|| protocol_error("message_start 缺少 message 对象"))?;
+        // Bedrock 等网关会发不带 message 体（或全空）的 message_start；
+        // 按 rig 语义视为空开始，仅标记流已启动，后续内容块正常拼接。
+        let Some(message) = value.get("message").and_then(Value::as_object) else {
+            self.started = true;
+            return Ok(());
+        };
         let metadata = ResponseMetadata {
             decode_duration_ms: None,
             response_id: optional_string(message.get("id")),
@@ -397,10 +403,11 @@ impl MessagesAdapter {
             "thinking" => ActiveContentBlock::Thinking,
             "redacted_thinking" => ActiveContentBlock::RedactedThinking,
             "tool_use" => ActiveContentBlock::ToolUse,
+            // server_tool_use、web_search_tool_result、document 等服务端块：
+            // 按 rig 语义跳过整个块，不让流失败。
             other => {
-                return Err(protocol_error(format!(
-                    "Messages 包含未知内容块类型 {other}"
-                )));
+                self.ignored_blocks.insert(index);
+                return Ok(());
             }
         };
         if self.active_blocks.insert(index, block_kind).is_some() {
@@ -493,6 +500,9 @@ impl MessagesAdapter {
             .and_then(Value::as_object)
             .ok_or_else(|| protocol_error("content_block_delta 缺少 delta"))?;
         let delta_type = required_str_from_map(delta, "type")?;
+        if self.ignored_blocks.contains(&index) {
+            return Ok(());
+        }
         let active_kind = self
             .active_blocks
             .get(&index)
@@ -545,10 +555,10 @@ impl MessagesAdapter {
                     delta: required_str_from_map(delta, "partial_json")?.to_owned(),
                 });
             }
+            // citations_delta 等未知增量：按 rig 语义跳过，不影响已识别通道。
             other => {
-                return Err(protocol_error(format!(
-                    "Messages 包含未知内容增量类型 {other}"
-                )));
+                let _ = other;
+                return Ok(());
             }
         }
         Ok(())
@@ -562,6 +572,9 @@ impl MessagesAdapter {
     ) -> Result<(), ModelError> {
         require_started(self.started)?;
         let index = required_u32(value, "index")?;
+        if self.ignored_blocks.remove(&index) {
+            return Ok(());
+        }
         let block_kind = self
             .active_blocks
             .remove(&index)
