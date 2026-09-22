@@ -237,9 +237,12 @@ impl ResponsesAdapter {
                 self.consume_response_terminal(event_type, &value, output)
             }
             "response.failed" | "error" => Err(classify_provider_error(&value)),
-            other => Err(protocol_error(format!(
-                "Responses SSE 包含未知事件 {other}"
-            ))),
+            // OpenAI 会新增事件类型、兼容网关可能注入自定义事件：按 rig 的
+            // WireEvent::Unknown 语义跳过，不让整条流失败。
+            other => {
+                let _ = other;
+                Ok(())
+            }
         }
     }
 
@@ -587,9 +590,16 @@ impl ResponsesAdapter {
         output: &mut VecDeque<ModelStreamEvent>,
     ) -> Result<(), ModelError> {
         require_started(self.started)?;
-        for pending in self.tools.values() {
+        // 只发 response.completed、省略逐项 output_item.done 的兼容网关：
+        // 已开始（参数至少流过一次）的函数调用在此统一补发结束事件，
+        // 不让整轮已完成的响应被丢弃。
+        for pending in self.tools.values_mut() {
             if !pending.ended {
-                return Err(protocol_error("Responses 终态前仍有未结束的函数调用"));
+                output.push_back(ModelStreamEvent::ToolCallEnd {
+                    index: pending.output_index,
+                    id: pending.call_id.clone(),
+                });
+                pending.ended = true;
             }
         }
         let response = value
