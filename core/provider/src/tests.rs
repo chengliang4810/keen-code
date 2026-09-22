@@ -148,7 +148,11 @@ async fn transport_error_移除请求url和敏感查询() {
     drop(listener);
     let secret_cursor = "synthetic-signed-cursor-private";
     let url = format!("http://{address}/v1/models?cursor={secret_cursor}");
-    let error = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("测试 HTTP 客户端应当创建");
+    let error = client
         .get(&url)
         .send()
         .await
@@ -6133,7 +6137,16 @@ fn retry_client(base_url: &str, retry: RetryConfig) -> crate::ProviderClient {
     )
     .expect("重试测试配置应当有效");
     config.retry = retry;
-    crate::ProviderClient::new(config).expect("重试测试客户端应当创建")
+    // 系统代理（macOS 网络设置）会把 127.0.0.1 的连接拒绝改写成代理 502，
+    // 破坏「发送阶段连接中断」的分类断言；测试客户端对系统代理封闭。
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(config.connect_timeout)
+        .read_timeout(config.read_timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("重试测试 HTTP 客户端应当创建");
+    crate::ProviderClient::new_with_http_client(config, http)
 }
 
 /// 创建 20ms 起步、80ms 封顶的三次尝试快速退避策略。

@@ -497,6 +497,19 @@ impl ProviderClient {
         })
     }
 
+    /// 重构既有构造逻辑；测试用它注入 `no_proxy` 客户端，保证对系统代理
+    /// （macOS 网络设置）封闭，不因开发者环境改变失败语义。
+    #[cfg(test)]
+    pub(crate) fn new_with_http_client(config: ProviderConfig, http: Client) -> Self {
+        Self {
+            config: Arc::new(config),
+            http,
+            observer: None,
+            #[cfg(feature = "io-trace")]
+            trace: None,
+        }
+    }
+
     /// 创建显式启用线级证据收集的客户端与独立收集器。
     #[cfg(feature = "io-trace")]
     pub fn new_traced(
