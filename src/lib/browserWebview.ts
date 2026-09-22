@@ -7,6 +7,7 @@
 
 import * as api from "@/lib/api";
 import type { BrowserRect } from "@/lib/api";
+import { syncNativeThemeSurfaces } from "./nativeTheme";
 
 /** 每个标签的命令尾链；链上命令保证按调用顺序执行。 */
 const queues = new Map<string, Promise<unknown>>();
@@ -28,7 +29,11 @@ export function enqueueBrowserOp<T>(tabId: string, op: () => Promise<T>): Promis
 }
 
 export function openBrowserWebview(tabId: string, url: string, rect: BrowserRect) {
-  return enqueueBrowserOp(tabId, () => api.browserOpen(tabId, url, rect));
+  return enqueueBrowserOp(tabId, async () => {
+    await api.browserOpen(tabId, url, rect);
+    // 子 WebView 创建后才出现在 Tauri 的列表中；在显示前消费当前主题底色。
+    await syncNativeThemeSurfaces();
+  });
 }
 
 export function setBrowserBounds(tabId: string, rect: BrowserRect) {

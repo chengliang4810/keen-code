@@ -1,0 +1,457 @@
+.host-startup-shell {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--space-5);
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+.host-startup-shell--remote {
+  display: block;
+  height: var(--visual-viewport-height, 100dvh);
+  min-height: var(--visual-viewport-height, 100dvh);
+  max-height: var(--visual-viewport-height, 100dvh);
+  padding: 0;
+  overflow: hidden;
+}
+
+.host-startup-shell--web {
+  display: block;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.host-startup-shell--login {
+  min-height: var(--visual-viewport-height, 100dvh);
+}
+
+.host-panel {
+  width: min(100%, 480px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-pop);
+}
+
+.host-panel--unsupported {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.host-panel--unsupported p {
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.host-panel__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.host-panel__icon {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-md);
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.web-login-panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.web-login-panel h2,
+.web-login-panel p {
+  margin: 0;
+}
+
+.web-login-panel h2 {
+  font-size: var(--text-lg);
+  line-height: 1.35;
+}
+
+.web-login-panel__form {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.web-login-panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.mobile-remote-shell {
+  position: relative;
+  display: grid;
+  width: 100%;
+  --mobile-remote-header-height: calc(52px + env(safe-area-inset-top, 0px));
+  grid-template-rows: auto minmax(0, 1fr);
+  height: var(--visual-viewport-height, 100dvh);
+  min-height: var(--visual-viewport-height, 100dvh);
+  max-height: var(--visual-viewport-height, 100dvh);
+  overflow: hidden;
+  background: var(--bg-app);
+  color: var(--text-primary);
+}
+
+.mobile-remote-shell__header {
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--mobile-remote-header-height);
+  padding-block: var(--space-2);
+  padding-top: calc(var(--space-2) + env(safe-area-inset-top, 0px));
+  padding-right: max(var(--space-3), calc(var(--space-3) + env(safe-area-inset-right, 0px)));
+  padding-bottom: var(--space-2);
+  padding-left: max(var(--space-3), calc(var(--space-3) + env(safe-area-inset-left, 0px)));
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.mobile-remote-shell__heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1 1 auto;
+}
+
+.mobile-remote-shell__heading strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-remote-shell__header-spacer {
+  width: 32px;
+  flex: 0 0 32px;
+}
+
+.mobile-remote-shell__sidebar {
+  position: absolute;
+  inset: var(--mobile-remote-header-height) auto 0 0;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  width: min(84vw, 320px);
+  padding: var(--space-4);
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-sidebar-solid);
+  transform: translateX(-105%);
+  transition: transform var(--motion-fast) var(--ease-out);
+}
+
+.mobile-remote-shell--sessions-open .mobile-remote-shell__sidebar {
+  transform: translateX(0);
+}
+
+.mobile-remote-shell__session-backdrop {
+  position: absolute;
+  inset: var(--mobile-remote-header-height) 0 0;
+  z-index: 2;
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--bg-overlay);
+  cursor: default;
+}
+
+.mobile-remote-shell__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.mobile-remote-shell__session-list {
+  display: grid;
+  gap: var(--space-1);
+  overflow-y: auto;
+  padding-top: var(--space-3);
+}
+
+.mobile-remote-shell__session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: 52px;
+  text-align: left;
+}
+
+.mobile-remote-shell__session-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mobile-remote-shell__session-copy strong,
+.mobile-remote-shell__session-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-remote-shell__session-copy span {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.mobile-remote-shell__conversation {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  padding-right: max(var(--space-4), calc(var(--space-4) + env(safe-area-inset-right, 0px)));
+  padding-bottom: max(var(--space-4), env(safe-area-inset-bottom, 0px));
+  padding-left: max(var(--space-4), calc(var(--space-4) + env(safe-area-inset-left, 0px)));
+}
+
+.mobile-remote-shell__messages-wrap {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mobile-remote-shell__messages {
+  min-height: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+}
+
+.mobile-remote-shell__messages-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-height: 100%;
+  padding: var(--space-2) 0;
+}
+
+.mobile-remote-shell__back-to-bottom {
+  position: absolute;
+  right: 50%;
+  bottom: var(--space-3);
+  z-index: 1;
+  transform: translateX(50%);
+  box-shadow: var(--shadow-pop);
+  white-space: nowrap;
+}
+
+.mobile-remote-shell__empty,
+.mobile-remote-shell__restoring {
+  display: grid;
+  place-items: center;
+  min-height: 120px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.mobile-remote-message {
+  max-width: min(86ch, 100%);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.mobile-remote-message p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mobile-remote-activities {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.mobile-remote-activity {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+
+.mobile-remote-activity__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.mobile-remote-activity pre {
+  max-height: 18rem;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mobile-remote-message--user {
+  align-self: flex-end;
+  background: var(--bg-user-bubble);
+}
+
+.mobile-remote-shell__composer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  padding-right: max(0px, env(safe-area-inset-right, 0px));
+  padding-bottom: max(var(--space-2), env(safe-area-inset-bottom, 0px));
+  padding-left: max(0px, env(safe-area-inset-left, 0px));
+  border-top: 1px solid var(--border-subtle);
+}
+
+.mobile-remote-shell__composer > textarea {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mobile-remote-shell__composer-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.mobile-remote-file-input {
+  display: none;
+}
+
+.mobile-remote-attachments {
+  display: grid;
+  flex: 1 0 100%;
+  width: 100%;
+  gap: var(--space-2);
+}
+
+.mobile-remote-attachment {
+  display: grid;
+  grid-template-columns: 2.5rem minmax(0, 1fr) 2rem;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+}
+
+.mobile-remote-attachment img {
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: var(--radius-xs);
+  object-fit: cover;
+}
+
+.mobile-remote-attachment span {
+  min-width: 0;
+}
+
+.mobile-remote-attachment strong,
+.mobile-remote-attachment small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mobile-remote-attachment small {
+  color: var(--text-secondary);
+}
+
+@media (min-width: 720px) {
+  .mobile-remote-shell {
+    grid-template-columns: 280px minmax(0, 1fr);
+    grid-template-rows: 1fr;
+  }
+
+  .mobile-remote-shell__header {
+    display: none;
+  }
+
+  .mobile-remote-shell__sidebar {
+    position: static;
+    width: auto;
+    transform: none;
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .mobile-remote-shell__conversation {
+    grid-column: 2;
+    grid-row: 1;
+    padding: var(--space-5);
+  }
+
+  .mobile-remote-shell__sessions-toggle {
+    display: none;
+  }
+
+  .mobile-remote-shell__session-backdrop {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .host-startup-shell {
+    padding: var(--space-3);
+  }
+
+  .host-startup-shell--remote {
+    padding: 0;
+  }
+
+  .web-login-panel {
+    padding: var(--space-4);
+  }
+
+  .mobile-remote-shell__conversation {
+    padding-top: var(--space-3);
+    padding-right: max(var(--space-3), calc(var(--space-3) + env(safe-area-inset-right, 0px)));
+    padding-bottom: max(var(--space-3), env(safe-area-inset-bottom, 0px));
+    padding-left: max(var(--space-3), calc(var(--space-3) + env(safe-area-inset-left, 0px)));
+  }
+
+  .mobile-remote-shell__composer {
+    flex-wrap: wrap;
+  }
+
+  .mobile-remote-shell__composer-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .mobile-remote-shell :where([data-slot="button"]) {
+    min-width: var(--ui-touch-target-touch);
+    min-height: var(--ui-touch-target-touch);
+  }
+}

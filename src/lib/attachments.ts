@@ -9,9 +9,37 @@
 import { isAbsoluteFsPath, pathBasename } from "./filePath";
 
 export interface Attachment {
+  /** Desktop 是 local；Web 上传后是 remote，禁止按 path 发送给 Agent。 */
+  source?: "local" | "remote";
   path: string;
   name: string;
   isDir: boolean;
+  /** Web Host 为当前认证会话签发的资源信息。 */
+  resourceId?: string;
+  contentType?: string;
+  size?: number;
+  previewUrl?: string;
+  /** Renderer-local state while a pasted file is materialized by Tauri. */
+  uploadStatus?: "ready" | "uploading" | "failed";
+  uploadProgress?: number;
+  uploadError?: string;
+}
+
+/** 判断附件是否由 Web Host 资源组成，而不是本机文件路径。 */
+export function isRemoteAttachment(attachment: Attachment): boolean {
+  return attachment.source === "remote" || attachment.resourceId !== undefined;
+}
+
+/** 远程资源必须有 Host 签发的 ID；pending/failed 不能进入发送层。 */
+export function isAttachmentReady(attachment: Attachment): boolean {
+  if (attachment.uploadStatus === "uploading" || attachment.uploadStatus === "failed") {
+    return false;
+  }
+  return !isRemoteAttachment(attachment) || Boolean(attachment.resourceId);
+}
+
+export function hasUnreadyAttachments(attachments: readonly Attachment[]): boolean {
+  return attachments.some((attachment) => !isAttachmentReady(attachment));
 }
 
 /** Merge new items by absolute path (dedupe). */
@@ -19,10 +47,14 @@ export function mergeAttachments(
   prev: Attachment[],
   next: Attachment[],
 ): Attachment[] {
-  const map = new Map(prev.map((a) => [a.path, a]));
+  const keyOf = (attachment: Attachment) =>
+    isRemoteAttachment(attachment) && attachment.resourceId
+      ? `remote:${attachment.resourceId}`
+      : `local:${attachment.path}`;
+  const map = new Map(prev.map((a) => [keyOf(a), a]));
   for (const a of next) {
     if (!a.path) continue;
-    map.set(a.path, a);
+    map.set(keyOf(a), a);
   }
   return Array.from(map.values());
 }
@@ -36,8 +68,13 @@ export function buildAgentPrompt(
   attachments: Attachment[],
 ): string {
   const body = escapeUserAttachmentDirectives(userText.trim());
-  if (!attachments.length) return body;
-  const refs = attachments
+  // 远程附件必须通过 Session Prompt 的 resource_link block 发送，不能把
+  // Web Host 资源 URI 或 pending 标识伪装成本机 `@path` 指令。
+  const readyAttachments = attachments.filter(
+    (attachment) => isAttachmentReady(attachment) && !isRemoteAttachment(attachment),
+  );
+  if (!readyAttachments.length) return body;
+  const refs = readyAttachments
     .map((a) => (isImagePath(a.path) ? `@image ${a.path}` : `@${a.path}`))
     .join("\n");
   return body ? `${body}\n\n${refs}` : refs;
@@ -167,6 +204,16 @@ export function isVideoPath(path: string): boolean {
 
 export function isMediaPath(path: string): boolean {
   return isImagePath(path) || isVideoPath(path);
+}
+
+/** 同时识别 Web 上传文件的 MIME，避免远程图片因 URI 没有扩展名而失去预览。 */
+export function isImageAttachment(attachment: Attachment): boolean {
+  return (
+    !attachment.isDir &&
+    (isImagePath(attachment.path) ||
+      isImagePath(attachment.name) ||
+      attachment.contentType?.toLowerCase().startsWith("image/") === true)
+  );
 }
 
 /**

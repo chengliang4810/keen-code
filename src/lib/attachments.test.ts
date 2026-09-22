@@ -6,6 +6,8 @@ import {
   extractSessionRelativeMediaRefs,
   filterAttachmentsNotInlined,
   isImagePath,
+  hasUnreadyAttachments,
+  isAttachmentReady,
   isMediaPath,
   isVideoPath,
   joinSessionMediaPath,
@@ -41,6 +43,40 @@ describe("attachments", () => {
       "hi\n\n@image /tmp/a.png\n@/tmp/a.txt\n@/tmp/proj",
     );
     expect(buildAgentPrompt("", [file])).toBe("@/tmp/a.txt");
+    expect(
+      buildAgentPrompt("hi", [
+        file,
+        { ...dir, uploadStatus: "uploading" },
+        { ...file, path: "/tmp/failed.txt", uploadStatus: "failed" },
+      ]),
+    ).toBe("hi\n\n@/tmp/a.txt");
+  });
+
+  it("Desktop 文本构造不会把 Web resource 当成本机路径", () => {
+    const remote: Attachment = {
+      source: "remote",
+      path: "remote-attachment://resource_1",
+      name: "photo.png",
+      isDir: false,
+      resourceId: "resource_1",
+      contentType: "image/png",
+      size: 4,
+      previewUrl: "/api/resources/resource_1",
+    };
+    expect(buildAgentPrompt("分析", [remote])).toBe("分析");
+  });
+
+  it("marks uploading and failed attachments as unready", () => {
+    expect(isAttachmentReady(file)).toBe(true);
+    expect(isAttachmentReady({ ...file, uploadStatus: "uploading" })).toBe(false);
+    expect(isAttachmentReady({ ...file, uploadStatus: "failed" })).toBe(false);
+    expect(
+      hasUnreadyAttachments([
+        file,
+        { ...dir, uploadStatus: "failed", uploadError: "save failed" },
+      ]),
+    ).toBe(true);
+    expect(hasUnreadyAttachments([file, dir])).toBe(false);
   });
 
   it("escapes attachment-shaped user text without changing its round trip", () => {
