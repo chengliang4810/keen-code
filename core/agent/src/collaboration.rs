@@ -1703,6 +1703,23 @@ struct GlobalTurnLimiterState {
     waiting: HashSet<u64>,
 }
 
+/// `dispatching` 标志的 RAII 复位守卫：Drop 在 panic 展开时也会复位，
+/// 防止一次深层 panic 永久饿死全局子 Agent 派发。
+struct GlobalDispatchingGuard {
+    limiter: Arc<CollaborationGlobalTurnLimiter>,
+}
+
+impl Drop for GlobalDispatchingGuard {
+    fn drop(&mut self) {
+        match self.limiter.state.lock() {
+            Ok(mut state) => state.dispatching = false,
+            Err(poisoned) => {
+                poisoned.into_inner().dispatching = false;
+            }
+        }
+    }
+}
+
 impl CollaborationGlobalTurnLimiter {
     /// 创建一个不允许零槽位的共享子 Agent 容量限制器。
     pub fn new(global_turn_limit: usize) -> Result<Self, CollaborationError> {
@@ -2804,6 +2821,12 @@ impl CollaborationGlobalTurnLimiter {
             }
             state.dispatching = true;
         }
+        // drive_inner 链路一旦 panic 展开，dispatching 若不复位会让全局子
+        // Agent 调度永久饿死（Turn 停留 WaitingCapacity）；RAII 守卫保证
+        // 展开/提前返回路径同样复位。手工复位路径保留，语义不变。
+        let _dispatching_guard = GlobalDispatchingGuard {
+            limiter: Arc::clone(self),
+        };
 
         let mut combined = GlobalDispatchReport::default();
         loop {
