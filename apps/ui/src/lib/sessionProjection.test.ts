@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { beginLocalSessionTurn, emptySession } from "./acp/store";
+import type { AcpHistoryMessage } from "./acp/store";
 import type { AcpSubagentInfo } from "./acp/store";
 import {
   mergeAcpLiveMessage,
