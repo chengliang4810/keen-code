@@ -633,7 +633,9 @@ async fn reader_loop(read: crate::transport::BoxedRead, shared: Arc<SharedClient
             };
             let sender = shared.pending.lock().await.remove(&id);
             let Some(sender) = sender else {
-                break ClientError::Protocol("Host 响应包含未知 request id".to_owned());
+                // 请求超时会把 pending 条目移除，Host 的迟到响应随后到达属于
+                // 正常竞态：丢弃这一帧即可，不能拆掉整条连接连坐其余在途请求。
+                continue;
             };
             if let Some(result) = object.get("result") {
                 let _ = sender.send(Ok(result.clone()));
