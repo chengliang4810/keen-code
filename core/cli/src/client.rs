@@ -897,7 +897,9 @@ mod tests {
             });
         let connection = IpcConnection::connect(&record).await.unwrap();
         let mut config = HostClientConfig::new(directory.path());
-        config.request_timeout = Duration::from_millis(1);
+        // 1ms 只会令握手在并行负载下随机超时；被测语义是 dispatch 本身无超时，
+        // 与握手预算无关，给 100ms 保证握手稳定。
+        config.request_timeout = Duration::from_millis(100);
         let client = HostClient::from_connection(connection, &config, &record)
             .await
             .unwrap();
