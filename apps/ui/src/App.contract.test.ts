@@ -486,7 +486,7 @@ describe("App 启动工作台契约", () => {
     expect(toggleSource).toContain("const rows = await sessionsList()");
     expect(toggleSource).not.toContain("sessionsList(checked.path)");
     expect(toggleSource).toContain(
-      "projectSidebar(rows, loadSessionPreferences(), [checked])",
+      "projectSidebar(rows, loadSessionPreferencesSafe(), [checked])",
     );
   });
 });
