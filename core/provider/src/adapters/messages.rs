@@ -147,7 +147,7 @@ impl MessagesAdapter {
         body.insert(
             // Anthropic 必填该字段。未显式配置时取 8192：覆盖全部 Claude 3.5+
             // 模型的输出上限，且把与 Chat/Responses（省略字段、按端点默认）的
-            // 截断差距减半；参考 peri/claude-code 的 32000 默认对旧模型会 400。
+            // 截断差距减半；同类宿主的 32000 默认对旧模型会 400，故不采用。
             "max_tokens".to_owned(),
             Value::from(request.max_output_tokens.unwrap_or(8192)),
         );
