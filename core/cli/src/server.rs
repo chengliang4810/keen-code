@@ -558,15 +558,37 @@ async fn handle_connection(
             }
             event = async {
                 match events.as_mut() {
-                    Some(receiver) => receiver.recv().await.ok(),
-                    None => std::future::pending::<Option<Value>>().await,
+                    // Lagged 不再静默禁用订阅：消费慢的客户端一旦落后超过
+                    // 广播容量，此前所有后续事件（含终态）会被永久丢弃，
+                    // attach 循环只等终态将无限挂起。
+                    Some(receiver) => Some(receiver.recv().await),
+                    None => std::future::pending::<Option<Result<Value, broadcast::error::RecvError>>>().await,
                 }
             }, if events.is_some() => {
-                if let Some(event) = event {
-                    let frame = NdjsonFrame::new(event)?;
-                    writer.lock().await.send(&frame).await?;
-                } else {
-                    events = None;
+                match event {
+                    Some(Ok(event)) => {
+                        let frame = NdjsonFrame::new(event)?;
+                        writer.lock().await.send(&frame).await?;
+                    }
+                    Some(Err(broadcast::error::RecvError::Lagged(missed))) => {
+                        // 与 headless 的 keencode/runtime/lagged 同款追赶提示：
+                        // 让客户端走 Snapshot/Journal 重新对账而不是挂等终态。
+                        let frame = NdjsonFrame::new(json!({
+                            "jsonrpc": "2.0",
+                            "method": "keencode/runtime/lagged",
+                            "params": {
+                                "missedEvents": missed,
+                                "catchUp": "reload_snapshot_and_replay_journal",
+                            }
+                        }))?;
+                        writer.lock().await.send(&frame).await?;
+                    }
+                    Some(Err(broadcast::error::RecvError::Closed)) => {
+                        events = None;
+                    }
+                    None => {
+                        events = None;
+                    }
                 }
             }
             Some(result) = requests.join_next(), if !requests.is_empty() => {
