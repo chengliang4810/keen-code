@@ -391,7 +391,7 @@ mod tests {
             .expect("macOS 登录 Shell 应能捕获 PATH");
         let joined = captured
             .iter()
-            .map(|path| path.to_string_lossy().to_owned())
+            .map(|path| path.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(":");
         assert!(joined.contains("/usr/bin"), "实际捕获：{joined}");
