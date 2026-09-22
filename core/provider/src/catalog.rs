@@ -7,6 +7,7 @@ use reqwest::{Method, Response, Url};
 use serde_json::Value;
 
 use crate::client::ProviderClient;
+use crate::config::ApiKey;
 use crate::http::{decode_error_response, transport_error};
 
 /// 模型目录中单个模型标识允许的最大 UTF-8 字节数。
@@ -162,11 +163,16 @@ pub(crate) async fn fetch_model_catalog(
             .await;
             return Err(catalog_failure(catalog, merged, order, error));
         }
-        let (value, page_bytes) =
-            match read_catalog_json(response, client.config().max_event_bytes).await {
-                Ok(page) => page,
-                Err(error) => return Err(catalog_failure(catalog, merged, order, error)),
-            };
+        let (value, page_bytes) = match read_catalog_json(
+            response,
+            client.config().max_event_bytes,
+            client.config().api_key(),
+        )
+        .await
+        {
+            Ok(page) => page,
+            Err(error) => return Err(catalog_failure(catalog, merged, order, error)),
+        };
         catalog.wire_bytes = match catalog.wire_bytes.checked_add(page_bytes) {
             Some(bytes) => bytes,
             None => {
@@ -404,15 +410,15 @@ fn replace_query_pair(url: &mut Url, name: &str, value: &str) {
 async fn read_catalog_json(
     mut response: Response,
     max_bytes: usize,
+    api_key: Option<&ApiKey>,
 ) -> Result<(Value, usize), ModelError> {
     let mut body = Vec::new();
+    // 分块读取失败走与请求发送一致的 transport_error：reqwest 错误 Display
+    // 会带完整 URL（含服务端可控的 query），必须经统一脱敏与截断出口。
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|error| ModelError::Transport {
-            message: error.to_string(),
-            retryable: true,
-        })?
+        .map_err(|error| transport_error(error, api_key))?
     {
         let next_len = body
             .len()
