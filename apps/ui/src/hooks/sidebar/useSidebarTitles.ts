@@ -8,7 +8,7 @@ import {
   sanitizeGeneratedSessionTitle,
 } from "@/lib/sessionTitle";
 import {
-  loadSessionPreferences,
+  loadSessionPreferencesSafe,
   updateSessionPreference,
 } from "@/lib/sessionPreferences";
 import {
@@ -64,7 +64,7 @@ export function useSidebarTitles({
 
   const applyMessagePrefixTitle = useCallback(
     (sessionId: string, userText: string) => {
-      const source = loadSessionPreferences()[sessionId]?.titleSource;
+      const source = loadSessionPreferencesSafe()[sessionId]?.titleSource;
       if (
         source === "manual" ||
         source === "automatic" ||
@@ -123,7 +123,7 @@ export function useSidebarTitles({
         expectedTitle;
       const canReplaceCurrentTitle = canGenerateAutomaticSessionTitle({
         currentTitle,
-        titleSource: loadSessionPreferences()[sessionId]?.titleSource,
+        titleSource: loadSessionPreferencesSafe()[sessionId]?.titleSource,
         localizedPlaceholders: [
           tr("session.new"),
           tr("session.placeholderTitle"),
@@ -143,7 +143,7 @@ export function useSidebarTitles({
         const title = sanitizeGeneratedSessionTitle(candidate);
         if (!title) return;
 
-        const latestPreferences = loadSessionPreferences()[sessionId];
+        const latestPreferences = loadSessionPreferencesSafe()[sessionId];
         const latestTitle =
           sessionTitleOverridesRef.current.get(sessionId) ??
           sessionsRef.current.find((row) => row.id === sessionId)?.title ??

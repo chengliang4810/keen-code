@@ -10,14 +10,14 @@ import { t, type Locale } from "@/i18n";
 import type { Project, SessionRow } from "@/features/app/models";
 import * as api from "@/lib/api";
 import {
-  loadSessionOrder,
-  loadSessionSortMode,
+  loadSessionOrderSafe,
+  loadSessionSortModeSafe,
   saveSessionSortMode,
   sortSessionRows,
   type SidebarSortMode,
 } from "@/lib/sidebarOrder";
 import {
-  loadSessionPreferences,
+  loadSessionPreferencesSafe,
 } from "@/lib/sessionPreferences";
 import {
   projectSidebar,
@@ -99,9 +99,9 @@ export function useSidebarLists({
   const [visibleSessionsByProject, setVisibleSessionsByProject] = useState<
     Record<string, number>
   >({});
-  const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrder());
+  const [sessionOrder, setSessionOrder] = useState(() => loadSessionOrderSafe());
   const [sessionSortMode, setSessionSortModeState] = useState(() =>
-    loadSessionSortMode(),
+    loadSessionSortModeSafe(),
   );
   const setSessionSortMode = useCallback((mode: SidebarSortMode) => {
     saveSessionSortMode(mode);
@@ -167,7 +167,7 @@ export function useSidebarLists({
       if (!mounted.current) return;
       const projection = projectSidebar(
         rows,
-        loadSessionPreferences(),
+        loadSessionPreferencesSafe(),
         persistedProjects,
       );
       setProjects(projection.projects);
@@ -238,7 +238,7 @@ export function useSidebarLists({
       // 不再次作为协议过滤条件，避免不同 Transport 的路径序列化产生授权分歧。
       const rows = await sessionsList();
       if (!isCurrentProject(project)) return;
-      const projection = projectSidebar(rows, loadSessionPreferences(), [checked]);
+      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), [checked]);
       setProjects((previous) => previous.map((item) => item.id === project.id ? checked : item));
       setSessions((previous) => [...previous.filter((item) => item.projectId !== project.id), ...projection.sessions]);
       loadedProjects.current.add(project.id);
@@ -257,7 +257,7 @@ export function useSidebarLists({
         const rows = await sessionsList();
         const projection = projectSidebar(
           rows,
-          loadSessionPreferences(),
+          loadSessionPreferencesSafe(),
           projectsFromSessions(rows),
         );
         setProjects(projection.projects);
@@ -271,7 +271,7 @@ export function useSidebarLists({
       }
       const targets = projects.filter((project) => project.id === projectId || loadedProjects.current.has(project.id) || expandedProjects[project.id]);
       const rows = (await Promise.all(targets.map((project) => sessionsList(project.path)))).flat();
-      const projection = projectSidebar(rows, loadSessionPreferences(), projects);
+      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), projects);
       const ids = new Set(targets.map((project) => project.id));
       ids.forEach((id) => loadedProjects.current.add(id));
       setSessions((previous) => [...previous.filter((item) => !item.projectId || !ids.has(item.projectId)), ...projection.sessions]);
@@ -285,7 +285,7 @@ export function useSidebarLists({
     try {
       const rows = await sessionsList();
       const sourceProjects = api.isTauri() ? projects : projectsFromSessions(rows);
-      const projection = projectSidebar(rows, loadSessionPreferences(), sourceProjects);
+      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), sourceProjects);
       setProjects(projection.projects);
       setSessions(projection.sessions);
       projection.projects.forEach((project) => loadedProjects.current.add(project.id));

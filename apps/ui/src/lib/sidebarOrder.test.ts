@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  DEFAULT_SESSION_SORT_MODE,
+  loadSessionOrderSafe,
+  loadSessionSortModeSafe,
   loadSessionSortMode,
   moveId,
   orderedByIds,
@@ -93,5 +96,33 @@ describe("sidebar sort mode", () => {
     expect(loadSessionSortMode(storage)).toBe("updatedAt");
     values.set("keencode.sidebar-session-sort-mode", JSON.stringify("bogus"));
     expect(() => loadSessionSortMode(storage)).toThrow();
+  });
+});
+
+describe("损坏数据的降级加载", () => {
+  it("loadSessionOrderSafe 删除坏 key 并回退为空", () => {
+    const storage = new Map<string, string>([
+      ["keencode.sidebar-session-order", "{ broken"],
+    ]);
+    const stub = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    } as unknown as Storage;
+    expect(loadSessionOrderSafe(stub)).toEqual([]);
+    expect(storage.has("keencode.sidebar-session-order")).toBe(false);
+  });
+
+  it("loadSessionSortModeSafe 删除坏 key 并回退默认值", () => {
+    const storage = new Map<string, string>([
+      ["keencode.sidebar-session-sort-mode", "42"],
+    ]);
+    const stub = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    } as unknown as Storage;
+    expect(loadSessionSortModeSafe(stub)).toBe(DEFAULT_SESSION_SORT_MODE);
+    expect(storage.has("keencode.sidebar-session-sort-mode")).toBe(false);
   });
 });

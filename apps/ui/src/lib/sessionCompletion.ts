@@ -46,3 +46,17 @@ export function saveUnreadTerminalResults(
   if (!storage) return;
   storage.setItem(UNREAD_TERMINAL_RESULTS_KEY, JSON.stringify([...results]));
 }
+
+/** 损坏数据降级包装：删除坏 key、返回空集合，绝不抛出。 */
+export function loadUnreadTerminalResultsSafe(storage: Storage | null): Map<string, UnreadTerminalResult> {
+  try {
+    return loadUnreadTerminalResults(storage);
+  } catch {
+    try {
+      storage?.removeItem(UNREAD_TERMINAL_RESULTS_KEY);
+    } catch {
+      // 忽略清理失败；空集合已兜底。
+    }
+    return new Map();
+  }
+}

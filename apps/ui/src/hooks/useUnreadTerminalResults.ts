@@ -7,7 +7,7 @@ import {
 } from "react";
 import * as api from "@/lib/api";
 import {
-  loadUnreadTerminalResults,
+  loadUnreadTerminalResultsSafe,
   type UnreadTerminalResult,
 } from "@/lib/sessionCompletion";
 
@@ -26,7 +26,7 @@ export function useUnreadTerminalResults(appBooting: boolean): {
 } {
   const [unreadTerminalResults, setUnreadTerminalResults] = useState<
     UnreadTerminalResults
-  >(() => loadUnreadTerminalResults(localStorage));
+  >(() => loadUnreadTerminalResultsSafe(localStorage));
   /** 最近一次成功推送的数量，避免重复写入原生角标。 */
   const appliedBadgeRef = useRef<number | null>(null);
 

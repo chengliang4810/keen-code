@@ -90,3 +90,30 @@ export function moveId(ids: readonly string[], source: string, target: string, a
   next.splice(targetIndex + (after ? 1 : 0), 0, source);
   return next;
 }
+
+/** 损坏数据降级包装：删除坏 key、返回默认值，绝不抛出（useState 初始化安全）。 */
+export function loadSessionOrderSafe(storage: Storage = localStorage): string[] {
+  try {
+    return loadSessionOrder(storage);
+  } catch {
+    try {
+      storage.removeItem(SESSION_ORDER_KEY);
+    } catch {
+      // 忽略清理失败；默认值已兜底。
+    }
+    return [];
+  }
+}
+
+export function loadSessionSortModeSafe(storage: Storage = localStorage): SidebarSortMode {
+  try {
+    return loadSessionSortMode(storage);
+  } catch {
+    try {
+      storage.removeItem(SESSION_SORT_MODE_KEY);
+    } catch {
+      // 忽略清理失败；默认值已兜底。
+    }
+    return DEFAULT_SESSION_SORT_MODE;
+  }
+}

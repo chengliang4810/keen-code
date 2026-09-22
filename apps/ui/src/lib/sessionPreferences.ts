@@ -211,3 +211,19 @@ export function autoArchiveExpiredSessions(
   }
   return preferences;
 }
+
+/** 损坏数据降级包装：删除坏 key、返回空偏好，绝不抛出。 */
+export function loadSessionPreferencesSafe(
+  storage: Storage | null = defaultStorage(),
+): SessionPreferences {
+  try {
+    return loadSessionPreferences(storage);
+  } catch {
+    try {
+      storage?.removeItem(SESSION_PREFERENCES_KEY);
+    } catch {
+      // 忽略清理失败；空偏好已兜底。
+    }
+    return {};
+  }
+}
