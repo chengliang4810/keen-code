@@ -4533,6 +4533,9 @@ pub struct AgentRuntime {
     shutdown_error: Mutex<Option<AgentRuntimeError>>,
     /// 防止并发 shutdown 在首次调用尚未记录失败结果时提前返回成功。
     shutdown_gate: AsyncMutex<()>,
+    /// 全局后台任务完成中继：把每个 Session 泵捕获的终态转发给上层
+    /// （AcpHost 通知泵），用于把任务完成注入主对话。
+    task_notification_tx: tokio::sync::broadcast::Sender<(String, BackgroundTaskCompletion)>,
 }
 
 #[derive(Default)]
@@ -4800,7 +4803,15 @@ impl AgentRuntime {
             closed: AtomicBool::new(false),
             shutdown_error: Mutex::new(None),
             shutdown_gate: AsyncMutex::new(()),
+            task_notification_tx: tokio::sync::broadcast::channel(256).0,
         })
+    }
+
+    /// 订阅全局后台任务完成中继；上层（AcpHost 通知泵）把终态注入主对话。
+    pub fn subscribe_task_completions(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<(String, BackgroundTaskCompletion)> {
+        self.task_notification_tx.subscribe()
     }
 
     /// 返回三种厂商协议共享的 Provider 注册表。
@@ -9135,11 +9146,16 @@ async fn run_background_task_completion_pump(
         if completion.status == BackgroundTaskStatus::Failed {
             tracing::error!(session_id, task_id = %completion.task_id, "background shell failed");
         }
-        let Some(event) = background_task_completion_event(&completion) else {
-            continue;
-        };
         let Some(runtime) = runtime.upgrade() else {
             break;
+        };
+        // 完成中继：上层 AcpHost 通知泵把终态格式化为 task-notification 并
+        // 注入主对话；无订阅者时静默丢弃。
+        let _ = runtime
+            .task_notification_tx
+            .send((session_id.clone(), completion.clone()));
+        let Some(event) = background_task_completion_event(&completion) else {
+            continue;
         };
         let delivery = match runtime.session_delivery(&session_id) {
             Ok(delivery) => delivery,
@@ -9744,7 +9760,7 @@ fn map_transient_event(event: &AgentStreamEvent) -> Vec<DeliveryDraft> {
 }
 
 /// 返回非零 UTC Unix 毫秒时间，系统时钟异常时使用一作为稳定下界。
-fn unix_time_ms() -> u64 {
+pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

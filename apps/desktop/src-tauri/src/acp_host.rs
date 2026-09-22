@@ -4,7 +4,7 @@
 //! Journal 归约与桌面实时投递仍由 [`AgentRuntime`] 和其下游组件负责。
 
 use crate::agent_runtime::{
-    AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome,
+    AgentRuntime, AgentRuntimeError, RootTurnOptions, RootTurnStartOutcome, unix_time_ms,
 };
 use crate::session_commands::{
     PLAN_MODE_CONTRACT_EN, ULTRA_MODE_CONTRACT_EN, authorize_stored_session_root,
@@ -26,6 +26,7 @@ use keencode_runtime::{
     OperationStatus, OperationTerminal, PromptAdmissionRequest, RuntimeError, RuntimeEventPayload,
     RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeSession, RuntimeSnapshot,
 };
+use keencode_tools::BackgroundTaskCompletion;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -278,6 +279,7 @@ pub(crate) fn install(
     let encoder =
         AcpResponseEncoder::with_limits(response_limits).map_err(|error| error.to_string())?;
     let prompt_queue = Arc::clone(host_runtime.prompt_queue());
+    let notification_runtime = Arc::clone(&runtime);
     let host = Arc::new_cyclic(|self_ref| AcpHost {
         app: app.clone(),
         runtime,
@@ -295,7 +297,114 @@ pub(crate) fn install(
     ACP_HOST
         .set(Arc::clone(&host) as Arc<dyn AcpHostBridge>)
         .map_err(|_| "ACP Host 已经初始化".to_owned())?;
+    // 后台任务完成 → 主对话通知泵（ZCode 语义）：任务终态格式化为
+    // task-notification 并以 detached Prompt 注入会话，忙时自动排队。
+    let notification_rx = notification_runtime.subscribe_task_completions();
+    tokio::spawn(run_task_notification_pump(
+        Arc::clone(&host),
+        notification_rx,
+    ));
     Ok(host)
+}
+
+/// 后台任务通知泉使用的固定连接标识；只用于 admission 归属，不代表真实连接。
+const TASK_NOTIFICATION_CONNECTION: &str = "keencode-task-notification-pump";
+
+/// 把一次后台任务终态格式化为 ZCode 风格的 task-notification 文本。
+/// 该文本会作为合成用户输入开启（或排队进入）主对话的一个模型轮。
+pub(crate) fn format_task_notification_text(completion: &BackgroundTaskCompletion) -> String {
+    let mut lines = Vec::with_capacity(8);
+    lines.push("<task-notification>".to_owned());
+    lines.push(format!("<task-id>{}</task-id>", completion.task_id));
+    lines.push(format!("<status>{}</status>", completion.status.as_str()));
+    lines.push(format!(
+        "<duration-ms>{}</duration-ms>",
+        completion.duration_ms
+    ));
+    if !completion.summary.is_empty() {
+        lines.push(format!("<summary>{}</summary>", completion.summary));
+    }
+    lines.push("</task-notification>".to_owned());
+    lines.push(
+        "后台任务已结束：可用 TaskOutput(task_id) 读取增量输出；如需继续处理请直接行动，不要轮询。"
+            .to_owned(),
+    );
+    lines.join("\n")
+}
+
+/// 后台任务完成通知泉：把全局完成中继里的终态注入主对话。
+///
+/// 幂等性：同一 (session, task) 只通知一次；admission 忙时会自动排队
+/// （next 优先级语义），EOF 即退出。
+async fn run_task_notification_pump(
+    host: Arc<AcpHost>,
+    rx: tokio::sync::broadcast::Receiver<(String, BackgroundTaskCompletion)>,
+) {
+    let mut receiver = rx;
+    let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let (session_id, completion) = match receiver.recv().await {
+            Ok(pair) => pair,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
+        let dedup_key = format!("{}:{}", session_id, completion.task_id);
+        if !notified.insert(dedup_key) {
+            continue;
+        }
+        let text = format_task_notification_text(&completion);
+        let unix_ms = unix_time_ms();
+        let operation_id = match OperationId::new(format!(
+            "task-notify-{}-{}-{unix_ms}",
+            session_id, completion.task_id
+        )) {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::error!(session_id, task_id = %completion.task_id, %error, "invalid notification operation id");
+                continue;
+            }
+        };
+        let turn_id = format!("turn-notify-{}-{unix_ms}", completion.task_id);
+        let connection_id = match keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION) {
+            Ok(id) => id,
+            Err(_) => break,
+        };
+        let project_root = match authorized_metadata(&host.runtime, &host.app, &session_id)
+            .map(|(_, root)| root)
+        {
+            Ok(root) => root,
+            Err(_) => {
+                tracing::error!(session_id, task_id = %completion.task_id, "cannot authorize notification session");
+                continue;
+            }
+        };
+        let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, false);
+        let request = PromptDriveRequest {
+            connection_id,
+            session_id: session_id.clone(),
+            operation_id,
+            turn_id,
+            text,
+            project_root,
+            payload_digest,
+            ultra_mode: false,
+            detached: true,
+        };
+        if let Err(failure) = host.admit_prompt(request).await {
+            tracing::error!(
+                session_id,
+                task_id = %completion.task_id,
+                ?failure,
+                "failed to admit task notification prompt"
+            );
+        } else {
+            tracing::info!(
+                session_id,
+                task_id = %completion.task_id,
+                "task notification prompt admitted"
+            );
+        }
+    }
 }
 
 /// 安装 Desktop Client 的远程 bridge；Remote 分支不能初始化本地 Runtime。
@@ -2551,5 +2660,46 @@ mod session_control_tests {
         drop(other);
         let _next = session_control_lock(&controls, "next").unwrap();
         assert_eq!(controls.lock().unwrap().len(), 1);
+    }
+}
+
+/// task-notification 文本契约：ZCode 风格 XML 块 + 明确的行动指引。
+#[cfg(test)]
+mod task_notification_tests {
+    use super::*;
+    use keencode_tools::BackgroundTaskStatus;
+
+    #[test]
+    fn formats_succeeded_completion_with_dedupable_fields() {
+        let completion = BackgroundTaskCompletion {
+            session_id: "session-1".to_owned(),
+            task_id: "task-7".to_owned(),
+            status: BackgroundTaskStatus::Succeeded,
+            duration_ms: 4_200,
+            summary: "npm test: 12 passed".to_owned(),
+        };
+        let text = format_task_notification_text(&completion);
+        assert!(text.contains("<task-notification>"));
+        assert!(text.contains("<task-id>task-7</task-id>"));
+        assert!(text.contains("<status>succeeded</status>"));
+        assert!(text.contains("<duration-ms>4200</duration-ms>"));
+        assert!(text.contains("<summary>npm test: 12 passed</summary>"));
+        assert!(text.contains("</task-notification>"));
+        assert!(text.contains("TaskOutput(task_id)"));
+    }
+
+    #[test]
+    fn failed_completion_states_the_status_without_synthetic_exit_code() {
+        let completion = BackgroundTaskCompletion {
+            session_id: "session-1".to_owned(),
+            task_id: "task-8".to_owned(),
+            status: BackgroundTaskStatus::Failed,
+            duration_ms: 900,
+            summary: String::new(),
+        };
+        let text = format_task_notification_text(&completion);
+        assert!(text.contains("<status>failed</status>"));
+        assert!(!text.contains("exit-code"), "不得伪造真实退出码：{text}");
+        assert!(!text.contains("<summary>"), "空摘要不得输出空标签：{text}");
     }
 }
