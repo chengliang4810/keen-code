@@ -343,7 +343,10 @@ fn read_catalog_bytes(path: &Path) -> Option<Vec<u8>> {
 /// 同分候选先偏好无冒号变体后缀的键，再按供应商与模型标识字典序取最小，保证
 /// 结果与遍历顺序无关。
 fn find_catalog_row<'a>(document: &'a Value, model_id: &str) -> Option<(&'a Value, String)> {
-    let mut best: Option<((u8, bool, &str, &str), &'a Value)> = None;
+    type CatalogOrdering<'a> = (u8, bool, &'a str, &'a str);
+    type CatalogCandidate<'a> = (CatalogOrdering<'a>, &'a Value);
+
+    let mut best: Option<CatalogCandidate<'a>> = None;
     for (provider_key, provider) in document.as_object()? {
         let Some(models) = provider.get("models").and_then(Value::as_object) else {
             continue;

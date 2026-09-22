@@ -3092,7 +3092,8 @@ mod tests {
         let document = vec![StoredProjectRecord {
             id: "project-current".to_owned(),
             name: "Current".to_owned(),
-            path: canonical_root.to_string_lossy().into_owned(),
+            // 项目记录沿用生产写入格式：Windows 扩展前缀隐藏、分隔符统一为斜杠。
+            path: path_to_frontend(&canonical_root),
         }];
 
         assert_eq!(

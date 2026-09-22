@@ -1,7 +1,7 @@
 //! 桌面 Runtime 的标准 ACP Client Request 共享投递与响应路由。
 
 use crate::agent_runtime::{AgentRuntime, SessionDeliverySender};
-use keencode_acp::{AcpClientRequestFrame, AcpResponseDecoder};
+use keencode_acp::{AcpClientRequestFrame, AcpResponseDecoder, ConnectionId};
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -33,14 +33,31 @@ pub(crate) struct SessionDeliverySink {
     runtime: Weak<AgentRuntime>,
     /// 该出口唯一允许投递的 Session。
     session_id: String,
+    /// Client Request 唯一允许送达的 ACP 连接。
+    connection_id: ConnectionId,
 }
 
 impl SessionDeliverySink {
     /// 使用装配根弱引用和固定 Session 创建出口。
+    #[cfg(test)]
     pub(crate) fn new(runtime: Weak<AgentRuntime>, session_id: String) -> Self {
+        Self::for_connection(
+            runtime,
+            session_id,
+            ConnectionId::new("embedded-desktop").expect("固定桌面连接标识应合法"),
+        )
+    }
+
+    /// 使用装配根、Session 和固定目标连接创建出口。
+    pub(crate) fn for_connection(
+        runtime: Weak<AgentRuntime>,
+        session_id: String,
+        connection_id: ConnectionId,
+    ) -> Self {
         Self {
             runtime,
             session_id,
+            connection_id,
         }
     }
 }
@@ -50,6 +67,7 @@ impl ClientRequestSink for SessionDeliverySink {
     fn send_client_request(&self, request: AcpClientRequestFrame) -> ClientRequestFuture<'_> {
         let runtime = self.runtime.clone();
         let session_id = self.session_id.clone();
+        let connection_id = self.connection_id.clone();
         Box::pin(async move {
             let runtime = runtime
                 .upgrade()
@@ -57,7 +75,7 @@ impl ClientRequestSink for SessionDeliverySink {
             let delivery = runtime
                 .session_delivery(&session_id)
                 .map_err(|_| ClientRequestBridgeError::DeliveryUnavailable)?;
-            SessionDeliverySender::send_client_request(&delivery, request)
+            SessionDeliverySender::send_client_request_to(&delivery, connection_id, request)
                 .await
                 .map_err(|_| ClientRequestBridgeError::DeliveryUnavailable)
         })
@@ -137,18 +155,16 @@ impl fmt::Display for ClientRequestBridgeError {
 
 impl Error for ClientRequestBridgeError {}
 
-/// 将一个完整 JSON-RPC Client Response 交给现有 Runtime 响应路由。
-///
-/// `acp_dispatch` 与保留的内部命令共用该入口，确保响应不会再次进入
-/// `AcpRequestDecoder`，并且响应成功、失败信封都保持同一严格路由边界。
-pub(crate) fn route_client_response(
+/// 将响应连同 transport 连接身份交给 Runtime，防止跨连接抢答。
+pub(crate) fn route_client_response_from_connection(
     runtime: &AgentRuntime,
+    connection_id: &ConnectionId,
     response_json: &str,
 ) -> Result<(), String> {
     let request_id = route_response_request_id(&AcpResponseDecoder::new(), response_json)
         .map_err(|error| error.to_string())?;
     runtime
-        .route_client_response(&request_id, response_json)
+        .route_client_response_from_connection(connection_id, &request_id, response_json)
         .map_err(|error| error.to_string())
 }
 

@@ -40,7 +40,8 @@
     "license": "MIT",
     "licenseFile": "../LICENSE",
     "resources": {
-      "../LICENSE": "LICENSE"
+      "../LICENSE": "LICENSE",
+      "../dist/": "web/"
     },
     "icon": [
       "icons/32x32.png",

@@ -3,6 +3,11 @@ resolver = "3"
 members = [
     # 标准 ACP Schema、严格方法解码、扩展事件与客户端请求边界。
     "crates/keencode-acp",
+    # 独立本地 ACP Client 与非交互命令行入口。
+    "crates/keencode-cli",
+    # 终端界面预留 crate；当前只声明边界，不包含 TUI 实现。
+    # 本机 Host 提供的认证 Web、资源和移动端传输安全边界。
+    "crates/keencode-web",
     "crates/keencode-agent",
     "crates/keencode-model",
     "crates/keencode-provider",

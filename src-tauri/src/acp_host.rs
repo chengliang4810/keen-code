@@ -14,7 +14,7 @@ use crate::session_commands::{
 use keencode_acp::schema;
 use keencode_acp::{
     AcpBoundaryError, AcpIncomingFrame, AcpNotification, AcpRequest, AcpRequestDecoder,
-    AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload,
+    AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload, OperationId,
 };
 use keencode_agent::{CollaborationIdGenerator, UuidCollaborationIdGenerator};
 use keencode_resources::{
@@ -22,15 +22,20 @@ use keencode_resources::{
     SessionId, TurnStatus, TurnStopReason,
 };
 use keencode_runtime::{
-    RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,
-    RuntimeSession, RuntimeSnapshot,
+    AdmissionDisposition, ExecutionIdentity, HostPromptQueue, HostRuntime, OperationState,
+    OperationStatus, OperationTerminal, PromptAdmissionRequest, RuntimeError, RuntimeEventPayload,
+    RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeSession, RuntimeSnapshot,
 };
 use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
+use tokio::sync::{Notify, broadcast};
 use tracing::Instrument;
 
 #[cfg(feature = "benchmark")]
@@ -65,6 +70,12 @@ const META_OPERATION_ID: &str = "keencode/operationId";
 const META_TURN_ID: &str = "keencode/turnId";
 /// ACP `_meta` 中可选的本轮 Ultra 开关。
 const META_ULTRA_MODE: &str = "keencode/ultraMode";
+/// Prompt 是否要求客户端断开后继续由 Host 托管；CLI detach 使用该元数据。
+const META_DETACHED: &str = "keencode/detached";
+/// 非交互 CLI 在绑定稳定执行身份后即可断开的 admission 方法。
+const OPERATION_ADMIT_METHOD: &str = "keencode/operation/admit";
+/// 跨连接查询 Prompt operation 状态的方法。
+const OPERATION_STATUS_METHOD: &str = "keencode/operation/status";
 /// ACP `_meta` 中可选的 Fork 标题。
 const META_TITLE: &str = "keencode/title";
 /// ACP 响应 `_meta` 中的最小 Session 快照键。
@@ -94,8 +105,45 @@ const REASONING_EFFORT_VALUES: &[(&str, &str)] = &[
 /// 只有根 Agent 的用户 Turn 才能作为标准 Prompt 的终态。
 const ROOT_SOURCE_AGENT_ID: &str = ROOT_AGENT_ID;
 
-/// 全局唯一的当前进程 ACP Host。
-static ACP_HOST: OnceLock<Arc<AcpHost>> = OnceLock::new();
+/// Host bridge 的异步请求边界；实现不能把 JSON-RPC request id 改写成连接 id。
+pub(crate) type AcpHostBridgeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Option<Value>, String>> + Send + 'a>>;
+
+/// Desktop 本地 Host 与 Desktop Client 共用的 ACP 业务边界。
+///
+/// Tauri/Web 只依赖这组最小操作，不直接知道 Host 是当前进程还是 discovery
+/// 找到的另一个进程。事件订阅按 transport connection 隔离，避免把定向的
+/// elicitation 请求广播给无关连接。
+pub(crate) trait AcpHostBridge: Send + Sync + 'static {
+    /// 分发一条完整 JSON-RPC 请求、通知或 Client Response。
+    fn dispatch<'a>(
+        &'a self,
+        connection_id: &'a keencode_acp::ConnectionId,
+        message: Value,
+    ) -> AcpHostBridgeFuture<'a>;
+
+    /// 订阅该连接对应的 Host 主动消息。
+    fn subscribe(
+        &self,
+        _connection_id: &keencode_acp::ConnectionId,
+    ) -> Option<broadcast::Receiver<Value>> {
+        None
+    }
+
+    /// 清理连接级状态；不得因为 UI/CLI 断开而停止共享 Host。
+    fn disconnect(&self, connection_id: &keencode_acp::ConnectionId);
+
+    /// 发布由 Runtime 编码的 delivery；Remote bridge 不直接产生本地 Runtime 事件。
+    fn publish_delivery(
+        &self,
+        _payload: Value,
+        _target_connection_id: Option<&keencode_acp::ConnectionId>,
+    ) {
+    }
+}
+
+/// 全局唯一的当前进程 ACP bridge。
+static ACP_HOST: OnceLock<Arc<dyn AcpHostBridge>> = OnceLock::new();
 
 /// 记录 Session 加载阶段耗时；慢路径提升为 warn，便于在用户感知卡顿前发现回归。
 fn record_session_load_phase(session_id: &str, phase: &str, elapsed: Duration) {
@@ -126,6 +174,13 @@ struct HandshakeState {
     protocol_version: Option<schema::ProtocolVersion>,
     /// 首次握手协商出的完整 Client 能力；重复握手必须完全一致。
     client_capabilities: Option<schema::ClientCapabilities>,
+}
+
+/// 一个传输连接独立持有的 ACP 状态；不同连接不能共享能力协商。
+#[derive(Default)]
+struct ConnectionState {
+    /// 当前连接的握手状态。
+    handshake: HandshakeState,
 }
 
 /// 协议方法执行失败时使用的固定安全错误分类。
@@ -168,7 +223,7 @@ impl HostFailure {
 }
 
 /// 当前桌面进程中唯一的 ACP Host 实例。
-struct AcpHost {
+pub(crate) struct AcpHost {
     /// 用于读取应用授权目录、本地设置和扩展状态的 Tauri 句柄。
     app: AppHandle,
     /// 唯一的 Session/Turn Runtime。
@@ -177,12 +232,23 @@ struct AcpHost {
     decoder: AcpRequestDecoder,
     /// 封闭类型化响应编码器。
     encoder: AcpResponseEncoder,
-    /// 握手后固定的协议版本。
-    handshake: Mutex<HandshakeState>,
+    /// 按传输连接隔离的握手状态；key 不能使用 JSON-RPC request id。
+    connections: Mutex<BTreeMap<String, ConnectionState>>,
+    /// 跨 Desktop/Web/CLI 共享的 Prompt admission 账本。
+    prompt_queue: Arc<HostPromptQueue>,
+    /// Desktop 所有权、连接生命周期与 Prompt queue 的统一事实源。
+    host_runtime: Arc<HostRuntime>,
+    /// Session active slot 释放后唤醒排队 Prompt。
+    queue_wakeup: Arc<Notify>,
     /// 序列化新 Session 创建；已知 Session 的控制操作使用独立锁。
     control_gate: tokio::sync::Mutex<()>,
     /// 不同 Session 可并行恢复；同一 Session 的重放和修改仍有序。
     session_controls: Mutex<BTreeMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    /// 每个本地 IPC 连接独立的事件出口；Session 更新广播给全部连接，
+    /// Client Request 只投递给其 connection_id 指向的连接。
+    event_sinks: Mutex<BTreeMap<String, broadcast::Sender<Value>>>,
+    /// 让 trait object 入口仍能调用需要 `Arc<Self>` 的后台 Prompt driver。
+    self_ref: Weak<AcpHost>,
 }
 
 /// 取得目标 Session 的共享锁；其他 Session 不会受其长时间历史投递影响。
@@ -202,34 +268,221 @@ fn session_control_lock(
 }
 
 /// 安装当前应用唯一 ACP Host；必须在 Agent Runtime 已进入 Tauri State 后调用。
-pub(crate) fn install(app: &AppHandle, runtime: Arc<AgentRuntime>) -> Result<(), String> {
+pub(crate) fn install(
+    app: &AppHandle,
+    runtime: Arc<AgentRuntime>,
+    host_runtime: Arc<HostRuntime>,
+) -> Result<Arc<AcpHost>, String> {
     let response_limits = AcpResponseLimits::new(ACP_RESPONSE_MAX_BYTES, 64, 65_536)
         .map_err(|error| error.to_string())?;
-    let host = Arc::new(AcpHost {
+    let encoder =
+        AcpResponseEncoder::with_limits(response_limits).map_err(|error| error.to_string())?;
+    let prompt_queue = Arc::clone(host_runtime.prompt_queue());
+    let host = Arc::new_cyclic(|self_ref| AcpHost {
         app: app.clone(),
         runtime,
         decoder: AcpRequestDecoder::new(),
-        encoder: AcpResponseEncoder::with_limits(response_limits)
-            .map_err(|error| error.to_string())?,
-        handshake: Mutex::new(HandshakeState::default()),
+        encoder,
+        connections: Mutex::new(BTreeMap::new()),
+        prompt_queue,
+        host_runtime,
+        queue_wakeup: Arc::new(Notify::new()),
         control_gate: tokio::sync::Mutex::new(()),
         session_controls: Mutex::new(BTreeMap::new()),
+        event_sinks: Mutex::new(BTreeMap::new()),
+        self_ref: self_ref.clone(),
     });
     ACP_HOST
-        .set(host)
+        .set(Arc::clone(&host) as Arc<dyn AcpHostBridge>)
+        .map_err(|_| "ACP Host 已经初始化".to_owned())?;
+    Ok(host)
+}
+
+/// 安装 Desktop Client 的远程 bridge；Remote 分支不能初始化本地 Runtime。
+pub(crate) fn install_remote_bridge(bridge: Arc<dyn AcpHostBridge>) -> Result<(), String> {
+    ACP_HOST
+        .set(bridge)
         .map_err(|_| "ACP Host 已经初始化".to_owned())
 }
 
 /// Tauri 唯一 ACP 请求入口；标准通知成功或失败都不产生返回值。
 #[tauri::command]
 pub async fn acp_dispatch(message: serde_json::Value) -> Result<Option<serde_json::Value>, String> {
+    let connection_id =
+        keencode_acp::ConnectionId::new("embedded-desktop").map_err(|error| error.to_string())?;
+    acp_dispatch_value_for_connection(&connection_id, message).await
+}
+
+/// 使用 transport 生成的稳定 ConnectionId 分发 ACP 请求。
+pub(crate) async fn acp_dispatch_value_for_connection(
+    connection_id: &keencode_acp::ConnectionId,
+    message: serde_json::Value,
+) -> Result<Option<serde_json::Value>, String> {
     let host = ACP_HOST
         .get()
         .ok_or_else(|| "ACP Host 尚未初始化".to_owned())?;
-    host.dispatch(message).await
+    host.dispatch(connection_id, message).await
+}
+
+/// 传输断开时清理连接级握手；不会取消 detached operation 或停止 Host。
+pub(crate) fn acp_disconnect(connection_id: &keencode_acp::ConnectionId) {
+    if let Some(host) = ACP_HOST.get() {
+        host.disconnect(connection_id);
+    }
+}
+
+/// 将 Runtime 产生的标准 delivery 发布到当前 ACP bridge。
+///
+/// Owned Host 由本地 Runtime 调用，Remote Host 由 Remote Client 事件泵调用。
+/// payload 已经是脱敏的 ACP delivery；这里不记录正文，也不重建 request id。
+pub(crate) fn publish_delivery(
+    payload: Value,
+    target_connection_id: Option<&keencode_acp::ConnectionId>,
+) {
+    if let Some(host) = ACP_HOST.get() {
+        host.publish_delivery(payload, target_connection_id);
+    }
 }
 
 impl AcpHost {
+    /// 传输连接断开只清理握手状态；HostPromptQueue 保留 operation 供重连恢复。
+    fn disconnect(&self, connection_id: &keencode_acp::ConnectionId) {
+        if let Ok(mut connections) = self.connections.lock() {
+            connections.remove(connection_id.as_str());
+        }
+        if let Ok(mut event_sinks) = self.event_sinks.lock() {
+            event_sinks.remove(connection_id.as_str());
+        }
+        self.runtime
+            .elicitation_coordinator()
+            .disconnect(connection_id);
+        if let Ok(reports) = self.prompt_queue.disconnect_report(connection_id)
+            && !reports.is_empty()
+        {
+            tracing::info!(
+                target: "keencode_diagnostics",
+                connection_id = %connection_id,
+                operations = reports.len(),
+                "ACP connection detached; operations remain hosted"
+            );
+        }
+        if let Err(error) = self.host_runtime.detach(connection_id) {
+            tracing::debug!(
+                target: "keencode_diagnostics",
+                connection_id = %connection_id,
+                %error,
+                "ACP connection lifecycle was already detached"
+            );
+        }
+    }
+
+    /// 创建/取得一个连接级事件出口；广播 sender 只由 Host 持有。
+    fn subscribe_events(
+        &self,
+        connection_id: &keencode_acp::ConnectionId,
+    ) -> broadcast::Receiver<Value> {
+        let mut event_sinks = self
+            .event_sinks
+            .lock()
+            .expect("ACP event sink mutex poisoned");
+        event_sinks
+            .entry(connection_id.as_str().to_owned())
+            .or_insert_with(|| broadcast::channel(256).0)
+            .subscribe()
+    }
+
+    /// 发送一个 ACP delivery notification 或定向 Client Request。
+    fn publish_delivery(
+        &self,
+        payload: Value,
+        target_connection_id: Option<&keencode_acp::ConnectionId>,
+    ) {
+        let frame = if payload.get("type").and_then(Value::as_str) == Some("client_request")
+            && let Some(request) = payload.get("request").filter(|value| value.is_object())
+        {
+            // CLI/NDJSON 客户端按原始 ACP Client Request 处理 elicitation；
+            // Tauri/WebView 由 Remote Client 事件泵包装成统一 delivery。
+            request.clone()
+        } else {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "method": "acp://delivery",
+                "params": payload,
+            })
+        };
+        let Ok(event_sinks) = self.event_sinks.lock() else {
+            return;
+        };
+        match target_connection_id {
+            Some(connection_id) => {
+                if let Some(sender) = event_sinks.get(connection_id.as_str()) {
+                    let _ = sender.send(frame);
+                }
+            }
+            None => {
+                for sender in event_sinks.values() {
+                    let _ = sender.send(frame.clone());
+                }
+            }
+        }
+    }
+
+    /// 将 Client Response 路由给既有 ElicitationCoordinator，并同步 admission 状态。
+    fn route_client_response(
+        &self,
+        connection_id: &keencode_acp::ConnectionId,
+        response_json: &str,
+    ) -> Result<(), String> {
+        let request_id = serde_json::from_str::<Value>(response_json)
+            .ok()
+            .and_then(|value| value.get("id").and_then(Value::as_str).map(str::to_owned));
+        let request_id = request_id.ok_or_else(|| "ACP Client Response 缺少请求标识".to_owned())?;
+        let coordinator = self.runtime.elicitation_coordinator();
+        match coordinator.pending_connection_for_request(&request_id) {
+            Some(target) if &target == connection_id => {}
+            Some(_) => return Err("ACP Client Response 来自非目标连接".to_owned()),
+            None => return Err("ACP 待决请求不存在或已经结束".to_owned()),
+        }
+        // 严格响应路由会移除 pending，先只读取 operation 身份；任何错误、迟到或
+        // 非目标连接响应都必须在改变 HostPromptQueue 前失败。
+        let operation = Some(request_id.as_str()).and_then(|request_id| {
+            coordinator
+                .pending_session_id_for_request(request_id)
+                .and_then(|session_id| {
+                    self.prompt_queue
+                        .operation_for_session(&session_id)
+                        .ok()
+                        .flatten()
+                        .map(|status| (status, session_id))
+                })
+        });
+        crate::client_request::route_client_response_from_connection(
+            self.runtime.as_ref(),
+            connection_id,
+            response_json,
+        )?;
+        if let Some((status, _session_id)) = operation.as_ref()
+            && matches!(
+                status.state,
+                OperationState::Claimed | OperationState::Running
+            )
+        {
+            let _ = self
+                .prompt_queue
+                .mark_needs_input(&status.operation_id, request_id.clone())
+                .map_err(|error| error.to_string())?;
+            let digest = format!("{:x}", Sha256::digest(response_json.as_bytes()));
+            let answer_id =
+                OperationId::new(format!("answer-{digest}")).map_err(|error| error.to_string())?;
+            let _ = self
+                .prompt_queue
+                .answer_elicitation(&status.operation_id, request_id, answer_id, digest)
+                .map_err(|error| error.to_string())?;
+            self.queue_wakeup.notify_waiters();
+        }
+        Ok(())
+    }
+
     /// 只等待当前 Session 的控制操作，弱引用表不永久保留历史锁。
     async fn lock_session_control(
         &self,
@@ -243,17 +496,30 @@ impl AcpHost {
     }
 
     /// 严格解码并分发一个 JSON-RPC 值，同时尽可能原样保留合法请求 ID。
-    async fn dispatch(&self, message: Value) -> Result<Option<Value>, String> {
+    async fn dispatch(
+        self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
+        message: Value,
+    ) -> Result<Option<Value>, String> {
         let started = std::time::Instant::now();
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .unwrap_or("client_response")
+            .to_owned();
+        let observability = self
+            .app
+            .try_state::<Arc<crate::diagnostics::Diagnostics>>()
+            .map(|diagnostics| diagnostics.observability());
         let span = tracing::info_span!(target: "keencode_diagnostics", "acp.request",
-            method = message.get("method").and_then(serde_json::Value::as_str).unwrap_or("client_response"),
+            method = %method,
             request_id = %message.get("id").filter(|id| id.is_string() || id.is_number()).unwrap_or(&serde_json::Value::Null),
             session_id = message.pointer("/params/sessionId").and_then(serde_json::Value::as_str).unwrap_or(""),
             turn_id = message.pointer("/params/_meta/keencode~1turnId").and_then(serde_json::Value::as_str).unwrap_or(""),
             operation_id = message.pointer("/params/_meta/keencode~1operationId").and_then(serde_json::Value::as_str).unwrap_or(""));
         async {
             tracing::info!(target: "keencode_diagnostics", "request started");
-            let result = self.dispatch_inner(message).await;
+            let result = self.dispatch_inner(connection_id, message).await;
             match &result {
                 Err(error) => tracing::error!(%error, elapsed_ms = started.elapsed().as_millis(), "ACP transport failed"),
                 Ok(Some(value)) if value.get("error").is_some() => {
@@ -261,16 +527,79 @@ impl AcpHost {
                 }
                 Ok(value) => tracing::info!(target: "keencode_diagnostics", session_id = value.as_ref().and_then(|v| v.pointer("/result/sessionId")).and_then(serde_json::Value::as_str).unwrap_or(""), elapsed_ms = started.elapsed().as_millis(), "request completed"),
             }
+            if let Some(observability) = observability.as_deref() {
+                let status = match &result {
+                    Err(_) => "error",
+                    Ok(Some(value)) if value.get("error").is_some() => "error",
+                    Ok(_) => "ok",
+                };
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                observability.increment_counter(&format!("host.acp.requests.{status}"), 1);
+                observability.record_histogram("host.acp.request_duration_ms", elapsed_ms as f64);
+                observability.record_trace(crate::diagnostics::observability::TraceSample {
+                    trace_id: format!("acp:{}:{}:{}", connection_id, method, started.elapsed().as_nanos()),
+                    span_id: format!("acp:{}:{}", connection_id, method),
+                    parent_span_id: None,
+                    name: "host.acp.request".to_owned(),
+                    started_at_ms: crate::diagnostics::observability::now_epoch_ms()
+                        .saturating_sub(elapsed_ms),
+                    duration_ms: Some(elapsed_ms),
+                    ttft_ms: None,
+                    status: status.to_owned(),
+                    attributes: BTreeMap::from([
+                        ("method".to_owned(), method.clone()),
+                        ("connection_scope".to_owned(), "host".to_owned()),
+                    ]),
+                });
+            }
             result
         }.instrument(span).await
     }
 
-    async fn dispatch_inner(&self, message: Value) -> Result<Option<Value>, String> {
+    async fn dispatch_inner(
+        self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
+        message: Value,
+    ) -> Result<Option<Value>, String> {
+        // WebSocket ACP 只允许标准 ACP/Session 方法；本地 Web Host 生命周期控制
+        // 属于 Tauri facade，不能借由已认证浏览器连接获得宿主控制权。
+        if connection_id.as_str() == "embedded-desktop"
+            && let Some(response) = crate::web_host::dispatch_control(&self.app, &message).await?
+        {
+            return Ok(Some(response));
+        }
         if looks_like_client_response(&message) {
             let response_json = serde_json::to_string(&message)
                 .map_err(|_| "ACP Client Response 无法序列化".to_owned())?;
-            crate::client_request::route_client_response(self.runtime.as_ref(), &response_json)?;
+            self.route_client_response(connection_id, &response_json)?;
             return Ok(None);
+        }
+        if matches!(
+            message.get("method").and_then(Value::as_str),
+            Some(OPERATION_ADMIT_METHOD | OPERATION_STATUS_METHOD)
+        ) {
+            let id = request_id_from_value(&message).unwrap_or(schema::RequestId::Null);
+            if matches!(id, schema::RequestId::Null) {
+                return self.error_value(id, HostFailure::InvalidRequest).map(Some);
+            }
+            if !self.is_initialized(connection_id) {
+                return self.error_value(id, HostFailure::AuthRequired).map(Some);
+            }
+            let result = self
+                .dispatch_operation_method(connection_id, &message)
+                .await;
+            return match result {
+                Ok(result) => {
+                    let id = serde_json::to_value(id)
+                        .map_err(|_| "ACP 请求 ID 无法序列化".to_owned())?;
+                    Ok(Some(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result,
+                    })))
+                }
+                Err(failure) => self.error_value(id, failure).map(Some),
+            };
         }
         let request_id = request_id_from_value(&message);
         let raw = serde_json::to_vec(&message).map_err(|_| "ACP 请求无法序列化".to_owned())?;
@@ -292,33 +621,141 @@ impl AcpHost {
                 if matches!(id, schema::RequestId::Null) {
                     return self.error_value(id, HostFailure::InvalidRequest).map(Some);
                 }
-                if !matches!(&request, AcpRequest::Initialize(_)) && !self.is_initialized() {
+                if !matches!(&request, AcpRequest::Initialize(_))
+                    && !self.is_initialized(connection_id)
+                {
                     return self.error_value(id, HostFailure::AuthRequired).map(Some);
                 }
-                match self.dispatch_request(id.clone(), request).await {
+                match self
+                    .dispatch_request(connection_id, id.clone(), request)
+                    .await
+                {
                     Ok(value) => Ok(Some(value)),
                     Err(failure) => self.error_value(id, failure).map(Some),
                 }
             }
             AcpIncomingFrame::Notification(notification) => {
                 // 握手前的通知不改变 Host 状态；按 JSON-RPC 约定静默丢弃。
-                if self.is_initialized() {
-                    self.dispatch_notification(notification).await;
+                if self.is_initialized(connection_id) {
+                    self.dispatch_notification(connection_id, notification)
+                        .await;
                 }
                 Ok(None)
             }
         }
     }
 
+    /// 分发不属于标准 ACP Schema、但由本机 CLI 共享的 operation 生命周期方法。
+    async fn dispatch_operation_method(
+        self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
+        message: &Value,
+    ) -> Result<Value, HostFailure> {
+        let method = message
+            .get("method")
+            .and_then(Value::as_str)
+            .ok_or(HostFailure::InvalidRequest)?;
+        let params = message
+            .get("params")
+            .and_then(Value::as_object)
+            .ok_or(HostFailure::InvalidParams)?;
+        match method {
+            OPERATION_ADMIT_METHOD => {
+                let session_id = params
+                    .get("sessionId")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or(HostFailure::InvalidParams)?
+                    .to_owned();
+                let text = params
+                    .get("prompt")
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or(HostFailure::InvalidParams)?
+                    .to_owned();
+                if params.get("detached").and_then(Value::as_bool) != Some(true) {
+                    return Err(HostFailure::InvalidParams);
+                }
+                let operation_id = params
+                    .get("_meta")
+                    .and_then(Value::as_object)
+                    .and_then(|meta| meta.get(META_OPERATION_ID))
+                    .and_then(Value::as_str)
+                    .ok_or(HostFailure::InvalidParams)?;
+                let operation_id = OperationId::new(operation_id.to_owned())
+                    .map_err(|_| HostFailure::InvalidParams)?;
+                let turn_id = params
+                    .get("_meta")
+                    .and_then(Value::as_object)
+                    .and_then(|meta| meta.get(META_TURN_ID))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(default_turn_id);
+                let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
+                    .map_err(|_| HostFailure::ResourceNotFound)?;
+                // 与 headless adapter 保持一致：detach 重试的指纹只由 Prompt 正文和
+                // HostCore 的 sessionId 共同决定，随机分配的 turnId 不参与冲突判断。
+                let payload_digest = format!("{:x}", Sha256::digest(text.as_bytes()));
+                let status = self
+                    .admit_prompt(PromptDriveRequest {
+                        connection_id: connection_id.clone(),
+                        session_id,
+                        operation_id,
+                        turn_id,
+                        text,
+                        project_root,
+                        payload_digest,
+                        ultra_mode: false,
+                        detached: true,
+                    })
+                    .await?;
+                if status.execution.is_none() {
+                    return Err(HostFailure::Internal);
+                }
+                let status_value =
+                    serde_json::to_value(&status).map_err(|error| internal_failure(error))?;
+                Ok(serde_json::json!({
+                    "operationId": status.operation_id,
+                    "sessionId": status.session_id,
+                    "execution": status.execution,
+                    "state": status.state,
+                    "status": status_value,
+                }))
+            }
+            OPERATION_STATUS_METHOD => {
+                let operation_id = params
+                    .get("operationId")
+                    .and_then(Value::as_str)
+                    .or_else(|| {
+                        params
+                            .get("_meta")
+                            .and_then(Value::as_object)
+                            .and_then(|meta| meta.get(META_OPERATION_ID))
+                            .and_then(Value::as_str)
+                    })
+                    .ok_or(HostFailure::InvalidParams)?;
+                let operation_id = OperationId::new(operation_id.to_owned())
+                    .map_err(|_| HostFailure::InvalidParams)?;
+                let status = self
+                    .prompt_queue
+                    .status(&operation_id)
+                    .map_err(map_prompt_queue_failure)?;
+                serde_json::to_value(status).map_err(|error| internal_failure(error))
+            }
+            _ => Err(HostFailure::MethodNotFound),
+        }
+    }
+
     /// 分发一个已严格解码且带请求 ID 的标准 ACP 请求。
     async fn dispatch_request(
-        &self,
+        self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
         id: schema::RequestId,
         request: AcpRequest,
     ) -> Result<Value, HostFailure> {
         match request {
             AcpRequest::Initialize(request) => {
-                let response = self.handle_initialize(request)?;
+                let response = self.handle_initialize(connection_id, request)?;
                 self.result_value(id, &response)
             }
             AcpRequest::Authenticate(_) => Err(HostFailure::InvalidParams),
@@ -331,7 +768,7 @@ impl AcpHost {
                 self.result_value(id, &response)
             }
             AcpRequest::Prompt(request) => {
-                let response = self.handle_prompt(request).await?;
+                let response = self.handle_prompt(connection_id, request).await?;
                 self.result_value(id, &response)
             }
             AcpRequest::DeleteSession(request) => {
@@ -364,9 +801,15 @@ impl AcpHost {
     }
 
     /// 分发不产生响应的标准通知。
-    async fn dispatch_notification(&self, notification: AcpNotification) {
+    async fn dispatch_notification(
+        &self,
+        connection_id: &keencode_acp::ConnectionId,
+        notification: AcpNotification,
+    ) {
         match notification {
-            AcpNotification::Cancel(notification) => self.handle_cancel(notification).await,
+            AcpNotification::Cancel(notification) => {
+                self.handle_cancel(connection_id, notification).await
+            }
             AcpNotification::SessionConfigUpdate(_) => {
                 // 配置通知只作为 ACP 输入边界保留；配置刷新由现有 Tauri 控制面完成。
             }
@@ -374,17 +817,22 @@ impl AcpHost {
     }
 
     /// 返回当前是否已完成初始化握手。
-    fn is_initialized(&self) -> bool {
-        self.handshake
+    fn is_initialized(&self, connection_id: &keencode_acp::ConnectionId) -> bool {
+        self.connections
             .lock()
             .ok()
-            .and_then(|state| state.protocol_version.clone())
+            .and_then(|states| {
+                states
+                    .get(connection_id.as_str())
+                    .and_then(|state| state.handshake.protocol_version.clone())
+            })
             .is_some()
     }
 
     /// 完成一次只支持协议版本 1 的初始化握手。
     fn handle_initialize(
         &self,
+        connection_id: &keencode_acp::ConnectionId,
         request: schema::InitializeRequest,
     ) -> Result<keencode_acp::InitializeResponseDto, HostFailure> {
         if request.protocol_version != SUPPORTED_PROTOCOL_VERSION
@@ -396,27 +844,33 @@ impl AcpHost {
             .map_err(|error| internal_failure(error))?
             .to_string_lossy()
             .into_owned();
-        let mut state = self
-            .handshake
+        let mut connections = self
+            .connections
             .lock()
             .map_err(|error| internal_failure(error))?;
-        if state.protocol_version.is_some() {
-            if state.client_capabilities.as_ref() != Some(&request.client_capabilities) {
+        let state = connections
+            .entry(connection_id.as_str().to_owned())
+            .or_default();
+        if state.handshake.protocol_version.is_some() {
+            if state.handshake.client_capabilities.as_ref() != Some(&request.client_capabilities) {
                 return Err(HostFailure::InvalidParams);
             }
             self.runtime
                 .elicitation_coordinator()
-                .negotiate_client_capabilities(&request.client_capabilities)
+                .negotiate_connection_capabilities(connection_id, &request.client_capabilities)
                 .map_err(|_| HostFailure::InvalidParams)?;
-            return Ok(initialize_response(default_cwd));
+            return initialize_response(default_cwd, &self.host_runtime);
         }
         self.runtime
             .elicitation_coordinator()
-            .negotiate_client_capabilities(&request.client_capabilities)
+            .negotiate_connection_capabilities(connection_id, &request.client_capabilities)
             .map_err(|_| HostFailure::InvalidParams)?;
-        let response = initialize_response(default_cwd);
-        state.protocol_version = Some(SUPPORTED_PROTOCOL_VERSION);
-        state.client_capabilities = Some(request.client_capabilities);
+        let response = initialize_response(default_cwd, &self.host_runtime)?;
+        self.host_runtime
+            .attach_client(connection_id.clone())
+            .map_err(|error| internal_failure(error))?;
+        state.handshake.protocol_version = Some(SUPPORTED_PROTOCOL_VERSION);
+        state.handshake.client_capabilities = Some(request.client_capabilities);
         Ok(response)
     }
 
@@ -642,70 +1096,60 @@ impl AcpHost {
         }
     }
 
-    /// 合并文本 Prompt、注入本轮开发者上下文，并等待根 Turn 权威终态。
+    /// 合并文本 Prompt、交给 Host 后台 driver，并等待可重放的 operation 终态。
     async fn handle_prompt(
-        &self,
+        self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
         request: schema::PromptRequest,
     ) -> Result<schema::PromptResponse, HostFailure> {
         let session_id = request.session_id.0.as_ref().to_owned();
         let text = prompt_text(request.prompt)?;
         let turn_id = prompt_turn_id(request.meta.as_ref())?;
         let ultra_mode = meta_bool(request.meta.as_ref(), META_ULTRA_MODE)?;
+        let detached = meta_bool(request.meta.as_ref(), META_DETACHED)?;
+        let operation_id = OperationId::new(operation_id(request.meta.as_ref())?)
+            .map_err(|_| HostFailure::InvalidParams)?;
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
-        // 项目候选可能连接外部 MCP；先在 Session 控制锁之外完成，避免一个
-        // 项目的慢扩展发现阻塞该 Session 的纯本地控制操作。
-        self.ensure_extensions(&project_root).await?;
-        // Prompt 只把“打开 Session 到 TurnStarted”的启动阶段纳入同一把锁。
-        // fork/rewind 会持有该锁直到原 MCP 侧车恢复，因此两者的线性化结果只能是：
-        // Prompt 先启动并令修改因 active work 失败，或修改完整恢复后 Prompt 再冻结工具。
-        let prompt_start_control = self.lock_session_control(&session_id).await?;
+        // 授权成功后立即绑定 Web 连接，覆盖 Prompt 响应返回前产生的实时增量；
+        // Desktop 连接不在 Web adapter 中，WebHostManager 会安全跳过该绑定。
+        if let Some(web_host) = self.app.try_state::<Arc<crate::web_host::WebHostManager>>()
+            && let Err(error) = web_host.bind_connection_session(connection_id, &session_id)
+        {
+            tracing::error!(
+                target: "keencode_diagnostics",
+                connection_id = %connection_id,
+                session_id,
+                %error,
+                "failed to bind Web connection before Prompt admission"
+            );
+            return Err(HostFailure::Internal);
+        }
+        let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, ultra_mode);
+        let status = self
+            .admit_prompt(PromptDriveRequest {
+                connection_id: connection_id.clone(),
+                session_id: session_id.clone(),
+                operation_id: operation_id.clone(),
+                turn_id,
+                text,
+                project_root,
+                payload_digest,
+                ultra_mode,
+                detached,
+            })
+            .await?;
+        let execution = status.execution.ok_or(HostFailure::Internal)?;
+        self.wait_for_operation_terminal(&operation_id).await?;
+        let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
+            .map_err(|_| HostFailure::ResourceNotFound)?;
         let session = self
             .runtime
-            .open_or_create_session(&project_root, Some(&session_id), "acp-prompt")
+            .open_or_create_session(&project_root, Some(&session_id), "acp-prompt-result")
             .map_err(map_runtime_failure)?;
-        self.runtime
-            .ensure_session_delivery(&session_id)
-            .map_err(map_runtime_failure)?;
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| internal_failure(error))?;
-        let developer_context = self.developer_context(snapshot.state.plan.enabled, ultra_mode)?;
-        let memory_settings = crate::app_settings::get(&self.app).map_err(internal_failure)?;
-        // 必须先订阅，再调用 start_root_turn，避免 TurnCompleted 在响应等待前被错过。
-        let mut subscription = session
-            .subscribe()
-            .map_err(|error| internal_failure(error))?;
-        let outcome = self
-            .runtime
-            .start_root_turn(
-                &session_id,
-                &turn_id,
-                &text,
-                RootTurnOptions {
-                    developer_context,
-                    plan_enabled: snapshot.state.plan.enabled,
-                },
-            )
-            .await
-            .map_err(map_runtime_failure)?;
-        // Provider 回合可能持续很久；目录已经冻结且 TurnStarted 已成为权威事实后
-        // 立即释放控制锁，不把普通模型执行与 Session MCP load/status/unload 串行。
-        drop(prompt_start_control);
-        if matches!(outcome, RootTurnStartOutcome::Started)
-            && memory_settings.local_memories
-            && let Some(memories) = self.app.try_state::<Arc<crate::memories::MemoryService>>()
-        {
-            memories.trigger(
-                Arc::clone(&self.runtime),
-                Some(session_id.clone()),
-                memory_settings.interface_language,
-                false,
-            );
-        }
         let terminal = self
-            .wait_for_turn_terminal(&session, &turn_id, &mut subscription)
-            .await?;
+            .snapshot_terminal(&session, &execution.turn_id)?
+            .ok_or(HostFailure::Internal)?;
         let final_snapshot = self
             .runtime
             .session_snapshot(&session_id)
@@ -715,9 +1159,262 @@ impl AcpHost {
             schema::PromptResponse::new(stop_reason).meta(Some(snapshot_meta(
                 &self.app,
                 &final_snapshot,
-                Some(&turn_id),
+                Some(&execution.turn_id),
             ))),
         )
+    }
+
+    /// 将 Prompt admission 与请求连接解耦；driver 一旦创建就由 Host 持有到终态。
+    async fn admit_prompt(
+        self: &Arc<Self>,
+        request: PromptDriveRequest,
+    ) -> Result<OperationStatus, HostFailure> {
+        let admission_started = std::time::Instant::now();
+        let admission = self
+            .prompt_queue
+            .admit(PromptAdmissionRequest {
+                connection_id: request.connection_id.clone(),
+                session_id: request.session_id.clone(),
+                operation_id: request.operation_id.clone(),
+                prompt: request.text.clone(),
+                payload_digest: request.payload_digest.clone(),
+                detached: request.detached,
+            })
+            .map_err(map_prompt_queue_failure)?;
+        if let Some(observability) = self
+            .app
+            .try_state::<Arc<crate::diagnostics::Diagnostics>>()
+            .map(|diagnostics| diagnostics.observability())
+        {
+            let disposition = admission.disposition.to_string();
+            observability.increment_counter(&format!("host.prompt.admission.{disposition}"), 1);
+            observability.record_histogram(
+                "host.prompt.admission_duration_ms",
+                admission_started.elapsed().as_millis() as f64,
+            );
+        }
+        if admission.disposition != AdmissionDisposition::Duplicate {
+            let host = Arc::clone(self);
+            tokio::spawn(async move {
+                host.drive_prompt(request).await;
+            });
+        }
+        self.wait_for_operation_execution(&admission.operation_id)
+            .await
+    }
+
+    /// 启动并观察一个已 admission 的 Prompt；传输断开不会取消该后台任务。
+    async fn drive_prompt(self: Arc<Self>, request: PromptDriveRequest) {
+        if let Err((failure, code)) = self.drive_prompt_inner(&request).await {
+            tracing::error!(
+                target: "keencode_diagnostics",
+                operation_id = %request.operation_id,
+                ?failure,
+                "Prompt background driver failed"
+            );
+            self.finish_operation_failure(&request.operation_id, code);
+        }
+    }
+
+    /// 执行后台 Prompt 的单一生命周期；错误码只记录阶段，不包含 Prompt 正文。
+    async fn drive_prompt_inner(
+        &self,
+        request: &PromptDriveRequest,
+    ) -> Result<(), (HostFailure, &'static str)> {
+        loop {
+            let notified = self.queue_wakeup.notified();
+            match self
+                .prompt_queue
+                .claim_operation(&request.session_id, &request.operation_id)
+                .map_err(|error| (map_prompt_queue_failure(error), "operation_claim_failed"))?
+            {
+                Some(_) => break,
+                None => {
+                    let status =
+                        self.prompt_queue
+                            .status(&request.operation_id)
+                            .map_err(|error| {
+                                (map_prompt_queue_failure(error), "operation_status_failed")
+                            })?;
+                    if status.state.is_terminal() {
+                        return Ok(());
+                    }
+                    notified.await;
+                }
+            }
+        }
+        self.ensure_extensions(&request.project_root)
+            .await
+            .map_err(|failure| (failure, "extension_setup_failed"))?;
+        let prompt_start_control = self
+            .lock_session_control(&request.session_id)
+            .await
+            .map_err(|failure| (failure, "session_control_failed"))?;
+        let session = self
+            .runtime
+            .open_or_create_session(
+                &request.project_root,
+                Some(&request.session_id),
+                "acp-prompt",
+            )
+            .map_err(|error| (map_runtime_failure(error), "session_open_failed"))?;
+        self.runtime
+            .ensure_session_delivery(&request.session_id)
+            .map_err(|error| (map_runtime_failure(error), "delivery_setup_failed"))?;
+        let snapshot = session
+            .snapshot()
+            .map_err(|error| (internal_failure(error), "session_snapshot_failed"))?;
+        let developer_context = self
+            .developer_context(snapshot.state.plan.enabled, request.ultra_mode)
+            .map_err(|failure| (failure, "developer_context_failed"))?;
+        let memory_settings = crate::app_settings::get(&self.app)
+            .map_err(|error| (internal_failure(error), "settings_failed"))?;
+        // 先订阅再启动，保证快速终态也能由 driver 归约到 operation 账本。
+        let mut events = session
+            .subscribe()
+            .map_err(|error| (internal_failure(error), "subscription_failed"))?;
+        let outcome = self
+            .runtime
+            .start_root_turn(
+                &request.session_id,
+                &request.turn_id,
+                &request.text,
+                RootTurnOptions {
+                    developer_context,
+                    plan_enabled: snapshot.state.plan.enabled,
+                    elicitation_connection_id: Some(request.connection_id.clone()),
+                },
+            )
+            .await
+            .map_err(|error| (map_runtime_failure(error), "runtime_start_failed"))?;
+        let execution = ExecutionIdentity::new(
+            request.session_id.clone(),
+            request.turn_id.clone(),
+            request.turn_id.clone(),
+        )
+        .map_err(|error| (internal_failure(error), "execution_identity_failed"))?;
+        self.prompt_queue
+            .bind_execution(&request.operation_id, execution)
+            .map_err(|error| (internal_failure(error), "execution_bind_failed"))?;
+        self.queue_wakeup.notify_waiters();
+        drop(prompt_start_control);
+        if matches!(outcome, RootTurnStartOutcome::Started)
+            && memory_settings.local_memories
+            && let Some(memories) = self.app.try_state::<Arc<crate::memories::MemoryService>>()
+        {
+            memories.trigger(
+                Arc::clone(&self.runtime),
+                Some(request.session_id.clone()),
+                memory_settings.interface_language,
+                false,
+            );
+        }
+        let terminal = self
+            .wait_for_turn_terminal(
+                &session,
+                &request.turn_id,
+                &request.operation_id,
+                &mut events,
+            )
+            .await
+            .map_err(|failure| (failure, "runtime_terminal_wait_failed"))?;
+        self.finish_operation_terminal(&request.operation_id, &terminal)
+            .map_err(|failure| (failure, "operation_finish_failed"))
+    }
+
+    /// 等到 operation 已绑定稳定执行身份，供 detach 调用安全返回。
+    async fn wait_for_operation_execution(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<OperationStatus, HostFailure> {
+        loop {
+            let notified = self.queue_wakeup.notified();
+            let status = self
+                .prompt_queue
+                .status(operation_id)
+                .map_err(map_prompt_queue_failure)?;
+            if status.execution.is_some() || status.state.is_terminal() {
+                return Ok(status);
+            }
+            notified.await;
+        }
+    }
+
+    /// 等到后台 driver 写入终态；连接 future 被取消不影响 driver 自身。
+    async fn wait_for_operation_terminal(
+        &self,
+        operation_id: &OperationId,
+    ) -> Result<OperationStatus, HostFailure> {
+        loop {
+            let notified = self.queue_wakeup.notified();
+            let status = self
+                .prompt_queue
+                .status(operation_id)
+                .map_err(map_prompt_queue_failure)?;
+            if status.state.is_terminal() {
+                return Ok(status);
+            }
+            notified.await;
+        }
+    }
+
+    /// 将启动/等待阶段失败收口为 operation 终态；失败摘要不包含 Prompt 正文。
+    fn finish_operation_failure(&self, operation_id: &OperationId, code: &str) {
+        let Ok(terminal) = OperationTerminal::new(code, None::<String>) else {
+            return;
+        };
+        match self
+            .prompt_queue
+            .finish(operation_id, OperationState::Failed, terminal)
+        {
+            Ok(_) => self.queue_wakeup.notify_waiters(),
+            Err(error) => tracing::error!(
+                target: "keencode_diagnostics",
+                operation_id = %operation_id,
+                %error,
+                "failed to finalize Prompt operation"
+            ),
+        }
+    }
+
+    /// 把 Runtime 根 Turn 的权威终态映射到 Host admission 账本。
+    fn finish_operation_terminal(
+        &self,
+        operation_id: &OperationId,
+        terminal: &TerminalTurn,
+    ) -> Result<(), HostFailure> {
+        if self
+            .prompt_queue
+            .status(operation_id)
+            .map_err(map_prompt_queue_failure)?
+            .state
+            .is_terminal()
+        {
+            return Ok(());
+        }
+        let state = match terminal.status {
+            TurnStatus::Completed => OperationState::Completed,
+            TurnStatus::Cancelled => OperationState::Cancelled,
+            TurnStatus::Failed => OperationState::Failed,
+            TurnStatus::Running => return Err(HostFailure::Internal),
+        };
+        let code = match (terminal.status.clone(), terminal.stop_reason) {
+            (TurnStatus::Completed, None) => "completed",
+            (TurnStatus::Cancelled, Some(TurnStopReason::Cancelled)) => "cancelled",
+            (TurnStatus::Failed, Some(TurnStopReason::LimitReached)) => "limit_reached",
+            (TurnStatus::Failed, Some(TurnStopReason::ModelOutputLimit)) => "max_tokens",
+            (TurnStatus::Failed, Some(TurnStopReason::ModelRefusal)) => "refusal",
+            (TurnStatus::Failed, Some(TurnStopReason::ContextBlocked)) => "context_blocked",
+            (TurnStatus::Failed, Some(TurnStopReason::Failed)) => "failed",
+            _ => "failed",
+        };
+        let receipt = OperationTerminal::new(code, None::<String>)
+            .map_err(|error| internal_failure(error))?;
+        self.prompt_queue
+            .finish(operation_id, state, receipt)
+            .map_err(|error| internal_failure(error))?;
+        self.queue_wakeup.notify_waiters();
+        Ok(())
     }
 
     /// 构造标准 Session 配置目录；只公开无凭据的 Provider、模型和推理强度。
@@ -1148,12 +1845,54 @@ impl AcpHost {
     }
 
     /// 按标准 `session/cancel` 语义向精确根 Turn 树发出级联取消。
-    async fn handle_cancel(&self, notification: schema::CancelNotification) {
+    async fn handle_cancel(
+        &self,
+        _connection_id: &keencode_acp::ConnectionId,
+        notification: schema::CancelNotification,
+    ) {
         let session_id = notification.session_id.0.as_ref().to_owned();
         let explicit_turn = match meta_string(notification.meta.as_ref(), META_TURN_ID) {
             Ok(turn) => turn,
             Err(_) => return,
         };
+        let explicit_operation = match meta_string(notification.meta.as_ref(), META_OPERATION_ID) {
+            Ok(Some(value)) => match OperationId::new(value) {
+                Ok(operation) => Some(operation),
+                Err(_) => return,
+            },
+            Ok(None) => None,
+            Err(_) => return,
+        };
+        if let Some(operation_id) = explicit_operation
+            && let Ok(status) = self.prompt_queue.status(&operation_id)
+        {
+            if status.session_id != session_id {
+                return;
+            }
+            if status.state == OperationState::Admitted {
+                if let Ok(terminal) = OperationTerminal::new("cancelled", None::<String>) {
+                    match self.prompt_queue.cancel_pending(&operation_id, terminal) {
+                        Ok(_) => self.queue_wakeup.notify_waiters(),
+                        Err(error) => tracing::error!(
+                            target: "keencode_diagnostics",
+                            operation_id = %operation_id,
+                            %error,
+                            "取消排队 Prompt 失败"
+                        ),
+                    }
+                }
+                return;
+            }
+            if status.execution.is_none() {
+                return;
+            }
+            if let Some(execution) = status.execution {
+                if let Err(error) = self.runtime.cancel_turn(&session_id, &execution.turn_id) {
+                    tracing::error!(session_id, turn_id = %execution.turn_id, %error, "取消回合失败");
+                }
+                return;
+            }
+        }
         let turn_id = match explicit_turn {
             Some(turn) => Some(turn),
             None => self
@@ -1169,17 +1908,54 @@ impl AcpHost {
         }
     }
 
+    /// 把 Runtime 当前待决 Elicitation 映射到 Host operation 状态。
+    fn sync_prompt_needs_input(
+        &self,
+        operation_id: &OperationId,
+        session_id: &str,
+    ) -> Result<(), HostFailure> {
+        let Some(request_id) = self
+            .runtime
+            .elicitation_coordinator()
+            .pending_request_id_for_session(session_id)
+        else {
+            return Ok(());
+        };
+        let status = self
+            .prompt_queue
+            .status(operation_id)
+            .map_err(map_prompt_queue_failure)?;
+        if matches!(
+            status.state,
+            OperationState::Claimed | OperationState::Running
+        ) {
+            match self.prompt_queue.mark_needs_input(operation_id, request_id) {
+                Ok(_) => self.queue_wakeup.notify_waiters(),
+                Err(error) => tracing::debug!(
+                    target: "keencode_diagnostics",
+                    operation_id = %operation_id,
+                    %error,
+                    "Prompt NeedsInput 状态已由其他路径收口"
+                ),
+            }
+        }
+        Ok(())
+    }
+
     /// 等待指定根 Turn 的权威终态；慢订阅者 Lag 后回到 Snapshot 检查。
     async fn wait_for_turn_terminal(
         &self,
         session: &RuntimeSession,
         turn_id: &str,
+        operation_id: &OperationId,
         subscription: &mut RuntimeEventSubscription,
     ) -> Result<TerminalTurn, HostFailure> {
+        self.sync_prompt_needs_input(operation_id, session.session_id().as_str())?;
         if let Some(terminal) = self.snapshot_terminal(session, turn_id)? {
             return Ok(terminal);
         }
         loop {
+            self.sync_prompt_needs_input(operation_id, session.session_id().as_str())?;
             match subscription.recv().await {
                 Ok(delivery) => {
                     let should_check = match delivery.payload {
@@ -1311,12 +2087,95 @@ impl AcpHost {
     }
 }
 
+impl AcpHostBridge for AcpHost {
+    fn dispatch<'a>(
+        &'a self,
+        connection_id: &'a keencode_acp::ConnectionId,
+        message: Value,
+    ) -> AcpHostBridgeFuture<'a> {
+        let host = self.self_ref.upgrade();
+        Box::pin(async move {
+            let host = host.ok_or_else(|| "ACP Host 已经释放".to_owned())?;
+            host.dispatch(connection_id, message).await
+        })
+    }
+
+    fn subscribe(
+        &self,
+        connection_id: &keencode_acp::ConnectionId,
+    ) -> Option<broadcast::Receiver<Value>> {
+        Some(self.subscribe_events(connection_id))
+    }
+
+    fn disconnect(&self, connection_id: &keencode_acp::ConnectionId) {
+        self.disconnect(connection_id);
+    }
+
+    fn publish_delivery(
+        &self,
+        payload: Value,
+        target_connection_id: Option<&keencode_acp::ConnectionId>,
+    ) {
+        self.publish_delivery(payload, target_connection_id);
+    }
+}
+
+impl keencode_cli::HostDispatch for AcpHost {
+    /// 把本地 NDJSON transport 的连接身份交给同一个 Desktop ACP Host。
+    fn dispatch(
+        &self,
+        connection_id: keencode_acp::ConnectionId,
+        message: Value,
+    ) -> keencode_cli::HostDispatchFuture<'_> {
+        Box::pin(async move {
+            AcpHostBridge::dispatch(self, &connection_id, message)
+                .await
+                .map_err(|_| keencode_cli::HostDispatchError::Internal)
+        })
+    }
+
+    /// IPC 连接关闭只释放连接级状态；后台 operation 和 Desktop owner 生命周期保持不变。
+    fn disconnected(&self, connection_id: &keencode_acp::ConnectionId) {
+        AcpHostBridge::disconnect(self, connection_id);
+    }
+
+    /// 给 CLI 复用同一 Host delivery 总线；慢客户端由 broadcast lag 后走重连恢复。
+    fn subscribe(
+        &self,
+        connection_id: &keencode_acp::ConnectionId,
+    ) -> Option<broadcast::Receiver<Value>> {
+        AcpHostBridge::subscribe(self, connection_id)
+    }
+}
+
 /// 一个根 Turn 的终态快照。
 struct TerminalTurn {
     /// Runtime 归约后的粗粒度状态。
     status: TurnStatus,
     /// 非正常终态的精确资源层原因。
     stop_reason: Option<TurnStopReason>,
+}
+
+/// 后台 Prompt driver 所需的稳定输入；创建后不再借用请求连接。
+struct PromptDriveRequest {
+    /// admission 时的连接身份，同时约束本轮 Elicitation 的投递与响应来源。
+    connection_id: keencode_acp::ConnectionId,
+    /// 权威 Session 标识。
+    session_id: String,
+    /// 跨连接幂等操作标识。
+    operation_id: OperationId,
+    /// 本轮根 Turn 标识。
+    turn_id: String,
+    /// 完整 Prompt 正文；不会写入诊断日志。
+    text: String,
+    /// admission 时已经授权的项目目录。
+    project_root: PathBuf,
+    /// 请求内容摘要，用于 operationId 冲突判断。
+    payload_digest: String,
+    /// 本轮 Ultra 模式选择。
+    ultra_mode: bool,
+    /// 客户端断开后是否继续托管。
+    detached: bool,
 }
 
 /// 如实发布实际选择；未配置或已不在目录中的模型不能被列表第一项偷偷替换。
@@ -1383,7 +2242,10 @@ fn looks_like_client_response(message: &Value) -> bool {
 }
 
 /// 生成首次和重复 ACP 握手完全一致的能力响应，并提供可直接新建 Session 的默认 cwd。
-fn initialize_response(default_cwd: String) -> keencode_acp::InitializeResponseDto {
+fn initialize_response(
+    default_cwd: String,
+    host_runtime: &HostRuntime,
+) -> Result<keencode_acp::InitializeResponseDto, HostFailure> {
     let session_capabilities = keencode_acp::InitializeSessionCapabilitiesDto::new()
         .list(Some(schema::SessionListCapabilities::new()))
         .fork(Some(schema::SessionForkCapabilities::new()));
@@ -1394,10 +2256,17 @@ fn initialize_response(default_cwd: String) -> keencode_acp::InitializeResponseD
         .session_capabilities(session_capabilities);
     let mut meta = Map::new();
     meta.insert(META_DEFAULT_CWD.to_owned(), Value::String(default_cwd));
-    keencode_acp::InitializeResponseDto::new(SUPPORTED_PROTOCOL_VERSION)
-        .agent_capabilities(capabilities)
-        .agent_info(Some(schema::Implementation::new("KeenCode", "0.0.1")))
-        .meta(Some(meta))
+    meta.extend(
+        host_runtime
+            .initialize_meta()
+            .map_err(|error| internal_failure(error))?,
+    );
+    Ok(
+        keencode_acp::InitializeResponseDto::new(SUPPORTED_PROTOCOL_VERSION)
+            .agent_capabilities(capabilities)
+            .agent_info(Some(schema::Implementation::new("KeenCode", "0.0.1")))
+            .meta(Some(meta)),
+    )
 }
 
 /// 把持久化推理强度转换成标准 Session 配置值。
@@ -1439,6 +2308,18 @@ fn map_runtime_failure(error: AgentRuntimeError) -> HostFailure {
         }
         AgentRuntimeError::ProviderNotConfigured => HostFailure::ProviderNotConfigured,
         AgentRuntimeError::ProviderReloadFailed => HostFailure::ProviderReloadFailed,
+        _ => HostFailure::Internal,
+    }
+}
+
+/// 将 Host admission 错误压缩为稳定 ACP 分类；operation 冲突不允许静默重启。
+fn map_prompt_queue_failure(error: keencode_runtime::HostCoreError) -> HostFailure {
+    tracing::error!(target: "keencode_diagnostics", %error, "Host Prompt admission operation failed");
+    match error {
+        keencode_runtime::HostCoreError::InvalidRequest(_)
+        | keencode_runtime::HostCoreError::OperationConflict
+        | keencode_runtime::HostCoreError::QueueFull => HostFailure::InvalidParams,
+        keencode_runtime::HostCoreError::OperationNotFound => HostFailure::ResourceNotFound,
         _ => HostFailure::Internal,
     }
 }
@@ -1496,6 +2377,18 @@ fn prompt_text(blocks: Vec<schema::ContentBlock>) -> Result<String, HostFailure>
         return Err(HostFailure::InvalidParams);
     }
     Ok(text)
+}
+
+/// 为 Prompt admission 计算有界稳定指纹；只写入摘要，不把正文放进诊断日志。
+fn prompt_payload_digest(session_id: &str, turn_id: &str, text: &str, ultra_mode: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"keencode/session/prompt/v1");
+    for value in [session_id, turn_id, text] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value.as_bytes());
+    }
+    hasher.update([u8::from(ultra_mode)]);
+    format!("{:x}", hasher.finalize())
 }
 
 /// 从保留元数据中读取一个有界字符串。

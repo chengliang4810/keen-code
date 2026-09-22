@@ -50,7 +50,9 @@ pub use journal::{
     SnapshotPolicy, SnapshotStatus, TruncatedTailRecovery,
 };
 pub use reducer::{ReductionError, reduce_record};
-pub use session_lease::{SessionLease, SessionLeaseAcquire};
+pub use session_lease::{
+    HostLease, HostLeaseAcquire, HostOwner, SessionLease, SessionLeaseAcquire,
+};
 pub use session_mutation::{
     SessionEditUserRequest, SessionEditUserResult, SessionForkRequest, SessionForkResult,
     fork_session, prepare_edit_user, recover_session_mutations,

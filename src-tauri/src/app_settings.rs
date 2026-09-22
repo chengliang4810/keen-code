@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
+use crate::web_host::WebHostSettings;
 
 /// 应用更新安装包的下载源偏好。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -121,6 +122,8 @@ pub struct AppSettings {
     pub archive_retention_days: u16,
     /// WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。
     pub web_service_url: String,
+    /// 本机 Web Host 的非秘密配置；长期 Token 只保存在系统凭据库。
+    pub web_host: WebHostSettings,
 }
 
 impl Default for AppSettings {
@@ -193,6 +196,7 @@ impl AppSettings {
             auto_archive_conversations: true,
             archive_retention_days: 7,
             web_service_url: String::new(),
+            web_host: WebHostSettings::default(),
         }
     }
 
@@ -227,6 +231,9 @@ impl AppSettings {
             WebServiceConfig::new(&self.web_service_url)
                 .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))?;
         }
+        self.web_host
+            .validate()
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
             let mut characters = project_id.chars();
@@ -303,6 +310,9 @@ pub struct AppSettingsPatch {
     /// 更新 WebFetch 与 WebSearch 的兼容服务基础 URL；空字符串表示禁用。
     #[serde(default, deserialize_with = "deserialize_web_service_url")]
     pub web_service_url: Option<String>,
+    /// 更新本机 Web Host 的非秘密配置；Token 不属于设置补丁。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub web_host: Option<WebHostSettings>,
 }
 
 /// 将缺失补丁字段解析为空，同时拒绝调用方显式传入 null。
@@ -387,6 +397,13 @@ impl AppSettings {
     /// 返回当前设置对应的网络工具配置；未配置时使用内置服务。
     pub(crate) fn web_service_config(&self) -> Result<Option<WebServiceConfig>> {
         web_service_config(&self.web_service_url)
+    }
+
+    /// 返回带宿主运行时资源根的 Web Host 配置，不把运行时路径写入普通设置文件。
+    pub(crate) fn web_host_settings(&self, app: &AppHandle) -> Result<WebHostSettings> {
+        self.web_host
+            .with_runtime_defaults(app)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))
     }
 }
 
@@ -480,6 +497,9 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     }
     if let Some(value) = patch.web_service_url {
         settings.web_service_url = normalize_web_service_url(&value)?;
+    }
+    if let Some(value) = patch.web_host {
+        settings.web_host = value;
     }
     settings.validate()?;
     save_to_path(&path, &settings)?;

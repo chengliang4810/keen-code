@@ -29,19 +29,111 @@ mod plugin_secrets;
 mod plugins;
 mod power_management;
 mod providers;
+mod remote_host_client;
 mod session_commands;
 mod shell_env;
 mod storage;
 mod task_notifications;
 mod terminal;
 mod tray;
+mod web_host;
 mod workspace;
 
 use crate::agent_runtime::AgentRuntime;
 use crate::providers::{ProviderModelsResult, ProviderUpsert, ProvidersListResult};
-use std::sync::Arc;
+use keencode_acp::{HostDiscoveryRecord, HostOwnerKind, HostTransportKind};
+use keencode_cli::{
+    HostDispatch, LocalHostServer, LocalHostServerConfig, LocalHostServerHandle, NoopHostActivity,
+};
+use keencode_runtime::{HostRuntime, HostRuntimeAcquire};
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const OBSERVABILITY_EVENT: &str = "keencode://observability";
+
+/// Desktop 持有的本地 Host transport 与根级 lease；只在明确退出时释放。
+struct DesktopHostState {
+    runtime: Arc<HostRuntime>,
+    server: Mutex<Option<LocalHostServerHandle>>,
+    /// Remote Client 模式只保留 transport 句柄；不拥有也不关闭既有 Host。
+    remote_client: Mutex<Option<Arc<remote_host_client::RemoteHostClient>>>,
+    shutdown_started: AtomicBool,
+}
+
+impl DesktopHostState {
+    /// 先停止接受本地连接，再删除 discovery 并释放根级 lease。
+    fn shutdown(&self) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let server = self.server.lock().ok().and_then(|mut server| server.take());
+        if let Some(server) = server
+            && let Err(error) = tauri::async_runtime::block_on(server.stop())
+        {
+            tracing::error!(%error, "Desktop Host transport shutdown failed");
+        }
+        if self
+            .remote_client
+            .lock()
+            .map(|client| client.is_some())
+            .unwrap_or(false)
+        {
+            // Drop 由 DesktopHostState 生命周期完成；Client 断开不会触发远程 Host
+            // shutdown，也不会删除其 discovery 或 lease。
+            if let Ok(mut client) = self.remote_client.lock()
+                && let Some(client) = client.take()
+            {
+                client.shutdown();
+            }
+        } else if let Err(error) = self.runtime.explicit_shutdown() {
+            tracing::error!(%error, "Desktop Host runtime shutdown failed");
+        }
+    }
+}
+
+/// 为当前数据根生成与 headless Host 一致的本机端点。
+fn desktop_host_endpoint(root: &Path, fingerprint: &str) -> (HostTransportKind, String) {
+    #[cfg(windows)]
+    {
+        let _ = root;
+        return (
+            HostTransportKind::NamedPipe,
+            format!(r"\\.\pipe\keencode-{fingerprint}"),
+        );
+    }
+    #[cfg(unix)]
+    {
+        let _ = fingerprint;
+        return (
+            HostTransportKind::UnixSocket,
+            root.join("host.sock").to_string_lossy().into_owned(),
+        );
+    }
+    #[allow(unreachable_code)]
+    (
+        HostTransportKind::UnixSocket,
+        root.join("host.sock").to_string_lossy().into_owned(),
+    )
+}
+
+/// OS lease 已归当前进程所有时，清理 Unix 上一次异常退出留下的 socket 节点。
+fn cleanup_stale_desktop_host_endpoint(transport: HostTransportKind, endpoint: &str) {
+    #[cfg(unix)]
+    if transport == HostTransportKind::UnixSocket {
+        use std::os::unix::fs::FileTypeExt;
+        let path = Path::new(endpoint);
+        if let Ok(metadata) = std::fs::symlink_metadata(path)
+            && metadata.file_type().is_socket()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    let _ = (transport, endpoint);
+}
 
 /// ACP Host 使用的无凭据 Provider 模型目录条目。
 pub(crate) struct AcpProviderCatalogEntry {
@@ -97,6 +189,22 @@ fn diagnostics_record(
     diagnostics.error(&component, message);
 }
 
+/// 记录会导致前端失去正常控制流的未捕获异常；普通 console/error 仍只写日志。
+#[tauri::command]
+fn diagnostics_crash_record(
+    kind: String,
+    message: String,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) {
+    diagnostics.record_crash(diagnostics::observability::CrashRecord {
+        occurred_at_ms: diagnostics::observability::now_epoch_ms(),
+        kind: kind.clone(),
+        message: "frontend uncaught exception".to_owned(),
+        backtrace: Some(message.clone()),
+    });
+    diagnostics.error(&kind, message);
+}
+
 /// 记录前端聚合后的性能数据；正常观测不得污染错误级诊断。
 #[tauri::command]
 fn performance_record(
@@ -107,20 +215,110 @@ fn performance_record(
     diagnostics.log("info", &component, message);
 }
 
+/// 返回当前进程内已经脱敏、有界的结构化运行时观测快照。
+#[tauri::command]
+fn diagnostics_snapshot(
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) -> diagnostics::observability::ObservabilitySnapshot {
+    diagnostics.observability().snapshot()
+}
+
+/// 导出后端生成的脱敏观测 JSON；命令边界不读取原始诊断日志。
+#[tauri::command]
+fn diagnostics_export(
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) -> Result<String, String> {
+    diagnostics.observability().export_redacted()
+}
+
+/// 记录前端或其他产生端计算完成的标量观测值。
+#[tauri::command]
+fn diagnostics_metric_record(
+    name: String,
+    value: f64,
+    unit: String,
+    tags: BTreeMap<String, String>,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) {
+    diagnostics
+        .observability()
+        .record_metric(&name, value, &unit, tags);
+}
+
+/// 接收前端 WebView 资源采样；后端只保留有界、脱敏的数值摘要。
+#[tauri::command]
+fn diagnostics_resource_record(
+    mut sample: diagnostics::observability::ResourceSample,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) {
+    let process = diagnostics.process_resource_sample();
+    sample.process_id = std::process::id();
+    sample.cpu_percent = process.cpu_percent;
+    sample.resident_bytes = process.resident_bytes;
+    sample.private_bytes = process.private_bytes;
+    sample.virtual_bytes = process.virtual_bytes;
+    sample.process_count = process.process_count;
+    diagnostics.observability().record_resource_sample(sample);
+}
+
+/// 接收产生端已经用单调时钟计算完成的 Trace/TTFT，不跨进程重算时长。
+#[tauri::command]
+fn diagnostics_trace_record(
+    trace: diagnostics::observability::TraceSample,
+    diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
+) {
+    let observability = diagnostics.observability();
+    if let Some(ttft_ms) = trace.ttft_ms {
+        observability.record_ttft(ttft_ms as f64);
+    }
+    observability.record_trace(trace);
+}
+
+/// 将结构化观测事件从专用转发线程送到 Tauri，避免阻塞 Agent/IPC 调用线程。
+fn spawn_observability_event_bridge(
+    app: &AppHandle,
+    observability: Arc<diagnostics::observability::ObservabilityStore>,
+) {
+    let receiver = observability.subscribe();
+    let app = app.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("keencode-observability-events".to_owned())
+        .spawn(move || {
+            while let Ok(event) = receiver.recv() {
+                if app.emit(OBSERVABILITY_EVENT, event).is_err() {
+                    break;
+                }
+            }
+        })
+    {
+        eprintln!("[keencode] 无法启动观测事件转发线程: {error}");
+    }
+}
+
 /// 前端完成首次绘制后报告可交互时间点。
 #[tauri::command]
 fn startup_frontend_ready(diagnostics: State<'_, Arc<diagnostics::Diagnostics>>) {
     diagnostics.startup_phase("frontend_interactive");
 }
 
+/// 返回当前进程持有的本地 Runtime；Desktop Client 不得在本地读写第二份
+/// Provider/Session 事实，必须明确提示调用方由远程 Host 负责。
+fn require_owned_runtime(app: &AppHandle) -> Result<Arc<AgentRuntime>, String> {
+    app.try_state::<Arc<AgentRuntime>>()
+        .map(|state| Arc::clone(state.inner()))
+        .ok_or_else(|| {
+            "当前 Desktop Client 未持有 Agent Runtime；请通过远程 Host 执行此操作".to_owned()
+        })
+}
+
 /// 按需读取当前 Session 工具图片，二进制返回且不接受任意文件路径。
 #[tauri::command]
 async fn read_tool_image(
-    runtime: State<'_, Arc<AgentRuntime>>,
+    app: AppHandle,
     session_id: String,
     artifact_id: String,
 ) -> Result<tauri::ipc::Response, String> {
-    let runtime = Arc::clone(runtime.inner());
+    let runtime = require_owned_runtime(&app)?;
     tauri::async_runtime::spawn_blocking(move || runtime.read_tool_image(&session_id, &artifact_id))
         .await
         .map_err(|_| "图片读取任务失败".to_owned())?
@@ -161,15 +359,26 @@ async fn settings_set(
     settings: app_settings::AppSettingsPatch,
     app: AppHandle,
     power_management: State<'_, Arc<power_management::PowerManagement>>,
-    runtime: State<'_, Arc<AgentRuntime>>,
     memories: State<'_, Arc<memories::MemoryService>>,
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
 ) -> Result<app_settings::AppSettings, String> {
+    let runtime = require_owned_runtime(&app)?;
     let previous = app_settings::get(&app).map_err(|error| error.to_string())?;
     let previous_web_service = previous
         .web_service_config()
         .map_err(|error| error.to_string())?;
     let web_service_update = settings
         .web_service_config_update()
+        .map_err(|error| error.to_string())?;
+    let web_host_update = settings
+        .web_host
+        .as_ref()
+        .map(|value| {
+            let mut candidate = previous.clone();
+            candidate.web_host = value.clone();
+            candidate.web_host_settings(&app)
+        })
+        .transpose()
         .map_err(|error| error.to_string())?;
     let mut background_agent_limit_changed = false;
     let mut keep_computer_awake_changed = false;
@@ -183,7 +392,7 @@ async fn settings_set(
     if let Some(web_service) = web_service_update {
         if let Err(error) = runtime.set_web_service_config(web_service) {
             rollback_settings_side_effects(
-                runtime.inner().as_ref(),
+                runtime.as_ref(),
                 power_management.inner(),
                 &previous,
                 previous_web_service.clone(),
@@ -199,7 +408,7 @@ async fn settings_set(
         && let Err(error) = power_management.set_keep_awake(enabled)
     {
         rollback_settings_side_effects(
-            runtime.inner().as_ref(),
+            runtime.as_ref(),
             power_management.inner(),
             &previous,
             previous_web_service.clone(),
@@ -213,6 +422,12 @@ async fn settings_set(
     }
     match app_settings::set(&app, settings) {
         Ok(saved) => {
+            if let Some(web_settings) = web_host_update {
+                web_host
+                    .set_settings(web_settings)
+                    .await
+                    .map_err(|error| error.to_string())?;
+            }
             memories.set_enabled(saved.local_memories);
             if saved.interface_language != previous.interface_language {
                 // macOS 应用菜单是原生界面，语言变化后必须重建才能跟随界面语言。
@@ -223,18 +438,13 @@ async fn settings_set(
                 && (saved.interface_language != previous.interface_language
                     || !previous.local_memories)
             {
-                memories.trigger(
-                    runtime.inner().clone(),
-                    None,
-                    saved.interface_language,
-                    true,
-                );
+                memories.trigger(runtime.clone(), None, saved.interface_language, true);
             }
             Ok(saved)
         }
         Err(error) => {
             rollback_settings_side_effects(
-                runtime.inner().as_ref(),
+                runtime.as_ref(),
                 power_management.inner(),
                 &previous,
                 previous_web_service,
@@ -247,9 +457,51 @@ async fn settings_set(
     }
 }
 
+/// 启动 Desktop Web Host；Token、静态根和上传根不从前端命令参数读取。
+#[tauri::command]
+async fn web_host_start(
+    port: Option<u16>,
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
+) -> Result<web_host::WebHostStatus, String> {
+    web_host
+        .start(port)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// 停止 Desktop Web Host 并撤销旧浏览器会话。
+#[tauri::command]
+async fn web_host_stop(
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
+) -> Result<web_host::WebHostStatus, String> {
+    web_host.stop().await.map_err(|error| error.to_string())
+}
+
+/// 返回不含 Token 的 Desktop Web Host 状态。
+#[tauri::command]
+async fn web_host_status(
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
+) -> Result<web_host::WebHostStatus, String> {
+    Ok(web_host.status().await)
+}
+
+/// 保存新的 Web Token；正文只在命令调用栈与系统凭据 provider 中出现。
+#[tauri::command]
+async fn web_host_set_token(
+    token: String,
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
+) -> Result<web_host::WebHostStatus, String> {
+    let token = keencode_web::WebToken::try_from(token).map_err(|error| error.to_string())?;
+    web_host
+        .set_token(token)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// 返回 KeenCode 自定义模型供应商列表。
 #[tauri::command]
 fn providers_list(app: AppHandle) -> Result<ProvidersListResult, String> {
+    require_owned_runtime(&app)?;
     providers::list(&app).map_err(|error| error.to_string())
 }
 
@@ -269,9 +521,9 @@ async fn providers_upsert(
     supports_vision: std::collections::BTreeMap<String, bool>,
     create_only: bool,
     app: AppHandle,
-    agent_runtime: State<'_, Arc<AgentRuntime>>,
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
+    let agent_runtime = require_owned_runtime(&app)?;
     diagnostics.log(
         "info",
         "ipc.providers_upsert",
@@ -323,9 +575,9 @@ async fn providers_upsert(
 async fn providers_remove(
     id: String,
     app: AppHandle,
-    agent_runtime: State<'_, Arc<AgentRuntime>>,
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
+    let agent_runtime = require_owned_runtime(&app)?;
     diagnostics.log(
         "info",
         "ipc.providers_remove",
@@ -357,9 +609,9 @@ async fn providers_select_model(
     provider_id: String,
     model_id: String,
     app: AppHandle,
-    agent_runtime: State<'_, Arc<AgentRuntime>>,
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<ProvidersListResult, String> {
+    let agent_runtime = require_owned_runtime(&app)?;
     diagnostics.log(
         "info",
         "ipc.providers_select_model",
@@ -405,6 +657,7 @@ fn providers_list_models(
 /// 导出单个供应商的配置 JSON 文档。
 #[tauri::command]
 fn providers_export(provider_id: String, app: AppHandle) -> Result<String, String> {
+    require_owned_runtime(&app)?;
     providers::export(&app, &provider_id).map_err(|error| error.to_string())
 }
 
@@ -413,9 +666,9 @@ fn providers_export(provider_id: String, app: AppHandle) -> Result<String, Strin
 async fn providers_import(
     config: String,
     app: AppHandle,
-    agent_runtime: State<'_, Arc<AgentRuntime>>,
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
 ) -> Result<providers::ProvidersImportResult, String> {
+    let agent_runtime = require_owned_runtime(&app)?;
     diagnostics.log(
         "info",
         "ipc.providers_import",
@@ -475,6 +728,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             use tauri::Manager;
             let diagnostics = diagnostics::Diagnostics::init(app.handle(), startup_started_at);
             diagnostics.install();
+            spawn_observability_event_bridge(app.handle(), diagnostics.observability());
             diagnostics.startup_phase("backend_setup");
             diagnostics.log(
                 "info",
@@ -520,30 +774,111 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             app.manage(Arc::new(mcp_oauth::McpOAuthRegistry::new_with_event_sink(
                 acp_host::mcp_oauth_event_sink(app.handle()),
             )));
-            let agent_runtime = AgentRuntime::build(app.handle())?;
-            agent_runtime.set_web_service_config(current_settings.web_service_config()?)?;
-            agent_runtime
-                .set_background_agent_limit(current_settings.background_agent_limit as usize)?;
-            diagnostics.startup_phase("runtime_ready");
+            let data_root = storage::root_dir(app.handle()).map_err(|error| error.to_string())?;
+            let host_acquire = HostRuntime::acquire(&data_root, HostOwnerKind::Desktop)
+                .map_err(|error| error.to_string())?;
+            let host_runtime = host_acquire.runtime().clone();
+            let (agent_runtime, remote_client) = match host_acquire {
+                HostRuntimeAcquire::Owned(_) => {
+                    let agent_runtime = AgentRuntime::build(app.handle())?;
+                    agent_runtime.set_web_service_config(current_settings.web_service_config()?)?;
+                    agent_runtime.set_background_agent_limit(
+                        current_settings.background_agent_limit as usize,
+                    )?;
+                    diagnostics.startup_phase("agent_runtime_ready");
+                    (Some(agent_runtime), None)
+                }
+                HostRuntimeAcquire::Client(_) => {
+                    // Client 分支只连接既有 Host；禁止构造第二 Runtime、第二
+                    // Journal 或第二 Provider 注册表。
+                    let client = tauri::async_runtime::block_on(
+                        remote_host_client::RemoteHostClient::connect(
+                            app.handle().clone(),
+                            remote_host_client::config_for_root(&data_root),
+                        ),
+                    )
+                    .map_err(|error| format!("连接既有 KeenCode Host 失败: {error}"))?;
+                    diagnostics.startup_phase("remote_host_connected");
+                    (None, Some(Arc::new(client)))
+                }
+            };
             let memories = memories::MemoryService::new(app.handle())?;
             memories.set_enabled(current_settings.local_memories);
             app.manage(Arc::clone(&memories));
-            app.manage(Arc::clone(&agent_runtime));
-            acp_host::install(app.handle(), Arc::clone(&agent_runtime))?;
-            if let Some(window) = app.get_webview_window("main") {
-                #[cfg(target_os = "macos")]
-                {
-                    // 使用不透明窗口底，避免整窗原生毛玻璃让暗色侧栏和设置导航泛灰。
-                    let _ =
-                        window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    // 非 macOS 平台使用与深色主题一致的实色背景，避免白屏闪烁。
-                    let _ =
-                        window.set_background_color(Some(tauri::window::Color(13, 13, 13, 255)));
-                }
+            if let Some(agent_runtime) = agent_runtime.as_ref() {
+                app.manage(Arc::clone(agent_runtime));
             }
+            let web_settings = current_settings
+                .web_host_settings(app.handle())
+                .map_err(|error| error.to_string())?;
+            let web_manager = web_host::WebHostManager::new(
+                web_settings,
+                web_host::credential_provider().map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+            web_manager
+                .set_observability(diagnostics.observability())
+                .map_err(|error| error.to_string())?;
+            app.manage(Arc::new(web_manager));
+            let (local_server, remote_client) = if let Some(agent_runtime) = agent_runtime {
+                let acp_host = acp_host::install(
+                    app.handle(),
+                    Arc::clone(&agent_runtime),
+                    Arc::clone(&host_runtime),
+                )?;
+                let (transport, endpoint) = desktop_host_endpoint(
+                    host_runtime.data_root(),
+                    host_runtime.data_root_fingerprint(),
+                );
+                cleanup_stale_desktop_host_endpoint(transport, &endpoint);
+                let starting_record = HostDiscoveryRecord::new_with_host_id(
+                    transport,
+                    endpoint.clone(),
+                    HostOwnerKind::Desktop,
+                    std::process::id(),
+                    host_runtime.host_id().to_owned(),
+                    host_runtime.data_root_fingerprint().to_owned(),
+                    "starting",
+                )
+                .map_err(|error| error.to_string())?;
+                let dispatch: Arc<dyn HostDispatch> = acp_host;
+                let activity = Arc::new(NoopHostActivity);
+                // bind 和 spawn 必须处于同一个 Tokio reactor 上下文；Tauri setup
+                // 本身是同步线程，离开 block_on 后再 tokio::spawn 会直接 panic。
+                let local_server = tauri::async_runtime::block_on(async {
+                    LocalHostServer::bind(
+                        &starting_record,
+                        LocalHostServerConfig::default(),
+                        dispatch,
+                        activity,
+                    )
+                    .await
+                    .map(LocalHostServer::spawn)
+                })
+                .map_err(|error| error.to_string())?;
+                host_runtime
+                    .mark_ready_and_publish(transport, endpoint)
+                    .map_err(|error| error.to_string())?;
+                diagnostics.startup_phase("host_ready");
+                (Some(local_server), None)
+            } else {
+                let client = remote_client
+                    .as_ref()
+                    .cloned()
+                    .ok_or_else(|| "Remote Host Client 未初始化".to_owned())?;
+                acp_host::install_remote_bridge(
+                    Arc::clone(&client) as Arc<dyn acp_host::AcpHostBridge>
+                )?;
+                (None, Some(client))
+            };
+            app.manage(DesktopHostState {
+                runtime: host_runtime,
+                server: Mutex::new(local_server),
+                remote_client: Mutex::new(remote_client),
+                shutdown_started: AtomicBool::new(false),
+            });
+            // 主窗口与子 WebView 的背景由前端在应用主题和皮肤生效后同步；不要在
+            // Rust 启动阶段写入固定深色，否则浅色主题会在透明边缘长期露出黑底。
             // 托盘图标常驻；创建失败不阻断启动，仅记录诊断。
             if let Err(error) = tray::install(app.handle()) {
                 diagnostics.log(
@@ -557,9 +892,19 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
         .invoke_handler(tauri::generate_handler![
             settings_get,
             settings_set,
+            web_host_start,
+            web_host_stop,
+            web_host_status,
+            web_host_set_token,
             diagnostics_log_path,
             diagnostics_record,
+            diagnostics_crash_record,
             performance_record,
+            diagnostics_snapshot,
+            diagnostics_export,
+            diagnostics_metric_record,
+            diagnostics_resource_record,
+            diagnostics_trace_record,
             startup_frontend_ready,
             app_exit::app_confirm_exit,
             app_updates::app_update_info,
@@ -685,8 +1030,10 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
                     tray::show_main_window(app);
                 }
             } else {
-                let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
-                app_exit::run_approved_shutdown(&runtime);
+                app_exit::run_approved_shutdown(app);
+                if let Some(host) = app.try_state::<DesktopHostState>() {
+                    host.shutdown();
+                }
             }
         }
         #[cfg(target_os = "macos")]

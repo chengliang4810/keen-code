@@ -17,6 +17,8 @@ description = "KeenCode Session Runtime 与 Agent 权威提交组合层"
 [dependencies]
 # 解码 Provider 中立消息中的内联 Base64 图片并写入 ArtifactStore。
 base64 = "0.22.1"
+# 复用跨 Desktop、Web 与 CLI 的 Host 生命周期、幂等和恢复协议类型。
+keencode-acp = { path = "../keencode-acp" }
 # 接收 Agent 六类权威事件与工具 Round 预检契约。
 keencode-agent = { path = "../keencode-agent" }
 # 读取 Provider 中立消息、图片与工具结果类型。
@@ -37,6 +39,8 @@ tokio = { version = "1.47.1", features = ["sync"] }
 tracing = "0.1"
 # 为项目级持久 Goal 生成按时间排序且跨进程唯一的标识。
 uuid = { version = "1.18.1", features = ["v7"] }
+# 原子写入 Host discovery 临时文件，并保证临时文件与目标位于同一数据根。
+tempfile = "3.21.0"
 
 [dev-dependencies]
 # 仅在 Runtime 测试中固定 Journal 批量截止时间，避免用墙钟竞争断言读取路径语义。

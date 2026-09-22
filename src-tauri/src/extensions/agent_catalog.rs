@@ -900,7 +900,19 @@ mod tests {
             assert!(is_builtin_agent(&entry.name.to_uppercase()));
             assert_eq!(entry.document.name.as_deref(), Some(entry.name.as_str()));
             assert_eq!(entry.document.model.as_deref(), Some("test::model"));
-            assert!(entry.document.system_prompt.len() > 1000);
+            let required_marker = match entry.name.as_str() {
+                "plan" => "You are a software architect and planning specialist for KeenCode.",
+                "explore" => "# Repository investigation",
+                "code-reviewer" => "## Review Dimensions",
+                "general-purpose" => "You are an agent for KeenCode.",
+                "verification" => "=== VERIFICATION STRATEGY ===",
+                name => panic!("未知的内置 Agent：{name}"),
+            };
+            assert!(
+                entry.document.system_prompt.contains(required_marker),
+                "内置 Agent {} 缺少关键正文：{required_marker}",
+                entry.name
+            );
             assert!(!entry.document.system_prompt.contains("${"));
             if matches!(entry.name.as_str(), "explore" | "plan" | "code-reviewer") {
                 assert_eq!(

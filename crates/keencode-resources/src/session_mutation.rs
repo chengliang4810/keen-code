@@ -1808,7 +1808,12 @@ fn list_records(layout: &MutationLayout) -> Result<Vec<(PathBuf, MutationRecord)
             Err(error) => match tombstone_envelope(&bytes) {
                 Some(envelope) => {
                     scanned_records += 1;
-                    skip_completed_tombstone(layout, &path, &envelope.operation_key, envelope.version);
+                    skip_completed_tombstone(
+                        layout,
+                        &path,
+                        &envelope.operation_key,
+                        envelope.version,
+                    );
                     continue;
                 }
                 None => {

@@ -53,7 +53,13 @@ struct ExitRequestedPayload {
 /// 查询在专用线程上限时执行：Runtime 卡死时既不能永远阻塞主线程，也不能再依赖
 /// Runtime 自身回答，此时按用户已明确发起退出处理，直接走强制退出。
 pub fn request_exit(app: &AppHandle) -> Result<usize, String> {
-    let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
+    let Some(runtime) = app.try_state::<Arc<AgentRuntime>>() else {
+        // Desktop Client 不持有 Runtime；退出只需要关闭本地 transport/client，
+        // 不能把远程 Host 的活动任务当作本地任务查询或停止。
+        finalize_exit(app);
+        return Ok(0);
+    };
+    let runtime = runtime.inner().clone();
     let (sender, receiver) = mpsc::channel();
     std::thread::spawn(move || {
         let _ = sender.send(runtime.active_session_ids());
@@ -131,19 +137,28 @@ pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
     if exit_state.is_approved() {
         return Ok(());
     }
-    let runtime = app.state::<Arc<AgentRuntime>>().inner().clone();
-    runtime
-        .shutdown()
-        .await
-        .map_err(|error| error.to_string())?;
-    app.state::<Arc<crate::analytics::AnalyticsRecorder>>()
+    if let Some(runtime) = app.try_state::<Arc<AgentRuntime>>() {
+        runtime
+            .shutdown()
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    if let Some(analytics) = app.try_state::<Arc<crate::analytics::AnalyticsRecorder>>() {
+        analytics.flush()?;
+    }
+    // 诊断日志使用独立有界队列；退出放行前必须等待已接收的最后一批日志
+    // 写入并同步到磁盘，避免退出时只剩内存队列而丢失关键错误摘要。
+    app.state::<Arc<crate::diagnostics::Diagnostics>>()
         .flush()?;
     exit_state.approve();
     Ok(())
 }
 
 /// 在已放行的退出事件中补充一次幂等 shutdown；看门狗保证任何卡死都无法阻止退出。
-pub fn run_approved_shutdown(runtime: &Arc<AgentRuntime>) {
+pub fn run_approved_shutdown(app: &AppHandle) {
+    let runtime = app
+        .try_state::<Arc<AgentRuntime>>()
+        .map(|state| state.inner().clone());
     std::thread::Builder::new()
         .name("keencode-exit-watchdog".to_owned())
         .spawn(|| {
@@ -151,7 +166,9 @@ pub fn run_approved_shutdown(runtime: &Arc<AgentRuntime>) {
             std::process::exit(0);
         })
         .expect("退出看门狗线程应能启动");
-    let _ = tauri::async_runtime::block_on(runtime.shutdown());
+    if let Some(runtime) = runtime {
+        let _ = tauri::async_runtime::block_on(runtime.shutdown());
+    }
 }
 
 #[cfg(test)]

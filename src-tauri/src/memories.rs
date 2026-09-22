@@ -104,6 +104,15 @@ fn consolidation_output_format() -> StructuredOutputConfig {
     )
 }
 
+/// 本地记忆隔离生成的业务输入；取消接收器保留为可变执行控制参数。
+struct MemoryGenerationRequest<'a> {
+    session_id: &'a str,
+    system_prompt: &'a str,
+    input: &'a str,
+    structured_output: StructuredOutputConfig,
+    generation: u64,
+}
+
 /// 本地记忆流水线的业务状态；schema 和 version 由外层持久化文件承载。
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -726,13 +735,16 @@ impl MemoryService {
     async fn generate_isolated(
         &self,
         runtime: &AgentRuntime,
-        session_id: &str,
-        system_prompt: &str,
-        input: &str,
-        structured_output: StructuredOutputConfig,
-        generation: u64,
+        request: MemoryGenerationRequest<'_>,
         cancellation: &mut watch::Receiver<u64>,
     ) -> Result<String> {
+        let MemoryGenerationRequest {
+            session_id,
+            system_prompt,
+            input,
+            structured_output,
+            generation,
+        } = request;
         self.ensure_generation(generation)?;
         tokio::select! {
             result = runtime.generate_isolated(session_id, system_prompt, input, MODEL_TIMEOUT_SECS, structured_output) => {
@@ -777,11 +789,13 @@ impl MemoryService {
         let response = self
             .generate_isolated(
                 runtime,
-                session_id,
-                &system_prompt,
-                &input,
-                extraction_output_format(),
-                generation,
+                MemoryGenerationRequest {
+                    session_id,
+                    system_prompt: &system_prompt,
+                    input: &input,
+                    structured_output: extraction_output_format(),
+                    generation,
+                },
                 cancellation,
             )
             .await?;
@@ -832,11 +846,13 @@ impl MemoryService {
             |system_prompt, input| async move {
                 self.generate_isolated(
                     runtime,
-                    CONSOLIDATION_SESSION_ID,
-                    &system_prompt,
-                    &input,
-                    consolidation_output_format(),
-                    generation,
+                    MemoryGenerationRequest {
+                        session_id: CONSOLIDATION_SESSION_ID,
+                        system_prompt: &system_prompt,
+                        input: &input,
+                        structured_output: consolidation_output_format(),
+                        generation,
+                    },
                     cancellation,
                 )
                 .await

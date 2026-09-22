@@ -10,7 +10,8 @@ use keencode_acp::schema::{
     EnumOption, Meta, MultiSelectPropertySchema, RequestId, StringPropertySchema,
 };
 use keencode_acp::{
-    AcpClientRequestEncoder, AcpClientRequestFrame, AcpResponseDecoder, ElicitationRouter,
+    AcpClientRequestEncoder, AcpClientRequestFrame, AcpResponseDecoder, ConnectionId,
+    ElicitationRouter,
 };
 use keencode_tools::{
     UserQuestion, UserQuestionAnswer, UserQuestionError, UserQuestionFuture, UserQuestionHandler,
@@ -19,8 +20,8 @@ use keencode_tools::{
 use parking_lot::Mutex;
 use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 use tokio::sync::oneshot;
 use tokio::task::AbortHandle;
 
@@ -51,6 +52,8 @@ pub enum ElicitationBridgeError {
     InvalidResponse,
     /// 响应携带的请求标识不存在或已经结束。
     UnknownRequest,
+    /// 响应来自非请求目标连接。
+    ResponseConnectionMismatch,
     /// 响应到达时请求尚未被投递泵确认送达。
     RequestNotDelivered,
     /// 用户拒绝或取消了本次问答。
@@ -74,6 +77,7 @@ impl std::fmt::Display for ElicitationBridgeError {
             Self::DeliveryUnavailable => formatter.write_str("问答请求无法送达桌面"),
             Self::InvalidResponse => formatter.write_str("ACP 问答响应无效"),
             Self::UnknownRequest => formatter.write_str("ACP 待决问答不存在或已经结束"),
+            Self::ResponseConnectionMismatch => formatter.write_str("ACP 问答响应来自非目标连接"),
             Self::RequestNotDelivered => formatter.write_str("ACP 待决问答尚未送达桌面"),
             Self::Cancelled => formatter.write_str("用户取消了本次问答"),
             Self::InternalState => formatter.write_str("问答 Runtime 内部状态不一致"),
@@ -103,6 +107,8 @@ enum ElicitationDeliveryStage {
 
 /// 单个待决标准 Elicitation 的不可变绑定和一次性等待者。
 struct PendingElicitation {
+    /// 请求唯一允许投递和响应的 ACP 连接。
+    connection_id: ConnectionId,
     /// 请求绑定的唯一 Session。
     session_id: String,
     /// 用于把结构化响应还原为工具答案的原始问题定义。
@@ -125,6 +131,10 @@ struct ElicitationCoordinatorInner {
 
 /// 一个 Runtime 内全部待决结构化问答。
 struct ElicitationState {
+    /// 每条已初始化连接不可变的能力协商快照。
+    routers: HashMap<ConnectionId, ElicitationRouter>,
+    /// 当前 Session 正在执行的 Prompt 所属连接。
+    session_connections: HashMap<String, ConnectionId>,
     /// 按字符串 JSON-RPC 标识保存的待决请求。
     pending: HashMap<String, PendingElicitation>,
     /// 每个 Session 当前唯一待决请求，防止前端被并发弹窗覆盖。
@@ -142,8 +152,6 @@ pub struct ElicitationCoordinator {
     request_encoder: AcpClientRequestEncoder,
     /// 标准 ACP Client Response 严格解码器。
     response_decoder: AcpResponseDecoder,
-    /// initialize 协商后固定的共享能力快照；握手前不发送问答。
-    router: Arc<OnceLock<ElicitationRouter>>,
     /// 持有到响应终态的每 Session 展示串行门。
     client_request_gate: Arc<ClientRequestDisplayGate>,
 }
@@ -159,6 +167,8 @@ impl ElicitationCoordinator {
         Self {
             inner: Arc::new(ElicitationCoordinatorInner {
                 state: Mutex::new(ElicitationState {
+                    routers: HashMap::new(),
+                    session_connections: HashMap::new(),
                     pending: HashMap::new(),
                     pending_by_session: HashMap::new(),
                     closed: false,
@@ -166,48 +176,153 @@ impl ElicitationCoordinator {
             }),
             request_encoder: AcpClientRequestEncoder::new(),
             response_decoder: AcpResponseDecoder::new(),
-            router: Arc::new(OnceLock::new()),
             client_request_gate,
         }
     }
 
-    /// 首次握手固定实际能力；同能力刷新幂等，改变能力必须建立新连接。
+    /// 为嵌入式桌面连接协商能力；保留单连接调用方兼容入口。
+    #[cfg(test)]
     pub fn negotiate_client_capabilities(
         &self,
         capabilities: &ClientCapabilities,
     ) -> Result<(), ElicitationBridgeError> {
+        self.negotiate_connection_capabilities(&embedded_desktop_connection(), capabilities)
+    }
+
+    /// 首次握手固定指定连接的能力；同连接重复握手必须完全一致。
+    pub fn negotiate_connection_capabilities(
+        &self,
+        connection_id: &ConnectionId,
+        capabilities: &ClientCapabilities,
+    ) -> Result<(), ElicitationBridgeError> {
         let negotiated = ElicitationRouter::from_client_capabilities(capabilities);
-        let current = self.router.get_or_init(|| negotiated);
-        if current == &negotiated {
-            Ok(())
-        } else {
-            Err(ElicitationBridgeError::CapabilitiesUnavailable)
+        let mut state = self.inner.state.lock();
+        match state.routers.get(connection_id) {
+            Some(current) if current != &negotiated => {
+                Err(ElicitationBridgeError::CapabilitiesUnavailable)
+            }
+            Some(_) => Ok(()),
+            None => {
+                state.routers.insert(connection_id.clone(), negotiated);
+                Ok(())
+            }
         }
     }
 
-    /// 仅在 Client 明确协商支持表单时向 Agent 暴露 AskUser 工具。
+    /// 返回嵌入式桌面连接是否支持表单；保留单连接调用方兼容入口。
+    #[cfg(test)]
     pub fn supports_form(&self) -> bool {
-        self.router
-            .get()
+        self.supports_form_for_connection(&embedded_desktop_connection())
+    }
+
+    /// 仅在指定连接明确协商支持表单时返回 true。
+    pub fn supports_form_for_connection(&self, connection_id: &ConnectionId) -> bool {
+        self.inner
+            .state
+            .lock()
+            .routers
+            .get(connection_id)
+            .is_some_and(ElicitationRouter::supports_form)
+    }
+
+    /// 将当前 Session 的交互问答绑定到发起本轮 Prompt 的连接。
+    pub fn bind_session_connection(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<(), ElicitationBridgeError> {
+        let mut state = self.inner.state.lock();
+        if !state.routers.contains_key(connection_id) {
+            return Err(ElicitationBridgeError::CapabilitiesUnavailable);
+        }
+        state
+            .session_connections
+            .insert(session_id.to_owned(), connection_id.clone());
+        Ok(())
+    }
+
+    /// 返回当前 Session 绑定连接是否声明表单问答能力。
+    pub fn session_supports_form(&self, session_id: &str) -> bool {
+        let state = self.inner.state.lock();
+        state
+            .session_connections
+            .get(session_id)
+            .and_then(|connection_id| state.routers.get(connection_id))
             .is_some_and(ElicitationRouter::supports_form)
     }
 
     /// 为一个已经建立投递泵的 Session 创建 AskUser Handler。
+    #[cfg(test)]
     pub fn handler(
         self: &Arc<Self>,
         session_id: keencode_agent::SessionId,
         sink: Arc<dyn ClientRequestSink>,
     ) -> DesktopQuestionHandler {
+        self.handler_for_connection(session_id, embedded_desktop_connection(), sink)
+    }
+
+    /// 为一个 Session 创建只允许目标连接投递与响应的 AskUser Handler。
+    pub fn handler_for_connection(
+        self: &Arc<Self>,
+        session_id: keencode_agent::SessionId,
+        connection_id: ConnectionId,
+        sink: Arc<dyn ClientRequestSink>,
+    ) -> DesktopQuestionHandler {
         DesktopQuestionHandler {
             session_id,
+            connection_id,
             coordinator: Arc::clone(self),
             sink,
         }
     }
 
+    /// 返回 Session 当前绑定的 Prompt 连接。
+    pub fn session_connection(&self, session_id: &str) -> Option<ConnectionId> {
+        self.inner
+            .state
+            .lock()
+            .session_connections
+            .get(session_id)
+            .cloned()
+    }
+
     /// 返回当前进程尚未收口的问答数量。
     pub fn pending_len(&self) -> usize {
         self.inner.state.lock().pending.len()
+    }
+
+    /// 返回指定 Session 当前唯一待决 Elicitation 的请求标识。
+    ///
+    /// Host admission 只保存稳定标识和状态，不复制问答正文；该只读查询让
+    /// HostPromptQueue 在 Agent 发出请求后记录 `NeedsInput`，实际回答仍由本
+    /// 协调器负责严格解码和 exactly-once 收口。
+    pub fn pending_request_id_for_session(&self, session_id: &str) -> Option<String> {
+        self.inner
+            .state
+            .lock()
+            .pending_by_session
+            .get(session_id)
+            .cloned()
+    }
+
+    /// 返回一个待决请求所属的 Session；用于回答竞态下先登记 Host admission 状态。
+    pub fn pending_session_id_for_request(&self, request_id: &str) -> Option<String> {
+        self.inner
+            .state
+            .lock()
+            .pending
+            .get(request_id)
+            .map(|pending| pending.session_id.clone())
+    }
+
+    /// 返回待决请求唯一允许响应的连接。
+    pub fn pending_connection_for_request(&self, request_id: &str) -> Option<ConnectionId> {
+        self.inner
+            .state
+            .lock()
+            .pending
+            .get(request_id)
+            .map(|pending| pending.connection_id.clone())
     }
 
     /// 判断字符串 JSON-RPC 标识是否属于一个待决问答。
@@ -216,13 +331,29 @@ impl ElicitationCoordinator {
     }
 
     /// 严格解析并 exactly-once 收口一个完整 ACP Elicitation 响应。
+    #[cfg(test)]
     pub fn respond(&self, response_json: &str) -> Result<(), ElicitationBridgeError> {
+        self.respond_from_connection(&embedded_desktop_connection(), response_json)
+    }
+
+    /// 校验来源连接后严格解析并 exactly-once 收口一个完整响应。
+    pub fn respond_from_connection(
+        &self,
+        connection_id: &ConnectionId,
+        response_json: &str,
+    ) -> Result<(), ElicitationBridgeError> {
         if response_json.len() > self.response_decoder.limits().max_payload_bytes() {
             return Err(ElicitationBridgeError::InvalidResponse);
         }
         let routed_request_id = response_request_id(response_json)?;
-        if !self.contains_pending(&routed_request_id) {
-            return Err(ElicitationBridgeError::UnknownRequest);
+        {
+            let state = self.inner.state.lock();
+            let Some(pending) = state.pending.get(&routed_request_id) else {
+                return Err(ElicitationBridgeError::UnknownRequest);
+            };
+            if &pending.connection_id != connection_id {
+                return Err(ElicitationBridgeError::ResponseConnectionMismatch);
+            }
         }
         let decoded = match self
             .response_decoder
@@ -286,6 +417,8 @@ impl ElicitationCoordinator {
             return;
         }
         state.closed = true;
+        state.routers.clear();
+        state.session_connections.clear();
         let pending = state
             .pending
             .drain()
@@ -303,24 +436,62 @@ impl ElicitationCoordinator {
         }
     }
 
+    /// 断开连接时取消其全部待决问答，并移除能力和 Session 绑定。
+    pub fn disconnect(&self, connection_id: &ConnectionId) {
+        let mut state = self.inner.state.lock();
+        state.routers.remove(connection_id);
+        state
+            .session_connections
+            .retain(|_, current| current != connection_id);
+        let request_ids = state
+            .pending
+            .iter()
+            .filter(|(_, pending)| &pending.connection_id == connection_id)
+            .map(|(request_id, _)| request_id.clone())
+            .collect::<Vec<_>>();
+        let mut cancelled = Vec::with_capacity(request_ids.len());
+        for request_id in request_ids {
+            if let Some(pending) = state.pending.remove(&request_id) {
+                state.pending_by_session.remove(&pending.session_id);
+                cancelled.push(pending);
+            }
+        }
+        drop(state);
+        for mut pending in cancelled {
+            if let Some(abort) = pending.dispatch_abort.take() {
+                abort.abort();
+            }
+            let _ = pending.waiter.send(Err(
+                ElicitationBridgeError::Cancelled.into_user_question_error()
+            ));
+        }
+    }
+
     /// 同步登记一次问答并启动当前 Session 的唯一异步投递。
     fn register(
         &self,
         handler_session_id: &keencode_agent::SessionId,
+        connection_id: &ConnectionId,
         request: UserQuestionRequest,
         sink: Arc<dyn ClientRequestSink>,
     ) -> Result<RegisteredElicitation, ElicitationBridgeError> {
         if &request.session_id != handler_session_id {
             return Err(ElicitationBridgeError::SessionMismatch);
         }
+        let router = {
+            let state = self.inner.state.lock();
+            state
+                .routers
+                .get(connection_id)
+                .copied()
+                .ok_or(ElicitationBridgeError::CapabilitiesUnavailable)?
+        };
         let request_id = next_request_id()?;
         let frame = self
             .request_encoder
             .elicitation_request_frame(
                 RequestId::Str(request_id.clone()),
-                self.router
-                    .get()
-                    .ok_or(ElicitationBridgeError::CapabilitiesUnavailable)?,
+                &router,
                 create_request(&request),
             )
             .map_err(|_| ElicitationBridgeError::RegistrationRejected)?;
@@ -340,6 +511,7 @@ impl ElicitationCoordinator {
             state.pending.insert(
                 request_id.clone(),
                 PendingElicitation {
+                    connection_id: connection_id.clone(),
                     session_id: session_id.clone(),
                     questions: request.questions,
                     delivery_stage: ElicitationDeliveryStage::Dispatching,
@@ -485,9 +657,14 @@ impl ClientRequestRouter for ElicitationCoordinator {
         ElicitationCoordinator::contains_pending(self, request_id)
     }
 
-    /// 使用严格 ACP Response 解码器处理完整响应。
-    fn respond(&self, response_json: &str) -> Result<(), String> {
-        ElicitationCoordinator::respond(self, response_json).map_err(|error| error.to_string())
+    /// 生产路由必须验证 Client Response 的传输连接身份。
+    fn respond_from_connection(
+        &self,
+        connection_id: &ConnectionId,
+        response_json: &str,
+    ) -> Result<(), String> {
+        ElicitationCoordinator::respond_from_connection(self, connection_id, response_json)
+            .map_err(|error| error.to_string())
     }
 }
 
@@ -495,6 +672,8 @@ impl ClientRequestRouter for ElicitationCoordinator {
 pub struct DesktopQuestionHandler {
     /// 该 Handler 唯一允许接收的 Session。
     session_id: keencode_agent::SessionId,
+    /// 本轮 Prompt 唯一允许交互的 ACP 连接。
+    connection_id: ConnectionId,
     /// 进程内共享的问答协调器。
     coordinator: Arc<ElicitationCoordinator>,
     /// 当前 Session 的 ACP 投递泵。
@@ -504,9 +683,12 @@ pub struct DesktopQuestionHandler {
 impl UserQuestionHandler for DesktopQuestionHandler {
     /// 同步登记问题并等待一次严格 Client 响应。
     fn ask(&self, request: UserQuestionRequest) -> UserQuestionFuture<'_> {
-        let registration =
-            self.coordinator
-                .register(&self.session_id, request, Arc::clone(&self.sink));
+        let registration = self.coordinator.register(
+            &self.session_id,
+            &self.connection_id,
+            request,
+            Arc::clone(&self.sink),
+        );
         Box::pin(async move {
             let RegisteredElicitation {
                 mut guard,
@@ -557,6 +739,12 @@ fn next_request_id() -> Result<String, ElicitationBridgeError> {
         })
         .map(|previous| format!("elicitation-{}", previous + 1))
         .map_err(|_| ElicitationBridgeError::RequestIdExhausted)
+}
+
+/// 返回进程内桌面 transport 使用的稳定连接身份。
+#[cfg(test)]
+fn embedded_desktop_connection() -> ConnectionId {
+    ConnectionId::new("embedded-desktop").expect("固定桌面连接标识应合法")
 }
 
 /// 把 Provider 中立问题集合转换为标准 ACP form schema。
@@ -706,6 +894,11 @@ mod tests {
         ))
     }
 
+    /// 构造测试 transport 的稳定连接标识。
+    fn connection(value: &str) -> ConnectionId {
+        ConnectionId::new(value).expect("测试连接标识应合法")
+    }
+
     /// 未协商时不支持表单；缺少表单能力的 Client 不能触发任何投递。
     #[test]
     fn form_elicitation_requires_actual_client_capability() {
@@ -715,14 +908,24 @@ mod tests {
         let sink = Arc::new(RecordingSink { sender });
         let session = SessionId::new("session-capability").unwrap();
         assert!(matches!(
-            coordinator.register(&session, request(session.as_str()), sink.clone()),
+            coordinator.register(
+                &session,
+                &embedded_desktop_connection(),
+                request(session.as_str()),
+                sink.clone()
+            ),
             Err(ElicitationBridgeError::CapabilitiesUnavailable)
         ));
         coordinator
             .negotiate_client_capabilities(&ClientCapabilities::new())
             .unwrap();
         assert!(matches!(
-            coordinator.register(&session, request(session.as_str()), sink),
+            coordinator.register(
+                &session,
+                &embedded_desktop_connection(),
+                request(session.as_str()),
+                sink
+            ),
             Err(ElicitationBridgeError::RegistrationRejected)
         ));
         assert_eq!(coordinator.pending_len(), 0);
@@ -746,6 +949,38 @@ mod tests {
             Err(ElicitationBridgeError::CapabilitiesUnavailable)
         );
         assert!(coordinator.supports_form());
+    }
+
+    /// 不同连接独立协商能力，同一连接重复 initialize 不得改变既有快照。
+    #[test]
+    fn capability_negotiation_is_isolated_per_connection() {
+        let coordinator = ElicitationCoordinator::new();
+        let desktop = connection("desktop-a");
+        let web = connection("web-b");
+        coordinator
+            .negotiate_connection_capabilities(&desktop, &form_capabilities())
+            .expect("Desktop 应协商表单能力");
+        coordinator
+            .negotiate_connection_capabilities(&web, &ClientCapabilities::new())
+            .expect("Web 应独立协商无表单能力");
+        coordinator
+            .negotiate_connection_capabilities(&desktop, &form_capabilities())
+            .expect("同连接相同能力重复 initialize 应幂等");
+
+        assert!(coordinator.supports_form_for_connection(&desktop));
+        assert!(!coordinator.supports_form_for_connection(&web));
+        assert_eq!(
+            coordinator.negotiate_connection_capabilities(&desktop, &ClientCapabilities::new()),
+            Err(ElicitationBridgeError::CapabilitiesUnavailable)
+        );
+        coordinator
+            .bind_session_connection("shared-session", &web)
+            .expect("Session 应可绑定 Web 连接");
+        assert!(!coordinator.session_supports_form("shared-session"));
+        coordinator
+            .bind_session_connection("shared-session", &desktop)
+            .expect("同 Session 下一轮应可绑定 Desktop 连接");
+        assert!(coordinator.session_supports_form("shared-session"));
     }
 
     /// 把标准 Client Request 交给测试接收端。
@@ -928,6 +1163,177 @@ mod tests {
         let response = answer.await.expect("AskUser 应收到答案");
         assert_eq!(response.answers[0].values, ["直接实现"]);
         assert_eq!(response.answers[1].values, ["测试", "Clippy"]);
+        assert_eq!(coordinator.pending_len(), 0);
+    }
+
+    /// 同 Session 的其他连接不能抢答，拒绝后原请求仍可由目标连接完成。
+    #[tokio::test]
+    async fn response_is_restricted_to_the_target_connection() {
+        let coordinator = Arc::new(ElicitationCoordinator::new());
+        let target = connection("web-target");
+        let other = connection("web-other");
+        coordinator
+            .negotiate_connection_capabilities(&target, &form_capabilities())
+            .unwrap();
+        coordinator
+            .negotiate_connection_capabilities(&other, &form_capabilities())
+            .unwrap();
+        coordinator
+            .bind_session_connection("session-shared", &target)
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let handler = coordinator.handler_for_connection(
+            SessionId::new("session-shared").unwrap(),
+            target.clone(),
+            Arc::new(RecordingSink { sender }),
+        );
+        let answer = handler.ask(request("session-shared"));
+        let frame = receiver.recv().await.expect("目标连接应收到请求");
+        let request_id = frame_request_id(&frame);
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "action": "accept",
+                "content": { "strategy": "直接实现", "checks": ["测试"] }
+            }
+        })
+        .to_string();
+
+        assert_eq!(
+            coordinator.respond_from_connection(&other, &response),
+            Err(ElicitationBridgeError::ResponseConnectionMismatch)
+        );
+        assert_eq!(coordinator.pending_len(), 1);
+        coordinator
+            .respond_from_connection(&target, &response)
+            .expect("目标连接仍应完成原请求");
+        assert!(answer.await.is_ok());
+        assert_eq!(coordinator.pending_len(), 0);
+    }
+
+    /// 断线取消旧请求；同标识重连后迟到旧响应不能命中新请求。
+    #[tokio::test]
+    async fn disconnect_cancels_pending_and_reconnect_does_not_reuse_old_response() {
+        let coordinator = Arc::new(ElicitationCoordinator::new());
+        let target = connection("web-reconnect");
+        coordinator
+            .negotiate_connection_capabilities(&target, &form_capabilities())
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let sink: Arc<dyn ClientRequestSink> = Arc::new(RecordingSink { sender });
+        let handler = coordinator.handler_for_connection(
+            SessionId::new("session-reconnect").unwrap(),
+            target.clone(),
+            Arc::clone(&sink),
+        );
+        let old_answer = handler.ask(request("session-reconnect"));
+        let old_frame = receiver.recv().await.expect("旧连接应收到请求");
+        let old_request_id = frame_request_id(&old_frame);
+        let old_response = json!({
+            "jsonrpc": "2.0",
+            "id": old_request_id.clone(),
+            "result": { "action": "cancel" }
+        })
+        .to_string();
+
+        coordinator.disconnect(&target);
+        assert!(old_answer.await.is_err());
+        assert_eq!(coordinator.pending_len(), 0);
+        assert_eq!(
+            coordinator.respond_from_connection(&target, &old_response),
+            Err(ElicitationBridgeError::UnknownRequest)
+        );
+
+        coordinator
+            .negotiate_connection_capabilities(&target, &form_capabilities())
+            .expect("重连必须重新协商能力");
+        coordinator
+            .bind_session_connection("session-reconnect", &target)
+            .unwrap();
+        let reconnected = coordinator.handler_for_connection(
+            SessionId::new("session-reconnect").unwrap(),
+            target.clone(),
+            sink,
+        );
+        let new_answer = reconnected.ask(request("session-reconnect"));
+        let new_frame = receiver.recv().await.expect("重连后应收到新请求");
+        let new_request_id = frame_request_id(&new_frame);
+        assert_ne!(old_request_id, new_request_id);
+        assert_eq!(
+            coordinator.respond_from_connection(&target, &old_response),
+            Err(ElicitationBridgeError::UnknownRequest)
+        );
+        coordinator
+            .respond_from_connection(
+                &target,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": new_request_id,
+                    "result": { "action": "cancel" }
+                })
+                .to_string(),
+            )
+            .expect("新请求应由重连后的连接正常收口");
+        assert!(new_answer.await.is_err());
+    }
+
+    /// 目标连接与其他连接并发响应时，非目标响应永远不能消费请求。
+    #[tokio::test]
+    async fn concurrent_cross_connection_response_cannot_win() {
+        let coordinator = Arc::new(ElicitationCoordinator::new());
+        let target = connection("web-race-target");
+        let other = connection("web-race-other");
+        for connection_id in [&target, &other] {
+            coordinator
+                .negotiate_connection_capabilities(connection_id, &form_capabilities())
+                .unwrap();
+        }
+        let (sender, mut receiver) = mpsc::channel(1);
+        let handler = coordinator.handler_for_connection(
+            SessionId::new("session-race").unwrap(),
+            target.clone(),
+            Arc::new(RecordingSink { sender }),
+        );
+        let answer = handler.ask(request("session-race"));
+        let request_id = frame_request_id(&receiver.recv().await.unwrap());
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "action": "accept",
+                "content": { "strategy": "直接实现", "checks": ["测试"] }
+            }
+        })
+        .to_string();
+        let barrier = Arc::new(tokio::sync::Barrier::new(3));
+        let wrong = {
+            let coordinator = Arc::clone(&coordinator);
+            let connection_id = other.clone();
+            let response = response.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator.respond_from_connection(&connection_id, &response)
+            })
+        };
+        let correct = {
+            let coordinator = Arc::clone(&coordinator);
+            let connection_id = target.clone();
+            let barrier = Arc::clone(&barrier);
+            tokio::spawn(async move {
+                barrier.wait().await;
+                coordinator.respond_from_connection(&connection_id, &response)
+            })
+        };
+        barrier.wait().await;
+        assert_eq!(correct.await.unwrap(), Ok(()));
+        assert!(matches!(
+            wrong.await.unwrap(),
+            Err(ElicitationBridgeError::ResponseConnectionMismatch
+                | ElicitationBridgeError::UnknownRequest)
+        ));
+        assert!(answer.await.is_ok());
         assert_eq!(coordinator.pending_len(), 0);
     }
 

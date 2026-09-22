@@ -40,6 +40,10 @@ chrono = { version = "0.4", features = ["serde"] }
 iana-time-zone = "0.1"
 # 接入 KeenCode 自有 ACP 协议与事件契约。
 keencode-acp = { path = "../crates/keencode-acp" }
+# 复用本地 NDJSON Host transport；Desktop 仍持有唯一 Runtime 与业务状态。
+keencode-cli = { path = "../crates/keencode-cli" }
+# 接入本机 Web/HTTP/WS transport；Runtime 与业务事实仍由桌面 Host 持有。
+keencode-web = { path = "../crates/keencode-web" }
 # 接入 KeenCode 自有 Agent 回合执行核心。
 keencode-agent = { path = "../crates/keencode-agent" }
 # 接入 KeenCode 自有供应商配置与注册表。
@@ -105,6 +109,13 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["a
 [target.'cfg(target_os = "windows")'.dependencies]
 # 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。
 winreg = "0.55"
+# 读取宿主与 WebView2 子进程的进程树、CPU 时间和内存计数器；仅 Windows 编译。
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 # 为 Tauri 集成测试暴露资源层的一次性 Journal 追加故障注入点。

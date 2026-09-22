@@ -7,6 +7,8 @@
 #![forbid(unsafe_code)]
 
 mod file_changes;
+mod host_core;
+mod host_runtime;
 mod manager;
 mod persistent_state;
 mod publisher;
@@ -16,6 +18,16 @@ mod control_tests;
 #[cfg(test)]
 mod persistent_state_tests;
 
+pub use host_core::{
+    AdmissionDisposition, AdmissionReceipt, ClaimedPrompt, ElicitationAnswerDisposition,
+    ElicitationAnswerReceipt, ElicitationAnswerResult, ExecutionIdentity, HostCoreConfig,
+    HostCoreError, HostLifecycleController, HostPromptQueue, HostQueueSnapshot, OperationState,
+    OperationStatus, OperationTerminal, PromptAdmissionRequest, RecoveredOperation,
+};
+pub use host_runtime::{
+    HOST_DISCOVERY_FILE_NAME, HostRuntime, HostRuntimeAcquire, HostRuntimeError, HostRuntimeMode,
+    discovery_path, publish_discovery,
+};
 pub use manager::RuntimeManager;
 pub use persistent_state::PersistentAgentState;
 pub use publisher::{

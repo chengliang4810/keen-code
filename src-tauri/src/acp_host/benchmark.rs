@@ -112,7 +112,11 @@ impl BenchmarkAcpHost {
         }
         self.runtime
             .elicitation_coordinator()
-            .negotiate_client_capabilities(&request.client_capabilities)
+            .negotiate_connection_capabilities(
+                &keencode_acp::ConnectionId::new("benchmark-client")
+                    .map_err(|_| "ACP benchmark 连接标识无效".to_owned())?,
+                &request.client_capabilities,
+            )
             .map_err(|_| "ACP Client 能力无效".to_owned())?;
         *self
             .initialized

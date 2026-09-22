@@ -65,6 +65,16 @@ pub use protocol::{
     SessionMcpStatusResponse, SessionMcpUnloadRequest, SteerSessionRequest, SteerSessionResponse,
     ValidateAcpParams,
 };
+pub use protocol::{
+    ConnectionId, DATA_ROOT_FINGERPRINT_HEX_BYTES, DEFAULT_CWD_META_KEY, EventRecoveryPlan,
+    HOST_DATA_ROOT_FINGERPRINT_META_KEY, HOST_DISCOVERY_PROTOCOL, HOST_DISCOVERY_SCHEMA_VERSION,
+    HOST_OWNER_KIND_META_KEY, HOST_PROTOCOL_VERSION, HostConnectionRole, HostDisconnectAction,
+    HostDiscoveryRecord, HostDiscoveryValidationError, HostLifecycleAction, HostLifecyclePhase,
+    HostOwnerKind, HostTransportKind, MAX_HOST_ENDPOINT_BYTES, MAX_HOST_PROMPT_BYTES,
+    MAX_HOST_STARTED_AT_BYTES, OperationId, SessionEventCursor, SessionRecoveryWindow,
+    data_root_fingerprint, host_initialize_meta, merge_host_initialize_meta,
+    validate_host_initialize_meta,
+};
 pub use sequence::SessionSequence;
 
 #[cfg(test)]

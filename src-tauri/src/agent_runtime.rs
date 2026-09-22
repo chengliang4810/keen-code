@@ -23,9 +23,9 @@ use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use keencode_acp::{
     AcpClientRequestFrame, AgentLifecycleStatus, BackgroundTaskInfo, BackgroundTaskKind,
-    BackgroundTaskTerminalStatus, CompactionFailureKind, KeenCodeEvent, KeenCodeEventEnvelope,
-    KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse, SessionSequence,
-    SessionUpdateDeliveryEnvelope, TurnFailureKind,
+    BackgroundTaskTerminalStatus, CompactionFailureKind, ConnectionId, KeenCodeEvent,
+    KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse,
+    SessionSequence, SessionUpdateDeliveryEnvelope, TurnFailureKind,
 };
 use keencode_agent::{
     AgentCapabilities, AgentCommitSinkError, AgentDepth, AgentDynamicInputAcknowledgement,
@@ -85,7 +85,7 @@ use keencode_tools::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -318,6 +318,7 @@ impl LifecycleStartState {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // 部分原生测试目标会单独编译库测试夹具，不会同时编译其调用模块。
     pub(crate) fn with_started(started: Arc<Mutex<HashSet<(String, HookPhase)>>>) -> Self {
         Self {
             started,
@@ -334,6 +335,7 @@ impl LifecycleStartState {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)] // 仅供生命周期并发测试读取回调计数。
     pub(crate) fn callback_completion_count(&self) -> usize {
         self.completed_callbacks.load(Ordering::SeqCst)
     }
@@ -517,6 +519,8 @@ pub struct RootTurnOptions {
     pub developer_context: Option<String>,
     /// 本轮开始前必须原子写入 Session 快照的 Plan 模式状态。
     pub plan_enabled: bool,
+    /// 本轮交互式 Client Request 唯一允许送达的 ACP 连接。
+    pub elicitation_connection_id: Option<ConnectionId>,
 }
 
 /// 根 Turn 启动屏障完成后的精确幂等结果。
@@ -2068,6 +2072,25 @@ struct FrozenAgentPrompt {
     catalog: String,
     /// 小上下文只发送独立核心提示词，不拼接能力、目录或自定义指令。
     small_context: bool,
+}
+
+/// 构建冻结提示词时随工具快照变化的能力输入，避免调用方传递一组易错位的标量。
+struct FrozenPromptContext<'a> {
+    cwd: &'a Path,
+    can_spawn: bool,
+    has_skill: bool,
+    catalog: &'a str,
+    small_context: bool,
+}
+
+/// 一次隔离模型生成的完整请求参数；Provider 由调用路径单独绑定。
+struct IsolatedGenerationRequest<'a> {
+    session_id: &'a str,
+    system_prompt: &'a str,
+    input: &'a str,
+    timeout_secs: u64,
+    purpose: &'static str,
+    structured_output: Option<StructuredOutputConfig>,
 }
 
 impl FrozenAgentPrompt {
@@ -4442,8 +4465,12 @@ pub trait ClientRequestRouter: Send + Sync {
     /// 判断请求标识是否属于当前路由的待决账本。
     fn contains_pending(&self, request_id: &str) -> bool;
 
-    /// 严格处理完整 JSON-RPC 响应，错误说明不得包含敏感载荷。
-    fn respond(&self, response_json: &str) -> Result<(), String>;
+    /// 校验来源连接后严格处理响应，错误说明不得包含敏感载荷。
+    fn respond_from_connection(
+        &self,
+        connection_id: &ConnectionId,
+        response_json: &str,
+    ) -> Result<(), String>;
 }
 
 /// 自研 Runtime 的进程内唯一桌面装配根。
@@ -4495,6 +4522,9 @@ pub struct AgentRuntime {
     session_mcp: Mutex<HashMap<String, Arc<session_mcp::SessionMcpRuntime>>>,
     /// Tauri 或测试环境提供的同步可靠投递边界。
     emitter: Arc<dyn DeliveryEmitter>,
+    /// 进程内脱敏观测出口；测试/headless 装配可以省略，但生产桌面必须共享
+    /// Diagnostics 的同一实例，保证 Agent、工具和 Host 事件落在同一快照。
+    observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
     /// 当前 Runtime 创建的投递世代使用的时间边界；生产装配固定使用有界生产配置。
     delivery_timeouts: DeliveryTimeouts,
     /// 关闭后禁止建立新投递世代或热加载配置。
@@ -4511,6 +4541,23 @@ struct TitleGeneration {
     cancellation: TurnCancellation,
 }
 
+/// Agent Runtime 的平台无关构造输入。
+///
+/// `AppHandle`、Tauri 事件和 Provider 配置读取留在桌面 adapter；headless Host
+/// 只需要提供自己的持久化根、投递器和已装配的 Provider 注册表即可复用同一 Runtime。
+pub(crate) struct AgentRuntimeBuildConfig {
+    /// Runtime 使用的本地数据根目录。
+    pub(crate) storage_root: PathBuf,
+    /// Session 实时事件投递边界；实现可以是 Tauri、IPC 或测试 sink。
+    pub(crate) emitter: Arc<dyn DeliveryEmitter>,
+    /// 当前 Host 代次使用的 Provider 注册表。
+    pub(crate) provider_registry: ProviderRegistry,
+    /// 可选的请求观测记录器；headless 没有桌面 Analytics 时可以省略。
+    pub(crate) analytics: Option<Arc<AnalyticsRecorder>>,
+    /// 可选的结构化观测存储；headless/test 装配不建立桌面 Diagnostics。
+    pub(crate) observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
+}
+
 impl AgentRuntime {
     /// 从当前 KeenCode 数据根和 Provider 配置创建生产装配根。
     pub fn build(app: &AppHandle) -> Result<Arc<Self>, AgentRuntimeError> {
@@ -4523,18 +4570,41 @@ impl AgentRuntime {
         );
         app.manage(Arc::clone(&analytics));
         let registry = ProviderRegistry::with_request_observer(analytics.clone());
-        let runtime = Arc::new(Self::new_with_registry(storage_root, emitter, registry)?);
-        let weak_runtime = Arc::downgrade(&runtime);
-        analytics
-            .set_retry_notifier(Arc::new(move |notice| {
-                if let Some(runtime) = weak_runtime.upgrade() {
-                    runtime.publish_model_retry_notice(notice);
-                }
-            }))
-            .map_err(|error| initialization_failed("model_retry_notifier", error))?;
+        let runtime = Self::build_with_config(AgentRuntimeBuildConfig {
+            storage_root,
+            emitter,
+            provider_registry: registry,
+            analytics: Some(analytics),
+            observability: app
+                .try_state::<Arc<crate::diagnostics::Diagnostics>>()
+                .map(|diagnostics| diagnostics.observability()),
+        })?;
         runtime
             .reload_providers(app)
             .map_err(|error| initialization_failed("reload_providers", error))?;
+        Ok(runtime)
+    }
+
+    /// 使用平台无关输入创建 Runtime；不会读取 Tauri 状态或启动外部服务。
+    pub(crate) fn build_with_config(
+        config: AgentRuntimeBuildConfig,
+    ) -> Result<Arc<Self>, AgentRuntimeError> {
+        let runtime = Arc::new(Self::new_with_registry_and_observability(
+            config.storage_root,
+            config.emitter,
+            config.provider_registry,
+            config.observability,
+        )?);
+        if let Some(analytics) = config.analytics {
+            let weak_runtime = Arc::downgrade(&runtime);
+            analytics
+                .set_retry_notifier(Arc::new(move |notice| {
+                    if let Some(runtime) = weak_runtime.upgrade() {
+                        runtime.publish_model_retry_notice(notice);
+                    }
+                }))
+                .map_err(|error| initialization_failed("model_retry_notifier", error))?;
+        }
         Ok(runtime)
     }
 
@@ -4631,6 +4701,7 @@ impl AgentRuntime {
     }
 
     /// 使用明确 Provider 注册表创建测试或生产装配根。
+    #[allow(dead_code)]
     fn new_with_registry(
         storage_root: impl Into<std::path::PathBuf>,
         emitter: Arc<dyn DeliveryEmitter>,
@@ -4641,6 +4712,24 @@ impl AgentRuntime {
             emitter,
             provider_registry,
             DeliveryTimeouts::production(),
+            None,
+        )
+    }
+
+    /// 使用明确 Provider 注册表和结构化观测出口创建 Runtime；生产装配通过
+    /// [`AgentRuntime::build`] 注入 Diagnostics，测试默认保持无观测副作用。
+    fn new_with_registry_and_observability(
+        storage_root: impl Into<std::path::PathBuf>,
+        emitter: Arc<dyn DeliveryEmitter>,
+        provider_registry: ProviderRegistry,
+        observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
+    ) -> Result<Self, AgentRuntimeError> {
+        Self::new_with_registry_and_delivery_timeouts(
+            storage_root,
+            emitter,
+            provider_registry,
+            DeliveryTimeouts::production(),
+            observability,
         )
     }
 
@@ -4656,6 +4745,7 @@ impl AgentRuntime {
             emitter,
             ProviderRegistry::new(),
             delivery_timeouts,
+            None,
         )
     }
 
@@ -4665,6 +4755,7 @@ impl AgentRuntime {
         emitter: Arc<dyn DeliveryEmitter>,
         provider_registry: ProviderRegistry,
         delivery_timeouts: DeliveryTimeouts,
+        observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
     ) -> Result<Self, AgentRuntimeError> {
         let storage_root = storage_root.into();
         let runtime_manager = RuntimeManager::new(RuntimeConfig::new(storage_root.clone()))
@@ -4704,6 +4795,7 @@ impl AgentRuntime {
             extension_candidate_change_gate: Mutex::new(()),
             session_mcp: Mutex::new(HashMap::new()),
             emitter,
+            observability,
             delivery_timeouts,
             closed: AtomicBool::new(false),
             shutdown_error: Mutex::new(None),
@@ -5120,15 +5212,14 @@ impl AgentRuntime {
         let title = tokio::select! {
             biased;
             _ = gate.cancellation.cancelled() => return Err(AgentRuntimeError::SessionUnavailable),
-            result = self.generate_isolated_with_provider(
-                provider,
+            result = self.generate_isolated_with_provider(provider, IsolatedGenerationRequest {
                 session_id,
-                TITLE_SYSTEM_PROMPT,
+                system_prompt: TITLE_SYSTEM_PROMPT,
                 input,
-                TITLE_GENERATION_TIMEOUT_SECS,
-                "title",
-                None,
-            ) => result.map_err(runtime_operation_failed)?,
+                timeout_secs: TITLE_GENERATION_TIMEOUT_SECS,
+                purpose: "title",
+                structured_output: None,
+            }) => result.map_err(runtime_operation_failed)?,
         };
         let title = validate_generated_title(&title)?;
         session
@@ -5160,12 +5251,14 @@ impl AgentRuntime {
             .map_err(|error| anyhow!(error))?;
         self.generate_isolated_with_provider(
             provider,
-            session_id,
-            system_prompt,
-            input,
-            timeout_secs,
-            purpose,
-            Some(structured_output),
+            IsolatedGenerationRequest {
+                session_id,
+                system_prompt,
+                input,
+                timeout_secs,
+                purpose,
+                structured_output: Some(structured_output),
+            },
         )
         .await
     }
@@ -5174,13 +5267,16 @@ impl AgentRuntime {
     async fn generate_isolated_with_provider(
         &self,
         provider: ResolvedProvider,
-        session_id: &str,
-        system_prompt: &str,
-        input: &str,
-        timeout_secs: u64,
-        purpose: &'static str,
-        structured_output: Option<StructuredOutputConfig>,
+        request: IsolatedGenerationRequest<'_>,
     ) -> anyhow::Result<String> {
+        let IsolatedGenerationRequest {
+            session_id,
+            system_prompt,
+            input,
+            timeout_secs,
+            purpose,
+            structured_output,
+        } = request;
         if system_prompt.trim().is_empty() || input.trim().is_empty() {
             bail!("隔离模型调用的系统提示词和输入不能为空");
         }
@@ -5864,11 +5960,13 @@ impl AgentRuntime {
         let frozen = self.frozen_agent_prompt(
             execution,
             &launch.agent.agent_id,
-            &launch.agent.profile.cwd,
-            can_spawn,
-            has_skill,
-            &catalog,
-            small_context,
+            FrozenPromptContext {
+                cwd: &launch.agent.profile.cwd,
+                can_spawn,
+                has_skill,
+                catalog: &catalog,
+                small_context,
+            },
         )?;
         // 完整模式把 Memory/Plan 等动态上下文与环境放在历史之前；小上下文
         // 只保留独立核心提示词、普通对话输入及必要恢复说明。稳定前缀跨 Turn 字节稳定。
@@ -6047,12 +6145,15 @@ impl AgentRuntime {
         &self,
         execution: &RuntimeAgentExecution,
         agent_id: &RunnerAgentId,
-        cwd: &Path,
-        can_spawn: bool,
-        has_skill: bool,
-        catalog: &str,
-        small_context: bool,
+        context: FrozenPromptContext<'_>,
     ) -> Result<Arc<FrozenAgentPrompt>, AgentRuntimeError> {
+        let FrozenPromptContext {
+            cwd,
+            can_spawn,
+            has_skill,
+            catalog,
+            small_context,
+        } = context;
         let mut state = execution
             .state
             .lock()
@@ -6200,16 +6301,25 @@ impl AgentRuntime {
         )
         .map_err(|error| runtime_operation_failed(error))?;
         // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
-        if self.elicitations.supports_form() {
+        if self
+            .elicitations
+            .session_supports_form(&execution.session_id)
+        {
+            let connection_id = self
+                .elicitations
+                .session_connection(&execution.session_id)
+                .ok_or(AgentRuntimeError::StateUnavailable)?;
             // 工具表跨整个 Turn 复用，而 Session 重载会替换投递世代；
             // 因此问答出口只绑定装配根弱引用，在发送瞬间解析当时的世代。
             let question_handler = Arc::new(
-                self.elicitations.handler(
+                self.elicitations.handler_for_connection(
                     AgentSessionId::new(execution.session_id.clone())
                         .map_err(|_| AgentRuntimeError::InvalidSession)?,
-                    Arc::new(SessionDeliverySink::new(
+                    connection_id.clone(),
+                    Arc::new(SessionDeliverySink::for_connection(
                         execution.owner.clone(),
                         execution.session_id.clone(),
+                        connection_id,
                     )),
                 ),
             );
@@ -6484,6 +6594,11 @@ impl AgentRuntime {
         } else {
             PlanGuard::inactive()
         };
+        if let Some(connection_id) = options.elicitation_connection_id.as_ref() {
+            self.elicitations
+                .bind_session_connection(session_id, connection_id)
+                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        }
         let journal_turn_present = snapshot
             .state
             .turns
@@ -7660,8 +7775,10 @@ impl AgentRuntime {
     }
 
     /// 按完整字符串 JSON-RPC ID 把响应交给唯一匹配的严格路由。
-    pub fn route_client_response(
+    /// 按完整请求标识与来源连接把响应交给唯一匹配的严格路由。
+    pub fn route_client_response_from_connection(
         &self,
+        connection_id: &ConnectionId,
         request_id: &str,
         response_json: &str,
     ) -> Result<(), AgentRuntimeError> {
@@ -7679,7 +7796,7 @@ impl AgentRuntime {
             return Err(AgentRuntimeError::StateUnavailable);
         }
         router
-            .respond(response_json)
+            .respond_from_connection(connection_id, response_json)
             .map_err(|_| AgentRuntimeError::ClientResponseRejected)
     }
 
@@ -8470,11 +8587,24 @@ impl SessionDeliverySender {
     }
 
     /// 将一个完整标准 ACP Client Request 放入 Session 共享 FIFO。
+    #[cfg(test)]
     pub async fn send_client_request(
         &self,
         request: AcpClientRequestFrame,
     ) -> Result<(), AgentRuntimeError> {
+        let connection_id = ConnectionId::new("embedded-desktop")
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        self.send_client_request_to(connection_id, request).await
+    }
+
+    /// 将 Client Request 只投递给指定 ACP 连接。
+    pub async fn send_client_request_to(
+        &self,
+        connection_id: ConnectionId,
+        request: AcpClientRequestFrame,
+    ) -> Result<(), AgentRuntimeError> {
         self.send_command(|acknowledged| DeliveryCommand::EmitClientRequest {
+            connection_id,
             request: Box::new(request),
             acknowledged,
         })
@@ -8676,6 +8806,8 @@ enum DeliveryCommand {
     },
     /// 与普通事件共享 FIFO 的完整 Client Request。
     EmitClientRequest {
+        /// 仅供内部 emitter 选择 transport 连接，不进入桌面事件 JSON。
+        connection_id: ConnectionId,
         /// 标准 ACP JSON-RPC 2.0 请求。
         request: Box<AcpClientRequestFrame>,
         /// 请求实际 emit 完成后的回执。
@@ -8702,7 +8834,7 @@ enum DeliveryCommand {
 /// Tauri 唯一事件载荷的严格外层联合。
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum AcpDelivery {
+pub(crate) enum AcpDelivery {
     /// 标准 ACP Session 更新。
     SessionUpdate {
         /// 带 Session 身份和当前投递序号的标准信封。
@@ -8716,13 +8848,16 @@ enum AcpDelivery {
     },
     /// Agent 向 Client 发起的标准 JSON-RPC 请求。
     ClientRequest {
+        /// 仅供进程内 emitter 定向投递，序列化时不得暴露。
+        #[serde(skip)]
+        connection_id: ConnectionId,
         /// 完整且未拆散的标准请求帧。
         request: AcpClientRequestFrame,
     },
 }
 
 /// 对 Tauri 和测试记录器隐藏具体发送机制的同步投递边界。
-trait DeliveryEmitter: Send + Sync {
+pub(crate) trait DeliveryEmitter: Send + Sync {
     /// 只有事件被目标边界接受后才能返回成功。
     fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError>;
 
@@ -8755,9 +8890,53 @@ struct TauriDeliveryEmitter {
 impl DeliveryEmitter for TauriDeliveryEmitter {
     /// 同步调用 Tauri emit，失败时让当前 Session 世代永久停止。
     fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-        self.app
+        // IPC Client 不能监听 Tauri event；先把同一份已编码 delivery 发布到
+        // ACP Host bridge。Bridge 只负责有界 fan-out，不复制 Runtime 事实。
+        if let Ok(payload) = serde_json::to_value(delivery) {
+            let target = match delivery {
+                AcpDelivery::ClientRequest { connection_id, .. } => Some(connection_id),
+                _ => None,
+            };
+            crate::acp_host::publish_delivery(payload, target);
+        }
+        if let AcpDelivery::ClientRequest {
+            connection_id,
+            request,
+        } = delivery
+        {
+            if connection_id.as_str() == "embedded-desktop" {
+                return self
+                    .app
+                    .emit(ACP_DELIVERY_EVENT, delivery)
+                    .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
+            }
+            let session_id = client_request_session_id(request)
+                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
+            let payload = serde_json::to_vec(delivery)
+                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+            let web_host = self
+                .app
+                .try_state::<Arc<crate::web_host::WebHostManager>>()
+                .ok_or(AgentRuntimeError::DesktopEmitFailed)?;
+            return web_host
+                .publish_connection_event(connection_id, &session_id, payload)
+                .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
+        }
+        let result = self
+            .app
             .emit(ACP_DELIVERY_EVENT, delivery)
-            .map_err(|_| AgentRuntimeError::DesktopEmitFailed)
+            .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
+        if result.is_ok()
+            && let Some((session_id, journal_sequence, payload)) = web_delivery_parts(delivery)
+            && let Some(web_host) = self.app.try_state::<Arc<crate::web_host::WebHostManager>>()
+            && let Err(error) =
+                web_host.publish_session_event(&session_id, journal_sequence, payload)
+        {
+            // Web 浏览器是可选的旁路消费者；慢连接应收到 gap，而不能反向令
+            // 桌面 Runtime 的权威投递世代失败。
+            tracing::warn!(%error, session_id, "Web Host 事件旁路投递失败");
+        }
+        result
     }
 
     /// 使用当前应用设置发送一次原生根任务终态通知。
@@ -8766,6 +8945,34 @@ impl DeliveryEmitter for TauriDeliveryEmitter {
             .state::<Arc<crate::task_notifications::TaskNotifications>>()
             .notify_terminal(&self.app, task_title, stop_reason);
     }
+}
+
+/// 将已经通过桌面 ACP 投递边界的消息复制给当前 Web Session 连接。
+///
+/// `SessionUpdate` 信封当前只携带 Runtime delivery 序号，因此没有可用的
+/// Journal 游标；Web adapter 会沿用该连接最近的权威水位。KeenCode 扩展事件
+/// 自带 Journal 序号，可直接用于 gap/reconnect 游标。
+fn web_delivery_parts(delivery: &AcpDelivery) -> Option<(String, Option<u64>, Vec<u8>)> {
+    let (session_id, journal_sequence) = match delivery {
+        AcpDelivery::SessionUpdate { envelope } => (envelope.session_id().to_owned(), None),
+        AcpDelivery::KeenCodeEvent { envelope } => (
+            envelope.session_id().to_owned(),
+            envelope.journal_sequence(),
+        ),
+        AcpDelivery::ClientRequest { .. } => return None,
+    };
+    let payload = serde_json::to_vec(delivery).ok()?;
+    Some((session_id, journal_sequence, payload))
+}
+
+/// 从标准 Client Request 的 Session scope 读取定向投递所需的 Session 标识。
+fn client_request_session_id(request: &AcpClientRequestFrame) -> Option<String> {
+    let value = serde_json::to_value(request).ok()?;
+    value
+        .pointer("/params/sessionId")
+        .and_then(Value::as_str)
+        .or_else(|| value.pointer("/params/session_id").and_then(Value::as_str))
+        .map(str::to_owned)
 }
 
 /// 串行处理一个 Session 当前世代的全部桌面消息。
@@ -8863,13 +9070,17 @@ async fn run_delivery_pump(
                 let _ = acknowledged.send(result);
             }
             DeliveryCommand::EmitClientRequest {
+                connection_id,
                 request,
                 acknowledged,
             } => {
                 let result = if let Some(error) = lifecycle.rejection() {
                     Err(error)
                 } else {
-                    emitter.emit(&AcpDelivery::ClientRequest { request: *request })
+                    emitter.emit(&AcpDelivery::ClientRequest {
+                        connection_id,
+                        request: *request,
+                    })
                 };
                 if result.is_err() {
                     lifecycle.mark_failed();
@@ -9055,11 +9266,17 @@ fn agent_background_task_completion_draft(
 }
 
 /// 仅记录执行元数据；工具正文仍由带 sequence 的权威 Journal 保留。
-fn log_runtime_event(session_id: &str, state: &SessionState, sequence: u64, event: &SessionEvent) {
+fn log_runtime_event(
+    session_id: &str,
+    state: &SessionState,
+    sequence: u64,
+    event: &SessionEvent,
+    observability: Option<&crate::diagnostics::observability::ObservabilityStore>,
+) {
     match event {
         SessionEvent::AtomicBatch { events } => {
             for event in events {
-                log_runtime_event(session_id, state, sequence, event);
+                log_runtime_event(session_id, state, sequence, event, observability);
             }
         }
         SessionEvent::TurnStarted {
@@ -9068,9 +9285,19 @@ fn log_runtime_event(session_id: &str, state: &SessionState, sequence: u64, even
             ..
         } => {
             tracing::info!(target: "keencode_diagnostics", session_id, sequence, turn_id = %turn_id, agent_id = %source_agent_id, "turn started");
+            if let Some(observability) = observability {
+                observability.increment_counter("agent.turns.started", 1);
+                observability.record_metric(
+                    "agent.turn.started",
+                    1.0,
+                    "count",
+                    [("agent_id".to_owned(), source_agent_id.as_str().to_owned())],
+                );
+            }
         }
         SessionEvent::TurnCompleted { turn_id } => {
             tracing::info!(target: "keencode_diagnostics", session_id, sequence, turn_id = %turn_id, "turn completed");
+            record_agent_turn_terminal(session_id, state, turn_id, "completed", observability);
         }
         SessionEvent::TurnStopped {
             turn_id,
@@ -9078,11 +9305,33 @@ fn log_runtime_event(session_id: &str, state: &SessionState, sequence: u64, even
             message,
         } => {
             tracing::warn!(session_id, sequence, turn_id = %turn_id, ?reason, error = %message, "turn stopped");
+            let status = match reason {
+                TurnStopReason::Cancelled => "cancelled",
+                _ => "failed",
+            };
+            record_agent_turn_terminal(session_id, state, turn_id, status, observability);
+        }
+        SessionEvent::ToolExecutionStarted { request_id } => {
+            if let Some(observability) = observability {
+                observability.increment_counter("agent.tools.started", 1);
+                if let Ok(request) = tool_request(state, request_id.as_str()) {
+                    observability.record_metric(
+                        "agent.tool.started",
+                        1.0,
+                        "count",
+                        [
+                            ("tool".to_owned(), request.tool_name.clone()),
+                            ("effect".to_owned(), format!("{:?}", request.effect)),
+                        ],
+                    );
+                }
+            }
         }
         SessionEvent::ToolCompleted {
             request_id,
             outcome,
         } => {
+            record_tool_terminal(state, request_id.as_str(), outcome, observability);
             if outcome.status == ToolCompletionStatus::Failed || outcome.result.is_error {
                 let request = tool_request(state, request_id.as_str()).ok();
                 tracing::error!(session_id, sequence, request_id = %request_id,
@@ -9094,9 +9343,119 @@ fn log_runtime_event(session_id: &str, state: &SessionState, sequence: u64, even
         }
         SessionEvent::ToolSideEffectUnknown { request_id, .. } => {
             tracing::error!(session_id, sequence, request_id = %request_id, "tool side effect unknown; details in session events.jsonl");
+            if let Some(observability) = observability {
+                observability.increment_counter("agent.tools.side_effect_unknown", 1);
+            }
         }
         _ => {}
     }
+}
+
+/// 把权威 Turn 终态投影为有界 Agent metric/trace；正文和绝对路径不进入属性。
+fn record_agent_turn_terminal(
+    session_id: &str,
+    state: &SessionState,
+    turn_id: &ResourceTurnId,
+    status: &str,
+    observability: Option<&crate::diagnostics::observability::ObservabilityStore>,
+) {
+    let Some(observability) = observability else {
+        return;
+    };
+    let Some(turn) = state.turns.get(turn_id) else {
+        observability.increment_counter("agent.turns.observation_missing", 1);
+        return;
+    };
+    let duration_ms = turn
+        .completed_at_unix_ms
+        .map(|completed| completed.saturating_sub(turn.started_at_unix_ms));
+    observability.increment_counter(&format!("agent.turns.{status}"), 1);
+    if let Some(duration_ms) = duration_ms {
+        observability.record_histogram("agent.turn_duration_ms", duration_ms as f64);
+    }
+    let mut attributes = BTreeMap::from([
+        (
+            "agent_id".to_owned(),
+            turn.source_agent_id.as_str().to_owned(),
+        ),
+        (
+            "root_turn".to_owned(),
+            (turn.root_turn_id == turn.turn_id).to_string(),
+        ),
+    ]);
+    if let Some(parent) = &turn.parent_turn_id {
+        attributes.insert("parent_turn".to_owned(), parent.as_str().to_owned());
+    }
+    observability.record_trace(crate::diagnostics::observability::TraceSample {
+        trace_id: format!("{session_id}:{}", turn.turn_id),
+        span_id: format!("agent-turn:{}", turn.turn_id),
+        parent_span_id: turn
+            .parent_turn_id
+            .as_ref()
+            .map(|parent| format!("agent-turn:{parent}")),
+        name: "agent.turn".to_owned(),
+        started_at_ms: turn.started_at_unix_ms,
+        duration_ms,
+        ttft_ms: None,
+        status: status.to_owned(),
+        attributes,
+    });
+}
+
+/// 从权威工具生命周期读取执行耗时；工具参数和结果只保留在 Session Journal。
+fn record_tool_terminal(
+    state: &SessionState,
+    request_id: &str,
+    outcome: &keencode_resources::ToolOutcome,
+    observability: Option<&crate::diagnostics::observability::ObservabilityStore>,
+) {
+    let Some(observability) = observability else {
+        return;
+    };
+    let Some(lifecycle) = state
+        .tools
+        .iter()
+        .find(|(known_request_id, _)| known_request_id.as_str() == request_id)
+        .map(|(_, lifecycle)| lifecycle)
+    else {
+        observability.increment_counter("agent.tools.observation_missing", 1);
+        return;
+    };
+    let status = match outcome.status {
+        ToolCompletionStatus::Succeeded => "succeeded",
+        ToolCompletionStatus::Failed => "failed",
+        ToolCompletionStatus::Cancelled => "cancelled",
+        ToolCompletionStatus::SideEffectUnknown => "side_effect_unknown",
+    };
+    observability.increment_counter(&format!("agent.tools.completed.{status}"), 1);
+    let started = lifecycle
+        .execution_started_at_unix_ms
+        .unwrap_or(lifecycle.requested_at_unix_ms);
+    if let Some(completed) = lifecycle.completed_at_unix_ms {
+        observability.record_histogram(
+            "agent.tool_duration_ms",
+            completed.saturating_sub(started) as f64,
+        );
+    }
+    observability.record_trace(crate::diagnostics::observability::TraceSample {
+        trace_id: format!("tool:{request_id}"),
+        span_id: format!("tool:{request_id}"),
+        parent_span_id: Some(format!("agent-turn:{}", lifecycle.request.turn_id)),
+        name: "agent.tool".to_owned(),
+        started_at_ms: started,
+        duration_ms: lifecycle
+            .completed_at_unix_ms
+            .map(|completed| completed.saturating_sub(started)),
+        ttft_ms: None,
+        status: status.to_owned(),
+        attributes: BTreeMap::from([
+            ("tool".to_owned(), lifecycle.request.tool_name.clone()),
+            (
+                "effect".to_owned(),
+                format!("{:?}", lifecycle.request.effect),
+            ),
+        ]),
+    });
 }
 
 /// 将 Runtime 有界广播订阅映射到当前 Session 投递世代，Lag 时显式要求重放。
@@ -9136,7 +9495,13 @@ async fn run_runtime_event_pump(
                             break;
                         }
                     };
-                    log_runtime_event(&session_id, &snapshot.state, record.sequence, &record.event);
+                    log_runtime_event(
+                        &session_id,
+                        &snapshot.state,
+                        record.sequence,
+                        &record.event,
+                        runtime.observability.as_deref(),
+                    );
                     terminal_notice = root_task_terminal_notice(&snapshot.state, &record.event);
                     match map_authoritative_record_with_projection(
                         &session,
@@ -9156,6 +9521,15 @@ async fn run_runtime_event_pump(
             },
             Err(RuntimeEventReceiveError::Lagged(skipped)) => {
                 tracing::warn!(session_id, ?skipped, "Runtime 事件订阅滞后，开始恢复");
+                if let Some(observability) = runtime.observability.as_deref() {
+                    observability.increment_counter("runtime.events.lagged", 1);
+                    observability.record_metric(
+                        "runtime.events.skipped",
+                        skipped.missed_events as f64,
+                        "count",
+                        [("session_scope".to_owned(), "single_session".to_owned())],
+                    );
+                }
                 vec![DeliveryDraft::KeenCodeEvent {
                     turn_id: None,
                     source_agent_id: None,
@@ -9180,6 +9554,9 @@ async fn run_runtime_event_pump(
         };
         if let Err(error) = sender.send_live_batch(drafts, terminal_notice).await {
             tracing::error!(session_id, %error, "Runtime 实时事件发送失败");
+            if let Some(observability) = runtime.observability.as_deref() {
+                observability.increment_counter("runtime.events.delivery_failed", 1);
+            }
             break;
         }
         if lagged {
@@ -10672,7 +11049,7 @@ mod tests {
         ElicitationSchema, ElicitationSessionScope, RequestId, SessionUpdate,
     };
     use keencode_acp::{
-        AcpClientRequestEncoder, BackgroundTaskKind, BackgroundTaskTerminalStatus,
+        AcpClientRequestEncoder, BackgroundTaskKind, BackgroundTaskTerminalStatus, ConnectionId,
         ElicitationRouter, KeenCodeEvent, SessionUpdateDeliveryEnvelope,
     };
     use keencode_agent::{
@@ -15772,6 +16149,41 @@ mod tests {
         assert!(values[1].get("envelope").is_some());
         assert_eq!(values[2]["type"], "client_request");
         assert_eq!(values[2]["request"]["jsonrpc"], "2.0");
+        assert!(values[2].get("connection_id").is_none());
+        assert!(values[2].get("connectionId").is_none());
+    }
+
+    /// Session FIFO 必须把 Client Request 的内部目标连接原样交给 emitter。
+    #[tokio::test]
+    async fn client_request_delivery_preserves_internal_connection_target() {
+        struct TargetEmitter {
+            connections: Mutex<Vec<ConnectionId>>,
+        }
+
+        impl DeliveryEmitter for TargetEmitter {
+            fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
+                let AcpDelivery::ClientRequest { connection_id, .. } = delivery else {
+                    return Err(AgentRuntimeError::RuntimeOperationFailed);
+                };
+                self.connections.lock().push(connection_id.clone());
+                let value = serde_json::to_value(delivery)
+                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                assert!(value.get("connection_id").is_none());
+                assert!(value.get("connectionId").is_none());
+                Ok(())
+            }
+        }
+
+        let emitter = Arc::new(TargetEmitter {
+            connections: Mutex::new(Vec::new()),
+        });
+        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
+        let target = ConnectionId::new("web-target-connection").unwrap();
+        sender
+            .send_client_request_to(target.clone(), client_request())
+            .await
+            .expect("Client Request 应定向送达");
+        assert_eq!(emitter.connections.lock().as_slice(), &[target]);
     }
 
     #[tokio::test]
@@ -16477,6 +16889,7 @@ mod tests {
                     RootTurnOptions {
                         developer_context: Some(dynamic_context.to_owned()),
                         plan_enabled: false,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await
@@ -16738,6 +17151,7 @@ mod tests {
                         // 模拟 Memory/Plan 在两轮之间变化，不应改写既有历史。
                         developer_context: Some("本轮动态记忆标记".to_owned()),
                         plan_enabled: false,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await
@@ -16904,6 +17318,7 @@ mod tests {
                     RootTurnOptions {
                         developer_context: Some("本轮工具轮动态记忆标记".to_owned()),
                         plan_enabled: false,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await
@@ -19114,6 +19529,7 @@ mod tests {
                     RootTurnOptions {
                         developer_context: None,
                         plan_enabled: true,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await,
@@ -19128,6 +19544,7 @@ mod tests {
                     RootTurnOptions {
                         developer_context: Some("重新抽取的动态记忆".to_owned()),
                         plan_enabled: false,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await
@@ -19171,6 +19588,7 @@ mod tests {
                     RootTurnOptions {
                         developer_context: None,
                         plan_enabled: true,
+                        elicitation_connection_id: None,
                     },
                 )
                 .await,

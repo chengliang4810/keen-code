@@ -77,10 +77,10 @@ impl PluginCommandCatalog {
         }
         // Provider 可能把 Slash 名称开头的 `plugin:` 误当协议前缀剥离；
         // 只补全后做完整键匹配，不接受模糊或跨市场解析。
-        if !key.starts_with("plugin:") {
-            if let Some(entry) = self.commands.get(&format!("plugin:{key}")) {
-                return Some(entry);
-            }
+        if !key.starts_with("plugin:")
+            && let Some(entry) = self.commands.get(&format!("plugin:{key}"))
+        {
+            return Some(entry);
         }
         let mut matches = self.commands.values().filter(|entry| {
             super::public_component_name(&entry.name)

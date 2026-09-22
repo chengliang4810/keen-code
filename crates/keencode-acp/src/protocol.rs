@@ -25,6 +25,11 @@ use crate::json::{
 };
 use crate::{AcpBoundaryError, ElicitationRouter, InitializeResponseDto};
 
+#[path = "host_protocol.rs"]
+mod host_protocol;
+
+pub use host_protocol::*;
+
 /// 扩展协议标识允许的最大 UTF-8 字节数。
 const MAX_IDENTIFIER_BYTES: usize = 256;
 /// Session 用户可见标题允许的最大 UTF-8 字节数。
@@ -1441,6 +1446,24 @@ impl AcpNotification {
             Self::SessionConfigUpdate(_) => "keencode/config/update",
         }
     }
+
+    /// 将已经严格解码的通知恢复为规范 JSON-RPC 信封。
+    ///
+    /// 该入口只用于 transport adapter 把同一条输入转交给现有 Host；它不重新
+    /// 解析未知字段，也不允许调用方绕过 [`AcpRequestDecoder`] 的边界校验。
+    pub fn into_json_rpc_value(self) -> Result<Value, AcpBoundaryError> {
+        let method = self.method().to_owned();
+        let params = match &self {
+            Self::Cancel(value) => serde_json::to_value(value),
+            Self::SessionConfigUpdate(value) => serde_json::to_value(value),
+        }
+        .map_err(|_| AcpBoundaryError::InvalidParams)?;
+        Ok(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+        }))
+    }
 }
 
 impl fmt::Debug for AcpNotification {
@@ -1476,6 +1499,23 @@ impl AcpRequestFrame {
     pub fn into_parts(self) -> (RequestId, AcpRequest) {
         (self.id, self.request)
     }
+
+    /// 将已经严格解码的请求恢复为规范 JSON-RPC 信封。
+    ///
+    /// 类型化 ACP 请求没有对外暴露统一的 `Serialize` 枚举；adapter 必须通过
+    /// 这个入口保留原始 JSON-RPC ID 和方法名，再交回现有 Host dispatch。此处
+    /// 只序列化已通过 [`AcpRequestDecoder`] 校验的封闭请求变体。
+    pub fn into_json_rpc_value(self) -> Result<Value, AcpBoundaryError> {
+        let Self { id, request } = self;
+        let method = request.method();
+        let params = request_params_value(request)?;
+        Ok(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": method,
+            "params": params,
+        }))
+    }
 }
 
 impl fmt::Debug for AcpRequestFrame {
@@ -1496,6 +1536,53 @@ pub enum AcpIncomingFrame {
     Request(Box<AcpRequestFrame>),
     /// 不带 JSON-RPC ID 且不产生响应的通知。
     Notification(AcpNotification),
+}
+
+impl AcpIncomingFrame {
+    /// 将严格解码的输入恢复为规范 JSON-RPC 值，供 Host adapter 原样转交。
+    pub fn into_json_rpc_value(self) -> Result<Value, AcpBoundaryError> {
+        match self {
+            Self::Request(frame) => frame.into_json_rpc_value(),
+            Self::Notification(notification) => notification.into_json_rpc_value(),
+        }
+    }
+}
+
+fn request_params_value(request: AcpRequest) -> Result<Value, AcpBoundaryError> {
+    let value = match request {
+        AcpRequest::Initialize(value) => serde_json::to_value(value),
+        AcpRequest::Authenticate(value) => serde_json::to_value(value),
+        AcpRequest::NewSession(value) => serde_json::to_value(value),
+        AcpRequest::LoadSession(value) => serde_json::to_value(value),
+        AcpRequest::Prompt(value) => serde_json::to_value(value),
+        AcpRequest::DeleteSession(value) => serde_json::to_value(value),
+        AcpRequest::SetSessionConfigOption(value) => serde_json::to_value(value),
+        AcpRequest::SetSessionMode(value) => serde_json::to_value(value),
+        AcpRequest::ListSessions(value) => serde_json::to_value(value),
+        AcpRequest::ForkSession(value) => serde_json::to_value(value),
+        AcpRequest::SteerSession(value) => serde_json::to_value(value),
+        AcpRequest::SessionMcpLoad(value) => serde_json::to_value(value),
+        AcpRequest::SessionMcpStatus(value) => serde_json::to_value(value),
+        AcpRequest::SessionMcpUnload(value) => serde_json::to_value(value),
+        AcpRequest::RenameSession(value) => serde_json::to_value(value),
+        AcpRequest::GenerateSessionTitle(value) => serde_json::to_value(value),
+        AcpRequest::RewindCandidates(value) => serde_json::to_value(value),
+        AcpRequest::RewindSession(value) => serde_json::to_value(value),
+        AcpRequest::ReplaySession(value) => serde_json::to_value(value),
+        AcpRequest::CancelBackgroundTask(value) => serde_json::to_value(value),
+        AcpRequest::ResumeBackgroundTask(value) => serde_json::to_value(value),
+        AcpRequest::ListBackgroundTasks(value) => serde_json::to_value(value),
+        AcpRequest::GoalGet(value) => serde_json::to_value(value),
+        AcpRequest::GoalUpsert(value) => serde_json::to_value(value),
+        AcpRequest::GoalTransition(value) => serde_json::to_value(value),
+        AcpRequest::GoalClear(value) => serde_json::to_value(value),
+        AcpRequest::McpList(value) => serde_json::to_value(value),
+        AcpRequest::McpOAuthStart(value) => serde_json::to_value(value),
+        AcpRequest::McpOAuthCallback(value) => serde_json::to_value(value),
+        AcpRequest::McpOAuthCancel(value) => serde_json::to_value(value),
+        AcpRequest::ReadFileChange(value) => serde_json::to_value(value),
+    };
+    value.map_err(|_| AcpBoundaryError::InvalidParams)
 }
 
 /// 把进程内 JSON 值严格转换为标准 ACP 和当前唯一扩展结构。

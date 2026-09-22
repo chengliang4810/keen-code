@@ -20,6 +20,7 @@ const COMPACTION_DIGEST_VERSION: u32 = 1;
 ///
 /// Summary 与投影是压缩会注入模型上下文的内容，必须与来源消息一起进 Digest，
 /// 否则持久化历史可以在 Digest 校验通过的前提下伪造摘要或投影文本。
+#[allow(clippy::too_many_arguments)] // 摘要必须显式绑定全部持久化身份字段，聚合对象会弱化调用方的字段审计。
 pub fn compaction_source_digest_sha256(
     session_id: &SessionId,
     turn_id: &TurnId,

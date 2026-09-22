@@ -260,12 +260,15 @@ mod tests {
         }
         assert!(!core().contains("{{"));
         assert!(!core().contains("Turn date:"));
-        assert!(core().contains("mark a task in_progress before starting work"));
-        assert!(core().contains("always mark it completed when fully accomplished"));
-        // 身份与协作风格、受众假设和篇幅约束属于稳定前缀，不能被后续精简悄悄移除。
-        assert!(core().contains("Write for a person, not a console."));
-        assert!(core().contains("Avoid cheerleading, motivational language"));
-        assert!(core().contains("Do not exceed roughly 50-70 lines"));
+        assert!(core().contains("move each item from pending to in_progress before doing it"));
+        assert!(core().contains("to completed only after its deliverable and checks are finished"));
+        // 身份、协作风格和交付约束属于稳定前缀，不能被后续精简悄悄移除。
+        assert!(core().contains("You work inside a desktop coding session"));
+        assert!(core().contains("Use direct, respectful prose in the user's language."));
+        assert!(core().contains(
+            "Avoid praise, slogans, exaggerated certainty and repetitive progress messages."
+        ));
+        assert!(core().contains("Keep small tasks to a few sentences."));
     }
 
     #[test]

@@ -1133,7 +1133,10 @@ impl KeenCodeEvent {
                     validate_identifier(goal_id, MAX_EVENT_IDENTIFIER_BYTES)?;
                 }
                 if let Some(status) = status {
-                    if !matches!(status.as_str(), "active" | "paused" | "completed" | "blocked") {
+                    if !matches!(
+                        status.as_str(),
+                        "active" | "paused" | "completed" | "blocked"
+                    ) {
                         return Err(AcpBoundaryError::InvalidSemanticValue);
                     }
                 }

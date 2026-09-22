@@ -9,6 +9,11 @@ use crate::atomic::{
 };
 use crate::{ResourceError, SessionId};
 
+#[path = "host_lease.rs"]
+mod host_lease;
+
+pub use host_lease::{HostLease, HostLeaseAcquire, HostOwner};
+
 /// 一个 Session Runtime 的跨进程独占所有权凭证。
 ///
 /// 该值不可克隆；只要值仍存活，`runtime.lock` 的操作系统独占锁就保持有效。调用方

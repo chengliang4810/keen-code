@@ -178,6 +178,7 @@ async fn live_messages_desktop_lifecycle() {
     let mut records = Vec::new();
     records.push(run(&runtime,&session,"read-facts","读取 facts.txt，报告回执和预算。",RootTurnOptions {
         developer_context:Some("Synthetic memory: currency is JPY; do not add dependencies. Internal request tag KC_EPHEMERAL_ONLY_F3M9 is metadata, omit it from the answer.".into()),plan_enabled:false,
+        elicitation_connection_id: None,
     }).await);
     records.push(
         run(
@@ -239,6 +240,7 @@ async fn live_messages_desktop_lifecycle() {
             RootTurnOptions {
                 developer_context: None,
                 plan_enabled: true,
+                elicitation_connection_id: None,
             },
         )
         .await,
