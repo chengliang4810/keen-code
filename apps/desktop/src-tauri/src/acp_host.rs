@@ -157,6 +157,7 @@ pub(crate) fn workflow_host() -> Option<Arc<AcpHost>> {
 /// 未正常完成即中止。前端通过该命令发起并等待最终报告。
 #[tauri::command]
 pub(crate) async fn workflow_start(
+    app: AppHandle,
     session_id: String,
     workflow_id: String,
     steps: Vec<String>,
@@ -165,11 +166,84 @@ pub(crate) async fn workflow_start(
     if steps.is_empty() {
         return Err("workflow 至少需要一个步骤".to_owned());
     }
+    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
     let outcomes = host
-        .run_workflow(&session_id, &workflow_id, steps)
+        .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
         .await
         .map_err(|failure| format!("{failure:?}"))?;
     serde_json::to_value(outcomes).map_err(|error| error.to_string())
+}
+
+/// 恢复一次中断/失败的工作流：已完成步骤按 Journal 跳过，只重跑剩余步骤。
+#[tauri::command]
+pub(crate) async fn workflow_resume(
+    app: AppHandle,
+    session_id: String,
+    workflow_id: String,
+) -> Result<serde_json::Value, String> {
+    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
+    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
+    let journal = WorkflowJournal::load(&journal_dir, &workflow_id)
+        .ok_or_else(|| format!("workflow {workflow_id} 不存在"))?;
+    let steps = journal.step_prompts();
+    if steps.is_empty() {
+        return Err("workflow 没有可恢复的步骤".to_owned());
+    }
+    let outcomes = host
+        .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
+        .await
+        .map_err(|failure| format!("{failure:?}"))?;
+    serde_json::to_value(outcomes).map_err(|error| error.to_string())
+}
+
+/// amend：停飞在飞步骤（仅允许排队中/已结束的运行），导入已完成步骤，
+/// 并以新的步骤列表开启一个替代 run（新 workflow id = 原 id + 后缀）。
+#[tauri::command]
+pub(crate) async fn workflow_amend(
+    app: AppHandle,
+    session_id: String,
+    workflow_id: String,
+    new_steps: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
+    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
+    let original = WorkflowJournal::load(&journal_dir, &workflow_id)
+        .ok_or_else(|| format!("workflow {workflow_id} 不存在"))?;
+    if original.has_in_flight() {
+        return Err("工作流仍有步骤在运行，请先停止当前运行再 amend".to_owned());
+    }
+    if new_steps.is_empty() {
+        return Err("workflow amend 至少需要一个新步骤".to_owned());
+    }
+    let amended_id = format!("{workflow_id}-amend-{}", unix_time_ms());
+    let mut amended = WorkflowJournal::new(&amended_id, &session_id, &new_steps);
+    // 导入已完成步骤：置于新 run 队首，run_workflow 会按 succeeded 跳过。
+    let mut imported = original
+        .steps
+        .iter()
+        .filter(|step| step.status == "succeeded")
+        .cloned()
+        .collect::<Vec<_>>();
+    for step in &mut amended.steps {
+        step.index += imported.len();
+        imported.push(step.clone());
+    }
+    amended.steps = imported;
+    amended.steps_total = amended.steps.len();
+    amended
+        .save(&journal_dir)
+        .map_err(|failure| format!("{failure:?}"))?;
+    let prompts = amended.step_prompts();
+    let outcomes = host
+        .run_workflow(&session_id, &amended_id, prompts, &journal_dir)
+        .await
+        .map_err(|failure| format!("{failure:?}"))?;
+    serde_json::to_value(serde_json::json!({
+        "workflowId": amended_id,
+        "importedFrom": workflow_id,
+        "steps": outcomes,
+    }))
+    .map_err(|error| error.to_string())
 }
 
 /// 记录 Session 加载阶段耗时；慢路径提升为 warn，便于在用户感知卡顿前发现回归。
@@ -382,6 +456,93 @@ pub(crate) struct WorkflowStepOutcome {
     pub turn_id: String,
     /// 归一化结束原因；Cancelled/Failed 时为诊断值。
     pub stop_reason: Option<schema::StopReason>,
+}
+
+/// 工作流 Journal 的单步记录：resume 按它跳过已完成步骤，amend 导入它们。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkflowJournalStep {
+    pub index: usize,
+    pub prompt: String,
+    /// pending | running | succeeded | failed | cancelled
+    pub status: String,
+    #[serde(default)]
+    pub operation_id: String,
+    #[serde(default)]
+    pub turn_id: String,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+}
+
+/// 一个工作流 run 的持久化 Journal（app 数据根 workflows/<id>.json）。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct WorkflowJournal {
+    pub workflow_id: String,
+    pub session_id: String,
+    pub steps_total: usize,
+    pub steps: Vec<WorkflowJournalStep>,
+}
+
+impl WorkflowJournal {
+    pub fn new(workflow_id: &str, session_id: &str, prompts: &[String]) -> Self {
+        Self {
+            workflow_id: workflow_id.to_owned(),
+            session_id: session_id.to_owned(),
+            steps_total: prompts.len(),
+            steps: prompts
+                .iter()
+                .enumerate()
+                .map(|(index, prompt)| WorkflowJournalStep {
+                    index,
+                    prompt: prompt.clone(),
+                    status: "pending".to_owned(),
+                    operation_id: String::new(),
+                    turn_id: String::new(),
+                    stop_reason: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn load(dir: &std::path::Path, workflow_id: &str) -> Option<Self> {
+        let raw = std::fs::read_to_string(dir.join(format!("{workflow_id}.json"))).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    pub fn save(&self, dir: &std::path::Path) -> Result<(), HostFailure> {
+        std::fs::create_dir_all(dir).map_err(|_| HostFailure::Internal)?;
+        let path = dir.join(format!("{}.json", self.workflow_id));
+        let tmp = dir.join(format!("{}.tmp", self.workflow_id));
+        let bytes = serde_json::to_vec_pretty(self).map_err(|_| HostFailure::Internal)?;
+        std::fs::write(&tmp, bytes).map_err(|_| HostFailure::Internal)?;
+        std::fs::rename(&tmp, &path).map_err(|_| HostFailure::Internal)?;
+        Ok(())
+    }
+
+    pub fn step(&self, index: usize) -> Option<&WorkflowJournalStep> {
+        self.steps.get(index)
+    }
+
+    pub fn set_status(&mut self, index: usize, status: &str) {
+        if let Some(step) = self.steps.get_mut(index) {
+            step.status = status.to_owned();
+        }
+    }
+
+    pub fn has_in_flight(&self) -> bool {
+        self.steps.iter().any(|step| step.status == "running")
+    }
+
+    pub fn step_prompts(&self) -> Vec<String> {
+        self.steps.iter().map(|step| step.prompt.clone()).collect()
+    }
+}
+
+/// 解析 workflow Journal 目录：app 数据根下的 workflows/。
+pub(crate) fn workflow_journal_dir(app: &AppHandle) -> Result<std::path::PathBuf, HostFailure> {
+    let root = crate::storage::root_dir(app).map_err(|_| HostFailure::Internal)?;
+    let dir = root.join("workflows");
+    std::fs::create_dir_all(&dir).map_err(|_| HostFailure::Internal)?;
+    Ok(dir)
 }
 
 /// 把一次后台任务终态格式化为 ZCode 风格的 task-notification 文本。
@@ -1324,7 +1485,10 @@ impl AcpHost {
         if let Some(spec) = text.strip_prefix(WORKFLOW_COMMAND_PREFIX) {
             let steps = parse_workflow_steps(spec)?;
             let workflow_id = format!("{:x}", unix_time_ms());
-            let outcomes = self.run_workflow(&session_id, &workflow_id, steps).await?;
+            let journal_dir = workflow_journal_dir(&self.app).map_err(|_| HostFailure::Internal)?;
+            let outcomes = self
+                .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
+                .await?;
             let report = serde_json::json!({
                 "workflowId": workflow_id,
                 "steps": outcomes,
@@ -1576,19 +1740,40 @@ impl AcpHost {
     ///
     /// 每个步骤都是一个真实的 detached Prompt 回合：写权威 Journal、在会话中
     /// 可见、可取消；后续步骤天然继承同一会话的历史上下文。任一步骤未正常
-    /// 完成即中止剩余步骤。
+    /// 完成即中止剩余步骤。Journal 持久化每步状态：resume 时已完成步骤按
+    /// Journal 记录跳过（只回放结果），running 视为中断重跑该步。
     pub(crate) async fn run_workflow(
         self: &Arc<Self>,
         session_id: &str,
         workflow_id: &str,
         steps: Vec<String>,
+        journal_dir: &std::path::Path,
     ) -> Result<Vec<WorkflowStepOutcome>, HostFailure> {
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
+        let mut journal = WorkflowJournal::load(journal_dir, workflow_id)
+            .unwrap_or_else(|| WorkflowJournal::new(workflow_id, session_id, &steps));
+        journal.steps_total = journal.steps.len();
         let connection_id = keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION)
             .map_err(|_| HostFailure::InvalidParams)?;
         let mut outcomes = Vec::new();
         for (index, prompt) in steps.into_iter().enumerate() {
+            if journal
+                .step(index)
+                .is_some_and(|step| step.status == "succeeded")
+            {
+                // resume：已完成步骤按 Journal 记录回放，不再执行。
+                let record = journal.step(index).expect("上条件已确认存在");
+                outcomes.push(WorkflowStepOutcome {
+                    step_index: index,
+                    operation_id: record.operation_id.clone(),
+                    turn_id: record.turn_id.clone(),
+                    stop_reason: Some(schema::StopReason::EndTurn),
+                });
+                continue;
+            }
+            journal.set_status(index, "running");
+            let _ = journal.save(journal_dir);
             let unix_ms = unix_time_ms();
             let operation_id =
                 OperationId::new(format!("workflow-{workflow_id}-{index}-{unix_ms}"))
@@ -1627,6 +1812,22 @@ impl AcpHost {
                 .and_then(|terminal| prompt_stop_reason(&terminal).ok());
             let finished_cleanly = terminal_status.state.is_terminal()
                 && stop_reason == Some(schema::StopReason::EndTurn);
+            journal.set_status(
+                index,
+                if finished_cleanly {
+                    "succeeded"
+                } else if stop_reason == Some(schema::StopReason::Cancelled) {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+            );
+            if let Some(step) = journal.steps.get_mut(index) {
+                step.operation_id = admitted.operation_id.as_str().to_owned();
+                step.turn_id = executed_turn_id.clone();
+                step.stop_reason = stop_reason.as_ref().map(|reason| format!("{reason:?}"));
+            }
+            let _ = journal.save(journal_dir);
             outcomes.push(WorkflowStepOutcome {
                 step_index: index,
                 operation_id: admitted.operation_id.as_str().to_owned(),
@@ -1637,6 +1838,7 @@ impl AcpHost {
                 break;
             }
         }
+        let _ = journal.save(journal_dir);
         Ok(outcomes)
     }
 

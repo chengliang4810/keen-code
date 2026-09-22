@@ -891,6 +891,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
         })
         .invoke_handler(tauri::generate_handler![
             acp_host::workflow_start,
+            acp_host::workflow_resume,
+            acp_host::workflow_amend,
             settings_get,
             settings_set,
             web_host_start,
