@@ -203,6 +203,149 @@ const historyProjectionCache = new WeakMap<
   { sessionId: string; length: number; revision: number; result: ChatMessage[] }
 >();
 
+type LiveTextProjectionCache = {
+  /** 已归约的正文，避免每个绘制批次重新遍历并 join 全量文本。 */
+  content: string;
+  /** 与 deriveFieldsFromSegments 相同语义的思考阶段。 */
+  thoughtPhases: string[];
+  /** 已扫描到的段数量；流式路径只会在尾部追加或原地增长。 */
+  processedSegmentCount: number;
+  /** 最近一次扫描到的文本段，用于吸收 appendText 的原地增长。 */
+  lastTextSegment: Extract<MessageSegment, { kind: "content" | "thought" }> | null;
+  lastTextSegmentIndex: number;
+  lastTextLength: number;
+};
+
+/**
+ * 实时段由 ACP reducer 维护为 append-only 文本段：相邻同类 delta 在尾段
+ * 原地追加，工具/压缩段只改变结构化字段。按数组身份缓存正文与思考字段，
+ * 每帧只处理新增段或尾段新增字符；数组被截断/重排时自动回退一次全文扫描。
+ */
+const liveTextProjectionCache = new WeakMap<
+  MessageSegment[],
+  LiveTextProjectionCache
+>();
+
+function rebuildLiveTextProjection(
+  segments: MessageSegment[],
+): LiveTextProjectionCache {
+  const contentParts: string[] = [];
+  const thoughtPhases: string[] = [];
+  let lastTextSegment: LiveTextProjectionCache["lastTextSegment"] = null;
+  let lastTextSegmentIndex = -1;
+  for (const [index, segment] of segments.entries()) {
+    if (segment.kind === "content") {
+      contentParts.push(segment.text);
+      lastTextSegment = segment;
+      lastTextSegmentIndex = index;
+    } else if (segment.kind === "thought") {
+      thoughtPhases.push(segment.text);
+      lastTextSegment = segment;
+      lastTextSegmentIndex = index;
+    }
+  }
+  const cache: LiveTextProjectionCache = {
+    content: contentParts.join(""),
+    thoughtPhases,
+    processedSegmentCount: segments.length,
+    lastTextSegment,
+    lastTextSegmentIndex,
+    lastTextLength: lastTextSegment?.text.length ?? 0,
+  };
+  liveTextProjectionCache.set(segments, cache);
+  return cache;
+}
+
+/**
+ * 从 Web Host 的 Session 列表派生项目树。
+ *
+ * Desktop 的项目登记属于 Tauri 本地状态，Web 只允许通过 ACP 读取 Session
+ * 的 `cwd`，因此这里使用规范化路径作为稳定身份，避免在前端复制一份项目
+ * 持久化事实。该投影只用于 Web 侧栏，项目写操作仍按宿主 capability 禁用。
+ */
+export function projectsFromSessions(sessions: SessionListItem[]): ProjectView[] {
+  const seen = new Set<string>();
+  const projects: ProjectView[] = [];
+  for (const session of sessions) {
+    const path = session.cwd.trim();
+    if (!path) continue;
+    const normalized = normalizeSessionProjectPath(path);
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    const displayPath = path.replace(/\\/g, "/");
+    const withoutTrailing = displayPath.replace(/\/+$/, "") || displayPath;
+    const name =
+      withoutTrailing.split("/").at(-1)?.trim() ||
+      (withoutTrailing.match(/^[a-z]:$/i)?.[0] ?? withoutTrailing);
+    projects.push({
+      id: `web-project:${encodeURIComponent(normalized)}`,
+      name,
+      path: session.cwd.trim(),
+      pathOk: true,
+    });
+  }
+  return projects;
+}
+
+function liveTextFields(segments: MessageSegment[]): {
+  content: string;
+  thought: string | undefined;
+  thoughtPhases: string[] | undefined;
+} {
+  let cache = liveTextProjectionCache.get(segments);
+  if (!cache) cache = rebuildLiveTextProjection(segments);
+
+  const previousLast = cache.lastTextSegment;
+  if (
+    previousLast &&
+    segments[cache.lastTextSegmentIndex] !== previousLast
+  ) {
+    cache = rebuildLiveTextProjection(segments);
+  } else if (cache.processedSegmentCount > segments.length) {
+    cache = rebuildLiveTextProjection(segments);
+  } else {
+    // The reducer only mutates the final text segment by appending. A shrink
+    // means an external/manual mutation, so discard the incremental state.
+    const currentLength = previousLast?.text.length ?? 0;
+    if (currentLength < cache.lastTextLength) {
+      cache = rebuildLiveTextProjection(segments);
+    } else if (previousLast && currentLength > cache.lastTextLength) {
+      const delta = previousLast.text.slice(cache.lastTextLength);
+      if (previousLast.kind === "content") {
+        cache.content += delta;
+      } else {
+        const phase = cache.thoughtPhases.at(-1);
+        if (phase === undefined) cache.thoughtPhases.push(previousLast.text);
+        else cache.thoughtPhases[cache.thoughtPhases.length - 1] = phase + delta;
+      }
+      cache.lastTextLength = currentLength;
+    }
+
+    for (let index = cache.processedSegmentCount; index < segments.length; index += 1) {
+      const segment = segments[index];
+      if (segment?.kind === "content") {
+        cache.content += segment.text;
+        cache.lastTextSegment = segment;
+        cache.lastTextSegmentIndex = index;
+        cache.lastTextLength = segment.text.length;
+      } else if (segment?.kind === "thought") {
+        cache.thoughtPhases.push(segment.text);
+        cache.lastTextSegment = segment;
+        cache.lastTextSegmentIndex = index;
+        cache.lastTextLength = segment.text.length;
+      }
+    }
+    cache.processedSegmentCount = segments.length;
+  }
+
+  const thoughts = cache.thoughtPhases.filter((text) => text.trim());
+  return {
+    content: cache.content,
+    thought: thoughts.length ? thoughts.join("\n\n⟪phase⟫\n\n") : undefined,
+    thoughtPhases: thoughts.length ? thoughts : undefined,
+  };
+}
+
 /** 将 ACP 历史消息投影为工作台消息。 */
 export function projectAcpHistory(
   sessionId: string,
@@ -291,7 +434,10 @@ export function projectAcpLiveMessage(
   );
   const turnMetadata = view.live_turn_metadata;
   if (segments.length === 0 && !turnMetadata) return null;
-  const fields = deriveFieldsFromSegments(segments);
+  const fields =
+    segments.length === view.live_segments.length
+      ? liveTextFields(view.live_segments)
+      : deriveFieldsFromSegments(segments);
   return {
     id: assistantTurnMessageId(
       view.session_id,

@@ -16,8 +16,7 @@ use keencode_tools::BashTool;
 #[cfg(windows)]
 use keencode_tools::PowerShellTool;
 use keencode_tools::{
-    EditTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool,
-    register_local_tools,
+    EditTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool, register_local_tools,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -441,7 +440,6 @@ async fn local_tools_execute_complete_workflow_in_isolated_directory() {
         .await
         .expect("Bash 应在项目目录中完成命令");
     assert!(output_text(&shell_output).contains("shell-ok"));
-
 }
 
 /// 真实 Read 图片结果必须经 Agent Runner 完整进入第二轮 Provider 中立请求。

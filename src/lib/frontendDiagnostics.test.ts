@@ -25,7 +25,7 @@ describe("formatFrontendError", () => {
 describe("前端错误落盘", () => {
   afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
-  it("窗口异常、未处理拒绝和 console.error 都进入统一文件入口", async () => {
+  it("未捕获异常进入 Crash，console.error 只进入普通诊断日志", async () => {
     const invoke = vi.fn().mockResolvedValue(undefined);
     const surface = Object.assign(new EventTarget(), { __TAURI_INTERNALS__: { invoke } });
     vi.stubGlobal("window", surface);
@@ -35,12 +35,35 @@ describe("前端错误落盘", () => {
       surface.dispatchEvent(Object.assign(new Event("error"), { error: new Error("window failure") }));
       surface.dispatchEvent(Object.assign(new Event("unhandledrejection"), { reason: new Error("promise failure") }));
       console.error("console failure");
-      expect(invoke.mock.calls.map(([, args]) => args.component)).toEqual([
+      expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+        "diagnostics_crash_record", "diagnostics_crash_record", "diagnostics_record",
+      ]);
+      expect(invoke.mock.calls.map(([, args]) => args.kind ?? args.component)).toEqual([
         "frontend.window_error", "frontend.unhandled_rejection", "frontend.console_error",
       ]);
       expect(JSON.stringify(invoke.mock.calls)).toContain("promise failure");
     } finally { uninstall(); }
     surface.dispatchEvent(new Event("error"));
     expect(invoke).toHaveBeenCalledTimes(3);
+  });
+
+  it("资源加载失败只进入普通诊断，不计为 Crash", () => {
+    const invoke = vi.fn().mockResolvedValue(undefined);
+    const surface = Object.assign(new EventTarget(), { __TAURI_INTERNALS__: { invoke } });
+    vi.stubGlobal("window", surface);
+    const uninstall = installFrontendErrorHandlers();
+    try {
+      const event = new Event("error");
+      Object.defineProperty(event, "target", {
+        value: { tagName: "IMG", getAttribute: () => "/asset.png" },
+      });
+      surface.dispatchEvent(event);
+      expect(invoke).toHaveBeenCalledWith("diagnostics_record", expect.objectContaining({
+        component: "frontend.resource_error",
+      }), undefined);
+      expect(invoke).not.toHaveBeenCalledWith("diagnostics_crash_record", expect.anything());
+    } finally {
+      uninstall();
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { performanceRecord } from "@/lib/acp/api";
+import { observabilityRecordMetric } from "@/lib/observability";
 
 type Aggregate = {
   count: number;
@@ -10,6 +11,7 @@ type TurnPerformance = {
   sessionId: string;
   turnId: string;
   startedAt: number;
+  completedAt: number | null;
   deliveryCount: number;
   projection: Aggregate;
   markdown: Aggregate & {
@@ -24,6 +26,8 @@ type TurnPerformance = {
 
 const turns = new Map<string, TurnPerformance>();
 const activeTurnBySession = new Map<string, string>();
+/** 观测不能成为长时间运行页面的第二份会话状态。 */
+const MAX_TRACKED_TURNS = 256;
 let longTaskObserver: PerformanceObserver | null = null;
 
 function aggregate(): Aggregate {
@@ -49,21 +53,56 @@ function ensureLongTaskObserver(): void {
   if (!supported) return;
   longTaskObserver = new PerformanceObserver((list) => {
     for (const entry of list.getEntries()) {
-      for (const turn of turns.values()) add(turn.longTasks, entry.duration);
+      recordLongTaskEntry(entry);
     }
   });
   longTaskObserver.observe({ entryTypes: ["longtask"] });
 }
 
+/**
+ * Long Task 是页面级 PerformanceEntry，不携带 Session/Turn 标识；只按同一
+ * `performance.now()` 时间轴把它归给一个拥有者。不能把一条页面阻塞广播给
+ * 所有活跃会话，否则并发 Session 会重复计算前端卡顿。
+ */
+function recordLongTaskEntry(entry: Pick<PerformanceEntry, "startTime" | "duration">): void {
+  if (!Number.isFinite(entry.startTime) || !Number.isFinite(entry.duration) || entry.duration < 0) return;
+  const start = entry.startTime;
+  const end = start + entry.duration;
+  const candidates = [...turns.values()].filter((turn) =>
+    turn.startedAt <= end && (turn.completedAt === null || start <= turn.completedAt),
+  );
+  if (!candidates.length) return;
+  const started = candidates.filter((turn) => turn.startedAt <= start);
+  const owner = (started.length ? started : candidates).sort((left, right) => {
+    if (left.startedAt !== right.startedAt) return right.startedAt - left.startedAt;
+    return left.turnId.localeCompare(right.turnId);
+  })[0];
+  if (owner) add(owner.longTasks, entry.duration);
+}
+
+/** 测试和原生视觉夹具可注入同一时间域的 Long Task，生产 Observer 走同一归属逻辑。 */
+export function recordFrontendLongTask(startTime: number, duration: number): void {
+  recordLongTaskEntry({ startTime, duration });
+}
+
 export function beginFrontendTurnPerformance(sessionId: string, turnId: string): void {
   const previousTurnId = activeTurnBySession.get(sessionId);
-  if (previousTurnId && previousTurnId !== turnId) turns.delete(previousTurnId);
+  if (previousTurnId && previousTurnId !== turnId) {
+    const previous = turns.get(previousTurnId);
+    // 已完成 Turn 仍可能处于一秒 flush 窗口，必须保留其聚合结果；
+    // 只有断线/切换时仍未完成的旧 Turn 才能直接释放。
+    if (previous?.completedAt === null || previous === undefined) {
+      if (previous?.flushTimer) clearTimeout(previous.flushTimer);
+      turns.delete(previousTurnId);
+    }
+  }
   activeTurnBySession.set(sessionId, turnId);
   if (!turns.has(turnId)) {
     turns.set(turnId, {
       sessionId,
       turnId,
       startedAt: performance.now(),
+      completedAt: null,
       deliveryCount: 0,
       projection: aggregate(),
       markdown: { ...aggregate(), sourceChars: 0, maxSourceChars: 0, fullParseCount: 0 },
@@ -72,7 +111,30 @@ export function beginFrontendTurnPerformance(sessionId: string, turnId: string):
       flushTimer: null,
     });
   }
+  // Session 断线或宿主卸载时可能没有终态事件，保留窗口也不能无限增长。
+  while (turns.size > MAX_TRACKED_TURNS) {
+    const removable = [...turns.entries()].find(([, turn]) => turn.completedAt !== null);
+    const key = removable?.[0] ?? turns.keys().next().value;
+    if (key === undefined) break;
+    const turn = turns.get(key);
+    if (turn?.flushTimer) clearTimeout(turn.flushTimer);
+    turns.delete(key);
+    if (turn && activeTurnBySession.get(turn.sessionId) === key) {
+      activeTurnBySession.delete(turn.sessionId);
+    }
+  }
   ensureLongTaskObserver();
+}
+
+/** 连接断开、恢复失败或组件卸载时主动释放当前轮观测。 */
+export function abandonFrontendTurnPerformance(sessionId: string, turnId?: string): void {
+  const activeId = activeTurnBySession.get(sessionId);
+  const targetId = turnId ?? activeId;
+  if (!targetId) return;
+  const turn = turns.get(targetId);
+  if (turn?.flushTimer) clearTimeout(turn.flushTimer);
+  turns.delete(targetId);
+  if (activeId === targetId) activeTurnBySession.delete(sessionId);
 }
 
 export function recordFrontendDelivery(sessionId: string): void {
@@ -118,6 +180,7 @@ function rounded(value: number): number {
 export function completeFrontendTurnPerformance(sessionId: string, turnId: string): void {
   const turn = turns.get(turnId);
   if (!turn || turn.sessionId !== sessionId || turn.flushTimer) return;
+  turn.completedAt = performance.now();
   // Final Markdown settlement and ResizeObserver callbacks occur after the terminal delivery.
   turn.flushTimer = setTimeout(() => {
     turns.delete(turnId);
@@ -156,10 +219,24 @@ export function completeFrontendTurnPerformance(sessionId: string, turnId: strin
       },
     };
     void performanceRecord("frontend.turn_performance", JSON.stringify(payload)).catch(() => {});
+    // 结构化指标与兼容日志并行保留：日志供历史诊断使用，指标供运行时面板查询。
+    void Promise.all([
+      observabilityRecordMetric("frontend.turn.elapsed_ms", payload.elapsedMs, "ms"),
+      observabilityRecordMetric("frontend.turn.delivery_count", payload.deliveryCount, "count"),
+      observabilityRecordMetric("frontend.turn.projection_total_ms", payload.projection.totalMs, "ms"),
+      observabilityRecordMetric("frontend.turn.projection_max_ms", payload.projection.maxMs, "ms"),
+      observabilityRecordMetric("frontend.turn.markdown_total_ms", payload.markdown.totalMs, "ms"),
+      observabilityRecordMetric("frontend.turn.markdown_full_parse_count", payload.markdown.fullParseCount, "count"),
+      observabilityRecordMetric("frontend.turn.virtualizer_total_ms", payload.virtualizer.totalMs, "ms"),
+      observabilityRecordMetric("frontend.turn.virtualizer_measurement_count", payload.virtualizer.measurementCount, "count"),
+      observabilityRecordMetric("frontend.turn.long_task_count", payload.longTasks.count, "count"),
+    ]).catch(() => {});
   }, 1_000);
 }
 
 export function resetFrontendPerformanceForTests(): void {
+  longTaskObserver?.disconnect();
+  longTaskObserver = null;
   for (const turn of turns.values()) {
     if (turn.flushTimer) clearTimeout(turn.flushTimer);
   }

@@ -739,6 +739,8 @@ struct RequestLifecycle {
     purpose: Option<String>,
     /// 逻辑请求开始时间。
     logical_started_at_ms: u64,
+    /// 逻辑请求的单调时钟起点；只用于本进程内 duration/TTFT 计算。
+    logical_started: Instant,
     /// 当前请求允许的最大 HTTP 尝试次数。
     max_attempts: u32,
     /// 已经开始的 HTTP 尝试计数。
@@ -747,6 +749,8 @@ struct RequestLifecycle {
     attempt_started_at_ms: Option<u64>,
     /// 首次收到响应头的时间。
     response_headers_at_ms: Option<u64>,
+    /// 真实 SSE 首个有效输出相对逻辑请求起点的耗时。
+    first_output_elapsed_ms: Option<u64>,
     /// 已收到的 HTTP 状态。
     http_status: Option<u16>,
     /// Provider 返回的安全请求标识。
@@ -784,10 +788,12 @@ impl RequestLifecycle {
             agent_id: observation_metadata(request, REQUEST_METADATA_AGENT_ID),
             purpose: observation_metadata(request, REQUEST_METADATA_PURPOSE),
             logical_started_at_ms: now,
+            logical_started: Instant::now(),
             max_attempts: config.retry.max_attempts,
             attempt: 0,
             attempt_started_at_ms: None,
             response_headers_at_ms: None,
+            first_output_elapsed_ms: None,
             http_status: None,
             provider_request_id: None,
             usage: TokenUsage::unknown(),
@@ -823,9 +829,15 @@ impl RequestLifecycle {
 
     /// 保存一次尝试在响应头到达时捕获的不含响应正文和 Header 内容的事实。
     fn record_attempt_head(&mut self, head: &AttemptHead) {
-        self.response_headers_at_ms = Some(head.headers_at_ms);
+        // `response_headers_at_ms` 表示逻辑请求的首次响应头，不应被重试覆盖。
+        // HTTP 状态和请求 ID 仍以最近一次真实尝试为准，便于定位最终失败原因。
+        if self.response_headers_at_ms.is_none() {
+            self.response_headers_at_ms = Some(head.headers_at_ms);
+        }
         self.http_status = Some(head.http_status);
-        self.provider_request_id = head.provider_request_id.clone();
+        if head.provider_request_id.is_some() {
+            self.provider_request_id = head.provider_request_id.clone();
+        }
     }
 
     /// 合并 Provider 报告的可空用量字段。
@@ -839,6 +851,22 @@ impl RequestLifecycle {
             self.provider_request_id = response_id
                 .and_then(|value| safe_provider_request_id(value, self.api_key.as_ref()));
         }
+    }
+
+    /// 仅把真实 SSE 的首个非空输出边界记为 TTFT；缓冲响应不得进入此路径。
+    fn observe_output(&mut self, event: &ModelStreamEvent) {
+        if self.mode != RequestMode::Stream
+            || self.first_output_elapsed_ms.is_some()
+            || !is_output_delta(event)
+        {
+            return;
+        }
+        self.first_output_elapsed_ms = Some(
+            self.logical_started
+                .elapsed()
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64,
+        );
     }
 
     /// 在实际 HTTP 尝试前形成唯一逻辑失败终态。
@@ -966,6 +994,8 @@ impl RequestLifecycle {
     }
 
     /// 组装并同步投递一条不含敏感正文的不可变观测。
+    /// 参数与 Provider 生命周期字段一一对应，保留显式形态便于审计每个终态。
+    #[allow(clippy::too_many_arguments)]
     fn emit(
         &mut self,
         scope: RequestObservationScope,
@@ -988,6 +1018,7 @@ impl RequestLifecycle {
             endpoint: self.endpoint.clone(),
             at_ms,
             duration_ms,
+            ttft_ms: self.first_output_elapsed_ms,
             retry_delay_ms,
             response_headers_at_ms: self.response_headers_at_ms,
             http_status: self.http_status,
@@ -1218,6 +1249,9 @@ impl Stream for RetryModelStream {
             };
             match stream.as_mut().poll_next(context) {
                 Poll::Ready(Some(Ok(event))) => {
+                    if let Some(lifecycle) = this.lifecycle.as_mut() {
+                        lifecycle.observe_output(&event);
+                    }
                     match &event {
                         ModelStreamEvent::MessageStart { metadata } => {
                             if let Some(lifecycle) = this.lifecycle.as_mut() {
@@ -1356,7 +1390,7 @@ impl DeadlineTimer {
             .store(now.saturating_add(duration_nanos(delay)), Ordering::Relaxed);
         // 唤醒可能在长等待中的计时线程，让它立即按新到期时刻重新计算。
         if let Ok(guard) = self.shared.notify.lock() {
-            let _ = self.shared.notify_condvar.notify_all();
+            self.shared.notify_condvar.notify_all();
             drop(guard);
         }
     }
@@ -1386,7 +1420,7 @@ impl Drop for DeadlineTimer {
             cancelled.store(true, Ordering::Relaxed);
             // 通知可能在长等待中的计时线程立即退出。
             if let Ok(guard) = self.shared.notify.lock() {
-                let _ = self.shared.notify_condvar.notify_all();
+                self.shared.notify_condvar.notify_all();
                 drop(guard);
             }
         }
@@ -1422,10 +1456,9 @@ fn spawn_deadline_thread(
                     // 变量唤醒本线程，超时兜底防通知丢失；下游背压停 poll 时
                     // 不再按 50ms 轮询空转 OS 线程。
                     if let Ok(guard) = shared.notify.lock() {
-                        let _ = shared.notify_condvar.wait_timeout(
-                            guard,
-                            DEADLINE_POST_EXPIRY_IDLE,
-                        );
+                        let _ = shared
+                            .notify_condvar
+                            .wait_timeout(guard, DEADLINE_POST_EXPIRY_IDLE);
                     }
                     continue;
                 }

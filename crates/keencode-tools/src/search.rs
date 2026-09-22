@@ -490,7 +490,7 @@ fn execute_grep(
                     }
                 };
                 let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
-                let path_display = display_path(&path);
+                let path_display = display_path(path);
                 match input.output_mode {
                     GrepOutputMode::Content => {
                         let remaining = limit - result_count;

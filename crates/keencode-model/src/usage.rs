@@ -132,7 +132,13 @@ impl StopReason {
         let redacted = redact_error_secrets_bounded(reason.trim(), MAX_FAILURE_REASON_BYTES);
         let display = redacted
             .chars()
-            .map(|character| if character.is_control() { ' ' } else { character })
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
             .collect::<String>();
         Some(ModelError::ProviderUnavailable {
             message: format!("上游提前终止响应（结束原因 {display}）"),

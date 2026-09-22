@@ -38,18 +38,40 @@ pub fn effective_path() -> OsString {
 /// 相对名字依次匹配 PATH 目录下的可执行文件，找不到时返回 NotFound，
 /// 与按候选回退的 spawn 语义保持一致。
 pub fn resolve_program(program: &OsStr) -> io::Result<OsString> {
+    resolve_program_in_path(program, &effective_path())
+}
+
+/// 按给定 PATH 解析程序名，独立保留解析规则以便在不修改进程级覆盖的情况下测试。
+fn resolve_program_in_path(program: &OsStr, effective: &OsStr) -> io::Result<OsString> {
     let path = Path::new(program);
     if path.is_absolute() || has_path_separator(program) {
         return Ok(program.to_os_string());
     }
-    let effective = effective_path();
-    for directory in std::env::split_paths(&effective) {
+    for directory in std::env::split_paths(effective) {
         if directory.as_os_str().is_empty() {
             continue;
         }
         let candidate = directory.join(path);
         if candidate.is_file() {
             return Ok(candidate.into_os_string());
+        }
+        #[cfg(windows)]
+        if path.extension().is_none() {
+            // Windows 的 Command::new 会按 PATHEXT 补全后缀；自定义 PATH
+            // 解析器也必须覆盖 git.exe、工具.cmd 等无后缀调用。
+            let pathext = std::env::var_os("PATHEXT")
+                .unwrap_or_else(|| OsString::from(".COM;.EXE;.BAT;.CMD"));
+            for extension in pathext.to_string_lossy().split(';') {
+                if extension.is_empty() {
+                    continue;
+                }
+                let mut name = program.to_os_string();
+                name.push(extension);
+                let candidate = directory.join(name);
+                if candidate.is_file() {
+                    return Ok(candidate.into_os_string());
+                }
+            }
         }
     }
     Err(io::Error::new(
@@ -101,6 +123,23 @@ mod tests {
     fn resolve_program_reports_not_found_for_missing_names() {
         let error = resolve_program(OsStr::new("keencode-definitely-missing-probe")).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn resolve_program_uses_pathext_for_extensionless_names() {
+        let directory = tempfile::tempdir().expect("应创建 PATH 探针目录");
+        let executable = directory.path().join("keencode-path-probe.exe");
+        std::fs::write(&executable, b"probe").expect("应写入 PATH 探针");
+        let effective = std::env::join_paths([directory.path()]).expect("应构造测试 PATH");
+
+        let resolved = resolve_program_in_path(OsStr::new("keencode-path-probe"), &effective)
+            .expect("Windows PATHEXT 应解析 .exe 探针");
+        assert!(
+            resolved
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&executable.to_string_lossy())
+        );
     }
 
     #[test]

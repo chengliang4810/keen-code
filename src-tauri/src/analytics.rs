@@ -22,7 +22,7 @@ use std::{
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 const RECORD_FILE: &str = "model-request-records.jsonl";
 const DEFAULT_PAGE_SIZE: usize = 20;
@@ -34,9 +34,6 @@ enum AnalyticsEvent {
     Request(Box<RequestObservation>),
     /// 查询命令使用屏障等待此前排队的记录完成落盘。
     Flush(SyncSender<Result<(), String>>),
-    /// 仅原生测试可关闭真实接收端，确认后让正式 flush 路径观察通道断开。
-    #[cfg(all(test, windows, feature = "native-desktop-tests"))]
-    DisconnectWriterForTest(SyncSender<()>),
 }
 
 /// 一次实际模型调用 attempt 的安全本地记录。
@@ -160,6 +157,8 @@ pub struct TaskCacheUsage {
 pub struct AnalyticsRecorder {
     sender: Sender<AnalyticsEvent>,
     retry_notifier: OnceLock<Arc<dyn Fn(ModelRetryNotice) + Send + Sync>>,
+    /// Provider 观测在同一同步边界分流到有界内存存储；不经过磁盘 writer。
+    observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
 }
 
 /// Provider 已确定会继续尝试时，投递给桌面实时会话的安全重试事实。
@@ -220,13 +219,6 @@ impl AnalyticsRecorder {
                             }
                             let _ = reply.send(result);
                         }
-                        #[cfg(all(test, windows, feature = "native-desktop-tests"))]
-                        AnalyticsEvent::DisconnectWriterForTest(reply) => {
-                            // 必须先断开接收端再回执，避免后续 flush 误入仍存活的队列。
-                            drop(receiver);
-                            let _ = reply.send(());
-                            break;
-                        }
                     }
                 }
                 let _ = writer.flush();
@@ -235,6 +227,9 @@ impl AnalyticsRecorder {
         Ok(Self {
             sender,
             retry_notifier: OnceLock::new(),
+            observability: app
+                .try_state::<Arc<crate::diagnostics::Diagnostics>>()
+                .map(|diagnostics| diagnostics.observability()),
         })
     }
 
@@ -246,6 +241,7 @@ impl AnalyticsRecorder {
         Self {
             sender,
             retry_notifier: OnceLock::new(),
+            observability: None,
         }
     }
 
@@ -256,18 +252,6 @@ impl AnalyticsRecorder {
         self.retry_notifier
             .set(notifier)
             .map_err(|_| "模型重试通知器已经初始化".to_owned())
-    }
-
-    /// 原生验收中断开同一个正式记录器，不替换 Tauri state 或生产退出流程。
-    #[cfg(all(test, windows, feature = "native-desktop-tests"))]
-    pub(crate) fn disconnect_writer_for_test(&self) -> Result<(), String> {
-        let (reply, result) = mpsc::sync_channel(1);
-        self.sender
-            .send(AnalyticsEvent::DisconnectWriterForTest(reply))
-            .map_err(|_| "测试记录器 writer 已提前退出".to_owned())?;
-        result
-            .recv_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| format!("等待测试 writer 断开失败：{error}"))
     }
 
     /// 等待此前已接收的观测写入文件并同步到操作系统存储层。
@@ -324,6 +308,7 @@ impl AnalyticsRecorder {
                 error = observation.error_summary.as_deref().unwrap_or(""),
                 "模型请求失败");
         }
+        self.record_observability(&observation);
         if self
             .sender
             .send(AnalyticsEvent::Request(Box::new(observation)))
@@ -331,6 +316,64 @@ impl AnalyticsRecorder {
         {
             tracing::error!("模型请求日志 writer 已退出");
         }
+    }
+
+    /// 单元测试只验证 Provider 观测分流，不创建 Tauri App 或持久化文件。
+    #[cfg(test)]
+    fn with_observability_for_test(
+        observability: Arc<crate::diagnostics::observability::ObservabilityStore>,
+    ) -> Self {
+        let mut recorder = Self::with_disconnected_writer_for_test();
+        recorder.observability = Some(observability);
+        recorder
+    }
+
+    /// 把真实 Provider 生命周期终态投影为有界 Trace、TTFT 和聚合指标。
+    /// 这里只消费已脱敏的 Provider 中立短元数据，不保存 endpoint 或正文。
+    fn record_observability(&self, observation: &RequestObservation) {
+        if observation.scope != RequestObservationScope::Logical
+            || observation.state == RequestObservationState::Started
+        {
+            return;
+        }
+        let Some(store) = &self.observability else {
+            return;
+        };
+        let duration_ms = observation.duration_ms.unwrap_or_default();
+        let status = match observation.state {
+            RequestObservationState::Completed => "ok",
+            RequestObservationState::Cancelled => "cancelled",
+            RequestObservationState::Failed => "error",
+            RequestObservationState::Started => return,
+        };
+        let mode = match observation.mode {
+            RequestMode::Stream => "stream",
+            RequestMode::Buffered => "buffered",
+        };
+        let mut attributes = BTreeMap::from([
+            ("model".to_owned(), observation.model.clone()),
+            ("protocol".to_owned(), protocol_name(&observation.protocol)),
+            ("mode".to_owned(), mode.to_owned()),
+        ]);
+        if let Some(purpose) = &observation.purpose {
+            attributes.insert("purpose".to_owned(), purpose.clone());
+        }
+        store.record_histogram("provider.request_duration_ms", duration_ms as f64);
+        store.increment_counter(&format!("provider.requests.{status}"), 1);
+        if let Some(ttft_ms) = observation.ttft_ms {
+            store.record_ttft(ttft_ms as f64);
+        }
+        store.record_trace(crate::diagnostics::observability::TraceSample {
+            trace_id: observation.logical_request_id.clone(),
+            span_id: format!("{}-logical", observation.logical_request_id),
+            parent_span_id: None,
+            name: "provider.request".to_owned(),
+            started_at_ms: observation.at_ms.saturating_sub(duration_ms),
+            duration_ms: observation.duration_ms,
+            ttft_ms: observation.ttft_ms,
+            status: status.to_owned(),
+            attributes,
+        });
     }
 }
 
@@ -915,6 +958,7 @@ mod tests {
                 175
             },
             duration_ms: (state != RequestObservationState::Started).then_some(75),
+            ttft_ms: (state == RequestObservationState::Completed).then_some(25),
             retry_delay_ms: None,
             response_headers_at_ms: (state == RequestObservationState::Completed).then_some(125),
             http_status: (state == RequestObservationState::Completed).then_some(200),
@@ -938,6 +982,37 @@ mod tests {
             agent_id: Some("agent-1".to_owned()),
             purpose: Some("primary".to_owned()),
         }
+    }
+
+    #[test]
+    fn logical_provider_terminal_observation_reaches_runtime_observability() {
+        let store = Arc::new(crate::diagnostics::observability::ObservabilityStore::default());
+        let recorder = super::AnalyticsRecorder::with_observability_for_test(Arc::clone(&store));
+
+        recorder.record_request(observation(
+            RequestObservationScope::Logical,
+            RequestObservationState::Completed,
+            1,
+        ));
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.counters.get("provider.requests.ok"), Some(&1));
+        assert!(
+            snapshot
+                .histograms
+                .iter()
+                .any(|histogram| histogram.name == "provider.request_duration_ms"
+                    && histogram.count == 1)
+        );
+        assert!(
+            snapshot
+                .histograms
+                .iter()
+                .any(|histogram| histogram.name == "runtime.ttft_ms" && histogram.count == 1)
+        );
+        assert_eq!(snapshot.traces.len(), 1);
+        assert_eq!(snapshot.traces[0].name, "provider.request");
+        assert_eq!(snapshot.traces[0].ttft_ms, Some(25));
     }
 
     #[test]

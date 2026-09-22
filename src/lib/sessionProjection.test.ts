@@ -6,13 +6,50 @@ import {
   mergeAcpTurnError,
   projectAcpConversation,
   projectAcpHistory,
+  projectAcpLiveMessage,
   projectAcpSessionState,
   projectAcpSnapshot,
   projectSubagentConversation,
   projectSidebar,
+  projectsFromSessions,
 } from "./sessionProjection";
 
 describe("sessionProjection", () => {
+  it("从 Web ACP Session cwd 派生稳定项目投影并去重路径", () => {
+    const projects = projectsFromSessions([
+      {
+        id: "one",
+        title: null,
+        cwd: "D:\\Projects\\Demo\\",
+        updatedAt: "",
+        lastUserMessageAt: null,
+      },
+      {
+        id: "two",
+        title: null,
+        cwd: "d:/projects/demo",
+        updatedAt: "",
+        lastUserMessageAt: null,
+      },
+      {
+        id: "three",
+        title: null,
+        cwd: "D:/Projects/Other",
+        updatedAt: "",
+        lastUserMessageAt: null,
+      },
+    ]);
+
+    expect(projects).toHaveLength(2);
+    expect(projects[0]).toMatchObject({
+      name: "Demo",
+      path: "D:\\Projects\\Demo\\",
+      pathOk: true,
+    });
+    expect(projects[0]?.id).toBe("web-project:d%3A%2Fprojects%2Fdemo");
+    expect(projects[1]?.name).toBe("Other");
+  });
+
   it("按 Session cwd 关联项目，并只从当前偏好读取展示状态", () => {
     const projection = projectSidebar(
       [
@@ -591,5 +628,30 @@ describe("sessionProjection", () => {
     );
     expect(reprojected).not.toBe(first);
     expect(reprojected[0]?.content).toBe("分片一分片二");
+  });
+
+  it("流式正文缓存跟随尾段追加、阶段追加和非追加回退", () => {
+    const view = emptySession("session-1");
+    view.status = "streaming";
+    view.active_root_turn_id = "turn-1";
+    view.live_segments = [{ kind: "content", text: "第一段" }];
+
+    expect(projectAcpLiveMessage(view)?.content).toBe("第一段");
+    const firstContent = view.live_segments[0];
+    if (firstContent?.kind !== "content") throw new Error("测试正文段缺失");
+    firstContent.text += "追加";
+    expect(projectAcpLiveMessage(view)?.content).toBe("第一段追加");
+
+    view.live_segments.push({ kind: "thought", text: "补充思考" });
+    const interleaved = projectAcpLiveMessage(view);
+    expect(interleaved?.content).toBe("第一段追加");
+    expect(interleaved?.thought).toBe("补充思考");
+
+    // 外部恢复/测试数据可能原地替换文本，长度不再是 append-only；
+    // 此时必须回退全文重建，不能沿用旧正文。
+    const lastThought = view.live_segments[1];
+    if (lastThought?.kind !== "thought") throw new Error("测试思考段缺失");
+    lastThought.text = "替换";
+    expect(projectAcpLiveMessage(view)?.thought).toBe("替换");
   });
 });

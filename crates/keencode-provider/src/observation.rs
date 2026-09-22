@@ -96,6 +96,11 @@ pub struct RequestObservation {
     pub at_ms: u64,
     /// 已结束观测从开始到当前的毫秒数。
     pub duration_ms: Option<u64>,
+    /// 真实流式响应从逻辑请求开始到首个有效输出增量的单调时钟耗时。
+    ///
+    /// 缓冲 JSON、空增量和仅包含 Usage/响应头的事件保持 `None`，避免把
+    /// 客户端合成事件误报为 TTFT。
+    pub ttft_ms: Option<u64>,
     /// 本次失败已经安排自动重试时，下一次尝试前等待的毫秒数。
     pub retry_delay_ms: Option<u64>,
     /// 首次收到响应头的 Unix 毫秒时间。

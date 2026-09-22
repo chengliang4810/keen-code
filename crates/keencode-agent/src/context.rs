@@ -1109,7 +1109,9 @@ impl ContextManager {
             // 已达到既有触发线时交给 precompression_target，不走预测路径。
             return None;
         }
-        let expected_growth = u64::from(self.policy.reserved_output_tokens)
+        let expected_growth = self
+            .policy
+            .reserved_output_tokens
             .saturating_add(PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS);
         (self
             .estimate_request(request)

@@ -1731,7 +1731,9 @@ async fn provider_failure_stop_reason_reports_upstream_cause_not_tools() {
             .messages
             .iter()
             .flat_map(|message| &message.content)
-            .any(|block| matches!(block, ContentBlock::Text { text } if text == "已收到的部分正文"))
+            .any(
+                |block| matches!(block, ContentBlock::Text { text } if text == "已收到的部分正文")
+            )
     );
 
     // 带完整工具调用：同样按上游失败收尾，绝不进入工具执行或报成工具相关错误。
@@ -7145,12 +7147,7 @@ async fn max_output_truncation_recovers_with_instruction_and_completes() {
 #[tokio::test]
 async fn max_output_truncation_recovers_at_most_eight_times_then_terminal() {
     let replies = (1..=9)
-        .map(|index| {
-            text_reply_with_stop(
-                &format!("第 {index} 段"),
-                StopReason::MaxOutputTokens,
-            )
-        })
+        .map(|index| text_reply_with_stop(&format!("第 {index} 段"), StopReason::MaxOutputTokens))
         .collect::<Vec<_>>();
     let provider = Arc::new(ScriptedProvider::new(
         ProviderCapabilities::default(),
@@ -7171,7 +7168,10 @@ async fn max_output_truncation_recovers_at_most_eight_times_then_terminal() {
     // 初始 user + 9 段截断 assistant + 8 条续跑指令。
     assert_eq!(result.messages.len(), 18);
     for message_index in (2..17).step_by(2) {
-        assert!(matches!(result.messages[message_index].role, MessageRole::User));
+        assert!(matches!(
+            result.messages[message_index].role,
+            MessageRole::User
+        ));
         assert!(result.messages[message_index].is_meta);
     }
     assert!(matches!(result.messages[17].role, MessageRole::Assistant));
@@ -8740,11 +8740,8 @@ async fn todo_reminder_skips_empty_list_and_read_only_mode() {
         "空列表不应提醒: {empty:?}"
     );
 
-    let read_only = todo_reminder_request_counts(
-        Some(seeded_todo_state()),
-        PlanGuard::read_only(),
-    )
-    .await;
+    let read_only =
+        todo_reminder_request_counts(Some(seeded_todo_state()), PlanGuard::read_only()).await;
     assert!(
         read_only.iter().all(|count| *count == 0),
         "只读模式不应提醒: {read_only:?}"

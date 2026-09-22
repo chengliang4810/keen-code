@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { performanceRecord } from "@/lib/acp/api";
+import { observabilityRecordMetric } from "@/lib/observability";
 import {
   beginFrontendTurnPerformance,
   completeFrontendTurnPerformance,
   recordFrontendDelivery,
+  recordFrontendLongTask,
   recordFrontendProjection,
   recordMarkdownParse,
   recordVirtualizerWork,
@@ -14,11 +16,16 @@ vi.mock("@/lib/acp/api", () => ({
   performanceRecord: vi.fn().mockResolvedValue(undefined),
 }));
 
+vi.mock("@/lib/observability", () => ({
+  observabilityRecordMetric: vi.fn().mockResolvedValue(undefined),
+}));
+
 describe("frontendPerformance", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     resetFrontendPerformanceForTests();
     vi.mocked(performanceRecord).mockClear();
+    vi.mocked(observabilityRecordMetric).mockClear();
   });
 
   afterEach(() => {
@@ -70,6 +77,16 @@ describe("frontendPerformance", () => {
         measurementCount: 1,
       },
     });
+    expect(observabilityRecordMetric).toHaveBeenCalledWith(
+      "frontend.turn.projection_total_ms",
+      3.3,
+      "ms",
+    );
+    expect(observabilityRecordMetric).toHaveBeenCalledWith(
+      "frontend.turn.virtualizer_measurement_count",
+      1,
+      "count",
+    );
   });
 
   it("新 Turn 不接收上一个 Turn 延迟到达的 Session 采样", async () => {
@@ -89,5 +106,36 @@ describe("frontendPerformance", () => {
     const current = payloads.find((payload) => payload.turnId === "turn-b");
     expect(previous?.deliveryCount).toBe(0);
     expect(current?.deliveryCount).toBe(1);
+  });
+
+  it("页面 Long Task 只归属时间轴上唯一的 Turn，不向所有活跃 Session 广播", async () => {
+    const now = vi.spyOn(performance, "now");
+    now.mockReturnValueOnce(10); // turn-a start
+    beginFrontendTurnPerformance("session-a", "turn-a");
+    now.mockReturnValueOnce(20); // turn-b start
+    beginFrontendTurnPerformance("session-b", "turn-b");
+
+    // 该任务从 turn-a 开始，跨过 turn-b 的开始时间；owner 仍是最晚已开始的
+    // turn-a，而不是把同一条页面任务记入两个 Turn。
+    recordFrontendLongTask(12, 30);
+    now.mockReturnValue(40);
+    completeFrontendTurnPerformance("session-a", "turn-a");
+    completeFrontendTurnPerformance("session-b", "turn-b");
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    const payloads = vi.mocked(performanceRecord).mock.calls.map((call) =>
+      JSON.parse(call[1]),
+    );
+    expect(payloads.find((payload) => payload.turnId === "turn-a")?.longTasks).toMatchObject({
+      count: 1,
+      totalMs: 30,
+      maxMs: 30,
+    });
+    expect(payloads.find((payload) => payload.turnId === "turn-b")?.longTasks).toMatchObject({
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+    });
+    now.mockRestore();
   });
 });

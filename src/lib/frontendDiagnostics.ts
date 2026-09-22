@@ -33,21 +33,40 @@ export function reportFrontendError(component: string, value: unknown): void {
   void nativeInvoke("diagnostics_record", { component, message: formatFrontendError(value) }).catch(() => {});
 }
 
+/** 未捕获异常进入结构化 Crash 和诊断日志；业务错误不得调用此入口。 */
+export function reportFrontendCrash(kind: string, value: unknown): void {
+  if (!isTauri()) return;
+  void nativeInvoke("diagnostics_crash_record", {
+    kind,
+    message: formatFrontendError(value),
+  }).catch(() => {});
+}
+
 /** 注册浏览器全局同步异常与未处理 Promise 拒绝监听。 */
 export function installFrontendErrorHandlers(): () => void {
   /** 记录未被业务代码捕获的同步异常。 */
   const onError = (event: ErrorEvent) => {
+    // 捕获阶段也会收到 script/img/link 等资源加载失败；它们没有 Error
+    // 对象，不应污染 Crash 统计，单独保留为普通诊断事件。
+    if (!event.error && event.target && typeof (event.target as Element).tagName === "string") {
+      const target = event.target as Element;
+      reportFrontendError(
+        "frontend.resource_error",
+        `${target.tagName.toLowerCase()} resource failed${target.getAttribute?.("src") ?? target.getAttribute?.("href") ?? ""}`,
+      );
+      return;
+    }
     const location = event.filename
       ? `\nsource=${event.filename}:${event.lineno}:${event.colno}`
       : "";
-    reportFrontendError(
+    reportFrontendCrash(
       "frontend.window_error",
       `${formatFrontendError(event.error ?? event.message ?? `Resource failed: ${(event.target as Element | null)?.tagName ?? "unknown"}`)}${location}`,
     );
   };
   /** 记录未被业务代码处理的异步拒绝。 */
   const onUnhandledRejection = (event: PromiseRejectionEvent) => {
-    reportFrontendError("frontend.unhandled_rejection", event.reason);
+    reportFrontendCrash("frontend.unhandled_rejection", event.reason);
   };
   const originalError = console.error;
   const loggedError: typeof console.error = (...args) => {

@@ -3,10 +3,10 @@ use serde_json::{Value, json};
 
 use crate::{
     ContentBlock, Message, MessageRole, ModelError, ModelProvider, ModelRequest, ModelStreamEvent,
-    OpaqueReasoningState, ProviderCapabilities, ProviderProtocol, REDACTED_SECRET, ReasoningContent,
-    ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, StructuredOutputConfig,
-    StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage, ToolCall, ToolChoice,
-    ToolDefinition, ToolResult, cache_hit_rate,
+    OpaqueReasoningState, ProviderCapabilities, ProviderProtocol, REDACTED_SECRET,
+    ReasoningContent, ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason,
+    StructuredOutputConfig, StructuredOutputEnforcement, StructuredOutputFailureKind, TokenUsage,
+    ToolCall, ToolChoice, ToolDefinition, ToolResult, cache_hit_rate,
 };
 
 fn user_request() -> ModelRequest {
@@ -211,7 +211,13 @@ fn usage_cache_fields_round_trip_with_camel_case_keys() {
 /// 端点自报失败的结束原因归一为带上游原因的上游错误，中性原因不误判。
 #[test]
 fn stop_reason_provider_failure_normalizes_only_failure_names() {
-    for reason in ["error", "server_error", "internal_error", "FAILED", "failure"] {
+    for reason in [
+        "error",
+        "server_error",
+        "internal_error",
+        "FAILED",
+        "failure",
+    ] {
         let error = StopReason::Other {
             reason: reason.to_owned(),
         }

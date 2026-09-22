@@ -5492,6 +5492,10 @@ async fn request_observer_真实http在message_end完成且过滤凭据请求标
     assert_eq!(completed.http_status, Some(200));
     assert_eq!(completed.usage.input_tokens, Some(7));
     assert_eq!(completed.usage.output_tokens, Some(3));
+    assert!(
+        completed.ttft_ms.is_some(),
+        "真实 SSE 首个有效增量必须形成 TTFT"
+    );
     assert_eq!(completed.session_id.as_deref(), Some("session-observed"));
     assert_eq!(completed.turn_id.as_deref(), Some("turn-observed"));
     assert_eq!(completed.agent_id.as_deref(), Some("agent-observed"));
@@ -5546,6 +5550,12 @@ async fn request_observer_缓冲响应拒绝恶意body请求标识() {
         let _ = finish_model_server(server);
         let observations = observer.snapshot();
         assert_eq!(observations.len(), 4);
+        assert!(
+            observations
+                .iter()
+                .all(|observation| observation.ttft_ms.is_none()),
+            "缓冲 JSON 不得伪造 TTFT"
+        );
         assert!(
             observations
                 .iter()

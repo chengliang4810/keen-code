@@ -3826,9 +3826,10 @@ async fn runner_mechanical_truncation_recovers_failed_compression_and_continues_
         .expect("机械截断成功必须投递 transient 终态事件");
     assert_eq!(truncated, record.estimated_tokens_after);
     assert!(
-        events
-            .iter()
-            .any(|event| matches!(event.kind(), AgentStreamEventKind::ContextCompactionStarted { .. })),
+        events.iter().any(|event| matches!(
+            event.kind(),
+            AgentStreamEventKind::ContextCompactionStarted { .. }
+        )),
         "兜底前应发出 Started"
     );
     assert!(record.summary.is_empty());

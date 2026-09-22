@@ -192,14 +192,7 @@ fn local_tool_registration_is_stable() {
             "Write",
         ]
     } else {
-        vec![
-            "Bash",
-            "Edit",
-            "Glob",
-            "Grep",
-            "Read",
-            "Write",
-        ]
+        vec!["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
     };
     assert_eq!(names, expected);
 }
