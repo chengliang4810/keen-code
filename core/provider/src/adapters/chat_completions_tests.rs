@@ -353,16 +353,15 @@ fn streaming_fields_preserve_repeated_fragments_and_original_names() {
 }
 
 #[test]
-fn reasoning_limit_is_shared_across_fields_and_rejects_before_growth() {
+fn reasoning_limit_is_shared_across_fields_and_degrades_past_limit() {
     let mut adapter = ChatCompletionsAdapter::new();
     let at_limit = "x".repeat(super::MAX_CHAT_REASONING_STATE_BYTES);
     adapter
         .remember_reasoning_text("reasoning_content", &at_limit)
         .unwrap();
-    let error = adapter
-        .remember_reasoning_text("reasoning", "y")
-        .unwrap_err();
-    assert!(matches!(error, keencode_model::ModelError::Protocol { .. }));
+    // 超限后优雅降级：不报错，仅停止回放续传。
+    adapter.remember_reasoning_text("reasoning", "y").unwrap();
+    assert!(!adapter.reasoning_state_replayable);
     assert!(adapter.chat_reasoning_content.is_none());
     assert!(adapter.chat_reasoning.is_none());
     adapter

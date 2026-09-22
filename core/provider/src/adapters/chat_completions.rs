@@ -441,13 +441,13 @@ impl ChatCompletionsAdapter {
         };
         if current.saturating_add(other).saturating_add(text.len()) > MAX_CHAT_REASONING_STATE_BYTES
         {
+            // 超限是容量退化而非协议错误：置为不可回放并丢弃已积累状态，
+            // 当前回合继续正常输出，`take_reasoning_continuation_event` 的
+            // 优雅分支在后续事件里自然生效。
             self.reasoning_state_replayable = false;
             self.chat_reasoning_content = None;
             self.chat_reasoning = None;
-            return Err(protocol_error(format!(
-                "Chat 推理续传状态超过 {} 字节上限",
-                MAX_CHAT_REASONING_STATE_BYTES
-            )));
+            return Ok(());
         }
         let target = match field {
             "reasoning_content" => &mut self.chat_reasoning_content,
