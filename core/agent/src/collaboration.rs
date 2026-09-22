@@ -6619,15 +6619,33 @@ impl CollaborationCoordinator {
                     let agent_id = launch.agent.agent_id.clone();
                     let root_agent_id = launch.agent.root_agent_id.clone();
                     let turn_id = launch.turn_id.clone();
-                    let fence = self.execution_fence(&root_agent_id)?;
-                    let fence_state = fence
-                        .lock()
-                        .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+                    // 准备阶段失败只记录并跳过本动作，不丢弃队列中排在其后的
+                    // 其他动作（如 NotifyWaiters / CancelTurn）。
+                    let fence = match self.execution_fence(&root_agent_id) {
+                        Ok(fence) => fence,
+                        Err(error) => {
+                            failures.push(format!("Agent Turn 执行栅栏获取失败: {error}"));
+                            continue;
+                        }
+                    };
+                    let fence_state = match fence.lock() {
+                        Ok(fence_state) => fence_state,
+                        Err(_) => {
+                            failures.push("Agent Turn 执行栅栏锁已中毒".to_owned());
+                            continue;
+                        }
+                    };
                     if fence_state.closing {
                         continue;
                     }
                     let still_pending = {
-                        let state = self.lock_state()?;
+                        let state = match self.lock_state() {
+                            Ok(state) => state,
+                            Err(error) => {
+                                failures.push(format!("Agent Turn 状态锁获取失败: {error}"));
+                                continue;
+                            }
+                        };
                         state.start_outbox.contains_key(&turn_id)
                             && state.roots.get(&root_agent_id).is_some_and(|root| {
                                 root.lifecycle == RecoveredRootLifecycle::Open && !root.suspended
@@ -6710,7 +6728,13 @@ impl CollaborationCoordinator {
                 PostCommitAction::SignalTurn(signal) => {
                     let turn_id = signal.turn_id.clone();
                     let Some(root_agent_id) = ({
-                        let state = self.lock_state()?;
+                        let state = match self.lock_state() {
+                            Ok(state) => state,
+                            Err(error) => {
+                                failures.push(format!("Agent Turn 信号状态锁获取失败: {error}"));
+                                continue;
+                            }
+                        };
                         state
                             .active_turns
                             .get(&turn_id)
@@ -6718,16 +6742,32 @@ impl CollaborationCoordinator {
                     }) else {
                         continue;
                     };
-                    let fence = self.execution_fence(&root_agent_id)?;
-                    let fence_state = fence
-                        .lock()
-                        .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+                    let fence = match self.execution_fence(&root_agent_id) {
+                        Ok(fence) => fence,
+                        Err(error) => {
+                            failures.push(format!("Agent Turn 信号执行栅栏获取失败: {error}"));
+                            continue;
+                        }
+                    };
+                    let fence_state = match fence.lock() {
+                        Ok(fence_state) => fence_state,
+                        Err(_) => {
+                            failures.push("Agent Turn 信号执行栅栏锁已中毒".to_owned());
+                            continue;
+                        }
+                    };
                     if fence_state.closing {
                         continue;
                     }
                     let signal_key = AgentTurnSignalKey::from_signal(&signal);
                     let pending_signal = {
-                        let state = self.lock_state()?;
+                        let state = match self.lock_state() {
+                            Ok(state) => state,
+                            Err(error) => {
+                                failures.push(format!("Agent Turn 信号状态读取失败: {error}"));
+                                continue;
+                            }
+                        };
                         state.signal_outbox.get(&signal_key).cloned()
                     };
                     let Some(pending_signal) = pending_signal else {
@@ -6753,15 +6793,28 @@ impl CollaborationCoordinator {
                 }
                 PostCommitAction::QuiesceTree(request) => {
                     let root_agent_id = request.root_agent_id.clone();
-                    let fence = self.execution_fence(&root_agent_id)?;
-                    let mut fence_state = fence
-                        .lock()
-                        .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+                    let fence = match self.execution_fence(&root_agent_id) {
+                        Ok(fence) => fence,
+                        Err(error) => {
+                            failures.push(format!("Agent 树静止栅栏获取失败: {error}"));
+                            continue;
+                        }
+                    };
+                    let mut fence_state = match fence.lock() {
+                        Ok(fence_state) => fence_state,
+                        Err(_) => {
+                            failures.push("Agent 树静止栅栏锁已中毒".to_owned());
+                            continue;
+                        }
+                    };
                     fence_state.closing = true;
-                    let still_pending = self
-                        .lock_state()?
-                        .quiesce_outbox
-                        .contains_key(&root_agent_id);
+                    let still_pending = match self.lock_state() {
+                        Ok(state) => state.quiesce_outbox.contains_key(&root_agent_id),
+                        Err(error) => {
+                            failures.push(format!("Agent 树静止状态读取失败: {error}"));
+                            continue;
+                        }
+                    };
                     if !still_pending {
                         continue;
                     }
@@ -6890,13 +6943,28 @@ impl CollaborationCoordinator {
                 }
                 PostCommitAction::CloseTree(request) => {
                     let root_agent_id = request.root_agent_id.clone();
-                    let fence = self.execution_fence(&root_agent_id)?;
-                    let mut fence_state = fence
-                        .lock()
-                        .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+                    let fence = match self.execution_fence(&root_agent_id) {
+                        Ok(fence) => fence,
+                        Err(error) => {
+                            failures.push(format!("Agent 树清理栅栏获取失败: {error}"));
+                            continue;
+                        }
+                    };
+                    let mut fence_state = match fence.lock() {
+                        Ok(fence_state) => fence_state,
+                        Err(_) => {
+                            failures.push("Agent 树清理栅栏锁已中毒".to_owned());
+                            continue;
+                        }
+                    };
                     fence_state.closing = true;
-                    let still_pending =
-                        self.lock_state()?.close_outbox.contains_key(&root_agent_id);
+                    let still_pending = match self.lock_state() {
+                        Ok(state) => state.close_outbox.contains_key(&root_agent_id),
+                        Err(error) => {
+                            failures.push(format!("Agent 树清理状态读取失败: {error}"));
+                            continue;
+                        }
+                    };
                     if !still_pending {
                         continue;
                     }
