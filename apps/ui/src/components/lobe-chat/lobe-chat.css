@@ -5,8 +5,13 @@
 
 .lobe-chat {
   /* Type */
-  --chat-font: var(--font-sans);
-  --chat-mono: var(--font-mono);
+  /* 对话区字体完全对齐 ZCode（packages/ui/src/styles.css）：ZCode 未覆盖
+   * --font-sans，正文使用 Tailwind v4 默认 sans 栈；代码为其 CJK 等宽栈。 */
+  --chat-font: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
+    'Segoe UI Symbol', 'Noto Color Emoji';
+  --chat-mono: ui-monospace, 'SFMono-Regular', Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC',
+    monospace;
 
   /* 对话字号跟随界面字号：默认 14px 时与改动前逐像素一致。 */
   --chat-fs: var(--text-md);
@@ -459,9 +464,9 @@
 
 /* ── Markdown body ── */
 .chat-md {
-  /* 不使用 Harness 的 font 简写：它会把 Codex 的 430 可变字重重置为 400。 */
   font-family: var(--chat-font);
-  font-weight: var(--font-ui-weight);
+  /* ZCode MessageResponse 正文为常规字重 400，不启用可变字重。 */
+  font-weight: 400;
   font-size: var(--chat-prose-fs);
   /* 对齐 ZCode MessageResponse：正文使用 unitless 行高，字号变化时保持比例。 */
   line-height: 1.75;
@@ -494,33 +499,27 @@
   margin: 24px 0 16px;
   font-weight: 600;
   color: var(--chat-prose-text);
-  letter-spacing: 0;
+  /* 字距与行高都继承正文（ZCode 仅在容器上声明 tracking-wide 与 leading-1.75）。 */
 }
 .chat-md h1 {
   font-size: var(--chat-prose-heading-xl);
-  line-height: calc(30px + var(--ui-font-delta));
 }
 .chat-md h2 {
   font-size: var(--chat-prose-heading-lg);
-  line-height: calc(28px + var(--ui-font-delta));
 }
 .chat-md h3 {
   font-size: var(--chat-prose-heading-base);
-  line-height: calc(26px + var(--ui-font-delta));
 }
 .chat-md h4 {
   font-size: var(--chat-prose-fs);
-  line-height: calc(24px + var(--ui-font-delta));
 }
 .chat-md h5 {
   font-size: var(--chat-prose-fs);
   font-weight: 500;
-  line-height: calc(24px + var(--ui-font-delta));
 }
 .chat-md h6 {
   font-size: var(--chat-prose-fs);
   font-weight: 400;
-  line-height: calc(24px + var(--ui-font-delta));
 }
 
 /* Markdown lists follow ZCode's native marker and wrapping semantics. */
@@ -617,7 +616,8 @@
   background: var(--chat-inline-code-bg);
   border: 0;
   font-family: var(--chat-mono);
-  font-size: var(--text-sm);
+  /* ZCode 行内代码为 text-ui-sm = 基准−2 = 12px。 */
+  font-size: var(--text-xs);
   color: var(--chat-inline-code-fg);
   box-shadow: none;
   outline: none;
@@ -688,8 +688,8 @@
   padding: 8px 0;
   overflow: auto;
   font-family: var(--chat-mono);
-  /* 代码字号跟随界面基线，默认是 14px；行距保持 20px 便于扫描。 */
-  font-size: var(--chat-fs);
+  /* ZCode 代码块默认 12px（codePreviewSettings.fontSizePx）；行距保持 20px 便于扫描。 */
+  font-size: var(--text-xs);
   line-height: calc(var(--spacing) * 5);
   /* Explicit fg — never inherit a muted/wrong parent color */
   color: var(--chat-code-fg) !important;

@@ -390,14 +390,17 @@ describe("ConversationThread 思考耗时", () => {
     expect(chatCss).not.toMatch(/\.chat-md li::before/);
     expect(chatCss).toMatch(/--chat-prose-fs:\s*var\(--text-md\);/);
     expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-family:\s*var\(--chat-font\);/s);
-    expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-weight:\s*var\(--font-ui-weight\);/s);
+    // 对话区字体完全对齐 ZCode：正文常规 400 字重，字族为 ZCode 生效的默认 sans 栈与 CJK 等宽栈。
+    expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-weight:\s*400;/s);
+    expect(chatCss).toMatch(/--chat-font:\s*ui-sans-serif,\s*system-ui,\s*sans-serif,/);
+    expect(chatCss).toMatch(/--chat-mono:[^;]*'Noto Sans CJK SC',\s*monospace;/s);
     expect(chatCss).not.toMatch(/\.chat-md\s*\{[^}]*font:\s*var\(--dsw-font-markdown-base\);/s);
     expect(chatCss).toMatch(
       /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--text-primary\);/,
     );
   });
 
-  it("Markdown 标题字号对齐 ZCode 的 18/16/14px token，并保留标题行高", () => {
+  it("Markdown 标题字号对齐 ZCode 的 18/16/14px token，行距与字距继承正文", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(
@@ -410,14 +413,17 @@ describe("ConversationThread 思考耗时", () => {
       /--chat-prose-heading-base:\s*var\(--text-md\);/,
     );
     expect(chatCss).toMatch(
-      /\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\);[^}]*line-height:\s*calc\(30px \+ var\(--ui-font-delta\)\);/s,
+      /\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\);/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\);[^}]*line-height:\s*calc\(28px \+ var\(--ui-font-delta\)\);/s,
+      /\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\);/s,
     );
     expect(chatCss).toMatch(
-      /\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\);[^}]*line-height:\s*calc\(26px \+ var\(--ui-font-delta\)\);/s,
+      /\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\);/s,
     );
+    // ZCode 标题不自带行高与字距：两者都继承容器的 leading-1.75 / tracking-wide。
+    expect(chatCss).not.toMatch(/\.chat-md h[1-6]\s*\{[^}]*line-height:/s);
+    expect(chatCss).not.toMatch(/\.chat-md h1,\s*\.chat-md h2,[^}]*letter-spacing:\s*0;/s);
   });
 
   it("Markdown 正文使用 ZCode 的 unitless 行高和 tracking-wide，表格继承正文行高", () => {
@@ -428,6 +434,13 @@ describe("ConversationThread 思考耗时", () => {
     );
     expect(chatCss).toMatch(
       /\.chat-code__pre\s*\{[^}]*line-height:\s*calc\(var\(--spacing\) \* 5\);/s,
+    );
+    // 代码字号对齐 ZCode：行内代码与代码块默认都是 12px（ui-sm / codePreviewSettings）。
+    expect(chatCss).toMatch(
+      /\.chat-md__inline-code,\s*\.chat-md :not\(pre\) > code\s*\{[^}]*font-size:\s*var\(--text-xs\);/s,
+    );
+    expect(chatCss).toMatch(
+      /\.chat-code__pre\s*\{[^}]*font-size:\s*var\(--text-xs\);/s,
     );
     const tableRule = chatCss.match(/\.chat-md table\s*\{([^}]*)\}/s)?.[1] ?? "";
     expect(tableRule).toContain("border-collapse: separate;");

@@ -66,7 +66,7 @@ describe("chat code block", () => {
     expect(css).toMatch(/\.chat-code\s*\{[^}]*margin:\s*16px 0;/s);
     expect(css).toMatch(/\.chat-code__bar\s*\{[^}]*padding:\s*8px 12px;/s);
     expect(css).toMatch(
-      /\.chat-code__pre\s*\{[^}]*font-size:\s*var\(--chat-fs\);/s,
+      /\.chat-code__pre\s*\{[^}]*font-size:\s*var\(--text-xs\);/s,
     );
     expect(css).toMatch(/\.chat-code__line\s*\{[^}]*padding:\s*0 12px;/s);
     expect(css).not.toContain(".chat-code__line::before");
@@ -97,8 +97,10 @@ describe("chat code block", () => {
     expect(html).toContain("<h1>Heading</h1>");
     expect(css).toMatch(/\.chat-md\s*\{[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0\.025em;/s);
     expect(css).toMatch(/\.chat-code__pre\s*\{[^}]*line-height:\s*calc\(var\(--spacing\)\s*\*\s*5\)/s);
-    expect(css).toMatch(/\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\)[^}]*line-height:\s*calc\(30px\s*\+\s*var\(--ui-font-delta\)\)/s);
-    expect(css).toMatch(/\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\)[^}]*line-height:\s*calc\(28px\s*\+\s*var\(--ui-font-delta\)\)/s);
-    expect(css).toMatch(/\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\)[^}]*line-height:\s*calc\(26px\s*\+\s*var\(--ui-font-delta\)\)/s);
+    expect(css).toMatch(/\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\)/s);
+    expect(css).toMatch(/\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\)/s);
+    expect(css).toMatch(/\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\)/s);
+    // ZCode 标题不声明固定行高，继承正文的 1.75。
+    expect(css).not.toMatch(/\.chat-md h[1-6]\s*\{[^}]*line-height:/s);
   });
 });
