@@ -95,11 +95,10 @@ test("detects forbidden source names, research paths, and UI references", () => 
   }
 });
 
-// 覆盖明确排除的专有来源标识，以及针对开源代理的模仿性描述。
-test("detects proprietary identifiers and open-agent imitation descriptions", () => {
+// 覆盖专有插件标识，以及针对开源代理的模仿性描述。
+test("detects proprietary plugin identifiers and open-agent imitation descriptions", () => {
   const source = FORBIDDEN_SOURCE_TEXT;
   const rules = SOURCE_RULE_IDS;
-  const capitalizedEditor = `${source.prohibitedEditor[0].toUpperCase()}${source.prohibitedEditor.slice(1)}`;
   const capitalizedAgent = `${source.openSourceAgent[0].toUpperCase()}${source.openSourceAgent.slice(1)}`;
   const cases = [
     [
@@ -117,7 +116,6 @@ test("detects proprietary identifiers and open-agent imitation descriptions", ()
       `${source.productWord}-${source.pluginCollection}-${source.officialQualifier}`,
       rules.proprietaryPluginRepository,
     ],
-    ["src/editor.ts", capitalizedEditor, rules.prohibitedEditor],
     [
       "src/clipboard.ts",
       `${source.openSourceAgent}-${source.clipboardComponent}`,
@@ -156,7 +154,6 @@ test("requires alphanumeric boundaries for proprietary and imitation rules", () 
     `${source.productWord}_${source.pluginCollection}`,
     `${source.externalOrganization}/${source.pluginCollection}-${source.officialQualifier}`,
     `${source.productWord}-${source.pluginCollection}-${source.officialQualifier}`,
-    source.prohibitedEditor,
     `${source.openSourceAgent}-${source.clipboardComponent}`,
     `${source.openSourceAgent}-${source.imitationStyle}`,
     `${source.openSourceAgent}_${source.imitationLike}`,

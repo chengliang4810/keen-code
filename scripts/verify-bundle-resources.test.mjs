@@ -136,11 +136,12 @@ test("对象形式的嵌套 installer.exe 保留 NSIS 类型", () => {
   }
 });
 
-// 读取当前 Tauri 配置并确认只要求项目自身许可证，不依赖第三方汇总。
-test("Tauri 配置携带法律资源", () => {
+// 读取当前 Tauri 配置并确认许可证和 Web Host 静态产物都有稳定目标目录。
+test("Tauri 配置携带法律资源与 Web Host 资源", () => {
   const config = readFileSync(join(process.cwd(), "src-tauri/tauri.conf.json"), "utf8");
   assert.deepEqual(validateBundleConfiguration(JSON.parse(config)), [
     { source: join(process.cwd(), "LICENSE"), target: "LICENSE" },
+    { source: join(process.cwd(), "dist"), target: "web/" },
   ]);
 });
 

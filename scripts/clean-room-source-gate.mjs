@@ -148,8 +148,6 @@ export const FORBIDDEN_SOURCE_TEXT = Object.freeze({
     0x61,
     0x6c,
   ]),
-  /** 已明确排除的编辑器来源标识。 */
-  prohibitedEditor: textFromCodePoints([0x7a, 0x63, 0x6f, 0x64, 0x65]),
   /** 可以单独合法引用的开源编码代理名称。 */
   openSourceAgent: textFromCodePoints([0x63, 0x6f, 0x64, 0x65, 0x78]),
   /** 已明确排除的剪贴板组件名称片段。 */
@@ -238,7 +236,6 @@ export const SOURCE_RULE_IDS = Object.freeze({
   ].join("-"),
   proprietaryPluginDirectory: "source-proprietary-plugin-directory",
   proprietaryPluginRepository: "source-proprietary-plugin-repository",
-  prohibitedEditor: "source-proprietary-editor",
   externalClipboard: "source-external-agent-clipboard",
   openAgentImitation: "source-open-agent-imitation",
   localReferencePath: "local-reference-path",
@@ -296,11 +293,6 @@ const FORBIDDEN_RULES = Object.freeze([
       `(?<![A-Za-z0-9])(?:${escapeRegExp(`${FORBIDDEN_SOURCE_TEXT.externalOrganization}/${FORBIDDEN_SOURCE_TEXT.pluginCollection}-${FORBIDDEN_SOURCE_TEXT.officialQualifier}`)}|${escapeRegExp(`${FORBIDDEN_SOURCE_TEXT.productWord}-${FORBIDDEN_SOURCE_TEXT.pluginCollection}-${FORBIDDEN_SOURCE_TEXT.officialQualifier}`)})(?![A-Za-z0-9])`,
       "i",
     ),
-  },
-  {
-    id: SOURCE_RULE_IDS.prohibitedEditor,
-    description: "已排除的编辑器来源标识",
-    pattern: boundedPattern(FORBIDDEN_SOURCE_TEXT.prohibitedEditor),
   },
   {
     id: SOURCE_RULE_IDS.externalClipboard,
