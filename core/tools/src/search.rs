@@ -417,6 +417,10 @@ fn execute_grep(
     let mut skipped_large = 0_usize;
     let mut skipped_unreadable = 0_usize;
     let mut truncated = false;
+    // 渲染输出的字节预算：单条匹配行可达 16MB（单行压缩产物），而 Agent 层
+    // 在 512KB 处就会截断文本——超出预算的渲染纯属内存放大。
+    let max_rendered_bytes: usize = 512 * 1024;
+    let mut rendered_bytes = 0_usize;
 
     let workers = search_threads().min(files.len().max(1));
     let stopped = AtomicBool::new(false);
@@ -491,6 +495,10 @@ fn execute_grep(
                 };
                 let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
                 let path_display = display_path(path);
+                if rendered_bytes >= max_rendered_bytes {
+                    truncated = true;
+                    break;
+                }
                 match input.output_mode {
                     GrepOutputMode::Content => {
                         let remaining = limit - result_count;
@@ -504,20 +512,25 @@ fn execute_grep(
                             truncated = true;
                         }
                         result_count = result_count.saturating_add(selected.len());
-                        rendered.push(render_content(
+                        let block = render_content(
                             &path_display,
                             text,
                             &selected,
                             input.context_before,
                             input.context_after,
-                        ));
+                        );
+                        rendered_bytes = rendered_bytes.saturating_add(block.len());
+                        rendered.push(block);
                     }
                     GrepOutputMode::FilesWithMatches => {
+                        rendered_bytes = rendered_bytes.saturating_add(path_display.len());
                         rendered.push(path_display);
                         result_count = result_count.saturating_add(1);
                     }
                     GrepOutputMode::Count => {
-                        rendered.push(format!("{path_display}:{}", analysis.match_count));
+                        let line = format!("{path_display}:{}", analysis.match_count);
+                        rendered_bytes = rendered_bytes.saturating_add(line.len());
+                        rendered.push(line);
                         result_count = result_count.saturating_add(1);
                     }
                 }
