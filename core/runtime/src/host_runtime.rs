@@ -453,6 +453,9 @@ pub fn publish_discovery(
         .validate_for_root(data_root)
         .map_err(map_discovery_validation)?;
     let path = discovery_path(data_root);
+    // 匹配分支本身在所有平台执行符号类型校验；布尔结果只有 Windows 的 persist
+    // 前删除旧目标会读取，其他平台不绑定使用。
+    #[cfg_attr(not(windows), allow(unused_variables))]
     let destination_exists = match fs::symlink_metadata(&path) {
         Ok(metadata) => {
             if metadata.file_type().is_symlink() || !metadata.is_file() {
