@@ -225,6 +225,18 @@ pub(super) fn parse_marketplace_plugin_source(
                     .and_then(Value::as_str)
                     .filter(|url| !url.trim().is_empty())
                     .ok_or_else(|| format!("{source} 插件 source 缺少 url"))?;
+                let reference = optional_text("ref")?;
+                let sha = optional_text("sha")?;
+                if source != "url" {
+                    // 插件来源可能随远程市场清单下发：拒绝本地路径形态。
+                    validate_git_source_url(url, false, source)?;
+                    if let Some(reference) = &reference {
+                        validate_git_source_reference(reference, source)?;
+                    }
+                    if let Some(sha) = &sha {
+                        validate_git_source_sha(sha, source)?;
+                    }
+                }
                 let headers = parse_http_headers(object.get("headers"))?;
                 if source == "url" && !headers.is_empty() && path.is_none() {
                     return Ok(MarketplacePluginSourceSpec::HttpArchive {
@@ -239,8 +251,8 @@ pub(super) fn parse_marketplace_plugin_source(
                     } else {
                         path
                     },
-                    reference: optional_text("ref")?,
-                    sha: optional_text("sha")?,
+                    reference,
+                    sha,
                     sparse_paths,
                 })
             }
@@ -1343,6 +1355,70 @@ pub(super) fn sort_plugin_probes(measured: &mut [(String, Option<Duration>)]) {
     measured.sort_by_key(|(_, elapsed)| elapsed.unwrap_or(Duration::MAX));
 }
 
+/// 校验 marketplace/plugin Git 来源 URL。`ext::` 传输会在本机执行外部
+/// 命令，前导 `-` 的值会被 git 解析为选项，控制字符一律拒绝。
+///
+/// `allow_local` 控制 https/ssh 之外的本地路径形态：市场级来源由用户本机
+/// 配置（与既有 `file`/`directory` 来源同级）允许本地路径；插件级来源来自
+/// 可能远程下发的市场清单，只允许 https/ssh/git@ 远程地址，避免远程清单
+/// 把用户本机任意目录打包进插件内容。
+pub(super) fn validate_git_source_url(
+    url: &str,
+    allow_local: bool,
+    label: &str,
+) -> Result<(), String> {
+    if url.is_empty() || url.starts_with('-') {
+        return Err(format!("{label} Git URL 非法：不能为空或以 `-` 开头"));
+    }
+    if url.chars().any(char::is_control) {
+        return Err(format!("{label} Git URL 含控制字符"));
+    }
+    if allow_local && (url.starts_with('/') || url.starts_with("file://")) {
+        return Ok(());
+    }
+    if let Ok(parsed) = url::Url::parse(url) {
+        if matches!(parsed.scheme(), "https" | "ssh") && parsed.host_str().is_some() {
+            return Ok(());
+        }
+        return Err(format!(
+            "{label} Git URL 仅支持 https/ssh 远程地址，收到 scheme `{}`",
+            parsed.scheme()
+        ));
+    }
+    // 无 scheme 的 SCP 形态：git@host:path。
+    if let Some((user_at, path)) = url.split_once(':')
+        && user_at.starts_with("git@")
+        && user_at.len() > "git@".len()
+        && !path.is_empty()
+        && !path.starts_with('-')
+    {
+        return Ok(());
+    }
+    Err(format!("{label} Git URL 仅支持 https/ssh/git@ 形态：{url}"))
+}
+
+/// 校验 marketplace/plugin 指定的固定提交标识：40 位十六进制。
+pub(super) fn validate_git_source_sha(sha: &str, label: &str) -> Result<(), String> {
+    if sha.len() == 40 && sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(format!("{label} Git sha 必须是 40 位十六进制提交标识"))
+}
+
+/// 校验 Git 引用（分支/标签）：拒绝选项注入、控制字符与相对引用。
+pub(super) fn validate_git_source_reference(reference: &str, label: &str) -> Result<(), String> {
+    if reference.is_empty()
+        || reference.starts_with('-')
+        || reference.contains("..")
+        || reference
+            .chars()
+            .any(|char| char.is_whitespace() || char.is_control())
+    {
+        return Err(format!("{label} Git 引用非法：{reference}"));
+    }
+    Ok(())
+}
+
 /// 克隆一个 Git 来源；当同时提供 `ref` 与 `sha` 时，按 KeenCode 规则以 `sha` 为准。
 pub(super) fn clone_git_source(
     url: &str,
@@ -1352,6 +1428,15 @@ pub(super) fn clone_git_source(
     target: &Path,
     label: &str,
 ) -> Result<(), String> {
+    // 汇点处允许本地路径（市场级来源既有能力）；ext::、选项注入与控制
+    // 字符（会构成安装期命令执行）在所有路径上一律拒绝。
+    validate_git_source_url(url, true, label)?;
+    if let Some(reference) = reference {
+        validate_git_source_reference(reference, label)?;
+    }
+    if let Some(sha) = sha {
+        validate_git_source_sha(sha, label)?;
+    }
     let parent = target
         .parent()
         .ok_or_else(|| format!("{label}缺少下载父目录"))?;
@@ -1370,7 +1455,7 @@ pub(super) fn clone_git_source(
         {
             command.arg("--branch").arg(reference);
         }
-        command.arg(&url).arg(&staging);
+        command.arg("--").arg(&url).arg(&staging);
         if let Err(error) = run_external(&mut command, label) {
             failures.push(error);
             continue;
@@ -1518,6 +1603,7 @@ pub(super) fn run_external_with_timeout(
 
 /// 在浅克隆后取得并检出 marketplace/plugin 指定的固定提交。
 pub(super) fn checkout_git_sha(root: &Path, sha: &str, label: &str) -> Result<(), String> {
+    validate_git_source_sha(sha, label)?;
     let mut fetch = process::Command::new("git");
     fetch
         .current_dir(root)
@@ -1975,6 +2061,10 @@ pub(super) fn parse_marketplace_source_value(
             let value = required_text("url")?;
             let (url, shorthand_ref) = split_git_ref(&value);
             let reference = optional_text("ref")?.or(shorthand_ref);
+            validate_git_source_url(&url, true, "市场 Git 来源")?;
+            if let Some(reference) = &reference {
+                validate_git_source_reference(reference, "市场 Git 来源")?;
+            }
             Ok(MarketplaceSourceSpec::Git {
                 url,
                 reference,

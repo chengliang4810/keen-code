@@ -1361,6 +1361,35 @@ fn rejects_unsafe_marketplace_source_options() {
     );
 }
 
+/// Git 来源 URL 必须拒绝 `ext::` 传输、选项注入与控制字符；插件级来源
+/// 额外拒绝本地路径，防止远程市场清单把本机目录打包进插件内容。
+#[test]
+fn validates_git_source_urls_before_clone() {
+    // ext:: 传输会在安装期执行任意命令，是最关键的拒绝对象。
+    assert!(validate_git_source_url("ext::sh -c id", false, "测试").is_err());
+    assert!(validate_git_source_url("ext::sh -c id", true, "测试").is_err());
+    // 选项注入与控制字符。
+    assert!(validate_git_source_url("-u", false, "测试").is_err());
+    assert!(validate_git_source_url("https://github.com/a#b\n-x", false, "测试").is_err());
+    // 插件级（allow_local=false）拒绝本地路径与 file scheme。
+    assert!(validate_git_source_url("/tmp/repo", false, "测试").is_err());
+    assert!(validate_git_source_url("file:///tmp/repo", false, "测试").is_err());
+    assert!(validate_git_source_url("http://github.com/a/b", false, "测试").is_err());
+    // 合法形态：https、ssh、git@ SCP；市场级允许本地路径。
+    assert!(validate_git_source_url("https://github.com/acme/tools.git", false, "测试").is_ok());
+    assert!(validate_git_source_url("ssh://git@github.com/acme/tools", false, "测试").is_ok());
+    assert!(validate_git_source_url("git@github.com:acme/tools.git", false, "测试").is_ok());
+    assert!(validate_git_source_url("/tmp/local-repo", true, "测试").is_ok());
+    // sha 必须是 40 位十六进制。
+    assert!(validate_git_source_sha("abc123", "测试").is_err());
+    assert!(validate_git_source_sha(&"a".repeat(41), "测试").is_err());
+    assert!(validate_git_source_sha(&format!("{:040x}", 1), "测试").is_ok());
+    // 引用拒绝选项前缀、控制字符与相对引用。
+    assert!(validate_git_source_reference("--upload-pack=cmd", "测试").is_err());
+    assert!(validate_git_source_reference("refs/heads/../heads", "测试").is_err());
+    assert!(validate_git_source_reference("main", "测试").is_ok());
+}
+
 /// marketplace 允许用 `./` 声明市场根目录本身就是插件目录。
 #[test]
 fn resolves_marketplace_root_plugin_source() {
