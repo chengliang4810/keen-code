@@ -17,10 +17,10 @@
 
 ### 独立组件展示入口
 
-- `src/components/design-system/DesignSystemShowcase.tsx`：保持独立导出，不接入业务路由，集中展示 Desktop、Web 登录、Mobile Remote 和 Observability 的状态矩阵。
-- `src/components/host/`：Web 登录与移动远程壳只接收 `hostMode`、状态和回调，不直接调用 Tauri；移动远程壳不展示本地路径或 Terminal。
-- `src/components/host/HostStartupShell.tsx`：由 `src/main.tsx` 接入顶层启动路径；Desktop 原样渲染 `App`，Web/Mobile 只消费注入的 `HostTransportAdapter`。
-- `src/components/ObservabilityPanel.tsx`：观测面板的稳定导入入口；`ObservabilityPanelView` 可接收脱敏 fixture 做静态状态展示。
+- `apps/ui/src/components/design-system/DesignSystemShowcase.tsx`：保持独立导出，不接入业务路由，集中展示 Desktop、Web 登录、Mobile Remote 和 Observability 的状态矩阵。
+- `apps/ui/src/components/host/`：Web 登录与移动远程壳只接收 `hostMode`、状态和回调，不直接调用 Tauri；移动远程壳不展示本地路径或 Terminal。
+- `apps/ui/src/components/host/HostStartupShell.tsx`：由 `apps/ui/src/main.tsx` 接入顶层启动路径；Desktop 原样渲染 `App`，Web/Mobile 只消费注入的 `HostTransportAdapter`。
+- `apps/ui/src/components/ObservabilityPanel.tsx`：观测面板的稳定导入入口；`ObservabilityPanelView` 可接收脱敏 fixture 做静态状态展示。
 
 ## 视口与主题矩阵
 
@@ -39,7 +39,7 @@
 ## 宿主边界
 
 - 浏览器/Vite 夹具只验证 React、CSS、部分交互和注入状态；不证明本地 Agent、文件、Git、Terminal 或 Tauri command 可用。
-- 当前产品主宿主是 Tauri Desktop；`src/lib/tauri.ts` 在非 Tauri 环境不能提供真实 `invoke`。
+- 当前产品主宿主是 Tauri Desktop；`apps/ui/src/lib/tauri.ts` 在非 Tauri 环境不能提供真实 `invoke`。
 - Web Service URL 是服务配置，不是本机 Web Host 地址。
 - `?hostMode=web`、`?hostMode=mobile-remote` 或注入的 `VITE_KEENCODE_HOST_MODE` 才会启用对应启动壳；缺省值保持 Desktop。
 - 当前工作树的 Web 启动路径使用同源 `BrowserWebHostTransport` 完成 Token 登录、WebSocket/ACP 请求和事件投影；移动远程端到端连接仍需宿主实现与验收。
@@ -47,8 +47,8 @@
 
 ## 组件、资源与所有权检查
 
-- 基础控件优先来自 `@appica/ui-react` 或 `src/components/ui/` 本地包装。
-- 图标来自 `src/components/icons.tsx` 与 `@tabler/icons-react`；没有新增第二套图标库或手写重复 SVG。
+- 基础控件优先来自 `@appica/ui-react` 或 `apps/ui/src/components/ui/` 本地包装。
+- 图标来自 `apps/ui/src/components/icons.tsx` 与 `@tabler/icons-react`；没有新增第二套图标库或手写重复 SVG。
 - 原生 `textarea` / `contenteditable` 只作为编辑宿主；代码、Diff、Markdown、Terminal、Office 视图是内容排版例外。
 - 新图片、字体、脚本和外部依赖要检查来源、许可证、体积、CSP 和离线失败行为。
 - 外部研究位于 `docs/research/archive/`，不作为当前基线；第三方适配归属查看 `THIRD_PARTY_NOTICES.md`。
@@ -66,6 +66,13 @@ pnpm run check:design-system
 pnpm exec vitest run src/components/SettingsPage.test.ts src/components/lobe-chat/ConversationThread.test.tsx
 git diff --check
 ```
+
+## 2026-09-23 对话区字体完全对齐 ZCode
+
+- 需求：对话区字体完全按照 ZCode（`packages/ui`）的对话区排版调整；范围仅限会话消息渲染（lobe-chat `.chat-md` 作用域），不涉及资源预览的 `.md-body` 与全局控件。
+- 修改：`apps/ui/src/components/lobe-chat/lobe-chat.css`。`--chat-font` 改为 ZCode 实际生效的 Tailwind v4 默认 sans 栈；`--chat-mono` 改为 ZCode 的 CJK 等宽栈；`.chat-md` 正文 430 可变字重改为 400；标题组移除 `letter-spacing: 0` 与 h1–h6 固定行高，继承正文的 tracking-wide 与 leading-1.75；行内代码 13px→12px（`--text-xs`，对齐 ZCode `text-ui-sm`）；代码块 14px→12px（对齐 `codePreviewSettings.fontSizePx` 默认值）。字号基准 14px、正文行高 1.75、字距 0.025em、标题 18/16/14px 与 24px/16px 外距不变。基线源码快照：提交 335ab6ec（目录重组后的工作树）。
+- 代码级验证：`pnpm run typecheck`、`pnpm run lint:css`、`check:design-system`、全量 Vitest 1678 项通过；`ConversationThread.test.tsx` 与 `CodeBlock.test.tsx` 的排版契约同步改为 ZCode 对齐断言（400 字重、两族字体栈、标题无固定行高与字距、代码 12px）。
+- 未验收：本轮夜间环境无浏览器连接器、未启动 Tauri 原生窗口，未采集截图或 computed-style 像素证据。恢复后需在 1440×900、deviceScaleFactor=1、中英文与浅/深主题下对比对话区正文、标题、行内代码与代码块的实际渲染，并用 `pnpm run dev:desktop` 复核原生窗口。
 
 ## 2026-09-22 共享控件真实 computed-style 验收
 
