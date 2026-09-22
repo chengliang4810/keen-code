@@ -1631,6 +1631,7 @@ impl ContextManager {
             plan,
             source_messages,
             budget,
+            &mut || ensure_not_cancelled(cancellation),
         )?;
         let mut summaries = self
             .summarize_chunks(
@@ -1685,13 +1686,18 @@ impl ContextManager {
                 .map(|summary| Message::text(MessageRole::User, summary))
                 .collect();
             let current_estimate = JsonContextTokenEstimator.estimate_messages(&current_messages);
-            let chunks =
-                match split_generated_summary_chunks(&request.model, current_messages, budget) {
-                    Ok(chunks) => chunks,
-                    Err(error) => {
-                        return Err(attach_summary_usage(error, usage.usage.clone()));
-                    }
-                };
+            let mut check = || ensure_not_cancelled(cancellation);
+            let chunks = match split_generated_summary_chunks(
+                &request.model,
+                current_messages,
+                budget,
+                &mut check,
+            ) {
+                Ok(chunks) => chunks,
+                Err(error) => {
+                    return Err(attach_summary_usage(error, usage.usage.clone()));
+                }
+            };
             let next = self
                 .summarize_chunks(
                     &request.model,
@@ -2073,6 +2079,7 @@ fn split_source_chunks(
     plan: ReplacementPlan,
     source_messages: Vec<Message>,
     budget: Option<SummaryBudget>,
+    check_cancelled: &mut dyn FnMut() -> Result<(), ContextError>,
 ) -> Result<Vec<Vec<Message>>, ContextError> {
     let Some(budget) = budget else {
         return Ok(vec![source_messages]);
@@ -2088,6 +2095,8 @@ fn split_source_chunks(
     let mut chunks = Vec::new();
     let mut chunk_start = selected_units[0].start;
     for unit in selected_units {
+        // 逐单元检查取消：估算为 O(n²) 纯 CPU，长会话在此窗口取消应立即生效。
+        check_cancelled()?;
         let candidate = &messages[chunk_start..unit.end];
         if summary_request_fits(model, candidate, budget)? {
             continue;
@@ -2174,10 +2183,12 @@ fn split_generated_summary_chunks(
     model: &str,
     messages: Vec<Message>,
     budget: SummaryBudget,
+    check_cancelled: &mut dyn FnMut() -> Result<(), ContextError>,
 ) -> Result<Vec<Vec<Message>>, ContextError> {
     let mut chunks = Vec::new();
     let mut current = Vec::new();
     for message in messages {
+        check_cancelled()?;
         let mut candidate = current.clone();
         candidate.push(message.clone());
         if summary_request_fits(model, &candidate, budget)? {
