@@ -145,8 +145,11 @@ impl MessagesAdapter {
         body.insert("messages".to_owned(), Value::Array(messages));
         body.insert("stream".to_owned(), Value::Bool(streaming));
         body.insert(
+            // Anthropic 必填该字段。未显式配置时取 8192：覆盖全部 Claude 3.5+
+            // 模型的输出上限，且把与 Chat/Responses（省略字段、按端点默认）的
+            // 截断差距减半；参考 peri/claude-code 的 32000 默认对旧模型会 400。
             "max_tokens".to_owned(),
-            Value::from(request.max_output_tokens.unwrap_or(4096)),
+            Value::from(request.max_output_tokens.unwrap_or(8192)),
         );
         // 缓存前缀顺序为 tools → system → messages：system 非空时末块断点
         // 的缓存前缀已包含整个 tools 数组，tools 断点只是其严格子集。
