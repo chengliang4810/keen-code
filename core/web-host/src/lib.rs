@@ -2080,7 +2080,6 @@ fn build_router(
             "/api/resources/{id}",
             get(resource_handler).head(resource_handler),
         )
-        .route("/api/uploads", post(single_upload_handler))
         .route("/api/uploads/start", post(upload_start_handler))
         .route(
             "/api/uploads/{id}",
@@ -2094,6 +2093,15 @@ fn build_router(
     } else {
         router
     };
+    // 单次整包上传的声明上限是 max_upload_bytes；DefaultBodyLimit 只对该
+    // 路由放宽到两者较大值（route 级 layer 后应用，覆盖全局默认），其余
+    // API 仍受 max_request_bytes 约束。
+    let upload_body_limit =
+        max_request_bytes.max(usize::try_from(state.uploads.max_bytes).unwrap_or(usize::MAX));
+    let router = router.route(
+        "/api/uploads",
+        post(single_upload_handler).layer(axum::extract::DefaultBodyLimit::max(upload_body_limit)),
+    );
     router
         .fallback(static_handler)
         .layer(axum::extract::DefaultBodyLimit::max(max_request_bytes))
