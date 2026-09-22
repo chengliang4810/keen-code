@@ -336,6 +336,8 @@ pub(crate) fn install(
 
 /// 后台任务通知泉使用的固定连接标识；只用于 admission 归属，不代表真实连接。
 const TASK_NOTIFICATION_CONNECTION: &str = "keencode-task-notification-pump";
+/// 批处理窗口：首条通知到达后继续收集同窗终态的时长（ZCode 合批语义）。
+const TASK_NOTIFICATION_BATCH_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
 /// /workflow 斜杠命令前缀。
 const WORKFLOW_COMMAND_PREFIX: &str = "/workflow";
 
@@ -427,45 +429,66 @@ async fn run_task_notification_pump(
     let mut receiver = rx;
     let mut notified: std::collections::HashSet<String> = std::collections::HashSet::new();
     loop {
-        let notice = match receiver.recv().await {
+        // 首条通知到达后再收集一个短窗口内的后续终态：连续完成多个任务时
+        // 合并为一条合成输入、只开启一个模型轮（ZCode 批处理语义）。
+        let mut batch = vec![match receiver.recv().await {
             Ok(notice) => notice,
             Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        }];
+        let closed = loop {
+            match tokio::time::timeout(TASK_NOTIFICATION_BATCH_WINDOW, receiver.recv()).await {
+                Ok(Ok(notice)) => batch.push(notice),
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
+                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => break true,
+                Err(_elapsed) => break false,
+            }
         };
-        let dedup_key = format!("{}:{}", notice.session_id, notice.task_id);
-        if !notified.insert(dedup_key) {
+        batch.retain(|notice| notified.insert(format!("{}:{}", notice.session_id, notice.task_id)));
+        if batch.is_empty() {
+            if closed {
+                break;
+            }
             continue;
         }
-        let text = format_task_notification_text(&notice);
+        let session_id = batch[0].session_id.clone();
+        let text = batch
+            .iter()
+            .map(format_task_notification_text)
+            .collect::<Vec<_>>()
+            .join("\n\n");
         let unix_ms = unix_time_ms();
         let operation_id = match OperationId::new(format!(
             "task-notify-{}-{}-{unix_ms}",
-            notice.session_id, notice.task_id
+            batch[0].session_id, batch[0].task_id
         )) {
             Ok(id) => id,
             Err(error) => {
-                tracing::error!(session_id = %notice.session_id, task_id = %notice.task_id, %error, "invalid notification operation id");
+                tracing::error!(session_id = %batch[0].session_id, task_id = %batch[0].task_id, %error, "invalid notification operation id");
+                if closed {
+                    break;
+                }
                 continue;
             }
         };
-        let turn_id = format!("turn-notify-{}-{unix_ms}", notice.task_id);
+        let turn_id = format!("turn-notify-{}-{unix_ms}", batch[0].task_id);
         let connection_id = match keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION) {
             Ok(id) => id,
             Err(_) => break,
         };
-        let project_root = match authorized_metadata(&host.runtime, &host.app, &notice.session_id)
+        let project_root = match authorized_metadata(&host.runtime, &host.app, &session_id)
             .map(|(_, root)| root)
         {
             Ok(root) => root,
             Err(_) => {
-                tracing::error!(session_id = %notice.session_id, task_id = %notice.task_id, "cannot authorize notification session");
+                tracing::error!(session_id = %session_id, "cannot authorize notification session");
                 continue;
             }
         };
-        let payload_digest = prompt_payload_digest(&notice.session_id, &turn_id, &text, false);
+        let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, false);
         let request = PromptDriveRequest {
             connection_id,
-            session_id: notice.session_id.clone(),
+            session_id: session_id.clone(),
             operation_id,
             turn_id,
             text,
@@ -476,15 +499,15 @@ async fn run_task_notification_pump(
         };
         if let Err(failure) = host.admit_prompt(request).await {
             tracing::error!(
-                session_id = %notice.session_id,
-                task_id = %notice.task_id,
+                session_id = %session_id,
+                steps = batch.len(),
                 ?failure,
                 "failed to admit task notification prompt"
             );
         } else {
             tracing::info!(
-                session_id = %notice.session_id,
-                task_id = %notice.task_id,
+                session_id = %session_id,
+                steps = batch.len(),
                 "task notification prompt admitted"
             );
         }
