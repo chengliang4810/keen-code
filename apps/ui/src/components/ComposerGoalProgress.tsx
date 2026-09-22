@@ -111,12 +111,23 @@ export function ComposerGoalProgress({
         if (next > elapsedRef.current) elapsedRef.current = next;
       }
       setElapsed(elapsedRef.current);
-      if (current) storeGoalElapsed(current.id, elapsedRef.current);
     };
     updateElapsed();
     if (!current || current.status !== "active" || !running) return;
-    const timer = window.setInterval(updateElapsed, 1000);
-    return () => window.clearInterval(timer);
+    const persist = () => storeGoalElapsed(current.id, elapsedRef.current);
+    const timer = window.setInterval(() => {
+      updateElapsed();
+      persist();
+    }, 1000);
+    const persistOnHide = () => {
+      if (document.visibilityState === "hidden") persist();
+    };
+    document.addEventListener("visibilitychange", persistOnHide);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", persistOnHide);
+      persist();
+    };
   }, [
     current?.id,
     current?.status,
