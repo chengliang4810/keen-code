@@ -2,11 +2,31 @@
  * Pure windowing math for fixed-height lists (sidebar sessions, etc.).
  * Zero-deps — used by VirtualList; safe to unit-test without DOM.
  *
- * Matches `.tree-l3` CSS: height 30px, list gap 2px (see app.css).
+ * Matches `.tree-l3` CSS: height 32px, list gap 2px (see app-foundation.css).
  */
 
 /** Fixed session row height in the project tree (`.tree-l3`). */
-export const SIDEBAR_SESSION_ROW_HEIGHT = 30;
+export const SIDEBAR_SESSION_ROW_HEIGHT = 32;
+
+/** Narrow viewports use the same touch-row geometry as coarse/no-hover devices. */
+export const SIDEBAR_TOUCH_BREAKPOINT = 760;
+
+export function shouldUseSidebarTouchLayout(
+  viewportWidth: number,
+  noHover: boolean,
+  coarsePointer: boolean,
+): boolean {
+  return viewportWidth <= SIDEBAR_TOUCH_BREAKPOINT || noHover || coarsePointer;
+}
+
+/** Archive rows have a title line plus a workspace/activity metadata line. */
+export const SIDEBAR_ARCHIVED_SESSION_ROW_HEIGHT = 48;
+
+/** Touch layouts expand session rows to preserve the 44px interaction target. */
+export const SIDEBAR_TOUCH_SESSION_ROW_HEIGHT = 44;
+
+/** Touch archive rows retain the second metadata line and a 44px target. */
+export const SIDEBAR_TOUCH_ARCHIVED_SESSION_ROW_HEIGHT = 56;
 
 /** Flex gap between session rows (`.tree-l3-list` / orphan stack). */
 export const SIDEBAR_SESSION_ROW_GAP = 2;

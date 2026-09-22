@@ -567,6 +567,8 @@ export function compactMessageSegments(
   segments: MessageSegment[],
 ): MessageSegment[] {
   const out: MessageSegment[] = [];
+  /** 以 toolCallId 定位既有工具，避免工具密集时间线的 O(n²) 查找。 */
+  const toolIndices = new Map<string, number>();
   for (const raw of segments) {
     if (raw.kind === "compaction") {
       // 压缩是有序边界，不能合并它两侧的正文或工具阶段。
@@ -574,10 +576,8 @@ export function compactMessageSegments(
       continue;
     }
     if (raw.kind === "tool") {
-      const existing = out.findIndex(
-        (s) => s.kind === "tool" && s.toolCallId === raw.toolCallId,
-      );
-      if (existing >= 0) {
+      const existing = toolIndices.get(raw.toolCallId);
+      if (existing !== undefined) {
         const prev = out[existing] as MessageToolSegment;
         const title =
           (raw.title && !isGenericToolLabel(raw.title) ? raw.title : "") ||
@@ -597,6 +597,7 @@ export function compactMessageSegments(
         };
         continue;
       }
+      toolIndices.set(raw.toolCallId, out.length);
       out.push({ ...raw });
       continue;
     }

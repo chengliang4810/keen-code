@@ -45,6 +45,7 @@ export function useAcpSessionRuntime(
     sessionsRef,
     sendInFlightRef,
     configuredModelsRef,
+    applyHostConfigOptions,
     clearPendingAskUserRef,
     pendingAskUserBySessionRef,
     setPendingAskUserSessionIds,
@@ -118,6 +119,7 @@ export function useAcpSessionRuntime(
     setPlanModeSessionKey,
     modelBySessionRef,
     setSessionModelReference,
+    applyHostConfigOptions,
   });
 
   useAcpRuntimeEvents({
@@ -134,6 +136,7 @@ export function useAcpSessionRuntime(
     contextUsageBySessionRef,
     viewingSessionIdRef,
     configuredModelsRef,
+    applyHostConfigOptions,
     clearPendingAskUserRef,
     pendingAskUserBySessionRef,
     setPendingAskUserSessionIds,

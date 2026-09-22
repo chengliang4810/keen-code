@@ -1,4 +1,5 @@
 import { useEffect } from "react";
+import { resolveHostMode } from "@/components/host/hostMode";
 import * as api from "@/lib/api";
 import { modelIdFromSessionReference } from "@/lib/modelCatalog";
 import type {
@@ -43,6 +44,7 @@ import {
   turnLatencyNow,
   type TurnLatencyState,
 } from "@/lib/turnLatency";
+import type { SessionConfigOption } from "@/lib/acp/api";
 import {
   saveUnreadTerminalResults,
   type UnreadTerminalResult,
@@ -90,6 +92,8 @@ export interface AcpRuntimeEventsOptions {
   viewingSessionIdRef: Ref<string | null>;
   /** 当前仍可选择的模型目录。 */
   configuredModelsRef: Ref<Array<{ id: string }>>;
+  /** 将 Host 的标准模型/推理目录投影到 Composer。 */
+  applyHostConfigOptions?: (options: SessionConfigOption[], sessionId?: string) => void;
   /** 移除已经响应或取消的 Client 请求卡片。 */
   clearPendingAskUserRef: Ref<
     (sessionId?: string | null, rpcId?: string | number) => void
@@ -240,6 +244,7 @@ export function useAcpRuntimeEvents({
   contextUsageBySessionRef,
   viewingSessionIdRef,
   configuredModelsRef,
+  applyHostConfigOptions,
   clearPendingAskUserRef,
   pendingAskUserBySessionRef,
   setPendingAskUserSessionIds,
@@ -255,7 +260,7 @@ export function useAcpRuntimeEvents({
   observeSessionDelivery,
 }: AcpRuntimeEventsOptions): void {
   useEffect(() => {
-    if (!api.isTauri()) return;
+    if (!api.isTauri() && resolveHostMode() === "desktop") return;
     let disposed = false;
     let unlisten: (() => void) | null = null;
     const pendingProjectionSessions = new Set<string>();
@@ -367,6 +372,10 @@ export function useAcpRuntimeEvents({
         }
       }
       if (update.sessionUpdate === "config_option_update") {
+        applyHostConfigOptions?.(
+          update.configOptions as unknown as SessionConfigOption[],
+          envelope.sessionId,
+        );
         const modelOption = update.configOptions.find(
           (option) => option.id === "model",
         );
@@ -516,6 +525,19 @@ export function useAcpRuntimeEvents({
     };
     const handleDelivery = (raw: unknown) => {
       const receivedAtMs = turnLatencyNow();
+      if (isRecord(raw) && raw.type === "gap" && typeof raw.sessionId === "string") {
+        void diagnosticsRecord(
+          "frontend.acp_delivery_gap",
+          `Web Host 投递缺口：Session ${raw.sessionId}`,
+        ).catch(() => {});
+        void recoverSession(raw.sessionId).catch((error) => {
+          void diagnosticsRecord(
+            "frontend.acp_recovery",
+            error instanceof Error ? error.message : String(error),
+          ).catch(() => {});
+        });
+        return;
+      }
       const delivery = parseAcpTauriDelivery(raw);
       if (!delivery) {
         if (isRecord(raw) && raw.type === "client_request" &&
@@ -654,5 +676,11 @@ export function useAcpRuntimeEvents({
       projectionBatcher.cancel();
       unlisten?.();
     };
-  }, [commitWorkspace, recoverSession, refreshTaskCacheUsage, observeSessionDelivery]);
+  }, [
+    applyHostConfigOptions,
+    commitWorkspace,
+    recoverSession,
+    refreshTaskCacheUsage,
+    observeSessionDelivery,
+  ]);
 }

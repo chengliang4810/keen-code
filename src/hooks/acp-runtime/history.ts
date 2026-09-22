@@ -6,6 +6,7 @@ import {
   sessionConnect,
   sessionLoad,
   sessionSnapshotFromResult,
+  type SessionConfigOption,
   type ReplayResult,
   type SessionSnapshot,
 } from "@/lib/acp/api";
@@ -62,6 +63,8 @@ export interface AcpRuntimeHistoryOptions {
   modelBySessionRef: Ref<Map<string, string>>;
   /** 仅当前视图恢复完成时更新模型菜单；必须保留供应商，否则同名模型会串供应商。 */
   setSessionModelReference: (reference: string) => void;
+  /** 将恢复/新建返回的 Host 配置目录交给统一 Composer 投影。 */
+  applyHostConfigOptions?: (options: SessionConfigOption[], sessionId?: string) => void;
 }
 
 /** 一次恢复公开的两个入口。 */
@@ -91,6 +94,7 @@ export function useAcpRuntimeHistory({
   setPlanModeSessionKey,
   modelBySessionRef,
   setSessionModelReference,
+  applyHostConfigOptions,
 }: AcpRuntimeHistoryOptions): AcpRuntimeHistoryResult {
   /** 每个 Session 当前唯一恢复任务。 */
   const recoveryBySessionRef = useRef(new Map<string, Promise<void>>());
@@ -255,6 +259,7 @@ export function useAcpRuntimeHistory({
           view.project_path = snapshot.projectPath ?? null;
           view.title = snapshot.title ?? null;
           view.plan_mode = mode === "plan";
+          applyHostConfigOptions?.(loaded.configOptions, sessionId);
           const modelValue = loaded.configOptions.find((option) => option.id === "model")?.currentValue;
           if (typeof modelValue === "string" && modelValue.length > 0) {
             modelBySessionRef.current.set(sessionId, modelValue);
@@ -349,6 +354,7 @@ export function useAcpRuntimeHistory({
       setPlanModeSessionKey,
       modelBySessionRef,
       setSessionModelReference,
+      applyHostConfigOptions,
       awaitDelivery,
       startBackfill,
     ],
@@ -403,6 +409,7 @@ export function useAcpRuntimeHistory({
         const modelValue = opened.configOptions?.find(
           (option) => option.id === "model",
         )?.currentValue;
+        if (opened.configOptions) applyHostConfigOptions?.(opened.configOptions);
         if (typeof modelValue === "string" && modelValue.length > 0) {
           modelBySessionRef.current.set(opened.sessionId, modelValue);
         }
@@ -424,7 +431,7 @@ export function useAcpRuntimeHistory({
       title: view.title, lastError: view.last_error?.message ?? null,
     };
     return snapshot;
-  }, [recoverSession, currentViewFocus, modelBySessionRef]);
+  }, [recoverSession, currentViewFocus, modelBySessionRef, applyHostConfigOptions]);
 
   return { replayHistory, recoverSession, observeSessionDelivery, connectSession };
 }

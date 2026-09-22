@@ -1,8 +1,9 @@
 /** ACP JSON-RPC 客户端：所有前端出站请求都通过唯一 Tauri 命令发送。 */
 
-import { invoke } from "../tauri";
+import { invoke, isTauri } from "../tauri";
 import { formatFrontendError, reportFrontendError } from "../frontendDiagnostics";
 import type { AcpJsonRpcId } from "./events";
+import { getInjectedHostTransportAdapter } from "@/components/host/hostMode";
 
 /** 对外复用 ACP JSON-RPC 请求标识类型；默认请求标识仍由客户端生成 UUID。 */
 export type { AcpJsonRpcId } from "./events";
@@ -117,6 +118,10 @@ function protocolError(message: string): Error {
 
 /** 调用唯一 Tauri ACP 命令，不允许业务层直接选择其他命令。 */
 async function dispatch(message: AcpRequestMessage | AcpNotificationMessage | AcpResponseMessage): Promise<unknown> {
+  if (!isTauri()) {
+    const transport = getInjectedHostTransportAdapter();
+    if (transport?.dispatch) return transport.dispatch(message);
+  }
   return invoke<unknown>("acp_dispatch", { message });
 }
 

@@ -7,6 +7,11 @@ import { isProjectPathMissing } from "@/lib/projectPath";
 import { ensureAcpSession } from "@/lib/acp/projection";
 import { projectAcpSnapshot } from "@/lib/sessionProjection";
 import { createOperationId } from "@/lib/acp/api";
+import { canUseAcpHost } from "@/lib/hostCapabilities";
+import {
+  modelIdFromSessionReference,
+  providerIdFromSessionReference,
+} from "@/lib/modelCatalog";
 import {
   isSameView,
   shouldAdoptView,
@@ -26,6 +31,7 @@ export interface UseSessionConnectionOptions {
   sessionId: string | null;
   activeProject: Project | null;
   effort: string;
+  modelReference?: string;
   api: SessionTurnApiPort;
   runtime: SessionTurnRuntimePort;
   ui: Pick<SessionTurnUiPort, "setSession" | "setLocalError" | "setLiveHost">;
@@ -43,6 +49,7 @@ export function useSessionConnection({
   sessionId,
   activeProject,
   effort,
+  modelReference,
   api,
   runtime,
   ui,
@@ -94,7 +101,7 @@ export function useSessionConnection({
         return null;
       }
       const originView = currentViewFocus();
-      if (!api.isTauri()) return null;
+      if (!canUseAcpHost(api.isTauri())) return null;
       if (connectingRef.current) return null;
       setConnectingState(true);
       try {
@@ -139,6 +146,16 @@ export function useSessionConnection({
           openedSessionId,
         );
         if (!preferredId) {
+          const providerId = providerIdFromSessionReference(modelReference ?? "");
+          const modelId = modelIdFromSessionReference(modelReference ?? "");
+          if (providerId && modelId && api.setModel) {
+            await api.setModel({
+              sessionId: openedSessionId,
+              providerId,
+              modelId,
+              operationId: `${operationId}-model`,
+            });
+          }
           await api.setEffort({
             sessionId: openedSessionId,
             effort,
@@ -204,6 +221,7 @@ export function useSessionConnection({
       currentViewFocus,
       draftKeyRef,
       effort,
+      modelReference,
       locale,
       messagesBySessionRef,
       observeHostActiveTurn,

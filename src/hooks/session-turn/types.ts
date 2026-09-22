@@ -22,6 +22,7 @@ import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import type { SessionPreferencePatch } from "@/lib/sessionPreferences";
 import type { TurnLatencyState } from "@/lib/turnLatency";
 import type { ViewFocus } from "@/lib/viewFocus";
+import type { SessionPromptContentBlock } from "@/lib/remotePrompt";
 
 export type StateSetter<T> = Dispatch<SetStateAction<T>>;
 export type Ref<T> = MutableRefObject<T>;
@@ -49,6 +50,13 @@ export interface SessionTurnApiPort {
     /** 新建 Session 的确定性幂等标识。 */
     operationId: string;
   }) => Promise<AcpSessionSnapshot>;
+  /** 新建 Web Session 后按用户在草稿中选择的模型绑定 Host 配置。 */
+  setModel?: (args: {
+    sessionId: string;
+    providerId: string;
+    modelId: string;
+    operationId: string;
+  }) => Promise<void>;
   setEffort: (args: {
     /** 目标 Session。 */
     sessionId: string;
@@ -61,6 +69,8 @@ export interface SessionTurnApiPort {
     text: string;
     sessionId: string;
     requestId: string;
+    /** Web Host 可直接传递标准文本与 resource_link blocks。 */
+    prompt?: SessionPromptContentBlock[];
     planMode?: boolean;
     ultraMode?: boolean;
   }) => SessionPromptRun;
@@ -180,6 +190,8 @@ export interface UseSessionTurnOptions {
   modelLabel: string;
   effort: string;
   hasConfiguredModel: boolean;
+  /** 草稿当前选择的完整 providerId::modelId 引用。 */
+  modelReference?: string;
   goalModeSessionKey: string | null;
   planModeSessionKey: string | null;
   ultraModeSessionKey: string | null;

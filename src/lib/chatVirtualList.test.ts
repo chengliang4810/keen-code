@@ -7,14 +7,17 @@ import {
   CHAT_PIN_OVERSCAN_MIN_PX,
   CHAT_VIRTUALIZE_THRESHOLD,
   applyForceIndices,
+  captureChatVisibleRowAnchors,
   computeChatVirtualWindow,
   cumulativeOffsets,
   estimateChatRowHeight,
   findEndIndex,
   findStartIndex,
+  resolveChatVisibleRowAnchor,
   resolveChatOverscanPx,
   scrollTopAfterHeightChange,
   shouldCommitRowHeight,
+  visibleChatRowAnchorAdjustment,
 } from "./chatVirtualList";
 
 const fixed = (h: number) => () => h;
@@ -398,11 +401,136 @@ describe("long transcript window scale", () => {
 
 
 describe("历史前插识别", () => {
-  it("仅为完整保留既有顺序的前插返回偏移", async () => {
+  it("允许过滤旧行但要求共同 key 顺序稳定", async () => {
     const { prependedChatRowCount } = await import("./chatVirtualList");
     expect(prependedChatRowCount(["b", "c"], ["a", "b", "c"])).toBe(1);
     expect(prependedChatRowCount(["b", "c"], ["b", "c", "d"])).toBe(0);
-    expect(prependedChatRowCount(["b", "c"], ["a", "b", "d"])).toBe(0);
+    expect(prependedChatRowCount(["b", "c"], ["a", "b", "d"])).toBe(1);
+    expect(prependedChatRowCount(["a", "b", "c"], ["x", "b", "c"])).toBe(1);
+    expect(prependedChatRowCount(["a", "b"], ["b", "a"])).toBe(0);
     expect(prependedChatRowCount([], ["a"])).toBe(0);
+  });
+});
+
+describe("key-based visible-row anchors", () => {
+  it("captures the first visible row with a viewport-relative offset", () => {
+    const keys = ["a", "b", "c", "d"];
+    const offsets = [0, 100, 200, 300, 400];
+    const anchors = captureChatVisibleRowAnchors({
+      keys,
+      offsets,
+      scrollTop: 210,
+      viewportHeight: 120,
+      maxCandidates: 3,
+    });
+
+    expect(anchors[0]).toEqual({ key: "c", index: 2, offsetTop: -10 });
+    expect(anchors.map((anchor) => anchor.key)).toEqual(["c", "d", "b"]);
+  });
+
+  it("resolves a non-strict prepend when an earlier visible row was filtered", () => {
+    const previousKeys = ["a", "b", "c", "d"];
+    const previousOffsets = [0, 100, 200, 300, 400];
+    const previousAnchors = captureChatVisibleRowAnchors({
+      keys: previousKeys,
+      offsets: previousOffsets,
+      scrollTop: 110,
+      viewportHeight: 120,
+      maxCandidates: 3,
+    });
+    const nextKeys = ["new", "a", "c", "d"];
+    const nextOffsets = [0, 80, 180, 280, 380];
+    const match = resolveChatVisibleRowAnchor({
+      previousKeys,
+      previousOffsets,
+      previousScrollTop: 110,
+      previousAnchors,
+      nextKeys,
+      nextOffsets,
+    });
+
+    expect(match).toMatchObject({
+      key: "c",
+      previousIndex: 2,
+      nextIndex: 2,
+      previousOffsetTop: 90,
+      nextOffsetTop: 180,
+    });
+    expect(
+      visibleChatRowAnchorAdjustment({
+        anchor: match!,
+        currentScrollTop: 190,
+      }),
+    ).toBe(-100);
+  });
+
+  it("uses estimated offsets first and supports a measured second correction", () => {
+    const previousKeys = ["b", "c"];
+    const previousOffsets = [0, 100, 200];
+    const previousAnchors = captureChatVisibleRowAnchors({
+      keys: previousKeys,
+      offsets: previousOffsets,
+      scrollTop: 100,
+    });
+    const nextKeys = ["a", "b", "c"];
+    const estimated = [0, 120, 220, 320];
+    const estimatedMatch = resolveChatVisibleRowAnchor({
+      previousKeys,
+      previousOffsets,
+      previousScrollTop: 100,
+      previousAnchors,
+      nextKeys,
+      nextOffsets: estimated,
+    });
+    expect(estimatedMatch?.key).toBe("c");
+    expect(
+      visibleChatRowAnchorAdjustment({
+        anchor: estimatedMatch!,
+        currentScrollTop: 120,
+      }),
+    ).toBe(100);
+
+    const measured = [0, 200, 300, 400];
+    const measuredMatch = resolveChatVisibleRowAnchor({
+      previousKeys,
+      previousOffsets,
+      previousScrollTop: 100,
+      previousAnchors,
+      nextKeys,
+      nextOffsets: measured,
+    });
+    expect(
+      visibleChatRowAnchorAdjustment({
+        anchor: measuredMatch!,
+        currentScrollTop: 220,
+      }),
+    ).toBe(80);
+  });
+
+  it("keeps candidate work bounded for a long transcript", () => {
+    const count = 20_000;
+    const keys = Array.from({ length: count }, (_, index) => `row-${index}`);
+    const offsets = cumulativeOffsets(count, () => 72);
+    const anchors = captureChatVisibleRowAnchors({
+      keys,
+      offsets,
+      scrollTop: 72 * 10_000 + 11,
+      viewportHeight: 800,
+      maxCandidates: 24,
+    });
+    expect(anchors.length).toBeLessThanOrEqual(24);
+    expect(anchors[0]?.key).toBe("row-10000");
+
+    const nextKeys = ["history-0", ...keys];
+    const nextOffsets = cumulativeOffsets(nextKeys.length, () => 72);
+    const match = resolveChatVisibleRowAnchor({
+      previousKeys: keys,
+      previousOffsets: offsets,
+      previousScrollTop: 72 * 10_000 + 11,
+      previousAnchors: anchors,
+      nextKeys,
+      nextOffsets,
+    });
+    expect(match).toMatchObject({ key: "row-10000", nextIndex: 10_001 });
   });
 });

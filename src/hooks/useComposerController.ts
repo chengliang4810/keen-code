@@ -6,7 +6,6 @@ import {
   useState,
   type Dispatch,
   type MutableRefObject,
-  type RefObject,
   type SetStateAction,
 } from "react";
 import type { Locale } from "@/i18n";
@@ -27,7 +26,7 @@ import type {
 import type { Attachment } from "@/lib/attachments";
 import type { PromptHistoryEntry } from "@/lib/composerPromptHistory";
 import type { SkillInfo, SlashItem } from "@/lib/slashCatalog";
-import { calculateComposerOverlayLayout } from "@/lib/composerOverlayLayout";
+import { normalizeComposerHeight } from "@/lib/composerOverlayLayout";
 import type { ComposerPlusEntry } from "@/components/ComposerPlusPanel";
 import { useComposerAttachments } from "./composer/useComposerAttachments";
 import { useComposerModes } from "./composer/useComposerModes";
@@ -158,9 +157,6 @@ export interface UseComposerControllerOptions {
   navigation: ComposerNavigationPort;
   feedback: ComposerFeedbackPort;
   actions: ComposerActionPort;
-  /** 问答卡片位于输入区上方，两者共同决定消息底部留白。 */
-  askUserWrapRef?: RefObject<HTMLDivElement | null>;
-  askUserKey?: string | number | null;
 }
 
 export interface ComposerController {
@@ -179,10 +175,14 @@ export interface ComposerController {
     addToComposer: string;
     remove: string;
     viewImage: string;
+    retry: string;
+    uploading: string;
+    failed: string;
   };
-  addAttachmentsFromPaths: (paths: string[]) => Promise<void>;
+  addAttachmentsFromPaths: (paths: string[]) => Promise<boolean>;
   addPastedFiles: (files: File[]) => Promise<void>;
   pickComposerFiles: () => Promise<void>;
+  retryAttachment: (attachment: Attachment) => Promise<void>;
   skillsLoading: boolean;
   liveSlash: {
     present: boolean;
@@ -235,7 +235,6 @@ export interface ComposerController {
   composerShellRef: Ref<HTMLDivElement | null>;
   composerWrapRef: Ref<HTMLDivElement | null>;
   composerPlusTriggerRef: Ref<HTMLButtonElement | null>;
-  composerFloatPad: number;
   /** 输入区独立高度，用于将问答卡片定位在停止按钮上方。 */
   composerHeight: number;
   requestComposerFocus: () => void;
@@ -270,8 +269,6 @@ export function useComposerController({
   navigation,
   feedback,
   actions,
-  askUserWrapRef,
-  askUserKey = null,
 }: UseComposerControllerOptions): ComposerController {
   const [draft, setDraftState] = useState("");
   const draftRef = useRef(draft);
@@ -402,8 +399,7 @@ export function useComposerController({
     });
   }, []);
 
-  const [{ composerFloatPad, composerHeight }, setComposerOverlayLayout] =
-    useState({ composerFloatPad: 168, composerHeight: 168 });
+  const [composerHeight, setComposerHeight] = useState(168);
   const welcomeSession =
     !session.sessionId &&
     session.messages.length === 0 &&
@@ -411,28 +407,19 @@ export function useComposerController({
   useEffect(() => {
     const element = composerWrapRef.current;
     if (!element || typeof ResizeObserver === "undefined") return;
-    /** 定位只依赖输入区自身高度，总留白不参与定位，避免测量反馈。 */
+    /** 仅记录输入区自身高度，供等待用户回答的卡片保持稳定最小高度。 */
     const measure = () => {
-      const measured = calculateComposerOverlayLayout(
+      const measured = normalizeComposerHeight(
         element.getBoundingClientRect().height,
-        askUserWrapRef?.current?.getBoundingClientRect().height ?? 0,
       );
-      if (measured.composerHeight <= 0) return;
-      setComposerOverlayLayout((previous) =>
-        previous.composerHeight === measured.composerHeight &&
-        previous.composerFloatPad === measured.composerFloatPad
-          ? previous
-          : measured,
-      );
+      if (measured <= 0) return;
+      setComposerHeight((previous) => (previous === measured ? previous : measured));
     };
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(element);
-    if (askUserWrapRef?.current) observer.observe(askUserWrapRef.current);
     return () => observer.disconnect();
   }, [
-    askUserKey,
-    askUserWrapRef,
     attachments.attachments.length,
     slash.composerMenuOpen,
     draft,
@@ -509,7 +496,6 @@ export function useComposerController({
     composerShellRef,
     composerWrapRef,
     composerPlusTriggerRef,
-    composerFloatPad,
     composerHeight,
     requestComposerFocus,
     syncComposerHeight,

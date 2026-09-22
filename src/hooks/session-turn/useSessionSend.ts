@@ -1,7 +1,12 @@
 import { useCallback } from "react";
 import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { SessionSnapshot } from "@/lib/session";
-import { buildAgentPrompt } from "@/lib/attachments";
+import {
+  buildAgentPrompt,
+  hasUnreadyAttachments,
+  isRemoteAttachment,
+} from "@/lib/attachments";
+import { buildRemotePrompt } from "@/lib/remotePrompt";
 import { buildGoalDraft } from "@/lib/goalDraft";
 import {
   clearPriorTurnErrors,
@@ -126,6 +131,10 @@ export function useSessionSend({
         sendInFlightRef.current = false;
         return false;
       }
+      if (hasUnreadyAttachments(att)) {
+        sendInFlightRef.current = false;
+        return false;
+      }
       if (!hasConfiguredModel) {
         sendInFlightRef.current = false;
         return false;
@@ -134,8 +143,17 @@ export function useSessionSend({
         options.targetSessionId !== undefined
           ? options.targetSessionId
           : sessionId;
-      const cacheKey = sendTargetId ?? "__draft__";
       const originView = currentViewFocus();
+      const isWebHost = !api.isTauri();
+      if (isWebHost && att.some((attachment) => !isRemoteAttachment(attachment))) {
+        // Web Host 没有可供 Agent 使用的本机路径；拒绝意外混入的旧草稿/路径附件。
+        sendInFlightRef.current = false;
+        if (isViewingSendTarget(originView, currentViewFocus(), sendTargetId)) {
+          setLocalError(tr("composer.attachPasteFailed"));
+        }
+        return false;
+      }
+      const cacheKey = sendTargetId ?? "__draft__";
       let latencySessionId: string | null = null;
       const viewingTarget = () =>
         isViewingSendTarget(
@@ -153,7 +171,18 @@ export function useSessionSend({
         if (viewingTarget()) setLocalError(localizeUiError(cause, locale));
         return false;
       }
-      const agentText = buildAgentPrompt(agentBody, att);
+      const agentText = isWebHost ? agentBody : buildAgentPrompt(agentBody, att);
+      const prompt = isWebHost
+        ? buildRemotePrompt(
+            agentBody,
+            att.map((attachment) => ({
+              resourceId: attachment.resourceId!,
+              fileName: attachment.name,
+              contentType: attachment.contentType ?? "application/octet-stream",
+              size: attachment.size ?? 0,
+            })),
+          )
+        : undefined;
       const optimisticDisplay = storedDisplay.trim();
       const turnStartedAtMs = turnLatencyNow();
       const ts = Math.floor(turnStartedAtMs);
@@ -428,6 +457,7 @@ export function useSessionSend({
           text: agentText,
           sessionId: resolvedSessionId,
           requestId,
+          prompt,
           planMode,
           ultraMode,
         });

@@ -39,6 +39,11 @@ export function useSessionQueueSteering({
       if (!sessionId || sessionState !== "streaming") {
         throw new Error(tr("composer.queueSteerNotRunning"));
       }
+      if (api.isTauri && !api.isTauri() && item.attachments.length > 0) {
+        // `keencode/session/steer` 目前只有 text 字段，不能把 Web resource
+        // 当作本机路径或静默丢弃；让队列等待当前回合结束后走 session/prompt。
+        throw new Error("Web Host 附件会在当前回合结束后发送。");
+      }
       const segments = parseStoredContent(item.storedDisplay);
       const agentBody = serializeForAgent(segments);
       if (item.createGoal) {

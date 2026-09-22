@@ -29,12 +29,16 @@ import {
 import {
   CHAT_DEFAULT_ROW_ESTIMATE_PX,
   CHAT_VIRTUALIZE_THRESHOLD,
+  captureChatVisibleRowAnchors,
   computeChatVirtualWindow,
   cumulativeOffsets,
-  prependedChatRowCount,
+  resolveChatVisibleRowAnchor,
   resolveChatOverscanPx,
   scrollTopAfterHeightChange,
   shouldCommitRowHeight,
+  visibleChatRowAnchorAdjustment,
+  type ChatVisibleRowAnchor,
+  type ChatVisibleRowAnchorMatch,
   type ChatVirtualWindow,
 } from "@/lib/chatVirtualList";
 import { markProgrammaticStickScroll } from "@/lib/stickToBottom";
@@ -132,11 +136,20 @@ export function useChatMessageVirtualizer(
     offsets: number[];
   } | null>(null);
 
-  const previousRowsRef = useRef<{ conversationKey: typeof conversationKey; keys: string[]; scrollHeight: number } | null>(null);
+  const previousRowsRef = useRef<{
+    conversationKey: typeof conversationKey;
+    keys: string[];
+    offsets: number[];
+    scrollHeight: number;
+    scrollTop: number;
+    anchors: ChatVisibleRowAnchor[];
+  } | null>(null);
+  /** 前插首帧使用估算位置，下一批 ResizeObserver 测量完成后再校正一次。 */
+  const pendingPrependAnchorRef = useRef<{
+    conversationKey: typeof conversationKey;
+    anchor: ChatVisibleRowAnchorMatch;
+  } | null>(null);
   const keys = useMemo(() => Array.from({ length: itemCount }, (_, index) => getKey(index)), [itemCount, getKey]);
-  const previousRows = previousRowsRef.current;
-  const prepended = previousRows?.conversationKey === conversationKey
-    ? prependedChatRowCount(previousRows.keys, keys) : 0;
 
   const [win, setWin] = useState<ChatVirtualWindow>(() => full(itemCount));
 
@@ -176,6 +189,40 @@ export function useChatMessageVirtualizer(
     offsetsCacheRef.current = { version, count: itemCount, offsets };
     return offsets;
   }, [itemCount, getHeight]);
+
+  /** 将当前稳定 key 锚点落到最新测量/估算坐标，供首帧和二次校正共用。 */
+  const correctPendingPrependAnchor = useCallback(() => {
+    const pending = pendingPrependAnchorRef.current;
+    if (!pending || pending.conversationKey !== conversationKey) return false;
+    if (isPinnedRef.current) return false;
+    const viewport = viewportRef.current;
+    // 通常前插后索引仍未改变，避免为每次流式渲染建立整份 key Map；只有
+    // 锚点行再次被过滤/替换时才退回一次线性查找。
+    const nextIndex =
+      keys[pending.anchor.nextIndex] === pending.anchor.key
+        ? pending.anchor.nextIndex
+        : keys.indexOf(pending.anchor.key);
+    if (!viewport || nextIndex < 0) return false;
+
+    const nextOffsetTop = getOffsets()[nextIndex];
+    if (!Number.isFinite(nextOffsetTop)) return false;
+    const delta = visibleChatRowAnchorAdjustment({
+      anchor: {
+        ...pending.anchor,
+        nextIndex,
+        nextOffsetTop,
+      },
+      currentScrollTop: viewport.scrollTop,
+    });
+    if (delta == null || Math.abs(delta) <= 0.5) return false;
+
+    const nextScrollTop = Math.max(0, viewport.scrollTop + delta);
+    if (Math.abs(nextScrollTop - viewport.scrollTop) <= 0.5) return false;
+    ignoreScrollAdjustRef.current = true;
+    markProgrammaticStickScroll(viewport, nextScrollTop);
+    viewport.scrollTop = nextScrollTop;
+    return true;
+  }, [conversationKey, getOffsets, isPinnedRef, keys, viewportRef]);
 
   /** 立即根据当前视口、行高和吸底状态重算窗口。 */
   const recomputeNow = useCallback(() => {
@@ -249,9 +296,15 @@ export function useChatMessageVirtualizer(
     const delay = isPinnedRef.current ? 72 : 32;
     recomputeTimerRef.current = setTimeout(() => {
       recomputeTimerRef.current = null;
+      // 首帧先按估算高度恢复阅读位置；此时已提交的 ResizeObserver 测量
+      // 可能已经使前插行变高，延迟到同一批测量结束后再按 key 校正一次。
+      if (pendingPrependAnchorRef.current) {
+        correctPendingPrependAnchor();
+        pendingPrependAnchorRef.current = null;
+      }
       recomputeNow();
     }, delay);
-  }, [recomputeNow, isPinnedRef]);
+  }, [correctPendingPrependAnchor, recomputeNow, isPinnedRef]);
 
   // 滚动触发重算，并通过 rAF 限制快速滚动时的更新频率。
   useEffect(() => {
@@ -291,19 +344,71 @@ export function useChatMessageVirtualizer(
     };
   }, [virtualized, itemCount, viewportRef, recompute, recomputeNow, conversationKey]);
 
-  // 历史头插与行高重测分别处理；绘制前补偿，保持用户阅读的位置。
+  // 历史头插与行高重测分别处理；绘制前按稳定 key 补偿，保持用户阅读的位置。
   useLayoutEffect(() => {
     const viewport = viewportRef.current;
-    if (viewport && prepended && !isPinnedRef.current) {
-      const delta = virtualized
-        ? getOffsets()[prepended] ?? 0
-        : viewport.scrollHeight - (previousRows?.scrollHeight ?? viewport.scrollHeight);
-      const top = viewport.scrollTop + delta;
-      markProgrammaticStickScroll(viewport, top);
-      viewport.scrollTop = top;
+    const previous = previousRowsRef.current;
+    if (pendingPrependAnchorRef.current?.conversationKey !== conversationKey) {
+      pendingPrependAnchorRef.current = null;
+    }
+    const sameConversation = previous?.conversationKey === conversationKey;
+    // 历史分页只会改变首行或缩短当前窗口；纯追加保持首 key，不进入 O(n)
+    // 的锚点解析，避免流式末尾更新给长会话增加整表扫描。
+    const possibleRowChange =
+      sameConversation &&
+      previous != null &&
+      (previous.keys.length > keys.length || previous.keys[0] !== keys[0]);
+
+    if (viewport && sameConversation && possibleRowChange && !isPinnedRef.current) {
+      if (virtualized) {
+        const nextOffsets = getOffsets();
+        const anchor = resolveChatVisibleRowAnchor({
+          previousKeys: previous.keys,
+          previousOffsets: previous.offsets,
+          previousScrollTop: previous.scrollTop,
+          previousAnchors: previous.anchors,
+          nextKeys: keys,
+          nextOffsets,
+        });
+        // 只有锚点在新数组中的位置/偏移变化时才处理；纯追加不会触发滚动。
+        if (
+          anchor &&
+          (anchor.previousIndex !== anchor.nextIndex ||
+            Math.abs(anchor.nextOffsetTop - anchor.previousOffsetTop) > 0.5)
+        ) {
+          pendingPrependAnchorRef.current = { conversationKey, anchor };
+          correctPendingPrependAnchor();
+          // 等当前批次的 ResizeObserver 回调完成后再做一次实测校正。
+          recompute();
+        }
+      } else {
+        // 短会话没有测量缓存，浏览器的真实 scrollHeight 是更精确的锚点。
+        const delta = viewport.scrollHeight - (previous.scrollHeight ?? viewport.scrollHeight);
+        if (delta > 0) {
+          const nextScrollTop = viewport.scrollTop + delta;
+          markProgrammaticStickScroll(viewport, nextScrollTop);
+          viewport.scrollTop = nextScrollTop;
+        }
+      }
       recomputeNow();
     }
-    previousRowsRef.current = { conversationKey, keys, scrollHeight: viewport?.scrollHeight ?? 0 };
+
+    const offsets = getOffsets();
+    previousRowsRef.current = {
+      conversationKey,
+      keys,
+      offsets,
+      scrollHeight: viewport?.scrollHeight ?? 0,
+      scrollTop: viewport?.scrollTop ?? 0,
+      anchors: viewport
+        ? captureChatVisibleRowAnchors({
+            keys,
+            offsets,
+            scrollTop: viewport.scrollTop,
+            viewportHeight: viewport.clientHeight,
+          })
+        : [],
+    };
   });
 
   // 已挂载消息流式增长或强制索引变化时立即重算。
@@ -357,6 +462,9 @@ export function useChatMessageVirtualizer(
       heightsRef.current.set(key, nextH);
       heightsVersionRef.current += 1;
       offsetsCacheRef.current = null;
+      // 前插后的新行首次测量可能偏离估算值；用同一 key 的最新累计偏移
+      // 校正视口，避免只修正「旧行整体在上方」而遗漏未测量前缀。
+      correctPendingPrependAnchor();
       recompute();
       // 吸底时在行高提交后再次对齐真实底部，避免尾部短暂空白后回弹。
       if (pin && viewport) {
@@ -373,8 +481,21 @@ export function useChatMessageVirtualizer(
       }
       recordVirtualizerWork(conversationKey, performance.now() - started, true);
     },
-    [virtualized, getOffsets, isPinnedRef, viewportRef, recompute, conversationKey],
+    [
+      virtualized,
+      correctPendingPrependAnchor,
+      getOffsets,
+      isPinnedRef,
+      viewportRef,
+      recompute,
+      conversationKey,
+    ],
   );
+
+  // measureRef 回调按索引缓存，不能闭包捕获旧 itemCount/offsets；保持缓存稳定，
+  // 但把真正的提交逻辑转发到本次渲染的最新实现。
+  const commitRowHeightRef = useRef(commitRowHeight);
+  commitRowHeightRef.current = commitRowHeight;
 
   /**
    * 按索引缓存稳定的 ref 回调。
@@ -402,9 +523,9 @@ export function useChatMessageVirtualizer(
         if (!el || !virtualized) return;
 
         // 挂载时立即测量，并持续观察后续媒体加载和布局增长。
-        commitRowHeight(index, el);
+        commitRowHeightRef.current(index, el);
         const ro = new ResizeObserver(() => {
-          commitRowHeight(index, el);
+          commitRowHeightRef.current(index, el);
         });
         ro.observe(el);
         rowObserversRef.current.set(index, ro);
@@ -412,7 +533,7 @@ export function useChatMessageVirtualizer(
       measureCallbackCacheRef.current.set(index, cb);
       return cb;
     },
-    [virtualized, commitRowHeight],
+    [virtualized],
   );
 
   if (!virtualized) {
@@ -429,9 +550,11 @@ export function useChatMessageVirtualizer(
 
   return {
     virtualized: true,
-    start: Math.min(itemCount, win.start + prepended),
-    end: Math.min(itemCount, win.end + prepended),
-    paddingTop: win.paddingTop + (prepended ? getOffsets()[prepended] ?? 0 : 0),
+    // scrollTop 已由 key anchor 补偿；窗口本身已经按新数组重算，不能再按
+    // 前插数量叠加索引/顶部占位，否则会把同一段历史平移两次。
+    start: win.start,
+    end: win.end,
+    paddingTop: win.paddingTop,
     paddingBottom: win.paddingBottom,
     measureRef,
     onViewportScroll: recomputeNow,

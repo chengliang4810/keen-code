@@ -371,6 +371,73 @@ describe("useSessionSend local error recovery", () => {
     expect(fixture.getLocalError()).toBe("已有错误");
   });
 
+  it("底层发送再次拒绝未完成附件，避免 pending 路径进入 Agent", async () => {
+    const fixture = makeOptions();
+    const send = renderSend(fixture.options);
+
+    await expect(
+      send({
+        ...validSend("pending-attachment-turn"),
+        att: [{
+          path: "pending-attachment://1",
+          name: "clip.png",
+          isDir: false,
+          uploadStatus: "failed",
+        }],
+      }),
+    ).resolves.toBe(false);
+    expect(fixture.api.send).not.toHaveBeenCalled();
+    expect(fixture.options.state.sendInFlightRef.current).toBe(false);
+  });
+
+  it("Web 发送使用文本与 resource_link blocks，不把远程资源拼成本机路径", async () => {
+    const fixture = makeOptions();
+    const send = renderSend(fixture.options);
+    const remote = {
+      source: "remote" as const,
+      path: "remote-attachment://resource_send",
+      name: "photo.png",
+      isDir: false,
+      resourceId: "resource_send",
+      contentType: "image/png",
+      size: 7,
+      previewUrl: "/api/resources/resource_send",
+    };
+
+    await expect(send({ ...validSend("web-resource"), att: [remote] })).resolves.toBe(true);
+    expect(fixture.api.send).toHaveBeenCalledWith(expect.objectContaining({
+      text: "有效问题",
+      prompt: [
+        { type: "text", text: "有效问题" },
+        {
+          type: "resource_link",
+          name: "photo.png",
+          uri: "/api/resources/resource_send",
+          mimeType: "image/png",
+          size: 7,
+        },
+      ],
+    }));
+    expect(fixture.api.send.mock.calls[0]![0].text).not.toContain("remote-attachment");
+  });
+
+  it("Desktop 发送继续使用本机附件文本契约", async () => {
+    const fixture = makeOptions();
+    fixture.api.isTauri = () => true;
+    const send = renderSend(fixture.options);
+    const local = {
+      path: "C:/workspace/photo.png",
+      name: "photo.png",
+      isDir: false,
+    };
+
+    await expect(send({ ...validSend("desktop-path"), att: [local] })).resolves.toBe(true);
+    expect(fixture.api.send).toHaveBeenCalledWith(expect.objectContaining({
+      text: "有效问题\n\n@image C:/workspace/photo.png",
+      prompt: undefined,
+    }));
+  });
+
   it("成功重试会清除失败前的旧错误，不遗留前次错误", async () => {
     const failedRun = deferred<SessionPromptResult>();
     const fixture = makeOptions({

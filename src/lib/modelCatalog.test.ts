@@ -9,6 +9,7 @@ import {
   hasConfiguredProviderModel,
   isBoundSessionModelReference,
   isValidEffort,
+  modelOptionsFromSessionConfig,
   modelIdFromSessionReference,
   pickDefaultEffort,
   providerIdFromSessionReference,
@@ -39,6 +40,44 @@ it("Host 的 unconfigured 占位值按未选择处理", () => {
   expect(isBoundSessionModelReference("   ")).toBe(false);
   expect(isBoundSessionModelReference("fix-local::hy3")).toBe(true);
   expect(isBoundSessionModelReference("hy3")).toBe(true);
+});
+
+it("标准 ACP Session 配置目录可投影为 Web Composer 模型和推理档位", () => {
+  const projection = modelOptionsFromSessionConfig([
+    {
+      id: "model",
+      currentValue: "local::gpt-5",
+      options: [
+        { value: "local::gpt-5", name: "本机 / gpt-5" },
+        { value: "cloud::gpt-5", name: "Cloud / gpt-5" },
+        { value: "unconfigured", name: "未配置模型" },
+      ],
+    },
+    {
+      id: "reasoning_effort",
+      currentValue: "medium",
+      options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+      ],
+    },
+  ]);
+
+  expect(projection.currentModel).toBe("local::gpt-5");
+  expect(projection.models).toMatchObject([
+    {
+      providerId: "local",
+      providerLabel: "本机",
+      id: "gpt-5",
+      label: "gpt-5",
+      reasoningSupported: true,
+    },
+    { providerId: "cloud", providerLabel: "Cloud", id: "gpt-5" },
+  ]);
+  expect(projection.efforts).toMatchObject([
+    { id: "low", isDefault: false },
+    { id: "medium", isDefault: true },
+  ]);
 });
 
 describe("findActiveModel", () => {

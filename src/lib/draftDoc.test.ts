@@ -11,6 +11,11 @@ import {
   serializeStored,
   type DraftSegment,
 } from "./draftDoc";
+import {
+  buildComposerMentionMarkdown,
+  encodeComposerMention,
+  type ComposerMention,
+} from "./composerMentions";
 
 describe("draftDoc empty", () => {
   it("isDraftEmpty ignores whitespace-only text", () => {
@@ -21,6 +26,20 @@ describe("draftDoc empty", () => {
       isDraftEmpty([
         { type: "text", text: "  " },
         { type: "skill", name: "x" },
+      ]),
+    ).toBe(false);
+    expect(
+      isDraftEmpty([
+        {
+          type: "mention",
+          mention: {
+            id: "file:/tmp/a.txt",
+            kind: "file",
+            label: "a.txt",
+            value: "/tmp/a.txt",
+            markdown: "[a.txt](/tmp/a.txt)",
+          },
+        },
       ]),
     ).toBe(false);
   });
@@ -51,6 +70,35 @@ describe("draftDoc roundtrip", () => {
     const segs = parseStoredContent(raw);
     expect(segs.every((s) => s.type === "text")).toBe(true);
     expect(serializeStored(segs)).toBe(raw);
+  });
+
+  it("round-trips structured mentions and keeps ordinary @ text plain", () => {
+    const mention: ComposerMention = {
+      id: "plugin:reviewer@marketplace",
+      kind: "plugin",
+      label: "reviewer",
+      value: "reviewer@marketplace",
+      markdown: buildComposerMentionMarkdown(
+        "plugin",
+        "reviewer",
+        "reviewer@marketplace",
+      ),
+      data: { pluginId: "reviewer@marketplace" },
+    };
+    const raw = `look ${encodeComposerMention(mention)} here`;
+    expect(parseStoredContent(raw)).toEqual([
+      { type: "text", text: "look " },
+      { type: "mention", mention },
+      { type: "text", text: " here" },
+    ]);
+    expect(serializeStored(parseStoredContent(raw))).toBe(raw);
+    expect(serializeForAgent(parseStoredContent(raw))).toBe(
+      "look [@reviewer](plugin://reviewer@marketplace) here",
+    );
+    expect(previewStoredAsSlash(raw)).toBe("look @reviewer here");
+    expect(parseStoredContent("ordinary @text")).toEqual([
+      { type: "text", text: "ordinary @text" },
+    ]);
   });
 });
 

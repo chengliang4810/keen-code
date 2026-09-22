@@ -39,6 +39,7 @@ export type {
 
 export interface UseSidebarControllerOptions {
   locale: Locale;
+  canWriteProjects: boolean;
   /** The session currently shown by the workbench. */
   currentSessionId: string | null;
   activeProject: Project | null;
@@ -157,6 +158,7 @@ export interface UseSidebarControllerResult {
 /** 管理侧栏树、搜索、项目/会话菜单以及会话标题持久化。ACP 连接与消息投影由调用方负责。 */
 export function useSidebarController({
   locale,
+  canWriteProjects,
   currentSessionId,
   activeProject,
   setActiveProject,
@@ -228,6 +230,7 @@ export function useSidebarController({
   const menus = useSidebarMenus();
   const drag = useSidebarDrag({
     locale,
+    canWriteProjects,
     projects,
     setProjects,
     sessions,
@@ -246,6 +249,7 @@ export function useSidebarController({
   const actions = useSidebarActions({
     locale,
     tr,
+    canWriteProjects,
     activeProject,
     projects,
     currentSessionId,

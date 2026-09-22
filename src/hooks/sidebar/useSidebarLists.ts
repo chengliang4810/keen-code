@@ -19,7 +19,11 @@ import {
 import {
   loadSessionPreferences,
 } from "@/lib/sessionPreferences";
-import { projectSidebar } from "@/lib/sessionProjection";
+import {
+  projectSidebar,
+  projectsFromSessions,
+} from "@/lib/sessionProjection";
+import { canUseAcpHost } from "@/lib/hostCapabilities";
 import {
   diagnosticsRecord,
   sessionsList,
@@ -153,13 +157,13 @@ export function useSidebarLists({
 
   const refreshLists = useCallback(async () => {
     setAppBooting(false);
-    if (!api.isTauri()) return;
+    if (!canUseAcpHost(api.isTauri())) return;
     const phase = "sessions_list/projects_list";
     try {
-      const [rows, persistedProjects] = await Promise.all([
-        sessionsList(),
-        api.projectsList(),
-      ]);
+      const rows = await sessionsList();
+      const persistedProjects = api.isTauri()
+        ? await api.projectsList()
+        : projectsFromSessions(rows);
       if (!mounted.current) return;
       const projection = projectSidebar(
         rows,
@@ -216,7 +220,10 @@ export function useSidebarLists({
     if (loadingProjects.current.has(project.id)) return;
     loadingProjects.current.add(project.id);
     try {
-      const checked = await api.projectValidate(project.id);
+      // Web 项目是由 Session cwd 派生的只读投影，不再经过 Tauri 项目登记。
+      const checked = api.isTauri()
+        ? await api.projectValidate(project.id)
+        : project;
       if (!isCurrentProject(project)) return;
       if (!checked) {
         loadedProjects.current.delete(project.id);
@@ -227,7 +234,9 @@ export function useSidebarLists({
         showToast(t(locale, "project.removedMissing", { name: project.name }));
         return;
       }
-      const rows = await sessionsList(checked.path);
+      // Host 持有 Session 与项目根的权威绑定；客户端路径只用于本地投影，
+      // 不再次作为协议过滤条件，避免不同 Transport 的路径序列化产生授权分歧。
+      const rows = await sessionsList();
       if (!isCurrentProject(project)) return;
       const projection = projectSidebar(rows, loadSessionPreferences(), [checked]);
       setProjects((previous) => previous.map((item) => item.id === project.id ? checked : item));
@@ -243,7 +252,23 @@ export function useSidebarLists({
 
   const refreshSessions = useCallback(async (projectId?: string) => {
     try {
-      if (!api.isTauri()) return;
+      if (!canUseAcpHost(api.isTauri())) return;
+      if (!api.isTauri()) {
+        const rows = await sessionsList();
+        const projection = projectSidebar(
+          rows,
+          loadSessionPreferences(),
+          projectsFromSessions(rows),
+        );
+        setProjects(projection.projects);
+        setSessions(projection.sessions);
+        setActiveProject((previous) =>
+          previous
+            ? projection.projects.find((project) => project.id === previous.id) ?? previous
+            : previous,
+        );
+        return;
+      }
       const targets = projects.filter((project) => project.id === projectId || loadedProjects.current.has(project.id) || expandedProjects[project.id]);
       const rows = (await Promise.all(targets.map((project) => sessionsList(project.path)))).flat();
       const projection = projectSidebar(rows, loadSessionPreferences(), projects);
@@ -256,11 +281,14 @@ export function useSidebarLists({
   }, [projects, expandedProjects]);
 
   const loadAllSessions = useCallback(async () => {
-    if (!api.isTauri()) return;
+    if (!canUseAcpHost(api.isTauri())) return;
     try {
       const rows = await sessionsList();
-      setSessions(projectSidebar(rows, loadSessionPreferences(), projects).sessions);
-      projects.forEach((project) => loadedProjects.current.add(project.id));
+      const sourceProjects = api.isTauri() ? projects : projectsFromSessions(rows);
+      const projection = projectSidebar(rows, loadSessionPreferences(), sourceProjects);
+      setProjects(projection.projects);
+      setSessions(projection.sessions);
+      projection.projects.forEach((project) => loadedProjects.current.add(project.id));
     } catch (cause) {
       showToast(cause instanceof Error ? cause.message : String(cause));
     }
@@ -268,7 +296,9 @@ export function useSidebarLists({
 
   const refreshProjects = useCallback(async () => {
     try {
-      const list = await api.projectsList();
+      const list = api.isTauri()
+        ? await api.projectsList()
+        : projectsFromSessions(await sessionsList());
       setProjects(list);
       setActiveProject((previous) => {
         if (!previous) return previous;

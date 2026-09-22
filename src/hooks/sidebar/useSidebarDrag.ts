@@ -17,6 +17,8 @@ import type { Locale } from "@/i18n";
 
 export interface SidebarDragOptions {
   locale: Locale;
+  /** Web Host 项目顺序只来自 Session 投影，不能持久化重排。 */
+  canWriteProjects: boolean;
   projects: Project[];
   setProjects: SidebarSetState<Project[]>;
   sessions: SessionRow[];
@@ -53,6 +55,7 @@ export interface SidebarDragResult {
 
 export function useSidebarDrag({
   locale,
+  canWriteProjects,
   projects,
   setProjects,
   sessions,
@@ -77,11 +80,15 @@ export function useSidebarDrag({
       kind: SidebarDragKind,
       id: string,
     ) => {
+      if (kind === "project" && !canWriteProjects) {
+        event.preventDefault();
+        return;
+      }
       draggedSidebarItemRef.current = { kind, id };
       event.dataTransfer.effectAllowed = "move";
       event.dataTransfer.setData("text/plain", id);
     },
-    [],
+    [canWriteProjects],
   );
 
   const endSidebarDrag = useCallback(() => {
@@ -91,6 +98,7 @@ export function useSidebarDrag({
 
   const applyProjectOrder = useCallback(
     (ids: string[]) => {
+      if (!canWriteProjects) return;
       if (ids.every((id, index) => id === projects[index]?.id)) return;
       setProjects(orderedByIds(projects, ids));
       const revision = ++projectReorderRevisionRef.current;
@@ -107,11 +115,12 @@ export function useSidebarDrag({
         },
       );
     },
-    [locale, projects, refreshProjects, setLocalError, setProjects],
+    [canWriteProjects, locale, projects, refreshProjects, setLocalError, setProjects],
   );
 
   const dragOverProject = useCallback(
     (event: ReactDragEvent<HTMLElement>, targetId: string) => {
+      if (!canWriteProjects) return;
       if (draggedSidebarItemRef.current?.kind !== "project") return;
       event.preventDefault();
       const { top, height } = event.currentTarget.getBoundingClientRect();
@@ -122,11 +131,12 @@ export function useSidebarDrag({
           : { id: targetId, after },
       );
     },
-    [],
+    [canWriteProjects],
   );
 
   const dropProject = useCallback(
     (event: ReactDragEvent<HTMLElement>, targetId: string) => {
+      if (!canWriteProjects) return;
       event.preventDefault();
       event.stopPropagation();
       const dragged = draggedSidebarItemRef.current;
@@ -142,7 +152,7 @@ export function useSidebarDrag({
       setProjectDropHint(null);
       applyProjectOrder(ids);
     },
-    [applyProjectOrder, projects],
+    [applyProjectOrder, canWriteProjects, projects],
   );
 
   const dropSession = useCallback(

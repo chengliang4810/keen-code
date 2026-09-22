@@ -9,6 +9,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type RefObject,
@@ -26,6 +27,12 @@ import {
   shouldReleaseStickOnScrollUp,
   takeProgrammaticStickScroll,
 } from "@/lib/stickToBottom";
+import {
+  readSessionScrollMemory,
+  resolveSessionScrollTop,
+  saveSessionScrollMemory,
+  type SessionScrollMemoryState,
+} from "./useSessionScrollMemory";
 
 export type UseStickToBottomOptions = {
   /** 会话身份变化时重新吸底，例如切换 Session 或首条消息变化。 */
@@ -38,6 +45,8 @@ export type UseStickToBottomOptions = {
   thresholdPx?: number;
   /** 是否启用吸底行为。 */
   enabled?: boolean;
+  /** 首批历史行到达后再次尝试恢复；只应在首行窗口变化时更新。 */
+  contentReadyKey?: string | number | null;
 };
 
 export type UseStickToBottomResult = {
@@ -63,6 +72,7 @@ export function useStickToBottom(
     escapeStickKey = null,
     thresholdPx = STICK_TO_BOTTOM_THRESHOLD_PX,
     enabled = true,
+    contentReadyKey = null,
   } = options;
 
   const viewportRef = useRef<HTMLDivElement | null>(null);
@@ -91,6 +101,20 @@ export function useStickToBottom(
   const enabledRef = useRef(enabled);
   enabledRef.current = enabled;
 
+  /** 尚未被当前 DOM 完整表示的离底恢复目标；避免首批 rows 到达前被 clamp 覆盖。 */
+  const pendingScrollRestoreRef = useRef<{
+    key: string;
+    state: SessionScrollMemoryState;
+  } | null>(null);
+  /** 会话切换恢复后跳过一次由首条用户消息派生的 forceStickKey。 */
+  const skipForceStickKeyRef = useRef<string | null>(null);
+  const forceStickKeyRef = useRef(forceStickKey);
+  forceStickKeyRef.current = forceStickKey;
+  /** 用户在恢复窗口内滚动后，恢复任务必须立即让出控制权。 */
+  const userAdjustedDuringRestoreRef = useRef(false);
+  const currentMemoryKey =
+    conversationKey == null ? null : String(conversationKey).trim() || null;
+
   const [showBack, setShowBack] = useState(false);
 
   /** 根据当前溢出和吸底状态同步“回到底部”按钮。 */
@@ -103,6 +127,46 @@ export function useStickToBottom(
     const overflow = el.scrollHeight > el.clientHeight + 40;
     setShowBack(!isPinnedRef.current && overflow);
   }, []);
+
+  const clearPendingScrollRestore = useCallback((userAdjusted = false) => {
+    pendingScrollRestoreRef.current = null;
+    if (userAdjusted) userAdjustedDuringRestoreRef.current = true;
+  }, []);
+
+  /** 读取当前视口快照；快照只存尺寸和位置，不把消息内容写入缓存。 */
+  const buildScrollMemoryState = useCallback(
+    (element: HTMLDivElement): SessionScrollMemoryState => ({
+      scrollTop: Math.max(0, Number(element.scrollTop) || 0),
+      scrollHeight: Math.max(0, Number(element.scrollHeight) || 0),
+      clientHeight: Math.max(0, Number(element.clientHeight) || 0),
+      wasPinnedToBottom:
+        isPinnedRef.current &&
+        isNearBottom(
+          element.scrollTop,
+          element.scrollHeight,
+          element.clientHeight,
+          thresholdRef.current,
+        ),
+      updatedAt: Date.now(),
+    }),
+    [],
+  );
+
+  /** 保存当前会话；离底恢复尚未完整表示时保留原始目标，避免 clamp 覆盖它。 */
+  const cacheCurrentScrollMemory = useCallback(
+    (element: HTMLDivElement, key = currentMemoryKey): SessionScrollMemoryState | null => {
+      if (!key) return null;
+      const pending = pendingScrollRestoreRef.current;
+      if (pending?.key === key && !userAdjustedDuringRestoreRef.current) {
+        saveSessionScrollMemory(key, pending.state);
+        return pending.state;
+      }
+      const state = buildScrollMemoryState(element);
+      saveSessionScrollMemory(key, state);
+      return state;
+    },
+    [buildScrollMemoryState, currentMemoryKey],
+  );
 
   /** 立即写入滚动位置，并标记对应的程序滚动事件。 */
   const applyScrollTop = useCallback((top: number) => {
@@ -127,9 +191,11 @@ export function useStickToBottom(
     (behavior: ScrollBehavior = "instant") => {
       const el = viewportRef.current;
       if (!el) return;
+      clearPendingScrollRestore();
       escapedRef.current = false;
       isPinnedRef.current = true;
       userIntentDownRef.current = false;
+      userAdjustedDuringRestoreRef.current = false;
       const top = bottomScrollTop(el.scrollHeight, el.clientHeight);
       if (behavior === "smooth" && typeof el.scrollTo === "function") {
         // 平滑滚动仅用于显式“回到底部”按钮，并忽略过程中的中间滚动事件。
@@ -164,8 +230,31 @@ export function useStickToBottom(
         applyScrollTop(top);
       }
       syncShowBack();
+      cacheCurrentScrollMemory(el);
     },
-    [applyScrollTop, syncShowBack],
+    [
+      applyScrollTop,
+      cacheCurrentScrollMemory,
+      clearPendingScrollRestore,
+      syncShowBack,
+    ],
+  );
+
+  /** 恢复离底会话位置；内容不足时只会暂时钳制，pending 目标由首批 rows effect 重放。 */
+  const restoreScrollMemory = useCallback(
+    (state: SessionScrollMemoryState, key = currentMemoryKey): boolean => {
+      const el = viewportRef.current;
+      if (!el) return false;
+      escapedRef.current = true;
+      isPinnedRef.current = false;
+      userIntentDownRef.current = false;
+      userAdjustedDuringRestoreRef.current = false;
+      applyScrollTop(resolveSessionScrollTop(state, el));
+      syncShowBack();
+      cacheCurrentScrollMemory(el, key);
+      return true;
+    },
+    [applyScrollTop, cacheCurrentScrollMemory, currentMemoryKey, syncShowBack],
   );
 
   /** 仅在仍处于吸底状态时跟随到最新内容。 */
@@ -193,6 +282,7 @@ export function useStickToBottom(
       // 虚拟列表和吸底控制器的主动滚动不是用户离开底部。
       if (ignore != null && Math.abs(ignore - scrollTop) < 1) {
         syncShowBack();
+        cacheCurrentScrollMemory(el);
         return;
       }
 
@@ -219,15 +309,18 @@ export function useStickToBottom(
         if (Math.abs(scrollTop - maxTop) > 0.5) {
           applyScrollTop(maxTop);
         }
+        cacheCurrentScrollMemory(el);
         return;
       }
 
       // 检测到明确向上浏览时立即脱离，避免同一手势内的流式增长把用户拉回底部。
       if (shouldEscape) {
+        clearPendingScrollRestore(true);
         userIntentDownRef.current = false;
         isPinnedRef.current = false;
         escapedRef.current = true;
         syncShowBack();
+        cacheCurrentScrollMemory(el);
         return;
       }
 
@@ -248,6 +341,7 @@ export function useStickToBottom(
           const top = bottomScrollTop(el.scrollHeight, el.clientHeight);
           if (Math.abs(el.scrollTop - top) > 0.5) applyScrollTop(top);
           syncShowBack();
+          cacheCurrentScrollMemory(el);
           return;
         }
 
@@ -271,6 +365,7 @@ export function useStickToBottom(
           !scrollingDown &&
           !(hard && intentDown)
         ) {
+          cacheCurrentScrollMemory(el);
           return;
         }
 
@@ -296,6 +391,7 @@ export function useStickToBottom(
           );
         }
         syncShowBack();
+        cacheCurrentScrollMemory(el);
       }, 1);
     };
 
@@ -313,16 +409,19 @@ export function useStickToBottom(
         e.deltaY <= -STICK_ESCAPE_WHEEL_DELTA &&
         el.scrollHeight > el.clientHeight
       ) {
+        clearPendingScrollRestore(true);
         userIntentDownRef.current = false;
         if (isPinnedRef.current) {
           escapedRef.current = true;
           isPinnedRef.current = false;
           syncShowBack();
         }
+        cacheCurrentScrollMemory(el);
         return;
       }
       // deltaY > 0 表示接近最新内容；记录意图以支持最大 scrollTop 处重新吸底。
       if (e.deltaY >= STICK_ESCAPE_WHEEL_DELTA) {
+        clearPendingScrollRestore(true);
         userIntentDownRef.current = true;
         if (escapedRef.current) {
           requestAnimationFrame(() => {
@@ -343,6 +442,7 @@ export function useStickToBottom(
                 bottomScrollTop(v.scrollHeight, v.clientHeight),
               );
               syncShowBack();
+              cacheCurrentScrollMemory(v);
             }
           });
         }
@@ -359,13 +459,16 @@ export function useStickToBottom(
       const dy = y - touchY;
       // 手指向下表示内容向上；只有明确拖动才解除吸底，过滤底部轻触。
       if (dy > STICK_ESCAPE_MIN_DELTA_PX) {
+        clearPendingScrollRestore(true);
         userIntentDownRef.current = false;
         if (isPinnedRef.current) {
           escapedRef.current = true;
           isPinnedRef.current = false;
           syncShowBack();
+          cacheCurrentScrollMemory(el);
         }
       } else if (dy < -STICK_ESCAPE_MIN_DELTA_PX) {
+        clearPendingScrollRestore(true);
         // 手指向上表示内容向下接近最新消息。
         userIntentDownRef.current = true;
       }
@@ -390,6 +493,7 @@ export function useStickToBottom(
             isPinnedRef.current = true;
             userIntentDownRef.current = false;
             syncShowBack();
+            cacheCurrentScrollMemory(v);
           }
         });
       }
@@ -439,21 +543,141 @@ export function useStickToBottom(
       }
       scrollbarDragRef.current = false;
     };
-  }, [enabled, conversationKey, syncShowBack, applyScrollTop]);
+  }, [
+    enabled,
+    conversationKey,
+    syncShowBack,
+    applyScrollTop,
+    cacheCurrentScrollMemory,
+    clearPendingScrollRestore,
+  ]);
 
-  // 切换会话时重新吸底并跳到底部。
-  useEffect(() => {
+  // 会话切换时先读取独立缓存；cleanup 保存旧视口，首批 rows 到达后由下方 effect 重放。
+  useLayoutEffect(() => {
     if (!enabled) return;
-    escapedRef.current = false;
-    isPinnedRef.current = true;
-    userIntentDownRef.current = false;
-    const id = requestAnimationFrame(() => scrollToBottom("instant"));
-    return () => cancelAnimationFrame(id);
-  }, [conversationKey, enabled, scrollToBottom]);
+    const key = currentMemoryKey;
+    const elementAtCommit = viewportRef.current;
+    const saved = readSessionScrollMemory(key);
+    pendingScrollRestoreRef.current = null;
+    userAdjustedDuringRestoreRef.current = false;
+
+    if (!saved || saved.wasPinnedToBottom) {
+      skipForceStickKeyRef.current = null;
+      escapedRef.current = false;
+      isPinnedRef.current = true;
+      userIntentDownRef.current = false;
+      scrollToBottom("instant");
+    } else if (key) {
+      skipForceStickKeyRef.current =
+        forceStickKeyRef.current == null
+          ? null
+          : String(forceStickKeyRef.current);
+      pendingScrollRestoreRef.current = { key, state: saved };
+      restoreScrollMemory(saved, key);
+    }
+
+    let correctionFrame = 0;
+    if (key && saved && !saved.wasPinnedToBottom) {
+      correctionFrame = requestAnimationFrame(() => {
+        const pending = pendingScrollRestoreRef.current;
+        if (
+          pending?.key === key &&
+          !userAdjustedDuringRestoreRef.current
+        ) {
+          restoreScrollMemory(pending.state, key);
+        }
+      });
+    }
+
+    return () => {
+      if (correctionFrame) cancelAnimationFrame(correctionFrame);
+      if (key) {
+        const pending = pendingScrollRestoreRef.current;
+        if (
+          pending?.key === key &&
+          !userAdjustedDuringRestoreRef.current
+        ) {
+          saveSessionScrollMemory(key, pending.state);
+        } else if (elementAtCommit) {
+          cacheCurrentScrollMemory(elementAtCommit, key);
+        }
+      }
+    };
+  }, [
+    cacheCurrentScrollMemory,
+    currentMemoryKey,
+    enabled,
+    restoreScrollMemory,
+    scrollToBottom,
+  ]);
+
+  // session scope 往往先于消息 rows 到达；内容就绪后再恢复一次，避免空视口 clamp 覆盖原位置。
+  useLayoutEffect(() => {
+    const key = currentMemoryKey;
+    const pending = pendingScrollRestoreRef.current;
+    if (
+      !enabled ||
+      contentReadyKey == null ||
+      !key ||
+      !pending ||
+      pending.key !== key
+    ) {
+      return;
+    }
+
+    restoreScrollMemory(pending.state, key);
+    let correctionFrame = 0;
+    let releaseFrame = 0;
+    correctionFrame = requestAnimationFrame(() => {
+      const current = pendingScrollRestoreRef.current;
+      if (
+        current?.key === key &&
+        !userAdjustedDuringRestoreRef.current
+      ) {
+        restoreScrollMemory(current.state, key);
+      }
+      releaseFrame = requestAnimationFrame(() => {
+        const currentElement = viewportRef.current;
+        const currentState = pendingScrollRestoreRef.current;
+        if (
+          currentElement &&
+          currentState?.key === key &&
+          !userAdjustedDuringRestoreRef.current
+        ) {
+          const restoredTop = resolveSessionScrollTop(
+            currentState.state,
+            currentElement,
+          );
+          if (
+            restoredTop + 1 >= currentState.state.scrollTop ||
+            currentElement.scrollHeight >= currentState.state.scrollHeight
+          ) {
+            pendingScrollRestoreRef.current = null;
+          }
+        }
+      });
+    });
+
+    return () => {
+      cancelAnimationFrame(correctionFrame);
+      if (releaseFrame) cancelAnimationFrame(releaseFrame);
+    };
+  }, [
+    contentReadyKey,
+    currentMemoryKey,
+    enabled,
+    restoreScrollMemory,
+  ]);
 
   // 用户发送消息或回合开始运行时强制跟随；双 rAF 等待新消息行高完成首帧布局。
   useEffect(() => {
     if (!enabled || forceStickKey == null || forceStickKey === "") return;
+    const forceKey = String(forceStickKey);
+    if (skipForceStickKeyRef.current === forceKey) {
+      skipForceStickKeyRef.current = null;
+      return;
+    }
+    skipForceStickKeyRef.current = null;
     escapedRef.current = false;
     isPinnedRef.current = true;
     userIntentDownRef.current = false;
@@ -471,11 +695,12 @@ export function useStickToBottom(
   // 显式导航到历史内容时解除吸底，后续 scroll 事件无需伪装成用户手势。
   useEffect(() => {
     if (!enabled || escapeStickKey == null || escapeStickKey === "") return;
+    clearPendingScrollRestore(true);
     isPinnedRef.current = false;
     escapedRef.current = true;
     userIntentDownRef.current = false;
     syncShowBack();
-  }, [escapeStickKey, enabled, syncShowBack]);
+  }, [escapeStickKey, enabled, syncShowBack, clearPendingScrollRestore]);
 
   // 吸底期间持续处理内容增长和收缩。
   useEffect(() => {
@@ -491,6 +716,7 @@ export function useStickToBottom(
       // 小幅重排不进入完整尺寸修正，但吸底时仍需跟随，避免流式增量累积后掉队。
       if (previousHeight != null && isHeightDeltaNoise(difference)) {
         followIfPinned();
+        cacheCurrentScrollMemory(el);
         previousHeight = height;
         return;
       }
@@ -519,6 +745,7 @@ export function useStickToBottom(
       // 内容或视口尺寸变化仅在吸底状态下跟随；脱离后不补偿全部高度差，
       // 防止底部的流式增长把正在阅读历史的用户拉下去。
       followIfPinned();
+      cacheCurrentScrollMemory(el);
 
       previousHeight = height;
       requestAnimationFrame(() => {
@@ -554,7 +781,13 @@ export function useStickToBottom(
       if (raf) cancelAnimationFrame(raf);
       ro.disconnect();
     };
-  }, [enabled, conversationKey, applyScrollTop, followIfPinned]);
+  }, [
+    enabled,
+    conversationKey,
+    applyScrollTop,
+    followIfPinned,
+    cacheCurrentScrollMemory,
+  ]);
 
   return {
     viewportRef,

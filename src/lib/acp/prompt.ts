@@ -8,6 +8,7 @@ import type {
 import { listenAcp } from "./api";
 import type { AcpTauriDelivery } from "./events";
 import { acpInitialize, acpRequest } from "./client";
+import type { SessionPromptContentBlock } from "@/lib/remotePrompt";
 
 /** 根 Agent 的固定来源标识；子 Agent 终态不能完成根 Prompt。 */
 const ROOT_SOURCE_AGENT_ID = "root";
@@ -22,6 +23,8 @@ export interface StartSessionPromptArgs {
   sessionId: string;
   /** 同时作为根 Turn 标识的本轮唯一请求标识。 */
   requestId: string;
+  /** Web Host 使用的标准文本与 resource_link blocks。 */
+  prompt?: SessionPromptContentBlock[];
   /** 是否在发送前切换到持久 Plan 模式。 */
   planMode?: boolean;
   /** 是否为本轮启用主动委派契约。 */
@@ -202,7 +205,7 @@ export function startSessionPrompt(
         "session/prompt",
         {
           sessionId: args.sessionId,
-          prompt: [{ type: "text", text: args.text }],
+          prompt: args.prompt ?? [{ type: "text", text: args.text }],
           _meta: {
             "keencode/turnId": args.requestId,
             "keencode/ultraMode": args.ultraMode === true,

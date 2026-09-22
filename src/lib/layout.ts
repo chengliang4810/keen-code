@@ -15,8 +15,8 @@ export interface LayoutPrefs {
 }
 
 export const DEFAULT_LAYOUT: LayoutPrefs = {
-  // Harness Sidebar 的默认列宽；用户手动拖动后的持久化宽度仍生效。
-  sidebarWidth: 280,
+  // ZCode 桌面侧栏默认与最小宽度均为 264px；用户拖动后的宽度继续持久化。
+  sidebarWidth: 264,
   asideWidth: 360,
   /** Right resource pane starts closed; open via top-bar files icon. */
   asideCollapsed: true,
@@ -24,8 +24,13 @@ export const DEFAULT_LAYOUT: LayoutPrefs = {
   sidebarCollapsed: false,
 };
 
-export const SIDEBAR_WIDTH_MIN = 220;
-export const SIDEBAR_WIDTH_MAX = 480;
+export const SIDEBAR_WIDTH_MIN = 264;
+/**
+ * 侧栏不再使用固定像素上限；运行时上限由工作区可用宽度的 50% 决定。
+ * Infinity 仅作为无 viewport/持久化解析时的开放上限，实际拖动仍传入
+ * getSidebarWidthMax() 返回的有限值。
+ */
+export const SIDEBAR_WIDTH_MAX = Number.POSITIVE_INFINITY;
 export const MAIN_WIDTH_MIN = 460;
 export const ASIDE_WIDTH_MIN = 240;
 export const ASIDE_WIDTH_MAX = 1920;
@@ -35,10 +40,31 @@ export function shouldCollapsePane(width: number, minWidth: number): boolean {
   return width <= minWidth - PANE_COLLAPSE_OVERSHOOT;
 }
 
-export function clampSidebarWidth(w: number): number {
+/** ZCode keeps the navigation rail within half of the available shell. */
+export function getSidebarWidthMax(availableWidth = Number.POSITIVE_INFINITY): number {
+  if (!Number.isFinite(availableWidth) || availableWidth <= 0) {
+    return SIDEBAR_WIDTH_MAX;
+  }
+  // 与 ZCode WorkspaceShellLayout 保持一致：侧栏最多占工作区一半，
+  // 但窄窗口仍保留可用的 264px 最小宽度。
+  return Math.max(SIDEBAR_WIDTH_MIN, Math.floor(availableWidth / 2));
+}
+
+export interface SidebarResizeStart {
+  clientX: number;
+  width: number;
+}
+
+export function clampSidebarWidth(
+  w: number,
+  maxWidth = SIDEBAR_WIDTH_MAX,
+): number {
   if (!Number.isFinite(w)) return DEFAULT_LAYOUT.sidebarWidth;
+  const max = Number.isFinite(maxWidth)
+    ? Math.max(SIDEBAR_WIDTH_MIN, Math.round(maxWidth))
+    : SIDEBAR_WIDTH_MAX;
   return Math.min(
-    SIDEBAR_WIDTH_MAX,
+    max,
     Math.max(SIDEBAR_WIDTH_MIN, Math.round(w)),
   );
 }
@@ -107,6 +133,31 @@ export function loadLayout(storage: {
   if (raw === null) return { ...DEFAULT_LAYOUT };
   if (!raw.trim()) throw new Error("布局配置不能为空");
   return parseLayout(JSON.parse(raw));
+}
+
+/** 手机首次进入先展示主工作区，侧栏仍可由标题栏按钮打开为抽屉。 */
+export function loadInitialLayout(
+  storage: { getItem(k: string): string | null },
+  viewportWidth: number,
+): LayoutPrefs {
+  // 布局偏好只影响界面，不应因损坏或超出当前尺寸约束而阻止应用启动。
+  // 这里回退到当前默认值，不改写原值，避免初始化阶段产生额外存储副作用。
+  let layout: LayoutPrefs;
+  try {
+    layout = loadLayout(storage);
+  } catch {
+    layout = { ...DEFAULT_LAYOUT };
+  }
+  // 保留持久化值本身，但在当前窗口过窄时只把本次启动的布局限制在可用范围内；
+  // 窗口放大后仍可恢复用户保存的宽度，而不会让当前工作区溢出。
+  layout = {
+    ...layout,
+    sidebarWidth: clampSidebarWidth(
+      layout.sidebarWidth,
+      getSidebarWidthMax(viewportWidth),
+    ),
+  };
+  return viewportWidth <= 760 ? { ...layout, sidebarCollapsed: true } : layout;
 }
 
 /** 校验并持久化当前唯一的布局结构。 */

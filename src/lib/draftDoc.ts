@@ -1,14 +1,22 @@
 /**
- * Composer draft document model: text segments + inline skill chips.
- * Storage / user bubbles use stable tokens `[[skill:name]]`.
- * Agent 提示词把 Skills 序列化为 Runtime 支持的 `/name` 调用形式。
+ * Composer draft document model: text segments + inline skill/mention nodes.
+ * Storage / user bubbles use stable tokens; Agent 提示词再序列化为 canonical
+ * skill/mention markdown。
  */
+
+import {
+  decodeComposerMentionToken,
+  encodeComposerMention,
+  type ComposerMention,
+} from "./composerMentions";
 
 export type DraftSegment =
   | { type: "text"; text: string }
-  | { type: "skill"; name: string };
+  | { type: "skill"; name: string }
+  | { type: "mention"; mention: ComposerMention };
 
-const SKILL_TOKEN_RE = /\[\[skill:([a-zA-Z0-9_.:-]+)\]\]/g;
+const SKILL_TOKEN_PREFIX = "[[skill:";
+const TOKEN_SUFFIX = "]]";
 
 /** 当前唯一的内建 Slash 动作，不应在 ACP 历史中还原成 Skill。 */
 const BUILTIN_SLASH_NAMES = new Set(["goal"]);
@@ -55,14 +63,35 @@ export function parseStoredContent(content: string): DraftSegment[] {
   if (!content) return [];
   const segments: DraftSegment[] = [];
   let last = 0;
-  const re = new RegExp(SKILL_TOKEN_RE.source, "g");
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(content)) !== null) {
-    if (m.index > last) {
-      segments.push({ type: "text", text: content.slice(last, m.index) });
+  let cursor = 0;
+  while (cursor < content.length) {
+    const skillStart = content.indexOf(SKILL_TOKEN_PREFIX, cursor);
+    const mentionStart = content.indexOf("[[mention:", cursor);
+    const starts = [skillStart, mentionStart].filter((index) => index >= 0);
+    const tokenStart = starts.length ? Math.min(...starts) : -1;
+    if (tokenStart < 0) break;
+
+    const tokenEnd = content.indexOf(TOKEN_SUFFIX, tokenStart + 2);
+    if (tokenEnd < 0) break;
+    const token = content.slice(tokenStart, tokenEnd + TOKEN_SUFFIX.length);
+    let segment: DraftSegment | null = null;
+    if (token.startsWith(SKILL_TOKEN_PREFIX)) {
+      const name = token.slice(SKILL_TOKEN_PREFIX.length, -TOKEN_SUFFIX.length);
+      if (isValidSkillName(name)) segment = { type: "skill", name };
+    } else {
+      const mention = decodeComposerMentionToken(token);
+      if (mention) segment = { type: "mention", mention };
     }
-    segments.push({ type: "skill", name: m[1]! });
-    last = m.index + m[0].length;
+    if (!segment) {
+      cursor = tokenEnd + TOKEN_SUFFIX.length;
+      continue;
+    }
+    if (tokenStart > last) {
+      segments.push({ type: "text", text: content.slice(last, tokenStart) });
+    }
+    segments.push(segment);
+    last = tokenEnd + TOKEN_SUFFIX.length;
+    cursor = last;
   }
   if (last < content.length) {
     segments.push({ type: "text", text: content.slice(last) });
@@ -73,8 +102,27 @@ export function parseStoredContent(content: string): DraftSegment[] {
 /** Serialize segments back to stored form (`[[skill:name]]` tokens). */
 export function serializeStored(segments: DraftSegment[]): string {
   return segments
-    .map((s) => (s.type === "text" ? s.text : `[[skill:${s.name}]]`))
+    .map((s) => {
+      if (s.type === "text") return s.text;
+      if (s.type === "skill") return `[[skill:${s.name}]]`;
+      return encodeComposerMention(s.mention);
+    })
     .join("");
+}
+
+function isValidSkillName(name: string): boolean {
+  if (!name) return false;
+  for (const char of name) {
+    if (
+      !(char >= "a" && char <= "z") &&
+      !(char >= "A" && char <= "Z") &&
+      !(char >= "0" && char <= "9") &&
+      !"_.:-".includes(char)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -113,6 +161,14 @@ export function segmentsFromEditorDom(root: Node): DraftSegment[] {
     }
     if (node.nodeType !== ELEMENT_NODE) return;
     const he = node as HTMLElement;
+    const mentionToken = he.dataset?.composerMention;
+    if (mentionToken) {
+      const mention = decodeComposerMentionToken(mentionToken);
+      if (mention) {
+        segs.push({ type: "mention", mention });
+        return;
+      }
+    }
     const skill = he.dataset?.skill;
     if (skill) {
       segs.push({ type: "skill", name: skill });
@@ -156,13 +212,23 @@ export function segmentsFromEditorDom(root: Node): DraftSegment[] {
  */
 export function previewStoredAsSlash(stored: string): string {
   if (!stored) return stored;
-  return stored.replace(new RegExp(SKILL_TOKEN_RE.source, "g"), "/$1");
+  return serializePreviewSegments(parseStoredContent(stored));
+}
+
+function serializePreviewSegments(segments: DraftSegment[]): string {
+  return segments
+    .map((segment) => {
+      if (segment.type === "text") return segment.text;
+      if (segment.type === "skill") return `/${segment.name}`;
+      return `@${segment.mention.label}`;
+    })
+    .join("");
 }
 
 /** Empty when there are no skills and no non-whitespace text. */
 export function isDraftEmpty(segments: DraftSegment[]): boolean {
   for (const s of segments) {
-    if (s.type === "skill") return false;
+    if (s.type === "skill" || s.type === "mention") return false;
     if (s.type === "text" && s.text.trim() !== "") return false;
   }
   return true;
@@ -178,6 +244,7 @@ export function serializeForAgent(segments: DraftSegment[]): string {
   const textParts: string[] = [];
   for (const s of segments) {
     if (s.type === "skill") skillTokens.push(`/${s.name}`);
+    else if (s.type === "mention") textParts.push(s.mention.markdown);
     else textParts.push(s.text);
   }
 

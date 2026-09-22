@@ -17,6 +17,7 @@ import type { SessionLiveMap } from "@/lib/sessionLiveStore";
 import type { TurnLatencyState } from "@/lib/turnLatency";
 import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
 import type { ViewFocus } from "@/lib/viewFocus";
+import type { SessionConfigOption } from "@/lib/acp/api";
 
 export type Ref<T> = MutableRefObject<T>;
 export type SetState<T> = Dispatch<SetStateAction<T>>;
@@ -63,6 +64,8 @@ export interface UseAcpSessionRuntimeOptions {
   sessionsRef: Ref<SessionRow[]>;
   sendInFlightRef: Ref<boolean>;
   configuredModelsRef: Ref<ModelOption[]>;
+  /** 将 Host 返回的标准模型/推理目录投影给 Composer；Web 必须复用该目录。 */
+  applyHostConfigOptions?: (options: SessionConfigOption[], sessionId?: string) => void;
   clearPendingAskUserRef: Ref<ClearPendingAskUser>;
   pendingAskUserBySessionRef: Ref<Map<string, AskUserPayload>>;
   setPendingAskUserSessionIds: SetState<Set<string>>;

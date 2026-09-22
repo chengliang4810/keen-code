@@ -17,6 +17,7 @@ export type SettingsSectionId =
   | "mcp"
   | "requests"
   | "analytics"
+  | "observability"
   | "about";
 
 /** 首版设置侧栏的固定顺序。 */
@@ -34,6 +35,7 @@ export const SETTINGS_SECTION_IDS: readonly SettingsSectionId[] = [
   "archived",
   "requests",
   "analytics",
+  "observability",
   "about",
 ] as const;
 
@@ -75,7 +77,8 @@ export type SettingsNavIcon =
   | "requests"
   | "info"
   | "personalization"
-  | "analytics";
+  | "analytics"
+  | "observability";
 
 /** 设置侧栏入口定义。 */
 export type SettingsNavDef = {
@@ -167,6 +170,12 @@ export const SETTINGS_NAV: readonly SettingsNavDef[] = [
     id: "analytics",
     icon: "analytics",
     labelKey: "settings.nav.analytics",
+    group: "data",
+  },
+  {
+    id: "observability",
+    icon: "observability",
+    labelKey: "settings.nav.observability",
     group: "data",
   },
   {

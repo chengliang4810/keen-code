@@ -73,3 +73,29 @@ it("直接发送成功时不回填", async () => {
   expect(options.ui.setDraft).toHaveBeenCalledTimes(1);
   expect(options.ui.setDraft).toHaveBeenCalledWith("");
 });
+
+it("附件仍在上传或失败时不发送也不入队", async () => {
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "ready", connecting: false,
+    draft: "hello",
+    attachments: [{ path: "pending://1", name: "clip.png", isDir: false, uploadStatus: "uploading" }],
+    hasConfiguredModel: true,
+    goalModeSessionKey: null, planModeSessionKey: null, ultraModeSessionKey: null,
+    executeSend: vi.fn(),
+    sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+
+  await result.send();
+
+  expect(options.executeSend).not.toHaveBeenCalled();
+  expect(options.sendQueue.enqueue).not.toHaveBeenCalled();
+  expect(options.ui.setDraft).not.toHaveBeenCalled();
+});

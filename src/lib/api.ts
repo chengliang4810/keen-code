@@ -788,6 +788,31 @@ export interface AppSettings {
   archiveRetentionDays: number;
   /** WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。 */
   webServiceUrl: string;
+  /** 本机 Web Host 的非秘密配置；长期 Token 通过独立命令写入凭据库。 */
+  webHost?: WebHostSettings;
+}
+
+/** Desktop Web Host 的可展示配置，不包含 Token。 */
+export interface WebHostSettings {
+  enabled: boolean;
+  bind: string;
+  port: number;
+  staticRoot: string;
+  uploadRoot: string;
+  allowedHosts: string[];
+  allowedOrigins: string[];
+  outboundQueueCapacity: number;
+}
+
+/** Desktop Web Host 的运行状态，不包含 Token。 */
+export interface WebHostStatus {
+  state: "disabled" | "stopped" | "running" | "stopping" | "failed";
+  bind: string;
+  port: number;
+  activeConnections: number;
+  maxConnections: number;
+  sessionCount: number;
+  tokenVersion: number;
 }
 
 /** 当前界面允许局部更新的应用设置。 */
@@ -811,6 +836,7 @@ export type AppSettingsPatch = Partial<
     | "autoArchiveConversations"
     | "archiveRetentionDays"
     | "webServiceUrl"
+    | "webHost"
   >
 >;
 
@@ -820,6 +846,26 @@ export async function settingsGet() {
 
 export async function settingsSet(settings: AppSettingsPatch) {
   return invoke<AppSettings>("settings_set", { settings });
+}
+
+/** 启动本机 Web Host；Token 不从前端命令参数传入。 */
+export function webHostStart(port?: number): Promise<WebHostStatus> {
+  return invoke<WebHostStatus>("web_host_start", { port: port ?? null });
+}
+
+/** 停止本机 Web Host 并撤销浏览器会话。 */
+export function webHostStop(): Promise<WebHostStatus> {
+  return invoke<WebHostStatus>("web_host_stop");
+}
+
+/** 读取不含 Token 的本机 Web Host 状态。 */
+export function webHostStatus(): Promise<WebHostStatus> {
+  return invoke<WebHostStatus>("web_host_status");
+}
+
+/** 将 Web Token 写入系统凭据库并轮换运行中 Host 会话。 */
+export function webHostSetToken(token: string): Promise<WebHostStatus> {
+  return invoke<WebHostStatus>("web_host_set_token", { token });
 }
 
 /** 读取当前设备唯一的全局用户自定义指令；首次使用时为空。 */

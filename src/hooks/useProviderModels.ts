@@ -28,7 +28,10 @@ import {
   pickNewChatModel,
   providerIdFromSessionReference,
   type ModelOption,
+  modelOptionsFromSessionConfig,
 } from "@/lib/modelCatalog";
+import { canUseAcpHost, isWebHost } from "@/lib/hostCapabilities";
+import type { SessionConfigOption } from "@/lib/acp/api";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
 
@@ -47,6 +50,8 @@ export interface UseProviderModelsOptions {
 export interface UseProviderModelsResult {
   /** 当前会话或草稿使用的模型 ID。 */
   modelId: string;
+  /** 当前完整 Session 模型引用，供 Web Host 新建 Session 继承选择。 */
+  sessionModelReference: string;
   /** 当前会话实际绑定的供应商；草稿尚未选定或引用缺失时为空。 */
   sessionProviderId: string | null;
   /**
@@ -56,6 +61,8 @@ export interface UseProviderModelsResult {
    * 供应商，因此这里保存完整引用；空引用表示尚未选定。
    */
   setSessionModelReference: SetState<string>;
+  /** 将标准 ACP Session 配置目录投影到 Composer。 */
+  applyHostConfigOptions: (options: SessionConfigOption[], sessionId?: string) => void;
   effort: string;
   setEffort: SetState<string>;
   configuredModels: ModelOption[];
@@ -87,6 +94,8 @@ export function useProviderModels({
    * 只保留模型 ID 会让菜单回落成全局活跃供应商，因此这里保存完整引用。
    */
   const [sessionModelReference, setSessionModelReference] = useState("");
+  const sessionModelReferenceRef = useRef(sessionModelReference);
+  sessionModelReferenceRef.current = sessionModelReference;
   /**
    * Host 在 Session 尚未绑定 Provider 时返回 `unconfigured` 占位值。该状态由运行时
    * 回退到全局默认 Provider，因此必须按“未选择”处理，不能当成模型名展示或据它拦截发送。
@@ -105,6 +114,7 @@ export function useProviderModels({
   currentSessionIdRef.current = sessionId;
   const [effort, setEffort] = useState(DEFAULT_EFFORT);
   const [configuredModels, setConfiguredModels] = useState<ModelOption[]>([]);
+  const [hostConfigKnown, setHostConfigKnown] = useState(false);
   const configuredModelsRef = useRef<ModelOption[]>([]);
   configuredModelsRef.current = configuredModels;
   const [modelMetadataById, setModelMetadataById] = useState<
@@ -141,7 +151,6 @@ export function useProviderModels({
     if (!api.isTauri()) {
       setActiveCustomProvider(null);
       setActiveCustomModelId(null);
-      setConfiguredModels([]);
       return;
     }
     try {
@@ -186,6 +195,43 @@ export function useProviderModels({
       /* 保留上一次可用路由，避免设置页短暂失败清空当前模型。 */
     }
   }, []);
+
+  const applyHostConfigOptions = useCallback(
+    (options: SessionConfigOption[], targetSessionId?: string) => {
+      if (!isWebHost()) return;
+      const projection = modelOptionsFromSessionConfig(options);
+      setHostConfigKnown(true);
+      setConfiguredModels(projection.models);
+      const updatesCurrentSelection =
+        targetSessionId === undefined ||
+        targetSessionId === currentSessionIdRef.current;
+      const preservesDraftSelection =
+        targetSessionId !== undefined || !sessionModelReferenceRef.current;
+      if (
+        updatesCurrentSelection &&
+        preservesDraftSelection &&
+        projection.currentModel &&
+        isBoundSessionModelReference(projection.currentModel)
+      ) {
+        setSessionModelReference(projection.currentModel);
+      } else if (
+        updatesCurrentSelection &&
+        preservesDraftSelection &&
+        projection.currentModel === "unconfigured"
+      ) {
+        setSessionModelReference("");
+      }
+      if (projection.efforts.length > 0) {
+        setEffort((current) =>
+          projection.efforts.some((entry) => entry.id === current)
+            ? current
+            : projection.efforts.find((entry) => entry.isDefault)?.id ??
+              projection.efforts[0]!.id,
+        );
+      }
+    },
+    [],
+  );
 
   /** 仅按 modelId 查询固定公共目录，供应商名称和地址不参与匹配。 */
   useEffect(() => {
@@ -254,16 +300,28 @@ export function useProviderModels({
 
   // 发送门槛保持按全局默认供应商判断：会话绑定的供应商被删除时，运行时仍会给出
   // 明确错误，比在这里静默禁用发送按钮更容易定位。
-  const hasConfiguredModel = hasConfiguredProviderModel(
-    activeCustomProvider?.id,
-    activeCustomModelId,
-    availableModels,
+  const hasConfiguredModel = canUseAcpHost(api.isTauri()) && (
+    isWebHost()
+      ? !hostConfigKnown || (
+          isBoundSessionModelReference(boundSessionModelReference) &&
+          availableModels.some(
+            (model) =>
+              model.providerId === sessionProviderId && model.id === modelId,
+          )
+        )
+      : hasConfiguredProviderModel(
+          activeCustomProvider?.id,
+          activeCustomModelId,
+          availableModels,
+        )
   );
 
   return {
     modelId,
+    sessionModelReference: boundSessionModelReference,
     sessionProviderId,
     setSessionModelReference,
+    applyHostConfigOptions,
     effort,
     setEffort,
     configuredModels,

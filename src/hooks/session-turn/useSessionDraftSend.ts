@@ -1,5 +1,5 @@
 import { useCallback, useRef } from "react";
-import type { Attachment } from "@/lib/attachments";
+import { hasUnreadyAttachments, type Attachment } from "@/lib/attachments";
 import { isDraftEmpty, parseStoredContent, serializeForAgent } from "@/lib/draftDoc";
 import { buildGoalDraft } from "@/lib/goalDraft";
 import { localizeUiError } from "@/lib/session";
@@ -111,6 +111,7 @@ export function useSessionDraftSend({
     const segments = parseStoredContent(storedDisplay);
     const att = attachments;
     if (isDraftEmpty(segments) && !att.length) return;
+    if (hasUnreadyAttachments(att)) return;
     if (!hasConfiguredModel) return;
     // 本地参数错误保留输入、附件和 Goal 开关，且不得进入队列。
     if (createGoal) {

@@ -154,6 +154,27 @@ export function removeQueuedSend(
   return queue.filter((q) => q.id !== id);
 }
 
+/** 将队列项移动到锚点之前；锚点为 null 时移动到队尾。 */
+export function reorderQueuedSend(
+  queue: QueuedSend[],
+  id: string,
+  beforeId: string | null,
+): QueuedSend[] {
+  const fromIndex = queue.findIndex((item) => item.id === id);
+  if (fromIndex < 0) return queue;
+
+  const remaining = queue.filter((item) => item.id !== id);
+  if (beforeId === id) return queue;
+  const anchorIndex = beforeId === null
+    ? remaining.length
+    : remaining.findIndex((item) => item.id === beforeId);
+  if (anchorIndex < 0) return queue;
+
+  const next = [...remaining];
+  next.splice(anchorIndex, 0, queue[fromIndex]!);
+  return next.every((item, index) => item === queue[index]) ? queue : next;
+}
+
 /** Replace the editable message body without changing queue order or metadata. */
 export function updateQueuedSend(
   queue: QueuedSend[],

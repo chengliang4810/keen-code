@@ -30,6 +30,7 @@ describe("settingsCatalog", () => {
       "archived",
       "requests",
       "analytics",
+      "observability",
       "about",
     ]);
     expect(ids).toEqual([...SETTINGS_SECTION_IDS]);
@@ -58,7 +59,7 @@ describe("settingsCatalog", () => {
       agent: ["personalization", "agents"],
       extensions: ["skills", "plugins", "market", "mcp"],
       archive: ["archive", "archived"],
-      data: ["requests", "analytics"],
+      data: ["requests", "analytics", "observability"],
     });
     expect(SETTINGS_NAV.filter((item) => item.group === null).map((item) => item.id)).toEqual([
       "about",

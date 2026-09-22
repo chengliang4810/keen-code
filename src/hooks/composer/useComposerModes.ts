@@ -9,6 +9,7 @@ import type {
 } from "../useComposerController";
 import { reduceGoalSnapshot } from "@/lib/acp/store";
 import { isGoalToolName } from "@/lib/toolDisplay";
+import { canUseAcpHost } from "@/lib/hostCapabilities";
 
 export interface ComposerModesController {
   goalModeSessionKey: string | null;
@@ -87,7 +88,7 @@ export function useComposerModes({
   useEffect(() => {
     const currentPorts = portsRef.current;
     const sessionId = currentPorts.session.sessionId;
-    if (!currentPorts.api.isTauri() || !sessionId) return;
+    if (!canUseAcpHost(currentPorts.api.isTauri()) || !sessionId) return;
     void currentPorts.api.goals
       .get(sessionId)
       .then((result) => {

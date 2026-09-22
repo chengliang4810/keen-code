@@ -10,6 +10,7 @@ import {
   bindDraftQueue,
   queuePreviewText,
   queueSessionKey,
+  reorderQueuedSend,
   removeQueuedSend,
   updateQueuedSend,
   requeueAfterFlushFail,
@@ -124,6 +125,38 @@ describe("sendQueue", () => {
     expect(head?.id).toBe(a.id);
     expect(rest).toHaveLength(1);
     expect(removeQueuedSend(rest, b.id)).toEqual([]);
+  });
+
+  it("reorders an item before an anchor without mutating the source queue", () => {
+    const items = ["a", "b", "c"].map((storedDisplay, index) =>
+      makeQueuedSend({ storedDisplay, attachments: [], now: index }),
+    );
+
+    const next = reorderQueuedSend(items, items[0]!.id, items[2]!.id);
+
+    expect(next.map((item) => item.storedDisplay)).toEqual(["b", "a", "c"]);
+    expect(items.map((item) => item.storedDisplay)).toEqual(["a", "b", "c"]);
+  });
+
+  it("moves an item to the end when the anchor is null", () => {
+    const items = ["a", "b", "c"].map((storedDisplay, index) =>
+      makeQueuedSend({ storedDisplay, attachments: [], now: index }),
+    );
+
+    expect(
+      reorderQueuedSend(items, items[0]!.id, null).map(
+        (item) => item.storedDisplay,
+      ),
+    ).toEqual(["b", "c", "a"]);
+  });
+
+  it("keeps the same queue for missing or unchanged reorder requests", () => {
+    const item = makeQueuedSend({ storedDisplay: "a", attachments: [] });
+    const queue = [item];
+
+    expect(reorderQueuedSend(queue, "missing", null)).toBe(queue);
+    expect(reorderQueuedSend(queue, item.id, item.id)).toBe(queue);
+    expect(reorderQueuedSend(queue, item.id, "missing")).toBe(queue);
   });
 
   it("requeueAtFront restores claimed head without dup", () => {

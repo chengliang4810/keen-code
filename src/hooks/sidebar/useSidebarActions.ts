@@ -25,6 +25,8 @@ import type {
 export interface SidebarActionsOptions {
   locale: Locale;
   tr: SidebarTranslator;
+  /** Web Host 项目是只读 Session cwd 投影，不暴露项目写操作。 */
+  canWriteProjects: boolean;
   activeProject: Project | null;
   projects: Project[];
   currentSessionId: string | null;
@@ -60,6 +62,7 @@ export interface SidebarActionsResult {
 export function useSidebarActions({
   locale,
   tr,
+  canWriteProjects,
   activeProject,
   projects,
   currentSessionId,
@@ -82,6 +85,7 @@ export function useSidebarActions({
 }: SidebarActionsOptions): SidebarActionsResult {
   const renameProject = useCallback(
     (project: Project) => {
+      if (!canWriteProjects) return;
       setCtxMenu(null);
       setAppDialog({
         kind: "prompt",
@@ -106,6 +110,7 @@ export function useSidebarActions({
     },
     [
       activeProject?.id,
+      canWriteProjects,
       locale,
       refreshProjects,
       setActiveProject,
@@ -158,6 +163,7 @@ export function useSidebarActions({
 
   const relocateProject = useCallback(
     async (project: Project) => {
+      if (!canWriteProjects) return;
       setCtxMenu(null);
       if (!api.isTauri()) {
         setLocalError(tr("error.needTauri"));
@@ -186,6 +192,7 @@ export function useSidebarActions({
     },
     [
       activeProject?.id,
+      canWriteProjects,
       locale,
       onActiveProjectRelocated,
       refreshProjects,
@@ -199,6 +206,7 @@ export function useSidebarActions({
 
   const removeProjectFromApp = useCallback(
     (project: Project) => {
+      if (!canWriteProjects) return;
       setCtxMenu(null);
       setAppDialog({
         kind: "confirm",
@@ -233,6 +241,7 @@ export function useSidebarActions({
     },
     [
       activeProject?.id,
+      canWriteProjects,
       locale,
       onActiveProjectRemoved,
       refreshProjects,

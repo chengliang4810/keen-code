@@ -20,6 +20,8 @@ export type ProjectDialogTranslator = (
 
 export interface UseProjectDialogOptions {
   projects: Project[];
+  /** Web Host 的项目列表来自 Session cwd，只读且不能打开本地目录选择器。 */
+  canWriteProjects: boolean;
   /** The session currently projected by the workbench. */
   activeSession: SessionSnapshot;
   finalizeAddedProject: (
@@ -38,6 +40,7 @@ export interface UseProjectDialogOptions {
 /** 管理添加项目弹窗及其原生目录选择/拖放来源。 */
 export function useProjectDialog({
   projects,
+  canWriteProjects,
   activeSession,
   finalizeAddedProject,
   navigateSettings,
@@ -116,6 +119,7 @@ export function useProjectDialog({
 
   const openAddProject = useCallback(
     (opts: AddProjectIntent, returnFocus?: HTMLElement | null) => {
+      if (!canWriteProjects) return;
       resetAddProject();
       setLocalError(null);
       addProjectReturnFocusRef.current =
@@ -125,7 +129,7 @@ export function useProjectDialog({
           : null);
       setAddProjectIntent(opts);
     },
-    [resetAddProject, setLocalError],
+    [canWriteProjects, resetAddProject, setLocalError],
   );
 
   const closeAddProject = useCallback(() => {
@@ -133,6 +137,7 @@ export function useProjectDialog({
   }, [addProjectBusy, resetAddProject]);
 
   const pickAddProjectDirectory = useCallback(async () => {
+    if (!canWriteProjects) return;
     setAddProjectError(null);
     if (!api.isTauri()) {
       setAddProjectError(tr("error.needTauri"));
@@ -149,9 +154,10 @@ export function useProjectDialog({
         setAddProjectError(localizeUiError(error, locale));
       }
     }
-  }, [applyAddProjectSource, locale, tr]);
+  }, [applyAddProjectSource, canWriteProjects, locale, tr]);
 
   const submitAddProject = useCallback(async () => {
+    if (!canWriteProjects) return;
     const intent = addProjectIntent;
     const name = addProjectName.trim();
     if (!intent || addProjectBusy) return;
@@ -189,6 +195,7 @@ export function useProjectDialog({
     addProjectIntent,
     addProjectName,
     addProjectPath,
+    canWriteProjects,
     finalizeAddedProject,
     locale,
     projects,

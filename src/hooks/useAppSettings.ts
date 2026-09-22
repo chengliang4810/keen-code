@@ -17,6 +17,18 @@ import {
 const DEFAULT_TERMINAL_FONT_FAMILY =
   'ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace';
 
+/** 设置文件缺少 Web Host 字段时的兼容默认值；运行时资源根由 Rust 补全。 */
+const DEFAULT_WEB_HOST_SETTINGS: api.WebHostSettings = {
+  enabled: false,
+  bind: "127.0.0.1",
+  port: 32123,
+  staticRoot: "",
+  uploadRoot: "",
+  allowedHosts: [],
+  allowedOrigins: [],
+  outboundQueueCapacity: 256,
+};
+
 export interface UseAppSettingsOptions {
   /** 等待应用启动页结束后再从 Tauri 恢复设置。 */
   appBooting: boolean;
@@ -39,6 +51,9 @@ export interface AppSettingsController extends SettingsRouteSettings {
   archiveRetentionDays: number;
   onAutoArchiveConversations: (value: boolean) => void;
   onArchiveRetentionDays: (value: number) => void;
+  /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
+  webHostSettings: api.WebHostSettings;
+  onWebHostSettings: (value: api.WebHostSettings) => void;
 }
 
 /**
@@ -65,6 +80,9 @@ export function useAppSettings({
   const [archiveRetentionDays, setArchiveRetentionDays] = useState(7);
   /** WebFetch 与 WebSearch 的兼容服务基础 URL；空值保持网络工具禁用。 */
   const [webServiceUrl, setWebServiceUrl] = useState("");
+  const [webHostSettings, setWebHostSettings] = useState<api.WebHostSettings>(
+    DEFAULT_WEB_HOST_SETTINGS,
+  );
   const [appUpdateDownloadSource, setAppUpdateDownloadSource] =
     useState<api.AppUpdateDownloadSource>("auto");
   const [keepComputerAwake, setKeepComputerAwake] = useState(true);
@@ -143,6 +161,7 @@ export function useAppSettings({
         setAutoArchiveConversations(settings.autoArchiveConversations);
         setArchiveRetentionDays(settings.archiveRetentionDays);
         setWebServiceUrl(settings.webServiceUrl);
+        setWebHostSettings(settings.webHost ?? DEFAULT_WEB_HOST_SETTINGS);
         setLocale(settings.interfaceLanguage);
       })
       .catch(() => {});
@@ -403,6 +422,21 @@ export function useAppSettings({
     [webServiceUrl, updateSetting],
   );
 
+  /** Web Host 只持久化非秘密配置；运行时启停由设置面板单独控制。 */
+  const onWebHostSettings = useCallback(
+    (value: api.WebHostSettings) => {
+      updateSetting({
+        key: "webHost",
+        value,
+        optimistic: value,
+        previous: webHostSettings,
+        apply: setWebHostSettings,
+        normalizeSaved: (saved) => saved.webHost ?? DEFAULT_WEB_HOST_SETTINGS,
+      });
+    },
+    [webHostSettings, updateSetting],
+  );
+
   return {
     locale,
     onLocaleChange,
@@ -444,5 +478,7 @@ export function useAppSettings({
     onArchiveRetentionDays,
     webServiceUrl,
     onWebServiceUrl,
+    webHostSettings,
+    onWebHostSettings,
   };
 }

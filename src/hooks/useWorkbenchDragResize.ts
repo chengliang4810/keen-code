@@ -8,9 +8,9 @@ import {
 import type { LayoutPrefs } from "@/lib/layout";
 import {
   ASIDE_WIDTH_MIN,
-  SIDEBAR_WIDTH_MIN,
   clampAsideWidth,
   clampSidebarWidth,
+  getSidebarWidthMax,
   saveLayout,
   shouldCollapsePane,
 } from "@/lib/layout";
@@ -32,6 +32,10 @@ export interface UseWorkbenchDragResizeOptions {
   setDragZone: StateSetter<DragZone>;
   selectAddProjectSourceFromPaths: (paths: string[]) => void | Promise<void>;
   sidebarRef: RefObject<HTMLElement | null>;
+  sidebarResizeStartRef: RefObject<{
+    clientX: number;
+    width: number;
+  } | null>;
   asideRef: RefObject<HTMLElement | null>;
   layout: LayoutPrefs;
   setLayout: StateSetter<LayoutPrefs>;
@@ -50,6 +54,7 @@ export function useWorkbenchDragResize({
   setDragZone,
   selectAddProjectSourceFromPaths,
   sidebarRef,
+  sidebarResizeStartRef,
   asideRef,
   layout,
   setLayout,
@@ -128,6 +133,15 @@ export function useWorkbenchDragResize({
   useEffect(() => {
     if (!resizingSidebar) return;
     let frame = 0;
+    const start = sidebarResizeStartRef.current ?? {
+      clientX: layout.sidebarWidth,
+      width: layout.sidebarWidth,
+    };
+    const measuredWidth =
+      sidebarRef.current?.parentElement?.getBoundingClientRect().width;
+    const availableWidth =
+      measuredWidth && measuredWidth > 0 ? measuredWidth : window.innerWidth;
+    const maxWidth = getSidebarWidthMax(availableWidth);
     let pendingWidth = layout.sidebarWidth;
     const paint = () => {
       frame = 0;
@@ -139,21 +153,11 @@ export function useWorkbenchDragResize({
       pane.style.maxWidth = width;
     };
     const onMove = (event: PointerEvent) => {
-      const collapsed = shouldCollapsePane(event.clientX, SIDEBAR_WIDTH_MIN);
-      pendingWidth = clampSidebarWidth(event.clientX);
-      if (collapsed) {
-        if (frame) cancelAnimationFrame(frame);
-        setLayout((current) => {
-          const next = {
-            ...current,
-            sidebarWidth: pendingWidth,
-            sidebarCollapsed: true,
-          };
-          saveLayout(localStorage, next);
-          return next;
-        });
-        setResizingSidebar(false);
-      } else if (!frame) {
+      pendingWidth = clampSidebarWidth(
+        start.width + event.clientX - start.clientX,
+        maxWidth,
+      );
+      if (!frame) {
         frame = requestAnimationFrame(paint);
       }
     };
@@ -166,6 +170,7 @@ export function useWorkbenchDragResize({
         saveLayout(localStorage, next);
         return next;
       });
+      sidebarResizeStartRef.current = null;
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
     };
@@ -179,8 +184,16 @@ export function useWorkbenchDragResize({
       window.removeEventListener("pointerup", onUp);
       document.body.style.cursor = "";
       document.body.style.userSelect = "";
+      sidebarResizeStartRef.current = null;
     };
-  }, [layout.sidebarWidth, resizingSidebar, setLayout, setResizingSidebar, sidebarRef]);
+  }, [
+    layout.sidebarWidth,
+    resizingSidebar,
+    setLayout,
+    setResizingSidebar,
+    sidebarRef,
+    sidebarResizeStartRef,
+  ]);
 
   useEffect(() => {
     if (!resizingAside) return;

@@ -6,9 +6,11 @@ import type {
   GoalRecordDto,
 } from "./events";
 import { isEventIdentifier } from "./events";
-import { invoke } from "../tauri";
+import { invoke, isTauri } from "../tauri";
 import { acpInitialize, acpNotify, acpRequest, acpRespond } from "./client";
 import { startSessionPrompt } from "./prompt";
+import { getInjectedHostTransportAdapter } from "@/components/host/hostMode";
+import type { SessionPromptContentBlock } from "@/lib/remotePrompt";
 import type {
   AcpMcpServerConfig,
   SessionMcpMutationResult,
@@ -46,6 +48,22 @@ export interface SessionSnapshot {
   lastError?: string | null;
   /** 后端诊断日志绝对路径。 */
   diagnosticsPath?: string | null;
+}
+
+/** 标准 ACP Session 配置项；Web 与 Desktop 共同使用同一份 Host 目录。 */
+export interface SessionConfigOption {
+  /** 配置项稳定标识，例如 `model` 或 `reasoning_effort`。 */
+  id: string;
+  /** 配置项用户可见名称。 */
+  name?: string;
+  /** 当前配置值。 */
+  currentValue?: unknown;
+  /** 可选值目录；选项字段由 ACP Schema 约束为对象。 */
+  options?: Array<Record<string, unknown>>;
+  /** 标准配置项类型。 */
+  type?: string;
+  /** 配置项说明。 */
+  description?: string;
 }
 
 /** 权威 TurnStarted 事件确认的回合起点，不是后端私有响应。 */
@@ -120,7 +138,7 @@ export async function sessionConnect(args: {
   operationId: string;
 }): Promise<SessionSnapshot & {
   /** Runtime 当前 Session 配置项；仅新建分支返回，供调用方登记初始模型。 */
-  configOptions?: Array<{ id: string; currentValue?: unknown }>;
+  configOptions?: SessionConfigOption[];
 }> {
   if (args.sessionId) {
     return sessionSnapshotFromResult(
@@ -134,7 +152,7 @@ export async function sessionConnect(args: {
   }
   const result = await acpRequest<{
     sessionId: string;
-    configOptions?: Array<{ id: string; currentValue?: unknown }>;
+    configOptions?: SessionConfigOption[];
     _meta?: Record<string, unknown>;
   }>(
     "session/new",
@@ -178,6 +196,8 @@ export function sessionSend(args: {
   sessionId: string;
   /** 本轮唯一且非空的请求标识。 */
   requestId: string;
+  /** Web Host 的标准 Prompt blocks；Desktop 省略并沿用文本路径契约。 */
+  prompt?: SessionPromptContentBlock[];
   /** 计划模式：true 时后端在 developerContext 注入规划契约。 */
   planMode?: boolean;
   /** Ultra：true 时后端在 developerContext 注入主动委派契约。 */
@@ -607,20 +627,7 @@ export interface SessionLoadResult {
     }>;
   };
   /** Runtime 当前 Session 配置项。 */
-  configOptions: Array<{
-    /** 配置项稳定标识。 */
-    id: string;
-    /** 配置项用户可见名称。 */
-    name: string;
-    /** 配置项说明。 */
-    description?: string;
-    /** 当前配置值。 */
-    currentValue?: unknown;
-    /** 可选值目录。 */
-    options?: Array<Record<string, unknown>>;
-    /** 标准配置项类别。 */
-    type?: string;
-  }>;
+  configOptions: SessionConfigOption[];
   /** ACP 标准透传元数据。 */
   _meta?: Record<string, unknown>;
 }
@@ -686,6 +693,16 @@ export async function listenAcp<EventName extends keyof AcpEventPayloads>(
   event: EventName,
   handler: (notification: AcpEventPayloads[EventName]) => void,
 ): Promise<() => void> {
+  if (!isTauri()) {
+    if (event !== "acp://delivery") {
+      throw new Error(`浏览器 Host 不支持事件：${event}`);
+    }
+    const transport = getInjectedHostTransportAdapter();
+    if (!transport?.subscribeDelivery) {
+      throw new Error("Web Host transport adapter 尚未注入");
+    }
+    return transport.subscribeDelivery(handler as (delivery: unknown) => void);
+  }
   const { listen } = await import("@tauri-apps/api/event");
   const unlisten = await listen<AcpEventPayloads[EventName]>(event, (e) => {
     handler(e.payload);

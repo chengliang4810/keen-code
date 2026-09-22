@@ -34,6 +34,7 @@ import {
   sessionFork,
   sessionRewind,
   sessionSend,
+  sessionSetModel,
   sessionSetEffort,
   sessionSteer,
   sessionStop,
@@ -67,6 +68,7 @@ export const acpSessionApi = {
   steer: sessionSteer,
   stop: sessionStop,
   rewind: sessionRewind,
+  setModel: sessionSetModel,
   setEffort: sessionSetEffort,
 };
 

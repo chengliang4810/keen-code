@@ -386,10 +386,185 @@ export function shouldCommitRowHeight(
   return true;
 }
 
-/** 仅识别在既有列表前插入历史；替换列表或切换会话不能补偿滚动。 */
+/**
+ * 视口内消息锚点。`offsetTop` 是行顶相对视口顶的偏移，允许为负数；
+ * 因此锚点在首帧只有估算高度时也可以跨前插保持同一阅读位置。
+ */
+export type ChatVisibleRowAnchor = {
+  key: string;
+  index: number;
+  offsetTop: number;
+};
+
+export type ChatVisibleRowAnchorMatch = {
+  key: string;
+  previousIndex: number;
+  nextIndex: number;
+  previousOffsetTop: number;
+  nextOffsetTop: number;
+};
+
+/**
+ * 捕获视口附近的一小组稳定 key 锚点。
+ *
+ * 第一项是当前视口的首个相交行，后续行用于处理前插期间的过滤/替换：
+ * 如果首个可见 key 被过滤掉，仍可选用距离最近的存活行。只保留有限数量
+ * 候选，避免长会话在每次提交时复制整份行元数据。
+ */
+export function captureChatVisibleRowAnchors(input: {
+  keys: readonly string[];
+  offsets: readonly number[];
+  scrollTop: number;
+  viewportHeight?: number;
+  maxCandidates?: number;
+}): ChatVisibleRowAnchor[] {
+  const count = Math.min(input.keys.length, Math.max(0, input.offsets.length - 1));
+  if (count <= 0) return [];
+
+  const scrollTop = Number.isFinite(input.scrollTop) ? Math.max(0, input.scrollTop) : 0;
+  const first = Math.min(count - 1, findStartIndex(input.offsets as number[], scrollTop));
+  const maxCandidates = Math.max(1, Math.floor(input.maxCandidates ?? 32));
+  const anchors: ChatVisibleRowAnchor[] = [];
+  const seen = new Set<number>();
+
+  const push = (index: number) => {
+    if (index < 0 || index >= count || seen.has(index)) return;
+    const key = input.keys[index];
+    const rowTop = input.offsets[index];
+    if (key == null || !Number.isFinite(rowTop)) return;
+    seen.add(index);
+    anchors.push({ key, index, offsetTop: rowTop - scrollTop });
+  };
+
+  // 首屏首先向后收集，保持真实可见行的顺序；过滤时通常后续行仍然存在。
+  for (let index = first; index < count && anchors.length < maxCandidates; index += 1) {
+    push(index);
+  }
+  // 视口首行被过滤时，补少量上方候选，避免只能退回列表首行。
+  for (
+    let index = first - 1;
+    index >= 0 && anchors.length < maxCandidates;
+    index -= 1
+  ) {
+    push(index);
+  }
+  return anchors;
+}
+
+/**
+ * 在新行数组中解析旧视口锚点。
+ *
+ * 不要求旧 key 是新数组的严格连续后缀：中间行被过滤、历史窗口被裁剪或
+ * 新旧批次交错时，按稳定 key 选择第一个仍存在的候选；候选全部缺失时再
+ * 从旧锚点附近向两侧扫描一次。复杂度为 O(n + k)，不会在长会话中对每个
+ * 候选反复调用 `indexOf`。
+ */
+export function resolveChatVisibleRowAnchor(input: {
+  previousKeys: readonly string[];
+  previousOffsets: readonly number[];
+  previousScrollTop?: number;
+  previousAnchors?: readonly ChatVisibleRowAnchor[];
+  nextKeys: readonly string[];
+  nextOffsets: readonly number[];
+}): ChatVisibleRowAnchorMatch | null {
+  const previousCount = Math.min(
+    input.previousKeys.length,
+    Math.max(0, input.previousOffsets.length - 1),
+  );
+  const nextCount = Math.min(
+    input.nextKeys.length,
+    Math.max(0, input.nextOffsets.length - 1),
+  );
+  if (previousCount <= 0 || nextCount <= 0) return null;
+
+  const nextIndexByKey = new Map<string, number>();
+  for (let index = 0; index < nextCount; index += 1) {
+    const key = input.nextKeys[index];
+    if (key != null && !nextIndexByKey.has(key)) nextIndexByKey.set(key, index);
+  }
+
+  const primaryIndex = input.previousAnchors?.[0]?.index ?? 0;
+  const previousScrollTop = Number.isFinite(input.previousScrollTop)
+    ? Math.max(0, input.previousScrollTop ?? 0)
+    : 0;
+  const candidates: ChatVisibleRowAnchor[] = [];
+  const seen = new Set<number>();
+  const addCandidate = (index: number, offsetTop?: number) => {
+    if (index < 0 || index >= previousCount || seen.has(index)) return;
+    const key = input.previousKeys[index];
+    const rowTop = input.previousOffsets[index];
+    if (key == null || !Number.isFinite(rowTop)) return;
+    seen.add(index);
+    candidates.push({
+      key,
+      index,
+      offsetTop:
+        offsetTop != null && Number.isFinite(offsetTop)
+          ? offsetTop
+          : rowTop - previousScrollTop,
+    });
+  };
+
+  for (const anchor of input.previousAnchors ?? []) {
+    addCandidate(anchor.index, anchor.offsetTop);
+  }
+  // 候选可能因过滤同时消失；全量扫描只发生在一次前插解析中，避免错误回退。
+  for (let distance = 0; distance < previousCount; distance += 1) {
+    addCandidate(primaryIndex + distance);
+    if (distance > 0) addCandidate(primaryIndex - distance);
+  }
+
+  for (const candidate of candidates) {
+    const nextIndex = nextIndexByKey.get(candidate.key);
+    if (nextIndex == null) continue;
+    const nextOffsetTop = input.nextOffsets[nextIndex];
+    if (!Number.isFinite(nextOffsetTop)) continue;
+    return {
+      key: candidate.key,
+      previousIndex: candidate.index,
+      nextIndex,
+      previousOffsetTop: candidate.offsetTop,
+      nextOffsetTop,
+    };
+  }
+  return null;
+}
+
+/**
+ * 根据已解析的 key 锚点计算当前 scrollTop 需要的平移量。
+ * `currentScrollTop` 可以是浏览器在内容变更后自动钳制过的中间值。
+ */
+export function visibleChatRowAnchorAdjustment(input: {
+  anchor: ChatVisibleRowAnchorMatch;
+  currentScrollTop: number;
+}): number | null {
+  if (!Number.isFinite(input.currentScrollTop)) return null;
+  const nextScrollTop = input.anchor.nextOffsetTop - input.anchor.previousOffsetTop;
+  if (!Number.isFinite(nextScrollTop)) return null;
+  return nextScrollTop - input.currentScrollTop;
+}
+
+/**
+ * 返回新数组中首个仍存活的旧 key 之前新增的行数。
+ *
+ * 这是兼容旧调用方的轻量前插判定：允许旧列表中间行被过滤，不要求严格连续
+ * 后缀；完全没有共同 key 或共同 key 顺序被打乱时返回 0，交给会话切换逻辑处理。
+ */
 export function prependedChatRowCount(previous: readonly string[], next: readonly string[]): number {
-  if (!previous.length || next.length <= previous.length) return 0;
-  const offset = next.indexOf(previous[0]!);
-  if (offset <= 0 || offset + previous.length > next.length) return 0;
-  return previous.every((key, index) => next[offset + index] === key) ? offset : 0;
+  if (!previous.length || !next.length) return 0;
+  const previousIndexByKey = new Map<string, number>();
+  for (let index = 0; index < previous.length; index += 1) {
+    const key = previous[index];
+    if (!previousIndexByKey.has(key)) previousIndexByKey.set(key, index);
+  }
+  let lastPreviousIndex = -1;
+  let firstCommonNextIndex = -1;
+  for (let index = 0; index < next.length; index += 1) {
+    const previousIndex = previousIndexByKey.get(next[index]!);
+    if (previousIndex == null) continue;
+    if (previousIndex < lastPreviousIndex) return 0;
+    if (firstCommonNextIndex < 0) firstCommonNextIndex = index;
+    lastPreviousIndex = previousIndex;
+  }
+  return firstCommonNextIndex > 0 ? firstCommonNextIndex : 0;
 }

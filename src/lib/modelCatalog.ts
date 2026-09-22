@@ -1,6 +1,7 @@
 /** 当前供应商模型与推理强度展示目录。 */
 
 import type { ModelMetadata, ModelReasoningInfo } from "./api";
+import type { SessionConfigOption } from "./acp/api";
 
 /** ACP 使用 providerId::modelId 定位路由；界面目录与元数据查询使用模型本身的 ID。 */
 export function modelIdFromSessionReference(reference: string): string {
@@ -68,6 +69,64 @@ export interface ModelOption {
   maxOutputTokens?: number;
   /** 是否支持图片输入：供应商配置为权威值，其次才是远端目录声明。 */
   supportsVision?: boolean;
+}
+
+/**
+ * 把 ACP Host 的标准 Session 配置目录投影为 Composer 模型目录。
+ * Web Host 不暴露 Desktop Provider IPC，因此模型选择必须直接复用 Host
+ * 返回的 `providerId::modelId` 选项，不能在浏览器另建供应商状态。
+ */
+export function modelOptionsFromSessionConfig(
+  configOptions: SessionConfigOption[],
+): { models: ModelOption[]; currentModel: string; efforts: EffortOption[] } {
+  const modelOption = configOptions.find((option) => option.id === "model");
+  const effortOption = configOptions.find(
+    (option) => option.id === "reasoning_effort",
+  );
+  const models: ModelOption[] = [];
+  for (const option of modelOption?.options ?? []) {
+    const value = typeof option.value === "string" ? option.value.trim() : "";
+    const separator = value.indexOf("::");
+    if (!value || separator <= 0 || separator === value.length - 2) continue;
+    const providerId = value.slice(0, separator);
+    const id = value.slice(separator + 2);
+    const rawName = typeof option.name === "string" ? option.name.trim() : "";
+    const providerLabel = rawName.includes("/")
+      ? rawName.slice(0, rawName.indexOf("/")).trim()
+      : providerId;
+    const label = rawName.includes("/")
+      ? rawName.slice(rawName.indexOf("/") + 1).trim() || id
+      : rawName || id;
+    models.push({
+      providerId,
+      providerLabel,
+      id,
+      label,
+      isDefault: false,
+    });
+  }
+  const currentModel =
+    typeof modelOption?.currentValue === "string"
+      ? modelOption.currentValue
+      : "";
+  const efforts: EffortOption[] = [];
+  for (const option of effortOption?.options ?? []) {
+    const id = typeof option.value === "string" ? option.value.trim() : "";
+    if (!id) continue;
+    efforts.push({
+      id,
+      value: id,
+      label: typeof option.name === "string" ? option.name : undefined,
+      isDefault: option.value === effortOption?.currentValue,
+    });
+  }
+  if (efforts.length > 0) {
+    for (const model of models) {
+      model.reasoningEfforts = efforts;
+      model.reasoningSupported = true;
+    }
+  }
+  return { models, currentModel, efforts };
 }
 
 /**

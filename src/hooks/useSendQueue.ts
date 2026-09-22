@@ -17,6 +17,7 @@ import {
   makeQueuedSend,
   bindDraftQueue,
   queueSessionKey,
+  reorderQueuedSend,
   removeQueuedSend,
   requeueAfterFlushFail,
   SEND_QUEUE_MAX,
@@ -97,6 +98,12 @@ export function useSendQueue({
   const activeQueue = useMemo(
     () => getQueueForKey(sendQueueByKey, queueSessionKey(sessionId)),
     [sendQueueByKey, sessionId],
+  );
+  const queuedSessionIds = useMemo(
+    () => Object.entries(sendQueueByKey)
+      .filter(([key, queue]) => key !== "__draft__" && queue.length > 0)
+      .map(([key]) => key),
+    [sendQueueByKey],
   );
 
   const setHold = useCallback((on: boolean) => {
@@ -191,6 +198,23 @@ export function useSendQueue({
       cancelEditItem(id);
     },
     [cancelEditItem, sessionId, writeMap],
+  );
+
+  /** 将当前会话中的一条队列消息移动到指定锚点之前。 */
+  const reorderItem = useCallback(
+    (id: string, beforeId: string | null) => {
+      // 正在编辑或引导时保持该队列的稳定性，避免操作中的消息被换位。
+      if (steeringIdsRef.current.size > 0 || editingIdsRef.current.size > 0) {
+        return false;
+      }
+      const key = queueSessionKey(sessionId);
+      const queue = getQueueForKey(sendQueueByKeyRef.current, key);
+      const reordered = reorderQueuedSend(queue, id, beforeId);
+      if (reordered === queue) return false;
+      writeMap(setQueueForKey(sendQueueByKeyRef.current, key, reordered));
+      return true;
+    },
+    [sessionId, writeMap],
   );
 
   /**
@@ -326,6 +350,48 @@ export function useSendQueue({
     setHold,
   ]);
 
+  /**
+   * 立即发送只改变队列优先级，然后复用现有 flush/executeSend 入口；
+   * 不在渲染层伪造暂停或直接调用 ACP。
+   */
+  const sendNowItem = useCallback(
+    (id: string) => {
+      if (
+        sessionState === "streaming" ||
+        connecting ||
+        steeringIdsRef.current.size > 0 ||
+        editingIdsRef.current.size > 0
+      ) {
+        return false;
+      }
+      const key = queueSessionKey(sessionId);
+      const queue = getQueueForKey(sendQueueByKeyRef.current, key);
+      if (!queue.some((item) => item.id === id)) return false;
+
+      const firstId = queue[0]?.id ?? null;
+      const prioritized = reorderQueuedSend(queue, id, firstId);
+      if (prioritized !== queue) {
+        writeMap(setQueueForKey(sendQueueByKeyRef.current, key, prioritized));
+      }
+      setHold(false);
+      cancelFlushTimer();
+      flushQueueTimerRef.current = setTimeout(() => {
+        flushQueueTimerRef.current = null;
+        flush();
+      }, 0);
+      return true;
+    },
+    [
+      cancelFlushTimer,
+      connecting,
+      flush,
+      sessionId,
+      sessionState,
+      setHold,
+      writeMap,
+    ],
+  );
+
   // Clear flush hold once a real turn is in progress again.
   useEffect(() => {
     if (sessionState === "streaming") {
@@ -377,11 +443,14 @@ export function useSendQueue({
 
   return {
     activeQueue,
+    queuedSessionIds,
     flushHold,
     steeringIds,
     editingIds,
     enqueue,
     steerItem,
+    reorderItem,
+    sendNowItem,
     removeItem,
     beginEditItem,
     cancelEditItem,

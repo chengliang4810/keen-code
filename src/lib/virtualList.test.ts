@@ -4,9 +4,14 @@ import {
   itemOffset,
   scrollTopForIndex,
   totalListHeight,
+  SIDEBAR_ARCHIVED_SESSION_ROW_HEIGHT,
   SIDEBAR_SESSION_ROW_GAP,
   SIDEBAR_SESSION_ROW_HEIGHT,
+  SIDEBAR_TOUCH_ARCHIVED_SESSION_ROW_HEIGHT,
+  SIDEBAR_TOUCH_BREAKPOINT,
+  SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
   SIDEBAR_VIRTUALIZE_THRESHOLD,
+  shouldUseSidebarTouchLayout,
 } from "./virtualList";
 
 const H = SIDEBAR_SESSION_ROW_HEIGHT;
@@ -30,9 +35,20 @@ describe("totalListHeight / itemOffset", () => {
   });
 
   it("matches sidebar constants used by CSS", () => {
-    expect(H).toBe(30);
+    expect(H).toBe(32);
+    expect(SIDEBAR_ARCHIVED_SESSION_ROW_HEIGHT).toBe(48);
     expect(G).toBe(2);
+    expect(SIDEBAR_TOUCH_SESSION_ROW_HEIGHT).toBe(44);
+    expect(SIDEBAR_TOUCH_ARCHIVED_SESSION_ROW_HEIGHT).toBe(56);
     expect(SIDEBAR_VIRTUALIZE_THRESHOLD).toBeGreaterThanOrEqual(16);
+  });
+
+  it("uses touch row geometry for a 390px hover-capable viewport", () => {
+    expect(SIDEBAR_TOUCH_BREAKPOINT).toBe(760);
+    expect(shouldUseSidebarTouchLayout(390, false, false)).toBe(true);
+    expect(shouldUseSidebarTouchLayout(1200, false, false)).toBe(false);
+    expect(shouldUseSidebarTouchLayout(1200, true, false)).toBe(true);
+    expect(shouldUseSidebarTouchLayout(1200, false, true)).toBe(true);
   });
 });
 

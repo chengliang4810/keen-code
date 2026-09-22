@@ -161,6 +161,34 @@ describe("ACP Prompt 生命周期", () => {
     expect(apiMocks.listenAcp).not.toHaveBeenCalled();
   });
 
+  it("Web Prompt 原样发送文本与标准 resource_link blocks", async () => {
+    const prompt = [
+      { type: "text" as const, text: "请分析" },
+      {
+        type: "resource_link" as const,
+        name: "photo.png",
+        uri: "/api/resources/resource_1",
+        mimeType: "image/png",
+        size: 4,
+      },
+    ];
+    const run = startSessionPrompt({
+      text: "请分析",
+      prompt,
+      sessionId: "session-1",
+      requestId: "turn-1",
+    });
+    const { handler } = await waitForListener();
+    handler(delivery("turn_started"));
+    await expect(run.started).resolves.toBeDefined();
+    await expect(run.completed).resolves.toEqual({ stopReason: "end_turn" });
+    expect(clientMocks.acpRequest).toHaveBeenCalledWith(
+      "session/prompt",
+      expect.objectContaining({ sessionId: "session-1", prompt }),
+      "turn-1",
+    );
+  });
+
   it("TurnStarted 后的 Prompt 错误只拒绝 completed 并清理监听", async () => {
     const promptResult = deferred<unknown>();
     const unlisten = vi.fn();

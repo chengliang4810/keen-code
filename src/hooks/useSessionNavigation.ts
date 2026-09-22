@@ -4,6 +4,7 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useState,
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
@@ -50,6 +51,20 @@ import {
   type DraftNavigationSnapshot,
 } from "@/lib/draftNavigation";
 import { shouldAdoptView, type ViewFocus } from "@/lib/viewFocus";
+import {
+  appendSessionHistory,
+  draftHistoryEntry,
+  EMPTY_SESSION_NAVIGATION_HISTORY,
+  historyCanGoBack,
+  historyCanGoForward,
+  moveSessionHistory,
+  removeSessionHistoryAt,
+  sameSessionHistoryEntry,
+  sessionHistoryEntry,
+  type SessionNavigationHistoryEntry,
+  type SessionNavigationHistoryState,
+} from "@/lib/sessionNavigationHistory";
+import { canUseAcpHost } from "@/lib/hostCapabilities";
 
 type StateSetter<T> = Dispatch<SetStateAction<T>>;
 type Ref<T> = MutableRefObject<T>;
@@ -94,6 +109,8 @@ export interface SessionNavigationAcpRuntimePort {
 /** Sidebar state that is intentionally changed as part of navigation. */
 export interface SessionNavigationSidebarPort {
   projects: Project[];
+  /** 当前已加载的会话列表；历史恢复失败时仍会尝试使用历史快照。 */
+  sessions?: SessionRow[];
   activeProject: Project | null;
   setActiveProject: StateSetter<Project | null>;
   setExpandedProjects: StateSetter<Record<string, boolean>>;
@@ -164,6 +181,10 @@ export interface UseSessionNavigationResult extends SessionNavigationRefs {
   bumpViewEpoch: () => void;
   openSession: SessionNavigationOpenSession;
   newChat: SessionNavigationNewChat;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  goBack: () => Promise<void>;
+  goForward: () => Promise<void>;
 }
 
 /** 管理任务导航、草稿隔离、Session 打开和新草稿切换。 */
@@ -189,6 +210,12 @@ export function useSessionNavigation({
   portsRef.current = { route, runtime, sidebar, composer, providers, ui };
   /** 会话草稿只在当前桌面生命周期保存；空草稿不占缓存，不与新对话草稿混用。 */
   const sessionDraftsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
+  /** 仅保存视图访问顺序；不可用目标会在遍历时移除。 */
+  const navigationHistoryRef = useRef<SessionNavigationHistoryState>(
+    EMPTY_SESSION_NAVIGATION_HISTORY,
+  );
+  const [navigationHistoryRevision, setNavigationHistoryRevision] = useState(0);
+  const historyTraversalRef = useRef(false);
   const navigationTimingRef = useRef<{
     sessionId: string; epoch: number; started: number; firstCommit?: number;
   } | null>(null);
@@ -274,11 +301,54 @@ export function useSessionNavigation({
     );
   }, []);
 
-  const openSession = useCallback<SessionNavigationOpenSession>(
-    async (row, project) => {
+  const updateNavigationHistory = useCallback(
+    (next: SessionNavigationHistoryState) => {
+      if (next === navigationHistoryRef.current) return;
+      navigationHistoryRef.current = next;
+      setNavigationHistoryRevision((revision) => revision + 1);
+    },
+    [],
+  );
+
+  const currentHistoryEntry = useCallback((): SessionNavigationHistoryEntry | null => {
+    const current = portsRef.current;
+    const sessionId = viewingSessionIdRef.current;
+    if (sessionId) {
+      const row = current.sidebar.sessions?.find((item) => item.id === sessionId);
+      if (!row) return null;
+      const project = row.projectId
+        ? current.sidebar.projects.find((item) => item.id === row.projectId) ?? null
+        : null;
+      return sessionHistoryEntry(row, project);
+    }
+    return draftHistoryEntry(current.sidebar.activeProject);
+  }, []);
+
+  const recordUserNavigation = useCallback(
+    (entry: SessionNavigationHistoryEntry) => {
+      let state = navigationHistoryRef.current;
+      // 首次导航若已有可识别的当前视图，先把它作为历史起点。
+      if (state.index < 0) {
+        const current = currentHistoryEntry();
+        if (current && !sameSessionHistoryEntry(current, entry)) {
+          state = appendSessionHistory(state, current);
+        }
+      }
+      updateNavigationHistory(appendSessionHistory(state, entry));
+    },
+    [currentHistoryEntry, updateNavigationHistory],
+  );
+
+  const openSessionInternal = useCallback(
+    async (
+      row: SessionRow,
+      project: Project | null | undefined,
+      recordHistory: boolean,
+    ): Promise<boolean> => {
       const current = portsRef.current;
-      // The browser preview deliberately does not create ACP sessions.
-      if (!current.runtime.isTauri() || typeof window === "undefined") return;
+      // 只有 Desktop 或已经认证的本机 Web Host 可以打开 ACP Session；
+      // 普通浏览器预览页保持只读，不伪造远程会话。
+      if (!canUseAcpHost(current.runtime.isTauri()) || typeof window === "undefined") return false;
       const started = performance.now();
 
       const projectForSession =
@@ -286,6 +356,9 @@ export function useSessionNavigation({
           ? project
           : current.sidebar.projects.find((item) => item.id === row.projectId) ??
             null;
+      if (recordHistory) {
+        recordUserNavigation(sessionHistoryEntry(row, projectForSession));
+      }
       current.route.navigateWorkbench();
       current.sidebar.setUnreadTerminalResults((previous) => {
         if (!previous.has(row.id)) return previous;
@@ -386,7 +459,7 @@ export function useSessionNavigation({
         if (!view) throw new Error(`ACP Session 未登记：${row.id}`);
         if (!canAdoptOpenView()) {
           clearOpeningSlot();
-          return;
+          return false;
         }
         const projected = projectAcpSnapshot(view);
         const snapshot = hostState
@@ -411,6 +484,7 @@ export function useSessionNavigation({
           current.providers.setSessionModelReference(sessionModelReference);
         }
         await current.runtime.refreshSessions();
+        return true;
       } catch (cause) {
         if (canAdoptOpenView()) {
           void diagnosticsRecord("session_navigation", JSON.stringify({
@@ -424,13 +498,32 @@ export function useSessionNavigation({
           current.ui.setLocalError(localizeUiError(cause, locale));
         }
         clearOpeningSlot();
+        return false;
       }
     },
-    [bumpViewEpoch, currentViewFocus, locale, snapshotOutgoingDraft, snapshotOutgoingSession],
+    [
+      bumpViewEpoch,
+      currentViewFocus,
+      locale,
+      recordUserNavigation,
+      snapshotOutgoingDraft,
+      snapshotOutgoingSession,
+    ],
   );
 
-  const newChat = useCallback<SessionNavigationNewChat>(
-    async (project, options) => {
+  const openSession = useCallback<SessionNavigationOpenSession>(
+    async (row, project) => {
+      await openSessionInternal(row, project, true);
+    },
+    [openSessionInternal],
+  );
+
+  const newChatInternal = useCallback(
+    async (
+      project: Project | null | undefined,
+      options: { seedDraft?: string } | undefined,
+      recordHistory: boolean,
+    ): Promise<boolean> => {
       const current = portsRef.current;
       const projectForDraft =
         project === undefined ? current.sidebar.activeProject : project;
@@ -438,7 +531,11 @@ export function useSessionNavigation({
         current.ui.setLocalError(
           tr("project.pathMissing", { name: projectForDraft.name }),
         );
-        return;
+        return false;
+      }
+
+      if (recordHistory) {
+        recordUserNavigation(draftHistoryEntry(projectForDraft));
       }
 
       snapshotOutgoingDraft();
@@ -516,8 +613,95 @@ export function useSessionNavigation({
         );
       }
       current.composer.requestComposerFocus();
+      return true;
     },
-    [bumpViewEpoch, snapshotOutgoingDraft, snapshotOutgoingSession, tr],
+    [
+      bumpViewEpoch,
+      recordUserNavigation,
+      snapshotOutgoingDraft,
+      snapshotOutgoingSession,
+      tr,
+    ],
+  );
+
+  const newChat = useCallback<SessionNavigationNewChat>(
+    async (project, options) => {
+      await newChatInternal(project, options, true);
+    },
+    [newChatInternal],
+  );
+
+  const traverseHistory = useCallback(
+    async (direction: "back" | "forward") => {
+      if (historyTraversalRef.current) return;
+      historyTraversalRef.current = true;
+      try {
+        let anchorIndex = navigationHistoryRef.current.index;
+        while (true) {
+          const moved = moveSessionHistory(
+            navigationHistoryRef.current,
+            direction,
+          );
+          const entry = moved.entry;
+          if (!entry) return;
+          const targetIndex = moved.state.index;
+          updateNavigationHistory(moved.state);
+
+          const current = portsRef.current;
+          const project = entry.projectId
+            ? current.sidebar.projects.find((item) => item.id === entry.projectId) ?? null
+            : null;
+          const succeeded = entry.kind === "session"
+            ? await openSessionInternal(
+                current.sidebar.sessions?.find((item) => item.id === entry.sessionId) ??
+                  entry.row,
+                project,
+                false,
+              )
+            : await newChatInternal(project, undefined, false);
+          if (succeeded) return;
+
+          // 用户在异步恢复期间发起了另一条导航，保留新分支，不移除它。
+          const latest = navigationHistoryRef.current;
+          if (
+            latest.index !== targetIndex ||
+            latest.entries[targetIndex] !== entry
+          ) {
+            return;
+          }
+          const preservedIndex = anchorIndex > targetIndex
+            ? anchorIndex - 1
+            : anchorIndex;
+          updateNavigationHistory(
+            removeSessionHistoryAt(
+              { ...latest, index: preservedIndex },
+              targetIndex,
+            ),
+          );
+          anchorIndex = preservedIndex;
+        }
+      } finally {
+        historyTraversalRef.current = false;
+      }
+    },
+    [newChatInternal, openSessionInternal, updateNavigationHistory],
+  );
+
+  const goBack = useCallback(
+    () => traverseHistory("back"),
+    [traverseHistory],
+  );
+  const goForward = useCallback(
+    () => traverseHistory("forward"),
+    [traverseHistory],
+  );
+  const canGoBack = useMemo(
+    () => historyCanGoBack(navigationHistoryRef.current),
+    [navigationHistoryRevision],
+  );
+  const canGoForward = useMemo(
+    () => historyCanGoForward(navigationHistoryRef.current),
+    [navigationHistoryRevision],
   );
 
   useEffect(() => {
@@ -538,5 +722,9 @@ export function useSessionNavigation({
     bumpViewEpoch,
     openSession,
     newChat,
+    canGoBack,
+    canGoForward,
+    goBack,
+    goForward,
   };
 }
