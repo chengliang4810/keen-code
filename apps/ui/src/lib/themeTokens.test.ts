@@ -7,10 +7,12 @@ const appFoundation = readFileSync(
   new URL("../styles/app-foundation.css", import.meta.url),
   "utf8",
 );
+// Windows 检出（core.autocrlf）会把工作树 CSS 变成 CRLF；归一化行尾，
+// 保证多行选择器断言在各平台一致。
 const governance = readFileSync(
   new URL("../styles/ui-governance.css", import.meta.url),
   "utf8",
-);
+).replaceAll("\r\n", "\n");
 const skins = readFileSync(new URL("../styles/skins.css", import.meta.url), "utf8");
 const tailwind = readFileSync(new URL("../styles/tailwind.css", import.meta.url), "utf8");
 const settingsShell = readFileSync(
