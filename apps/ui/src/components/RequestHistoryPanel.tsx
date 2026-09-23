@@ -41,7 +41,7 @@ import {
 
 export const REQUEST_HISTORY_PAGE_SIZE = 20;
 
-export type RequestHistoryFilters = {
+type RequestHistoryFilters = {
   model: string;
   status: string;
   from: string;
@@ -196,14 +196,14 @@ export function buildRequestHistoryQuery(
   return query;
 }
 
-export function formatRequestHistoryMode(
+function formatRequestHistoryMode(
   mode: RequestRecord["requestMode"],
   labels: Pick<RequestHistoryLabels, "stream" | "sync">,
 ): string {
   return mode === "stream" ? labels.stream : labels.sync;
 }
 
-export function formatRequestHistoryTime(
+function formatRequestHistoryTime(
   atMs: number | null | undefined,
   locale: Locale,
   missing: string,
@@ -232,7 +232,7 @@ export function formatSafeRequestEndpoint(
   }
 }
 
-export function formatRequestHistoryStatus(
+function formatRequestHistoryStatus(
   status: string,
   labels: RequestHistoryLabels,
 ): string {

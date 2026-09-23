@@ -978,21 +978,6 @@ div.composer__input:empty::before {
   font-size: calc(11.5px + var(--ui-font-delta));
 }
 
-.ext-item__body {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-
-.ext-item__main {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
 /* 模型选择器与文字块垂直居中，固定在行右侧不参与压缩。 */
 .ext-item__model {
   display: flex;
@@ -1610,10 +1595,6 @@ div.composer__input:empty::before {
   text-align: left;
 }
 
-.summary-panel__row--static {
-  cursor: default;
-}
-
 .summary-panel__row-icon {
   display: inline-flex;
   flex-shrink: 0;
@@ -1789,12 +1770,6 @@ div.composer__input:empty::before {
 .summary-panel__git-actions button:disabled {
   opacity: 0.4;
   cursor: default;
-}
-
-.summary-panel__divider {
-  height: 1px;
-  margin: 10px 4px;
-  background: var(--border-subtle);
 }
 
 .summary-panel__section-title {

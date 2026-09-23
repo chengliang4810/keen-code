@@ -375,11 +375,6 @@
     gap: 8px;
   }
 
-  .composer__spacer {
-    flex: 1 1 8px;
-    min-width: 0;
-  }
-
   .rp-mode-tabs,
   .rp-tabs__scroll {
     max-width: 100%;

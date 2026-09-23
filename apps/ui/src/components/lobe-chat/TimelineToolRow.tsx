@@ -31,6 +31,7 @@ import {
   summarizeToolDisplay,
   toolCommandText,
 } from "@/lib/toolDisplay";
+import { extractToolInputFields, normalizeToolName } from "@/lib/toolInputFields";
 import { normalizeTaskStatus } from "@/lib/sessionTasks";
 import {
   IconChevronDown,
@@ -45,8 +46,6 @@ import {
   IconSearch,
   IconUser,
 } from "@/components/icons";
-import type { AcpStructuredToolResult } from "@/lib/acp/types";
-import { StructuredToolResultView } from "@/components/StructuredToolResultView";
 import { TimelineImageGroup } from "./TimelineImageGroup";
 import { isImageTool } from "@/lib/timelinePhases";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
@@ -58,98 +57,6 @@ import {
   isToolSegmentCancelled,
   isToolSegmentRunning,
 } from "@/lib/toolSegmentStatus";
-
-/** 工具输入中可用于界面展示的当前字段。 */
-interface ToolInputFields {
-  /** 文件工具的绝对或相对路径。 */
-  path?: string;
-  /** 文件搜索工具使用的匹配模式。 */
-  pattern?: string;
-  /** 命令工具的完整命令。 */
-  command?: string;
-  /** AskUser 的首个问题 prompt。 */
-  question?: string;
-  /** 工具或 Skill 搜索关键词。 */
-  query?: string;
-  /** Skill 或 PluginCommand 请求加载的当前 name。 */
-  extensionName?: string;
-  /** WebFetch 请求访问的网址。 */
-  url?: string;
-  /** ExecuteExtraTool 代理调用的真实工具名。 */
-  targetToolName?: string;
-  /** Read 工具请求的 1-based 起始行。 */
-  offset?: number;
-  /** Read 工具请求的行数。 */
-  limit?: number;
-}
-
-/** 解析工具 JSON 参数，只提取当前界面明确支持的字段。 */
-function parseToolInput(input?: string): ToolInputFields {
-  if (!input?.trim()) return {};
-  try {
-    const value = JSON.parse(input) as Record<string, unknown>;
-    const path = [value.file_path, value.folder_path, value.path]
-      .find(
-        (item): item is string =>
-          typeof item === "string" && !!item.trim(),
-      );
-    const pattern =
-      typeof value.pattern === "string" && value.pattern.trim()
-        ? value.pattern
-        : undefined;
-    const command =
-      typeof value.command === "string" && value.command.trim()
-        ? value.command
-        : undefined;
-    const questions = Array.isArray(value.questions) ? value.questions : [];
-    const question = questions
-      .map((item) =>
-        item && typeof item === "object"
-          ? (item as Record<string, unknown>).prompt
-          : undefined,
-      )
-      .find(
-        (item): item is string =>
-          typeof item === "string" && !!item.trim(),
-      );
-    const query =
-      typeof value.query === "string" && value.query.trim()
-        ? value.query
-        : undefined;
-    const extensionName =
-      typeof value.name === "string" && value.name.trim()
-        ? value.name
-        : undefined;
-    const url =
-      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
-    const targetToolName =
-      typeof value.tool_name === "string" && value.tool_name.trim()
-        ? value.tool_name
-        : undefined;
-    const offset =
-      Number.isInteger(value.offset) && Number(value.offset) > 0
-        ? Number(value.offset)
-        : undefined;
-    const limit =
-      Number.isInteger(value.limit) && Number(value.limit) > 0
-        ? Number(value.limit)
-        : undefined;
-    return {
-      path,
-      pattern,
-      command,
-      question,
-      query,
-      extensionName,
-      url,
-      targetToolName,
-      offset,
-      limit,
-    };
-  } catch {
-    return {};
-  }
-}
 
 /** 在读取文件名后显示请求的行号范围。 */
 function readPathLabel(path: string, offset?: number, limit?: number): string {
@@ -188,14 +95,8 @@ type TimelineToolCategory =
  * wire kind is the generic `edit` category.
  */
 function timelineToolCategory(tool: MessageToolSegment): TimelineToolCategory {
-  const title = (tool.title || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[\s./-]+/g, "_");
-  const kind = (tool.toolKind || "")
-    .toLowerCase()
-    .trim()
-    .replace(/[\s./-]+/g, "_");
+  const title = normalizeToolName(tool.title || "");
+  const kind = normalizeToolName(tool.toolKind || "");
 
   const categoryFor = (value: string): TimelineToolCategory => {
     if (value === "askuser") {
@@ -382,7 +283,6 @@ export function subagentForTool(
     tool.input,
     tool.output,
     tool.detail,
-    tool.structuredResult?.output,
   ]
     .filter(Boolean)
     .join("\n");
@@ -722,39 +622,21 @@ function formatToolDuration(durationMs?: number | null): string {
     : `${(durationMs / 1000).toFixed(1)}s`;
 }
 
-/** 工具行展开后的详情体：结构化结果优先，其次规整后的原始正文。 */
+/** 工具行展开后的详情体：展示规整后的原始正文。 */
 export function TimelineToolDetailBody({
   tool,
   locale,
   failed,
   cancelled,
-  readTool,
-  editTool,
-  commandTool,
   rawAllowed,
 }: {
   tool: MessageToolSegment;
   locale: Locale;
   failed: boolean;
   cancelled: boolean;
-  readTool: boolean;
-  editTool: boolean;
-  commandTool: boolean;
   /** 成功时是否允许回显原始正文；只有未分类工具为 true。 */
   rawAllowed: boolean;
 }) {
-  if (
-    tool.structuredResult &&
-    (failed || cancelled || (!readTool && !editTool && !commandTool))
-  ) {
-    return (
-      <StructuredToolResultView
-        locale={locale}
-        toolName={tool.toolKind || tool.title}
-        result={tool.structuredResult as unknown as AcpStructuredToolResult}
-      />
-    );
-  }
   if (!(tool.output || tool.detail)?.trim()) return null;
   // 成功时只有未分类工具会走到这里；已知分类的成功正文不回显。
   if (!(failed || cancelled || rawAllowed)) return null;
@@ -786,7 +668,7 @@ export function TimelineToolRow({
   const failed = isToolSegmentFailed(tool);
   const cancelled = isToolSegmentCancelled(tool);
   const running = isToolSegmentRunning(tool);
-  const inputFields = parseToolInput(tool.input);
+  const inputFields = extractToolInputFields(tool.input);
   const category = timelineToolCategory(tool);
   const renderer = timelineToolRenderer(tool);
   const planTool = isPlanTool(tool);
@@ -865,12 +747,11 @@ export function TimelineToolRow({
     !executeExtraTool &&
     !waitAgentTool &&
     !planTool &&
-    !!(tool.structuredResult || tool.output?.trim() || tool.detail?.trim());
-  // 可展开必须有实际内容：失败/取消但无正文、无结构化结果时不渲染空详情区。
+    !!(tool.output?.trim() || tool.detail?.trim());
+  // 可展开必须有实际内容：失败/取消但无正文时不渲染空详情区。
   const detailText = (tool.output || tool.detail)?.trim() || "";
   const hasDetail =
-    (failed || cancelled || hasGenericDetail) &&
-    !!(detailText || tool.structuredResult);
+    (failed || cancelled || hasGenericDetail) && !!detailText;
   const [open, setOpen] = useState(false);
   const pathTail = readTool || editTool ? toolPathTail(resolvedPath) : "";
   const duration = formatToolDuration(tool.durationMs);
@@ -1029,9 +910,6 @@ export function TimelineToolRow({
             locale={locale}
             failed={failed}
             cancelled={cancelled}
-            readTool={readTool}
-            editTool={editTool}
-            commandTool={commandTool}
             rawAllowed={hasGenericDetail}
           />
           </div>

@@ -4,6 +4,7 @@ import type {
   HostTransportSnapshot,
   HostUploadedAttachment,
 } from "./hostMode";
+import { randomUuid } from "@/lib/randomUuid";
 
 type JsonRpcId = string | number;
 type JsonRecord = Record<string, unknown>;
@@ -244,7 +245,7 @@ class BrowserWebHostTransport implements HostTransportAdapter {
   private async ensureInitialized(): Promise<void> {
     if (this.initialized) return;
     if (this.initializing) return this.initializing;
-    const id = `web-init-${globalThis.crypto.randomUUID()}`;
+    const id = `web-init-${randomUuid()}`;
     this.initializing = this.send({
       jsonrpc: "2.0",
       id,

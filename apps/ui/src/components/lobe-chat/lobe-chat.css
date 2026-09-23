@@ -1033,8 +1033,7 @@
   border-radius: var(--radius-full);
 }
 
-.lobe-subagent-card__running-dot,
-.lobe-subagent-card__complete-badge {
+.lobe-subagent-card__running-dot {
   position: absolute;
   right: -1px;
   bottom: -1px;
@@ -1049,13 +1048,6 @@
   width: 10px;
   height: 10px;
   background: var(--accent);
-}
-
-.lobe-subagent-card__complete-badge {
-  width: 15px;
-  height: 15px;
-  background: var(--success);
-  color: var(--success-fg, #fff);
 }
 
 .lobe-subagent-card__identity {

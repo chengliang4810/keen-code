@@ -1,7 +1,12 @@
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { expect, it, vi } from "vitest";
+import type { ViewFocus } from "@/lib/viewFocus";
 import { useSessionDraftSend, type UseSessionDraftSendOptions } from "./useSessionDraftSend";
+
+function fakeRuntime(viewFocus: ViewFocus) {
+  return { currentViewFocus: () => ({ ...viewFocus }) };
+}
 
 it.each(["ready", "streaming"] as const)("%s 下非法 Goal 保留输入且不发送/排队", async (sessionState) => {
   const options: UseSessionDraftSendOptions = {
@@ -9,6 +14,7 @@ it.each(["ready", "streaming"] as const)("%s 下非法 Goal 保留输入且不�
     draft: "中".repeat(22000), attachments: [], hasConfiguredModel: true,
     goalModeSessionKey: "s", planModeSessionKey: null, ultraModeSessionKey: null,
     executeSend: vi.fn(),
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
     sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
     ui: {
       setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
@@ -34,6 +40,7 @@ it("直接发送失败时回填原文与附件，避免输入丢失", async () =
     draft: "hello", attachments: [{ name: "a.png" } as never], hasConfiguredModel: true,
     goalModeSessionKey: "s", planModeSessionKey: null, ultraModeSessionKey: null,
     executeSend: vi.fn().mockResolvedValue(false),
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
     sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
     ui: {
       setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
@@ -59,6 +66,7 @@ it("直接发送成功时不回填", async () => {
     draft: "hello", attachments: [], hasConfiguredModel: true,
     goalModeSessionKey: null, planModeSessionKey: null, ultraModeSessionKey: null,
     executeSend: vi.fn().mockResolvedValue(true),
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
     sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
     ui: {
       setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
@@ -82,6 +90,7 @@ it("附件仍在上传或失败时不发送也不入队", async () => {
     hasConfiguredModel: true,
     goalModeSessionKey: null, planModeSessionKey: null, ultraModeSessionKey: null,
     executeSend: vi.fn(),
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
     sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
     ui: {
       setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
@@ -98,4 +107,35 @@ it("附件仍在上传或失败时不发送也不入队", async () => {
   expect(options.executeSend).not.toHaveBeenCalled();
   expect(options.sendQueue.enqueue).not.toHaveBeenCalled();
   expect(options.ui.setDraft).not.toHaveBeenCalled();
+});
+
+it("发送期间切走视图时不回填旧会话草稿", async () => {
+  // 连接耗时窗口内用户切到会话 b：失败回填不得写进 b 的输入框。
+  const viewFocus: ViewFocus = { sessionId: "s", epoch: 1 };
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "ready", connecting: false,
+    draft: "hello", attachments: [{ name: "a.png" } as never], hasConfiguredModel: true,
+    goalModeSessionKey: "s", planModeSessionKey: null, ultraModeSessionKey: null,
+    executeSend: vi.fn(async () => {
+      viewFocus.sessionId = "b";
+      return false;
+    }),
+    runtime: fakeRuntime(viewFocus),
+    sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+  await result.send();
+  // 只有 clearComposerAfterSubmit 的清空调用，没有回填。
+  expect(options.ui.setDraft).toHaveBeenCalledTimes(1);
+  expect(options.ui.setDraft).toHaveBeenCalledWith("");
+  expect(options.ui.setAttachments).toHaveBeenCalledTimes(1);
+  expect(options.ui.setGoalModeSessionKey).not.toHaveBeenCalledWith("s");
+  expect(options.ui.setLocalError).not.toHaveBeenCalled();
 });

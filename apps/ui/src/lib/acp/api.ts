@@ -7,6 +7,7 @@ import type {
 } from "./events";
 import { isEventIdentifier } from "./events";
 import { invoke, isTauri } from "../tauri";
+import { randomUuid } from "../randomUuid";
 import { acpInitialize, acpNotify, acpRequest, acpRespond } from "./client";
 import { startSessionPrompt } from "./prompt";
 import { getInjectedHostTransportAdapter } from "@/components/host/hostMode";
@@ -28,7 +29,7 @@ export function createOperationId(scope: string): string {
   if (!scope || scope.trim() !== scope || /\s/.test(scope)) {
     throw new Error("operationId scope 必须为非空且不含空白的字符串");
   }
-  return `${scope}-${globalThis.crypto.randomUUID()}`;
+  return `${scope}-${randomUuid()}`;
 }
 
 export interface SessionSnapshot {

@@ -169,6 +169,7 @@ export function useSessionTurn({
     planModeSessionKey,
     ultraModeSessionKey,
     executeSend,
+    runtime,
     sendQueue,
     ui,
   });

@@ -98,10 +98,6 @@
   border-top: 0.5px solid var(--dsw-alias-border-l2);
 }
 
-.ui-stat-title-value {
-  font-variant-numeric: tabular-nums;
-}
-
 /* Section-heading glyph seated left of the section name. */
 .ui-stat-title-label {
   display: inline-flex;
@@ -134,15 +130,6 @@
   color: var(--dsw-alias-label-secondary);
   font-variant-numeric: tabular-nums;
   text-align: right;
-}
-
-.ui-stat-details .ui-stat-route {
-  overflow-wrap: anywhere;
-}
-
-.ui-stat-reasoning {
-  color: var(--dsw-alias-label-tertiary);
-  white-space: nowrap;
 }
 
 .lobe-turn-metrics {

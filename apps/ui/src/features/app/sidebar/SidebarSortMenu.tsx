@@ -13,7 +13,7 @@ import { IconArrowsSort, IconClock, IconMessageCircle } from "@/components/icons
 import type { SidebarSortMode } from "@/lib/sidebarOrder";
 import type { SidebarTranslator } from "./types";
 
-export interface SidebarSortMenuProps {
+interface SidebarSortMenuProps {
   tr: SidebarTranslator;
   mode: SidebarSortMode;
   onModeChange: (mode: SidebarSortMode) => void;

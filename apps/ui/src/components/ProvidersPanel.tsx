@@ -10,6 +10,7 @@ import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
 import { cachedRead, invalidateReadCache } from "@/lib/readCache";
+import { randomUuid } from "@/lib/randomUuid";
 import { copyTextInGesture } from "@/lib/clipboardWrite";
 import { createT, type Locale } from "@/i18n";
 import { formatTokenCount } from "@/lib/contextUsage";
@@ -39,7 +40,7 @@ import {
   IconTrash,
 } from "@/components/icons";
 
-export interface ProvidersPanelProps {
+interface ProvidersPanelProps {
   locale: Locale;
   /** 供应商配置变化后通知桌面外壳刷新模型列表。 */
   onProviderActivated?: () => void;
@@ -401,7 +402,7 @@ export function ProvidersPanel({
     setHint(tr("prov.saving"));
     setHintTone("muted");
     try {
-      const id = editingId ?? globalThis.crypto.randomUUID();
+      const id = editingId ?? randomUuid();
       const result = await api.providersUpsert({
         id,
         models: form.models,

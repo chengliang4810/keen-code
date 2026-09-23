@@ -22,7 +22,7 @@ export type SidebarSessionRowVariant =
   | "history"
   | "archived";
 
-export interface SidebarSessionRowProps extends SidebarSessionActions {
+interface SidebarSessionRowProps extends SidebarSessionActions {
   tr: SidebarTranslator;
   session: SessionRow;
   project: Project | null;

@@ -27,12 +27,8 @@ import {
 } from "../turnLatency";
 import type { AgentNicknameRef } from "../agentNicknames";
 import type {
-  AcpArtifactReference,
-  AcpFileOperation,
   AcpRetryProjection,
-  AcpStructuredToolResult,
   AcpSystemNotificationLevel,
-  AcpToolResultItem,
 } from "./types";
 import { parseFileChangeResourceLink } from "./fileChanges";
 import { toolCompletionStatusOf } from "./events";
@@ -320,52 +316,6 @@ function todoRevisionOf(
     : null;
 }
 
-function isFiniteNumber(value: unknown): value is number {
-  return typeof value === "number" && Number.isFinite(value);
-}
-
-function isFileOperation(value: unknown): value is AcpFileOperation {
-  return (
-    value === "created" ||
-    value === "modified" ||
-    value === "deleted" ||
-    value === "renamed" ||
-    value === "read" ||
-    value === "unknown"
-  );
-}
-
-/**
- * Validate one ACP artifact without allowing malformed provider data into the
- * typed UI projection. Invalid optional fields are omitted; required fields
- * invalidate the reference.
- */
-function parseArtifact(value: unknown): AcpArtifactReference | null | undefined {
-  if (value === null) return null;
-  if (!isRecord(value)) return undefined;
-  if (
-    typeof value.id !== "string" ||
-    typeof value.media_type !== "string" ||
-    !isFiniteNumber(value.size_bytes) ||
-    value.size_bytes < 0
-  ) {
-    return undefined;
-  }
-
-  const artifact: AcpArtifactReference = {
-    id: value.id,
-    media_type: value.media_type,
-    size_bytes: value.size_bytes,
-  };
-  if (value.path === null || typeof value.path === "string") {
-    artifact.path = value.path;
-  }
-  if (value.sha256 === null || typeof value.sha256 === "string") {
-    artifact.sha256 = value.sha256;
-  }
-  return artifact;
-}
-
 /** 提取标准工具内容中的本次精确快照；省略 content 不得清空既有状态。 */
 function standardFileChanges(
   content: AcpToolCallContent[] | undefined,
@@ -387,126 +337,6 @@ function standardFileChanges(
       ? [{ path: reference.path, reference }]
       : [];
   });
-}
-
-/** Validate and retain a single typed item from an ACP structured result. */
-function parseToolResultItem(value: unknown): AcpToolResultItem | undefined {
-  if (!isRecord(value) || typeof value.type !== "string") return undefined;
-
-  switch (value.type) {
-    case "text":
-      return typeof value.text === "string"
-        ? { type: "text", text: value.text }
-        : undefined;
-    case "diff": {
-      if (typeof value.path !== "string" || typeof value.patch !== "string") {
-        return undefined;
-      }
-      const item: Extract<AcpToolResultItem, { type: "diff" }> = {
-        type: "diff",
-        path: value.path,
-        patch: value.patch,
-      };
-      if (value.old_path === null || typeof value.old_path === "string") {
-        item.old_path = value.old_path;
-      }
-      return item;
-    }
-    case "file": {
-      if (
-        typeof value.path !== "string" ||
-        !isFileOperation(value.operation)
-      ) {
-        return undefined;
-      }
-      const item: Extract<AcpToolResultItem, { type: "file" }> = {
-        type: "file",
-        path: value.path,
-        operation: value.operation,
-      };
-      if (value.size_bytes === null || isFiniteNumber(value.size_bytes)) {
-        item.size_bytes = value.size_bytes;
-      }
-      if (value.sha256 === null || typeof value.sha256 === "string") {
-        item.sha256 = value.sha256;
-      }
-      return item;
-    }
-    case "command": {
-      if (typeof value.command !== "string") return undefined;
-      const item: Extract<AcpToolResultItem, { type: "command" }> = {
-        type: "command",
-        command: value.command,
-      };
-      if (value.exit_code === null || isFiniteNumber(value.exit_code)) {
-        item.exit_code = value.exit_code;
-      }
-      if (typeof value.stdout === "string") item.stdout = value.stdout;
-      if (typeof value.stderr === "string") item.stderr = value.stderr;
-      if (value.duration_ms === null || isFiniteNumber(value.duration_ms)) {
-        item.duration_ms = value.duration_ms;
-      }
-      return item;
-    }
-    case "image": {
-      if (
-        typeof value.media_type !== "string" ||
-        typeof value.data !== "string"
-      ) {
-        return undefined;
-      }
-      const item: Extract<AcpToolResultItem, { type: "image" }> = {
-        type: "image",
-        media_type: value.media_type,
-        data: value.data,
-      };
-      if (value.label === null || typeof value.label === "string") {
-        item.label = value.label;
-      }
-      return item;
-    }
-    case "artifact": {
-      const artifact = parseArtifact(value.artifact);
-      return artifact && artifact !== null
-        ? { type: "artifact", artifact }
-        : undefined;
-    }
-    default:
-      return undefined;
-  }
-}
-
-/**
- * Recognize only the ACP structured-result shape. This intentionally stays
- * private to the store: raw tool output is untrusted provider data and the
- * public type module must remain a data-only contract.
- */
-function parseStructuredToolResult(
-  value: unknown,
-): AcpStructuredToolResult | undefined {
-  if (!isRecord(value) || typeof value.output !== "string") return undefined;
-
-  const result: AcpStructuredToolResult = { output: value.output };
-  if (typeof value.is_error === "boolean") result.is_error = value.is_error;
-  if (typeof value.truncated === "boolean") result.truncated = value.truncated;
-  if (value.original_bytes === null || isFiniteNumber(value.original_bytes)) {
-    result.original_bytes = value.original_bytes;
-  }
-  if (Array.isArray(value.items)) {
-    result.items = value.items
-      .map(parseToolResultItem)
-      .filter((item): item is AcpToolResultItem => item !== undefined);
-  }
-  if ("artifact" in value) {
-    const artifact = parseArtifact(value.artifact);
-    if (artifact !== undefined) result.artifact = artifact;
-  }
-  if (Array.isArray(value.extensions)) {
-    result.extensions = value.extensions
-      .filter(isRecord)
-      .map((extension) => ({ ...extension }));
-  }
-  return result;
 }
 
 /**
@@ -539,31 +369,6 @@ function nativeToolResultText(value: unknown, toolCallId: string): string | unde
     } else return undefined;
   }
   return texts.length ? texts.join("\n") : undefined;
-}
-
-/** Derive the small, stable fields used by compact tool-row rendering. */
-function structuredToolProjection(result: AcpStructuredToolResult): {
-  path?: string;
-  resultTitle?: string;
-  durationMs?: number;
-} {
-  const items = result.items ?? [];
-  const single = items.length === 1 ? items[0] : undefined;
-  if (single?.type === "file") {
-    return { path: single.path, resultTitle: single.operation };
-  }
-  if (single?.type === "diff") {
-    return { path: single.path, resultTitle: "diff" };
-  }
-
-  const command = items.find((item) => item.type === "command");
-  return command?.type === "command" &&
-    command.duration_ms !== null &&
-    command.duration_ms !== undefined &&
-    Number.isFinite(command.duration_ms) &&
-    command.duration_ms >= 0
-    ? { durationMs: command.duration_ms }
-    : {};
 }
 
 /**
@@ -942,7 +747,6 @@ function reduceSessionUpdate(
       const existing = findToolIn(segments, update.toolCallId);
       const status = update.status ?? existing?.status ?? "in_progress";
       const completionStatus = toolCompletionStatusOf(update);
-      const structuredResult = parseStructuredToolResult(update.rawOutput);
       const imageSources = toolResultImageSources(update.rawOutput, update.toolCallId, view.session_id);
       const standardTexts = update.content
         ?.flatMap((item) => item.type === "content" && item.content.type === "text"
@@ -952,12 +756,7 @@ function reduceSessionUpdate(
       const output =
         standardOutput ??
         nativeToolResultText(update.rawOutput, update.toolCallId) ??
-        structuredResult?.output ??
         stringifyToolValue(update.rawOutput);
-      const structuredProjection = structuredResult
-        ? structuredToolProjection(structuredResult)
-        : {};
-      const structuredError = structuredResult?.is_error === true;
       if (!existing) {
         // ACP does not guarantee that tool_call precedes tool_call_update on
         // every transport. Retain a minimal segment so the later call can
@@ -970,14 +769,12 @@ function reduceSessionUpdate(
           status,
           ...(completionStatus ? { completionStatus } : {}),
           ...(output !== undefined ? { output, detail: output } : {}),
-          ...(structuredResult ? { structuredResult } : {}),
           ...(imageSources !== undefined ? { imageSources } : {}),
-          ...structuredProjection,
           ...(update.content !== undefined
             ? { fileChanges: standardFileChanges(update.content, view.session_id) }
             : {}),
           streaming: isToolRunning(status),
-          isError: status === "failed" || structuredError,
+          isError: status === "failed",
         });
         break;
       }
@@ -996,17 +793,12 @@ function reduceSessionUpdate(
         existing.output = output;
         existing.detail = output ?? existing.input;
       }
-      if (structuredResult) {
-        existing.structuredResult = structuredResult;
-        existing.detail = output ?? existing.input;
-        Object.assign(existing, structuredProjection);
-      }
       if (update.content !== undefined) {
         existing.fileChanges = standardFileChanges(update.content, view.session_id);
       }
       existing.streaming = isToolRunning(existing.status);
       existing.isError =
-        existing.isError || existing.status === "failed" || structuredError;
+        existing.isError || existing.status === "failed";
       break;
     }
     case "plan": {

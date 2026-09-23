@@ -782,11 +782,6 @@
   gap: 4px;
 }
 
-.ask-user__free-hint {
-  font-size: calc(11.5px + var(--ui-font-delta));
-  color: var(--text-tertiary);
-}
-
 .ask-user__textarea {
   width: 100%;
   box-sizing: border-box;
@@ -2127,10 +2122,6 @@ button.composer__context-item {
   flex-direction: column;
 }
 
-.file-path-details__head {
-  flex-shrink: 0;
-}
-
 .file-path-details__body {
   display: flex;
   flex-direction: column;
@@ -2172,11 +2163,6 @@ button.composer__context-item {
   border-radius: var(--radius-md);
   background: var(--bg-hover);
   border: 1px solid var(--border-subtle);
-}
-
-.file-path-details__actions {
-  flex-shrink: 0;
-  margin-top: 4px;
 }
 
 .composer__input {
@@ -2375,11 +2361,6 @@ button.composer__context-item {
   white-space: nowrap;
 }
 
-
-.composer__spacer {
-  flex: 1;
-  min-width: 8px;
-}
 
 .composer-plus-trigger.is-open {
   transform: none;

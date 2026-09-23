@@ -1,5 +1,6 @@
 import type { Attachment } from "@/lib/attachments";
 import { previewStoredAsSlash } from "@/lib/draftDoc";
+import { randomUuid } from "./randomUuid";
 import { isSessionBusy, type SessionState } from "@/lib/session";
 
 /** Max follow-ups kept per session (FIFO drop oldest when exceeded). */
@@ -24,7 +25,7 @@ export function queueSessionKey(sessionId: string | null | undefined): string {
 }
 
 function newQueueId(): string {
-  return `q-${globalThis.crypto.randomUUID()}`;
+  return `q-${randomUuid()}`;
 }
 
 export function makeQueuedSend(input: {

@@ -27,6 +27,7 @@ import {
   turnLatencyNow,
 } from "@/lib/turnLatency";
 import { formatFrontendError, reportFrontendError } from "@/lib/frontendDiagnostics";
+import { randomUuid } from "@/lib/randomUuid";
 import { isViewingSendTarget } from "@/lib/viewFocus";
 import type {
   EnsureConnected,
@@ -188,7 +189,7 @@ export function useSessionSend({
       const ts = Math.floor(turnStartedAtMs);
       const userMessageId = `u-${ts}`;
       const pendingAssistantId = `a-pending-${ts}`;
-      const requestId = queuedRequestId ?? globalThis.crypto.randomUUID();
+      const requestId = queuedRequestId ?? randomUuid();
       const dropIds = fromQueue
         ? new Set([userMessageId, pendingAssistantId])
         : new Set([pendingAssistantId]);

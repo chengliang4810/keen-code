@@ -135,14 +135,3 @@ export function highlightChatCodeLines(
   linesCache.set(key, promise);
   void promise.then((lines) => callback(lines));
 }
-
-/** 供测试与内存审计读取的缓存规模。 */
-export function getShikiChatHighlighterStats(): {
-  languages: number;
-  cachedLines: number;
-} {
-  return {
-    languages: loadedLanguages.size,
-    cachedLines: linesCache.size,
-  };
-}

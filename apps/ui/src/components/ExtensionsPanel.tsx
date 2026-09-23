@@ -75,7 +75,7 @@ import {
 
 export type ExtensionsTabId = "market" | "plugins" | "skills" | "mcp";
 
-export interface ExtensionsPanelProps {
+interface ExtensionsPanelProps {
   locale: Locale;
   /** 当前工作台项目路径，供项目级 Skills、插件与 MCP 查询使用。 */
   projectPath?: string | null;

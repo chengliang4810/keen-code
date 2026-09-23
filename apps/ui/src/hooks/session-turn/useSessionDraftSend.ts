@@ -5,11 +5,13 @@ import { buildGoalDraft } from "@/lib/goalDraft";
 import { localizeUiError } from "@/lib/session";
 import type { Locale } from "@/i18n";
 import { shouldEnqueueSend } from "@/lib/sendQueue";
+import { isViewingSendTarget } from "@/lib/viewFocus";
 import type { SessionSnapshot } from "@/lib/session";
 import type {
   ExecuteSend,
   Ref,
   SessionTurnQueuePort,
+  SessionTurnRuntimePort,
   SessionTurnUiPort,
 } from "./types";
 
@@ -25,6 +27,7 @@ export interface UseSessionDraftSendOptions {
   planModeSessionKey: string | null;
   ultraModeSessionKey: string | null;
   executeSend: ExecuteSend;
+  runtime: Pick<SessionTurnRuntimePort, "currentViewFocus">;
   sendQueue: SessionTurnQueuePort;
   ui: Pick<
     SessionTurnUiPort,
@@ -58,9 +61,13 @@ export function useSessionDraftSend({
   planModeSessionKey,
   ultraModeSessionKey,
   executeSend,
+  runtime,
   sendQueue,
   ui,
 }: UseSessionDraftSendOptions): SessionDraftSendResult {
+  const {
+    currentViewFocus,
+  } = runtime;
   const {
     setDraft,
     setAttachments,
@@ -133,6 +140,9 @@ export function useSessionDraftSend({
     clearComposerAfterSubmit();
     // 直接发送失败或抛异常时输入框与时间线都已清空：把原文与附件回填输入框，
     // 与队列路径保留消息的行为对齐，避免用户文字丢失。
+    const originView = currentViewFocus();
+    const stillViewing = () =>
+      isViewingSendTarget(originView, currentViewFocus(), sessionId);
     try {
       const sent = await executeSend({
         storedDisplay,
@@ -144,8 +154,11 @@ export function useSessionDraftSend({
       });
       if (sent) return;
     } catch (cause) {
+      if (!stillViewing()) return;
       ui.setLocalError(localizeUiError(cause, locale));
     }
+    // 等待连接期间用户已切走时不得回填，避免把旧会话的草稿写进新视图。
+    if (!stillViewing()) return;
     setDraft(storedDisplay);
     setAttachments(att);
     if (createGoal) setGoalModeSessionKey(key);
@@ -153,6 +166,7 @@ export function useSessionDraftSend({
     attachments,
     clearComposerAfterSubmit,
     connecting,
+    currentViewFocus,
     draft,
     executeSend,
     goalModeSessionKey,

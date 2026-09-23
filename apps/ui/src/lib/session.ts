@@ -3,10 +3,7 @@ import { GoalDraftValidationError } from "./goalDraft";
 import { LocalGitError } from "./gitError";
 import { t, type Locale, type MessageKey } from "../i18n";
 import { AcpRpcError, type AcpRpcErrorReason } from "./acp/client";
-import type {
-  AcpStructuredToolResult,
-  AcpSystemNotificationLevel,
-} from "./acp/types";
+import type { AcpSystemNotificationLevel } from "./acp/types";
 import type { FileChangeReference } from "./acp/fileChanges";
 import type { ToolCompletionStatus } from "./acp/events";
 import { buildErrorDeck, deckCodeFromAgent } from "./errorDeck";
@@ -95,8 +92,6 @@ export interface MessageToolSegment {
   resultTitle?: string | null;
   /** 工具执行耗时，单位毫秒。 */
   durationMs?: number | null;
-  /** ACP 工具调用返回的结构化结果。 */
-  structuredResult?: AcpStructuredToolResult | null;
   /** 仅由 ACP 标准 Diff 投影的文件快照。 */
   fileChanges?: MessageFileChange[];
   /** 工具实际返回的图片来源；优先使用不可变 Session 快照。 */

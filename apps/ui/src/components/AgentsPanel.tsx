@@ -36,7 +36,7 @@ import { Tip } from "@/components/ui/tooltip";
 import { shortPathLabel } from "@/lib/extensionsUi";
 import { ProviderModelMenu } from "@/components/ProviderModelMenu";
 
-export interface AgentsPanelProps {
+interface AgentsPanelProps {
   locale: Locale;
   /** 当前工作台项目路径；为空时只查询全局与内置子智能体。 */
   projectPath?: string | null;

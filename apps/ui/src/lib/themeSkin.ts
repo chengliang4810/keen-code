@@ -78,19 +78,19 @@ export const WALLPAPER_ACCEPT =
   "image/jpeg,image/png,image/webp,image/gif,image/jpg,video/mp4,video/webm";
 
 /** Longest edge after compress for still images (keeps IDB payload modest). */
-export const WALLPAPER_MAX_EDGE = 1920;
+const WALLPAPER_MAX_EDGE = 1920;
 
 /** Max still-image blob bytes after JPEG compress (~1.6 MiB payload). */
-export const WALLPAPER_MAX_IMAGE_BYTES = 1_600_000;
+const WALLPAPER_MAX_IMAGE_BYTES = 1_600_000;
 
 /** Reject image / gif source files larger than this before decode. */
-export const WALLPAPER_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
+const WALLPAPER_MAX_SOURCE_BYTES = 12 * 1024 * 1024;
 
 /** Reject video source files larger than this (videos are stored as-is). */
 export const WALLPAPER_MAX_VIDEO_BYTES = 200 * 1024 * 1024;
 
 /** Video mimetypes we accept for wallpaper (browser can autoplay when muted). */
-export const WALLPAPER_ALLOWED_VIDEO_MIMES: ReadonlySet<string> = new Set([
+const WALLPAPER_ALLOWED_VIDEO_MIMES: ReadonlySet<string> = new Set([
   "video/mp4",
   "video/webm",
 ]);

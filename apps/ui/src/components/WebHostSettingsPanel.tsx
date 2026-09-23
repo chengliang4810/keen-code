@@ -16,7 +16,7 @@ const MAX_WEB_HOST_TOKEN_BYTES = 512;
 
 type WebHostAction = "status" | "start" | "stop" | "token" | null;
 
-export interface WebHostSettingsPanelProps {
+interface WebHostSettingsPanelProps {
   locale: Locale;
   settings: api.WebHostSettings;
   onSettingsChange: (settings: api.WebHostSettings) => void;

@@ -12,7 +12,7 @@ import {
 } from "@/components/icons";
 
 /** 输入框目标栏属性。 */
-export interface ComposerGoalProgressProps {
+interface ComposerGoalProgressProps {
   /** 当前界面语言。 */
   locale: Locale;
   /** ACP Goal 事件归约出的当前目标投影。 */

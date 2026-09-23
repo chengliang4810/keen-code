@@ -53,7 +53,7 @@ function patchCjkSingleTilde(plugin: CjkPlugin): CjkPlugin {
 }
 
 /** 聊天与资源面板共用的 KaTeX 配置(行内单 `$` 开启)。 */
-export const chatMathPlugin = createMathPlugin({ singleDollarTextMath: true });
+const chatMathPlugin = createMathPlugin({ singleDollarTextMath: true });
 
 /**
  * 不注册 @streamdown/code / @streamdown/mermaid:代码高亮由自家

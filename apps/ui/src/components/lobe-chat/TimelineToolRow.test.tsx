@@ -697,16 +697,6 @@ describe("TimelineToolRow", () => {
           status: "completed",
           path: "README.md",
           durationMs: 118,
-          structuredResult: {
-            output: "读取完成",
-            items: [
-              {
-                type: "file",
-                path: "README.md",
-                operation: "read",
-              },
-            ],
-          },
         },
       }),
     );
@@ -731,18 +721,7 @@ describe("TimelineToolRow", () => {
           status: "failed",
           isError: true,
           durationMs: 1437,
-          structuredResult: {
-            output: "AssertionError",
-            is_error: true,
-            items: [
-              {
-                type: "command",
-                command: "pnpm test",
-                exit_code: 1,
-                stderr: "AssertionError",
-              },
-            ],
-          },
+          output: "AssertionError",
         },
       }),
     );
@@ -878,9 +857,6 @@ describe("TimelineToolDetailBody", () => {
   const baseFlags = {
     failed: false,
     cancelled: false,
-    readTool: false,
-    editTool: false,
-    commandTool: false,
     rawAllowed: true,
   };
 
@@ -910,7 +886,6 @@ describe("TimelineToolDetailBody", () => {
       React.createElement(TimelineToolDetailBody, {
         locale: "zh",
         ...baseFlags,
-        readTool: true,
         rawAllowed: false,
         tool: {
           kind: "tool",
@@ -934,7 +909,6 @@ describe("TimelineToolDetailBody", () => {
         locale: "zh",
         ...baseFlags,
         failed: true,
-        commandTool: true,
         rawAllowed: false,
         tool: {
           kind: "tool",

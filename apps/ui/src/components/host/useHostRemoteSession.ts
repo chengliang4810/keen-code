@@ -9,6 +9,7 @@ import {
   type SessionUpdateDeliveryEnvelope,
 } from "@/lib/acp/events";
 import { parseElicitationPayload } from "@/lib/elicitation";
+import { randomUuid } from "@/lib/randomUuid";
 import { buildRemotePrompt } from "@/lib/remotePrompt";
 import type { AskUserPayload } from "@/lib/session";
 import type { HostTransportAdapter } from "./hostMode";
@@ -181,7 +182,7 @@ async function rpcRequest<T>(
   transport: HostTransportAdapter,
   method: string,
   params: JsonRecord,
-  requestId = `remote-${globalThis.crypto.randomUUID()}`,
+  requestId = `remote-${randomUuid()}`,
 ): Promise<T> {
   if (!transport.dispatch) throw new Error("远程 Host transport 不支持 ACP 请求。");
   const response = await transport.dispatch({ jsonrpc: "2.0", id: requestId, method, params });
@@ -483,7 +484,7 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
     const sessionId = selectedRef.current;
     const value = text.trim();
     if (!transport || !sessionId || (!value && attachments.length === 0) || sending) return;
-    const requestId = `remote-turn-${globalThis.crypto.randomUUID()}`;
+    const requestId = `remote-turn-${randomUuid()}`;
     setSending(true);
     setError(null);
     updateSession(sessionId, (state) => ({ ...state, status: "running", activeTurnId: requestId }));

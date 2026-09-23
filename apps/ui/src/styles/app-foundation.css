@@ -407,17 +407,6 @@ textarea,
   pointer-events: none;
 }
 
-.sidebar--collapsed {
-  width: 0 !important;
-  min-width: 0 !important;
-  max-width: 0 !important;
-  padding: 0 !important;
-  border: none !important;
-  opacity: 0;
-  overflow: hidden;
-  pointer-events: none;
-}
-
 /* ZCode desktop sidebar: a fixed 48px drag band followed by dense navigation. */
 .sidebar-chrome {
   display: flex;
@@ -453,17 +442,6 @@ textarea,
 /* macOS 全屏：红绿灯收入菜单栏悬停区，侧栏按钮回到与品牌行同一左缘。 */
 .platform-mac .app-shell.is-fullscreen .sidebar-chrome {
   padding-left: 16px;
-}
-
-/* Panel toggle next to traffic lights — no extra left margin; keep drawable */
-.sidebar-chrome > .chrome-btn--traffic {
-  margin-left: 0;
-  margin-right: 2px;
-  flex-shrink: 0;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
-  position: relative;
-  z-index: 2;
 }
 
 /* Avoid Tip/layout making the traffic-adjacent control look like an empty slab */
@@ -1415,15 +1393,6 @@ textarea,
   transform: none;
   isolation: auto;
 }
-.cpm__actions {
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  gap: 4px;
-  flex-shrink: 0;
-  padding-top: 6px;
-  border-top: 1px solid var(--border-subtle);
-}
 /* Project list keeps the panel stable and scrolls independently. */
 .cpm__list {
   display: flex;
@@ -1439,9 +1408,6 @@ textarea,
   align-items: center;
   margin: 0;
   flex-shrink: 0;
-}
-.cpm__pop .cpm__item .cmm__opt-check {
-  margin-top: 0;
 }
 
 /* ===== KeenCode settings full page ===== */
@@ -1580,13 +1546,6 @@ textarea,
   flex-wrap: wrap;
   max-width: 100%;
   pointer-events: auto;
-}
-
-.settings-page__tabs .settings-seg__btn {
-  pointer-events: auto;
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-  app-region: no-drag;
 }
 
 .settings-page__nav-group {
@@ -1998,20 +1957,6 @@ textarea,
   background: color-mix(in srgb, var(--text-primary) 10%, transparent);
 }
 
-.app-update-progress__bar {
-  height: 100%;
-  min-width: 2px;
-  border-radius: inherit;
-  background: var(--accent);
-  transition: width var(--motion-enter) var(--ease-out);
-}
-
-.app-update-progress__track.is-indeterminate .app-update-progress__bar {
-  width: 38%;
-  min-width: 38%;
-  animation: app-update-indeterminate 1.2s ease-in-out infinite;
-}
-
 .app-update-progress__detail {
   color: var(--text-tertiary);
   font-size: calc(12px + var(--ui-font-delta));
@@ -2032,33 +1977,10 @@ textarea,
   margin-top: 2px;
 }
 
-@keyframes app-update-indeterminate {
-  from {
-    transform: translateX(-110%);
-  }
-  to {
-    transform: translateX(275%);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .app-update-progress__bar {
-    transition: none;
-  }
-
-  .app-update-progress__track.is-indeterminate .app-update-progress__bar {
-    animation: none;
-  }
-}
-
 @media (max-width: 920px) {
   .settings-about__features {
     grid-template-columns: 1fr;
   }
-}
-
-.settings-row__hint.is-danger {
-  color: var(--danger);
 }
 
 .settings-row__hint {
@@ -2232,14 +2154,9 @@ textarea,
     align-self: flex-end;
   }
 
-  .settings-row:not(.settings-row--stack) > .settings-input--compact,
-  .settings-row:not(.settings-row--stack) > .settings-seg {
+  .settings-row:not(.settings-row--stack) > .settings-input--compact {
     width: 100%;
     flex-basis: auto;
-  }
-
-  .settings-row:not(.settings-row--stack) > .settings-seg .settings-seg__btn {
-    flex: 1;
   }
 
   .web-host-settings__status,
@@ -2263,20 +2180,6 @@ textarea,
 .settings-skin-grid {
   width: 100%;
   margin-top: 4px;
-}
-
-@media (forced-colors: active) {
-  .settings-seg {
-    border: 1px solid CanvasText;
-    background: Canvas;
-  }
-
-  .settings-seg__btn[data-active] {
-    background: Highlight;
-    color: HighlightText;
-    box-shadow: none;
-  }
-
 }
 
 /* Custom wallpaper upload (Appearance) */

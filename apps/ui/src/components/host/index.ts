@@ -12,7 +12,6 @@ export type {
   WebLoginPanelProps,
   WebLoginStatus,
 } from "./WebLoginPanel";
-export { isHostMode } from "./hostMode";
 export {
   getInjectedHostTransportAdapter,
   parseHostMode,

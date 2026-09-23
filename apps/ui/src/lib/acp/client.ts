@@ -2,6 +2,7 @@
 
 import { invoke, isTauri } from "../tauri";
 import { formatFrontendError, reportFrontendError } from "../frontendDiagnostics";
+import { randomUuid } from "../randomUuid";
 import type { AcpJsonRpcId } from "./events";
 import { getInjectedHostTransportAdapter } from "@/components/host/hostMode";
 
@@ -131,7 +132,7 @@ async function requestRaw<T>(
   params: Record<string, unknown>,
   requestId?: AcpJsonRpcId,
 ): Promise<T> {
-  const id = requestId ?? globalThis.crypto.randomUUID();
+  const id = requestId ?? randomUuid();
   try {
     const raw = await dispatch({
       jsonrpc: "2.0",

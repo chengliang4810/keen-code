@@ -7,7 +7,7 @@
  */
 
 /** File/fence spellings accepted by both chat fences and resource previews. */
-export const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
+const LANGUAGE_ALIASES: Readonly<Record<string, string>> = {
   bash: "bash",
   cjs: "javascript",
   conf: "ini",

@@ -5,6 +5,7 @@
 
 import { pathBasename } from "./filePath";
 import { stripAnsi } from "./session";
+import { extractToolInputFields, normalizeToolName } from "./toolInputFields";
 
 export type ToolDisplayKind =
   | "bash"
@@ -33,26 +34,6 @@ export interface ToolDisplayInfo {
 /** 工具组标题支持的界面语言。 */
 type ToolDisplayLocale = "zh" | "zh-TW" | "en";
 
-/** 工具输入中可用于工具组摘要的字段。 */
-interface ToolSummaryInputFields {
-  /** 文件或目录路径。 */
-  path?: string;
-  /** 文本搜索模式。 */
-  pattern?: string;
-  /** 终端执行命令。 */
-  command?: string;
-  /** 网页或元工具的查询。 */
-  query?: string;
-  /** WebFetch 目标网址。 */
-  url?: string;
-  /** ExecuteExtraTool 目标工具名。 */
-  toolName?: string;
-  /** Skill 或 PluginCommand 的当前 name 字段。 */
-  extensionName?: string;
-  /** AskUser 首个问题的 prompt。 */
-  question?: string;
-}
-
 /** 生成工具组摘要所需的最小工具结构。 */
 export interface ToolSummaryInput {
   /** 工具分类或协议名称。 */
@@ -71,9 +52,9 @@ export interface ToolSummaryInput {
   waitOutcome?: string | null;
 }
 
-/** 把工具名称标准化为当前界面分类使用的稳定键。 */
+/** 把工具名称标准化为当前界面分类使用的稳定键；空值按空串处理。 */
 function normalizedToolName(value: string | null | undefined): string {
-  return (value || "").trim().toLowerCase().replace(/[\s./-]+/g, "_");
+  return normalizeToolName(value ?? "");
 }
 
 /** 从当前命令工具参数生成展示文本；Git 参数只作可读引用，不作为 Shell 脚本执行。 */
@@ -136,61 +117,6 @@ function clip(s: string, max = 56): string {
   const t = s.trim();
   if (t.length <= max) return t;
   return `${t.slice(0, max - 1).trimEnd()}…`;
-}
-
-/** 解析工具输入，只提取可安全展示的路径、模式和命令。 */
-function parseToolSummaryInput(input?: string | null): ToolSummaryInputFields {
-  if (!input?.trim()) return {};
-  try {
-    const value = JSON.parse(input) as Record<string, unknown>;
-    const path = [value.file_path, value.folder_path, value.path].find(
-      (item): item is string => typeof item === "string" && !!item.trim(),
-    );
-    const pattern =
-      typeof value.pattern === "string" && value.pattern.trim()
-        ? value.pattern
-        : undefined;
-    const command = [value.command, value.cmd].find(
-      (item): item is string => typeof item === "string" && !!item.trim(),
-    );
-    const query =
-      typeof value.query === "string" && value.query.trim()
-        ? value.query
-        : undefined;
-    const url =
-      typeof value.url === "string" && value.url.trim() ? value.url : undefined;
-    const toolName =
-      typeof value.tool_name === "string" && value.tool_name.trim()
-        ? value.tool_name
-        : undefined;
-    const extensionName =
-      typeof value.name === "string" && value.name.trim()
-        ? value.name
-        : undefined;
-    const questions = Array.isArray(value.questions) ? value.questions : [];
-    const question = questions
-      .map((item) =>
-        item && typeof item === "object"
-          ? (item as Record<string, unknown>).prompt
-          : undefined,
-      )
-      .find(
-        (item): item is string =>
-          typeof item === "string" && !!item.trim(),
-      );
-    return {
-      path,
-      pattern,
-      command,
-      query,
-      url,
-      toolName,
-      extensionName,
-      question,
-    };
-  } catch {
-    return {};
-  }
 }
 
 /** 返回工具分类对应的进行中动作。 */
@@ -405,15 +331,15 @@ export function summarizeRunningTool(
     return "正在等待子任务完成…";
   }
   const kind = classifyToolKind(tool.kind, tool.title);
-  const fields = parseToolSummaryInput(tool.input);
+  const fields = extractToolInputFields(tool.input);
   const explicitPath = fields.path || tool.path || "";
   const target =
     kind === "bash"
       ? toolCommandText(tool)
       : kind === "web"
         ? fields.query || fields.url
-        : kind === "meta"
-          ? fields.query || fields.toolName
+          : kind === "meta"
+            ? fields.query || fields.targetToolName
           : kind === "skill" || kind === "plugin-command"
             ? fields.extensionName
             : kind === "ask"

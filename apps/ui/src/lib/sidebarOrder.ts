@@ -1,7 +1,7 @@
 const SESSION_ORDER_KEY = "keencode.sidebar-session-order";
 const SESSION_SORT_MODE_KEY = "keencode.sidebar-session-sort-mode";
 
-export function loadSessionOrder(storage: Storage = localStorage): string[] {
+function loadSessionOrder(storage: Storage = localStorage): string[] {
   const value = storage.getItem(SESSION_ORDER_KEY);
   if (value === null) return [];
   const parsed: unknown = JSON.parse(value);
