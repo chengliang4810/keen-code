@@ -2,7 +2,11 @@
 @import "tailwindcss" source(none);
 @import "@appica/ui-react/styles.css";
 @source "../";
-@source "../../node_modules/@appica/ui-react/dist";
+/* 官方组件的 utility 类由本项目的 Tailwind 编译。@source 只扫描 vite 项目根
+ * （apps/ui）内部的路径，仓库根 node_modules 在项目根之外会静默扫描为空，
+ * 因此 postinstall 会把官方 dist 同步到 apps/ui/appica-scan（见
+ * tooling/scripts/sync-appica-scan.mjs），这里扫描该同步目录。 */
+@source "../../appica-scan";
 
 @theme inline {
   --font-sans: var(--font-sans);

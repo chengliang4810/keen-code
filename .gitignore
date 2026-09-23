@@ -81,3 +81,6 @@ __pycache__/
 /.zcode/
 /result.json
 /vendor/
+
+# Appica UI 编译产物同步目录，供 Tailwind @source 扫描（见 tooling/scripts/sync-appica-scan.mjs）
+/apps/ui/appica-scan/
