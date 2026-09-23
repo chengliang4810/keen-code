@@ -2591,6 +2591,8 @@ async fn business_websocket_loop(
     }
     // 后台 dispatch 任务写 socket 失败时置位；主循环在下轮 select 后退出。
     let send_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // 并发 dispatch 上限对齐 IPC server 的 permit 模式，防止单连接洪泛。
+    let dispatch_permits = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
     loop {
         if send_failed.load(std::sync::atomic::Ordering::Relaxed) {
             break;
@@ -2617,7 +2619,12 @@ async fn business_websocket_loop(
                 let dispatch_connection = connection_id.clone();
                 let dispatch_sender = std::sync::Arc::clone(&sender);
                 let dispatch_failed = std::sync::Arc::clone(&send_failed);
+                let dispatch_permit = std::sync::Arc::clone(&dispatch_permits);
                 tokio::spawn(async move {
+                    let _permit = dispatch_permit
+                        .acquire()
+                        .await
+                        .expect("Web dispatch semaphore 必须保持开放");
                     match dispatch_adapter.dispatch_acp(&dispatch_connection, &raw).await {
                         Ok(Some(response)) => {
                             let mut writer = dispatch_sender.lock().await;
