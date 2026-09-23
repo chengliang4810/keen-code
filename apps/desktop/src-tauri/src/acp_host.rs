@@ -400,8 +400,10 @@ pub(crate) fn install(
         .map_err(|_| "ACP Host 已经初始化".to_owned())?;
     // 后台任务完成 → 主对话通知泵（ZCode 语义）：任务终态格式化为
     // task-notification 并以 detached Prompt 注入会话，忙时自动排队。
+    // 必须用 Tauri 的 async runtime：install 在 setup 阶段执行，此时没有
+    // Tokio reactor 上下文，tokio::spawn 会直接 panic 并 abort 进程。
     let notification_rx = notification_runtime.subscribe_task_completions();
-    tokio::spawn(run_task_notification_pump(
+    tauri::async_runtime::spawn(run_task_notification_pump(
         Arc::clone(&host),
         notification_rx,
     ));
