@@ -27,7 +27,6 @@ dist-installers
 Thumbs.db
 
 # Tauri / Rust
-apps/desktop/target
 apps/desktop/gen/schemas
 
 # Local runtime data & secrets
@@ -68,6 +67,7 @@ __pycache__/
 /.vitest/
 /.pnpm-store/
 /.github/tauri.release.conf.json
+/out/
 
 # KeenCode Agent 生成的临时报告
 .keencode/plans/

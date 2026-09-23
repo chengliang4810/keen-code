@@ -1,9 +1,0 @@
-{
-  "steps": [
-    { "do": "eval", "js": "document.querySelector('.sidebar [role=button][aria-expanded]') ? 'sidebar-ok' : 'no-sidebar'", "desc": "侧栏存在性" },
-    { "do": "clicktext", "role": "button", "text": "搜索" },
-    { "do": "wait", "ms": 700 },
-    { "do": "eval", "js": "(() => { const row=[...document.querySelectorAll('.search-panel button.search-panel__row')].find(e=>e.textContent.includes('e2e-test-project')); if(!row) return 'row-not-found'; const r=row.getBoundingClientRect(); const cx=Math.round(r.x+r.width/2), cy=Math.round(r.y+r.height/2); const hit=document.elementFromPoint(cx,cy); return JSON.stringify({center:{cx,cy}, hitTag:hit?hit.tagName:null, hitClass:hit?(hit.className||'').toString().slice(0,60):null, hitText:hit?(hit.textContent||'').slice(0,30):null, hitIsRowOrChild: hit? row.contains(hit):null, dlgOpen:!!document.querySelector('.search-panel')}); })()", "desc": "检查行中心坐标命中的实际元素" },
-    { "do": "eval", "js": "(() => { const r=document.querySelector('.search-panel')?.getBoundingClientRect(); return JSON.stringify({dlg:r?{x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)}:null, scrollY:window.scrollY, innerH:window.innerHeight}); })()", "desc": "读弹窗容器 rect 与视口" }
-  ]
-}

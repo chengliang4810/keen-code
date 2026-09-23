@@ -1,7 +1,0 @@
-{"steps":[
-  {"do":"type","css":".composer__input","text":"请只回复两个字：你好"},
-  {"do":"eval","js":"document.querySelector('.composer__input').innerText"},
-  {"do":"clicktext","role":"button","text":"发送"},
-  {"do":"wait","ms":3000},
-  {"do":"eval","js":"document.body.innerText.slice(0,600)"}
-]}

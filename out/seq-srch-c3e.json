@@ -1,9 +1,0 @@
-{
-  "steps": [
-    { "do": "eval", "js": "(() => { window.__clicks=[]; const rec=(e)=>{ if(window.__clicks.length<6) window.__clicks.push({type:e.type,x:Math.round(e.clientX),y:Math.round(e.clientY),target:(e.target.tagName||'')+':'+(e.target.className||'').toString().slice(0,40)}); }; for(const t of ['pointerdown','mousedown','click']) document.addEventListener(t, rec, true); return 'listeners-on'; })()", "desc": "document 级捕获监听记录真实点击坐标" },
-    { "do": "eval", "js": "(() => { const row=[...document.querySelectorAll('.search-panel button.search-panel__row')].find(e=>e.textContent.includes('e2e-test-project')); const r=row.getBoundingClientRect(); return JSON.stringify({rowCenter:{x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}, dlgOpen:!!document.querySelector('.search-panel')}); })()", "desc": "记录行中心坐标" },
-    { "do": "clicktext", "role": "button", "text": "e2e-test-project" },
-    { "do": "wait", "ms": 500 },
-    { "do": "eval", "js": "JSON.stringify({recorded:window.__clicks, dlgOpen:!!document.querySelector('.search-panel')})", "desc": "对比监听记录与预期坐标" }
-  ]
-}

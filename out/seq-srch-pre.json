@@ -1,6 +1,0 @@
-{
-  "steps": [
-    { "do": "eval", "js": "(() => { const rows=[...document.querySelectorAll('.sidebar [role=button]')].filter(e=>['你好','以森林为题的尽可能长的文章'].includes(e.textContent.trim())); return JSON.stringify(rows.map(e=>({t:e.textContent.trim().slice(0,6), cls:e.className.slice(0,80), ds:e.getAttribute('data-state')}))); })()", "desc": "对比侧栏会话行选中态 DOM 特征" },
-    { "do": "eval", "js": "(() => { const head=[...document.querySelectorAll('.sidebar button')].find(e=>e.textContent.trim()==='项目'); return JSON.stringify({projGroupExpanded:head?head.getAttribute('aria-expanded'):null}); })()", "desc": "读项目分组开关状态" }
-  ]
-}
