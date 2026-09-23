@@ -33,9 +33,14 @@ pub fn set(app: &AppHandle, instructions: String) -> Result<String> {
 }
 
 /// 读取当前设备唯一的全局用户自定义指令（IPC 入口）。
+///
+/// 异步命令 + `spawn_blocking`：同步命令在 Tauri v2 中内联运行于主线程，
+/// 读取（可能较大的）指令文件会阻塞窗口事件处理。
 #[tauri::command]
-pub fn custom_instructions_get(app: AppHandle) -> Result<String, String> {
-    get(&app).map_err(|error| error.to_string())
+pub async fn custom_instructions_get(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || get(&app).map_err(|error| error.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// 校验并保存当前设备唯一的全局用户自定义指令（IPC 入口）。

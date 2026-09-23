@@ -1245,11 +1245,18 @@ pub fn memories_reset(memories: State<'_, Arc<MemoryService>>) -> Result<(), Str
 }
 
 /// 读取长期记忆正文；文件尚不存在时为空。
+///
+/// 异步命令 + `spawn_blocking`：记忆正文可能较大，同步读取会阻塞主线程。
 #[tauri::command]
-pub fn memories_get(memories: State<'_, Arc<MemoryService>>) -> Result<String, String> {
-    memories
-        .read_memory_file()
-        .map_err(|error| error.to_string())
+pub async fn memories_get(memories: State<'_, Arc<MemoryService>>) -> Result<String, String> {
+    let memories = Arc::clone(memories.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        memories
+            .read_memory_file()
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 保存用户编辑的长期记忆正文。

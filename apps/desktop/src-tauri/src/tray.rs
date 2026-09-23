@@ -302,8 +302,13 @@ fn handle_tray_icon_event(tray: &TrayIcon, event: TrayIconEvent) {
 
 #[tauri::command]
 /// 用当前界面语言的投影替换托盘菜单。
-pub fn tray_set_menu(app: AppHandle, menu: TrayMenuPayload) -> Result<(), String> {
-    apply_menu(&app, &menu)
+///
+/// 异步命令 + `spawn_blocking`：构建原生菜单涉及 AppKit 调用与磁盘读取
+/// （图标、本地化），同步执行会阻塞主线程；启动路径上会与其他命令排队。
+pub async fn tray_set_menu(app: AppHandle, menu: TrayMenuPayload) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || apply_menu(&app, &menu))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

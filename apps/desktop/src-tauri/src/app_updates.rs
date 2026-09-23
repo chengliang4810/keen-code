@@ -473,12 +473,18 @@ fn begin_update_download(
 }
 
 /// 读取当前构建版本及后台下载进度，不访问网络。
+///
+/// 异步命令 + `spawn_blocking`：该命令持下载状态锁并读取构建信息，
+/// 同步执行会占用主线程；启动路径上它与其他命令并发调用。
 #[tauri::command]
-pub fn app_update_info(
+pub async fn app_update_info(
     app: AppHandle,
     pending: State<'_, PendingUpdate>,
 ) -> Result<AppUpdateStatus, String> {
-    pending_status(&app, pending.inner())
+    let pending = pending.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || pending_status(&app, &pending))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 /// 读取 GitHub Releases 的签名更新清单；发现更新后立即开始后台预下载。
