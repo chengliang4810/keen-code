@@ -1355,6 +1355,20 @@ pub(super) fn sort_plugin_probes(measured: &mut [(String, Option<Duration>)]) {
     measured.sort_by_key(|(_, elapsed)| elapsed.unwrap_or(Duration::MAX));
 }
 
+/// Windows 本地绝对路径：盘符形态 `C:\path` / `C:/path`，或 UNC `\\server\share`。
+/// 盘符相对形态（`C:repo`）不算绝对路径，仍走后续 URL 校验被拒绝。
+fn is_windows_absolute_path(url: &str) -> bool {
+    let bytes = url.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    {
+        return true;
+    }
+    url.starts_with("\\\\")
+}
+
 /// 校验 marketplace/plugin Git 来源 URL。`ext::` 传输会在本机执行外部
 /// 命令，前导 `-` 的值会被 git 解析为选项，控制字符一律拒绝。
 ///
@@ -1373,7 +1387,11 @@ pub(super) fn validate_git_source_url(
     if url.chars().any(char::is_control) {
         return Err(format!("{label} Git URL 含控制字符"));
     }
-    if allow_local && (url.starts_with('/') || url.starts_with("file://")) {
+    // Windows 盘符路径会被 url::Url 解析成 scheme `c`，必须在 URL 解析前
+    // 按本地路径放行，否则市场级本机来源在 Windows 上永远校验失败。
+    if allow_local
+        && (url.starts_with('/') || url.starts_with("file://") || is_windows_absolute_path(url))
+    {
         return Ok(());
     }
     if let Ok(parsed) = url::Url::parse(url) {

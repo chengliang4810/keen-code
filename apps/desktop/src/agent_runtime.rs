@@ -10765,7 +10765,18 @@ fn map_persisted_message(
                 } else {
                     keencode_acp::schema::ToolCallStatus::Completed
                 };
-                let raw_output = serde_json::to_value(&tool_result.content)
+                // raw_output 统一为 camelCase 的完整 ToolResult 信封（toolCallId/content/isError），
+                // 与 tool_projection::completed_fields 的形状约定一致；裸数组形状会让前端的
+                // 图片/Artifact 识别退化为原始 JSON 文本。错误正文同样脱敏。
+                let mut projected = tool_result.clone();
+                if projected.is_error {
+                    for part in &mut projected.content {
+                        if let keencode_model::ToolResultContent::Text { text } = part {
+                            *text = keencode_model::redact_error_secrets(text);
+                        }
+                    }
+                }
+                let raw_output = serde_json::to_value(projected)
                     .map_err(|error| runtime_operation_failed(error))?;
                 keencode_acp::schema::SessionUpdate::ToolCallUpdate(
                     keencode_acp::schema::ToolCallUpdate::new(

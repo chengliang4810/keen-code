@@ -4,11 +4,11 @@ use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
@@ -552,6 +552,12 @@ fn temporary_path_for(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// 使用同目录临时文件和 rename 原子写入字节。
+///
+/// 与 `storage::atomic_write_private` 的权限差异是刻意的：本函数写用户项目
+/// 文件，覆盖既有文件时保留原文件权限，新建文件走默认 umask；app 私有数据
+/// （`~/.keencode` 下）则由 storage 版始终强制 0600。不要合并两条路径，也不
+/// 要在这里把项目文件改成 0600。临时文件命名、错误文案（直接透传前端）与
+/// 目录同步失败时的静默处理同样是本路径的既定行为。
 fn atomic_write_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -1004,10 +1010,15 @@ pub fn save_pasted_attachment(
     Ok(path_to_frontend(&target))
 }
 
-/// 读取任意现有绝对路径下的本地图片，供 WebView 生成 Blob 预览。
+/// 读取授权根目录（已添加项目 + 应用数据目录）内现有绝对路径下的本地图片，供 WebView 生成 Blob 预览。
+/// 与其他文件命令共用 `authorize_existing_absolute` 边界，拒绝读取项目与数据目录之外的任意路径。
 #[tauri::command]
-pub async fn read_local_image(path: String) -> Result<tauri::ipc::Response, String> {
-    tauri::async_runtime::spawn_blocking(move || read_local_image_bytes(Path::new(&path)))
+pub async fn read_local_image(
+    app: AppHandle,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let authorized = authorize_existing_absolute(&app, Path::new(&path))?;
+    tauri::async_runtime::spawn_blocking(move || read_local_image_bytes(&authorized))
         .await
         .map_err(|error| format!("本地图片读取任务失败：{error}"))?
         .map(tauri::ipc::Response::new)
@@ -1838,15 +1849,15 @@ fn write_text_file(
 
 /// 创建不会在 Windows 桌面环境中弹出控制台窗口的 Git 命令。
 fn git_command() -> Command {
-    let command = Command::new("git");
+    let mut command = Command::new("git");
+    // 禁止交互式凭据提示：无凭据时快速失败，而不是在后台线程里永久等待输入。
+    command.env("GIT_TERMINAL_PROMPT", "0");
     #[cfg(windows)]
-    let command = {
+    {
         use std::os::windows::process::CommandExt;
 
-        let mut command = command;
         command.creation_flags(CREATE_NO_WINDOW);
-        command
-    };
+    }
     command
 }
 
@@ -1858,6 +1869,66 @@ fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
         .args(args)
         .output()
         .map_err(|error| format!("无法执行 git：{error}"))
+}
+
+/// `git push` 等网络命令的等待上限：半开连接不应永久占用后台线程。
+const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 限时执行带项目工作目录的 Git 命令；超时后杀掉子进程并返回错误。
+/// stdout/stderr 由独立线程排空，避免子进程写满管道缓冲导致的双端卡死。
+fn run_git_with_timeout(root: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut child = git_command()
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("无法执行 git：{error}"))?;
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "git stdout 管道不可用".to_owned())?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "git stderr 管道不可用".to_owned())?;
+    fn drain(pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut buffer = Vec::new();
+            let mut pipe = pipe;
+            let _ = pipe.read_to_end(&mut buffer);
+            buffer
+        })
+    }
+    let stdout_reader = drain(stdout_pipe);
+    let stderr_reader = drain(stderr_pipe);
+    let deadline = Instant::now() + GIT_NETWORK_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+            Err(error) => return Err(format!("git 进程等待失败：{error}")),
+        }
+    };
+    let Some(status) = status else {
+        return Err(format!(
+            "git {} 超时（超过 {} 秒未完成，已终止）",
+            args.first().unwrap_or(&"命令"),
+            GIT_NETWORK_TIMEOUT.as_secs()
+        ));
+    };
+    Ok(Output {
+        status,
+        stdout: stdout_reader.join().unwrap_or_default(),
+        stderr: stderr_reader.join().unwrap_or_default(),
+    })
 }
 
 /// 执行包含路径参数的 Git 命令。
@@ -2679,7 +2750,7 @@ fn git_push_blocking(app: AppHandle, project_path: String) -> Result<GitPushResu
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
     }
-    let output = run_git(&root, &["push"])?;
+    let output = run_git_with_timeout(&root, &["push"])?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
     }

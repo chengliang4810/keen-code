@@ -113,6 +113,11 @@ pub(crate) fn open_readonly_regular_file(path: &Path) -> std::io::Result<File> {
 /// 删除原文件。替换一旦完成就视为已提交；随后父目录同步失败只记录警告，不能
 /// 再向调用方报告“写入失败”，否则跨文件/系统密钥库的补偿逻辑会错误回滚已经
 /// 与新文件配套的数据，制造内容不一致。
+///
+/// 与 `workspace::atomic_write_bytes` 的权限差异是刻意的：本函数面向
+/// `~/.keencode` 下的 app 私有数据，始终强制 0600；而 workspace 版写用户项目
+/// 文件，覆盖时保留原文件权限、新建时走默认 umask。不要把两者合并成一条
+/// 无差别路径，也不要在这里把项目文件改成 0600。
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("私有文件路径缺少父目录")?;
     fs::create_dir_all(parent)

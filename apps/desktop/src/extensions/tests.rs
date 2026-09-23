@@ -1374,12 +1374,20 @@ fn validates_git_source_urls_before_clone() {
     // 插件级（allow_local=false）拒绝本地路径与 file scheme。
     assert!(validate_git_source_url("/tmp/repo", false, "测试").is_err());
     assert!(validate_git_source_url("file:///tmp/repo", false, "测试").is_err());
+    assert!(validate_git_source_url(r"C:\repo", false, "测试").is_err());
+    assert!(validate_git_source_url(r"\\server\share\repo", false, "测试").is_err());
     assert!(validate_git_source_url("http://github.com/a/b", false, "测试").is_err());
     // 合法形态：https、ssh、git@ SCP；市场级允许本地路径。
     assert!(validate_git_source_url("https://github.com/acme/tools.git", false, "测试").is_ok());
     assert!(validate_git_source_url("ssh://git@github.com/acme/tools", false, "测试").is_ok());
     assert!(validate_git_source_url("git@github.com:acme/tools.git", false, "测试").is_ok());
     assert!(validate_git_source_url("/tmp/local-repo", true, "测试").is_ok());
+    // 市场级接受 Windows 盘符与 UNC 本地路径；盘符路径若被 url 解析会得到
+    // scheme `c`，必须按本地路径放行。盘符相对形态（`C:repo`）仍被拒绝。
+    assert!(validate_git_source_url(r"C:\Users\dev\repo", true, "测试").is_ok());
+    assert!(validate_git_source_url("C:/Users/dev/repo", true, "测试").is_ok());
+    assert!(validate_git_source_url(r"\\server\share\repo", true, "测试").is_ok());
+    assert!(validate_git_source_url("C:repo", true, "测试").is_err());
     // sha 必须是 40 位十六进制。
     assert!(validate_git_source_sha("abc123", "测试").is_err());
     assert!(validate_git_source_sha(&"a".repeat(41), "测试").is_err());

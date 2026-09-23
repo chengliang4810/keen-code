@@ -10,9 +10,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, State};
 
-/// Tauri 注入的唯一自研 Agent Runtime。
-type RuntimeState<'a> = State<'a, Arc<AgentRuntime>>;
-
 /// Tauri 注入的后端诊断记录器。
 type DiagnosticsState<'a> = State<'a, Arc<crate::diagnostics::Diagnostics>>;
 
@@ -285,13 +282,15 @@ pub(crate) fn session_mode_state(plan_enabled: bool) -> SessionModeState {
 }
 
 /// 清除桌面焦点；该赋值天然幂等且不会关闭或取消任何 Session。
+/// Desktop Client 模式未持有本地 Runtime，走 require_owned_runtime 的友好降级提示。
 #[tauri::command]
 pub fn session_disconnect(
-    runtime: RuntimeState<'_>,
+    app: AppHandle,
     diagnostics: DiagnosticsState<'_>,
-) -> SessionSnapshot {
+) -> Result<SessionSnapshot, String> {
+    let runtime = crate::require_owned_runtime(&app)?;
     runtime.clear_focus();
-    idle_session_snapshot(diagnostics.path())
+    Ok(idle_session_snapshot(diagnostics.path()))
 }
 
 #[cfg(test)]

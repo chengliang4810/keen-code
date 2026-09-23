@@ -145,106 +145,6 @@ pub(crate) trait AcpHostBridge: Send + Sync + 'static {
 
 /// 全局唯一的当前进程 ACP bridge。
 static ACP_HOST: OnceLock<Arc<dyn AcpHostBridge>> = OnceLock::new();
-/// workflow 命令使用的具体宿主句柄；与 ACP_HOST 同时安装。
-static WORKFLOW_HOST: OnceLock<Arc<AcpHost>> = OnceLock::new();
-
-/// 返回 workflow 运行器使用的具体宿主句柄。
-pub(crate) fn workflow_host() -> Option<Arc<AcpHost>> {
-    WORKFLOW_HOST.get().cloned()
-}
-
-/// /workflow 命令的顺序运行入口：逐步以 detached Prompt 执行，任一步骤
-/// 未正常完成即中止。前端通过该命令发起并等待最终报告。
-#[tauri::command]
-pub(crate) async fn workflow_start(
-    app: AppHandle,
-    session_id: String,
-    workflow_id: String,
-    steps: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
-    if steps.is_empty() {
-        return Err("workflow 至少需要一个步骤".to_owned());
-    }
-    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
-    let outcomes = host
-        .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
-        .await
-        .map_err(|failure| format!("{failure:?}"))?;
-    serde_json::to_value(outcomes).map_err(|error| error.to_string())
-}
-
-/// 恢复一次中断/失败的工作流：已完成步骤按 Journal 跳过，只重跑剩余步骤。
-#[tauri::command]
-pub(crate) async fn workflow_resume(
-    app: AppHandle,
-    session_id: String,
-    workflow_id: String,
-) -> Result<serde_json::Value, String> {
-    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
-    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
-    let journal = WorkflowJournal::load(&journal_dir, &workflow_id)
-        .ok_or_else(|| format!("workflow {workflow_id} 不存在"))?;
-    let steps = journal.step_prompts();
-    if steps.is_empty() {
-        return Err("workflow 没有可恢复的步骤".to_owned());
-    }
-    let outcomes = host
-        .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
-        .await
-        .map_err(|failure| format!("{failure:?}"))?;
-    serde_json::to_value(outcomes).map_err(|error| error.to_string())
-}
-
-/// amend：停飞在飞步骤（仅允许排队中/已结束的运行），导入已完成步骤，
-/// 并以新的步骤列表开启一个替代 run（新 workflow id = 原 id + 后缀）。
-#[tauri::command]
-pub(crate) async fn workflow_amend(
-    app: AppHandle,
-    session_id: String,
-    workflow_id: String,
-    new_steps: Vec<String>,
-) -> Result<serde_json::Value, String> {
-    let host = workflow_host().ok_or_else(|| "ACP Host 未初始化".to_owned())?;
-    let journal_dir = workflow_journal_dir(&app).map_err(|failure| format!("{failure:?}"))?;
-    let original = WorkflowJournal::load(&journal_dir, &workflow_id)
-        .ok_or_else(|| format!("workflow {workflow_id} 不存在"))?;
-    if original.has_in_flight() {
-        return Err("工作流仍有步骤在运行，请先停止当前运行再 amend".to_owned());
-    }
-    if new_steps.is_empty() {
-        return Err("workflow amend 至少需要一个新步骤".to_owned());
-    }
-    let amended_id = format!("{workflow_id}-amend-{}", unix_time_ms());
-    let mut amended = WorkflowJournal::new(&amended_id, &session_id, &new_steps);
-    // 导入已完成步骤：置于新 run 队首，run_workflow 会按 succeeded 跳过。
-    let mut imported = original
-        .steps
-        .iter()
-        .filter(|step| step.status == "succeeded")
-        .cloned()
-        .collect::<Vec<_>>();
-    for step in &mut amended.steps {
-        step.index += imported.len();
-        imported.push(step.clone());
-    }
-    amended.steps = imported;
-    amended.steps_total = amended.steps.len();
-    amended
-        .save(&journal_dir)
-        .map_err(|failure| format!("{failure:?}"))?;
-    let prompts = amended.step_prompts();
-    let outcomes = host
-        .run_workflow(&session_id, &amended_id, prompts, &journal_dir)
-        .await
-        .map_err(|failure| format!("{failure:?}"))?;
-    serde_json::to_value(serde_json::json!({
-        "workflowId": amended_id,
-        "importedFrom": workflow_id,
-        "steps": outcomes,
-    }))
-    .map_err(|error| error.to_string())
-}
 
 /// 记录 Session 加载阶段耗时；慢路径提升为 warn，便于在用户感知卡顿前发现回归。
 fn record_session_load_phase(session_id: &str, phase: &str, elapsed: Duration) {
@@ -394,7 +294,6 @@ pub(crate) fn install(
         event_sinks: Mutex::new(BTreeMap::new()),
         self_ref: self_ref.clone(),
     });
-    let _ = WORKFLOW_HOST.set(Arc::clone(&host));
     ACP_HOST
         .set(Arc::clone(&host) as Arc<dyn AcpHostBridge>)
         .map_err(|_| "ACP Host 已经初始化".to_owned())?;
@@ -528,14 +427,6 @@ impl WorkflowJournal {
         if let Some(step) = self.steps.get_mut(index) {
             step.status = status.to_owned();
         }
-    }
-
-    pub fn has_in_flight(&self) -> bool {
-        self.steps.iter().any(|step| step.status == "running")
-    }
-
-    pub fn step_prompts(&self) -> Vec<String> {
-        self.steps.iter().map(|step| step.prompt.clone()).collect()
     }
 }
 
