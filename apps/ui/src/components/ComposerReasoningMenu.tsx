@@ -86,13 +86,13 @@ export function ComposerReasoningMenu({
   const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
 
   const trigger = (
+      <Tip label={`${labels.reasoning}: ${currentLabel}`} disabled={open}>
       <DropdownMenuTrigger render={<Button
         type="button"
         variant="ghost"
         size="md"
         className="cmm__trigger"
         aria-label={`${labels.reasoning}: ${currentLabel}`}
-        title={`${labels.reasoning}: ${currentLabel}`}
       />}>
         <span className="cmm__icon" aria-hidden>
           <IconBrain size={14} />
@@ -104,6 +104,7 @@ export function ComposerReasoningMenu({
           <IconChevronDown size={12} />
         </span>
     </DropdownMenuTrigger>
+    </Tip>
   );
 
   return (

@@ -1,5 +1,10 @@
 import { Button } from "@appica/ui-react/button";
-import { useMemo, useRef, useState } from "react";
+import {
+  PreviewCard,
+  PreviewCardContent,
+  PreviewCardTrigger,
+} from "@appica/ui-react/preview-card";
+import { useMemo, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpTodoProjection } from "@/lib/acp/store";
 import {
@@ -28,6 +33,16 @@ function normalizeComposerTodoStatus(status: string): ComposerTodoStatus {
   return "pending";
 }
 
+/** 终态后的 in_progress 不得继续显示运行动画。 */
+export function composerTodoDisplayStatus(
+  status: string,
+  running: boolean,
+): ComposerTodoStatus {
+  return normalizeComposerTodoStatus(
+    status === "in_progress" && !running ? "pending" : status,
+  );
+}
+
 /** 计算计划卡片当前所处的步骤序号。 */
 export function composerTodoStep(
   items: AcpTodoProjection["items"],
@@ -37,6 +52,42 @@ export function composerTodoStep(
   if (activeIndex >= 0) return activeIndex + 1;
   const pendingIndex = items.findIndex((item) => item.status !== "completed");
   return pendingIndex >= 0 ? pendingIndex + 1 : items.length;
+}
+
+/** 悬浮计划卡片正文；独立导出便于在内容进入 Portal 前保持稳定渲染语义。 */
+export function ComposerTodoCardList({
+  items,
+  running,
+  revision,
+}: {
+  items: AcpTodoProjection["items"];
+  running: boolean;
+  revision: number;
+}) {
+  return (
+    <ol className="composer-todo__card">
+      {items.map((item, index) => {
+        const status = composerTodoDisplayStatus(item.status, running);
+        return (
+          <li
+            key={`${revision}:${index}:${item.content}`}
+            className={`composer-todo__item composer-todo__item--${status}`}
+          >
+            <span className="composer-todo__item-icon" aria-hidden>
+              {status === "completed" ? (
+                <IconCircleCheck size={18} />
+              ) : status === "in_progress" ? (
+                <IconLoader size={18} />
+              ) : (
+                <IconCircle size={18} />
+              )}
+            </span>
+            <span className="composer-todo__content">{item.content}</span>
+          </li>
+        );
+      })}
+    </ol>
+  );
 }
 
 /** 显示在输入框上方的当前计划与步骤进度。 */
@@ -50,7 +101,6 @@ export function ComposerTodoProgress({
   const completed = items.filter((item) => item.status === "completed").length;
   const progress = (completed / items.length) * 100;
   const [open, setOpen] = useState(false);
-  const panelRef = useRef<HTMLDivElement>(null);
 
   if (items.length === 0) return null;
 
@@ -59,66 +109,48 @@ export function ComposerTodoProgress({
       ? `第 ${step} / ${items.length} 步`
       : `Step ${step} / ${items.length}`;
   return (
-    <div
-      ref={panelRef}
-      className={`composer-todo${open ? " is-open" : ""}`}
-      role="status"
-      aria-live="polite"
-      aria-label={stepLabel}
-      onMouseLeave={() => setOpen(false)}
-      onFocus={() => setOpen(true)}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
-      }}
-    >
-      <ol className="composer-todo__card" aria-hidden={!open}>
-        {items.map((item, index) => {
-          const status = normalizeComposerTodoStatus(
-            item.status === "in_progress" && !running ? "pending" : item.status,
-          );
-          return (
-            <li
-              key={`${todos?.revision ?? 0}:${index}:${item.content}`}
-              className={`composer-todo__item composer-todo__item--${status}`}
-            >
-              <span className="composer-todo__item-icon" aria-hidden>
-                {status === "completed" ? (
-                  <IconCircleCheck size={18} />
-                ) : status === "in_progress" ? (
-                  <IconLoader size={18} />
-                ) : (
-                  <IconCircle size={18} />
-                )}
-              </span>
-              <span className="composer-todo__content">{item.content}</span>
-            </li>
-          );
-        })}
-      </ol>
-      <Button size="md"
-        type="button"
-        variant="ghost"
-        className="composer-todo__step"
-        aria-expanded={open}
-        onMouseEnter={() => setOpen(true)}
-      >
-        <svg
-          className="composer-todo__progress"
-          viewBox="0 0 16 16"
-          aria-hidden="true"
+    <PreviewCard open={open} onOpenChange={setOpen}>
+      <div className="composer-todo" role="status" aria-live="polite">
+      <PreviewCardTrigger
+        delay={0}
+        render={<Button size="md"
+            type="button"
+            variant="ghost"
+            className="composer-todo__step"
+            aria-label={stepLabel}
+            aria-expanded={open}
+          />}
         >
-          <circle className="composer-todo__progress-track" cx="8" cy="8" r="6" />
-          <circle
-            className="composer-todo__progress-value"
-            cx="8"
-            cy="8"
-            r="6"
-            pathLength="100"
-            strokeDasharray={`${progress} 100`}
-          />
-        </svg>
-        <span>{stepLabel}</span>
-      </Button>
-    </div>
+          <svg
+            className="composer-todo__progress"
+            viewBox="0 0 16 16"
+            aria-hidden="true"
+          >
+            <circle className="composer-todo__progress-track" cx="8" cy="8" r="6" />
+            <circle
+              className="composer-todo__progress-value"
+              cx="8"
+              cy="8"
+              r="6"
+              pathLength="100"
+              strokeDasharray={`${progress} 100`}
+            />
+          </svg>
+          <span>{stepLabel}</span>
+        </PreviewCardTrigger>
+      </div>
+      <PreviewCardContent
+        side="top"
+        align="center"
+        arrow={false}
+        className="w-[min(29.5rem,80vw)] max-w-none min-w-0 gap-0 border-0 bg-transparent p-0 shadow-none"
+      >
+        <ComposerTodoCardList
+          items={items}
+          running={running}
+          revision={todos?.revision ?? 0}
+        />
+      </PreviewCardContent>
+    </PreviewCard>
   );
 }

@@ -17,6 +17,11 @@ import {
   AlertDescription,
   AlertTitle,
 } from "@appica/ui-react/alert";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@appica/ui-react/collapsible";
 import { ChatFindBar } from "@/components/ChatFindBar";
 import { isProjectPathMissing } from "@/lib/projectPath";
 import {
@@ -226,6 +231,11 @@ export function MainNotices({
       )}
 
       {errorBanner && !hasChatTurnError && (
+        <Collapsible
+          open={errorDetailOpen}
+          onOpenChange={setErrorDetailOpen}
+          className="contents"
+        >
         <Alert variant="error" className="mx-5 mb-2">
           <AlertTitle>
             {errorBanner.code ? `${errorBanner.code}: ` : ""}
@@ -280,27 +290,30 @@ export function MainNotices({
               </Button>
             ) : null}
             {errorBanner.detail ? (
-              <Button
-                type="button"
-                variant="ghost"
-                size="md"
-                aria-expanded={errorDetailOpen}
-                onClick={() => setErrorDetailOpen((value) => !value)}
+              <CollapsibleTrigger
+                render={
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="md"
+                  />
+                }
               >
                 {errorDetailOpen
                   ? tr("error.hideDetails")
                   : tr("error.details")}
-              </Button>
+              </CollapsibleTrigger>
             ) : null}
           </AlertAction>
-          {errorBanner.detail && errorDetailOpen ? (
-            <AlertDescription>
+          {errorBanner.detail ? (
+            <CollapsibleContent render={<AlertDescription />}>
               <pre className="max-h-40 overflow-auto whitespace-pre-wrap font-mono">
                 {errorBanner.detail}
               </pre>
-            </AlertDescription>
+            </CollapsibleContent>
           ) : null}
         </Alert>
+        </Collapsible>
       )}
     </>
   );

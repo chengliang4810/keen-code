@@ -365,7 +365,6 @@ export function ComposerToolbar({
               disabled={sendDisabled}
               onClick={() => void send()}
               aria-label={sendLabel}
-              title={sendLabel}
             >
               <IconArrowUp size={16} />
             </Button>

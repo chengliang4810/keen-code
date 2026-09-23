@@ -483,7 +483,6 @@ export function MobileRemoteShell({
                     variant="ghost"
                     size="icon-md"
                     aria-label={uploading ? labels.uploading : labels.attach}
-                    title={uploading ? labels.uploading : labels.attach}
                     disabled={uploading || busy || connection !== "connected" || restoring}
                     onClick={() => fileInputRef.current?.click()}
                   ><IconPaperclip size={18} /></Button>

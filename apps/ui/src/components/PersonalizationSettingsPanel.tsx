@@ -1,5 +1,10 @@
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@appica/ui-react/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@appica/ui-react/collapsible";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { Switch } from "@/components/ui/switch";
@@ -93,7 +98,12 @@ export function PersonalizationSettingsPanel({
 
   return (
     <div className="settings-personalization-stack">
-    <section className="settings-personalization" id="settings-anchor-custom-instructions">
+    <Collapsible
+      open={helpOpen}
+      onOpenChange={setHelpOpen}
+      render={<section id="settings-anchor-custom-instructions" />}
+      className="settings-personalization"
+    >
       <div className="settings-personalization__header">
         <div className="settings-personalization__heading">
           <h2 className="settings-personalization__title">
@@ -104,28 +114,25 @@ export function PersonalizationSettingsPanel({
             id="settings-custom-instructions-description"
           >
             {t("settings.personalization.description")} {" "}
-      <Button size="md"
-        type="button"
-        variant="ghost"
-        className="settings-personalization__learn-more"
-              aria-expanded={helpOpen}
-              aria-controls="settings-custom-instructions-help"
-              onClick={() => setHelpOpen((open) => !open)}
+            <CollapsibleTrigger
+              render={<Button
+                size="md"
+                type="button"
+                variant="ghost"
+                className="settings-personalization__learn-more"
+              />}
             >
               {t("settings.personalization.learnMore")}
-            </Button>
+            </CollapsibleTrigger>
           </p>
         </div>
       </div>
 
-      {helpOpen ? (
-        <p
-          className="settings-personalization__help"
-          id="settings-custom-instructions-help"
-        >
+      <CollapsibleContent>
+        <p className="settings-personalization__help">
           {t("settings.personalization.help")}
         </p>
-      ) : null}
+      </CollapsibleContent>
 
       <Textarea
         inputSize="md"
@@ -149,7 +156,7 @@ export function PersonalizationSettingsPanel({
       {saveError ? (
         <Alert variant="error"><AlertDescription>{t("settings.personalization.saveFailed")}</AlertDescription></Alert>
       ) : null}
-    </section>
+    </Collapsible>
 
     <section className="settings-personalization" id="settings-anchor-local-memories">
       <div className="settings-personalization__header">

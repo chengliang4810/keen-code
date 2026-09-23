@@ -2,6 +2,8 @@ import { Card } from "@/components/ui/card";
 import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
 import { Input } from "@/components/ui/input";
 import { Button } from "@appica/ui-react/button";
+import { ToggleGroup } from "@appica/ui-react/toggle-group";
+import { Toggle } from "@appica/ui-react/toggle";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
 import { Tip } from "@/components/ui/tooltip";
@@ -349,38 +351,39 @@ export function ExtensionsBuildExtras({
 
       <Card className="ext-card ext-market-catalog">
         <div className="ext-market-browse">
-          <div
+          <ToggleGroup
             className="ext-plugin-filters"
             aria-label={tr("ext.market.filterLabel")}
+            value={[marketFilter]}
+            onValueChange={(value) => {
+              // 再次点击已选项会取消选中；过滤语义要求始终有选中项，回退到“全部”。
+              setMarketFilter(value[0] ?? "__all__");
+            }}
           >
-            <Button size="md"
-              type="button"
-              variant={marketFilter === "__all__" ? "soft" : "ghost"}
-              aria-pressed={marketFilter === "__all__"}
-              className={
-                "ext-plugin-filter" +
-                (marketFilter === "__all__" ? " is-active" : "")
-              }
-              onClick={() => setMarketFilter("__all__")}
+            <Toggle
+              value="__all__"
+              render={<Button size="md"
+                type="button"
+                variant={marketFilter === "__all__" ? "soft" : "ghost"}
+                className="ext-plugin-filter"
+              />}
             >
               {tr("ext.market.filterAll")}
-            </Button>
+            </Toggle>
             {sources.map((source) => (
-              <Button size="md"
+              <Toggle
                 key={source.name}
-                type="button"
-                variant={marketFilter === source.name ? "soft" : "ghost"}
-                aria-pressed={marketFilter === source.name}
-                className={
-                  "ext-plugin-filter" +
-                  (marketFilter === source.name ? " is-active" : "")
-                }
-                onClick={() => setMarketFilter(source.name)}
+                value={source.name}
+                render={<Button size="md"
+                  type="button"
+                  variant={marketFilter === source.name ? "soft" : "ghost"}
+                  className="ext-plugin-filter"
+                />}
               >
                 {source.name}
-              </Button>
+              </Toggle>
             ))}
-          </div>
+          </ToggleGroup>
           <label className="sr-only" htmlFor="ext-market-search">
             {tr("ext.market.searchPlaceholder")}
           </label>

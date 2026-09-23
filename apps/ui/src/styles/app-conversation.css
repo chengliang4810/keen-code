@@ -16,7 +16,7 @@
 @media (min-width: 761px) {
   .main.main--frame {
     margin: 4px 4px 4px 0;
-    border: 1px solid var(--border-subtle);
+    /* 面板底色与 app 背景同源，框体只留几何不留描边。 */
     overflow: hidden;
   }
 
@@ -99,7 +99,7 @@
   app-region: no-drag;
 }
 
-.main__brand-button,
+.main__sidebar-toggle,
 .main__task-nav-button {
   width: 28px;
   min-width: 28px;
@@ -710,10 +710,30 @@
 }
 
 .ask-user__opt {
+  display: flex;
+  align-items: center;
   width: 100%;
-  text-align: left;
-  justify-content: flex-start;
   gap: 10px;
+  padding: 6px 12px;
+  text-align: left;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.ask-user__opt:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+}
+
+.ask-user__opt--active {
+  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.ask-user__opt--disabled {
+  opacity: 0.6;
+  pointer-events: none;
 }
 
 .ask-user__index {
@@ -924,8 +944,7 @@
 }
 
 .composer-todo__card {
-  display: none;
-  position: static;
+  display: block;
   box-sizing: border-box;
   width: 100%;
   margin: 0;
@@ -935,16 +954,6 @@
   border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--bg-elevated) 96%, transparent);
   box-shadow: 0 6px 18px color-mix(in srgb, var(--ink-black) 7%, transparent);
-  opacity: 0;
-  visibility: hidden;
-  transform: translateY(5px);
-}
-
-.composer-todo.is-open .composer-todo__card {
-  display: block;
-  opacity: 1;
-  visibility: visible;
-  transform: translateY(0);
 }
 
 .composer-todo__item {
@@ -2505,12 +2514,6 @@ button.composer__context-item {
   text-align: center;
   pointer-events: auto;
 }
-.composer-welcome__logo {
-  display: block;
-  width: 48px;
-  height: 48px;
-  object-fit: contain;
-}
 .composer-welcome h1 {
   max-width: 100%;
   margin: 0;
@@ -2523,14 +2526,12 @@ button.composer__context-item {
 @container conversation-stage (max-width: 760px) {
   .composer-wrap--welcome { gap: 16px; padding: 16px; }
   .composer-welcome { gap: 10px; }
-  .composer-welcome__logo { width: 40px; height: 40px; }
   .composer-welcome h1 { font-size: calc(22px + var(--ui-font-delta)); }
 }
 
 @media (max-height: 600px) {
   .composer-wrap--welcome { gap: 16px; }
   .composer-welcome { gap: 10px; }
-  .composer-welcome__logo { width: 40px; height: 40px; }
   .composer-welcome h1 { font-size: calc(22px + var(--ui-font-delta)); }
 }
 

@@ -2177,7 +2177,7 @@ export function ResourceViewer({
             <TabsTrigger key={mode} value={`singleton:${mode}`} render={<div />} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
               {mode === "changes" && totalChangeBadge > 0 ? <span className="rp-mode-tab__count">{totalChangeBadge > 99 ? "99+" : totalChangeBadge}</span> : null}
-              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }}><IconClose size={11} /></Button>
+              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }}><IconClose size={11} /></Button></Tip>
             </TabsTrigger>
           );
         })}
@@ -2186,7 +2186,7 @@ export function ResourceViewer({
           return (
             <TabsTrigger key={tab.id} value={`terminal:${tab.id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
               <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
-              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }}><IconClose size={11} /></Button>
+              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }}><IconClose size={11} /></Button></Tip>
             </TabsTrigger>
           );
         })}
@@ -2196,13 +2196,15 @@ export function ResourceViewer({
           return (
             <TabsTrigger key={agent.agent_id} value={`subagent:${agent.agent_id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `subagent:${agent.agent_id}` }); }}>
               <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} className="rp-mode-tab__agent-avatar" /><span className="rp-mode-tab__label">{displayName}</span>
-              <Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" title={tr("resources.tabClose")} aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }}><IconClose size={11} /></Button>
+              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }}><IconClose size={11} /></Button></Tip>
             </TabsTrigger>
           );
         })}
         {hasModeTabs ? (
           <DropdownMenu>
-            <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-md" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} title={tr("resources.newTab")} />}><IconPlus size={15} /></DropdownMenuTrigger>
+            <Tip label={tr("resources.newTab")}>
+              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-md" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} />}><IconPlus size={15} /></DropdownMenuTrigger>
+            </Tip>
             <DropdownMenuContent
               align="end"
               sideOffset={6}

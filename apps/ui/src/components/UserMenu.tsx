@@ -2,6 +2,7 @@ import { Button } from "@appica/ui-react/button";
 /** 侧栏底部固定操作：设置入口以及按需显示的更新入口。 */
 
 import { IconDownload, IconSettings } from "@/components/icons";
+import { Tip } from "@/components/ui/tooltip";
 
 export interface UserMenuProps {
   labels: {
@@ -31,26 +32,26 @@ export function UserMenu({
           size="md"
           className="sidebar-footer-action"
           onClick={onSettings}
-          title={labels.settings}
           aria-label={labels.settings}
         >
           <IconSettings size={16} />
           <span>{labels.settings}</span>
         </Button>
         {updateAvailable ? (
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-md"
-            className="sidebar-update-action"
-            onClick={onUpdate}
-            disabled={updateBusy}
-            title={labels.update}
-            aria-label={labels.update}
-            aria-busy={updateBusy || undefined}
-          >
-            <IconDownload size={17} />
-          </Button>
+          <Tip label={labels.update}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-md"
+              className="sidebar-update-action"
+              onClick={onUpdate}
+              disabled={updateBusy}
+              aria-label={labels.update}
+              aria-busy={updateBusy || undefined}
+            >
+              <IconDownload size={17} />
+            </Button>
+          </Tip>
         ) : null}
       </div>
     </div>

@@ -8,6 +8,11 @@ import {
   SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
 } from "@/lib/virtualList";
 import { Button } from "@appica/ui-react/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@appica/ui-react/collapsible";
 import { Badge } from "@appica/ui-react/badge";
 import { Tip } from "@/components/ui/tooltip";
 import { VirtualList } from "@/components/VirtualList";
@@ -142,19 +147,21 @@ export function ProjectTree({
   onSessionSortModeChange,
 }: ProjectTreeProps) {
   return (
-    <>
+    <Collapsible open={projectsOpen} onOpenChange={setProjectsOpen} className="contents">
       <div className="tree-l1 tree-l1--top-spaced">
-        <Button
-          type="button"
-          variant="ghost"
-          size="md"
-          className="tree-l1__head"
-          onClick={() => setProjectsOpen((value) => !value)}
-          aria-expanded={projectsOpen}
+        <CollapsibleTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="md"
+              className="tree-l1__head"
+            />
+          }
         >
           <span className="tree-l1__label">{tr("sidebar.projects")}</span>
           <IconChevronDown size={14} className="chevron--disclose" />
-        </Button>
+        </CollapsibleTrigger>
         <div className="tree-l1__actions">
           <SidebarSortMenu
             tr={tr}
@@ -199,12 +206,12 @@ export function ProjectTree({
         </div>
       </div>
 
-      {projectsOpen && projects.length === 0 ? (
+      <CollapsibleContent>
+      {projects.length === 0 ? (
         <div className="sidebar-empty">{tr("sidebar.noProjects")}</div>
       ) : null}
 
-      {projectsOpen
-        ? projects.map((project) => {
+      {projects.map((project) => {
             const open = expandedProjects[project.id] === true;
             const projectSessions = sessionsForProject(project.id);
             const visibleSessionCount =
@@ -407,8 +414,8 @@ export function ProjectTree({
                 ) : null}
               </div>
             );
-          })
-        : null}
-    </>
+          })}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

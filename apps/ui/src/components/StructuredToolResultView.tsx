@@ -17,6 +17,7 @@ import {
   IconFileText,
 } from "@/components/icons";
 import { compactToolResultText } from "@/lib/toolDisplay";
+import { Tip } from "@/components/ui/tooltip";
 
 /** 结构化工具结果视图属性。 */
 export interface StructuredToolResultViewProps {
@@ -123,15 +124,16 @@ function ArtifactRow({
         </span>
       </div>
       {artifact.path && onOpenPath ? (
-        <Button
-          type="button"
-          variant="ghost" size="icon-md"
-          title={labels.open}
-          aria-label={`${labels.open}: ${artifact.path}`}
-          onClick={() => onOpenPath(artifact.path!)}
-        >
-          <IconExternalLink size={13} />
-        </Button>
+        <Tip label={labels.open}>
+          <Button
+            type="button"
+            variant="ghost" size="icon-md"
+            aria-label={`${labels.open}: ${artifact.path}`}
+            onClick={() => onOpenPath(artifact.path!)}
+          >
+            <IconExternalLink size={13} />
+          </Button>
+        </Tip>
       ) : null}
     </div>
   );
@@ -166,15 +168,16 @@ function ResultItem({
               <code title={item.path}>{item.path}</code>
             </span>
             {onOpenPath ? (
-              <Button
-                type="button"
-                variant="ghost" size="icon-md"
-                title={labels.open}
-                aria-label={`${labels.open}: ${item.path}`}
-                onClick={() => onOpenPath(item.path)}
-              >
-                <IconExternalLink size={13} />
-              </Button>
+              <Tip label={labels.open}>
+                <Button
+                  type="button"
+                  variant="ghost" size="icon-md"
+                  aria-label={`${labels.open}: ${item.path}`}
+                  onClick={() => onOpenPath(item.path)}
+                >
+                  <IconExternalLink size={13} />
+                </Button>
+              </Tip>
             ) : null}
           </div>
           {item.old_path && item.old_path !== item.path ? (

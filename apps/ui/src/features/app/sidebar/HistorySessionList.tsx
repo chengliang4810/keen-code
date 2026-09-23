@@ -1,5 +1,10 @@
 import type { SessionRow } from "@/features/app/models";
 import { Button } from "@appica/ui-react/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@appica/ui-react/collapsible";
 import { VirtualList } from "@/components/VirtualList";
 import { IconChevronDown } from "@/components/icons";
 import {
@@ -44,23 +49,29 @@ export function HistorySessionList({
   if (orphanSessions.length === 0) return null;
 
   return (
-    <>
+    <Collapsible
+      open={historyOpen}
+      onOpenChange={setHistoryOpen}
+      className="contents"
+    >
       <div className="tree-l1 tree-l1--top-spaced">
-        <Button
-          type="button"
-          variant="ghost"
-          size="md"
-          className="tree-l1__head"
-          onClick={() => setHistoryOpen((value) => !value)}
-          aria-expanded={historyOpen}
+        <CollapsibleTrigger
+          render={
+            <Button
+              type="button"
+              variant="ghost"
+              size="md"
+              className="tree-l1__head"
+            />
+          }
         >
           <span className="tree-l1__label">
             {tr("sidebar.otherSessions")}
           </span>
           <IconChevronDown size={14} className="chevron--disclose" />
-        </Button>
+        </CollapsibleTrigger>
       </div>
-      {historyOpen ? (
+      <CollapsibleContent>
         <VirtualList
           className="tree-orphan-list"
           items={orphanSessions}
@@ -95,7 +106,7 @@ export function HistorySessionList({
             />
           )}
         />
-      ) : null}
-    </>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

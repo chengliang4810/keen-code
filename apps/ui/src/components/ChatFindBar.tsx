@@ -13,6 +13,7 @@ import {
   IconSearch,
 } from "@/components/icons";
 import { formatChatFindCount } from "@/lib/chatFind";
+import { Tip } from "@/components/ui/tooltip";
 
 export type ChatFindBarLabels = {
   placeholder: string;
@@ -108,44 +109,47 @@ export function ChatFindBar({
         {query.trim() ? countText : ""}
       </span>
       <div className="chat-find__actions">
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-md"
-          className="chat-find__btn"
-          aria-label={labels.prev}
-          title={labels.prev}
-          disabled={matchCount === 0}
-          onClick={onPrev}
-        >
-          <IconChevronLeft
-            size={16}
-            className="chat-find__chev chat-find__chev--up"
-          />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-md"
-          className="chat-find__btn"
-          aria-label={labels.next}
-          title={labels.next}
-          disabled={matchCount === 0}
-          onClick={onNext}
-        >
-          <IconChevronDown size={16} />
-        </Button>
-        <Button
-          type="button"
-          variant="ghost"
-          size="icon-md"
-          className="chat-find__btn chat-find__btn--close"
-          aria-label={labels.close}
-          title={labels.close}
-          onClick={onClose}
-        >
-          <IconClose size={15} />
-        </Button>
+        <Tip label={labels.prev}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-md"
+            className="chat-find__btn"
+            aria-label={labels.prev}
+            disabled={matchCount === 0}
+            onClick={onPrev}
+          >
+            <IconChevronLeft
+              size={16}
+              className="chat-find__chev chat-find__chev--up"
+            />
+          </Button>
+        </Tip>
+        <Tip label={labels.next}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-md"
+            className="chat-find__btn"
+            aria-label={labels.next}
+            disabled={matchCount === 0}
+            onClick={onNext}
+          >
+            <IconChevronDown size={16} />
+          </Button>
+        </Tip>
+        <Tip label={labels.close}>
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-md"
+            className="chat-find__btn chat-find__btn--close"
+            aria-label={labels.close}
+            onClick={onClose}
+          >
+            <IconClose size={15} />
+          </Button>
+        </Tip>
       </div>
     </div>
   );

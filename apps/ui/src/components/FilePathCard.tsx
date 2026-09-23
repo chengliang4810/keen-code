@@ -211,15 +211,7 @@ export function FilePathCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path, projectPath, absolutePath, kind]);
 
-  useEffect(() => {
-    if (!detailsOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setDetailsOpen(false);
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [detailsOpen]);
-
+  // Escape 关闭由 GlassModal（Appica Dialog）原生处理，不重复挂全局监听。
   const openInPanel = async () => {
     if (isUrl) {
       // 聊天/面板宿主：URL 在右侧面板的网页标签中打开。

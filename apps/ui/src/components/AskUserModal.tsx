@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
 import { Button } from "@appica/ui-react/button";
 import { Textarea } from "@/components/ui/textarea";
+import { Radio, RadioGroup } from "@/components/ui/radio-group";
+import { Checkbox, CheckboxGroup } from "@/components/ui/checkbox-group";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
 
 export type AskUserLabels = {
@@ -64,6 +66,27 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
   const question = questions[currentPage]!;
   const chosen = selected[question.id] || [];
 
+  const renderOptionRow = (option: AskUserQuestionItem["options"][number], index: number) => {
+    const active = chosen.includes(option.id);
+    return (
+      <label key={option.id}
+        className={
+          `ask-user__opt${active ? " ask-user__opt--active" : ""}` +
+          (busy ? " ask-user__opt--disabled" : "")
+        }>
+        {question.multiSelect
+          ? <Checkbox value={option.id} disabled={busy} />
+          : <Radio value={option.id} disabled={busy} />}
+        <span className="ask-user__index">{index + 1}</span>
+        <span className="ask-user__opt-copy">
+          <span className="ask-user__opt-label">{option.label}</span>
+          {option.description ? <span className="ask-user__opt-desc">{option.description}</span> : null}
+        </span>
+        {active ? <IconChevronRight size={18} className="ask-user__opt-arrow" /> : null}
+      </label>
+    );
+  };
+
   /** 提交当前全部问题的结构化答案。 */
   const submit = async () => {
     if (busy || !canSubmit) return;
@@ -77,17 +100,12 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
     setBusy(true);
     try { await onCancel(); } finally { setBusy(false); }
   };
-  /** 切换当前问题的选项，并清除同题自由输入。 */
-  const choose = (optionId: string) => {
-    setSelected((previous) => {
-      const current = previous[question.id] || [];
-      return { ...previous, [question.id]: question.multiSelect
-        ? current.includes(optionId) ? current.filter((id) => id !== optionId) : [...current, optionId]
-        : [optionId] };
-    });
+  /** 更新当前问题的选中项，并清除同题自由输入；单选答完自动进入下一题。 */
+  const selectOption = (optionIds: string[]) => {
+    setSelected((previous) => ({ ...previous, [question.id]: optionIds }));
     setFreeText((previous) => ({ ...previous, [question.id]: "" }));
     setEditingText(false);
-    if (!question.multiSelect && currentPage < questions.length - 1) {
+    if (!question.multiSelect && optionIds.length > 0 && currentPage < questions.length - 1) {
       setPage(currentPage + 1);
     }
   };
@@ -118,24 +136,23 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
       </header>
 
       {question.multiSelect ? <p className="ask-user__hint">{labels.multiHint}</p> : null}
-      <div className="ask-user__options" role="group" aria-label={question.question}>
-        {question.options.map((option, index) => {
-          const active = chosen.includes(option.id);
-          return (
-            <Button size="md" key={option.id} type="button"
-              variant={active ? "soft" : "outline"}
-              className={`ask-user__opt${active ? " ask-user__opt--active" : ""}`}
-              disabled={busy} aria-pressed={active} onClick={() => choose(option.id)}>
-              <span className="ask-user__index">{index + 1}</span>
-              <span className="ask-user__opt-copy">
-                <span className="ask-user__opt-label">{option.label}</span>
-                {option.description ? <span className="ask-user__opt-desc">{option.description}</span> : null}
-              </span>
-              {active ? <IconChevronRight size={18} className="ask-user__opt-arrow" /> : null}
-            </Button>
-          );
-        })}
-      </div>
+      {question.multiSelect ? (
+        <CheckboxGroup
+          className="ask-user__options"
+          aria-label={question.question}
+          value={chosen}
+          onValueChange={(value) => selectOption(value)}>
+          {question.options.map(renderOptionRow)}
+        </CheckboxGroup>
+      ) : (
+        <RadioGroup
+          className="ask-user__options"
+          aria-label={question.question}
+          value={chosen[0] ?? ""}
+          onValueChange={(value) => { if (typeof value === "string" && value) selectOption([value]); }}>
+          {question.options.map(renderOptionRow)}
+        </RadioGroup>
+      )}
 
       {question.allowCustomAnswer !== false &&
       (editingText || question.options.length === 0) ? (

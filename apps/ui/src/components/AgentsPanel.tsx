@@ -32,6 +32,7 @@ import {
 } from "@/components/ui/select";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { Switch } from "@/components/ui/switch";
+import { Tip } from "@/components/ui/tooltip";
 import { shortPathLabel } from "@/lib/extensionsUi";
 import { ProviderModelMenu } from "@/components/ProviderModelMenu";
 
@@ -444,16 +445,17 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
                 </span>
                 <div className="ext-agent-row__content">
                   <div className="ext-agent-row__heading">
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="md"
-                      className="ext-item__head-btn"
-                      title={tr("agents.detail.view")}
-                      onClick={() => void openDetail(agent)}
-                    >
-                      <strong className="ext-item__name">{agent.name}</strong>
-                    </Button>
+                    <Tip label={tr("agents.detail.view")}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="md"
+                        className="ext-item__head-btn"
+                        onClick={() => void openDetail(agent)}
+                      >
+                        <strong className="ext-item__name">{agent.name}</strong>
+                      </Button>
+                    </Tip>
                     <Badge size="md" variant={agent.source === "global" ? "primary-outline" : "soft"}>
                       {agent.source === "global"
                         ? tr("agents.source.global")
@@ -464,10 +466,12 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
                   </div>
                   <p className="ext-item__desc">{agent.description}</p>
                   {agent.path ? (
-                    <Button type="button" variant="ghost" size="md" className="ext-path-btn" title={agent.path} onClick={() => void api.pathReveal(agent.path!)}>
-                      <IconFolder size={13} />
-                      <span>{shortPathLabel(agent.path, 48)}</span>
-                    </Button>
+                    <Tip label={agent.path}>
+                      <Button type="button" variant="ghost" size="md" className="ext-path-btn" onClick={() => void api.pathReveal(agent.path!)}>
+                        <IconFolder size={13} />
+                        <span>{shortPathLabel(agent.path, 48)}</span>
+                      </Button>
+                    </Tip>
                   ) : null}
                 </div>
                 <div className="ext-agent-row__controls">
@@ -483,17 +487,18 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
                     </div>
                   ) : null}
                   {agent.source === "global" ? (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-md"
-                      title={tr("agents.remove")}
-                      aria-label={tr("agents.remove")}
-                      disabled={busy}
-                      onClick={() => setRemoveTarget(agent)}
-                    >
-                      <IconTrash size={15} />
-                    </Button>
+                    <Tip label={tr("agents.remove")}>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-md"
+                        aria-label={tr("agents.remove")}
+                        disabled={busy}
+                        onClick={() => setRemoveTarget(agent)}
+                      >
+                        <IconTrash size={15} />
+                      </Button>
+                    </Tip>
                   ) : null}
                 </div>
               </li>
