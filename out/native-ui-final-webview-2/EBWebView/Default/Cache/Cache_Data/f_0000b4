@@ -1,0 +1,231 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/components/host/WebLoginPanel.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/components/host/WebLoginPanel.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { Alert, AlertDescription } from "/node_modules/.vite/deps/@appica_ui-react_alert.js?v=341393c0";
+import { Field, FieldDescription, FieldLabel } from "/node_modules/.vite/deps/@appica_ui-react_field.js?v=341393c0";
+import { Input } from "/src/components/ui/input.tsx";
+import { Button } from "/src/components/ui/button.tsx";
+import { IconWorld } from "/src/components/icons.tsx";
+import "/src/components/host/host-mode.css";
+export const defaultWebLoginLabels = {
+  title: "登录 KeenCode Web",
+  description: "登录后可从浏览器访问已授权的远程会话。",
+  token: "Web Token",
+  tokenPlaceholder: "粘贴 Web Token",
+  submit: "继续登录",
+  submitting: "正在登录…",
+  signedIn: "已登录",
+  error: "登录失败，请检查 Token 或稍后重试。",
+  unsupportedHost: "当前宿主不需要 Web 登录。"
+};
+export function WebLoginPanel({
+  hostMode,
+  status,
+  token,
+  onTokenChange,
+  onSubmit,
+  errorMessage,
+  labels: labelOverrides
+}) {
+  const labels = { ...defaultWebLoginLabels, ...labelOverrides };
+  const isWeb = hostMode === "web" || hostMode === "mobile-remote";
+  const submitting = status === "submitting";
+  if (!isWeb) {
+    return /* @__PURE__ */ jsxDEV(
+      "section",
+      {
+        className: "host-panel host-panel--unsupported",
+        "data-host-mode": hostMode,
+        "data-testid": "web-login-panel",
+        children: [
+          /* @__PURE__ */ jsxDEV("div", { className: "host-panel__icon", "aria-hidden": "true", children: /* @__PURE__ */ jsxDEV(IconWorld, { size: 20 }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 85,
+            columnNumber: 11
+          }, this) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 84,
+            columnNumber: 9
+          }, this),
+          /* @__PURE__ */ jsxDEV("p", { children: labels.unsupportedHost }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 87,
+            columnNumber: 9
+          }, this)
+        ]
+      },
+      void 0,
+      true,
+      {
+        fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+        lineNumber: 79,
+        columnNumber: 7
+      },
+      this
+    );
+  }
+  return /* @__PURE__ */ jsxDEV(
+    "section",
+    {
+      className: "host-panel web-login-panel",
+      "data-host-mode": hostMode,
+      "data-status": status,
+      "data-testid": "web-login-panel",
+      children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "host-panel__heading", children: [
+          /* @__PURE__ */ jsxDEV("div", { className: "host-panel__icon", "aria-hidden": "true", children: /* @__PURE__ */ jsxDEV(IconWorld, { size: 20 }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 101,
+            columnNumber: 11
+          }, this) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 100,
+            columnNumber: 9
+          }, this),
+          /* @__PURE__ */ jsxDEV("div", { children: [
+            /* @__PURE__ */ jsxDEV("h2", { children: labels.title }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+              lineNumber: 104,
+              columnNumber: 11
+            }, this),
+            /* @__PURE__ */ jsxDEV("p", { children: labels.description }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+              lineNumber: 105,
+              columnNumber: 11
+            }, this)
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 103,
+            columnNumber: 9
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+          lineNumber: 99,
+          columnNumber: 7
+        }, this),
+        status === "error" ? /* @__PURE__ */ jsxDEV(Alert, { variant: "error", role: "alert", children: /* @__PURE__ */ jsxDEV(AlertDescription, { children: errorMessage || labels.error }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+          lineNumber: 111,
+          columnNumber: 11
+        }, this) }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+          lineNumber: 110,
+          columnNumber: 7
+        }, this) : null,
+        status === "signed-in" ? /* @__PURE__ */ jsxDEV(Alert, { variant: "success", role: "status", children: /* @__PURE__ */ jsxDEV(AlertDescription, { children: labels.signedIn }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+          lineNumber: 116,
+          columnNumber: 11
+        }, this) }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+          lineNumber: 115,
+          columnNumber: 7
+        }, this) : null,
+        /* @__PURE__ */ jsxDEV(
+          "form",
+          {
+            className: "web-login-panel__form",
+            onSubmit: (event) => {
+              event.preventDefault();
+              if (!submitting) void onSubmit();
+            },
+            children: [
+              /* @__PURE__ */ jsxDEV(Field, { children: [
+                /* @__PURE__ */ jsxDEV(FieldLabel, { children: labels.token }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                  lineNumber: 128,
+                  columnNumber: 11
+                }, this),
+                /* @__PURE__ */ jsxDEV(
+                  Input,
+                  {
+                    type: "password",
+                    autoComplete: "current-password",
+                    value: token,
+                    placeholder: labels.tokenPlaceholder,
+                    disabled: submitting || status === "signed-in",
+                    onChange: (event) => onTokenChange(event.target.value)
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                    lineNumber: 129,
+                    columnNumber: 11
+                  },
+                  this
+                ),
+                /* @__PURE__ */ jsxDEV(FieldDescription, { children: labels.description }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                  lineNumber: 137,
+                  columnNumber: 11
+                }, this)
+              ] }, void 0, true, {
+                fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                lineNumber: 127,
+                columnNumber: 9
+              }, this),
+              /* @__PURE__ */ jsxDEV("div", { className: "web-login-panel__actions", children: /* @__PURE__ */ jsxDEV(Button, { type: "submit", variant: "primary", disabled: submitting || status === "signed-in", children: submitting ? labels.submitting : labels.submit }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                lineNumber: 140,
+                columnNumber: 11
+              }, this) }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+                lineNumber: 139,
+                columnNumber: 9
+              }, this)
+            ]
+          },
+          void 0,
+          true,
+          {
+            fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+            lineNumber: 120,
+            columnNumber: 7
+          },
+          this
+        )
+      ]
+    },
+    void 0,
+    true,
+    {
+      fileName: "D:/projects/keen-code/src/components/host/WebLoginPanel.tsx",
+      lineNumber: 93,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_c = WebLoginPanel;
+var _c;
+$RefreshReg$(_c, "WebLoginPanel");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/components/host/WebLoginPanel.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/components/host/WebLoginPanel.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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QUFBQSxZQUNqQztBQUFBLFlBRUE7QUFBQSxxQ0FBQyxTQUNDO0FBQUEsdUNBQUMsY0FBWUUsaUJBQU9iLFNBQXBCO0FBQUE7QUFBQTtBQUFBO0FBQUEsdUJBQTBCO0FBQUEsZ0JBQzFCO0FBQUEsa0JBQUM7QUFBQTtBQUFBLG9CQUNDLE1BQUs7QUFBQSxvQkFDTCxjQUFhO0FBQUEsb0JBQ2IsT0FBT0E7QUFBQUEsb0JBQ1AsYUFBYWEsT0FBT1o7QUFBQUEsb0JBQ3BCLFVBQVVFLGNBQWNNLFdBQVc7QUFBQSxvQkFDbkMsVUFBVSxDQUFDTyxVQUFVTixjQUFjTSxNQUFNRSxPQUFPQyxLQUFLO0FBQUE7QUFBQSxrQkFOdkQ7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLGdCQU15RDtBQUFBLGdCQUV6RCx1QkFBQyxvQkFBa0JOLGlCQUFPZCxlQUExQjtBQUFBO0FBQUE7QUFBQTtBQUFBLHVCQUFzQztBQUFBLG1CQVZ4QztBQUFBO0FBQUE7QUFBQTtBQUFBLHFCQVdBO0FBQUEsY0FDQSx1QkFBQyxTQUFJLFdBQVUsNEJBQ2IsaUNBQUMsVUFBTyxNQUFLLFVBQVMsU0FBUSxXQUFVLFVBQVVJLGNBQWNNLFdBQVcsYUFDeEVOLHVCQUFhVSxPQUFPVixhQUFhVSxPQUFPWCxVQUQzQztBQUFBO0FBQUE7QUFBQTtBQUFBLHFCQUVBLEtBSEY7QUFBQTtBQUFBO0FBQUE7QUFBQSxxQkFJQTtBQUFBO0FBQUE7QUFBQSxVQXZCRjtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUEsUUF3QkE7QUFBQTtBQUFBO0FBQUEsSUFuREY7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLEVBb0RBO0FBRUo7QUFBQ2tCLEtBbkZlYjtBQUFhLElBQUFhO0FBQUEsYUFBQUEsSUFBQSIsIm5hbWVzIjpbIkFsZXJ0IiwiQWxlcnREZXNjcmlwdGlvbiIsIkZpZWxkIiwiRmllbGREZXNjcmlwdGlvbiIsIkZpZWxkTGFiZWwiLCJJbnB1dCIsIkJ1dHRvbiIsIkljb25Xb3JsZCIsImRlZmF1bHRXZWJMb2dpbkxhYmVscyIsInRpdGxlIiwiZGVzY3JpcHRpb24iLCJ0b2tlbiIsInRva2VuUGxhY2Vob2xkZXIiLCJzdWJtaXQiLCJzdWJtaXR0aW5nIiwic2lnbmVkSW4iLCJlcnJvciIsInVuc3VwcG9ydGVkSG9zdCIsIldlYkxvZ2luUGFuZWwiLCJob3N0TW9kZSIsInN0YXR1cyIsIm9uVG9rZW5DaGFuZ2UiLCJvblN1Ym1pdCIsImVycm9yTWVzc2FnZSIsImxhYmVscyIsImxhYmVsT3ZlcnJpZGVzIiwiaXNXZWIiLCJldmVudCIsInByZXZlbnREZWZhdWx0IiwidGFyZ2V0IiwidmFsdWUiLCJfYyJdLCJpZ25vcmVMaXN0IjpbXSwic291cmNlcyI6WyJXZWJMb2dpblBhbmVsLnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyBBbGVydCwgQWxlcnREZXNjcmlwdGlvbiB9IGZyb20gXCJAYXBwaWNhL3VpLXJlYWN0L2FsZXJ0XCI7XG5pbXBvcnQgeyBGaWVsZCwgRmllbGREZXNjcmlwdGlvbiwgRmllbGRMYWJlbCB9IGZyb20gXCJAYXBwaWNhL3VpLXJlYWN0L2ZpZWxkXCI7XG5pbXBvcnQgeyBJbnB1dCB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvaW5wdXRcIjtcbmltcG9ydCB7IEJ1dHRvbiB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvYnV0dG9uXCI7XG5pbXBvcnQgeyBJY29uV29ybGQgfSBmcm9tIFwiQC9jb21wb25lbnRzL2ljb25zXCI7XG5pbXBvcnQgdHlwZSB7IEhvc3RNb2RlIH0gZnJvbSBcIi4vaG9zdE1vZGVcIjtcbmltcG9ydCBcIi4vaG9zdC1tb2RlLmNzc1wiO1xuXG5leHBvcnQgdHlwZSBXZWJMb2dpblN0YXR1cyA9IFwic2lnbmVkLW91dFwiIHwgXCJzdWJtaXR0aW5nXCIgfCBcInNpZ25lZC1pblwiIHwgXCJlcnJvclwiO1xuXG5leHBvcnQgaW50ZXJmYWNlIFdlYkxvZ2luTGFiZWxzIHtcbiAgdGl0bGU6IHN0cmluZztcbiAgZGVzY3JpcHRpb246IHN0cmluZztcbiAgdG9rZW46IHN0cmluZztcbiAgdG9rZW5QbGFjZWhvbGRlcjogc3RyaW5nO1xuICBzdWJtaXQ6IHN0cmluZztcbiAgc3VibWl0dGluZzogc3RyaW5nO1xuICBzaWduZWRJbjogc3RyaW5nO1xuICBlcnJvcjogc3RyaW5nO1xuICB1bnN1cHBvcnRlZEhvc3Q6IHN0cmluZztcbn1cblxuZXhwb3J0IGNvbnN0IGRlZmF1bHRXZWJMb2dpbkxhYmVsczogV2ViTG9naW5MYWJlbHMgPSB7XG4gIHRpdGxlOiBcIueZu+W9lSBLZWVuQ29kZSBXZWJcIixcbiAgZGVzY3JpcHRpb246IFwi55m75b2V5ZCO5Y+v5LuO5rWP6KeI5Zmo6K6/6Zeu5bey5o6I5p2D55qE6L+c56iL5Lya6K+d44CCXCIsXG4gIHRva2VuOiBcIldlYiBUb2tlblwiLFxuICB0b2tlblBsYWNlaG9sZGVyOiBcIueymOi0tCBXZWIgVG9rZW5cIixcbiAgc3VibWl0OiBcIue7p+e7reeZu+W9lVwiLFxuICBzdWJtaXR0aW5nOiBcIuato+WcqOeZu+W9leKAplwiLFxuICBzaWduZWRJbjogXCLlt7LnmbvlvZVcIixcbiAgZXJyb3I6IFwi55m75b2V5aSx6LSl77yM6K+35qOA5p+lIFRva2VuIOaIlueojeWQjumHjeivleOAglwiLFxuICB1bnN1cHBvcnRlZEhvc3Q6IFwi5b2T5YmN5a6/5Li75LiN6ZyA6KaBIFdlYiDnmbvlvZXjgIJcIixcbn07XG5cbmV4cG9ydCBpbnRlcmZhY2UgV2ViTG9naW5QYW5lbFByb3BzIHtcbiAgaG9zdE1vZGU6IEhvc3RNb2RlO1xuICBzdGF0dXM6IFdlYkxvZ2luU3RhdHVzO1xuICB0b2tlbjogc3RyaW5nO1xuICBvblRva2VuQ2hhbmdlOiAodmFsdWU6IHN0cmluZykgPT4gdm9pZDtcbiAgb25TdWJtaXQ6ICgpID0+IHZvaWQgfCBQcm9taXNlPHZvaWQ+O1xuICBlcnJvck1lc3NhZ2U/OiBzdHJpbmcgfCBudWxsO1xuICBsYWJlbHM/OiBQYXJ0aWFsPFdlYkxvZ2luTGFiZWxzPjtcbn1cblxuZXhwb3J0IGZ1bmN0aW9uIFdlYkxvZ2luUGFuZWwoe1xuICBob3N0TW9kZSxcbiAgc3RhdHVzLFxuICB0b2tlbixcbiAgb25Ub2tlbkNoYW5nZSxcbiAgb25TdWJtaXQsXG4gIGVycm9yTWVzc2FnZSxcbiAgbGFiZWxzOiBsYWJlbE92ZXJyaWRlcyxcbn06IFdlYkxvZ2luUGFuZWxQcm9wcykge1xuICBjb25zdCBsYWJlbHMgPSB7IC4uLmRlZmF1bHRXZWJMb2dpbkxhYmVscywgLi4ubGFiZWxPdmVycmlkZXMgfTtcbiAgY29uc3QgaXNXZWIgPSBob3N0TW9kZSA9PT0gXCJ3ZWJcIiB8fCBob3N0TW9kZSA9PT0gXCJtb2JpbGUtcmVtb3RlXCI7XG4gIGNvbnN0IHN1Ym1pdHRpbmcgPSBzdGF0dXMgPT09IFwic3VibWl0dGluZ1wiO1xuXG4gIGlmICghaXNXZWIpIHtcbiAgICByZXR1cm4gKFxuICAgICAgPHNlY3Rpb25cbiAgICAgICAgY2xhc3NOYW1lPVwiaG9zdC1wYW5lbCBob3N0LXBhbmVsLS11bnN1cHBvcnRlZFwiXG4gICAgICAgIGRhdGEtaG9zdC1tb2RlPXtob3N0TW9kZX1cbiAgICAgICAgZGF0YS10ZXN0aWQ9XCJ3ZWItbG9naW4tcGFuZWxcIlxuICAgICAgPlxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cImhvc3QtcGFuZWxfX2ljb25cIiBhcmlhLWhpZGRlbj1cInRydWVcIj5cbiAgICAgICAgICA8SWNvbldvcmxkIHNpemU9ezIwfSAvPlxuICAgICAgICA8L2Rpdj5cbiAgICAgICAgPHA+e2xhYmVscy51bnN1cHBvcnRlZEhvc3R9PC9wPlxuICAgICAgPC9zZWN0aW9uPlxuICAgICk7XG4gIH1cblxuICByZXR1cm4gKFxuICAgIDxzZWN0aW9uXG4gICAgICBjbGFzc05hbWU9XCJob3N0LXBhbmVsIHdlYi1sb2dpbi1wYW5lbFwiXG4gICAgICBkYXRhLWhvc3QtbW9kZT17aG9zdE1vZGV9XG4gICAgICBkYXRhLXN0YXR1cz17c3RhdHVzfVxuICAgICAgZGF0YS10ZXN0aWQ9XCJ3ZWItbG9naW4tcGFuZWxcIlxuICAgID5cbiAgICAgIDxkaXYgY2xhc3NOYW1lPVwiaG9zdC1wYW5lbF9faGVhZGluZ1wiPlxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cImhvc3QtcGFuZWxfX2ljb25cIiBhcmlhLWhpZGRlbj1cInRydWVcIj5cbiAgICAgICAgICA8SWNvbldvcmxkIHNpemU9ezIwfSAvPlxuICAgICAgICA8L2Rpdj5cbiAgICAgICAgPGRpdj5cbiAgICAgICAgICA8aDI+e2xhYmVscy50aXRsZX08L2gyPlxuICAgICAgICAgIDxwPntsYWJlbHMuZGVzY3JpcHRpb259PC9wPlxuICAgICAgICA8L2Rpdj5cbiAgICAgIDwvZGl2PlxuXG4gICAgICB7c3RhdHVzID09PSBcImVycm9yXCIgPyAoXG4gICAgICAgIDxBbGVydCB2YXJpYW50PVwiZXJyb3JcIiByb2xlPVwiYWxlcnRcIj5cbiAgICAgICAgICA8QWxlcnREZXNjcmlwdGlvbj57ZXJyb3JNZXNzYWdlIHx8IGxhYmVscy5lcnJvcn08L0FsZXJ0RGVzY3JpcHRpb24+XG4gICAgICAgIDwvQWxlcnQ+XG4gICAgICApIDogbnVsbH1cbiAgICAgIHtzdGF0dXMgPT09IFwic2lnbmVkLWluXCIgPyAoXG4gICAgICAgIDxBbGVydCB2YXJpYW50PVwic3VjY2Vzc1wiIHJvbGU9XCJzdGF0dXNcIj5cbiAgICAgICAgICA8QWxlcnREZXNjcmlwdGlvbj57bGFiZWxzLnNpZ25lZElufTwvQWxlcnREZXNjcmlwdGlvbj5cbiAgICAgICAgPC9BbGVydD5cbiAgICAgICkgOiBudWxsfVxuXG4gICAgICA8Zm9ybVxuICAgICAgICBjbGFzc05hbWU9XCJ3ZWItbG9naW4tcGFuZWxfX2Zvcm1cIlxuICAgICAgICBvblN1Ym1pdD17KGV2ZW50KSA9PiB7XG4gICAgICAgICAgZXZlbnQucHJldmVudERlZmF1bHQoKTtcbiAgICAgICAgICBpZiAoIXN1Ym1pdHRpbmcpIHZvaWQgb25TdWJtaXQoKTtcbiAgICAgICAgfX1cbiAgICAgID5cbiAgICAgICAgPEZpZWxkPlxuICAgICAgICAgIDxGaWVsZExhYmVsPntsYWJlbHMudG9rZW59PC9GaWVsZExhYmVsPlxuICAgICAgICAgIDxJbnB1dFxuICAgICAgICAgICAgdHlwZT1cInBhc3N3b3JkXCJcbiAgICAgICAgICAgIGF1dG9Db21wbGV0ZT1cImN1cnJlbnQtcGFzc3dvcmRcIlxuICAgICAgICAgICAgdmFsdWU9e3Rva2VufVxuICAgICAgICAgICAgcGxhY2Vob2xkZXI9e2xhYmVscy50b2tlblBsYWNlaG9sZGVyfVxuICAgICAgICAgICAgZGlzYWJsZWQ9e3N1Ym1pdHRpbmcgfHwgc3RhdHVzID09PSBcInNpZ25lZC1pblwifVxuICAgICAgICAgICAgb25DaGFuZ2U9eyhldmVudCkgPT4gb25Ub2tlbkNoYW5nZShldmVudC50YXJnZXQudmFsdWUpfVxuICAgICAgICAgIC8+XG4gICAgICAgICAgPEZpZWxkRGVzY3JpcHRpb24+e2xhYmVscy5kZXNjcmlwdGlvbn08L0ZpZWxkRGVzY3JpcHRpb24+XG4gICAgICAgIDwvRmllbGQ+XG4gICAgICAgIDxkaXYgY2xhc3NOYW1lPVwid2ViLWxvZ2luLXBhbmVsX19hY3Rpb25zXCI+XG4gICAgICAgICAgPEJ1dHRvbiB0eXBlPVwic3VibWl0XCIgdmFyaWFudD1cInByaW1hcnlcIiBkaXNhYmxlZD17c3VibWl0dGluZyB8fCBzdGF0dXMgPT09IFwic2lnbmVkLWluXCJ9PlxuICAgICAgICAgICAge3N1Ym1pdHRpbmcgPyBsYWJlbHMuc3VibWl0dGluZyA6IGxhYmVscy5zdWJtaXR9XG4gICAgICAgICAgPC9CdXR0b24+XG4gICAgICAgIDwvZGl2PlxuICAgICAgPC9mb3JtPlxuICAgIDwvc2VjdGlvbj5cbiAgKTtcbn1cbiJdLCJmaWxlIjoiRDovcHJvamVjdHMva2Vlbi1jb2RlL3NyYy9jb21wb25lbnRzL2hvc3QvV2ViTG9naW5QYW5lbC50c3gifQ==

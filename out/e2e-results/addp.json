@@ -1,0 +1,18 @@
+{
+  "areaId": "addp",
+  "areaName": "创建项目弹窗",
+  "verdict": "fail",
+  "passCount": 4,
+  "failCount": 1,
+  "blockedCount": 1,
+  "total": 6,
+  "failures": [
+    {
+      "id": "addp-c5",
+      "label": "创建项目（提交按钮）",
+      "evidence": "输入“e2e-addp-项目A”点击提交：项目创建成功且重载后侧栏出现 button 'e2e-addp-项目A'；但提交成功瞬间整窗白屏（eval 实测 #root childElementCount=0，截图 out/shots/addp-5-blank-after-submit.png 为纯空白窗口），与已知问题“创建项目提交后 React #185 白屏”一致，用户必须手动重载才能看到新项目。busy 暂态经页面内 15ms 轮询捕捉到 1 帧：按钮文本“正在创建…”、disabled=true、右上角关闭钮隐藏、输入框 readOnly=true，符合预期。“已存在同路径项目时直接选中它”分支依赖来源路径（c2 被原生对话框阻塞）未能实测；同名无路径重复提交实测弹窗内报错“操作失败，请重试。”（Alert 正常显示、不关窗、不白屏）。",
+      "severity": "高"
+    }
+  ],
+  "blockedNotes": "addp-c2（选择已有项目文件夹按钮）：两条路径均无法自动化——点击走 api.pickDirectory → Tauri pick_directory → app.dialog().file().blocking_pick_folder()（src-tauri/src/workspace.rs:917-920）= Windows 原生目录对话框；拖放走 Tauri webview.onDragDropEvent OS 级事件（src/hooks/useWorkbenchDragResize.ts:86-107），CDP 合成事件不可达。按钮本体存在已确认（#add-project-source，文本“选择已有项目文件夹”）。"
+}

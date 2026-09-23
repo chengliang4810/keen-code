@@ -1,0 +1,608 @@
+"use client";
+import {
+  ContextMenuRootContext,
+  MenuArrow,
+  MenuBackdrop,
+  MenuCheckboxItem,
+  MenuCheckboxItemIndicator,
+  MenuGroup,
+  MenuGroupLabel,
+  MenuItem,
+  MenuLinkItem,
+  MenuPopup,
+  MenuPortal,
+  MenuPositioner,
+  MenuRadioGroup,
+  MenuRadioItem,
+  MenuRadioItemIndicator,
+  MenuRootContext,
+  MenuSubmenuRoot,
+  MenuSubmenuTrigger,
+  findRootOwnerId,
+  index_parts_exports,
+  useContextMenuRootContext,
+  useMenuRootContext
+} from "/node_modules/.vite/deps/chunk-MS6MQIHW.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-LL52NYQO.js?v=341393c0";
+import {
+  navigationLinkVariants
+} from "/node_modules/.vite/deps/chunk-5HKVH3PH.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-OFB7BOTN.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-ZC7O543K.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-ZVD7VVMZ.js?v=341393c0";
+import {
+  Separator
+} from "/node_modules/.vite/deps/chunk-TAX7XVP5.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-VTSE33MH.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-X4EEDQMP.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-242UXUEY.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-FLVISRMZ.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-EMUWFRK6.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-5T4MQA3J.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-NOSNFGDL.js?v=341393c0";
+import {
+  splitFloatingProps
+} from "/node_modules/.vite/deps/chunk-XDERPMMR.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-4F4DSR7S.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-NYJGPNC5.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-TL5ER77B.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-KY7NK5F5.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-LNQEFALS.js?v=341393c0";
+import {
+  useReducedMotion
+} from "/node_modules/.vite/deps/chunk-WXTVF6BV.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-ZC5ZR7IM.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-AI3CPQIU.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-63LI3Z4H.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-5A4L2GXO.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-YIGBZ6SX.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-CZFQ5SLG.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-EM5SU2YT.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-UGKWQ5YV.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-ZBV7USKU.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-FDYXN4QK.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-G64RGAYH.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-PWITTTM7.js?v=341393c0";
+import {
+  addEventListener
+} from "/node_modules/.vite/deps/chunk-JTXVRWPW.js?v=341393c0";
+import {
+  contains,
+  getTarget,
+  pressableTriggerOpenStateMapping,
+  stopEvent
+} from "/node_modules/.vite/deps/chunk-B2B4DXP4.js?v=341393c0";
+import {
+  useTimeout
+} from "/node_modules/.vite/deps/chunk-ZKOWGVVP.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-4GQMDVV5.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-UI5XAVVN.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-6JVU4J4E.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-Q723KW4Z.js?v=341393c0";
+import {
+  createChangeEventDetails,
+  reason_parts_exports
+} from "/node_modules/.vite/deps/chunk-EIPLHTKK.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-LM2K4WU6.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GL46B26J.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-32YKATOX.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GPLCYBEI.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-XCXD75MQ.js?v=341393c0";
+import {
+  useId
+} from "/node_modules/.vite/deps/chunk-KD2YTZUQ.js?v=341393c0";
+import {
+  ownerDocument
+} from "/node_modules/.vite/deps/chunk-H42XUSOK.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-3LPHUCVY.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-2VEKR5CR.js?v=341393c0";
+import {
+  useRenderElement
+} from "/node_modules/.vite/deps/chunk-O5KZOVAW.js?v=341393c0";
+import {
+  cn
+} from "/node_modules/.vite/deps/chunk-MCT4N4XI.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-76V45DLG.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-DEX2RCYB.js?v=341393c0";
+import {
+  require_jsx_runtime
+} from "/node_modules/.vite/deps/chunk-V46J5SUH.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GFQRAAPS.js?v=341393c0";
+import {
+  require_react
+} from "/node_modules/.vite/deps/chunk-ZWRFQRRA.js?v=341393c0";
+import {
+  __export,
+  __toESM
+} from "/node_modules/.vite/deps/chunk-DC5AMYBS.js?v=341393c0";
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/context-menu/context-menu.js
+var import_jsx_runtime2 = __toESM(require_jsx_runtime());
+var React3 = __toESM(require_react());
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/context-menu/index.parts.mjs
+var index_parts_exports2 = {};
+__export(index_parts_exports2, {
+  Arrow: () => MenuArrow,
+  Backdrop: () => MenuBackdrop,
+  CheckboxItem: () => MenuCheckboxItem,
+  CheckboxItemIndicator: () => MenuCheckboxItemIndicator,
+  Group: () => MenuGroup,
+  GroupLabel: () => MenuGroupLabel,
+  Item: () => MenuItem,
+  LinkItem: () => MenuLinkItem,
+  Popup: () => MenuPopup,
+  Portal: () => MenuPortal,
+  Positioner: () => ContextMenuPositioner,
+  RadioGroup: () => MenuRadioGroup,
+  RadioItem: () => MenuRadioItem,
+  RadioItemIndicator: () => MenuRadioItemIndicator,
+  Root: () => ContextMenuRoot,
+  Separator: () => Separator,
+  SubmenuRoot: () => MenuSubmenuRoot,
+  SubmenuTrigger: () => MenuSubmenuTrigger,
+  Trigger: () => ContextMenuTrigger
+});
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/context-menu/root/ContextMenuRoot.mjs
+var React = __toESM(require_react(), 1);
+var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+function ContextMenuRoot(props) {
+  const [anchor, setAnchor] = React.useState({
+    getBoundingClientRect() {
+      return DOMRect.fromRect({
+        width: 0,
+        height: 0,
+        x: 0,
+        y: 0
+      });
+    }
+  });
+  const backdropRef = React.useRef(null);
+  const internalBackdropRef = React.useRef(null);
+  const actionsRef = React.useRef(null);
+  const positionerRef = React.useRef(null);
+  const allowMouseUpTriggerRef = React.useRef(true);
+  const initialCursorPointRef = React.useRef(null);
+  const id = useId();
+  const contextValue = React.useMemo(() => ({
+    anchor,
+    setAnchor,
+    actionsRef,
+    backdropRef,
+    internalBackdropRef,
+    positionerRef,
+    allowMouseUpTriggerRef,
+    initialCursorPointRef,
+    rootId: id
+  }), [anchor, id]);
+  return (0, import_jsx_runtime.jsx)(ContextMenuRootContext.Provider, {
+    value: contextValue,
+    children: (0, import_jsx_runtime.jsx)(MenuRootContext.Provider, {
+      value: void 0,
+      children: (0, import_jsx_runtime.jsx)(index_parts_exports.Root, {
+        ...props
+      })
+    })
+  });
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/context-menu/trigger/ContextMenuTrigger.mjs
+var React2 = __toESM(require_react(), 1);
+var LONG_PRESS_DELAY = 500;
+var ContextMenuTrigger = React2.forwardRef(function ContextMenuTrigger2(componentProps, forwardedRef) {
+  const {
+    render,
+    className,
+    style,
+    ...elementProps
+  } = componentProps;
+  const {
+    setAnchor,
+    actionsRef,
+    internalBackdropRef,
+    backdropRef,
+    positionerRef,
+    allowMouseUpTriggerRef,
+    initialCursorPointRef,
+    rootId
+  } = useContextMenuRootContext(false);
+  const {
+    store
+  } = useMenuRootContext(false);
+  const open = store.useState("open");
+  const disabled = store.useState("disabled");
+  const triggerRef = React2.useRef(null);
+  const touchPositionRef = React2.useRef(null);
+  const longPressTimeout = useTimeout();
+  const allowMouseUpTimeout = useTimeout();
+  const allowMouseUpRef = React2.useRef(false);
+  const mouseUpAbortControllerRef = React2.useRef(null);
+  function handleLongPress(x, y, event) {
+    var _a;
+    const isTouchEvent = event.type.startsWith("touch");
+    initialCursorPointRef.current = {
+      x,
+      y
+    };
+    setAnchor({
+      getBoundingClientRect() {
+        return DOMRect.fromRect({
+          width: isTouchEvent ? 10 : 0,
+          height: isTouchEvent ? 10 : 0,
+          x,
+          y
+        });
+      }
+    });
+    allowMouseUpRef.current = false;
+    (_a = actionsRef.current) == null ? void 0 : _a.setOpen(true, createChangeEventDetails(reason_parts_exports.triggerPress, event));
+    allowMouseUpTimeout.start(LONG_PRESS_DELAY, () => {
+      allowMouseUpRef.current = true;
+    });
+  }
+  function handleContextMenu(event) {
+    var _a;
+    if (disabled) {
+      return;
+    }
+    allowMouseUpTriggerRef.current = true;
+    stopEvent(event);
+    handleLongPress(event.clientX, event.clientY, event.nativeEvent);
+    const doc = ownerDocument(triggerRef.current);
+    (_a = mouseUpAbortControllerRef.current) == null ? void 0 : _a.abort();
+    const mouseUpAbortController = new AbortController();
+    mouseUpAbortControllerRef.current = mouseUpAbortController;
+    doc.addEventListener("mouseup", (mouseEvent) => {
+      var _a2;
+      allowMouseUpTriggerRef.current = false;
+      if (!allowMouseUpRef.current) {
+        return;
+      }
+      allowMouseUpTimeout.clear();
+      allowMouseUpRef.current = false;
+      const mouseUpTarget = getTarget(mouseEvent);
+      if (contains(positionerRef.current, mouseUpTarget)) {
+        return;
+      }
+      if (rootId && mouseUpTarget && findRootOwnerId(mouseUpTarget) === rootId) {
+        return;
+      }
+      (_a2 = actionsRef.current) == null ? void 0 : _a2.setOpen(false, createChangeEventDetails(reason_parts_exports.cancelOpen, mouseEvent));
+    }, {
+      once: true,
+      signal: mouseUpAbortController.signal
+    });
+  }
+  function cancelLongPress() {
+    longPressTimeout.clear();
+    touchPositionRef.current = null;
+  }
+  function handleTouchStart(event) {
+    if (disabled) {
+      cancelLongPress();
+      return;
+    }
+    allowMouseUpTriggerRef.current = false;
+    if (event.touches.length !== 1) {
+      cancelLongPress();
+      return;
+    }
+    event.stopPropagation();
+    const touch = event.touches[0];
+    const touchPosition = {
+      x: touch.clientX,
+      y: touch.clientY
+    };
+    touchPositionRef.current = touchPosition;
+    longPressTimeout.start(LONG_PRESS_DELAY, () => {
+      handleLongPress(touchPosition.x, touchPosition.y, event.nativeEvent);
+    });
+  }
+  function handleTouchMove(event) {
+    if (event.touches.length !== 1) {
+      cancelLongPress();
+      return;
+    }
+    if (longPressTimeout.isStarted() && touchPositionRef.current) {
+      const touch = event.touches[0];
+      const moveThreshold = 10;
+      const deltaX = Math.abs(touch.clientX - touchPositionRef.current.x);
+      const deltaY = Math.abs(touch.clientY - touchPositionRef.current.y);
+      if (deltaX > moveThreshold || deltaY > moveThreshold) {
+        cancelLongPress();
+      }
+    }
+  }
+  React2.useEffect(() => () => {
+    var _a;
+    (_a = mouseUpAbortControllerRef.current) == null ? void 0 : _a.abort();
+  }, []);
+  React2.useEffect(() => {
+    function handleDocumentContextMenu(event) {
+      if (disabled) {
+        return;
+      }
+      const target = getTarget(event);
+      const targetElement = target;
+      if (contains(triggerRef.current, targetElement) || contains(internalBackdropRef.current, targetElement) || contains(backdropRef.current, targetElement)) {
+        event.preventDefault();
+      }
+    }
+    const doc = ownerDocument(triggerRef.current);
+    return addEventListener(doc, "contextmenu", handleDocumentContextMenu);
+  }, [backdropRef, disabled, internalBackdropRef]);
+  const state = {
+    open
+  };
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: [triggerRef, forwardedRef],
+    props: [{
+      onContextMenu: handleContextMenu,
+      onTouchStart: handleTouchStart,
+      onTouchMove: handleTouchMove,
+      onTouchEnd: cancelLongPress,
+      onTouchCancel: cancelLongPress,
+      style: {
+        WebkitTouchCallout: "none"
+      }
+    }, elementProps],
+    stateAttributesMapping: pressableTriggerOpenStateMapping
+  });
+  return element;
+});
+if (true) ContextMenuTrigger.displayName = "ContextMenuTrigger";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/context-menu/positioner/ContextMenuPositioner.mjs
+var ContextMenuPositioner = MenuPositioner;
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/context-menu/context-menu.js
+var ContextMenuContext = React3.createContext(null);
+function useContextMenuContext() {
+  const ctx = React3.useContext(ContextMenuContext);
+  if (!ctx) {
+    throw new Error("ContextMenu sub-components must be rendered inside <ContextMenu>");
+  }
+  return ctx;
+}
+function ContextMenu({ size = "md", children, ...rest }) {
+  const reducedMotion = useReducedMotion();
+  const ctx = React3.useMemo(() => ({ size, reducedMotion }), [size, reducedMotion]);
+  return (0, import_jsx_runtime2.jsx)(ContextMenuContext, { value: ctx, children: (0, import_jsx_runtime2.jsx)(index_parts_exports2.Root, { ...rest, children }) });
+}
+function ContextMenuTrigger3({ className, ...props }) {
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.Trigger, { "data-slot": "context-menu-trigger", className: cn(className), ...props });
+}
+var POPUP_SIZE = {
+  sm: "min-w-40 rounded-md",
+  md: "min-w-48 rounded-lg",
+  lg: "min-w-56 rounded-xl"
+};
+var ICON_SIZE = {
+  sm: "size-4",
+  md: "size-4.5",
+  lg: "size-5"
+};
+function popupClassName(size, className) {
+  return cn(
+    "max-h-(--available-height) bg-background border-border-overlay flex flex-col border shadow-2xl outline-none",
+    POPUP_SIZE[size],
+    "origin-(--transform-origin)",
+    "motion-safe:transition-[opacity,scale] motion-safe:duration-200 motion-safe:ease-[cubic-bezier(0.175,0.885,0.32,1.5)]",
+    "data-starting-style:motion-safe:scale-90 data-starting-style:motion-safe:opacity-0",
+    "data-ending-style:motion-safe:scale-95 data-ending-style:motion-safe:opacity-0 data-ending-style:motion-safe:duration-100 data-ending-style:motion-safe:ease-out",
+    className
+  );
+}
+function ContextMenuContent({ className, children, ...props }) {
+  const { size } = useContextMenuContext();
+  const { positioner, portal, popup } = splitFloatingProps(props);
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.Portal, { ...portal, children: (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.Positioner,
+    {
+      align: "start",
+      sideOffset: 2,
+      ...positioner,
+      className: cn("isolate z-50", positioner.className),
+      children: (0, import_jsx_runtime2.jsx)(index_parts_exports2.Popup, { "data-slot": "context-menu-content", className: popupClassName(size, className), ...popup, children: (0, import_jsx_runtime2.jsx)("div", { className: "flex flex-col gap-0.5 overflow-x-hidden overflow-y-auto p-2", children }) })
+    }
+  ) });
+}
+var ITEM_BASE = "w-full outline-hidden";
+var ITEM_TEXT = {
+  sm: "gap-1",
+  md: "gap-1.5",
+  lg: "gap-1.5"
+};
+function ContextMenuItem({ className, ...props }) {
+  const { size } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.Item,
+    {
+      "data-slot": "context-menu-item",
+      className: cn(navigationLinkVariants({ variant: "pill", size }), ITEM_BASE, className),
+      ...props
+    }
+  );
+}
+function ContextMenuLinkItem({ className, ...props }) {
+  const { size } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.LinkItem,
+    {
+      "data-slot": "context-menu-link-item",
+      className: cn(navigationLinkVariants({ variant: "pill", size }), ITEM_BASE, className),
+      ...props
+    }
+  );
+}
+function ContextMenuGroup(props) {
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.Group, { "data-slot": "context-menu-group", ...props });
+}
+var GROUP_LABEL_SIZE = {
+  sm: "px-2.5 pt-1.5 pb-1 text-xs",
+  md: "px-3 pt-2 pb-1.25 text-sm",
+  lg: "px-3.5 pt-2.5 pb-1.5 text-base"
+};
+function ContextMenuGroupLabel({ className, ...props }) {
+  const { size } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.GroupLabel,
+    {
+      "data-slot": "context-menu-group-label",
+      className: cn("text-foreground-subtle", GROUP_LABEL_SIZE[size], className),
+      ...props
+    }
+  );
+}
+function ContextMenuSeparator({ className, ...props }) {
+  return (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.Separator,
+    {
+      "data-slot": "context-menu-separator",
+      className: cn("bg-border -mx-2 my-1.5 h-px shrink-0", className),
+      ...props
+    }
+  );
+}
+function ContextMenuRadioGroup(props) {
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.RadioGroup, { "data-slot": "context-menu-radio-group", ...props });
+}
+function ContextMenuRadioItem({ className, children, ...props }) {
+  const { size, reducedMotion } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsxs)(
+    index_parts_exports2.RadioItem,
+    {
+      "data-slot": "context-menu-radio-item",
+      className: cn(navigationLinkVariants({ variant: "pill", size }), ITEM_BASE, "justify-between", className),
+      ...props,
+      children: [
+        (0, import_jsx_runtime2.jsx)("span", { className: cn("flex items-center", ITEM_TEXT[size]), children }),
+        (0, import_jsx_runtime2.jsx)(
+          index_parts_exports2.RadioItemIndicator,
+          {
+            "data-slot": "context-menu-radio-item-indicator",
+            keepMounted: !reducedMotion,
+            className: "group/check text-foreground-intense shrink-0",
+            children: (0, import_jsx_runtime2.jsx)(CheckIcon, { "data-icon": "end", className: "me-0.5 size-[1.125em]" })
+          }
+        )
+      ]
+    }
+  );
+}
+function ContextMenuCheckboxItem({ className, children, ...props }) {
+  const { size, reducedMotion } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsxs)(
+    index_parts_exports2.CheckboxItem,
+    {
+      "data-slot": "context-menu-checkbox-item",
+      className: cn(navigationLinkVariants({ variant: "pill", size }), ITEM_BASE, "justify-between", className),
+      ...props,
+      children: [
+        (0, import_jsx_runtime2.jsx)("span", { className: cn("flex items-center", ITEM_TEXT[size]), children }),
+        (0, import_jsx_runtime2.jsx)(
+          index_parts_exports2.CheckboxItemIndicator,
+          {
+            "data-slot": "context-menu-checkbox-item-indicator",
+            keepMounted: !reducedMotion,
+            className: "group/check text-foreground-intense shrink-0",
+            children: (0, import_jsx_runtime2.jsx)(CheckIcon, { "data-icon": "end", className: "me-0.5 size-[1.125em]" })
+          }
+        )
+      ]
+    }
+  );
+}
+function ContextMenuSub(props) {
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.SubmenuRoot, { ...props });
+}
+function ContextMenuSubTrigger({ className, children, ...props }) {
+  const { size } = useContextMenuContext();
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.SubmenuTrigger, { className: "group/submenu-trigger outline-hidden", ...props, children: (0, import_jsx_runtime2.jsxs)(
+    "span",
+    {
+      "data-slot": "context-menu-sub-trigger",
+      className: cn(navigationLinkVariants({ variant: "pill", size }), ITEM_BASE, "justify-between", className),
+      children: [
+        (0, import_jsx_runtime2.jsx)("span", { className: cn("flex flex-1 items-center", ITEM_TEXT[size]), children }),
+        (0, import_jsx_runtime2.jsx)(ChevronEndIcon, { "data-icon": "end", className: cn(ICON_SIZE[size], "shrink-0 rtl:rotate-180") })
+      ]
+    }
+  ) });
+}
+function ContextMenuSubContent({ className, children, ...props }) {
+  const { size } = useContextMenuContext();
+  const { positioner, portal, popup } = splitFloatingProps(props);
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports2.Portal, { ...portal, children: (0, import_jsx_runtime2.jsx)(
+    index_parts_exports2.Positioner,
+    {
+      side: "inline-end",
+      align: "start",
+      sideOffset: 12,
+      ...positioner,
+      className: cn("isolate z-50", positioner.className),
+      children: (0, import_jsx_runtime2.jsx)(
+        index_parts_exports2.Popup,
+        {
+          "data-slot": "context-menu-sub-content",
+          className: popupClassName(size, cn("w-(--anchor-width)", className)),
+          ...popup,
+          children: (0, import_jsx_runtime2.jsx)("div", { className: "flex flex-col gap-0.5 overflow-x-hidden overflow-y-auto p-2", children })
+        }
+      )
+    }
+  ) });
+}
+function CheckIcon({ className, ...props }) {
+  return (0, import_jsx_runtime2.jsx)(
+    "svg",
+    {
+      xmlns: "http://www.w3.org/2000/svg",
+      viewBox: "0 0 24 24",
+      fill: "none",
+      stroke: "currentColor",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      "aria-hidden": "true",
+      className: cn("stroke-2", className),
+      ...props,
+      children: (0, import_jsx_runtime2.jsx)(
+        "path",
+        {
+          d: "M4.3 12.55 L9.25 17.5 L19.7 6.5",
+          pathLength: 1,
+          strokeDasharray: "1 2",
+          className: cn(
+            "opacity-0 [stroke-dashoffset:1.02]",
+            "group-data-checked/check:opacity-100 group-data-checked/check:[stroke-dashoffset:0]",
+            "motion-safe:transition-[opacity,stroke-dashoffset] motion-safe:ease-out",
+            "motion-safe:delay-[0ms,150ms] motion-safe:duration-[150ms,0ms]",
+            "motion-safe:group-data-checked/check:delay-[0ms] motion-safe:group-data-checked/check:duration-[0ms,300ms]"
+          )
+        }
+      )
+    }
+  );
+}
+function ChevronEndIcon(props) {
+  return (0, import_jsx_runtime2.jsx)("svg", { xmlns: "http://www.w3.org/2000/svg", viewBox: "0 0 16 16", fill: "currentColor", "aria-hidden": "true", ...props, children: (0, import_jsx_runtime2.jsx)("path", { d: "M5.558 3.558c.244-.244.641-.244.885 0l4 4c.244.244.244.641 0 .885l-4 4c-.244.244-.641.244-.885 0s-.244-.641 0-.885L9.115 8 5.558 4.442c-.244-.244-.244-.641 0-.885z" }) });
+}
+export {
+  ContextMenu,
+  ContextMenuCheckboxItem,
+  ContextMenuContent,
+  ContextMenuGroup,
+  ContextMenuGroupLabel,
+  ContextMenuItem,
+  ContextMenuLinkItem,
+  ContextMenuRadioGroup,
+  ContextMenuRadioItem,
+  ContextMenuSeparator,
+  ContextMenuSub,
+  ContextMenuSubContent,
+  ContextMenuSubTrigger,
+  ContextMenuTrigger3 as ContextMenuTrigger
+};
+//# sourceMappingURL=@appica_ui-react_context-menu.js.map

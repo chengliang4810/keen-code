@@ -1,0 +1,229 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/features/app/overlays/WorktreeCreateModal.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { GlassModal } from "/src/components/GlassModal.tsx";
+import { Button } from "/src/components/ui/button.tsx";
+import { Input } from "/src/components/ui/input.tsx";
+import { Alert, AlertDescription } from "/node_modules/.vite/deps/@appica_ui-react_alert.js?v=341393c0";
+import { Field, FieldLabel } from "/node_modules/.vite/deps/@appica_ui-react_field.js?v=341393c0";
+export function WorktreeCreateModal({
+  tr,
+  open,
+  setOpen,
+  busy,
+  startChat,
+  name,
+  setName,
+  refName,
+  setRefName,
+  previewPath,
+  error,
+  setError,
+  submit
+}) {
+  return /* @__PURE__ */ jsxDEV(
+    GlassModal,
+    {
+      open,
+      onClose: () => {
+        if (!busy) setOpen(false);
+      },
+      title: startChat ? tr("composer.worktreeNewChatTitle") : tr("composer.worktreeNewTitle"),
+      size: "md",
+      closeLabel: tr("common.close"),
+      closeOnOverlay: !busy,
+      showClose: !busy,
+      wrapBody: true,
+      footer: /* @__PURE__ */ jsxDEV(Fragment, { children: [
+        /* @__PURE__ */ jsxDEV(
+          Button,
+          {
+            type: "button",
+            variant: "ghost",
+            disabled: busy,
+            onClick: () => setOpen(false),
+            children: tr("common.cancel")
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+            lineNumber: 76,
+            columnNumber: 11
+          },
+          this
+        ),
+        /* @__PURE__ */ jsxDEV(
+          Button,
+          {
+            type: "button",
+            variant: "primary",
+            disabled: busy || !name.trim(),
+            onClick: () => void submit(),
+            children: busy ? tr("composer.worktreeCreating") : startChat ? tr("composer.worktreeCreateChat") : tr("composer.worktreeCreate")
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+            lineNumber: 84,
+            columnNumber: 11
+          },
+          this
+        )
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+        lineNumber: 75,
+        columnNumber: 7
+      }, this),
+      children: /* @__PURE__ */ jsxDEV(
+        "form",
+        {
+          className: "wt-create",
+          onSubmit: (event) => {
+            event.preventDefault();
+            if (!busy) void submit();
+          },
+          children: [
+            /* @__PURE__ */ jsxDEV("p", { className: "wt-create__hint", children: startChat ? tr("composer.worktreeNewChatHint") : tr("composer.worktreeNewHint") }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 106,
+              columnNumber: 9
+            }, this),
+            /* @__PURE__ */ jsxDEV(Field, { children: [
+              /* @__PURE__ */ jsxDEV(FieldLabel, { children: tr("composer.worktreeName") }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+                lineNumber: 112,
+                columnNumber: 11
+              }, this),
+              /* @__PURE__ */ jsxDEV(
+                Input,
+                {
+                  className: "settings-input",
+                  value: name,
+                  onChange: (event) => {
+                    setName(event.target.value);
+                    setError(null);
+                  },
+                  placeholder: tr("composer.worktreeNamePlaceholder"),
+                  autoComplete: "off",
+                  autoFocus: true,
+                  disabled: busy,
+                  spellCheck: false
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+                  lineNumber: 115,
+                  columnNumber: 11
+                },
+                this
+              )
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 111,
+              columnNumber: 9
+            }, this),
+            /* @__PURE__ */ jsxDEV(Field, { children: [
+              /* @__PURE__ */ jsxDEV(FieldLabel, { children: tr("composer.worktreeRef") }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+                lineNumber: 130,
+                columnNumber: 11
+              }, this),
+              /* @__PURE__ */ jsxDEV(
+                Input,
+                {
+                  className: "settings-input",
+                  value: refName,
+                  onChange: (event) => {
+                    setRefName(event.target.value);
+                    setError(null);
+                  },
+                  placeholder: tr("composer.worktreeRefPlaceholder"),
+                  autoComplete: "off",
+                  disabled: busy,
+                  spellCheck: false
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+                  lineNumber: 133,
+                  columnNumber: 11
+                },
+                this
+              )
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 129,
+              columnNumber: 9
+            }, this),
+            previewPath ? /* @__PURE__ */ jsxDEV("p", { className: "wt-create__preview", children: tr("composer.worktreePathPreview", { path: previewPath }) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 147,
+              columnNumber: 9
+            }, this) : null,
+            error ? /* @__PURE__ */ jsxDEV(Alert, { variant: "error", children: /* @__PURE__ */ jsxDEV(AlertDescription, { children: error }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 152,
+              columnNumber: 32
+            }, this) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+              lineNumber: 152,
+              columnNumber: 9
+            }, this) : null
+          ]
+        },
+        void 0,
+        true,
+        {
+          fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+          lineNumber: 99,
+          columnNumber: 7
+        },
+        this
+      )
+    },
+    void 0,
+    false,
+    {
+      fileName: "D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx",
+      lineNumber: 59,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_c = WorktreeCreateModal;
+var _c;
+$RefreshReg$(_c, "WorktreeCreateModal");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/features/app/overlays/WorktreeCreateModal.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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RyxzQkFBc0IsS0FENUI7QUFBQTtBQUFBO0FBQUE7QUFBQSxxQkFFQTtBQUFBLGNBQ0E7QUFBQSxnQkFBQztBQUFBO0FBQUEsa0JBQ0MsV0FBVTtBQUFBLGtCQUNWLE9BQU9PO0FBQUFBLGtCQUNQLFVBQVUsQ0FBQ08sVUFBVTtBQUNuQk4sK0JBQVdNLE1BQU1FLE9BQU9DLEtBQUs7QUFDN0JOLDZCQUFTLElBQUk7QUFBQSxrQkFDZjtBQUFBLGtCQUNBLGFBQWFYLEdBQUcsaUNBQWlDO0FBQUEsa0JBQ2pELGNBQWE7QUFBQSxrQkFDYixVQUFVRztBQUFBQSxrQkFDVixZQUFZO0FBQUE7QUFBQSxnQkFWZDtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUEsY0FVb0I7QUFBQSxpQkFkdEI7QUFBQTtBQUFBO0FBQUE7QUFBQSxtQkFnQkE7QUFBQSxZQUNDTSxjQUNDLHVCQUFDLE9BQUUsV0FBVSxzQkFDVlQsYUFBRyxnQ0FBZ0MsRUFBRWtCLE1BQU1ULFlBQVksQ0FBQyxLQUQzRDtBQUFBO0FBQUE7QUFBQTtBQUFBLG1CQUVBLElBQ0U7QUFBQSxZQUNIQyxRQUNDLHVCQUFDLFNBQU0sU0FBUSxTQUFRLGlDQUFDLG9CQUFrQkEsbUJBQW5CO0FBQUE7QUFBQTtBQUFBO0FBQUEsbUJBQXlCLEtBQWhEO0FBQUE7QUFBQTtBQUFBO0FBQUEsbUJBQW1FLElBQ2pFO0FBQUE7QUFBQTtBQUFBLFFBdEROO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxNQXVEQTtBQUFBO0FBQUEsSUEvRkY7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLEVBZ0dBO0FBRUo7QUFBQ1MsS0FsSGVwQjtBQUFtQixJQUFBb0I7QUFBQSxhQUFBQSxJQUFBIiwibmFtZXMiOlsiR2xhc3NNb2RhbCIsIkJ1dHRvbiIsIklucHV0IiwiQWxlcnQiLCJBbGVydERlc2NyaXB0aW9uIiwiRmllbGQiLCJGaWVsZExhYmVsIiwiV29ya3RyZWVDcmVhdGVNb2RhbCIsInRyIiwib3BlbiIsInNldE9wZW4iLCJidXN5Iiwic3RhcnRDaGF0IiwibmFtZSIsInNldE5hbWUiLCJyZWZOYW1lIiwic2V0UmVmTmFtZSIsInByZXZpZXdQYXRoIiwiZXJyb3IiLCJzZXRFcnJvciIsInN1Ym1pdCIsInRyaW0iLCJldmVudCIsInByZXZlbnREZWZhdWx0IiwidGFyZ2V0IiwidmFsdWUiLCJwYXRoIiwiX2MiXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsiV29ya3RyZWVDcmVhdGVNb2RhbC50c3giXSwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHsgR2xhc3NNb2RhbCB9IGZyb20gXCJAL2NvbXBvbmVudHMvR2xhc3NNb2RhbFwiO1xyXG5pbXBvcnQgeyBCdXR0b24gfSBmcm9tIFwiQC9jb21wb25lbnRzL3VpL2J1dHRvblwiO1xyXG5pbXBvcnQgeyBJbnB1dCB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvaW5wdXRcIjtcclxuaW1wb3J0IHsgQWxlcnQsIEFsZXJ0RGVzY3JpcHRpb24gfSBmcm9tIFwiQGFwcGljYS91aS1yZWFjdC9hbGVydFwiO1xyXG5pbXBvcnQgeyBGaWVsZCwgRmllbGRMYWJlbCB9IGZyb20gXCJAYXBwaWNhL3VpLXJlYWN0L2ZpZWxkXCI7XHJcbmltcG9ydCB0eXBlIHsgU2V0U3RhdGUsIFRyYW5zbGF0b3IgfSBmcm9tIFwiLi90eXBlc1wiO1xyXG5cclxuZXhwb3J0IGludGVyZmFjZSBXb3JrdHJlZUNyZWF0ZU1vZGFsUHJvcHMge1xyXG4gIHRyOiBUcmFuc2xhdG9yO1xyXG4gIG9wZW46IGJvb2xlYW47XHJcbiAgc2V0T3BlbjogU2V0U3RhdGU8Ym9vbGVhbj47XHJcbiAgYnVzeTogYm9vbGVhbjtcclxuICBzdGFydENoYXQ6IGJvb2xlYW47XHJcbiAgbmFtZTogc3RyaW5nO1xyXG4gIHNldE5hbWU6IFNldFN0YXRlPHN0cmluZz47XHJcbiAgcmVmTmFtZTogc3RyaW5nO1xyXG4gIHNldFJlZk5hbWU6IFNldFN0YXRlPHN0cmluZz47XHJcbiAgcHJldmlld1BhdGg6IHN0cmluZyB8IG51bGw7XHJcbiAgZXJyb3I6IHN0cmluZyB8IG51bGw7XHJcbiAgc2V0RXJyb3I6IFNldFN0YXRlPHN0cmluZyB8IG51bGw+O1xyXG4gIHN1Ym1pdDogKCkgPT4gdm9pZCB8IFByb21pc2U8dm9pZD47XHJcbn1cclxuXHJcbmV4cG9ydCBmdW5jdGlvbiBXb3JrdHJlZUNyZWF0ZU1vZGFsKHtcclxuICB0cixcclxuICBvcGVuLFxyXG4gIHNldE9wZW4sXHJcbiAgYnVzeSxcclxuICBzdGFydENoYXQsXHJcbiAgbmFtZSxcclxuICBzZXROYW1lLFxyXG4gIHJlZk5hbWUsXHJcbiAgc2V0UmVmTmFtZSxcclxuICBwcmV2aWV3UGF0aCxcclxuICBlcnJvcixcclxuICBzZXRFcnJvcixcclxuICBzdWJtaXQsXHJcbn06IFdvcmt0cmVlQ3JlYXRlTW9kYWxQcm9wcykge1xyXG4gIHJldHVybiAoXHJcbiAgICA8R2xhc3NNb2RhbFxyXG4gICAgICBvcGVuPXtvcGVufVxyXG4gICAgICBvbkNsb3NlPXsoKSA9PiB7XHJcbiAgICAgICAgaWYgKCFidXN5KSBzZXRPcGVuKGZhbHNlKTtcclxuICAgICAgfX1cclxuICAgICAgdGl0bGU9e1xyXG4gICAgICAgIHN0YXJ0Q2hhdFxyXG4gICAgICAgICAgPyB0cihcImNvbXBvc2VyLndvcmt0cmVlTmV3Q2hhdFRpdGxlXCIpXHJcbiAgICAgICAgICA6IHRyKFwiY29tcG9zZXIud29ya3RyZWVOZXdUaXRsZVwiKVxyXG4gICAgICB9XHJcbiAgICAgIHNpemU9XCJtZFwiXHJcbiAgICAgIGNsb3NlTGFiZWw9e3RyKFwiY29tbW9uLmNsb3NlXCIpfVxyXG4gICAgICBjbG9zZU9uT3ZlcmxheT17IWJ1c3l9XHJcbiAgICAgIHNob3dDbG9zZT17IWJ1c3l9XHJcbiAgICAgIHdyYXBCb2R5XHJcbiAgICAgIGZvb3Rlcj17XHJcbiAgICAgICAgPD5cclxuICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXHJcbiAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXHJcbiAgICAgICAgICAgIGRpc2FibGVkPXtidXN5fVxyXG4gICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiBzZXRPcGVuKGZhbHNlKX1cclxuICAgICAgICAgID5cclxuICAgICAgICAgICAge3RyKFwiY29tbW9uLmNhbmNlbFwiKX1cclxuICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgICAgPEJ1dHRvblxyXG4gICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICAgICAgdmFyaWFudD1cInByaW1hcnlcIlxyXG4gICAgICAgICAgICBkaXNhYmxlZD17YnVzeSB8fCAhbmFtZS50cmltKCl9XHJcbiAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHZvaWQgc3VibWl0KCl9XHJcbiAgICAgICAgICA+XHJcbiAgICAgICAgICAgIHtidXN5XHJcbiAgICAgICAgICAgICAgPyB0cihcImNvbXBvc2VyLndvcmt0cmVlQ3JlYXRpbmdcIilcclxuICAgICAgICAgICAgICA6IHN0YXJ0Q2hhdFxyXG4gICAgICAgICAgICAgICAgPyB0cihcImNvbXBvc2VyLndvcmt0cmVlQ3JlYXRlQ2hhdFwiKVxyXG4gICAgICAgICAgICAgICAgOiB0cihcImNvbXBvc2VyLndvcmt0cmVlQ3JlYXRlXCIpfVxyXG4gICAgICAgICAgPC9CdXR0b24+XHJcbiAgICAgICAgPC8+XHJcbiAgICAgIH1cclxuICAgID5cclxuICAgICAgPGZvcm1cclxuICAgICAgICBjbGFzc05hbWU9XCJ3dC1jcmVhdGVcIlxyXG4gICAgICAgIG9uU3VibWl0PXsoZXZlbnQpID0+IHtcclxuICAgICAgICAgIGV2ZW50LnByZXZlbnREZWZhdWx0KCk7XHJcbiAgICAgICAgICBpZiAoIWJ1c3kpIHZvaWQgc3VibWl0KCk7XHJcbiAgICAgICAgfX1cclxuICAgICAgPlxyXG4gICAgICAgIDxwIGNsYXNzTmFtZT1cInd0LWNyZWF0ZV9faGludFwiPlxyXG4gICAgICAgICAge3N0YXJ0Q2hhdFxyXG4gICAgICAgICAgICA/IHRyKFwiY29tcG9zZXIud29ya3RyZWVOZXdDaGF0SGludFwiKVxyXG4gICAgICAgICAgICA6IHRyKFwiY29tcG9zZXIud29ya3RyZWVOZXdIaW50XCIpfVxyXG4gICAgICAgIDwvcD5cclxuICAgICAgICA8RmllbGQ+XHJcbiAgICAgICAgICA8RmllbGRMYWJlbD5cclxuICAgICAgICAgICAge3RyKFwiY29tcG9zZXIud29ya3RyZWVOYW1lXCIpfVxyXG4gICAgICAgICAgPC9GaWVsZExhYmVsPlxyXG4gICAgICAgICAgPElucHV0XHJcbiAgICAgICAgICAgIGNsYXNzTmFtZT1cInNldHRpbmdzLWlucHV0XCJcclxuICAgICAgICAgICAgdmFsdWU9e25hbWV9XHJcbiAgICAgICAgICAgIG9uQ2hhbmdlPXsoZXZlbnQpID0+IHtcclxuICAgICAgICAgICAgICBzZXROYW1lKGV2ZW50LnRhcmdldC52YWx1ZSk7XHJcbiAgICAgICAgICAgICAgc2V0RXJyb3IobnVsbCk7XHJcbiAgICAgICAgICAgIH19XHJcbiAgICAgICAgICAgIHBsYWNlaG9sZGVyPXt0cihcImNvbXBvc2VyLndvcmt0cmVlTmFtZVBsYWNlaG9sZGVyXCIpfVxyXG4gICAgICAgICAgICBhdXRvQ29tcGxldGU9XCJvZmZcIlxyXG4gICAgICAgICAgICBhdXRvRm9jdXNcclxuICAgICAgICAgICAgZGlzYWJsZWQ9e2J1c3l9XHJcbiAgICAgICAgICAgIHNwZWxsQ2hlY2s9e2ZhbHNlfVxyXG4gICAgICAgICAgLz5cclxuICAgICAgICA8L0ZpZWxkPlxyXG4gICAgICAgIDxGaWVsZD5cclxuICAgICAgICAgIDxGaWVsZExhYmVsPlxyXG4gICAgICAgICAgICB7dHIoXCJjb21wb3Nlci53b3JrdHJlZVJlZlwiKX1cclxuICAgICAgICAgIDwvRmllbGRMYWJlbD5cclxuICAgICAgICAgIDxJbnB1dFxyXG4gICAgICAgICAgICBjbGFzc05hbWU9XCJzZXR0aW5ncy1pbnB1dFwiXHJcbiAgICAgICAgICAgIHZhbHVlPXtyZWZOYW1lfVxyXG4gICAgICAgICAgICBvbkNoYW5nZT17KGV2ZW50KSA9PiB7XHJcbiAgICAgICAgICAgICAgc2V0UmVmTmFtZShldmVudC50YXJnZXQudmFsdWUpO1xyXG4gICAgICAgICAgICAgIHNldEVycm9yKG51bGwpO1xyXG4gICAgICAgICAgICB9fVxyXG4gICAgICAgICAgICBwbGFjZWhvbGRlcj17dHIoXCJjb21wb3Nlci53b3JrdHJlZVJlZlBsYWNlaG9sZGVyXCIpfVxyXG4gICAgICAgICAgICBhdXRvQ29tcGxldGU9XCJvZmZcIlxyXG4gICAgICAgICAgICBkaXNhYmxlZD17YnVzeX1cclxuICAgICAgICAgICAgc3BlbGxDaGVjaz17ZmFsc2V9XHJcbiAgICAgICAgICAvPlxyXG4gICAgICAgIDwvRmllbGQ+XHJcbiAgICAgICAge3ByZXZpZXdQYXRoID8gKFxyXG4gICAgICAgICAgPHAgY2xhc3NOYW1lPVwid3QtY3JlYXRlX19wcmV2aWV3XCI+XHJcbiAgICAgICAgICAgIHt0cihcImNvbXBvc2VyLndvcmt0cmVlUGF0aFByZXZpZXdcIiwgeyBwYXRoOiBwcmV2aWV3UGF0aCB9KX1cclxuICAgICAgICAgIDwvcD5cclxuICAgICAgICApIDogbnVsbH1cclxuICAgICAgICB7ZXJyb3IgPyAoXHJcbiAgICAgICAgICA8QWxlcnQgdmFyaWFudD1cImVycm9yXCI+PEFsZXJ0RGVzY3JpcHRpb24+e2Vycm9yfTwvQWxlcnREZXNjcmlwdGlvbj48L0FsZXJ0PlxyXG4gICAgICAgICkgOiBudWxsfVxyXG4gICAgICA8L2Zvcm0+XHJcbiAgICA8L0dsYXNzTW9kYWw+XHJcbiAgKTtcclxufVxyXG4iXSwiZmlsZSI6IkQ6L3Byb2plY3RzL2tlZW4tY29kZS9zcmMvZmVhdHVyZXMvYXBwL292ZXJsYXlzL1dvcmt0cmVlQ3JlYXRlTW9kYWwudHN4In0=

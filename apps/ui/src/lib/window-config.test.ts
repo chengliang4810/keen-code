@@ -5,7 +5,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const TAURI_DIR = resolve(__dirname, "../../../desktop/src-tauri");
+const TAURI_DIR = resolve(__dirname, "../../../desktop");
 const CONF_PATH = resolve(TAURI_DIR, "tauri.conf.json");
 const MAC_PATH = resolve(TAURI_DIR, "tauri.macos.conf.json");
 const WIN_PATH = resolve(TAURI_DIR, "tauri.windows.conf.json");

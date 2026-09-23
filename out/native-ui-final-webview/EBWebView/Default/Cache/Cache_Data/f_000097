@@ -1,0 +1,532 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/@fs/D:\\projects\\keen-code\\src\\components\\StructuredToolResultView.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/components/StructuredToolResultView.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { Button } from "/src/components/ui/button.tsx";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger
+} from "/node_modules/.vite/deps/@appica_ui-react_collapsible.js?v=341393c0";
+import {
+  IconAlertTriangle,
+  IconExternalLink,
+  IconFileDiff,
+  IconFileText
+} from "/src/components/icons.tsx";
+import { compactToolResultText } from "/src/lib/toolDisplay.ts";
+function labelsForLocale(locale) {
+  if (locale === "zh") {
+    return {
+      result: "结构化结果",
+      truncated: "输出已截断，完整内容保留在产物中",
+      originalSize: "原始大小",
+      stdout: "标准输出",
+      stderr: "标准错误",
+      exitCode: "退出码",
+      duration: "耗时",
+      open: "打开",
+      artifact: "产物",
+      extensions: "扩展"
+    };
+  }
+  return {
+    result: "Structured result",
+    truncated: "Output was truncated; the full content is retained as an artifact",
+    originalSize: "Original size",
+    stdout: "stdout",
+    stderr: "stderr",
+    exitCode: "Exit code",
+    duration: "Duration",
+    open: "Open",
+    artifact: "Artifact",
+    extensions: "Extensions"
+  };
+}
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+function formatDuration(durationMs) {
+  return durationMs < 1e3 ? `${durationMs} ms` : `${(durationMs / 1e3).toFixed(2)} s`;
+}
+function ArtifactRow({
+  artifact,
+  labels,
+  onOpenPath
+}) {
+  return /* @__PURE__ */ jsxDEV("div", { className: "structured-result__artifact", children: [
+    /* @__PURE__ */ jsxDEV("div", { children: [
+      /* @__PURE__ */ jsxDEV("strong", { children: labels.artifact }, void 0, false, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 136,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("code", { title: artifact.path ?? artifact.id, children: artifact.path ?? artifact.id }, void 0, false, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 137,
+        columnNumber: 9
+      }, this),
+      /* @__PURE__ */ jsxDEV("span", { children: [
+        artifact.media_type,
+        " · ",
+        formatBytes(artifact.size_bytes)
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 140,
+        columnNumber: 9
+      }, this)
+    ] }, void 0, true, {
+      fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+      lineNumber: 135,
+      columnNumber: 7
+    }, this),
+    artifact.path && onOpenPath ? /* @__PURE__ */ jsxDEV(
+      Button,
+      {
+        type: "button",
+        variant: "ghost",
+        size: "icon-md",
+        title: labels.open,
+        "aria-label": `${labels.open}: ${artifact.path}`,
+        onClick: () => onOpenPath(artifact.path),
+        children: /* @__PURE__ */ jsxDEV(IconExternalLink, { size: 13 }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 152,
+          columnNumber: 11
+        }, this)
+      },
+      void 0,
+      false,
+      {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 145,
+        columnNumber: 7
+      },
+      this
+    ) : null
+  ] }, void 0, true, {
+    fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+    lineNumber: 134,
+    columnNumber: 5
+  }, this);
+}
+_c = ArtifactRow;
+function ResultItem({
+  item,
+  labels,
+  onOpenPath
+}) {
+  switch (item.type) {
+    case "text":
+      return /* @__PURE__ */ jsxDEV("pre", { className: "structured-result__text", children: compactToolResultText(item.text) }, void 0, false, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 175,
+        columnNumber: 9
+      }, this);
+    case "diff":
+      return /* @__PURE__ */ jsxDEV("div", { className: "structured-result__item", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "structured-result__item-head", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: [
+            /* @__PURE__ */ jsxDEV(IconFileDiff, { size: 13 }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 184,
+              columnNumber: 15
+            }, this),
+            /* @__PURE__ */ jsxDEV("code", { title: item.path, children: item.path }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 185,
+              columnNumber: 15
+            }, this)
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 183,
+            columnNumber: 13
+          }, this),
+          onOpenPath ? /* @__PURE__ */ jsxDEV(
+            Button,
+            {
+              type: "button",
+              variant: "ghost",
+              size: "icon-md",
+              title: labels.open,
+              "aria-label": `${labels.open}: ${item.path}`,
+              onClick: () => onOpenPath(item.path),
+              children: /* @__PURE__ */ jsxDEV(IconExternalLink, { size: 13 }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+                lineNumber: 195,
+                columnNumber: 17
+              }, this)
+            },
+            void 0,
+            false,
+            {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 188,
+              columnNumber: 13
+            },
+            this
+          ) : null
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 182,
+          columnNumber: 11
+        }, this),
+        item.old_path && item.old_path !== item.path ? /* @__PURE__ */ jsxDEV("div", { className: "structured-result__rename", children: [
+          item.old_path,
+          " → ",
+          item.path
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 200,
+          columnNumber: 11
+        }, this) : null,
+        /* @__PURE__ */ jsxDEV("pre", { className: "structured-result__diff", children: compactToolResultText(item.patch) }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 204,
+          columnNumber: 11
+        }, this)
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 181,
+        columnNumber: 9
+      }, this);
+    case "file":
+      return /* @__PURE__ */ jsxDEV("div", { className: "structured-result__item-head", children: [
+        /* @__PURE__ */ jsxDEV("span", { children: [
+          /* @__PURE__ */ jsxDEV(IconFileText, { size: 13 }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 213,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("code", { title: item.path, children: item.path }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 214,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("small", { children: item.operation }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 215,
+            columnNumber: 13
+          }, this),
+          typeof item.size_bytes === "number" ? /* @__PURE__ */ jsxDEV("small", { children: formatBytes(item.size_bytes) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 217,
+            columnNumber: 13
+          }, this) : null
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 212,
+          columnNumber: 11
+        }, this),
+        onOpenPath ? /* @__PURE__ */ jsxDEV(
+          Button,
+          {
+            type: "button",
+            variant: "ghost",
+            size: "icon-md",
+            title: labels.open,
+            "aria-label": `${labels.open}: ${item.path}`,
+            onClick: () => onOpenPath(item.path),
+            children: /* @__PURE__ */ jsxDEV(IconExternalLink, { size: 13 }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 228,
+              columnNumber: 15
+            }, this)
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 221,
+            columnNumber: 11
+          },
+          this
+        ) : null
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 211,
+        columnNumber: 9
+      }, this);
+    case "command":
+      return /* @__PURE__ */ jsxDEV("div", { className: "structured-result__command", children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "structured-result__command-head", children: [
+          /* @__PURE__ */ jsxDEV("code", { children: item.command }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 237,
+            columnNumber: 13
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { children: [
+            labels.exitCode,
+            ": ",
+            item.exit_code ?? "signal",
+            typeof item.duration_ms === "number" ? ` · ${labels.duration}: ${formatDuration(item.duration_ms)}` : ""
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 238,
+            columnNumber: 13
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 236,
+          columnNumber: 11
+        }, this),
+        item.stdout ? /* @__PURE__ */ jsxDEV(Collapsible, { className: "structured-result__command-details", children: [
+          /* @__PURE__ */ jsxDEV(CollapsibleTrigger, { className: "structured-result__command-trigger", children: labels.stdout }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 247,
+            columnNumber: 15
+          }, this),
+          /* @__PURE__ */ jsxDEV(CollapsibleContent, { children: /* @__PURE__ */ jsxDEV("pre", { children: compactToolResultText(item.stdout) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 251,
+            columnNumber: 17
+          }, this) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 250,
+            columnNumber: 15
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 246,
+          columnNumber: 11
+        }, this) : null,
+        item.stderr ? /* @__PURE__ */ jsxDEV(
+          Collapsible,
+          {
+            className: "structured-result__command-details",
+            defaultOpen: item.exit_code !== 0,
+            children: [
+              /* @__PURE__ */ jsxDEV(CollapsibleTrigger, { className: "structured-result__command-trigger", children: labels.stderr }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+                lineNumber: 260,
+                columnNumber: 15
+              }, this),
+              /* @__PURE__ */ jsxDEV(CollapsibleContent, { children: /* @__PURE__ */ jsxDEV("pre", { className: "is-error", children: compactToolResultText(item.stderr) }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+                lineNumber: 264,
+                columnNumber: 17
+              }, this) }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+                lineNumber: 263,
+                columnNumber: 15
+              }, this)
+            ]
+          },
+          void 0,
+          true,
+          {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 256,
+            columnNumber: 11
+          },
+          this
+        ) : null
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 235,
+        columnNumber: 9
+      }, this);
+    case "image":
+      return /* @__PURE__ */ jsxDEV("figure", { className: "structured-result__image", children: [
+        /* @__PURE__ */ jsxDEV(
+          "img",
+          {
+            src: `data:${item.media_type};base64,${item.data}`,
+            alt: item.label ?? "",
+            loading: "lazy"
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 275,
+            columnNumber: 11
+          },
+          this
+        ),
+        item.label ? /* @__PURE__ */ jsxDEV("figcaption", { children: item.label }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 280,
+          columnNumber: 25
+        }, this) : null
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+        lineNumber: 274,
+        columnNumber: 9
+      }, this);
+    case "artifact":
+      return /* @__PURE__ */ jsxDEV(
+        ArtifactRow,
+        {
+          artifact: item.artifact,
+          labels,
+          onOpenPath
+        },
+        void 0,
+        false,
+        {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 285,
+          columnNumber: 9
+        },
+        this
+      );
+  }
+}
+_c2 = ResultItem;
+export function StructuredToolResultView({
+  locale,
+  toolName,
+  result,
+  onOpenPath
+}) {
+  const labels = labelsForLocale(locale);
+  const items = result.items ?? [];
+  return /* @__PURE__ */ jsxDEV(
+    "section",
+    {
+      className: "structured-result" + (result.is_error ? " is-error" : ""),
+      "aria-label": `${toolName ? `${toolName} · ` : ""}${labels.result}`,
+      children: [
+        /* @__PURE__ */ jsxDEV("header", { className: "structured-result__head", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: labels.result }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 311,
+            columnNumber: 9
+          }, this),
+          toolName ? /* @__PURE__ */ jsxDEV("code", { children: toolName }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 312,
+            columnNumber: 21
+          }, this) : null
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 310,
+          columnNumber: 7
+        }, this),
+        result.truncated ? /* @__PURE__ */ jsxDEV("div", { className: "structured-result__warning", role: "status", children: [
+          /* @__PURE__ */ jsxDEV(IconAlertTriangle, { size: 13 }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 316,
+            columnNumber: 11
+          }, this),
+          /* @__PURE__ */ jsxDEV("span", { children: [
+            labels.truncated,
+            typeof result.original_bytes === "number" ? ` · ${labels.originalSize}: ${formatBytes(result.original_bytes)}` : ""
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 317,
+            columnNumber: 11
+          }, this)
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 315,
+          columnNumber: 7
+        }, this) : null,
+        items.length > 0 ? /* @__PURE__ */ jsxDEV("div", { className: "structured-result__items", children: items.map(
+          (item, index) => /* @__PURE__ */ jsxDEV(
+            ResultItem,
+            {
+              item,
+              labels,
+              onOpenPath
+            },
+            `${item.type}:${index}`,
+            false,
+            {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 328,
+              columnNumber: 9
+            },
+            this
+          )
+        ) }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 326,
+          columnNumber: 7
+        }, this) : result.output ? /* @__PURE__ */ jsxDEV("pre", { className: "structured-result__text", children: compactToolResultText(result.output) }, void 0, false, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 337,
+          columnNumber: 7
+        }, this) : null,
+        result.artifact ? /* @__PURE__ */ jsxDEV(
+          ArtifactRow,
+          {
+            artifact: result.artifact,
+            labels,
+            onOpenPath
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 342,
+            columnNumber: 7
+          },
+          this
+        ) : null,
+        result.extensions?.length ? /* @__PURE__ */ jsxDEV("div", { className: "structured-result__extensions", children: [
+          /* @__PURE__ */ jsxDEV("span", { children: labels.extensions }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+            lineNumber: 350,
+            columnNumber: 11
+          }, this),
+          result.extensions.map(
+            (extension) => /* @__PURE__ */ jsxDEV("code", { children: String(extension.namespace) }, String(extension.namespace), false, {
+              fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+              lineNumber: 352,
+              columnNumber: 9
+            }, this)
+          )
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+          lineNumber: 349,
+          columnNumber: 7
+        }, this) : null
+      ]
+    },
+    void 0,
+    true,
+    {
+      fileName: "D:/projects/keen-code/src/components/StructuredToolResultView.tsx",
+      lineNumber: 304,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_c3 = StructuredToolResultView;
+var _c, _c2, _c3;
+$RefreshReg$(_c, "ArtifactRow");
+$RefreshReg$(_c2, "ResultItem");
+$RefreshReg$(_c3, "StructuredToolResultView");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/components/StructuredToolResultView.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/components/StructuredToolResultView.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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QjtBQUFBLFlBQ0E7QUFBQTtBQUFBLFVBSEY7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLFFBR3lCLElBRXZCO0FBQUEsUUFDSFIsT0FBT1MsWUFBWWdDLFNBQ2xCLHVCQUFDLFNBQUksV0FBVSxpQ0FDYjtBQUFBLGlDQUFDLFVBQU16QixpQkFBT1AsY0FBZDtBQUFBO0FBQUE7QUFBQTtBQUFBLGlCQUF5QjtBQUFBLFVBQ3hCVCxPQUFPUyxXQUFXaUM7QUFBQUEsWUFBSSxDQUFDRyxjQUN0Qix1QkFBQyxVQUNFQyxpQkFBT0QsVUFBVUUsU0FBUyxLQURsQkQsT0FBT0QsVUFBVUUsU0FBUyxHQUFyQztBQUFBO0FBQUE7QUFBQTtBQUFBLG1CQUVBO0FBQUEsVUFDRDtBQUFBLGFBTkg7QUFBQTtBQUFBO0FBQUE7QUFBQSxlQU9BLElBQ0U7QUFBQTtBQUFBO0FBQUEsSUFyRE47QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLEVBc0RBO0FBRUo7QUFBQ0MsTUFqRWVaO0FBQXdCLElBQUFkLElBQUFhLEtBQUFhO0FBQUEsYUFBQTFCLElBQUE7QUFBQSxhQUFBYSxLQUFBO0FBQUEsYUFBQWEsS0FBQSIsIm5hbWVzIjpbIkJ1dHRvbiIsIkNvbGxhcHNpYmxlIiwiQ29sbGFwc2libGVDb250ZW50IiwiQ29sbGFwc2libGVUcmlnZ2VyIiwiSWNvbkFsZXJ0VHJpYW5nbGUiLCJJY29uRXh0ZXJuYWxMaW5rIiwiSWNvbkZpbGVEaWZmIiwiSWNvbkZpbGVUZXh0IiwiY29tcGFjdFRvb2xSZXN1bHRUZXh0IiwibGFiZWxzRm9yTG9jYWxlIiwibG9jYWxlIiwicmVzdWx0IiwidHJ1bmNhdGVkIiwib3JpZ2luYWxTaXplIiwic3Rkb3V0Iiwic3RkZXJyIiwiZXhpdENvZGUiLCJkdXJhdGlvbiIsIm9wZW4iLCJhcnRpZmFjdCIsImV4dGVuc2lvbnMiLCJmb3JtYXRCeXRlcyIsImJ5dGVzIiwidG9GaXhlZCIsImZvcm1hdER1cmF0aW9uIiwiZHVyYXRpb25NcyIsIkFydGlmYWN0Um93IiwibGFiZWxzIiwib25PcGVuUGF0aCIsInBhdGgiLCJpZCIsIm1lZGlhX3R5cGUiLCJzaXplX2J5dGVzIiwiX2MiLCJSZXN1bHRJdGVtIiwiaXRlbSIsInR5cGUiLCJ0ZXh0Iiwib2xkX3BhdGgiLCJwYXRjaCIsIm9wZXJhdGlvbiIsImNvbW1hbmQiLCJleGl0X2NvZGUiLCJkdXJhdGlvbl9tcyIsImRhdGEiLCJsYWJlbCIsIl9jMiIsIlN0cnVjdHVyZWRUb29sUmVzdWx0VmlldyIsInRvb2xOYW1lIiwiaXRlbXMiLCJpc19lcnJvciIsIm9yaWdpbmFsX2J5dGVzIiwibGVuZ3RoIiwibWFwIiwiaW5kZXgiLCJvdXRwdXQiLCJleHRlbnNpb24iLCJTdHJpbmciLCJuYW1lc3BhY2UiLCJfYzMiXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsiU3RydWN0dXJlZFRvb2xSZXN1bHRWaWV3LnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgeyBCdXR0b24gfSBmcm9tIFwiQC9jb21wb25lbnRzL3VpL2J1dHRvblwiO1xyXG5pbXBvcnQge1xyXG4gIENvbGxhcHNpYmxlLFxyXG4gIENvbGxhcHNpYmxlQ29udGVudCxcclxuICBDb2xsYXBzaWJsZVRyaWdnZXIsXHJcbn0gZnJvbSBcIkBhcHBpY2EvdWktcmVhY3QvY29sbGFwc2libGVcIjtcclxuaW1wb3J0IHR5cGUgeyBMb2NhbGUgfSBmcm9tIFwiQC9pMThuXCI7XHJcbmltcG9ydCB0eXBlIHtcclxuICBBY3BBcnRpZmFjdFJlZmVyZW5jZSxcclxuICBBY3BTdHJ1Y3R1cmVkVG9vbFJlc3VsdCxcclxuICBBY3BUb29sUmVzdWx0SXRlbSxcclxufSBmcm9tIFwiQC9saWIvYWNwL3R5cGVzXCI7XHJcbmltcG9ydCB7XHJcbiAgSWNvbkFsZXJ0VHJpYW5nbGUsXHJcbiAgSWNvbkV4dGVybmFsTGluayxcclxuICBJY29uRmlsZURpZmYsXHJcbiAgSWNvbkZpbGVUZXh0LFxyXG59IGZyb20gXCJAL2NvbXBvbmVudHMvaWNvbnNcIjtcclxuaW1wb3J0IHsgY29tcGFjdFRvb2xSZXN1bHRUZXh0IH0gZnJvbSBcIkAvbGliL3Rvb2xEaXNwbGF5XCI7XHJcblxyXG4vKiog57uT5p6E5YyW5bel5YW357uT5p6c6KeG5Zu+5bGe5oCn44CCICovXHJcbmV4cG9ydCBpbnRlcmZhY2UgU3RydWN0dXJlZFRvb2xSZXN1bHRWaWV3UHJvcHMge1xyXG4gIC8qKiDlvZPliY3nlYzpnaLor63oqIDjgIIgKi9cclxuICBsb2NhbGU6IExvY2FsZTtcclxuICAvKiog5bel5YW356iz5a6a5ZCN56ew44CCICovXHJcbiAgdG9vbE5hbWU/OiBzdHJpbmc7XHJcbiAgLyoqIEFnZW50IOi/lOWbnueahOadg+Wogee7k+aehOWMluW3peWFt+e7k+aenOOAgiAqL1xyXG4gIHJlc3VsdDogQWNwU3RydWN0dXJlZFRvb2xSZXN1bHQ7XHJcbiAgLyoqIOaJk+W8gOacrOWcsOaWh+S7tuaIliBEaWZmIOeahOW3peS9nOWPsOWbnuiwg+OAgiAqL1xyXG4gIG9uT3BlblBhdGg/OiAocGF0aDogc3RyaW5nKSA9PiB2b2lkO1xyXG59XHJcblxyXG4vKiog57uT5p6E5YyW5bel5YW357uT5p6c5L2/55So55qE5pys5Zyw5YyW5paH5qGI44CCICovXHJcbmludGVyZmFjZSBTdHJ1Y3R1cmVkUmVzdWx0TGFiZWxzIHtcclxuICAvKiog57uT5p6c5qCH6aKY44CCICovXHJcbiAgcmVzdWx0OiBzdHJpbmc7XHJcbiAgLyoqIOaIquaWreaPkOekuuOAgiAqL1xyXG4gIHRydW5jYXRlZDogc3RyaW5nO1xyXG4gIC8qKiDljp/lp4vlpKflsI/moIfnrb7jgIIgKi9cclxuICBvcmlnaW5hbFNpemU6IHN0cmluZztcclxuICAvKiog5qCH5YeG6L6T5Ye65qCH562+44CCICovXHJcbiAgc3Rkb3V0OiBzdHJpbmc7XHJcbiAgLyoqIOagh+WHhumUmeivr+agh+etvuOAgiAqL1xyXG4gIHN0ZGVycjogc3RyaW5nO1xyXG4gIC8qKiDpgIDlh7rnoIHmoIfnrb7jgIIgKi9cclxuICBleGl0Q29kZTogc3RyaW5nO1xyXG4gIC8qKiDogJfml7bmoIfnrb7jgIIgKi9cclxuICBkdXJhdGlvbjogc3RyaW5nO1xyXG4gIC8qKiDmiZPlvIDmlofku7blkb3ku6TjgIIgKi9cclxuICBvcGVuOiBzdHJpbmc7XHJcbiAgLyoqIOS6p+eJqeagh+etvuOAgiAqL1xyXG4gIGFydGlmYWN0OiBzdHJpbmc7XHJcbiAgLyoqIOaJqeWxleagh+etvuOAgiAqL1xyXG4gIGV4dGVuc2lvbnM6IHN0cmluZztcclxufVxyXG5cclxuLyoqIOi/lOWbnue7k+aehOWMluW3peWFt+e7k+aenOeahOS4reiLseaWh+aWh+ahiOOAgiAqL1xyXG5mdW5jdGlvbiBsYWJlbHNGb3JMb2NhbGUobG9jYWxlOiBMb2NhbGUpOiBTdHJ1Y3R1cmVkUmVzdWx0TGFiZWxzIHtcclxuICBpZiAobG9jYWxlID09PSBcInpoXCIpIHtcclxuICAgIHJldHVybiB7XHJcbiAgICAgIHJlc3VsdDogXCLnu5PmnoTljJbnu5PmnpxcIixcclxuICAgICAgdHJ1bmNhdGVkOiBcIui+k+WHuuW3suaIquaWre+8jOWujOaVtOWGheWuueS/neeVmeWcqOS6p+eJqeS4rVwiLFxyXG4gICAgICBvcmlnaW5hbFNpemU6IFwi5Y6f5aeL5aSn5bCPXCIsXHJcbiAgICAgIHN0ZG91dDogXCLmoIflh4bovpPlh7pcIixcclxuICAgICAgc3RkZXJyOiBcIuagh+WHhumUmeivr1wiLFxyXG4gICAgICBleGl0Q29kZTogXCLpgIDlh7rnoIFcIixcclxuICAgICAgZHVyYXRpb246IFwi6ICX5pe2XCIsXHJcbiAgICAgIG9wZW46IFwi5omT5byAXCIsXHJcbiAgICAgIGFydGlmYWN0OiBcIuS6p+eJqVwiLFxyXG4gICAgICBleHRlbnNpb25zOiBcIuaJqeWxlVwiLFxyXG4gICAgfTtcclxuICB9XHJcbiAgcmV0dXJuIHtcclxuICAgIHJlc3VsdDogXCJTdHJ1Y3R1cmVkIHJlc3VsdFwiLFxyXG4gICAgdHJ1bmNhdGVkOiBcIk91dHB1dCB3YXMgdHJ1bmNhdGVkOyB0aGUgZnVsbCBjb250ZW50IGlzIHJldGFpbmVkIGFzIGFuIGFydGlmYWN0XCIsXHJcbiAgICBvcmlnaW5hbFNpemU6IFwiT3JpZ2luYWwgc2l6ZVwiLFxyXG4gICAgc3Rkb3V0OiBcInN0ZG91dFwiLFxyXG4gICAgc3RkZXJyOiBcInN0ZGVyclwiLFxyXG4gICAgZXhpdENvZGU6IFwiRXhpdCBjb2RlXCIsXHJcbiAgICBkdXJhdGlvbjogXCJEdXJhdGlvblwiLFxyXG4gICAgb3BlbjogXCJPcGVuXCIsXHJcbiAgICBhcnRpZmFjdDogXCJBcnRpZmFjdFwiLFxyXG4gICAgZXh0ZW5zaW9uczogXCJFeHRlbnNpb25zXCIsXHJcbiAgfTtcclxufVxyXG5cclxuLyoqIOWwhuWtl+iKguaVsOagvOW8j+WMluS4uue0p+WHkeeahOS6jOi/m+WItuWNleS9jeOAgiAqL1xyXG5mdW5jdGlvbiBmb3JtYXRCeXRlcyhieXRlczogbnVtYmVyKTogc3RyaW5nIHtcclxuICBpZiAoYnl0ZXMgPCAxMDI0KSByZXR1cm4gYCR7Ynl0ZXN9IEJgO1xyXG4gIGlmIChieXRlcyA8IDEwMjQgKiAxMDI0KSByZXR1cm4gYCR7KGJ5dGVzIC8gMTAyNCkudG9GaXhlZCgxKX0gS2lCYDtcclxuICByZXR1cm4gYCR7KGJ5dGVzIC8gKDEwMjQgKiAxMDI0KSkudG9GaXhlZCgxKX0gTWlCYDtcclxufVxyXG5cclxuLyoqIOWwhuavq+enkuagvOW8j+WMluS4uumAguWQiOW3peWFt+ihjOWxleekuueahOiAl+aXtuOAgiAqL1xyXG5mdW5jdGlvbiBmb3JtYXREdXJhdGlvbihkdXJhdGlvbk1zOiBudW1iZXIpOiBzdHJpbmcge1xyXG4gIHJldHVybiBkdXJhdGlvbk1zIDwgMTAwMFxyXG4gICAgPyBgJHtkdXJhdGlvbk1zfSBtc2BcclxuICAgIDogYCR7KGR1cmF0aW9uTXMgLyAxMDAwKS50b0ZpeGVkKDIpfSBzYDtcclxufVxyXG5cclxuLyoqIOa4suafk+S4gOS4quWPr+aMiemcgOaJk+W8gOeahOacrOWcsOS6p+eJqeW8leeUqOOAgiAqL1xyXG5mdW5jdGlvbiBBcnRpZmFjdFJvdyh7XHJcbiAgYXJ0aWZhY3QsXHJcbiAgbGFiZWxzLFxyXG4gIG9uT3BlblBhdGgsXHJcbn06IHtcclxuICAvKiogQWdlbnQg6L+U5Zue55qE5pys5Zyw5Lqn54mp5byV55So44CCICovXHJcbiAgYXJ0aWZhY3Q6IEFjcEFydGlmYWN0UmVmZXJlbmNlO1xyXG4gIC8qKiDlvZPliY3mlofmoYjpm4blkIjjgIIgKi9cclxuICBsYWJlbHM6IFN0cnVjdHVyZWRSZXN1bHRMYWJlbHM7XHJcbiAgLyoqIOaJk+W8gOacrOWcsOi3r+W+hOeahOWbnuiwg+OAgiAqL1xyXG4gIG9uT3BlblBhdGg/OiAocGF0aDogc3RyaW5nKSA9PiB2b2lkO1xyXG59KSB7XHJcbiAgcmV0dXJuIChcclxuICAgIDxkaXYgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX2FydGlmYWN0XCI+XHJcbiAgICAgIDxkaXY+XHJcbiAgICAgICAgPHN0cm9uZz57bGFiZWxzLmFydGlmYWN0fTwvc3Ryb25nPlxyXG4gICAgICAgIDxjb2RlIHRpdGxlPXthcnRpZmFjdC5wYXRoID8/IGFydGlmYWN0LmlkfT5cclxuICAgICAgICAgIHthcnRpZmFjdC5wYXRoID8/IGFydGlmYWN0LmlkfVxyXG4gICAgICAgIDwvY29kZT5cclxuICAgICAgICA8c3Bhbj5cclxuICAgICAgICAgIHthcnRpZmFjdC5tZWRpYV90eXBlfSDCtyB7Zm9ybWF0Qnl0ZXMoYXJ0aWZhY3Quc2l6ZV9ieXRlcyl9XHJcbiAgICAgICAgPC9zcGFuPlxyXG4gICAgICA8L2Rpdj5cclxuICAgICAge2FydGlmYWN0LnBhdGggJiYgb25PcGVuUGF0aCA/IChcclxuICAgICAgICA8QnV0dG9uXHJcbiAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiIHNpemU9XCJpY29uLW1kXCJcclxuICAgICAgICAgIHRpdGxlPXtsYWJlbHMub3Blbn1cclxuICAgICAgICAgIGFyaWEtbGFiZWw9e2Ake2xhYmVscy5vcGVufTogJHthcnRpZmFjdC5wYXRofWB9XHJcbiAgICAgICAgICBvbkNsaWNrPXsoKSA9PiBvbk9wZW5QYXRoKGFydGlmYWN0LnBhdGghKX1cclxuICAgICAgICA+XHJcbiAgICAgICAgICA8SWNvbkV4dGVybmFsTGluayBzaXplPXsxM30gLz5cclxuICAgICAgICA8L0J1dHRvbj5cclxuICAgICAgKSA6IG51bGx9XHJcbiAgICA8L2Rpdj5cclxuICApO1xyXG59XHJcblxyXG4vKiog5riy5p+T57uT5p6E5YyW5bel5YW357uT5p6c5Lit55qE5LiA5Liq57G75Z6L5YyW5p2h55uu44CCICovXHJcbmZ1bmN0aW9uIFJlc3VsdEl0ZW0oe1xyXG4gIGl0ZW0sXHJcbiAgbGFiZWxzLFxyXG4gIG9uT3BlblBhdGgsXHJcbn06IHtcclxuICAvKiog6ZyA6KaB5riy5p+T55qE56iz5a6a57uT5p6c5p2h55uu44CCICovXHJcbiAgaXRlbTogQWNwVG9vbFJlc3VsdEl0ZW07XHJcbiAgLyoqIOW9k+WJjeaWh+ahiOmbhuWQiOOAgiAqL1xyXG4gIGxhYmVsczogU3RydWN0dXJlZFJlc3VsdExhYmVscztcclxuICAvKiog5omT5byA5pys5Zyw6Lev5b6E55qE5Zue6LCD44CCICovXHJcbiAgb25PcGVuUGF0aD86IChwYXRoOiBzdHJpbmcpID0+IHZvaWQ7XHJcbn0pIHtcclxuICBzd2l0Y2ggKGl0ZW0udHlwZSkge1xyXG4gICAgY2FzZSBcInRleHRcIjpcclxuICAgICAgcmV0dXJuIChcclxuICAgICAgICA8cHJlIGNsYXNzTmFtZT1cInN0cnVjdHVyZWQtcmVzdWx0X190ZXh0XCI+XHJcbiAgICAgICAgICB7Y29tcGFjdFRvb2xSZXN1bHRUZXh0KGl0ZW0udGV4dCl9XHJcbiAgICAgICAgPC9wcmU+XHJcbiAgICAgICk7XHJcbiAgICBjYXNlIFwiZGlmZlwiOlxyXG4gICAgICByZXR1cm4gKFxyXG4gICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX2l0ZW1cIj5cclxuICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX2l0ZW0taGVhZFwiPlxyXG4gICAgICAgICAgICA8c3Bhbj5cclxuICAgICAgICAgICAgICA8SWNvbkZpbGVEaWZmIHNpemU9ezEzfSAvPlxyXG4gICAgICAgICAgICAgIDxjb2RlIHRpdGxlPXtpdGVtLnBhdGh9PntpdGVtLnBhdGh9PC9jb2RlPlxyXG4gICAgICAgICAgICA8L3NwYW4+XHJcbiAgICAgICAgICAgIHtvbk9wZW5QYXRoID8gKFxyXG4gICAgICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxyXG4gICAgICAgICAgICAgICAgdmFyaWFudD1cImdob3N0XCIgc2l6ZT1cImljb24tbWRcIlxyXG4gICAgICAgICAgICAgICAgdGl0bGU9e2xhYmVscy5vcGVufVxyXG4gICAgICAgICAgICAgICAgYXJpYS1sYWJlbD17YCR7bGFiZWxzLm9wZW59OiAke2l0ZW0ucGF0aH1gfVxyXG4gICAgICAgICAgICAgICAgb25DbGljaz17KCkgPT4gb25PcGVuUGF0aChpdGVtLnBhdGgpfVxyXG4gICAgICAgICAgICAgID5cclxuICAgICAgICAgICAgICAgIDxJY29uRXh0ZXJuYWxMaW5rIHNpemU9ezEzfSAvPlxyXG4gICAgICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgICAgICApIDogbnVsbH1cclxuICAgICAgICAgIDwvZGl2PlxyXG4gICAgICAgICAge2l0ZW0ub2xkX3BhdGggJiYgaXRlbS5vbGRfcGF0aCAhPT0gaXRlbS5wYXRoID8gKFxyXG4gICAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInN0cnVjdHVyZWQtcmVzdWx0X19yZW5hbWVcIj5cclxuICAgICAgICAgICAgICB7aXRlbS5vbGRfcGF0aH0g4oaSIHtpdGVtLnBhdGh9XHJcbiAgICAgICAgICAgIDwvZGl2PlxyXG4gICAgICAgICAgKSA6IG51bGx9XHJcbiAgICAgICAgICA8cHJlIGNsYXNzTmFtZT1cInN0cnVjdHVyZWQtcmVzdWx0X19kaWZmXCI+XHJcbiAgICAgICAgICAgIHtjb21wYWN0VG9vbFJlc3VsdFRleHQoaXRlbS5wYXRjaCl9XHJcbiAgICAgICAgICA8L3ByZT5cclxuICAgICAgICA8L2Rpdj5cclxuICAgICAgKTtcclxuICAgIGNhc2UgXCJmaWxlXCI6XHJcbiAgICAgIHJldHVybiAoXHJcbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9faXRlbS1oZWFkXCI+XHJcbiAgICAgICAgICA8c3Bhbj5cclxuICAgICAgICAgICAgPEljb25GaWxlVGV4dCBzaXplPXsxM30gLz5cclxuICAgICAgICAgICAgPGNvZGUgdGl0bGU9e2l0ZW0ucGF0aH0+e2l0ZW0ucGF0aH08L2NvZGU+XHJcbiAgICAgICAgICAgIDxzbWFsbD57aXRlbS5vcGVyYXRpb259PC9zbWFsbD5cclxuICAgICAgICAgICAge3R5cGVvZiBpdGVtLnNpemVfYnl0ZXMgPT09IFwibnVtYmVyXCIgPyAoXHJcbiAgICAgICAgICAgICAgPHNtYWxsPntmb3JtYXRCeXRlcyhpdGVtLnNpemVfYnl0ZXMpfTwvc21hbGw+XHJcbiAgICAgICAgICAgICkgOiBudWxsfVxyXG4gICAgICAgICAgPC9zcGFuPlxyXG4gICAgICAgICAge29uT3BlblBhdGggPyAoXHJcbiAgICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIiBzaXplPVwiaWNvbi1tZFwiXHJcbiAgICAgICAgICAgICAgdGl0bGU9e2xhYmVscy5vcGVufVxyXG4gICAgICAgICAgICAgIGFyaWEtbGFiZWw9e2Ake2xhYmVscy5vcGVufTogJHtpdGVtLnBhdGh9YH1cclxuICAgICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiBvbk9wZW5QYXRoKGl0ZW0ucGF0aCl9XHJcbiAgICAgICAgICAgID5cclxuICAgICAgICAgICAgICA8SWNvbkV4dGVybmFsTGluayBzaXplPXsxM30gLz5cclxuICAgICAgICAgICAgPC9CdXR0b24+XHJcbiAgICAgICAgICApIDogbnVsbH1cclxuICAgICAgICA8L2Rpdj5cclxuICAgICAgKTtcclxuICAgIGNhc2UgXCJjb21tYW5kXCI6XHJcbiAgICAgIHJldHVybiAoXHJcbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fY29tbWFuZFwiPlxyXG4gICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fY29tbWFuZC1oZWFkXCI+XHJcbiAgICAgICAgICAgIDxjb2RlPntpdGVtLmNvbW1hbmR9PC9jb2RlPlxyXG4gICAgICAgICAgICA8c3Bhbj5cclxuICAgICAgICAgICAgICB7bGFiZWxzLmV4aXRDb2RlfToge2l0ZW0uZXhpdF9jb2RlID8/IFwic2lnbmFsXCJ9XHJcbiAgICAgICAgICAgICAge3R5cGVvZiBpdGVtLmR1cmF0aW9uX21zID09PSBcIm51bWJlclwiXHJcbiAgICAgICAgICAgICAgICA/IGAgwrcgJHtsYWJlbHMuZHVyYXRpb259OiAke2Zvcm1hdER1cmF0aW9uKGl0ZW0uZHVyYXRpb25fbXMpfWBcclxuICAgICAgICAgICAgICAgIDogXCJcIn1cclxuICAgICAgICAgICAgPC9zcGFuPlxyXG4gICAgICAgICAgPC9kaXY+XHJcbiAgICAgICAgICB7aXRlbS5zdGRvdXQgPyAoXHJcbiAgICAgICAgICAgIDxDb2xsYXBzaWJsZSBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fY29tbWFuZC1kZXRhaWxzXCI+XHJcbiAgICAgICAgICAgICAgPENvbGxhcHNpYmxlVHJpZ2dlciBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fY29tbWFuZC10cmlnZ2VyXCI+XHJcbiAgICAgICAgICAgICAgICB7bGFiZWxzLnN0ZG91dH1cclxuICAgICAgICAgICAgICA8L0NvbGxhcHNpYmxlVHJpZ2dlcj5cclxuICAgICAgICAgICAgICA8Q29sbGFwc2libGVDb250ZW50PlxyXG4gICAgICAgICAgICAgICAgPHByZT57Y29tcGFjdFRvb2xSZXN1bHRUZXh0KGl0ZW0uc3Rkb3V0KX08L3ByZT5cclxuICAgICAgICAgICAgICA8L0NvbGxhcHNpYmxlQ29udGVudD5cclxuICAgICAgICAgICAgPC9Db2xsYXBzaWJsZT5cclxuICAgICAgICAgICkgOiBudWxsfVxyXG4gICAgICAgICAge2l0ZW0uc3RkZXJyID8gKFxyXG4gICAgICAgICAgICA8Q29sbGFwc2libGVcclxuICAgICAgICAgICAgICBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fY29tbWFuZC1kZXRhaWxzXCJcclxuICAgICAgICAgICAgICBkZWZhdWx0T3Blbj17aXRlbS5leGl0X2NvZGUgIT09IDB9XHJcbiAgICAgICAgICAgID5cclxuICAgICAgICAgICAgICA8Q29sbGFwc2libGVUcmlnZ2VyIGNsYXNzTmFtZT1cInN0cnVjdHVyZWQtcmVzdWx0X19jb21tYW5kLXRyaWdnZXJcIj5cclxuICAgICAgICAgICAgICAgIHtsYWJlbHMuc3RkZXJyfVxyXG4gICAgICAgICAgICAgIDwvQ29sbGFwc2libGVUcmlnZ2VyPlxyXG4gICAgICAgICAgICAgIDxDb2xsYXBzaWJsZUNvbnRlbnQ+XHJcbiAgICAgICAgICAgICAgICA8cHJlIGNsYXNzTmFtZT1cImlzLWVycm9yXCI+XHJcbiAgICAgICAgICAgICAgICAgIHtjb21wYWN0VG9vbFJlc3VsdFRleHQoaXRlbS5zdGRlcnIpfVxyXG4gICAgICAgICAgICAgICAgPC9wcmU+XHJcbiAgICAgICAgICAgICAgPC9Db2xsYXBzaWJsZUNvbnRlbnQ+XHJcbiAgICAgICAgICAgIDwvQ29sbGFwc2libGU+XHJcbiAgICAgICAgICApIDogbnVsbH1cclxuICAgICAgICA8L2Rpdj5cclxuICAgICAgKTtcclxuICAgIGNhc2UgXCJpbWFnZVwiOlxyXG4gICAgICByZXR1cm4gKFxyXG4gICAgICAgIDxmaWd1cmUgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX2ltYWdlXCI+XHJcbiAgICAgICAgICA8aW1nXHJcbiAgICAgICAgICAgIHNyYz17YGRhdGE6JHtpdGVtLm1lZGlhX3R5cGV9O2Jhc2U2NCwke2l0ZW0uZGF0YX1gfVxyXG4gICAgICAgICAgICBhbHQ9e2l0ZW0ubGFiZWwgPz8gXCJcIn1cclxuICAgICAgICAgICAgbG9hZGluZz1cImxhenlcIlxyXG4gICAgICAgICAgLz5cclxuICAgICAgICAgIHtpdGVtLmxhYmVsID8gPGZpZ2NhcHRpb24+e2l0ZW0ubGFiZWx9PC9maWdjYXB0aW9uPiA6IG51bGx9XHJcbiAgICAgICAgPC9maWd1cmU+XHJcbiAgICAgICk7XHJcbiAgICBjYXNlIFwiYXJ0aWZhY3RcIjpcclxuICAgICAgcmV0dXJuIChcclxuICAgICAgICA8QXJ0aWZhY3RSb3dcclxuICAgICAgICAgIGFydGlmYWN0PXtpdGVtLmFydGlmYWN0fVxyXG4gICAgICAgICAgbGFiZWxzPXtsYWJlbHN9XHJcbiAgICAgICAgICBvbk9wZW5QYXRoPXtvbk9wZW5QYXRofVxyXG4gICAgICAgIC8+XHJcbiAgICAgICk7XHJcbiAgfVxyXG59XHJcblxyXG4vKiog5oyJ57G75Z6L5riy5p+TIERpZmbjgIHmlofku7bjgIHlkb3ku6TjgIHlm77niYflkozkuqfniannrYnnqLPlrprlt6Xlhbfnu5PmnpzjgIIgKi9cclxuZXhwb3J0IGZ1bmN0aW9uIFN0cnVjdHVyZWRUb29sUmVzdWx0Vmlldyh7XHJcbiAgbG9jYWxlLFxyXG4gIHRvb2xOYW1lLFxyXG4gIHJlc3VsdCxcclxuICBvbk9wZW5QYXRoLFxyXG59OiBTdHJ1Y3R1cmVkVG9vbFJlc3VsdFZpZXdQcm9wcykge1xyXG4gIGNvbnN0IGxhYmVscyA9IGxhYmVsc0ZvckxvY2FsZShsb2NhbGUpO1xyXG4gIGNvbnN0IGl0ZW1zID0gcmVzdWx0Lml0ZW1zID8/IFtdO1xyXG4gIHJldHVybiAoXHJcbiAgICA8c2VjdGlvblxyXG4gICAgICBjbGFzc05hbWU9e1xyXG4gICAgICAgIFwic3RydWN0dXJlZC1yZXN1bHRcIiArIChyZXN1bHQuaXNfZXJyb3IgPyBcIiBpcy1lcnJvclwiIDogXCJcIilcclxuICAgICAgfVxyXG4gICAgICBhcmlhLWxhYmVsPXtgJHt0b29sTmFtZSA/IGAke3Rvb2xOYW1lfSDCtyBgIDogXCJcIn0ke2xhYmVscy5yZXN1bHR9YH1cclxuICAgID5cclxuICAgICAgPGhlYWRlciBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9faGVhZFwiPlxyXG4gICAgICAgIDxzcGFuPntsYWJlbHMucmVzdWx0fTwvc3Bhbj5cclxuICAgICAgICB7dG9vbE5hbWUgPyA8Y29kZT57dG9vbE5hbWV9PC9jb2RlPiA6IG51bGx9XHJcbiAgICAgIDwvaGVhZGVyPlxyXG4gICAgICB7cmVzdWx0LnRydW5jYXRlZCA/IChcclxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInN0cnVjdHVyZWQtcmVzdWx0X193YXJuaW5nXCIgcm9sZT1cInN0YXR1c1wiPlxyXG4gICAgICAgICAgPEljb25BbGVydFRyaWFuZ2xlIHNpemU9ezEzfSAvPlxyXG4gICAgICAgICAgPHNwYW4+XHJcbiAgICAgICAgICAgIHtsYWJlbHMudHJ1bmNhdGVkfVxyXG4gICAgICAgICAgICB7dHlwZW9mIHJlc3VsdC5vcmlnaW5hbF9ieXRlcyA9PT0gXCJudW1iZXJcIlxyXG4gICAgICAgICAgICAgID8gYCDCtyAke2xhYmVscy5vcmlnaW5hbFNpemV9OiAke2Zvcm1hdEJ5dGVzKHJlc3VsdC5vcmlnaW5hbF9ieXRlcyl9YFxyXG4gICAgICAgICAgICAgIDogXCJcIn1cclxuICAgICAgICAgIDwvc3Bhbj5cclxuICAgICAgICA8L2Rpdj5cclxuICAgICAgKSA6IG51bGx9XHJcbiAgICAgIHtpdGVtcy5sZW5ndGggPiAwID8gKFxyXG4gICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX2l0ZW1zXCI+XHJcbiAgICAgICAgICB7aXRlbXMubWFwKChpdGVtLCBpbmRleCkgPT4gKFxyXG4gICAgICAgICAgICA8UmVzdWx0SXRlbVxyXG4gICAgICAgICAgICAgIGtleT17YCR7aXRlbS50eXBlfToke2luZGV4fWB9XHJcbiAgICAgICAgICAgICAgaXRlbT17aXRlbX1cclxuICAgICAgICAgICAgICBsYWJlbHM9e2xhYmVsc31cclxuICAgICAgICAgICAgICBvbk9wZW5QYXRoPXtvbk9wZW5QYXRofVxyXG4gICAgICAgICAgICAvPlxyXG4gICAgICAgICAgKSl9XHJcbiAgICAgICAgPC9kaXY+XHJcbiAgICAgICkgOiByZXN1bHQub3V0cHV0ID8gKFxyXG4gICAgICAgIDxwcmUgY2xhc3NOYW1lPVwic3RydWN0dXJlZC1yZXN1bHRfX3RleHRcIj5cclxuICAgICAgICAgIHtjb21wYWN0VG9vbFJlc3VsdFRleHQocmVzdWx0Lm91dHB1dCl9XHJcbiAgICAgICAgPC9wcmU+XHJcbiAgICAgICkgOiBudWxsfVxyXG4gICAgICB7cmVzdWx0LmFydGlmYWN0ID8gKFxyXG4gICAgICAgIDxBcnRpZmFjdFJvd1xyXG4gICAgICAgICAgYXJ0aWZhY3Q9e3Jlc3VsdC5hcnRpZmFjdH1cclxuICAgICAgICAgIGxhYmVscz17bGFiZWxzfVxyXG4gICAgICAgICAgb25PcGVuUGF0aD17b25PcGVuUGF0aH1cclxuICAgICAgICAvPlxyXG4gICAgICApIDogbnVsbH1cclxuICAgICAge3Jlc3VsdC5leHRlbnNpb25zPy5sZW5ndGggPyAoXHJcbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzdHJ1Y3R1cmVkLXJlc3VsdF9fZXh0ZW5zaW9uc1wiPlxyXG4gICAgICAgICAgPHNwYW4+e2xhYmVscy5leHRlbnNpb25zfTwvc3Bhbj5cclxuICAgICAgICAgIHtyZXN1bHQuZXh0ZW5zaW9ucy5tYXAoKGV4dGVuc2lvbikgPT4gKFxyXG4gICAgICAgICAgICA8Y29kZSBrZXk9e1N0cmluZyhleHRlbnNpb24ubmFtZXNwYWNlKX0+XHJcbiAgICAgICAgICAgICAge1N0cmluZyhleHRlbnNpb24ubmFtZXNwYWNlKX1cclxuICAgICAgICAgICAgPC9jb2RlPlxyXG4gICAgICAgICAgKSl9XHJcbiAgICAgICAgPC9kaXY+XHJcbiAgICAgICkgOiBudWxsfVxyXG4gICAgPC9zZWN0aW9uPlxyXG4gICk7XHJcbn1cclxuIl0sImZpbGUiOiJEOi9wcm9qZWN0cy9rZWVuLWNvZGUvc3JjL2NvbXBvbmVudHMvU3RydWN0dXJlZFRvb2xSZXN1bHRWaWV3LnRzeCJ9

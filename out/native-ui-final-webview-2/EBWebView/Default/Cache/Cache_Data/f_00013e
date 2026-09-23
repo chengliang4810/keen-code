@@ -1,0 +1,1669 @@
+"use client";
+import {
+  areArraysEqual,
+  getDefaultLabelId,
+  resolveAriaLabelledBy
+} from "/node_modules/.vite/deps/chunk-ROB6PIBY.js?v=341393c0";
+import {
+  PrehydrationScript,
+  script,
+  useIsHydrating
+} from "/node_modules/.vite/deps/chunk-OSLLGWF6.js?v=341393c0";
+import {
+  CompositeList
+} from "/node_modules/.vite/deps/chunk-VTSE33MH.js?v=341393c0";
+import {
+  useCompositeListItem
+} from "/node_modules/.vite/deps/chunk-X4EEDQMP.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-242UXUEY.js?v=341393c0";
+import {
+  valueToPercent
+} from "/node_modules/.vite/deps/chunk-TUX75DD2.js?v=341393c0";
+import {
+  formatNumber
+} from "/node_modules/.vite/deps/chunk-SFLOZR4X.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-RH6A4J4A.js?v=341393c0";
+import {
+  ARROW_DOWN,
+  ARROW_LEFT,
+  ARROW_RIGHT,
+  ARROW_UP,
+  COMPOSITE_KEYS,
+  END,
+  HOME,
+  PAGE_DOWN,
+  PAGE_UP
+} from "/node_modules/.vite/deps/chunk-LNQEFALS.js?v=341393c0";
+import {
+  focusElementWithVisible,
+  useLabel
+} from "/node_modules/.vite/deps/chunk-II64BLWM.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-O5GK3HYM.js?v=341393c0";
+import {
+  AnimatePresence,
+  LazyMotion,
+  domAnimation,
+  m,
+  useAnimate
+} from "/node_modules/.vite/deps/chunk-Q3A4IXWI.js?v=341393c0";
+import {
+  useReducedMotion
+} from "/node_modules/.vite/deps/chunk-WXTVF6BV.js?v=341393c0";
+import {
+  fieldValidityMapping,
+  useFieldRootContext,
+  useFormContext,
+  useLabelableContext,
+  useLabelableId,
+  useRegisterFieldControl
+} from "/node_modules/.vite/deps/chunk-W752RAWH.js?v=341393c0";
+import {
+  useControlled
+} from "/node_modules/.vite/deps/chunk-ZC5ZR7IM.js?v=341393c0";
+import {
+  useValueChanged
+} from "/node_modules/.vite/deps/chunk-AI3CPQIU.js?v=341393c0";
+import {
+  useBaseUiId
+} from "/node_modules/.vite/deps/chunk-63LI3Z4H.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-YIGBZ6SX.js?v=341393c0";
+import {
+  useDirection
+} from "/node_modules/.vite/deps/chunk-CZFQ5SLG.js?v=341393c0";
+import {
+  clamp
+} from "/node_modules/.vite/deps/chunk-ZT26ISD7.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-G64RGAYH.js?v=341393c0";
+import {
+  useValueAsRef
+} from "/node_modules/.vite/deps/chunk-PWITTTM7.js?v=341393c0";
+import {
+  addEventListener
+} from "/node_modules/.vite/deps/chunk-JTXVRWPW.js?v=341393c0";
+import {
+  activeElement,
+  contains,
+  getTarget,
+  matchesFocusVisible
+} from "/node_modules/.vite/deps/chunk-B2B4DXP4.js?v=341393c0";
+import {
+  visuallyHidden
+} from "/node_modules/.vite/deps/chunk-UI5XAVVN.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-CGK6OLWA.js?v=341393c0";
+import {
+  createChangeEventDetails,
+  createGenericEventDetails,
+  reason_parts_exports
+} from "/node_modules/.vite/deps/chunk-EIPLHTKK.js?v=341393c0";
+import {
+  useAnimationFrame
+} from "/node_modules/.vite/deps/chunk-GL46B26J.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-32YKATOX.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GPLCYBEI.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-XCXD75MQ.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-KD2YTZUQ.js?v=341393c0";
+import {
+  getWindow,
+  isElement,
+  isHTMLElement,
+  ownerDocument
+} from "/node_modules/.vite/deps/chunk-H42XUSOK.js?v=341393c0";
+import {
+  useStableCallback
+} from "/node_modules/.vite/deps/chunk-3LPHUCVY.js?v=341393c0";
+import {
+  useIsoLayoutEffect
+} from "/node_modules/.vite/deps/chunk-2VEKR5CR.js?v=341393c0";
+import {
+  mergeProps,
+  useMergedRefs,
+  useRenderElement,
+  warn
+} from "/node_modules/.vite/deps/chunk-O5KZOVAW.js?v=341393c0";
+import {
+  cn
+} from "/node_modules/.vite/deps/chunk-MCT4N4XI.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-76V45DLG.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-DEX2RCYB.js?v=341393c0";
+import {
+  require_jsx_runtime
+} from "/node_modules/.vite/deps/chunk-V46J5SUH.js?v=341393c0";
+import {
+  require_react
+} from "/node_modules/.vite/deps/chunk-ZWRFQRRA.js?v=341393c0";
+import {
+  __export,
+  __toESM
+} from "/node_modules/.vite/deps/chunk-DC5AMYBS.js?v=341393c0";
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/slider/slider.js
+var import_jsx_runtime3 = __toESM(require_jsx_runtime());
+var React9 = __toESM(require_react());
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/index.parts.mjs
+var index_parts_exports = {};
+__export(index_parts_exports, {
+  Control: () => SliderControl,
+  Indicator: () => SliderIndicator,
+  Label: () => SliderLabel,
+  Root: () => SliderRoot,
+  Thumb: () => SliderThumb,
+  Track: () => SliderTrack,
+  Value: () => SliderValue
+});
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/root/SliderRoot.mjs
+var React2 = __toESM(require_react(), 1);
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/asc.mjs
+function asc(a, b) {
+  return a - b;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/getSliderValue.mjs
+function getSliderValue(valueInput, index2, min, max, range, values) {
+  const clamped = clamp(valueInput, min, max);
+  if (!range) {
+    return clamped;
+  }
+  const output = values.slice();
+  output[index2] = clamp(clamped, values[index2 - 1] ?? -Infinity, values[index2 + 1] ?? Infinity);
+  return output.sort(asc);
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/validateMinimumDistance.mjs
+function validateMinimumDistance(values, step, minStepsBetweenValues) {
+  if (!Array.isArray(values)) {
+    return true;
+  }
+  const minDistance = step * minStepsBetweenValues;
+  for (let i = 0; i < values.length - 1; i += 1) {
+    if (!(Math.abs(values[i] - values[i + 1]) >= minDistance)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/root/stateAttributesMapping.mjs
+var nullMapping = () => null;
+var sliderStateAttributesMapping = {
+  activeThumbIndex: nullMapping,
+  max: nullMapping,
+  min: nullMapping,
+  minStepsBetweenValues: nullMapping,
+  step: nullMapping,
+  values: nullMapping,
+  ...fieldValidityMapping
+};
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/root/SliderRootContext.mjs
+var React = __toESM(require_react(), 1);
+var SliderRootContext = React.createContext(void 0);
+if (true) SliderRootContext.displayName = "SliderRootContext";
+function useSliderRootContext() {
+  const context = React.useContext(SliderRootContext);
+  if (context === void 0) {
+    throw new Error(true ? "Base UI: SliderRootContext is missing. Slider parts must be placed within <Slider.Root>." : formatErrorMessage_default(62));
+  }
+  return context;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/root/SliderRoot.mjs
+var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+function areValuesEqual(newValue, oldValue) {
+  return newValue === oldValue || Array.isArray(newValue) && Array.isArray(oldValue) && areArraysEqual(newValue, oldValue);
+}
+var SliderRoot = React2.forwardRef(function SliderRoot2(componentProps, forwardedRef) {
+  const {
+    "aria-labelledby": ariaLabelledByProp,
+    className,
+    defaultValue,
+    disabled: disabledProp = false,
+    id: idProp,
+    format,
+    largeStep = 10,
+    locale,
+    render,
+    max = 100,
+    min = 0,
+    minStepsBetweenValues = 0,
+    form,
+    name: nameProp,
+    onValueChange: onValueChangeProp,
+    onValueCommitted: onValueCommittedProp,
+    orientation = "horizontal",
+    step = 1,
+    thumbCollisionBehavior = "push",
+    thumbAlignment = "center",
+    value: valueProp,
+    style,
+    ...elementProps
+  } = componentProps;
+  const id = useBaseUiId(idProp);
+  const defaultLabelId = getDefaultLabelId(id);
+  const onValueChange = useStableCallback(onValueChangeProp);
+  const onValueCommitted = useStableCallback(onValueCommittedProp);
+  const {
+    clearErrors
+  } = useFormContext();
+  const {
+    state: fieldState,
+    disabled: fieldDisabled,
+    name: fieldName,
+    setTouched,
+    setDirty,
+    validityData,
+    validation
+  } = useFieldRootContext();
+  const {
+    labelId: fieldLabelId
+  } = useLabelableContext();
+  const [labelId, setLabelId] = React2.useState();
+  const ariaLabelledby = ariaLabelledByProp ?? resolveAriaLabelledBy(fieldLabelId, labelId);
+  const disabled = fieldDisabled || disabledProp;
+  const name = fieldName ?? nameProp;
+  const [valueUnwrapped, setValueUnwrapped] = useControlled({
+    controlled: valueProp,
+    default: defaultValue ?? min,
+    name: "Slider"
+  });
+  const sliderRef = React2.useRef(null);
+  const controlRef = React2.useRef(null);
+  const thumbRefs = React2.useRef([]);
+  const pressedThumbCenterOffsetRef = React2.useRef(null);
+  const pressedThumbIndexRef = React2.useRef(-1);
+  const pressedValuesRef = React2.useRef(null);
+  const lastChangeReasonRef = React2.useRef(reason_parts_exports.none);
+  const [active, setActiveState] = React2.useState(-1);
+  const [lastUsedThumbIndex, setLastUsedThumbIndex] = React2.useState(-1);
+  const [dragging, setDragging] = React2.useState(false);
+  const [thumbMap, setThumbMap] = React2.useState(() => /* @__PURE__ */ new Map());
+  const [indicatorPosition, setIndicatorPosition] = React2.useState([void 0, void 0]);
+  const setActive = useStableCallback((value) => {
+    setActiveState(value);
+    if (value !== -1) {
+      setLastUsedThumbIndex(value);
+    }
+  });
+  const registerFieldControlRef = useStableCallback((element2) => {
+    if (element2) {
+      controlRef.current = element2;
+    }
+  });
+  const range = Array.isArray(valueUnwrapped);
+  const values = React2.useMemo(() => {
+    if (!range) {
+      return [clamp(valueUnwrapped, min, max)];
+    }
+    return valueUnwrapped.map((value) => clamp(value, min, max)).sort(asc);
+  }, [max, min, range, valueUnwrapped]);
+  const fieldValue = range ? values : values[0];
+  useRegisterFieldControl(validation.inputRef, id, fieldValue, void 0, !disabled, nameProp);
+  useValueChanged(fieldValue, () => {
+    clearErrors(name);
+    validation.change(fieldValue);
+    const initialValue = validityData.initialValue;
+    let isDirty;
+    if (Array.isArray(fieldValue) && Array.isArray(initialValue)) {
+      isDirty = !areArraysEqual(fieldValue, initialValue);
+    } else {
+      isDirty = fieldValue !== initialValue;
+    }
+    setDirty(isDirty);
+  });
+  const setValue = useStableCallback((newValue, details) => {
+    if (Number.isNaN(newValue) || areValuesEqual(newValue, valueUnwrapped)) {
+      return false;
+    }
+    const nativeEvent = details.event;
+    const EventConstructor = nativeEvent.constructor;
+    const clonedEvent = new EventConstructor(nativeEvent.type, nativeEvent);
+    Object.defineProperty(clonedEvent, "target", {
+      writable: true,
+      value: {
+        value: newValue,
+        name
+      }
+    });
+    details.event = clonedEvent;
+    onValueChange(newValue, details);
+    if (details.isCanceled) {
+      return false;
+    }
+    lastChangeReasonRef.current = details.reason;
+    setValueUnwrapped(newValue);
+    return true;
+  });
+  const handleInputChange = useStableCallback((valueInput, index2, event) => {
+    const newValue = getSliderValue(valueInput, index2, min, max, range, values);
+    if (validateMinimumDistance(newValue, step, minStepsBetweenValues)) {
+      const reason = "key" in event ? reason_parts_exports.keyboard : reason_parts_exports.inputChange;
+      const applied = setValue(newValue, createChangeEventDetails(reason, event.nativeEvent, void 0, {
+        activeThumbIndex: index2
+      }));
+      setTouched(true);
+      if (applied) {
+        onValueCommitted(newValue, createGenericEventDetails(reason, event.nativeEvent));
+      }
+    }
+  });
+  if (true) {
+    if (min >= max) {
+      warn("Slider `max` must be greater than `min`.");
+    }
+  }
+  useIsoLayoutEffect(() => {
+    if (!disabled) {
+      return;
+    }
+    const activeEl = activeElement(ownerDocument(sliderRef.current));
+    if (contains(sliderRef.current, activeEl)) {
+      activeEl.blur();
+    }
+    if (active !== -1) {
+      setActive(-1);
+    }
+  }, [active, disabled, setActive]);
+  const state = React2.useMemo(() => ({
+    ...fieldState,
+    activeThumbIndex: active,
+    disabled,
+    dragging,
+    orientation,
+    max,
+    min,
+    minStepsBetweenValues,
+    step,
+    values
+  }), [fieldState, active, disabled, dragging, max, min, minStepsBetweenValues, orientation, step, values]);
+  const contextValue = React2.useMemo(() => ({
+    active,
+    controlRef,
+    disabled,
+    dragging,
+    validation,
+    format,
+    handleInputChange,
+    indicatorPosition,
+    inset: thumbAlignment !== "center",
+    labelId: ariaLabelledby,
+    rootLabelId: defaultLabelId,
+    largeStep,
+    lastUsedThumbIndex,
+    lastChangeReasonRef,
+    form,
+    locale,
+    max,
+    min,
+    minStepsBetweenValues,
+    name,
+    onValueCommitted,
+    orientation,
+    pressedThumbCenterOffsetRef,
+    pressedThumbIndexRef,
+    pressedValuesRef,
+    registerFieldControlRef,
+    renderBeforeHydration: thumbAlignment === "edge",
+    setActive,
+    setDragging,
+    setIndicatorPosition,
+    setLabelId,
+    setValue,
+    state,
+    step,
+    thumbCollisionBehavior,
+    thumbMap,
+    thumbRefs,
+    values
+  }), [active, ariaLabelledby, defaultLabelId, disabled, dragging, validation, format, handleInputChange, indicatorPosition, largeStep, lastUsedThumbIndex, form, locale, max, min, minStepsBetweenValues, name, onValueCommitted, orientation, registerFieldControlRef, setActive, setValue, state, step, thumbCollisionBehavior, thumbAlignment, thumbMap, values]);
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: [forwardedRef, sliderRef],
+    props: [{
+      "aria-labelledby": ariaLabelledby,
+      id,
+      role: "group"
+    }, elementProps, (props) => validation.getValidationProps(disabled, props)],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return (0, import_jsx_runtime.jsx)(SliderRootContext.Provider, {
+    value: contextValue,
+    children: (0, import_jsx_runtime.jsx)(CompositeList, {
+      elementsRef: thumbRefs,
+      onMapChange: setThumbMap,
+      children: element
+    })
+  });
+});
+if (true) SliderRoot.displayName = "SliderRoot";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/label/SliderLabel.mjs
+var React3 = __toESM(require_react(), 1);
+var SliderLabel = React3.forwardRef(function SliderLabel2(componentProps, forwardedRef) {
+  const {
+    render,
+    className,
+    style,
+    ...elementProps
+  } = componentProps;
+  const elementPropsWithoutId = elementProps;
+  delete elementPropsWithoutId.id;
+  const {
+    state,
+    setLabelId,
+    controlRef,
+    rootLabelId
+  } = useSliderRootContext();
+  function focusControl(event, controlId) {
+    var _a;
+    if (controlId) {
+      const controlElement = ownerDocument(event.currentTarget).getElementById(controlId);
+      if (isHTMLElement(controlElement)) {
+        focusElementWithVisible(controlElement);
+        return;
+      }
+    }
+    const fallbackInputs = (_a = controlRef.current) == null ? void 0 : _a.querySelectorAll('input[type="range"]');
+    const fallbackInput = (fallbackInputs == null ? void 0 : fallbackInputs.length) === 1 ? fallbackInputs[0] : null;
+    if (isHTMLElement(fallbackInput)) {
+      focusElementWithVisible(fallbackInput);
+    }
+  }
+  const labelProps = useLabel({
+    id: rootLabelId,
+    setLabelId,
+    focusControl
+  });
+  return useRenderElement("div", componentProps, {
+    ref: forwardedRef,
+    state,
+    props: [labelProps, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+});
+if (true) SliderLabel.displayName = "SliderLabel";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/value/SliderValue.mjs
+var React4 = __toESM(require_react(), 1);
+var SliderValue = React4.forwardRef(function SliderValue2(componentProps, forwardedRef) {
+  const {
+    "aria-live": ariaLive = "off",
+    render,
+    className,
+    children,
+    style,
+    ...elementProps
+  } = componentProps;
+  const {
+    thumbMap,
+    state,
+    values,
+    format,
+    locale
+  } = useSliderRootContext();
+  const outputFor = Array.from(thumbMap.values(), ({
+    inputId
+  }) => inputId).join(" ").trim() || void 0;
+  const formattedValues = React4.useMemo(() => values.map((v) => formatNumber(v, locale, format)), [format, locale, values]);
+  const defaultDisplayValue = formattedValues.join(" – ");
+  const element = useRenderElement("output", componentProps, {
+    state,
+    ref: forwardedRef,
+    props: [{
+      // off by default because it will keep announcing when the slider is being dragged
+      // and also when the value is changing (but not yet committed)
+      "aria-live": ariaLive,
+      children: typeof children === "function" ? children(formattedValues, values) : defaultDisplayValue,
+      htmlFor: outputFor
+    }, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return element;
+});
+if (true) SliderValue.displayName = "SliderValue";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/control/SliderControl.mjs
+var React5 = __toESM(require_react(), 1);
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/getMidpoint.mjs
+function getMidpoint(element, vertical) {
+  const rect = element.getBoundingClientRect();
+  return vertical ? (rect.top + rect.bottom) / 2 : (rect.left + rect.right) / 2;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/roundValueToStep.mjs
+function getDecimalPrecision(num) {
+  if (num === 0) {
+    return 0;
+  }
+  if (Math.abs(num) < 1) {
+    const parts = num.toExponential().split("e-");
+    const matissaDecimalPart = parts[0].split(".")[1];
+    return (matissaDecimalPart ? matissaDecimalPart.length : 0) + parseInt(parts[1], 10);
+  }
+  const decimalPart = num.toString().split(".")[1];
+  return decimalPart ? decimalPart.length : 0;
+}
+function roundValueToStep(value, step, min) {
+  const nearest = Math.round((value - min) / step) * step + min;
+  return Number(nearest.toFixed(Math.max(getDecimalPrecision(step), getDecimalPrecision(min))));
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/getPushedThumbValues.mjs
+function getPushedThumbValues(values, index2, nextValue, min, max, step, minStepsBetweenValues, initialValues) {
+  const nextValues = values.slice();
+  const minValueDifference = step * minStepsBetweenValues;
+  const lastIndex = nextValues.length - 1;
+  const baseInitialValues = initialValues ?? values;
+  const indexMin = min + index2 * minValueDifference;
+  const indexMax = max - (lastIndex - index2) * minValueDifference;
+  nextValues[index2] = clamp(nextValue, indexMin, indexMax);
+  for (let i = index2 + 1; i <= lastIndex; i += 1) {
+    const minAllowed = nextValues[i - 1] + minValueDifference;
+    const maxAllowed = max - (lastIndex - i) * minValueDifference;
+    const initialValue = baseInitialValues[i];
+    let candidate = Math.max(nextValues[i], minAllowed);
+    if (initialValue < candidate) {
+      candidate = Math.max(initialValue, minAllowed);
+    }
+    nextValues[i] = clamp(candidate, minAllowed, maxAllowed);
+  }
+  for (let i = index2 - 1; i >= 0; i -= 1) {
+    const maxAllowed = nextValues[i + 1] - minValueDifference;
+    const minAllowed = min + i * minValueDifference;
+    const initialValue = baseInitialValues[i];
+    let candidate = Math.min(nextValues[i], maxAllowed);
+    if (initialValue > candidate) {
+      candidate = Math.min(initialValue, maxAllowed);
+    }
+    nextValues[i] = clamp(candidate, minAllowed, maxAllowed);
+  }
+  for (let i = 0; i <= lastIndex; i += 1) {
+    nextValues[i] = Number(nextValues[i].toFixed(12));
+  }
+  return nextValues;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/utils/resolveThumbCollision.mjs
+function resolveThumbCollision(behavior, values, currentValues, initialValues, pressedIndex, nextValue, min, max, step, minStepsBetweenValues) {
+  const activeValues = currentValues ?? values;
+  const baselineValues = initialValues ?? values;
+  const range = activeValues.length > 1;
+  if (!range) {
+    return {
+      value: nextValue,
+      thumbIndex: 0,
+      didSwap: false
+    };
+  }
+  const minValueDifference = step * minStepsBetweenValues;
+  if (behavior === "push") {
+    return {
+      value: getPushedThumbValues(activeValues, pressedIndex, nextValue, min, max, step, minStepsBetweenValues),
+      thumbIndex: pressedIndex,
+      didSwap: false
+    };
+  }
+  const candidateValues = activeValues.slice();
+  const previousNeighbor = candidateValues[pressedIndex - 1];
+  const nextNeighbor = candidateValues[pressedIndex + 1];
+  const lowerBound = previousNeighbor != null ? previousNeighbor + minValueDifference : min;
+  const upperBound = nextNeighbor != null ? nextNeighbor - minValueDifference : max;
+  const pressedValueAfterClamp = Number(clamp(nextValue, lowerBound, upperBound).toFixed(12));
+  candidateValues[pressedIndex] = pressedValueAfterClamp;
+  switch (behavior) {
+    case "swap": {
+      const pressedInitialValue = activeValues[pressedIndex];
+      const epsilon = 1e-7;
+      const movingForward = nextValue > pressedInitialValue;
+      const movingBackward = nextValue < pressedInitialValue;
+      const shouldSwapForward = movingForward && nextNeighbor != null && nextValue >= nextNeighbor - epsilon;
+      const shouldSwapBackward = movingBackward && previousNeighbor != null && nextValue <= previousNeighbor + epsilon;
+      if (!shouldSwapForward && !shouldSwapBackward) {
+        return {
+          value: candidateValues,
+          thumbIndex: pressedIndex,
+          didSwap: false
+        };
+      }
+      const targetIndex = shouldSwapForward ? pressedIndex + 1 : pressedIndex - 1;
+      const initialValuesForPush = candidateValues.map((_, index2) => {
+        if (index2 === pressedIndex) {
+          return pressedValueAfterClamp;
+        }
+        const baseline = baselineValues[index2];
+        if (baseline != null) {
+          return baseline;
+        }
+        return activeValues[index2];
+      });
+      let nextValueForTarget = nextValue;
+      if (shouldSwapForward) {
+        nextValueForTarget = Math.max(nextValue, candidateValues[targetIndex]);
+      } else {
+        nextValueForTarget = Math.min(nextValue, candidateValues[targetIndex]);
+      }
+      const adjustedValues = getPushedThumbValues(candidateValues, targetIndex, nextValueForTarget, min, max, step, minStepsBetweenValues, initialValuesForPush);
+      const neighborIndex = shouldSwapForward ? targetIndex - 1 : targetIndex + 1;
+      const previousValue = adjustedValues[neighborIndex - 1];
+      const nextValueAfter = adjustedValues[neighborIndex + 1];
+      let neighborLowerBound = previousValue != null ? previousValue + minValueDifference : min;
+      neighborLowerBound = Math.max(neighborLowerBound, min + neighborIndex * minValueDifference);
+      let neighborUpperBound = nextValueAfter != null ? nextValueAfter - minValueDifference : max;
+      neighborUpperBound = Math.min(neighborUpperBound, max - (adjustedValues.length - 1 - neighborIndex) * minValueDifference);
+      const restoredValue = clamp(pressedValueAfterClamp, neighborLowerBound, neighborUpperBound);
+      adjustedValues[neighborIndex] = Number(restoredValue.toFixed(12));
+      return {
+        value: adjustedValues,
+        thumbIndex: targetIndex,
+        didSwap: true
+      };
+    }
+    case "none":
+    default: {
+      return {
+        value: candidateValues,
+        thumbIndex: pressedIndex,
+        didSwap: false
+      };
+    }
+  }
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/control/SliderControl.mjs
+var INTENTIONAL_DRAG_COUNT_THRESHOLD = 2;
+function getControlOffset(styles, vertical) {
+  if (!styles) {
+    return {
+      start: 0,
+      end: 0
+    };
+  }
+  function parseSize(value) {
+    const parsed = value != null ? parseFloat(value) : 0;
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  const start = !vertical ? "InlineStart" : "Top";
+  const end = !vertical ? "InlineEnd" : "Bottom";
+  return {
+    start: parseSize(styles[`border${start}Width`]) + parseSize(styles[`padding${start}`]),
+    end: parseSize(styles[`border${end}Width`]) + parseSize(styles[`padding${end}`])
+  };
+}
+function getFingerCoords(event, touchIdRef) {
+  if (touchIdRef.current != null && event.changedTouches) {
+    const touchEvent = event;
+    for (let i = 0; i < touchEvent.changedTouches.length; i += 1) {
+      const touch = touchEvent.changedTouches[i];
+      if (touch.identifier === touchIdRef.current) {
+        return {
+          x: touch.clientX,
+          y: touch.clientY
+        };
+      }
+    }
+    return null;
+  }
+  return {
+    x: event.clientX,
+    y: event.clientY
+  };
+}
+var SliderControl = React5.forwardRef(function SliderControl2(componentProps, forwardedRef) {
+  const {
+    render: renderProp,
+    className,
+    style,
+    ...elementProps
+  } = componentProps;
+  const {
+    disabled,
+    dragging,
+    inset,
+    lastChangeReasonRef,
+    max,
+    min,
+    minStepsBetweenValues,
+    onValueCommitted,
+    orientation,
+    pressedThumbCenterOffsetRef,
+    pressedThumbIndexRef,
+    pressedValuesRef,
+    registerFieldControlRef,
+    renderBeforeHydration,
+    setActive,
+    setDragging,
+    setValue,
+    state,
+    step,
+    thumbCollisionBehavior,
+    thumbRefs,
+    values
+  } = useSliderRootContext();
+  const direction = useDirection();
+  const range = values.length > 1;
+  const vertical = orientation === "vertical";
+  const controlRef = React5.useRef(null);
+  const stylesRef = React5.useRef(null);
+  const setStylesRef = useStableCallback((element2) => {
+    if (element2 && stylesRef.current == null) {
+      stylesRef.current = getWindow(element2).getComputedStyle(element2);
+    }
+  });
+  const touchIdRef = React5.useRef(null);
+  const moveCountRef = React5.useRef(0);
+  const insetThumbOffsetRef = React5.useRef(0);
+  const currentInteractionValueRef = React5.useRef(null);
+  const latestValuesRef = useValueAsRef(values);
+  function getThumbInput(el) {
+    return el == null ? void 0 : el.querySelector('input[type="range"]');
+  }
+  function updatePressedThumb(nextIndex) {
+    pressedThumbIndexRef.current = nextIndex;
+    if (!thumbRefs.current[nextIndex]) {
+      pressedThumbCenterOffsetRef.current = null;
+    }
+  }
+  function resetPressedThumb() {
+    pressedThumbIndexRef.current = -1;
+    pressedThumbCenterOffsetRef.current = null;
+  }
+  function isTargetDisabledThumb(target) {
+    if (!isElement(target)) {
+      return false;
+    }
+    return thumbRefs.current.some((thumbEl) => {
+      var _a;
+      if (!isElement(thumbEl) || !contains(thumbEl, target)) {
+        return false;
+      }
+      return ((_a = getThumbInput(thumbEl)) == null ? void 0 : _a.disabled) === true;
+    });
+  }
+  function getFingerState(fingerCoords) {
+    const control = controlRef.current;
+    const thumbIndex = pressedThumbIndexRef.current;
+    if (!control || thumbIndex < 0 || thumbIndex >= values.length) {
+      if (thumbIndex >= values.length) {
+        currentInteractionValueRef.current = null;
+      }
+      return null;
+    }
+    const {
+      width,
+      height,
+      bottom,
+      left,
+      right
+    } = control.getBoundingClientRect();
+    const controlOffset = getControlOffset(stylesRef.current, vertical);
+    const insetThumbOffset = insetThumbOffsetRef.current;
+    const controlSize = (vertical ? height : width) - controlOffset.start - controlOffset.end - insetThumbOffset * 2;
+    const thumbCenterOffset = pressedThumbCenterOffsetRef.current ?? 0;
+    const fingerX = fingerCoords.x - thumbCenterOffset;
+    const fingerY = fingerCoords.y - thumbCenterOffset;
+    const valueSize = vertical ? bottom - fingerY - controlOffset.end : (direction === "rtl" ? right - fingerX : fingerX - left) - controlOffset.start;
+    const valueRescaled = clamp((valueSize - insetThumbOffset) / controlSize, 0, 1);
+    let newValue = (max - min) * valueRescaled + min;
+    newValue = roundValueToStep(newValue, step, min);
+    newValue = clamp(newValue, min, max);
+    if (!range) {
+      return {
+        value: newValue,
+        thumbIndex,
+        didSwap: false
+      };
+    }
+    return resolveThumbCollision(thumbCollisionBehavior, values, latestValuesRef.current, pressedValuesRef.current, thumbIndex, newValue, min, max, step, minStepsBetweenValues);
+  }
+  function startPressing(fingerCoords) {
+    var _a;
+    pressedValuesRef.current = range ? values.slice() : null;
+    currentInteractionValueRef.current = null;
+    latestValuesRef.current = values;
+    const pressedThumbIndex = pressedThumbIndexRef.current;
+    let closestThumbIndex = pressedThumbIndex;
+    if (pressedThumbIndex > -1 && pressedThumbIndex < values.length) {
+      if (values[pressedThumbIndex] === max) {
+        let candidateIndex = pressedThumbIndex;
+        while (candidateIndex > 0 && values[candidateIndex - 1] === max) {
+          candidateIndex -= 1;
+        }
+        closestThumbIndex = candidateIndex;
+      }
+    } else {
+      const axis = !vertical ? "x" : "y";
+      let minDistance;
+      closestThumbIndex = -1;
+      for (let i = 0; i < thumbRefs.current.length; i += 1) {
+        const thumbEl = thumbRefs.current[i];
+        if (isElement(thumbEl) && !((_a = getThumbInput(thumbEl)) == null ? void 0 : _a.disabled)) {
+          const midpoint = getMidpoint(thumbEl, vertical);
+          const distance = Math.abs(fingerCoords[axis] - midpoint);
+          if (minDistance === void 0 || distance <= minDistance) {
+            closestThumbIndex = i;
+            minDistance = distance;
+          }
+        }
+      }
+    }
+    if (closestThumbIndex > -1 && closestThumbIndex !== pressedThumbIndex) {
+      updatePressedThumb(closestThumbIndex);
+    }
+    if (inset) {
+      const thumbEl = thumbRefs.current[closestThumbIndex];
+      if (isElement(thumbEl)) {
+        const thumbRect = thumbEl.getBoundingClientRect();
+        const side = !vertical ? "width" : "height";
+        insetThumbOffsetRef.current = thumbRect[side] / 2;
+      }
+    }
+  }
+  function focusThumb(thumbIndex) {
+    var _a;
+    const input = getThumbInput((_a = thumbRefs.current) == null ? void 0 : _a[thumbIndex]);
+    if (!input) {
+      return;
+    }
+    input.focus({
+      preventScroll: true,
+      // Prevent pointer-driven focus rings in browsers that support this option.
+      // Supported in Chrome from 144+.
+      focusVisible: false
+    });
+  }
+  function setValueFromPointer(finger, reason, nativeEvent) {
+    const applied = setValue(finger.value, createChangeEventDetails(reason, nativeEvent, void 0, {
+      activeThumbIndex: finger.thumbIndex
+    }));
+    if (applied) {
+      currentInteractionValueRef.current = finger.value;
+      latestValuesRef.current = Array.isArray(finger.value) ? finger.value : [finger.value];
+      if (finger.didSwap) {
+        updatePressedThumb(finger.thumbIndex);
+        focusThumb(finger.thumbIndex);
+      }
+    }
+    return applied;
+  }
+  const handleTouchMove = useStableCallback((nativeEvent) => {
+    const fingerCoords = getFingerCoords(nativeEvent, touchIdRef);
+    if (fingerCoords == null) {
+      return;
+    }
+    moveCountRef.current += 1;
+    if (nativeEvent.type === "pointermove" && nativeEvent.buttons === 0) {
+      handleTouchEnd(nativeEvent);
+      return;
+    }
+    const finger = getFingerState(fingerCoords);
+    if (finger == null) {
+      return;
+    }
+    if (validateMinimumDistance(finger.value, step, minStepsBetweenValues)) {
+      if (!dragging && moveCountRef.current > INTENTIONAL_DRAG_COUNT_THRESHOLD) {
+        setDragging(true);
+      }
+      setValueFromPointer(finger, reason_parts_exports.drag, nativeEvent);
+    }
+  });
+  const handleTouchEnd = useStableCallback((nativeEvent) => {
+    var _a, _b;
+    setActive(-1);
+    setDragging(false);
+    pressedThumbCenterOffsetRef.current = null;
+    const interactionValue = currentInteractionValueRef.current;
+    if (Array.isArray(interactionValue) && interactionValue.length !== values.length) {
+      currentInteractionValueRef.current = null;
+    }
+    if (currentInteractionValueRef.current != null) {
+      const commitReason = lastChangeReasonRef.current;
+      onValueCommitted(currentInteractionValueRef.current, createGenericEventDetails(commitReason, nativeEvent));
+    }
+    if ("pointerType" in nativeEvent && ((_a = controlRef.current) == null ? void 0 : _a.hasPointerCapture(nativeEvent.pointerId))) {
+      (_b = controlRef.current) == null ? void 0 : _b.releasePointerCapture(nativeEvent.pointerId);
+    }
+    pressedThumbIndexRef.current = -1;
+    touchIdRef.current = null;
+    stopListening();
+  });
+  const handleTouchStart = useStableCallback((nativeEvent) => {
+    if (disabled) {
+      return;
+    }
+    if (isTargetDisabledThumb(getTarget(nativeEvent))) {
+      resetPressedThumb();
+      return;
+    }
+    const touch = nativeEvent.changedTouches[0];
+    if (touch == null) {
+      return;
+    }
+    touchIdRef.current = touch.identifier;
+    const fingerCoords = {
+      x: touch.clientX,
+      y: touch.clientY
+    };
+    startPressing(fingerCoords);
+    const finger = getFingerState(fingerCoords);
+    if (finger == null) {
+      return;
+    }
+    focusThumb(finger.thumbIndex);
+    setValueFromPointer(finger, reason_parts_exports.trackPress, nativeEvent);
+    moveCountRef.current = 0;
+    const doc = ownerDocument(controlRef.current);
+    doc.addEventListener("touchmove", handleTouchMove, {
+      passive: true
+    });
+    doc.addEventListener("touchend", handleTouchEnd, {
+      passive: true
+    });
+  });
+  const stopListening = useStableCallback(() => {
+    const doc = ownerDocument(controlRef.current);
+    doc.removeEventListener("pointermove", handleTouchMove);
+    doc.removeEventListener("pointerup", handleTouchEnd);
+    doc.removeEventListener("touchmove", handleTouchMove);
+    doc.removeEventListener("touchend", handleTouchEnd);
+    pressedValuesRef.current = null;
+    currentInteractionValueRef.current = null;
+  });
+  const focusFrame = useAnimationFrame();
+  React5.useEffect(() => {
+    const control = controlRef.current;
+    if (!control) {
+      return () => stopListening();
+    }
+    const unsubscribeTouchStart = addEventListener(control, "touchstart", handleTouchStart, {
+      passive: true
+    });
+    return () => {
+      unsubscribeTouchStart();
+      focusFrame.cancel();
+      stopListening();
+    };
+  }, [stopListening, handleTouchStart, controlRef, focusFrame]);
+  React5.useEffect(() => {
+    if (disabled) {
+      stopListening();
+    }
+  }, [disabled, stopListening]);
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: [forwardedRef, registerFieldControlRef, controlRef, setStylesRef],
+    props: [{
+      ["data-base-ui-slider-control"]: renderBeforeHydration ? "" : void 0,
+      onPointerDown(event) {
+        const control = controlRef.current;
+        const target = getTarget(event.nativeEvent);
+        if (!control || disabled || event.defaultPrevented || !isElement(target) || // Only handle left clicks
+        event.button !== 0) {
+          return;
+        }
+        if (isTargetDisabledThumb(target)) {
+          resetPressedThumb();
+          return;
+        }
+        const fingerCoords = {
+          x: event.clientX,
+          y: event.clientY
+        };
+        startPressing(fingerCoords);
+        const finger = getFingerState(fingerCoords);
+        if (finger == null) {
+          return;
+        }
+        const pressedOnFocusedThumb = contains(thumbRefs.current[finger.thumbIndex], activeElement(ownerDocument(control)));
+        if (pressedOnFocusedThumb) {
+          event.preventDefault();
+        } else {
+          focusFrame.request(() => {
+            focusThumb(finger.thumbIndex);
+          });
+        }
+        setDragging(true);
+        const pressedOnAnyThumb = pressedThumbCenterOffsetRef.current != null;
+        if (!pressedOnAnyThumb) {
+          setValueFromPointer(finger, reason_parts_exports.trackPress, event.nativeEvent);
+        }
+        if (event.nativeEvent.pointerId) {
+          control.setPointerCapture(event.nativeEvent.pointerId);
+        }
+        moveCountRef.current = 0;
+        const doc = ownerDocument(control);
+        doc.addEventListener("pointermove", handleTouchMove, {
+          passive: true
+        });
+        doc.addEventListener("pointerup", handleTouchEnd, {
+          once: true
+        });
+      }
+    }, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return element;
+});
+if (true) SliderControl.displayName = "SliderControl";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/track/SliderTrack.mjs
+var React6 = __toESM(require_react(), 1);
+var SliderTrack = React6.forwardRef(function SliderTrack2(componentProps, forwardedRef) {
+  const {
+    render,
+    className,
+    style,
+    ...elementProps
+  } = componentProps;
+  const {
+    state
+  } = useSliderRootContext();
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: forwardedRef,
+    props: [{
+      style: {
+        position: "relative"
+      }
+    }, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return element;
+});
+if (true) SliderTrack.displayName = "SliderTrack";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/thumb/SliderThumb.mjs
+var React7 = __toESM(require_react(), 1);
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/thumb/SliderThumbDataAttributes.mjs
+var index = "data-index";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/thumb/SliderThumb.mjs
+var import_jsx_runtime2 = __toESM(require_jsx_runtime(), 1);
+var _PrehydrationScript;
+var ALL_KEYS = /* @__PURE__ */ new Set([...COMPOSITE_KEYS, PAGE_UP, PAGE_DOWN]);
+function getDefaultAriaValueText(values, index2, format, locale) {
+  if (index2 < 0) {
+    return void 0;
+  }
+  if (values.length === 2) {
+    return `${formatNumber(values[index2], locale, format)} ${index2 === 0 ? "start" : "end"} range`;
+  }
+  return format ? formatNumber(values[index2], locale, format) : void 0;
+}
+function getNewValue(thumbValue, increment, direction, min, max) {
+  const value = thumbValue + increment * direction;
+  const roundedValue = Number(value.toFixed(Math.max(getDecimalPrecision(thumbValue), getDecimalPrecision(increment), getDecimalPrecision(min))));
+  return clamp(roundedValue, min, max);
+}
+var SliderThumb = React7.forwardRef(function SliderThumb2(componentProps, forwardedRef) {
+  const {
+    render,
+    children: childrenProp,
+    className,
+    "aria-describedby": ariaDescribedByProp,
+    "aria-label": ariaLabelProp,
+    "aria-labelledby": ariaLabelledByProp,
+    "aria-valuetext": ariaValueTextProp,
+    disabled: disabledProp = false,
+    getAriaLabel: getAriaLabelProp,
+    getAriaValueText: getAriaValueTextProp,
+    id: idProp,
+    index: indexProp,
+    inputRef: inputRefProp,
+    onBlur: onBlurProp,
+    onFocus: onFocusProp,
+    onKeyDown: onKeyDownProp,
+    tabIndex: tabIndexProp,
+    style,
+    ...elementProps
+  } = componentProps;
+  const id = useBaseUiId(idProp);
+  const {
+    active: activeIndex,
+    lastUsedThumbIndex,
+    controlRef,
+    disabled: contextDisabled,
+    validation,
+    format,
+    handleInputChange,
+    inset,
+    labelId,
+    largeStep,
+    locale,
+    max,
+    min,
+    minStepsBetweenValues,
+    form,
+    name,
+    orientation,
+    pressedThumbCenterOffsetRef,
+    pressedThumbIndexRef,
+    renderBeforeHydration,
+    setActive,
+    setIndicatorPosition,
+    state,
+    step,
+    thumbRefs,
+    values: sliderValues
+  } = useSliderRootContext();
+  const direction = useDirection();
+  const disabled = disabledProp || contextDisabled;
+  const range = sliderValues.length > 1;
+  const vertical = orientation === "vertical";
+  const rtl = direction === "rtl";
+  const {
+    setTouched,
+    setFocused,
+    validationMode
+  } = useFieldRootContext();
+  const thumbRef = React7.useRef(null);
+  const inputRef = React7.useRef(null);
+  const restoringFocusVisibleRef = React7.useRef(false);
+  const handleFocusProp = useStableCallback((event) => {
+    if (restoringFocusVisibleRef.current) {
+      return;
+    }
+    onFocusProp == null ? void 0 : onFocusProp(event);
+  });
+  const handleBlurProp = useStableCallback((event) => {
+    if (restoringFocusVisibleRef.current) {
+      return;
+    }
+    onBlurProp == null ? void 0 : onBlurProp(event);
+  });
+  const defaultInputId = useBaseUiId();
+  const labelableId = useLabelableId();
+  const inputId = range ? defaultInputId : labelableId;
+  const thumbMetadata = React7.useMemo(() => ({
+    inputId
+  }), [inputId]);
+  const {
+    ref: listItemRef,
+    index: compositeIndex
+  } = useCompositeListItem({
+    metadata: thumbMetadata
+  });
+  const index2 = !range ? 0 : indexProp ?? compositeIndex;
+  const last = index2 === sliderValues.length - 1;
+  const thumbValue = sliderValues[index2];
+  const thumbValuePercent = valueToPercent(thumbValue, min, max);
+  const [positionPercent, setPositionPercent] = React7.useState();
+  const isHydrating = useIsHydrating();
+  const safeLastUsedThumbIndex = lastUsedThumbIndex >= 0 && lastUsedThumbIndex < sliderValues.length ? lastUsedThumbIndex : -1;
+  const getInsetPosition = useStableCallback(() => {
+    const control = controlRef.current;
+    const thumb = thumbRef.current;
+    if (!control || !thumb) {
+      return;
+    }
+    const thumbRect = thumb.getBoundingClientRect();
+    const controlRect = control.getBoundingClientRect();
+    const side = vertical ? "height" : "width";
+    const controlSize = controlRect[side] - thumbRect[side];
+    const thumbOffsetFromControlEdge = thumbRect[side] / 2 + controlSize * thumbValuePercent / 100;
+    const nextPositionPercent = thumbOffsetFromControlEdge / controlRect[side] * 100;
+    const nextInsetPosition = Number.isFinite(nextPositionPercent) ? nextPositionPercent : void 0;
+    setPositionPercent(nextInsetPosition);
+    if (index2 === 0) {
+      setIndicatorPosition((prevPosition) => [nextInsetPosition, prevPosition[1]]);
+    } else if (last) {
+      setIndicatorPosition((prevPosition) => [prevPosition[0], nextInsetPosition]);
+    }
+  });
+  useIsoLayoutEffect(() => {
+    if (inset) {
+      queueMicrotask(getInsetPosition);
+    }
+  }, [getInsetPosition, inset]);
+  useIsoLayoutEffect(() => {
+    if (inset) {
+      getInsetPosition();
+    }
+  }, [getInsetPosition, inset, thumbValuePercent]);
+  useIsoLayoutEffect(() => {
+    if (!inset) {
+      return void 0;
+    }
+    const control = controlRef.current;
+    const thumb = thumbRef.current;
+    if (!control || !thumb) {
+      return void 0;
+    }
+    const ResizeObserverCtor = getWindow(control).ResizeObserver;
+    if (typeof ResizeObserverCtor !== "function") {
+      return void 0;
+    }
+    const resizeObserver = new ResizeObserverCtor(getInsetPosition);
+    resizeObserver.observe(control);
+    resizeObserver.observe(thumb);
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, [controlRef, getInsetPosition, inset]);
+  const startEdge = vertical ? "bottom" : "insetInlineStart";
+  const crossOffsetProperty = vertical ? "left" : "top";
+  let zIndex;
+  if (range) {
+    if (activeIndex === index2) {
+      zIndex = 2;
+    } else if (safeLastUsedThumbIndex === index2) {
+      zIndex = 1;
+    }
+  } else if (activeIndex === index2) {
+    zIndex = 1;
+  }
+  let thumbStyle;
+  if (!inset && !Number.isFinite(thumbValuePercent)) {
+    thumbStyle = visuallyHidden;
+  } else {
+    thumbStyle = {
+      position: "absolute",
+      [startEdge]: inset ? "var(--position)" : `${thumbValuePercent}%`,
+      [crossOffsetProperty]: "50%",
+      translate: `${(vertical || !rtl ? -1 : 1) * 50}% ${(vertical ? 1 : -1) * 50}%`,
+      zIndex,
+      ...inset && {
+        ["--position"]: `${positionPercent ?? 0}%`,
+        visibility: renderBeforeHydration && isHydrating || positionPercent === void 0 ? "hidden" : void 0
+      }
+    };
+  }
+  let cssWritingMode;
+  if (vertical) {
+    cssWritingMode = rtl ? "vertical-rl" : "vertical-lr";
+  }
+  const ariaLabel = typeof getAriaLabelProp === "function" ? getAriaLabelProp(index2) : ariaLabelProp;
+  const inputProps = mergeProps({
+    "aria-label": ariaLabel,
+    "aria-labelledby": ariaLabelledByProp ?? (ariaLabel == null ? labelId : void 0),
+    "aria-describedby": ariaDescribedByProp,
+    "aria-orientation": orientation,
+    "aria-valuenow": thumbValue,
+    "aria-valuetext": typeof getAriaValueTextProp === "function" ? getAriaValueTextProp(formatNumber(thumbValue, locale, format), thumbValue, index2) : ariaValueTextProp ?? getDefaultAriaValueText(sliderValues, index2, format, locale),
+    disabled,
+    form,
+    id: inputId,
+    max,
+    min,
+    name,
+    onChange(event) {
+      handleInputChange(event.currentTarget.valueAsNumber, index2, event);
+    },
+    onFocus(event) {
+      const isRestoringFocusVisible = restoringFocusVisibleRef.current;
+      restoringFocusVisibleRef.current = false;
+      setActive(index2);
+      setFocused(true);
+      if (isRestoringFocusVisible) {
+        event.stopPropagation();
+      }
+    },
+    onBlur(event) {
+      if (restoringFocusVisibleRef.current) {
+        event.stopPropagation();
+        return;
+      }
+      setActive(-1);
+      if (thumbRefs.current.some((thumb) => contains(thumb, event.relatedTarget))) {
+        return;
+      }
+      setTouched(true);
+      setFocused(false);
+      if (validationMode === "onBlur") {
+        validation.commit(getSliderValue(thumbValue, index2, min, max, range, sliderValues));
+      }
+    },
+    onKeyDown(event) {
+      if (event.defaultPrevented) {
+        return;
+      }
+      if (!ALL_KEYS.has(event.key)) {
+        return;
+      }
+      if (COMPOSITE_KEYS.has(event.key)) {
+        event.stopPropagation();
+      }
+      let newValue = null;
+      let direction2 = 0;
+      let increment = event.shiftKey ? largeStep : step;
+      const roundedValue = roundValueToStep(thumbValue, step, min);
+      switch (event.key) {
+        case ARROW_UP:
+          direction2 = 1;
+          break;
+        case ARROW_RIGHT:
+          direction2 = rtl ? -1 : 1;
+          break;
+        case ARROW_DOWN:
+          direction2 = -1;
+          break;
+        case ARROW_LEFT:
+          direction2 = rtl ? 1 : -1;
+          break;
+        case PAGE_UP:
+          increment = largeStep;
+          direction2 = 1;
+          break;
+        case PAGE_DOWN:
+          increment = largeStep;
+          direction2 = -1;
+          break;
+        case END:
+          newValue = range && Number.isFinite(sliderValues[index2 + 1]) ? sliderValues[index2 + 1] - step * minStepsBetweenValues : max;
+          break;
+        case HOME:
+          newValue = range && Number.isFinite(sliderValues[index2 - 1]) ? sliderValues[index2 - 1] + step * minStepsBetweenValues : min;
+          break;
+        default:
+          break;
+      }
+      if (direction2 !== 0) {
+        newValue = getNewValue(roundedValue, increment, direction2, min, max);
+      }
+      if (newValue !== null) {
+        const input = event.currentTarget;
+        if (!matchesFocusVisible(input)) {
+          restoringFocusVisibleRef.current = true;
+          input.blur();
+          input.focus({
+            preventScroll: true,
+            // Show `:focus-visible` after keyboard interaction, even if the
+            // thumb was previously focused by a pointer.
+            focusVisible: true
+          });
+        }
+        handleInputChange(newValue, index2, event);
+        event.preventDefault();
+      }
+    },
+    step,
+    style: {
+      ...visuallyHidden,
+      // So that VoiceOver's focus indicator matches the thumb's dimensions
+      width: "100%",
+      height: "100%",
+      writingMode: cssWritingMode
+    },
+    tabIndex: tabIndexProp,
+    type: "range",
+    value: thumbValue ?? ""
+  }, (props) => validation.getValidationProps(disabled, props), {
+    onFocus: handleFocusProp,
+    onBlur: handleBlurProp,
+    onKeyDown: onKeyDownProp
+  });
+  const mergedInputRef = useMergedRefs(inputRef, validation.inputRef, inputRefProp);
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: [forwardedRef, listItemRef, thumbRef],
+    props: [{
+      [index]: index2,
+      children: (0, import_jsx_runtime2.jsxs)(React7.Fragment, {
+        children: [childrenProp, (0, import_jsx_runtime2.jsx)("input", {
+          ref: mergedInputRef,
+          ...inputProps,
+          suppressHydrationWarning: true
+        }), inset && last && renderBeforeHydration && (_PrehydrationScript || (_PrehydrationScript = (0, import_jsx_runtime2.jsx)(PrehydrationScript, {
+          script
+        })))]
+      }),
+      id,
+      onPointerDown(event) {
+        if (disabled) {
+          return;
+        }
+        pressedThumbIndexRef.current = index2;
+        const midpoint = getMidpoint(event.currentTarget, vertical);
+        pressedThumbCenterOffsetRef.current = (vertical ? event.clientY : event.clientX) - midpoint;
+      },
+      style: thumbStyle,
+      suppressHydrationWarning: renderBeforeHydration || void 0
+    }, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return element;
+});
+if (true) SliderThumb.displayName = "SliderThumb";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/slider/indicator/SliderIndicator.mjs
+var React8 = __toESM(require_react(), 1);
+function getIndicatorStyles(vertical, range, inset, start, end, forceHidden) {
+  const styles = {
+    visibility: forceHidden || inset && (start === void 0 || range && end === void 0) ? "hidden" : void 0,
+    position: vertical ? "absolute" : "relative",
+    [vertical ? "width" : "height"]: "inherit"
+  };
+  let startValue = `${start ?? 0}%`;
+  let sizeValue = `${(end ?? 0) - (start ?? 0)}%`;
+  if (inset) {
+    styles["--start-position"] = startValue;
+    startValue = "var(--start-position)";
+    if (range) {
+      styles["--relative-size"] = sizeValue;
+      sizeValue = "var(--relative-size)";
+    }
+  }
+  styles[vertical ? "bottom" : "insetInlineStart"] = range ? startValue : 0;
+  styles[vertical ? "height" : "width"] = range ? sizeValue : startValue;
+  return styles;
+}
+var SliderIndicator = React8.forwardRef(function SliderIndicator2(componentProps, forwardedRef) {
+  const {
+    render,
+    className,
+    style: styleProp,
+    ...elementProps
+  } = componentProps;
+  const {
+    indicatorPosition,
+    inset,
+    max,
+    min,
+    orientation,
+    renderBeforeHydration,
+    state,
+    values
+  } = useSliderRootContext();
+  const isHydrating = useIsHydrating();
+  const vertical = orientation === "vertical";
+  const range = values.length > 1;
+  const style = getIndicatorStyles(vertical, range, inset, inset ? indicatorPosition[0] : valueToPercent(values[0], min, max), inset ? indicatorPosition[1] : valueToPercent(values[values.length - 1], min, max), inset && renderBeforeHydration && isHydrating);
+  const element = useRenderElement("div", componentProps, {
+    state,
+    ref: forwardedRef,
+    props: [{
+      ["data-base-ui-slider-indicator"]: renderBeforeHydration ? "" : void 0,
+      style,
+      suppressHydrationWarning: renderBeforeHydration || void 0
+    }, elementProps],
+    stateAttributesMapping: sliderStateAttributesMapping
+  });
+  return element;
+});
+if (true) SliderIndicator.displayName = "SliderIndicator";
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/slider/slider.js
+var TOOLTIP_TILT_DEG = 8;
+var TOOLTIP_TILT_TRANSITION = {
+  duration: 0.4,
+  ease: [0.34, 1.56, 0.64, 1]
+};
+var TOOLTIP_POPUP_TRANSITION = {
+  duration: 0.2,
+  ease: [0.175, 0.885, 0.32, 1.5]
+};
+var tooltipWrapperClasses = "absolute z-10 pointer-events-none transition-transform duration-250 group-hover:scale-110 group-focus-within:scale-110 motion-reduce:transition-none data-[orientation=horizontal]:bottom-full data-[orientation=horizontal]:left-1/2 data-[orientation=horizontal]:-translate-x-1/2 data-[orientation=horizontal]:mb-1 data-[orientation=horizontal]:origin-bottom data-[orientation=vertical]:top-1/2 data-[orientation=vertical]:-translate-y-1/2 data-[orientation=vertical]:inset-s-full data-[orientation=vertical]:ms-1 data-[orientation=vertical]:ltr:origin-left data-[orientation=vertical]:rtl:origin-right";
+var tooltipInnerClasses = "bg-background-inverse text-foreground-inverse rounded-4xs block px-1 py-0.5 text-xs leading-none whitespace-nowrap data-[orientation=horizontal]:origin-bottom data-[orientation=vertical]:ltr:origin-left data-[orientation=vertical]:rtl:origin-right";
+function SliderTooltip({
+  index: index2,
+  visibility,
+  orientation,
+  changeVersion,
+  direction,
+  dirSign,
+  reduced,
+  open
+}) {
+  const [scope, animate] = useAnimate();
+  React9.useEffect(() => {
+    if (reduced || changeVersion === 0 || !scope.current) return;
+    const sign = direction === "up" ? 1 : -1;
+    const tilt = -sign * dirSign * TOOLTIP_TILT_DEG;
+    animate(scope.current, { rotate: [tilt, 0] }, TOOLTIP_TILT_TRANSITION);
+  }, [changeVersion, direction, dirSign, reduced, animate, scope]);
+  const visible = visibility === "always" || open;
+  return (0, import_jsx_runtime3.jsx)("span", { "data-slot": "slider-tooltip-wrapper", "data-orientation": orientation, className: tooltipWrapperClasses, children: (0, import_jsx_runtime3.jsx)(AnimatePresence, { children: visible && (0, import_jsx_runtime3.jsx)(
+    m.div,
+    {
+      ref: scope,
+      "data-slot": "slider-tooltip",
+      "data-orientation": orientation,
+      "aria-hidden": "true",
+      className: tooltipInnerClasses,
+      initial: reduced ? false : { opacity: 0, scale: 0.9 },
+      animate: { opacity: 1, scale: 1 },
+      exit: reduced ? { opacity: 0 } : { opacity: 0, scale: 0.95 },
+      transition: reduced ? { duration: 0 } : TOOLTIP_POPUP_TRANSITION,
+      children: (0, import_jsx_runtime3.jsx)(index_parts_exports.Value, { children: (formattedValues) => (0, import_jsx_runtime3.jsx)("span", { className: "leading-none", children: (formattedValues == null ? void 0 : formattedValues[index2]) ?? "" }) })
+    }
+  ) }) });
+}
+var thumbClasses = "group relative block size-3 shrink-0 cursor-default rounded-full select-none disabled:pointer-events-none disabled:opacity-disabled";
+var thumbVisualClasses = "bg-background border-primary relative block size-full rounded-full border-2 shadow-xs transition-transform duration-250 group-hover:scale-125 group-focus-within:scale-125 motion-reduce:transition-none";
+function SliderThumb3({
+  index: index2,
+  ariaLabel,
+  tooltipVisibility,
+  orientation,
+  changeVersion,
+  direction,
+  dirSign,
+  reduced
+}) {
+  const [hovered, setHovered] = React9.useState(false);
+  const [focused, setFocused] = React9.useState(false);
+  const autoOpen = tooltipVisibility === "auto" && (hovered || focused);
+  const eventHandlers = tooltipVisibility === "auto" ? {
+    onPointerEnter: () => setHovered(true),
+    onPointerLeave: () => setHovered(false),
+    onFocus: () => setFocused(true),
+    onBlur: () => setFocused(false)
+  } : {};
+  return (0, import_jsx_runtime3.jsxs)(
+    index_parts_exports.Thumb,
+    {
+      index: index2,
+      "aria-label": ariaLabel,
+      "data-slot": "slider-thumb",
+      className: thumbClasses,
+      ...eventHandlers,
+      children: [
+        (0, import_jsx_runtime3.jsx)("span", { "data-slot": "slider-thumb-visual", className: thumbVisualClasses }),
+        tooltipVisibility !== "never" && (0, import_jsx_runtime3.jsx)(
+          SliderTooltip,
+          {
+            index: index2,
+            visibility: tooltipVisibility,
+            orientation,
+            changeVersion,
+            direction,
+            dirSign,
+            reduced,
+            open: autoOpen
+          }
+        )
+      ]
+    }
+  );
+}
+var rootClasses = "data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-fit";
+var controlClasses = "relative flex w-full touch-none items-center select-none data-disabled:opacity-disabled data-disabled:pointer-events-none data-[orientation=vertical]:h-full data-[orientation=vertical]:min-h-40 data-[orientation=vertical]:w-auto data-[orientation=vertical]:flex-col";
+var trackClasses = "relative grow overflow-hidden rounded-full bg-background-strong select-none data-[orientation=horizontal]:h-1.5 data-[orientation=horizontal]:w-full data-[orientation=vertical]:h-full data-[orientation=vertical]:w-1.5";
+var indicatorClasses = "bg-primary select-none data-[orientation=horizontal]:h-full data-[orientation=vertical]:w-full";
+function toArray(value) {
+  if (value == null) return [];
+  return Array.isArray(value) ? [...value] : [value];
+}
+function Slider({
+  tooltipVisibility = "auto",
+  thumbAriaLabel,
+  className,
+  value,
+  defaultValue,
+  orientation = "horizontal",
+  onValueChange,
+  ...rootProps
+}) {
+  const direction = useDirection();
+  const dirSign = direction === "rtl" ? -1 : 1;
+  const reduced = useReducedMotion();
+  const seed = value ?? defaultValue;
+  const thumbCount = Array.isArray(seed) ? seed.length : 1;
+  const trackTooltips = tooltipVisibility !== "never";
+  const prevValuesRef = React9.useRef(toArray(seed));
+  const [tilts, setTilts] = React9.useState(
+    () => Array.from({ length: thumbCount }, () => ({ direction: "up", version: 0 }))
+  );
+  const handleValueChange = (next, details) => {
+    if (trackTooltips) {
+      const nextArr = toArray(next);
+      const prevArr = prevValuesRef.current;
+      prevValuesRef.current = nextArr;
+      setTilts((prev) => {
+        let changed = false;
+        const updated = nextArr.map((_, i) => {
+          const existing = prev[i] ?? { direction: "up", version: 0 };
+          const p = prevArr[i] ?? 0;
+          const c = nextArr[i] ?? p;
+          if (c === p) return existing;
+          changed = true;
+          return { direction: c > p ? "up" : "down", version: existing.version + 1 };
+        });
+        return changed || updated.length !== prev.length ? updated : prev;
+      });
+    }
+    onValueChange == null ? void 0 : onValueChange(next, details);
+  };
+  const resolveAriaLabel = (index2) => {
+    if (typeof thumbAriaLabel === "function") return thumbAriaLabel(index2);
+    return thumbAriaLabel;
+  };
+  return (0, import_jsx_runtime3.jsx)(LazyMotion, { features: domAnimation, strict: true, children: (0, import_jsx_runtime3.jsx)(
+    index_parts_exports.Root,
+    {
+      "data-slot": "slider",
+      orientation,
+      value,
+      defaultValue,
+      onValueChange: handleValueChange,
+      className: cn(rootClasses, className),
+      ...rootProps,
+      children: (0, import_jsx_runtime3.jsxs)(index_parts_exports.Control, { "data-slot": "slider-control", className: controlClasses, children: [
+        (0, import_jsx_runtime3.jsx)(index_parts_exports.Track, { "data-slot": "slider-track", className: trackClasses, children: (0, import_jsx_runtime3.jsx)(index_parts_exports.Indicator, { "data-slot": "slider-indicator", className: indicatorClasses }) }),
+        Array.from({ length: thumbCount }).map((_, i) => {
+          var _a, _b;
+          return (0, import_jsx_runtime3.jsx)(
+            SliderThumb3,
+            {
+              index: i,
+              ariaLabel: resolveAriaLabel(i),
+              tooltipVisibility,
+              orientation,
+              changeVersion: ((_a = tilts[i]) == null ? void 0 : _a.version) ?? 0,
+              direction: ((_b = tilts[i]) == null ? void 0 : _b.direction) ?? "up",
+              dirSign,
+              reduced
+            },
+            i
+          );
+        })
+      ] })
+    }
+  ) });
+}
+export {
+  Slider
+};
+//# sourceMappingURL=@appica_ui-react_slider.js.map

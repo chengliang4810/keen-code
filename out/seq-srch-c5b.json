@@ -1,0 +1,15 @@
+{
+  "steps": [
+    { "do": "clicktext", "role": "button", "text": "搜索" },
+    { "do": "wait", "ms": 700 },
+    { "do": "clicktext", "role": "button", "text": "回复两个字：好的" },
+    { "do": "wait", "ms": 900 },
+    { "do": "eval", "js": "(() => { const projBtn=[...document.querySelectorAll('button')].find(e=>e.textContent.trim()==='e2e-test-project' && e.closest('[class*=composer],[class*=chat],main,body')); const active=[...document.querySelectorAll('.sidebar .tree-l3--active')].map(e=>e.textContent.trim().slice(0,10)); return JSON.stringify({activeSession:active, dlgClosed:!document.querySelector('.search-panel')}); })()", "desc": "激活项目会话并读当前状态" },
+    { "do": "eval", "js": "(() => { const sel=[...document.querySelectorAll('button')].filter(e=>e.textContent.includes('e2e-test-project')||e.textContent.trim()==='选择项目').map(e=>e.textContent.trim().slice(0,20)); return JSON.stringify({projectSelector:sel}); })()", "desc": "读项目选择器当前值" },
+    { "do": "clicktext", "role": "button", "text": "搜索" },
+    { "do": "wait", "ms": 700 },
+    { "do": "clicktext", "role": "button", "text": "新建对话" },
+    { "do": "wait", "ms": 900 },
+    { "do": "eval", "js": "(() => { const ce=document.querySelector('[contenteditable=true]'); const sel=[...document.querySelectorAll('button')].filter(e=>e.textContent.includes('e2e-test-project')||e.textContent.trim()==='选择项目').map(e=>e.textContent.trim().slice(0,20)); return JSON.stringify({c5_dlgClosed:!document.querySelector('.search-panel'), c5_composerEmpty:ce?(ce.textContent||'').trim()==='' :null, c5_projectSelector:sel, c5_hasPlaceholder:document.body.innerText.includes('今天想从哪里开始')}); })()", "desc": "c5：项目上下文中新建草稿并断言项目保持" }
+  ]
+}

@@ -1,0 +1,348 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/features/app/overlays/SessionSearchPortal.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { Button } from "/src/components/ui/button.tsx";
+import {
+  Dialog,
+  DialogContent,
+  DialogTitle
+} from "/src/components/ui/dialog.tsx";
+import { Input } from "/src/components/ui/input.tsx";
+import {
+  IconClose,
+  IconFolder,
+  IconNewChat,
+  IconSearch
+} from "/src/components/icons.tsx";
+export function SessionSearchPortal({
+  platform,
+  tr,
+  open,
+  setOpen,
+  query,
+  setQuery,
+  returnFocusRef,
+  hits,
+  projects,
+  canWriteProjects,
+  sessions,
+  activeProject,
+  openSession,
+  newChat,
+  addProject,
+  setProjectsOpen,
+  setExpandedProjects
+}) {
+  return /* @__PURE__ */ jsxDEV(
+    Dialog,
+    {
+      open,
+      onOpenChange: (nextOpen) => {
+        if (!nextOpen) setOpen(false);
+      },
+      children: /* @__PURE__ */ jsxDEV(
+        DialogContent,
+        {
+          frame: false,
+          closeButton: false,
+          className: "search-panel",
+          viewportProps: { className: "search-overlay" },
+          finalFocus: returnFocusRef,
+          children: [
+            /* @__PURE__ */ jsxDEV(DialogTitle, { className: "sr-only", children: tr("sidebar.search") }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 98,
+              columnNumber: 9
+            }, this),
+            /* @__PURE__ */ jsxDEV("div", { className: "search-panel__head", children: [
+              /* @__PURE__ */ jsxDEV(IconSearch, { size: 16 }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                lineNumber: 100,
+                columnNumber: 11
+              }, this),
+              /* @__PURE__ */ jsxDEV(
+                Input,
+                {
+                  autoFocus: true,
+                  className: "search-panel__input",
+                  placeholder: tr("search.placeholder"),
+                  value: query,
+                  onChange: (event) => setQuery(event.target.value)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                  lineNumber: 101,
+                  columnNumber: 11
+                },
+                this
+              ),
+              /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  size: "icon-md",
+                  className: "modal-close",
+                  onClick: () => setOpen(false),
+                  "aria-label": tr("common.close"),
+                  children: /* @__PURE__ */ jsxDEV(IconClose, { size: 16 }, void 0, false, {
+                    fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                    lineNumber: 114,
+                    columnNumber: 13
+                  }, this)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                  lineNumber: 108,
+                  columnNumber: 11
+                },
+                this
+              )
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 99,
+              columnNumber: 9
+            }, this),
+            hits.matchedProjects.length > 0 ? /* @__PURE__ */ jsxDEV(Fragment, { children: [
+              /* @__PURE__ */ jsxDEV("div", { className: "search-panel__section", children: tr("sidebar.projects") }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                lineNumber: 119,
+                columnNumber: 13
+              }, this),
+              hits.matchedProjects.map(
+                (project) => /* @__PURE__ */ jsxDEV(
+                  Button,
+                  {
+                    type: "button",
+                    variant: "ghost",
+                    className: "search-panel__row",
+                    onClick: () => {
+                      setOpen(false);
+                      setProjectsOpen(true);
+                      setExpandedProjects((expanded) => ({
+                        ...expanded,
+                        [project.id]: true
+                      }));
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxDEV(IconFolder, { size: 15 }, void 0, false, {
+                        fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                        lineNumber: 138,
+                        columnNumber: 17
+                      }, this),
+                      /* @__PURE__ */ jsxDEV("span", { className: "search-panel__title", children: project.name }, void 0, false, {
+                        fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                        lineNumber: 139,
+                        columnNumber: 17
+                      }, this),
+                      /* @__PURE__ */ jsxDEV("span", { className: "search-panel__meta", children: project.path }, void 0, false, {
+                        fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                        lineNumber: 140,
+                        columnNumber: 17
+                      }, this)
+                    ]
+                  },
+                  project.id,
+                  true,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                    lineNumber: 123,
+                    columnNumber: 11
+                  },
+                  this
+                )
+              )
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 118,
+              columnNumber: 9
+            }, this) : null,
+            /* @__PURE__ */ jsxDEV("div", { className: "search-panel__section", children: tr("search.chats") }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 145,
+              columnNumber: 9
+            }, this),
+            hits.matchedSessions.length === 0 ? /* @__PURE__ */ jsxDEV("div", { className: "sidebar-empty sidebar-empty--search-empty", children: tr("search.noMatches") }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 147,
+              columnNumber: 9
+            }, this) : null,
+            hits.matchedSessions.map((hit, index) => {
+              const row = sessions.find((session) => session.id === hit.id);
+              if (!row) return null;
+              const project = projects.find(
+                (candidate) => candidate.id === row.projectId
+              );
+              const metaParts = [];
+              if (project?.name) metaParts.push(project.name);
+              if (index < 9) metaParts.push(`${platform === "mac" ? "⌘" : "Ctrl+"}${index + 1}`);
+              return /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  className: "search-panel__row",
+                  onClick: () => {
+                    setOpen(false);
+                    void openSession(row, project ?? null);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxDEV(IconNewChat, { size: 15 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 171,
+                      columnNumber: 15
+                    }, this),
+                    /* @__PURE__ */ jsxDEV("span", { className: "search-panel__body", children: /* @__PURE__ */ jsxDEV("span", { className: "search-panel__title", children: row.title }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 173,
+                      columnNumber: 17
+                    }, this) }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 172,
+                      columnNumber: 15
+                    }, this),
+                    /* @__PURE__ */ jsxDEV("span", { className: "search-panel__meta", children: metaParts.join(" · ") || "—" }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 175,
+                      columnNumber: 15
+                    }, this)
+                  ]
+                },
+                hit.id,
+                true,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                  lineNumber: 161,
+                  columnNumber: 13
+                },
+                this
+              );
+            }),
+            /* @__PURE__ */ jsxDEV("div", { className: "search-panel__foot", children: [
+              /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  className: "search-panel__row",
+                  onClick: () => {
+                    setOpen(false);
+                    void newChat(activeProject);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxDEV(IconNewChat, { size: 15 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 191,
+                      columnNumber: 13
+                    }, this),
+                    /* @__PURE__ */ jsxDEV("span", { className: "search-panel__title", children: tr("search.newChat") }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 192,
+                      columnNumber: 13
+                    }, this)
+                  ]
+                },
+                void 0,
+                true,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                  lineNumber: 182,
+                  columnNumber: 11
+                },
+                this
+              ),
+              canWriteProjects ? /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  className: "search-panel__row",
+                  onClick: () => {
+                    setOpen(false);
+                    void addProject(returnFocusRef.current);
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxDEV(IconFolder, { size: 15 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 206,
+                      columnNumber: 15
+                    }, this),
+                    /* @__PURE__ */ jsxDEV("span", { className: "search-panel__title", children: tr("sidebar.addProject") }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                      lineNumber: 207,
+                      columnNumber: 15
+                    }, this)
+                  ]
+                },
+                void 0,
+                true,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+                  lineNumber: 197,
+                  columnNumber: 11
+                },
+                this
+              ) : null
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+              lineNumber: 181,
+              columnNumber: 9
+            }, this)
+          ]
+        },
+        void 0,
+        true,
+        {
+          fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+          lineNumber: 91,
+          columnNumber: 7
+        },
+        this
+      )
+    },
+    void 0,
+    false,
+    {
+      fileName: "D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx",
+      lineNumber: 85,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_c = SessionSearchPortal;
+var _c;
+$RefreshReg$(_c, "SessionSearchPortal");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/features/app/overlays/SessionSearchPortal.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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YUE7QUFBQSxjQUNDUSxtQkFDQztBQUFBLGdCQUFDO0FBQUE7QUFBQSxrQkFDQyxNQUFLO0FBQUEsa0JBQ0wsU0FBUTtBQUFBLGtCQUNSLFdBQVU7QUFBQSxrQkFDVixTQUFTLE1BQU07QUFDYk4sNEJBQVEsS0FBSztBQUNiLHlCQUFLVyxXQUFXUixlQUFlb0MsT0FBTztBQUFBLGtCQUN4QztBQUFBLGtCQUVBO0FBQUEsMkNBQUMsY0FBVyxNQUFNLE1BQWxCO0FBQUE7QUFBQTtBQUFBO0FBQUEsMkJBQXFCO0FBQUEsb0JBQ3JCLHVCQUFDLFVBQUssV0FBVSx1QkFDYnpDLGFBQUcsb0JBQW9CLEtBRDFCO0FBQUE7QUFBQTtBQUFBO0FBQUEsMkJBRUE7QUFBQTtBQUFBO0FBQUEsZ0JBWkY7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLGNBYUEsSUFDRTtBQUFBLGlCQTlCTjtBQUFBO0FBQUE7QUFBQTtBQUFBLG1CQStCQTtBQUFBO0FBQUE7QUFBQSxRQXpIRjtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUEsTUEwSEE7QUFBQTtBQUFBLElBaElGO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxFQWlJQTtBQUVKO0FBQUMwQyxLQXZKZTVDO0FBQW1CLElBQUE0QztBQUFBLGFBQUFBLElBQUEiLCJuYW1lcyI6WyJCdXR0b24iLCJEaWFsb2ciLCJEaWFsb2dDb250ZW50IiwiRGlhbG9nVGl0bGUiLCJJbnB1dCIsIkljb25DbG9zZSIsIkljb25Gb2xkZXIiLCJJY29uTmV3Q2hhdCIsIkljb25TZWFyY2giLCJTZXNzaW9uU2VhcmNoUG9ydGFsIiwicGxhdGZvcm0iLCJ0ciIsIm9wZW4iLCJzZXRPcGVuIiwicXVlcnkiLCJzZXRRdWVyeSIsInJldHVybkZvY3VzUmVmIiwiaGl0cyIsInByb2plY3RzIiwiY2FuV3JpdGVQcm9qZWN0cyIsInNlc3Npb25zIiwiYWN0aXZlUHJvamVjdCIsIm9wZW5TZXNzaW9uIiwibmV3Q2hhdCIsImFkZFByb2plY3QiLCJzZXRQcm9qZWN0c09wZW4iLCJzZXRFeHBhbmRlZFByb2plY3RzIiwibmV4dE9wZW4iLCJjbGFzc05hbWUiLCJldmVudCIsInRhcmdldCIsInZhbHVlIiwibWF0Y2hlZFByb2plY3RzIiwibGVuZ3RoIiwibWFwIiwicHJvamVjdCIsImV4cGFuZGVkIiwiaWQiLCJuYW1lIiwicGF0aCIsIm1hdGNoZWRTZXNzaW9ucyIsImhpdCIsImluZGV4Iiwicm93IiwiZmluZCIsInNlc3Npb24iLCJjYW5kaWRhdGUiLCJwcm9qZWN0SWQiLCJtZXRhUGFydHMiLCJwdXNoIiwidGl0bGUiLCJqb2luIiwiY3VycmVudCIsIl9jIl0sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbIlNlc3Npb25TZWFyY2hQb3J0YWwudHN4Il0sInNvdXJjZXNDb250ZW50IjpbImltcG9ydCB0eXBlIHsgUmVmT2JqZWN0IH0gZnJvbSBcInJlYWN0XCI7XHJcbmltcG9ydCB0eXBlIHsgUHJvamVjdCwgU2Vzc2lvblJvdyB9IGZyb20gXCJAL2ZlYXR1cmVzL2FwcC9tb2RlbHNcIjtcclxuaW1wb3J0IHR5cGUgeyBTZXNzaW9uU2VhcmNoSGl0cyB9IGZyb20gXCJAL2xpYi9zZXNzaW9uU2VhcmNoXCI7XHJcbmltcG9ydCB7IEJ1dHRvbiB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvYnV0dG9uXCI7XHJcbmltcG9ydCB7XHJcbiAgRGlhbG9nLFxyXG4gIERpYWxvZ0NvbnRlbnQsXHJcbiAgRGlhbG9nVGl0bGUsXHJcbn0gZnJvbSBcIkAvY29tcG9uZW50cy91aS9kaWFsb2dcIjtcbmltcG9ydCB7IElucHV0IH0gZnJvbSBcIkAvY29tcG9uZW50cy91aS9pbnB1dFwiO1xyXG5pbXBvcnQge1xyXG4gIEljb25DbG9zZSxcclxuICBJY29uRm9sZGVyLFxyXG4gIEljb25OZXdDaGF0LFxyXG4gIEljb25TZWFyY2gsXHJcbn0gZnJvbSBcIkAvY29tcG9uZW50cy9pY29uc1wiO1xyXG5pbXBvcnQgdHlwZSB7XHJcbiAgQWRkUHJvamVjdEFjdGlvbixcclxuICBOZXdDaGF0QWN0aW9uLFxyXG4gIE9wZW5TZXNzaW9uQWN0aW9uLFxyXG4gIFNldFN0YXRlLFxyXG4gIFRyYW5zbGF0b3IsXHJcbn0gZnJvbSBcIi4vdHlwZXNcIjtcclxuXHJcbmV4cG9ydCBpbnRlcmZhY2UgU2Vzc2lvblNlYXJjaFBvcnRhbFByb3BzIHtcclxuICBwbGF0Zm9ybTogXCJtYWNcIiB8IFwid2luXCIgfCBcIm90aGVyXCI7XHJcbiAgdHI6IFRyYW5zbGF0b3I7XHJcbiAgb3BlbjogYm9vbGVhbjtcclxuICBzZXRPcGVuOiBTZXRTdGF0ZTxib29sZWFuPjtcclxuICBxdWVyeTogc3RyaW5nO1xyXG4gIHNldFF1ZXJ5OiBTZXRTdGF0ZTxzdHJpbmc+O1xyXG4gIHJldHVybkZvY3VzUmVmOiBSZWZPYmplY3Q8SFRNTEVsZW1lbnQgfCBudWxsPjtcclxuICBoaXRzOiBTZXNzaW9uU2VhcmNoSGl0cztcclxuICBwcm9qZWN0czogUHJvamVjdFtdO1xuICAvKiogV2ViIEhvc3Qg6aG555uu5Y+q6K+777yM5LiN5pi+56S65re75Yqg6aG555uu5YWl5Y+j44CCICovXG4gIGNhbldyaXRlUHJvamVjdHM6IGJvb2xlYW47XG4gIHNlc3Npb25zOiBTZXNzaW9uUm93W107XHJcbiAgYWN0aXZlUHJvamVjdDogUHJvamVjdCB8IG51bGw7XHJcbiAgb3BlblNlc3Npb246IE9wZW5TZXNzaW9uQWN0aW9uO1xyXG4gIG5ld0NoYXQ6IE5ld0NoYXRBY3Rpb247XHJcbiAgYWRkUHJvamVjdDogQWRkUHJvamVjdEFjdGlvbjtcclxuICBzZXRQcm9qZWN0c09wZW46IFNldFN0YXRlPGJvb2xlYW4+O1xyXG4gIHNldEV4cGFuZGVkUHJvamVjdHM6IFNldFN0YXRlPFJlY29yZDxzdHJpbmcsIGJvb2xlYW4+PjtcclxufVxyXG5cclxuZXhwb3J0IGZ1bmN0aW9uIFNlc3Npb25TZWFyY2hQb3J0YWwoe1xyXG4gIHBsYXRmb3JtLFxyXG4gIHRyLFxyXG4gIG9wZW4sXHJcbiAgc2V0T3BlbixcclxuICBxdWVyeSxcclxuICBzZXRRdWVyeSxcclxuICByZXR1cm5Gb2N1c1JlZixcclxuICBoaXRzLFxyXG4gIHByb2plY3RzLFxuICBjYW5Xcml0ZVByb2plY3RzLFxuICBzZXNzaW9ucyxcclxuICBhY3RpdmVQcm9qZWN0LFxyXG4gIG9wZW5TZXNzaW9uLFxyXG4gIG5ld0NoYXQsXHJcbiAgYWRkUHJvamVjdCxcclxuICBzZXRQcm9qZWN0c09wZW4sXHJcbiAgc2V0RXhwYW5kZWRQcm9qZWN0cyxcclxufTogU2Vzc2lvblNlYXJjaFBvcnRhbFByb3BzKSB7XHJcbiAgcmV0dXJuIChcclxuICAgIDxEaWFsb2dcclxuICAgICAgb3Blbj17b3Blbn1cclxuICAgICAgb25PcGVuQ2hhbmdlPXsobmV4dE9wZW4pID0+IHtcclxuICAgICAgICBpZiAoIW5leHRPcGVuKSBzZXRPcGVuKGZhbHNlKTtcclxuICAgICAgfX1cclxuICAgID5cclxuICAgICAgPERpYWxvZ0NvbnRlbnRcclxuICAgICAgICBmcmFtZT17ZmFsc2V9XHJcbiAgICAgICAgY2xvc2VCdXR0b249e2ZhbHNlfVxyXG4gICAgICAgIGNsYXNzTmFtZT1cInNlYXJjaC1wYW5lbFwiXHJcbiAgICAgICAgdmlld3BvcnRQcm9wcz17eyBjbGFzc05hbWU6IFwic2VhcmNoLW92ZXJsYXlcIiB9fVxyXG4gICAgICAgIGZpbmFsRm9jdXM9e3JldHVybkZvY3VzUmVmfVxyXG4gICAgICA+XHJcbiAgICAgICAgPERpYWxvZ1RpdGxlIGNsYXNzTmFtZT1cInNyLW9ubHlcIj57dHIoXCJzaWRlYmFyLnNlYXJjaFwiKX08L0RpYWxvZ1RpdGxlPlxyXG4gICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic2VhcmNoLXBhbmVsX19oZWFkXCI+XHJcbiAgICAgICAgICA8SWNvblNlYXJjaCBzaXplPXsxNn0gLz5cclxuICAgICAgICAgIDxJbnB1dFxyXG4gICAgICAgICAgICBhdXRvRm9jdXNcclxuICAgICAgICAgICAgY2xhc3NOYW1lPVwic2VhcmNoLXBhbmVsX19pbnB1dFwiXHJcbiAgICAgICAgICAgIHBsYWNlaG9sZGVyPXt0cihcInNlYXJjaC5wbGFjZWhvbGRlclwiKX1cclxuICAgICAgICAgICAgdmFsdWU9e3F1ZXJ5fVxyXG4gICAgICAgICAgICBvbkNoYW5nZT17KGV2ZW50KSA9PiBzZXRRdWVyeShldmVudC50YXJnZXQudmFsdWUpfVxyXG4gICAgICAgICAgLz5cclxuICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXHJcbiAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiIHNpemU9XCJpY29uLW1kXCIgY2xhc3NOYW1lPVwibW9kYWwtY2xvc2VcIlxyXG4gICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiBzZXRPcGVuKGZhbHNlKX1cclxuICAgICAgICAgICAgYXJpYS1sYWJlbD17dHIoXCJjb21tb24uY2xvc2VcIil9XHJcbiAgICAgICAgICA+XHJcbiAgICAgICAgICAgIDxJY29uQ2xvc2Ugc2l6ZT17MTZ9IC8+XHJcbiAgICAgICAgICA8L0J1dHRvbj5cclxuICAgICAgICA8L2Rpdj5cclxuICAgICAgICB7aGl0cy5tYXRjaGVkUHJvamVjdHMubGVuZ3RoID4gMCA/IChcclxuICAgICAgICAgIDw+XHJcbiAgICAgICAgICAgIDxkaXYgY2xhc3NOYW1lPVwic2VhcmNoLXBhbmVsX19zZWN0aW9uXCI+XHJcbiAgICAgICAgICAgICAge3RyKFwic2lkZWJhci5wcm9qZWN0c1wiKX1cclxuICAgICAgICAgICAgPC9kaXY+XHJcbiAgICAgICAgICAgIHtoaXRzLm1hdGNoZWRQcm9qZWN0cy5tYXAoKHByb2plY3QpID0+IChcclxuICAgICAgICAgICAgICA8QnV0dG9uXHJcbiAgICAgICAgICAgICAgICBrZXk9e3Byb2plY3QuaWR9XHJcbiAgICAgICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXHJcbiAgICAgICAgICAgICAgICBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX3Jvd1wiXHJcbiAgICAgICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiB7XHJcbiAgICAgICAgICAgICAgICAgIHNldE9wZW4oZmFsc2UpO1xyXG4gICAgICAgICAgICAgICAgICAvLyBQcm9qZWN0IGlzIGEgZm9sZGVyOiBleHBhbmQgb25seTsgc2VsZWN0aW9uIGlzIGZvciBzZXNzaW9ucy5cclxuICAgICAgICAgICAgICAgICAgc2V0UHJvamVjdHNPcGVuKHRydWUpO1xyXG4gICAgICAgICAgICAgICAgICBzZXRFeHBhbmRlZFByb2plY3RzKChleHBhbmRlZCkgPT4gKHtcclxuICAgICAgICAgICAgICAgICAgICAuLi5leHBhbmRlZCxcclxuICAgICAgICAgICAgICAgICAgICBbcHJvamVjdC5pZF06IHRydWUsXHJcbiAgICAgICAgICAgICAgICAgIH0pKTtcclxuICAgICAgICAgICAgICAgIH19XHJcbiAgICAgICAgICAgICAgPlxyXG4gICAgICAgICAgICAgICAgPEljb25Gb2xkZXIgc2l6ZT17MTV9IC8+XHJcbiAgICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX3RpdGxlXCI+e3Byb2plY3QubmFtZX08L3NwYW4+XHJcbiAgICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX21ldGFcIj57cHJvamVjdC5wYXRofTwvc3Bhbj5cclxuICAgICAgICAgICAgICA8L0J1dHRvbj5cclxuICAgICAgICAgICAgKSl9XHJcbiAgICAgICAgICA8Lz5cclxuICAgICAgICApIDogbnVsbH1cclxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cInNlYXJjaC1wYW5lbF9fc2VjdGlvblwiPnt0cihcInNlYXJjaC5jaGF0c1wiKX08L2Rpdj5cclxuICAgICAgICB7aGl0cy5tYXRjaGVkU2Vzc2lvbnMubGVuZ3RoID09PSAwID8gKFxyXG4gICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzaWRlYmFyLWVtcHR5IHNpZGViYXItZW1wdHktLXNlYXJjaC1lbXB0eVwiPlxuICAgICAgICAgICAge3RyKFwic2VhcmNoLm5vTWF0Y2hlc1wiKX1cclxuICAgICAgICAgIDwvZGl2PlxyXG4gICAgICAgICkgOiBudWxsfVxyXG4gICAgICAgIHtoaXRzLm1hdGNoZWRTZXNzaW9ucy5tYXAoKGhpdCwgaW5kZXgpID0+IHtcclxuICAgICAgICAgIGNvbnN0IHJvdyA9IHNlc3Npb25zLmZpbmQoKHNlc3Npb24pID0+IHNlc3Npb24uaWQgPT09IGhpdC5pZCk7XHJcbiAgICAgICAgICBpZiAoIXJvdykgcmV0dXJuIG51bGw7XHJcbiAgICAgICAgICBjb25zdCBwcm9qZWN0ID0gcHJvamVjdHMuZmluZChcclxuICAgICAgICAgICAgKGNhbmRpZGF0ZSkgPT4gY2FuZGlkYXRlLmlkID09PSByb3cucHJvamVjdElkLFxyXG4gICAgICAgICAgKTtcclxuICAgICAgICAgIGNvbnN0IG1ldGFQYXJ0czogc3RyaW5nW10gPSBbXTtcclxuICAgICAgICAgIGlmIChwcm9qZWN0Py5uYW1lKSBtZXRhUGFydHMucHVzaChwcm9qZWN0Lm5hbWUpO1xyXG4gICAgICAgICAgaWYgKGluZGV4IDwgOSkgbWV0YVBhcnRzLnB1c2goYCR7cGxhdGZvcm0gPT09IFwibWFjXCIgPyBcIuKMmFwiIDogXCJDdHJsK1wifSR7aW5kZXggKyAxfWApO1xyXG4gICAgICAgICAgcmV0dXJuIChcclxuICAgICAgICAgICAgPEJ1dHRvblxyXG4gICAgICAgICAgICAgIGtleT17aGl0LmlkfVxyXG4gICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxyXG4gICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXHJcbiAgICAgICAgICAgICAgY2xhc3NOYW1lPVwic2VhcmNoLXBhbmVsX19yb3dcIlxyXG4gICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHtcclxuICAgICAgICAgICAgICAgIHNldE9wZW4oZmFsc2UpO1xyXG4gICAgICAgICAgICAgICAgdm9pZCBvcGVuU2Vzc2lvbihyb3csIHByb2plY3QgPz8gbnVsbCk7XHJcbiAgICAgICAgICAgICAgfX1cclxuICAgICAgICAgICAgPlxyXG4gICAgICAgICAgICAgIDxJY29uTmV3Q2hhdCBzaXplPXsxNX0gLz5cclxuICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX2JvZHlcIj5cclxuICAgICAgICAgICAgICAgIDxzcGFuIGNsYXNzTmFtZT1cInNlYXJjaC1wYW5lbF9fdGl0bGVcIj57cm93LnRpdGxlfTwvc3Bhbj5cclxuICAgICAgICAgICAgICA8L3NwYW4+XHJcbiAgICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwic2VhcmNoLXBhbmVsX19tZXRhXCI+XHJcbiAgICAgICAgICAgICAgICB7bWV0YVBhcnRzLmpvaW4oXCIgwrcgXCIpIHx8IFwi4oCUXCJ9XHJcbiAgICAgICAgICAgICAgPC9zcGFuPlxyXG4gICAgICAgICAgICA8L0J1dHRvbj5cclxuICAgICAgICAgICk7XHJcbiAgICAgICAgfSl9XHJcbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX2Zvb3RcIj5cclxuICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXHJcbiAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXHJcbiAgICAgICAgICAgIGNsYXNzTmFtZT1cInNlYXJjaC1wYW5lbF9fcm93XCJcclxuICAgICAgICAgICAgb25DbGljaz17KCkgPT4ge1xyXG4gICAgICAgICAgICAgIHNldE9wZW4oZmFsc2UpO1xyXG4gICAgICAgICAgICAgIHZvaWQgbmV3Q2hhdChhY3RpdmVQcm9qZWN0KTtcclxuICAgICAgICAgICAgfX1cclxuICAgICAgICAgID5cclxuICAgICAgICAgICAgPEljb25OZXdDaGF0IHNpemU9ezE1fSAvPlxyXG4gICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX3RpdGxlXCI+XHJcbiAgICAgICAgICAgICAge3RyKFwic2VhcmNoLm5ld0NoYXRcIil9XHJcbiAgICAgICAgICAgIDwvc3Bhbj5cclxuICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgICAge2NhbldyaXRlUHJvamVjdHMgPyAoXG4gICAgICAgICAgICA8QnV0dG9uXG4gICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIlxuICAgICAgICAgICAgICBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX3Jvd1wiXG4gICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHtcbiAgICAgICAgICAgICAgICBzZXRPcGVuKGZhbHNlKTtcbiAgICAgICAgICAgICAgICB2b2lkIGFkZFByb2plY3QocmV0dXJuRm9jdXNSZWYuY3VycmVudCk7XG4gICAgICAgICAgICAgIH19XG4gICAgICAgICAgICA+XG4gICAgICAgICAgICAgIDxJY29uRm9sZGVyIHNpemU9ezE1fSAvPlxuICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJzZWFyY2gtcGFuZWxfX3RpdGxlXCI+XG4gICAgICAgICAgICAgICAge3RyKFwic2lkZWJhci5hZGRQcm9qZWN0XCIpfVxuICAgICAgICAgICAgICA8L3NwYW4+XG4gICAgICAgICAgICA8L0J1dHRvbj5cbiAgICAgICAgICApIDogbnVsbH1cbiAgICAgICAgPC9kaXY+XHJcbiAgICAgIDwvRGlhbG9nQ29udGVudD5cclxuICAgIDwvRGlhbG9nPlxyXG4gICk7XHJcbn1cclxuIl0sImZpbGUiOiJEOi9wcm9qZWN0cy9rZWVuLWNvZGUvc3JjL2ZlYXR1cmVzL2FwcC9vdmVybGF5cy9TZXNzaW9uU2VhcmNoUG9ydGFsLnRzeCJ9

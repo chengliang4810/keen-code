@@ -20,14 +20,14 @@ describe("WebHostSettingsPanel Token validation", () => {
 describe("Web Host release wiring", () => {
   it("bundles the built frontend under the runtime web resource root", () => {
     const config = JSON.parse(readFileSync(
-      new URL("../../../desktop/src-tauri/tauri.conf.json", import.meta.url),
+      new URL("../../../desktop/tauri.conf.json", import.meta.url),
       "utf8",
     ));
     const backend = readFileSync(
-      new URL("../../../desktop/src-tauri/src/web_host.rs", import.meta.url),
+      new URL("../../../desktop/src/web_host.rs", import.meta.url),
       "utf8",
     );
-    expect(config.bundle.resources["../../ui/dist/"]).toBe("web/");
+    expect(config.bundle.resources["../ui/dist/"]).toBe("web/");
     expect(backend).toContain('.join("web")');
   });
 });

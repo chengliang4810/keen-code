@@ -1,0 +1,629 @@
+"use client";
+import {
+  LazyMotion,
+  domAnimation,
+  m,
+  useAnimate
+} from "/node_modules/.vite/deps/chunk-Q3A4IXWI.js?v=341393c0";
+import {
+  useReducedMotion
+} from "/node_modules/.vite/deps/chunk-WXTVF6BV.js?v=341393c0";
+import {
+  useFieldItemContext
+} from "/node_modules/.vite/deps/chunk-RBEWTAYF.js?v=341393c0";
+import {
+  useAriaLabelledBy
+} from "/node_modules/.vite/deps/chunk-RLAB5OEM.js?v=341393c0";
+import {
+  fieldValidityMapping,
+  useFieldRootContext,
+  useFormContext,
+  useLabelableContext,
+  useLabelableId,
+  useRegisterFieldControl
+} from "/node_modules/.vite/deps/chunk-W752RAWH.js?v=341393c0";
+import {
+  useControlled
+} from "/node_modules/.vite/deps/chunk-ZC5ZR7IM.js?v=341393c0";
+import {
+  useValueChanged
+} from "/node_modules/.vite/deps/chunk-AI3CPQIU.js?v=341393c0";
+import {
+  useBaseUiId
+} from "/node_modules/.vite/deps/chunk-63LI3Z4H.js?v=341393c0";
+import {
+  visuallyHidden,
+  visuallyHiddenInput
+} from "/node_modules/.vite/deps/chunk-UI5XAVVN.js?v=341393c0";
+import {
+  dispatchClickWithModifiers,
+  useButton
+} from "/node_modules/.vite/deps/chunk-6JVU4J4E.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-Q723KW4Z.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-CGK6OLWA.js?v=341393c0";
+import {
+  createChangeEventDetails,
+  reason_parts_exports
+} from "/node_modules/.vite/deps/chunk-EIPLHTKK.js?v=341393c0";
+import {
+  useOpenChangeComplete,
+  useTransitionStatus
+} from "/node_modules/.vite/deps/chunk-LM2K4WU6.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GL46B26J.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-32YKATOX.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GPLCYBEI.js?v=341393c0";
+import {
+  transitionStatusMapping
+} from "/node_modules/.vite/deps/chunk-XCXD75MQ.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-KD2YTZUQ.js?v=341393c0";
+import {
+  getWindow
+} from "/node_modules/.vite/deps/chunk-H42XUSOK.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-3LPHUCVY.js?v=341393c0";
+import {
+  useIsoLayoutEffect
+} from "/node_modules/.vite/deps/chunk-2VEKR5CR.js?v=341393c0";
+import {
+  EMPTY_OBJECT,
+  mergeProps,
+  useMergedRefs,
+  useRenderElement
+} from "/node_modules/.vite/deps/chunk-O5KZOVAW.js?v=341393c0";
+import {
+  cn,
+  useComposedRefs
+} from "/node_modules/.vite/deps/chunk-MCT4N4XI.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-76V45DLG.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-DEX2RCYB.js?v=341393c0";
+import {
+  require_jsx_runtime
+} from "/node_modules/.vite/deps/chunk-V46J5SUH.js?v=341393c0";
+import "/node_modules/.vite/deps/chunk-GFQRAAPS.js?v=341393c0";
+import {
+  require_react
+} from "/node_modules/.vite/deps/chunk-ZWRFQRRA.js?v=341393c0";
+import {
+  __export,
+  __toESM
+} from "/node_modules/.vite/deps/chunk-DC5AMYBS.js?v=341393c0";
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/checkbox/checkbox.js
+var import_jsx_runtime2 = __toESM(require_jsx_runtime());
+var React5 = __toESM(require_react());
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/index.parts.mjs
+var index_parts_exports = {};
+__export(index_parts_exports, {
+  Indicator: () => CheckboxIndicator,
+  Root: () => CheckboxRoot
+});
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/root/CheckboxRoot.mjs
+var React3 = __toESM(require_react(), 1);
+
+// node_modules/.pnpm/@base-ui+utils@0.4.0_@types_5069fad45854dbc2595142a59ce2bdf1/node_modules/@base-ui/utils/getDefaultFormSubmitter.mjs
+function getDefaultFormSubmitter(form) {
+  if (!form) {
+    return null;
+  }
+  for (const candidate of form.elements) {
+    const tagName = candidate.tagName;
+    if (tagName === "BUTTON" || tagName === "INPUT") {
+      const button = candidate;
+      if (button.type === "submit") {
+        return button;
+      }
+    }
+  }
+  return null;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/root/CheckboxRootDataAttributes.mjs
+var checked = "data-checked";
+var unchecked = "data-unchecked";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/utils/getCheckboxStateAttributesMapping.mjs
+function getCheckboxStateAttributesMapping(state) {
+  return {
+    checked(value) {
+      if (state.indeterminate) {
+        return {};
+      }
+      if (value) {
+        return {
+          [checked]: ""
+        };
+      }
+      return {
+        [unchecked]: ""
+      };
+    },
+    ...fieldValidityMapping
+  };
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox-group/CheckboxGroupContext.mjs
+var React = __toESM(require_react(), 1);
+var CheckboxGroupContext = React.createContext(void 0);
+if (true) CheckboxGroupContext.displayName = "CheckboxGroupContext";
+function useCheckboxGroupContext() {
+  return React.useContext(CheckboxGroupContext);
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/root/CheckboxRootContext.mjs
+var React2 = __toESM(require_react(), 1);
+var CheckboxRootContext = React2.createContext(void 0);
+if (true) CheckboxRootContext.displayName = "CheckboxRootContext";
+function useCheckboxRootContext() {
+  const context = React2.useContext(CheckboxRootContext);
+  if (context === void 0) {
+    throw new Error(true ? "Base UI: CheckboxRootContext is missing. Checkbox parts must be placed within <Checkbox.Root>." : formatErrorMessage_default(14));
+  }
+  return context;
+}
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/root/CheckboxRoot.mjs
+var import_jsx_runtime = __toESM(require_jsx_runtime(), 1);
+var PARENT_CHECKBOX = "data-parent";
+var CheckboxRoot = React3.forwardRef(function CheckboxRoot2(componentProps, forwardedRef) {
+  const {
+    checked: checkedProp,
+    className,
+    defaultChecked = false,
+    "aria-labelledby": ariaLabelledByProp,
+    disabled: disabledProp = false,
+    form,
+    id: idProp,
+    indeterminate = false,
+    inputRef: inputRefProp,
+    name: nameProp,
+    onCheckedChange,
+    parent = false,
+    readOnly = false,
+    render,
+    required = false,
+    uncheckedValue,
+    value: valueProp,
+    nativeButton = false,
+    style,
+    ...elementProps
+  } = componentProps;
+  const {
+    clearErrors
+  } = useFormContext();
+  const {
+    disabled: rootDisabled,
+    name: fieldName,
+    setDirty,
+    setFilled,
+    setFocused,
+    setTouched,
+    state: fieldState,
+    validationMode,
+    validityData,
+    validation: localValidation
+  } = useFieldRootContext();
+  const fieldItemContext = useFieldItemContext();
+  const {
+    labelId,
+    registerControlId,
+    getDescriptionProps
+  } = useLabelableContext();
+  const groupContext = useCheckboxGroupContext();
+  const parentContext = (groupContext == null ? void 0 : groupContext.allValues) === void 0 ? void 0 : groupContext.parent;
+  const isGroupedWithParent = parentContext !== void 0;
+  const disabled = rootDisabled || fieldItemContext.disabled || (groupContext == null ? void 0 : groupContext.disabled) || disabledProp;
+  const name = fieldName ?? nameProp;
+  const value = valueProp ?? name;
+  const id = useBaseUiId();
+  const ownsControlId = (groupContext == null ? void 0 : groupContext.registerControlId) !== registerControlId;
+  const controlId = useLabelableId({
+    id: idProp || void 0,
+    enabled: ownsControlId
+  });
+  const rootId = nativeButton ? controlId : id;
+  let groupProps = {};
+  if (isGroupedWithParent) {
+    if (parent) {
+      groupProps = parentContext.getParentProps();
+    } else if (value !== void 0) {
+      groupProps = parentContext.getChildProps(value);
+    }
+  }
+  const {
+    checked: groupChecked = checkedProp,
+    indeterminate: groupIndeterminate = indeterminate,
+    onCheckedChange: groupOnChange,
+    ...otherGroupProps
+  } = groupProps;
+  const groupValue = groupContext == null ? void 0 : groupContext.value;
+  const controlRef = React3.useRef(null);
+  const {
+    getButtonProps,
+    buttonRef
+  } = useButton({
+    disabled,
+    native: nativeButton
+  });
+  const validation = (groupContext == null ? void 0 : groupContext.validation) ?? localValidation;
+  const [checked2, setCheckedState] = useControlled({
+    controlled: value !== void 0 && groupValue !== void 0 && !parent ? groupValue.includes(value) : groupChecked,
+    default: defaultChecked,
+    name: "Checkbox",
+    state: "checked"
+  });
+  const computedChecked = isGroupedWithParent ? Boolean(groupChecked) : checked2;
+  const computedIndeterminate = isGroupedWithParent ? groupIndeterminate || indeterminate : indeterminate;
+  useRegisterFieldControl(controlRef, id, checked2, void 0, !groupContext && !disabled, nameProp);
+  const registerChildId = parentContext == null ? void 0 : parentContext.registerChildId;
+  const inputRef = React3.useRef(null);
+  const registerFieldInput = validation.registerInput;
+  const registeredInputValue = groupContext ? value : void 0;
+  const registerInput = React3.useCallback((element2) => registerFieldInput(element2, {
+    controlRef,
+    value: registeredInputValue
+  }), [registerFieldInput, registeredInputValue]);
+  const mergedInputRef = useMergedRefs(inputRefProp, inputRef, parent ? void 0 : registerInput);
+  const ariaLabelledBy = useAriaLabelledBy(ariaLabelledByProp, labelId, inputRef, !nativeButton, controlId);
+  useIsoLayoutEffect(() => {
+    if (inputRef.current) {
+      inputRef.current.indeterminate = computedIndeterminate;
+    }
+    if (!groupContext) {
+      setFilled(checked2);
+    }
+  }, [checked2, computedIndeterminate, groupContext, setFilled]);
+  useValueChanged(checked2, () => {
+    if (groupContext) {
+      return;
+    }
+    clearErrors(name);
+    setDirty(checked2 !== validityData.initialValue);
+    validation.change(checked2);
+  });
+  const inputProps = mergeProps(
+    {
+      checked: checked2,
+      disabled,
+      form,
+      // parent checkboxes unset `name` to be excluded from form submission
+      name: parent ? void 0 : name,
+      // Set `id` to stop Chrome warning about an unassociated input.
+      // When using a native button, the `id` is applied to the button instead.
+      id: nativeButton ? void 0 : controlId,
+      required,
+      ref: mergedInputRef,
+      style: name ? visuallyHiddenInput : visuallyHidden,
+      tabIndex: -1,
+      type: "checkbox",
+      "aria-hidden": true,
+      onChange(event) {
+        if (event.nativeEvent.defaultPrevented) {
+          return;
+        }
+        if (readOnly) {
+          event.preventDefault();
+          return;
+        }
+        const nextChecked = event.currentTarget.checked;
+        const details = createChangeEventDetails(reason_parts_exports.none, event.nativeEvent);
+        onCheckedChange == null ? void 0 : onCheckedChange(nextChecked, details);
+        if (details.isCanceled) {
+          return;
+        }
+        groupOnChange == null ? void 0 : groupOnChange(nextChecked, details);
+        if (details.isCanceled) {
+          return;
+        }
+        setCheckedState(nextChecked);
+        if (value !== void 0 && groupContext !== void 0 && !parent && !isGroupedWithParent) {
+          const nextGroupValue = nextChecked ? [...groupContext.value, value] : groupContext.value.filter((item) => item !== value);
+          groupContext.setValue(nextGroupValue, details);
+        }
+      },
+      onClick(event) {
+        event.stopPropagation();
+      },
+      onFocus() {
+        var _a;
+        (_a = controlRef.current) == null ? void 0 : _a.focus();
+      }
+    },
+    // React <19 sets an empty value if `undefined` is passed explicitly
+    // To avoid this, we only set the value if it's defined
+    valueProp !== void 0 ? {
+      value: (groupContext ? checked2 && valueProp : valueProp) || ""
+    } : EMPTY_OBJECT,
+    getDescriptionProps,
+    (props) => validation.getValidationProps(disabled, props)
+  );
+  React3.useEffect(() => {
+    if (!parentContext || value === void 0) {
+      return void 0;
+    }
+    const disabledStates = parentContext.disabledStatesRef.current;
+    disabledStates.set(value, disabled);
+    return () => {
+      disabledStates.delete(value);
+    };
+  }, [parentContext, disabled, value]);
+  const state = React3.useMemo(() => ({
+    ...fieldState,
+    checked: computedChecked,
+    disabled,
+    readOnly,
+    required,
+    indeterminate: computedIndeterminate
+  }), [fieldState, computedChecked, disabled, readOnly, required, computedIndeterminate]);
+  const stateAttributesMapping = getCheckboxStateAttributesMapping(state);
+  const element = useRenderElement("span", componentProps, {
+    state,
+    ref: [buttonRef, controlRef, forwardedRef],
+    props: [{
+      id: rootId,
+      role: "checkbox",
+      "aria-checked": computedIndeterminate ? "mixed" : computedChecked,
+      "aria-readonly": readOnly || void 0,
+      "aria-required": required || void 0,
+      "aria-labelledby": ariaLabelledBy,
+      [PARENT_CHECKBOX]: parent ? "" : void 0,
+      onFocus() {
+        if (!disabled) {
+          setFocused(true);
+        }
+      },
+      onBlur() {
+        const inputEl = inputRef.current;
+        if (!inputEl) {
+          return;
+        }
+        setTouched(true);
+        setFocused(false);
+        if (validationMode === "onBlur") {
+          validation.commit(groupContext ? groupValue : inputEl.checked);
+        }
+      },
+      onKeyDown(event) {
+        var _a;
+        if (event.key !== "Enter") {
+          return;
+        }
+        event.preventBaseUIHandler();
+        if (event.defaultPrevented) {
+          return;
+        }
+        const formToSubmit = ((_a = inputRef.current) == null ? void 0 : _a.form) ?? null;
+        const currentTarget = event.currentTarget;
+        const nativeEvent = event.nativeEvent;
+        const originalPreventDefault = event.preventDefault;
+        const originalNativePreventDefault = nativeEvent.preventDefault;
+        let preventDefaultCalledAfterPropagation = false;
+        event.preventDefault = () => {
+          preventDefaultCalledAfterPropagation = true;
+          originalPreventDefault.call(event);
+        };
+        nativeEvent.preventDefault = () => {
+          preventDefaultCalledAfterPropagation = true;
+          originalNativePreventDefault.call(nativeEvent);
+        };
+        originalNativePreventDefault.call(nativeEvent);
+        getWindow(currentTarget).queueMicrotask(() => {
+          var _a2;
+          event.preventDefault = originalPreventDefault;
+          nativeEvent.preventDefault = originalNativePreventDefault;
+          if (!preventDefaultCalledAfterPropagation) {
+            (_a2 = getDefaultFormSubmitter(formToSubmit)) == null ? void 0 : _a2.click();
+          }
+        });
+      },
+      onClick(event) {
+        if (readOnly || disabled) {
+          return;
+        }
+        event.preventDefault();
+        const input = inputRef.current;
+        if (!input) {
+          return;
+        }
+        dispatchClickWithModifiers(input, event);
+      }
+    }, elementProps, otherGroupProps, getButtonProps, getDescriptionProps, (props) => validation.getValidationProps(disabled, props)],
+    stateAttributesMapping
+  });
+  const renderedId = element.props.id;
+  useIsoLayoutEffect(() => {
+    if (!registerChildId || parent || value === void 0 || renderedId === void 0) {
+      return void 0;
+    }
+    return registerChildId(value, renderedId);
+  }, [registerChildId, parent, value, renderedId]);
+  return (0, import_jsx_runtime.jsxs)(CheckboxRootContext.Provider, {
+    value: state,
+    children: [element, !checked2 && !groupContext && name && !parent && uncheckedValue !== void 0 && (0, import_jsx_runtime.jsx)("input", {
+      type: "hidden",
+      form,
+      name,
+      value: uncheckedValue,
+      disabled
+    }), (0, import_jsx_runtime.jsx)("input", {
+      ...inputProps,
+      suppressHydrationWarning: true
+    })]
+  });
+});
+if (true) CheckboxRoot.displayName = "CheckboxRoot";
+
+// node_modules/.pnpm/@base-ui+react@1.8.0_@date-_1e7e88748afd00166501d8f7062e9347/node_modules/@base-ui/react/checkbox/indicator/CheckboxIndicator.mjs
+var React4 = __toESM(require_react(), 1);
+var CheckboxIndicator = React4.forwardRef(function CheckboxIndicator2(componentProps, forwardedRef) {
+  const {
+    render,
+    className,
+    style,
+    keepMounted = false,
+    ...elementProps
+  } = componentProps;
+  const rootState = useCheckboxRootContext();
+  const rendered = rootState.checked || rootState.indeterminate;
+  const {
+    mounted,
+    transitionStatus,
+    setMounted
+  } = useTransitionStatus(rendered);
+  const indicatorRef = React4.useRef(null);
+  const state = {
+    ...rootState,
+    transitionStatus
+  };
+  useOpenChangeComplete({
+    batch: true,
+    enabled: !rendered,
+    open: rendered,
+    ref: indicatorRef,
+    onComplete() {
+      if (!rendered) {
+        setMounted(false);
+      }
+    }
+  });
+  const baseStateAttributesMapping = getCheckboxStateAttributesMapping(rootState);
+  const stateAttributesMapping = {
+    ...baseStateAttributesMapping,
+    ...transitionStatusMapping
+  };
+  const shouldRender = keepMounted || mounted;
+  const element = useRenderElement("span", componentProps, {
+    ref: [forwardedRef, indicatorRef],
+    state,
+    stateAttributesMapping,
+    props: elementProps
+  });
+  if (!shouldRender) {
+    return null;
+  }
+  return element;
+});
+if (true) CheckboxIndicator.displayName = "CheckboxIndicator";
+
+// node_modules/.pnpm/@appica+ui-react@1.1.0_@dat_7ad236a8a3161143ebd89985f4437c37/node_modules/@appica/ui-react/dist/components/checkbox/checkbox.js
+var SQUISH_TRANSITION = {
+  duration: 0.3,
+  ease: [0.4, 0, 0.2, 1]
+};
+var ZERO_TRANSITION = { duration: 0 };
+function CheckboxIndicator3({
+  checked: checked2,
+  indeterminate,
+  reduced
+}) {
+  const showCheck = checked2 && !indeterminate;
+  const showDash = indeterminate;
+  return (0, import_jsx_runtime2.jsx)(index_parts_exports.Indicator, { "data-slot": "checkbox-indicator", className: "flex items-center justify-center", keepMounted: true, children: (0, import_jsx_runtime2.jsxs)(
+    "svg",
+    {
+      className: "text-primary-foreground size-[1em] min-h-4 min-w-4",
+      xmlns: "http://www.w3.org/2000/svg",
+      viewBox: "0 0 16 16",
+      fill: "none",
+      stroke: "currentColor",
+      strokeWidth: "1.5",
+      strokeLinecap: "round",
+      strokeLinejoin: "round",
+      children: [
+        (0, import_jsx_runtime2.jsx)(
+          m.path,
+          {
+            d: "M4 8.5l2.5 2.5 5.5-5.5",
+            style: { strokeDasharray: 20 },
+            initial: false,
+            animate: {
+              strokeDashoffset: showCheck ? 0 : 20,
+              opacity: showDash ? 0 : 1
+            },
+            transition: reduced ? ZERO_TRANSITION : {
+              strokeDashoffset: {
+                duration: showCheck ? 0.3 : 0,
+                ease: "easeOut",
+                delay: showCheck ? 0.15 : 0
+              },
+              opacity: { duration: 0.1 }
+            }
+          }
+        ),
+        (0, import_jsx_runtime2.jsx)(
+          m.line,
+          {
+            x1: "4",
+            y1: "8",
+            x2: "12",
+            y2: "8",
+            initial: false,
+            animate: {
+              scaleX: showDash ? 1 : 0,
+              opacity: showDash ? 1 : 0
+            },
+            transition: reduced ? ZERO_TRANSITION : {
+              scaleX: {
+                duration: showDash ? 0.2 : 0,
+                ease: "easeOut",
+                delay: showDash ? 0.15 : 0
+              },
+              opacity: {
+                duration: showDash ? 0.15 : 0,
+                delay: showDash ? 0.2 : 0
+              }
+            }
+          }
+        )
+      ]
+    }
+  ) });
+}
+function CheckboxRoot3({
+  renderProps,
+  state,
+  reduced
+}) {
+  const { checked: checked2, indeterminate } = state;
+  const { ref, ...htmlProps } = renderProps;
+  const [scope, animate] = useAnimate();
+  const composedRef = useComposedRefs(ref, scope);
+  const prevState = React5.useRef({ checked: checked2, indeterminate });
+  React5.useEffect(() => {
+    const toggled = prevState.current.checked !== checked2 || prevState.current.indeterminate !== indeterminate;
+    prevState.current = { checked: checked2, indeterminate };
+    if (toggled && !reduced) {
+      animate(scope.current, { scale: [1, 0.8, 1.1, 1] }, SQUISH_TRANSITION);
+    }
+  }, [checked2, indeterminate, animate, scope, reduced]);
+  return (0, import_jsx_runtime2.jsx)("span", { "data-slot": "checkbox", ...htmlProps, ref: composedRef, children: (0, import_jsx_runtime2.jsx)(CheckboxIndicator3, { checked: checked2, indeterminate, reduced }) });
+}
+function Checkbox({ className, ...props }) {
+  const reduced = useReducedMotion();
+  const ariaInvalid = props["aria-invalid"];
+  const invalid = ariaInvalid === true || ariaInvalid === "true";
+  return (0, import_jsx_runtime2.jsx)(LazyMotion, { features: domAnimation, strict: true, children: (0, import_jsx_runtime2.jsx)(
+    index_parts_exports.Root,
+    {
+      ...props,
+      ...invalid ? { "data-invalid": "" } : {},
+      className: cn(
+        "flex size-[1em] min-h-4 min-w-4 shrink-0 cursor-default items-center justify-center",
+        "bg-background border-border-strong outline-ring-input rounded-[calc(tan(atan2(var(--radius-3xs),1rem))*100%)] border",
+        "transition-[background-color,border-color,box-shadow] duration-200 motion-reduce:transition-none",
+        "hover:not-data-checked:not-data-indeterminate:not-data-disabled:not-data-invalid:border-border-emphasis",
+        "focus-visible:border-transparent!",
+        "data-checked:bg-primary data-checked:outline-ring-primary data-checked:border-transparent",
+        "data-indeterminate:bg-primary data-indeterminate:outline-ring-primary data-indeterminate:border-transparent",
+        "data-disabled:not-data-checked:not-data-indeterminate:bg-background-subtle data-disabled:data-checked:opacity-disabled data-disabled:data-indeterminate:opacity-disabled data-disabled:cursor-not-allowed data-disabled:not-data-checked:not-data-indeterminate:border-dashed",
+        "data-invalid:border-error data-invalid:not-data-checked:not-data-indeterminate:bg-error-subtle data-invalid:outline-ring-error",
+        className
+      ),
+      render: (renderProps, state) => (0, import_jsx_runtime2.jsx)(CheckboxRoot3, { renderProps, state, reduced })
+    }
+  ) });
+}
+export {
+  Checkbox
+};
+//# sourceMappingURL=@appica_ui-react_checkbox.js.map

@@ -20,7 +20,7 @@ members = [
     "core/runtime",
     "core/tools",
     # 原生桌面宿主：窗口、托盘、命令、事件与本地系统能力。
-    "apps/desktop/src-tauri",
+    "apps/desktop",
     # 真实模型兼容性探测与报告；仅按需运行，不参与默认构建。
     "tooling/provider-live-test",
 ]

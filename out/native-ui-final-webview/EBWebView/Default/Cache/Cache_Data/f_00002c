@@ -1,0 +1,311 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/src/features/app/overlays/AddProjectModal.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import { pathBasename } from "/src/lib/filePath.ts";
+import { projectPathPreview } from "/src/features/app/models.ts";
+import { Button } from "/src/components/ui/button.tsx";
+import { Input } from "/src/components/ui/input.tsx";
+import { Spinner } from "/node_modules/.vite/deps/@appica_ui-react_spinner.js?v=341393c0";
+import { Alert, AlertDescription } from "/node_modules/.vite/deps/@appica_ui-react_alert.js?v=341393c0";
+import { Field, FieldDescription, FieldLabel } from "/node_modules/.vite/deps/@appica_ui-react_field.js?v=341393c0";
+import { GlassModal } from "/src/components/GlassModal.tsx";
+import { IconFolder, IconFolderPlus } from "/src/components/icons.tsx";
+export function AddProjectModal({
+  tr,
+  intent,
+  name,
+  setName,
+  path,
+  busy,
+  error,
+  nameRef,
+  dropRef,
+  returnFocusRef,
+  nameEditedRef,
+  setError,
+  dragZone,
+  projectDirectory,
+  close,
+  submit,
+  pickDirectory,
+  reset,
+  navigateSettings
+}) {
+  const openProjectDirectorySettings = () => {
+    reset();
+    navigateSettings("general");
+  };
+  return /* @__PURE__ */ jsxDEV(
+    GlassModal,
+    {
+      open: intent !== null,
+      onClose: close,
+      title: tr("addProject.title"),
+      titleId: "add-project-title",
+      size: "md",
+      className: "add-project-modal",
+      overlayClassName: "add-project-overlay",
+      closeLabel: tr("common.close"),
+      closeOnOverlay: !busy,
+      showClose: !busy,
+      wrapBody: true,
+      returnFocusRef,
+      footer: /* @__PURE__ */ jsxDEV(Fragment, { children: [
+        /* @__PURE__ */ jsxDEV(
+          Button,
+          {
+            type: "button",
+            variant: "ghost",
+            disabled: busy,
+            onClick: close,
+            children: tr("common.cancel")
+          },
+          void 0,
+          false,
+          {
+            fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+            lineNumber: 99,
+            columnNumber: 11
+          },
+          this
+        ),
+        /* @__PURE__ */ jsxDEV(
+          Button,
+          {
+            type: "submit",
+            form: "add-project-form",
+            variant: "primary",
+            disabled: busy,
+            children: [
+              busy ? /* @__PURE__ */ jsxDEV(Spinner, { currentColor: true, className: "text-sm" }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                lineNumber: 113,
+                columnNumber: 21
+              }, this) : null,
+              busy ? tr("addProject.adding") : tr("addProject.submit")
+            ]
+          },
+          void 0,
+          true,
+          {
+            fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+            lineNumber: 107,
+            columnNumber: 11
+          },
+          this
+        )
+      ] }, void 0, true, {
+        fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+        lineNumber: 98,
+        columnNumber: 7
+      }, this),
+      children: /* @__PURE__ */ jsxDEV(
+        "form",
+        {
+          id: "add-project-form",
+          className: "add-project-form",
+          onSubmit: (event) => {
+            event.preventDefault();
+            void submit();
+          },
+          children: [
+            /* @__PURE__ */ jsxDEV(Field, { className: "add-project-field", children: [
+              /* @__PURE__ */ jsxDEV(FieldLabel, { htmlFor: "add-project-name", children: tr("addProject.name") }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                lineNumber: 128,
+                columnNumber: 11
+              }, this),
+              /* @__PURE__ */ jsxDEV("div", { className: "add-project-name-control", children: [
+                /* @__PURE__ */ jsxDEV(IconFolder, { size: 17 }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                  lineNumber: 132,
+                  columnNumber: 13
+                }, this),
+                /* @__PURE__ */ jsxDEV(
+                  Input,
+                  {
+                    ref: nameRef,
+                    id: "add-project-name",
+                    className: "settings-input",
+                    value: name,
+                    placeholder: tr("addProject.namePlaceholder"),
+                    maxLength: 120,
+                    autoComplete: "off",
+                    "data-modal-autofocus": true,
+                    readOnly: busy,
+                    "aria-invalid": error === tr("addProject.nameRequired") || void 0,
+                    "aria-describedby": error ? "add-project-error" : void 0,
+                    onChange: (event) => {
+                      const effectiveNameEditedRef = nameEditedRef;
+                      effectiveNameEditedRef.current = true;
+                      setName(event.target.value);
+                      setError(null);
+                    }
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                    lineNumber: 133,
+                    columnNumber: 13
+                  },
+                  this
+                )
+              ] }, void 0, true, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                lineNumber: 131,
+                columnNumber: 11
+              }, this)
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+              lineNumber: 127,
+              columnNumber: 9
+            }, this),
+            /* @__PURE__ */ jsxDEV(Field, { className: "add-project-field", children: [
+              /* @__PURE__ */ jsxDEV(FieldLabel, { htmlFor: "add-project-source", children: tr("addProject.sourceFolder") }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                lineNumber: 158,
+                columnNumber: 11
+              }, this),
+              /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  ref: dropRef,
+                  id: "add-project-source",
+                  type: "button",
+                  variant: "outline",
+                  size: "md",
+                  className: "add-project-drop" + (dragZone === "project" ? " is-active" : ""),
+                  disabled: busy,
+                  onClick: () => void pickDirectory(),
+                  "aria-label": path ? pathBasename(path) : tr("addProject.chooseFolder"),
+                  children: [
+                    /* @__PURE__ */ jsxDEV(IconFolderPlus, { size: 24 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                      lineNumber: 177,
+                      columnNumber: 13
+                    }, this),
+                    /* @__PURE__ */ jsxDEV("strong", { className: "add-project-drop__title", children: path ? pathBasename(path) : tr("addProject.chooseFolder") }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                      lineNumber: 178,
+                      columnNumber: 13
+                    }, this),
+                    path ? /* @__PURE__ */ jsxDEV("span", { className: "add-project-drop__path", title: path, children: path }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                      lineNumber: 182,
+                      columnNumber: 13
+                    }, this) : null
+                  ]
+                },
+                void 0,
+                true,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                  lineNumber: 161,
+                  columnNumber: 11
+                },
+                this
+              ),
+              !path && projectDirectory ? /* @__PURE__ */ jsxDEV(FieldDescription, { className: "add-project-default-path", children: [
+                /* @__PURE__ */ jsxDEV("span", { children: tr("addProject.defaultLocation", {
+                  path: projectPathPreview(
+                    projectDirectory,
+                    name.trim() || tr("addProject.namePlaceholder")
+                  )
+                }) }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                  lineNumber: 189,
+                  columnNumber: 15
+                }, this),
+                /* @__PURE__ */ jsxDEV(
+                  Button,
+                  {
+                    type: "button",
+                    variant: "ghost",
+                    size: "md",
+                    className: "add-project-default-path__settings",
+                    onClick: openProjectDirectorySettings,
+                    children: tr("addProject.changeDefaultLocation")
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                    lineNumber: 197,
+                    columnNumber: 15
+                  },
+                  this
+                )
+              ] }, void 0, true, {
+                fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+                lineNumber: 188,
+                columnNumber: 11
+              }, this) : null
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+              lineNumber: 157,
+              columnNumber: 9
+            }, this),
+            error ? /* @__PURE__ */ jsxDEV(Alert, { id: "add-project-error", variant: "error", children: /* @__PURE__ */ jsxDEV(AlertDescription, { children: error }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+              lineNumber: 210,
+              columnNumber: 13
+            }, this) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+              lineNumber: 209,
+              columnNumber: 9
+            }, this) : null
+          ]
+        },
+        void 0,
+        true,
+        {
+          fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+          lineNumber: 119,
+          columnNumber: 7
+        },
+        this
+      )
+    },
+    void 0,
+    false,
+    {
+      fileName: "D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx",
+      lineNumber: 84,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_c = AddProjectModal;
+var _c;
+$RefreshReg$(_c, "AddProjectModal");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/features/app/overlays/AddProjectModal.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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LElBaklGO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxFQWtJQTtBQUVKO0FBQUNzQixLQS9KZTdCO0FBQWUsSUFBQTZCO0FBQUEsYUFBQUEsSUFBQSIsIm5hbWVzIjpbInBhdGhCYXNlbmFtZSIsInByb2plY3RQYXRoUHJldmlldyIsIkJ1dHRvbiIsIklucHV0IiwiU3Bpbm5lciIsIkFsZXJ0IiwiQWxlcnREZXNjcmlwdGlvbiIsIkZpZWxkIiwiRmllbGREZXNjcmlwdGlvbiIsIkZpZWxkTGFiZWwiLCJHbGFzc01vZGFsIiwiSWNvbkZvbGRlciIsIkljb25Gb2xkZXJQbHVzIiwiQWRkUHJvamVjdE1vZGFsIiwidHIiLCJpbnRlbnQiLCJuYW1lIiwic2V0TmFtZSIsInBhdGgiLCJidXN5IiwiZXJyb3IiLCJuYW1lUmVmIiwiZHJvcFJlZiIsInJldHVybkZvY3VzUmVmIiwibmFtZUVkaXRlZFJlZiIsInNldEVycm9yIiwiZHJhZ1pvbmUiLCJwcm9qZWN0RGlyZWN0b3J5IiwiY2xvc2UiLCJzdWJtaXQiLCJwaWNrRGlyZWN0b3J5IiwicmVzZXQiLCJuYXZpZ2F0ZVNldHRpbmdzIiwib3BlblByb2plY3REaXJlY3RvcnlTZXR0aW5ncyIsImV2ZW50IiwicHJldmVudERlZmF1bHQiLCJ1bmRlZmluZWQiLCJlZmZlY3RpdmVOYW1lRWRpdGVkUmVmIiwiY3VycmVudCIsInRhcmdldCIsInZhbHVlIiwidHJpbSIsIl9jIl0sImlnbm9yZUxpc3QiOltdLCJzb3VyY2VzIjpbIkFkZFByb2plY3RNb2RhbC50c3giXSwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHR5cGUgeyBSZWZPYmplY3QgfSBmcm9tIFwicmVhY3RcIjtcclxuaW1wb3J0IHR5cGUgeyBTZXR0aW5nc1NlY3Rpb25JZCB9IGZyb20gXCJAL2xpYi9zZXR0aW5nc0NhdGFsb2dcIjtcclxuaW1wb3J0IHR5cGUgeyBEcmFnWm9uZSB9IGZyb20gXCJAL2xpYi9kcmFnWm9uZVwiO1xyXG5pbXBvcnQgeyBwYXRoQmFzZW5hbWUgfSBmcm9tIFwiQC9saWIvZmlsZVBhdGhcIjtcclxuaW1wb3J0IHsgcHJvamVjdFBhdGhQcmV2aWV3IH0gZnJvbSBcIkAvZmVhdHVyZXMvYXBwL21vZGVsc1wiO1xyXG5pbXBvcnQgdHlwZSB7IEFkZFByb2plY3RJbnRlbnQgfSBmcm9tIFwiQC9ob29rcy91c2VQcm9qZWN0RGlhbG9nXCI7XHJcbmltcG9ydCB7IEJ1dHRvbiB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvYnV0dG9uXCI7XHJcbmltcG9ydCB7IElucHV0IH0gZnJvbSBcIkAvY29tcG9uZW50cy91aS9pbnB1dFwiO1xyXG5pbXBvcnQgeyBTcGlubmVyIH0gZnJvbSBcIkBhcHBpY2EvdWktcmVhY3Qvc3Bpbm5lclwiO1xyXG5pbXBvcnQgeyBBbGVydCwgQWxlcnREZXNjcmlwdGlvbiB9IGZyb20gXCJAYXBwaWNhL3VpLXJlYWN0L2FsZXJ0XCI7XHJcbmltcG9ydCB7IEZpZWxkLCBGaWVsZERlc2NyaXB0aW9uLCBGaWVsZExhYmVsIH0gZnJvbSBcIkBhcHBpY2EvdWktcmVhY3QvZmllbGRcIjtcclxuaW1wb3J0IHsgR2xhc3NNb2RhbCB9IGZyb20gXCJAL2NvbXBvbmVudHMvR2xhc3NNb2RhbFwiO1xyXG5pbXBvcnQgeyBJY29uRm9sZGVyLCBJY29uRm9sZGVyUGx1cyB9IGZyb20gXCJAL2NvbXBvbmVudHMvaWNvbnNcIjtcclxuaW1wb3J0IHR5cGUgeyBTZXRTdGF0ZSwgVHJhbnNsYXRvciB9IGZyb20gXCIuL3R5cGVzXCI7XHJcblxyXG5leHBvcnQgaW50ZXJmYWNlIEFkZFByb2plY3RNb2RhbFByb3BzIHtcclxuICB0cjogVHJhbnNsYXRvcjtcclxuICBpbnRlbnQ6IEFkZFByb2plY3RJbnRlbnQgfCBudWxsO1xyXG4gIG5hbWU6IHN0cmluZztcclxuICBzZXROYW1lOiBTZXRTdGF0ZTxzdHJpbmc+O1xyXG4gIHBhdGg6IHN0cmluZztcclxuICBidXN5OiBib29sZWFuO1xyXG4gIGVycm9yOiBzdHJpbmcgfCBudWxsO1xyXG4gIG5hbWVSZWY6IFJlZk9iamVjdDxIVE1MSW5wdXRFbGVtZW50IHwgbnVsbD47XHJcbiAgZHJvcFJlZjogUmVmT2JqZWN0PEhUTUxCdXR0b25FbGVtZW50IHwgbnVsbD47XHJcbiAgcmV0dXJuRm9jdXNSZWY6IFJlZk9iamVjdDxIVE1MRWxlbWVudCB8IG51bGw+O1xyXG4gIG5hbWVFZGl0ZWRSZWY6IFJlZk9iamVjdDxib29sZWFuPjtcclxuICBzZXRFcnJvcjogU2V0U3RhdGU8c3RyaW5nIHwgbnVsbD47XHJcbiAgZHJhZ1pvbmU6IERyYWdab25lO1xyXG4gIHByb2plY3REaXJlY3Rvcnk6IHN0cmluZztcclxuICBjbG9zZTogKCkgPT4gdm9pZDtcclxuICBzdWJtaXQ6ICgpID0+IHZvaWQgfCBQcm9taXNlPHZvaWQ+O1xyXG4gIHBpY2tEaXJlY3Rvcnk6ICgpID0+IHZvaWQgfCBQcm9taXNlPHZvaWQ+O1xyXG4gIHJlc2V0OiAoKSA9PiB2b2lkO1xyXG4gIG5hdmlnYXRlU2V0dGluZ3M6IChzZWN0aW9uPzogU2V0dGluZ3NTZWN0aW9uSWQpID0+IHZvaWQ7XHJcbn1cclxuXHJcbmV4cG9ydCBmdW5jdGlvbiBBZGRQcm9qZWN0TW9kYWwoe1xyXG4gIHRyLFxyXG4gIGludGVudCxcclxuICBuYW1lLFxyXG4gIHNldE5hbWUsXHJcbiAgcGF0aCxcclxuICBidXN5LFxyXG4gIGVycm9yLFxyXG4gIG5hbWVSZWYsXHJcbiAgZHJvcFJlZixcclxuICByZXR1cm5Gb2N1c1JlZixcclxuICBuYW1lRWRpdGVkUmVmLFxyXG4gIHNldEVycm9yLFxyXG4gIGRyYWdab25lLFxyXG4gIHByb2plY3REaXJlY3RvcnksXHJcbiAgY2xvc2UsXHJcbiAgc3VibWl0LFxyXG4gIHBpY2tEaXJlY3RvcnksXHJcbiAgcmVzZXQsXHJcbiAgbmF2aWdhdGVTZXR0aW5ncyxcclxufTogQWRkUHJvamVjdE1vZGFsUHJvcHMpIHtcclxuICBjb25zdCBvcGVuUHJvamVjdERpcmVjdG9yeVNldHRpbmdzID0gKCkgPT4ge1xyXG4gICAgcmVzZXQoKTtcclxuICAgIG5hdmlnYXRlU2V0dGluZ3MoXCJnZW5lcmFsXCIpO1xyXG4gIH07XHJcblxyXG4gIHJldHVybiAoXHJcbiAgICA8R2xhc3NNb2RhbFxyXG4gICAgICBvcGVuPXtpbnRlbnQgIT09IG51bGx9XHJcbiAgICAgIG9uQ2xvc2U9e2Nsb3NlfVxyXG4gICAgICB0aXRsZT17dHIoXCJhZGRQcm9qZWN0LnRpdGxlXCIpfVxyXG4gICAgICB0aXRsZUlkPVwiYWRkLXByb2plY3QtdGl0bGVcIlxyXG4gICAgICBzaXplPVwibWRcIlxyXG4gICAgICBjbGFzc05hbWU9XCJhZGQtcHJvamVjdC1tb2RhbFwiXHJcbiAgICAgIG92ZXJsYXlDbGFzc05hbWU9XCJhZGQtcHJvamVjdC1vdmVybGF5XCJcclxuICAgICAgY2xvc2VMYWJlbD17dHIoXCJjb21tb24uY2xvc2VcIil9XHJcbiAgICAgIGNsb3NlT25PdmVybGF5PXshYnVzeX1cclxuICAgICAgc2hvd0Nsb3NlPXshYnVzeX1cclxuICAgICAgd3JhcEJvZHlcclxuICAgICAgcmV0dXJuRm9jdXNSZWY9e3JldHVybkZvY3VzUmVmfVxyXG4gICAgICBmb290ZXI9e1xyXG4gICAgICAgIDw+XHJcbiAgICAgICAgICA8QnV0dG9uXHJcbiAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxyXG4gICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIlxyXG4gICAgICAgICAgICBkaXNhYmxlZD17YnVzeX1cclxuICAgICAgICAgICAgb25DbGljaz17Y2xvc2V9XHJcbiAgICAgICAgICA+XHJcbiAgICAgICAgICAgIHt0cihcImNvbW1vbi5jYW5jZWxcIil9XHJcbiAgICAgICAgICA8L0J1dHRvbj5cclxuICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgdHlwZT1cInN1Ym1pdFwiXHJcbiAgICAgICAgICAgIGZvcm09XCJhZGQtcHJvamVjdC1mb3JtXCJcclxuICAgICAgICAgICAgdmFyaWFudD1cInByaW1hcnlcIlxyXG4gICAgICAgICAgICBkaXNhYmxlZD17YnVzeX1cclxuICAgICAgICAgID5cclxuICAgICAgICAgICAge2J1c3kgPyA8U3Bpbm5lciBjdXJyZW50Q29sb3IgY2xhc3NOYW1lPVwidGV4dC1zbVwiIC8+IDogbnVsbH1cclxuICAgICAgICAgICAge2J1c3kgPyB0cihcImFkZFByb2plY3QuYWRkaW5nXCIpIDogdHIoXCJhZGRQcm9qZWN0LnN1Ym1pdFwiKX1cclxuICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgIDwvPlxyXG4gICAgICB9XHJcbiAgICA+XHJcbiAgICAgIDxmb3JtXHJcbiAgICAgICAgaWQ9XCJhZGQtcHJvamVjdC1mb3JtXCJcclxuICAgICAgICBjbGFzc05hbWU9XCJhZGQtcHJvamVjdC1mb3JtXCJcclxuICAgICAgICBvblN1Ym1pdD17KGV2ZW50KSA9PiB7XHJcbiAgICAgICAgICBldmVudC5wcmV2ZW50RGVmYXVsdCgpO1xyXG4gICAgICAgICAgdm9pZCBzdWJtaXQoKTtcclxuICAgICAgICB9fVxyXG4gICAgICA+XHJcbiAgICAgICAgPEZpZWxkIGNsYXNzTmFtZT1cImFkZC1wcm9qZWN0LWZpZWxkXCI+XHJcbiAgICAgICAgICA8RmllbGRMYWJlbCBodG1sRm9yPVwiYWRkLXByb2plY3QtbmFtZVwiPlxyXG4gICAgICAgICAgICB7dHIoXCJhZGRQcm9qZWN0Lm5hbWVcIil9XHJcbiAgICAgICAgICA8L0ZpZWxkTGFiZWw+XHJcbiAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cImFkZC1wcm9qZWN0LW5hbWUtY29udHJvbFwiPlxyXG4gICAgICAgICAgICA8SWNvbkZvbGRlciBzaXplPXsxN30gLz5cclxuICAgICAgICAgICAgPElucHV0XHJcbiAgICAgICAgICAgICAgcmVmPXtuYW1lUmVmfVxyXG4gICAgICAgICAgICAgIGlkPVwiYWRkLXByb2plY3QtbmFtZVwiXHJcbiAgICAgICAgICAgICAgY2xhc3NOYW1lPVwic2V0dGluZ3MtaW5wdXRcIlxyXG4gICAgICAgICAgICAgIHZhbHVlPXtuYW1lfVxyXG4gICAgICAgICAgICAgIHBsYWNlaG9sZGVyPXt0cihcImFkZFByb2plY3QubmFtZVBsYWNlaG9sZGVyXCIpfVxyXG4gICAgICAgICAgICAgIG1heExlbmd0aD17MTIwfVxyXG4gICAgICAgICAgICAgIGF1dG9Db21wbGV0ZT1cIm9mZlwiXHJcbiAgICAgICAgICAgICAgZGF0YS1tb2RhbC1hdXRvZm9jdXNcclxuICAgICAgICAgICAgICByZWFkT25seT17YnVzeX1cclxuICAgICAgICAgICAgICBhcmlhLWludmFsaWQ9e1xyXG4gICAgICAgICAgICAgICAgZXJyb3IgPT09IHRyKFwiYWRkUHJvamVjdC5uYW1lUmVxdWlyZWRcIikgfHwgdW5kZWZpbmVkXHJcbiAgICAgICAgICAgICAgfVxyXG4gICAgICAgICAgICAgIGFyaWEtZGVzY3JpYmVkYnk9e2Vycm9yID8gXCJhZGQtcHJvamVjdC1lcnJvclwiIDogdW5kZWZpbmVkfVxyXG4gICAgICAgICAgICAgIG9uQ2hhbmdlPXsoZXZlbnQpID0+IHtcclxuICAgICAgICAgICAgICAgIGNvbnN0IGVmZmVjdGl2ZU5hbWVFZGl0ZWRSZWYgPSBuYW1lRWRpdGVkUmVmO1xyXG4gICAgICAgICAgICAgICAgZWZmZWN0aXZlTmFtZUVkaXRlZFJlZi5jdXJyZW50ID0gdHJ1ZTtcclxuICAgICAgICAgICAgICAgIHNldE5hbWUoZXZlbnQudGFyZ2V0LnZhbHVlKTtcclxuICAgICAgICAgICAgICAgIHNldEVycm9yKG51bGwpO1xyXG4gICAgICAgICAgICAgIH19XHJcbiAgICAgICAgICAgIC8+XHJcbiAgICAgICAgICA8L2Rpdj5cclxuICAgICAgICA8L0ZpZWxkPlxyXG5cclxuICAgICAgICA8RmllbGQgY2xhc3NOYW1lPVwiYWRkLXByb2plY3QtZmllbGRcIj5cclxuICAgICAgICAgIDxGaWVsZExhYmVsIGh0bWxGb3I9XCJhZGQtcHJvamVjdC1zb3VyY2VcIj5cclxuICAgICAgICAgICAge3RyKFwiYWRkUHJvamVjdC5zb3VyY2VGb2xkZXJcIil9XHJcbiAgICAgICAgICA8L0ZpZWxkTGFiZWw+XHJcbiAgICAgICAgICA8QnV0dG9uXHJcbiAgICAgICAgICAgIHJlZj17ZHJvcFJlZn1cclxuICAgICAgICAgICAgaWQ9XCJhZGQtcHJvamVjdC1zb3VyY2VcIlxyXG4gICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcclxuICAgICAgICAgICAgdmFyaWFudD1cIm91dGxpbmVcIlxyXG4gICAgICAgICAgICBzaXplPVwibWRcIlxyXG4gICAgICAgICAgICBjbGFzc05hbWU9e1xyXG4gICAgICAgICAgICAgIFwiYWRkLXByb2plY3QtZHJvcFwiICtcclxuICAgICAgICAgICAgICAoZHJhZ1pvbmUgPT09IFwicHJvamVjdFwiID8gXCIgaXMtYWN0aXZlXCIgOiBcIlwiKVxyXG4gICAgICAgICAgICB9XHJcbiAgICAgICAgICAgIGRpc2FibGVkPXtidXN5fVxyXG4gICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiB2b2lkIHBpY2tEaXJlY3RvcnkoKX1cclxuICAgICAgICAgICAgYXJpYS1sYWJlbD17XHJcbiAgICAgICAgICAgICAgcGF0aCA/IHBhdGhCYXNlbmFtZShwYXRoKSA6IHRyKFwiYWRkUHJvamVjdC5jaG9vc2VGb2xkZXJcIilcclxuICAgICAgICAgICAgfVxyXG4gICAgICAgICAgPlxyXG4gICAgICAgICAgICA8SWNvbkZvbGRlclBsdXMgc2l6ZT17MjR9IC8+XHJcbiAgICAgICAgICAgIDxzdHJvbmcgY2xhc3NOYW1lPVwiYWRkLXByb2plY3QtZHJvcF9fdGl0bGVcIj5cclxuICAgICAgICAgICAgICB7cGF0aCA/IHBhdGhCYXNlbmFtZShwYXRoKSA6IHRyKFwiYWRkUHJvamVjdC5jaG9vc2VGb2xkZXJcIil9XHJcbiAgICAgICAgICAgIDwvc3Ryb25nPlxyXG4gICAgICAgICAgICB7cGF0aCA/IChcclxuICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJhZGQtcHJvamVjdC1kcm9wX19wYXRoXCIgdGl0bGU9e3BhdGh9PlxyXG4gICAgICAgICAgICAgICAge3BhdGh9XHJcbiAgICAgICAgICAgICAgPC9zcGFuPlxyXG4gICAgICAgICAgICApIDogbnVsbH1cclxuICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgICAgeyFwYXRoICYmIHByb2plY3REaXJlY3RvcnkgPyAoXHJcbiAgICAgICAgICAgIDxGaWVsZERlc2NyaXB0aW9uIGNsYXNzTmFtZT1cImFkZC1wcm9qZWN0LWRlZmF1bHQtcGF0aFwiPlxyXG4gICAgICAgICAgICAgIDxzcGFuPlxyXG4gICAgICAgICAgICAgICAge3RyKFwiYWRkUHJvamVjdC5kZWZhdWx0TG9jYXRpb25cIiwge1xyXG4gICAgICAgICAgICAgICAgICBwYXRoOiBwcm9qZWN0UGF0aFByZXZpZXcoXHJcbiAgICAgICAgICAgICAgICAgICAgcHJvamVjdERpcmVjdG9yeSxcclxuICAgICAgICAgICAgICAgICAgICBuYW1lLnRyaW0oKSB8fCB0cihcImFkZFByb2plY3QubmFtZVBsYWNlaG9sZGVyXCIpLFxyXG4gICAgICAgICAgICAgICAgICApLFxyXG4gICAgICAgICAgICAgICAgfSl9XHJcbiAgICAgICAgICAgICAgPC9zcGFuPlxyXG4gICAgICAgICAgICAgIDxCdXR0b25cclxuICAgICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxyXG4gICAgICAgICAgICAgICAgdmFyaWFudD1cImdob3N0XCIgc2l6ZT1cIm1kXCIgY2xhc3NOYW1lPVwiYWRkLXByb2plY3QtZGVmYXVsdC1wYXRoX19zZXR0aW5nc1wiXHJcbiAgICAgICAgICAgICAgICBvbkNsaWNrPXtvcGVuUHJvamVjdERpcmVjdG9yeVNldHRpbmdzfVxyXG4gICAgICAgICAgICAgID5cclxuICAgICAgICAgICAgICAgIHt0cihcImFkZFByb2plY3QuY2hhbmdlRGVmYXVsdExvY2F0aW9uXCIpfVxyXG4gICAgICAgICAgICAgIDwvQnV0dG9uPlxyXG4gICAgICAgICAgICA8L0ZpZWxkRGVzY3JpcHRpb24+XHJcbiAgICAgICAgICApIDogbnVsbH1cclxuICAgICAgICA8L0ZpZWxkPlxyXG5cclxuICAgICAgICB7ZXJyb3IgPyAoXHJcbiAgICAgICAgICA8QWxlcnQgaWQ9XCJhZGQtcHJvamVjdC1lcnJvclwiIHZhcmlhbnQ9XCJlcnJvclwiPlxyXG4gICAgICAgICAgICA8QWxlcnREZXNjcmlwdGlvbj57ZXJyb3J9PC9BbGVydERlc2NyaXB0aW9uPlxyXG4gICAgICAgICAgPC9BbGVydD5cclxuICAgICAgICApIDogbnVsbH1cclxuICAgICAgPC9mb3JtPlxyXG4gICAgPC9HbGFzc01vZGFsPlxyXG4gICk7XHJcbn1cclxuIl0sImZpbGUiOiJEOi9wcm9qZWN0cy9rZWVuLWNvZGUvc3JjL2ZlYXR1cmVzL2FwcC9vdmVybGF5cy9BZGRQcm9qZWN0TW9kYWwudHN4In0=

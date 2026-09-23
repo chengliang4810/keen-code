@@ -1,0 +1,8 @@
+{"steps":[
+  {"do":"type","css":"[role=dialog] input","text":"e2e-test-project"},
+  {"do":"wait","ms":300},
+  {"do":"eval","js":"document.querySelector('[role=dialog] input')?.value"},
+  {"do":"clicktext","role":"button","text":"创建项目"},
+  {"do":"wait","ms":1000},
+  {"do":"eval","js":"document.body.innerText.slice(0,250)"}
+]}

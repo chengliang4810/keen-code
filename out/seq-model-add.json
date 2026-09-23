@@ -1,0 +1,5 @@
+{"steps":[
+  {"do":"clicktext","role":"button","text":"添加模型"},
+  {"do":"wait","ms":600},
+  {"do":"ax"}
+]}

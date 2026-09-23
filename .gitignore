@@ -27,8 +27,8 @@ dist-installers
 Thumbs.db
 
 # Tauri / Rust
-apps/desktop/src-tauri/target
-apps/desktop/src-tauri/gen/schemas
+apps/desktop/target
+apps/desktop/gen/schemas
 
 # Local runtime data & secrets
 *.db

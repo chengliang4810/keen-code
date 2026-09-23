@@ -1,0 +1,43 @@
+{
+  "areaId": "hdr",
+  "areaName": "主区顶栏",
+  "verdict": "pass",
+  "passCount": 5,
+  "failCount": 0,
+  "blockedCount": 0,
+  "total": 5,
+  "failures": [],
+  "blockedNotes": "",
+  "controls": [
+    {
+      "id": "hdr-c1",
+      "label": "显示侧栏（侧栏收起时左上）",
+      "verdict": "pass",
+      "evidence": "先点侧栏“隐藏侧栏”造出前置（eval 返回 sidebarCollapsed:true、.sidebar 宽 0，顶栏左上出现 aria-label=显示侧栏/新建对话两按钮，符合 howToOpen）；点击“显示侧栏”后 eval 返回 {sidebarCollapsed:false, sidebarW:278, topLeftBtnsLeft:0}，侧栏重新展开且左上两图标按钮消失，符合 MainHeader.tsx:77-94。截图 out/shots/hdr-4-c1-sidebar-reshown.png"
+    },
+    {
+      "id": "hdr-c2",
+      "label": "新建对话（侧栏收起时左上）",
+      "verdict": "pass",
+      "evidence": "侧栏收起态点击顶栏 aria-label=新建对话 后 eval 返回 {title:null, draftComposer:true, sidebarCollapsed:true}：主区变草稿态（h1 标题为空、“选择项目”草稿输入区出现），且 .main__top 按钮只剩左上两个（右侧操作按钮组因 session.sessionId 为空而隐藏，符合 MainHeader.tsx:132 条件渲染与 95-105 的 newChat(null)）。展开侧栏核实会话列表完整（e2e-test-project + 3 个会话含“你好”），新建草稿无副作用"
+    },
+    {
+      "id": "hdr-c3",
+      "label": "会话标题旁“⋯”按钮",
+      "verdict": "pass",
+      "evidence": "打开“你好”会话后顶栏 h1=你好、.main__title-menu 按钮存在；click .main__title-menu 后 eval 读取 [role=menu] 返回 [\"重命名\",\"分叉会话\",\"查看轨迹\",\"复制会话 ID\"]，四项与预期一致（MainHeader.tsx:115-127 openSessionMenu）；Escape 关闭后 eval 返回 menu closed。截图 out/shots/hdr-1-c3-session-menu.png"
+    },
+    {
+      "id": "hdr-c4",
+      "label": "任务摘要按钮（右上，有活动会话时）",
+      "verdict": "pass",
+      "evidence": "点击前 aria-pressed=\"false\"，点击后 eval 返回 {pressed:\"true\", cls:true}（variant soft + is-on，MainHeader.tsx:141-155）；浮层 .summary-panel 出现且标题为“摘要”（ConversationStage.tsx:130-139 渲染）；再次点击后 eval 返回 {pressed:\"false\", panelGone:true}，展开/收起均可逆。截图 out/shots/hdr-2-c4-summary-open.png"
+    },
+    {
+      "id": "hdr-c5",
+      "label": "显示/隐藏右栏按钮（右上，有活动会话时）",
+      "verdict": "pass",
+      "evidence": "点击后 eval 返回 {btnIsOn:false, asideWidths:[278,320,0]}：右栏 aside 从 496px 收起为 320px 窄条、按钮 is-on 消失，同时摘要浮层自动展开（summaryPressed:\"true\"、.summary-panel 出现，App.tsx:445-450 联动）；再点后 eval 返回 {asideBtnIsOn:true, asides:[{sidebar,278},{aside,496}], summaryPressed:\"false\", summaryPanelOpen:false}：右栏恢复 496px、摘要自动收起，完全可逆。截图 out/shots/hdr-3-c5-aside-collapsed-summary-auto.png。备注：计划 expected 写“并持久化”，实测 localStorage keencode.layout 仅存 sidebarWidth/asideWidth/sidebarCollapsed，asideCollapsed 有意不落盘（layout.ts:96-97 注释 Cold start always closed; open state is session-only），属计划描述与实现设计注释的差异，控件展开/收起行为本身正常"
+    }
+  ]
+}

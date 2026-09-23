@@ -80,7 +80,7 @@ export function configuredResourceMappings(config, configPath) {
 }
 
 // 校验配置显式携带项目自身的根 MIT 许可证。
-export function validateBundleConfiguration(config, configPath = join(REPOSITORY_ROOT, "apps/desktop/src-tauri/tauri.conf.json")) {
+export function validateBundleConfiguration(config, configPath = join(REPOSITORY_ROOT, "apps/desktop/tauri.conf.json")) {
   if (config.bundle?.license !== "MIT") throw new Error("Tauri bundle.license 必须为 MIT");
   const licenseFile = config.bundle?.licenseFile;
   if (resolve(dirname(resolve(configPath)), String(licenseFile)) !== join(REPOSITORY_ROOT, "LICENSE")) {
@@ -568,7 +568,7 @@ export function verifyBundleArtifact(artifact, repositoryRoot = REPOSITORY_ROOT,
 }
 
 // 校验配置和最终发行成品；仅有 target/release 暂存资源而没有真实 bundle 时必须失败。
-export function verifyBundle(targetRoot = join(REPOSITORY_ROOT, "target"), configPath = join(REPOSITORY_ROOT, "apps/desktop/src-tauri/tauri.conf.json")) {
+export function verifyBundle(targetRoot = join(REPOSITORY_ROOT, "target"), configPath = join(REPOSITORY_ROOT, "apps/desktop/tauri.conf.json")) {
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   validateBundleConfiguration(config, configPath);
   const artifacts = findBundleArtifacts(targetRoot);
@@ -608,7 +608,7 @@ function main() {
   const targetIndex = args.indexOf("--target");
   const configIndex = args.indexOf("--config");
   const targetRoot = targetIndex >= 0 ? resolve(args[targetIndex + 1]) : join(REPOSITORY_ROOT, "target");
-  const configPath = configIndex >= 0 ? resolve(args[configIndex + 1]) : join(REPOSITORY_ROOT, "apps/desktop/src-tauri/tauri.conf.json");
+  const configPath = configIndex >= 0 ? resolve(args[configIndex + 1]) : join(REPOSITORY_ROOT, "apps/desktop/tauri.conf.json");
   const directories = verifyBundle(targetRoot, configPath);
   console.log(`Tauri 许可证资源校验通过：${directories.map((path) => relative(REPOSITORY_ROOT, path)).join(", ")}`);
 }

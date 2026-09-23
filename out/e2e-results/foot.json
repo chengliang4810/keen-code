@@ -1,0 +1,11 @@
+{
+  "areaId": "foot",
+  "areaName": "用户菜单（侧栏底部）",
+  "verdict": "pass",
+  "passCount": 2,
+  "failCount": 0,
+  "blockedCount": 0,
+  "total": 2,
+  "failures": [],
+  "blockedNotes": ""
+}

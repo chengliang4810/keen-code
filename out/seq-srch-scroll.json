@@ -1,0 +1,7 @@
+{
+  "steps": [
+    { "do": "clicktext", "role": "button", "text": "搜索" },
+    { "do": "wait", "ms": 700 },
+    { "do": "eval", "js": "(() => { const panel=document.querySelector('.search-panel'); if(!panel) return 'no-panel'; const sb=(el)=>el?getComputedStyle(el).scrollBehavior+'|ox:'+getComputedStyle(el).overflowX+'|oy:'+getComputedStyle(el).overflowY:'n/a'; const overlays=[...document.querySelectorAll('[class*=search-overlay], [class*=search-panel]')].map(e=>({cls:e.className.toString().slice(0,40), oy:getComputedStyle(e).overflowY, ox:getComputedStyle(e).overflowX, sb:getComputedStyle(e).scrollBehavior, canScroll:e.scrollHeight>e.clientHeight, sh:e.scrollHeight, ch:e.clientHeight})); return JSON.stringify(overlays); })()", "desc": "弹窗打开时读滚动容器属性" }
+  ]
+}

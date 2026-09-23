@@ -1,0 +1,11 @@
+{
+  "areaId": "composer-input",
+  "areaName": "消息输入框",
+  "verdict": "pass",
+  "passCount": 1,
+  "failCount": 0,
+  "blockedCount": 0,
+  "total": 1,
+  "failures": [],
+  "blockedNotes": ""
+}

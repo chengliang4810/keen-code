@@ -1,0 +1,187 @@
+{
+  "areas": [
+    {
+      "id": "ext-market",
+      "name": "插件市场页",
+      "howToOpen": "应用启动后，点击左侧栏底部「设置」按钮进入设置页，再点击设置页左侧导航「扩展」分组中的「插件市场」。",
+      "controls": [
+        { "id": "mk-c1", "kind": "button", "label": "适配设置（标题行按钮）", "expected": "弹出模型适配对话框，可把 sonnet/opus/haiku 别名映射到已配置模型。", "risk": "safe" },
+        { "id": "mk-c2", "kind": "button", "label": "刷新目录（标题行）", "expected": "重新拉取市场清单并轮询刷新插件列表，期间按钮显示「更新中」。", "risk": "safe" },
+        { "id": "mk-c3", "kind": "button", "label": "市场源（标题行齿轮图标按钮）", "expected": "打开市场源管理对话框，列出已登记源及其路径。", "risk": "safe" },
+        { "id": "mk-c4", "kind": "button", "label": "添加源（标题行 + 图标按钮）", "expected": "打开添加市场源对话框，含路径输入框与添加/取消按钮。", "risk": "safe" },
+        { "id": "mk-c5", "kind": "button", "label": "全部来源（筛选条）", "expected": "清除来源筛选，列表显示所有来源的插件。", "risk": "safe" },
+        { "id": "mk-c6", "kind": "button", "label": "市场源名称筛选按钮（每个已登记源一个）", "expected": "仅显示该来源下的插件，按钮进入选中态。", "risk": "safe" },
+        { "id": "mk-c7", "kind": "input", "label": "搜索插件…（搜索框）", "expected": "输入关键词即时按名称、描述、来源过滤插件列表。", "risk": "safe" },
+        { "id": "mk-c8", "kind": "button", "label": "安装（未安装插件卡片）", "expected": "弹出安装确认对话框，显示插件名与 LSP 重启提示。", "risk": "safe" },
+        { "id": "mk-c9", "kind": "button", "label": "管理（已安装插件卡片）", "expected": "已安装插件显示「管理」；设置页场景下无页签回调，该按钮为禁用态（待实测确认）。", "risk": "safe" },
+        { "id": "mk-c10", "kind": "button", "label": "上一页（超过 20 条时出现）", "expected": "列表翻到上一页，第一页时按钮禁用。", "risk": "safe" },
+        { "id": "mk-c11", "kind": "button", "label": "下一页（超过 20 条时出现）", "expected": "列表翻到下一页，末页时按钮禁用。", "risk": "safe" },
+        { "id": "mk-c12", "kind": "input", "label": "添加源对话框：市场源路径输入框", "expected": "输入源路径后「添加」按钮才可用，按回车可直接提交。", "risk": "safe" },
+        { "id": "mk-c13", "kind": "button", "label": "添加（添加源对话框底部）", "expected": "登记该市场源并关闭对话框，随后目录自动刷新。", "risk": "safe" },
+        { "id": "mk-c14", "kind": "button", "label": "取消（添加源对话框底部）", "expected": "关闭对话框，不登记新源。", "risk": "safe" },
+        { "id": "mk-c15", "kind": "button", "label": "刷新源（市场源对话框顶部）", "expected": "重新校验全部本地市场清单，期间显示「更新中」。", "risk": "safe" },
+        { "id": "mk-c16", "kind": "button", "label": "刷新（市场源对话框每个源行内）", "expected": "只重新校验该市场源清单。", "risk": "safe" },
+        { "id": "mk-c17", "kind": "button", "label": "移除（市场源对话框每个源行内，红色）", "expected": "弹出移除市场源确认对话框。", "risk": "destructive" },
+        { "id": "mk-c18", "kind": "button", "label": "移除（移除确认对话框底部）", "expected": "删除该市场源登记（不删除原目录）并刷新列表。", "risk": "destructive" },
+        { "id": "mk-c19", "kind": "button", "label": "取消（移除确认对话框底部）", "expected": "关闭确认框，源保持不变。", "risk": "safe" },
+        { "id": "mk-c20", "kind": "button", "label": "安装（安装确认对话框底部）", "expected": "安装该插件，卡片徽标变为「已安装」。", "risk": "safe" },
+        { "id": "mk-c21", "kind": "button", "label": "取消（安装确认对话框底部）", "expected": "关闭对话框，不安装。", "risk": "safe" },
+        { "id": "mk-c22", "kind": "menu", "label": "适配设置对话框：sonnet 别名模型下拉", "expected": "展开供应商→模型菜单，选择后回填别名映射。", "risk": "safe" },
+        { "id": "mk-c23", "kind": "menu", "label": "适配设置对话框：opus、haiku 别名模型下拉（同款两枚）", "expected": "同 sonnet：展开供应商→模型菜单并回填所选映射。", "risk": "safe" },
+        { "id": "mk-c24", "kind": "button", "label": "保存（适配设置对话框底部）", "expected": "写入模型别名映射并关闭对话框。", "risk": "safe" },
+        { "id": "mk-c25", "kind": "button", "label": "取消（适配设置对话框底部）", "expected": "关闭对话框，不保存别名修改。", "risk": "safe" },
+        { "id": "mk-c26", "kind": "button", "label": "关闭 ×（本页各对话框右上角内置关闭按钮）", "expected": "关闭当前对话框。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "ext-plugins",
+      "name": "插件管理页",
+      "howToOpen": "应用启动后，点击左侧栏底部「设置」按钮进入设置页，再点击设置页左侧导航「扩展」分组中的「插件」。",
+      "controls": [
+        { "id": "pg-c1", "kind": "button", "label": "全部更新（标题行，有插件时显示）", "expected": "批量更新全部已安装插件，按钮短暂显示「更新中」。", "risk": "safe" },
+        { "id": "pg-c2", "kind": "tab", "label": "全部（筛选页签）", "expected": "列表显示全部插件。", "risk": "safe" },
+        { "id": "pg-c3", "kind": "tab", "label": "已启用（筛选页签）", "expected": "列表只显示启用状态的插件。", "risk": "safe" },
+        { "id": "pg-c4", "kind": "tab", "label": "已禁用（筛选页签）", "expected": "列表只显示禁用状态的插件。", "risk": "safe" },
+        { "id": "pg-c5", "kind": "button", "label": "浏览插件市场（空状态按钮）", "expected": "跳转到设置页「插件市场」分区（仅无已安装插件时出现，待实测确认）。", "risk": "safe" },
+        { "id": "pg-c6", "kind": "button", "label": "插件路径按钮（每行的文件夹图标+短路径）", "expected": "在系统文件管理器中打开该插件目录。", "risk": "safe" },
+        { "id": "pg-c7", "kind": "button", "label": "启用/禁用（每行第一个操作按钮）", "expected": "切换该插件启用状态，状态徽标随之变化。", "risk": "safe" },
+        { "id": "pg-c8", "kind": "button", "label": "更新（每行）", "expected": "更新该插件到最新版本。", "risk": "safe" },
+        { "id": "pg-c9", "kind": "button", "label": "详情（每行）", "expected": "打开详情对话框并加载插件详情文本。", "risk": "safe" },
+        { "id": "pg-c10", "kind": "button", "label": "配置（每行）", "expected": "打开 userConfig 配置编辑对话框并加载字段定义。", "risk": "safe" },
+        { "id": "pg-c11", "kind": "button", "label": "卸载（每行，红色）", "expected": "弹出卸载确认对话框。", "risk": "destructive" },
+        { "id": "pg-c12", "kind": "button", "label": "卸载（卸载确认对话框底部）", "expected": "卸载该插件并刷新列表。", "risk": "destructive" },
+        { "id": "pg-c13", "kind": "button", "label": "取消（卸载确认对话框底部）", "expected": "关闭确认框，插件保留。", "risk": "safe" },
+        { "id": "pg-c14", "kind": "button", "label": "关闭（详情对话框底部）", "expected": "关闭详情对话框。", "risk": "safe" },
+        { "id": "pg-c15", "kind": "input", "label": "配置对话框：文本/数字/密码字段输入框", "expected": "输入值后可保存到插件 userConfig（敏感字段留空则不覆盖已有值）。", "risk": "safe" },
+        { "id": "pg-c16", "kind": "checkbox", "label": "配置对话框：布尔字段复选框", "expected": "勾选/取消把该字段切换为 true/false 并显示已启用/已禁用。", "risk": "safe" },
+        { "id": "pg-c17", "kind": "select", "label": "配置对话框：枚举字段下拉", "expected": "展开候选值列表，选择后回填该字段。", "risk": "safe" },
+        { "id": "pg-c18", "kind": "button", "label": "选择…（目录/文件字段旁）", "expected": "打开系统路径选择器并把所选路径回填到字段。", "risk": "safe" },
+        { "id": "pg-c19", "kind": "button", "label": "添加值（多值字段底部）", "expected": "在多值字段追加一行空值输入。", "risk": "safe" },
+        { "id": "pg-c20", "kind": "button", "label": "−（移除值，多值字段每行）", "expected": "删除该行的值。", "risk": "safe" },
+        { "id": "pg-c21", "kind": "button", "label": "保存（配置对话框底部）", "expected": "保存插件配置并热刷新，随后刷新插件列表。", "risk": "safe" },
+        { "id": "pg-c22", "kind": "button", "label": "取消（配置对话框底部）", "expected": "关闭配置对话框，不保存修改。", "risk": "safe" },
+        { "id": "pg-c23", "kind": "button", "label": "关闭（操作失败错误提示条上）", "expected": "清除错误提示条（仅操作失败时出现，待实测确认）。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "ext-skills",
+      "name": "技能页",
+      "howToOpen": "应用启动后，点击左侧栏底部「设置」按钮进入设置页，再点击设置页左侧导航「扩展」分组中的「技能」。",
+      "controls": [
+        { "id": "sk-c1", "kind": "button", "label": "在文件管理器中显示（每行技能的路径按钮）", "expected": "在系统文件管理器中打开该技能目录（需已存在技能条目，待实测确认）。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "ext-mcp",
+      "name": "MCP 服务器页",
+      "howToOpen": "应用启动后，点击左侧栏底部「设置」按钮进入设置页，再点击设置页左侧导航「扩展」分组中的「MCP 服务器」。",
+      "controls": [
+        { "id": "mc-c1", "kind": "button", "label": "诊断（标题行）", "expected": "打开 MCP 诊断对话框并运行全部服务器的健康检查。", "risk": "safe" },
+        { "id": "mc-c2", "kind": "button", "label": "添加服务器（标题行）", "expected": "打开添加 MCP 服务器对话框。", "risk": "safe" },
+        { "id": "mc-c3", "kind": "button", "label": "全部启用（标题行，有停用用户级服务器时）", "expected": "批量启用全部用户级 MCP 服务器（待实测确认）。", "risk": "safe" },
+        { "id": "mc-c4", "kind": "switch", "label": "服务器启用开关（用户级服务器行内）", "expected": "切换该服务器启用状态，失败时自动回滚开关。", "risk": "safe" },
+        { "id": "mc-c5", "kind": "button", "label": "授权（需要 OAuth 的服务器行内）", "expected": "发起 OAuth 流程并在系统浏览器打开授权页面。", "risk": "safe" },
+        { "id": "mc-c6", "kind": "button", "label": "诊断（每行）", "expected": "只诊断该服务器并弹出诊断对话框。", "risk": "safe" },
+        { "id": "mc-c7", "kind": "button", "label": "移除（用户级服务器行内，红色）", "expected": "弹出移除 MCP 服务器确认对话框。", "risk": "destructive" },
+        { "id": "mc-c8", "kind": "button", "label": "在文件管理器中显示（target 为本地路径的行）", "expected": "在系统文件管理器中打开该配置路径。", "risk": "safe" },
+        { "id": "mc-c9", "kind": "input", "label": "手动完成 OAuth 回调输入框（授权流程中）", "expected": "可粘贴回调 URL、查询参数或授权码（仅授权流程中出现，待实测确认）。", "risk": "safe" },
+        { "id": "mc-c10", "kind": "button", "label": "提交回调（回调输入框旁）", "expected": "校验并提交授权码完成 OAuth，状态徽标变为已授权。", "risk": "safe" },
+        { "id": "mc-c11", "kind": "button", "label": "取消授权（回调输入框旁）", "expected": "取消进行中的 OAuth 授权流程。", "risk": "safe" },
+        { "id": "mc-c12", "kind": "button", "label": "重新打开授权页面（回调区提示行）", "expected": "再次在系统浏览器打开授权页面。", "risk": "safe" },
+        { "id": "mc-c13", "kind": "tab", "label": "手动填写（添加对话框页签）", "expected": "切换到表单模式（名称/命令/参数/环境变量）。", "risk": "safe" },
+        { "id": "mc-c14", "kind": "tab", "label": "粘贴 JSON（添加对话框页签）", "expected": "切换到 JSON 导入模式，显示 JSON 配置文本域。", "risk": "safe" },
+        { "id": "mc-c15", "kind": "input", "label": "名称（添加对话框）", "expected": "填写服务器稳定名称，与命令同为必填。", "risk": "safe" },
+        { "id": "mc-c16", "kind": "input", "label": "命令（添加对话框）", "expected": "填写启动命令，如 npx。", "risk": "safe" },
+        { "id": "mc-c17", "kind": "input", "label": "参数（添加对话框）", "expected": "按空格拆分为启动参数列表。", "risk": "safe" },
+        { "id": "mc-c18", "kind": "textarea", "label": "环境变量（可选）（添加对话框）", "expected": "每行 KEY=value 解析为环境变量。", "risk": "safe" },
+        { "id": "mc-c19", "kind": "textarea", "label": "JSON 配置（添加对话框 JSON 页签）", "expected": "粘贴 mcpServers JSON 并校验后批量导入。", "risk": "safe" },
+        { "id": "mc-c20", "kind": "button", "label": "添加（添加对话框底部）", "expected": "注册该服务器并关闭对话框，列表刷新。", "risk": "safe" },
+        { "id": "mc-c21", "kind": "button", "label": "取消（添加对话框底部）", "expected": "关闭对话框，不添加。", "risk": "safe" },
+        { "id": "mc-c22", "kind": "button", "label": "移除（移除确认对话框底部）", "expected": "删除该用户级服务器配置并刷新列表。", "risk": "destructive" },
+        { "id": "mc-c23", "kind": "button", "label": "取消（移除确认对话框底部）", "expected": "关闭确认框，服务器配置保留。", "risk": "safe" },
+        { "id": "mc-c24", "kind": "button", "label": "重新运行（诊断对话框底部）", "expected": "再次运行诊断并刷新报告。", "risk": "safe" },
+        { "id": "mc-c25", "kind": "button", "label": "关闭（诊断对话框底部）", "expected": "关闭诊断对话框。", "risk": "safe" },
+        { "id": "mc-c26", "kind": "button", "label": "关闭 ×（本页各对话框右上角内置关闭按钮）", "expected": "关闭当前对话框（诊断运行中除外）。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "agents-settings",
+      "name": "子智能体设置页",
+      "howToOpen": "应用启动后，点击左侧栏底部「设置」按钮进入设置页，再点击设置页左侧导航「Agent能力」分组中的「子智能体」。",
+      "controls": [
+        { "id": "ag-c1", "kind": "button", "label": "增加子智能体（标题行）", "expected": "打开创建子智能体对话框并加载可勾选工具目录。", "risk": "safe" },
+        { "id": "ag-c2", "kind": "button", "label": "子智能体名称（每行标题按钮）", "expected": "打开该子智能体的定义详情对话框。", "risk": "safe" },
+        { "id": "ag-c3", "kind": "button", "label": "定义路径按钮（有定义文件的行）", "expected": "在系统文件管理器中打开该定义文件。", "risk": "safe" },
+        { "id": "ag-c4", "kind": "menu", "label": "模型覆盖下拉（全局/内置行，显示跟随当前会话或模型名）", "expected": "展开供应商→模型菜单（含「跟随当前会话」项），选择后立即保存覆盖。", "risk": "safe" },
+        { "id": "ag-c5", "kind": "button", "label": "删除（垃圾桶图标，仅全局定义行）", "expected": "弹出删除子智能体确认对话框。", "risk": "destructive" },
+        { "id": "ag-c6", "kind": "input", "label": "标识（创建对话框）", "expected": "填写子智能体名称（必填，如 code-reviewer）。", "risk": "safe" },
+        { "id": "ag-c7", "kind": "menu", "label": "指定模型下拉（创建对话框）", "expected": "选择覆盖模型或「跟随当前会话」。", "risk": "safe" },
+        { "id": "ag-c8", "kind": "input", "label": "最大轮数（创建对话框数字字段）", "expected": "输入正整数限制该子智能体轮数，空则不限。", "risk": "safe" },
+        { "id": "ag-c9", "kind": "input", "label": "委托说明（创建对话框）", "expected": "填写描述（必填），用于主智能体决定何时委托。", "risk": "safe" },
+        { "id": "ag-c10", "kind": "select", "label": "可用工具下拉（全部工具/指定工具）", "expected": "切换工具模式并更新提示文案，指定工具时出现勾选列表。", "risk": "safe" },
+        { "id": "ag-c11", "kind": "checkbox", "label": "工具勾选列表（指定工具模式逐项）", "expected": "勾选/取消该子智能体可调用的工具。", "risk": "safe" },
+        { "id": "ag-c12", "kind": "textarea", "label": "系统提示（创建对话框）", "expected": "填写系统提示词（必填）。", "risk": "safe" },
+        { "id": "ag-c13", "kind": "switch", "label": "注入 AGENTS.md（创建对话框底部开关）", "expected": "切换是否把项目 AGENTS.md 注入子智能体上下文。", "risk": "safe" },
+        { "id": "ag-c14", "kind": "button", "label": "创建（创建对话框底部）", "expected": "校验必填后写入全局定义并刷新列表。", "risk": "safe" },
+        { "id": "ag-c15", "kind": "button", "label": "取消（创建对话框底部）", "expected": "清空表单并关闭对话框。", "risk": "safe" },
+        { "id": "ag-c16", "kind": "button", "label": "关闭 ×（定义详情对话框右上角）", "expected": "关闭详情对话框。", "risk": "safe" },
+        { "id": "ag-c17", "kind": "button", "label": "删除（删除确认对话框内）", "expected": "删除该全局子智能体定义并刷新列表。", "risk": "destructive" },
+        { "id": "ag-c18", "kind": "button", "label": "取消（删除确认对话框内）", "expected": "关闭确认框，定义保留。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "resource-tabs",
+      "name": "右侧资源面板标签区",
+      "howToOpen": "应用启动后右侧面板默认收起：点击主界面顶栏的「显示侧栏」按钮展开右侧资源面板；面板内无标签时显示「打开标签页」网格，已有标签时显示顶部模式标签条。",
+      "controls": [
+        { "id": "rp-c1", "kind": "button", "label": "显示侧栏/隐藏侧栏（顶栏右侧面板开关）", "expected": "切换右侧资源面板的显示与收起。", "risk": "safe" },
+        { "id": "rp-c2", "kind": "button", "label": "文件（打开标签页网格）", "expected": "打开「文件」标签页，显示文件树/预览区。", "risk": "safe" },
+        { "id": "rp-c3", "kind": "button", "label": "变更（打开标签页网格）", "expected": "打开「变更」标签页，显示工作区改动。", "risk": "safe" },
+        { "id": "rp-c4", "kind": "button", "label": "终端（打开标签页网格）", "expected": "创建一个 PTY 终端并切换到终端视图（无项目时禁用）。", "risk": "safe" },
+        { "id": "rp-c5", "kind": "button", "label": "轨迹（打开标签页网格）", "expected": "打开「轨迹」标签页，显示会话轨迹账本。", "risk": "safe" },
+        { "id": "rp-c6", "kind": "button", "label": "新建网页（打开标签页网格）", "expected": "新建一个空白网页标签并显示内置浏览器地址栏。", "risk": "safe" },
+        { "id": "rp-c7", "kind": "tab", "label": "模式标签条单例标签（文件/变更/网页/轨迹/子智能体）", "expected": "点击切换到对应单例视图。", "risk": "safe" },
+        { "id": "rp-c8", "kind": "tab", "label": "终端 {n}（模式标签条，每个终端实例一个）", "expected": "切换到该终端实例；已退出的终端标题追加「（已退出）」。", "risk": "safe" },
+        { "id": "rp-c9", "kind": "button", "label": "关闭标签 ×（每个模式标签行内）", "expected": "关闭该标签；终端标签同时结束对应 PTY 会话。", "risk": "safe" },
+        { "id": "rp-c10", "kind": "button", "label": "新建标签 +（标签条末尾下拉触发器）", "expected": "展开新建标签下拉菜单。", "risk": "safe" },
+        { "id": "rp-c11", "kind": "menu", "label": "新建标签菜单项（文件/变更/终端/轨迹/新建网页）", "expected": "点击对应项新建并聚焦该标签。", "risk": "safe" },
+        { "id": "rp-c12", "kind": "menu", "label": "标签右键菜单（关闭/关闭其他/关闭右侧/关闭左侧/全部关闭）", "expected": "对标签条执行对应批量关闭并保持一个聚焦标签。", "risk": "safe" },
+        { "id": "rp-c13", "kind": "tab", "label": "文件/网页文件标签（文件标签条，文件或网页模式下）", "expected": "点击切换已打开的文件或网页标签。", "risk": "safe" },
+        { "id": "rp-c14", "kind": "button", "label": "关闭标签 ×（活动文件标签行内）", "expected": "关闭该文件/网页标签。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "web-browser",
+      "name": "内置浏览器网页标签",
+      "howToOpen": "应用启动后点击顶栏「显示侧栏」展开右侧资源面板，点击「打开标签页」网格中的「新建网页」，出现地址栏与网页区域。",
+      "controls": [
+        { "id": "wb-c1", "kind": "button", "label": "后退（地址栏左箭头）", "expected": "网页历史后退；页面未就绪时禁用。", "risk": "safe" },
+        { "id": "wb-c2", "kind": "button", "label": "前进（地址栏右箭头）", "expected": "网页历史前进；页面未就绪时禁用。", "risk": "safe" },
+        { "id": "wb-c3", "kind": "button", "label": "刷新（地址栏刷新图标）", "expected": "重新加载当前网页。", "risk": "safe" },
+        { "id": "wb-c4", "kind": "input", "label": "地址栏（输入网址或本地文件路径）", "expected": "回车后导航到网址；输入本地路径则转交文件预览打开。", "risk": "safe" },
+        { "id": "wb-c5", "kind": "button", "label": "用系统应用打开（地址栏外链图标）", "expected": "在系统默认浏览器中打开当前页面。", "risk": "safe" },
+        { "id": "wb-c6", "kind": "other", "label": "网页内容区（原生子 WebView）", "expected": "页面内链接、表单、滚动可正常鼠标操作（待实测确认）。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "terminal",
+      "name": "内置终端",
+      "howToOpen": "应用启动后点击顶栏「显示侧栏」展开右侧资源面板，点击「打开标签页」网格中的「终端」（需已打开项目会话，无项目时按钮禁用并提示「选择项目后可以新建终端」）。",
+      "controls": [
+        { "id": "tm-c1", "kind": "other", "label": "终端输入区（xterm 终端实例）", "expected": "键盘输入写入 PTY，回车执行命令并回显输出（待实测确认）。", "risk": "safe" }
+      ]
+    },
+    {
+      "id": "summary-subagents",
+      "name": "摘要面板子智能体区",
+      "howToOpen": "打开一个会话后，点击主界面顶栏「显示摘要」图标按钮，右侧滑出摘要面板；面板下方「子智能体」区列出运行中/已完成的子智能体。",
+      "controls": [
+        { "id": "sa-c1", "kind": "button", "label": "显示摘要/隐藏摘要（顶栏开关）", "expected": "打开或关闭摘要侧面板。", "risk": "safe" },
+        { "id": "sa-c2", "kind": "button", "label": "子智能体行（头像+名称+时长+状态）", "expected": "在右侧资源面板打开该子智能体的会话标签。", "risk": "safe" },
+        { "id": "sa-c3", "kind": "button", "label": "停止子智能体（运行中行尾停止按钮）", "expected": "取消该子智能体后台任务，按钮进入停止中状态（仅有后台任务标识的行显示，待实测确认）。", "risk": "safe" },
+        { "id": "sa-c4", "kind": "button", "label": "已完成（{count}）（含头像组按钮）", "expected": "在右侧资源面板打开「子智能体」列表标签（有已完成子智能体时显示，待实测确认）。", "risk": "safe" },
+        { "id": "sa-c5", "kind": "button", "label": "停止后台进程（后台进程行尾停止按钮）", "expected": "取消对应后台 shell 任务并刷新列表（有后台 shell 任务时显示，待实测确认）。", "risk": "safe" }
+      ]
+    }
+  ]
+}

@@ -138,7 +138,7 @@ test("对象形式的嵌套 installer.exe 保留 NSIS 类型", () => {
 
 // 读取当前 Tauri 配置并确认许可证和 Web Host 静态产物都有稳定目标目录。
 test("Tauri 配置携带法律资源与 Web Host 资源", () => {
-  const config = readFileSync(join(process.cwd(), "apps/desktop/src-tauri/tauri.conf.json"), "utf8");
+  const config = readFileSync(join(process.cwd(), "apps/desktop/tauri.conf.json"), "utf8");
   assert.deepEqual(validateBundleConfiguration(JSON.parse(config)), [
     { source: join(process.cwd(), "LICENSE"), target: "LICENSE" },
     { source: join(process.cwd(), "apps/ui/dist"), target: "web/" },
@@ -243,7 +243,7 @@ test("资源目录必须与源文件一致", (context) => {
 
 // 目标文件名冲突会使后写入的资源覆盖前一个资源，配置门禁必须提前拒绝。
 test("拒绝 bundle 资源目标路径冲突", () => {
-  const config = JSON.parse(readFileSync(join(process.cwd(), "apps/desktop/src-tauri/tauri.conf.json"), "utf8"));
+  const config = JSON.parse(readFileSync(join(process.cwd(), "apps/desktop/tauri.conf.json"), "utf8"));
   config.bundle.resources["../README.md"] = "LICENSE";
   assert.throws(() => validateBundleConfiguration(config), /bundle 目标路径冲突/);
 });
@@ -318,7 +318,7 @@ test("空目录和不支持的目标类型不能通过体积门禁", () => {
   const root = mkdtempSync(join(tmpdir(), "keencode-empty-bundle-"));
   try {
     assert.throws(
-      () => verifyBundle(root, join(process.cwd(), "apps/desktop/src-tauri/tauri.conf.json")),
+      () => verifyBundle(root, join(process.cwd(), "apps/desktop/tauri.conf.json")),
       /未找到实际安装\/分发包成品.*空目录/s,
     );
     assert.throws(() => validateBundleSizes(findBundleArtifacts(root)), /空目录不能通过体积校验/);

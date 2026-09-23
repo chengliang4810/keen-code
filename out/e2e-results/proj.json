@@ -1,0 +1,24 @@
+{
+  "areaId": "proj",
+  "areaName": "侧栏项目分组",
+  "verdict": "fail",
+  "passCount": 7,
+  "failCount": 2,
+  "blockedCount": 2,
+  "total": 11,
+  "failures": [
+    {
+      "id": "proj-c3",
+      "label": "菜单项：最后用户消息时间",
+      "evidence": "切换与持久化生效：键盘 ArrowUp/Enter 选中后 localStorage keencode.sidebar-session-sort-mode 由 \"updatedAt\" 实时变为 \"lastUserMessage\"，菜单内 aria-checked 同步迁移；但选择后菜单未自动关闭（选择后 sleep 1s 读取 [role=menu] 仍存在，menuStillOpen=true），鼠标点击路径同样复现；Base UI 文档 Item.closeOnClick 默认 true 应关闭。会话顺序在两种模式下相同（3 条会话恰好同序），无法用顺序差异佐证重排。",
+      "severity": "low"
+    },
+    {
+      "id": "proj-c4",
+      "label": "菜单项：更新时间",
+      "evidence": "鼠标点击\"更新时间\"后 localStorage 写入 \"updatedAt\"、aria-checked 迁移到该项，但菜单未关闭：点击后 1.5s 截图 out/shots/proj-05-c4-after.png 仍显示菜单打开且\"更新时间\"带选中标记，eval 读 [role=menu] visible=true；键盘路径复现同一行为。排序功能本身正常，Escape 可关闭。",
+      "severity": "low"
+    }
+  ],
+  "blockedNotes": "proj-c10（显示更多）：需某项目下会话超过 5 条才出现按钮；被测项目 e2e-test-project 下 0 条会话（展开显示\"暂无会话\"），实测规则限制每区域最多发 2 条消息，无法创造 6+ 条会话。proj-c11（重新定位文件夹…）：仅项目路径丢失时出现（useSidebarActions relocateProject / ProjectTree.tsx pathMissing 分支）；创造该状态需移动/删除专用测试仓库 C:/Users/chengliang/Documents/KeenCode/e2e-test-project，超出授权范围，且该流程最终调 api.pickDirectory() 打开 Windows 原生目录选择器，无法自动化。proj-c8 的子条件\"项目路径丢失时新建对话按钮置灰\"依赖同一前置，未验证（主行为已 pass）。另注：测试中曾出现的\"折叠头点击无效\"经排查为驱动 roletext finder 按 innerText 长度选最短候选、误中 innerText 为空的图标按钮（如把 clicktext \"项目\" 点到\"收起全部项目\"、clicktext \"对话\" 点到\"对话排序方式\"并因此打开排序菜单），改用精确 CSS 选择器（.tree-l1__head、.tree-l2、button[aria-label=…]）后真实鼠标点击全部正常；以及图标按钮 hover tooltip（420ms）可能遮挡相邻按钮点击，测试时先移开鼠标规避，均非应用缺陷。"
+}

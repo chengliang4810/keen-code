@@ -14,7 +14,7 @@
 
 KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite 6 前端，Tauri 2 桌面外壳，进程内自研 Rust Agent 运行时。浏览器开发服务器只用于前端开发，不能代替原生桌面验收。
 
-仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` 内含 `src-tauri/` 桌面宿主、`cli/` 命令行）、`core/`（共享 Rust 库，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
+仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` Tauri 桌面宿主 crate 根、`cli/` 命令行）、`core/`（共享 Rust 库，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
 
 | 改动内容 | 优先检查的位置 |
 | --- | --- |
@@ -24,8 +24,8 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 | 业务视图与聊天渲染 | `apps/ui/src/components/`、`apps/ui/src/components/lobe-chat/` |
 | 通用控件、样式与翻译 | `apps/ui/src/components/ui/`、`apps/ui/src/styles/`、`apps/ui/src/i18n/` |
 | 前端纯规则 | `apps/ui/src/lib/`；测试通常与实现同目录 |
-| Tauri 命令注册与桌面集成 | `apps/desktop/src-tauri/src/lib.rs` 及同目录业务模块 |
-| 桌面会话接入、历史加载、工具投影 | `apps/desktop/src-tauri/src/agent_runtime.rs`、`apps/desktop/src-tauri/src/agent_runtime/` |
+| Tauri 命令注册与桌面集成 | `apps/desktop/src/lib.rs` 及同目录业务模块 |
+| 桌面会话接入、历史加载、工具投影 | `apps/desktop/src/agent_runtime.rs`、`apps/desktop/src/agent_runtime/` |
 | ACP 方法、事件与协议契约 | `core/acp/` |
 | Agent Loop、上下文、取消、Plan 守卫、协作 | `core/agent/` |
 | Provider 中立消息、请求、流与错误类型 | `core/model/` |
@@ -34,9 +34,9 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 | 会话日志、快照、Artifact、Memory、Goal 持久化 | `core/resources/` |
 | 工具定义与执行 | `core/tools/` |
 | MCP 与 Skills 核心 | `core/mcp/`、`core/skills/` |
-| 插件与扩展桌面接入 | `apps/desktop/src-tauri/src/extensions/`、`apps/desktop/src-tauri/src/plugins/` 及对应 `.rs` 入口 |
-| 产品内系统提示词与子 Agent 模板 | `apps/desktop/src-tauri/prompts/`；先读其中的 `README.md` |
-| 构建、发布、性能与验收 | `package.json`、`.github/workflows/`、`tooling/scripts/`、`design-qa.md`、`docs/benchmark.md` |
+| 插件与扩展桌面接入 | `apps/desktop/src/extensions/`、`apps/desktop/src/plugins/` 及对应 `.rs` 入口 |
+| 产品内系统提示词与子 Agent 模板 | `apps/desktop/prompts/`；先读其中的 `README.md` |
+| 构建、发布、性能与验收 | `package.json`、`.github/workflows/`、`tooling/scripts/`、`docs/benchmark.md` |
 
 ## 架构硬约束
 
@@ -71,7 +71,7 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 - 原生控件仅限 UI 组件底层、浏览器要求的隐藏控件，以及 `contenteditable`、媒体等无等价组件的宿主；在代码中解释原因，不另建可见控件样式。
 - 使用组件既有变体、尺寸和语义化令牌。业务 `className` 只负责必要布局与产品结构，不覆盖控件颜色、字体、边框、圆角和交互状态。
 - 后端或协议调整不得无意改变界面。品牌或文案变化保留原盒模型与层级，并记录有意差异。
-- 可见界面修改按 `design-qa.md` 记录基线提交或源码快照、运行环境、截图位置、复现命令；在相同状态、视口和 `deviceScaleFactor` 下比较截图与像素差异。
+- 可见界面修改在提交说明中记录基线提交或源码快照、运行环境、截图位置、复现命令；在相同状态、视口和 `deviceScaleFactor` 下比较截图与像素差异。
 - 缺失基线先尝试隔离重建；无法重建则记录原因和未验证范围，继续其他验证。历史记录和浏览器截图不能代替本次原生桌面验收。
 
 ## 开发与验证命令
@@ -96,7 +96,7 @@ pnpm dev           # 仅前端开发
 | Tauri 后端 | `cargo test -p keencode-desktop` |
 | 跨 crate 或公共协议 | 检查所有受影响的包；涉及桌面接入时另跑 `cargo test -p keencode-desktop` |
 
-**唯一的 Rust workspace**：根 `Cargo.toml` 统一管理 `core/`、`apps/desktop/src-tauri` 和 `tooling/provider-live-test`，共享一份 `Cargo.lock` 与根 `target/`。前端检查不能代替 Rust 测试；首次构建桌面端或执行 `cargo check` 前需要 `apps/ui/dist` 存在（`pnpm build` 或 `mkdir -p apps/ui/dist`），因为 Tauri 构建脚本在编译期校验打包资源。
+**唯一的 Rust workspace**：根 `Cargo.toml` 统一管理 `core/`、`apps/desktop` 和 `tooling/provider-live-test`，共享一份 `Cargo.lock` 与根 `target/`。前端检查不能代替 Rust 测试；首次构建桌面端或执行 `cargo check` 前需要 `apps/ui/dist` 存在（`pnpm build` 或 `mkdir -p apps/ui/dist`），因为 Tauri 构建脚本在编译期校验打包资源。
 
 Rust 修改还需做格式检查和 lint：
 
@@ -111,7 +111,7 @@ cargo clippy -p <包名> --all-targets -- -D warnings
 
 - 允许通过 npm/pnpm、Cargo 正常声明和使用第三方依赖，遵守其许可证；优先复用已有依赖。
 - 经用户明确授权，KeenCode 前端可以直接复用 Apache-2.0 许可的 ZCode UI 组件与 CSS，以 ZCode 作为桌面和 Web 界面的视觉基线；复用范围不扩展到协议、运行时、提示词、凭据或产品数据。
-- 复制或改编第三方源码时，必须核对许可证，保留必要的版权与许可证文本，并在 `THIRD_PARTY_NOTICES.md`、`DESIGN.md` 或对应源码附近记录来源和影响范围。不得通过改名、删除声明或放宽门禁隐藏来源。
+- 复制或改编第三方源码时，必须核对许可证，保留必要的版权与许可证文本，并在对应源码附近记录来源和影响范围（当前第三方归属登记见 `apps/ui/src/components/ui/README.md`）。不得通过改名、删除声明或放宽门禁隐藏来源。
 - 其他未获明确授权的外部项目仍仅用于参考；需要引入其源码时必须先确认许可与归属要求。
 - `pnpm run check:clean-room` 仅检查部分来源名称与参考描述，不能证明源码原创，也不能把所有关键词命中认定为复制。来源判断需要结合文件内容、引入历史和实际引用。
 

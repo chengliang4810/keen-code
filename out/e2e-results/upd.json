@@ -1,0 +1,11 @@
+{
+  "areaId": "upd",
+  "areaName": "应用更新弹窗",
+  "verdict": "pass",
+  "passCount": 2,
+  "failCount": 0,
+  "blockedCount": 1,
+  "total": 3,
+  "failures": [],
+  "blockedNotes": "upd-c2（重试下载）依赖 downloadState=failed 前置，无法安全创造：实测三种下载源下载均成功（应用内实际完成 3 次完整下载，缓存 pending-update.bin mtime 分别为 12:24:47 国内加速/auto、12:28:33 国内加速/auto、12:32:16 GitHub 直连——原预期 GitHub 直连被墙会失败，实测该网络环境直连同样成功），ready 状态下应用无任何 UI 入口可对同一版本重新触发下载（src-tauri/src/app_updates.rs:527-534 同版本且 ready 时 app_update_check 直接返回现有状态，不重新下载），断网等人为制造故障会影响宿主系统未执行。缺：真实下载失败状态。"
+}

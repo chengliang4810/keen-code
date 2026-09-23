@@ -1,0 +1,18 @@
+{
+  "areaId": "pmenu",
+  "areaName": "项目右键菜单",
+  "verdict": "blocked",
+  "passCount": 3,
+  "failCount": 0,
+  "blockedCount": 1,
+  "total": 4,
+  "failures": [
+    {
+      "id": "pmenu-c2",
+      "label": "重新定位…",
+      "evidence": "点击后确实弹出系统原生\"选择文件夹\"对话框（keencode-desktop PID 18052 的 MainWindowTitle 变为\"选择文件夹\"，EnumWindows 枚举到窗口类 #32770 标题\"选择文件夹\"），但原生 IFileDialog 无法经 CDP 选择目录，\"选定后项目路径更新并弹成功提示\"无法验证；已向对话框发 WM_CLOSE（等同取消）恢复，项目未变动（projectStillThere:true）。缺：可脚本化选择目录的原生对话框通道。",
+      "severity": "low"
+    }
+  ],
+  "blockedNotes": "pmenu-c2 后半段（选定目录后路径更新+成功提示）被 Windows 原生\"选择文件夹\"对话框阻断（本环境规则：原生文件/文件夹选择器无法自动化），其余 3 项全部实测通过。菜单打开方式验证：点击项目行\"⋯\"按钮（svg.tabler-icon-dots）4 次均展开含 4 个 menuitem 的菜单。pmenu-c1 证据：点击后 Shell.Application Windows() 由基线 [file:///D:/projects/ZCode] 新增窗口 url=file:///C:/Users/chengliang/Documents/KeenCode 且 selected=[e2e-test-project]，与项目注册路径 C:/Users/chengliang/Documents/KeenCode/e2e-test-project（out/e2e-appdata/projects.json）一致，reveal 定位语义正确。"
+}

@@ -1,0 +1,49 @@
+{
+  "areaId": "srch",
+  "areaName": "会话搜索弹窗",
+  "verdict": "pass",
+  "passCount": 6,
+  "failCount": 0,
+  "blockedCount": 0,
+  "total": 6,
+  "failures": [],
+  "blockedNotes": "",
+  "details": [
+    {
+      "id": "srch-c1",
+      "label": "搜索输入框（占位“搜索会话或项目…”）",
+      "verdict": "pass",
+      "evidence": "eval 断言：输入“森林”后命中行 rows=[\"以森林为题的尽可能长的文章\",\"新建对话\",\"创建项目\"]（后两项为底部固定按钮），项目行 e2e-test-project 消失（实时过滤生效）；改输无效词“zzzqqq999”后 inputVal=\"zzzqqq999\"、占位出现 noMatchText=\"无匹配结果\" 且会话行清空。截图 out/shots/srch-1-no-match.png、srch-3-filter.png、srch-2-dialog-open.png。"
+    },
+    {
+      "id": "srch-c2",
+      "label": "关闭按钮（输入框右侧 ×）",
+      "verdict": "pass",
+      "evidence": "点击前 eval 确认焦点在 .search-panel__input（in-dialog）；clicktext button \"关闭\" 后断言 {dialogOpen:false, activeAfter:\"搜索\", isActiveSearchBtn:true}——弹窗关闭且焦点恢复到侧栏“搜索”按钮（useSidebarSearch.ts:59-66 记录、SessionSearchPortal.tsx:74 finalFocus 恢复）。"
+    },
+    {
+      "id": "srch-c3",
+      "label": "项目命中行",
+      "verdict": "pass",
+      "evidence": "先点“收起全部项目”得基线 aria-expanded=false；打开弹窗后真实点击项目行，document 级 mousedown 监听实测落点 (640,330) 正中行中心 (642,330)，点击后断言 {dlg:false, expanded:\"true\"}；项目分组整体收起（projRowVisible=false）的前置下点击行后 {c3b_groupReopened:\"true\", c3b_projectExpanded:\"true\"}——分组重新打开且项目展开。注：初次两次“失败”为 clicktext 文本“e2e-test-project”同时命中更短的会话行 meta（“回复两个字：好的 e2e-test-project · Ctrl+2”，落点 (640,430) 与该行中心吻合），系测试选择器歧义而非应用缺陷，改用唯一路径文本后 1/1 通过。"
+    },
+    {
+      "id": "srch-c4",
+      "label": "会话命中行（带 Ctrl+序号 提示）",
+      "verdict": "pass",
+      "evidence": "弹窗内确认行“你好”带 Ctrl+1 提示（ax: button name=\"你好 Ctrl+1\"），点击后监听实测落点 (640,395) 正中行中心 (642,395)，断言 {c4_dlgClosed:true, c4_activeSession:[\"你好\"]}（侧栏 tree-l3--active 切换）；另一次点击“回复两个字：好的”行后 activeSession 同步切换为该会话。弹窗均关闭。"
+    },
+    {
+      "id": "srch-c5",
+      "label": "底部“新建对话”",
+      "verdict": "pass",
+      "evidence": "点击底部“新建对话”行后断言 {c5_dlgClosed:true, c5_composerEmpty:true, c5_hasPlaceholder:true, chatBlockCount:0}，侧栏会话数 l3Count=4 不变（草稿未物化新行，无 active 行）；在项目会话“回复两个字：好的”激活上下文中重复该操作后 projectSelector=[\"e2e-test-project\"]——新草稿保持在当前项目下。"
+    },
+    {
+      "id": "srch-c6",
+      "label": "底部“创建项目”",
+      "verdict": "pass",
+      "evidence": "点击底部“创建项目”行后断言 {c6_searchClosed:true, c6_dialogs:[\"创建项目项目名称已有项目文件夹（可选）…\"], c6_hasInput:true}——搜索弹窗关闭且“创建项目”弹窗（AddProjectModal）带名称输入框出现；按 Escape 后 dlgCount=0 弹窗取消，未实际创建项目。"
+    }
+  ]
+}

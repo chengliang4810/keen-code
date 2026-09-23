@@ -1,0 +1,8 @@
+{"steps":[
+  {"do":"type","css":"input[placeholder='例如：工作中转服务']","text":"Workbuddy"},
+  {"do":"type","css":"input[placeholder='https://your-relay.example.com']","text":"http://162.14.111.215:8787/v1"},
+  {"do":"type","css":"input[placeholder='sk-…']","text":"aidawan"},
+  {"do":"clicktext","role":"button","text":"添加模型"},
+  {"do":"wait","ms":800},
+  {"do":"eval","js":"JSON.stringify({dialog:!!document.querySelector('[role=dialog]'),text:(document.querySelector('[role=dialog]')||{}).innerText?.slice(0,300),inputs:[...document.querySelectorAll('[role=dialog] input, [role=dialog] [contenteditable]')].map(i=>i.getAttribute('placeholder')||i.getAttribute('aria-label')||i.tagName)})"}
+]}

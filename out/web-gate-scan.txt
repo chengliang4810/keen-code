@@ -1,0 +1,805 @@
+src/lib\activeTurn.test.ts:208:    const route = (label: string, terminal = false) => {
+src/lib\activeTurn.test.ts:211:        if (terminal) recoverableCompletedTurns.delete("session-a");
+src/components\AgentsPanel.test.tsx:68:    const invoke = vi.fn().mockResolvedValue({
+src/components\AgentsPanel.test.tsx:72:      __TAURI_INTERNALS__: { invoke },
+src/components\AgentsPanel.test.tsx:77:    expect(invoke).toHaveBeenCalledWith("agents_tool_catalog", {}, undefined);
+src/components\AgentsPanel.test.tsx:81:    const invoke = vi.fn().mockResolvedValue({});
+src/components\AgentsPanel.test.tsx:83:      __TAURI_INTERNALS__: { invoke },
+src/components\AgentsPanel.test.tsx:95:    expect(invoke).toHaveBeenCalledWith(
+src/components\AgentsPanel.test.tsx:110:    const invoke = vi.fn().mockResolvedValue({});
+src/components\AgentsPanel.test.tsx:112:      __TAURI_INTERNALS__: { invoke },
+src/components\AgentsPanel.test.tsx:124:    expect(invoke).toHaveBeenCalledWith(
+src/components\AgentsPanel.test.tsx:139:    const invoke = vi.fn().mockResolvedValue({
+src/components\AgentsPanel.test.tsx:144:      __TAURI_INTERNALS__: { invoke },
+src/components\AgentsPanel.test.tsx:148:    expect(invoke).toHaveBeenCalledWith(
+src/components\AgentsPanel.test.tsx:166:    const invoke = vi.fn().mockResolvedValue({});
+src/components\AgentsPanel.test.tsx:168:      __TAURI_INTERNALS__: { invoke },
+src/components\AgentsPanel.test.tsx:174:    expect(invoke).toHaveBeenNthCalledWith(
+src/components\AgentsPanel.test.tsx:180:    expect(invoke).toHaveBeenNthCalledWith(
+src/components\AgentsPanel.tsx:251:    if (!api.isTauri()) {
+src/components\AgentsPanel.tsx:253:      setError(tr("ext.needTauri"));
+src/components\AgentsPanel.tsx:275:    if (!api.isTauri()) return;
+src/components\AgentsPanel.tsx:310:    if (catalog.length === 0 && api.isTauri()) {
+src/components\AgentsPanel.tsx:377:    if (!api.isTauri()) return;
+src/components\AgentsPanel.tsx:421:          disabled={busy || !api.isTauri()}
+src/hooks\sidebar\useSidebarActions.ts:52:  relocateProject: (project: Project) => Promise<void>;
+src/hooks\sidebar\useSidebarActions.ts:94:            await api.projectRename(project.id, next);
+src/hooks\sidebar\useSidebarActions.ts:159:  const relocateProject = useCallback(
+src/hooks\sidebar\useSidebarActions.ts:162:      if (!api.isTauri()) {
+src/hooks\sidebar\useSidebarActions.ts:163:        setLocalError(tr("error.needTauri"));
+src/hooks\sidebar\useSidebarActions.ts:169:        const updated = await api.projectRelocate(project.id, directory);
+src/hooks\sidebar\useSidebarActions.ts:211:            if (!api.isTauri()) {
+src/hooks\sidebar\useSidebarActions.ts:212:              setLocalError(tr("error.needTauri"));
+src/hooks\sidebar\useSidebarActions.ts:215:            await api.projectRemove(project.id);
+src/hooks\sidebar\useSidebarActions.ts:332:    relocateProject,
+src/hooks\composer\useComposerAttachments.ts:116:        const next = currentPorts.api.isTauri()
+src/hooks\composer\useComposerAttachments.ts:159:    if (!currentPorts.api.isTauri()) {
+src/hooks\composer\useComposerAttachments.ts:187:      if (!files.length || !currentPorts.api.isTauri()) return;
+src/hooks\acp-runtime\events.ts:263:    if (!api.isTauri() && resolveHostMode() === "desktop") return;
+src/hooks\acp-runtime\events.ts:467:      terminalRoot: boolean,
+src/hooks\acp-runtime\events.ts:483:      if (terminalRoot && !reduction.childAgentId) {
+src/hooks\acp-runtime\events.ts:623:      const terminalRoot = isTerminalKeenCodeEvent(envelope.event) &&
+src/hooks\acp-runtime\events.ts:633:      const optimisticUser = terminalRoot
+src/hooks\acp-runtime\events.ts:656:        terminalRoot,
+src/hooks\sidebar\useSidebarDrag.ts:100:            const saved = await api.projectsReorder(ids);
+src/hooks\composer\useComposerSlashMenu.ts:94:    if (!apiRef.current.isTauri()) return;
+src/hooks\sidebar\useSidebarLists.ts:160:    if (!canUseAcpHost(api.isTauri())) return;
+src/hooks\sidebar\useSidebarLists.ts:164:      const persistedProjects = api.isTauri()
+src/hooks\sidebar\useSidebarLists.ts:165:        ? await api.projectsList()
+src/hooks\sidebar\useSidebarLists.ts:224:      const checked = api.isTauri()
+src/hooks\sidebar\useSidebarLists.ts:225:        ? await api.projectValidate(project.id)
+src/hooks\sidebar\useSidebarLists.ts:253:      if (!canUseAcpHost(api.isTauri())) return;
+src/hooks\sidebar\useSidebarLists.ts:254:      if (!api.isTauri()) {
+src/hooks\sidebar\useSidebarLists.ts:282:    if (!canUseAcpHost(api.isTauri())) return;
+src/hooks\sidebar\useSidebarLists.ts:285:      const sourceProjects = api.isTauri() ? projects : projectsFromSessions(rows);
+src/hooks\sidebar\useSidebarLists.ts:297:      const list = api.isTauri()
+src/hooks\sidebar\useSidebarLists.ts:298:        ? await api.projectsList()
+src/hooks\acp-runtime\history.ts:78:  /** 共享 Reducer 处理投递后通知等待方；不能由 invoke 响应代替。 */
+src/hooks\composer\useComposerModes.ts:91:    if (!canUseAcpHost(currentPorts.api.isTauri()) || !sessionId) return;
+src/components\AttachmentCard.tsx:51:  onAddToComposer?: (a: Attachment) => void;
+src/components\AttachmentCard.tsx:65:  onAddToComposer,
+src/components\AttachmentCard.tsx:109:      !api.isTauri() ||
+src/components\AttachmentCard.tsx:136:      if (api.isTauri()) await api.pathOpen(attachment.path);
+src/components\AttachmentCard.tsx:144:      if (api.isTauri()) await api.pathReveal(attachment.path);
+src/components\AttachmentCard.tsx:216:  if (onAddToComposer) {
+src/components\AttachmentCard.tsx:221:      onClick: () => onAddToComposer(attachment),
+src/lib\acp\events.ts:168:      type: "terminal";
+src/lib\acp\events.ts:170:      terminalId: string;
+src/lib\acp\events.ts:758:    case "terminal":
+src/lib\acp\events.ts:759:      return hasOnlyKeys(value, ["type", "terminalId"], ["_meta"]) &&
+src/lib\acp\events.ts:760:        isIdentifier(value.terminalId);
+src/lib\acp\client.test.ts:9:/** 在测试中安装 Tauri 内部 invoke 桩，并返回可检查的调用记录。 */
+src/lib\acp\client.test.ts:11:  const invoke = vi.fn((command: string, args: unknown) => command === "diagnostics_record" ? Promise.resolve() : handler(command, args));
+src/lib\acp\client.test.ts:12:  vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/lib\acp\client.test.ts:13:  return invoke;
+src/lib\acp\client.test.ts:35:    const invoke = stubTauriInvoke(async (command, args) => {
+src/lib\acp\client.test.ts:43:    const logs = invoke.mock.calls.filter(([command]) => command === "diagnostics_record");
+src/lib\acp\client.test.ts:59:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:71:    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+src/lib\acp\client.test.ts:72:    const initialize = messageFrom(invoke.mock.calls[0]!);
+src/lib\acp\client.test.ts:94:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\acp\client.test.ts:99:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:121:    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
+src/lib\acp\client.test.ts:125:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:139:    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(1);
+src/lib\acp\client.test.ts:143:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:157:    expect(messageFrom(invoke.mock.calls[1]!)).toMatchObject({
+src/lib\acp\client.test.ts:179:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:198:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\acp\client.test.ts:199:    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+src/lib\acp\client.test.ts:204:    expect(messageFrom(invoke.mock.calls[0]!)).toMatchObject({
+src/lib\acp\client.test.ts:213:    expect(messageFrom(invoke.mock.calls[1]!)).toEqual(responses[0]);
+src/lib\acp\client.test.ts:214:    expect(messageFrom(invoke.mock.calls[2]!)).toEqual(responses[1]);
+src/lib\acp\client.test.ts:215:    expect(typeof messageFrom(invoke.mock.calls[1]!).result).toBe("object");
+src/lib\acp\client.test.ts:216:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\acp\client.test.ts:222:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:242:    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
+src/lib\acp\client.test.ts:246:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:261:    expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(1);
+src/lib\acp\client.test.ts:272:      const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:292:      expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
+src/lib\acp\client.test.ts:299:    const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:321:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\acp\client.test.ts:394:      const invoke = stubTauriInvoke(async (_command, args) => {
+src/lib\acp\client.test.ts:434:      expect(invoke.mock.calls.filter(([command]) => command === "acp_dispatch")).toHaveLength(2);
+src/lib\acp\api.ts:1:/** ACP 后端命令包装（前端 → Tauri invoke）。 */
+src/lib\acp\api.ts:9:import { invoke, isTauri } from "../tauri";
+src/lib\acp\api.ts:118:  return invoke<string>("diagnostics_log_path");
+src/lib\acp\api.ts:123:  return invoke<void>("diagnostics_record", { component, message });
+src/lib\acp\api.ts:128:  return invoke<void>("performance_record", { component, message });
+src/lib\acp\api.ts:406:  return invoke<SessionSnapshot>("session_disconnect");
+src/lib\acp\api.ts:693:  if (!isTauri()) {
+src/features\app\sidebar\SidebarSessionRow.tsx:78:        (unreadResult ? " tree-l3--unread-terminal" : "")
+src/hooks\acp-runtime\taskCache.ts:29:    if (!sessionId || !api.isTauri()) {
+src/lib\acp\events.test.ts:95:      { type: "terminal" as const, terminalId: "terminal-1" },
+src/lib\acp\events.test.ts:111:      { type: "terminal", terminalId: "" },
+src/lib\acp\client.ts:3:import { invoke, isTauri } from "../tauri";
+src/lib\acp\client.ts:121:  if (!isTauri()) {
+src/lib\acp\client.ts:125:  return invoke<unknown>("acp_dispatch", { message });
+src/lib\acp\store.test.ts:135:    (terminalType) => {
+src/lib\acp\store.test.ts:156:      const terminal = eventDelivery(10, { type: terminalType }, { journalSequence: 10 });
+src/lib\acp\store.test.ts:157:      apply(live, terminal);
+src/lib\acp\store.test.ts:163:      for (const delivery of [...deliveries, terminal]) {
+src/lib\acp\store.test.ts:171:      expect(reduceDeliveryEnvelope(live, terminal).status).not.toBe("applied");
+src/lib\acp\store.ts:178:  terminal_turns: Record<string, "completed" | "failed" | "cancelled">;
+src/lib\acp\store.ts:228:    terminal_turns: {},
+src/lib\acp\store.ts:908:        // existing segment; it must not roll a terminal result back to a
+src/lib\acp\store.ts:1131:      if (!turnId || view.terminal_turns[turnId]) break;
+src/lib\acp\store.ts:1137:      view.terminal_turns[turnId] = status;
+src/lib\acp\store.ts:1155:          // A delayed terminal event for an older Turn must still settle that
+src/lib\acp\store.ts:1231:      // terminal notice available, but never let an old Turn change the
+src/lib\acp\store.ts:1236:      // A terminal Turn is monotonic. A late running/waiting status cannot
+src/lib\acp\store.ts:1361:      // result text, completion time, metrics, or a terminal state for a new
+src/lib\acp\store.ts:1435:      envelope.turnId && view.terminal_turns[envelope.turnId],
+src/lib\acp\prompt.ts:114:  let terminalObserved = false;
+src/lib\acp\prompt.ts:164:    terminalObserved = true;
+src/lib\acp\prompt.ts:172:    if (startedObserved || terminalObserved || startedWaitTimer !== null) return;
+src/lib\acp\prompt.ts:217:      if (startedObserved || terminalObserved) cleanupListener();
+src/features\app\sidebar\ProjectTree.tsx:56:  relocateProject: SidebarRelocateProject;
+src/features\app\sidebar\ProjectTree.tsx:58:  addProject: SidebarAddProject;
+src/features\app\sidebar\ProjectTree.tsx:126:  relocateProject,
+src/features\app\sidebar\ProjectTree.tsx:132:  addProject,
+src/features\app\sidebar\ProjectTree.tsx:178:          <Tip label={tr("sidebar.addProject")}>
+src/features\app\sidebar\ProjectTree.tsx:184:              aria-label={tr("sidebar.addProject")}
+src/features\app\sidebar\ProjectTree.tsx:185:              onClick={() => void addProject()}
+src/features\app\sidebar\ProjectTree.tsx:319:                          void relocateProject(project);
+src/features\app\sidebar\ProjectTree.tsx:322:                        {tr("sidebar.relocateProject")}
+src/lib\acp\historyPages.ts:48:  view.terminal_turns = { ...older.terminal_turns, ...view.terminal_turns };
+src/hooks\useWorktrees.ts:65:  gitWorktrees: api.GitWorktreeEntry[];
+src/hooks\useWorktrees.ts:66:  gitWorktreesAvailable: boolean | null;
+src/hooks\useWorktrees.ts:67:  gitWorktreesLoading: boolean;
+src/hooks\useWorktrees.ts:68:  gitWorktreesReason: string | null;
+src/hooks\useWorktrees.ts:115:  const [gitWorktrees, setGitWorktrees] = useState<api.GitWorktreeEntry[]>([]);
+src/hooks\useWorktrees.ts:116:  const [gitWorktreesAvailable, setGitWorktreesAvailable] = useState<
+src/hooks\useWorktrees.ts:119:  const [gitWorktreesLoading, setGitWorktreesLoading] = useState(false);
+src/hooks\useWorktrees.ts:120:  const [gitWorktreesReason, setGitWorktreesReason] = useState<string | null>(
+src/hooks\useWorktrees.ts:139:  const gitWorktreesReqRef = useRef(0);
+src/hooks\useWorktrees.ts:140:  const gitWorktreesPathRef = useRef<string | null>(null);
+src/hooks\useWorktrees.ts:144:    if (!path || !api.isTauri()) {
+src/hooks\useWorktrees.ts:145:      gitWorktreesReqRef.current += 1;
+src/hooks\useWorktrees.ts:146:      gitWorktreesPathRef.current = null;
+src/hooks\useWorktrees.ts:154:    const requestId = ++gitWorktreesReqRef.current;
+src/hooks\useWorktrees.ts:157:    if (gitWorktreesPathRef.current !== path) {
+src/hooks\useWorktrees.ts:158:      gitWorktreesPathRef.current = path;
+src/hooks\useWorktrees.ts:165:      const result = await api.gitWorktreesList(path);
+src/hooks\useWorktrees.ts:166:      if (requestId !== gitWorktreesReqRef.current) return;
+src/hooks\useWorktrees.ts:177:      if (requestId !== gitWorktreesReqRef.current) return;
+src/hooks\useWorktrees.ts:182:      if (requestId === gitWorktreesReqRef.current) {
+src/hooks\useWorktrees.ts:201:    if (!api.isTauri() || !activeProject?.path || !worktreeGcOpen) return;
+src/hooks\useWorktrees.ts:225:    if (!api.isTauri() || !activeProject?.path) return;
+src/hooks\useWorktrees.ts:264:      if (!api.isTauri()) return;
+src/hooks\useWorktrees.ts:273:          const added = (await api.projectCreate(
+src/hooks\useWorktrees.ts:320:      const main = mainWorktreePath(gitWorktrees) || activeProject?.path || "";
+src/hooks\useWorktrees.ts:326:  }, [activeProject?.path, gitWorktrees, worktreeCreateName]);
+src/hooks\useWorktrees.ts:329:    if (!api.isTauri() || !activeProject?.path) return;
+src/hooks\useWorktrees.ts:364:        const added = (await api.projectCreate(
+src/hooks\useWorktrees.ts:417:    gitWorktrees,
+src/hooks\useWorktrees.ts:418:    gitWorktreesAvailable,
+src/hooks\useWorktrees.ts:419:    gitWorktreesLoading,
+src/hooks\useWorktrees.ts:420:    gitWorktreesReason,
+src/hooks\session-turn\useSessionConnection.ts:104:      if (!canUseAcpHost(api.isTauri())) return null;
+src/hooks\useWorkbenchDragResize.ts:30:  addProjectOpen: boolean;
+src/hooks\useWorkbenchDragResize.ts:31:  addProjectDropRef: RefObject<HTMLElement | null>;
+src/hooks\useWorkbenchDragResize.ts:52:  addProjectOpen,
+src/hooks\useWorkbenchDragResize.ts:53:  addProjectDropRef,
+src/hooks\useWorkbenchDragResize.ts:71:        addProjectDropRef.current?.getBoundingClientRect() ?? null,
+src/hooks\useWorkbenchDragResize.ts:72:        addProjectOpen,
+src/hooks\useWorkbenchDragResize.ts:74:    [addProjectDropRef, addProjectOpen],
+src/hooks\useWorkbenchDragResize.ts:79:    if (!isTauri()) return;
+src/hooks\useWindowChrome.ts:21:    if (!api.isTauri()) return;
+src/features\app\SettingsRoute.tsx:62:  terminalFontFamily: string;
+src/features\app\SettingsRoute.tsx:64:  terminalShell: TerminalShell;
+src/features\app\SettingsRoute.tsx:65:  terminalShellOptions: readonly TerminalShellOption[];
+src/components\ComposerModelMenu.test.tsx:82:        onAddModel: () => {},
+src/components\ComposerModelMenu.test.tsx:113:        onAddModel={() => {}}
+src/components\ComposerModelMenu.test.tsx:143:        onAddModel={() => {}}
+src/components\ComposerModelMenu.test.tsx:168:        onAddModel={() => {}}
+src/components\ComposerModelMenu.test.tsx:205:        onAddModel={() => {}}
+src/features\app\ResourceAside.tsx:42:  terminalFontFamily: string;
+src/features\app\ResourceAside.tsx:66:  terminalFontFamily,
+src/features\app\ResourceAside.tsx:117:              terminalFontFamily={terminalFontFamily}
+src/lib\api.ts:3:import { invoke, isTauri } from "./tauri";
+src/lib\api.ts:11:  return invoke<void>("startup_frontend_ready");
+src/lib\api.ts:16:  return invoke<void>("app_confirm_exit");
+src/lib\api.ts:21:  return invoke<void>("app_close_window");
+src/lib\api.ts:46:  return invoke<void>("tray_set_menu", { menu });
+src/lib\api.ts:51:  return invoke<void>("tray_set_badge", { count });
+src/lib\api.ts:102:export async function terminalCreate(
+src/lib\api.ts:108:  return invoke<void>("terminal_create", { id, cwd, cols, rows });
+src/lib\api.ts:111:export async function terminalWrite(id: string, data: number[]) {
+src/lib\api.ts:112:  return invoke<void>("terminal_write", { id, data });
+src/lib\api.ts:115:export async function terminalResize(id: string, cols: number, rows: number) {
+src/lib\api.ts:116:  return invoke<void>("terminal_resize", { id, cols, rows });
+src/lib\api.ts:119:export async function terminalClose(id: string) {
+src/lib\api.ts:120:  return invoke<void>("terminal_close", { id });
+src/lib\api.ts:137:export async function terminalShellsList() {
+src/lib\api.ts:138:  return invoke<TerminalShellOption[]>("terminal_shells_list");
+src/lib\api.ts:179:  return invoke<AppUpdateStatus>("app_update_info");
+src/lib\api.ts:184:  return invoke<AppUpdateStatus>("app_update_check");
+src/lib\api.ts:189:  return invoke<void>("app_update_install");
+src/lib\api.ts:205:export async function projectsList() {
+src/lib\api.ts:206:  return invoke<ProjectRecord[]>("projects_list");
+src/lib\api.ts:210:export function projectValidate(id: string): Promise<ProjectRecord | null> {
+src/lib\api.ts:211:  return invoke<ProjectRecord | null>("project_validate", { id });
+src/lib\api.ts:215:export async function projectCreate(name: string, path?: string | null) {
+src/lib\api.ts:216:  return invoke<ProjectRecord>("project_create", { name, path: path ?? null });
+src/lib\api.ts:221:  return invoke<string>("project_default_directory");
+src/lib\api.ts:242:export async function gitWorktreesList(projectPath: string) {
+src/lib\api.ts:243:  return invoke<GitWorktreesResult>("git_worktrees_list", { projectPath });
+src/lib\api.ts:264:  return invoke<GitWorktreeAddResult>("git_worktree_add", {
+src/lib\api.ts:272:  return invoke<string | null>("pick_directory");
+src/lib\api.ts:277:  return invoke<string[]>("pick_attach_files");
+src/lib\api.ts:282:  return invoke<string>("save_pasted_attachment", { name, bytes });
+src/lib\api.ts:287:  return invoke<ArrayBuffer>("read_local_image", { path });
+src/lib\api.ts:292:  return invoke<ArrayBuffer>("read_tool_image", { sessionId, artifactId });
+src/lib\api.ts:304:  return invoke<PathEntry[]>("paths_classify", { paths });
+src/lib\api.ts:309:  return invoke<void>("path_open", { path });
+src/lib\api.ts:314:  return invoke<void>("url_open", { url });
+src/lib\api.ts:327:  return invoke<void>("browser_open", {
+src/lib\api.ts:339:  return invoke<void>("browser_bounds", {
+src/lib\api.ts:350:  return invoke<void>("browser_show", { tabId });
+src/lib\api.ts:355:  return invoke<void>("browser_hide", { tabId });
+src/lib\api.ts:360:  return invoke<void>("browser_close", { tabId });
+src/lib\api.ts:365:  return invoke<void>("browser_navigate", { tabId, url });
+src/lib\api.ts:370:  return invoke<void>("browser_reload", { tabId });
+src/lib\api.ts:375:  return invoke<void>("browser_history", { tabId, direction });
+src/lib\api.ts:380:  return invoke<void>("path_reveal", { path });
+src/lib\api.ts:392:  return invoke<GitFileDiffResult>("git_file_diff", { projectPath, path });
+src/lib\api.ts:424:  return invoke<GitUntrackedDirectoryResult>("git_untracked_directory", {
+src/lib\api.ts:518:  const request = invoke<GitStatusResult>("git_status", { projectPath })
+src/lib\api.ts:586:  return invoke<GitShowFileResult>("git_show_file", { projectPath, path });
+src/lib\api.ts:608:  const result = await invoke<GitCommitResult>("git_commit", opts)
+src/lib\api.ts:616:  return invoke("git_push", { projectPath });
+src/lib\api.ts:625:  const result = await invoke<{ branch: string; output: string }>(
+src/lib\api.ts:668:  return invoke<FsEntry[]>("fs_list_dir", {
+src/lib\api.ts:676:  return invoke<FsReadResult>("fs_read_file", {
+src/lib\api.ts:689:  const result = await invoke<FsWriteResult>("fs_write_file", {
+src/lib\api.ts:705:  const result = await invoke<FsWriteResult>("fs_write_absolute", {
+src/lib\api.ts:716:  return invoke<FsReadResult>("fs_read_absolute", { path });
+src/lib\api.ts:724:  return invoke<FsReadResult>("fs_open_path", {
+src/lib\api.ts:732:  return invoke<ProjectRecord>("project_remove", { id });
+src/lib\api.ts:740:  return invoke<ProjectRecord>("project_relocate", { id, path });
+src/lib\api.ts:743:export async function projectRename(id: string, name: string) {
+src/lib\api.ts:744:  return invoke<ProjectRecord>("project_rename", { id, name });
+src/lib\api.ts:748:  return invoke<ProjectRecord[]>("projects_reorder", { ids });
+src/lib\api.ts:752:  return invoke("project_reveal", { id });
+src/lib\api.ts:780:  terminalFontFamily: string;
+src/lib\api.ts:782:  terminalShell: TerminalShell;
+src/lib\api.ts:833:    | "terminalFontFamily"
+src/lib\api.ts:834:    | "terminalShell"
+src/lib\api.ts:844:  return invoke<AppSettings>("settings_get");
+src/lib\api.ts:848:  return invoke<AppSettings>("settings_set", { settings });
+src/lib\api.ts:853:  return invoke<WebHostStatus>("web_host_start", { port: port ?? null });
+src/lib\api.ts:858:  return invoke<WebHostStatus>("web_host_stop");
+src/lib\api.ts:863:  return invoke<WebHostStatus>("web_host_status");
+src/lib\api.ts:868:  return invoke<WebHostStatus>("web_host_set_token", { token });
+src/lib\api.ts:873:  return invoke<string>("custom_instructions_get", {});
+src/lib\api.ts:880:  return invoke<string>("custom_instructions_set", { instructions });
+src/lib\api.ts:891:  return invoke<MemoryStatus>("memories_status");
+src/lib\api.ts:895:  return invoke<void>("memories_reset");
+src/lib\api.ts:900:  return invoke<string>("memories_get", {});
+src/lib\api.ts:905:  return invoke<string>("memories_set", { content });
+src/lib\api.ts:1067:  return invoke<void>("extensions_set_mcp", { name, enabled });
+src/lib\api.ts:1072:  return invoke<void>("extensions_enable_all_mcp", { names });
+src/lib\api.ts:1077:  return invoke<SkillsListResult>("skills_list", {
+src/lib\api.ts:1084:  return invoke<AgentsListResult>("agents_list", {
+src/lib\api.ts:1096:  return invoke<AgentToolCatalogResult>("agents_tool_catalog");
+src/lib\api.ts:1125:  return invoke<AgentDetailDto>("agent_detail", {
+src/lib\api.ts:1140:  return invoke<void>("agent_create", input);
+src/lib\api.ts:1145:  return invoke<void>("agent_remove", { name });
+src/lib\api.ts:1150:  return invoke<void>("agent_update", { name, model });
+src/lib\api.ts:1155:  return invoke<InspectMcpResult>("inspect_mcp", {
+src/lib\api.ts:1207:  return invoke<PluginsListResult>("plugins_list", {
+src/lib\api.ts:1214:  return invoke<void>("plugin_enable", { name });
+src/lib\api.ts:1219:  return invoke<void>("plugin_disable", { name });
+src/lib\api.ts:1224:  return invoke<void>("plugin_uninstall", { name });
+src/lib\api.ts:1229:  return invoke<PluginDetailsResult>("plugin_details", { name });
+src/lib\api.ts:1266:  return invoke<PluginUserConfigResult>("plugin_user_config_get", { name });
+src/lib\api.ts:1275:  return invoke<PluginUserConfigResult>("plugin_user_config_set", {
+src/lib\api.ts:1284:  return invoke<void>("plugin_install", { source });
+src/lib\api.ts:1290:  return invoke<void>("plugin_update", {
+src/lib\api.ts:1321:  return invoke<ProvidersListResult>("providers_list");
+src/lib\api.ts:1337:  return invoke<ProvidersListResult>("providers_upsert", {
+src/lib\api.ts:1353:  return invoke<ProvidersListResult>("providers_remove", { id });
+src/lib\api.ts:1358:  return invoke<string>("providers_export", { providerId });
+src/lib\api.ts:1374:  return invoke<ProvidersImportResult>("providers_import", { config });
+src/lib\api.ts:1379:  return invoke<string | null>("pick_text_file");
+src/lib\api.ts:1383:  return invoke<ProvidersListResult>("providers_select_model", {
+src/lib\api.ts:1395:  return invoke<{
+src/lib\api.ts:1507:  return invoke<ModelMetadata>("model_metadata_get", { modelId });
+src/lib\api.ts:1512:  return invoke<ModelMetadata[]>("model_metadata_get_many", { modelIds });
+src/lib\api.ts:1520:  if (!isTauri()) return () => {};
+src/lib\api.ts:1554:  return invoke<GitWorktreeGcResult>("git_worktree_gc", {
+src/lib\api.ts:1599:  return invoke<MarketplaceSourceDto[]>("marketplace_list");
+src/lib\api.ts:1604:  return invoke<MarketplaceAvailableResult>("marketplace_available");
+src/lib\api.ts:1609:  return invoke<void>("marketplace_add", { source });
+src/lib\api.ts:1614:  return invoke<void>("marketplace_remove", { name });
+src/lib\api.ts:1622:  return invoke<void>("marketplace_update", {
+src/lib\api.ts:1679:  return invoke<void>("mcp_add", opts);
+src/lib\api.ts:1684:  return invoke<void>("mcp_import", { config });
+src/lib\api.ts:1688:  return invoke<void>("mcp_remove", { name });
+src/lib\api.ts:1696:  return invoke<McpDoctorReport>("mcp_doctor", {
+src/lib\api.ts:1839:  return invoke<RequestRecordsPage>("request_records_list", { query });
+src/lib\api.ts:1846:  return invoke<TaskCacheUsage>("task_cache_usage_get", { sessionId });
+src/lib\api.ts:1851:  return invoke<UsageStats>("usage_stats_get");
+src/lib\api.ts:1857:  return invoke<PluginModelAliases>("plugin_model_aliases_get");
+src/lib\api.ts:1861:  return invoke<PluginModelAliases>("plugin_model_aliases_set", { config });
+src/hooks\useUnreadTerminalResults.ts:35:    if (appBooting || !api.isTauri()) return;
+src/hooks\useTrayMenu.ts:62:    if (appBooting || !api.isTauri()) return;
+src/hooks\useTrayMenu.ts:76:    if (!api.isTauri()) return;
+src/lib\api.test.ts:94:  const invoke = vi.fn<TauriInvoke>(async (command, args) => {
+src/lib\api.test.ts:113:    __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:115:  return invoke;
+src/lib\api.test.ts:122:      ".invoke_handler(tauri::generate_handler![",
+src/lib\api.test.ts:142:      ".invoke_handler(tauri::generate_handler![",
+src/lib\api.test.ts:163:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:177:    expect(invoke).toHaveBeenCalledTimes(2);
+src/lib\api.test.ts:178:    const messages = invoke.mock.calls.map(acpMessageFromCall);
+src/lib\api.test.ts:195:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\api.test.ts:201:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:226:    expect(invoke).toHaveBeenCalledTimes(2);
+src/lib\api.test.ts:227:    const initialize = acpMessageFromCall(invoke.mock.calls[0]!);
+src/lib\api.test.ts:239:    const cancel = acpMessageFromCall(invoke.mock.calls[1]!);
+src/lib\api.test.ts:249:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\api.test.ts:255:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:268:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\api.test.ts:278:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:291:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\api.test.ts:297:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:310:    expect(invoke.mock.calls.map(([command]) => command)).not.toContain(
+src/lib\api.test.ts:352:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:361:    expect(invoke).toHaveBeenCalledTimes(2);
+src/lib\api.test.ts:362:    expect(acpMessageFromCall(invoke.mock.calls[0]!)).toMatchObject({
+src/lib\api.test.ts:366:    expect(acpMessageFromCall(invoke.mock.calls[1]!)).toEqual({
+src/lib\api.test.ts:375:    const invoke = stubAcpDispatch((message) => {
+src/lib\api.test.ts:413:    expect(invoke).toHaveBeenCalledTimes(4);
+src/lib\api.test.ts:414:    const messages = invoke.mock.calls.map(acpMessageFromCall);
+src/lib\api.test.ts:444:    const invoke = vi
+src/lib\api.test.ts:449:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:456:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:462:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:471:    const invoke = vi
+src/lib\api.test.ts:476:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:481:    expect(invoke).toHaveBeenNthCalledWith(1, "memories_get", {}, undefined);
+src/lib\api.test.ts:482:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:500:    const invoke = vi.fn().mockResolvedValue(result);
+src/lib\api.test.ts:502:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:506:    expect(invoke).toHaveBeenCalledWith(
+src/lib\api.test.ts:514:    const invoke = vi
+src/lib\api.test.ts:519:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:529:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:539:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:548:    const invoke = vi.fn().mockResolvedValue({ files: [], truncated: false });
+src/lib\api.test.ts:550:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:555:    expect(invoke).toHaveBeenCalledWith(
+src/lib\api.test.ts:567:    const invoke = vi.fn().mockReturnValue(pending);
+src/lib\api.test.ts:569:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:574:    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+src/lib\api.test.ts:581:    expect(invoke).toHaveBeenCalledTimes(1);
+src/lib\api.test.ts:597:    const invoke = vi
+src/lib\api.test.ts:603:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:609:    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(1));
+src/lib\api.test.ts:612:    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2));
+src/lib\api.test.ts:616:    expect(invoke).toHaveBeenCalledTimes(2);
+src/lib\api.test.ts:622:    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3));
+src/lib\api.test.ts:629:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\api.test.ts:635:    const invoke = vi
+src/lib\api.test.ts:641:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:650:    expect(invoke).toHaveBeenCalledTimes(1);
+src/lib\api.test.ts:655:    expect(invoke).toHaveBeenCalledTimes(2);
+src/lib\api.test.ts:661:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\api.test.ts:665:    const invoke = vi
+src/lib\api.test.ts:671:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:684:    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+src/lib\api.test.ts:692:    const invoke = vi
+src/lib\api.test.ts:698:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:712:    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+src/lib\api.test.ts:722:    const invoke = vi
+src/lib\api.test.ts:728:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:740:    expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+src/lib\api.test.ts:764:      terminalFontFamily: "monospace",
+src/lib\api.test.ts:765:      terminalShell: "auto",
+src/lib\api.test.ts:771:    const invoke = vi.fn().mockResolvedValue(saved);
+src/lib\api.test.ts:773:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:780:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:786:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:795:    const invoke = vi.fn().mockResolvedValue({ webServiceUrl: "" });
+src/lib\api.test.ts:797:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:803:    expect(invoke).toHaveBeenCalledWith(
+src/lib\api.test.ts:817:    const invoke = vi.fn().mockResolvedValue({});
+src/lib\api.test.ts:819:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:828:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:834:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:840:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:846:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:852:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:861:    const invoke = vi.fn().mockResolvedValue({});
+src/lib\api.test.ts:863:      __TAURI_INTERNALS__: { invoke },
+src/lib\api.test.ts:872:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:878:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:884:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:890:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:896:    expect(invoke).toHaveBeenNthCalledWith(
+src/lib\api.test.ts:911:    const invoke = vi.fn().mockResolvedValue({
+src/lib\api.test.ts:920:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/lib\api.test.ts:932:    expect(invoke).toHaveBeenCalledWith(
+src/hooks\useSidebarController.ts:141:  relocateProject: (project: Project) => Promise<void>;
+src/hooks\useSidebarController.ts:326:    relocateProject: actions.relocateProject,
+src/components\ComposerModelMenu.tsx:28:  onAddModel: () => void;
+src/components\ComposerModelMenu.tsx:72:  onAddModel,
+src/components\ComposerModelMenu.tsx:96:          onClick={onAddModel}
+src/components\ComposerModelMenu.tsx:152:      footerAction={{ label: labels.manageModels, onSelect: onAddModel }}
+src/lib\appSettingPersistence.test.ts:43:    terminalFontFamily: "monospace",
+src/lib\appSettingPersistence.test.ts:44:    terminalShell: "auto",
+src/lib\appSettingPersistence.test.ts:142:        key: "terminalFontFamily",
+src/components\ComposerProjectMenu.tsx:34:    addProject: string;
+src/components\ComposerProjectMenu.tsx:40:  onAdd: (returnFocus: HTMLButtonElement | null) => void;
+src/components\ComposerProjectMenu.tsx:49:  onAdd,
+src/components\ComposerProjectMenu.tsx:131:              onAdd(triggerRef.current);
+src/components\ComposerProjectMenu.tsx:135:            <span>{labels.addProject}</span>
+src/hooks\useSessionNavigation.ts:351:      if (!canUseAcpHost(current.runtime.isTauri()) || typeof window === "undefined") return false;
+src/features\app\overlays\SessionSearchPortal.tsx:39:  addProject: AddProjectAction;
+src/features\app\overlays\SessionSearchPortal.tsx:58:  addProject,
+src/features\app\overlays\SessionSearchPortal.tsx:180:              void addProject(returnFocusRef.current);
+src/features\app\overlays\SessionSearchPortal.tsx:185:              {tr("sidebar.addProject")}
+src/features\app\overlays\SessionContextMenu.tsx:31:  relocateProject: ProjectAction;
+src/features\app\overlays\SessionContextMenu.tsx:48:  relocateProject,
+src/features\app\overlays\SessionContextMenu.tsx:66:            void api.projectReveal(project.id).catch((error: unknown) => {
+src/features\app\overlays\SessionContextMenu.tsx:76:          onClick: () => void relocateProject(project),
+src/features\app\overlays\SessionContextMenu.tsx:132:    relocateProject,
+src/features\app\overlays\AddProjectModal.tsx:68:      title={tr("addProject.title")}
+src/features\app\overlays\AddProjectModal.tsx:95:            {busy ? tr("addProject.adding") : tr("addProject.submit")}
+src/features\app\overlays\AddProjectModal.tsx:110:            {tr("addProject.name")}
+src/features\app\overlays\AddProjectModal.tsx:119:              placeholder={tr("addProject.namePlaceholder")}
+src/features\app\overlays\AddProjectModal.tsx:125:                error === tr("addProject.nameRequired") || undefined
+src/features\app\overlays\AddProjectModal.tsx:140:            {tr("addProject.sourceFolder")}
+src/features\app\overlays\AddProjectModal.tsx:155:              path ? pathBasename(path) : tr("addProject.chooseFolder")
+src/features\app\overlays\AddProjectModal.tsx:160:              {path ? pathBasename(path) : tr("addProject.chooseFolder")}
+src/features\app\overlays\AddProjectModal.tsx:171:                {tr("addProject.defaultLocation", {
+src/features\app\overlays\AddProjectModal.tsx:174:                    name.trim() || tr("addProject.namePlaceholder"),
+src/features\app\overlays\AddProjectModal.tsx:183:                {tr("addProject.changeDefaultLocation")}
+src/hooks\useProjectDialog.ts:50:  const [addProjectIntent, setAddProjectIntent] =
+src/hooks\useProjectDialog.ts:52:  const [addProjectName, setAddProjectName] = useState("");
+src/hooks\useProjectDialog.ts:53:  const [addProjectPath, setAddProjectPath] = useState("");
+src/hooks\useProjectDialog.ts:54:  const [addProjectBusy, setAddProjectBusy] = useState(false);
+src/hooks\useProjectDialog.ts:55:  const [addProjectError, setAddProjectError] = useState<string | null>(null);
+src/hooks\useProjectDialog.ts:56:  const addProjectNameRef = useRef<HTMLInputElement>(null);
+src/hooks\useProjectDialog.ts:57:  const addProjectDropRef = useRef<HTMLButtonElement>(null);
+src/hooks\useProjectDialog.ts:58:  const addProjectReturnFocusRef = useRef<HTMLElement | null>(null);
+src/hooks\useProjectDialog.ts:59:  const addProjectSourceRequestRef = useRef(0);
+src/hooks\useProjectDialog.ts:60:  const addProjectNameEditedRef = useRef(false);
+src/hooks\useProjectDialog.ts:65:      if (!addProjectNameEditedRef.current) {
+src/hooks\useProjectDialog.ts:78:      if (!paths.length || !api.isTauri()) return;
+src/hooks\useProjectDialog.ts:79:      const request = ++addProjectSourceRequestRef.current;
+src/hooks\useProjectDialog.ts:86:        if (request !== addProjectSourceRequestRef.current) return;
+src/hooks\useProjectDialog.ts:89:          setAddProjectError(tr("addProject.folderOnly"));
+src/hooks\useProjectDialog.ts:93:          setAddProjectError(tr("addProject.oneFolderOnly"));
+src/hooks\useProjectDialog.ts:98:        if (request === addProjectSourceRequestRef.current) {
+src/hooks\useProjectDialog.ts:107:    addProjectSourceRequestRef.current += 1;
+src/hooks\useProjectDialog.ts:108:    addProjectNameEditedRef.current = false;
+src/hooks\useProjectDialog.ts:121:      addProjectReturnFocusRef.current =
+src/hooks\useProjectDialog.ts:132:    if (!addProjectBusy) resetAddProject();
+src/hooks\useProjectDialog.ts:133:  }, [addProjectBusy, resetAddProject]);
+src/hooks\useProjectDialog.ts:137:    if (!api.isTauri()) {
+src/hooks\useProjectDialog.ts:138:      setAddProjectError(tr("error.needTauri"));
+src/hooks\useProjectDialog.ts:141:    const request = ++addProjectSourceRequestRef.current;
+src/hooks\useProjectDialog.ts:144:      if (request === addProjectSourceRequestRef.current && path) {
+src/hooks\useProjectDialog.ts:148:      if (request === addProjectSourceRequestRef.current) {
+src/hooks\useProjectDialog.ts:155:    const intent = addProjectIntent;
+src/hooks\useProjectDialog.ts:156:    const name = addProjectName.trim();
+src/hooks\useProjectDialog.ts:157:    if (!intent || addProjectBusy) return;
+src/hooks\useProjectDialog.ts:159:      setAddProjectError(tr("addProject.nameRequired"));
+src/hooks\useProjectDialog.ts:160:      addProjectNameRef.current?.focus();
+src/hooks\useProjectDialog.ts:163:    const existing = addProjectPath
+src/hooks\useProjectDialog.ts:164:      ? projects.find((project) => pathsEqual(project.path, addProjectPath))
+src/hooks\useProjectDialog.ts:169:      showToast(tr("addProject.existingSelected", { name: existing.name }));
+src/hooks\useProjectDialog.ts:175:      const project = (await api.projectCreate(
+src/hooks\useProjectDialog.ts:177:        addProjectPath || null,
+src/hooks\useProjectDialog.ts:188:    addProjectBusy,
+src/hooks\useProjectDialog.ts:189:    addProjectIntent,
+src/hooks\useProjectDialog.ts:190:    addProjectName,
+src/hooks\useProjectDialog.ts:191:    addProjectPath,
+src/hooks\useProjectDialog.ts:200:  const addProject = useCallback(
+src/hooks\useProjectDialog.ts:213:    addProjectIntent,
+src/hooks\useProjectDialog.ts:214:    addProjectName,
+src/hooks\useProjectDialog.ts:216:    addProjectPath,
+src/hooks\useProjectDialog.ts:217:    addProjectBusy,
+src/hooks\useProjectDialog.ts:218:    addProjectError,
+src/hooks\useProjectDialog.ts:220:    addProjectNameRef,
+src/hooks\useProjectDialog.ts:221:    addProjectDropRef,
+src/hooks\useProjectDialog.ts:222:    addProjectReturnFocusRef,
+src/hooks\useProjectDialog.ts:223:    addProjectNameEditedRef,
+src/hooks\useProjectDialog.ts:231:    addProject,
+src/components\ConversationSummaryPanel.tsx:238:    if (!api.isTauri()) {
+src/components\ConversationSummaryPanel.tsx:254:    if (!sessionId || !api.isTauri()) {
+src/hooks\useSessionLifecycleActions.ts:234:    if (!current.isTauri()) {
+src/hooks\useSessionLifecycleActions.ts:235:      current.ui.showToast(tr("error.needTauri"));
+src/hooks\useFrontendObservability.ts:35:    if (!api.isTauri()) return;
+src/hooks\useProviderModels.ts:151:    if (!api.isTauri()) {
+src/hooks\useProviderModels.ts:238:    if (!api.isTauri() || !modelId) return;
+src/hooks\useProviderModels.ts:303:  const hasConfiguredModel = canUseAcpHost(api.isTauri()) && (
+src/features\app\main\ComposerAttachments.tsx:54:          onAddToComposer={(added: Attachment) =>
+src/components\EmbeddedBrowser.tsx:105:  const desktop = isTauri();
+src/hooks\useAppUpdate.ts:25:    if (!api.isTauri()) return;
+src/hooks\useAppUpdate.ts:43:    if (!api.isTauri()) return;
+src/hooks\useAppUpdate.ts:58:    if (!api.isTauri()) return;
+src/hooks\useAppUpdate.ts:71:    if (appBooting || !api.isTauri()) return;
+src/features\app\main\ComposerContextBar.tsx:31:  gitWorktrees: GitWorktreeEntry[];
+src/features\app\main\ComposerContextBar.tsx:32:  gitWorktreesAvailable: boolean | null;
+src/features\app\main\ComposerContextBar.tsx:33:  gitWorktreesLoading: boolean;
+src/features\app\main\ComposerContextBar.tsx:34:  gitWorktreesReason: string | null;
+src/features\app\main\ComposerContextBar.tsx:55:  gitWorktrees,
+src/features\app\main\ComposerContextBar.tsx:56:  gitWorktreesAvailable,
+src/features\app\main\ComposerContextBar.tsx:57:  gitWorktreesLoading,
+src/features\app\main\ComposerContextBar.tsx:58:  gitWorktreesReason,
+src/features\app\main\ComposerContextBar.tsx:104:              addProject: tr("composer.addProject"),
+src/features\app\main\ComposerContextBar.tsx:111:            onAdd={(returnFocus) => {
+src/features\app\main\ComposerContextBar.tsx:115:          {activeProject && gitWorktreesAvailable === true ? (
+src/features\app\main\ComposerContextBar.tsx:119:              worktrees={gitWorktrees}
+src/features\app\main\ComposerContextBar.tsx:120:              worktreesAvailable={gitWorktreesAvailable}
+src/features\app\main\ComposerContextBar.tsx:121:              worktreesLoading={gitWorktreesLoading}
+src/features\app\main\ComposerContextBar.tsx:122:              worktreesReason={gitWorktreesReason}
+src/hooks\useAppDialog.ts:38:    if (!api.isTauri()) return;
+src/hooks\useAppSettings.ts:91:  const [terminalFontFamily, setTerminalFontFamily] = useState(
+src/hooks\useAppSettings.ts:94:  const [terminalShell, setTerminalShell] = useState<api.TerminalShell>("auto");
+src/hooks\useAppSettings.ts:95:  const [terminalShellOptions, setTerminalShellOptions] = useState<
+src/hooks\useAppSettings.ts:119:    if (!api.isTauri()) return;
+src/hooks\useAppSettings.ts:143:    if (appBooting || !api.isTauri()) return;
+src/hooks\useAppSettings.ts:157:        setTerminalFontFamily(settings.terminalFontFamily);
+src/hooks\useAppSettings.ts:158:        setTerminalShell(settings.terminalShell);
+src/hooks\useAppSettings.ts:169:      .terminalShellsList()
+src/hooks\useAppSettings.ts:335:        key: "terminalFontFamily",
+src/hooks\useAppSettings.ts:338:        previous: terminalFontFamily,
+src/hooks\useAppSettings.ts:342:    [terminalFontFamily, updateSetting],
+src/hooks\useAppSettings.ts:348:        key: "terminalShell",
+src/hooks\useAppSettings.ts:351:        previous: terminalShell,
+src/hooks\useAppSettings.ts:355:    [terminalShell, updateSetting],
+src/hooks\useAppSettings.ts:375:      const path = await api.projectDefaultDirectory();
+src/hooks\useAppSettings.ts:457:    terminalFontFamily,
+src/hooks\useAppSettings.ts:459:    terminalShell,
+src/hooks\useAppSettings.ts:460:    terminalShellOptions,
+src/lib\dragZone.ts:52:  addProjectOpen: boolean,
+src/lib\dragZone.ts:54:  if (!addProjectOpen) return null;
+src/features\app\main\ComposerToolbar.tsx:253:            if (!canUseAcpHost(isTauri())) {
+src/features\app\main\ComposerToolbar.tsx:272:            } else if (isTauri()) {
+src/features\app\main\ComposerToolbar.tsx:280:          onAddModel={() => {
+src/features\app\main\ComposerToolbar.tsx:328:            if (canUseAcpHost(isTauri()) && activeSessionId) {
+src/features\app\main\ConversationStage.tsx:112:        onAddAttachmentToComposer={(attachment) =>
+src/components\FileMediaPlayer.tsx:174:    if (!absolutePath || !api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:351:    if (!api.isTauri()) {
+src/components\ExtensionsPanel.tsx:366:    if (!api.isTauri()) {
+src/components\ExtensionsPanel.tsx:371:      setSkillsError(tr("ext.needTauri"));
+src/components\ExtensionsPanel.tsx:421:    if (!api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:498:    if (!p || !api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:508:    if (!api.isTauri() || busyKey) return;
+src/components\ExtensionsPanel.tsx:526:    if (!api.isTauri() || busyKey || servers.length === 0) return;
+src/components\ExtensionsPanel.tsx:546:    if (!api.isTauri() || mcpOauthFlowRef.current || busyKey || actionBusy) {
+src/components\ExtensionsPanel.tsx:592:      !api.isTauri() ||
+src/components\ExtensionsPanel.tsx:614:      !api.isTauri() ||
+src/components\ExtensionsPanel.tsx:657:      !api.isTauri() ||
+src/components\ExtensionsPanel.tsx:727:    if (!api.isTauri() || actionBusy || plugins.length === 0) {
+src/components\ExtensionsPanel.tsx:753:    if (!api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:793:    if (!api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:816:    if (!target || !result || configSaving || !api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:863:    if (!api.isTauri() || actionBusy) return;
+src/components\ExtensionsPanel.tsx:900:    if (!target || !api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:918:      if (!api.isTauri()) return;
+src/components\ExtensionsPanel.tsx:1305:              !!actionBusy || !!busyKey || !!mcpOauthFlow || !api.isTauri()
+src/components\ExtensionsBuildExtras.tsx:129:    if (!api.isTauri()) {
+src/components\ExtensionsBuildExtras.tsx:177:    if (!api.isTauri()) {
+src/features\app\main\MainNotices.tsx:37:  relocateProject: (project: Project) => void | Promise<void>;
+src/features\app\main\MainNotices.tsx:75:  relocateProject,
+src/features\app\main\MainNotices.tsx:114:            terminalCandidate: saw && !live?.liveToolId,
+src/features\app\main\MainNotices.tsx:147:              onClick={() => void relocateProject(activeProject)}
+src/components\FilePathCard.tsx:125:    if (!api.isTauri()) {
+src/components\FilePathCard.tsx:167:    if (!api.isTauri()) return;
+src/components\FilePathCard.tsx:217:    if (!api.isTauri()) return;
+src/components\FilePathCard.tsx:236:    if (!api.isTauri()) return;
+src/components\HtmlBrowser.tsx:28:  if (!isTauri()) {
+src/components\ImageUi.tsx:268:    if (!localPath || !api.isTauri()) return;
+src/lib\filePreviewSrc.ts:55:  if (!isTauri()) {
+src/lib\filePreviewSrc.ts:76:  if (preview.stream && preview.absolutePath && isTauri()) {
+src/components\host\useHostRemoteSession.test.ts:74:          { type: "terminal", terminalId: "terminal-secret" },
+src/components\host\useHostRemoteSession.test.ts:84:    expect(JSON.stringify(activities)).not.toContain("terminal-secret");
+src/lib\frontendDiagnostics.test.ts:29:    const invoke = vi.fn().mockResolvedValue(undefined);
+src/lib\frontendDiagnostics.test.ts:30:    const surface = Object.assign(new EventTarget(), { __TAURI_INTERNALS__: { invoke } });
+src/lib\frontendDiagnostics.test.ts:38:      expect(invoke.mock.calls.map(([command]) => command)).toEqual([
+src/lib\frontendDiagnostics.test.ts:41:      expect(invoke.mock.calls.map(([, args]) => args.kind ?? args.component)).toEqual([
+src/lib\frontendDiagnostics.test.ts:44:      expect(JSON.stringify(invoke.mock.calls)).toContain("promise failure");
+src/lib\frontendDiagnostics.test.ts:47:    expect(invoke).toHaveBeenCalledTimes(3);
+src/lib\frontendDiagnostics.test.ts:51:    const invoke = vi.fn().mockResolvedValue(undefined);
+src/lib\frontendDiagnostics.test.ts:52:    const surface = Object.assign(new EventTarget(), { __TAURI_INTERNALS__: { invoke } });
+src/lib\frontendDiagnostics.test.ts:61:      expect(invoke).toHaveBeenCalledWith("diagnostics_record", expect.objectContaining({
+src/lib\frontendDiagnostics.test.ts:64:      expect(invoke).not.toHaveBeenCalledWith("diagnostics_crash_record", expect.anything());
+src/lib\frontendDiagnostics.ts:1:import { invoke as nativeInvoke } from "@tauri-apps/api/core";
+src/lib\frontendDiagnostics.ts:31:  if (!isTauri()) return;
+src/lib\frontendDiagnostics.ts:38:  if (!isTauri()) return;
+src/lib\frontendPerformance.ts:184:  // Final Markdown settlement and ResizeObserver callbacks occur after the terminal delivery.
+src/components\lobe-chat\ConversationThread.tsx:241:  onAddAttachmentToComposer,
+src/components\lobe-chat\ConversationThread.tsx:255:  onAddAttachmentToComposer?: (att: Attachment) => void;
+src/components\lobe-chat\ConversationThread.tsx:316:              onAddToComposer={onAddAttachmentToComposer}
+src/components\lobe-chat\ConversationThread.tsx:471:  onAddAttachmentToComposer?: (att: Attachment) => void;
+src/components\lobe-chat\ConversationThread.tsx:540:  onAddAttachmentToComposer,
+src/components\lobe-chat\ConversationThread.tsx:1020:                              onAddToComposer={onAddAttachmentToComposer}
+src/components\lobe-chat\ConversationThread.tsx:1318:                            onAddAttachmentToComposer={
+src/components\lobe-chat\ConversationThread.tsx:1319:                              onAddAttachmentToComposer
+src/components\lobe-chat\ConversationThread.tsx:1379:                        onAddAttachmentToComposer={onAddAttachmentToComposer}
+src/components\ProvidersPanel.test.tsx:6:    const invoke = vi.fn().mockResolvedValue({});
+src/components\ProvidersPanel.test.tsx:7:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/components\ProvidersPanel.test.tsx:9:    expect(invoke).toHaveBeenCalledWith("providers_upsert", expect.objectContaining({ chatOutputTokenField: "max_tokens" }), undefined);
+src/components\ProvidersPanel.test.tsx:16:    const invoke = vi.fn().mockResolvedValue({});
+src/components\ProvidersPanel.test.tsx:18:      __TAURI_INTERNALS__: { invoke },
+src/components\ProvidersPanel.test.tsx:33:    expect(invoke).toHaveBeenCalledWith(
+src/components\ProvidersPanel.test.tsx:53:    const invoke = vi.fn().mockResolvedValue({});
+src/components\ProvidersPanel.test.tsx:55:      __TAURI_INTERNALS__: { invoke },
+src/components\ProvidersPanel.test.tsx:68:    expect(invoke).toHaveBeenCalledWith(
+src/components\ProvidersPanel.test.tsx:76:    const invoke = vi.fn().mockResolvedValue({ models: [] });
+src/components\ProvidersPanel.test.tsx:78:      __TAURI_INTERNALS__: { invoke },
+src/components\ProvidersPanel.test.tsx:87:    expect(invoke).toHaveBeenCalledWith(
+src/components\ProvidersPanel.test.tsx:100:    const invoke = vi.fn().mockResolvedValue("{}");
+src/components\ProvidersPanel.test.tsx:101:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/components\ProvidersPanel.test.tsx:104:    expect(invoke).toHaveBeenCalledWith("providers_export", { providerId: "provider" }, undefined);
+src/components\ProvidersPanel.test.tsx:108:    const invoke = vi.fn().mockResolvedValue({
+src/components\ProvidersPanel.test.tsx:115:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/components\ProvidersPanel.test.tsx:118:    expect(invoke).toHaveBeenCalledWith(
+src/components\ProvidersPanel.test.tsx:126:    const invoke = vi.fn().mockResolvedValue("json-text");
+src/components\ProvidersPanel.test.tsx:127:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke } });
+src/components\ProvidersPanel.test.tsx:129:    expect(invoke).toHaveBeenCalledWith("pick_text_file", {}, undefined);
+src/lib\hostCapabilities.ts:12: * `isTauri() === false` 当成“远端能力可用”。
+src/lib\hostCapabilities.ts:14:export function canUseAcpHost(native = isTauri()): boolean {
+src/lib\imageSrc.test.ts:56:    // isTauri() is false in vitest — path must not throw, must resolve once.
+src/lib\imageSrc.ts:68:  if (!isTauri()) {
+src/lib\imageSrc.ts:94:    if (!reference || !isTauri()) return null;
+src/lib\imageSrc.ts:102:  if (!raw || !isTauri() || !isAbsoluteFsPath(raw)) {
+src/components\ProvidersPanel.tsx:205:      if (!api.isTauri()) {
+src/components\ProvidersPanel.tsx:554:    if (!api.isTauri() || importDraft?.submitting) return;
+src/components\ResourceViewer.tabs.test.ts:13:    expect(source).toContain("terminalTabs.map((tab)");
+src/components\ResourceViewer.tabs.test.ts:33:    expect(source).toContain("closeRequests={terminalCloseRequests}");
+src/components\ResourceViewer.tabs.test.ts:34:    expect(source).toContain("fontFamily={terminalFontFamily}");
+src/components\ResourceViewer.tsx:156:  terminalFontFamily?: string;
+src/components\ResourceViewer.tsx:185:  | "terminal"
+src/components\ResourceViewer.tsx:189:type SingletonSideMode = Exclude<SideMode, "terminal" | "subagent">;
+src/components\ResourceViewer.tsx:308:  terminalFontFamily,
+src/components\ResourceViewer.tsx:333:  const [terminalTabs, setTerminalTabs] = useSessionState<TerminalTab[]>(sessionKey, []);
+src/components\ResourceViewer.tsx:334:  const [terminalActiveId, setTerminalActiveId] = useSessionState<string | null>(sessionKey, null);
+src/components\ResourceViewer.tsx:335:  const [terminalCreateRequest, setTerminalCreateRequest] = useSessionState(sessionKey, 0);
+src/components\ResourceViewer.tsx:336:  const [terminalCloseRequests, setTerminalCloseRequests] = useSessionState<string[]>(sessionKey, []);
+src/components\ResourceViewer.tsx:443:    if (!projectPath || !api.isTauri()) {
+src/components\ResourceViewer.tsx:526:      if (!entry.isDirectory || !key || !projectPath || !api.isTauri()) return;
+src/components\ResourceViewer.tsx:668:      if (projectPath && api.isTauri()) {
+src/components\ResourceViewer.tsx:757:    if (!path || !api.isTauri()) return;
+src/components\ResourceViewer.tsx:844:      if (!api.isTauri()) throw new Error("Tauri required");
+src/components\ResourceViewer.tsx:1046:    if (!tab || tab.tabKind === "url" || !api.isTauri()) return;
+src/components\ResourceViewer.tsx:1086:      if (!api.isTauri()) {
+src/components\ResourceViewer.tsx:1175:    if (!api.isTauri()) {
+src/components\ResourceViewer.tsx:1232:      if (!api.isTauri()) {
+src/components\ResourceViewer.tsx:2077:    setSideMode("terminal");
+src/components\ResourceViewer.tsx:2093:    const terminal = terminalTabs.find((tab) => tab.id !== excluded);
+src/components\ResourceViewer.tsx:2094:    if (terminal) {
+src/components\ResourceViewer.tsx:2095:      setTerminalActiveId(terminal.id);
+src/components\ResourceViewer.tsx:2096:      setSideMode("terminal");
+src/components\ResourceViewer.tsx:2118:    if (sideMode === "terminal" && terminalActiveId === id) {
+src/components\ResourceViewer.tsx:2129:    ...terminalTabs.map((tab) => `terminal:${tab.id}`),
+src/components\ResourceViewer.tsx:2136:    else if (kind === "terminal") closeTerminalTab(id);
+src/components\ResourceViewer.tsx:2142:    else if (kind === "terminal") { setTerminalActiveId(id); setSideMode("terminal"); }
+src/components\ResourceViewer.tsx:2153:  const hasModeTabs = openSingletons.length > 0 || terminalTabs.length > 0 || subagents.some((agent) => openSubagentIds.includes(agent.agent_id));
+src/components\ResourceViewer.tsx:2155:    sideMode === "terminal" && terminalActiveId
+src/components\ResourceViewer.tsx:2156:      ? `terminal:${terminalActiveId}`
+src/components\ResourceViewer.tsx:2184:        {terminalTabs.map((tab) => {
+src/components\ResourceViewer.tsx:2185:          const selected = sideMode === "terminal" && terminalActiveId === tab.id;
+src/components\ResourceViewer.tsx:2187:            <TabsTrigger key={tab.id} value={`terminal:${tab.id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
+src/components\ResourceViewer.tsx:2188:              <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
+src/components\ResourceViewer.tsx:2213:              <DropdownMenuItem disabled={!projectPath} onClick={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
+src/components\ResourceViewer.tsx:2292:          <span>{tr("terminal.new")}</span>
+src/components\ResourceViewer.tsx:2484:        fontFamily={terminalFontFamily}
+src/components\ResourceViewer.tsx:2485:        active={sideMode === "terminal"}
+src/components\ResourceViewer.tsx:2486:        activeTabId={terminalActiveId}
+src/components\ResourceViewer.tsx:2487:        createRequest={terminalCreateRequest}
+src/components\ResourceViewer.tsx:2488:        closeRequests={terminalCloseRequests}
+src/components\ResourceViewer.tsx:2568:          (sideMode === null || sideMode === "terminal" || sideMode === "trajectory" || sideMode === "agents" || sideMode === "subagent"
+src/lib\observability.test.ts:17:import { invoke } from "./tauri";
+src/lib\observability.test.ts:20:  invoke: vi.fn().mockResolvedValue(undefined),
+src/lib\observability.test.ts:36:    vi.mocked(invoke).mockClear();
+src/lib\observability.test.ts:60:    expect(invoke).toHaveBeenCalledWith("diagnostics_trace_record", { trace: finished });
+src/lib\observability.test.ts:77:    expect(invoke).toHaveBeenNthCalledWith(1, "diagnostics_snapshot");
+src/lib\observability.test.ts:78:    expect(invoke).toHaveBeenNthCalledWith(2, "diagnostics_export");
+src/lib\observability.test.ts:79:    expect(invoke).toHaveBeenNthCalledWith(3, "diagnostics_metric_record", {
+src/lib\observability.test.ts:85:    expect(invoke).toHaveBeenNthCalledWith(4, "diagnostics_resource_record", {
+src/lib\observability.test.ts:186:    expect(invoke).not.toHaveBeenCalled();
+src/components\SettingsPage.test.ts:216:    const end = source.indexOf('id="settings-anchor-terminal-font"', start);
+src/components\SettingsPage.test.ts:239:    const terminalStart = source.indexOf('id="settings-anchor-terminal-font"');
+src/components\SettingsPage.test.ts:244:    expect(terminalStart).toBeGreaterThan(fontSizeStart);
+src/components\SettingsPage.test.ts:250:    const start = source.indexOf('id="settings-anchor-terminal-font"');
+src/components\SettingsPage.test.ts:262:    expect(source).toContain("terminalShellOptions.length > 0");
+src/components\SettingsPage.test.ts:264:    expect(source).toContain("terminalShellOptions.map");
+src/lib\observability.ts:2:import { invoke, isTauri } from "./tauri";
+src/lib\observability.ts:131:  return invoke<ObservabilitySnapshot>("diagnostics_snapshot");
+src/lib\observability.ts:136:  return invoke<string>("diagnostics_export");
+src/lib\observability.ts:145:  return invoke<void>("diagnostics_metric_record", { name, value, unit, tags });
+src/lib\observability.ts:149:  return invoke<void>("diagnostics_resource_record", { sample });
+src/lib\observability.ts:153:  return invoke<void>("diagnostics_trace_record", { trace });
+src/lib\observability.ts:163:  if (!isTauri()) return () => {};
+src/components\SettingsPage.tsx:195:  terminalFontFamily: string;
+src/components\SettingsPage.tsx:197:  terminalShell: TerminalShell;
+src/components\SettingsPage.tsx:198:  terminalShellOptions: readonly TerminalShellOption[];
+src/components\SettingsPage.tsx:352:  terminalFontFamily,
+src/components\SettingsPage.tsx:354:  terminalShell,
+src/components\SettingsPage.tsx:355:  terminalShellOptions,
+src/components\SettingsPage.tsx:1091:                id="settings-anchor-terminal-font"
+src/components\SettingsPage.tsx:1094:                  <label className="settings-row__label" htmlFor="settings-terminal-font">
+src/components\SettingsPage.tsx:1095:                    {t("settings.terminalFont")}
+src/components\SettingsPage.tsx:1097:                  <div className="settings-row__desc" id="settings-terminal-font-desc">
+src/components\SettingsPage.tsx:1098:                    {t("settings.terminalFontDesc")}
+src/components\SettingsPage.tsx:1102:                  key={terminalFontFamily}
+src/components\SettingsPage.tsx:1103:                  id="settings-terminal-font"
+src/components\SettingsPage.tsx:1105:                  defaultValue={terminalFontFamily}
+src/components\SettingsPage.tsx:1107:                  aria-describedby="settings-terminal-font-desc"
+src/components\SettingsPage.tsx:1111:                      event.currentTarget.value = terminalFontFamily;
+src/components\SettingsPage.tsx:1114:                    if (value !== terminalFontFamily) onTerminalFontFamily(value);
+src/components\SettingsPage.tsx:1121:              {terminalShellOptions.length > 0 && (
+src/components\SettingsPage.tsx:1125:                      {t("settings.terminalShell")}
+src/components\SettingsPage.tsx:1128:                      {t("settings.terminalShellDesc")}
+src/components\SettingsPage.tsx:1132:                    value={terminalShell}
+src/components\SettingsPage.tsx:1139:                      aria-label={t("settings.terminalShell")}
+src/components\SettingsPage.tsx:1145:                        {t("settings.terminalShellAuto")}
+src/components\SettingsPage.tsx:1147:                      {terminalShellOptions.map((shell) => (
+src/components\SettingsPage.tsx:1665:                        if (isTauri()) {
+src/components\lobe-chat\TimelineToolRow.tsx:241:      value.includes("terminal") ||
+src/components\SubagentRow.tsx:17:function terminalExcerpt(agent: AcpSubagentInfo): string {
+src/components\SubagentRow.tsx:45:    : terminalExcerpt(agent) || agent.prompt?.trim() || "";
+src/components\TerminalPanel.tsx:19:  terminal: Terminal;
+src/components\TerminalPanel.tsx:75:      .terminalResize(id, runtime.terminal.cols, runtime.terminal.rows)
+src/components\TerminalPanel.tsx:80:    if (!api.isTauri()) return;
+src/components\TerminalPanel.tsx:84:      listen<TerminalOutput>("terminal://output", ({ payload }) => {
+src/components\TerminalPanel.tsx:85:        runtimes.current.get(payload.id)?.terminal.write(
+src/components\TerminalPanel.tsx:89:      listen<TerminalExited>("terminal://exited", ({ payload }) => {
+src/components\TerminalPanel.tsx:112:      runtime.terminal.options.fontFamily = fontFamily;
+src/components\TerminalPanel.tsx:134:      runtime.terminal.open(host);
+src/components\TerminalPanel.tsx:152:    if (!projectPath || !api.isTauri()) return;
+src/components\TerminalPanel.tsx:153:    const id = `terminal-${Date.now()}-${++sequence.current}`;
+src/components\TerminalPanel.tsx:154:    const terminal = new Terminal({
+src/components\TerminalPanel.tsx:169:    terminal.loadAddon(fit);
+src/components\TerminalPanel.tsx:170:    terminal.onData((data) => {
+src/components\TerminalPanel.tsx:172:        .terminalWrite(id, Array.from(new TextEncoder().encode(data)))
+src/components\TerminalPanel.tsx:176:      terminal,
+src/components\TerminalPanel.tsx:183:      { id, title: tr("terminal.tabName", { number: visibleTabs.length + 1 }), exited: false, sessionKey },
+src/components\TerminalPanel.tsx:188:      await api.terminalCreate(id, projectPath, 100, 30);
+src/components\TerminalPanel.tsx:191:      terminal.writeln(
+src/components\TerminalPanel.tsx:192:        `\r\n\x1b[31m${tr("terminal.startFailed", { error: String(reason) })}\x1b[0m`,
+src/components\TerminalPanel.tsx:201:    void api.terminalClose(id).catch(() => {});
+src/components\TerminalPanel.tsx:204:    runtime?.terminal.dispose();
+src/components\TerminalPanel.tsx:240:        void api.terminalClose(id).catch(() => {});
+src/components\TerminalPanel.tsx:242:        runtime.terminal.dispose();
+src/components\TerminalPanel.tsx:250:    <section className={"terminal-panel" + (active ? " is-active" : "")}>
+src/components\TerminalPanel.tsx:251:      {error ? <div className="terminal-panel__error">{error}</div> : null}
+src/components\TerminalPanel.tsx:252:      <div className="terminal-panel__body">
+src/components\TerminalPanel.tsx:254:          <div className="terminal-panel__empty">
+src/components\TerminalPanel.tsx:257:              {projectPath ? tr("terminal.empty") : tr("terminal.needProject")}
+src/components\TerminalPanel.tsx:265:              "terminal-instance" + (tab.id === activeId ? " is-active" : "")
+src/components\VideoUi.tsx:168:    if (!localPath || !api.isTauri()) return;
+src/components\VideoUi.tsx:177:    if (!localPath || !api.isTauri()) return;
+src/components\WebHostSettingsPanel.tsx:54:    if (!api.isTauri()) return;
+src/lib\sessionCompletion.ts:3:  "keencode.unread-terminal-session-results";
+src/lib\sessionLiveStore.ts:17:  terminalReason: EndOfTurnReason | null;
+src/lib\sessionLiveStore.ts:38:    terminalReason: null,
+src/lib\sessionLiveStore.ts:244:    terminalReason: reason,
+src/lib\sessionPhase.test.ts:20:        terminalCandidate: true,
+src/lib\sessionPhase.ts:16:  terminalCandidate?: boolean;
+src/lib\sessionPhase.ts:18:  if (input.terminalCandidate) return "maybe_done";
+src/lib\sessionTasks.test.ts:21:  it("maps successful and unknown terminal statuses to completed", () => {
+src/lib\tauri.test.ts:2:import { invoke, isTauri } from "./tauri";
+src/lib\tauri.test.ts:11:    expect(isTauri()).toBe(false);
+src/lib\tauri.test.ts:14:    expect(isTauri()).toBe(true);
+src/lib\tauri.test.ts:19:    await expect(invoke("projects_list")).rejects.toThrow(
+src/lib\tauri.test.ts:27:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke: native } });
+src/lib\tauri.test.ts:28:    await expect(invoke("projects_list", { privateInput: "hidden" })).rejects.toBe(error);
+src/lib\tauri.test.ts:32:    await expect(invoke("diagnostics_record")).rejects.toBe(error);
+src/lib\tauri.test.ts:38:    vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke: tauriInvoke } });
+src/lib\tauri.test.ts:40:    await expect(invoke("example_command", { id: "item-1" })).resolves.toEqual({
+src/lib\tauri.ts:4:export function isTauri(): boolean {
+src/lib\tauri.ts:12:export async function invoke<T>(
+src/lib\tauri.ts:16:  if (!isTauri()) throw new Error(`Tauri required: ${command}`);
+src/lib\tauri.ts:17:  const { invoke: tauriInvoke } = await import("@tauri-apps/api/core");
+src/lib\themeSkin.test.ts:61: * invoked), so a plain object suffices and lets us fake arbitrary sizes
+src/lib\toolDisplay.test.ts:162:            '{"command":"rg -n \\\"terminal_create|terminalCreate|terminals\\\" src"}',
+src/lib\toolDisplay.test.ts:166:    ).toBe('正在运行 rg -n "terminal_create|terminalCreate|terminals" src');

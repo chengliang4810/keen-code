@@ -1,0 +1,602 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/@fs/D:\\projects\\keen-code\\src\\features\\app\\main\\MainHeader.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/features/app/main/MainHeader.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+var _s = $RefreshSig$();
+import __vite__cjsImport3_react from "/node_modules/.vite/deps/react.js?v=341393c0"; const useState = __vite__cjsImport3_react["useState"];
+import { Button } from "/src/components/ui/button.tsx";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuGroupLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger
+} from "/src/components/ui/dropdown-menu.tsx";
+import { Tip } from "/src/components/ui/tooltip.tsx";
+import {
+  IconArrowLeft,
+  IconArrowRight,
+  IconBolt,
+  IconGitBranch,
+  IconMore,
+  IconNewChat,
+  IconPanelRight,
+  IconFolder,
+  IconSummary
+} from "/src/components/icons.tsx";
+import { saveLayout } from "/src/lib/layout.ts";
+import { isPlaceholderSessionTitle } from "/src/lib/sessionTitle.ts";
+import { pathsEqual } from "/src/lib/gitWorktree.ts";
+export function resolveHeaderWorktreeBranch(projectPath, worktrees, detachedLabel) {
+  const path = projectPath?.trim();
+  if (!path) return null;
+  const current = worktrees.find((worktree) => pathsEqual(worktree.path, path));
+  if (!current) return null;
+  const branch = current.branch?.trim();
+  if (branch) return branch;
+  return current.detached ? detachedLabel : null;
+}
+export function MainHeader({
+  layout,
+  setLayout,
+  useCustomWindowChrome,
+  toggleMaximizeFromTitlebar,
+  tr,
+  sessions,
+  activeProject,
+  projects,
+  gitWorktrees,
+  bindSessionProject,
+  session,
+  summaryOpen,
+  summaryTriggerRef,
+  setSummaryOpen,
+  openSessionMenu,
+  newChat,
+  canGoBack,
+  canGoForward,
+  goBack,
+  goForward
+}) {
+  _s();
+  const current = sessions.find((item) => item.id === session.sessionId);
+  const title = current?.title || session.title || "";
+  const showTitle = !isPlaceholderSessionTitle(
+    title,
+    [
+      tr("session.new"),
+      tr("session.placeholderTitle")
+    ]
+  );
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const currentBranch = resolveHeaderWorktreeBranch(
+    activeProject?.path,
+    gitWorktrees,
+    tr("composer.worktreeDetached")
+  );
+  const projectContextLabel = [activeProject?.name, currentBranch].filter(Boolean).join(" · ");
+  const projectContextTooltip = [activeProject?.path, currentBranch].filter(Boolean).join("\n");
+  return /* @__PURE__ */ jsxDEV(
+    "div",
+    {
+      className: "main__top",
+      "data-tauri-drag-region": true,
+      onDoubleClick: () => {
+        if (useCustomWindowChrome) void toggleMaximizeFromTitlebar();
+      },
+      children: [
+        /* @__PURE__ */ jsxDEV("div", { className: "main__title-row", children: [
+          layout.sidebarCollapsed && /* @__PURE__ */ jsxDEV(Fragment, { children: [
+            /* @__PURE__ */ jsxDEV(Tip, { label: tr("main.leftPaneShow"), children: /* @__PURE__ */ jsxDEV(
+              Button,
+              {
+                type: "button",
+                variant: "ghost",
+                size: "md",
+                className: "main__brand-button",
+                "aria-label": "KeenCode",
+                onClick: () => setLayout((currentLayout) => {
+                  const next = { ...currentLayout, sidebarCollapsed: false };
+                  saveLayout(localStorage, next);
+                  return next;
+                }),
+                children: /* @__PURE__ */ jsxDEV(IconBolt, { size: 18 }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 175,
+                  columnNumber: 17
+                }, this)
+              },
+              void 0,
+              false,
+              {
+                fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                lineNumber: 161,
+                columnNumber: 15
+              },
+              this
+            ) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 160,
+              columnNumber: 13
+            }, this),
+            /* @__PURE__ */ jsxDEV("div", { className: "main__task-nav", "data-testid": "main-task-navigation", children: [
+              /* @__PURE__ */ jsxDEV(Tip, { label: tr("resources.browserBack"), children: /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  size: "md",
+                  className: "main__task-nav-button",
+                  "aria-label": tr("resources.browserBack"),
+                  disabled: !canGoBack,
+                  onClick: () => void goBack(),
+                  children: /* @__PURE__ */ jsxDEV(IconArrowLeft, { size: 16 }, void 0, false, {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 189,
+                    columnNumber: 19
+                  }, this)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 180,
+                  columnNumber: 17
+                },
+                this
+              ) }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                lineNumber: 179,
+                columnNumber: 15
+              }, this),
+              /* @__PURE__ */ jsxDEV(Tip, { label: tr("resources.browserForward"), children: /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: "ghost",
+                  size: "md",
+                  className: "main__task-nav-button",
+                  "aria-label": tr("resources.browserForward"),
+                  disabled: !canGoForward,
+                  onClick: () => void goForward(),
+                  children: /* @__PURE__ */ jsxDEV(IconArrowRight, { size: 16 }, void 0, false, {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 202,
+                    columnNumber: 19
+                  }, this)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 193,
+                  columnNumber: 17
+                },
+                this
+              ) }, void 0, false, {
+                fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                lineNumber: 192,
+                columnNumber: 15
+              }, this)
+            ] }, void 0, true, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 178,
+              columnNumber: 13
+            }, this),
+            /* @__PURE__ */ jsxDEV(Tip, { label: tr("sidebar.newSession"), children: /* @__PURE__ */ jsxDEV(
+              Button,
+              {
+                type: "button",
+                variant: "ghost",
+                size: "md",
+                className: "main__new-task-button",
+                "aria-label": tr("sidebar.newSession"),
+                onClick: () => void newChat(null),
+                children: /* @__PURE__ */ jsxDEV(IconNewChat, { size: 16 }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 215,
+                  columnNumber: 17
+                }, this)
+              },
+              void 0,
+              false,
+              {
+                fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                lineNumber: 207,
+                columnNumber: 15
+              },
+              this
+            ) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 206,
+              columnNumber: 13
+            }, this)
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+            lineNumber: 159,
+            columnNumber: 9
+          }, this),
+          activeProject ? /* @__PURE__ */ jsxDEV(
+            DropdownMenu,
+            {
+              open: projectMenuOpen,
+              onOpenChange: setProjectMenuOpen,
+              size: "md",
+              children: [
+                /* @__PURE__ */ jsxDEV(Tip, { label: projectContextTooltip, disabled: projectMenuOpen, children: /* @__PURE__ */ jsxDEV(
+                  DropdownMenuTrigger,
+                  {
+                    "data-testid": "main-project-context",
+                    className: "main__project-context",
+                    "aria-label": projectContextLabel || activeProject.path,
+                    render: /* @__PURE__ */ jsxDEV(Button, { type: "button", variant: "ghost", size: "md" }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                      lineNumber: 232,
+                      columnNumber: 15
+                    }, this),
+                    children: /* @__PURE__ */ jsxDEV(IconFolder, { size: 16 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                      lineNumber: 235,
+                      columnNumber: 17
+                    }, this)
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 227,
+                    columnNumber: 15
+                  },
+                  this
+                ) }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 226,
+                  columnNumber: 13
+                }, this),
+                /* @__PURE__ */ jsxDEV(
+                  DropdownMenuContent,
+                  {
+                    className: "main__project-context-popover",
+                    align: "start",
+                    sideOffset: 6,
+                    children: [
+                      /* @__PURE__ */ jsxDEV("div", { className: "main__project-context-summary", children: [
+                        /* @__PURE__ */ jsxDEV("div", { className: "main__project-context-name", children: [
+                          /* @__PURE__ */ jsxDEV(IconFolder, { size: 16 }, void 0, false, {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 245,
+                            columnNumber: 19
+                          }, this),
+                          /* @__PURE__ */ jsxDEV("strong", { title: activeProject.name, children: activeProject.name }, void 0, false, {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 246,
+                            columnNumber: 19
+                          }, this)
+                        ] }, void 0, true, {
+                          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                          lineNumber: 244,
+                          columnNumber: 17
+                        }, this),
+                        /* @__PURE__ */ jsxDEV(
+                          "code",
+                          {
+                            className: "main__project-context-path",
+                            title: activeProject.path,
+                            children: activeProject.path
+                          },
+                          void 0,
+                          false,
+                          {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 248,
+                            columnNumber: 17
+                          },
+                          this
+                        ),
+                        currentBranch ? /* @__PURE__ */ jsxDEV("div", { className: "main__project-context-branch", children: [
+                          /* @__PURE__ */ jsxDEV(IconGitBranch, { size: 15 }, void 0, false, {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 256,
+                            columnNumber: 21
+                          }, this),
+                          /* @__PURE__ */ jsxDEV("span", { title: currentBranch, children: currentBranch }, void 0, false, {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 257,
+                            columnNumber: 21
+                          }, this)
+                        ] }, void 0, true, {
+                          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                          lineNumber: 255,
+                          columnNumber: 15
+                        }, this) : null,
+                        activeProject.pathOk === false ? /* @__PURE__ */ jsxDEV("span", { className: "main__project-context-missing", children: tr("project.pathMissingShort") }, void 0, false, {
+                          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                          lineNumber: 261,
+                          columnNumber: 15
+                        }, this) : null
+                      ] }, void 0, true, {
+                        fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                        lineNumber: 243,
+                        columnNumber: 15
+                      }, this),
+                      projects.length > 1 ? /* @__PURE__ */ jsxDEV(Fragment, { children: [
+                        /* @__PURE__ */ jsxDEV(DropdownMenuSeparator, {}, void 0, false, {
+                          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                          lineNumber: 268,
+                          columnNumber: 19
+                        }, this),
+                        /* @__PURE__ */ jsxDEV(DropdownMenuGroup, { children: [
+                          /* @__PURE__ */ jsxDEV(DropdownMenuGroupLabel, { children: tr("composer.pickProject") }, void 0, false, {
+                            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                            lineNumber: 270,
+                            columnNumber: 21
+                          }, this),
+                          /* @__PURE__ */ jsxDEV(
+                            DropdownMenuRadioGroup,
+                            {
+                              value: activeProject.id,
+                              onValueChange: (projectId) => {
+                                const project = projects.find(
+                                  (candidate) => candidate.id === projectId
+                                );
+                                if (project) void bindSessionProject(project);
+                              },
+                              children: projects.map(
+                                (project) => /* @__PURE__ */ jsxDEV(
+                                  DropdownMenuRadioItem,
+                                  {
+                                    value: project.id,
+                                    className: "main__project-context-option",
+                                    title: project.path,
+                                    children: /* @__PURE__ */ jsxDEV("span", { className: "main__project-context-option-copy", children: [
+                                      /* @__PURE__ */ jsxDEV("span", { className: "main__project-context-option-name", children: project.name }, void 0, false, {
+                                        fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                                        lineNumber: 290,
+                                        columnNumber: 29
+                                      }, this),
+                                      /* @__PURE__ */ jsxDEV("span", { className: "main__project-context-option-path", children: project.path }, void 0, false, {
+                                        fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                                        lineNumber: 293,
+                                        columnNumber: 29
+                                      }, this)
+                                    ] }, void 0, true, {
+                                      fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                                      lineNumber: 289,
+                                      columnNumber: 27
+                                    }, this)
+                                  },
+                                  project.id,
+                                  false,
+                                  {
+                                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                                    lineNumber: 283,
+                                    columnNumber: 19
+                                  },
+                                  this
+                                )
+                              )
+                            },
+                            void 0,
+                            false,
+                            {
+                              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                              lineNumber: 273,
+                              columnNumber: 21
+                            },
+                            this
+                          )
+                        ] }, void 0, true, {
+                          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                          lineNumber: 269,
+                          columnNumber: 19
+                        }, this)
+                      ] }, void 0, true, {
+                        fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                        lineNumber: 267,
+                        columnNumber: 13
+                      }, this) : null
+                    ]
+                  },
+                  void 0,
+                  true,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 238,
+                    columnNumber: 13
+                  },
+                  this
+                )
+              ]
+            },
+            void 0,
+            true,
+            {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 221,
+              columnNumber: 9
+            },
+            this
+          ) : null,
+          showTitle ? /* @__PURE__ */ jsxDEV(Fragment, { children: [
+            /* @__PURE__ */ jsxDEV(Tip, { label: title, children: /* @__PURE__ */ jsxDEV("h1", { className: "main__title", children: title }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 309,
+              columnNumber: 15
+            }, this) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 308,
+              columnNumber: 13
+            }, this),
+            current && /* @__PURE__ */ jsxDEV(Tip, { label: tr("session.menu"), children: /* @__PURE__ */ jsxDEV(
+              Button,
+              {
+                type: "button",
+                variant: "ghost",
+                size: "icon-md",
+                className: "main__title-menu",
+                onClick: (event) => openSessionMenu(event, current),
+                children: /* @__PURE__ */ jsxDEV(IconMore, { size: 16 }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 322,
+                  columnNumber: 19
+                }, this)
+              },
+              void 0,
+              false,
+              {
+                fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                lineNumber: 315,
+                columnNumber: 17
+              },
+              this
+            ) }, void 0, false, {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 314,
+              columnNumber: 11
+            }, this)
+          ] }, void 0, true, {
+            fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+            lineNumber: 307,
+            columnNumber: 9
+          }, this) : null
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+          lineNumber: 157,
+          columnNumber: 7
+        }, this),
+        session.sessionId ? /* @__PURE__ */ jsxDEV("div", { className: "main__top-actions", children: [
+          /* @__PURE__ */ jsxDEV(
+            Tip,
+            {
+              label: summaryOpen ? tr("main.summaryHide") : tr("main.summaryShow"),
+              children: /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  ref: summaryTriggerRef,
+                  type: "button",
+                  variant: summaryOpen ? "soft" : "ghost",
+                  size: "icon-md",
+                  className: "chrome-btn main__pane-toggle" + (summaryOpen ? " is-on" : ""),
+                  "aria-pressed": summaryOpen,
+                  onClick: () => setSummaryOpen((value) => !value),
+                  children: /* @__PURE__ */ jsxDEV(IconSummary, { size: 16 }, void 0, false, {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 351,
+                    columnNumber: 15
+                  }, this)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 339,
+                  columnNumber: 13
+                },
+                this
+              )
+            },
+            void 0,
+            false,
+            {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 332,
+              columnNumber: 11
+            },
+            this
+          ),
+          /* @__PURE__ */ jsxDEV(
+            Tip,
+            {
+              label: layout.asideCollapsed ? tr("main.rightPaneShow") : tr("main.rightPaneHide"),
+              children: /* @__PURE__ */ jsxDEV(
+                Button,
+                {
+                  type: "button",
+                  variant: !layout.asideCollapsed ? "soft" : "ghost",
+                  size: "icon-md",
+                  className: "chrome-btn main__pane-toggle" + (!layout.asideCollapsed ? " is-on" : ""),
+                  onClick: () => setLayout((currentLayout) => {
+                    const next = {
+                      ...currentLayout,
+                      asideCollapsed: !currentLayout.asideCollapsed
+                    };
+                    saveLayout(localStorage, next);
+                    return next;
+                  }),
+                  children: /* @__PURE__ */ jsxDEV(IconPanelRight, { size: 16 }, void 0, false, {
+                    fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                    lineNumber: 380,
+                    columnNumber: 15
+                  }, this)
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+                  lineNumber: 361,
+                  columnNumber: 13
+                },
+                this
+              )
+            },
+            void 0,
+            false,
+            {
+              fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+              lineNumber: 354,
+              columnNumber: 11
+            },
+            this
+          )
+        ] }, void 0, true, {
+          fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+          lineNumber: 331,
+          columnNumber: 7
+        }, this) : null
+      ]
+    },
+    void 0,
+    true,
+    {
+      fileName: "D:/projects/keen-code/src/features/app/main/MainHeader.tsx",
+      lineNumber: 150,
+      columnNumber: 5
+    },
+    this
+  );
+}
+_s(MainHeader, "K5gSMpu10F82eaUiTkelpF0XIBw=");
+_c = MainHeader;
+var _c;
+$RefreshReg$(_c, "MainHeader");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/features/app/main/MainHeader.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/features/app/main/MainHeader.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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QUFBLGdCQW5CM0I7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLGNBb0JBO0FBQUE7QUFBQSxZQTNCRjtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUEsVUE0QkE7QUFBQSxhQW5ERjtBQUFBO0FBQUE7QUFBQTtBQUFBLGVBb0RBLElBQ0U7QUFBQTtBQUFBO0FBQUEsSUExT047QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLEVBMk9BO0FBRUo7QUFBQ2pCLEdBdlJlckIsWUFBVTtBQUFBLEtBQVZBO0FBQVUsSUFBQWlEO0FBQUEsYUFBQUEsSUFBQSIsIm5hbWVzIjpbInVzZVN0YXRlIiwiQnV0dG9uIiwiRHJvcGRvd25NZW51IiwiRHJvcGRvd25NZW51Q29udGVudCIsIkRyb3Bkb3duTWVudUdyb3VwIiwiRHJvcGRvd25NZW51R3JvdXBMYWJlbCIsIkRyb3Bkb3duTWVudVJhZGlvR3JvdXAiLCJEcm9wZG93bk1lbnVSYWRpb0l0ZW0iLCJEcm9wZG93bk1lbnVTZXBhcmF0b3IiLCJEcm9wZG93bk1lbnVUcmlnZ2VyIiwiVGlwIiwiSWNvbkFycm93TGVmdCIsIkljb25BcnJvd1JpZ2h0IiwiSWNvbkJvbHQiLCJJY29uR2l0QnJhbmNoIiwiSWNvbk1vcmUiLCJJY29uTmV3Q2hhdCIsIkljb25QYW5lbFJpZ2h0IiwiSWNvbkZvbGRlciIsIkljb25TdW1tYXJ5Iiwic2F2ZUxheW91dCIsImlzUGxhY2Vob2xkZXJTZXNzaW9uVGl0bGUiLCJwYXRoc0VxdWFsIiwicmVzb2x2ZUhlYWRlcldvcmt0cmVlQnJhbmNoIiwicHJvamVjdFBhdGgiLCJ3b3JrdHJlZXMiLCJkZXRhY2hlZExhYmVsIiwicGF0aCIsInRyaW0iLCJjdXJyZW50IiwiZmluZCIsIndvcmt0cmVlIiwiYnJhbmNoIiwiZGV0YWNoZWQiLCJNYWluSGVhZGVyIiwibGF5b3V0Iiwic2V0TGF5b3V0IiwidXNlQ3VzdG9tV2luZG93Q2hyb21lIiwidG9nZ2xlTWF4aW1pemVGcm9tVGl0bGViYXIiLCJ0ciIsInNlc3Npb25zIiwiYWN0aXZlUHJvamVjdCIsInByb2plY3RzIiwiZ2l0V29ya3RyZWVzIiwiYmluZFNlc3Npb25Qcm9qZWN0Iiwic2Vzc2lvbiIsInN1bW1hcnlPcGVuIiwic3VtbWFyeVRyaWdnZXJSZWYiLCJzZXRTdW1tYXJ5T3BlbiIsIm9wZW5TZXNzaW9uTWVudSIsIm5ld0NoYXQiLCJjYW5Hb0JhY2siLCJjYW5Hb0ZvcndhcmQiLCJnb0JhY2siLCJnb0ZvcndhcmQiLCJfcyIsIml0ZW0iLCJpZCIsInNlc3Npb25JZCIsInRpdGxlIiwic2hvd1RpdGxlIiwicHJvamVjdE1lbnVPcGVuIiwic2V0UHJvamVjdE1lbnVPcGVuIiwiY3VycmVudEJyYW5jaCIsInByb2plY3RDb250ZXh0TGFiZWwiLCJuYW1lIiwiZmlsdGVyIiwiQm9vbGVhbiIsImpvaW4iLCJwcm9qZWN0Q29udGV4dFRvb2x0aXAiLCJzaWRlYmFyQ29sbGFwc2VkIiwiY3VycmVudExheW91dCIsIm5leHQiLCJsb2NhbFN0b3JhZ2UiLCJwYXRoT2siLCJsZW5ndGgiLCJwcm9qZWN0SWQiLCJwcm9qZWN0IiwiY2FuZGlkYXRlIiwibWFwIiwiZXZlbnQiLCJ2YWx1ZSIsImFzaWRlQ29sbGFwc2VkIiwiX2MiXSwiaWdub3JlTGlzdCI6W10sInNvdXJjZXMiOlsiTWFpbkhlYWRlci50c3giXSwic291cmNlc0NvbnRlbnQiOlsiaW1wb3J0IHR5cGUge1xuICBEaXNwYXRjaCxcbiAgTW91c2VFdmVudCBhcyBSZWFjdE1vdXNlRXZlbnQsXG4gIFJlZk9iamVjdCxcbiAgU2V0U3RhdGVBY3Rpb24sXG59IGZyb20gXCJyZWFjdFwiO1xuaW1wb3J0IHsgdXNlU3RhdGUgfSBmcm9tIFwicmVhY3RcIjtcbmltcG9ydCB0eXBlIHsgTWVzc2FnZUtleSwgVmFycyB9IGZyb20gXCJAL2kxOG5cIjtcclxuaW1wb3J0IHR5cGUgeyBMYXlvdXRQcmVmcyB9IGZyb20gXCJAL2xpYi9sYXlvdXRcIjtcbmltcG9ydCB0eXBlIHsgUHJvamVjdCwgU2Vzc2lvblJvdyB9IGZyb20gXCJAL2ZlYXR1cmVzL2FwcC9tb2RlbHNcIjtcbmltcG9ydCB0eXBlIHsgU2Vzc2lvblNuYXBzaG90IH0gZnJvbSBcIkAvbGliL3Nlc3Npb25cIjtcbmltcG9ydCB0eXBlIHsgR2l0V29ya3RyZWVFbnRyeSB9IGZyb20gXCJAL2xpYi9hcGlcIjtcbmltcG9ydCB7IEJ1dHRvbiB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvYnV0dG9uXCI7XG5pbXBvcnQge1xuICBEcm9wZG93bk1lbnUsXG4gIERyb3Bkb3duTWVudUNvbnRlbnQsXG4gIERyb3Bkb3duTWVudUdyb3VwLFxuICBEcm9wZG93bk1lbnVHcm91cExhYmVsLFxuICBEcm9wZG93bk1lbnVSYWRpb0dyb3VwLFxuICBEcm9wZG93bk1lbnVSYWRpb0l0ZW0sXG4gIERyb3Bkb3duTWVudVNlcGFyYXRvcixcbiAgRHJvcGRvd25NZW51VHJpZ2dlcixcbn0gZnJvbSBcIkAvY29tcG9uZW50cy91aS9kcm9wZG93bi1tZW51XCI7XG5pbXBvcnQgeyBUaXAgfSBmcm9tIFwiQC9jb21wb25lbnRzL3VpL3Rvb2x0aXBcIjtcbmltcG9ydCB7XG4gIEljb25BcnJvd0xlZnQsXG4gIEljb25BcnJvd1JpZ2h0LFxuICBJY29uQm9sdCxcbiAgSWNvbkdpdEJyYW5jaCxcbiAgSWNvbk1vcmUsXG4gIEljb25OZXdDaGF0LFxuICBJY29uUGFuZWxSaWdodCxcbiAgSWNvbkZvbGRlcixcbiAgSWNvblN1bW1hcnksXG59IGZyb20gXCJAL2NvbXBvbmVudHMvaWNvbnNcIjtcbmltcG9ydCB7IHNhdmVMYXlvdXQgfSBmcm9tIFwiQC9saWIvbGF5b3V0XCI7XG5pbXBvcnQgeyBpc1BsYWNlaG9sZGVyU2Vzc2lvblRpdGxlIH0gZnJvbSBcIkAvbGliL3Nlc3Npb25UaXRsZVwiO1xuaW1wb3J0IHsgcGF0aHNFcXVhbCB9IGZyb20gXCJAL2xpYi9naXRXb3JrdHJlZVwiO1xuXHJcbnR5cGUgU2V0U3RhdGU8VD4gPSBEaXNwYXRjaDxTZXRTdGF0ZUFjdGlvbjxUPj47XHJcbnR5cGUgVHJhbnNsYXRvciA9IChrZXk6IE1lc3NhZ2VLZXksIHZhcnM/OiBWYXJzKSA9PiBzdHJpbmc7XHJcbnR5cGUgTmV3Q2hhdCA9IChcbiAgcHJvamVjdD86IFByb2plY3QgfCBudWxsLFxuICBvcHRpb25zPzogeyBzZWVkRHJhZnQ/OiBzdHJpbmcgfSxcbikgPT4gdm9pZCB8IFByb21pc2U8dm9pZD47XG50eXBlIEJpbmRTZXNzaW9uUHJvamVjdCA9IChcbiAgcHJvamVjdDogUHJvamVjdCB8IG51bGwsXG4gIG9wdGlvbnM/OiB7IHNpbGVudD86IGJvb2xlYW4gfSxcbikgPT4gUHJvbWlzZTx2b2lkPjtcblxuLyoqIOS7juW3sue7j+WKoOi9veeahCB3b3JrdHJlZSDliJfooajkuK3op6PmnpDlvZPliY3pobnnm67nmoTliIbmlK/vvJvkuI3pop3lpJbop6blj5EgR2l0IOafpeivouOAgiAqL1xuZXhwb3J0IGZ1bmN0aW9uIHJlc29sdmVIZWFkZXJXb3JrdHJlZUJyYW5jaChcbiAgcHJvamVjdFBhdGg6IHN0cmluZyB8IG51bGwgfCB1bmRlZmluZWQsXG4gIHdvcmt0cmVlczogR2l0V29ya3RyZWVFbnRyeVtdLFxuICBkZXRhY2hlZExhYmVsOiBzdHJpbmcsXG4pOiBzdHJpbmcgfCBudWxsIHtcbiAgY29uc3QgcGF0aCA9IHByb2plY3RQYXRoPy50cmltKCk7XG4gIGlmICghcGF0aCkgcmV0dXJuIG51bGw7XG4gIGNvbnN0IGN1cnJlbnQgPSB3b3JrdHJlZXMuZmluZCgod29ya3RyZWUpID0+IHBhdGhzRXF1YWwod29ya3RyZWUucGF0aCwgcGF0aCkpO1xuICBpZiAoIWN1cnJlbnQpIHJldHVybiBudWxsO1xuICBjb25zdCBicmFuY2ggPSBjdXJyZW50LmJyYW5jaD8udHJpbSgpO1xuICBpZiAoYnJhbmNoKSByZXR1cm4gYnJhbmNoO1xuICByZXR1cm4gY3VycmVudC5kZXRhY2hlZCA/IGRldGFjaGVkTGFiZWwgOiBudWxsO1xufVxuXHJcbmV4cG9ydCBpbnRlcmZhY2UgTWFpbkhlYWRlclByb3BzIHtcclxuICBsYXlvdXQ6IExheW91dFByZWZzO1xyXG4gIHNldExheW91dDogU2V0U3RhdGU8TGF5b3V0UHJlZnM+O1xyXG4gIHVzZUN1c3RvbVdpbmRvd0Nocm9tZTogYm9vbGVhbjtcclxuICB0b2dnbGVNYXhpbWl6ZUZyb21UaXRsZWJhcjogKCkgPT4gUHJvbWlzZTx2b2lkPjtcclxuICB0cjogVHJhbnNsYXRvcjtcbiAgc2Vzc2lvbnM6IFNlc3Npb25Sb3dbXTtcbiAgYWN0aXZlUHJvamVjdDogUHJvamVjdCB8IG51bGw7XG4gIHByb2plY3RzOiBQcm9qZWN0W107XG4gIGdpdFdvcmt0cmVlczogR2l0V29ya3RyZWVFbnRyeVtdO1xuICBiaW5kU2Vzc2lvblByb2plY3Q6IEJpbmRTZXNzaW9uUHJvamVjdDtcbiAgc2Vzc2lvbjogU2Vzc2lvblNuYXBzaG90O1xuICBzdW1tYXJ5T3BlbjogYm9vbGVhbjtcclxuICBzdW1tYXJ5VHJpZ2dlclJlZjogUmVmT2JqZWN0PEhUTUxCdXR0b25FbGVtZW50IHwgbnVsbD47XHJcbiAgc2V0U3VtbWFyeU9wZW46IFNldFN0YXRlPGJvb2xlYW4+O1xuICBvcGVuU2Vzc2lvbk1lbnU6IChldmVudDogUmVhY3RNb3VzZUV2ZW50LCBzZXNzaW9uOiBTZXNzaW9uUm93KSA9PiB2b2lkO1xuICBuZXdDaGF0OiBOZXdDaGF0O1xuICBjYW5Hb0JhY2s6IGJvb2xlYW47XG4gIGNhbkdvRm9yd2FyZDogYm9vbGVhbjtcbiAgZ29CYWNrOiAoKSA9PiBQcm9taXNlPHZvaWQ+O1xuICBnb0ZvcndhcmQ6ICgpID0+IFByb21pc2U8dm9pZD47XG59XG5cclxuZXhwb3J0IGZ1bmN0aW9uIE1haW5IZWFkZXIoe1xyXG4gIGxheW91dCxcclxuICBzZXRMYXlvdXQsXHJcbiAgdXNlQ3VzdG9tV2luZG93Q2hyb21lLFxyXG4gIHRvZ2dsZU1heGltaXplRnJvbVRpdGxlYmFyLFxyXG4gIHRyLFxuICBzZXNzaW9ucyxcbiAgYWN0aXZlUHJvamVjdCxcbiAgcHJvamVjdHMsXG4gIGdpdFdvcmt0cmVlcyxcbiAgYmluZFNlc3Npb25Qcm9qZWN0LFxuICBzZXNzaW9uLFxuICBzdW1tYXJ5T3BlbixcclxuICBzdW1tYXJ5VHJpZ2dlclJlZixcclxuICBzZXRTdW1tYXJ5T3BlbixcbiAgb3BlblNlc3Npb25NZW51LFxuICBuZXdDaGF0LFxuICBjYW5Hb0JhY2ssXG4gIGNhbkdvRm9yd2FyZCxcbiAgZ29CYWNrLFxuICBnb0ZvcndhcmQsXG59OiBNYWluSGVhZGVyUHJvcHMpIHtcbiAgY29uc3QgY3VycmVudCA9IHNlc3Npb25zLmZpbmQoKGl0ZW0pID0+IGl0ZW0uaWQgPT09IHNlc3Npb24uc2Vzc2lvbklkKTtcclxuICBjb25zdCB0aXRsZSA9IGN1cnJlbnQ/LnRpdGxlIHx8IHNlc3Npb24udGl0bGUgfHwgXCJcIjtcclxuICBjb25zdCBzaG93VGl0bGUgPSAhaXNQbGFjZWhvbGRlclNlc3Npb25UaXRsZSh0aXRsZSwgW1xuICAgIHRyKFwic2Vzc2lvbi5uZXdcIiksXG4gICAgdHIoXCJzZXNzaW9uLnBsYWNlaG9sZGVyVGl0bGVcIiksXG4gIF0pO1xuICBjb25zdCBbcHJvamVjdE1lbnVPcGVuLCBzZXRQcm9qZWN0TWVudU9wZW5dID0gdXNlU3RhdGUoZmFsc2UpO1xuICBjb25zdCBjdXJyZW50QnJhbmNoID0gcmVzb2x2ZUhlYWRlcldvcmt0cmVlQnJhbmNoKFxuICAgIGFjdGl2ZVByb2plY3Q/LnBhdGgsXG4gICAgZ2l0V29ya3RyZWVzLFxuICAgIHRyKFwiY29tcG9zZXIud29ya3RyZWVEZXRhY2hlZFwiKSxcbiAgKTtcbiAgY29uc3QgcHJvamVjdENvbnRleHRMYWJlbCA9IFthY3RpdmVQcm9qZWN0Py5uYW1lLCBjdXJyZW50QnJhbmNoXVxuICAgIC5maWx0ZXIoQm9vbGVhbilcbiAgICAuam9pbihcIiDCtyBcIik7XG4gIGNvbnN0IHByb2plY3RDb250ZXh0VG9vbHRpcCA9IFthY3RpdmVQcm9qZWN0Py5wYXRoLCBjdXJyZW50QnJhbmNoXVxuICAgIC5maWx0ZXIoQm9vbGVhbilcbiAgICAuam9pbihcIlxcblwiKTtcblxyXG4gIHJldHVybiAoXG4gICAgPGRpdlxuICAgICAgY2xhc3NOYW1lPVwibWFpbl9fdG9wXCJcbiAgICAgIGRhdGEtdGF1cmktZHJhZy1yZWdpb25cbiAgICAgIG9uRG91YmxlQ2xpY2s9eygpID0+IHtcbiAgICAgICAgaWYgKHVzZUN1c3RvbVdpbmRvd0Nocm9tZSkgdm9pZCB0b2dnbGVNYXhpbWl6ZUZyb21UaXRsZWJhcigpO1xuICAgICAgfX1cbiAgICA+XG4gICAgICA8ZGl2IGNsYXNzTmFtZT1cIm1haW5fX3RpdGxlLXJvd1wiPlxuICAgICAgICB7bGF5b3V0LnNpZGViYXJDb2xsYXBzZWQgJiYgKFxuICAgICAgICAgIDw+XG4gICAgICAgICAgICA8VGlwIGxhYmVsPXt0cihcIm1haW4ubGVmdFBhbmVTaG93XCIpfT5cbiAgICAgICAgICAgICAgPEJ1dHRvblxuICAgICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXG4gICAgICAgICAgICAgICAgc2l6ZT1cIm1kXCJcbiAgICAgICAgICAgICAgICBjbGFzc05hbWU9XCJtYWluX19icmFuZC1idXR0b25cIlxuICAgICAgICAgICAgICAgIGFyaWEtbGFiZWw9XCJLZWVuQ29kZVwiXG4gICAgICAgICAgICAgICAgb25DbGljaz17KCkgPT5cbiAgICAgICAgICAgICAgICAgIHNldExheW91dCgoY3VycmVudExheW91dCkgPT4ge1xuICAgICAgICAgICAgICAgICAgICBjb25zdCBuZXh0ID0geyAuLi5jdXJyZW50TGF5b3V0LCBzaWRlYmFyQ29sbGFwc2VkOiBmYWxzZSB9O1xuICAgICAgICAgICAgICAgICAgICBzYXZlTGF5b3V0KGxvY2FsU3RvcmFnZSwgbmV4dCk7XG4gICAgICAgICAgICAgICAgICAgIHJldHVybiBuZXh0O1xuICAgICAgICAgICAgICAgICAgfSlcbiAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgICA8SWNvbkJvbHQgc2l6ZT17MTh9IC8+XG4gICAgICAgICAgICAgIDwvQnV0dG9uPlxuICAgICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cIm1haW5fX3Rhc2stbmF2XCIgZGF0YS10ZXN0aWQ9XCJtYWluLXRhc2stbmF2aWdhdGlvblwiPlxuICAgICAgICAgICAgICA8VGlwIGxhYmVsPXt0cihcInJlc291cmNlcy5icm93c2VyQmFja1wiKX0+XG4gICAgICAgICAgICAgICAgPEJ1dHRvblxuICAgICAgICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXG4gICAgICAgICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIlxuICAgICAgICAgICAgICAgICAgc2l6ZT1cIm1kXCJcbiAgICAgICAgICAgICAgICAgIGNsYXNzTmFtZT1cIm1haW5fX3Rhc2stbmF2LWJ1dHRvblwiXG4gICAgICAgICAgICAgICAgICBhcmlhLWxhYmVsPXt0cihcInJlc291cmNlcy5icm93c2VyQmFja1wiKX1cbiAgICAgICAgICAgICAgICAgIGRpc2FibGVkPXshY2FuR29CYWNrfVxuICAgICAgICAgICAgICAgICAgb25DbGljaz17KCkgPT4gdm9pZCBnb0JhY2soKX1cbiAgICAgICAgICAgICAgICA+XG4gICAgICAgICAgICAgICAgICA8SWNvbkFycm93TGVmdCBzaXplPXsxNn0gLz5cbiAgICAgICAgICAgICAgICA8L0J1dHRvbj5cbiAgICAgICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgICAgIDxUaXAgbGFiZWw9e3RyKFwicmVzb3VyY2VzLmJyb3dzZXJGb3J3YXJkXCIpfT5cbiAgICAgICAgICAgICAgICA8QnV0dG9uXG4gICAgICAgICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcbiAgICAgICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXG4gICAgICAgICAgICAgICAgICBzaXplPVwibWRcIlxuICAgICAgICAgICAgICAgICAgY2xhc3NOYW1lPVwibWFpbl9fdGFzay1uYXYtYnV0dG9uXCJcbiAgICAgICAgICAgICAgICAgIGFyaWEtbGFiZWw9e3RyKFwicmVzb3VyY2VzLmJyb3dzZXJGb3J3YXJkXCIpfVxuICAgICAgICAgICAgICAgICAgZGlzYWJsZWQ9eyFjYW5Hb0ZvcndhcmR9XG4gICAgICAgICAgICAgICAgICBvbkNsaWNrPXsoKSA9PiB2b2lkIGdvRm9yd2FyZCgpfVxuICAgICAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgICAgIDxJY29uQXJyb3dSaWdodCBzaXplPXsxNn0gLz5cbiAgICAgICAgICAgICAgICA8L0J1dHRvbj5cbiAgICAgICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICAgIDxUaXAgbGFiZWw9e3RyKFwic2lkZWJhci5uZXdTZXNzaW9uXCIpfT5cbiAgICAgICAgICAgICAgPEJ1dHRvblxuICAgICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXG4gICAgICAgICAgICAgICAgc2l6ZT1cIm1kXCJcbiAgICAgICAgICAgICAgICBjbGFzc05hbWU9XCJtYWluX19uZXctdGFzay1idXR0b25cIlxuICAgICAgICAgICAgICAgIGFyaWEtbGFiZWw9e3RyKFwic2lkZWJhci5uZXdTZXNzaW9uXCIpfVxuICAgICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHZvaWQgbmV3Q2hhdChudWxsKX1cbiAgICAgICAgICAgICAgPlxuICAgICAgICAgICAgICAgIDxJY29uTmV3Q2hhdCBzaXplPXsxNn0gLz5cbiAgICAgICAgICAgICAgPC9CdXR0b24+XG4gICAgICAgICAgICA8L1RpcD5cbiAgICAgICAgICA8Lz5cbiAgICAgICAgKX1cbiAgICAgICAge2FjdGl2ZVByb2plY3QgPyAoXG4gICAgICAgICAgPERyb3Bkb3duTWVudVxuICAgICAgICAgICAgb3Blbj17cHJvamVjdE1lbnVPcGVufVxuICAgICAgICAgICAgb25PcGVuQ2hhbmdlPXtzZXRQcm9qZWN0TWVudU9wZW59XG4gICAgICAgICAgICBzaXplPVwibWRcIlxuICAgICAgICAgID5cbiAgICAgICAgICAgIDxUaXAgbGFiZWw9e3Byb2plY3RDb250ZXh0VG9vbHRpcH0gZGlzYWJsZWQ9e3Byb2plY3RNZW51T3Blbn0+XG4gICAgICAgICAgICAgIDxEcm9wZG93bk1lbnVUcmlnZ2VyXG4gICAgICAgICAgICAgICAgZGF0YS10ZXN0aWQ9XCJtYWluLXByb2plY3QtY29udGV4dFwiXG4gICAgICAgICAgICAgICAgY2xhc3NOYW1lPVwibWFpbl9fcHJvamVjdC1jb250ZXh0XCJcbiAgICAgICAgICAgICAgICBhcmlhLWxhYmVsPXtwcm9qZWN0Q29udGV4dExhYmVsIHx8IGFjdGl2ZVByb2plY3QucGF0aH1cbiAgICAgICAgICAgICAgICByZW5kZXI9e1xuICAgICAgICAgICAgICAgICAgPEJ1dHRvbiB0eXBlPVwiYnV0dG9uXCIgdmFyaWFudD1cImdob3N0XCIgc2l6ZT1cIm1kXCIgLz5cbiAgICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgICA8SWNvbkZvbGRlciBzaXplPXsxNn0gLz5cbiAgICAgICAgICAgICAgPC9Ecm9wZG93bk1lbnVUcmlnZ2VyPlxuICAgICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgICA8RHJvcGRvd25NZW51Q29udGVudFxuICAgICAgICAgICAgICBjbGFzc05hbWU9XCJtYWluX19wcm9qZWN0LWNvbnRleHQtcG9wb3ZlclwiXG4gICAgICAgICAgICAgIGFsaWduPVwic3RhcnRcIlxuICAgICAgICAgICAgICBzaWRlT2Zmc2V0PXs2fVxuICAgICAgICAgICAgPlxuICAgICAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cIm1haW5fX3Byb2plY3QtY29udGV4dC1zdW1tYXJ5XCI+XG4gICAgICAgICAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJtYWluX19wcm9qZWN0LWNvbnRleHQtbmFtZVwiPlxuICAgICAgICAgICAgICAgICAgPEljb25Gb2xkZXIgc2l6ZT17MTZ9IC8+XG4gICAgICAgICAgICAgICAgICA8c3Ryb25nIHRpdGxlPXthY3RpdmVQcm9qZWN0Lm5hbWV9PnthY3RpdmVQcm9qZWN0Lm5hbWV9PC9zdHJvbmc+XG4gICAgICAgICAgICAgICAgPC9kaXY+XG4gICAgICAgICAgICAgICAgPGNvZGVcbiAgICAgICAgICAgICAgICAgIGNsYXNzTmFtZT1cIm1haW5fX3Byb2plY3QtY29udGV4dC1wYXRoXCJcbiAgICAgICAgICAgICAgICAgIHRpdGxlPXthY3RpdmVQcm9qZWN0LnBhdGh9XG4gICAgICAgICAgICAgICAgPlxuICAgICAgICAgICAgICAgICAge2FjdGl2ZVByb2plY3QucGF0aH1cbiAgICAgICAgICAgICAgICA8L2NvZGU+XG4gICAgICAgICAgICAgICAge2N1cnJlbnRCcmFuY2ggPyAoXG4gICAgICAgICAgICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cIm1haW5fX3Byb2plY3QtY29udGV4dC1icmFuY2hcIj5cbiAgICAgICAgICAgICAgICAgICAgPEljb25HaXRCcmFuY2ggc2l6ZT17MTV9IC8+XG4gICAgICAgICAgICAgICAgICAgIDxzcGFuIHRpdGxlPXtjdXJyZW50QnJhbmNofT57Y3VycmVudEJyYW5jaH08L3NwYW4+XG4gICAgICAgICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICAgICAgICApIDogbnVsbH1cbiAgICAgICAgICAgICAgICB7YWN0aXZlUHJvamVjdC5wYXRoT2sgPT09IGZhbHNlID8gKFxuICAgICAgICAgICAgICAgICAgPHNwYW4gY2xhc3NOYW1lPVwibWFpbl9fcHJvamVjdC1jb250ZXh0LW1pc3NpbmdcIj5cbiAgICAgICAgICAgICAgICAgICAge3RyKFwicHJvamVjdC5wYXRoTWlzc2luZ1Nob3J0XCIpfVxuICAgICAgICAgICAgICAgICAgPC9zcGFuPlxuICAgICAgICAgICAgICAgICkgOiBudWxsfVxuICAgICAgICAgICAgICA8L2Rpdj5cbiAgICAgICAgICAgICAge3Byb2plY3RzLmxlbmd0aCA+IDEgPyAoXG4gICAgICAgICAgICAgICAgPD5cbiAgICAgICAgICAgICAgICAgIDxEcm9wZG93bk1lbnVTZXBhcmF0b3IgLz5cbiAgICAgICAgICAgICAgICAgIDxEcm9wZG93bk1lbnVHcm91cD5cbiAgICAgICAgICAgICAgICAgICAgPERyb3Bkb3duTWVudUdyb3VwTGFiZWw+XG4gICAgICAgICAgICAgICAgICAgICAge3RyKFwiY29tcG9zZXIucGlja1Byb2plY3RcIil9XG4gICAgICAgICAgICAgICAgICAgIDwvRHJvcGRvd25NZW51R3JvdXBMYWJlbD5cbiAgICAgICAgICAgICAgICAgICAgPERyb3Bkb3duTWVudVJhZGlvR3JvdXBcbiAgICAgICAgICAgICAgICAgICAgICB2YWx1ZT17YWN0aXZlUHJvamVjdC5pZH1cbiAgICAgICAgICAgICAgICAgICAgICBvblZhbHVlQ2hhbmdlPXsocHJvamVjdElkKSA9PiB7XG4gICAgICAgICAgICAgICAgICAgICAgICBjb25zdCBwcm9qZWN0ID0gcHJvamVjdHMuZmluZChcbiAgICAgICAgICAgICAgICAgICAgICAgICAgKGNhbmRpZGF0ZSkgPT4gY2FuZGlkYXRlLmlkID09PSBwcm9qZWN0SWQsXG4gICAgICAgICAgICAgICAgICAgICAgICApO1xuICAgICAgICAgICAgICAgICAgICAgICAgaWYgKHByb2plY3QpIHZvaWQgYmluZFNlc3Npb25Qcm9qZWN0KHByb2plY3QpO1xuICAgICAgICAgICAgICAgICAgICAgIH19XG4gICAgICAgICAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgICAgICAgICB7cHJvamVjdHMubWFwKChwcm9qZWN0KSA9PiAoXG4gICAgICAgICAgICAgICAgICAgICAgICA8RHJvcGRvd25NZW51UmFkaW9JdGVtXG4gICAgICAgICAgICAgICAgICAgICAgICAgIGtleT17cHJvamVjdC5pZH1cbiAgICAgICAgICAgICAgICAgICAgICAgICAgdmFsdWU9e3Byb2plY3QuaWR9XG4gICAgICAgICAgICAgICAgICAgICAgICAgIGNsYXNzTmFtZT1cIm1haW5fX3Byb2plY3QtY29udGV4dC1vcHRpb25cIlxuICAgICAgICAgICAgICAgICAgICAgICAgICB0aXRsZT17cHJvamVjdC5wYXRofVxuICAgICAgICAgICAgICAgICAgICAgICAgPlxuICAgICAgICAgICAgICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJtYWluX19wcm9qZWN0LWNvbnRleHQtb3B0aW9uLWNvcHlcIj5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICA8c3BhbiBjbGFzc05hbWU9XCJtYWluX19wcm9qZWN0LWNvbnRleHQtb3B0aW9uLW5hbWVcIj5cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICAgIHtwcm9qZWN0Lm5hbWV9XG4gICAgICAgICAgICAgICAgICAgICAgICAgICAgPC9zcGFuPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgIDxzcGFuIGNsYXNzTmFtZT1cIm1haW5fX3Byb2plY3QtY29udGV4dC1vcHRpb24tcGF0aFwiPlxuICAgICAgICAgICAgICAgICAgICAgICAgICAgICAge3Byb2plY3QucGF0aH1cbiAgICAgICAgICAgICAgICAgICAgICAgICAgICA8L3NwYW4+XG4gICAgICAgICAgICAgICAgICAgICAgICAgIDwvc3Bhbj5cbiAgICAgICAgICAgICAgICAgICAgICAgIDwvRHJvcGRvd25NZW51UmFkaW9JdGVtPlxuICAgICAgICAgICAgICAgICAgICAgICkpfVxuICAgICAgICAgICAgICAgICAgICA8L0Ryb3Bkb3duTWVudVJhZGlvR3JvdXA+XG4gICAgICAgICAgICAgICAgICA8L0Ryb3Bkb3duTWVudUdyb3VwPlxuICAgICAgICAgICAgICAgIDwvPlxuICAgICAgICAgICAgICApIDogbnVsbH1cbiAgICAgICAgICAgIDwvRHJvcGRvd25NZW51Q29udGVudD5cbiAgICAgICAgICA8L0Ryb3Bkb3duTWVudT5cbiAgICAgICAgKSA6IG51bGx9XG4gICAgICAgIHtzaG93VGl0bGUgPyAoXG4gICAgICAgICAgPD5cbiAgICAgICAgICAgIDxUaXAgbGFiZWw9e3RpdGxlfT5cbiAgICAgICAgICAgICAgPGgxIGNsYXNzTmFtZT1cIm1haW5fX3RpdGxlXCI+XG4gICAgICAgICAgICAgICAge3RpdGxlfVxuICAgICAgICAgICAgICA8L2gxPlxuICAgICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgICB7Y3VycmVudCAmJiAoXG4gICAgICAgICAgICAgIDxUaXAgbGFiZWw9e3RyKFwic2Vzc2lvbi5tZW51XCIpfT5cbiAgICAgICAgICAgICAgICA8QnV0dG9uXG4gICAgICAgICAgICAgICAgICB0eXBlPVwiYnV0dG9uXCJcbiAgICAgICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXG4gICAgICAgICAgICAgICAgICBzaXplPVwiaWNvbi1tZFwiXG4gICAgICAgICAgICAgICAgICBjbGFzc05hbWU9XCJtYWluX190aXRsZS1tZW51XCJcbiAgICAgICAgICAgICAgICAgIG9uQ2xpY2s9eyhldmVudCkgPT4gb3BlblNlc3Npb25NZW51KGV2ZW50LCBjdXJyZW50KX1cbiAgICAgICAgICAgICAgICA+XG4gICAgICAgICAgICAgICAgICA8SWNvbk1vcmUgc2l6ZT17MTZ9IC8+XG4gICAgICAgICAgICAgICAgPC9CdXR0b24+XG4gICAgICAgICAgICAgIDwvVGlwPlxuICAgICAgICAgICAgKX1cbiAgICAgICAgICA8Lz5cbiAgICAgICAgKSA6IG51bGx9XG4gICAgICA8L2Rpdj5cblxuICAgICAge3Nlc3Npb24uc2Vzc2lvbklkID8gKFxuICAgICAgICA8ZGl2IGNsYXNzTmFtZT1cIm1haW5fX3RvcC1hY3Rpb25zXCI+XG4gICAgICAgICAgPFRpcFxuICAgICAgICAgICAgbGFiZWw9e1xuICAgICAgICAgICAgICBzdW1tYXJ5T3BlblxuICAgICAgICAgICAgICAgID8gdHIoXCJtYWluLnN1bW1hcnlIaWRlXCIpXG4gICAgICAgICAgICAgICAgOiB0cihcIm1haW4uc3VtbWFyeVNob3dcIilcbiAgICAgICAgICAgIH1cbiAgICAgICAgICA+XG4gICAgICAgICAgICA8QnV0dG9uXG4gICAgICAgICAgICAgIHJlZj17c3VtbWFyeVRyaWdnZXJSZWZ9XG4gICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgICAgICB2YXJpYW50PXtzdW1tYXJ5T3BlbiA/IFwic29mdFwiIDogXCJnaG9zdFwifVxuICAgICAgICAgICAgICBzaXplPVwiaWNvbi1tZFwiXG4gICAgICAgICAgICAgIGNsYXNzTmFtZT17XG4gICAgICAgICAgICAgICAgXCJjaHJvbWUtYnRuIG1haW5fX3BhbmUtdG9nZ2xlXCIgK1xuICAgICAgICAgICAgICAgIChzdW1tYXJ5T3BlbiA/IFwiIGlzLW9uXCIgOiBcIlwiKVxuICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgIGFyaWEtcHJlc3NlZD17c3VtbWFyeU9wZW59XG4gICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHNldFN1bW1hcnlPcGVuKCh2YWx1ZSkgPT4gIXZhbHVlKX1cbiAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgPEljb25TdW1tYXJ5IHNpemU9ezE2fSAvPlxuICAgICAgICAgICAgPC9CdXR0b24+XG4gICAgICAgICAgPC9UaXA+XG4gICAgICAgICAgPFRpcFxuICAgICAgICAgICAgbGFiZWw9e1xuICAgICAgICAgICAgICBsYXlvdXQuYXNpZGVDb2xsYXBzZWRcbiAgICAgICAgICAgICAgICA/IHRyKFwibWFpbi5yaWdodFBhbmVTaG93XCIpXG4gICAgICAgICAgICAgICAgOiB0cihcIm1haW4ucmlnaHRQYW5lSGlkZVwiKVxuICAgICAgICAgICAgfVxuICAgICAgICAgID5cbiAgICAgICAgICAgIDxCdXR0b25cbiAgICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXG4gICAgICAgICAgICAgIHZhcmlhbnQ9eyFsYXlvdXQuYXNpZGVDb2xsYXBzZWQgPyBcInNvZnRcIiA6IFwiZ2hvc3RcIn1cbiAgICAgICAgICAgICAgc2l6ZT1cImljb24tbWRcIlxuICAgICAgICAgICAgICBjbGFzc05hbWU9e1xuICAgICAgICAgICAgICAgIFwiY2hyb21lLWJ0biBtYWluX19wYW5lLXRvZ2dsZVwiICtcbiAgICAgICAgICAgICAgICAoIWxheW91dC5hc2lkZUNvbGxhcHNlZCA/IFwiIGlzLW9uXCIgOiBcIlwiKVxuICAgICAgICAgICAgICB9XG4gICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+XG4gICAgICAgICAgICAgICAgc2V0TGF5b3V0KChjdXJyZW50TGF5b3V0KSA9PiB7XG4gICAgICAgICAgICAgICAgICBjb25zdCBuZXh0ID0ge1xuICAgICAgICAgICAgICAgICAgICAuLi5jdXJyZW50TGF5b3V0LFxuICAgICAgICAgICAgICAgICAgICBhc2lkZUNvbGxhcHNlZDogIWN1cnJlbnRMYXlvdXQuYXNpZGVDb2xsYXBzZWQsXG4gICAgICAgICAgICAgICAgICB9O1xuICAgICAgICAgICAgICAgICAgc2F2ZUxheW91dChsb2NhbFN0b3JhZ2UsIG5leHQpO1xuICAgICAgICAgICAgICAgICAgcmV0dXJuIG5leHQ7XG4gICAgICAgICAgICAgICAgfSlcbiAgICAgICAgICAgICAgfVxuICAgICAgICAgICAgPlxuICAgICAgICAgICAgICA8SWNvblBhbmVsUmlnaHQgc2l6ZT17MTZ9IC8+XG4gICAgICAgICAgICA8L0J1dHRvbj5cbiAgICAgICAgICA8L1RpcD5cbiAgICAgICAgPC9kaXY+XG4gICAgICApIDogbnVsbH1cbiAgICA8L2Rpdj5cbiAgKTtcbn1cbiJdLCJmaWxlIjoiRDovcHJvamVjdHMva2Vlbi1jb2RlL3NyYy9mZWF0dXJlcy9hcHAvbWFpbi9NYWluSGVhZGVyLnRzeCJ9

@@ -1,0 +1,254 @@
+import { createHotContext as __vite__createHotContext } from "/@vite/client";import.meta.hot = __vite__createHotContext("/@fs/D:\\projects\\keen-code\\src\\features\\app\\sidebar\\SidebarChrome.tsx");import __vite__cjsImport0_react_jsxDevRuntime from "/node_modules/.vite/deps/react_jsx-dev-runtime.js?v=341393c0"; const Fragment = __vite__cjsImport0_react_jsxDevRuntime["Fragment"]; const jsxDEV = __vite__cjsImport0_react_jsxDevRuntime["jsxDEV"];
+import * as RefreshRuntime from "/@react-refresh";
+const inWebWorker = typeof WorkerGlobalScope !== "undefined" && self instanceof WorkerGlobalScope;
+let prevRefreshReg;
+let prevRefreshSig;
+if (import.meta.hot && !inWebWorker) {
+  if (!window.$RefreshReg$) {
+    throw new Error(
+      "@vitejs/plugin-react can't detect preamble. Something is wrong."
+    );
+  }
+  prevRefreshReg = window.$RefreshReg$;
+  prevRefreshSig = window.$RefreshSig$;
+  window.$RefreshReg$ = RefreshRuntime.getRefreshReg("D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx");
+  window.$RefreshSig$ = RefreshRuntime.createSignatureFunctionForTransform;
+}
+import {
+  getSidebarWidthMax,
+  SIDEBAR_WIDTH_MIN,
+  saveLayout
+} from "/src/lib/layout.ts";
+import { Button } from "/src/components/ui/button.tsx";
+import { Tip } from "/src/components/ui/tooltip.tsx";
+import { IconArrowLeft, IconArrowRight } from "/src/components/icons.tsx";
+export function SidebarChrome({
+  layout,
+  setLayout,
+  setResizingSidebar,
+  sidebarRef,
+  sidebarResizeStartRef,
+  canGoBack,
+  canGoForward,
+  goBack,
+  goForward,
+  useCustomWindowChrome,
+  toggleMaximizeFromTitlebar,
+  tr
+}) {
+  const getAvailableWidth = () => {
+    const measured = sidebarRef.current?.parentElement?.getBoundingClientRect().width;
+    if (measured && measured > 0) return measured;
+    return typeof window === "undefined" ? Number.POSITIVE_INFINITY : window.innerWidth;
+  };
+  return /* @__PURE__ */ jsxDEV(Fragment, { children: [
+    !layout.sidebarCollapsed && /* @__PURE__ */ jsxDEV(
+      "div",
+      {
+        className: "sidebar-resizer",
+        role: "separator",
+        "aria-orientation": "vertical",
+        "aria-label": tr("main.resizeLeftPane"),
+        tabIndex: 0,
+        "aria-valuemin": SIDEBAR_WIDTH_MIN,
+        "aria-valuemax": getSidebarWidthMax(getAvailableWidth()),
+        "aria-valuenow": layout.sidebarWidth,
+        onKeyDown: (event) => {
+          const max = getSidebarWidthMax(getAvailableWidth());
+          const nextWidth = event.key === "Home" ? SIDEBAR_WIDTH_MIN : event.key === "End" ? max : event.key === "ArrowLeft" ? Math.max(SIDEBAR_WIDTH_MIN, layout.sidebarWidth - 16) : event.key === "ArrowRight" ? Math.min(max, layout.sidebarWidth + 16) : null;
+          if (nextWidth == null) return;
+          event.preventDefault();
+          setLayout((current) => {
+            const next = { ...current, sidebarWidth: nextWidth };
+            saveLayout(localStorage, next);
+            return next;
+          });
+        },
+        onPointerDown: (event) => {
+          event.preventDefault();
+          sidebarResizeStartRef.current = {
+            clientX: event.clientX,
+            width: layout.sidebarWidth
+          };
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          setResizingSidebar(true);
+        }
+      },
+      void 0,
+      false,
+      {
+        fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+        lineNumber: 76,
+        columnNumber: 7
+      },
+      this
+    ),
+    /* @__PURE__ */ jsxDEV(
+      "div",
+      {
+        className: "sidebar-chrome",
+        "data-tauri-drag-region": true,
+        onDoubleClick: () => {
+          if (useCustomWindowChrome) void toggleMaximizeFromTitlebar();
+        },
+        children: [
+          /* @__PURE__ */ jsxDEV(Tip, { label: tr("main.leftPaneHide"), children: /* @__PURE__ */ jsxDEV(
+            Button,
+            {
+              type: "button",
+              variant: "ghost",
+              size: "md",
+              className: "sidebar-brand",
+              "aria-label": tr("main.leftPaneHide"),
+              onClick: () => setLayout((current) => {
+                const next = { ...current, sidebarCollapsed: true };
+                saveLayout(localStorage, next);
+                return next;
+              }),
+              children: /* @__PURE__ */ jsxDEV(
+                "img",
+                {
+                  src: "/logo.png",
+                  alt: "",
+                  className: "sidebar-brand__logo",
+                  draggable: false
+                },
+                void 0,
+                false,
+                {
+                  fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                  lineNumber: 140,
+                  columnNumber: 13
+                },
+                this
+              )
+            },
+            void 0,
+            false,
+            {
+              fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+              lineNumber: 126,
+              columnNumber: 11
+            },
+            this
+          ) }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+            lineNumber: 125,
+            columnNumber: 9
+          }, this),
+          /* @__PURE__ */ jsxDEV(
+            "div",
+            {
+              className: "sidebar-chrome__task-nav",
+              "data-testid": "sidebar-task-navigation",
+              children: [
+                /* @__PURE__ */ jsxDEV(Tip, { label: tr("resources.browserBack"), children: /* @__PURE__ */ jsxDEV(
+                  Button,
+                  {
+                    type: "button",
+                    variant: "ghost",
+                    size: "md",
+                    className: "sidebar-chrome__icon-button",
+                    "aria-label": tr("resources.browserBack"),
+                    disabled: !canGoBack,
+                    onClick: () => void goBack(),
+                    children: /* @__PURE__ */ jsxDEV(IconArrowLeft, { size: 16 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                      lineNumber: 162,
+                      columnNumber: 15
+                    }, this)
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                    lineNumber: 153,
+                    columnNumber: 13
+                  },
+                  this
+                ) }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                  lineNumber: 152,
+                  columnNumber: 11
+                }, this),
+                /* @__PURE__ */ jsxDEV(Tip, { label: tr("resources.browserForward"), children: /* @__PURE__ */ jsxDEV(
+                  Button,
+                  {
+                    type: "button",
+                    variant: "ghost",
+                    size: "md",
+                    className: "sidebar-chrome__icon-button",
+                    "aria-label": tr("resources.browserForward"),
+                    disabled: !canGoForward,
+                    onClick: () => void goForward(),
+                    children: /* @__PURE__ */ jsxDEV(IconArrowRight, { size: 16 }, void 0, false, {
+                      fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                      lineNumber: 175,
+                      columnNumber: 15
+                    }, this)
+                  },
+                  void 0,
+                  false,
+                  {
+                    fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                    lineNumber: 166,
+                    columnNumber: 13
+                  },
+                  this
+                ) }, void 0, false, {
+                  fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+                  lineNumber: 165,
+                  columnNumber: 11
+                }, this)
+              ]
+            },
+            void 0,
+            true,
+            {
+              fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+              lineNumber: 148,
+              columnNumber: 9
+            },
+            this
+          ),
+          /* @__PURE__ */ jsxDEV("div", { className: "sidebar-chrome__drag", "data-tauri-drag-region": true }, void 0, false, {
+            fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+            lineNumber: 179,
+            columnNumber: 9
+          }, this)
+        ]
+      },
+      void 0,
+      true,
+      {
+        fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+        lineNumber: 118,
+        columnNumber: 7
+      },
+      this
+    )
+  ] }, void 0, true, {
+    fileName: "D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx",
+    lineNumber: 74,
+    columnNumber: 5
+  }, this);
+}
+_c = SidebarChrome;
+var _c;
+$RefreshReg$(_c, "SidebarChrome");
+if (import.meta.hot && !inWebWorker) {
+  window.$RefreshReg$ = prevRefreshReg;
+  window.$RefreshSig$ = prevRefreshSig;
+}
+if (import.meta.hot && !inWebWorker) {
+  RefreshRuntime.__hmr_import(import.meta.url).then((currentExports) => {
+    RefreshRuntime.registerExportsForReactRefresh("D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx", currentExports);
+    import.meta.hot.accept((nextExports) => {
+      if (!nextExports) return;
+      const invalidateMessage = RefreshRuntime.validateRefreshBoundaryAndEnqueueUpdate("D:/projects/keen-code/src/features/app/sidebar/SidebarChrome.tsx", currentExports, nextExports);
+      if (invalidateMessage) import.meta.hot.invalidate(invalidateMessage);
+    });
+  });
+}
+
+//# sourceMappingURL=data:application/json;base64,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QUFBQUEsb0JBQ1gsU0FBUyxNQUFNLEtBQUtFLFVBQVU7QUFBQSxvQkFFOUIsaUNBQUMsa0JBQWUsTUFBTSxNQUF0QjtBQUFBO0FBQUE7QUFBQTtBQUFBLDJCQUF5QjtBQUFBO0FBQUEsa0JBVDNCO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQSxnQkFVQSxLQVhGO0FBQUE7QUFBQTtBQUFBO0FBQUEsdUJBWUE7QUFBQTtBQUFBO0FBQUEsWUE3QkY7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLFVBOEJBO0FBQUEsVUFDQSx1QkFBQyxTQUFJLFdBQVUsd0JBQXVCLDBCQUFzQixRQUE1RDtBQUFBO0FBQUE7QUFBQTtBQUFBLGlCQUE0RDtBQUFBO0FBQUE7QUFBQSxNQTdEOUQ7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBO0FBQUE7QUFBQTtBQUFBLElBOERBO0FBQUEsT0ExR0Y7QUFBQTtBQUFBO0FBQUE7QUFBQSxTQTJHQTtBQUVKO0FBQUM2QixLQXBJZXRDO0FBQWEsSUFBQXNDO0FBQUEsYUFBQUEsSUFBQSIsIm5hbWVzIjpbImdldFNpZGViYXJXaWR0aE1heCIsIlNJREVCQVJfV0lEVEhfTUlOIiwic2F2ZUxheW91dCIsIkJ1dHRvbiIsIlRpcCIsIkljb25BcnJvd0xlZnQiLCJJY29uQXJyb3dSaWdodCIsIlNpZGViYXJDaHJvbWUiLCJsYXlvdXQiLCJzZXRMYXlvdXQiLCJzZXRSZXNpemluZ1NpZGViYXIiLCJzaWRlYmFyUmVmIiwic2lkZWJhclJlc2l6ZVN0YXJ0UmVmIiwiY2FuR29CYWNrIiwiY2FuR29Gb3J3YXJkIiwiZ29CYWNrIiwiZ29Gb3J3YXJkIiwidXNlQ3VzdG9tV2luZG93Q2hyb21lIiwidG9nZ2xlTWF4aW1pemVGcm9tVGl0bGViYXIiLCJ0ciIsImdldEF2YWlsYWJsZVdpZHRoIiwibWVhc3VyZWQiLCJjdXJyZW50IiwicGFyZW50RWxlbWVudCIsImdldEJvdW5kaW5nQ2xpZW50UmVjdCIsIndpZHRoIiwid2luZG93IiwiTnVtYmVyIiwiUE9TSVRJVkVfSU5GSU5JVFkiLCJpbm5lcldpZHRoIiwic2lkZWJhckNvbGxhcHNlZCIsInNpZGViYXJXaWR0aCIsImV2ZW50IiwibWF4IiwibmV4dFdpZHRoIiwia2V5IiwiTWF0aCIsIm1pbiIsInByZXZlbnREZWZhdWx0IiwibmV4dCIsImxvY2FsU3RvcmFnZSIsImNsaWVudFgiLCJjdXJyZW50VGFyZ2V0Iiwic2V0UG9pbnRlckNhcHR1cmUiLCJwb2ludGVySWQiLCJfYyJdLCJpZ25vcmVMaXN0IjpbXSwic291cmNlcyI6WyJTaWRlYmFyQ2hyb21lLnRzeCJdLCJzb3VyY2VzQ29udGVudCI6WyJpbXBvcnQgdHlwZSB7IEtleWJvYXJkRXZlbnQgYXMgUmVhY3RLZXlib2FyZEV2ZW50LCBQb2ludGVyRXZlbnQgYXMgUmVhY3RQb2ludGVyRXZlbnQsIFJlZk9iamVjdCB9IGZyb20gXCJyZWFjdFwiO1xuaW1wb3J0IHtcbiAgZ2V0U2lkZWJhcldpZHRoTWF4LFxuICBTSURFQkFSX1dJRFRIX01JTixcbiAgc2F2ZUxheW91dCxcbiAgdHlwZSBMYXlvdXRQcmVmcyxcbiAgdHlwZSBTaWRlYmFyUmVzaXplU3RhcnQsXG59IGZyb20gXCJAL2xpYi9sYXlvdXRcIjtcbmltcG9ydCB0eXBlIHtcclxuICBTaWRlYmFyU2V0U3RhdGUsXHJcbiAgU2lkZWJhclRyYW5zbGF0b3IsXHJcbn0gZnJvbSBcIi4vdHlwZXNcIjtcclxuaW1wb3J0IHsgQnV0dG9uIH0gZnJvbSBcIkAvY29tcG9uZW50cy91aS9idXR0b25cIjtcbmltcG9ydCB7IFRpcCB9IGZyb20gXCJAL2NvbXBvbmVudHMvdWkvdG9vbHRpcFwiO1xuaW1wb3J0IHsgSWNvbkFycm93TGVmdCwgSWNvbkFycm93UmlnaHQgfSBmcm9tIFwiQC9jb21wb25lbnRzL2ljb25zXCI7XG5cclxuZXhwb3J0IGludGVyZmFjZSBTaWRlYmFyQ2hyb21lUHJvcHMge1xuICBsYXlvdXQ6IExheW91dFByZWZzO1xuICBzZXRMYXlvdXQ6IFNpZGViYXJTZXRTdGF0ZTxMYXlvdXRQcmVmcz47XG4gIHNldFJlc2l6aW5nU2lkZWJhcjogU2lkZWJhclNldFN0YXRlPGJvb2xlYW4+O1xuICBzaWRlYmFyUmVmOiBSZWZPYmplY3Q8SFRNTEVsZW1lbnQgfCBudWxsPjtcbiAgc2lkZWJhclJlc2l6ZVN0YXJ0UmVmOiBSZWZPYmplY3Q8U2lkZWJhclJlc2l6ZVN0YXJ0IHwgbnVsbD47XG4gIGNhbkdvQmFjazogYm9vbGVhbjtcbiAgY2FuR29Gb3J3YXJkOiBib29sZWFuO1xuICBnb0JhY2s6ICgpID0+IFByb21pc2U8dm9pZD47XG4gIGdvRm9yd2FyZDogKCkgPT4gUHJvbWlzZTx2b2lkPjtcbiAgdXNlQ3VzdG9tV2luZG93Q2hyb21lOiBib29sZWFuO1xuICB0b2dnbGVNYXhpbWl6ZUZyb21UaXRsZWJhcjogKCkgPT4gUHJvbWlzZTx2b2lkPjtcclxuICB0cjogU2lkZWJhclRyYW5zbGF0b3I7XHJcbn1cclxuXHJcbmV4cG9ydCBmdW5jdGlvbiBTaWRlYmFyQ2hyb21lKHtcclxuICBsYXlvdXQsXG4gIHNldExheW91dCxcbiAgc2V0UmVzaXppbmdTaWRlYmFyLFxuICBzaWRlYmFyUmVmLFxuICBzaWRlYmFyUmVzaXplU3RhcnRSZWYsXG4gIGNhbkdvQmFjayxcbiAgY2FuR29Gb3J3YXJkLFxuICBnb0JhY2ssXG4gIGdvRm9yd2FyZCxcbiAgdXNlQ3VzdG9tV2luZG93Q2hyb21lLFxuICB0b2dnbGVNYXhpbWl6ZUZyb21UaXRsZWJhcixcclxuICB0cixcclxufTogU2lkZWJhckNocm9tZVByb3BzKSB7XG4gIGNvbnN0IGdldEF2YWlsYWJsZVdpZHRoID0gKCkgPT4ge1xuICAgIGNvbnN0IG1lYXN1cmVkID0gc2lkZWJhclJlZi5jdXJyZW50Py5wYXJlbnRFbGVtZW50Py5nZXRCb3VuZGluZ0NsaWVudFJlY3QoKS53aWR0aDtcbiAgICBpZiAobWVhc3VyZWQgJiYgbWVhc3VyZWQgPiAwKSByZXR1cm4gbWVhc3VyZWQ7XG4gICAgcmV0dXJuIHR5cGVvZiB3aW5kb3cgPT09IFwidW5kZWZpbmVkXCJcbiAgICAgID8gTnVtYmVyLlBPU0lUSVZFX0lORklOSVRZXG4gICAgICA6IHdpbmRvdy5pbm5lcldpZHRoO1xuICB9O1xuXG4gIHJldHVybiAoXG4gICAgPD5cclxuICAgICAgeyFsYXlvdXQuc2lkZWJhckNvbGxhcHNlZCAmJiAoXHJcbiAgICAgICAgPGRpdlxyXG4gICAgICAgICAgY2xhc3NOYW1lPVwic2lkZWJhci1yZXNpemVyXCJcclxuICAgICAgICAgIHJvbGU9XCJzZXBhcmF0b3JcIlxuICAgICAgICAgIGFyaWEtb3JpZW50YXRpb249XCJ2ZXJ0aWNhbFwiXG4gICAgICAgICAgYXJpYS1sYWJlbD17dHIoXCJtYWluLnJlc2l6ZUxlZnRQYW5lXCIpfVxuICAgICAgICAgIHRhYkluZGV4PXswfVxuICAgICAgICAgIGFyaWEtdmFsdWVtaW49e1NJREVCQVJfV0lEVEhfTUlOfVxuICAgICAgICAgIGFyaWEtdmFsdWVtYXg9e1xuICAgICAgICAgICAgZ2V0U2lkZWJhcldpZHRoTWF4KGdldEF2YWlsYWJsZVdpZHRoKCkpXG4gICAgICAgICAgfVxuICAgICAgICAgIGFyaWEtdmFsdWVub3c9e2xheW91dC5zaWRlYmFyV2lkdGh9XG4gICAgICAgICAgb25LZXlEb3duPXsoZXZlbnQ6IFJlYWN0S2V5Ym9hcmRFdmVudDxIVE1MRGl2RWxlbWVudD4pID0+IHtcbiAgICAgICAgICAgIGNvbnN0IG1heCA9IGdldFNpZGViYXJXaWR0aE1heChnZXRBdmFpbGFibGVXaWR0aCgpKTtcbiAgICAgICAgICAgIGNvbnN0IG5leHRXaWR0aCA9XG4gICAgICAgICAgICAgIGV2ZW50LmtleSA9PT0gXCJIb21lXCJcbiAgICAgICAgICAgICAgICA/IFNJREVCQVJfV0lEVEhfTUlOXG4gICAgICAgICAgICAgICAgOiBldmVudC5rZXkgPT09IFwiRW5kXCJcbiAgICAgICAgICAgICAgICAgID8gbWF4XG4gICAgICAgICAgICAgICAgICA6IGV2ZW50LmtleSA9PT0gXCJBcnJvd0xlZnRcIlxuICAgICAgICAgICAgICAgICAgICA/IE1hdGgubWF4KFNJREVCQVJfV0lEVEhfTUlOLCBsYXlvdXQuc2lkZWJhcldpZHRoIC0gMTYpXG4gICAgICAgICAgICAgICAgICAgIDogZXZlbnQua2V5ID09PSBcIkFycm93UmlnaHRcIlxuICAgICAgICAgICAgICAgICAgICAgID8gTWF0aC5taW4obWF4LCBsYXlvdXQuc2lkZWJhcldpZHRoICsgMTYpXG4gICAgICAgICAgICAgICAgICAgICAgOiBudWxsO1xuICAgICAgICAgICAgaWYgKG5leHRXaWR0aCA9PSBudWxsKSByZXR1cm47XG4gICAgICAgICAgICBldmVudC5wcmV2ZW50RGVmYXVsdCgpO1xuICAgICAgICAgICAgc2V0TGF5b3V0KChjdXJyZW50KSA9PiB7XG4gICAgICAgICAgICAgIGNvbnN0IG5leHQgPSB7IC4uLmN1cnJlbnQsIHNpZGViYXJXaWR0aDogbmV4dFdpZHRoIH07XG4gICAgICAgICAgICAgIHNhdmVMYXlvdXQobG9jYWxTdG9yYWdlLCBuZXh0KTtcbiAgICAgICAgICAgICAgcmV0dXJuIG5leHQ7XG4gICAgICAgICAgICB9KTtcbiAgICAgICAgICB9fVxuICAgICAgICAgIG9uUG9pbnRlckRvd249eyhldmVudDogUmVhY3RQb2ludGVyRXZlbnQ8SFRNTERpdkVsZW1lbnQ+KSA9PiB7XG4gICAgICAgICAgICBldmVudC5wcmV2ZW50RGVmYXVsdCgpO1xuICAgICAgICAgICAgc2lkZWJhclJlc2l6ZVN0YXJ0UmVmLmN1cnJlbnQgPSB7XG4gICAgICAgICAgICAgIGNsaWVudFg6IGV2ZW50LmNsaWVudFgsXG4gICAgICAgICAgICAgIHdpZHRoOiBsYXlvdXQuc2lkZWJhcldpZHRoLFxuICAgICAgICAgICAgfTtcbiAgICAgICAgICAgIGV2ZW50LmN1cnJlbnRUYXJnZXQuc2V0UG9pbnRlckNhcHR1cmU/LihldmVudC5wb2ludGVySWQpO1xuICAgICAgICAgICAgc2V0UmVzaXppbmdTaWRlYmFyKHRydWUpO1xuICAgICAgICAgIH19XG4gICAgICAgIC8+XHJcbiAgICAgICl9XHJcbiAgICAgIDxkaXZcclxuICAgICAgICBjbGFzc05hbWU9XCJzaWRlYmFyLWNocm9tZVwiXHJcbiAgICAgICAgZGF0YS10YXVyaS1kcmFnLXJlZ2lvblxyXG4gICAgICAgIG9uRG91YmxlQ2xpY2s9eygpID0+IHtcclxuICAgICAgICAgIGlmICh1c2VDdXN0b21XaW5kb3dDaHJvbWUpIHZvaWQgdG9nZ2xlTWF4aW1pemVGcm9tVGl0bGViYXIoKTtcclxuICAgICAgICB9fVxyXG4gICAgICA+XHJcbiAgICAgICAgPFRpcCBsYWJlbD17dHIoXCJtYWluLmxlZnRQYW5lSGlkZVwiKX0+XG4gICAgICAgICAgPEJ1dHRvblxuICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXG4gICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIlxuICAgICAgICAgICAgc2l6ZT1cIm1kXCJcbiAgICAgICAgICAgIGNsYXNzTmFtZT1cInNpZGViYXItYnJhbmRcIlxuICAgICAgICAgICAgYXJpYS1sYWJlbD17dHIoXCJtYWluLmxlZnRQYW5lSGlkZVwiKX1cbiAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+XG4gICAgICAgICAgICAgIHNldExheW91dCgoY3VycmVudCkgPT4ge1xuICAgICAgICAgICAgICAgIGNvbnN0IG5leHQgPSB7IC4uLmN1cnJlbnQsIHNpZGViYXJDb2xsYXBzZWQ6IHRydWUgfTtcbiAgICAgICAgICAgICAgICBzYXZlTGF5b3V0KGxvY2FsU3RvcmFnZSwgbmV4dCk7XG4gICAgICAgICAgICAgICAgcmV0dXJuIG5leHQ7XG4gICAgICAgICAgICAgIH0pXG4gICAgICAgICAgICB9XG4gICAgICAgICAgPlxuICAgICAgICAgICAgPGltZ1xuICAgICAgICAgICAgICBzcmM9XCIvbG9nby5wbmdcIlxuICAgICAgICAgICAgICBhbHQ9XCJcIlxuICAgICAgICAgICAgICBjbGFzc05hbWU9XCJzaWRlYmFyLWJyYW5kX19sb2dvXCJcbiAgICAgICAgICAgICAgZHJhZ2dhYmxlPXtmYWxzZX1cbiAgICAgICAgICAgIC8+XG4gICAgICAgICAgPC9CdXR0b24+XG4gICAgICAgIDwvVGlwPlxuICAgICAgICA8ZGl2XG4gICAgICAgICAgY2xhc3NOYW1lPVwic2lkZWJhci1jaHJvbWVfX3Rhc2stbmF2XCJcbiAgICAgICAgICBkYXRhLXRlc3RpZD1cInNpZGViYXItdGFzay1uYXZpZ2F0aW9uXCJcbiAgICAgICAgPlxuICAgICAgICAgIDxUaXAgbGFiZWw9e3RyKFwicmVzb3VyY2VzLmJyb3dzZXJCYWNrXCIpfT5cbiAgICAgICAgICAgIDxCdXR0b25cbiAgICAgICAgICAgICAgdHlwZT1cImJ1dHRvblwiXG4gICAgICAgICAgICAgIHZhcmlhbnQ9XCJnaG9zdFwiXG4gICAgICAgICAgICAgIHNpemU9XCJtZFwiXG4gICAgICAgICAgICAgIGNsYXNzTmFtZT1cInNpZGViYXItY2hyb21lX19pY29uLWJ1dHRvblwiXG4gICAgICAgICAgICAgIGFyaWEtbGFiZWw9e3RyKFwicmVzb3VyY2VzLmJyb3dzZXJCYWNrXCIpfVxuICAgICAgICAgICAgICBkaXNhYmxlZD17IWNhbkdvQmFja31cbiAgICAgICAgICAgICAgb25DbGljaz17KCkgPT4gdm9pZCBnb0JhY2soKX1cbiAgICAgICAgICAgID5cbiAgICAgICAgICAgICAgPEljb25BcnJvd0xlZnQgc2l6ZT17MTZ9IC8+XG4gICAgICAgICAgICA8L0J1dHRvbj5cbiAgICAgICAgICA8L1RpcD5cbiAgICAgICAgICA8VGlwIGxhYmVsPXt0cihcInJlc291cmNlcy5icm93c2VyRm9yd2FyZFwiKX0+XG4gICAgICAgICAgICA8QnV0dG9uXG4gICAgICAgICAgICAgIHR5cGU9XCJidXR0b25cIlxuICAgICAgICAgICAgICB2YXJpYW50PVwiZ2hvc3RcIlxuICAgICAgICAgICAgICBzaXplPVwibWRcIlxuICAgICAgICAgICAgICBjbGFzc05hbWU9XCJzaWRlYmFyLWNocm9tZV9faWNvbi1idXR0b25cIlxuICAgICAgICAgICAgICBhcmlhLWxhYmVsPXt0cihcInJlc291cmNlcy5icm93c2VyRm9yd2FyZFwiKX1cbiAgICAgICAgICAgICAgZGlzYWJsZWQ9eyFjYW5Hb0ZvcndhcmR9XG4gICAgICAgICAgICAgIG9uQ2xpY2s9eygpID0+IHZvaWQgZ29Gb3J3YXJkKCl9XG4gICAgICAgICAgICA+XG4gICAgICAgICAgICAgIDxJY29uQXJyb3dSaWdodCBzaXplPXsxNn0gLz5cbiAgICAgICAgICAgIDwvQnV0dG9uPlxuICAgICAgICAgIDwvVGlwPlxuICAgICAgICA8L2Rpdj5cbiAgICAgICAgPGRpdiBjbGFzc05hbWU9XCJzaWRlYmFyLWNocm9tZV9fZHJhZ1wiIGRhdGEtdGF1cmktZHJhZy1yZWdpb24gLz5cbiAgICAgIDwvZGl2PlxyXG4gICAgPC8+XHJcbiAgKTtcclxufVxyXG4iXSwiZmlsZSI6IkQ6L3Byb2plY3RzL2tlZW4tY29kZS9zcmMvZmVhdHVyZXMvYXBwL3NpZGViYXIvU2lkZWJhckNocm9tZS50c3gifQ==

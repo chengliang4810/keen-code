@@ -1,0 +1,16 @@
+{
+  "steps": [
+    { "do": "eval", "js": "JSON.stringify({before:[...document.querySelectorAll('.sidebar [role=button][aria-expanded]')].filter(e=>e.textContent.trim()==='e2e-test-project').map(e=>e.getAttribute('aria-expanded')).join()})", "desc": "读当前展开基线" },
+    { "do": "clicktext", "role": "button", "text": "收起全部项目" },
+    { "do": "wait", "ms": 700 },
+    { "do": "eval", "js": "JSON.stringify({collapsed:[...document.querySelectorAll('.sidebar [role=button][aria-expanded]')].filter(e=>e.textContent.trim()==='e2e-test-project').map(e=>e.getAttribute('aria-expanded')).join()})", "desc": "收起后基线应为 false" },
+    { "do": "clicktext", "role": "button", "text": "搜索" },
+    { "do": "wait", "ms": 700 },
+    { "do": "eval", "js": "!!document.querySelector('.search-panel')", "desc": "弹窗已开" },
+    { "do": "clicktext", "role": "button", "text": "e2e-test-project" },
+    { "do": "wait", "ms": 400 },
+    { "do": "eval", "js": "JSON.stringify({dialogOpen:!!document.querySelector('.search-panel'), expandedReal:[...document.querySelectorAll('.sidebar [role=button][aria-expanded]')].filter(e=>e.textContent.trim()==='e2e-test-project').map(e=>e.getAttribute('aria-expanded')).join()})", "desc": "真实点击后读展开状态" },
+    { "do": "wait", "ms": 900 },
+    { "do": "eval", "js": "JSON.stringify({expandedSettled:[...document.querySelectorAll('.sidebar [role=button][aria-expanded]')].filter(e=>e.textContent.trim()==='e2e-test-project').map(e=>e.getAttribute('aria-expanded')).join()})", "desc": "延时再读最终状态" }
+  ]
+}

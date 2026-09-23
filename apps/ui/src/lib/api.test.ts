@@ -64,7 +64,7 @@ function backgroundTaskResult(): BackgroundTaskInfo {
 /** 读取真实 Tauri 入口，避免 handler 注册回归测试依赖构建产物。 */
 function readTauriEntrySource(): string {
   return readFileSync(
-    new URL("../../../desktop/src-tauri/src/lib.rs", import.meta.url),
+    new URL("../../../desktop/src/lib.rs", import.meta.url),
     "utf8",
   );
 }
