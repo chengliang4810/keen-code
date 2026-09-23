@@ -3,6 +3,7 @@
  */
 
 import {
+  isValidElement,
   memo,
   useCallback,
   useEffect,
@@ -12,7 +13,8 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import type { Components } from "react-markdown";
+import type { Components } from "streamdown";
+import type { PluggableList } from "unified";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
@@ -20,6 +22,8 @@ import { VideoUi, videoUiLabels } from "@/components/VideoUi";
 import { FilePathCard } from "@/components/FilePathCard";
 import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import { HighlightedText } from "@/components/HighlightedText";
+import { normalizeSingleDollarMath } from "@/lib/dollarMathGuard";
+import { remarkAutolinkPunctuation } from "@/lib/remarkAutolinkPunctuation";
 import {
   isImagePath,
   isVideoPath,
@@ -37,7 +41,7 @@ import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import { reactNodeText } from "@/lib/reactNodeText";
 import { cn } from "@/lib/utils";
 import { CodeBlock } from "./CodeBlock";
-import { IncrementalMarkdown } from "./IncrementalMarkdown";
+import { StreamdownMarkdown } from "./StreamdownMarkdown";
 import {
   findMarkdownTextBlock,
   selectMarkdownTextBlock,
@@ -45,6 +49,26 @@ import {
 
 const useCommittedLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
+
+/** 稳定 identity,避免每个 token 重算 streamdown 的 remark 链。 */
+const CHAT_REMARK_PLUGINS: PluggableList = [remarkAutolinkPunctuation];
+
+/** 单个 img/code 块子节点解除段落包裹(对齐 streamdown 默认段落语义)。 */
+function unwrapSingleBlockChild(c: ReactNode): ReactNode | null {
+  const only = (Array.isArray(c) ? c : [c]).filter(
+    (child) => child != null && child !== "",
+  );
+  if (only.length !== 1 || !isValidElement(only[0])) return null;
+  const props = only[0].props as {
+    node?: { tagName?: string };
+    "data-block"?: unknown;
+  };
+  const tagName = props.node?.tagName;
+  if (tagName === "img" || (tagName === "code" && "data-block" in props)) {
+    return <>{c}</>;
+  }
+  return null;
+}
 
 /** Highlight string leaves for in-chat find (markdown-safe). */
 function highlightChildren(
@@ -348,7 +372,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   const buildComponents = (
     paint: (node: ReactNode) => ReactNode,
   ): Components => ({
-    p: ({ children: c }) => <p>{paint(c)}</p>,
+    p: ({ children: c }) => unwrapSingleBlockChild(c) ?? <p>{paint(c)}</p>,
     li: ({ children: c }) => <li>{paint(c)}</li>,
     strong: ({ children: c }) => <strong>{paint(c)}</strong>,
     em: ({ children: c }) => <em>{paint(c)}</em>,
@@ -398,13 +422,16 @@ export const MarkdownChat = memo(function MarkdownChat({
         </a>
       );
     },
-    pre: ({ children: c }) => <>{c}</>,
-    code: ({ className: cnCode, children: c }) => {
+    code: (props) => {
+      const { className: cnCode, children: c } = props;
       const match =
         typeof cnCode === "string"
           ? /language-([\w#+-]+)/.exec(cnCode)
           : null;
-      const block = Boolean(match) || String(c).includes("\n");
+      // streamdown 的默认 pre 会给块级 code 克隆 `data-block` 属性;
+      // 保留 className/换行嗅探作为兜底,不依赖单一标记。
+      const block =
+        "data-block" in props || Boolean(match) || String(c).includes("\n");
       if (!block) {
         return <code className="chat-md__inline-code">{paint(c)}</code>;
       }
@@ -455,8 +482,7 @@ export const MarkdownChat = memo(function MarkdownChat({
   });
 
   // Stable during token updates, so memoized prefix segments do not re-render.
-  const plainComponents = useMemo(
-    () => buildComponents((node) => node),
+  const plainComponents = useMemo(    () => buildComponents((node) => node),
     [imageLabels, renderPathOrUrl, streaming, tr],
   );
   // Find is an interactive exceptional path: use one full document parse so
@@ -468,6 +494,9 @@ export const MarkdownChat = memo(function MarkdownChat({
       )
     : plainComponents;
 
+  // `$` 公式启发式护栏只在源文本变化时重算;流式每个 delta 一次线性扫描。
+  const guardedSource = useMemo(() => normalizeSingleDollarMath(source), [source]);
+
   return (
     <div
       className={cn(
@@ -478,11 +507,12 @@ export const MarkdownChat = memo(function MarkdownChat({
       )}
       onMouseDown={handleMarkdownMouseDown}
     >
-      <IncrementalMarkdown
-        source={source}
+      <StreamdownMarkdown
+        source={guardedSource}
         streaming={streaming}
         components={components}
-        disabled={!!qFind}
+        className="chat-md__doc"
+        extraRemarkPlugins={CHAT_REMARK_PLUGINS}
         turnId={latencyTurnId}
       />
     </div>

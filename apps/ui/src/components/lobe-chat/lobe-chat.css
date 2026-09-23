@@ -144,6 +144,7 @@
   display: flex;
   flex-direction: column;
   gap: 0;
+  flex: 1 0 auto;
 }
 
 /* ZCode 的会话列在中等桌面保留 3rem 两侧空间，大屏为状态面板让位。 */
@@ -481,6 +482,22 @@
 }
 .chat-md > *:last-child {
   margin-bottom: 0;
+}
+
+/* streamdown 在 .chat-md 内再渲染一层文档容器;首尾块的边距归零
+ * 规则要落在这个真正的兄弟层上。 */
+.chat-md__doc > *:first-child {
+  margin-top: 0;
+}
+.chat-md__doc > *:last-child {
+  margin-bottom: 0;
+}
+
+/* 块级公式(KaTeX)超宽时横向滚动,不撑破消息列。 */
+.chat-md .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
 }
 
 .chat-md p {
@@ -863,89 +880,19 @@
   color: var(--chat-text-3);
 }
 
-/* Settled fences only: compact syntax tokens from highlight.js output. */
-.chat-code .hljs-comment,
-.chat-code .hljs-quote {
-  color: #7f848e;
-  font-style: italic;
-}
-.chat-code .hljs-keyword,
-.chat-code .hljs-doctag,
-.chat-code .hljs-formula {
-  color: #c678dd;
-}
-.chat-code .hljs-name,
-.chat-code .hljs-section,
-.chat-code .hljs-selector-tag,
-.chat-code .hljs-deletion {
-  color: #e06c75;
-}
-.chat-code .hljs-string,
-.chat-code .hljs-regexp,
-.chat-code .hljs-addition,
-.chat-code .hljs-attribute {
-  color: #98c379;
-}
-.chat-code .hljs-attr,
-.chat-code .hljs-number,
-.chat-code .hljs-type,
-.chat-code .hljs-variable,
-.chat-code .hljs-selector-class {
-  color: #d19a66;
-}
-.chat-code .hljs-built_in,
-.chat-code .hljs-title.class_,
-.chat-code .hljs-class .hljs-title {
-  color: #e6c07b;
-}
-.chat-code .hljs-literal,
-.chat-code .hljs-meta,
-.chat-code .hljs-symbol,
-.chat-code .hljs-title {
-  color: #61aeee;
-}
-.chat-code .hljs span {
+/*
+ * Settled fences only: Shiki token colors (github-light / github-dark).
+ * 每个 token span 通过内联 style 携带 --shiki-light/--shiki-dark 双主题变量,
+ * 明暗切换只由 data-theme 选择器换用哪一侧变量,高亮无需重跑
+ * (替代旧 highlight.js 的 hljs-* 手抄色板)。
+ */
+.chat-code__token {
+  color: var(--shiki-light, inherit);
   -webkit-text-fill-color: currentColor;
 }
 
-[data-theme="light"] .chat-code .hljs-comment,
-[data-theme="light"] .chat-code .hljs-quote {
-  color: #a0a1a7;
-}
-[data-theme="light"] .chat-code .hljs-keyword,
-[data-theme="light"] .chat-code .hljs-doctag,
-[data-theme="light"] .chat-code .hljs-formula {
-  color: #a626a4;
-}
-[data-theme="light"] .chat-code .hljs-name,
-[data-theme="light"] .chat-code .hljs-section,
-[data-theme="light"] .chat-code .hljs-selector-tag,
-[data-theme="light"] .chat-code .hljs-deletion {
-  color: #e45649;
-}
-[data-theme="light"] .chat-code .hljs-string,
-[data-theme="light"] .chat-code .hljs-regexp,
-[data-theme="light"] .chat-code .hljs-addition,
-[data-theme="light"] .chat-code .hljs-attribute {
-  color: #50a14f;
-}
-[data-theme="light"] .chat-code .hljs-attr,
-[data-theme="light"] .chat-code .hljs-number,
-[data-theme="light"] .chat-code .hljs-type,
-[data-theme="light"] .chat-code .hljs-variable,
-[data-theme="light"] .chat-code .hljs-selector-class {
-  color: #986801;
-}
-[data-theme="light"] .chat-code .hljs-built_in,
-[data-theme="light"] .chat-code .hljs-title.class_,
-[data-theme="light"] .chat-code .hljs-class .hljs-title {
-  color: #c18401;
-}
-[data-theme="light"] .chat-code .hljs-literal,
-[data-theme="light"] .chat-code .hljs-meta,
-[data-theme="light"] .chat-code .hljs-symbol,
-[data-theme="light"] .chat-code .hljs-title {
-  color: #4078f2;
+[data-theme="dark"] .chat-code__token {
+  color: var(--shiki-dark, inherit);
 }
 
 /*

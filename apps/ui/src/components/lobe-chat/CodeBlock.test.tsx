@@ -6,7 +6,6 @@ import { CodeBlock } from "./CodeBlock";
 import {
   resolveCodeBlockDescriptor,
   shouldRenderMermaidCodeBlock,
-  splitHighlightedHtml,
 } from "./codeBlockMeta";
 
 describe("chat code block", () => {
@@ -25,14 +24,6 @@ describe("chat code block", () => {
       language: "mermaid",
       iconKind: "diagram",
     });
-  });
-
-  it("keeps syntax spans balanced when a highlighted token crosses a line", () => {
-    const lines = splitHighlightedHtml('<span class="hljs-string">one\ntwo</span>');
-    expect(lines).toEqual([
-      '<span class="hljs-string">one</span>',
-      '<span class="hljs-string">two</span>',
-    ]);
   });
 
   it("renders line metadata and focused/marked line state without changing code text", () => {
@@ -55,8 +46,9 @@ describe("chat code block", () => {
     expect(html).not.toContain("index.ts");
     expect(html).toContain('data-code-block-icon="code"');
     expect(html).toContain("typescript");
-    expect(html).toContain("hljs-number");
+    // Shiki 高亮是异步的:SSR 首帧按纯文本行渲染,token 上色在客户端 effect 后。
     expect(html).toContain("three =");
+    expect(html).not.toContain("chat-code__token");
   });
 
   it("matches the ZCode code block spacing and feedback timing", () => {

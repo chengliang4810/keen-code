@@ -1,6 +1,9 @@
 /**
- * Code preview chrome + Atom One Dark / One Light dual themes
- * (highlight.js atom-one-* palette, scoped under .rp-code--dark / --light).
+ * Code preview chrome + dual themes.
+ *
+ * 配色从 highlight.js Atom One 迁移到 Shiki 双主题(github-light /
+ * github-dark):token 颜色经 `--shiki-light/--shiki-dark` CSS 变量解析,
+ * 明暗切换由 documentElement 的 `data-theme` 属性驱动,组件无需重渲染。
  */
 
 .rp-code {
@@ -22,6 +25,7 @@
   min-height: 0;
   overflow: auto;
   align-items: flex-start;
+  background: #fafafa;
 }
 
 .rp-code__gutter {
@@ -31,9 +35,9 @@
   text-align: right;
   -webkit-user-select: none;
   user-select: none;
-  color: var(--text-tertiary);
-  border-right: 1px solid var(--border-subtle);
-  background: color-mix(in srgb, var(--bg-code, var(--bg-hover)) 70%, transparent);
+  color: #9d9d9f;
+  border-right: 1px solid #e5e5e6;
+  background: #f0f0f0;
   position: sticky;
   left: 0;
   z-index: 1;
@@ -60,10 +64,11 @@
   cursor: text;
 }
 
-.rp-code__pre code.hljs {
+.rp-code__pre .rp-code__code {
   display: block;
   padding: 0 !important;
   background: transparent !important;
+  color: #383a42;
   font-family: inherit;
   font-size: inherit;
   line-height: inherit;
@@ -74,6 +79,16 @@
   -webkit-user-select: text;
   user-select: text;
   cursor: text;
+}
+
+.rp-code__line {
+  display: block;
+  min-height: 1.55em;
+}
+
+.rp-code__token {
+  color: var(--shiki-light, inherit);
+  font-style: inherit;
 }
 
 .rp-code__footer {
@@ -87,180 +102,22 @@
   user-select: none;
 }
 
-/* ── Atom One Dark ───────────────────────────────────────────────────────── */
-/* Palette from highlight.js atom-one-dark.css */
+/* ── Dark ────────────────────────────────────────────────────────────────── */
 
-.rp-code--dark,
-.rp-code--dark .rp-code__scroll {
+:root[data-theme="dark"] .rp-code__scroll {
   background: #282c34;
 }
 
-.rp-code--dark .rp-code__gutter {
+:root[data-theme="dark"] .rp-code__gutter {
   background: #21252b;
   color: #5c6370;
   border-right-color: #181a1f;
 }
 
-.rp-code--dark .hljs {
+:root[data-theme="dark"] .rp-code__pre .rp-code__code {
   color: #abb2bf;
-  background: transparent;
 }
 
-.rp-code--dark .hljs-comment,
-.rp-code--dark .hljs-quote {
-  color: #5c6370;
-  font-style: italic;
-}
-
-.rp-code--dark .hljs-doctag,
-.rp-code--dark .hljs-keyword,
-.rp-code--dark .hljs-formula {
-  color: #c678dd;
-}
-
-.rp-code--dark .hljs-section,
-.rp-code--dark .hljs-name,
-.rp-code--dark .hljs-selector-tag,
-.rp-code--dark .hljs-deletion,
-.rp-code--dark .hljs-subst {
-  color: #e06c75;
-}
-
-.rp-code--dark .hljs-literal {
-  color: #56b6c2;
-}
-
-.rp-code--dark .hljs-string,
-.rp-code--dark .hljs-regexp,
-.rp-code--dark .hljs-addition,
-.rp-code--dark .hljs-attribute,
-.rp-code--dark .hljs-meta .hljs-string {
-  color: #98c379;
-}
-
-.rp-code--dark .hljs-attr,
-.rp-code--dark .hljs-variable,
-.rp-code--dark .hljs-template-variable,
-.rp-code--dark .hljs-type,
-.rp-code--dark .hljs-selector-class,
-.rp-code--dark .hljs-selector-attr,
-.rp-code--dark .hljs-selector-pseudo,
-.rp-code--dark .hljs-number {
-  color: #d19a66;
-}
-
-.rp-code--dark .hljs-symbol,
-.rp-code--dark .hljs-bullet,
-.rp-code--dark .hljs-link,
-.rp-code--dark .hljs-meta,
-.rp-code--dark .hljs-selector-id,
-.rp-code--dark .hljs-title {
-  color: #61aeee;
-}
-
-.rp-code--dark .hljs-built_in,
-.rp-code--dark .hljs-title.class_,
-.rp-code--dark .hljs-class .hljs-title {
-  color: #e6c07b;
-}
-
-.rp-code--dark .hljs-emphasis {
-  font-style: italic;
-}
-
-.rp-code--dark .hljs-strong {
-  font-weight: bold;
-}
-
-.rp-code--dark .hljs-link {
-  text-decoration: underline;
-}
-
-/* ── Atom One Light ──────────────────────────────────────────────────────── */
-/* Palette from highlight.js atom-one-light.css */
-
-.rp-code--light,
-.rp-code--light .rp-code__scroll {
-  background: #fafafa;
-}
-
-.rp-code--light .rp-code__gutter {
-  background: #f0f0f0;
-  color: #9d9d9f;
-  border-right-color: #e5e5e6;
-}
-
-.rp-code--light .hljs {
-  color: #383a42;
-  background: transparent;
-}
-
-.rp-code--light .hljs-comment,
-.rp-code--light .hljs-quote {
-  color: #a0a1a7;
-  font-style: italic;
-}
-
-.rp-code--light .hljs-doctag,
-.rp-code--light .hljs-keyword,
-.rp-code--light .hljs-formula {
-  color: #a626a4;
-}
-
-.rp-code--light .hljs-section,
-.rp-code--light .hljs-name,
-.rp-code--light .hljs-selector-tag,
-.rp-code--light .hljs-deletion,
-.rp-code--light .hljs-subst {
-  color: #e45649;
-}
-
-.rp-code--light .hljs-literal {
-  color: #0184bb;
-}
-
-.rp-code--light .hljs-string,
-.rp-code--light .hljs-regexp,
-.rp-code--light .hljs-addition,
-.rp-code--light .hljs-attribute,
-.rp-code--light .hljs-meta .hljs-string {
-  color: #50a14f;
-}
-
-.rp-code--light .hljs-attr,
-.rp-code--light .hljs-variable,
-.rp-code--light .hljs-template-variable,
-.rp-code--light .hljs-type,
-.rp-code--light .hljs-selector-class,
-.rp-code--light .hljs-selector-attr,
-.rp-code--light .hljs-selector-pseudo,
-.rp-code--light .hljs-number {
-  color: #986801;
-}
-
-.rp-code--light .hljs-symbol,
-.rp-code--light .hljs-bullet,
-.rp-code--light .hljs-link,
-.rp-code--light .hljs-meta,
-.rp-code--light .hljs-selector-id,
-.rp-code--light .hljs-title {
-  color: #4078f2;
-}
-
-.rp-code--light .hljs-built_in,
-.rp-code--light .hljs-title.class_,
-.rp-code--light .hljs-class .hljs-title {
-  color: #c18401;
-}
-
-.rp-code--light .hljs-emphasis {
-  font-style: italic;
-}
-
-.rp-code--light .hljs-strong {
-  font-weight: bold;
-}
-
-.rp-code--light .hljs-link {
-  text-decoration: underline;
+:root[data-theme="dark"] .rp-code__token {
+  color: var(--shiki-dark, inherit);
 }

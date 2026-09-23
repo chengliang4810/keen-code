@@ -19,12 +19,14 @@ import {
 } from "@/components/icons";
 import { Button } from "@appica/ui-react/button";
 import { Tip } from "@/components/ui/tooltip";
-import { highlightChatCode } from "@/lib/chatCodeHighlight";
+import {
+  highlightChatCodeLines,
+  type ChatCodeLine,
+} from "@/lib/shikiChatHighlighter";
 import { cn } from "@/lib/utils";
 import {
   resolveCodeBlockDescriptor,
   shouldRenderMermaidCodeBlock,
-  splitHighlightedHtml,
   type CodeBlockIconKind,
 } from "./codeBlockMeta";
 import {
@@ -77,21 +79,18 @@ function isLineInRange(
 
 function CodeLines({
   text,
-  highlightedHtml,
+  tokenLines,
   focusedRange,
   markedLines,
   lineRefs,
 }: {
   text: string;
-  highlightedHtml: string | null;
+  tokenLines: ChatCodeLine[] | null;
   focusedRange?: { startLine: number; endLine: number } | null;
   markedLines?: readonly number[];
   lineRefs: MutableRefObject<Map<number, HTMLSpanElement>>;
 }) {
   const lines = text.split("\n");
-  const highlightedLines = highlightedHtml
-    ? splitHighlightedHtml(highlightedHtml)
-    : null;
   const marked = useMemo(
     () =>
       new Set(
@@ -103,12 +102,12 @@ function CodeLines({
   );
 
   return (
-    <code className={cn("chat-code__code", highlightedHtml && "hljs")}>
+    <code className="chat-code__code">
       {lines.map((line, index) => {
         const lineNumber = index + 1;
         const focused = isLineInRange(lineNumber, focusedRange);
         const markedLine = marked.has(lineNumber);
-        const htmlLine = highlightedLines?.[index] ?? "";
+        const tokens = tokenLines?.[index];
         return (
           <span
             key={lineNumber}
@@ -125,11 +124,18 @@ function CodeLines({
             data-focused={focused ? "true" : undefined}
             data-marked={markedLine ? "true" : undefined}
           >
-            {highlightedHtml ? (
-              <span
-                className="chat-code__line-content"
-                dangerouslySetInnerHTML={{ __html: htmlLine }}
-              />
+            {tokens ? (
+              <span className="chat-code__line-content">
+                {tokens.map((token, tokenIndex) => (
+                  <span
+                    key={tokenIndex}
+                    className="chat-code__token"
+                    style={token.style}
+                  >
+                    {token.content}
+                  </span>
+                ))}
+              </span>
             ) : (
               <span className="chat-code__line-content">{line}</span>
             )}
@@ -189,10 +195,22 @@ export function CodeBlock({
   const lang = (language || "text").replace(/^language-/, "") || "text";
   const text = extractText(children).replace(/^\n+|\n+$/g, "");
   const descriptor = useMemo(() => resolveCodeBlockDescriptor(lang), [lang]);
-  const highlightedHtml = useMemo(
-    () => (highlight ? highlightChatCode(text, lang) : null),
-    [highlight, lang, text],
-  );
+  // Shiki 高亮是异步的:首帧保持纯文本,settle 后由回调上色。流式围栏
+  // (highlight=false)完全不触发高亮器,避免 async setState 与流式更新叠加。
+  const [tokenLines, setTokenLines] = useState<ChatCodeLine[] | null>(null);
+  useEffect(() => {
+    if (!highlight) {
+      setTokenLines(null);
+      return;
+    }
+    let active = true;
+    highlightChatCodeLines(text, lang, (lines) => {
+      if (active) setTokenLines(lines);
+    });
+    return () => {
+      active = false;
+    };
+  }, [highlight, lang, text]);
   const renderMermaid = highlight && shouldRenderMermaidCodeBlock(lang, text);
   const mermaidLabels: MermaidBlockLabels = useMemo(
     () => ({ loading: previewLoading, diagram: previewTitle }),
@@ -297,7 +315,7 @@ export function CodeBlock({
           <pre className={cn("chat-code__pre", wrap && "is-wrap")}>
             <CodeLines
               text={text}
-              highlightedHtml={highlightedHtml}
+              tokenLines={tokenLines}
               focusedRange={focusedRange}
               markedLines={markedLines}
               lineRefs={lineRefs}

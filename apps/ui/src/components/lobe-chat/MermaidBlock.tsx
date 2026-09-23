@@ -54,6 +54,12 @@ function sanitizeMermaidSvg(svg: string): string {
 }
 
 /**
+ * Mermaid's default htmlLabels render flowchart node text as HTML inside
+ * foreignObject. The sanitizer below is SVG-profile-only and would strip
+ * that whole subtree, leaving label-less boxes. Flowchart-family diagrams
+ * honor `htmlLabels: false` and then draw plain SVG <text>/<tspan> labels,
+ * which survive sanitization and stay inside the strict boundary.
+ *//**
  * Mermaid is intentionally client-only and settled-message-only. During
  * streaming, the parent keeps using the ordinary code path so partial syntax
  * never starts an async renderer or replaces the first visible delta.
@@ -89,6 +95,7 @@ export function MermaidBlock({
       mermaid.initialize({
         startOnLoad: false,
         securityLevel: "strict",
+        htmlLabels: false,
         theme,
       });
       return mermaid.render(id, trimmedCode);

@@ -5,9 +5,11 @@
  */
 
 import { useMemo } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
+import type { Components } from "streamdown";
+import type { PluggableList } from "unified";
 import { remarkAutolinkPunctuation } from "@/lib/remarkAutolinkPunctuation";
+import { normalizeSingleDollarMath } from "@/lib/dollarMathGuard";
+import { StreamdownMarkdown } from "@/components/lobe-chat/StreamdownMarkdown";
 import type { Locale } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { VideoUi, videoUiLabels } from "@/components/VideoUi";
@@ -19,6 +21,8 @@ import {
 } from "@/lib/attachments";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 import { reactNodeText } from "@/lib/reactNodeText";
+
+const RESOURCE_REMARK_PLUGINS: PluggableList = [remarkAutolinkPunctuation];
 
 export function MarkdownBody({
   children,
@@ -62,64 +66,71 @@ export function MarkdownBody({
     );
   };
 
+  const components = useMemo<Components>(
+    () => ({
+      a: ({ href, children: c }) => {
+        const text = reactNodeText(c).trim();
+        const abs = resolveMediaHref(href, text, imagePathMap);
+        if (abs) return renderMedia(abs, text || pathBasename(abs));
+        return (
+          <a href={href} target="_blank" rel="noreferrer noopener">
+            {c}
+          </a>
+        );
+      },
+      pre: ({ children: c }) => <pre className="md-body__pre">{c}</pre>,
+      code: ({ className, children: c }) => {
+        const inline = !className;
+        if (inline) {
+          return <code className="md-body__code-inline">{c}</code>;
+        }
+        return <code className={className}>{c}</code>;
+      },
+      img: ({ src, alt }) => {
+        if (!src) return null;
+        const mapped =
+          resolveInlineMediaToken(src, imagePathMap) ?? src;
+        if (isVideoPath(mapped)) {
+          return renderMedia(
+            mapped,
+            typeof alt === "string" ? alt : pathBasename(mapped),
+          );
+        }
+        const local = isAbsoluteFsPath(mapped) ? mapped : undefined;
+        return (
+          <ImageUi
+            className="md-body__img md-body__img--card"
+            src={mapped}
+            alt={alt ?? ""}
+            path={local}
+            gallery={gallery}
+            labels={imageLabels}
+          />
+        );
+      },
+      table: ({ children: c }) => (
+        <div className="md-body__table-wrap">
+          <table>{c}</table>
+        </div>
+      ),
+    }),
+    // renderMedia 只消费下面这几个稳定值;imagePathMap 保持引用语义。
+    [gallery, imageLabels, imagePathMap, videoLabels],
+  );
+
   return (
     <div
       className={
         "md-body" + (streaming ? " md-body--streaming" : "")
       }
     >
-      <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkAutolinkPunctuation]}
-        components={{
-          a: ({ href, children: c }) => {
-            const text = reactNodeText(c).trim();
-            const abs = resolveMediaHref(href, text, imagePathMap);
-            if (abs) return renderMedia(abs, text || pathBasename(abs));
-            return (
-              <a href={href} target="_blank" rel="noreferrer noopener">
-                {c}
-              </a>
-            );
-          },
-          pre: ({ children: c }) => <pre className="md-body__pre">{c}</pre>,
-          code: ({ className, children: c }) => {
-            const inline = !className;
-            if (inline) {
-              return <code className="md-body__code-inline">{c}</code>;
-            }
-            return <code className={className}>{c}</code>;
-          },
-          img: ({ src, alt }) => {
-            if (!src) return null;
-            const mapped =
-              resolveInlineMediaToken(src, imagePathMap) ?? src;
-            if (isVideoPath(mapped)) {
-              return renderMedia(
-                mapped,
-                typeof alt === "string" ? alt : pathBasename(mapped),
-              );
-            }
-            const local = isAbsoluteFsPath(mapped) ? mapped : undefined;
-            return (
-              <ImageUi
-                className="md-body__img md-body__img--card"
-                src={mapped}
-                alt={alt ?? ""}
-                path={local}
-                gallery={gallery}
-                labels={imageLabels}
-              />
-            );
-          },
-          table: ({ children: c }) => (
-            <div className="md-body__table-wrap">
-              <table>{c}</table>
-            </div>
-          ),
-        }}
-      >
-        {children || (streaming ? " " : "")}
-      </ReactMarkdown>
+      <StreamdownMarkdown
+        source={normalizeSingleDollarMath(children || (streaming ? " " : ""))}
+        streaming={!!streaming}
+        components={components}
+        className="md-body__doc"
+        extraRemarkPlugins={RESOURCE_REMARK_PLUGINS}
+      />
     </div>
   );
 }

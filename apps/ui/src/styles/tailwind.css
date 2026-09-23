@@ -1,6 +1,8 @@
 /* Progressive Tailwind layer — maps to existing design tokens in tokens.css */
 @import "tailwindcss" source(none);
 @import "@appica/ui-react/styles.css";
+/* KaTeX 会同时输出 MathML 辅助层与 HTML 视觉层;缺这份 CSS 时两层都会显示。 */
+@import "katex/dist/katex.min.css";
 @source "../";
 /* 官方组件的 utility 类由本项目的 Tailwind 编译。@source 只扫描 vite 项目根
  * （apps/ui）内部的路径，仓库根 node_modules 在项目根之外会静默扫描为空，

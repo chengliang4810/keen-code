@@ -83,9 +83,15 @@ describe("MarkdownChat streaming", () => {
     );
 
     expect(streamingHtml).toContain("const answer: number = 42;");
-    expect(streamingHtml).not.toContain("hljs-keyword");
-    expect(settledHtml).toContain("hljs-keyword");
-    expect(settledHtml).toContain("hljs-number");
+    expect(settledHtml).toContain("const answer: number = 42;");
+    // Shiki 高亮器只在消息 settle 后由客户端 effect 异步上色;流式围栏
+    // 完全不触发高亮器(hljs 时代的 class 断言迁移为组件接线断言)。
+    const source = readFileSync(
+      new URL("./MarkdownChat.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(source).toContain("highlight={!streaming}");
+    expect(streamingHtml).not.toContain("chat-code__token");
   });
 
   it("keeps Markdown horizontal rules in the message flow", () => {
@@ -122,8 +128,10 @@ describe("MarkdownChat URL punctuation", () => {
       <MarkdownChat>{"[Node.js](https://nodejs.org)"}</MarkdownChat>,
     );
 
+    // streamdown 的 harden 阶段按 WHATWG URL 规范化 href(origin-only 链接
+    // 补尾斜杠);这是栈的固有行为,资源面板打开时由服务端自动跳转处理。
     expect(html).toContain('class="chat-md__link"');
-    expect(html).toContain('href="https://nodejs.org"');
+    expect(html).toContain('href="https://nodejs.org/"');
     expect(html).toContain(">Node.js</a>");
     expect(html).not.toContain("file-path-link");
 
@@ -170,10 +178,49 @@ describe("MarkdownChat URL punctuation", () => {
 
   it.each([
     "[地址](https://example.com/文档）)",
-    "<https://example.com/文档）>",
     "https://example.com/%EF%BC%89",
   ])("preserves intentional URL punctuation: %s", (source) => {
     const html = renderToString(<MarkdownChat>{source}</MarkdownChat>);
     expect(html).toContain("%EF%BC%89");
+  });
+
+  it("尖括号自动链接的 CJK 尾标点由 cjk 插件拆出链接外", () => {
+    // 行为差异:@streamdown/cjk 的 autolink 边界拆分(对齐 ZCode 基线)会
+    // 把 `<url）>` 形式尾部的 `）` 拆回正文;显式 [文本](url) 仍完整保留。
+    const html = renderToString(
+      <MarkdownChat>{"<https://example.com/文档）>"}</MarkdownChat>,
+    );
+    expect(html).toContain("https://example.com/%E6%96%87%E6%A1%A3");
+    expect(html).toContain("</a>）");
+  });
+});
+
+describe("MarkdownChat streamdown 渲染栈", () => {
+  it("渲染行内与块级公式(KaTeX)", () => {
+    const html = renderToString(
+      <MarkdownChat>{"能量守恒 $E=mc^2$。\n\n$$\\int_0^1 x^2\\,dx=\\tfrac{1}{3}$$"}</MarkdownChat>,
+    );
+    expect(html).toContain("katex");
+    expect(html).toContain("E=mc");
+  });
+
+  it("美元金额与共享路径不被误判为公式", () => {
+    const html = renderToString(
+      <MarkdownChat>
+        {"价格在 $5-$10 之间;环境变量 $HOME 与 $PATH 不同。\n复制到 D:\\proj\\C$\\out 目录。"}
+      </MarkdownChat>,
+    );
+    expect(html).toContain("$5-$10 之间");
+    expect(html).toContain("$HOME");
+    expect(html).toContain("C$\\out");
+    expect(html).not.toContain("katex");
+  });
+
+  it("单波浪线保留原文,双波浪线按 GFM 渲染删除线", () => {
+    const html = renderToString(
+      <MarkdownChat>{"约 3~5 天完成;~~旧方案~~ 已废弃。"}</MarkdownChat>,
+    );
+    expect(html).toContain("3~5");
+    expect(html).toMatch(/<(del|s)[^>]*>旧方案<\/(del|s)>/);
   });
 });

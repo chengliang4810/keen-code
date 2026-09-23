@@ -1,4 +1,4 @@
-import { normalizeHighlightLanguage } from "@/lib/highlightLanguages";
+import { normalizeHighlightLanguage } from "@/lib/languageAliases";
 
 export type CodeBlockIconKind =
   | "code"
@@ -11,7 +11,7 @@ export type CodeBlockIconKind =
 export interface CodeBlockDescriptor {
   /** Stable display name used when a fence does not carry a real filename. */
   fileName: string;
-  /** Normalized language id used by highlight.js and mermaid detection. */
+  /** 展示用规范语言名(别名映射见 lib/languageAliases)与 mermaid 检测共用。 */
   language: string;
   iconKind: CodeBlockIconKind;
 }
@@ -152,8 +152,9 @@ export function isMermaidLanguage(language: string | undefined): boolean {
 }
 
 /**
- * Keep inference deliberately narrow: an unlabeled text fence must not turn
- * ordinary prose beginning with a Mermaid-like word into an empty diagram.
+ * Mermaid 检测(语言显式标注或对空/text 围栏做首行关键字窄识别)。
+ * 高亮 token 的拆行逻辑随 highlight.js 迁移到 Shiki 的逐行 token 模型,
+ * 见 lib/shikiChatHighlighter.ts。
  */
 export function shouldRenderMermaidCodeBlock(
   language: string | undefined,
@@ -165,75 +166,4 @@ export function shouldRenderMermaidCodeBlock(
   return /^(?:graph|flowchart|sequenceDiagram|classDiagram|stateDiagram(?:-v2)?|erDiagram|journey|gantt|pie|quadrantChart|gitGraph|mindmap|timeline)\b/i.test(
     firstLine,
   );
-}
-
-type OpenTag = { name: string; source: string };
-
-function tagName(source: string): string | null {
-  const match = /^<\/?\s*([a-z][\w:-]*)/i.exec(source);
-  return match?.[1]?.toLowerCase() ?? null;
-}
-
-function isClosingTag(source: string): boolean {
-  return /^<\//.test(source);
-}
-
-function isSelfClosingTag(source: string): boolean {
-  return /\/\s*>$/.test(source) || /^<!/.test(source) || /^<\?/.test(source);
-}
-
-/**
- * Split highlight.js HTML into line wrappers without leaving syntax spans
- * open across sibling elements. This keeps line focus/mark styles reliable
- * while preserving tokens that span a newline.
- */
-export function splitHighlightedHtml(html: string): string[] {
-  const lines = [""];
-  const openTags: OpenTag[] = [];
-  const tokens = html.match(/<!--[\s\S]*?-->|<\/?[a-z][^>]*>|[^<]+/gi) ?? [];
-
-  const closeOpenTags = () => {
-    for (let index = openTags.length - 1; index >= 0; index -= 1) {
-      lines[lines.length - 1] += `</${openTags[index]!.name}>`;
-    }
-  };
-
-  for (const token of tokens) {
-    if (!token.startsWith("<")) {
-      const parts = token.split("\n");
-      for (const [index, part] of parts.entries()) {
-        lines[lines.length - 1] += part;
-        if (index < parts.length - 1) {
-          closeOpenTags();
-          lines.push(openTags.map((tag) => tag.source).join(""));
-        }
-      }
-      continue;
-    }
-
-    const name = tagName(token);
-    if (!name || isSelfClosingTag(token)) {
-      lines[lines.length - 1] += token;
-      continue;
-    }
-
-    if (isClosingTag(token)) {
-      lines[lines.length - 1] += token;
-      let openIndex = -1;
-      for (let index = openTags.length - 1; index >= 0; index -= 1) {
-        if (openTags[index]!.name === name) {
-          openIndex = index;
-          break;
-        }
-      }
-      if (openIndex >= 0) openTags.splice(openIndex, 1);
-      continue;
-    }
-
-    lines[lines.length - 1] += token;
-    openTags.push({ name, source: token });
-  }
-
-  closeOpenTags();
-  return lines.length > 0 ? lines : [""];
 }

@@ -18,7 +18,6 @@ export default defineConfig(() => ({
     rollupOptions: {
       output: {
         manualChunks(id) {
-          if (id.includes("/highlight.js/")) return "vendor-highlight";
           if (id.includes("/xlsx/") || id.includes("/docx-preview/")) return "vendor-office";
           if (id.includes("/plyr/")) return "vendor-media";
         },
