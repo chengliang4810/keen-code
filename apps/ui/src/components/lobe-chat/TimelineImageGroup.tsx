@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { IconPhoto, IconChevronDown, IconChevronRight } from "@/components/icons";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@appica/ui-react/collapsible";
 import type { MessageToolSegment } from "@/lib/session";
 
@@ -13,7 +13,7 @@ export function TimelineImageGroup({ tools, locale }: { tools: MessageToolSegmen
   const tr = createT(locale);
   return (
     <Collapsible open={open} onOpenChange={setOpen} className="lobe-timeline-tool" data-testid="timeline-images">
-      <CollapsibleTrigger render={<Button variant="ghost" className="lobe-timeline-tool__row" />}>
+      <CollapsibleTrigger render={<Button size="md" variant="ghost" className="lobe-timeline-tool__row" />}>
           <span className="lobe-timeline-tool__icon" aria-hidden><IconPhoto size={17} /></span>
           <span className="lobe-timeline-tool__action">{tr(sources.length === 1 ? "tool.imageViewed" : "tool.imagesViewed", { count: sources.length })}</span>
           <span className="lobe-timeline-tool__primary" aria-hidden>{open ? <IconChevronDown size={14} /> : <IconChevronRight size={14} />}</span>

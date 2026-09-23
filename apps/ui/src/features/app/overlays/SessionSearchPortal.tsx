@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import type { SessionSearchHits } from "@/lib/sessionSearch";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import {
   Dialog,
   DialogContent,
@@ -101,7 +101,7 @@ export function SessionSearchPortal({
               {tr("sidebar.projects")}
             </div>
             {hits.matchedProjects.map((project) => (
-              <Button
+              <Button size="md"
                 key={project.id}
                 type="button"
                 variant="ghost"
@@ -139,7 +139,7 @@ export function SessionSearchPortal({
           if (project?.name) metaParts.push(project.name);
           if (index < 9) metaParts.push(`${platform === "mac" ? "⌘" : "Ctrl+"}${index + 1}`);
           return (
-            <Button
+            <Button size="md"
               key={hit.id}
               type="button"
               variant="ghost"
@@ -160,7 +160,7 @@ export function SessionSearchPortal({
           );
         })}
         <div className="search-panel__foot">
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             className="search-panel__row"
@@ -175,7 +175,7 @@ export function SessionSearchPortal({
             </span>
           </Button>
           {canWriteProjects ? (
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               className="search-panel__row"

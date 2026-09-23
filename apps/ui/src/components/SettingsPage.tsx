@@ -2,7 +2,7 @@ import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { NumberField } from "@appica/ui-react/number-field";
 import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@appica/ui-react/slider";
 import {
@@ -598,7 +598,7 @@ export function SettingsPage({
           </Button>
         </div>
         <div className="settings-page__mobile-nav">
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             className="settings-page__mobile-back"
@@ -1093,15 +1093,15 @@ export function SettingsPage({
                     if (isThemePreference(next)) onTheme(next);
                   }}
                 >
-                  <Toggle value="light" render={<Button variant="outline" className="ui-toggle-appearance" />}>
+                  <Toggle value="light" render={<Button size="md" variant="outline" className="ui-toggle-appearance" />}>
                     <IconSun size={20} />
                     {t("settings.themeLight")}
                   </Toggle>
-                  <Toggle value="dark" render={<Button variant="outline" className="ui-toggle-appearance" />}>
+                  <Toggle value="dark" render={<Button size="md" variant="outline" className="ui-toggle-appearance" />}>
                     <IconMoon size={20} />
                     {t("settings.themeDark")}
                   </Toggle>
-                  <Toggle value="system" render={<Button variant="outline" className="ui-toggle-appearance" />}>
+                  <Toggle value="system" render={<Button size="md" variant="outline" className="ui-toggle-appearance" />}>
                     <IconDesktop size={20} />
                     {t("settings.themeSystem")}
                   </Toggle>
@@ -1339,7 +1339,7 @@ export function SettingsPage({
                               </Button>
                             </div>
                           ) : (
-                            <Button
+                            <Button size="md"
                               type="button"
                               variant="outline"
                               className={
@@ -1723,7 +1723,7 @@ export function SettingsPage({
                     <div className="settings-about__feature-desc">
                       {t("settings.aboutSourceDesc")}
                     </div>
-                    <Button
+                    <Button size="md"
                       type="button"
                       variant="ghost"
                       className="settings-about__source-link"

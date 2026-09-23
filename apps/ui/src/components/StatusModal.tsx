@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { useMemo } from "react";
 import type { Locale } from "@/i18n";
 import { createT } from "@/i18n";
@@ -50,7 +50,7 @@ export function StatusModal({
       size="md"
       className="status-modal"
       footer={
-        <Button type="button" variant="primary" onClick={onClose}>
+        <Button size="md" type="button" variant="primary" onClick={onClose}>
           {tr("common.close")}
         </Button>
       }

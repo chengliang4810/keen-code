@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Rich local document preview:
  * - DOCX → docx-preview (styled Word layout)
@@ -215,10 +215,10 @@ export function OfficeDocumentPreview({
           <pre className="office-preview__fallback">{textFallback}</pre>
         ) : null}
         <div className="office-preview__actions">
-          <Button type="button" variant="primary" onClick={() => void openExternal()}>
+          <Button size="md" type="button" variant="primary" onClick={() => void openExternal()}>
             {tr("office.openExternal")}
           </Button>
-          <Button type="button" variant="ghost" onClick={() => void pathReveal(absolutePath)}>
+          <Button size="md" type="button" variant="ghost" onClick={() => void pathReveal(absolutePath)}>
             {tr("resources.revealFolder")}
           </Button>
         </div>
@@ -270,7 +270,7 @@ export function OfficeDocumentPreview({
         <pre className="office-preview__fallback">{textFallback}</pre>
       ) : null}
       <div className="office-preview__actions">
-        <Button type="button" variant="primary" onClick={() => void openExternal()}>
+        <Button size="md" type="button" variant="primary" onClick={() => void openExternal()}>
           {tr("office.openExternal")}
         </Button>
       </div>

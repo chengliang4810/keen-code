@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /** 轨迹台账：右侧停靠栏的会话记录流水（dsh Trajectory 台账的本地化版本）。 */
 
 import {
@@ -432,7 +432,7 @@ export function TrajectoryLedger({
         data-status={record.status}
         key={record.key}
       >
-        <Button
+        <Button size="md"
           type="button"
           variant="ghost"
           className="rp-traj-row__main"
@@ -497,7 +497,7 @@ export function TrajectoryLedger({
     body = (
       <div className="rp__empty-state rp__empty-state--sm">
         <div className="rp__empty-desc">{tr("trajectory.loadFailed")}</div>
-        <Button
+        <Button size="md"
           type="button"
           variant="ghost"
           onClick={() => setReloadNonce((n) => n + 1)}
@@ -525,7 +525,7 @@ export function TrajectoryLedger({
         <div className="rp-traj-list" role="list">
           {renderItems.map((item) =>
             item.type === "turn-header" ? (
-              <Button
+              <Button size="md"
                 type="button"
                 variant="ghost"
                 className="rp-traj-turn"

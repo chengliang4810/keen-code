@@ -2,7 +2,7 @@
 import { Fragment } from "react";
 import { createT, type Locale } from "@/i18n";
 import { IconClock, IconDatabase } from "@/components/icons";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@appica/ui-react/popover";
 import type { TurnLatencySummary } from "@/lib/turnLatency";
 import { formatMetricTokens, formatTurnLatency, formatRunDuration, formatTokensPerSecond } from "@/lib/turnMetricsPresentation";
@@ -31,7 +31,7 @@ export function TurnMetrics({ summary, locale, durationMs }: {
     <span className="lobe-turn-metrics" data-testid="turn-metrics">
       <Popover>
         <span className="ui-stat-root">
-          <PopoverTrigger render={<Button variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.usage")} />}>
+          <PopoverTrigger render={<Button size="md" variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.usage")} />}>
               <IconDatabase size={15} />
               <span className="ui-stat-label">{tr("chat.turnMetrics.usageValue", {
                 value: formatMetricTokens(total, locale, true) ?? "—",
@@ -54,7 +54,7 @@ export function TurnMetrics({ summary, locale, durationMs }: {
       </Popover>
       <Popover>
         <span className="ui-stat-root">
-          <PopoverTrigger render={<Button variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.time")} />}>
+          <PopoverTrigger render={<Button size="md" variant="ghost" className="ui-button--stat" aria-label={tr("chat.turnMetrics.time")} />}>
               <IconClock size={15} />
               <span className="ui-stat-label">{tr("chat.turnMetrics.timeValue", { value: runMs == null ? "—" : runLabel })}</span>
           </PopoverTrigger>

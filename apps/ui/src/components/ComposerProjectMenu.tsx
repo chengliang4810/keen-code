@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import {
   DropdownMenu,

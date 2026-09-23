@@ -4,7 +4,7 @@ import type { DragZone } from "@/lib/dragZone";
 import { pathBasename } from "@/lib/filePath";
 import { projectPathPreview } from "@/features/app/models";
 import type { AddProjectIntent } from "@/hooks/useProjectDialog";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@appica/ui-react/spinner";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
@@ -77,7 +77,7 @@ export function AddProjectModal({
       returnFocusRef={returnFocusRef}
       footer={
         <>
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             disabled={busy}
@@ -85,7 +85,7 @@ export function AddProjectModal({
           >
             {tr("common.cancel")}
           </Button>
-          <Button
+          <Button size="md"
             type="submit"
             form="add-project-form"
             variant="primary"

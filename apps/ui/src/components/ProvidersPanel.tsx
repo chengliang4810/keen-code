@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { NumberField } from "@appica/ui-react/number-field";
 import { Avatar, AvatarFallback } from "@appica/ui-react/avatar";
@@ -668,7 +668,7 @@ export function ProvidersPanel({
 
       <div className="prov-split">
         <aside className="prov-split__list">
-          <Button
+          <Button size="md"
             type="button"
             variant="primary" className="prov-add-btn"
             onClick={openCreate}
@@ -699,7 +699,7 @@ export function ProvidersPanel({
                   (selection === provider.id ? " is-selected" : "")
                 }
               >
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               className="prov-item__main"
@@ -982,7 +982,7 @@ export function ProvidersPanel({
 
               <div className="prov-form__actions">
                 {editingId && (
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="destructive"
                     disabled={busy}
@@ -999,7 +999,7 @@ export function ProvidersPanel({
                 )}
                 <div className="prov-form__actions-end">
                   {rightMode === "create" && providers[0] ? (
-                    <Button
+                    <Button size="md"
                       type="button"
                       variant="ghost"
                       onClick={() => openEdit(providers[0]!)}
@@ -1008,7 +1008,7 @@ export function ProvidersPanel({
                       {tr("common.cancel")}
                     </Button>
                   ) : null}
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="primary"
                     onClick={() => void save()}
@@ -1041,14 +1041,14 @@ export function ProvidersPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={closeModelEditor}
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="submit"
               variant="primary"
               form="provider-add-model-form"
@@ -1138,14 +1138,14 @@ export function ProvidersPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => setModelPickerOpen(false)}
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               onClick={applyRemoteModels}
@@ -1232,7 +1232,7 @@ export function ProvidersPanel({
         wrapBody
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={importDraft?.submitting}
@@ -1240,7 +1240,7 @@ export function ProvidersPanel({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={!importDraft || !importDraft.check.ok || importDraft.submitting}
@@ -1255,7 +1255,7 @@ export function ProvidersPanel({
       >
         <p className="prov-field__hint">{tr("prov.importHint")}</p>
         <div className="prov-transfer-row">
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             onClick={() => void pickImportFile()}
@@ -1284,14 +1284,14 @@ export function ProvidersPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => setDeleteTarget(null)}
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="destructive"
               onClick={() => void confirmRemove()}

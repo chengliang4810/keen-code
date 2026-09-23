@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Whole-turn work disclosure.
  *
@@ -30,7 +30,7 @@ export function TurnWorkGroup({
       className={"lobe-turn-work" + (open ? " is-open" : "")}
       data-testid="turn-work-group"
     >
-      <Button
+      <Button size="md"
         type="button"
         variant="ghost"
         className="lobe-turn-work__trigger"

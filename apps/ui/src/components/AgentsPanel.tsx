@@ -1,6 +1,6 @@
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Card } from "@/components/ui/card";
@@ -422,7 +422,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
         <IconUser size={15} />
         {tr("agents.title")}
         {!loading ? <span className="ext-count">{agents.length}</span> : null}
-        <Button
+        <Button size="md"
           type="button"
           variant="primary" className="settings-page__h2-action"
           disabled={busy || !api.isTauri()}
@@ -511,8 +511,8 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
         onClose={closeCreate}
         footer={
           <>
-            <Button type="button" variant="ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</Button>
-            <Button type="button" variant="primary" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</Button>
+            <Button size="md" type="button" variant="ghost" disabled={busy} onClick={closeCreate}>{tr("common.cancel")}</Button>
+            <Button size="md" type="button" variant="primary" disabled={!canCreate || busy} onClick={() => void createAgent()}>{busy ? tr("agents.creating") : tr("agents.create")}</Button>
           </>
         }
       >
@@ -597,8 +597,8 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
       <GlassModal open={!!removeTarget} title={tr("agents.removeTitle")} onClose={() => !busy && setRemoveTarget(null)}>
         <p>{tr("agents.removeConfirm", { name: removeTarget?.name ?? "" })}</p>
         <div className="ext-item__actions">
-          <Button type="button" variant="ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
-          <Button type="button" variant="primary" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
+          <Button size="md" type="button" variant="ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
+          <Button size="md" type="button" variant="primary" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
         </div>
       </GlassModal>
     </div>

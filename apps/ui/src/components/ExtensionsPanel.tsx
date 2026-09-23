@@ -1,6 +1,6 @@
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
@@ -1034,7 +1034,7 @@ export function ExtensionsPanel({
           <span className="ext-count">{plugins.length}</span>
         ) : null}
         {!loading && plugins.length > 0 ? (
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost" className="ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey}
@@ -1290,7 +1290,7 @@ export function ExtensionsPanel({
           </Badge>
         ) : null}
         <span className="ext-h2-actions">
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost" className="ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey || !!mcpOauthFlow}
@@ -1299,7 +1299,7 @@ export function ExtensionsPanel({
             <IconDoctor size={14} />
             <span>{tr("ext.mcp.doctor")}</span>
           </Button>
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost" className="ext-bulk-btn"
             disabled={
@@ -1311,7 +1311,7 @@ export function ExtensionsPanel({
             <span>{tr("ext.mcp.add")}</span>
           </Button>
           {!loading && servers.length > 0 && mcpOffCount > 0 ? (
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost" className="ext-bulk-btn"
               disabled={!!busyKey || !!actionBusy || !!mcpOauthFlow}
@@ -1519,7 +1519,7 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={!!actionBusy}
@@ -1527,7 +1527,7 @@ export function ExtensionsPanel({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="destructive"
               disabled={!!actionBusy}
@@ -1558,7 +1558,7 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         wrapBody
         footer={
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             onClick={() => setDetailsOpen(false)}
@@ -1585,7 +1585,7 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={configSaving}
@@ -1593,7 +1593,7 @@ export function ExtensionsPanel({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={configLoading || configSaving || !configResult}
@@ -1654,7 +1654,7 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={actionBusy === "mcp:add"}
@@ -1662,7 +1662,7 @@ export function ExtensionsPanel({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={
@@ -1789,7 +1789,7 @@ export function ExtensionsPanel({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={!!actionBusy}
@@ -1797,7 +1797,7 @@ export function ExtensionsPanel({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="destructive"
               disabled={!!actionBusy}
@@ -1830,7 +1830,7 @@ export function ExtensionsPanel({
         wrapBody
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={doctorLoading}
@@ -1839,7 +1839,7 @@ export function ExtensionsPanel({
               <IconRefresh size={14} />
               <span>{tr("ext.mcp.doctorRerun")}</span>
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={doctorLoading}

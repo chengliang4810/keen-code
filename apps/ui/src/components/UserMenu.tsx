@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /** 侧栏底部固定操作：设置入口以及按需显示的更新入口。 */
 
 import { IconDownload, IconSettings } from "@/components/icons";

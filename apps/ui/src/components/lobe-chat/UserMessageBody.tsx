@@ -5,7 +5,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { IconChevronDown } from "@/components/icons";
 
 export const USER_MESSAGE_COLLAPSED_HEIGHT = 120;

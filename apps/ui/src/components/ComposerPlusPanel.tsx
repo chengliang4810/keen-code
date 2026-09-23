@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Unified composer command panel (+ button and `/` slash).
  *
@@ -244,7 +244,7 @@ export function ComposerPlusPanel({
 
         if (entry.kind === "upload") {
           return (
-            <Button
+            <Button size="md"
               key={`upload-${navIndex}`}
               id={`plus-opt-${navIndex}`}
               type="button"
@@ -279,7 +279,7 @@ export function ComposerPlusPanel({
           `/${item.name}`;
 
         return (
-          <Button
+          <Button size="md"
             key={`${entry.id}#${navIndex}`}
             id={`plus-opt-${navIndex}`}
             type="button"

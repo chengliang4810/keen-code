@@ -25,7 +25,7 @@ import {
 import { useImageViewerOptional } from "@/components/ImageViewer";
 import { IconCopy, IconExternalLink, IconFolder } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { createT, type Locale } from "@/i18n";
 import { isAbsoluteFsPath, pathBasename } from "@/lib/filePath";
 
@@ -390,7 +390,7 @@ export function ImageUi({
           </span>
         ) : resolvedSrc ? (
           layout === "thumbnail" ? (
-            <Button
+            <Button size="md"
               variant="ghost"
               className="att-card__btn att-card__btn--image"
               aria-label={`${labels.viewImage}: ${alt}`}

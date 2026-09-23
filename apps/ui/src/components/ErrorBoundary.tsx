@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { reportFrontendError } from "@/lib/frontendDiagnostics";
 
 /**
@@ -55,10 +55,10 @@ export class ErrorBoundary extends React.Component<
             错误详情已写入诊断日志，重试或重载可恢复。
           </p>
           <div className="error-boundary-fallback__actions">
-            <Button type="button" variant="primary" onClick={this.handleRetry}>
+            <Button size="md" type="button" variant="primary" onClick={this.handleRetry}>
               重试
             </Button>
-            <Button type="button" variant="ghost" onClick={this.handleReload}>
+            <Button size="md" type="button" variant="ghost" onClick={this.handleReload}>
               重载窗口
             </Button>
           </div>

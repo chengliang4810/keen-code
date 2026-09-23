@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import {
   Collapsible,
@@ -545,7 +545,7 @@ function SubagentTimelineCard({
   };
 
   return agent && onClick ? (
-    <Button
+    <Button size="md"
       type="button"
       variant="ghost" className="lobe-subagent-card"
       onClick={onClick}

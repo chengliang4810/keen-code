@@ -49,7 +49,7 @@ import {
   IconPuzzle,
   IconRename,
 } from "@/components/icons";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@appica/ui-react/spinner";
 import { formatMessageTime } from "@/lib/messageTime";
@@ -472,7 +472,7 @@ function UserMessageEditor({
         }}
       />
       <div className="lobe-chat-user-editor__actions">
-        <Button
+        <Button size="md"
           type="button"
           variant="ghost"
           disabled={submitting}
@@ -480,7 +480,7 @@ function UserMessageEditor({
         >
           {tr("common.cancel")}
         </Button>
-        <Button
+        <Button size="md"
           type="button"
           variant="primary"
           disabled={!canSend}

@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Card } from "@/components/ui/card";
 import { Thumbnail } from "@appica/ui-react/thumbnail";
 /**
@@ -263,7 +263,7 @@ export function AttachmentCard({
             setMenu({ x: e.clientX, y: e.clientY });
           }}
         >
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             className="attach-chip__main"
@@ -311,7 +311,7 @@ export function AttachmentCard({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
+                size="icon-sm"
                 className="attach-chip__retry"
                 aria-label={labels.retry ?? "Retry"}
                 onClick={() => onRetry(attachment)}
@@ -325,7 +325,7 @@ export function AttachmentCard({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
+                size="icon-sm"
                 className="attach-chip__x"
                 aria-label={labels.remove}
                 onClick={() => onRemove(attachment)}
@@ -337,7 +337,7 @@ export function AttachmentCard({
             <Button
               type="button"
               variant="ghost"
-              size="icon-xs"
+              size="icon-sm"
               className="attach-chip__x"
               aria-label={labels.remove}
               onClick={() => onRemove(attachment)}
@@ -428,7 +428,7 @@ export function AttachmentCard({
             <Button
               type="button"
               variant="ghost"
-              size="icon-xs"
+              size="icon-sm"
               aria-label={labels.retry ?? "Retry"}
               onClick={() => onRetry(attachment)}
             >

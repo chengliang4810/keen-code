@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * 当前 Session 的提示词历史选择器。
  * Newest-first list + optional fuzzy filter; Enter/click selects into composer.
@@ -135,7 +135,7 @@ export function PromptHistoryPanel({
               previewStoredAsSlash(entry.text),
             );
             return (
-              <Button
+              <Button size="md"
                 key={`${entry.historyIndex}:${i}`}
                 type="button"
                 variant={active ? "soft" : "ghost"}

@@ -10,7 +10,7 @@ import type {
   SidebarSetState,
   SidebarTranslator,
 } from "./types";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Tip } from "@/components/ui/tooltip";
 import { IconArrowLeft, IconArrowRight } from "@/components/icons";
 

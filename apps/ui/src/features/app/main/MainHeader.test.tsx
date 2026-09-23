@@ -82,7 +82,8 @@ describe("MainHeader workspace context", () => {
     const source = readSource(new URL("./MainHeader.tsx", import.meta.url));
 
     expect(html).toContain('data-testid="main-project-context"');
-    expect(html).toContain('data-size="md"');
+    // 上下文触发器统一渲染官方 Appica md 几何（h-10）。
+    expect(html).toContain("h-10");
     expect(html).toContain('aria-label="KeenCode · feat/header-context"');
     // Appica renders DropdownMenuContent in a client portal, so SSR omits the
     // menu body. Keep a source contract for the actual browser-rendered body.

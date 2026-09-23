@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Slider } from "@appica/ui-react/slider";
 /**
  * Visual wallpaper focus editor — window-aspect crop frame over full media.
@@ -556,14 +556,14 @@ export function WallpaperFocusEditor({
       closeOnOverlay={false}
       footer={
         <>
-          <Button type="button" variant="ghost" onClick={onReset}>
+          <Button size="md" type="button" variant="ghost" onClick={onReset}>
             {labels.reset}
           </Button>
           <div className="wallpaper-focus-modal__footer-spacer" />
-          <Button type="button" variant="ghost" onClick={onClose}>
+          <Button size="md" type="button" variant="ghost" onClick={onClose}>
             {labels.cancel}
           </Button>
-          <Button
+          <Button size="md"
             type="button"
             variant="primary"
             onClick={onConfirm}

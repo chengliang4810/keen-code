@@ -1,7 +1,7 @@
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Card } from "@/components/ui/card";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import {
   IconActivity,
   IconAlertTriangle,

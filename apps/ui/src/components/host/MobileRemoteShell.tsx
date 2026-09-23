@@ -3,7 +3,7 @@ import { Badge } from "@appica/ui-react/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AskUserModal } from "@/components/AskUserModal";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import {
   IconArrowLeft,
   IconChevronDown,
@@ -328,7 +328,7 @@ export function MobileRemoteShell({
             const id = item.id ?? `session-${index}`;
             const active = id === selectedSessionId || (!selectedSessionId && item === selected);
             return (
-              <Button
+              <Button size="md"
                 key={id}
                 type="button"
                 variant={active ? "soft" : "ghost"}
@@ -490,11 +490,11 @@ export function MobileRemoteShell({
                 </>
               ) : null}
               {busy && onStop ? (
-                <Button type="button" variant="outline" onClick={() => void onStop()}>
+                <Button size="md" type="button" variant="outline" onClick={() => void onStop()}>
                   <IconStop size={17} /><span>{labels.stop}</span>
                 </Button>
               ) : selected.status === "failed" && onRetry ? (
-                <Button type="button" variant="outline" onClick={() => void onRetry()}>
+                <Button size="md" type="button" variant="outline" onClick={() => void onRetry()}>
                   <IconRefresh size={17} /><span>{labels.retry}</span>
                 </Button>
               ) : null}

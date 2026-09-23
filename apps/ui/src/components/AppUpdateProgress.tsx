@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Progress } from "@appica/ui-react/progress";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { useMemo } from "react";
@@ -102,7 +102,7 @@ export function AppUpdateProgress({
       {state === "failed" || state === "ready" ? (
         <div className="app-update-progress__actions modal-actions">
           {state === "failed" ? (
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               onClick={() => void onRetry()}
@@ -110,7 +110,7 @@ export function AppUpdateProgress({
               {t("settings.updateRetry")}
             </Button>
           ) : (
-            <Button type="button" variant="primary" onClick={onInstall}>
+            <Button size="md" type="button" variant="primary" onClick={onInstall}>
               {t("settings.updateInstall")}
             </Button>
           )}

@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import {

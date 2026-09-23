@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Textarea } from "@/components/ui/textarea";
 import type { AskUserPayload, AskUserQuestionItem } from "@/lib/session";
 
@@ -122,7 +122,7 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
         {question.options.map((option, index) => {
           const active = chosen.includes(option.id);
           return (
-            <Button key={option.id} type="button"
+            <Button size="md" key={option.id} type="button"
               variant={active ? "soft" : "outline"}
               className={`ask-user__opt${active ? " ask-user__opt--active" : ""}`}
               disabled={busy} aria-pressed={active} onClick={() => choose(option.id)}>
@@ -150,15 +150,15 @@ export function AskUserModal({ payload, labels, onSubmit, onCancel }: Props) {
             }} />
         </label>
       ) : question.allowCustomAnswer !== false ? (
-        <Button type="button" variant="ghost" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
+        <Button size="md" type="button" variant="ghost" className="ask-user__custom" disabled={busy} onClick={() => setEditingText(true)}>
           <span className="ask-user__index"><IconRename size={15} /></span>
           <span>{labels.freeTextHint}</span>
         </Button>
       ) : null}
 
       <footer className="ask-user__footer">
-        <Button type="button" variant="ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>
-        <Button type="button" variant="primary" disabled={busy || !canSubmit} onClick={() => void submit()}>{labels.submit}</Button>
+        <Button size="md" type="button" variant="ghost" disabled={busy} onClick={() => void cancel()}>{labels.cancel}</Button>
+        <Button size="md" type="button" variant="primary" disabled={busy || !canSubmit} onClick={() => void submit()}>{labels.submit}</Button>
       </footer>
     </section>
   );

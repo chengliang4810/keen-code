@@ -15,7 +15,7 @@ import {
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@appica/ui-react/collapsible";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { IconBrain, IconChevronRight } from "@/components/icons";
 import { cn } from "@/lib/utils";
 import { t, type Locale } from "@/i18n";
@@ -440,7 +440,7 @@ export function Thinking({
       ) : null}
       <CollapsibleTrigger
         render={
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             className={cn("lobe-chat-thinking__trigger", open && "is-open")}

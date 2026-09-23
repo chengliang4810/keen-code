@@ -1,6 +1,6 @@
 import type { FormEvent, RefObject } from "react";
 import type { AppDialog } from "@/features/app/models";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
 import { GlassModal } from "@/components/GlassModal";
 import type { SetState, Translator } from "./types";
@@ -65,14 +65,14 @@ export function AppDialogPortal({
         >
           <p className="app-dialog__msg">{appDialog.message}</p>
           <div className="app-dialog__actions modal-actions">
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => setAppDialog(null)}
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               ref={confirmBtnRef}
               data-modal-autofocus
               type="submit"
@@ -97,14 +97,14 @@ export function AppDialogPortal({
             autoComplete="off"
           />
           <div className="app-dialog__actions modal-actions">
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => setAppDialog(null)}
             >
               {tr("common.cancel")}
             </Button>
-            <Button type="submit" variant="primary">
+            <Button size="md" type="submit" variant="primary">
               {appDialog.submitLabel || tr("common.save")}
             </Button>
           </div>

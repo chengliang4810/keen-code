@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { useEffect, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpGoalProjection } from "@/lib/acp/store";

@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import {
   IconAlertTriangle,
   IconCheck,
@@ -94,7 +94,7 @@ export function SubagentRow({
     : agent.agent_name;
   const headline = [displayName, agent.task_title].filter(Boolean).join(" · ");
   return (
-    <Button
+    <Button size="md"
       type="button"
       variant="ghost"
       className={`summary-panel__agent-row${className ? ` ${className}` : ""}`}

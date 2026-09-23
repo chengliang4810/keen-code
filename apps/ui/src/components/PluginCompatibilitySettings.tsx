@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { GlassModal } from "@/components/GlassModal";
 import { AgentModelSelect } from "@/components/AgentsPanel";
@@ -47,8 +47,8 @@ function CompatibilityDialog({ locale, onClose }: { locale: Locale; onClose: () 
   };
   return <GlassModal open onClose={() => { if (!saving) onClose(); }} title={tr("ext.compatibility.title")}
     closeLabel={tr("common.close")} footer={<>
-      <Button variant="ghost" disabled={saving} onClick={onClose}>{tr("common.cancel")}</Button>
-      <Button variant="primary" disabled={!ready || saving} onClick={() => void save()}>{tr("common.save")}</Button>
+      <Button size="md" variant="ghost" disabled={saving} onClick={onClose}>{tr("common.cancel")}</Button>
+      <Button size="md" variant="primary" disabled={!ready || saving} onClick={() => void save()}>{tr("common.save")}</Button>
     </>}>
     <p>{tr("ext.compatibility.description")}</p>
     {error ? <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert> : null}

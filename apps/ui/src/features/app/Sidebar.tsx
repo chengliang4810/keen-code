@@ -2,7 +2,7 @@ import { useState, type RefObject } from "react";
 import { UserMenu, type UserMenuProps } from "@/components/UserMenu";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { saveLayout, type LayoutPrefs } from "@/lib/layout";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { SidebarChrome } from "./sidebar/SidebarChrome";
 import type { SidebarChromeProps } from "./sidebar/SidebarChrome";
 import { SidebarNav } from "./sidebar/SidebarNav";

@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Inline video card for chat: session-relative / local paths.
  * Plays via Tauri asset://; right-click: open / reveal / copy path.
@@ -263,7 +263,7 @@ export const VideoUi = memo(function VideoUi({
             <div className="md-body__video-card__error">
               <span>{labels.loadError || "Failed to load video"}</span>
               {localPath && (
-                <Button
+                <Button size="md"
                   type="button"
                   variant="outline"
                   className="md-body__video-card__btn"

@@ -1,7 +1,7 @@
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { IconWorld } from "@/components/icons";
 import type { HostMode } from "./hostMode";
 import "./host-mode.css";
@@ -118,7 +118,7 @@ export function WebLoginPanel({
           <FieldDescription>{labels.description}</FieldDescription>
         </Field>
         <div className="web-login-panel__actions">
-          <Button type="submit" variant="primary" disabled={submitting || status === "signed-in"}>
+          <Button size="md" type="submit" variant="primary" disabled={submitting || status === "signed-in"}>
             {submitting ? labels.submitting : labels.submit}
           </Button>
         </div>

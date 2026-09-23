@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Alert, AlertDescription, AlertIcon } from "@appica/ui-react/alert";
 import { FieldError } from "@appica/ui-react/field";
 import { Separator } from "@appica/ui-react/separator";
@@ -538,7 +538,7 @@ export function ConversationSummaryPanel({
         <div className="summary-panel__overview">
             {git ? (
               <div className="summary-panel__git">
-                <Button
+                <Button size="md"
               type="button"
               variant="ghost"
               className="summary-panel__row"
@@ -558,7 +558,7 @@ export function ConversationSummaryPanel({
                 </Button>
 
                 <DropdownMenu open={branchMenuOpen} onOpenChange={setBranchMenuOpen}>
-                  <DropdownMenuTrigger render={<Button
+                  <DropdownMenuTrigger render={<Button size="md"
                       type="button"
                       variant="ghost"
                       className="summary-panel__row"
@@ -634,7 +634,7 @@ export function ConversationSummaryPanel({
                   </DropdownMenuContent>
                 </DropdownMenu>
 
-                <Button
+                <Button size="md"
               type="button"
               variant={gitFormOpen ? "soft" : "ghost"}
               className={
@@ -693,7 +693,7 @@ export function ConversationSummaryPanel({
                   </span>
                 </div>
                 <div className="summary-panel__git-actions">
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="primary"
                     disabled={Boolean(gitAction) || !git?.files.length}
@@ -706,7 +706,7 @@ export function ConversationSummaryPanel({
                     )}
                     {tr("summary.git.commit")}
                   </Button>
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="outline"
                     disabled={Boolean(gitAction) || !git?.files.length}
@@ -719,7 +719,7 @@ export function ConversationSummaryPanel({
                     )}
                     {tr("summary.git.commitAndPush")}
                   </Button>
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="outline"
                     disabled={Boolean(gitAction) || !git?.available}
@@ -871,7 +871,7 @@ export function ConversationSummaryPanel({
                   <Alert variant="error"><AlertIcon><IconAlertTriangle size={14} /></AlertIcon><AlertDescription>{agentTaskError}</AlertDescription></Alert>
                 ) : null}
                 {groupedSubagents.done.length ? (
-                  <Button
+                  <Button size="md"
                     type="button"
                     variant="ghost"
                     className="summary-panel__completed"
@@ -926,10 +926,10 @@ export function ConversationSummaryPanel({
         onClose={() => !branchBusy && setCreateBranchOpen(false)}
         footer={
           <>
-            <Button type="button" variant="ghost" onClick={() => setCreateBranchOpen(false)}>
+            <Button size="md" type="button" variant="ghost" onClick={() => setCreateBranchOpen(false)}>
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={newBranchInvalid || Boolean(branchBusy)}

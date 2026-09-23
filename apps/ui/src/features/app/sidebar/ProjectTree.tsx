@@ -7,7 +7,7 @@ import {
   SIDEBAR_SESSION_ROW_HEIGHT,
   SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
 } from "@/lib/virtualList";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Tip } from "@/components/ui/tooltip";
 import { VirtualList } from "@/components/VirtualList";
@@ -330,7 +330,7 @@ export function ProjectTree({
                 {open ? (
                   <div className="tree-l3-list-wrap">
                     {canWriteProjects && pathMissing ? (
-                      <Button
+                      <Button size="md"
                         type="button"
                         variant="ghost"
                         className="tree-l3 tree-l3--hint"

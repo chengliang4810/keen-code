@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import * as api from "@/lib/api";
 import { GlassModal } from "@/components/GlassModal";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import type { SetState, Translator } from "./types";
@@ -57,7 +57,7 @@ export function WorktreeGcModal({
       wrapBody
       footer={
         <>
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             disabled={busy}
@@ -65,7 +65,7 @@ export function WorktreeGcModal({
           >
             {tr("common.cancel")}
           </Button>
-          <Button
+          <Button size="md"
             type="button"
             variant="primary"
             disabled={busy || previewBusy}

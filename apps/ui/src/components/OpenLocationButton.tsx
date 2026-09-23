@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { ButtonGroup } from "@appica/ui-react/button-group";
 import {
   DropdownMenu,
@@ -115,7 +115,7 @@ export function OpenLocationButton({
       }
     >
       <Tip label={labels.openHint} disabled={disabled}>
-      <Button
+      <Button size="md"
         type="button"
         variant="outline"
         className="open-loc__main"

@@ -1,5 +1,5 @@
 import type { SessionRow } from "@/features/app/models";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { VirtualList } from "@/components/VirtualList";
 import { IconChevronDown } from "@/components/icons";
 import {

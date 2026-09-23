@@ -17,7 +17,7 @@ import {
   IconMaximize,
   IconTerminal,
 } from "@/components/icons";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Tip } from "@/components/ui/tooltip";
 import { highlightChatCode } from "@/lib/chatCodeHighlight";
 import { cn } from "@/lib/utils";

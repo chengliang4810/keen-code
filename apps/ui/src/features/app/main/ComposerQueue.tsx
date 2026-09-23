@@ -3,7 +3,7 @@ import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { QueuedSend } from "@/lib/sendQueue";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SessionTurnResult } from "@/hooks/useSessionTurn";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
   DropdownMenu,
@@ -156,7 +156,7 @@ export function ComposerQueue({
             n: String(sendQueue.activeQueue.length),
           })}
         </span>
-        <Button
+        <Button size="md"
           type="button"
           variant="ghost"
           className="composer__queue-clear"
@@ -173,7 +173,7 @@ export function ComposerQueue({
           <span className="composer__queue-hold-text">
             {tr("composer.queueHold")}
           </span>
-          <Button
+          <Button size="md"
             type="button"
             variant="outline"
             className="composer__queue-hold-retry"

@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { CopyButton } from "@appica/ui-react/copy-button";
 /**
  * Compact chat hover action — KeenCode tip + optional copy→check feedback.

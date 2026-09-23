@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * In-conversation find bar (Cmd/Ctrl+F).
  * Query + prev/next + match count; Escape closes via parent.

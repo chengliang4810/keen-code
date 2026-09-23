@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription, AlertTitle } from "@appica/ui-react/alert";
 import { Tip } from "@/components/ui/tooltip";
@@ -304,7 +304,7 @@ export function ExtensionsBuildExtras({
         ) : null}
         <span className="ext-h2-actions">
           <PluginCompatibilitySettings locale={locale} />
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost" className="ext-bulk-btn"
             disabled={loading || busy !== null}
@@ -353,7 +353,7 @@ export function ExtensionsBuildExtras({
             className="ext-plugin-filters"
             aria-label={tr("ext.market.filterLabel")}
           >
-            <Button
+            <Button size="md"
               type="button"
               variant={marketFilter === "__all__" ? "soft" : "ghost"}
               aria-pressed={marketFilter === "__all__"}
@@ -366,7 +366,7 @@ export function ExtensionsBuildExtras({
               {tr("ext.market.filterAll")}
             </Button>
             {sources.map((source) => (
-              <Button
+              <Button size="md"
                 key={source.name}
                 type="button"
                 variant={marketFilter === source.name ? "soft" : "ghost"}
@@ -563,7 +563,7 @@ export function ExtensionsBuildExtras({
         wrapBody
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={busy !== null}
@@ -571,7 +571,7 @@ export function ExtensionsBuildExtras({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={busy !== null || !addSource.trim()}
@@ -619,7 +619,7 @@ export function ExtensionsBuildExtras({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={busy !== null}
@@ -627,7 +627,7 @@ export function ExtensionsBuildExtras({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="destructive"
               disabled={busy !== null}
@@ -653,7 +653,7 @@ export function ExtensionsBuildExtras({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               disabled={busy !== null}
@@ -661,7 +661,7 @@ export function ExtensionsBuildExtras({
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               disabled={busy !== null}

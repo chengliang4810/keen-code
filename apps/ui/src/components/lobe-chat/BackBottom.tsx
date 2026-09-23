@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { IconChevronDown } from "@/components/icons";
 import { Tip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";

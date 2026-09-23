@@ -1,7 +1,7 @@
 import type { MessageKey } from "@/i18n";
 import { shortcutsForPlatform } from "@/lib/shortcuts";
 import { GlassModal } from "@/components/GlassModal";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Kbd } from "@appica/ui-react/kbd";
 import type { SetState, Translator } from "./types";
 
@@ -29,7 +29,7 @@ export function ShortcutsModal({
       size="md"
       closeLabel={tr("shortcuts.close")}
       footer={
-        <Button
+        <Button size="md"
           type="button"
           variant="ghost"
           onClick={() => setOpen(false)}

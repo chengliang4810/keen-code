@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Self-drawn window chrome for Windows (and other non-mac platforms when
  * decorations are disabled). macOS uses native Overlay traffic lights.

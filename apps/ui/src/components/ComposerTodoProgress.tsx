@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { useMemo, useRef, useState } from "react";
 import type { Locale } from "@/i18n";
 import type { AcpTodoProjection } from "@/lib/acp/store";
@@ -95,7 +95,7 @@ export function ComposerTodoProgress({
           );
         })}
       </ol>
-      <Button
+      <Button size="md"
         type="button"
         variant="ghost"
         className="composer-todo__step"

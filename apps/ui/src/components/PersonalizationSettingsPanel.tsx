@@ -1,5 +1,5 @@
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { Switch } from "@/components/ui/switch";
@@ -104,7 +104,7 @@ export function PersonalizationSettingsPanel({
             id="settings-custom-instructions-description"
           >
             {t("settings.personalization.description")} {" "}
-      <Button
+      <Button size="md"
         type="button"
         variant="ghost"
         className="settings-personalization__learn-more"

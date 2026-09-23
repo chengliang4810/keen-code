@@ -10,7 +10,7 @@ import type { LayoutPrefs } from "@/lib/layout";
 import type { Project, SessionRow } from "@/features/app/models";
 import type { SessionSnapshot } from "@/lib/session";
 import type { GitWorktreeEntry } from "@/lib/api";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import {
   DropdownMenu,
   DropdownMenuContent,

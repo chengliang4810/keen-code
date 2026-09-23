@@ -35,7 +35,8 @@ describe("SidebarChrome task navigation", () => {
     expect(html).toContain('aria-label="resources.browserForward"');
     expect(html).toContain("disabled");
     expect(html).not.toContain('aria-label="sidebar.newSession"');
-    expect((html.match(/data-size="md"/g) ?? []).length).toBe(3);
+    // 品牌入口与后退/前进三个按钮统一渲染官方 Appica md 几何（h-10）。
+    expect((html.match(/h-10/g) ?? []).length).toBe(3);
   });
 
   it("enables both task controls when the history has both directions", () => {
@@ -44,7 +45,8 @@ describe("SidebarChrome task navigation", () => {
     expect(html.match(/data-testid="sidebar-task-navigation"/g)).toHaveLength(1);
     expect(html.match(/aria-label="resources.browserBack"/g)).toHaveLength(1);
     expect(html.match(/aria-label="resources.browserForward"/g)).toHaveLength(1);
-    expect(html).not.toMatch(/aria-label="resources\.browserBack"[^>]*disabled/);
-    expect(html).not.toMatch(/aria-label="resources\.browserForward"[^>]*disabled/);
+    // 官方 Button 的 class 含 data-disabled:* 变体，这里只匹配 disabled 属性本身。
+    expect(html).not.toMatch(/aria-label="resources\.browserBack"[^>]*\sdisabled(?:[\s=>])/);
+    expect(html).not.toMatch(/aria-label="resources\.browserForward"[^>]*\sdisabled(?:[\s=>])/);
   });
 });

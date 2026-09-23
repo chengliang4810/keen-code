@@ -1,5 +1,5 @@
 import { GlassModal } from "@/components/GlassModal";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldLabel } from "@appica/ui-react/field";
@@ -54,7 +54,7 @@ export function WorktreeCreateModal({
       wrapBody
       footer={
         <>
-          <Button
+          <Button size="md"
             type="button"
             variant="ghost"
             disabled={busy}
@@ -62,7 +62,7 @@ export function WorktreeCreateModal({
           >
             {tr("common.cancel")}
           </Button>
-          <Button
+          <Button size="md"
             type="button"
             variant="primary"
             disabled={busy || !name.trim()}

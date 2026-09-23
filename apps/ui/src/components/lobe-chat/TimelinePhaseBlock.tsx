@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Collapsible work phase for KeenCode tool activity.
  * Header: summary · caret right.
@@ -128,7 +128,7 @@ export function TimelinePhaseBlock({
       data-phase-id={phase.id}
       data-live={phase.live ? "1" : "0"}
     >
-      <Button
+      <Button size="md"
         type="button"
         variant="ghost"
         className="lobe-timeline-phase__trigger"

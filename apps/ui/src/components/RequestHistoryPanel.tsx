@@ -1,6 +1,6 @@
 import { cachedRead } from "@/lib/readCache";
 import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Badge } from "@appica/ui-react/badge";
 import { Card } from "@/components/ui/card";
@@ -552,7 +552,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         <div className="request-history__filters-heading">
           <h2>{labels.filters}</h2>
           <div className="request-history__filter-actions">
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               className="request-history__clear"
@@ -561,7 +561,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
             >
               {loading ? labels.refreshing : labels.refresh}
             </Button>
-            <Button type="button" variant="ghost" className="request-history__clear" onClick={clearFilters}>
+            <Button size="md" type="button" variant="ghost" className="request-history__clear" onClick={clearFilters}>
               {labels.clearFilters}
             </Button>
           </div>
@@ -709,10 +709,10 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         <Pagination size="md" aria-label={labels.range.replace("{from}", String(first)).replace("{to}", String(last)).replace("{total}", String(currentPage.total))}>
           <PaginationList>
             <PaginationItem>
-              <PaginationLink render={<Button type="button" variant="ghost" />} disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</PaginationLink>
+              <PaginationLink render={<Button size="md" type="button" variant="ghost" />} disabled={currentPage.offset <= 0 || loading} onClick={() => setOffset(Math.max(0, currentPage.offset - currentPage.limit))}>{labels.previous}</PaginationLink>
             </PaginationItem>
             <PaginationItem>
-              <PaginationLink render={<Button type="button" variant="ghost" />} disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</PaginationLink>
+              <PaginationLink render={<Button size="md" type="button" variant="ghost" />} disabled={!currentPage.hasMore || loading} onClick={() => setOffset(currentPage.offset + currentPage.limit)}>{labels.next}</PaginationLink>
             </PaginationItem>
           </PaginationList>
         </Pagination>
@@ -729,7 +729,7 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
         bodyClassName="request-history__details-modal-body"
         wrapBody
         footer={
-          <Button type="button" variant="primary" onClick={closeDetails}>
+          <Button size="md" type="button" variant="primary" onClick={closeDetails}>
             {labels.close}
           </Button>
         }

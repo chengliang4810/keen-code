@@ -1,4 +1,4 @@
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 /**
  * Inline file / URL link for chat paths.
  * Default: name only (no path on the link — avoids resolve flash).
@@ -368,7 +368,7 @@ export function FilePathCard({
         }}
       >
         <Tip label={isUrl ? path : name}>
-      <Button
+      <Button size="md"
         type="button"
         variant="ghost"
         className="file-path-link__main"
@@ -408,7 +408,7 @@ export function FilePathCard({
         overlayClassName="file-path-details-overlay"
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => {
@@ -417,7 +417,7 @@ export function FilePathCard({
             >
               {labels.copyPath}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               onClick={() => setDetailsOpen(false)}

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Tip } from "@/components/ui/tooltip";
 import { Spinner } from "@appica/ui-react/spinner";
 import { Badge } from "@appica/ui-react/badge";
