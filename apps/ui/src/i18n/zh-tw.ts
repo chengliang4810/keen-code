@@ -512,7 +512,7 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.webHost.title": "桌面 Web Host",
   "settings.webHost.enabled": "允許瀏覽器存取",
   "settings.webHost.enabledDesc":
-    "為遠端工作台開放經過驗證的本機 Web Host。監聽器只有在手動啟動後才會開啟。",
+    "為遠端工作台開放經過驗證的本機 Web Host。開啟後，桌面啟動時會自動開放監聽。",
   "settings.webHost.bind": "監聽位址",
   "settings.webHost.bindDesc":
     "僅本機使用 127.0.0.1；手機存取請填寫電腦的具體區域網路 IP。公網位址和 0.0.0.0 會被拒絕。",

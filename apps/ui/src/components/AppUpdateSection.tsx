@@ -100,7 +100,15 @@ export function AppUpdateSection({
             aria-labelledby="app-update-download-source-label"
             aria-describedby="app-update-download-source-description"
           >
-            <SelectValue />
+            <SelectValue>
+              {() =>
+                downloadSourcePreference === "github"
+                  ? t("settings.updateSourceGithub")
+                  : downloadSourcePreference === "chinaMirror"
+                    ? t("settings.updateSourceChinaMirror")
+                    : t("settings.updateSourceAuto")
+              }
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectGroup>

@@ -56,6 +56,9 @@ describe("AppUpdateSection", () => {
     expect(html).toContain("当前已是最新版本");
     expect(html).toContain("检查更新");
     expect(html).toContain('role="combobox"');
+    // 触发器必须显示选项 label，而不是内部 value（Base UI 裸 SelectValue 会回退成 value）。
+    expect(html).toContain(">自动<");
+    expect(html).not.toContain(">auto<");
     expect(html).toContain(
       'aria-labelledby="app-update-download-source-label"',
     );

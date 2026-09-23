@@ -839,15 +839,37 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             let web_settings = current_settings
                 .web_host_settings(app.handle())
                 .map_err(|error| error.to_string())?;
-            let web_manager = web_host::WebHostManager::new(
-                web_settings,
-                web_host::credential_provider().map_err(|error| error.to_string())?,
-            )
-            .map_err(|error| error.to_string())?;
+            let web_host_enabled = web_settings.enabled;
+            let web_manager = Arc::new(
+                web_host::WebHostManager::new(
+                    web_settings,
+                    web_host::credential_provider().map_err(|error| error.to_string())?,
+                )
+                .map_err(|error| error.to_string())?,
+            );
             web_manager
                 .set_observability(diagnostics.observability())
                 .map_err(|error| error.to_string())?;
-            app.manage(Arc::new(web_manager));
+            app.manage(Arc::clone(&web_manager));
+            // 开关打开时桌面启动即自动开放监听；Token 缺失、端口被占用或静态
+            // 资源未就绪只记录诊断并保留 Stopped 状态，不阻断桌面启动，用户仍
+            // 可在设置面板手动重试。必须与下方 LocalHostServer 同样处于
+            // block_on 的 Tokio reactor 上下文内，否则 owner 的 tokio::spawn
+            // 会 panic。
+            if web_host_enabled {
+                match tauri::async_runtime::block_on(web_manager.start(None)) {
+                    Ok(status) => diagnostics.log(
+                        "info",
+                        "web_host.autostart",
+                        format!("监听已开启 bind={} port={}", status.bind, status.port),
+                    ),
+                    Err(error) => diagnostics.log(
+                        "warn",
+                        "web_host.autostart",
+                        format!("自动开启监听失败，可在设置面板手动启动：{error}"),
+                    ),
+                }
+            }
             let (local_server, remote_client) = if let Some(agent_runtime) = agent_runtime {
                 let acp_host = acp_host::install(
                     app.handle(),

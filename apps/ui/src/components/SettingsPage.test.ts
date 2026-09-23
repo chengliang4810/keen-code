@@ -64,11 +64,13 @@ describe("SettingsPage 左侧导航排版契约", () => {
 });
 
 describe("SettingsPage 卡片间距契约", () => {
-  it("主设置卡片和外观双栏卡片使用统一的桌面端内边距", () => {
-    const styles = readFileSync(new URL("../styles/app-foundation.css", import.meta.url), "utf8");
-
-    expect(styles).toMatch(
-      /\.settings-page__main > \[data-slot="card"\] > \[data-slot="card-content"\],[\s\S]*?\.settings-appearance-duo > \[data-slot="card"\] > \[data-slot="card-content"\]\s*\{\s*padding: 16px;/,
+  it("卡片内容层统一 16px 内容边界，行式卡等贴边例外由 :has 声明", () => {
+    expect(shellStyles).toMatch(
+      /\.settings-page__body \[data-slot="card-content"\]\s*\{\s*padding: 16px;/,
+    );
+    // 行式设置卡的内距来自 .settings-row 本身，内容层必须保持 0，避免双重边距。
+    expect(shellStyles).toMatch(
+      /\[data-slot="card-content"\]:has\(> \.settings-row\)[\s\S]*?\{\s*padding: 0;/,
     );
   });
 });

@@ -39,7 +39,8 @@ pub const WEB_STATUS_METHOD: &str = "keencode/web/status";
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WebHostSettings {
-    /// 是否允许创建监听器；默认关闭，避免桌面启动时意外开放端口。
+    /// 是否允许创建监听器；默认关闭。开启后桌面启动时自动开放监听
+    /// （见 `lib.rs` setup 的 autostart 分支），失败仅记录诊断。
     pub enabled: bool,
     /// TCP 绑定地址。仅允许回环、私有网络和链路本地地址，拒绝通配与公网地址。
     pub bind: IpAddr,

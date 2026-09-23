@@ -538,7 +538,7 @@ const en = {
   "settings.webHost.title": "Desktop Web Host",
   "settings.webHost.enabled": "Allow browser access",
   "settings.webHost.enabledDesc":
-    "Expose a local authenticated Web Host for the remote workbench. The listener stays off until you start it.",
+    "Expose a local authenticated Web Host for the remote workbench. When enabled, the listener starts automatically on desktop launch.",
   "settings.webHost.bind": "Listen address",
   "settings.webHost.bindDesc":
     "Use 127.0.0.1 for this computer, or a specific private LAN IP for phone access. Public and wildcard addresses are rejected.",
@@ -1905,7 +1905,7 @@ const zh: Record<MessageKey, string> = {
   "settings.webHost.title": "桌面 Web Host",
   "settings.webHost.enabled": "允许浏览器访问",
   "settings.webHost.enabledDesc":
-    "为远程工作台开放经过认证的本机 Web Host。监听器只有在手动启动后才会开启。",
+    "为远程工作台开放经过认证的本机 Web Host。开启后，桌面启动时会自动开放监听。",
   "settings.webHost.bind": "监听地址",
   "settings.webHost.bindDesc":
     "仅本机使用 127.0.0.1；手机访问请填写电脑的具体局域网 IP。公网地址和 0.0.0.0 会被拒绝。",

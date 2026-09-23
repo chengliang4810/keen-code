@@ -512,9 +512,16 @@ pub async fn app_update_check(
         .map_err(|error| format!("无法读取更新源设置：{error}"))?
         .app_update_download_source;
     let endpoints = update_manifest_endpoints(source_preference)?;
-    let updater = app
-        .updater_builder()
-        .timeout(UPDATE_CHECK_TIMEOUT)
+    let mut builder = app.updater_builder().timeout(UPDATE_CHECK_TIMEOUT);
+    // Tauri 更新器不会自动读取环境变量代理；GitHub release 资源常重定向到受网络干扰的
+    // 托管域，直连会超时。显式套用与 reqwest/子进程一致的代理，避免更新检查“无法检查
+    // GitHub Releases”。无可用代理时保持直连。
+    if let Some(proxy) =
+        crate::network_proxy::effective_proxy().and_then(|value| reqwest::Url::parse(&value).ok())
+    {
+        builder = builder.proxy(proxy);
+    }
+    let updater = builder
         .endpoints(endpoints)
         .map_err(|error| format!("更新服务配置无效：{error}"))?;
     #[cfg(windows)]

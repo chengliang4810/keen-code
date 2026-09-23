@@ -3373,7 +3373,7 @@ mod tests {
         fs::create_dir_all(&root).expect("create image preview directory");
         let image = root.join("preview.png");
         let text = root.join("preview.txt");
-        let image_bytes = include_bytes!("../../../../apps/ui/public/logo.png");
+        let image_bytes = include_bytes!("../../../apps/ui/public/logo.png");
         fs::write(&image, image_bytes).expect("write image fixture");
         fs::write(&text, b"not an image").expect("write text fixture");
 

@@ -996,7 +996,9 @@ export function SettingsPage({
                   onValueChange={(value) => onArchiveRetentionDays(Number(value))}
                 >
                   <SelectTrigger className="settings-input settings-input--compact" aria-label={t("settings.archive.retention")}>
-                    <SelectValue />
+                    <SelectValue>
+                      {() => t("settings.archive.afterDays", { days: archiveRetentionDays })}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     {[1, 3, 7, 14, 30, 60, 90].map((days) => (
@@ -1190,7 +1192,15 @@ export function SettingsPage({
                       className="settings-input settings-input--compact"
                       aria-label={t("settings.terminalShell")}
                     >
-                      <SelectValue />
+                      <SelectValue>
+                        {() =>
+                          terminalShell === "auto"
+                            ? t("settings.terminalShellAuto")
+                            : terminalShellOptions.find(
+                                  (shell) => shell.id === terminalShell,
+                                )?.name ?? terminalShell
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="auto">

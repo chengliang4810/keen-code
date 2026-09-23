@@ -17,7 +17,9 @@ pub(crate) fn configure_before_start() {
     if environment_proxy().is_some() {
         return;
     }
-    let Some(proxy) = platform_proxy() else {
+    // OS 系统代理缺失时（例如只在 git 里配了本地代理而未启用系统代理），回退使用 git
+    // 全局代理，让 reqwest、Tauri Updater 与各子进程和 git 共用同一网络出口。
+    let Some(proxy) = platform_proxy().or_else(git_global_proxy) else {
         return;
     };
     let no_proxy_configured = ["NO_PROXY", "no_proxy"]
@@ -61,6 +63,16 @@ fn environment_proxy() -> Option<String> {
     .find_map(|key| env::var(key).ok().and_then(|value| normalize_proxy(&value)))
 }
 
+/// 返回当前进程应当使用的代理地址（`https` 优先），供不会自动读取环境变量的客户端
+/// （如 Tauri 更新器）显式套用；与 `configure_before_start` 的选择顺序保持一致。
+pub(crate) fn effective_proxy() -> Option<String> {
+    environment_proxy().or_else(|| {
+        platform_proxy()
+            .and_then(|proxy| proxy.https.or(proxy.http))
+            .or_else(|| git_global_proxy().and_then(|proxy| proxy.https.or(proxy.http)))
+    })
+}
+
 fn normalize_proxy(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -70,6 +82,45 @@ fn normalize_proxy(value: &str) -> Option<String> {
         value.to_owned()
     } else {
         format!("http://{value}")
+    })
+}
+
+/// 读取 git 全局配置的代理，作为操作系统代理缺失时的回退来源。
+///
+/// 常见于只在 git 里配了本地代理（如 Clash 的 HTTP 端口）、却没有启用系统代理的开发机：
+/// 此时市场克隆的 git 子进程能走代理，reqwest 与 Tauri Updater 却因没有环境变量而直连失败。
+/// 复用同一份 git 代理，让全部网络出口保持一致。
+fn git_global_proxy() -> Option<PlatformProxy> {
+    let read = |key: &str| -> Option<String> {
+        let output = std::process::Command::new("git")
+            .args(["config", "--global", "--get", key])
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?;
+        output.status.success().then_some(())?;
+        String::from_utf8(output.stdout).ok()
+    };
+    platform_from_git_config(
+        read("http.proxy").as_deref(),
+        read("https.proxy").as_deref(),
+    )
+}
+
+/// 依据 git 的 `http.proxy` / `https.proxy` 构造平台代理；与 git 自身一致，
+/// 未单独配置 `https.proxy` 时 HTTPS 沿用 `http.proxy`。
+fn platform_from_git_config(
+    http_raw: Option<&str>,
+    https_raw: Option<&str>,
+) -> Option<PlatformProxy> {
+    let http = http_raw.and_then(normalize_proxy);
+    let https = https_raw.and_then(normalize_proxy).or_else(|| http.clone());
+    if http.is_none() && https.is_none() {
+        return None;
+    }
+    Some(PlatformProxy {
+        http,
+        https,
+        bypass: Vec::new(),
     })
 }
 
@@ -231,7 +282,7 @@ fn platform_proxy() -> Option<PlatformProxy> {
 
 #[cfg(test)]
 mod tests {
-    use super::{no_proxy_value, normalize_proxy, parse_windows_proxy};
+    use super::{no_proxy_value, normalize_proxy, parse_windows_proxy, platform_from_git_config};
 
     #[test]
     fn normalizes_proxy_urls_without_changing_explicit_schemes() {
@@ -295,5 +346,28 @@ mod tests {
             no_proxy_value(&proxy.bypass),
             "localhost,127.0.0.1,::1,.example.com"
         );
+    }
+
+    #[test]
+    fn git_http_proxy_also_covers_https() {
+        // 只配 http.proxy 时，https 沿用同一地址（与 git 行为一致）。
+        let proxy =
+            platform_from_git_config(Some("127.0.0.1:7890"), None).expect("应构造 git 代理");
+        assert_eq!(proxy.http.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(proxy.https.as_deref(), Some("http://127.0.0.1:7890"));
+    }
+
+    #[test]
+    fn git_keeps_explicit_https_proxy_scheme() {
+        let proxy = platform_from_git_config(Some("http://host:1"), Some("socks5h://host:2"))
+            .expect("应保留各自协议");
+        assert_eq!(proxy.http.as_deref(), Some("http://host:1"));
+        assert_eq!(proxy.https.as_deref(), Some("socks5h://host:2"));
+    }
+
+    #[test]
+    fn missing_git_proxy_yields_none() {
+        assert!(platform_from_git_config(None, None).is_none());
+        assert!(platform_from_git_config(Some("   "), None).is_none());
     }
 }
