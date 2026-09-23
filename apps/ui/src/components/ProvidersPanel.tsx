@@ -735,7 +735,6 @@ export function ProvidersPanel({
           {(rightMode === "create" || rightMode === "edit") && (
             <Card
               className="prov-detail prov-form"
-              contentProps={{ className: "prov-detail__content" }}
               data-testid="provider-form"
               inset={false}
             >
@@ -842,7 +841,13 @@ export function ProvidersPanel({
                       className="settings-input"
                       aria-label={tr("prov.protocol")}
                     >
-                      <SelectValue />
+                      <SelectValue>
+                        {() =>
+                          protocolOptions.find(
+                            (option) => option.value === form.apiBackend,
+                          )?.label ?? form.apiBackend
+                        }
+                      </SelectValue>
                     </SelectTrigger>
                     <SelectContent>
                       <SelectGroup>
@@ -1126,7 +1131,10 @@ export function ProvidersPanel({
               <label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</label>
             </div>
           </div>
-          <FieldDescription>{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</FieldDescription>
+          {/* Base UI 要求 FieldDescription 必须在 Field.Root 内；表单级提示单独包一层。 */}
+          <Field>
+            <FieldDescription>{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</FieldDescription>
+          </Field>
         </form>
       </GlassModal>
 

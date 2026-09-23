@@ -2197,7 +2197,14 @@ function PluginUserConfigEditor({
           aria-describedby={describedBy || undefined}
           aria-required={field.required || undefined}
         >
-          <SelectValue placeholder={tr("ext.plugins.configUnset")} />
+          <SelectValue>
+            {() =>
+              !field.required && selectedValue == null
+                ? tr("ext.plugins.configUnset")
+                : enumOptions.find((option) => option.value === selectedValue)
+                    ?.label ?? tr("ext.plugins.configUnset")
+            }
+          </SelectValue>
         </SelectTrigger>
         <SelectContent>
           <SelectGroup>

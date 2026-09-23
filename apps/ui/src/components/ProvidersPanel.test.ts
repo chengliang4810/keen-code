@@ -13,8 +13,12 @@ describe("ProvidersPanel 双栏布局", () => {
     expect(styles).toMatch(/@media \(max-width: 860px\)\s*\{\s*\.prov-split\s*\{\s*grid-template-columns: 1fr;\s*min-height: 0;/);
     expect(source.indexOf('className="prov-split__list"')).toBeLessThan(source.indexOf('className="prov-split__detail"'));
     expect(styles).toMatch(/\.prov-detail\s*\{[^}]*height: auto;[^}]*background: transparent;[^}]*box-shadow: none;/);
-    expect(styles).toMatch(/\.prov-detail__content\s*\{[^}]*padding: 16px 18px;/);
-    expect(source).toContain('contentProps={{ className: "prov-detail__content" }}');
+    // 表单卡内距由设置卡统一契约（settings-shell.css 内容层默认 16px）提供；
+    // 清零例外清单只允许 extensions 面板卡，不得再收录 prov-detail。
+    const shellStyles = readFileSync(new URL("../styles/settings-shell.css", import.meta.url), "utf8");
+    expect(shellStyles).toMatch(/\.settings-page__body \[data-slot="card-content"\]\s*\{\s*padding: 16px;/);
+    expect(shellStyles).not.toMatch(/\.prov-detail[^{]*\{\s*padding: 0;/);
+    expect(source).not.toContain("prov-detail__content");
     expect(source).toContain("inset={false}");
   });
 

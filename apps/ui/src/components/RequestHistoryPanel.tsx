@@ -587,7 +587,9 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 className="request-history__filter-select"
                 aria-label={labels.model}
               >
-                <SelectValue />
+                <SelectValue>
+                  {() => filters.model || labels.allModels}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>
@@ -624,7 +626,13 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
                 className="request-history__filter-select"
                 aria-label={labels.status}
               >
-                <SelectValue />
+                <SelectValue>
+                  {() =>
+                    filters.status
+                      ? formatRequestHistoryStatus(filters.status, labels)
+                      : labels.allStatuses
+                  }
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectGroup>

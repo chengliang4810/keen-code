@@ -1486,9 +1486,13 @@
   padding: 4px 0 6px;
   text-align: left;
 }
+/* 状态披露行是常驻元信息，不是可点按动作：去掉 Appica ghost 按钮的悬浮底色层。 */
+.lobe-turn-work__trigger:hover::before {
+  background: transparent;
+}
 .lobe-turn-work__title {
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1500,7 +1504,6 @@
   align-items: center;
   color: var(--chat-text-3);
   flex-shrink: 0;
-  margin-left: auto;
   transition: transform 0.15s ease;
 }
 .lobe-turn-work__caret.is-open {
