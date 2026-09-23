@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button, type ButtonProps } from "@/components/ui/button";
+import { Button, type ButtonProps } from "@appica/ui-react/button";
 import { IconCheck, IconChevronDown } from "@/components/icons";
 import {
   DropdownMenu,
@@ -36,8 +36,6 @@ interface ProviderModelMenuProps {
   triggerClassName?: string;
   triggerWrapperClassName?: string;
   triggerVariant?: ButtonProps["variant"];
-  /** Composer 触发器统一使用 Appica 的 md 控件几何，避免菜单触发器高度漂移。 */
-  triggerSize?: ButtonProps["size"];
   disabled?: boolean;
   align?: "start" | "center" | "end";
   sideOffset?: number;
@@ -69,7 +67,6 @@ export function ProviderModelMenu({
   triggerClassName,
   triggerWrapperClassName,
   triggerVariant = "outline",
-  triggerSize = "md",
   disabled,
   align = "start",
   sideOffset = 6,
@@ -88,7 +85,8 @@ export function ProviderModelMenu({
           id={triggerId}
           type="button"
           variant={triggerVariant}
-          size={triggerSize}
+          // 触发器统一使用 Appica 的 md 控件几何，避免菜单触发器高度漂移。
+          size="md"
           className={triggerClassName}
           disabled={disabled}
           aria-label={triggerLabel}

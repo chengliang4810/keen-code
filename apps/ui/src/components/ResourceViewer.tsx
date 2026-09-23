@@ -1,5 +1,5 @@
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@/components/ui/button";
+import { Button } from "@appica/ui-react/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toolbar, ToolbarButton } from "@appica/ui-react/toolbar";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
@@ -1575,7 +1575,7 @@ export function ResourceViewer({
         return (
           <div key={n.relativePath || n.name}>
             <Tip label={n.relativePath}>
-              <Button
+              <Button size="md"
                 type="button"
                 variant={active ? "soft" : "ghost"}
                 className={
@@ -1630,7 +1630,7 @@ export function ResourceViewer({
           className={"rp-changes-row" + (active ? " is-active" : "")}
           role="listitem"
         >
-          <Button
+          <Button size="md"
             type="button"
             variant={active ? "soft" : "ghost"}
             className="rp-changes-row__main"
@@ -2167,7 +2167,6 @@ export function ResourceViewer({
         value={activeModeTabKey}
         onValueChange={focusModeTabByKey}
         variant="line"
-        size="md"
         className="rp-mode-tabs-root"
       >
       <TabsList className="rp-mode-tabs" aria-label={tr("resources.title")}>
@@ -2280,23 +2279,23 @@ export function ResourceViewer({
       <div className="rp-tab-picker__title">{tr("resources.openTab")}</div>
       <div className="rp-tab-picker__desc">{tr("resources.openTabHint")}</div>
       <div className="rp-tab-picker__grid">
-        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
+        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
           <IconFiles size={20} />
           <span>{tr("changes.files")}</span>
         </Button>
-        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
+        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
           <IconFileDiff size={20} />
           <span>{tr("changes.title")}</span>
         </Button>
-        <Button type="button" variant="outline" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
+        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
           <IconTerminal size={20} />
           <span>{tr("terminal.new")}</span>
         </Button>
-        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
+        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
           <IconListTree size={20} />
           <span>{tr("trajectory.title")}</span>
         </Button>
-        <Button type="button" variant="outline" className="rp-tab-picker__item" onClick={openBlankWebTab}>
+        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={openBlankWebTab}>
           <IconWorld size={20} />
           <span>{tr("resources.browserNewTab")}</span>
         </Button>
@@ -2387,7 +2386,6 @@ export function ResourceViewer({
             value={activeId ?? ""}
             onValueChange={setActiveId}
             variant="line"
-            size="md"
             className="rp-tabs"
           >
           <div className="rp-tabs__scroll">
@@ -2858,7 +2856,7 @@ export function ResourceViewer({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => {
@@ -2868,7 +2866,7 @@ export function ResourceViewer({
             >
               {tr("resources.conflictReload")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               onClick={() => {
@@ -2892,14 +2890,14 @@ export function ResourceViewer({
         closeLabel={tr("common.close")}
         footer={
           <>
-            <Button
+            <Button size="md"
               type="button"
               variant="ghost"
               onClick={() => setDiscardTabId(null)}
             >
               {tr("common.cancel")}
             </Button>
-            <Button
+            <Button size="md"
               type="button"
               variant="primary"
               onClick={() => {

@@ -36,6 +36,11 @@ export type DropdownMenuProps = Omit<AppicaDropdownMenuProps, "size"> & {
   size?: "md";
 };
 
+/**
+ * 共享下拉菜单入口。Appica 的 size（md）负责弹层圆角、条目内边距、图标尺寸
+ * 与碰撞处理（max-h 由官方提供）；这里只保留项目菜单表面色、层级与 Tauri
+ * 拖拽守卫。
+ */
 export function DropdownMenu({ size: _size, ...props }: DropdownMenuProps) {
   return <AppicaDropdownMenu {...props} size="md" />;
 }
@@ -44,27 +49,28 @@ export function DropdownMenuTrigger({ className, ...props }: DropdownMenuTrigger
   return <AppicaDropdownMenuTrigger className={cn(className)} {...props} />;
 }
 
+const popupSurfaceClass =
+  "z-[60] max-w-(--available-width) min-w-32 border-border bg-popover text-foreground shadow-md [app-region:no-drag]";
+
 export function DropdownMenuContent({ className, ...props }: DropdownMenuContentProps) {
   return (
     <AppicaDropdownMenuContent
-      className={cn(
-        "z-[60] flex max-h-(--available-height) max-w-(--available-width) min-w-32 flex-col gap-0.5 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-popover p-1 text-foreground shadow-md *:p-1",
-        className,
-      )}
+      className={cn(popupSurfaceClass, className)}
       {...props}
     />
   );
 }
 
 export function DropdownMenuGroup(props: DropdownMenuGroupProps) {
-  return <AppicaDropdownMenuGroup className="flex flex-col gap-0.5" {...props} />;
+  return <AppicaDropdownMenuGroup {...props} />;
 }
 
 export function DropdownMenuGroupLabel({ className, ...props }: DropdownMenuGroupLabelProps) {
-  return <AppicaDropdownMenuGroupLabel className={cn("px-2 pt-2 pb-1 text-ui-base text-foreground-subtlest", className)} {...props} />;
+  return <AppicaDropdownMenuGroupLabel className={cn("text-ui-base text-foreground-subtlest", className)} {...props} />;
 }
 
-const itemClass = "group/dropdown-menu-item relative flex min-h-7 w-full cursor-default items-center gap-2 rounded-md px-2 py-1 text-ui-base/relaxed text-foreground outline-hidden select-none data-highlighted:bg-hover data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:text-foreground-subtlest data-disabled:opacity-100 [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4";
+const itemClass =
+  "text-ui-base/relaxed text-foreground data-highlighted:bg-hover data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:text-foreground-subtlest data-disabled:opacity-100";
 
 export function DropdownMenuItem({ className, ...props }: DropdownMenuItemProps) {
   return <AppicaDropdownMenuItem className={cn(itemClass, className)} {...props} />;
@@ -87,7 +93,7 @@ export function DropdownMenuCheckboxItem({ className, ...props }: DropdownMenuCh
 }
 
 export function DropdownMenuSeparator({ className, ...props }: DropdownMenuSeparatorProps) {
-  return <AppicaDropdownMenuSeparator className={cn("my-1 h-px bg-border", className)} {...props} />;
+  return <AppicaDropdownMenuSeparator className={cn("pointer-events-none", className)} {...props} />;
 }
 
 export function DropdownMenuSub(props: DropdownMenuSubProps) {
@@ -101,10 +107,7 @@ export function DropdownMenuSubTrigger({ className, ...props }: DropdownMenuSubT
 export function DropdownMenuSubContent({ className, ...props }: DropdownMenuSubContentProps) {
   return (
     <AppicaDropdownMenuSubContent
-      className={cn(
-        "z-[60] flex max-h-(--available-height) max-w-(--available-width) min-w-32 flex-col gap-0.5 overflow-x-hidden overflow-y-auto rounded-lg border border-border bg-popover p-1 text-foreground shadow-md *:p-1",
-        className,
-      )}
+      className={cn(popupSurfaceClass, className)}
       {...props}
     />
   );

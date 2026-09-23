@@ -15,25 +15,18 @@ import {
 
 import { cn } from "@/lib/utils";
 
-export type CardSize = "default" | "sm" | "md";
-
-export interface CardProps extends AppicaCardProps {
-  size?: CardSize;
-}
-
 /**
- * 共享卡片入口。Appica 继续负责 inset/frame 与 render 原语，
- * 这里集中锁定 KeenCode/ZCode 的卡片表面和紧凑尺寸。
+ * 共享卡片入口。Appica 负责 inset/frame、插槽间距与 render 原语；
+ * 这里只锁定 KeenCode/ZCode 的卡片表面（无 frame 时的 border + bg-card），
+ * 不再覆盖官方几何（内容层与插槽的内边距、间距由官方 Card 提供）。
  */
 export function Card({
   className,
   contentProps,
   frame = false,
   inset = false,
-  size = "md",
   ...props
-}: CardProps) {
-  const effectiveSize = size === "default" ? "md" : size;
+}: AppicaCardProps) {
   const contentClassName = frame === false ? "border-border bg-card" : undefined;
 
   return (
@@ -41,13 +34,11 @@ export function Card({
       {...props}
       frame={frame}
       inset={inset}
-      data-size={effectiveSize}
       className={cn("text-foreground", className)}
       contentProps={{
         ...contentProps,
         className: cn(
           contentClassName,
-          effectiveSize === "sm" ? "gap-3 py-3" : "gap-4 py-4",
           contentProps?.className,
         ),
       }}
@@ -56,11 +47,11 @@ export function Card({
 }
 
 export function CardMedia({ className, ...props }: AppicaCardMediaProps) {
-  return <AppicaCardMedia className={cn("overflow-hidden", className)} {...props} />;
+  return <AppicaCardMedia className={cn(className)} {...props} />;
 }
 
 export function CardHeader({ className, ...props }: AppicaCardHeaderProps) {
-  return <AppicaCardHeader className={cn("gap-1.5", className)} {...props} />;
+  return <AppicaCardHeader className={cn(className)} {...props} />;
 }
 
 export function CardTitle({ className, ...props }: AppicaCardTitleProps) {
@@ -72,5 +63,5 @@ export function CardDescription({ className, ...props }: AppicaCardDescriptionPr
 }
 
 export function CardFooter({ className, ...props }: AppicaCardFooterProps) {
-  return <AppicaCardFooter className={cn("gap-2", className)} {...props} />;
+  return <AppicaCardFooter className={cn(className)} {...props} />;
 }

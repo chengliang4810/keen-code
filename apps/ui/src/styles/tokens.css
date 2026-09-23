@@ -98,10 +98,6 @@
   --control-height: 36px;
   --titlebar-safe-left: 96px;
   --sidebar-leading-icon-center: 26px;
-  /* 共享控件的 ZCode md 几何；不使用 rem，避免随 UI 根字号折算。 */
-  --control-height-compact: 28px;
-  --control-height-tabs: 32px;
-  --control-radius-compact: 10px;
   /* 跨平台 UI 字体栈：优先系统字体，显式保留中文 fallback。 */
   --dsw-font-family: -apple-system-body, ui-sans-serif, -apple-system, system-ui,
     'Segoe UI', 'Helvetica', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',

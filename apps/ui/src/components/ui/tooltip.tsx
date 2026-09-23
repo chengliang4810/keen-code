@@ -24,11 +24,15 @@ export function TooltipTrigger(props: AppicaTooltipTriggerProps) {
   return <AppicaTooltipTrigger {...props} />;
 }
 
+/**
+ * 提示气泡的几何（内边距、圆角、字号）由官方 TooltipContent 提供；
+ * 这里只保留 KeenCode 的提示表面色与边框。
+ */
 export function TooltipContent({ className, ...props }: AppicaTooltipContentProps) {
   return (
     <AppicaTooltipContent
       className={cn(
-        "rounded-lg border border-border bg-tooltip px-3 py-1.5 text-xs text-tooltip-foreground shadow-md",
+        "border-border bg-tooltip text-tooltip-foreground",
         className,
       )}
       {...props}

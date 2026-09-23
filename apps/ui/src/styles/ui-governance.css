@@ -11,19 +11,6 @@
   --ui-mobile-inline-padding: 12px;
 }
 
-/* Appica 的 md utility 使用 rem；产品正文根字号为 14px 时会把 h-7 折成
- * 24.5px。共享 wrapper 使用这些末端几何类锁定 ZCode 的实际屏幕尺寸，
- * 不改变根字号，也不绕过 Appica 的 md 状态语义。 */
-.keencode-control-md {
-  height: var(--control-height-compact);
-  min-height: var(--control-height-compact);
-  border-radius: var(--control-radius-compact);
-}
-
-.keencode-tabs-list-md {
-  height: var(--control-height-tabs);
-}
-
 /* 桌面侧栏在窄视口变成覆盖抽屉，避免固定 264px 参与主区 flex 计算。 */
 .sidebar-mobile-backdrop {
   display: none;
@@ -214,24 +201,6 @@
   ) {
   font-family: inherit;
   letter-spacing: 0;
-}
-
-/* Appica's motion switch stays on the md preset for state/keyboard behavior;
- * apply ZCode's 28/32px tracks without letting the animated thumb overflow
- * the compact track. */
-.keencode-switch[data-size="md"] {
-  height: 18px;
-  width: 32px;
-}
-
-.keencode-switch[data-size="md"] [data-slot="switch-thumb"] {
-  width: 16px !important;
-  height: 16px !important;
-  background: var(--primary-foreground);
-}
-
-.keencode-switch [data-slot="switch-thumb"] > svg {
-  display: none;
 }
 
 /*

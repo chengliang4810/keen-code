@@ -30,12 +30,16 @@ export function DialogTrigger({ className, ...props }: AppicaDialogTriggerProps)
   return <AppicaDialogTrigger className={cn(className)} {...props} />;
 }
 
+/**
+ * 弹层表面由官方 Dialog 提供（rounded-2xl border shadow-2xl 与内容裁剪）。
+ * 这里只把无 frame 时的边框色收敛到项目 border token，并保留内容层圆角裁剪。
+ */
 export function DialogContent({ className, frame = false, ...props }: AppicaDialogContentProps) {
   return (
     <AppicaDialogContent
       frame={frame}
       className={cn(
-        "rounded-2xl border border-border shadow-2xl [&>[data-slot=dialog-content]]:overflow-hidden [&>[data-slot=dialog-content]]:rounded-[inherit]",
+        "border-border [&>[data-slot=dialog-content]]:overflow-hidden [&>[data-slot=dialog-content]]:rounded-[inherit]",
         className,
       )}
       {...props}
@@ -44,7 +48,7 @@ export function DialogContent({ className, frame = false, ...props }: AppicaDial
 }
 
 export function DialogHeader({ className, ...props }: AppicaDialogHeaderProps) {
-  return <AppicaDialogHeader className={cn("gap-1 p-6", className)} {...props} />;
+  return <AppicaDialogHeader className={cn(className)} {...props} />;
 }
 
 export function DialogTitle({ className, ...props }: AppicaDialogTitleProps) {
@@ -56,11 +60,11 @@ export function DialogDescription({ className, ...props }: AppicaDialogDescripti
 }
 
 export function DialogBody({ className, ...props }: AppicaDialogBodyProps) {
-  return <AppicaDialogBody className={cn("min-h-0 flex-1 px-6", className)} {...props} />;
+  return <AppicaDialogBody className={cn(className)} {...props} />;
 }
 
 export function DialogFooter({ className, ...props }: AppicaDialogFooterProps) {
-  return <AppicaDialogFooter className={cn("gap-2 p-6", className)} {...props} />;
+  return <AppicaDialogFooter className={cn(className)} {...props} />;
 }
 
 export function DialogClose({ className, ...props }: AppicaDialogCloseProps) {
