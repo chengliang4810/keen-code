@@ -1881,3 +1881,50 @@ fn marketplace_install_plan_keeps_market_identity_with_different_manifest_name()
         "upstream"
     );
 }
+
+/// marketplace_available 缓存指纹：市场记录与清单 mtime 变化必须让缓存失效，
+/// 相同输入必须稳定命中（面板每次挂载都调用该命令，指纹不稳会退化为无缓存）。
+#[test]
+fn marketplace_available_fingerprint_tracks_sources_and_manifest_mtime() {
+    let directory = tempfile::tempdir().expect("创建指纹测试目录");
+    let manifest = directory.path().join("marketplace.json");
+    fs::write(&manifest, br#"{"name":"demo","plugins":[]}"#).expect("写入市场清单");
+    let store = MarketplaceStore {
+        schema: MARKETPLACE_STORE_SCHEMA.to_owned(),
+        version: MARKETPLACE_STORE_VERSION,
+        sources: vec![MarketplaceRecord {
+            name: "demo".to_owned(),
+            path: directory.path().display().to_string(),
+            manifest_path: manifest.display().to_string(),
+        }],
+    };
+    let plugin_store = crate::plugins::PluginState::default();
+
+    let first = marketplace_available_fingerprint(&store, &plugin_store);
+    let second = marketplace_available_fingerprint(&store, &plugin_store);
+    assert_eq!(first, second, "相同输入必须产生稳定指纹");
+
+    // 清单 mtime 变化后指纹必须改变（否则会展示过期插件列表）。
+    let touched = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+    fs::File::options()
+        .write(true)
+        .open(&manifest)
+        .expect("打开市场清单")
+        .set_modified(touched)
+        .expect("设置 mtime");
+    let after_touch = marketplace_available_fingerprint(&store, &plugin_store);
+    assert_ne!(first, after_touch, "清单 mtime 变化必须使缓存失效");
+
+    // 市场源增删同样必须改变指纹。
+    let mut with_extra = store.clone();
+    with_extra.sources.push(MarketplaceRecord {
+        name: "other".to_owned(),
+        path: directory.path().display().to_string(),
+        manifest_path: manifest.display().to_string(),
+    });
+    assert_ne!(
+        after_touch,
+        marketplace_available_fingerprint(&with_extra, &plugin_store),
+        "市场源变化必须使缓存失效"
+    );
+}

@@ -66,6 +66,22 @@ pub struct ExtensionsState {
             std::sync::Arc<tokio::sync::Mutex<runtime_contributor::ProjectRuntimeCache>>,
         >,
     >,
+    /// `marketplace_available` 的结果缓存。
+    ///
+    /// 该命令要为每个市场源递归遍历全部插件目录（校验符号链接 + 统计组件），
+    /// 实测 39 个插件约 150-250ms；面板每次挂载都会调用它，导致切换市场分区
+    /// 时有明显的重复加载感。缓存以「市场记录 + 插件状态 + 各清单 mtime」的
+    /// 指纹为准，任一变化立即失效，因此不会展示过期数据。
+    marketplace_available_cache: Mutex<Option<MarketplaceAvailableCache>>,
+}
+
+/// `marketplace_available` 的缓存条目：指纹与对应结果。
+#[derive(Debug)]
+struct MarketplaceAvailableCache {
+    /// 输入指纹；变化即失效。
+    fingerprint: String,
+    /// 命中时的完整结果。
+    result: MarketplaceAvailableResult,
 }
 
 /// 默认市场的进程内取得状态；空闲时不启动后台任务。
@@ -2280,6 +2296,20 @@ pub fn marketplace_available(
     }
     let manager = plugin_manager(&app)?;
     let plugin_store = manager.load_state().map_err(|error| error.to_string())?;
+    // 缓存命中检查：面板每次挂载都会调用本命令，而遍历全部市场插件目录
+    // （校验 + 统计）约 150-250ms，重复加载感明显。指纹覆盖市场记录、
+    // 插件安装状态与各清单 mtime；任一变化立即失效，不会返回过期数据。
+    let fingerprint = marketplace_available_fingerprint(&marketplace_store, &plugin_store);
+    if let Ok(cache) = state.marketplace_available_cache.lock()
+        && let Some(cached) = cache.as_ref()
+        && cached.fingerprint == fingerprint
+    {
+        let mut result = cached.result.clone();
+        // loading/error 属于本次取得的实时状态，不参与缓存。
+        result.loading = loading;
+        result.error = error;
+        return Ok(result);
+    }
     let installed = plugin_store
         .plugins
         .iter()
@@ -2361,11 +2391,39 @@ pub fn marketplace_available(
             .cmp(&right.name)
             .then_with(|| left.marketplace.cmp(&right.marketplace))
     });
-    Ok(MarketplaceAvailableResult {
+    let result = MarketplaceAvailableResult {
         plugins,
         loading,
         error,
-    })
+    };
+    if let Ok(mut cache) = state.marketplace_available_cache.lock() {
+        *cache = Some(MarketplaceAvailableCache {
+            fingerprint,
+            result: result.clone(),
+        });
+    }
+    Ok(result)
+}
+
+/// 计算 `marketplace_available` 的输入指纹：市场记录、已安装插件与各清单 mtime。
+fn marketplace_available_fingerprint(
+    store: &MarketplaceStore,
+    plugin_store: &crate::plugins::PluginState,
+) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(store.sources.len() * 2 + 4);
+    for source in &store.sources {
+        parts.push(format!("{}|{}", source.name, source.path));
+        // 清单 mtime 变化（git pull、手动编辑）必须让缓存失效。
+        if let Ok(meta) = std::fs::metadata(&source.manifest_path)
+            && let Ok(modified) = meta.modified()
+            && let Ok(since) = modified.duration_since(std::time::UNIX_EPOCH)
+        {
+            parts.push(format!("mtime={}", since.as_nanos()));
+        }
+    }
+    parts.push(format!("v={}", MARKETPLACE_STORE_VERSION));
+    parts.push(format!("installed={}", plugin_store.plugins.len()));
+    parts.join("\n")
 }
 
 /// 添加一个包含 `.claude-plugin/marketplace.json` 的本地目录或清单文件。
