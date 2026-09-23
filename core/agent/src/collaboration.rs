@@ -6191,31 +6191,6 @@ impl CollaborationCoordinator {
         self.capacity()
     }
 
-    /// 更新共享全局与指定根树的子 Turn 上限。
-    pub fn update_turn_limits(
-        &self,
-        root_agent_id: &AgentId,
-        global_turn_limit: usize,
-        per_root_turn_limit: usize,
-    ) -> Result<CollaborationCapacity, CollaborationError> {
-        let report = self.inner.global_turn_limiter.update_limits_atomically(
-            &[(self, root_agent_id)],
-            global_turn_limit,
-            per_root_turn_limit,
-        )?;
-        if !report.dispatch_errors().is_empty() {
-            return Err(CollaborationError::CommittedExecutionPending {
-                message: report
-                    .dispatch_errors()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("；"),
-            });
-        }
-        self.capacity()
-    }
-
     /// 返回尚未消费的 mailbox 消息快照，不改变 exactly-once 状态。
     pub fn mailbox(&self, agent_id: &AgentId) -> Result<Vec<MailboxMessage>, CollaborationError> {
         let state = self.lock_state()?;

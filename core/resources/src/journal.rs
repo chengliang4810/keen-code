@@ -867,21 +867,6 @@ impl SessionJournal {
         Self::recover_truncated_tail_internal(storage_root.as_ref(), session_id, config, None)
     }
 
-    /// 显式恢复截断尾记录，并为恢复后的追加注入 Artifact 实体校验器。
-    pub fn recover_truncated_tail_with_artifact_validator(
-        storage_root: impl AsRef<Path>,
-        session_id: SessionId,
-        config: JournalConfig,
-        artifact_validator: Arc<dyn ArtifactValidator>,
-    ) -> Result<TruncatedTailRecovery, ResourceError> {
-        Self::recover_truncated_tail_internal(
-            storage_root.as_ref(),
-            session_id,
-            config,
-            Some(artifact_validator),
-        )
-    }
-
     /// 在跨实例追加锁内保留证据、截断日志并构造可继续写入的 Journal。
     fn recover_truncated_tail_internal(
         storage_root: &Path,
@@ -1622,12 +1607,6 @@ impl SessionJournal {
         batch_scheduler()
             .active_flush_worker_count
             .load(Ordering::Acquire)
-    }
-
-    /// 返回进程级调度器累计启动的刷盘线程数。
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn batch_scheduler_start_count_for_tests(&self) -> u64 {
-        batch_scheduler().worker_start_count.load(Ordering::Relaxed)
     }
 
     /// 把当前或下一批的超时截止点推迟，供跨 crate 测试隔离 64 条计数阈值。
@@ -3433,11 +3412,6 @@ pub mod test_support {
         super::APPEND_FAULT.with(|current| {
             current.replace(None);
         });
-    }
-
-    /// 重置进程的 sync_data 计数器并返回重置前的值。
-    pub fn take_sync_count() -> u64 {
-        super::SYNC_COUNT.swap(0, std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 返回进程累计的 sync_data 次数，不重置。

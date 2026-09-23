@@ -2741,6 +2741,31 @@ fn structured_output_refusals_are_not_misclassified_as_completed_json() {
 }
 
 #[test]
+fn responses_json_function_call_without_arguments_decodes_empty_arguments() {
+    // 非流式路径须与流式一致：arguments 缺省按空参数处理，不让整个响应失败。
+    let events = Adapter::new(ProviderProtocol::Responses)
+        .decode_json(json!({
+            "id": "resp-args-optional",
+            "object": "response",
+            "model": "test-model",
+            "status": "completed",
+            "output": [
+                {"type": "function_call", "call_id": "call-1", "name": "synthetic_tool"},
+                {"type": "function_call", "call_id": "call-2", "name": "synthetic_tool", "arguments": null}
+            ]
+        }))
+        .expect("缺省或 null arguments 的 function_call 应当可解码");
+    let argument_deltas: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ModelStreamEvent::ToolCallArgumentsDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(argument_deltas, vec!["", ""]);
+}
+
+#[test]
 fn responses_json_decodes_text_reasoning_state_and_usage() {
     let events = Adapter::new(ProviderProtocol::Responses)
         .decode_json(json!({

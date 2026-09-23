@@ -1,12 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use keencode_model::{
-    ContentBlock, ImageSource, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
-    OpaqueReasoningState, ReasoningEffort, ResponseMetadata, StopReason, TokenUsage, ToolChoice,
-    ToolResultContent,
+    ContentBlock, MessageRole, ModelError, ModelRequest, ModelStreamEvent, OpaqueReasoningState,
+    ResponseMetadata, StopReason, TokenUsage, ToolChoice, ToolResultContent,
 };
 use serde_json::{Map, Value, json};
 
+use super::wire::{
+    self, image_url, invalid_request, protocol_error, reasoning_effort, response_metadata,
+};
 use crate::{http::classify_in_band_provider_error, sse::SseFrame};
 
 const REASONING_STATE_KIND: &str = "responses-reasoning-item-v1";
@@ -846,7 +848,11 @@ impl ResponsesAdapter {
                 events.push(ModelStreamEvent::ToolCallArgumentsDelta {
                     index,
                     id: call_id.clone(),
-                    delta: required_str(object, "arguments")?.to_owned(),
+                    // 与流式路径一致：arguments 缺失或为 null 时按空参数处理，
+                    // 兼容省略该字段的网关，不让整个非流式响应失败。
+                    delta: optional_string_from_map(object, "arguments")?
+                        .unwrap_or_default()
+                        .to_owned(),
                 });
                 events.push(ModelStreamEvent::ToolCallEnd { index, id: call_id });
                 self.saw_tool_call = true;
@@ -1025,16 +1031,6 @@ fn encode_function_output(block: &ContentBlock) -> Result<Value, ModelError> {
     }))
 }
 
-/// 将图片来源转换为 Responses `input_image.image_url`。
-fn image_url(source: &ImageSource) -> String {
-    match source {
-        ImageSource::Url { url } => url.clone(),
-        ImageSource::Base64 { media_type, data } => {
-            format!("data:{media_type};base64,{data}")
-        }
-    }
-}
-
 /// 编码 Responses 工具选择策略。
 fn encode_tool_choice(choice: &ToolChoice) -> Value {
     match choice {
@@ -1043,35 +1039,6 @@ fn encode_tool_choice(choice: &ToolChoice) -> Value {
         ToolChoice::Required => Value::String("required".to_owned()),
         ToolChoice::Specific { name } => json!({ "type": "function", "name": name }),
     }
-}
-
-/// 映射 Provider 中立推理强度到 Responses 字段。
-fn reasoning_effort(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Minimal => "minimal",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::ExtraHigh => "xhigh",
-        ReasoningEffort::Maximum => "max",
-    }
-}
-
-/// 从 Responses JSON 对象提取响应元数据。
-fn response_metadata(response: &Map<String, Value>) -> Result<ResponseMetadata, ModelError> {
-    let metadata = ResponseMetadata {
-        decode_duration_ms: None,
-        response_id: response
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        model: response
-            .get("model")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-    };
-    metadata.validate()?;
-    Ok(metadata)
 }
 
 /// 解析 Responses Usage，并保持缺失值为 `None`。
@@ -1155,22 +1122,19 @@ fn response_stop_reason(
     })
 }
 
-/// 提取 Provider 错误对象中的安全文本摘要。
+/// 提取 Provider 错误对象中的安全文本摘要；Responses 额外回退到嵌套
+/// `response.error.message`（非流式错误响应把细节包在 response 对象内）。
 fn provider_error_message(value: &Value) -> String {
-    value
-        .get("error")
+    let nested_message = value
+        .get("response")
+        .and_then(|response| response.get("error"))
         .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("response")
-                .and_then(|response| response.get("error"))
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-        })
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("Responses Provider 返回未说明错误")
-        .to_owned()
+        .and_then(Value::as_str);
+    wire::provider_error_message_with_nested(
+        value,
+        nested_message,
+        "Responses Provider 返回未说明错误",
+    )
 }
 
 /// 判断顶层或嵌套响应是否包含 Provider 明确失败事实。
@@ -1234,10 +1198,7 @@ fn classify_provider_error(value: &Value) -> ModelError {
 
 /// 从 JSON 对象读取必需字符串字段。
 fn required_str<'a>(value: &'a Map<String, Value>, field: &str) -> Result<&'a str, ModelError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| protocol_error(format!("Responses 字段 {field} 必须是字符串")))
+    wire::required_str_from_map(value, field, "Responses")
 }
 
 /// 从顶层 JSON 值读取必需字符串字段。
@@ -1296,33 +1257,10 @@ fn complete_function_arguments(
 
 /// 从顶层 JSON 值读取可转换为 u32 的必需整数。
 fn required_u32_value(value: &Value, field: &str) -> Result<u32, ModelError> {
-    let number = value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| protocol_error(format!("Responses 字段 {field} 必须是非负整数")))?;
-    u32::try_from(number)
-        .map_err(|_| protocol_error(format!("Responses 字段 {field} 超过 u32 范围")))
+    wire::required_u32(value, field, "Responses")
 }
 
 /// 要求 SSE 已经收到响应开始事件。
 fn require_started(started: bool) -> Result<(), ModelError> {
-    if started {
-        Ok(())
-    } else {
-        Err(protocol_error("Responses 内容事件早于 response.created"))
-    }
-}
-
-/// 创建统一请求校验错误。
-fn invalid_request(message: impl Into<String>) -> ModelError {
-    ModelError::InvalidRequest {
-        message: message.into(),
-    }
-}
-
-/// 创建统一协议解析错误。
-fn protocol_error(message: impl Into<String>) -> ModelError {
-    ModelError::Protocol {
-        message: message.into(),
-    }
+    wire::require_started(started, "Responses 内容事件早于 response.created")
 }

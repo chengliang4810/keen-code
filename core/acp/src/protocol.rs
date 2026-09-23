@@ -697,12 +697,6 @@ impl GoalMutationResponse {
     }
 }
 
-/// `keencode/goal/upsert` 的类型化响应。
-pub type GoalUpsertResponse = GoalMutationResponse;
-
-/// `keencode/goal/transition` 的类型化响应。
-pub type GoalTransitionResponse = GoalMutationResponse;
-
 /// `keencode/goal/clear` 的类型化响应。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

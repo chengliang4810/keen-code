@@ -7,7 +7,8 @@ use keencode_model::{
 };
 use serde_json::{Map, Value, json};
 
-use crate::{http::classify_in_band_provider_error, sse::SseFrame};
+use super::wire::{self, invalid_request, protocol_error};
+use crate::sse::SseFrame;
 
 const SIGNATURE_STATE_KIND: &str = "messages-thinking-signature-v1";
 const REDACTED_STATE_KIND: &str = "messages-redacted-thinking-v1";
@@ -987,17 +988,6 @@ fn map_stop_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
-/// 提取 Provider 错误对象中的安全文本摘要。
-fn provider_error_message(value: &Value) -> String {
-    value
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("Messages Provider 返回未说明错误")
-        .to_owned()
-}
-
 /// 判断顶层值是否包含 Anthropic 错误事件约定的嵌套错误对象。
 fn has_explicit_provider_error(value: &Value) -> bool {
     value.get("error").is_some_and(Value::is_object)
@@ -1005,14 +995,7 @@ fn has_explicit_provider_error(value: &Value) -> bool {
 
 /// 仅把具有明确结构或上下文超限语义的 Provider 错误归一为稳定错误类型。
 fn classify_provider_error(value: &Value) -> ModelError {
-    let message = provider_error_message(value);
-    let code = value
-        .get("error")
-        .and_then(Value::as_object)
-        .and_then(|error| error.get("code").or_else(|| error.get("type")))
-        .and_then(Value::as_str)
-        .or_else(|| value.get("code").and_then(Value::as_str));
-    classify_in_band_provider_error(&message, code)
+    wire::classify_provider_error(value, "Messages Provider 返回未说明错误")
 }
 
 /// 从对象读取必需的字符串字段。
@@ -1020,20 +1003,12 @@ fn required_str_from_map<'a>(
     value: &'a Map<String, Value>,
     field: &str,
 ) -> Result<&'a str, ModelError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| protocol_error(format!("Messages 字段 {field} 必须是字符串")))
+    wire::required_str_from_map(value, field, "Messages")
 }
 
 /// 从顶层对象读取可转换为 u32 的必需整数。
 fn required_u32(value: &Value, field: &str) -> Result<u32, ModelError> {
-    let number = value
-        .get(field)
-        .and_then(Value::as_u64)
-        .ok_or_else(|| protocol_error(format!("Messages 字段 {field} 必须是非负整数")))?;
-    u32::try_from(number)
-        .map_err(|_| protocol_error(format!("Messages 字段 {field} 超过 u32 范围")))
+    wire::required_u32(value, field, "Messages")
 }
 
 /// 把可选 JSON 字符串复制为拥有所有权的值。
@@ -1043,28 +1018,10 @@ fn optional_string(value: Option<&Value>) -> Option<String> {
 
 /// 要求 SSE 已经收到响应开始事件。
 fn require_started(started: bool) -> Result<(), ModelError> {
-    if started {
-        Ok(())
-    } else {
-        Err(protocol_error("Messages 内容事件早于 message_start"))
-    }
+    wire::require_started(started, "Messages 内容事件早于 message_start")
 }
 
 /// 创建内容块序号混用类型时的统一协议错误。
 fn index_type_error(index: u32) -> ModelError {
     protocol_error(format!("内容块序号 {index} 被用于不同内容类型"))
-}
-
-/// 创建统一请求校验错误。
-fn invalid_request(message: impl Into<String>) -> ModelError {
-    ModelError::InvalidRequest {
-        message: message.into(),
-    }
-}
-
-/// 创建统一协议解析错误。
-fn protocol_error(message: impl Into<String>) -> ModelError {
-    ModelError::Protocol {
-        message: message.into(),
-    }
 }

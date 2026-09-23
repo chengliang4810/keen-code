@@ -53,12 +53,6 @@ impl ScriptedProvider {
         }
     }
 
-    /// 在脚本队尾追加一次调用结果。
-    pub fn push_reply(&self, reply: ScriptedReply) -> Result<(), ModelError> {
-        lock(&self.replies)?.push_back(reply);
-        Ok(())
-    }
-
     /// 返回尚未被模型调用消费的脚本数量。
     pub fn remaining_replies(&self) -> Result<usize, ModelError> {
         Ok(lock(&self.replies)?.len())

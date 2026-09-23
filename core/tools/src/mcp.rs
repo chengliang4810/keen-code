@@ -167,32 +167,6 @@ impl McpToolBuildReport {
     }
 }
 
-/// 将一个 MCP Server 当前公布的工具集冻结为延迟 Agent 工具。
-pub fn build_mcp_deferred_tools(
-    server_id: &str,
-    client: McpClient,
-    tool_set: &McpToolSet,
-) -> Result<Vec<Arc<dyn AgentTool>>, McpToolBridgeError> {
-    validate_remote_identity(server_id)?;
-    let mut names = BTreeSet::new();
-    let mut tools: Vec<Arc<dyn AgentTool>> = Vec::with_capacity(tool_set.tools().len());
-    for tool in tool_set.tools() {
-        if tool.requires_task() {
-            return Err(McpToolBridgeError::UnsupportedTaskTool);
-        }
-        let effect = match tool_set.effect_for(&tool.name) {
-            McpToolEffect::ReadOnly => ToolEffect::ReadOnly,
-            McpToolEffect::ChangesState => ToolEffect::ChangesState,
-        };
-        let bridge = McpToolBridge::new(server_id, client.clone(), tool, effect)?;
-        if !names.insert(bridge.definition.name.clone()) {
-            return Err(McpToolBridgeError::PortableNameCollision);
-        }
-        tools.push(Arc::new(bridge));
-    }
-    Ok(tools)
-}
-
 /// 尽可能构建 MCP 工具；单个坏工具不会阻断同一 Server 的其他工具。
 pub fn build_mcp_deferred_tools_best_effort(
     server_id: &str,

@@ -209,15 +209,6 @@ pub struct GoalRecord {
     pub updated_at_unix_ms: u64,
 }
 
-impl GoalRecord {
-    /// 返回明确预算存在且大于零时的使用比例。
-    pub fn usage_ratio(&self) -> Option<f64> {
-        self.token_budget
-            .filter(|budget| *budget > 0)
-            .map(|budget| self.tokens_used as f64 / budget as f64)
-    }
-}
-
 /// 项目 Goal 当前版本和可选记录。
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]

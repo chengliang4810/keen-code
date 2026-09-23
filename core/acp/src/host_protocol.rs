@@ -367,41 +367,6 @@ pub fn host_initialize_meta(
     Ok(meta)
 }
 
-/// 合并 Host `_meta` 字段，同时保留 `keencode/defaultCwd` 等既有字段。
-pub fn merge_host_initialize_meta(
-    mut existing: Option<Meta>,
-    data_root_fingerprint: impl Into<String>,
-    owner_kind: HostOwnerKind,
-) -> Result<Option<Meta>, AcpBoundaryError> {
-    let host = host_initialize_meta(data_root_fingerprint, owner_kind)?;
-    let meta = existing.get_or_insert_with(Map::new);
-    meta.extend(host);
-    Ok(existing)
-}
-
-/// 校验客户端看到的 Host `_meta` 是否属于预期数据根和 owner。
-pub fn validate_host_initialize_meta(
-    meta: Option<&Meta>,
-    expected_data_root_fingerprint: &str,
-    expected_owner_kind: HostOwnerKind,
-) -> Result<(), AcpBoundaryError> {
-    validate_root_fingerprint(expected_data_root_fingerprint)?;
-    let meta = meta.ok_or(AcpBoundaryError::InvalidSemanticValue)?;
-    let fingerprint = meta
-        .get(HOST_DATA_ROOT_FINGERPRINT_META_KEY)
-        .and_then(Value::as_str)
-        .ok_or(AcpBoundaryError::InvalidSemanticValue)?;
-    let owner = meta
-        .get(HOST_OWNER_KIND_META_KEY)
-        .and_then(Value::as_str)
-        .ok_or(AcpBoundaryError::InvalidSemanticValue)?;
-    validate_root_fingerprint(fingerprint)?;
-    if fingerprint != expected_data_root_fingerprint || owner != expected_owner_kind.as_wire() {
-        return Err(AcpBoundaryError::InvalidSemanticValue);
-    }
-    Ok(())
-}
-
 /// 按实际用户数据根路径计算稳定指纹，不向 wire 暴露原始路径。
 ///
 /// 首选 canonical path 以消除符号链接和 `.`/`..` 差异；路径不存在或 canonicalize
@@ -471,20 +436,6 @@ pub enum EventRecoveryPlan {
     ResyncRequired,
 }
 
-/// 一次恢复响应的明确边界。
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SessionRecoveryWindow {
-    /// 恢复起点与当前连接 delivery 序号。
-    pub cursor: SessionEventCursor,
-    /// 本次 Host 选择的恢复动作。
-    pub plan: EventRecoveryPlan,
-    /// 恢复读取观察到的 Journal 末尾水位。
-    pub through_journal_sequence: u64,
-    /// 当前连接下一条 delivery 的序号；断线后不能用来替代 Journal 水位。
-    pub next_delivery_sequence: u64,
-}
-
 /// Host 生命周期动作在协议层的结果。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -534,45 +485,6 @@ mod tests {
         );
         assert!(HostOwnerKind::parse_wire("Desktop").is_err());
         assert!(HostOwnerKind::parse_wire("server").is_err());
-    }
-
-    #[test]
-    fn host_meta覆盖自身字段但保留default_cwd() {
-        let mut existing = Map::new();
-        existing.insert(
-            DEFAULT_CWD_META_KEY.to_owned(),
-            Value::String("C:/project".to_owned()),
-        );
-        existing.insert("client/feature".to_owned(), Value::Bool(true));
-        let fingerprint = "a".repeat(DATA_ROOT_FINGERPRINT_HEX_BYTES);
-        let merged = merge_host_initialize_meta(
-            Some(existing),
-            fingerprint.clone(),
-            HostOwnerKind::Headless,
-        )
-        .unwrap()
-        .unwrap();
-        assert_eq!(
-            merged.get(DEFAULT_CWD_META_KEY),
-            Some(&Value::String("C:/project".to_owned()))
-        );
-        assert_eq!(merged.get("client/feature"), Some(&Value::Bool(true)));
-        assert_eq!(
-            merged
-                .get(HOST_DATA_ROOT_FINGERPRINT_META_KEY)
-                .and_then(Value::as_str),
-            Some(fingerprint.as_str())
-        );
-        assert_eq!(
-            merged.get(HOST_OWNER_KIND_META_KEY).and_then(Value::as_str),
-            Some("headless")
-        );
-        validate_host_initialize_meta(Some(&merged), &fingerprint, HostOwnerKind::Headless)
-            .expect("完整 Host meta 应通过校验");
-        assert!(
-            validate_host_initialize_meta(Some(&merged), &fingerprint, HostOwnerKind::Desktop)
-                .is_err()
-        );
     }
 
     #[test]

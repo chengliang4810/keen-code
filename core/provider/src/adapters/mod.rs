@@ -1,6 +1,7 @@
 mod chat_completions;
 mod messages;
 mod responses;
+mod wire;
 
 use std::collections::VecDeque;
 

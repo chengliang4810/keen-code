@@ -47,8 +47,7 @@ pub use lsp::{
 };
 pub use mcp::{
     McpDiagnosticCode, McpToolBridgeError, McpToolBuildReport, McpToolDiagnostic,
-    build_mcp_deferred_tools, build_mcp_deferred_tools_best_effort, portable_mcp_tool_name,
-    prepare_mcp_server_tools,
+    build_mcp_deferred_tools_best_effort, portable_mcp_tool_name, prepare_mcp_server_tools,
 };
 pub use path_overlay::{
     apply_to_std_command, apply_to_tokio_command, effective_path, path_overlay, resolve_program,

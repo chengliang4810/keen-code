@@ -1,15 +1,15 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use keencode_model::{
-    ContentBlock, ImageSource, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
-    OpaqueReasoningState, ReasoningEffort, ResponseMetadata, StopReason, TokenUsage, ToolChoice,
-    ToolResultContent,
+    ContentBlock, MessageRole, ModelError, ModelRequest, ModelStreamEvent, OpaqueReasoningState,
+    StopReason, TokenUsage, ToolChoice, ToolResultContent,
 };
 use serde_json::{Map, Value, json};
 
-use crate::{
-    REQUEST_METADATA_PROMPT_CACHE_KEY, http::classify_in_band_provider_error, sse::SseFrame,
+use super::wire::{
+    self, image_url, invalid_request, protocol_error, reasoning_effort, response_metadata,
 };
+use crate::{REQUEST_METADATA_PROMPT_CACHE_KEY, sse::SseFrame};
 
 /// Chat Completions 原生推理字段的不透明续传状态编码名。
 const CHAT_REASONING_STATE_KIND: &str = "chat-reasoning-state-v1";
@@ -927,16 +927,6 @@ fn encode_tool_message(block: &ContentBlock, images: &mut Vec<Value>) -> Result<
     }))
 }
 
-/// 将图片来源转换为 Chat `image_url.url`。
-fn image_url(source: &ImageSource) -> String {
-    match source {
-        ImageSource::Url { url } => url.clone(),
-        ImageSource::Base64 { media_type, data } => {
-            format!("data:{media_type};base64,{data}")
-        }
-    }
-}
-
 /// 编码 Chat 工具选择策略。
 fn encode_tool_choice(choice: &ToolChoice) -> Value {
     match choice {
@@ -948,35 +938,6 @@ fn encode_tool_choice(choice: &ToolChoice) -> Value {
             "function": { "name": name },
         }),
     }
-}
-
-/// 映射 Provider 中立推理强度到 Chat 字段。
-fn reasoning_effort(effort: ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::Minimal => "minimal",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::ExtraHigh => "xhigh",
-        ReasoningEffort::Maximum => "max",
-    }
-}
-
-/// 从 Chat JSON 对象提取响应元数据。
-fn response_metadata(response: &Map<String, Value>) -> Result<ResponseMetadata, ModelError> {
-    let metadata = ResponseMetadata {
-        decode_duration_ms: None,
-        response_id: response
-            .get("id")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-        model: response
-            .get("model")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned),
-    };
-    metadata.validate()?;
-    Ok(metadata)
 }
 
 /// 解析 Chat Usage，并保持缺失值为 `None`。
@@ -1016,58 +977,22 @@ fn map_finish_reason(reason: Option<&str>) -> StopReason {
     }
 }
 
-/// 提取 Provider 错误对象中的安全文本摘要。
-fn provider_error_message(value: &Value) -> String {
-    value
-        .get("error")
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-        .or_else(|| value.get("message").and_then(Value::as_str))
-        .unwrap_or("Chat Completions Provider 返回未说明错误")
-        .to_owned()
-}
-
 /// 只把具有明确上下文超限证据的 Chat Completions 错误归一为稳定错误类型。
 fn classify_provider_error(value: &Value) -> ModelError {
-    let message = provider_error_message(value);
-    let code = value
-        .get("error")
-        .and_then(Value::as_object)
-        .and_then(|error| error.get("code").or_else(|| error.get("type")))
-        .and_then(Value::as_str)
-        .or_else(|| value.get("code").and_then(Value::as_str));
-    classify_in_band_provider_error(&message, code)
+    wire::classify_provider_error(value, "Chat Completions Provider 返回未说明错误")
 }
 
 /// 从 JSON 对象读取必需字符串字段。
 fn required_str<'a>(value: &'a Map<String, Value>, field: &str) -> Result<&'a str, ModelError> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| protocol_error(format!("Chat 字段 {field} 必须是字符串")))
+    wire::required_str_from_map(value, field, "Chat")
 }
 
-/// 从 JSON 对象读取可转换为 u32 的必需整数。
 /// 读取 Runtime 写入且非空的会话稳定缓存路由键；未写入或为空时不进线格式。
 fn prompt_cache_key(metadata: &BTreeMap<String, String>) -> Option<&str> {
     metadata
         .get(REQUEST_METADATA_PROMPT_CACHE_KEY)
         .map(String::as_str)
         .filter(|value| !value.trim().is_empty())
-}
-
-/// 创建统一请求校验错误。
-fn invalid_request(message: impl Into<String>) -> ModelError {
-    ModelError::InvalidRequest {
-        message: message.into(),
-    }
-}
-
-/// 创建统一协议解析错误。
-fn protocol_error(message: impl Into<String>) -> ModelError {
-    ModelError::Protocol {
-        message: message.into(),
-    }
 }
 
 #[cfg(test)]

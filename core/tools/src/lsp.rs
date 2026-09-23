@@ -172,11 +172,6 @@ impl LspPreparationReport {
         &self.diagnostics
     }
 
-    /// 返回本次准备是否发生降级。
-    pub fn is_degraded(&self) -> bool {
-        !self.diagnostics.is_empty()
-    }
-
     /// 将另一阶段的启动结果合并到当前报告。
     pub fn append(&mut self, mut other: Self) {
         self.started_servers.append(&mut other.started_servers);

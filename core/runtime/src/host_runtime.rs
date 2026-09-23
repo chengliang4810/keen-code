@@ -1,7 +1,9 @@
 //! Desktop/headless Host 的 ownership、发现记录和生命周期状态。
 //!
-//! 这里不启动任何传输或 Agent Runtime。它只负责根级 OS lease、discovery 文件和
-//! Host Core 生命周期，因此 Desktop、headless 进程和测试可以共享同一套所有权事实。
+//! 这里不启动任何传输（WebSocket、本地 IPC）或 Agent Runtime。它只固化“先抢根级
+//! OS lease，失败后读取既有 Host discovery，Owned/Client 分支不能混用”的状态机，
+//! 负责 OS lease、discovery 文件和 Host Core 生命周期；真正的 Runtime/Transport
+//! 装配由上层完成。Desktop、headless 进程和测试可以共享同一套所有权事实。
 
 use keencode_acp::schema::Meta;
 use keencode_acp::{
@@ -40,7 +42,7 @@ pub enum HostRuntimeMode {
 pub enum HostRuntimeAcquire {
     /// 当前进程取得 owner lease。
     Owned(Arc<HostRuntime>),
-    /// 当前进程发现并校验了既有 Host。
+    /// 当前进程发现并校验了既有 Host，不能再创建第二套 Runtime。
     Client(Arc<HostRuntime>),
 }
 
@@ -92,8 +94,9 @@ impl HostRuntime {
         data_root: impl AsRef<Path>,
         owner_kind: HostOwnerKind,
     ) -> Result<HostRuntimeAcquire, HostRuntimeError> {
-        // 首次启动时数据根可能尚不存在；先创建目录，再规范化路径并计算
-        // lease/discovery 使用的稳定指纹。
+        // 首次启动时数据根可能尚不存在；先创建目录，再规范化并计算指纹。
+        // 不把未经 canonicalize 的路径交给 lease/discovery，避免同一根目录因
+        // 相对路径或符号链接产生多个 Host 身份。
         fs::create_dir_all(data_root.as_ref()).map_err(HostRuntimeError::Io)?;
         let data_root = fs::canonicalize(data_root.as_ref()).map_err(HostRuntimeError::Io)?;
         let owner = match owner_kind {
@@ -230,7 +233,8 @@ impl HostRuntime {
         let mut discovery = self.lock_discovery()?;
         publish_discovery(&self.data_root, &record)?;
         if let Err(error) = self.lifecycle.mark_ready() {
-            // 已发布但尚未 Ready 的中间态不能暴露给后续连接。
+            // 如果 discovery 已可见但 Host 尚未 Ready，客户端可能连接到尚未
+            // 服务的端点；清理这个不应发生的中间状态，不能掩盖原始错误。
             let _ = remove_discovery_if_owned(&self.data_root, &record);
             return Err(HostRuntimeError::Core(error));
         }
@@ -259,12 +263,15 @@ impl HostRuntime {
             .map_err(|_| HostRuntimeError::StateUnavailable)?
             .take();
         let lease_result = lease.map_or(Ok(()), |lease| {
+            // release(self) 消费租约；显式 shutdown 后不能继续被当作 owner。
             lease.release().map_err(HostRuntimeError::Resource)
         });
         let finish_result = self
             .lifecycle
             .finish_shutdown()
             .map_err(HostRuntimeError::Core);
+        // 即使 discovery 损坏或已被其他 owner 替换，也必须释放 OS lease 并
+        // 完成本地生命周期收尾。
         discovery_result.and(lease_result).and(finish_result)?;
         Ok(action)
     }
@@ -358,6 +365,7 @@ impl HostRuntime {
         if current.host_id != self.host_id
             || current.data_root_fingerprint != self.data_root_fingerprint
         {
+            // 新 owner 已经发布了自己的记录，旧 owner 不能把它删除。
             return Ok(());
         }
         fs::remove_file(path).map_err(HostRuntimeError::Io)
@@ -466,18 +474,19 @@ pub fn publish_discovery(
         Err(error) if error.kind() == io::ErrorKind::NotFound => false,
         Err(error) => return Err(HostRuntimeError::Io(error)),
     };
+    // 先完成序列化，再触碰文件系统；序列化失败时不产生任何临时文件残留。
+    let bytes =
+        serde_json::to_vec(record).map_err(|_| HostRuntimeError::InvalidDiscovery("json"))?;
     let mut builder = tempfile::Builder::new();
     builder.prefix(".keencode-host-discovery-");
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        builder.permissions(std::fs::Permissions::from_mode(0o600));
+        // 创建即 0600，不经过先建后改的中间权限状态。
+        builder.mode(0o600);
     }
     let mut temporary = builder
         .tempfile_in(data_root)
         .map_err(HostRuntimeError::Io)?;
-    let bytes =
-        serde_json::to_vec(record).map_err(|_| HostRuntimeError::InvalidDiscovery("json"))?;
     temporary.write_all(&bytes).map_err(HostRuntimeError::Io)?;
     temporary.flush().map_err(HostRuntimeError::Io)?;
     temporary
@@ -510,6 +519,7 @@ fn remove_discovery_if_owned(
         return Ok(());
     }
     let Ok(current) = HostRuntime::read_discovery(data_root) else {
+        // 无法证明文件归属当前 Host 时，不删除它。
         return Ok(());
     };
     if current.host_id == expected.host_id
@@ -604,14 +614,101 @@ mod tests {
         let root = temporary_root();
         let owned = HostRuntime::acquire(root.path(), HostOwnerKind::Headless).unwrap();
         let (transport, endpoint) = endpoint();
-        owned
-            .runtime()
-            .mark_ready_and_publish(transport, endpoint)
-            .unwrap();
+        let owner = owned.runtime();
+        owner.mark_ready_and_publish(transport, endpoint).unwrap();
         let client = HostRuntime::acquire(root.path(), HostOwnerKind::Desktop).unwrap();
         assert_eq!(client.mode(), HostRuntimeMode::Client);
+        assert_eq!(client.runtime().host_id(), owner.host_id());
         assert_eq!(client.runtime().phase().unwrap(), HostLifecyclePhase::Ready);
         assert_eq!(client.runtime().owner_kind(), HostOwnerKind::Headless);
+        assert_eq!(
+            owner.explicit_shutdown().unwrap(),
+            HostLifecycleAction::Shutdown
+        );
+    }
+
+    #[test]
+    fn stale_or_tampered_discovery_never_allows_client_mode() {
+        let root = temporary_root();
+        let _lease = match HostLease::try_acquire(root.path(), HostOwner::Desktop).unwrap() {
+            HostLeaseAcquire::Acquired(lease) => lease,
+            HostLeaseAcquire::Busy { .. } => panic!("首次应取得 lease"),
+        };
+        let (transport, _) = endpoint();
+        let record = HostDiscoveryRecord::new(
+            transport,
+            "endpoint",
+            HostOwnerKind::Desktop,
+            std::process::id(),
+            root.path(),
+            "2026-09-21T12:00:00Z",
+        )
+        .unwrap();
+        publish_discovery(root.path(), &record).unwrap();
+        let mut tampered = record;
+        tampered.data_root_fingerprint = "f".repeat(64);
+        fs::write(
+            discovery_path(root.path()),
+            serde_json::to_vec(&tampered).unwrap(),
+        )
+        .unwrap();
+        // 保持真实 OS lease 占用，使下一次 acquire 必须验证 Busy + discovery，
+        // 而不是直接成为新的 owner。
+        assert!(matches!(
+            HostRuntime::acquire(root.path(), HostOwnerKind::Desktop),
+            Err(HostRuntimeError::RootMismatch | HostRuntimeError::InvalidDiscovery(_))
+        ));
+    }
+
+    #[test]
+    fn publishing_discovery_replaces_existing_regular_file() {
+        let root = temporary_root();
+        let (transport, _) = endpoint();
+        let record = HostDiscoveryRecord::new(
+            transport,
+            "endpoint",
+            HostOwnerKind::Desktop,
+            std::process::id(),
+            root.path(),
+            "2026-09-21T12:00:00Z",
+        )
+        .unwrap();
+        publish_discovery(root.path(), &record).unwrap();
+        publish_discovery(root.path(), &record).unwrap();
+        let decoded = HostRuntime::read_discovery(root.path()).unwrap();
+        assert_eq!(decoded, record);
+    }
+
+    #[test]
+    fn busy_without_discovery_returns_explicit_unavailable_error() {
+        let root = temporary_root();
+        let _lease = match HostLease::try_acquire(root.path(), HostOwner::Headless).unwrap() {
+            HostLeaseAcquire::Acquired(lease) => lease,
+            HostLeaseAcquire::Busy { .. } => panic!("首次应取得 lease"),
+        };
+        assert!(matches!(
+            HostRuntime::acquire(root.path(), HostOwnerKind::Desktop),
+            Err(HostRuntimeError::DiscoveryUnavailable)
+        ));
+    }
+
+    #[test]
+    fn explicit_shutdown_releases_lease_when_discovery_is_malformed() {
+        let root = temporary_root();
+        let acquired = HostRuntime::acquire(root.path(), HostOwnerKind::Desktop).unwrap();
+        let runtime = acquired.runtime();
+        let (transport, _) = endpoint();
+        runtime
+            .mark_ready_and_publish(transport, "endpoint")
+            .unwrap();
+        fs::write(discovery_path(root.path()), b"malformed").unwrap();
+        assert_eq!(
+            runtime.explicit_shutdown().unwrap(),
+            HostLifecycleAction::Shutdown
+        );
+        assert_eq!(runtime.phase().unwrap(), HostLifecyclePhase::Stopped);
+        let next = HostRuntime::acquire(root.path(), HostOwnerKind::Headless).unwrap();
+        assert_eq!(next.mode(), HostRuntimeMode::Owned);
     }
 
     #[test]

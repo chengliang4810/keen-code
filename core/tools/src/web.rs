@@ -134,18 +134,6 @@ impl WebServiceConfig {
         Ok(self)
     }
 
-    /// 覆盖搜索查询字符上限；该值必须大于零。
-    pub fn with_query_limit(mut self, max_query_chars: usize) -> Result<Self, ToolError> {
-        if max_query_chars == 0 {
-            return Err(ToolError::permanent(
-                "invalid_web_config",
-                "网络搜索查询上限必须大于零",
-            ));
-        }
-        self.max_query_chars = max_query_chars;
-        Ok(self)
-    }
-
     /// 返回规范化后的服务基础网址。
     pub fn base_url(&self) -> &Url {
         &self.base_url
