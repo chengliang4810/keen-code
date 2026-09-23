@@ -475,7 +475,7 @@ describe("App 启动工作台契约", () => {
     expect(appSource).not.toContain("@/components/RuntimeGate");
   });
 
-  it("展开项目使用 Host 权威 Session 列表，不回传客户端路径作为过滤条件", () => {
+  it("展开项目按项目路径向 Host 查询 Session，避免其它项目会话退化为孤儿", () => {
     const sidebarSource = readSource("./hooks/sidebar/useSidebarLists.ts");
     const toggleStart = sidebarSource.indexOf("const toggleProject = useCallback");
     const toggleEnd = sidebarSource.indexOf("const refreshSessions", toggleStart);
@@ -483,8 +483,8 @@ describe("App 启动工作台契约", () => {
 
     expect(toggleStart).toBeGreaterThanOrEqual(0);
     expect(toggleEnd).toBeGreaterThan(toggleStart);
-    expect(toggleSource).toContain("const rows = await sessionsList()");
-    expect(toggleSource).not.toContain("sessionsList(checked.path)");
+    expect(toggleSource).toContain("const rows = await sessionsList(checked.path)");
+    expect(toggleSource).not.toContain("const rows = await sessionsList();");
     expect(toggleSource).toContain(
       "projectSidebar(rows, loadSessionPreferencesSafe(), [checked])",
     );
@@ -516,8 +516,11 @@ describe("App 顶栏布局契约", () => {
       /\.main__top\s*\{[\s\S]*?height: var\(--titlebar-height, 48px\);[\s\S]*?padding: 8px;[\s\S]*?border-bottom: 1px solid var\(--border-subtle\);/,
     );
     expect(cssSource).toMatch(
-      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame\s*\{[\s\S]*?margin: 4px 4px 4px 0;[\s\S]*?border: 1px solid var\(--border-subtle\);[\s\S]*?overflow: hidden;/,
+      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame\s*\{[\s\S]*?margin: 4px 4px 4px 0;[\s\S]*?overflow: hidden;/,
     );
+    const frameBlock =
+      cssSource.match(/\.main\.main--frame\s*\{([^}]*)\}/)?.[1] ?? "";
+    expect(frameBlock).not.toContain("border");
     expect(cssSource).toMatch(
       /\.platform-win \.main\.main--frame,[\s\S]*?border-radius: var\(--radius-workspace-win\);/,
     );

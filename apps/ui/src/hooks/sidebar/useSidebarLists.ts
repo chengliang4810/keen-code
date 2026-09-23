@@ -239,7 +239,9 @@ export function useSidebarLists({
       }
       // Host 持有 Session 与项目根的权威绑定；客户端路径只用于本地投影，
       // 不再次作为协议过滤条件，避免不同 Transport 的路径序列化产生授权分歧。
-      const rows = await sessionsList();
+      // 必须按项目路径查询：全局列表经单项目投影后，其它项目的会话会退化为
+      // 孤儿并落入下方合并，旧孤儿副本不被过滤，导致"对话"分区重复累积。
+      const rows = await sessionsList(checked.path);
       if (!isCurrentProject(project)) return;
       const projection = projectSidebar(rows, loadSessionPreferencesSafe(), [checked]);
       setProjects((previous) => previous.map((item) => item.id === project.id ? checked : item));
