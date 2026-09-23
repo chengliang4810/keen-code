@@ -68,16 +68,6 @@ textarea {
   animation: modal-in var(--motion-enter) var(--ease-out);
 }
 
-/* Theme flip: kill all transitions/animations for one frame so the switch
- * snaps instead of smearing (class toggled by applyThemeToDocument). */
-.theme-switching,
-.theme-switching *,
-.theme-switching *::before,
-.theme-switching *::after {
-  transition: none !important;
-  animation: none !important;
-}
-
 /* ==========================================================================
  * Feedback details — tactile press, numeric alignment
  * ========================================================================== */
@@ -1737,12 +1727,6 @@ textarea,
   margin-top: 14px;
 }
 
-/* Appica Card 默认只有紧凑内距；设置表单需要更清晰的桌面端内容边界。 */
-.settings-page__main > [data-slot="card"] > [data-slot="card-content"],
-.settings-appearance-duo > [data-slot="card"] > [data-slot="card-content"] {
-  padding: 16px;
-}
-
 .settings-row {
   display: flex;
   align-items: center;
@@ -2708,8 +2692,8 @@ textarea,
   color: var(--text-tertiary);
 }
 
-/* Harness 品牌栏及设置面板。只负责布局，控件沿用统一语义样式。 */
-.sidebar-brand {
+/* 侧栏折叠开关及设置面板。只负责布局，控件沿用统一语义样式。 */
+.sidebar-toggle {
   display: inline-flex;
   align-items: center;
   flex: 0 0 28px;
@@ -2724,12 +2708,6 @@ textarea,
   line-height: calc(24px + var(--ui-font-delta));
   /* 高度随字号增量同步，避免 20px 档位文字（24px/30px）溢出固定 24px 行盒。 */
   height: calc(24px + var(--ui-font-delta));
-}
-
-.sidebar-brand__logo {
-  width: 20px;
-  height: 20px;
-  object-fit: contain;
 }
 
 @media (max-width: 760px) {

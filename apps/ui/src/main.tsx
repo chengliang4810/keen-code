@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
+import { ThemeProvider } from "@appica/ui-react/providers/theme-provider";
 import { Toaster, ToastProvider } from "@appica/ui-react/toast";
 import App from "./App";
 import {
@@ -16,9 +17,11 @@ import "./styles/setup-wizard.css";
 import {
   applyNativeWindowTheme,
   applyThemeToDocument,
+  DEFAULT_THEME_PREFERENCE,
   getSystemTheme,
   loadThemePreference,
   resolveTheme,
+  THEME_STORAGE_KEY,
 } from "./lib/theme";
 import {
   applySkinToDocument,
@@ -42,6 +45,8 @@ document.documentElement.dataset.hostMode = bootHostMode;
 installFrontendErrorHandlers();
 
 // Apply persisted theme preference (default: Zai dark) before first React paint.
+// 主题的权威状态由 Appica ThemeProvider 接管；这里的首绘前同步只覆盖
+// provider 不负责的 KeenCode 表面（data-theme、meta 与 Tauri 原生外观）。
 const bootPref = loadThemePreference(localStorage);
 const bootTheme = resolveTheme(bootPref, getSystemTheme());
 applyThemeToDocument(bootTheme);
@@ -76,14 +81,26 @@ createRoot(document.getElementById("root")!, {
   },
 }).render(
   <StrictMode>
-    <ToastProvider timeout={2000}>
-      <ErrorBoundary scope="应用">
-        <HostStartupShell hostMode={bootHostMode} transport={bootHostTransport}>
-          <App />
-        </HostStartupShell>
-      </ErrorBoundary>
-      <Toaster position="top-center" timeout={2000} />
-    </ToastProvider>
+    {/* 官方主题系统：持有 light/dark/system 权威状态，负责持久化
+     * （同一 keencode.theme 键）、系统跟随、`.dark` 类与防闪脚本。 */}
+    <ThemeProvider
+      storageKey={THEME_STORAGE_KEY}
+      defaultTheme={DEFAULT_THEME_PREFERENCE}
+      enableSystem
+      disableTransitionOnChange
+    >
+      <ToastProvider timeout={2000}>
+        <ErrorBoundary scope="应用">
+          <HostStartupShell
+            hostMode={bootHostMode}
+            transport={bootHostTransport}
+          >
+            <App />
+          </HostStartupShell>
+        </ErrorBoundary>
+        <Toaster position="top-center" timeout={2000} />
+      </ToastProvider>
+    </ThemeProvider>
   </StrictMode>,
 );
 

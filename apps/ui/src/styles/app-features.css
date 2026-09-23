@@ -651,10 +651,6 @@ div.composer__input:empty::before {
   margin-bottom: 4px;
 }
 
-.settings-page__main > .ext-agent-card > [data-slot="card-content"] {
-  padding: 0;
-}
-
 .ext-agent-card {
   overflow: hidden;
 }

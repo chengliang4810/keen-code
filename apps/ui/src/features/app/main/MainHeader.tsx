@@ -25,10 +25,10 @@ import { Tip } from "@/components/ui/tooltip";
 import {
   IconArrowLeft,
   IconArrowRight,
-  IconBolt,
   IconGitBranch,
   IconMore,
   IconNewChat,
+  IconPanel,
   IconPanelRight,
   IconFolder,
   IconSummary,
@@ -143,8 +143,8 @@ export function MainHeader({
                 type="button"
                 variant="ghost"
                 size="md"
-                className="main__brand-button"
-                aria-label="KeenCode"
+                className="main__sidebar-toggle"
+                aria-label={tr("main.leftPaneShow")}
                 onClick={() =>
                   setLayout((currentLayout) => {
                     const next = { ...currentLayout, sidebarCollapsed: false };
@@ -153,7 +153,7 @@ export function MainHeader({
                   })
                 }
               >
-                <IconBolt size={18} />
+                <IconPanel size={16} />
               </Button>
             </Tip>
             <div className="main__task-nav" data-testid="main-task-navigation">

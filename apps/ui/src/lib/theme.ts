@@ -1,7 +1,13 @@
 /**
- * Theme preference + resolved light/dark for the document.
- * Preference is durable (`system` | `light` | `dark`); DOM always gets a
- * concrete `data-theme="light|dark"`. New installs default to Zai dark.
+ * KeenCode 主题桥接层。
+ *
+ * 主题状态、持久化、系统跟随、`.dark` 类与防闪脚本由 Appica 官方
+ * `ThemeProvider` / `useTheme` 管理（接线见 main.tsx 与 useThemeAppearance）。
+ * 本模块只保留 provider 覆盖不到的产品表面：
+ * - 把解析后的主题镜像到 `data-theme` 属性与 meta（tokens.css 与终端、
+ *   代码预览等组件读取该属性）；`.dark` 类由 provider 维护，这里写入
+ *   仅为启动首绘前的幂等镜像。
+ * - Tauri / macOS 原生窗口外观同步。
  */
 
 import { syncNativeThemeSurfaces } from "./nativeTheme";
@@ -10,6 +16,7 @@ export type Theme = "dark" | "light";
 /** User-facing choice including follow-OS. */
 export type ThemePreference = "system" | Theme;
 
+/** ThemeProvider 的 storageKey；值为裸字符串 `system|light|dark`。 */
 export const THEME_STORAGE_KEY = "keencode.theme";
 /** Fallback when OS scheme cannot be read (tests / SSR). */
 export const DEFAULT_RESOLVED_THEME: Theme = "dark";
@@ -57,27 +64,30 @@ export function resolveTheme(
   return preference;
 }
 
-export function toggleTheme(current: Theme): Theme {
-  return current === "dark" ? "light" : "dark";
+export interface ThemeStorage {
+  getItem(key: string): string | null;
 }
 
-/** Apply theme to documentElement (data-theme attribute).
+/** 读取持久化主题偏好；写入与解析 system 的权威路径属于 ThemeProvider。 */
+export function loadThemePreference(storage: ThemeStorage): ThemePreference {
+  return parseThemePreference(storage.getItem(THEME_STORAGE_KEY));
+}
+
+/**
+ * Mirror the resolved theme onto KeenCode product surfaces.
  *
- * Adds `.theme-switching` for one frame: app.css kills every transition/
- * animation under it so light↔dark snaps instead of smearing.
+ * 切换主题的过渡抑制由 ThemeProvider 的 `disableTransitionOnChange` 负责。
+ * provider 的语义是在 `<html>` 上保留唯一主题类（`.light` 或 `.dark`），但它
+ * 的防闪脚本在纯 CSR 入口下不会被执行、且挂载首轮 effect 被跳过——首帧作用域
+ * 必须由本镜像落位；后续每次主题变更 provider effect 与这里写入结果一致（幂等）。
  */
 export function applyThemeToDocument(
   theme: Theme,
   root: HTMLElement = document.documentElement,
 ): void {
   root.setAttribute("data-theme", theme);
-  // Appica 使用 Tailwind 的 `.dark` 作用域，而 KeenCode 的产品样式使用
-  // `data-theme`。两者必须同步，否则深色背景会叠加浅色控件前景色。
   root.classList.toggle("dark", theme === "dark");
-  // 与 ZCode 的 Zai 主题作用域保持一致，第三方浮层和复制过来的样式均可
-  // 直接消费同一套类名，不需要在业务组件中重复判断主题。
-  root.classList.toggle("theme-zai-dark", theme === "dark");
-  root.classList.toggle("theme-zai-light", theme === "light");
+  root.classList.toggle("light", theme === "light");
   root.style.colorScheme = theme;
 
   const ownerDocument = root.ownerDocument;
@@ -96,14 +106,6 @@ export function applyThemeToDocument(
       .getPropertyValue("--bg-main")
       .trim();
     if (background) syncMeta("theme-color", background);
-  }
-  root.classList.add("theme-switching");
-  if (typeof requestAnimationFrame === "function") {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => root.classList.remove("theme-switching"));
-    });
-  } else {
-    root.classList.remove("theme-switching");
   }
 }
 
@@ -130,95 +132,4 @@ export async function applyNativeWindowTheme(
     /* Native appearance sync failed; the CSS theme remains authoritative. */
   }
   await syncNativeThemeSurfaces();
-}
-
-/**
- * Apply preference end-to-end: unlock/lock native chrome, resolve system if
- * needed, write `data-theme`. When switching **to** system, native is unlocked
- * first so matchMedia reflects the real OS scheme.
- */
-export async function applyThemePreference(
-  preference: ThemePreference,
-  options?: {
-    /** Called with the concrete theme after resolve (for React state). */
-    onResolved?: (resolved: Theme, system: Theme) => void;
-  },
-): Promise<Theme> {
-  if (preference === "system") {
-    // Unlock WebView appearance so prefers-color-scheme tracks the OS.
-    await applyNativeWindowTheme(null);
-    // matchMedia can lag one frame after native unlock — re-read twice.
-    let system = getSystemTheme();
-    if (typeof requestAnimationFrame === "function") {
-      await new Promise<void>((r) => {
-        requestAnimationFrame(() => r());
-      });
-      system = getSystemTheme();
-    }
-    applyThemeToDocument(system);
-    // 解锁原生主题后，系统值可能跨过一帧才生效；此时重新读取 CSS 底色，
-    // 确保主窗口和已存在的嵌入浏览器不会继续使用切换前的颜色。
-    await syncNativeThemeSurfaces();
-    options?.onResolved?.(system, system);
-    return system;
-  }
-  applyThemeToDocument(preference);
-  await applyNativeWindowTheme(preference);
-  options?.onResolved?.(preference, getSystemTheme());
-  return preference;
-}
-
-export interface ThemeStorage {
-  getItem(key: string): string | null;
-  setItem(key: string, value: string): void;
-}
-
-/** 读取持久化主题偏好（跟随系统、浅色或深色）。 */
-export function loadThemePreference(storage: ThemeStorage): ThemePreference {
-  return parseThemePreference(storage.getItem(THEME_STORAGE_KEY));
-}
-
-/** 校验并持久化主题偏好，包括跟随系统。 */
-export function saveThemePreference(
-  storage: ThemeStorage,
-  preference: ThemePreference,
-): void {
-  if (!isThemePreference(preference)) {
-    throw new Error("主题偏好格式无效");
-  }
-  storage.setItem(THEME_STORAGE_KEY, preference);
-}
-
-/**
- * Subscribe to OS scheme changes. Returns unsubscribe.
- * No-op when matchMedia is unavailable.
- */
-export function subscribeSystemTheme(
-  onChange: (systemTheme: Theme) => void,
-  matchMedia: ((query: string) => MediaQueryList) | null = typeof window !==
-  "undefined"
-    ? window.matchMedia.bind(window)
-    : null,
-): () => void {
-  if (!matchMedia) return () => {};
-  let mql: MediaQueryList;
-  try {
-    mql = matchMedia("(prefers-color-scheme: dark)");
-  } catch {
-    return () => {};
-  }
-  const handler = () => {
-    onChange(mql.matches ? "dark" : "light");
-  };
-  if (typeof mql.addEventListener === "function") {
-    mql.addEventListener("change", handler);
-    return () => mql.removeEventListener("change", handler);
-  }
-  // 部分 WebView 仅提供 MediaQueryList 的 listener 方法。
-  const mqlWithListenerMethods = mql as MediaQueryList & {
-    addListener?: (cb: () => void) => void;
-    removeListener?: (cb: () => void) => void;
-  };
-  mqlWithListenerMethods.addListener?.(handler);
-  return () => mqlWithListenerMethods.removeListener?.(handler);
 }

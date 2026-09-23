@@ -213,15 +213,25 @@
   margin-top: 14px;
 }
 
-.settings-page__body > .ext-agent-card > [data-slot="card-content"] {
-  padding: 0;
+/* 设置卡片内容层的默认内距：图表、观测、请求筛选等内容式卡片由此获得统一的桌面边界。
+ * 行式卡与自带内距的面板卡在下方例外规则清零，避免双重边距。 */
+.settings-page__body [data-slot="card-content"] {
+  padding: 16px;
 }
 
+/* 行式设置卡贴边：横向内距与分隔线由 .settings-row 自带（含归档空态的内层 padding）。 */
 .settings-page__body > [data-slot="card"] > [data-slot="card-content"],
-.settings-page__body .settings-appearance-duo > [data-slot="card"] > [data-slot="card-content"] {
+.settings-page__body .settings-appearance-duo > [data-slot="card"] > [data-slot="card-content"],
+.settings-page__body [data-slot="card-content"]:has(> .settings-row),
+.settings-page__body [data-slot="card-content"]:has(> .settings-archived__empty) {
   padding: 0;
   border-color: var(--border-subtle);
   background: var(--bg-card);
+}
+
+/* extensions 面板卡的内层块（列表项/空态）自带内距。 */
+.settings-page__body .ext-card > [data-slot="card-content"] {
+  padding: 0;
 }
 
 .settings-page__body .settings-row {

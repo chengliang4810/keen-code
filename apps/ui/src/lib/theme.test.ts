@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_RESOLVED_THEME,
@@ -7,10 +8,7 @@ import {
   loadThemePreference,
   parseThemePreference,
   resolveTheme,
-  saveThemePreference,
-  subscribeSystemTheme,
   THEME_STORAGE_KEY,
-  toggleTheme,
   type ThemeStorage,
 } from "./theme";
 
@@ -23,10 +21,36 @@ function memoryStorage(initial: Record<string, string> = {}): ThemeStorage & {
     getItem(key) {
       return key in data ? data[key]! : null;
     },
-    setItem(key, value) {
-      data[key] = value;
-    },
   };
+}
+
+function fakeRoot() {
+  const attributes = new Map<string, string>();
+  const classes = new Set<string>();
+  const root = {
+    setAttribute(name: string, value: string) {
+      attributes.set(name, value);
+    },
+    classList: {
+      add(name: string) {
+        classes.add(name);
+      },
+      remove(name: string) {
+        classes.delete(name);
+      },
+      toggle(name: string, force?: boolean) {
+        const next = force ?? !classes.has(name);
+        if (next) classes.add(name);
+        else classes.delete(name);
+        return next;
+      },
+      contains(name: string) {
+        return classes.has(name);
+      },
+    },
+    style: {} as Record<string, string>,
+  } as unknown as HTMLElement;
+  return { attributes, classes, root };
 }
 
 describe("theme preference + resolve", () => {
@@ -67,53 +91,6 @@ describe("theme preference + resolve", () => {
     expect(getSystemTheme(null)).toBe(DEFAULT_RESOLVED_THEME);
   });
 
-  it("toggles dark ↔ light", () => {
-    expect(toggleTheme("dark")).toBe("light");
-    expect(toggleTheme("light")).toBe("dark");
-  });
-
-  it("同步 Appica 与 ZCode 的主题作用域", () => {
-    const attributes = new Map<string, string>();
-    const classes = new Set<string>();
-    const root = {
-      setAttribute(name: string, value: string) {
-        attributes.set(name, value);
-      },
-      classList: {
-        add(name: string) {
-          classes.add(name);
-        },
-        remove(name: string) {
-          classes.delete(name);
-        },
-        toggle(name: string, force?: boolean) {
-          const next = force ?? !classes.has(name);
-          if (next) classes.add(name);
-          else classes.delete(name);
-          return next;
-        },
-        contains(name: string) {
-          return classes.has(name);
-        },
-      },
-      style: {},
-    } as unknown as HTMLElement;
-
-    applyThemeToDocument("dark", root);
-    expect(attributes.get("data-theme")).toBe("dark");
-    expect(root.classList.contains("dark")).toBe(true);
-    expect(root.classList.contains("theme-zai-dark")).toBe(true);
-    expect(root.classList.contains("theme-zai-light")).toBe(false);
-    expect(root.style.colorScheme).toBe("dark");
-
-    applyThemeToDocument("light", root);
-    expect(attributes.get("data-theme")).toBe("light");
-    expect(root.classList.contains("dark")).toBe(false);
-    expect(root.classList.contains("theme-zai-dark")).toBe(false);
-    expect(root.classList.contains("theme-zai-light")).toBe(true);
-    expect(root.style.colorScheme).toBe("light");
-  });
-
   it("empty storage loads the Zai dark preference", () => {
     const storage = memoryStorage();
     expect(loadThemePreference(storage)).toBe("dark");
@@ -130,46 +107,65 @@ describe("theme preference + resolve", () => {
       expect(() => loadThemePreference(storage)).toThrow("主题偏好格式无效");
     }
   });
+});
 
-  it("persists system preference", () => {
-    const storage = memoryStorage();
-    saveThemePreference(storage, "system");
-    expect(storage.getItem(THEME_STORAGE_KEY)).toBe("system");
-    expect(loadThemePreference(storage)).toBe("system");
+describe("theme chrome mirror (KeenCode 产品表面)", () => {
+  it("同步 data-theme 属性、.light/.dark 类与 color-scheme", () => {
+    const { attributes, classes, root } = fakeRoot();
+
+    applyThemeToDocument("dark", root);
+    expect(attributes.get("data-theme")).toBe("dark");
+    expect(classes.has("dark")).toBe(true);
+    expect(classes.has("light")).toBe(false);
+    expect(root.style.colorScheme).toBe("dark");
+
+    applyThemeToDocument("light", root);
+    expect(attributes.get("data-theme")).toBe("light");
+    expect(classes.has("dark")).toBe(false);
+    expect(classes.has("light")).toBe(true);
+    expect(root.style.colorScheme).toBe("light");
   });
 
-  it("拒绝写入非当前主题值", () => {
-    const storage = memoryStorage();
-    expect(() =>
-      saveThemePreference(storage, "auto" as never),
-    ).toThrow("主题偏好格式无效");
-    expect(storage.data).toEqual({});
+  it("不再保留自定义的 theme-zai / theme-switching 作用域", () => {
+    const { classes, root } = fakeRoot();
+    applyThemeToDocument("dark", root);
+    expect(classes.has("theme-zai-dark")).toBe(false);
+    expect(classes.has("theme-zai-light")).toBe(false);
+    expect(classes.has("theme-switching")).toBe(false);
+  });
+});
+
+describe("Appica ThemeProvider 接线", () => {
+  const main = readFileSync(new URL("../main.tsx", import.meta.url), "utf8");
+  const hook = readFileSync(
+    new URL("../hooks/useThemeAppearance.ts", import.meta.url),
+    "utf8",
+  );
+
+  it("main.tsx 用官方 ThemeProvider 持有主题状态", () => {
+    expect(main).toContain(
+      'import { ThemeProvider } from "@appica/ui-react/providers/theme-provider"',
+    );
+    expect(main).toContain("<ThemeProvider");
+    expect(main).toContain("storageKey={THEME_STORAGE_KEY}");
+    expect(main).toContain("defaultTheme={DEFAULT_THEME_PREFERENCE}");
+    expect(main).toContain("enableSystem");
+    expect(main).toContain("disableTransitionOnChange");
   });
 
-  it("subscribeSystemTheme fires on change", () => {
-    const listeners = new Set<() => void>();
-    const mql = {
-      matches: true,
-      addEventListener: (_: string, cb: () => void) => {
-        listeners.add(cb);
-      },
-      removeEventListener: (_: string, cb: () => void) => {
-        listeners.delete(cb);
-      },
-    } as unknown as MediaQueryList;
-    const seen: string[] = [];
-    const unsub = subscribeSystemTheme((t) => seen.push(t), () => mql);
-    // flip
-    (mql as { matches: boolean }).matches = false;
-    for (const cb of listeners) cb();
-    expect(seen).toEqual(["light"]);
-    unsub();
-    expect(listeners.size).toBe(0);
+  it("useThemeAppearance 通过官方 useTheme 读写主题", () => {
+    expect(hook).toContain(
+      'import { useTheme } from "@appica/ui-react/hooks/use-theme"',
+    );
+    expect(hook).toContain("useTheme()");
+    expect(hook).toContain("setTheme(next)");
   });
 
-  it("resolveTheme(system) uses latest system argument (switch-to-system path)", () => {
-    // After unlock, caller passes freshly read OS theme — must win over stale state.
-    expect(resolveTheme("system", "dark")).toBe("dark");
-    expect(resolveTheme("system", "light")).toBe("light");
+  it("自定义状态实现不复活：持久化、系统订阅与切换编排归 provider", () => {
+    expect(hook).not.toContain("subscribeSystemTheme");
+    expect(hook).not.toContain("loadThemePreference");
+    expect(hook).not.toContain("saveThemePreference");
+    expect(hook).not.toContain("applyThemePreference");
+    expect(main).not.toContain("theme-switching");
   });
 });

@@ -79,12 +79,6 @@ function WelcomeCopy({ tr }: { tr: Translator }) {
 
   return (
     <div className="composer-welcome" data-testid="composer-welcome">
-      <img
-        className="composer-welcome__logo"
-        src="/logo.png"
-        alt=""
-        aria-hidden="true"
-      />
       <h1>{tr(getWelcomeGreetingKey(greetingDate))}</h1>
     </div>
   );

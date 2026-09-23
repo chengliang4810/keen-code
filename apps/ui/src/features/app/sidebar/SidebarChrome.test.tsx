@@ -24,18 +24,19 @@ function renderChrome(overrides: Partial<Parameters<typeof SidebarChrome>[0]> = 
 }
 
 describe("SidebarChrome task navigation", () => {
-  it("renders the product mark and keeps task navigation in the no-drag chrome", () => {
+  it("renders the sidebar toggle icon and keeps task navigation in the no-drag chrome", () => {
     const html = renderChrome();
 
     expect(html).toContain('class="sidebar-chrome"');
     expect(html).toContain("data-tauri-drag-region");
-    expect(html).toContain("sidebar-brand");
+    expect(html).toContain("sidebar-toggle");
+    expect(html).not.toContain("logo.png");
     expect(html).toContain('data-testid="sidebar-task-navigation"');
     expect(html).toContain('aria-label="resources.browserBack"');
     expect(html).toContain('aria-label="resources.browserForward"');
     expect(html).toContain("disabled");
     expect(html).not.toContain('aria-label="sidebar.newSession"');
-    // 品牌入口与后退/前进三个按钮统一渲染官方 Appica md 几何（h-10）。
+    // 折叠开关与后退/前进三个按钮统一渲染官方 Appica md 几何（h-10）。
     expect((html.match(/h-10/g) ?? []).length).toBe(3);
   });
 

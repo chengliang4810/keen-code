@@ -12,7 +12,7 @@ import type {
 } from "./types";
 import { Button } from "@appica/ui-react/button";
 import { Tip } from "@/components/ui/tooltip";
-import { IconArrowLeft, IconArrowRight } from "@/components/icons";
+import { IconArrowLeft, IconArrowRight, IconPanel } from "@/components/icons";
 
 export interface SidebarChromeProps {
   layout: LayoutPrefs;
@@ -108,7 +108,7 @@ export function SidebarChrome({
             type="button"
             variant="ghost"
             size="md"
-            className="sidebar-brand"
+            className="sidebar-toggle"
             aria-label={tr("main.leftPaneHide")}
             onClick={() =>
               setLayout((current) => {
@@ -118,12 +118,7 @@ export function SidebarChrome({
               })
             }
           >
-            <img
-              src="/logo.png"
-              alt=""
-              className="sidebar-brand__logo"
-              draggable={false}
-            />
+            <IconPanel size={16} />
           </Button>
         </Tip>
         <div

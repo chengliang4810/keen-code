@@ -883,10 +883,6 @@
   box-shadow: none;
 }
 
-.prov-detail__content {
-  padding: 16px 18px;
-}
-
 .prov-detail__title {
   margin: 0;
   font-size: calc(15px + var(--ui-font-delta));

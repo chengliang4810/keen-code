@@ -131,16 +131,16 @@ describe("Composer surface alignment", () => {
     expect(sessionComposer).toContain("border: 1px solid var(--border-subtle);");
   });
 
-  it("uses the real KeenCode logo in a normal-flow welcome layout", () => {
+  it("shows the welcome greeting without a product logo", () => {
     const stageSource = readSource(new URL("../MainStage.tsx", import.meta.url));
     const css = readSource(new URL("../../../styles/app-conversation.css", import.meta.url));
 
-    expect(stageSource).toContain('src="/logo.png"');
-    expect(stageSource).not.toContain("IconBolt");
+    expect(stageSource).not.toContain('src="/logo.png"');
+    expect(stageSource).not.toContain("composer-welcome__logo");
     expect(css).toMatch(
       /\.composer-wrap--welcome\s*\{[^}]*position:\s*relative;[^}]*flex:\s*1 1 auto;[^}]*justify-content:\s*center;/s,
     );
-    expect(css).toContain(".composer-welcome__logo");
+    expect(css).not.toContain(".composer-welcome__logo");
     expect(css).not.toContain("29dvh");
   });
 });
