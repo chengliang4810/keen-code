@@ -10,6 +10,7 @@ import { Field, FieldLabel } from "@appica/ui-react/field";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import * as api from "@/lib/api";
+import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
@@ -256,7 +257,11 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
     setLoading(true);
     setError(null);
     try {
-      const result = await api.agentsList(projectPath?.trim() || null);
+      // 短时缓存：切回本分区立即复用上次结果，避免每次挂载重新扫描代理目录。
+      const result = await cachedRead(
+        `agents_list:${projectPath?.trim() || "__global__"}`,
+        () => api.agentsList(projectPath?.trim() || null),
+      );
       setAgents(result.agents);
     } catch (cause) {
       setAgents([]);
@@ -273,8 +278,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
   /** 加载模型覆盖下拉的候选分组。 */
   useEffect(() => {
     if (!api.isTauri()) return;
-    void api
-      .providersList()
+    void cachedRead("providers_list", () => api.providersList())
       .then((list) => {
         setProviderGroups(
           list.providers
@@ -296,6 +300,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
     setError(null);
     try {
       await api.agentUpdate(agent.name, value ? value : null);
+      invalidateReadCache(`agents_list:${projectPath?.trim() || "__global__"}`);
       await refresh();
     } catch (cause) {
       setError(localizeUiError(cause, locale));
@@ -345,6 +350,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
         maxTurns: maxTurns.trim() ? Number(maxTurns) : null,
         model: createModel || null,
       });
+      invalidateReadCache(`agents_list:${projectPath?.trim() || "__global__"}`);
       setCreateOpen(false);
       setName("");
       setDescription("");
@@ -390,6 +396,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
     setError(null);
     try {
       await api.agentRemove(target.name);
+      invalidateReadCache(`agents_list:${projectPath?.trim() || "__global__"}`);
       setRemoveTarget(null);
       await refresh();
     } catch (cause) {

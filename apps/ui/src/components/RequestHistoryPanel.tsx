@@ -1,3 +1,4 @@
+import { cachedRead } from "@/lib/readCache";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
@@ -478,7 +479,11 @@ export function RequestHistoryPanel({ locale, labels }: Props) {
     }
     setLoading(true);
     setError(null);
-    void requestRecordsList(query)
+    // 短时缓存：仅在筛选条件或刷新版本变化时重新请求。
+    void cachedRead(
+      `request_records_list:${refreshVersion}:${JSON.stringify(query)}`,
+      () => requestRecordsList(query),
+    )
       .then((result) => {
         if (!active) return;
         setPage(result);

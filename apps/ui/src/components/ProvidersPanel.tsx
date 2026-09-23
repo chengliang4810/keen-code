@@ -9,6 +9,7 @@ import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
+import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { copyTextInGesture } from "@/lib/clipboardWrite";
 import { createT, type Locale } from "@/i18n";
 import { formatTokenCount } from "@/lib/contextUsage";
@@ -210,7 +211,9 @@ export function ProvidersPanel({
         });
         return;
       }
-      const result = await api.providersList();
+      // 走短时缓存：切回本分区时立即复用上次结果，避免"每次都要重新加载"；
+      // 供应商增删改会显式失效（见各写操作后的 invalidateReadCache）。
+      const result = await cachedRead("providers_list", () => api.providersList());
       setList(result);
       const preferred = initialProviderId
         ? result.providers.find((provider) => provider.id === initialProviderId)
@@ -412,6 +415,7 @@ export function ProvidersPanel({
         supportsVision: form.supportsVision,
         createOnly: !editingId,
       });
+      invalidateReadCache("providers_list");
       setList(result);
       const saved = result.providers.find((provider) => provider.id === id);
       if (saved) {
@@ -433,6 +437,7 @@ export function ProvidersPanel({
     setDeleteTarget(null);
     try {
       const result = await api.providersRemove(deleteTarget.id);
+      invalidateReadCache("providers_list");
       setList(result);
       if (result.providers[0]) {
         openEdit(result.providers[0]);
@@ -573,6 +578,7 @@ export function ProvidersPanel({
     setImportDraft({ ...importDraft, submitting: true });
     try {
       const result = await api.providersImport(importDraft.text);
+      invalidateReadCache("providers_list");
       setList({
         providers: result.providers,
         defaultModel: result.defaultModel,

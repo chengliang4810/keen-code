@@ -499,10 +499,18 @@ async fn web_host_set_token(
 }
 
 /// 返回 KeenCode 自定义模型供应商列表。
+///
+/// 异步命令 + `spawn_blocking`：同步命令在 Tauri v2 中内联运行于主线程，
+/// 而该命令持供应商配置锁并读取配置文件；设置页与子 Agent 面板挂载时都会
+/// 调用它，读盘不应阻塞窗口事件处理。
 #[tauri::command]
-fn providers_list(app: AppHandle) -> Result<ProvidersListResult, String> {
-    require_owned_runtime(&app)?;
-    providers::list(&app).map_err(|error| error.to_string())
+async fn providers_list(app: AppHandle) -> Result<ProvidersListResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_owned_runtime(&app)?;
+        providers::list(&app).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 新增或更新一个自定义模型供应商。
@@ -655,10 +663,16 @@ fn providers_list_models(
 }
 
 /// 导出单个供应商的配置 JSON 文档。
+///
+/// 异步命令 + `spawn_blocking`：与 `providers_list` 同为持锁读盘路径。
 #[tauri::command]
-fn providers_export(provider_id: String, app: AppHandle) -> Result<String, String> {
-    require_owned_runtime(&app)?;
-    providers::export(&app, &provider_id).map_err(|error| error.to_string())
+async fn providers_export(provider_id: String, app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        require_owned_runtime(&app)?;
+        providers::export(&app, &provider_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 /// 导入供应商配置并按标识合并到当前列表，随后热加载运行时。

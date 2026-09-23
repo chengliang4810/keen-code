@@ -8,6 +8,7 @@ import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import * as api from "@/lib/api";
+import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
@@ -362,7 +363,7 @@ export function ExtensionsPanel({
     }
   }, [currentProjectPath, locale]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (force = false) => {
     if (!api.isTauri()) {
       setSkills([]);
       setServers([]);
@@ -382,23 +383,23 @@ export function ExtensionsPanel({
     setPluginsError(null);
     setPathHint(null);
     const cwd = currentProjectPath;
+    // 四项读取按项目路径走短时缓存：切换分区/标签时立即复用上次结果，
+    // 避免每次挂载都重新遍历 Skills、MCP 与插件目录（实测有明显重复加载感）。
+    const scope = cwd ?? "__global__";
+    if (force) {
+      for (const prefix of ["skills_list", "inspect_mcp", "mcp_runtime_list", "plugins_list"]) {
+        invalidateReadCache(`${prefix}:${scope}`);
+      }
+    }
+    const loadOrError = <T,>(key: string, load: () => Promise<T>) =>
+      cachedRead(key, load)
+        .then((value) => ({ value, error: null as string | null }))
+        .catch((e) => ({ value: null, error: String(e) }));
     const [skillsLoad, mcpLoad, mcpRuntimeLoad, pluginsLoad] = await Promise.all([
-      api
-        .skillsList(cwd)
-        .then((value) => ({ value, error: null as string | null }))
-        .catch((e) => ({ value: null, error: String(e) })),
-      api
-        .inspectMcp(cwd)
-        .then((value) => ({ value, error: null as string | null }))
-        .catch((e) => ({ value: null, error: String(e) })),
-      api
-        .mcpRuntimeList(cwd)
-        .then((value) => ({ value, error: null as string | null }))
-        .catch((e) => ({ value: null, error: String(e) })),
-      api
-        .pluginsList(cwd)
-        .then((value) => ({ value, error: null as string | null }))
-        .catch((e) => ({ value: null, error: String(e) })),
+      loadOrError(`skills_list:${scope}`, () => api.skillsList(cwd)),
+      loadOrError(`inspect_mcp:${scope}`, () => api.inspectMcp(cwd)),
+      loadOrError(`mcp_runtime_list:${scope}`, () => api.mcpRuntimeList(cwd)),
+      loadOrError(`plugins_list:${scope}`, () => api.pluginsList(cwd)),
     ]);
     setSkills(sortSkillsByName(skillsLoad.value?.skills ?? []));
     setServers(sortMcpByName(mcpLoad.value?.servers ?? []));
@@ -535,7 +536,7 @@ export function ExtensionsPanel({
       await api.extensionsEnableAllMcp(names);
     } catch (e) {
       setPathHint(String(e));
-      await refresh();
+      await refresh(true);
     } finally {
       setBusyKey(null);
     }
@@ -686,7 +687,7 @@ export function ExtensionsPanel({
     setActionErrorSource(null);
     try {
       await action();
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setActionError(localizeUiError(e, locale));
       setActionErrorSource("plugin");
@@ -836,7 +837,7 @@ export function ExtensionsPanel({
       setConfigResult(saved);
       setConfigValues(buildConfigEditorValues(saved.fields));
       setConfigTouched(new Set());
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setConfigError(localizeUiError(e, locale));
     } finally {
@@ -886,7 +887,7 @@ export function ExtensionsPanel({
       }
       setAddOpen(false);
       resetAddForm();
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setActionError(localizeUiError(e, locale));
       setActionErrorSource("mcp");
@@ -904,7 +905,7 @@ export function ExtensionsPanel({
     setActionErrorSource(null);
     try {
       await api.mcpRemove(target.name);
-      await refresh();
+      await refresh(true);
     } catch (e) {
       setActionError(localizeUiError(e, locale));
       setActionErrorSource("mcp");

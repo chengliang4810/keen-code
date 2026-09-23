@@ -1,3 +1,4 @@
+import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -54,7 +55,7 @@ export function WebHostSettingsPanel({
     if (!api.isTauri()) return;
     setBusy("status");
     try {
-      setStatus(await api.webHostStatus());
+      setStatus(await cachedRead("web_host_status", () => api.webHostStatus()));
       setError(null);
     } catch {
       setError(t("settings.webHost.statusError"));
@@ -73,6 +74,7 @@ export function WebHostSettingsPanel({
       if (!enabled && status?.state === "running") {
         setBusy("stop");
         try {
+          invalidateReadCache("web_host_status");
           setStatus(await api.webHostStop());
         } catch {
           setError(t("settings.webHost.stopError"));
@@ -94,6 +96,7 @@ export function WebHostSettingsPanel({
         const next = action === "start"
           ? await api.webHostStart(settings.port)
           : await api.webHostStop();
+      invalidateReadCache("web_host_status");
         setStatus(next);
       } catch {
         setError(t(action === "start" ? "settings.webHost.startError" : "settings.webHost.stopError"));
@@ -113,6 +116,7 @@ export function WebHostSettingsPanel({
     setBusy("token");
     setError(null);
     try {
+      invalidateReadCache("web_host_status");
       setStatus(await api.webHostSetToken(value));
       setToken("");
       setTokenSaved(true);

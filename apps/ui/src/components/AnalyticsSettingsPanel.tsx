@@ -1,3 +1,4 @@
+import { cachedRead } from "@/lib/readCache";
 import { Card } from "@/components/ui/card";
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import {
@@ -122,7 +123,8 @@ export function AnalyticsSettingsPanel({ locale, labels }: Props) {
     let active = true;
     setLoading(true);
     setError(null);
-    void usageStatsGet()
+    // 短时缓存：切回本分区立即复用上次统计，避免每次挂载重新聚合。
+    void cachedRead(`usage_stats_get:${locale}`, () => usageStatsGet())
       .then((result) => {
         if (!active) return;
         setStats(result);
