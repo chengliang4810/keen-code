@@ -16,6 +16,8 @@ import {
  */
 
 import {
+  Suspense,
+  lazy,
   useCallback,
   useEffect,
   useMemo,
@@ -66,14 +68,6 @@ import {
   type WallpaperFocusApplyResult,
 } from "@/components/WallpaperFocusEditor";
 import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
-import { ProvidersPanel } from "@/components/ProvidersPanel";
-import { ExtensionsPanel } from "@/components/ExtensionsPanel";
-import { AgentsPanel } from "@/components/AgentsPanel";
-import { AnalyticsSettingsPanel } from "@/components/AnalyticsSettingsPanel";
-import { RequestHistoryPanel } from "@/components/RequestHistoryPanel";
-import { PersonalizationSettingsPanel } from "@/components/PersonalizationSettingsPanel";
-import { RuntimeObservabilityPanel } from "@/components/RuntimeObservabilityPanel";
-import { WebHostSettingsPanel } from "@/components/WebHostSettingsPanel";
 import {
   AppUpdateSection,
   type AppUpdateBusy,
@@ -109,6 +103,52 @@ import {
 import { formatColor } from "@appica/ui-react/color";
 import { ToggleGroup } from "@appica/ui-react/toggle-group";
 import { Toggle } from "@appica/ui-react/toggle";
+
+/**
+ * 设置分区面板按需加载：这些面板合计约 1.4MB 源码，静态导入会把它们全部
+ * 拉进设置页首屏依赖图（开发模式逐个请求 82 个模块、3.6MB）。改为 lazy 后
+ * 首次进入设置页只加载当前分区所需内容。
+ */
+const ProvidersPanel = lazy(() =>
+  import("@/components/ProvidersPanel").then((m) => ({ default: m.ProvidersPanel })),
+);
+const ExtensionsPanel = lazy(() =>
+  import("@/components/ExtensionsPanel").then((m) => ({ default: m.ExtensionsPanel })),
+);
+const AgentsPanel = lazy(() =>
+  import("@/components/AgentsPanel").then((m) => ({ default: m.AgentsPanel })),
+);
+const AnalyticsSettingsPanel = lazy(() =>
+  import("@/components/AnalyticsSettingsPanel").then((m) => ({
+    default: m.AnalyticsSettingsPanel,
+  })),
+);
+const RequestHistoryPanel = lazy(() =>
+  import("@/components/RequestHistoryPanel").then((m) => ({
+    default: m.RequestHistoryPanel,
+  })),
+);
+const PersonalizationSettingsPanel = lazy(() =>
+  import("@/components/PersonalizationSettingsPanel").then((m) => ({
+    default: m.PersonalizationSettingsPanel,
+  })),
+);
+const RuntimeObservabilityPanel = lazy(() =>
+  import("@/components/RuntimeObservabilityPanel").then((m) => ({
+    default: m.RuntimeObservabilityPanel,
+  })),
+);
+const WebHostSettingsPanel = lazy(() =>
+  import("@/components/WebHostSettingsPanel").then((m) => ({
+    default: m.WebHostSettingsPanel,
+  })),
+);
+
+/** 面板加载中的占位：保持布局稳定，避免分区切换时跳动。 */
+function SettingsPanelFallback() {
+  return <div className="settings-panel-fallback" aria-busy="true" />;
+}
+
 import {
   SETTINGS_NAV,
   SETTINGS_NAV_GROUPS,
@@ -858,11 +898,13 @@ export function SettingsPage({
               <h2 className="settings-page__h2" id="settings-anchor-web-host">
                 {t("settings.webHost.title")}
               </h2>
-              <WebHostSettingsPanel
+              <Suspense fallback={<SettingsPanelFallback />}>
+                <WebHostSettingsPanel
                 locale={locale}
                 settings={webHostSettings}
                 onSettingsChange={onWebHostSettings}
               />
+              </Suspense>
 
               <h2 className="settings-page__h2">
                 {t("settings.general.notifications")}
@@ -1440,17 +1482,20 @@ export function SettingsPage({
             <p className="settings-page__lead">
               {t("settings.tabProvidersHint")}
             </p>
-            <ProvidersPanel
+            <Suspense fallback={<SettingsPanelFallback />}>
+              <ProvidersPanel
               locale={locale}
               onProviderActivated={onProviderActivated}
               initialProviderId={providerId}
             />
+            </Suspense>
           </div>
         )}
 
         {section === "personalization" && (
           <div className="settings-search-target">
-            <PersonalizationSettingsPanel
+            <Suspense fallback={<SettingsPanelFallback />}>
+              <PersonalizationSettingsPanel
               value={customInstructions}
               locale={locale}
               onSave={onCustomInstructionsSave}
@@ -1460,6 +1505,7 @@ export function SettingsPage({
               onMemoryFileSave={onMemoryFileSave}
               onMemoriesReset={onMemoriesReset}
             />
+            </Suspense>
           </div>
         )}
 
@@ -1468,7 +1514,8 @@ export function SettingsPage({
             id="settings-anchor-analytics"
             className="settings-search-target"
           >
-            <AnalyticsSettingsPanel
+            <Suspense fallback={<SettingsPanelFallback />}>
+              <AnalyticsSettingsPanel
               locale={locale}
               labels={{
                 loading: t("settings.analytics.loading"),
@@ -1485,11 +1532,13 @@ export function SettingsPage({
                 rounds: t("settings.analytics.rounds"),
               }}
             />
+            </Suspense>
           </div>
         )}
 
         {section === "observability" && (
-          <RuntimeObservabilityPanel
+          <Suspense fallback={<SettingsPanelFallback />}>
+            <RuntimeObservabilityPanel
             labels={{
               title: t("settings.observability.title"),
               description: t("settings.observability.description"),
@@ -1532,10 +1581,12 @@ export function SettingsPage({
               time: t("settings.observability.time"),
             }}
           />
+          </Suspense>
         )}
 
         {section === "requests" && (
-          <RequestHistoryPanel
+          <Suspense fallback={<SettingsPanelFallback />}>
+            <RequestHistoryPanel
             locale={locale}
             labels={{
               loading: t("settings.requests.loading"),
@@ -1600,22 +1651,27 @@ export function SettingsPage({
               statusOther: t("settings.requests.statusOther"),
             }}
           />
+          </Suspense>
         )}
 
         {(section === "market" ||
           section === "plugins" ||
           section === "skills" ||
           section === "mcp") && (
-          <ExtensionsPanel
-            locale={locale}
-            projectPath={projectPath}
-            activeTab={section}
-            onOpenMarketplace={() => onSection("market")}
-          />
+          <Suspense fallback={<SettingsPanelFallback />}>
+            <ExtensionsPanel
+              locale={locale}
+              projectPath={projectPath}
+              activeTab={section}
+              onOpenMarketplace={() => onSection("market")}
+            />
+          </Suspense>
         )}
 
         {section === "agents" && (
-          <AgentsPanel locale={locale} projectPath={projectPath} />
+          <Suspense fallback={<SettingsPanelFallback />}>
+            <AgentsPanel locale={locale} projectPath={projectPath} />
+          </Suspense>
         )}
 
         {section === "about" && (

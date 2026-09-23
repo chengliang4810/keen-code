@@ -1474,6 +1474,12 @@ textarea,
   background: var(--bg-main);
 }
 
+/* 分区面板按需加载时的占位：只保留主题底色，避免切换分区时闪白。 */
+.settings-panel-fallback {
+  min-height: 120px;
+  background: var(--bg-main);
+}
+
 /*
  * Full-width drag overlay — sits on top of nav + content so the whole
  * titlebar band can move the window (mac Overlay traffic lights ok).
