@@ -64,47 +64,59 @@ export function inspectSource(relativePath, content) {
   return violations;
 }
 
+/**
+ * Appica 官方尺寸变体清单，来源为各组件官方文档的 props 表（@appica/ui-react 1.1.0）。
+ * 尺寸默认一律显式 md；只有特殊要求（如图标按钮的 icon-*）才使用其他官方变体。
+ * 像素数值（Avatar/Thumbnail/ColorSwatch 官方允许的 number）不在放行范围内：
+ * 本项目禁止用像素表达式模拟尺寸。
+ */
+const OFFICIAL_SM_MD_LG = ["sm", "md", "lg"];
+const OFFICIAL_BUTTON_SIZES = ["sm", "md", "lg", "icon-sm", "icon-md", "icon-lg"];
+const OFFICIAL_BADGE_SIZES = ["xs", "sm", "md", "lg", "icon-sm", "icon-md", "icon-lg"];
+const OFFICIAL_AVATAR_SIZES = ["2xs", "xs", "sm", "md", "lg", "xl", "2xl"];
+const OFFICIAL_SWATCH_SIZES = ["3xs", "2xs", "xs", "sm", "md", "lg", "xl"];
+
 const APPICA_SIZE_RULES = new Map([
-  ["Autocomplete", { prop: "size" }],
-  ["Avatar", { prop: "size" }],
-  ["Badge", { prop: "size" }],
-  ["Button", { prop: "size" }],
-  ["ButtonGroup", { prop: "size" }],
-  ["Calendar", { prop: "size" }],
-  ["Chip", { prop: "size" }],
-  ["ChipGroup", { prop: "size" }],
-  ["ColorPicker", { prop: "size" }],
-  ["ColorPickerEyeDropper", { prop: "size" }],
-  ["ColorSwatch", { prop: "size" }],
-  ["ColorSwatchPicker", { prop: "size" }],
-  ["Combobox", { prop: "size" }],
-  ["ContextMenu", { prop: "size" }],
-  ["CopyButton", { prop: "size" }],
-  ["DateField", { prop: "size" }],
-  ["DatePicker", { prop: "size" }],
-  ["DropdownMenu", { prop: "size" }],
-  ["Input", { prop: "inputSize" }],
-  ["Kbd", { prop: "size" }],
-  ["KbdGroup", { prop: "size" }],
-  ["Menubar", { prop: "size" }],
-  ["Navigation", { prop: "size" }],
-  ["NavigationLink", { prop: "size" }],
-  ["NavigationMenu", { prop: "size" }],
-  ["NumberField", { prop: "size" }],
-  ["OTPField", { prop: "size" }],
-  ["Pagination", { prop: "size" }],
-  ["Select", { prop: "size" }],
-  ["Switch", { prop: "size" }],
-  ["Table", { prop: "size" }],
-  ["Tabs", { prop: "size" }],
-  ["TabsList", { prop: "size" }],
-  ["TabsTrigger", { prop: "size" }],
-  ["Textarea", { prop: "inputSize" }],
-  ["Thumbnail", { prop: "size" }],
-  ["TimeField", { prop: "size" }],
+  ["Autocomplete", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Avatar", { prop: "size", allowed: OFFICIAL_AVATAR_SIZES }],
+  ["Badge", { prop: "size", allowed: OFFICIAL_BADGE_SIZES }],
+  ["Button", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
+  ["ButtonGroup", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
+  ["Calendar", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Chip", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["ChipGroup", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["ColorPicker", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["ColorPickerEyeDropper", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
+  ["ColorSwatch", { prop: "size", allowed: OFFICIAL_SWATCH_SIZES }],
+  ["ColorSwatchPicker", { prop: "size", allowed: OFFICIAL_SWATCH_SIZES }],
+  ["Combobox", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["ContextMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["CopyButton", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
+  ["DateField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["DatePicker", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["DropdownMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Input", { prop: "inputSize", allowed: OFFICIAL_SM_MD_LG }],
+  ["Kbd", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["KbdGroup", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Menubar", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Navigation", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["NavigationLink", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["NavigationMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["NumberField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["OTPField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Pagination", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Select", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Switch", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Table", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["Tabs", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["TabsList", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
+  ["TabsTrigger", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
+  ["Textarea", { prop: "inputSize", allowed: OFFICIAL_SM_MD_LG }],
+  ["Thumbnail", { prop: "size", allowed: OFFICIAL_AVATAR_SIZES }],
+  ["TimeField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
 ]);
 
-/** 所有 Appica 尺寸属性必须显式使用 md，避免同类控件出现不一致的视觉规格。 */
+/** Appica 尺寸必须显式传入官方变体；默认一律 md，非特殊要求（如图标按钮 icon-*）不变。 */
 function inspectAppicaSizes(relativePath, content, violations) {
   const sourceFile = ts.createSourceFile(
     relativePath,
@@ -140,40 +152,41 @@ function inspectAppicaSizes(relativePath, content, violations) {
       const tagName = opening.tagName.getText(sourceFile);
       const sizeRule = appicaComponents.get(tagName);
       if (sizeRule) {
+        let hasSizeAttribute = false;
         for (const attribute of opening.attributes.properties) {
           if (!ts.isJsxAttribute(attribute)) continue;
           const attributeName = attribute.name.text;
           if (attributeName !== sizeRule.prop) continue;
+          hasSizeAttribute = true;
 
           const value = attribute.initializer;
-          const isMd =
+          const literal =
             value &&
-            ((ts.isStringLiteral(value) && value.text === "md") ||
+            ((ts.isStringLiteral(value) && value.text) ||
               (ts.isJsxExpression(value) &&
                 value.expression &&
                 ts.isStringLiteral(value.expression) &&
-                value.expression.text === "md"));
-          if (isMd) continue;
+                value.expression.text));
+          if (literal && sizeRule.allowed.includes(literal)) continue;
 
           const line = sourceFile.getLineAndCharacterOfPosition(attribute.getStart(sourceFile)).line + 1;
           violations.push({
             rule: "DSG005",
             file: relativePath,
             line,
-            message: `Appica <${tagName}> 的 ${attributeName} 必须使用 md。`,
+            message:
+              `Appica <${tagName}> 的 ${attributeName} 必须是官方变体（${sizeRule.allowed.join("/")}），` +
+              `默认使用 md；当前为 ${literal ? `"${literal}"` : "非字面量"}。`,
           });
         }
 
-        const hasSizeAttribute = [...opening.attributes.properties].some(
-          (attribute) => ts.isJsxAttribute(attribute) && attribute.name.text === sizeRule.prop,
-        );
         if (!hasSizeAttribute) {
           const line = sourceFile.getLineAndCharacterOfPosition(opening.getStart(sourceFile)).line + 1;
           violations.push({
             rule: "DSG005",
             file: relativePath,
             line,
-            message: `Appica <${tagName}> 必须显式传入 ${sizeRule.prop}="md"；不得依赖默认尺寸。`,
+            message: `Appica <${tagName}> 必须显式传入 ${sizeRule.prop}="md"；尺寸默认统一为 md，非特殊要求不变。`,
           });
         }
       }

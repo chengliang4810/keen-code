@@ -139,8 +139,7 @@ https://appica.dev/ui/react/llms.txt
 - React 19 is a hard requirement. No `forwardRef` - `ref` is a plain prop.
 - Import from the subpath, one component per import:
   `import { Button } from '@appica/ui-react/button'`.
-- **尺寸统一**：所有直接使用或由本地 wrapper 封装的 `@appica/ui-react/*` 原语，其 `size` 与 `inputSize` 必须统一并显式写为 `md`，分别使用 `size="md"` 或 `inputSize="md"`；不得省略尺寸、使用其他尺寸变体、传入像素表达式，或通过样式覆盖模拟其他尺寸。KeenCode 的本地 UI wrapper 内部同样必须传 `md`，wrapper 自身的语义尺寸不应透传为 Appica 的非 `md` 尺寸。
-- 该尺寸规则适用于业务层直接使用和本地封装的 Appica 组件；提交前运行 `pnpm run check:design-system`，由 `DSG005` 门禁阻止未批准的尺寸变体。图标的像素 `size` 不属于 Appica 组件尺寸规则。
+- 尺寸默认统一设置为为 `md`
 - Never write hex colors, px radii, or duration literals. Use the role-based tokens:
   `bg-background-muted`, `text-foreground-intense`, `border-border-strong`, `var(--radius-md)`.
   Full list: https://appica.dev/ui/docs/react/colors.md

@@ -27,20 +27,7 @@ test("design-system gate honors explicit token and host allowlists", () => {
   assert.deepEqual(inspectSource("apps/ui/src/components/TerminalPanel.tsx", 'const theme = { background: "#000" };'), []);
 });
 
-test("design-system gate requires md for Appica size props", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { Badge } from "@appica/ui-react/badge";
-      import { Input } from "@appica/ui-react/input";
-      <Badge size="xs">状态</Badge>;
-      <Input inputSize="sm" />;
-    `,
-  );
-  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 2);
-});
-
-test("design-system gate requires an explicit md size for Appica controls", () => {
+test("design-system gate requires an explicit size for Appica controls", () => {
   const violations = inspectSource(
     "apps/ui/src/components/Example.tsx",
     `
@@ -66,7 +53,7 @@ test("design-system gate accepts md for every Appica size", () => {
   assert.deepEqual(violations.filter((item) => item.rule === "DSG005"), []);
 });
 
-test("design-system gate requires md for Appica CopyButton", () => {
+test("design-system gate requires explicit size on Appica CopyButton", () => {
   const violations = inspectSource(
     "apps/ui/src/components/CopyAction.tsx",
     `import { CopyButton } from "@appica/ui-react/copy-button";
@@ -77,25 +64,37 @@ test("design-system gate requires md for Appica CopyButton", () => {
   assert.equal(violations.filter((item) => item.rule === "DSG005").length, 1);
 });
 
-test("design-system gate rejects non-md Avatar sizes including pixel expressions", () => {
+test("design-system gate rejects non-official size literals", () => {
   const violations = inspectSource(
     "apps/ui/src/components/Example.tsx",
     `
-      import { Avatar } from "@appica/ui-react/avatar";
-      <Avatar size="sm" />;
-      <Avatar size={24} />;
+      import { Badge } from "@appica/ui-react/badge";
+      import { Input } from "@appica/ui-react/input";
+      <Badge size="xl">状态</Badge>;
+      <Input inputSize="huge" />;
     `,
   );
   assert.equal(violations.filter((item) => item.rule === "DSG005").length, 2);
 });
 
-test("design-system gate does not classify local Button icon semantics as Appica sizes", () => {
+test("design-system gate accepts official icon button sizes as special requirement", () => {
   const violations = inspectSource(
     "apps/ui/src/components/Example.tsx",
     `
-      import { Button } from "@/components/ui/button";
+      import { Button } from "@appica/ui-react/button";
       <Button size="icon-sm" aria-label="关闭" />;
     `,
   );
   assert.deepEqual(violations.filter((item) => item.rule === "DSG005"), []);
+});
+
+test("design-system gate rejects pixel expressions and non-literal sizes", () => {
+  const violations = inspectSource(
+    "apps/ui/src/components/Example.tsx",
+    `
+      import { Avatar } from "@appica/ui-react/avatar";
+      <Avatar size={24} />;
+    `,
+  );
+  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 1);
 });
