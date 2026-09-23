@@ -74,6 +74,9 @@ export function useSidebarLists({
   onProjectRemoved,
 }: SidebarListsOptions): SidebarListsResult {
   const [projects, setProjects] = useState<Project[]>([]);
+  /** 供空依赖回调读取最新值，避免把 showToast 放进依赖链。 */
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
   const [baseSessions, setSessions] = useState<SessionRow[]>([]);
   // 未进入列表的会话（新建对话首条消息）先在这里推进排序键，
   // 列表刷新载入该会话后合并，避免排序键在下一次 refreshLists 前推不动。
@@ -280,19 +283,45 @@ export function useSidebarLists({
     }
   }, [projects, expandedProjects]);
 
-  const loadAllSessions = useCallback(async () => {
-    if (!canUseAcpHost(api.isTauri())) return;
-    try {
-      const rows = await sessionsList();
-      const sourceProjects = api.isTauri() ? projects : projectsFromSessions(rows);
-      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), sourceProjects);
-      setProjects(projection.projects);
-      setSessions(projection.sessions);
-      projection.projects.forEach((project) => loadedProjects.current.add(project.id));
-    } catch (cause) {
-      showToast(cause instanceof Error ? cause.message : String(cause));
-    }
-  }, [projects, showToast]);
+  /**
+   * 读取全部会话并按项目投影。
+   *
+   * 依赖数组必须保持为空：本函数会 `setProjects`，而 `projectSidebar` 每次返回
+   * 全新对象数组（`projects.map(p => ({...p}))`），若把 `projects` 放进依赖，
+   * 引用变化会让本函数重建、进而再次触发调用方的 effect，形成无限请求循环
+   * （实测进入归档分区时一秒内 31 次 `sessions/list`）。最新值经 ref 读取，
+   * 并加 in-flight 去重避免并发重复请求。
+   */
+  const loadAllSessionsRef = useRef<() => Promise<void>>(async () => {});
+  const loadAllSessionsInFlight = useRef<Promise<void> | null>(null);
+  const loadAllSessions = useCallback((): Promise<void> => {
+    if (!canUseAcpHost(api.isTauri())) return Promise.resolve();
+    if (loadAllSessionsInFlight.current) return loadAllSessionsInFlight.current;
+    const run = (async () => {
+      try {
+        const rows = await sessionsList();
+        const currentProjects = projectsRef.current;
+        const sourceProjects = api.isTauri()
+          ? currentProjects
+          : projectsFromSessions(rows);
+        const projection = projectSidebar(
+          rows,
+          loadSessionPreferencesSafe(),
+          sourceProjects,
+        );
+        setProjects(projection.projects);
+        setSessions(projection.sessions);
+        projection.projects.forEach((project) => loadedProjects.current.add(project.id));
+      } catch (cause) {
+        showToastRef.current(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        loadAllSessionsInFlight.current = null;
+      }
+    })();
+    loadAllSessionsInFlight.current = run;
+    return run;
+  }, []);
+  loadAllSessionsRef.current = loadAllSessions;
 
   const refreshProjects = useCallback(async () => {
     try {
