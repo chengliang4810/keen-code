@@ -37,6 +37,7 @@ mod task_notifications;
 mod terminal;
 mod tray;
 mod web_host;
+mod webview_cleanup;
 mod workspace;
 
 use crate::agent_runtime::AgentRuntime;
@@ -731,6 +732,11 @@ pub fn run() {
 /// 共享正式桌面装配，原生测试只在独立测试进程中断开受控记录器通道。
 fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default()
+        // 必须最先注册:重复启动的桌面进程在进入 setup 与 Host 仲裁之前就被
+        // 终止,并由首个实例把既有主窗口带回前台。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
@@ -750,6 +756,14 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                 format!("应用启动，日志路径={}", diagnostics.path().display()),
             );
             app.manage(Arc::clone(&diagnostics));
+            let swept_webviews = webview_cleanup::take_swept_count();
+            if swept_webviews > 0 {
+                diagnostics.log(
+                    "warn",
+                    "webview.cleanup",
+                    format!("已清理上次异常退出遗留的 WebView2 孤儿进程 {swept_webviews} 个"),
+                );
+            }
             // 模型目录快照在后台按需刷新；查询只读本地文件，不阻塞启动。
             model_metadata::spawn_startup_refresh(app.handle().clone());
             app.manage(app_exit::ExitState::default());
@@ -1064,4 +1078,8 @@ fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
 pub fn configure_before_start() {
     network_proxy::configure_before_start();
     app_settings::configure_hardware_acceleration_before_start();
+    // 必须在任何 WebView 创建之前:同用户数据目录的残留浏览器进程会被新
+    // WebView 复用,错过此处就只剩不一致环境下的创建失败。并行实例的
+    // WebView2 因父进程仍存活而不受影响。
+    webview_cleanup::cleanup_stale_webviews();
 }

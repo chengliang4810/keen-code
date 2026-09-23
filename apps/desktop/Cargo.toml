@@ -101,6 +101,8 @@ portable-pty = "=0.8.1"
 keepawake = "0.6.0"
 # 将插件敏感 userConfig 保存到系统密钥库（Keychain、Credential Manager 或 Secret Service）。
 keyring = "=4.1.6"
+tauri-plugin-single-instance = "2"
+sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # 通过 Foundation 的进程内系统信息 API 读取 macOS 版本，避免启动外部进程。
