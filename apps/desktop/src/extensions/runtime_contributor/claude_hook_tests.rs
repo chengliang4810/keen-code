@@ -971,3 +971,72 @@ async fn installed_ponytail_subagent_start_contract() {
     assert!(!result.context.is_empty());
     assert!(format!("{:?}", result.context).contains("Ponytail"));
 }
+
+/// 用户级 Hooks 配置：缺失文件静默为空，合法配置按同一协议解析并带 user 命名空间。
+#[test]
+fn user_hooks_config_parses_with_user_namespace_and_missing_file_is_empty() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hooks.json");
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let (hooks, diagnostics) = parse_user_hooks(&path, &project);
+    assert!(hooks.is_empty(), "缺失文件不得产生 Hook");
+    assert!(diagnostics.is_empty(), "缺失文件不得产生诊断");
+
+    std::fs::write(
+        &path,
+        serde_json::to_vec(&json!({
+            "PreToolUse": [
+                {"matcher": "Bash", "hooks": [{"type": "command", "command": "true"}]}
+            ],
+            "Stop": [{"hooks": [{"type": "command", "command": "echo done"}]}]
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let (hooks, diagnostics) = parse_user_hooks(&path, &project);
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+    assert_eq!(hooks.len(), 2);
+    assert!(
+        hooks.iter().all(|hook| hook.name().starts_with("user:")),
+        "用户 Hook 必须带 user 命名空间：{:?}",
+        hooks.iter().map(|hook| hook.name()).collect::<Vec<_>>()
+    );
+    let pre = hooks
+        .iter()
+        .find(|hook| hook.phase() == HookPhase::PreToolUse)
+        .expect("应解析出 PreToolUse Hook");
+    let HookSpec::Command(spec) = pre else {
+        panic!("命令 Hook 应解析为 Command 规范");
+    };
+    assert_eq!(
+        spec.current_dir, project,
+        "命令 Hook 应使用项目根为工作目录"
+    );
+    assert_eq!(spec.matcher.as_deref(), Some("Bash"));
+}
+
+/// 无效用户配置隔离全部用户 Hook 并给出诊断，不影响其他扩展来源。
+#[test]
+fn invalid_user_hooks_config_is_isolated_with_diagnostic() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("hooks.json");
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(&project).unwrap();
+
+    for invalid in [
+        // 非对象顶层
+        json!([1, 2, 3]),
+        // 未知事件
+        json!({"NotARealEvent": [{"hooks": [{"type": "command", "command": "true"}]}]}),
+        // 缺少 type 的 Hook 对象
+        json!({"PreToolUse": [{"hooks": [{"command": "true"}]}]}),
+    ] {
+        std::fs::write(&path, serde_json::to_vec(&invalid).unwrap()).unwrap();
+        let (hooks, diagnostics) = parse_user_hooks(&path, &project);
+        assert!(hooks.is_empty(), "无效配置不得产出 Hook：{invalid}");
+        assert_eq!(diagnostics.len(), 1, "无效配置应产生一条诊断：{invalid}");
+        assert_eq!(diagnostics[0].code, "hooks_user_config_invalid");
+    }
+}

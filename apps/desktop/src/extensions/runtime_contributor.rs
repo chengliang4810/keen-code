@@ -735,7 +735,12 @@ fn prepare_extension_inputs(
         crate::plugins::PluginCommandCatalog::from_snapshot(&plugins)
             .map_err(|error| format!("无法建立插件 command 目录：{error}"))?,
     );
-    let (hooks, hook_diagnostics) = parse_plugin_hooks(&plugins);
+    let (mut hooks, hook_diagnostics) = parse_plugin_hooks(&plugins);
+    // 用户级 Hook 与插件 Hook 共用同一事件协议；同阶段内按名称排序保证冻结顺序确定。
+    let (user_hooks, user_hook_diagnostics) =
+        parse_user_hooks(&hooks_user_config_path(app)?, project_root);
+    hooks.extend(user_hooks);
+    hooks.sort_by(|left, right| left.name().cmp(right.name()));
     let user_path = mcp_user_config_path(app)?;
     let user_mcp_input = runtime_mcp_document_input(&user_path);
     let mcp_config_invalid = user_mcp_input.invalid();
@@ -746,6 +751,7 @@ fn prepare_extension_inputs(
     let (mcp_servers, mut diagnostics) =
         runtime_mcp_servers_from_sources(&mcp_document, plugins.clone(), project_root)?;
     diagnostics.extend(hook_diagnostics);
+    diagnostics.extend(user_hook_diagnostics);
     if let Some(diagnostic) = user_diagnostic {
         diagnostics.push(diagnostic);
     }
@@ -1305,6 +1311,92 @@ fn parse_plugin_hooks(
     }
     hooks.sort_by(|left, right| left.name().cmp(right.name()));
     (hooks, diagnostics)
+}
+
+/// 读取并解析用户级 Hooks 配置（`~/.keencode/hooks.json`）。
+///
+/// 与插件 Hook 使用同一份 JSON 事件协议与同一套严格解析器，区别只在来源：
+/// 用户配置没有插件命名空间，Hook 名称用 `user:<phase>:<group>:<index>`；
+/// 命令 Hook 的工作目录取当前项目根，与插件 Hook 覆盖 `current_dir` 的做法
+/// 一致。文件缺失返回空集合；文件存在但无效时隔离全部用户 Hook 并给出诊断，
+/// 不影响插件来源的 Hook 与其他扩展。
+fn parse_user_hooks(
+    path: &Path,
+    project_root: &Path,
+) -> (Vec<HookSpec>, Vec<RuntimeExtensionDiagnostic>) {
+    let raw = match std::fs::read(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), Vec::new());
+        }
+        Err(error) => {
+            let message = format!("读取用户 Hooks 配置失败：{error}");
+            tracing::warn!(path = %path.display(), %error, "用户 Hooks 配置不可读");
+            return (
+                Vec::new(),
+                vec![RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: "<user-config>".to_owned(),
+                    code: "hooks_user_config_unreadable".to_owned(),
+                    message: bounded_error_text(&message),
+                    tool: None,
+                }],
+            );
+        }
+    };
+    let parsed = (|| -> Result<Vec<HookSpec>, String> {
+        let value: Value = serde_json::from_slice(&raw)
+            .map_err(|error| format!("用户 Hooks 配置不是有效 JSON：{error}"))?;
+        let Value::Object(events) = value else {
+            return Err("用户 Hooks 配置必须是对象".to_owned());
+        };
+        let mut hooks = Vec::new();
+        for (event_name, groups) in &events {
+            let Some(phase) = parse_hook_phase(event_name) else {
+                return Err(format!("用户 Hook 事件 {event_name} 尚无宿主执行入口"));
+            };
+            let groups = normalize_hook_items(groups.clone());
+            for (group_index, group) in groups.into_iter().enumerate() {
+                let (matcher, values) = parse_hook_group(group)?;
+                for (hook_index, value) in normalize_hook_items(values).into_iter().enumerate() {
+                    let name = format!(
+                        "user:{}:{}:{}",
+                        hook_phase_name(phase),
+                        group_index,
+                        hook_index
+                    );
+                    hooks.push(parse_hook_spec(
+                        name,
+                        phase,
+                        matcher.clone(),
+                        value,
+                        project_root,
+                    )?);
+                }
+            }
+        }
+        Ok(hooks)
+    })();
+    match parsed {
+        Ok(hooks) => (hooks, Vec::new()),
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %bounded_error_text(&error),
+                "用户 Hooks 配置无效，已隔离全部用户 Hook"
+            );
+            (
+                Vec::new(),
+                vec![RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: "<user-config>".to_owned(),
+                    code: "hooks_user_config_invalid".to_owned(),
+                    message: bounded_error_text(&error),
+                    tool: None,
+                }],
+            )
+        }
+    }
 }
 
 /// 将 Hook 事件别名归一为 Provider 中立生命周期阶段。

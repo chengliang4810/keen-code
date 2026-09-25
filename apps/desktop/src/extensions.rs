@@ -2549,6 +2549,13 @@ fn mcp_user_config_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法确定 KeenCode MCP 配置目录：{error}"))
 }
 
+/// 返回用户手工维护的 Hooks 配置；插件 Hooks 不直接写入此文件。
+fn hooks_user_config_path(app: &AppHandle) -> Result<PathBuf, String> {
+    crate::storage::root_dir(app)
+        .map(|directory| directory.join("hooks.json"))
+        .map_err(|error| format!("无法确定 KeenCode Hooks 配置目录：{error}"))
+}
+
 /// 从启用插件快照提取不递归的精确 Skill 根，避免加载未声明的相邻目录。
 fn runtime_skill_config_from_snapshot(
     data_root: PathBuf,

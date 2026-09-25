@@ -8,4 +8,4 @@ Independent reads can run together. Operations that depend on previous output, m
 
 Quote shell paths and arguments, keep data out of executable interpolation, and avoid interactive commands unless their input and termination can be controlled. Inspect downloaded scripts before executing them. Limit output to useful evidence without hiding errors.
 
-After a tool error, inspect the cause and change the approach. Repeat the same invocation only if conditions have changed or the failure is demonstrably transient.
+After a tool error, inspect the cause and change the approach. Repeat the same invocation only if conditions have changed or the failure is demonstrably transient. Classify the failure before the next move: transient failures such as timeouts, rate limits and temporary unavailability call for retrying the same call until it succeeds — do not abandon a viable approach after one or two failures; permanent failures such as invalid parameters, denied permission and nonexistent resources will not succeed on retry — stop retrying that action and report what failed with alternatives.

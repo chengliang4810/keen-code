@@ -710,8 +710,16 @@ impl AcpHost {
         let coordinator = self.runtime.elicitation_coordinator();
         match coordinator.pending_connection_for_request(&request_id) {
             Some(target) if &target == connection_id => {}
-            Some(_) => return Err("ACP Client Response 来自非目标连接".to_owned()),
-            None => return Err("ACP 待决请求不存在或已经结束".to_owned()),
+            Some(_) => {
+                tracing::error!(target: "keencode_diagnostics", request_id = %request_id, "ACP Client Response 来自非目标连接");
+                return Err("ACP Client Response 来自非目标连接".to_owned());
+            }
+            None => {
+                // 响应迟到或对应问答已被其他路径收口：记日志供挂死排查，
+                // 迟到响应本身无需再唤醒任何等待方。
+                tracing::warn!(target: "keencode_diagnostics", request_id = %request_id, "ACP Client Response 无匹配待决请求（迟到或已收口）");
+                return Err("ACP 待决请求不存在或已经结束".to_owned());
+            }
         }
         // 严格响应路由会移除 pending，先只读取 operation 身份；任何错误、迟到或
         // 非目标连接响应都必须在改变 HostPromptQueue 前失败。
