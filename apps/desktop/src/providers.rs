@@ -69,6 +69,9 @@ struct ProviderRecord {
     chat_output_token_field: ChatOutputTokenField,
     /// 每模型是否支持图片输入；未勾选的模型保存为 false。
     supports_vision: BTreeMap<String, bool>,
+    /// 每模型显式开放的推理档位；缺项沿用公共模型目录。
+    #[serde(default)]
+    reasoning_efforts: BTreeMap<String, Vec<String>>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
@@ -151,6 +154,8 @@ pub struct CustomProvider {
     pub chat_output_token_field: ChatOutputTokenField,
     /// 每模型是否支持图片输入。
     pub supports_vision: BTreeMap<String, bool>,
+    /// 每模型显式开放的推理档位；缺项沿用公共模型目录。
+    pub reasoning_efforts: BTreeMap<String, Vec<String>>,
 }
 
 /// 模型设置页所需的完整供应商状态。
@@ -186,6 +191,8 @@ pub struct ProviderUpsert {
     pub chat_output_token_field: ChatOutputTokenField,
     /// 每模型是否支持图片输入。
     pub supports_vision: BTreeMap<String, bool>,
+    /// 每模型显式开放的推理档位；缺项沿用公共模型目录。
+    pub reasoning_efforts: BTreeMap<String, Vec<String>>,
     /// 是否只允许创建新记录。
     pub create_only: bool,
 }
@@ -384,6 +391,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
     let context_windows = validate_context_windows(input.context_windows, &models)?;
     let max_output_tokens = validate_max_output_tokens(input.max_output_tokens, &models)?;
     let supports_vision = validate_supports_vision(input.supports_vision, &models)?;
+    let reasoning_efforts = validate_reasoning_efforts(input.reasoning_efforts, &models)?;
     let record = ProviderRecord {
         id: id.clone(),
         name,
@@ -395,6 +403,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         max_output_tokens,
         chat_output_token_field: input.chat_output_token_field,
         supports_vision,
+        reasoning_efforts,
     };
     if let Some(index) = existing_index {
         state.providers[index] = record;
@@ -746,6 +755,7 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
             max_output_tokens: provider.max_output_tokens,
             chat_output_token_field: provider.chat_output_token_field,
             supports_vision: provider.supports_vision,
+            reasoning_efforts: provider.reasoning_efforts,
         })
         .collect();
     ProvidersListResult {
@@ -964,6 +974,22 @@ fn normalize_loaded_state(state: &mut ProviderState) -> Vec<String> {
         for model in &stale_vision {
             provider.supports_vision.remove(model);
         }
+        // 已删除模型或不受运行时支持的档位不应阻止整个配置加载。
+        let stale_efforts: Vec<String> = provider.reasoning_efforts.keys().cloned().collect();
+        provider.reasoning_efforts.retain(|model, efforts| {
+            models.iter().any(|item| item == model) && reasoning_efforts_in_order(efforts)
+        });
+        let dropped_efforts: Vec<_> = stale_efforts
+            .into_iter()
+            .filter(|model| !provider.reasoning_efforts.contains_key(model))
+            .collect();
+        if !dropped_efforts.is_empty() {
+            warnings.push(format!(
+                "供应商 {} 的推理档位配置无效或指向已删除模型，已忽略：{}",
+                provider.id,
+                dropped_efforts.join(", ")
+            ));
+        }
         // 缺失的视觉能力按“不支持”补齐，与运行时读取时的默认值一致，
         // 避免新增模型后整份配置因缺少该字段而无法加载。
         let missing_vision: Vec<String> = models
@@ -1062,6 +1088,7 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         validate_context_windows(provider.context_windows.clone(), &provider.models)?;
         validate_max_output_tokens(provider.max_output_tokens.clone(), &provider.models)?;
         validate_supports_vision(provider.supports_vision.clone(), &provider.models)?;
+        validate_reasoning_efforts(provider.reasoning_efforts.clone(), &provider.models)?;
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
             anyhow::bail!("供应商 {} 的协议类型不是规范格式", provider.id);
         }
@@ -1144,6 +1171,39 @@ fn validate_supports_vision(
         }
     }
     Ok(supports_vision)
+}
+
+/// 仅允许运行时可执行的档位，并保持用户指定的排序。
+const REASONING_EFFORT_IDS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// 档位顺序同时决定前端滑块方向，导入数据必须保持从低到高且无重复。
+fn reasoning_efforts_in_order(values: &[String]) -> bool {
+    let mut previous = None;
+    for value in values {
+        let Some(index) = REASONING_EFFORT_IDS.iter().position(|id| *id == value) else {
+            return false;
+        };
+        if previous.is_some_and(|last| index <= last) {
+            return false;
+        }
+        previous = Some(index);
+    }
+    true
+}
+
+fn validate_reasoning_efforts(
+    efforts: BTreeMap<String, Vec<String>>,
+    models: &[String],
+) -> Result<BTreeMap<String, Vec<String>>> {
+    for (model, values) in &efforts {
+        if !models.contains(model) || values.len() > REASONING_EFFORT_IDS.len() {
+            anyhow::bail!("模型 {model} 的推理档位配置无效");
+        }
+        if !reasoning_efforts_in_order(values) {
+            anyhow::bail!("模型 {model} 的推理档位不受支持、重复或顺序错误");
+        }
+    }
+    Ok(efforts)
 }
 
 /// 校验、去重并稳定保留模型列表顺序。
@@ -1374,9 +1434,47 @@ mod tests {
     use super::{
         ProviderExportFile, ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint,
         validate_api_key, validate_base_url, validate_catalog_secret_scope,
-        validate_context_windows, validate_exact_endpoint, validate_secret, validate_state,
+        validate_context_windows, validate_exact_endpoint, validate_reasoning_efforts,
+        validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn reasoning_efforts_validate_model_and_runtime_ids() {
+        let models = vec!["test-model".to_owned()];
+        let valid = BTreeMap::from([(
+            "test-model".to_owned(),
+            vec!["low".to_owned(), "high".to_owned(), "max".to_owned()],
+        )]);
+        assert_eq!(
+            validate_reasoning_efforts(valid.clone(), &models).unwrap(),
+            valid
+        );
+        assert!(
+            validate_reasoning_efforts(
+                BTreeMap::from([("test-model".to_owned(), vec![])]),
+                &models
+            )
+            .is_ok()
+        );
+        for invalid in [vec!["unknown"], vec!["low", "low"], vec!["high", "low"]] {
+            let values = invalid.into_iter().map(str::to_owned).collect();
+            assert!(
+                validate_reasoning_efforts(
+                    BTreeMap::from([("test-model".to_owned(), values)]),
+                    &models
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            validate_reasoning_efforts(
+                BTreeMap::from([("other".to_owned(), vec!["low".to_owned()])]),
+                &models
+            )
+            .is_err()
+        );
+    }
 
     /// 只填写域名时自动补全标准 `/v1`，自定义 API 路径不应被覆盖。
     #[test]
@@ -1475,7 +1573,7 @@ mod tests {
         );
     }
 
-    /// 供应商元数据接受 API Key 字段，密钥持久化到磁盘配置。
+    /// 供应商元数据接受 API Key 与模型推理档位，保存后原样往返。
     #[test]
     fn provider_record_persists_api_key() {
         let value = serde_json::json!({
@@ -1486,11 +1584,22 @@ mod tests {
             "apiKey": "persisted-key",
             "apiBackend": "responses",
             "contextWindows": {},
-            "supportsVision": {"test-model": false}
+            "supportsVision": {"test-model": false},
+            "reasoningEfforts": {"test-model": ["low", "high", "max"]}
         });
 
-        let record = serde_json::from_value::<ProviderRecord>(value).expect("应接受持久化密钥");
+        let record =
+            serde_json::from_value::<ProviderRecord>(value.clone()).expect("应接受持久化密钥");
         assert_eq!(record.api_key.as_deref(), Some("persisted-key"));
+        assert_eq!(
+            record.reasoning_efforts["test-model"],
+            ["low", "high", "max"]
+        );
+        let serialized = serde_json::to_value(&record).expect("配置可序列化");
+        assert_eq!(
+            serialized["reasoningEfforts"]["test-model"],
+            value["reasoningEfforts"]["test-model"]
+        );
     }
 
     /// 当前供应商记录必须显式保存每个能力配置，不得从缺失字段推导默认值。
@@ -1743,6 +1852,7 @@ mod tests {
                 max_output_tokens: BTreeMap::new(),
                 chat_output_token_field: Default::default(),
                 supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
+                reasoning_efforts: Default::default(),
             }],
         };
 
@@ -1783,6 +1893,7 @@ mod tests {
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
+            reasoning_efforts: Default::default(),
         };
 
         assert!(
@@ -1816,6 +1927,7 @@ mod tests {
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
+            reasoning_efforts: Default::default(),
         }
     }
 
@@ -1971,6 +2083,7 @@ mod provider_registry_tests {
             max_output_tokens: BTreeMap::new(),
             chat_output_token_field: Default::default(),
             supports_vision: [(model.to_owned(), true)].into_iter().collect(),
+            reasoning_efforts: Default::default(),
         }
     }
 

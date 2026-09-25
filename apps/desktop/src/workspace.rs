@@ -1194,10 +1194,12 @@ fn registered_project_root_from_document(
     projects: &ProjectsDocument,
     canonical: &Path,
 ) -> Option<PathBuf> {
-    let expected = path_to_frontend(canonical);
-    let project = projects.iter().find(|project| project.path == expected)?;
-    let stored = fs::canonicalize(&project.path).ok()?;
-    (stored.is_dir() && stored == canonical).then_some(stored)
+    // Windows 扩展路径与面向前端的盘符路径可指向同一目录；授权必须按
+    // 规范目录身份比较，不能要求登记文本与前端序列化文本逐字相同。
+    projects.iter().find_map(|project| {
+        let stored = fs::canonicalize(&project.path).ok()?;
+        (stored.is_dir() && stored == canonical).then_some(stored)
+    })
 }
 
 /// 返回所有已添加项目的规范化根目录。
@@ -3173,6 +3175,25 @@ mod tests {
         );
         assert_eq!(
             registered_project_root_from_document(&document, &canonical_child),
+            None
+        );
+        // 持久登记的路径文本不一定采用前端斜杠格式；同一目录仍须通过授权，
+        // 但子目录不能因此获得项目根授权。
+        let alternate_text = if cfg!(windows) {
+            canonical_root.to_string_lossy().into_owned()
+        } else {
+            format!("{}/", canonical_root.display())
+        };
+        let alternate_document = vec![StoredProjectRecord {
+            path: alternate_text,
+            ..document[0].clone()
+        }];
+        assert_eq!(
+            registered_project_root_from_document(&alternate_document, &canonical_root),
+            Some(canonical_root.clone())
+        );
+        assert_eq!(
+            registered_project_root_from_document(&alternate_document, &canonical_child),
             None
         );
         assert_eq!(

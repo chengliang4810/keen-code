@@ -528,6 +528,7 @@ async fn providers_upsert(
     max_output_tokens: std::collections::BTreeMap<String, u32>,
     chat_output_token_field: Option<keencode_provider::ChatOutputTokenField>,
     supports_vision: std::collections::BTreeMap<String, bool>,
+    reasoning_efforts: std::collections::BTreeMap<String, Vec<String>>,
     create_only: bool,
     app: AppHandle,
     diagnostics: State<'_, Arc<diagnostics::Diagnostics>>,
@@ -556,6 +557,7 @@ async fn providers_upsert(
             max_output_tokens,
             chat_output_token_field: chat_output_token_field.unwrap_or_default(),
             supports_vision,
+            reasoning_efforts,
             create_only,
         },
     )
