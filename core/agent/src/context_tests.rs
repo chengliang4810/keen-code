@@ -4271,6 +4271,12 @@ fn post_compaction_read_hint_bounds_paths_and_bytes() {
     assert_eq!(listed.len(), 5);
     // 最新的路径排在最前。
     assert!(listed[0].contains("module_07"));
+    // 未带 offset/limit 的读取只列路径，不编造读取区域。
+    assert!(
+        !listed[0].contains("上次读取"),
+        "未提供区域时不得渲染区域：{}",
+        listed[0]
+    );
     let list_bytes: usize = listed.iter().map(|line| line.len() + 1).sum();
     assert!(list_bytes <= 4 * 1_024);
     // micro / 机械形态不回注。
@@ -5072,4 +5078,131 @@ fn estimator_counts_only_replayable_reasoning_content() {
     );
     // 序列化口径只看内容：两种消息的其余部分逐字节相同。
     let _ = &mut resumable_message;
+}
+
+/// 压缩前带 offset/limit 的读取在重读提示中保留区域，便于精确续读。
+#[test]
+fn post_compaction_read_hint_preserves_read_regions() {
+    let messages = vec![
+        Message::text(MessageRole::User, "旧任务"),
+        Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolCall {
+                tool_call: ToolCall::new(
+                    "call-window",
+                    "Read",
+                    json!({ "file_path": "src/lib.rs", "offset": 400, "limit": 120 }),
+                ),
+            }],
+        ),
+        Message::new(
+            MessageRole::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_result: ToolResult::text("call-window", "旧内容", false),
+            }],
+        ),
+        // 只有 offset 的读取与只有 limit 的读取都必须各自如实渲染。
+        Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolCall {
+                tool_call: ToolCall::new(
+                    "call-offset",
+                    "Read",
+                    json!({ "file_path": "src/offset_only.rs", "offset": 7 }),
+                ),
+            }],
+        ),
+        Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::ToolCall {
+                tool_call: ToolCall::new(
+                    "call-limit",
+                    "Read",
+                    json!({ "file_path": "src/limit_only.rs", "limit": 25 }),
+                ),
+            }],
+        ),
+        Message::text(MessageRole::User, "近期问题"),
+    ];
+    let record = ContextCompressionRecord {
+        kind: ContextCompactionKind::Summary,
+        trigger: ContextCompressionTrigger::Budget,
+        estimated_tokens_before: 100,
+        estimated_tokens_after: 50,
+        replaced_start_index: 1,
+        replaced_end_index_exclusive: 5,
+        replaced_message_count: 4,
+        retained_message_count: 2,
+        source_digest_sha256: String::new(),
+        summary: "摘要".to_owned(),
+        projections: Vec::new(),
+        policy_version: MICRO_COMPACT_POLICY_VERSION,
+    };
+
+    let hint =
+        post_compaction_read_hint_message(&record, &messages).expect("区间内有读取时应生成提示");
+    let text = hint
+        .content
+        .iter()
+        .filter_map(|block| match block {
+            ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        text.contains("src/lib.rs（上次读取：offset=400, limit=120）"),
+        "完整区域应如实渲染：{text}"
+    );
+    assert!(
+        text.contains("src/offset_only.rs（上次读取：offset=7）"),
+        "只有 offset 时应只渲染 offset：{text}"
+    );
+    assert!(
+        text.contains("src/limit_only.rs（上次读取：limit=25）"),
+        "只有 limit 时应只渲染 limit：{text}"
+    );
+}
+
+/// 缓存击穿检测：只有"上一轮命中率高且跌幅明显"才报告，其余情形保持静默。
+///
+/// 通过公开的 `note_model_round_usage` 驱动：判定结果本身只产生诊断日志，
+/// 因此这里断言的是判定函数的纯逻辑（同模块可见）。
+#[test]
+fn cache_break_detection_reports_only_significant_drops() {
+    let anchor_with = |rate: Option<f64>| crate::context::RoundUsageAnchor {
+        input_tokens: 10_000,
+        message_count: 3,
+        cache_hit_rate: rate,
+    };
+
+    // 0.9 → 0.4：跌幅 0.5，超过阈值，应报告。
+    let detected = crate::context::cache_break_event(Some(&anchor_with(Some(0.9))), Some(0.4))
+        .expect("明显跌幅应被识别为缓存击穿");
+    assert_eq!(detected.previous, 0.9);
+    assert_eq!(detected.current, 0.4);
+
+    // 0.9 → 0.85：跌幅过小，属正常波动。
+    assert_eq!(
+        crate::context::cache_break_event(Some(&anchor_with(Some(0.9))), Some(0.85)),
+        None
+    );
+
+    // 0.4 → 0.05：上一轮命中率本就低，前缀未被有效缓存，不算击穿。
+    assert_eq!(
+        crate::context::cache_break_event(Some(&anchor_with(Some(0.4))), Some(0.05)),
+        None
+    );
+
+    // 命中率缺失（Provider 未报告缓存字段）时不臆测。
+    assert_eq!(
+        crate::context::cache_break_event(Some(&anchor_with(None)), Some(0.1)),
+        None
+    );
+    assert_eq!(
+        crate::context::cache_break_event(Some(&anchor_with(Some(0.9))), None),
+        None
+    );
+    assert_eq!(crate::context::cache_break_event(None, Some(0.1)), None);
 }

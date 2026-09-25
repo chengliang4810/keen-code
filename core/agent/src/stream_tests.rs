@@ -4803,6 +4803,70 @@ async fn invalid_tool_output_becomes_failed_result_before_failure_hook() {
     ));
 }
 
+/// 在执行中 panic 的最小测试工具。
+struct PanickingTool;
+
+impl AgentTool for PanickingTool {
+    /// 返回不接受额外字段的最小测试工具定义。
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "Panicking",
+            "验证工具 panic 隔离语义",
+            json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    /// 只读声明；panic 隔离与副作用语义无关。
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+
+    /// 单次调用顺序执行。
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    /// 在执行边界直接 panic，模拟工具实现内部不变量被破坏。
+    fn execute(&self, _context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        Box::pin(async {
+            panic!("工具实现测试崩溃");
+        })
+    }
+}
+
+/// 工具实现 panic 必须被隔离为一次普通失败结果，Turn 继续运转而不是
+/// 静默死亡（journal 永久停在 tool_execution_started、界面永远「工作中」）。
+#[tokio::test]
+async fn tool_panic_is_normalized_into_failed_result() {
+    let provider: Arc<dyn ModelProvider> = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[("call-panic", "Panicking", json!({}))]),
+            text_reply("panic 已被隔离"),
+        ],
+    ));
+    let mut tools = ToolRegistry::new();
+    tools
+        .register(Arc::new(PanickingTool))
+        .expect("panic 工具应注册");
+    let sink = Arc::new(RecordingSink::default());
+    let result = AgentRunner::new(provider, tools, RunLimits::default())
+        .with_event_sink(sink.clone())
+        .with_commit_sink(sink.clone())
+        .run_turn(test_turn_request())
+        .await;
+
+    assert!(result.is_success(), "panic 后 Turn 应继续完成");
+    assert_eq!(
+        completed_tools(&sink.commit_snapshot()),
+        vec![("call-panic".to_owned(), ToolCompletionStatus::Failed)]
+    );
+}
+
 /// Provider 最终形成无效空内容时，Agent 必须失败且不得提交 Round Transcript。
 #[tokio::test]
 async fn invalid_empty_model_content_never_commits_round() {

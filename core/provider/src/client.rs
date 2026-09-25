@@ -1315,6 +1315,7 @@ impl Stream for RetryModelStream {
                     let error = ModelError::StreamInterrupted {
                         message: "模型事件流在协议终态前关闭".to_owned(),
                         retryable: true,
+                        partial_text: None,
                     };
                     match this.handle_failure(error, None) {
                         FailureAction::RetryScheduled => {}
@@ -1668,6 +1669,7 @@ impl Stream for IdleWatchdogStream {
                         Poll::Ready(Some(Err(ModelError::StreamInterrupted {
                             message,
                             retryable: true,
+                            partial_text: None,
                         })))
                     }
                     Poll::Pending => {
@@ -2266,14 +2268,16 @@ mod retry_tests {
         assert!(retryable(
             &ModelError::StreamInterrupted {
                 message: "interrupted".to_owned(),
-                retryable: true
+                retryable: true,
+                partial_text: None
             },
             None
         ));
         assert!(!retryable(
             &ModelError::StreamInterrupted {
                 message: "interrupted".to_owned(),
-                retryable: false
+                retryable: false,
+                partial_text: None
             },
             None
         ));
@@ -2404,7 +2408,8 @@ mod retry_tests {
         assert!(!is_retryable_failure(
             &ModelError::StreamInterrupted {
                 message: "interrupted".to_owned(),
-                retryable: true
+                retryable: true,
+                partial_text: None
             },
             None,
             &muted
@@ -2644,6 +2649,7 @@ mod idle_watchdog_tests {
         let interrupted = |message: &str| ModelError::StreamInterrupted {
             message: message.to_owned(),
             retryable: true,
+            partial_text: None,
         };
         assert_eq!(
             classify_request_error(&interrupted("模型事件流超过 90000 ms 未收到任何事件")),

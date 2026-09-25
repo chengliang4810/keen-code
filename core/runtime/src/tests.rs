@@ -44,8 +44,9 @@ use super::{
     inject_runtime_lifecycle_failure, inject_runtime_lifecycle_indeterminate,
     inject_runtime_lifecycle_visible_indeterminate, journal_len, map_image_source, map_message,
     map_tool_result, mark_event_confirmed, mark_event_indeterminate, materialized_probe_artifacts,
-    preflight_round, preflight_round_candidate, recovery_event_id, recovery_gate_allows_event,
-    recovery_turn_stopped_event, refresh_recovery_required, runtime_lifecycle_event_id,
+    preflight_round, preflight_round_candidate, recover_tool_outcomes_for_turns, recovery_event_id,
+    recovery_gate_allows_event, recovery_turn_stopped_event, refresh_recovery_required,
+    runtime_lifecycle_event_id,
 };
 
 /// 创建使用资源层默认限制的隔离 Runtime 配置。
@@ -7365,4 +7366,101 @@ fn exact_metadata_ignores_other_sessions_and_never_authorizes_from_index() {
     std::fs::remove_file(directory.join("unrelated-file")).unwrap();
     assert_eq!(manager.list_stored_sessions().unwrap().len(), 1);
     assert!(manager.registered_session_ids().unwrap().is_empty());
+}
+
+/// 验证热路径收账按 Turn 过滤：只结算指定 Turn 的未收账工具；
+/// 只读工具以取消收账，副作用工具仍留给冷恢复标记未知，越界 Turn 无副作用。
+#[test]
+fn hot_tool_settlement_respects_turn_filter() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session = create(&root, "runtime-hot-settlement");
+    let session_id = session.session_id().clone();
+    let agent_id = AgentId::new("root").expect("根 Agent ID 应有效");
+    let turn_id = keencode_resources::TurnId::new("turn-settle").expect("Turn ID 应有效");
+    let make_tool = |index: u32, effect: ToolEffect| {
+        let request_id = keencode_resources::RequestId::derive_model_tool_call(
+            &session_id,
+            &turn_id,
+            &agent_id,
+            1,
+            &format!("call-{index}"),
+        )
+        .expect("请求 ID 应派生");
+        (
+            request_id.clone(),
+            SessionEvent::ToolRequested {
+                request: ToolRequest {
+                    request_id,
+                    turn_id: turn_id.clone(),
+                    agent_id: agent_id.clone(),
+                    model_round: 1,
+                    request_index: index,
+                    model_tool_call_id: format!("call-{index}"),
+                    tool_name: "Shell".to_owned(),
+                    arguments: serde_json::json!({"command": "test"}),
+                    effect,
+                },
+            },
+        )
+    };
+    append(
+        &session,
+        "hot-turn-started",
+        SessionEvent::TurnStarted {
+            turn_id: turn_id.clone(),
+            source_agent_id: agent_id.clone(),
+            root_turn_id: turn_id.clone(),
+            parent_turn_id: None,
+            prompt_summary: "热收账验证".to_owned(),
+        },
+    );
+    let (read_a, read_a_event) = make_tool(1, ToolEffect::ReadOnly);
+    let (write_a, write_a_event) = make_tool(2, ToolEffect::ChangesState);
+    append(&session, "hot-tool-read-a", read_a_event);
+    append(&session, "hot-tool-write-a", write_a_event);
+    append(
+        &session,
+        "hot-tool-write-a-started",
+        SessionEvent::ToolExecutionStarted {
+            request_id: write_a.clone(),
+        },
+    );
+
+    // 越界 Turn：不应收账任何工具。
+    let other_turn = keencode_resources::TurnId::new("turn-other").expect("Turn ID 应有效");
+    recover_tool_outcomes_for_turns(&session.inner, Some(std::slice::from_ref(&other_turn)))
+        .expect("越界收账应成功且无副作用");
+    let state = session.snapshot().expect("状态应读取").state;
+    assert!(
+        state
+            .tools
+            .get(&read_a)
+            .expect("只读工具应存在")
+            .outcome
+            .is_none()
+    );
+    assert!(
+        state
+            .tools
+            .get(&write_a)
+            .expect("副作用工具应存在")
+            .outcome
+            .is_none()
+    );
+
+    // 命中 Turn：只读工具取消收账，副作用工具留给冷恢复标记未知。
+    recover_tool_outcomes_for_turns(&session.inner, Some(std::slice::from_ref(&turn_id)))
+        .expect("热路径收账应成功");
+    let state = session.snapshot().expect("状态应读取").state;
+    let read_a_tool = state.tools.get(&read_a).expect("只读工具应存在");
+    assert_eq!(
+        read_a_tool.outcome.as_ref().map(|outcome| outcome.status),
+        Some(ToolCompletionStatus::Cancelled)
+    );
+    let write_a_tool = state.tools.get(&write_a).expect("副作用工具应存在");
+    assert_eq!(
+        write_a_tool.outcome.as_ref().map(|outcome| outcome.status),
+        Some(ToolCompletionStatus::SideEffectUnknown),
+        "副作用工具以未知副作用收账（语义与冷恢复一致）"
+    );
 }

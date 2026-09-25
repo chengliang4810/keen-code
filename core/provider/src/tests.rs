@@ -4166,20 +4166,70 @@ fn responses_sse_rejects_duplicate_function_arguments_done() {
     assert!(error.to_string().contains("函数参数完成事件重复"));
 }
 
-/// 验证 Responses 明确终态后除 `[DONE]` 外的任何语义帧都不能再进入归一器。
+/// 验证 Responses 明确终态后的任何尾随帧都被排空：网关追加的 `[DONE]`、空保活
+/// 帧与迟到事件不得把已完整生成并计费的响应整条作废。
 #[test]
-fn responses_sse_rejects_any_event_after_terminal() {
-    for extra in [
-        "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"late\"}",
-        "{\"type\":\"response.future.unknown\"}",
-    ] {
-        let raw = format!(
-            "data: {{\"type\":\"response.created\",\"response\":{{\"id\":\"resp-1\",\"model\":\"test-model\",\"status\":\"in_progress\"}}}}\n\ndata: {{\"type\":\"response.completed\",\"response\":{{\"id\":\"resp-1\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[]}}}}\n\ndata: {extra}\n\n"
-        );
-        let error = malformed_sse_error(ProviderProtocol::Responses, &raw);
+fn responses_sse_drains_any_event_after_terminal() {
+    let raw = concat!(
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"model\":\"test-model\",\"status\":\"in_progress\"}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"正文\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"model\":\"test-model\",\"status\":\"completed\",\"output\":[]}}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"late\"}\n\n",
+        "data: {\"type\":\"response.future.unknown\"}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Responses, &[raw.as_bytes()]);
+    let response = collect_events(events);
 
-        assert!(error.to_string().contains("结束后仍收到 SSE 事件"));
-    }
+    // 终态后的增量不进入响应，终态前的正文保持原样。
+    assert_eq!(response.content, vec![ContentBlock::text("正文")]);
+}
+
+/// 验证 Messages 在 message_stop 后进入排空模式：ping、迟到增量与多余数据帧
+/// 都被忽略，响应保持完整。
+#[test]
+fn messages_sse_drains_any_event_after_terminal() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-drain\",\"model\":\"test-model\"}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"正文\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+        "event: ping\n",
+        "data: {\"type\":\"ping\"}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Messages, &[raw.as_bytes()]);
+    let response = collect_events(events);
+
+    assert_eq!(response.content, vec![ContentBlock::text("正文")]);
+}
+
+/// 验证 Chat Completions 在 finish 后进入排空模式：重复 `[DONE]`、空数据帧与
+/// 迟到增量都被忽略。
+#[test]
+fn chat_sse_drains_any_event_after_terminal() {
+    let raw = concat!(
+        "data: {\"id\":\"chat-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"KC\"},\"finish_reason\":null}]}\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: [DONE]\n\n",
+        "data: {\"id\":\"chat-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"late\"},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: \n\n",
+        "data: [DONE]\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::ChatCompletions, &[raw.as_bytes()]);
+    let response = collect_events(events);
+
+    assert_eq!(response.content, vec![ContentBlock::text("KC")]);
 }
 
 /// 验证惰性起始之后连接中断仍是可重试的流中断，而不是部分成功。

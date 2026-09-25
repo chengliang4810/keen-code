@@ -1,9 +1,10 @@
 //! 内置工具共享的工作目录、资源上限与路径解析。
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 
 use keencode_agent::{ToolContext, ToolError, ToolOutputArtifactSink};
 
@@ -110,6 +111,38 @@ pub struct ToolEnvironment {
     artifact_directory: PathBuf,
     /// 可选的文件变更记录器；未配置时文件工具保持独立运行。
     file_mutation_recorder: Option<Arc<dyn FileMutationRecorder>>,
+    /// 本 Session 内模型读取过的文件指纹，用于拒绝基于陈旧内容的整文件覆写。
+    read_state: Arc<Mutex<HashMap<PathBuf, ReadFingerprint>>>,
+    /// 本 Session 已生成的 Shell 环境快照路径。
+    ///
+    /// 快照把用户登录 Shell 的环境变量与别名固化成一份可复放的脚本，后续每条
+    /// 命令先 source 它，使 `pnpm`、自定义别名等只在交互式 rc 中定义的命令在
+    /// 非交互执行下同样可用。`None` 表示尚未生成（惰性，首个命令时创建）。
+    shell_snapshot: Arc<Mutex<Option<PathBuf>>>,
+}
+
+/// 模型最近一次读取某文件时观察到的身份信息。
+///
+/// 只保存读取时刻的 `size` 与 `mtime`，不保存文件正文：正文可能远超上下文
+/// 预算，而这两项足以判断"磁盘上的内容是否还是模型读到的那份"。分页读取
+/// 同样登记指纹——若要求完整覆盖才允许覆写，受输出字节上限约束的大文件将
+/// 永远无法重写；此处只阻断"完全没读过"与"读后已被外部改动"两种情况。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ReadFingerprint {
+    /// 读取时刻的文件字节数。
+    pub(crate) size: u64,
+    /// 读取时刻的文件修改时间。
+    pub(crate) modified: Option<SystemTime>,
+}
+
+impl ReadFingerprint {
+    /// 从文件元数据构造指纹。
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            size: metadata.len(),
+            modified: metadata.modified().ok(),
+        }
+    }
 }
 
 impl ToolEnvironment {
@@ -142,6 +175,8 @@ impl ToolEnvironment {
             limits,
             artifact_directory: std::env::temp_dir().join("keencode").join("tool-output"),
             file_mutation_recorder: None,
+            read_state: Arc::new(Mutex::new(HashMap::new())),
+            shell_snapshot: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -182,6 +217,22 @@ impl ToolEnvironment {
         &self.artifact_directory
     }
 
+    /// 返回本 Session 已生成的 Shell 环境快照路径；尚未生成时返回 `None`。
+    pub(crate) fn shell_snapshot_path(&self) -> Option<PathBuf> {
+        self.shell_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    /// 登记本 Session 的 Shell 环境快照路径。
+    pub(crate) fn set_shell_snapshot_path(&self, path: PathBuf) {
+        *self
+            .shell_snapshot
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(path);
+    }
+
     /// 为后续文件编辑和写入安装可选的运行时变更记录器。
     pub fn with_file_mutation_recorder(mut self, recorder: Arc<dyn FileMutationRecorder>) -> Self {
         self.file_mutation_recorder = Some(recorder);
@@ -191,6 +242,93 @@ impl ToolEnvironment {
     /// 返回当前配置的文件变更记录器；未配置时返回 `None`。
     pub fn file_mutation_recorder(&self) -> Option<&dyn FileMutationRecorder> {
         self.file_mutation_recorder.as_deref()
+    }
+
+    /// 记录模型刚刚读取过某个文件，供后续整文件覆写判断内容是否仍然新鲜。
+    pub(crate) fn record_read(&self, path: &Path, fingerprint: ReadFingerprint) {
+        let mut state = self.read_state.lock().unwrap_or_else(|poisoned| {
+            // 读取指纹只是保护性提示，中毒锁恢复后继续使用既有映射。
+            poisoned.into_inner()
+        });
+        state.insert(path.to_path_buf(), fingerprint);
+    }
+
+    /// 返回本 Session 内模型读取该文件时观察到的指纹。
+    pub(crate) fn read_fingerprint(&self, path: &Path) -> Option<ReadFingerprint> {
+        let state = self.read_state.lock().unwrap_or_else(|poisoned| {
+            // 读取指纹只是保护性提示，中毒锁恢复后继续使用既有映射。
+            poisoned.into_inner()
+        });
+        state.get(path).copied()
+    }
+
+    /// 判断精确编辑是否建立在仍然有效的内容认知之上。
+    ///
+    /// 比整文件覆写宽松：编辑只替换匹配到的片段，不丢弃文件其余内容，因此
+    /// 只要求"本 Session 读过且读后未被外部改动"。未读过的文件不在此处拦截，
+    /// 交给 `old_string` 精确匹配本身去证明模型确实知道要替换的文本。
+    pub(crate) fn ensure_edit_is_fresh(&self, path: &Path) -> Result<(), ToolError> {
+        let Some(known) = self.read_fingerprint(path) else {
+            return Ok(());
+        };
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return Ok(());
+        };
+        if ReadFingerprint::from_metadata(&metadata) != known {
+            return Err(ToolError::permanent(
+                "file_changed_since_read",
+                format!(
+                    "文件在读取后被外部修改，已拒绝编辑：{}；请重新读取该文件后再编辑",
+                    display_path(path)
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// 判断整文件覆写是否建立在仍然有效的内容认知之上。
+    ///
+    /// 返回 `Err` 表示模型没有读过该文件，或读取后文件已被外部改动：此时
+    /// 整文件覆写会静默丢弃外部改动，必须要求先重新读取。新建文件（路径
+    /// 当前不存在且没有读取记录）不属于陈旧写，由写入路径单独处理。
+    pub(crate) fn ensure_write_is_fresh(&self, path: &Path) -> Result<(), ToolError> {
+        let Some(known) = self.read_fingerprint(path) else {
+            return Err(ToolError::permanent(
+                "write_requires_read",
+                format!(
+                    "整文件覆写前必须先读取目标文件：{}；请先 Read 该文件（或改用 Edit 做局部修改）后再写入",
+                    display_path(path)
+                ),
+            ));
+        };
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolError::permanent(
+                    "file_removed_since_read",
+                    format!(
+                        "文件在读取后已被删除，已拒绝写入：{}；请确认路径后重试",
+                        display_path(path)
+                    ),
+                ));
+            }
+            Err(error) => {
+                return Err(ToolError::permanent(
+                    "write_metadata_failed",
+                    format!("{}：{error}", display_path(path)),
+                ));
+            }
+        };
+        if ReadFingerprint::from_metadata(&metadata) != known {
+            return Err(ToolError::permanent(
+                "file_changed_since_read",
+                format!(
+                    "文件在读取后被外部修改，已拒绝整文件覆写：{}；请重新读取该文件后再写入",
+                    display_path(path)
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// 把非空绝对路径或相对 Session 工作目录的路径转为绝对路径。

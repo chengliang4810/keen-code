@@ -18,12 +18,16 @@ use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
 use crate::environment::{
-    EnvironmentArtifactSink, READ_ONLY_WALL_CLOCK_TIMEOUT, ToolEnvironment, display_path,
-    invalid_input,
+    EnvironmentArtifactSink, READ_ONLY_WALL_CLOCK_TIMEOUT, ReadFingerprint, ToolEnvironment,
+    display_path, invalid_input,
 };
 
 /// 未指定 `limit` 时单次读取的默认行数。
-const DEFAULT_READ_LINES: usize = 300;
+///
+/// 取 2,000 行与同类宿主一致：默认值决定的是「一次调用能拿回多少上下文」，
+/// 偏小会把大文件的常规读取切成多轮往返，而真正防止上下文爆炸的是
+/// `max_read_output_bytes` 的输出字节上限，与行数默认值相互独立。
+const DEFAULT_READ_LINES: usize = 2_000;
 
 /// 文本与图片同步读取每次最多从操作系统接收的字节数。
 const READ_BUFFER_BYTES: usize = 8 * 1024;
@@ -53,7 +57,12 @@ impl AgentTool for ReadTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Read",
-            "Read a UTF-8 text file with one-based line numbers; use offset and limit for pagination. PNG, JPEG, GIF, and WebP files are returned as inline images.",
+            "Read a UTF-8 text file with one-based line numbers; use offset and limit for pagination. PNG, JPEG, GIF, and WebP files are returned as inline images.\n\n\
+Usage:\n\
+- Pass an absolute path. Read the whole file when it is small; for large files read the region you need and follow the continuation offset reported by truncated output instead of guessing line numbers.\n\
+- Reading the same unchanged region again wastes context: after an edit, re-read only the changed area.\n\
+- A single line longer than the output budget cannot be returned; use Grep with context, or read a narrower region, rather than retrying the same call.\n\
+- Directory paths and unsupported binary formats are rejected; use Glob to enumerate files.",
             json!({
                 "type": "object",
                 "properties": {
@@ -119,7 +128,12 @@ impl AgentTool for EditTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Edit",
-            "Replace old_string exactly in a UTF-8 file. Requires exactly one match by default; replace_all=true replaces all non-overlapping matches. Uses atomic replacement in the same directory and preserves the UTF-8 BOM and original file permissions.",
+            "Replace old_string exactly in a UTF-8 file. Requires exactly one match by default; replace_all=true replaces all non-overlapping matches. Uses atomic replacement in the same directory and preserves the UTF-8 BOM, original file permissions and line-ending style (an LF old_string copied from Read output still matches a CRLF file, and replacements keep CRLF).\n\n\
+Usage:\n\
+- Read the file first and copy old_string verbatim from it, including indentation; a near-miss fails with the closest region reported so you can correct it in one step.\n\
+- Keep old_string as small as possible while still unique. When a short snippet is not unique, extend it with surrounding lines instead of setting replace_all.\n\
+- Use replace_all only for a deliberate global rename, and check the file afterwards.\n\
+- Create a new file with Write rather than Edit.",
             json!({
                 "type": "object",
                 "properties": {
@@ -180,7 +194,11 @@ impl AgentTool for WriteTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Write",
-            "Create or fully overwrite a UTF-8 file. Creates missing parent directories. Writes and syncs a temporary file in the target directory before atomic replacement.",
+            "Create or fully overwrite a UTF-8 file. Creates missing parent directories. Writes and syncs a temporary file in the target directory before atomic replacement. Overwriting an existing text file preserves its line-ending style (LF content written over a consistently-CRLF file keeps CRLF).\n\n\
+Usage:\n\
+- Writing replaces the whole file: read an existing file before overwriting it, and prefer Edit for a targeted change.\n\
+- Do not create documentation, README or summary files unless the user asked for them; do not add placeholder or stub content.\n\
+- Content is written verbatim apart from the line-ending preservation above, so include the exact final text including its trailing newline.",
             json!({
                 "type": "object",
                 "properties": {
@@ -330,13 +348,16 @@ fn read_file(
     let limit = input
         .limit
         .unwrap_or_else(|| DEFAULT_READ_LINES.min(environment.limits().max_read_lines));
-    read_text_lines(
+    let output = read_text_lines(
         cancellation,
         &path,
         offset,
         limit,
         environment.limits().max_read_output_bytes,
-    )
+    )?;
+    // 登记读取时刻的指纹，供后续整文件覆写判断内容是否仍然新鲜。
+    environment.record_read(&path, ReadFingerprint::from_metadata(&metadata));
+    Ok(output)
 }
 
 /// 读取受支持图片并编码为 Provider 中立工具结果。
@@ -806,6 +827,9 @@ fn edit_file(
         ));
     }
     let maximum_bytes = environment.limits().max_mutation_file_bytes;
+    // 编辑建立在"模型看到的旧文本"之上：若该文件在本 Session 中读取过，
+    // 但读后已被外部改动，精确匹配的语义就不再可靠，先要求重新读取。
+    environment.ensure_edit_is_fresh(&path)?;
     let original_bytes = read_bounded_file(
         cancellation,
         &path,
@@ -821,11 +845,21 @@ fn edit_file(
     )?;
     ensure_not_cancelled(cancellation)?;
     let (had_bom, original) = decode_utf8(&original_bytes)?;
-    let matches = original.match_indices(&input.old_string).count();
+    // Read 的输出把行尾 \r 归一为纯 \n，模型据此逐字复制的多行 old_string 在
+    // CRLF 文件上必然失配。直接匹配失败且文件一致使用 CRLF 时，把两个串的
+    // 行尾提升为 \r\n 后重试；替换串同步提升，避免编辑本身改写文件行尾风格。
+    let (match_old, match_new) =
+        resolve_line_ending_compatible_needles(original, &input.old_string, &input.new_string);
+    let matches = original.match_indices(&match_old).count();
     if matches == 0 {
+        let hint = if original.contains("\r\n") && input.old_string.contains('\n') {
+            "；该文件包含 CRLF 行尾而 Read 输出已归一为 LF，行尾归一匹配也未命中，请核对内容"
+        } else {
+            ""
+        };
         return Err(ToolError::permanent(
             "old_string_not_found",
-            "old_string 在目标文件中没有精确匹配",
+            format!("old_string 在目标文件中没有精确匹配{hint}"),
         ));
     }
     if !input.replace_all && matches != 1 {
@@ -838,15 +872,15 @@ fn edit_file(
     let edited_size = checked_edit_size(
         original.len(),
         had_bom,
-        input.old_string.len(),
-        input.new_string.len(),
+        match_old.len(),
+        match_new.len(),
         replacement_count,
         maximum_bytes,
     )?;
     let edited = if input.replace_all {
-        original.replace(&input.old_string, &input.new_string)
+        original.replace(&match_old, &match_new)
     } else {
-        original.replacen(&input.old_string, &input.new_string, 1)
+        original.replacen(&match_old, &match_new, 1)
     };
     let edited_bytes = encode_utf8(&edited, had_bom);
     debug_assert_eq!(edited_bytes.len(), edited_size);
@@ -867,6 +901,8 @@ fn edit_file(
     if let Some(prepared) = prepared {
         prepared.mark_applied()?;
     }
+    // 编辑后内容已由本次调用完整读出并改写，登记指纹反映最新磁盘状态。
+    record_written_file(environment, &path);
     Ok(ToolOutput::text(format!(
         "已原子编辑 {}，替换 {replacement_count} 处，写入 {} 字节",
         display_path(&path),
@@ -936,6 +972,15 @@ fn write_file(
     } else {
         None
     };
+    // 覆写模型能读到的文本内容前，必须确认它知道磁盘上的当前状态：没有读取
+    // 记录或读取后文件被外部改动时，整文件覆写会静默丢弃外部改动。二进制文件
+    // 无法经 Read 观察，不能要求"写前读过"，只保留工具执行窗口内的并发校验。
+    if previous.as_deref().is_some_and(is_readable_text) {
+        environment.ensure_write_is_fresh(&path)?;
+    }
+    // Read 的输出把行尾 \r 归一为 \n；模型据此重建的全文写回会把一致使用
+    // CRLF 的文件整体改成 LF。覆写既有文本文件时保持其原有行尾风格。
+    let content = preserve_existing_newline_style(previous.as_deref(), content);
     if previous.as_deref() == Some(content.as_slice()) {
         return Ok(ToolOutput::text(format!(
             "文件内容未变化：{}",
@@ -968,11 +1013,32 @@ fn write_file(
     if let Some(prepared) = prepared {
         prepared.mark_applied()?;
     }
+    // 写入者立即掌握刚落盘的内容，登记指纹让后续覆写无需重新读取。
+    record_written_file(environment, &path);
     Ok(ToolOutput::text(format!(
         "已原子{action} {}，写入 {} 字节",
         display_path(&path),
         content.len()
     )))
+}
+
+/// 判断已有内容是否为 Read 工具能够观察到的文本。
+///
+/// 与 Read 的判定保持一致：含 NUL 字节视为二进制，此类文件模型无法通过
+/// Read 建立内容认知，因此不适用"写前必须读过"的要求。
+fn is_readable_text(bytes: &[u8]) -> bool {
+    !bytes.contains(&0)
+}
+
+/// 在工具自身完成写入后登记最新指纹。
+///
+/// 写入者掌握刚落盘的完整内容，因此后续整文件覆写不应再被"未读取"或
+/// "读取后已变化"拦下；文件系统不支持读取元数据时静默跳过登记，让下一次
+/// 覆写回到"必须先读取"的保守路径。
+fn record_written_file(environment: &ToolEnvironment, path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        environment.record_read(path, ReadFingerprint::from_metadata(&metadata));
+    }
 }
 
 /// 在构造替换结果字符串前计算其完整 UTF-8 字节数并校验文件上限。
@@ -1067,6 +1133,63 @@ fn encode_utf8(text: &str, with_bom: bool) -> Vec<u8> {
     }
     bytes.extend_from_slice(text.as_bytes());
     bytes
+}
+
+/// 决定 Edit 实际用于匹配与替换的两段文本。
+///
+/// 只有在「文件一致使用 CRLF 行尾、直接匹配失败、提升后的 old 确实命中」
+/// 三个条件同时成立时才做行尾提升；其余情况原样返回，混合行尾或内容可疑
+/// 时一律保持精确匹配语义。
+fn resolve_line_ending_compatible_needles(
+    original: &str,
+    old_string: &str,
+    new_string: &str,
+) -> (String, String) {
+    if original.contains(old_string) || !old_string.contains('\n') {
+        return (old_string.to_owned(), new_string.to_owned());
+    }
+    if !file_consistently_uses_crlf(original) {
+        return (old_string.to_owned(), new_string.to_owned());
+    }
+    let crlf_old = normalize_newlines_to_crlf(old_string);
+    if original.contains(&crlf_old) {
+        (crlf_old, normalize_newlines_to_crlf(new_string))
+    } else {
+        (old_string.to_owned(), new_string.to_owned())
+    }
+}
+
+/// 覆写既有文本文件时，把新内容提升为该文件既有的 CRLF 行尾风格。
+///
+/// 只在「旧内容一致使用 CRLF、新内容可解码为 UTF-8 且确有换行」时转换；
+/// 二进制或编码不明的内容原样写入。
+fn preserve_existing_newline_style(previous: Option<&[u8]>, content: Vec<u8>) -> Vec<u8> {
+    let Some(previous) = previous else {
+        return content;
+    };
+    let Ok(previous_text) = std::str::from_utf8(previous) else {
+        return content;
+    };
+    if !file_consistently_uses_crlf(previous_text) {
+        return content;
+    }
+    let Ok(content_text) = std::str::from_utf8(&content) else {
+        return content;
+    };
+    if !content_text.contains('\n') {
+        return content;
+    }
+    normalize_newlines_to_crlf(content_text).into_bytes()
+}
+
+/// 判断文本中每个 `\n` 都属于 `\r\n`（一致 CRLF 行尾）。
+fn file_consistently_uses_crlf(text: &str) -> bool {
+    text.contains("\r\n") && text.matches('\n').count() == text.matches("\r\n").count()
+}
+
+/// 把文本中的换行统一为 `\r\n`；孤立的 `\r` 不受影响。
+fn normalize_newlines_to_crlf(value: &str) -> String {
+    value.replace("\r\n", "\n").replace('\n', "\r\n")
 }
 
 /// 按扩展名返回可内联模型的图片媒体类型。

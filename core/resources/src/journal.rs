@@ -2595,8 +2595,12 @@ fn read_records(
                     break;
                 }
             };
+            // 读端容忍更旧版本的事件（schema 演进靠 serde 字段兼容；首次不兼容
+            // 的版本 bump 时必须在 types.rs 登记按版本归一）。只拒绝来自更新
+            // 版本应用的记录：严格相等会让每次版本升级都把全部历史会话判为
+            // Corrupt 并从会话列表消失。
             if record.schema != crate::types::SESSION_EVENT_SCHEMA
-                || record.version != crate::types::SESSION_EVENT_VERSION
+                || record.version > crate::types::SESSION_EVENT_VERSION
                 || record.session != *session_id
             {
                 issues.push(CorruptionIssue::new(
@@ -2711,8 +2715,9 @@ fn read_replay_record(
     }
     let record: SessionEventRecord =
         serde_json::from_slice(line).map_err(|_| ResourceError::ReplayLogChanged)?;
+    // 与打开校验同一读端契约：容忍旧版本，只拒绝来自更新版本应用的记录。
     if record.schema != crate::types::SESSION_EVENT_SCHEMA
-        || record.version != crate::types::SESSION_EVENT_VERSION
+        || record.version > crate::types::SESSION_EVENT_VERSION
         || record.session != *session_id
         || record.sequence != expected_sequence
     {

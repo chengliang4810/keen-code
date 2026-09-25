@@ -78,6 +78,7 @@ const INVALID_TOOL_OUTPUT_ERROR_CODE: &str = "invalid_output";
 
 /// 工具执行超过外层墙钟上限时交给模型的稳定机器错误码。
 const TOOL_TIMEOUT_ERROR_CODE: &str = "tool_timeout";
+const TOOL_PANIC_ERROR_CODE: &str = "tool_panic";
 
 /// 工具执行超过外层墙钟上限时交给模型的固定有界说明。
 const TOOL_TIMEOUT_RESULT_PREFIX: &str = "tool_timeout：工具";
@@ -1133,6 +1134,41 @@ impl AgentRunner {
             },
             u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
         )
+    }
+
+    /// 把流中断前已确认的正文提交为一条 assistant 消息。
+    ///
+    /// 只在两个条件同时成立时提交：中断携带了部分正文，且本 Round 尚未提交过
+    /// 消息（状态仍停在请求阶段）。部分正文不含工具调用，因此不需要补配对结果。
+    /// 提交失败不改变调用方看到的原始错误分类：正文落盘属于尽力而为的补偿，
+    /// 与失败归因相比是次要信息。
+    fn commit_partial_stream_text(
+        &self,
+        request: &TurnRequest,
+        state: &TurnState,
+        error: &ModelError,
+    ) -> Result<(), AgentRunError> {
+        let Some(partial_text) = error.stream_partial_text() else {
+            return Ok(());
+        };
+        if state.phase() != TurnPhase::RequestingModel {
+            return Ok(());
+        }
+        let message = Message::new(
+            MessageRole::Assistant,
+            vec![ContentBlock::text(partial_text.to_owned())],
+        );
+        let identity = ModelEventIdentity::for_turn(request, state.round_count());
+        let event = identity.commit_envelope(AgentCommitEventKind::RoundCommitted {
+            segment_index: state.round_count(),
+            messages: vec![message],
+        });
+        commit_event_with_bounded_retry(
+            self.commit_sink.as_ref(),
+            &event,
+            AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS,
+        )
+        .map_err(commit_sink_run_error)
     }
 
     /// 同步提交一个权威事件；调用开始后不再受 Turn 取消或实时投递超时影响。
@@ -3288,6 +3324,9 @@ impl AgentRunner {
                     &tap_status,
                     started.elapsed(),
                 )?;
+                // 流中断前已经实时流给用户的正文必须落进历史：否则界面显示的
+                // 内容与持久记录不一致，用户看到的回答在下一轮上下文里消失。
+                self.commit_partial_stream_text(turn_request, state, &error)?;
                 if !tap_failure_boundary_sent(&tap_status) {
                     deliver_failure_boundary(&self.event_sink, &identity, &error, event_timeout)
                         .await
@@ -3635,6 +3674,11 @@ impl AgentRunner {
                     continue;
                 }
             };
+            // 并发方式按本次输入判定；判定失败按最保守的独占处理，
+            // 绝不让"判定不出来"的调用进入并行批次。
+            let concurrency = tool
+                .concurrency_for(&final_tool_calls[index].arguments)
+                .unwrap_or(ToolConcurrency::Exclusive);
             prepared.push(PreparedCall::execute(
                 index,
                 PreparedExecution {
@@ -3642,7 +3686,7 @@ impl AgentRunner {
                     tool_call_id,
                     tool: tool.clone(),
                     effect,
-                    concurrency: tool.concurrency(),
+                    concurrency,
                     fingerprint,
                 },
                 hook_context,
@@ -4664,6 +4708,21 @@ fn stop_reason_allows_tool_calls(stop_reason: &StopReason) -> bool {
         }
         StopReason::MaxOutputTokens | StopReason::ContentFilter | StopReason::Cancelled => false,
     }
+}
+
+/// 提取 panic 载荷中的有界消息；未知载荷类型归一为占位说明。
+///
+/// 消息进入工具结果与 Transcript，必须先截断到有界长度。
+fn panic_payload_summary(payload: &(dyn std::any::Any + Send)) -> String {
+    const MAX_PANIC_MESSAGE_CHARS: usize = 500;
+    let message = if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_owned()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "未携带可读消息".to_owned()
+    };
+    message.chars().take(MAX_PANIC_MESSAGE_CHARS).collect()
 }
 
 /// 提取非正常模型响应中已经确认的文本和推理，丢弃不能独立回放的工具调用。
@@ -5856,7 +5915,20 @@ async fn execute_one_raw(
     let wall_clock_limit = tool.timeout();
     // 工件通道在归一阶段使用：单结果超限截断与 Round 聚合截断共用。
     let artifact_sink = tool.output_artifact_sink();
-    let raced = Box::pin(race_tool_wall_clock(wall_clock_limit, executed));
+    let mut raced = Box::pin(race_tool_wall_clock(wall_clock_limit, executed));
+    // 工具实现内的 panic 不得击穿 Turn 任务：那会让 journal 永久停在
+    // tool_execution_started、界面永远「工作中」，只能靠重启冷恢复。在本
+    // 调用边界捕获展开并归一为一次普通工具失败；被展开的工具 Future 随
+    // select 结束一并丢弃。
+    let raced = std::future::poll_fn(|context| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            raced.as_mut().poll(context)
+        })) {
+            Ok(std::task::Poll::Ready(value)) => std::task::Poll::Ready(Ok(value)),
+            Ok(std::task::Poll::Pending) => std::task::Poll::Pending,
+            Err(payload) => std::task::Poll::Ready(Err(payload)),
+        }
+    });
     let (result, status, failure, terminal_error, observation, artifact) =
         match select(cancelled, raced).await {
             // Turn 取消优先于墙钟超时：两个条件同时就绪时取消先被轮询。
@@ -5875,7 +5947,7 @@ async fn execute_one_raw(
                     None,
                 )
             }
-            Either::Right((TimedToolRun::Finished(Ok(output)), _)) => {
+            Either::Right((Ok(TimedToolRun::Finished(Ok(output))), _)) => {
                 match validate_tool_output(call.id.clone(), output) {
                     Ok((result, _)) => (
                         result,
@@ -5929,7 +6001,7 @@ async fn execute_one_raw(
                     }
                 }
             }
-            Either::Right((TimedToolRun::Finished(Err(error)), _)) => {
+            Either::Right((Ok(TimedToolRun::Finished(Err(error))), _)) => {
                 let error = normalize_tool_error(&error);
                 let error_code = error.code.clone();
                 (
@@ -5944,7 +6016,7 @@ async fn execute_one_raw(
                     None,
                 )
             }
-            Either::Right((TimedToolRun::ExceededWallClock { limit, pending }, _)) => {
+            Either::Right((Ok(TimedToolRun::ExceededWallClock { limit, pending }), _)) => {
                 // 外层墙钟超时只切断本调用：取消独立执行令牌，并给予与
                 // Turn 取消相同的清理宽限；随后按一次真实失败继续循环。
                 call_cancellation.cancel();
@@ -5965,6 +6037,27 @@ async fn execute_one_raw(
                     Some(ToolExecutionObservation::Failed {
                         call: fingerprint.clone(),
                         error_code: TOOL_TIMEOUT_ERROR_CODE.to_owned(),
+                    }),
+                    None,
+                )
+            }
+            Either::Right((Err(payload), _)) => {
+                // 工具实现 panic：不携带 Turn 终态，把一次失败结果交给模型继续。
+                (
+                    ToolResult::text(
+                        call.id.clone(),
+                        format!(
+                            "工具实现在执行中崩溃（tool_panic）：{}",
+                            panic_payload_summary(payload.as_ref())
+                        ),
+                        true,
+                    ),
+                    ToolCompletionStatus::Failed,
+                    Some(ToolHookFailureKind::ToolError),
+                    None,
+                    Some(ToolExecutionObservation::Failed {
+                        call: fingerprint.clone(),
+                        error_code: TOOL_PANIC_ERROR_CODE.to_owned(),
                     }),
                     None,
                 )

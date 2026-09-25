@@ -73,6 +73,45 @@ pub const PREDICTIVE_CACHE_SKIP_HIT_RATE: f64 = 0.7;
 ///（头部空间 = 输入预算 − 当前估算，占输入预算）。
 pub const PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO: f64 = 0.2;
 
+/// 判定缓存击穿时的最低上一轮命中率：低于该值说明前缀本就没被有效缓存，
+/// 谈不上"击穿"。
+const CACHE_BREAK_MIN_PREVIOUS_HIT_RATE: f64 = 0.5;
+
+/// 判定缓存击穿时的命中率绝对跌幅阈值。
+const CACHE_BREAK_MIN_HIT_RATE_DROP: f64 = 0.3;
+
+/// 一次可观测的缓存命中率骤降。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct CacheBreakEvent {
+    /// 上一轮报告的缓存命中率。
+    pub(crate) previous: f64,
+    /// 本轮报告的缓存命中率。
+    pub(crate) current: f64,
+}
+
+/// 比较相邻两轮的缓存命中率，识别缓存前缀被改动导致的命中率骤降。
+///
+/// 只在"上一轮命中率足够高"且"跌幅足够大"时报告：低命中率会话（Provider 未
+/// 启用缓存或前缀本来就不稳定）的波动不是异常。命中率缺失时返回 `None`，
+/// 不臆测 Provider 未报告的量。
+pub(crate) fn cache_break_event(
+    previous: Option<&RoundUsageAnchor>,
+    current: Option<f64>,
+) -> Option<CacheBreakEvent> {
+    let previous_rate = previous?.cache_hit_rate?;
+    let current_rate = current?;
+    if previous_rate < CACHE_BREAK_MIN_PREVIOUS_HIT_RATE {
+        return None;
+    }
+    if previous_rate - current_rate < CACHE_BREAK_MIN_HIT_RATE_DROP {
+        return None;
+    }
+    Some(CacheBreakEvent {
+        previous: previous_rate,
+        current: current_rate,
+    })
+}
+
 /// 上下文压缩异步边界使用的对象安全 Future。
 pub type ContextFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
@@ -836,17 +875,17 @@ impl Default for ContextPolicy {
 
 /// 一轮已确认模型用量形成的估算锚点。
 #[derive(Clone, Copy, Debug)]
-struct RoundUsageAnchor {
+pub(crate) struct RoundUsageAnchor {
     /// 该轮请求的真实上下文输入规模：input_tokens 加 cache_read_tokens（已含
     /// 缓存读写与请求期注入内容），与桌面悬浮卡的上下文口径一致。
     /// 部分 Chat 网关把 prompt_tokens 报成非缓存明细，单取 input_tokens 会低估。
-    input_tokens: u64,
+    pub(crate) input_tokens: u64,
     /// 产生该用量的请求包含的消息数量；其后追加的消息按逐块规则增量估算。
-    message_count: usize,
+    pub(crate) message_count: usize,
     /// 该轮用量的提示词缓存命中率（`cache_read / input`）；Provider 未报告
     /// 缓存或输入字段时为 `None`，预测性触发的缓存感知跳过不生效。
     /// 压缩成功清锚时一并清除，不携带跨压缩的旧命中率。
-    cache_hit_rate: Option<f64>,
+    pub(crate) cache_hit_rate: Option<f64>,
 }
 
 /// 组合预算、估算器和摘要器的上下文管理核心。
@@ -992,11 +1031,22 @@ impl ContextManager {
         // （messages.rs 显式相加、chat_completions/responses 的 prompt_tokens
         // 本身即合集），此处不得再加 cache_read_tokens，否则高缓存命中会话
         // 的锚点被双算、压缩线被抬高。
+        let hit_rate = cache_hit_rate(usage);
         let mut anchor = self.usage_anchor.lock().expect("上下文用量锚点锁不应损坏");
+        // 命中率骤降意味着缓存前缀被改动（工具表变化、注入内容重排、压缩替换
+        // 历史等），整条前缀按未命中计价。这里只记录诊断，不改变任何请求行为。
+        if let Some(break_event) = cache_break_event(anchor.as_ref(), hit_rate) {
+            tracing::info!(
+                previous_hit_rate = break_event.previous,
+                current_hit_rate = break_event.current,
+                input_tokens,
+                "提示词缓存命中率较上一轮明显下降，缓存前缀可能已被改动"
+            );
+        }
         *anchor = Some(RoundUsageAnchor {
             input_tokens,
             message_count: request.messages.len(),
-            cache_hit_rate: cache_hit_rate(usage),
+            cache_hit_rate: hit_rate,
         });
     }
 
@@ -3140,16 +3190,51 @@ const READ_TOOL_NAME: &str = "read";
 /// 读取类工具调用参数中承载文件路径的键。
 const READ_TOOL_PATH_KEY: &str = "file_path";
 
-/// 从 transcript 提取压缩前最近被读取类工具调用读过的文件路径。
+/// 读取类工具调用参数中承载起始行号的键。
+const READ_TOOL_OFFSET_KEY: &str = "offset";
+
+/// 读取类工具调用参数中承载行数上限的键。
+const READ_TOOL_LIMIT_KEY: &str = "limit";
+
+/// 一条重新读取提示中的单个文件条目。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReadHintTarget {
+    /// 被读取过的文件路径。
+    path: String,
+    /// 该路径在整份 transcript 中最后一次读取的起始行；未指定时为 `None`。
+    offset: Option<u64>,
+    /// 该路径在整份 transcript 中最后一次读取的行数上限；未指定时为 `None`。
+    limit: Option<u64>,
+}
+
+impl ReadHintTarget {
+    /// 渲染为提示列表中的一行；带区域时同时给出 offset 与 limit 便于精确续读。
+    fn render(&self) -> String {
+        match (self.offset, self.limit) {
+            (Some(offset), Some(limit)) => {
+                format!(
+                    "- {}（上次读取：offset={offset}, limit={limit}）\n",
+                    self.path
+                )
+            }
+            (Some(offset), None) => format!("- {}（上次读取：offset={offset}）\n", self.path),
+            (None, Some(limit)) => format!("- {}（上次读取：limit={limit}）\n", self.path),
+            (None, None) => format!("- {}\n", self.path),
+        }
+    }
+}
+
+/// 从 transcript 提取压缩前最近被读取类工具调用读过的文件及其读取区域。
 ///
 /// 只统计工具名（大小写不敏感）等于 `read` 的 assistant 工具调用，以
 /// `file_path` 字符串参数为目标并按路径去重；某路径只有在其"整份 transcript
 /// 中最后一次被读取"落在压缩替换区间内时才入选——区间之后的近期重读说明
-/// 内容仍在上下文中，无需提示。结果按最后一次出现位置从新到旧排序（同位次
-/// 按路径字典序保证确定性），数量不超过 [`READ_HINT_MAX_FILES`]，列表总字节
-/// 不超过 [`READ_HINT_MAX_LIST_BYTES`]，装不下的更旧路径直接丢弃。
-fn recent_read_targets(messages: &[Message], range: std::ops::Range<usize>) -> Vec<String> {
-    let mut last_seen: HashMap<String, usize> = HashMap::new();
+/// 内容仍在上下文中，无需提示。同时记录该次调用的 `offset`/`limit`，让模型
+/// 能按原区域精确续读而不是整份重读。结果按最后一次出现位置从新到旧排序
+/// （同位次按路径字典序保证确定性），数量不超过 [`READ_HINT_MAX_FILES`]，
+/// 列表总字节不超过 [`READ_HINT_MAX_LIST_BYTES`]，装不下的更旧条目直接丢弃。
+fn recent_read_targets(messages: &[Message], range: std::ops::Range<usize>) -> Vec<ReadHintTarget> {
+    let mut last_seen: HashMap<String, (usize, Option<u64>, Option<u64>)> = HashMap::new();
     for (index, message) in messages.iter().enumerate() {
         if message.role != MessageRole::Assistant {
             continue;
@@ -3163,32 +3248,49 @@ fn recent_read_targets(messages: &[Message], range: std::ops::Range<usize>) -> V
                     .and_then(Value::as_str)
                 && !path.is_empty()
             {
-                last_seen.insert(path.to_owned(), index);
+                let offset = tool_call
+                    .arguments
+                    .get(READ_TOOL_OFFSET_KEY)
+                    .and_then(Value::as_u64);
+                let limit = tool_call
+                    .arguments
+                    .get(READ_TOOL_LIMIT_KEY)
+                    .and_then(Value::as_u64);
+                last_seen.insert(path.to_owned(), (index, offset, limit));
             }
         }
     }
-    let mut ordered: Vec<(usize, String)> = last_seen
+    let mut ordered: Vec<(usize, ReadHintTarget)> = last_seen
         .into_iter()
-        .filter(|(_, index)| *index >= range.start && *index < range.end)
-        .map(|(path, index)| (index, path))
+        .filter(|(_, (index, _, _))| *index >= range.start && *index < range.end)
+        .map(|(path, (index, offset, limit))| {
+            (
+                index,
+                ReadHintTarget {
+                    path,
+                    offset,
+                    limit,
+                },
+            )
+        })
         .collect();
-    ordered.sort_by(|(left_index, left_path), (right_index, right_path)| {
+    ordered.sort_by(|(left_index, left), (right_index, right)| {
         right_index
             .cmp(left_index)
-            .then_with(|| left_path.cmp(right_path))
+            .then_with(|| left.path.cmp(&right.path))
     });
     let mut selected = Vec::new();
     let mut total_bytes = 0_usize;
-    for (_, path) in ordered {
+    for (_, target) in ordered {
         if selected.len() >= READ_HINT_MAX_FILES {
             break;
         }
-        let line_bytes = format!("- {path}\n").len();
+        let line_bytes = target.render().len();
         if total_bytes.saturating_add(line_bytes) > READ_HINT_MAX_LIST_BYTES {
             break;
         }
         total_bytes += line_bytes;
-        selected.push(path);
+        selected.push(target);
     }
     selected
 }
@@ -3211,13 +3313,13 @@ pub(crate) fn post_compaction_read_hint_message(
     if start >= end {
         return None;
     }
-    let paths = recent_read_targets(messages, start..end);
-    if paths.is_empty() {
+    let targets = recent_read_targets(messages, start..end);
+    if targets.is_empty() {
         return None;
     }
-    let list = paths
+    let list = targets
         .iter()
-        .map(|path| format!("- {path}\n"))
+        .map(ReadHintTarget::render)
         .collect::<String>();
     let mut message = Message::text(
         MessageRole::User,
@@ -3225,7 +3327,8 @@ pub(crate) fn post_compaction_read_hint_message(
             "{TOOL_FAILURE_REMINDER_PREFIX}\n\
              来源：KeenCode Agent Runtime / PostCompactionReadHint\n\n\
              以下文件在压缩前被读取过，摘要可能未保留其内容。\
-             如当前任务仍需要，请重新 Read：\n{list}"
+             如当前任务仍需要，请重新 Read；带 offset/limit 的条目可按原区域续读，\
+             无需整份重读：\n{list}"
         ),
     );
     message.is_meta = true;

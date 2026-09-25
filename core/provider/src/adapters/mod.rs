@@ -97,6 +97,9 @@ impl Adapter {
             ModelError::Protocol { message } => ModelError::StreamInterrupted {
                 message,
                 retryable: true,
+                // Adapter 只做事件级校验，不累积正文；部分产出由消费方
+                // `collect_model_stream` 在收流结束时统一挂载。
+                partial_text: None,
             },
             other => other,
         })

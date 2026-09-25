@@ -253,7 +253,11 @@ impl MessagesAdapter {
         output: &mut VecDeque<ModelStreamEvent>,
     ) -> Result<(), ModelError> {
         if self.ended {
-            return Err(protocol_error("Messages 响应结束后仍收到 SSE 事件"));
+            // 排空模式：协议终态后到达的尾帧（网关追加的 [DONE]、空保活帧、ping、
+            // 迟到事件）已经无法改变一个完成的响应。裸忽略而不是报协议错误，避免
+            // 「终态后噪声」把已完整生成并计费的响应整条作废；真正的协议违例都
+            // 发生在终态之前，仍由下方逐帧校验拒绝。
+            return Ok(());
         }
         if frame.data.is_empty() && frame.event.as_deref() == Some("ping") {
             return Ok(());

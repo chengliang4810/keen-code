@@ -45,6 +45,25 @@ fn output_text(output: &keencode_agent::ToolOutput) -> &str {
     text
 }
 
+/// 按出现顺序收集 Read 输出中的一基行号（形如 `   12→正文`）。
+fn collect_line_numbers(text: &str) -> Vec<usize> {
+    text.lines()
+        .filter_map(|line| line.split_once('→'))
+        .filter_map(|(prefix, _)| prefix.trim().parse::<usize>().ok())
+        .collect()
+}
+
+/// 以 Read 工具登记目标文件的读取指纹。
+///
+/// Write 覆写已有文本文件要求模型先建立内容认知，因此涉及覆写的用例都要经过
+/// 真实 Read 路径，而不是直接构造文件后写入。
+async fn read_before_write(environment: &Arc<ToolEnvironment>, file_path: &str) {
+    ReadTool::new(Arc::clone(environment))
+        .execute(tool_context(), json!({ "file_path": file_path }))
+        .await
+        .expect("测试前置读取应成功");
+}
+
 /// 记录文件变更准备阶段看到的完整上下文和原始字节。
 #[derive(Debug, Default)]
 struct MutationProbe {
@@ -312,6 +331,7 @@ async fn mutation_recorder_mark_failure_is_not_success() {
             .expect("工具环境应有效")
             .with_file_mutation_recorder(recorder.clone()),
     );
+    read_before_write(&environment, "mark.txt").await;
     let error = WriteTool::new(environment)
         .execute(
             tool_context(),
@@ -340,6 +360,7 @@ async fn mutation_recorder_skips_identical_write() {
             .expect("工具环境应有效")
             .with_file_mutation_recorder(recorder.clone()),
     );
+    read_before_write(&environment, "same.txt").await;
 
     WriteTool::new(environment)
         .execute(
@@ -436,6 +457,7 @@ async fn mutation_recorder_external_change_prevents_write() {
             .expect("工具环境应有效")
             .with_file_mutation_recorder(recorder.clone()),
     );
+    read_before_write(&environment, "changed.txt").await;
     let error = WriteTool::new(environment)
         .execute(
             tool_context(),
@@ -542,6 +564,95 @@ async fn write_accepts_absolute_path_outside_working_directory() {
     );
 }
 
+/// 覆写已有文本文件必须先经过 Read：未读取、读取后外部改动、读取后被删除
+/// 三种情形都要被拒绝，避免整文件覆写静默丢弃外部改动。
+#[tokio::test]
+async fn write_requires_fresh_read_of_existing_text_file() {
+    let directory = tempdir().expect("应创建临时目录");
+    let path = directory.path().join("guarded.txt");
+    fs::write(&path, b"original").expect("应写入初始文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = WriteTool::new(Arc::clone(&environment));
+    let overwrite = json!({ "file_path": "guarded.txt", "content": "replacement" });
+
+    // 未读取过：拒绝覆写，磁盘内容保持原样。
+    let unread = tool
+        .execute(tool_context(), overwrite.clone())
+        .await
+        .expect_err("未读取就覆写必须被拒绝");
+    assert_eq!(unread.code, "write_requires_read");
+    assert_eq!(fs::read(&path).expect("文件应保持原样"), b"original");
+
+    // 读取后外部改动：拒绝覆写，外部改动不得被静默丢弃。
+    read_before_write(&environment, "guarded.txt").await;
+    fs::write(&path, b"changed by user").expect("应模拟外部修改");
+    let stale = tool
+        .execute(tool_context(), overwrite.clone())
+        .await
+        .expect_err("读取后外部改动必须阻止覆写");
+    assert_eq!(stale.code, "file_changed_since_read");
+    assert_eq!(fs::read(&path).expect("外部改动应保留"), b"changed by user");
+
+    // 重新读取后可以正常覆写。
+    read_before_write(&environment, "guarded.txt").await;
+    let written = tool
+        .execute(tool_context(), overwrite)
+        .await
+        .expect("重新读取后覆写应成功");
+    assert!(output_text(&written).contains("原子覆盖"));
+    assert_eq!(fs::read(&path).expect("应读取写入结果"), b"replacement");
+}
+
+/// 新建文件不受"写前读取"约束，且写入后自身登记指纹使连续覆写无需重读。
+#[tokio::test]
+async fn write_new_file_then_overwrite_without_reread() {
+    let directory = tempdir().expect("应创建临时目录");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = WriteTool::new(Arc::clone(&environment));
+
+    let created = tool
+        .execute(
+            tool_context(),
+            json!({ "file_path": "fresh.txt", "content": "first" }),
+        )
+        .await
+        .expect("新建文件应成功");
+    assert!(output_text(&created).contains("原子创建"));
+
+    let overwritten = tool
+        .execute(
+            tool_context(),
+            json!({ "file_path": "fresh.txt", "content": "second" }),
+        )
+        .await
+        .expect("写入者自身登记指纹后应可直接覆写");
+    assert!(output_text(&overwritten).contains("原子覆盖"));
+    assert_eq!(
+        fs::read(directory.path().join("fresh.txt")).expect("应读取文件"),
+        b"second"
+    );
+}
+
+/// 二进制文件无法经 Read 观察，因此不适用"写前读取"约束。
+#[tokio::test]
+async fn write_binary_file_is_not_blocked_by_read_requirement() {
+    let directory = tempdir().expect("应创建临时目录");
+    let path = directory.path().join("blob.bin");
+    fs::write(&path, [0x00, 0xff, 0x01]).expect("应写入二进制文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+
+    let output = WriteTool::new(environment)
+        .execute(
+            tool_context(),
+            json!({ "file_path": "blob.bin", "content": "text now" }),
+        )
+        .await
+        .expect("二进制文件覆写不应被读取要求拦截");
+
+    assert!(output_text(&output).contains("原子覆盖"));
+    assert_eq!(fs::read(&path).expect("应读取写入结果"), b"text now");
+}
+
 /// Edit 必须拒绝歧义匹配，并在全量替换时保留 BOM 与 CRLF。
 #[tokio::test]
 async fn edit_is_exact_atomic_and_preserves_encoding_shape() {
@@ -587,6 +698,112 @@ async fn edit_is_exact_atomic_and_preserves_encoding_shape() {
     );
 }
 
+/// Read 会把行尾 \r 归一为 \n；模型据此复制的多行 old_string 必须能在
+/// 一致 CRLF 的文件上命中，且替换后的新增行保持 CRLF。
+#[tokio::test]
+async fn edit_multiline_old_string_matches_crlf_file_via_newline_normalization() {
+    let directory = tempdir().expect("应创建临时目录");
+    let path = directory.path().join("crlf.rs");
+    fs::write(&path, "fn a() {\r\n    old();\r\n}\r\n").expect("应写入 CRLF 文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = EditTool::new(environment);
+
+    let edited = tool
+        .execute(
+            tool_context(),
+            json!({
+                "file_path": "crlf.rs",
+                "old_string": "fn a() {\n    old();\n}",
+                "new_string": "fn a() {\n    new();\n}"
+            }),
+        )
+        .await
+        .expect("行尾归一后多行编辑应成功");
+
+    assert!(output_text(&edited).contains("替换 1 处"));
+    assert_eq!(
+        fs::read_to_string(&path).expect("应读取编辑结果"),
+        "fn a() {\r\n    new();\r\n}\r\n",
+        "替换行应保持 CRLF，未编辑行尾不得被改写"
+    );
+}
+
+/// CRLF 文件上仍未命中的多行 old_string 必须在错误里提示行尾差异。
+#[tokio::test]
+async fn edit_not_found_on_crlf_file_hints_line_endings() {
+    let directory = tempdir().expect("应创建临时目录");
+    fs::write(directory.path().join("crlf.txt"), "alpha\r\nbeta\r\n").expect("应写入 CRLF 文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = EditTool::new(environment);
+
+    let error = tool
+        .execute(
+            tool_context(),
+            json!({
+                "file_path": "crlf.txt",
+                "old_string": "alpha\nmissing\n",
+                "new_string": "x"
+            }),
+        )
+        .await
+        .expect_err("内容不匹配必须失败");
+
+    assert_eq!(error.code, "old_string_not_found");
+    assert!(
+        error.message.contains("CRLF"),
+        "错误应提示 CRLF 行尾：{}",
+        error.message
+    );
+}
+
+/// 覆写一致 CRLF 的文件时，模型按 Read 的 LF 视图重建的内容保持 CRLF 行尾。
+#[tokio::test]
+async fn write_over_existing_file_preserves_crlf_style() {
+    let directory = tempdir().expect("应创建临时目录");
+    let path = directory.path().join("style.txt");
+    fs::write(&path, "one\r\ntwo\r\n").expect("应写入 CRLF 文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = WriteTool::new(Arc::clone(&environment));
+
+    read_before_write(&environment, "style.txt").await;
+    let written = tool
+        .execute(
+            tool_context(),
+            json!({ "file_path": "style.txt", "content": "one\ntwo\nthree\n" }),
+        )
+        .await
+        .expect("重读后覆写应成功");
+
+    assert!(output_text(&written).contains("原子覆盖"));
+    assert_eq!(
+        fs::read_to_string(&path).expect("应读取写入结果"),
+        "one\r\ntwo\r\nthree\r\n",
+        "整文件覆写必须保持 CRLF 行尾"
+    );
+}
+
+/// LF 文件与新建文件不受行尾提升影响，写入字节与内容逐字一致。
+#[tokio::test]
+async fn write_keeps_verbatim_bytes_for_lf_file() {
+    let directory = tempdir().expect("应创建临时目录");
+    let existing = directory.path().join("lf.txt");
+    fs::write(&existing, "one\ntwo\n").expect("应写入 LF 文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let tool = WriteTool::new(Arc::clone(&environment));
+
+    read_before_write(&environment, "lf.txt").await;
+    tool.execute(
+        tool_context(),
+        json!({ "file_path": "lf.txt", "content": "one\ntwo\nthree\n" }),
+    )
+    .await
+    .expect("覆写 LF 文件应成功");
+    assert_eq!(
+        fs::read_to_string(&existing).expect("应读取写入结果"),
+        "one\ntwo\nthree\n"
+    );
+}
+
 /// Read 必须按一基行号分页，并把受支持图片作为图片内容返回。
 #[tokio::test]
 async fn read_supports_line_windows_and_inline_images() {
@@ -626,14 +843,18 @@ async fn read_supports_line_windows_and_inline_images() {
 }
 
 /// 默认页限制和字节限制都须提供可继续读取的位置，不丢行或重复读同一页。
+///
+/// 默认读取同时受行数上限与输出字节上限约束，哪个先生效取决于每行长度；
+/// 本测试因此不写死页大小，而是断言两页合起来恰好覆盖全部行且无重叠。
 #[tokio::test]
 async fn read_default_budget_supports_continuation() {
     let directory = tempdir().unwrap();
     let environment = Arc::new(ToolEnvironment::new(directory.path()).unwrap());
     let tool = ReadTool::new(environment);
+    let total_lines = 2_050_usize;
     fs::write(
         directory.path().join("pages.txt"),
-        (1..=350)
+        (1..=total_lines)
             .map(|line| format!("line-{line}\n"))
             .collect::<String>(),
     )
@@ -643,19 +864,41 @@ async fn read_default_budget_supports_continuation() {
         .await
         .unwrap();
     let first = output_text(&first);
-    assert!(first.contains("300→line-300"));
-    assert!(!first.contains("301→line-301"));
-    assert!(first.contains("offset=301"));
+    let first_lines = collect_line_numbers(first);
+    assert!(!first_lines.is_empty(), "默认读取必须返回内容：{first}");
+    assert!(
+        first_lines.last().copied().unwrap() < total_lines,
+        "默认读取不应一次返回整个大文件"
+    );
+    let next_offset = first_lines.last().copied().unwrap() + 1;
+    assert!(
+        first.contains(&format!("offset={next_offset}")),
+        "截断后必须给出下一页的起始行：{first}"
+    );
+
     let next = tool
         .execute(
             tool_context(),
-            json!({"file_path":"pages.txt","offset":301}),
+            json!({"file_path":"pages.txt","offset":next_offset}),
         )
         .await
         .unwrap();
     let next = output_text(&next);
-    assert!(next.contains("301→line-301") && next.contains("350→line-350"));
-    assert!(!next.contains("offset="));
+    let next_lines = collect_line_numbers(next);
+    assert_eq!(
+        next_lines.last().copied(),
+        Some(total_lines),
+        "第二页必须读到文件末尾"
+    );
+    // 两页拼接后应恰好覆盖 1..=total_lines，既不丢行也不重复。
+    let mut covered = first_lines.clone();
+    covered.extend(next_lines);
+    assert_eq!(
+        covered,
+        (1..=total_lines).collect::<Vec<_>>(),
+        "两页合起来必须无重叠、无缺口地覆盖全部行"
+    );
+    assert!(!next.contains("offset="), "读到最后不应再给续读位置");
 
     fs::write(
         directory.path().join("wide.txt"),

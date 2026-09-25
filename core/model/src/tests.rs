@@ -1145,6 +1145,185 @@ fn collector_preserves_decode_timing_and_rejects_duplicates() {
     ));
 }
 
+/// 流在终态前中断时，中断前已确认的正文与推理必须随错误返回。
+///
+/// 这些内容已经实时流给用户，丢弃它们会让界面显示的内容在持久历史中消失。
+#[test]
+fn collector_carries_partial_text_on_stream_interruption() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            message_start(),
+            ModelStreamEvent::TextDelta {
+                index: 0,
+                delta: "已经写出的正文".to_owned(),
+            },
+            ModelStreamEvent::ReasoningDelta {
+                index: 1,
+                delta: "已经写出的推理".to_owned(),
+            },
+        ])],
+    );
+
+    let error = block_on(provider.complete(user_request())).unwrap_err();
+    assert!(
+        matches!(error, ModelError::StreamInterrupted { .. }),
+        "缺少结束事件的流必须归为中断，实际为 {error:?}"
+    );
+    assert_eq!(
+        error.stream_partial_text(),
+        Some("已经写出的正文已经写出的推理"),
+        "中断错误必须携带已确认的正文与推理"
+    );
+}
+
+/// 中断发生在任何正文之前时不挂载部分文本，避免下游提交空消息。
+#[test]
+fn collector_omits_partial_text_when_nothing_was_emitted() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([message_start()])],
+    );
+
+    let error = block_on(provider.complete(user_request())).unwrap_err();
+    assert_eq!(error.stream_partial_text(), None);
+}
+
+/// 输出上限截断时残缺的工具参数被剥离：正文保留，响应不含工具块。
+///
+/// 上层的输出上限续跑臂要求截断响应不含工具调用块；报协议错误会让该臂
+/// 不可达，把已完整生成并流出的响应整条作废。
+#[test]
+fn collector_drops_truncated_tool_arguments_under_output_limit() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            message_start(),
+            ModelStreamEvent::TextDelta {
+                index: 0,
+                delta: "已写出的正文".to_owned(),
+            },
+            ModelStreamEvent::ToolCallStart {
+                index: 1,
+                id: "call-1".to_owned(),
+                name: "Read".to_owned(),
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 1,
+                id: "call-1".to_owned(),
+                delta: "{\"path\":\"README".to_owned(),
+            },
+            ModelStreamEvent::ToolCallEnd {
+                index: 1,
+                id: "call-1".to_owned(),
+            },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::MaxOutputTokens,
+            },
+        ])],
+    );
+
+    let response = block_on(provider.complete(user_request())).unwrap();
+    assert_eq!(response.stop_reason, StopReason::MaxOutputTokens);
+    assert_eq!(
+        response.content,
+        vec![ContentBlock::text("已写出的正文")],
+        "截断的工具块应被剥离，正文必须保留"
+    );
+}
+
+/// 未结束的工具块在截断类终态下同样被剥离，而不是报协议错误。
+#[test]
+fn collector_drops_unended_tool_block_under_truncated_stop() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            message_start(),
+            ModelStreamEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_owned(),
+                name: "Bash".to_owned(),
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                id: "call-1".to_owned(),
+                delta: "{\"command\":\"cargo bu".to_owned(),
+            },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::ContentFilter,
+            },
+        ])],
+    );
+
+    let response = block_on(provider.complete(user_request())).unwrap();
+    assert_eq!(response.stop_reason, StopReason::ContentFilter);
+    assert!(response.content.is_empty());
+}
+
+/// 正常结束却携带残缺参数仍是协议违例，保持 fail closed。
+#[test]
+fn collector_still_rejects_truncated_tool_arguments_on_completed_stop() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            message_start(),
+            ModelStreamEvent::ToolCallStart {
+                index: 0,
+                id: "call-1".to_owned(),
+                name: "Read".to_owned(),
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 0,
+                id: "call-1".to_owned(),
+                delta: "{\"path\":\"README".to_owned(),
+            },
+            ModelStreamEvent::ToolCallEnd {
+                index: 0,
+                id: "call-1".to_owned(),
+            },
+            ModelStreamEvent::MessageEnd {
+                stop_reason: StopReason::Completed,
+            },
+        ])],
+    );
+
+    let error = block_on(provider.complete(user_request())).unwrap_err();
+    assert!(matches!(error, ModelError::Protocol { .. }));
+    assert!(error.to_string().contains("不是有效 JSON"));
+}
+
+/// 中断前的工具调用参数可能被截断，不得作为部分正文的一部分返回。
+#[test]
+fn collector_excludes_truncated_tool_arguments_from_partial_text() {
+    let provider = ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [ScriptedReply::events([
+            message_start(),
+            ModelStreamEvent::TextDelta {
+                index: 0,
+                delta: "正文".to_owned(),
+            },
+            ModelStreamEvent::ToolCallStart {
+                index: 1,
+                id: "call-1".to_owned(),
+                name: "Read".to_owned(),
+            },
+            ModelStreamEvent::ToolCallArgumentsDelta {
+                index: 1,
+                id: "call-1".to_owned(),
+                delta: "{\"file_path\":\"半截".to_owned(),
+            },
+        ])],
+    );
+
+    let error = block_on(provider.complete(user_request())).unwrap_err();
+    assert_eq!(
+        error.stream_partial_text(),
+        Some("正文"),
+        "被截断的工具参数不能进入部分正文"
+    );
+}
+
 /// #24 主路径零拷贝：请求克隆与分段追加都复用既有消息正文分配。
 ///
 /// 构造 100 条大文本消息的历史，克隆请求并追加下一轮消息；逐条正文指针必须

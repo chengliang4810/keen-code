@@ -205,10 +205,9 @@ impl ChatCompletionsAdapter {
         output: &mut VecDeque<ModelStreamEvent>,
     ) -> Result<(), ModelError> {
         if self.ended {
-            if frame.data.trim() == "[DONE]" {
-                return Ok(());
-            }
-            return Err(protocol_error("Chat Completions 响应结束后仍收到 SSE 数据"));
+            // 排空模式：终态后的尾帧（重复 [DONE]、空保活帧、迟到数据）不再影响
+            // 已完成的响应；终态之前的真实违例仍由下方逐帧校验拒绝。
+            return Ok(());
         }
         if frame.data.trim() == "[DONE]" {
             return self.emit_message_end(output);

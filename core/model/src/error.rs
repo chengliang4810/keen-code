@@ -164,6 +164,12 @@ pub enum ModelError {
         message: String,
         /// 是否适合由上层按退避策略重新请求。
         retryable: bool,
+        /// 中断前已经确认的正文与推理文本。
+        ///
+        /// 这些内容已经实时流给用户，必须能被上层落进历史，否则界面与
+        /// 持久记录会不一致。为空表示中断发生在任何正文之前。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_text: Option<String>,
     },
     /// 远端响应无法转换为统一事件。
     #[error("模型响应协议错误：{message}")]
@@ -198,6 +204,29 @@ impl ModelError {
             | Self::StructuredOutput { .. }
             | Self::Protocol { .. }
             | Self::Cancelled { .. } => false,
+        }
+    }
+
+    /// 在流中断错误上挂载中断前已确认的正文与推理文本。
+    ///
+    /// 只对 `StreamInterrupted` 生效；其他变体原样返回，避免调用方为类型
+    /// 分支写样板代码。空文本视为未提供，保持字段为 `None`。
+    #[must_use]
+    pub fn with_partial_text(mut self, partial_text: Option<String>) -> Self {
+        if let Self::StreamInterrupted {
+            partial_text: slot, ..
+        } = &mut self
+        {
+            *slot = partial_text.filter(|text| !text.is_empty());
+        }
+        self
+    }
+
+    /// 返回流中断前已确认的正文与推理文本；无部分产出时返回 `None`。
+    pub fn stream_partial_text(&self) -> Option<&str> {
+        match self {
+            Self::StreamInterrupted { partial_text, .. } => partial_text.as_deref(),
+            _ => None,
         }
     }
 

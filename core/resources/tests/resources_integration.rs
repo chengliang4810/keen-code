@@ -14,11 +14,11 @@ use keencode_resources::{
     MAX_REPLAY_PAGE_RECORDS, MailboxMessage, MailboxMessageId, MailboxState, MemoryDocument,
     MemoryEntry, MemoryFileStore, MessagePart, MessageRole, PersistedToolResult, PlanState,
     ProviderProtocolSnapshot, ProviderSnapshot, ReasoningEffortSnapshot, RequestId, ResourceError,
-    ScopeId, SessionEvent, SessionEventId, SessionEventRecord, SessionId, SessionJournal,
-    SessionMessage, SessionOpen, SessionState, SessionStatus, SnapshotPolicy, SubAgentState,
-    SubAgentStatus, TerminalId, TerminalRecord, TodoItem, ToolCompletionStatus, ToolEffect,
-    ToolOutcome, ToolRequest, ToolResultPart, TranscriptSegment, TurnId, TurnStopReason,
-    WorktreeRecord, filesystem_capabilities, project_scope_id,
+    SESSION_EVENT_VERSION, ScopeId, SessionEvent, SessionEventId, SessionEventRecord, SessionId,
+    SessionJournal, SessionMessage, SessionOpen, SessionState, SessionStatus, SnapshotPolicy,
+    SubAgentState, SubAgentStatus, TerminalId, TerminalRecord, TodoItem, ToolCompletionStatus,
+    ToolEffect, ToolOutcome, ToolRequest, ToolResultPart, TranscriptSegment, TurnId,
+    TurnStopReason, WorktreeRecord, filesystem_capabilities, project_scope_id,
 };
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -913,38 +913,58 @@ fn newline_only_jsonl_is_reported_as_invalid_json() {
     );
 }
 
-/// 验证 v2 事件即使正文仍可反序列化，也必须按 v6 envelope 版本不匹配拒绝。
+/// 验证读端版本契约：旧版本事件被容忍（避免每次版本升级都把全部历史会话
+/// 判为损坏并从会话列表消失），只有来自更新版本应用的记录才拒绝。
 #[test]
-fn v2_event_is_reported_as_envelope_mismatch_by_v6_reader() {
+fn older_event_version_is_tolerated_and_future_version_is_rejected() {
+    let rewrite_version = |log_path: &Path, version: Value| {
+        let lines = fs::read_to_string(log_path)
+            .expect("日志应读取")
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).expect("事件应是有效 JSON"))
+            .collect::<Vec<_>>();
+        let mut lines = lines;
+        lines[1]["version"] = version;
+        let rewritten = lines
+            .iter()
+            .map(|line| serde_json::to_string(line).expect("事件应编码"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        fs::write(log_path, &rewritten).expect("版本夹具应写入");
+    };
+
     let root = TempDir::new().expect("临时目录应创建");
-    let journal = ready(root.path(), "v2-event", SnapshotPolicy::Disabled);
+    let journal = ready(root.path(), "version-tolerance", SnapshotPolicy::Disabled);
     create_session(&journal);
     journal.append(message_event(1)).expect("消息应追加");
     let log_path = journal.log_path().to_owned();
     drop(journal);
 
-    let mut lines = fs::read_to_string(&log_path)
-        .expect("日志应读取")
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).expect("事件应是有效 JSON"))
-        .collect::<Vec<_>>();
-    lines[1]["version"] = json!(2);
-    let rewritten = lines
-        .iter()
-        .map(|line| serde_json::to_string(line).expect("事件应编码"))
-        .collect::<Vec<_>>()
-        .join("\n")
-        + "\n";
-    fs::write(&log_path, &rewritten).expect("旧版事件夹具应写入");
-
+    // 旧版本事件原样可读：serde 字段兼容语义下按当前 reducer 归约。
+    rewrite_version(&log_path, json!(SESSION_EVENT_VERSION - 1));
     let opened = SessionJournal::open(
         root.path(),
-        SessionId::new("v2-event").expect("Session ID 应有效"),
+        SessionId::new("version-tolerance").expect("Session ID 应有效"),
         config(SnapshotPolicy::Disabled),
     )
-    .expect("旧版事件应返回只读损坏报告");
+    .expect("旧版本日志应可打开");
+    assert!(
+        matches!(opened, SessionOpen::Ready(_)),
+        "旧版本事件必须被读端容忍"
+    );
+    drop(opened);
+
+    // 来自更新版本应用的记录按 envelope 不匹配拒绝，保持只读损坏报告。
+    rewrite_version(&log_path, json!(SESSION_EVENT_VERSION + 1));
+    let opened = SessionJournal::open(
+        root.path(),
+        SessionId::new("version-tolerance").expect("Session ID 应有效"),
+        config(SnapshotPolicy::Disabled),
+    )
+    .expect("未来版本应返回只读损坏报告");
     let SessionOpen::Corrupt(report) = opened else {
-        panic!("旧版事件不得作为当前事件读取");
+        panic!("来自更新版本应用的记录不得作为当前事件读取");
     };
     assert_eq!(report.valid_records, 1);
     assert!(
@@ -953,7 +973,6 @@ fn v2_event_is_reported_as_envelope_mismatch_by_v6_reader() {
             .iter()
             .any(|issue| matches!(issue.kind, CorruptionKind::EnvelopeMismatch { line: 2 }))
     );
-    assert_eq!(fs::read_to_string(log_path).expect("日志应保留"), rewritten);
 }
 
 /// 验证断电式尾记录不会被截断或静默修复，只返回最后有效状态。

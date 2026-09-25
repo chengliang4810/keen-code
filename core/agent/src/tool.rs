@@ -1071,6 +1071,17 @@ pub trait AgentTool: Send + Sync {
     ///（自身失败会 abort 同批排队兄弟）。
     fn concurrency(&self) -> ToolConcurrency;
 
+    /// 按本次调用输入返回实际并发方式。
+    ///
+    /// 默认回落到 [`AgentTool::concurrency`]，即并发方式与输入无关。只有需要
+    /// 按输入区分"本次调用是否真的只读"的工具才覆盖（如 Shell：`git status`
+    /// 可并行，`rm` 必须独占）。实现必须保持 fail-closed：判定不出的输入一律
+    /// 返回 `Exclusive`，绝不能把可能写状态的调用放进并行批次。
+    fn concurrency_for(&self, input: &Value) -> Result<ToolConcurrency, ToolError> {
+        let _ = input;
+        Ok(self.concurrency())
+    }
+
     /// 返回单次执行的外层墙钟上限；`None` 表示工具自管超时或有界用户交互。
     ///
     /// 默认 120 秒兜底防止挂起的本地操作挂死整个 Turn。内部已完整管理

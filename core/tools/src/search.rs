@@ -49,7 +49,10 @@ impl AgentTool for GlobTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Glob",
-            "Find files under the specified directory while respecting Git ignore rules. pattern is relative to the search root and uses / separators; explicitly use ** to span directories. Results are sorted by path.",
+            "Find files under the specified directory while respecting Git ignore rules. pattern is relative to the search root and uses / separators; explicitly use ** to span directories. Results are sorted by path.\n\n\
+Usage:\n\
+- Search with a specific pattern such as src/**/*.rs rather than a bare * or **/*, which matches nearly everything and spends the result budget on noise.\n\
+- Use Glob to locate files by name and Grep to locate content; read the files it returns rather than inferring their contents.",
             json!({
                 "type": "object",
                 "properties": {
@@ -116,7 +119,11 @@ impl AgentTool for GrepTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Grep",
-            "Search UTF-8 text files using Rust regular expressions and Git ignore rules. Supports content, matching-file, and per-file count output modes. With multiline=true, . can match across newlines.",
+            "Search UTF-8 text files using Rust regular expressions and Git ignore rules. Supports content, matching-file, and per-file count output modes. With multiline=true, . can match across newlines.\n\n\
+Usage:\n\
+- Prefer files_with_matches or count to locate candidates cheaply, then read the file; use content with context_before/context_after only when you need the surrounding lines.\n\
+- Narrow with path or glob instead of scanning the whole workspace, and escape regex metacharacters when searching for literal text.\n\
+- Results are capped; when output is truncated, tighten the pattern rather than repeating the same search.",
             json!({
                 "type": "object",
                 "properties": {

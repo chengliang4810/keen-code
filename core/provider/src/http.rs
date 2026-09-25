@@ -200,7 +200,9 @@ fn classify_http_error_with_api_key(
     if classifier.contains("service_unavailable")
         || classifier.contains("server_error")
         || classifier.contains("temporarily unavailable")
+        || classifier.contains("overloaded")
         || classifier.contains("服务不可用")
+        || classifier.contains("过载")
     {
         return ModelError::ProviderUnavailable {
             message,
@@ -233,10 +235,11 @@ fn classify_http_error_with_api_key(
             retryable: true,
         },
         400 | 409 | 422 => ModelError::InvalidRequest { message },
-        // 500/502/503/504 与 Cloudflare 源站瞬时错误 520、521、522、523、524、
-        // 527 都表示远端源站或网关当前不可用，重试有实际收益；525/526 描述
-        // TLS 握手与证书校验失败，通常不是瞬时源站故障，维持不可重试。
-        500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 527 => {
+        // 500/502/503/504、Anthropic 过载 529 与 Cloudflare 源站瞬时错误
+        // 520、521、522、523、524、527 都表示远端源站或网关当前不可用，
+        // 重试有实际收益；525/526 描述 TLS 握手与证书校验失败，通常不是
+        // 瞬时源站故障，维持不可重试。
+        500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 527 | 529 => {
             ModelError::ProviderUnavailable {
                 message,
                 status_code: Some(status),
@@ -443,9 +446,14 @@ pub(crate) fn redact_model_error(error: ModelError, api_key: Option<&ApiKey>) ->
             message: safe_error_message(api_key, &message),
             retryable,
         },
-        ModelError::StreamInterrupted { message, retryable } => ModelError::StreamInterrupted {
+        ModelError::StreamInterrupted {
+            message,
+            retryable,
+            partial_text,
+        } => ModelError::StreamInterrupted {
             message: safe_error_message(api_key, &message),
             retryable,
+            partial_text,
         },
         ModelError::Protocol { message } => ModelError::Protocol {
             message: safe_error_message(api_key, &message),
@@ -741,7 +749,8 @@ fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        ApiKey, MAX_ERROR_INPUT_BYTES, REDACTED_SECRET, redact_api_key_bounded, safe_error_message,
+        ApiKey, MAX_ERROR_INPUT_BYTES, REDACTED_SECRET, classify_http_error,
+        classify_in_band_provider_error, redact_api_key_bounded, safe_error_message,
     };
 
     #[test]
@@ -781,5 +790,41 @@ mod tests {
         assert_eq!(redacted.len(), MAX_ERROR_INPUT_BYTES);
         assert!(redacted.ends_with(REDACTED_SECRET));
         assert!(!redacted.contains(&key));
+    }
+
+    #[test]
+    fn anthropic_overload_529_is_retryable() {
+        // 529 是 Anthropic 的过载状态码，属远端瞬时故障；误判为不可重试会让
+        // 高峰期的一次过载直接终止整个 Turn。
+        let error = classify_http_error(529, None, "overloaded".to_owned(), None);
+        assert!(
+            matches!(
+                error,
+                super::ModelError::ProviderUnavailable {
+                    status_code: Some(529),
+                    retryable: true,
+                    ..
+                }
+            ),
+            "529 必须归类为可重试的 ProviderUnavailable，实际为 {error:?}"
+        );
+    }
+
+    #[test]
+    fn in_band_overloaded_error_is_retryable_without_status() {
+        // Anthropic 也会以 HTTP 200 正文携带 overloaded_error；in-band 路径用
+        // 固定 400 调用分类器，因此关键词层必须识别 overloaded 才能保持可重试。
+        let error = classify_in_band_provider_error("Overloaded", Some("overloaded_error"));
+        assert!(
+            matches!(
+                error,
+                super::ModelError::ProviderUnavailable {
+                    status_code: None,
+                    retryable: true,
+                    ..
+                }
+            ),
+            "in-band overloaded 必须可重试且不伪造状态码，实际为 {error:?}"
+        );
     }
 }

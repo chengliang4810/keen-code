@@ -2581,6 +2581,15 @@ impl RuntimeAgentRunner {
                 return Err(RuntimeError::RecoveryRequired);
             }
             control.turn_executions.remove(turn_id.as_str());
+            drop(control);
+            // Turn 已终态：热路径收账仍未终态的工具，保证 has_active_work
+            // 与 Journal 一致（与冷恢复 recover_tool_outcomes 同语义）。
+            // 收账失败不淹没 Turn 主结果，冷恢复会再次兜底。
+            if let Err(error) =
+                recover_tool_outcomes_for_turns(&self.inner, Some(std::slice::from_ref(&turn_id)))
+            {
+                tracing::warn!(target: "keencode_diagnostics", turn_id = %turn_id.as_str(), error = %error, "热路径工具收账失败，等待冷恢复兜底");
+            }
             guard.disarm();
             return Ok(result);
         }
@@ -2590,6 +2599,13 @@ impl RuntimeAgentRunner {
             .lock()
             .map_err(|_| RuntimeError::StateUnavailable)?;
         control.turn_executions.remove(turn_id.as_str());
+        drop(control);
+        // 同上：Turn 终态后对遗留未收账工具做热路径收账。
+        if let Err(error) =
+            recover_tool_outcomes_for_turns(&self.inner, Some(std::slice::from_ref(&turn_id)))
+        {
+            tracing::warn!(target: "keencode_diagnostics", turn_id = %turn_id.as_str(), error = %error, "热路径工具收账失败，等待冷恢复兜底");
+        }
         guard.disarm();
         Ok(result)
     }
@@ -6162,12 +6178,27 @@ fn recover_terminals(inner: &RuntimeSessionInner) -> Result<(), RuntimeError> {
 
 /// 冷恢复第二步：副作用工具标记未知，其余未终态工具显式取消。
 fn recover_tool_outcomes(inner: &RuntimeSessionInner) -> Result<(), RuntimeError> {
+    recover_tool_outcomes_for_turns(inner, None)
+}
+
+/// 热路径/冷恢复共用的未终态工具收账；`turns` 限定范围，`None` 表示全部。
+///
+/// Turn 终态提交后，任何仍无 outcome 的工具（例如等待用户问答时因竞速
+/// 与 Turn 生命周期失联）都必须立即收账：否则 `has_active_work` 永真，
+/// Session 永远不是空闲态，fork/后续编排全部被拒绝。
+fn recover_tool_outcomes_for_turns(
+    inner: &RuntimeSessionInner,
+    turns: Option<&[TurnId]>,
+) -> Result<(), RuntimeError> {
     let tools = inner
         .journal
         .state()?
         .tools
         .values()
-        .filter(|tool| tool.outcome.is_none())
+        .filter(|tool| {
+            tool.outcome.is_none()
+                && turns.is_none_or(|turns| turns.contains(&tool.request.turn_id))
+        })
         .cloned()
         .collect::<Vec<_>>();
     for tool in tools {

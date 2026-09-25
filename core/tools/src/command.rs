@@ -25,6 +25,8 @@ use tokio::time::{Instant, sleep, sleep_until};
 
 use crate::background::BackgroundTaskManager;
 use crate::environment::{EnvironmentArtifactSink, ToolEnvironment, display_path, invalid_input};
+use crate::read_only;
+use crate::shell_snapshot;
 
 /// 进程退出状态轮询间隔。
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
@@ -67,7 +69,20 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Bash",
-            "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.",
+            "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.\n\n\
+Working rules:\n\
+- Quote every path and argument; never interpolate untrusted text into an executable position.\n\
+- Do not start interactive commands (editors, pagers, prompts). Pass non-interactive flags such as -y or --yes, and feed input through files or stdin instead of a terminal.\n\
+- Prefer file tools for reading and editing files, and this tool for builds, tests, version control and system commands.\n\
+- Filter or redirect noisy output so the returned preview carries evidence rather than volume. A truncated preview keeps the head and tail and saves the complete output to a file you can read.\n\
+- Set timeout_ms for commands that can legitimately run long. A command that exceeds its timeout is killed with its process tree, so raise the limit instead of retrying blindly.\n\
+- Use run_in_background only when other work can proceed while it runs; collect the result with TaskOutput before depending on it.\n\n\
+Version control safety:\n\
+- Never rewrite published history: no force push, and no rebase or commit --amend on commits that are not yours alone.\n\
+- Do not commit, push, tag or open pull requests unless the user asked for it.\n\
+- Never bypass hooks or checks with --no-verify, and never discard work with destructive commands (checkout --, reset --hard, clean -f, branch -D) unless the user explicitly asked.\n\
+- Inspect downloaded scripts before executing them.\n\
+- When a command fails, read the error and change the approach; repeat an identical invocation only when conditions have changed or the failure is demonstrably transient.",
             shell_schema(&self.environment, self.background_tasks.is_some()),
         )
     }
@@ -82,6 +97,20 @@ impl AgentTool for BashTool {
     /// Shell 命令必须形成顺序副作用屏障。
     fn concurrency(&self) -> ToolConcurrency {
         ToolConcurrency::Exclusive
+    }
+
+    /// 按命令内容判定本次调用能否与其他只读调用并发。
+    ///
+    /// `effect` 始终返回 `ChangesState`（任意命令都可能写状态，Plan 守卫依赖
+    /// 该契约）；这里只解决并发调度：能静态证明只读的命令（`git status`、
+    /// `ls`、`grep` 等）可以并行，判定不出的命令一律独占。判错方向是安全的——
+    /// 把只读误判为独占只损失并行度，反之会破坏副作用屏障。
+    fn concurrency_for(&self, input: &Value) -> Result<ToolConcurrency, ToolError> {
+        let input = parse_shell_input(input, &self.environment)?;
+        Ok(match read_only::classify_bash_command(&input.command) {
+            read_only::ReadOnlyVerdict::ReadOnly => ToolConcurrency::ParallelReadOnly,
+            read_only::ReadOnlyVerdict::Writes => ToolConcurrency::Exclusive,
+        })
     }
 
     /// 命令超时由工具内部 `command_timeout` 完整管理（默认 120 秒、可配置到 1 小时），
@@ -104,12 +133,17 @@ impl AgentTool for BashTool {
             let timeout = command_timeout(&environment, input.timeout_ms)?;
             let background_timeout = input.timeout_ms.map(Duration::from_millis);
             let summary = command_summary("Bash", input.description.as_deref())?;
+            // 首次执行时生成一次登录 Shell 快照，之后每条命令先复放它：用户
+            // 只在交互式 rc 里定义的 PATH 追加、别名与函数因此对非交互命令同样
+            // 可用。快照缺失或生成失败时按原样执行，不阻塞命令。
+            let command = shell_snapshot::wrap_command(&environment, &input.command);
             let spec = ProcessSpec {
                 label: "Bash",
                 programs: bash_candidates(),
-                args: vec![OsString::from("-lc"), OsString::from(input.command)],
+                args: vec![OsString::from("-lc"), OsString::from(command)],
                 cwd,
                 timeout,
+                max_timeout_ms: environment.limits().max_command_timeout_ms,
                 environment: Vec::new(),
             };
             if input.run_in_background {
@@ -224,6 +258,7 @@ impl AgentTool for PowerShellTool {
                 ],
                 cwd,
                 timeout,
+                max_timeout_ms: environment.limits().max_command_timeout_ms,
                 environment: Vec::new(),
             };
             if input.run_in_background {
@@ -479,6 +514,8 @@ pub(crate) struct ProcessSpec {
     pub(crate) cwd: PathBuf,
     /// 从进程启动成功开始计算的硬超时。
     pub(crate) timeout: Duration,
+    /// 当前环境允许的最大超时毫秒数；仅用于超时报告中的可执行指引。
+    pub(crate) max_timeout_ms: u64,
     /// 仅对当前子进程树生效的环境变量覆盖。
     pub(crate) environment: Vec<(OsString, OsString)>,
 }
@@ -1354,7 +1391,13 @@ fn render_process_metadata(
             Some(code) => format!("退出码 {code}"),
             None => "被操作系统信号终止".to_owned(),
         },
-        ProcessTermination::TimedOut => format!("执行超时（{} 毫秒）", spec.timeout.as_millis()),
+        ProcessTermination::TimedOut => format!(
+            "执行超时（{} 毫秒）并已终止整个进程树；若该命令确实需要更长时间，\
+             请提高 timeout_ms（上限 {} 毫秒）或改用 run_in_background 后经 TaskOutput 收集结果，\
+             不要按原参数重试",
+            spec.timeout.as_millis(),
+            spec.max_timeout_ms
+        ),
         ProcessTermination::Cancelled => "已取消并清理进程树".to_owned(),
     };
     let mut report = format!("{}：{status}", spec.label);

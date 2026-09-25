@@ -180,10 +180,9 @@ impl ResponsesAdapter {
         output: &mut VecDeque<ModelStreamEvent>,
     ) -> Result<(), ModelError> {
         if self.ended {
-            if frame.data.trim() == "[DONE]" {
-                return Ok(());
-            }
-            return Err(protocol_error("Responses 结束后仍收到 SSE 事件"));
+            // 排空模式：终态后的尾帧（[DONE]、空保活帧、迟到事件）不再影响已完成
+            // 的响应；终态之前的真实违例仍由下方逐帧校验拒绝。
+            return Ok(());
         }
         if frame.data.trim().is_empty() || frame.data.trim() == "[DONE]" {
             return Ok(());

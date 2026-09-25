@@ -1582,8 +1582,12 @@ fn validate_envelope(
     state: &SessionState,
     record: &SessionEventRecord,
 ) -> Result<(), ReductionError> {
-    if record.schema != SESSION_EVENT_SCHEMA || record.version != SESSION_EVENT_VERSION {
-        return Err(ReductionError::new("事件 schema 或 version 不受支持"));
+    // 与 journal 打开校验同一读端契约：容忍旧版本事件，只拒绝来自更新版本
+    // 应用的记录；严格相等会让每次版本升级都把全部历史会话判为损坏。
+    if record.schema != SESSION_EVENT_SCHEMA || record.version > SESSION_EVENT_VERSION {
+        return Err(ReductionError::new(
+            "事件 schema 不受支持或来自更新版本的应用",
+        ));
     }
     if record.session != state.session_id {
         return Err(ReductionError::new("事件 Session 标识不匹配"));

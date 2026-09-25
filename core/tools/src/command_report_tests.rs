@@ -13,6 +13,7 @@ fn spec(directory: &Path) -> ProcessSpec {
         args: Vec::new(),
         cwd: directory.to_path_buf(),
         timeout: Duration::from_secs(1),
+        max_timeout_ms: 3_600_000,
         environment: Vec::new(),
     }
 }

@@ -107,6 +107,10 @@ enum PendingBlock {
 }
 
 /// 消费统一模型事件流，并校验事件顺序后生成完整响应。
+///
+/// 流在协议终态前中断时返回 [`ModelError::StreamInterrupted`]；该错误通过
+/// [`ModelError::stream_partial_text`] 携带中断前已确认的正文与推理文本，
+/// 使上层能把已经流出给用户的内容落进历史，而不是静默丢弃。
 pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelResponse, ModelError> {
     let mut started = false;
     let mut ended = false;
@@ -306,15 +310,20 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
         return Err(ModelError::StreamInterrupted {
             message: "事件流在响应开始事件之前关闭".to_owned(),
             retryable: true,
+            partial_text: None,
         });
     }
     if !ended {
         return Err(ModelError::StreamInterrupted {
             message: "事件流在响应结束事件之前关闭".to_owned(),
             retryable: true,
-        });
+            partial_text: None,
+        }
+        .with_partial_text(partial_stream_text(&blocks)));
     }
 
+    let stop_reason = stop_reason.ok_or_else(|| protocol_error("响应缺少结束原因"))?;
+    let metadata = metadata.ok_or_else(|| protocol_error("响应缺少开始元数据"))?;
     let mut content = Vec::with_capacity(blocks.len());
     for (index, block) in blocks {
         let content_block = match block {
@@ -343,15 +352,31 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
                 arguments,
                 ended,
             } => {
+                let truncated_tail = stop_reason_permits_truncated_tail(&stop_reason);
                 if !ended {
+                    if truncated_tail {
+                        continue;
+                    }
                     return Err(protocol_error(format!("内容块 {index} 的工具调用未结束")));
                 }
                 let arguments = if arguments.trim().is_empty() {
                     Value::Object(Default::default())
                 } else {
-                    serde_json::from_str(&arguments).map_err(|error| {
-                        protocol_error(format!("工具调用 {id} 的参数不是有效 JSON：{error}"))
-                    })?
+                    match serde_json::from_str(&arguments) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            if truncated_tail {
+                                // 输出上限截断、内容过滤或取消时，未完成的工具参数是
+                                // 流被切断的正常产物而非协议违例。剥离该块并保留正文，
+                                // 让上层按截断语义恢复或提交部分响应；报协议错误会把
+                                // 已完整生成的响应整条作废。
+                                continue;
+                            }
+                            return Err(protocol_error(format!(
+                                "工具调用 {id} 的参数不是有效 JSON：{error}"
+                            )));
+                        }
+                    }
                 };
                 let tool_call = ToolCall::new(id, name, arguments);
                 tool_call.validate()?;
@@ -360,12 +385,42 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
         };
         content.push(content_block);
     }
-
-    let stop_reason = stop_reason.ok_or_else(|| protocol_error("响应缺少结束原因"))?;
-    let metadata = metadata.ok_or_else(|| protocol_error("响应缺少开始元数据"))?;
     let response = ModelResponse::new(metadata, content, usage, stop_reason);
     response.validate()?;
     Ok(response)
+}
+
+/// 汇总流中断前已确认的正文与推理文本。
+///
+/// 只收集文本与推理块：工具调用的参数可能被截断，续跑或记账都不安全，因此
+/// 中断的工具块不进入部分产出。全部为空时返回 `None`，避免在错误上挂载空串。
+fn partial_stream_text(blocks: &BTreeMap<u32, PendingBlock>) -> Option<String> {
+    let mut partial = String::new();
+    for block in blocks.values() {
+        match block {
+            PendingBlock::Text(text) => partial.push_str(text),
+            PendingBlock::Reasoning { text, .. } => partial.push_str(text),
+            PendingBlock::Tool { .. } => {}
+        }
+    }
+    if partial.is_empty() {
+        None
+    } else {
+        Some(partial)
+    }
+}
+
+/// 判断该结束原因下是否容忍不完整（截断）的工具调用块。
+///
+/// 输出上限截断、内容过滤与取消都可能在工具参数传输中途切断流：此时残缺
+/// 参数是流被切断的正常产物，剥离后让上层按各自语义处理（输出上限续跑臂
+/// 要求响应不含工具调用块，部分响应提交会丢弃不可回放的工具块）。正常结束
+/// 却拿到残缺参数仍是协议违例，保持 fail closed。
+fn stop_reason_permits_truncated_tail(stop_reason: &StopReason) -> bool {
+    matches!(
+        stop_reason,
+        StopReason::MaxOutputTokens | StopReason::ContentFilter | StopReason::Cancelled
+    )
 }
 
 fn require_started(started: bool) -> Result<(), ModelError> {
