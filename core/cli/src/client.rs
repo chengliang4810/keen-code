@@ -90,6 +90,13 @@ pub struct HostClientConfig {
     pub request_timeout: Duration,
     /// 是否要求 Host 在 initialize `_meta` 中回显数据根指纹。
     pub require_host_identity: bool,
+    /// 是否在 initialize 中声明表单问答能力。
+    ///
+    /// 声明后 Host 会为本次连接注册 AskUser 工具，模型可以停下来向人提问，
+    /// 非交互请求此时以退出码 6（需要用户输入）返回，等待 Desktop/Web 或
+    /// `session attach` 接管续答。关闭后 Host 不注册该工具，模型只能依据
+    /// 已有上下文自行决策，请求不会因等待输入而中断。
+    pub declare_form_capability: bool,
 }
 
 impl HostClientConfig {
@@ -106,6 +113,7 @@ impl HostClientConfig {
             connect_timeout: Duration::from_secs(3),
             request_timeout: Duration::from_secs(30),
             require_host_identity: true,
+            declare_form_capability: true,
         }
     }
 }
@@ -513,7 +521,15 @@ impl HostClient {
     }
 
     /// 执行 ACP 握手；仅验证版本与 Host 数据根身份，不携带任何 Token。
+    ///
+    /// `clientCapabilities` 按配置声明表单问答能力：未声明时 Host 不注册
+    /// AskUser 工具，非交互请求不会以「需要用户输入」中断。
     async fn initialize(&self) -> Result<(), ClientError> {
+        let client_capabilities = if self.shared.config.declare_form_capability {
+            json!({"elicitation": {"form": {}}})
+        } else {
+            json!({})
+        };
         let result = self
             .request_with_id(
                 "cli-initialize".to_owned(),
@@ -521,7 +537,7 @@ impl HostClient {
                 json!({
                     "protocolVersion": 1,
                     "clientInfo": {"name":"KeenCode CLI","version":"0.1.0"},
-                    "clientCapabilities": {"elicitation": {"form": {}}}
+                    "clientCapabilities": client_capabilities
                 }),
             )
             .await?

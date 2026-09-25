@@ -44,6 +44,19 @@ KeenCode 启动后会立即检查 GitHub Releases，并在运行期间每 30 分
 
 加入项目即授予应用及 Agent 进程按当前系统用户权限工作的能力。文件修改、命令执行和网络访问不会逐次弹出审批框，请在发送任务前确认项目目录和指令范围，并在执行后审查工具记录与 Diff。
 
+## 命令行与外部编排
+
+除桌面应用外，KeenCode 提供非交互命令行入口 `keencode`，可在终端、CI 或脚本中运行一次性任务：
+
+```sh
+keencode run --json --no-input --cwd /path/to/repo -- "检查依赖并升级有安全问题的包"
+keencode session list
+```
+
+它以 NDJSON 输出事件流，并提供稳定的退出码（`0` 成功、`1` 任务失败、`2` 参数错误、`3` Host 不可用、`4` 认证失败、`5` 取消、`6` 需要用户输入）。定时与流水线调度交给系统 cron、GitHub Actions 或 Git hook，KeenCode 本身不运行常驻调度器。`--no-input` 让模型不提问而自行决策，适合无人值守场景。
+
+完整命令参考、事件字段、退出码契约与 cron / CI / Git hook 配方见 [docs/cli-and-external-orchestration.zh-CN.md](docs/cli-and-external-orchestration.zh-CN.md)。
+
 ## 本地开发
 
 需要 Node.js 20、pnpm 10.14.0、Rust stable，以及 Tauri 2 对应平台的系统构建工具。

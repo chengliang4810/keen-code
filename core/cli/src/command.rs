@@ -140,6 +140,8 @@ pub struct HeadlessOptions {
 pub struct CliOptions {
     /// 覆盖默认数据根；没有时与 Desktop 使用相同默认规则。
     pub data_root: Option<PathBuf>,
+    /// 是否声明表单问答能力；为 false 时 Host 不注册 AskUser 工具。
+    pub declare_form_capability: bool,
     /// 解析后的子命令。
     pub command: CliCommand,
 }
@@ -152,10 +154,14 @@ where
     let mut args = args.into_iter();
     let mut data_root = None;
     let mut global_json = false;
+    // `--no-input` 影响 ACP 握手，必须在建立连接前确定，因此既可作全局参数，
+    // 也可出现在 run / session send 的位置参数中；两处归并到同一开关。
+    let mut declare_form_capability = true;
     let command_name = loop {
         let Some(value) = args.next() else {
             return Ok(CliOptions {
                 data_root,
+                declare_form_capability,
                 command: CliCommand::Help,
             });
         };
@@ -165,9 +171,11 @@ where
                 data_root = Some(PathBuf::from(path));
             }
             "--json" => global_json = true,
+            "--no-input" => declare_form_capability = false,
             "-h" | "--help" => {
                 return Ok(CliOptions {
                     data_root,
+                    declare_form_capability,
                     command: CliCommand::Help,
                 });
             }
@@ -180,17 +188,25 @@ where
     };
     let positional = args.collect::<Vec<_>>();
     let command = match command_name.as_str() {
-        "run" => parse_run(positional, global_json)?,
-        "session" => parse_session(positional, global_json)?,
+        "run" => parse_run(positional, global_json, &mut declare_form_capability)?,
+        "session" => parse_session(positional, global_json, &mut declare_form_capability)?,
         "web" => parse_web(positional, global_json)?,
         "headless" => parse_headless(positional, global_json)?,
         "help" => CliCommand::Help,
         other => return Err(CliParseError::new(format!("未知命令: {other}"))),
     };
-    Ok(CliOptions { data_root, command })
+    Ok(CliOptions {
+        data_root,
+        declare_form_capability,
+        command,
+    })
 }
 
-fn parse_run(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliParseError> {
+fn parse_run(
+    args: Vec<String>,
+    global_json: bool,
+    declare_form_capability: &mut bool,
+) -> Result<CliCommand, CliParseError> {
     let mut json = global_json;
     let mut detach = false;
     let mut session_id = None;
@@ -207,6 +223,7 @@ fn parse_run(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliPars
             "--" => literal_prompt = true,
             "--json" => json = true,
             "--detach" => detach = true,
+            "--no-input" => *declare_form_capability = false,
             "--session" => session_id = Some(required_value(&mut args, "--session")?),
             "--cwd" => cwd = Some(PathBuf::from(required_value(&mut args, "--cwd")?)),
             "-h" | "--help" => return Ok(CliCommand::Help),
@@ -228,7 +245,11 @@ fn parse_run(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliPars
     }))
 }
 
-fn parse_session(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliParseError> {
+fn parse_session(
+    args: Vec<String>,
+    global_json: bool,
+    declare_form_capability: &mut bool,
+) -> Result<CliCommand, CliParseError> {
     let mut args = args.into_iter();
     let action = args
         .next()
@@ -269,6 +290,7 @@ fn parse_session(args: Vec<String>, global_json: bool) -> Result<CliCommand, Cli
                     "--" => literal_prompt = true,
                     "--json" => json = true,
                     "--detach" => detach = true,
+                    "--no-input" => *declare_form_capability = false,
                     other if other.starts_with('-') => {
                         return Err(CliParseError::new(format!(
                             "session send 未知参数: {other}"
@@ -414,7 +436,7 @@ where
 
 /// 返回 CLI 使用说明；内容固定，便于脚本检查。
 pub fn usage() -> &'static str {
-    "用法:\n  keencode run [--json] [--detach] [--session ID] [--cwd PATH] [--] PROMPT\n  keencode session list|show|send|attach|stop ...\n  keencode web start|stop|status ...\n  keencode headless [--json]\n\n以连字符开头的 Prompt 必须放在 -- 之后。普通命令在 Host 缺失时会启动同一可执行文件的 headless Host。\n退出码: 0 成功, 1 任务失败, 2 参数错误, 3 Host 不可用, 4 认证失败, 5 取消, 6 需要用户输入\n"
+    "用法:\n  keencode run [--json] [--detach] [--no-input] [--session ID] [--cwd PATH] [--] PROMPT\n  keencode session list|show|send|attach|stop ...\n  keencode web start|stop|status ...\n  keencode headless [--json]\n\n以连字符开头的 Prompt 必须放在 -- 之后。普通命令在 Host 缺失时会启动同一可执行文件的 headless Host。\n--no-input 不声明表单问答能力：模型不会停下来提问，请求也不会以退出码 6 中断。\n退出码: 0 成功, 1 任务失败, 2 参数错误, 3 Host 不可用, 4 认证失败, 5 取消, 6 需要用户输入\n"
 }
 
 #[cfg(test)]
@@ -541,5 +563,56 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// `--no-input` 既可作全局参数也可作 run / session send 的位置参数，
+    /// 三种写法都必须归并到同一开关；缺省时保持声明表单能力。
+    #[test]
+    fn 解析no_input开关() {
+        let default = parse_args(["run".to_owned(), "任务".to_owned()]).unwrap();
+        assert!(default.declare_form_capability, "缺省必须声明表单能力");
+
+        for args in [
+            vec!["--no-input", "run", "任务"],
+            vec!["run", "--no-input", "任务"],
+            vec!["run", "--json", "--no-input", "任务"],
+        ] {
+            let options = parse_args(args.iter().map(|value| (*value).to_owned())).unwrap();
+            assert!(
+                !options.declare_form_capability,
+                "run 的 --no-input 必须关闭表单能力: {args:?}"
+            );
+        }
+
+        let send = parse_args([
+            "session".to_owned(),
+            "send".to_owned(),
+            "s1".to_owned(),
+            "--no-input".to_owned(),
+            "继续".to_owned(),
+        ])
+        .unwrap();
+        assert!(
+            !send.declare_form_capability,
+            "session send 的 --no-input 必须关闭表单能力"
+        );
+
+        // 其他子命令不接受该参数，必须按未知参数拒绝而不是静默忽略。
+        assert!(
+            parse_args([
+                "session".to_owned(),
+                "list".to_owned(),
+                "--no-input".to_owned(),
+            ])
+            .is_err()
+        );
+    }
+
+    /// 使用说明必须公布 --no-input 与全部退出码，便于脚本自检。
+    #[test]
+    fn 使用说明包含no_input与退出码() {
+        let usage = usage();
+        assert!(usage.contains("--no-input"));
+        assert!(usage.contains("退出码: 0 成功, 1 任务失败, 2 参数错误, 3 Host 不可用, 4 认证失败, 5 取消, 6 需要用户输入"));
     }
 }

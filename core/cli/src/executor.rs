@@ -154,14 +154,21 @@ pub async fn execute_command(options: CliOptions) -> Result<CliExecutionResult, 
         .ok_or_else(|| {
             CliExecutionError::new("无法确定 KeenCode 数据根目录", ExitCode::InvalidArguments)
         })?;
-    let client = connect_or_start_headless(data_root).await?;
+    let client = connect_or_start_headless(data_root, options.declare_form_capability).await?;
     execute_with_client(&client, options.command).await
 }
 
 /// 优先连接 Desktop/既有 headless；仅在本地发现或传输不可用时拉起同一版本的
 /// headless 子进程。子进程独立持有 root lease，CLI 退出后 detached 操作仍可继续。
-async fn connect_or_start_headless(data_root: PathBuf) -> Result<HostClient, CliExecutionError> {
-    let config = HostClientConfig::new(data_root.clone());
+///
+/// `declare_form_capability` 决定本次连接是否声明表单问答能力：未声明时 Host
+/// 不注册 AskUser 工具，非交互请求不会以「需要用户输入」中断。
+async fn connect_or_start_headless(
+    data_root: PathBuf,
+    declare_form_capability: bool,
+) -> Result<HostClient, CliExecutionError> {
+    let mut config = HostClientConfig::new(data_root.clone());
+    config.declare_form_capability = declare_form_capability;
     match HostClient::connect(config.clone()).await {
         Ok(client) => return Ok(client),
         Err(error)
