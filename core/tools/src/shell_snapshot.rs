@@ -84,7 +84,13 @@ fn generate_snapshot(environment: &Arc<ToolEnvironment>, path: &Path) -> std::io
     if rendered.trim().is_empty() {
         return Err(std::io::Error::other("登录 Shell 未导出任何环境"));
     }
-    std::fs::write(path, rendered)
+    // TEMP/TMP 归一为长名后随快照下发：登录 Shell 的环境块可能携带 8.3 短名，
+    // 同一临时目录的多种路径形态会让命令间的字符串级比对互相矛盾。
+    let temp = crate::environment::long_form_temp_dir()
+        .to_string_lossy()
+        .into_owned();
+    let normalized = format!("{rendered}\nexport TEMP=\"{temp}\"\nexport TMP=\"{temp}\"\n");
+    std::fs::write(path, normalized)
 }
 
 /// 用当前平台可用的登录 Shell 执行一段脚本并返回输出。
