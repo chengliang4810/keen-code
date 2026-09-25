@@ -5,6 +5,7 @@ import { localizeUiError } from "@/lib/session";
 import * as api from "@/lib/api";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import {
+  IconArchive,
   IconCopy,
   IconExternalLink,
   IconFolderPlus,
@@ -37,6 +38,7 @@ export interface SessionContextMenuProps {
   confirmForkSession: SessionAction;
   viewTrajectory: SessionAction;
   copySessionId: SessionAction;
+  archiveSession: SessionAction;
 }
 
 export function SessionContextMenu({
@@ -55,6 +57,7 @@ export function SessionContextMenu({
   confirmForkSession,
   viewTrajectory,
   copySessionId,
+  archiveSession,
 }: SessionContextMenuProps) {
   const items = useMemo<ContextMenuItem[]>(() => {
     if (menu?.kind === "project") {
@@ -118,6 +121,12 @@ export function SessionContextMenu({
           onClick: () => void viewTrajectory(session),
         },
         {
+          id: "archive",
+          label: tr("sidebar.archive"),
+          icon: <IconArchive size={16} />,
+          onClick: () => void archiveSession(session),
+        },
+        {
           id: "copy-id",
           label: tr("session.copyId"),
           icon: <IconCopy size={16} />,
@@ -128,6 +137,7 @@ export function SessionContextMenu({
 
     return [];
   }, [
+    archiveSession,
     confirmForkSession,
     copySessionId,
     canWriteProjects,

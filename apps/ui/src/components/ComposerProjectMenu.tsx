@@ -93,6 +93,9 @@ export function ComposerProjectMenu({
             <DropdownMenuRadioGroup
               value={activeProject?.id ?? ""}
               onValueChange={(projectId) => {
+                // 选择后立即收起菜单：受控 open 若不复位，残留的弹层会拦截
+                // 后续点击并把它们继续解析成项目切换。
+                setOpen(false);
                 const project = projects.find((candidate) => candidate.id === projectId);
                 if (project) onSelect(project);
               }}

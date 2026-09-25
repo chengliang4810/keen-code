@@ -648,16 +648,17 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     expect(sidebarSource).toContain("filter(([id]) => id !== project.id)");
   });
 
-  it("项目栏目默认展开、具体项目默认收起", () => {
+  it("项目栏目默认展开、具体项目默认收起，且刷新不重置用户展开状态", () => {
     const controllerSource = readSource("./hooks/useSidebarController.ts");
     const listsSource = readSource("./hooks/sidebar/useSidebarLists.ts");
 
     expect(controllerSource).toContain(
       "const [projectsOpen, setProjectsOpen] = useState(true);",
     );
-    expect(listsSource).toContain(
-      "projection.projects.map((project) => [project.id, false])",
-    );
+    // 刷新只给新项目补默认折叠态；已展开的分组必须保留，
+    // 否则每次发消息/完成回合后的 refresh 都会把侧栏分组强制收起。
+    expect(listsSource).toContain("const next = { ...previous };");
+    expect(listsSource).toContain('if (!(project.id in next)) next[project.id] = false;');
   });
 
   it("无置顶或无项目任务时不渲染对应栏目，侧栏只保留高频任务入口", () => {

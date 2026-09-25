@@ -191,7 +191,7 @@ export function MainHeader({
                 size="md"
                 className="main__new-task-button"
                 aria-label={tr("sidebar.newSession")}
-                onClick={() => void newChat(null)}
+                onClick={() => void newChat()}
               >
                 <IconNewChat size={16} />
               </Button>

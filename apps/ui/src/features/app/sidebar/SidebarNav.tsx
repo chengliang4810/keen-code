@@ -38,7 +38,7 @@ export function SidebarNav({
         variant="ghost"
         size="md"
         className="nav-new"
-        onClick={() => void newChat(null)}
+        onClick={() => void newChat()}
       >
         <span className="nav-item__icon">
           <IconNewChat size={16} />

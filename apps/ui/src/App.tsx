@@ -33,7 +33,6 @@ import { useWorktrees } from "@/hooks/useWorktrees";
 import { acpSessionApi, useSessionLifecycleActions } from "@/hooks/useSessionLifecycleActions";
 import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
-  DEFAULT_LAYOUT,
   type SidebarResizeStart,
   loadInitialLayout,
 } from "@/lib/layout";
@@ -1243,6 +1242,7 @@ export default function App() {
     navigation: { newChat, openSession },
     sidebar: {
       refreshSessions,
+      loadAllSessions,
       archiveSession,
       setExpandedProjects,
       setHistoryOpen,
@@ -1967,8 +1967,8 @@ export default function App() {
         confirmForkSession={confirmForkSession}
         viewTrajectory={viewTrajectory}
         copySessionId={copySessionId}
-      />
-      <span hidden data-layout-default={JSON.stringify(DEFAULT_LAYOUT)} /></>
+        archiveSession={(session) => archiveSession(session)}
+      /></>
       )}
       {/* 更新浮层与当前视图无关：设置页同样需要显示更新进度和安装确认。 */}
       <AppUpdateModal

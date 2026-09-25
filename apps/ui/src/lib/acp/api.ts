@@ -272,8 +272,11 @@ export async function sessionFork(args: {
   operationId: string;
 }): Promise<{ id: string }> {
   const cwd = await sessionCwd(args.sourceId);
+  // 空 mcpServers 必须省略：ACP schema 对空列表做 skip_serializing_if，
+  // 发送空数组会让往返保留校验（input_preserved）判定字段丢失而拒绝请求。
   const result = await acpRequest<{ sessionId: string }>("session/fork", {
-    sessionId: args.sourceId, cwd, mcpServers: args.mcpServers ?? [],
+    sessionId: args.sourceId, cwd,
+    ...(args.mcpServers?.length ? { mcpServers: args.mcpServers } : {}),
     _meta: {
       "keencode/operationId": args.operationId,
       ...(args.title == null ? {} : { "keencode/title": args.title }),

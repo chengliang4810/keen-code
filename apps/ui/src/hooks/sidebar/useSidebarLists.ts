@@ -189,11 +189,15 @@ export function useSidebarLists({
         }
         return null;
       });
-      setExpandedProjects(
-        Object.fromEntries(
-          projection.projects.map((project) => [project.id, false]),
-        ),
-      );
+      setExpandedProjects((previous) => {
+        // 刷新只补新项目的默认折叠态，不重置用户已展开的分组；
+        // 强制全折叠会让每次发消息/完成回合都把侧栏分组收起。
+        const next = { ...previous };
+        for (const project of projection.projects) {
+          if (!(project.id in next)) next[project.id] = false;
+        }
+        return next;
+      });
       setLocalError(null);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);

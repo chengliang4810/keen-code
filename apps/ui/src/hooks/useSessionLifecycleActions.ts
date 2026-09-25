@@ -38,6 +38,8 @@ import {
   sessionSetEffort,
   sessionSteer,
   sessionStop,
+  acpClientRespond,
+  cancelledClientResponse,
 } from "@/lib/acp/api";
 import {
   createAcpWorkspaceState,
@@ -104,6 +106,8 @@ export interface UseSessionLifecycleActionsOptions {
   };
   sidebar: {
     refreshSessions: (projectId?: string) => Promise<void>;
+    /** 全量加载（含未绑定项目的会话）；分叉副本落在源会话的 cwd 项目下。 */
+    loadAllSessions: () => Promise<void>;
     archiveSession: (session: SessionRow, archived?: boolean) => Promise<void>;
     setExpandedProjects: StateSetter<Record<string, boolean>>;
     setHistoryOpen: StateSetter<boolean>;
@@ -219,6 +223,12 @@ export function useSessionLifecycleActions({
       current.runtime.openingSessionEpochRef.current = null;
       current.runtime.contextUsageBySessionRef.current.clear();
       current.ui.setContextUsage(null);
+      // Provider 路由切换会重建整个 ACP 工作区：被丢弃的待决问答必须回发
+      // cancel 响应，与 Turn 终态路径的收口对称；否则 AskUser 工具会无限
+      // 等待（无墙钟），Turn 永久停在 tool_execution_started。
+      for (const pending of current.runtime.pendingAskUserBySessionRef.current.values()) {
+        void acpClientRespond(cancelledClientResponse(pending.rpcId)).catch(() => {});
+      }
       current.runtime.pendingAskUserBySessionRef.current.clear();
       current.ui.setPendingAskUserSessionIds(new Set());
       current.ui.setAskUser(null);
@@ -245,7 +255,9 @@ export function useSessionLifecycleActions({
         title,
         operationId: createOperationId("session-fork"),
       });
-      await current.sidebar.refreshSessions(source.projectId ?? undefined);
+      // 分叉副本可能落在数据目录（源会话未绑定项目时），按项目刷新拿不到它，
+      // 必须全量加载才能让侧栏立即出现副本条目。
+      await current.sidebar.loadAllSessions();
       const row: SessionRow = {
         id: meta.id,
         title,

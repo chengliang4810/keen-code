@@ -398,7 +398,6 @@ describe("ACP Session 标准 API 映射", () => {
       {
         sessionId: "source",
         cwd: "D:/source",
-        mcpServers: [],
         _meta: {
           "keencode/operationId": "fork-op",
           "keencode/title": "Fork title",
@@ -406,6 +405,21 @@ describe("ACP Session 标准 API 映射", () => {
       },
       "fork-op",
     );
+  });
+
+  it("空 mcpServers 时省略该字段，避免 ACP 往返校验拒绝 fork", async () => {
+    clientMocks.acpRequest
+      .mockResolvedValueOnce({
+        sessions: [{ sessionId: "source", cwd: "D:/source" }],
+      })
+      .mockResolvedValueOnce({ sessionId: "forked" });
+
+    await sessionFork({ sourceId: "source", operationId: "fork-op" });
+    const params = clientMocks.acpRequest.mock.calls.at(-1)?.[1] as Record<
+      string,
+      unknown
+    >;
+    expect(Object.hasOwn(params, "mcpServers")).toBe(false);
   });
 
   it("使用标准 session/delete，并把幂等标识留在 JSON-RPC ID", async () => {
