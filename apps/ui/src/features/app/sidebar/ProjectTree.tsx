@@ -293,11 +293,7 @@ export function ProjectTree({
                     )}
                   </span>
                   <Tip
-                    label={
-                      pathMissing
-                        ? tr("project.pathMissing", { name: project.name })
-                        : project.path
-                    }
+                    label={pathMissing ? tr("project.pathMissing", { name: project.name }) : null}
                   >
                     <span className="tree-l2__name">{project.name}</span>
                   </Tip>

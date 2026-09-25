@@ -104,6 +104,64 @@
   border-top: none;
 }
 
+/* Worktree 清理预览保留 Git 原文，同时避免长路径撑破弹窗。 */
+.modal.worktree-gc-modal {
+  min-height: 0;
+}
+
+.wt-gc {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.wt-gc__force {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  line-height: 1.4;
+}
+
+.wt-gc__preview {
+  min-width: 0;
+}
+
+.wt-gc__preview-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  font-weight: 600;
+}
+
+.wt-gc__count {
+  font-weight: 400;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.wt-gc__output {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: min(32vh, 240px);
+  overflow: auto;
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Add project: existing modal/input/button variants own visual styling. */
 .modal.add-project-modal {
   width: min(760px, 100%);
@@ -496,10 +554,8 @@
   color: var(--text-primary);
 }
 
-/* Portaled to body — escapes all overflow parents */
-.cmm__pop--portal {
-  position: fixed;
-}
+/* Appica positions the portaled menu through its Positioner. The popup itself
+   must stay in that layout; fixing it to the viewport sends it to (0, 0). */
 
 /* 模型数量过多时限制子菜单高度，并在右侧就地滚动。 */
 .cmm__model-list {
@@ -884,6 +940,32 @@
 .prov-model-add-form {
   display: grid;
   gap: 16px;
+}
+
+/* Token 数值保持原生范围校验，隐藏浏览器自带的微调按钮。 */
+.prov-model-token-input {
+  width: 100%;
+  appearance: textfield;
+}
+
+.prov-model-token-input::-webkit-inner-spin-button,
+.prov-model-token-input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.prov-model-efforts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
+}
+
+.prov-model-effort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 5rem;
+  cursor: pointer;
 }
 
 .prov-model-options {

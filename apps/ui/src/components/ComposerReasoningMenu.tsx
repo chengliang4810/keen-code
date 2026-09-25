@@ -86,7 +86,7 @@ export function ComposerReasoningMenu({
   const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
 
   const trigger = (
-      <Tip label={`${labels.reasoning}: ${currentLabel}`} disabled={open}>
+      <Tip label={`${labels.reasoning}: ${currentLabel}`}>
       <DropdownMenuTrigger render={<Button
         type="button"
         variant="ghost"

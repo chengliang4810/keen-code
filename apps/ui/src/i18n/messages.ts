@@ -723,6 +723,8 @@ const en = {
   "prov.contextWindowFor": "Context window for {model} (tokens)",
   "prov.contextWindowPh": "200000",
   "prov.supportsVision": "Vision",
+  "prov.reasoningEfforts": "Reasoning levels",
+  "prov.reasoningEffortsHint": "Preselected from the model catalog. Adjust the levels this model accepts.",
   "prov.modelPickerTitle": "Select models",
   "prov.addSelected": "Add selected ({n})",
   "prov.modelPh": "e.g. gpt-5",
@@ -760,8 +762,6 @@ const en = {
   "prov.importErr.schema":
     "The file is not a KeenCode provider export (unexpected schema).",
   "prov.importErr.empty": "The file does not contain any provider.",
-  "prov.switchedHotReload":
-    "Model provider switched.",
   "common.cancel": "Cancel",
   "common.confirm": "Confirm",
   "common.save": "Save",
@@ -2044,6 +2044,8 @@ const zh: Record<MessageKey, string> = {
   "prov.contextWindowFor": "{model} 的上下文窗口（Token）",
   "prov.contextWindowPh": "200000",
   "prov.supportsVision": "支持视觉",
+  "prov.reasoningEfforts": "推理等级（从低到高）",
+  "prov.reasoningEffortsHint": "已按模型目录预选，可手动调整模型支持的档位。",
   "prov.modelPickerTitle": "选择模型",
   "prov.addSelected": "添加已选模型（{n}）",
   "prov.modelPh": "例如 gpt-5",
@@ -2080,8 +2082,6 @@ const zh: Record<MessageKey, string> = {
   "prov.importErr.json": "文件不是有效的 JSON。",
   "prov.importErr.schema": "文件不是 KeenCode 供应商导出格式（schema 不符）。",
   "prov.importErr.empty": "文件中没有可导入的供应商。",
-  "prov.switchedHotReload":
-    "已切换模型供应商。",
   "common.cancel": "取消",
   "common.confirm": "确认",
   "common.save": "保存",

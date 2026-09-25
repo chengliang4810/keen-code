@@ -107,7 +107,7 @@ export function SidebarChrome({
           <Button
             type="button"
             variant="ghost"
-            size="md"
+            size="icon-sm"
             className="sidebar-toggle"
             aria-label={tr("main.leftPaneHide")}
             onClick={() =>
@@ -129,7 +129,7 @@ export function SidebarChrome({
             <Button
               type="button"
               variant="ghost"
-              size="md"
+              size="icon-sm"
               className="sidebar-chrome__icon-button"
               aria-label={tr("resources.browserBack")}
               disabled={!canGoBack}
@@ -142,7 +142,7 @@ export function SidebarChrome({
             <Button
               type="button"
               variant="ghost"
-              size="md"
+              size="icon-sm"
               className="sidebar-chrome__icon-button"
               aria-label={tr("resources.browserForward")}
               disabled={!canGoForward}

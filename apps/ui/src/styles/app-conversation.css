@@ -26,6 +26,11 @@
     border-radius: var(--radius-workspace-win);
   }
 
+  .platform-win .main.main--frame {
+    /* 左侧栏与右上窗口按钮从窗口顶缘起算，主栏不能再低 4px。 */
+    margin-top: 0;
+  }
+
   .platform-mac .main.main--frame {
     border-radius: var(--radius-workspace-mac);
   }
@@ -52,6 +57,10 @@
   /* 标题的收缩基于实际 header 宽度，右侧面板打开时仍保持可用空间。 */
   container-type: inline-size;
   container-name: main-header;
+}
+
+.platform-win .main__top {
+  padding-block: 0;
 }
 
 .platform-win .settings-page__chrome,
@@ -99,26 +108,11 @@
   app-region: no-drag;
 }
 
-.main__sidebar-toggle,
-.main__task-nav-button {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  padding-inline: 0;
-}
-
 .main__task-nav {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
   flex-shrink: 0;
-}
-
-.main__new-task-button {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
-  padding-inline: 0;
 }
 
 @container main-header (max-width: 760px) {
@@ -146,9 +140,6 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
   color: var(--text-secondary);
   border-radius: var(--radius-md);
   flex-shrink: 0;

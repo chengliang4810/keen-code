@@ -245,6 +245,11 @@ textarea,
 }
 
 /* Win / frameless self-drawn chrome (mac uses Overlay traffic lights) */
+.platform-win.app-shell {
+  /* Windows 标题栏与窗口按钮共用高度，三个区域的图标中心保持一致。 */
+  --titlebar-height: 32px;
+}
+
 .window-controls {
   display: none;
   align-items: stretch;
@@ -265,13 +270,19 @@ textarea,
 
 .window-controls__btn {
   width: 46px;
-  height: var(--titlebar-height, 40px);
+  height: 32px;
+  border-radius: 0;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   -webkit-app-region: no-drag;
   app-region: no-drag;
+}
+
+.window-controls__btn svg {
+  width: 12px;
+  height: 12px;
 }
 
 /*
@@ -412,9 +423,9 @@ textarea,
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 48px;
-  min-height: 48px;
-  max-height: 48px;
+  height: var(--titlebar-height, 48px);
+  min-height: var(--titlebar-height, 48px);
+  max-height: var(--titlebar-height, 48px);
   padding: 0 12px 0 16px;
   /* Traffic lights + control width — must clear red/yellow/green entirely */
   padding-left: var(--titlebar-safe-left, 96px);
@@ -459,11 +470,7 @@ textarea,
   flex-shrink: 0;
 }
 
-.sidebar-chrome__icon-button,
 .sidebar-chrome > .main__pane-toggle {
-  width: 28px;
-  min-width: 28px;
-  height: 28px;
   padding-inline: 0;
 }
 
@@ -2599,18 +2606,9 @@ textarea,
 .sidebar-toggle {
   display: inline-flex;
   align-items: center;
-  flex: 0 0 28px;
-  width: 28px;
-  min-width: 28px;
+  flex-shrink: 0;
   justify-content: center;
-  padding-inline: 0;
   color: var(--text-primary);
-  font-size: calc(18px + var(--ui-font-delta));
-  font-weight: 600;
-  white-space: nowrap;
-  line-height: calc(24px + var(--ui-font-delta));
-  /* 高度随字号增量同步，避免 20px 档位文字（24px/30px）溢出固定 24px 行盒。 */
-  height: calc(24px + var(--ui-font-delta));
 }
 
 @media (max-width: 760px) {
@@ -2629,7 +2627,11 @@ textarea,
   .settings-page__main { padding: 16px 20px 48px; }
 }
 @media (max-height: 600px) {
-  .sidebar-chrome { height: 48px; min-height: 48px; max-height: 48px; }
+  .sidebar-chrome {
+    height: var(--titlebar-height, 48px);
+    min-height: var(--titlebar-height, 48px);
+    max-height: var(--titlebar-height, 48px);
+  }
 }
 
 .ui-toggle-appearance-group {

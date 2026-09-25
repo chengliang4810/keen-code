@@ -111,7 +111,7 @@ export function ComposerWorktreeMenu({
       }
     >
       <DropdownMenu open={open} onOpenChange={setOpen} size="md">
-        <Tip label={tip} disabled={open}>
+        <Tip label={tip}>
           <DropdownMenuTrigger
           className={
             isContext

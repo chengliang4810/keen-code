@@ -123,9 +123,6 @@ export function MainHeader({
   const projectContextLabel = [activeProject?.name, currentBranch]
     .filter(Boolean)
     .join(" · ");
-  const projectContextTooltip = [activeProject?.path, currentBranch]
-    .filter(Boolean)
-    .join("\n");
 
   return (
     <div
@@ -142,7 +139,7 @@ export function MainHeader({
               <Button
                 type="button"
                 variant="ghost"
-                size="md"
+                size="icon-sm"
                 className="main__sidebar-toggle"
                 aria-label={tr("main.leftPaneShow")}
                 onClick={() =>
@@ -161,7 +158,7 @@ export function MainHeader({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="md"
+                  size="icon-sm"
                   className="main__task-nav-button"
                   aria-label={tr("resources.browserBack")}
                   disabled={!canGoBack}
@@ -174,7 +171,7 @@ export function MainHeader({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="md"
+                  size="icon-sm"
                   className="main__task-nav-button"
                   aria-label={tr("resources.browserForward")}
                   disabled={!canGoForward}
@@ -188,7 +185,7 @@ export function MainHeader({
               <Button
                 type="button"
                 variant="ghost"
-                size="md"
+                size="icon-sm"
                 className="main__new-task-button"
                 aria-label={tr("sidebar.newSession")}
                 onClick={() => void newChat()}
@@ -204,18 +201,16 @@ export function MainHeader({
             onOpenChange={setProjectMenuOpen}
             size="md"
           >
-            <Tip label={projectContextTooltip} disabled={projectMenuOpen}>
-              <DropdownMenuTrigger
+            <DropdownMenuTrigger
                 data-testid="main-project-context"
                 className="main__project-context"
                 aria-label={projectContextLabel || activeProject.path}
                 render={
-                  <Button type="button" variant="ghost" size="md" />
+                  <Button type="button" variant="ghost" size="icon-sm" />
                 }
               >
                 <IconFolder size={16} />
-              </DropdownMenuTrigger>
-            </Tip>
+            </DropdownMenuTrigger>
             <DropdownMenuContent
               className="main__project-context-popover"
               align="start"
@@ -265,7 +260,6 @@ export function MainHeader({
                           key={project.id}
                           value={project.id}
                           className="main__project-context-option"
-                          title={project.path}
                         >
                           <span className="main__project-context-option-copy">
                             <span className="main__project-context-option-name">
@@ -296,7 +290,7 @@ export function MainHeader({
                 <Button
                   type="button"
                   variant="ghost"
-                  size="icon-md"
+                  size="icon-sm"
                   className="main__title-menu"
                   onClick={(event) => openSessionMenu(event, current)}
                 >
@@ -321,7 +315,7 @@ export function MainHeader({
               ref={summaryTriggerRef}
               type="button"
               variant={summaryOpen ? "soft" : "ghost"}
-              size="icon-md"
+              size="icon-sm"
               className={
                 "chrome-btn main__pane-toggle" +
                 (summaryOpen ? " is-on" : "")
@@ -342,7 +336,7 @@ export function MainHeader({
             <Button
               type="button"
               variant={!layout.asideCollapsed ? "soft" : "ghost"}
-              size="icon-md"
+              size="icon-sm"
               className={
                 "chrome-btn main__pane-toggle" +
                 (!layout.asideCollapsed ? " is-on" : "")

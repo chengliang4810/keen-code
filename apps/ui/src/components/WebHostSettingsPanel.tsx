@@ -2,7 +2,7 @@ import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { NumberField } from "@appica/ui-react/number-field";
+import { SettingsNumberInput } from "@/components/ui/settings-number-input";
 import { Button } from "@appica/ui-react/button";
 import { Switch } from "@/components/ui/switch";
 import { IconPlay, IconRefresh, IconStop } from "@/components/icons";
@@ -187,26 +187,14 @@ export function WebHostSettingsPanel({
             {t("settings.webHost.portDesc")}
           </div>
         </div>
-        <NumberField
-          key={settings.port}
+        <SettingsNumberInput
           id="settings-web-host-port"
-          size="md"
           min={MIN_WEB_HOST_PORT}
           max={MAX_WEB_HOST_PORT}
-          step={1}
-          defaultValue={settings.port}
+          value={settings.port}
           disabled={busy !== null}
           aria-describedby="settings-web-host-port-desc"
-          onValueCommitted={(value) => {
-            if (
-              value == null ||
-              !Number.isInteger(value) ||
-              value < MIN_WEB_HOST_PORT ||
-              value > MAX_WEB_HOST_PORT ||
-              value === settings.port
-            ) return;
-            onSettingsChange({ ...settings, port: value });
-          }}
+          onCommit={(value) => onSettingsChange({ ...settings, port: value })}
         />
       </div>
       <div className="settings-row settings-row--stack">

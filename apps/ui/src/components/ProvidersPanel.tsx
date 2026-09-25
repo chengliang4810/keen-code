@@ -2,7 +2,6 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@appica/ui-react/button";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
-import { NumberField } from "@appica/ui-react/number-field";
 import { Avatar, AvatarFallback } from "@appica/ui-react/avatar";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 模型设置：管理自定义模型供应商及其模型列表。 */
@@ -58,6 +57,8 @@ type FormState = {
   maxOutputTokensDraft: string;
   /** 手动添加模型是否支持图片输入。 */
   supportsVisionDraft: boolean;
+  /** 当前模型草稿启用的推理档位；空数组表示不开放可选推理档位。 */
+  reasoningEffortsDraft: string[];
   apiKey: string;
   apiBackend: string;
   chatOutputTokenField: "max_completion_tokens" | "max_tokens";
@@ -66,6 +67,7 @@ type FormState = {
   maxOutputTokens: Record<string, number>;
   /** 每模型是否支持图片输入。 */
   supportsVision: Record<string, boolean>;
+  reasoningEfforts: Record<string, string[]>;
 };
 
 type RightMode = "empty" | "create" | "edit";
@@ -87,6 +89,7 @@ type RemoteModel = {
   contextWindow?: number | null;
   maxOutputTokens: number;
   supportsVision: boolean;
+  reasoningEfforts: string[];
 };
 
 /** 创建空白供应商表单。 */
@@ -98,13 +101,23 @@ const emptyForm = (): FormState => ({
   contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
   maxOutputTokensDraft: "128000",
   supportsVisionDraft: false,
+  reasoningEffortsDraft: [],
   apiKey: "",
   apiBackend: "responses",
   chatOutputTokenField: "max_completion_tokens",
   contextWindows: {},
   maxOutputTokens: {},
   supportsVision: {},
+  reasoningEfforts: {},
 });
+
+/** 推理档位仅开放 Agent Runtime 能解析的值，顺序同时用于 Composer 滑块。 */
+const REASONING_EFFORT_IDS = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/** 公共目录可能包含端点自定义档位；只预填当前运行时能够执行的值。 */
+function supportedReasoningEfforts(values: string[] | undefined): string[] {
+  return REASONING_EFFORT_IDS.filter((id) => values?.includes(id));
+}
 
 /** 提取供应商地址中的主机名。 */
 function hostOf(url: string): string {
@@ -187,12 +200,14 @@ export function ProvidersPanel({
       contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
       supportsVisionDraft: false,
+      reasoningEffortsDraft: [],
       apiKey: provider.apiKey ?? "",
       apiBackend: provider.apiBackend,
       chatOutputTokenField: provider.chatOutputTokenField ?? "max_completion_tokens",
       contextWindows: { ...provider.contextWindows },
       maxOutputTokens: { ...provider.maxOutputTokens },
       supportsVision: { ...provider.supportsVision },
+      reasoningEfforts: { ...provider.reasoningEfforts },
     });
     setHint(null);
     setShowKey(false);
@@ -252,7 +267,9 @@ export function ProvidersPanel({
   const draftEdited = useRef(new Set<string>());
   const [loadingMetadata, setLoadingMetadata] = useState(false);
   useEffect(() => {
-    if (!modelAddOpen || modelEditTarget || !form.modelDraft.trim()) {
+    if (!modelAddOpen || !form.modelDraft.trim() || (modelEditTarget && (
+      modelEditTarget.remote || Object.hasOwn(form.reasoningEfforts, modelEditTarget.model)
+    ))) {
       setLoadingMetadata(false);
       return;
     }
@@ -263,9 +280,10 @@ export function ProvidersPanel({
         const [item] = await api.modelMetadataGetMany([form.modelDraft.trim()]);
         if (!cancelled) setForm((current) => ({
           ...current,
-          ...(!draftEdited.current.has("context") ? { contextWindowDraft: String(effectiveContextWindow(item?.contextWindow)) } : {}),
-          ...(!draftEdited.current.has("output") ? { maxOutputTokensDraft: String(item?.maxOutputTokens ?? 128000) } : {}),
-          ...(!draftEdited.current.has("vision") ? { supportsVisionDraft: item?.supportsVision ?? false } : {}),
+          ...(!modelEditTarget && !draftEdited.current.has("context") ? { contextWindowDraft: String(effectiveContextWindow(item?.contextWindow)) } : {}),
+          ...(!modelEditTarget && !draftEdited.current.has("output") ? { maxOutputTokensDraft: String(item?.maxOutputTokens ?? 128000) } : {}),
+          ...(!modelEditTarget && !draftEdited.current.has("vision") ? { supportsVisionDraft: item?.supportsVision ?? false } : {}),
+          ...(!draftEdited.current.has("reasoning") ? { reasoningEffortsDraft: supportedReasoningEfforts(item?.reasoning?.controls.find((control) => control.type === "effort")?.values) } : {}),
         }));
       } catch {
         // 目录不可用时保留当前输入及默认输出预算。
@@ -286,12 +304,14 @@ export function ProvidersPanel({
       contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
       supportsVisionDraft: false,
+      reasoningEffortsDraft: [],
     }));
     setModelAddOpen(true);
   };
 
   const openModelEditor = (model: string, remote = false) => {
     const item = remote ? remoteModels.find((entry) => entry.id === model) : undefined;
+    draftEdited.current.clear();
     setModelEditTarget({ model, remote });
     setLoadingMetadata(false);
     setForm((current) => ({
@@ -302,6 +322,7 @@ export function ProvidersPanel({
         : String(current.contextWindows[model] ?? DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: String(remote ? item?.maxOutputTokens ?? 128000 : current.maxOutputTokens[model] ?? 128000),
       supportsVisionDraft: remote ? Boolean(item?.supportsVision) : Boolean(current.supportsVision[model]),
+      reasoningEffortsDraft: [...(remote ? item?.reasoningEfforts ?? [] : current.reasoningEfforts[model] ?? [])],
     }));
     if (remote) setModelPickerOpen(false);
     setModelAddOpen(true);
@@ -323,6 +344,7 @@ export function ProvidersPanel({
         contextWindow: Number(form.contextWindowDraft) || null,
         maxOutputTokens: Number(form.maxOutputTokensDraft),
         supportsVision: form.supportsVisionDraft,
+        reasoningEfforts: form.reasoningEffortsDraft,
       } : item));
       closeModelEditor();
       return;
@@ -339,6 +361,8 @@ export function ProvidersPanel({
         ...current.supportsVision,
         [model]: current.supportsVisionDraft,
       };
+      const reasoningEfforts = { ...current.reasoningEfforts };
+      reasoningEfforts[model] = current.reasoningEffortsDraft;
       return {
         ...current,
         models: current.models.includes(model)
@@ -348,9 +372,11 @@ export function ProvidersPanel({
         contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
       maxOutputTokensDraft: "128000",
         supportsVisionDraft: false,
+        reasoningEffortsDraft: [],
         contextWindows,
         maxOutputTokens: { ...current.maxOutputTokens, [model]: Number(current.maxOutputTokensDraft) },
         supportsVision,
+        reasoningEfforts,
       };
     });
     closeModelEditor();
@@ -366,12 +392,15 @@ export function ProvidersPanel({
       delete maxOutputTokens[model];
       const supportsVision = { ...current.supportsVision };
       delete supportsVision[model];
+      const reasoningEfforts = { ...current.reasoningEfforts };
+      delete reasoningEfforts[model];
       return {
         ...current,
         models: current.models.filter((item) => item !== model),
         contextWindows,
         maxOutputTokens,
         supportsVision,
+        reasoningEfforts,
       };
     });
   };
@@ -414,6 +443,7 @@ export function ProvidersPanel({
         contextWindows: form.contextWindows,
         maxOutputTokens: Object.fromEntries(form.models.map((model) => [model, form.maxOutputTokens[model] ?? 128000])),
         supportsVision: form.supportsVision,
+        reasoningEfforts: form.reasoningEfforts,
         createOnly: !editingId,
       });
       invalidateReadCache("providers_list");
@@ -488,6 +518,7 @@ export function ProvidersPanel({
         contextWindow: form.contextWindows[model.id] ?? effectiveContextWindow(metadata.get(model.id)?.contextWindow ?? model.contextWindow),
         maxOutputTokens: form.maxOutputTokens[model.id] ?? metadata.get(model.id)?.maxOutputTokens ?? 128000,
         supportsVision: form.supportsVision[model.id] ?? metadata.get(model.id)?.supportsVision ?? false,
+        reasoningEfforts: form.reasoningEfforts[model.id] ?? supportedReasoningEfforts(metadata.get(model.id)?.reasoning?.controls.find((control) => control.type === "effort")?.values),
       }));
       setRemoteModels(models);
       setSelectedRemoteModels(
@@ -628,11 +659,13 @@ export function ProvidersPanel({
     setForm((current) => {
       const contextWindows = { ...current.contextWindows };
       const supportsVision = { ...current.supportsVision };
+      const reasoningEfforts = { ...current.reasoningEfforts };
       const maxOutputTokens = { ...current.maxOutputTokens };
       for (const model of remoteModels.filter((item) => selectedRemoteModels.has(item.id))) {
         if (model.contextWindow) contextWindows[model.id] = model.contextWindow;
         else delete contextWindows[model.id];
         supportsVision[model.id] = model.supportsVision;
+        reasoningEfforts[model.id] = model.reasoningEfforts;
         maxOutputTokens[model.id] = model.maxOutputTokens;
       }
       return {
@@ -644,6 +677,7 @@ export function ProvidersPanel({
         contextWindows,
         maxOutputTokens,
         supportsVision,
+        reasoningEfforts,
       };
     });
 
@@ -1089,6 +1123,7 @@ export function ProvidersPanel({
                   modelDraft: event.target.value,
                   contextWindowDraft: String(DEFAULT_MODEL_CONTEXT_WINDOW),
                   supportsVisionDraft: false,
+                  reasoningEffortsDraft: [],
                   maxOutputTokensDraft: "128000",
                 }));
               }}
@@ -1099,24 +1134,26 @@ export function ProvidersPanel({
           </Field>
           <Field>
             <FieldLabel htmlFor="provider-model-context-draft">{tr("prov.contextWindow")}</FieldLabel>
-            <NumberField
-              size="md"
+            <Input
               id="provider-model-context-draft"
+              className="settings-input prov-model-token-input"
+              type="number"
               min={1024}
               max={10000000}
-              step="any"
+              step={1}
               required
-              inputProps={{ inputMode: "numeric" }}
-              value={form.contextWindowDraft ? Number(form.contextWindowDraft) : null}
-              onValueChange={(value) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: value == null ? "" : String(value) })); }}
+              inputMode="numeric"
+              value={form.contextWindowDraft}
+              onChange={(event) => { draftEdited.current.add("context"); setForm((current) => ({ ...current, contextWindowDraft: event.target.value })); }}
               placeholder={tr("prov.contextWindowPh")}
             />
           </Field>
           <Field>
             <FieldLabel htmlFor="provider-model-output-draft">{tr("prov.maxOutputTokens")}</FieldLabel>
-            <NumberField size="md" id="provider-model-output-draft" min={1} max={4294967295} step={1} required
-              value={form.maxOutputTokensDraft ? Number(form.maxOutputTokensDraft) : null}
-              onValueChange={(value) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: value == null ? "" : String(value) })); }} />
+            <Input id="provider-model-output-draft" className="settings-input prov-model-token-input" type="number"
+              min={1} max={4294967295} step={1} required inputMode="numeric"
+              value={form.maxOutputTokensDraft}
+              onChange={(event) => { draftEdited.current.add("output"); setForm((current) => ({ ...current, maxOutputTokensDraft: event.target.value })); }} />
           </Field>
           <div className="prov-model-options">
             <div className="prov-model-option">
@@ -1132,6 +1169,29 @@ export function ProvidersPanel({
               <label htmlFor="provider-model-vision-draft">{tr("prov.supportsVision")}</label>
             </div>
           </div>
+          <Field>
+            <FieldLabel>{tr("prov.reasoningEfforts")}</FieldLabel>
+            <div className="prov-model-efforts" role="group" aria-label={tr("prov.reasoningEfforts")}>
+              {REASONING_EFFORT_IDS.map((id) => (
+                <label className="prov-model-effort" key={id}>
+                  <Checkbox
+                    checked={form.reasoningEffortsDraft.includes(id)}
+                    onCheckedChange={(checked) => {
+                      draftEdited.current.add("reasoning");
+                      setForm((current) => ({
+                        ...current,
+                        reasoningEffortsDraft: checked === true
+                          ? REASONING_EFFORT_IDS.filter((entry) => entry === id || current.reasoningEffortsDraft.includes(entry))
+                          : current.reasoningEffortsDraft.filter((entry) => entry !== id),
+                      }));
+                    }}
+                  />
+                  <span>{tr(`effort.${id}`)}</span>
+                </label>
+              ))}
+            </div>
+            <FieldDescription>{tr("prov.reasoningEffortsHint")}</FieldDescription>
+          </Field>
           {/* Base UI 要求 FieldDescription 必须在 Field.Root 内；表单级提示单独包一层。 */}
           <Field>
             <FieldDescription>{modelEditTarget ? tr("prov.modelEditHint") : tr("prov.modelAddHint")}</FieldDescription>

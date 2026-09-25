@@ -224,7 +224,6 @@ export function SidebarSessionRow({
           <span className="tree-l3__archive-meta">
             <span
               className="tree-l3__archive-workspace"
-              title={project?.path ?? undefined}
             >
               {project?.name ?? tr("settings.archived.noProject")}
             </span>

@@ -4,7 +4,6 @@ import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Card } from "@/components/ui/card";
-import { NumberField } from "@appica/ui-react/number-field";
 import { Field, FieldLabel } from "@appica/ui-react/field";
 /** 设置 → 子智能体：查看内置定义并管理 KeenCode 全局定义。 */
 
@@ -531,7 +530,7 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
           </div>
           <Field className="ext-agent-create__turns">
             <FieldLabel htmlFor="agent-max-turns">{tr("agents.maxTurns")}</FieldLabel>
-            <NumberField size="md" id="agent-max-turns" min={1} value={maxTurns ? Number(maxTurns) : null} onValueChange={(value) => setMaxTurns(value == null ? "" : String(value))} />
+            <Input id="agent-max-turns" className="settings-number-input" type="number" inputMode="numeric" min={1} step={1} value={maxTurns} onChange={(event) => setMaxTurns(event.target.value)} />
           </Field>
           <Field className="ext-agent-create__description">
             <FieldLabel htmlFor="agent-description">{tr("agents.description")}</FieldLabel>

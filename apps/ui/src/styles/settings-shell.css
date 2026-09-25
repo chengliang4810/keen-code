@@ -401,3 +401,14 @@
     transition: none;
   }
 }
+
+.settings-number-input {
+  width: min(100%, 7.5rem);
+  appearance: textfield;
+}
+
+.settings-number-input::-webkit-inner-spin-button,
+.settings-number-input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}

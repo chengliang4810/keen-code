@@ -57,15 +57,15 @@ export function ComposerProjectMenu({
   const label = activeProject?.name ?? labels.pickProject;
   const activeMissing = activeProject?.pathOk === false;
   const tip = activeMissing
-    ? (labels.pathMissing
-        ? `${labels.pathMissing}: ${activeProject?.path || ""}`.trim()
-        : activeProject?.path) || labels.pickProject
-    : activeProject?.path || labels.pickProject;
+    ? labels.pathMissing || labels.pickProject
+    : labels.pickProject;
 
   return (
     <div className={`cpm cpm--context${open ? " is-open" : ""}`}>
       <DropdownMenu open={open} onOpenChange={setOpen} size="md">
-        <Tip label={tip} disabled={open}>
+        {/* 菜单打开时保持 Tip 包裹结构稳定；切换 disabled 会重建触发器，
+            导致浮层失去锚点并跳到视口左上角。 */}
+        <Tip label={tip}>
           <DropdownMenuTrigger
             ref={triggerRef}
           className={
@@ -111,11 +111,6 @@ export function ComposerProjectMenu({
                       (missing ? " cpm__item--path-missing" : "")
                     }
                       value={p.id}
-                    title={
-                      missing && labels.pathMissing
-                        ? `${labels.pathMissing}: ${p.path}`
-                        : p.path
-                    }
                   >
                     <span className="cmm__opt-main">
                       <span className="cmm__opt-title">{p.name}</span>

@@ -51,6 +51,7 @@ export function WorktreeGcModal({
       }}
       title={tr("composer.worktreeGcTitle")}
       size="md"
+      className="worktree-gc-modal"
       closeLabel={tr("common.close")}
       closeOnOverlay={!busy}
       showClose={!busy}
@@ -80,35 +81,30 @@ export function WorktreeGcModal({
     >
       <div className="wt-gc">
         <p className="wt-gc__hint">{tr("composer.worktreeGcHint")}</p>
-        <div className="wt-gc__force">
+        <label className="wt-gc__force" htmlFor="worktree-gc-force">
           <Checkbox
             id="worktree-gc-force"
             checked={force}
             disabled={busy || previewBusy}
             onCheckedChange={(checked) => setForce(checked === true)}
-            aria-labelledby="worktree-gc-force-label"
           />
-          <label htmlFor="worktree-gc-force" id="worktree-gc-force-label">
-            {tr("composer.worktreeGcForce")}
-          </label>
-        </div>
-        <div className="wt-gc__preview-head">
-          {tr("composer.worktreeGcPreview")}
-        </div>
-        {previewBusy ? (
-          <p className="wt-gc__preview-status">
-            {tr("composer.worktreeGcPreviewLoading")}
-          </p>
-        ) : preview ? (
-          <>
-            {preview.prunable.length > 0 ? (
-              <p className="wt-gc__prunable">
-                {tr("composer.worktreeGcPrunable", {
-                  n: String(preview.prunable.length),
-                })}
-              </p>
+          <span>{tr("composer.worktreeGcForce")}</span>
+        </label>
+        <section className="wt-gc__preview" aria-label={tr("composer.worktreeGcPreview")}>
+          <div className="wt-gc__preview-head">
+            <span>{tr("composer.worktreeGcPreview")}</span>
+            {preview && !previewBusy ? (
+              <span className="wt-gc__count">
+                {tr("composer.worktreeGcPrunable", { n: String(preview.prunable.length) })}
+              </span>
             ) : null}
-            {preview.output.trim() || preview.prunable.length > 0 ? (
+          </div>
+          {previewBusy ? (
+            <p className="wt-gc__preview-status">
+              {tr("composer.worktreeGcPreviewLoading")}
+            </p>
+          ) : preview ? (
+            preview.output.trim() || preview.prunable.length > 0 ? (
               <pre className="wt-gc__output" tabIndex={0}>
                 {preview.output.trim() || preview.prunable.join("\n")}
               </pre>
@@ -116,13 +112,13 @@ export function WorktreeGcModal({
               <p className="wt-gc__preview-status">
                 {tr("composer.worktreeGcPreviewEmpty")}
               </p>
-            )}
-          </>
-        ) : error ? null : (
-          <p className="wt-gc__preview-status">
-            {tr("composer.worktreeGcPreviewEmpty")}
-          </p>
-        )}
+            )
+          ) : error ? null : (
+            <p className="wt-gc__preview-status">
+              {tr("composer.worktreeGcPreviewEmpty")}
+            </p>
+          )}
+        </section>
         {error ? (
           <Alert variant="error"><AlertDescription>{error}</AlertDescription></Alert>
         ) : null}

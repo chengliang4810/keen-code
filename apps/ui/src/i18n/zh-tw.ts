@@ -691,6 +691,8 @@ export const zhTW: Record<MessageKey, string> = {
   "prov.contextWindowFor": "{model} 的上下文視窗（Token）",
   "prov.contextWindowPh": "200000",
   "prov.supportsVision": "支援視覺",
+  "prov.reasoningEfforts": "推理等級（從低到高）",
+  "prov.reasoningEffortsHint": "已按模型目錄預選，可手動調整模型支援的檔位。",
   "prov.modelPickerTitle": "選擇模型",
   "prov.addSelected": "新增已選模型（{n}）",
   "prov.modelPh": "例如 gpt-5",
@@ -727,8 +729,6 @@ export const zhTW: Record<MessageKey, string> = {
   "prov.importErr.json": "檔案不是有效的 JSON。",
   "prov.importErr.schema": "檔案不是 KeenCode 供應商匯出格式（schema 不符）。",
   "prov.importErr.empty": "檔案中沒有可匯入的供應商。",
-  "prov.switchedHotReload":
-    "已切換模型供應商。",
   "common.cancel": "取消",
   "common.confirm": "確認",
   "common.save": "儲存",

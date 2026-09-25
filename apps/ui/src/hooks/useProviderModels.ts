@@ -9,7 +9,6 @@ import {
   type SetStateAction,
 } from "react";
 import type { Locale } from "@/i18n";
-import { createT } from "@/i18n";
 import * as api from "@/lib/api";
 import { diagnosticsRecord } from "@/lib/acp/api";
 import { localizeUiError } from "@/lib/session";
@@ -42,7 +41,7 @@ export type ShowToast = (message: string, durationMs?: number) => void;
 export interface UseProviderModelsOptions {
   /** 当前工作台正在查看的会话；空值表示新会话草稿。 */
   sessionId: string | null;
-  /** 当前界面语言，用于模型切换失败提示和供应商切换提示。 */
+  /** 当前界面语言，用于供应商刷新失败提示。 */
   locale: Locale;
   showToast: ShowToast;
 }
@@ -88,7 +87,6 @@ export function useProviderModels({
   locale,
   showToast,
 }: UseProviderModelsOptions): UseProviderModelsResult {
-  const tr = useMemo(() => createT(locale), [locale]);
   /**
    * 会话模型引用 `providerId::modelId`。同一模型 ID 可能同时存在于多个供应商，
    * 只保留模型 ID 会让菜单回落成全局活跃供应商，因此这里保存完整引用。
@@ -132,8 +130,12 @@ export function useProviderModels({
     () =>
       configuredModels.map((model) => {
         const merged = applyModelMetadata(model, modelMetadataById[model.id]);
+        const customEfforts = model.reasoningEfforts;
         return {
           ...merged,
+          ...(customEfforts !== undefined
+            ? { reasoningSupported: customEfforts.length > 0, reasoningEfforts: customEfforts }
+            : {}),
           contextWindow: model.contextWindow ?? merged.contextWindow,
           supportsVision: model.supportsVision ?? merged.supportsVision,
         };
@@ -175,6 +177,7 @@ export function useProviderModels({
           contextWindow: provider.contextWindows?.[model],
           // 供应商视觉配置是权威值，模型菜单据此标注图片输入能力。
           supportsVision: provider.supportsVision[model],
+          reasoningEfforts: provider.reasoningEfforts?.[model]?.map((id) => ({ id, value: id })),
         })),
       );
       setConfiguredModels(providerModels);
@@ -249,13 +252,20 @@ export function useProviderModels({
           { id: modelId, label: modelId },
           metadata,
         );
-        const efforts = effortsForModel(model);
+        const configured = configuredModelsRef.current.find(
+          (entry) => entry.id === modelId && entry.providerId === sessionProviderId,
+        );
+        const efforts = configured?.reasoningEfforts !== undefined
+          ? configured.reasoningEfforts
+          : effortsForModel(model);
         if (efforts.length > 0) {
           setEffort((current) =>
             efforts.some((entry) => entry.id === current)
               ? current
-              : pickDefaultEffort(model),
+              : pickDefaultEffort({ ...model, reasoningEfforts: efforts }),
           );
+        } else if (configured?.reasoningEfforts !== undefined) {
+          setEffort("none");
         }
         if (
           !sessionId &&
@@ -281,7 +291,7 @@ export function useProviderModels({
     return () => {
       cancelled = true;
     };
-  }, [activeCustomModelId, activeCustomProvider?.id, modelId, sessionId]);
+  }, [activeCustomModelId, activeCustomProvider?.id, modelId, sessionId, sessionProviderId]);
 
   useEffect(() => {
     void refreshProviderRoute();
@@ -291,12 +301,11 @@ export function useProviderModels({
     void refreshProviderRoute()
       .then(() => {
         setProviderRouteRevision((revision) => revision + 1);
-        showToast(tr("prov.switchedHotReload"), 3200);
       })
       .catch((error: unknown) =>
         showToast(localizeUiError(error, locale), 4500),
       );
-  }, [locale, refreshProviderRoute, showToast, tr]);
+  }, [locale, refreshProviderRoute, showToast]);
 
   // 发送门槛保持按全局默认供应商判断：会话绑定的供应商被删除时，运行时仍会给出
   // 明确错误，比在这里静默禁用发送按钮更容易定位。

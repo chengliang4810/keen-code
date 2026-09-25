@@ -1309,6 +1309,8 @@ export interface CustomProvider {
   chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
   /** 每模型是否支持图片输入。 */
   supportsVision: Record<string, boolean>;
+  /** 每模型用户显式配置的推理强度；缺项沿用模型目录。 */
+  reasoningEfforts: Record<string, string[]>;
 }
 
 export interface ProvidersListResult {
@@ -1332,6 +1334,7 @@ export async function providersUpsert(body: {
   maxOutputTokens?: Record<string, number>;
   chatOutputTokenField?: "max_completion_tokens" | "max_tokens";
   supportsVision: Record<string, boolean>;
+  reasoningEfforts?: Record<string, string[]>;
   createOnly: boolean;
 }) {
   return invoke<ProvidersListResult>("providers_upsert", {
@@ -1345,6 +1348,7 @@ export async function providersUpsert(body: {
     maxOutputTokens: body.maxOutputTokens ?? {},
     chatOutputTokenField: body.chatOutputTokenField ?? "max_completion_tokens",
     supportsVision: body.supportsVision,
+    reasoningEfforts: body.reasoningEfforts ?? {},
     createOnly: body.createOnly,
   });
 }

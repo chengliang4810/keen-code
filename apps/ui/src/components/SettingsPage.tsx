@@ -1,12 +1,11 @@
 import { Card } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
-import { NumberField } from "@appica/ui-react/number-field";
+import { SettingsNumberInput } from "@/components/ui/settings-number-input";
 import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
 import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
 import { Slider } from "@appica/ui-react/slider";
 import {
-  isUiFontSize,
   MAX_UI_FONT_SIZE,
   MIN_UI_FONT_SIZE,
 } from "@/lib/uiFontSize";
@@ -805,26 +804,13 @@ export function SettingsPage({
                       {t("settings.backgroundAgentLimitDesc")}
                     </div>
                   </div>
-                  <NumberField
-                    key={backgroundAgentLimit}
-                    size="md"
+                  <SettingsNumberInput
                     min={MIN_BACKGROUND_AGENT_LIMIT}
                     max={MAX_BACKGROUND_AGENT_LIMIT}
-                    step={1}
-                    defaultValue={backgroundAgentLimit}
+                    value={backgroundAgentLimit}
                     aria-label={t("settings.backgroundAgentLimit")}
                     aria-describedby="settings-background-agent-limit-desc"
-                    onValueCommitted={(value) => {
-                      if (
-                        value == null ||
-                        !Number.isInteger(value) ||
-                        value < MIN_BACKGROUND_AGENT_LIMIT ||
-                        value > MAX_BACKGROUND_AGENT_LIMIT
-                      ) return;
-                      if (value !== backgroundAgentLimit) {
-                        onBackgroundAgentLimit(value);
-                      }
-                    }}
+                    onCommit={onBackgroundAgentLimit}
                   />
                 </div>
                 <div
@@ -1124,20 +1110,14 @@ export function SettingsPage({
                     {t("settings.uiFontSizeDesc")}
                   </div>
                 </div>
-                <NumberField
-                  key={uiFontSize}
+                <SettingsNumberInput
                   id="settings-ui-font-size"
-                  size="md"
                   min={MIN_UI_FONT_SIZE}
                   max={MAX_UI_FONT_SIZE}
-                  step={1}
-                  defaultValue={uiFontSize}
+                  value={uiFontSize}
                   aria-label={t("settings.uiFontSize")}
                   aria-describedby="settings-ui-font-size-desc"
-                  onValueCommitted={(value) => {
-                    if (value == null || !isUiFontSize(value)) return;
-                    if (value !== uiFontSize) onUiFontSize(value);
-                  }}
+                  onCommit={onUiFontSize}
                 />
               </div>
               <div
