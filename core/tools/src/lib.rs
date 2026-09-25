@@ -41,7 +41,9 @@ pub use deferred::{
     DeferredToolCatalog, DeferredToolCatalogError, ExecuteExtraTool, SearchExtraTools,
     register_deferred_tools,
 };
-pub use environment::{FileMutationRecorder, PreparedFileMutation, ToolEnvironment, ToolLimits};
+pub use environment::{
+    FileMutationRecorder, PreparedFileMutation, ToolEnvironment, ToolLimits, long_form_temp_dir,
+};
 pub use filesystem::{EditTool, ReadTool, WriteTool};
 pub use lsp::{
     LspDiagnostic, LspDiagnosticCode, LspPreparationReport, LspRuntime, LspRuntimeError,

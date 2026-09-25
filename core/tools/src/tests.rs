@@ -17,8 +17,8 @@ use tempfile::tempdir;
 
 use crate::{
     BoundedCommandRequest, EditTool, FileMutationRecorder, GlobTool, GrepTool,
-    PreparedFileMutation, ReadTool, ToolEnvironment, ToolLimits, WriteTool, register_local_tools,
-    run_bounded_command,
+    PreparedFileMutation, ReadTool, ToolEnvironment, ToolLimits, WriteTool, long_form_temp_dir,
+    register_local_tools, run_bounded_command,
 };
 
 #[cfg(not(windows))]
@@ -2063,4 +2063,166 @@ fn environment_artifact_sink_saves_full_output_with_sanitized_prefix() {
         blocked_sink.save_output("Read", "内容").is_err(),
         "不可写目录应回传错误"
     );
+}
+
+/// 工作区白名单守卫：工作目录内读写自由，工作区外 Read/Write/Edit 一律拒绝，
+/// 长名临时目录豁免（离树草稿的合法落点）。
+#[tokio::test]
+async fn workspace_guard_confines_file_tools() {
+    let workspace = tempdir().expect("应创建工作区");
+    // "外部"目录必须真正落在守卫允许根之外：不能放在 %TEMP% 下（临时目录本身豁免）。
+    let outside = std::env::current_dir()
+        .expect("应取得进程工作目录")
+        .join(format!("guard-outside-{}", std::process::id()));
+    std::fs::create_dir_all(&outside).expect("应创建外部目录");
+    std::fs::write(workspace.path().join("inside.txt"), "inside").expect("应写入");
+    std::fs::write(outside.join("secret.txt"), "secret").expect("应写入外部文件");
+
+    let environment = Arc::new(
+        ToolEnvironment::new(workspace.path())
+            .expect("工具环境应有效")
+            .with_workspace_guard(),
+    );
+    let context = tool_context();
+
+    let inside_read = ReadTool::new(Arc::clone(&environment))
+        .execute(context.clone(), json!({ "file_path": "inside.txt" }))
+        .await
+        .expect("工作区内读取应放行");
+    assert!(output_text(&inside_read).contains("inside"));
+
+    let outside_read = ReadTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "file_path": outside.join("secret.txt")
+            }),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("工作区外读取应被拒绝"));
+    assert_eq!(outside_read.code, "path_outside_workspace");
+
+    let outside_write = WriteTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "file_path": outside.join("secret.txt"),
+                "content": "tamper"
+            }),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("工作区外写入应被拒绝"));
+    assert_eq!(outside_write.code, "path_outside_workspace");
+
+    let outside_edit = crate::EditTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "file_path": outside.join("secret.txt"),
+                "old_string": "secret",
+                "new_string": "tamper"
+            }),
+        )
+        .await
+        .err()
+        .unwrap_or_else(|| panic!("工作区外编辑应被拒绝"));
+    assert_eq!(outside_edit.code, "path_outside_workspace");
+
+    // 长名临时目录豁免：离树草稿（变异验证等）是合法落点。
+    let scratch = long_form_temp_dir().join("keencode-guard-scratch");
+    std::fs::create_dir_all(&scratch).expect("应创建临时草稿目录");
+    let scratch_write = WriteTool::new(Arc::clone(&environment))
+        .execute(
+            context,
+            json!({
+                "file_path": scratch.join("probe.txt"),
+                "content": "scratch"
+            }),
+        )
+        .await
+        .expect("临时目录写入应放行");
+    assert!(
+        output_text(&scratch_write).contains("写入")
+            || output_text(&scratch_write).contains("scratch")
+    );
+    let _ = std::fs::remove_dir_all(&scratch);
+    let _ = std::fs::remove_dir_all(&outside);
+}
+
+/// 守卫关闭（默认）时保持既有行为：工作区外路径不拦截。
+#[tokio::test]
+async fn workspace_guard_off_keeps_legacy_access() {
+    let workspace = tempdir().expect("应创建工作区");
+    let outside = tempdir().expect("应创建工作区外目录");
+    std::fs::write(outside.path().join("secret.txt"), "secret").expect("应写入外部文件");
+    let environment = Arc::new(ToolEnvironment::new(workspace.path()).expect("工具环境应有效"));
+    let output = ReadTool::new(environment)
+        .execute(
+            tool_context(),
+            json!({
+                "file_path": outside.path().join("secret.txt")
+            }),
+        )
+        .await
+        .expect("守卫关闭时外部读取应放行");
+    assert!(output_text(&output).contains("secret"));
+}
+
+/// 命令边界检查：POSIX 挂载、~、盘符绝对路径的工作区外引用被拒，
+/// 相对路径、工作区内绝对路径与临时目录豁免放行。
+#[test]
+fn command_boundary_rejects_out_of_workspace_path_tokens() {
+    let workspace = tempdir().expect("应创建工作区");
+    let environment = ToolEnvironment::new(workspace.path())
+        .expect("工具环境应有效")
+        .with_workspace_guard();
+
+    let drive = workspace.path().to_string_lossy()[..2].to_string();
+    let ps_case = format!(r"Get-ChildItem '{}\elsewhere'", drive);
+    let inside_case = format!("cat \"{}/inside.txt\"", workspace.path().to_string_lossy());
+    let cases = [
+        (
+            "ls \"D:/projects/harness-bench/fixtures/imported-qihoo\"",
+            true,
+        ),
+        ("cat ~/.hb-oracle/qi-006/ground_truth.json", true),
+        (ps_case.as_str(), true),
+        ("type /d/elsewhere/file.txt", true),
+        ("python -m pytest tests", false),
+        ("cat inside.txt", false),
+        ("grep -rn pattern .", false),
+        (inside_case.as_str(), false),
+        (
+            "python -c \"import tempfile;print(tempfile.gettempdir())\"",
+            false,
+        ),
+    ];
+    for (command, should_reject) in cases {
+        let result = environment.check_command_boundary(command);
+        assert_eq!(
+            result.is_err(),
+            should_reject,
+            "command {command:?} rejection mismatch: {result:?}"
+        );
+    }
+}
+
+/// 守卫开启时 `cd ..` 逃逸与 POSIX /tmp 映射语义。
+#[test]
+fn command_boundary_maps_posix_forms() {
+    let workspace = tempdir().expect("应创建工作区");
+    let environment = ToolEnvironment::new(workspace.path())
+        .expect("工具环境应有效")
+        .with_workspace_guard();
+    // /tmp 映射到长名临时目录，豁免。
+    assert!(
+        environment
+            .check_command_boundary("cd /tmp && ./probe")
+            .is_ok()
+    );
+    // `cd ..` 逃出工作目录后落在豁免的临时根内（放行），再上一层即越界，拒绝。
+    assert!(environment.check_command_boundary("cd ..").is_ok());
+    assert!(environment.check_command_boundary("cd ../..").is_err());
 }

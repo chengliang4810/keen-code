@@ -338,6 +338,7 @@ fn execute_glob(
 ) -> Result<ToolOutput, ToolError> {
     ensure_not_cancelled(cancellation)?;
     let root = environment.resolve_path(&input.path)?;
+    environment.check_workspace_path(&root)?;
     if !root.is_dir() {
         return Err(ToolError::permanent(
             "not_a_directory",
@@ -399,6 +400,7 @@ fn execute_grep(
 ) -> Result<ToolOutput, ToolError> {
     ensure_not_cancelled(cancellation)?;
     let root = environment.resolve_path(&input.path)?;
+    environment.check_workspace_path(&root)?;
     let metadata = fs::metadata(&root).map_err(|error| {
         ToolError::permanent(
             "search_path_failed",

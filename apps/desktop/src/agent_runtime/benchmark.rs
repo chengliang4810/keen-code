@@ -42,6 +42,9 @@ struct Request {
     #[serde(default)]
     chat_output_token_field: keencode_provider::ChatOutputTokenField,
     tool_allowlist: Option<Vec<String>>,
+    /// 工作区白名单守卫：开启后文件工具与命令的路径一律限定在工作目录内。
+    #[serde(default)]
+    workspace_guard: bool,
     timeout_ms: u64,
     context_window_tokens: Option<u64>,
     max_output_tokens: Option<u32>,
@@ -94,6 +97,7 @@ pub async fn run() -> anyhow::Result<()> {
         supports_vision: [(model.clone(), request.supports_vision)]
             .into_iter()
             .collect(),
+        reasoning_efforts: Default::default(),
         max_output_tokens: [(model.clone(), max_output_tokens)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();
@@ -113,6 +117,7 @@ pub async fn run() -> anyhow::Result<()> {
     )?)));
     let mut runtime = AgentRuntime::new_with_registry(&request.storage, emitter, registry)?;
     runtime.benchmark_tool_allowlist = request.tool_allowlist;
+    runtime.benchmark_workspace_guard = request.workspace_guard;
     let runtime = Arc::new(runtime);
     let acp_request_path = request.storage.join("acp-requests.jsonl");
     let acp = crate::acp_host::benchmark::BenchmarkAcpHost::new(

@@ -332,6 +332,7 @@ fn read_file(
 ) -> Result<ToolOutput, ToolError> {
     ensure_not_cancelled(cancellation)?;
     let path = environment.resolve_path(&input.file_path)?;
+    environment.check_workspace_path(&path)?;
     let metadata =
         fs::metadata(&path).map_err(|error| io_error("read_metadata_failed", &path, error))?;
     if !metadata.is_file() {
@@ -808,6 +809,7 @@ fn edit_file(
     ensure_not_cancelled(cancellation)?;
     let path = environment.resolve_path(&input.file_path)?;
     reject_symbolic_link(&path)?;
+    environment.check_workspace_path(&path)?;
     let metadata =
         fs::metadata(&path).map_err(|error| io_error("read_metadata_failed", &path, error))?;
     if !metadata.is_file() {
@@ -920,6 +922,7 @@ fn write_file(
     ensure_not_cancelled(cancellation)?;
     let path = environment.resolve_path(&input.file_path)?;
     reject_symbolic_link(&path)?;
+    environment.check_workspace_path(&path)?;
     let existing = match fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => Some(metadata),
         Ok(_) => {

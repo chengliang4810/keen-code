@@ -130,6 +130,8 @@ Version control safety:\n\
         Box::pin(async move {
             let input = parse_shell_input(&input, &environment)?;
             let cwd = resolve_command_cwd(&environment, input.cwd.as_deref())?;
+            environment.check_workspace_path(&cwd)?;
+            environment.check_command_boundary(&input.command)?;
             let timeout = command_timeout(&environment, input.timeout_ms)?;
             let background_timeout = input.timeout_ms.map(Duration::from_millis);
             let summary = command_summary("Bash", input.description.as_deref())?;
@@ -242,6 +244,8 @@ impl AgentTool for PowerShellTool {
         Box::pin(async move {
             let input = parse_shell_input(&input, &environment)?;
             let cwd = resolve_command_cwd(&environment, input.cwd.as_deref())?;
+            environment.check_workspace_path(&cwd)?;
+            environment.check_command_boundary(&input.command)?;
             let timeout = command_timeout(&environment, input.timeout_ms)?;
             let background_timeout = input.timeout_ms.map(Duration::from_millis);
             let summary = command_summary("PowerShell", input.description.as_deref())?;
@@ -866,6 +870,9 @@ fn spawn_bounded_group(request: &BoundedCommandRequest) -> io::Result<ProcessGro
     for (name, value) in &request.environment {
         command.env(name, value);
     }
+    for (name, value) in crate::environment::shell_temp_env_overrides() {
+        command.env(name, value);
+    }
     crate::path_overlay::apply_to_tokio_command(&mut command);
     spawn_group_command(command)
 }
@@ -1034,6 +1041,9 @@ pub(crate) fn spawn_group(program: &OsString, spec: &ProcessSpec) -> io::Result<
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     for (name, value) in &spec.environment {
+        command.env(name, value);
+    }
+    for (name, value) in crate::environment::shell_temp_env_overrides() {
         command.env(name, value);
     }
     crate::path_overlay::apply_to_tokio_command(&mut command);

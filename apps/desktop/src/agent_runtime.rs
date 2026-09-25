@@ -4516,6 +4516,9 @@ pub struct AgentRuntime {
     /// 仅评测根 Agent 使用；子 Agent 沿用已冻结的父工具快照。
     #[cfg(feature = "benchmark")]
     benchmark_tool_allowlist: Option<Vec<String>>,
+    /// 仅评测使用：工作区白名单守卫，开启后文件与命令路径限定在工作目录内。
+    #[cfg(feature = "benchmark")]
+    benchmark_workspace_guard: bool,
     /// 每个已连接 Session 当前唯一的桌面投递世代。
     deliveries: Mutex<HashMap<String, SessionDeliverySender>>,
     /// 每个 Session 串行化投递世代替换和关闭，避免旧泵仍在运行时发布新泵。
@@ -4809,6 +4812,8 @@ impl AgentRuntime {
             storage_root,
             #[cfg(feature = "benchmark")]
             benchmark_tool_allowlist: None,
+            #[cfg(feature = "benchmark")]
+            benchmark_workspace_guard: false,
             deliveries: Mutex::new(HashMap::new()),
             delivery_reset_gates: Mutex::new(HashMap::new()),
             live_pumps: Mutex::new(HashMap::new()),
@@ -6313,6 +6318,10 @@ impl AgentRuntime {
             .join("tool-output");
         // 首个会话构建环境前有界等待后台 PATH 捕获收尾；超时不阻塞会话创建。
         crate::shell_env::wait_for_capture_applied(Duration::from_secs(4));
+        #[cfg(feature = "benchmark")]
+        let benchmark_workspace_guard = self.benchmark_workspace_guard;
+        #[cfg(not(feature = "benchmark"))]
+        let benchmark_workspace_guard = false;
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
                 .and_then(|environment| {
@@ -6322,6 +6331,13 @@ impl AgentRuntime {
                     environment.with_file_mutation_recorder(Arc::new(
                         file_changes::RuntimeFileMutationRecorder::new(execution.session.clone()),
                     ))
+                })
+                .map(|environment| {
+                    if benchmark_workspace_guard {
+                        environment.with_workspace_guard()
+                    } else {
+                        environment
+                    }
                 })
                 .map_err(|error| runtime_operation_failed(error))?,
         );
