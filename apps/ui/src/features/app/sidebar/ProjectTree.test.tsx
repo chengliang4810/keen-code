@@ -69,6 +69,7 @@ describe("ProjectTree project write capability", () => {
     expect(html).not.toContain("sidebar.addProject");
     expect(html).not.toContain("sidebar.menu");
     expect(html).not.toContain("sidebar.relocateProject");
+    expect(html).not.toContain(project.path);
   });
 
   it("Desktop 仍显示项目写入口", () => {

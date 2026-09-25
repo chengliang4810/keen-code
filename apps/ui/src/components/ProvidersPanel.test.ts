@@ -57,6 +57,28 @@ describe("ProvidersPanel 添加模型弹窗", () => {
     expect(modal).not.toContain("providersUpsert");
     expect(modal).toContain("onClick={closeModelEditor}");
   });
+
+  it("模型 Token 输入占满表单行且不显示微调按钮", () => {
+    const modal = source.slice(source.indexOf("open={modelAddOpen}"), source.indexOf("open={modelPickerOpen}"));
+    expect(modal).toContain('className="settings-input prov-model-token-input" type="number"');
+    expect(modal).toContain('id="provider-model-context-draft"');
+    expect(modal).toContain('id="provider-model-output-draft"');
+    expect(modal).not.toContain("<NumberField");
+    expect(styles).toMatch(/\.prov-model-token-input\s*\{[^}]*width:\s*100%;/s);
+    expect(styles).toContain(".prov-model-token-input::-webkit-inner-spin-button");
+  });
+
+  it("模型推理档位可按模型编辑并随供应商配置保存", () => {
+    const modal = source.slice(source.indexOf("open={modelAddOpen}"), source.indexOf("open={modelPickerOpen}"));
+    expect(modal).toContain("REASONING_EFFORT_IDS.map");
+    expect(modal.indexOf('id="provider-model-vision-draft"')).toBeLessThan(modal.indexOf("REASONING_EFFORT_IDS.map"));
+    expect(modal).toContain("form.reasoningEffortsDraft.includes(id)");
+    expect(source).toContain("reasoningEfforts: form.reasoningEfforts");
+    expect(source).toContain("reasoningEffortsDraft: [...(remote ?");
+    expect(source).toContain("reasoningEfforts[model] = current.reasoningEffortsDraft");
+    expect(source).toContain("reasoningEfforts[model.id] = model.reasoningEfforts");
+    expect(source).toContain("supportedReasoningEfforts(item?.reasoning?.controls");
+  });
 });
 
 describe("ProvidersPanel 消息格式 Select 契约", () => {

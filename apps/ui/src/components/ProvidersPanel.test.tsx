@@ -43,6 +43,7 @@ describe("供应商 API Key 本地持久化契约", () => {
         maxOutputTokens: { model: 128000 },
         chatOutputTokenField: "max_completion_tokens",
         supportsVision: { model: false },
+        reasoningEfforts: {},
         createOnly: true,
       },
       undefined,

@@ -106,6 +106,35 @@ describe("App ACP elicitation 契约", () => {
   });
 });
 
+describe("Windows 标题栏与项目菜单定位契约", () => {
+  it("项目弹层留在 Appica Positioner 内，由组件定位而非固定到视口", () => {
+    const css = readSource("./styles/app-resource.css");
+    const menu = readSource("./components/ComposerProjectMenu.tsx");
+    expect(css).not.toMatch(/\.cmm__pop--portal\s*\{[^}]*position:\s*fixed/s);
+    expect(menu).toContain("<Tip label={tip}>");
+    expect(menu).not.toContain("disabled={open}");
+    expect(menu).not.toContain("activeProject?.path || labels.pickProject");
+    expect(menu).not.toContain("title={p.path}");
+  });
+
+  it("worktree 弹层打开时保持触发器锚点稳定", () => {
+    const menu = readSource("./components/ComposerWorktreeMenu.tsx");
+    expect(menu).toContain("<Tip label={tip}>");
+    expect(menu).not.toContain("disabled={open}");
+  });
+
+  it("Windows 窗口按钮沿用系统标题按钮的点击区域", () => {
+    const css = readSource("./styles/app-foundation.css");
+    const header = readSource("./styles/app-conversation.css");
+    expect(css).toMatch(/\.window-controls__btn\s*\{[^}]*width:\s*46px;[^}]*height:\s*32px;/s);
+    expect(css).toMatch(/\.window-controls__btn svg\s*\{[^}]*width:\s*12px;[^}]*height:\s*12px;/s);
+    expect(css).toMatch(/\.platform-win\.app-shell\s*\{[^}]*--titlebar-height:\s*32px;/s);
+    expect(css).toMatch(/\.sidebar-chrome\s*\{[^}]*height:\s*var\(--titlebar-height, 48px\);/s);
+    expect(header).toMatch(/\.platform-win \.main__top\s*\{[^}]*padding-block:\s*0;/s);
+    expect(header).toMatch(/\.platform-win \.main\.main--frame\s*\{[^}]*margin-top:\s*0;/s);
+  });
+});
+
 describe("App ACP 投递契约", () => {
   it("仅监听统一投递事件并用严格解析与共享 Reducer 处理", () => {
     const eventSource = readSource("./hooks/acp-runtime/events.ts");

@@ -8,6 +8,11 @@ const foundationCss = readSource(
 const source = readFileSync(new URL("./SidebarSessionRow.tsx", import.meta.url), "utf8");
 
 describe("SidebarSessionRow metadata and actions", () => {
+  it("归档项目名不通过原生 title 暴露完整路径", () => {
+    expect(source).toContain('className="tree-l3__archive-workspace"');
+    expect(source).not.toContain("title={project?.path ?? undefined}");
+  });
+
   it("状态固定在左侧 leading 槽，待回答 badge 保留在标题行", () => {
     expect(source).toContain('className="tree-l3__leading tree-l3__kind"');
     expect(source).toContain('className="tree-l3__trailing"');

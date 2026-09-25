@@ -36,8 +36,8 @@ describe("SidebarChrome task navigation", () => {
     expect(html).toContain('aria-label="resources.browserForward"');
     expect(html).toContain("disabled");
     expect(html).not.toContain('aria-label="sidebar.newSession"');
-    // 折叠开关与后退/前进三个按钮统一渲染官方 Appica md 几何（h-10）。
-    expect((html.match(/h-10/g) ?? []).length).toBe(3);
+    // 折叠开关与后退/前进共用官方紧凑图标按钮几何。
+    expect((html.match(/size-8 rounded-sm/g) ?? []).length).toBe(3);
   });
 
   it("enables both task controls when the history has both directions", () => {

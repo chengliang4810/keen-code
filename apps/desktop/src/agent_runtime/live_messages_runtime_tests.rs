@@ -150,6 +150,7 @@ async fn live_messages_desktop_lifecycle() {
         api_key: Some(p["apiKey"].as_str().unwrap().into()),
         context_windows: Default::default(),
         supports_vision: [(model.clone(), true)].into_iter().collect(),
+        reasoning_efforts: Default::default(),
         max_output_tokens: [(model.clone(), 8192)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();

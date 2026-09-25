@@ -64,6 +64,8 @@ describe("ComposerReasoningMenu", () => {
     );
 
     expect(source).toContain("<EffortSlider");
+    expect(source).toContain('<Tip label={`${labels.reasoning}: ${currentLabel}`}>');
+    expect(source).not.toContain("disabled={open}");
     expect(source).not.toContain("<Slider ");
     expect(source).toContain("fast={ultra}");
     expect(source).toContain('variant={ultra ? "primary" : "ghost"}');

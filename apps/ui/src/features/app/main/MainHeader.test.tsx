@@ -82,13 +82,15 @@ describe("MainHeader workspace context", () => {
     const source = readSource(new URL("./MainHeader.tsx", import.meta.url));
 
     expect(html).toContain('data-testid="main-project-context"');
-    // 上下文触发器统一渲染官方 Appica md 几何（h-10）。
-    expect(html).toContain("h-10");
+    // 项目触发器与标题栏其他图标按钮共用官方紧凑几何。
+    expect(html).toContain("size-8 rounded-sm");
     expect(html).toContain('aria-label="KeenCode · feat/header-context"');
     // Appica renders DropdownMenuContent in a client portal, so SSR omits the
     // menu body. Keep a source contract for the actual browser-rendered body.
     expect(source).toContain("main__project-context-path");
     expect(source).toContain("{activeProject.path}");
+    expect(source).not.toContain("projectContextTooltip");
+    expect(source).not.toContain("title={project.path}");
     expect(source).toContain("currentBranch");
     expect(source).toContain("DropdownMenuRadioGroup");
     expect(source).toContain("{project.name}");

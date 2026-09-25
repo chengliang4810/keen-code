@@ -86,10 +86,12 @@ describe("SettingsPage 主题选项排版", () => {
 });
 
 describe("SettingsPage 控件尺寸契约", () => {
-  it("设置页开关和数字输入统一使用中号尺寸", () => {
+  it("设置页开关保持中号，数字输入不使用步进控件", () => {
     expect(source).not.toContain('size="sm"');
     expect(source).toMatch(/<Switch[\s\S]*?size="md"/);
-    expect(source).toMatch(/<NumberField[\s\S]*?size="md"/);
+    expect(source).toContain("<SettingsNumberInput");
+    expect(source).not.toContain("<NumberField");
+    expect(shellStyles).toContain(".settings-number-input::-webkit-inner-spin-button");
   });
 });
 
@@ -121,10 +123,10 @@ describe("SettingsPage 后台任务并发契约", () => {
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(limitSource).toContain("<NumberField");
+    expect(limitSource).toContain("<SettingsNumberInput");
     expect(limitSource).toContain("min={MIN_BACKGROUND_AGENT_LIMIT}");
     expect(limitSource).toContain("max={MAX_BACKGROUND_AGENT_LIMIT}");
-    expect(limitSource).toContain("onBackgroundAgentLimit(value)");
+    expect(limitSource).toContain("onCommit={onBackgroundAgentLimit}");
   });
 });
 
@@ -238,7 +240,7 @@ describe("SettingsPage 界面字号契约", () => {
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(fontSizeSource).toContain("<NumberField");
+    expect(fontSizeSource).toContain("<SettingsNumberInput");
     expect(fontSizeSource).not.toMatch(/<input(?:\s|>)/);
     expect(fontSizeSource).toContain('id="settings-ui-font-size"');
     expect(fontSizeSource).toContain('htmlFor="settings-ui-font-size"');
@@ -247,9 +249,7 @@ describe("SettingsPage 界面字号契约", () => {
     );
     expect(fontSizeSource).toContain("min={MIN_UI_FONT_SIZE}");
     expect(fontSizeSource).toContain("max={MAX_UI_FONT_SIZE}");
-    expect(fontSizeSource).toContain("if (value == null || !isUiFontSize(value)) return;");
-    expect(fontSizeSource).toContain("onUiFontSize(value)");
-    expect(fontSizeSource).toContain("onValueCommitted");
+    expect(fontSizeSource).toContain("onCommit={onUiFontSize}");
   });
 
   it("界面字号位于主题之后、终端设置之前", () => {

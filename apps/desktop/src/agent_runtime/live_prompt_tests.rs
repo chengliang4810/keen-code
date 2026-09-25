@@ -125,6 +125,7 @@ async fn live_prompt_scope_and_cache() {
         context_windows: [(model.clone(), 65_536)].into_iter().collect(),
         max_output_tokens: [(model.clone(), 2_048)].into_iter().collect(),
         supports_vision: Default::default(),
+        reasoning_efforts: Default::default(),
     };
     let registry = ProviderRegistry::new();
     providers::replace_runtime_registry(
