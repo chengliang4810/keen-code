@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@appica/ui-react':
-        specifier: ^1.1.0
-        version: 1.1.0(@date-fns/tz@1.5.0)(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@4.3.3)
+        specifier: ^1.2.0
+        version: 1.2.0(@date-fns/tz@1.5.0)(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@4.3.3)
       '@blobatar/react':
         specifier: 2.5.0
         version: 2.5.0(blobatar@2.5.0(react@19.2.7))(react@19.2.7)
@@ -120,8 +120,8 @@ packages:
   '@antfu/install-pkg@2.1.0':
     resolution: {integrity: sha512-sdg9NxU3zR4Mnawfbc/x6GB5Wf17WYud5qOuEuxXjaKpYpMkISSJEjItGebXJ2bQ4DIcly4NYH23mtkGJjvKUw==}
 
-  '@appica/ui-react@1.1.0':
-    resolution: {integrity: sha512-pLUXibrtLxQRSGG7XqazKy3N3nmhE1hHLe0hLFS/BOEPbzNzQ0m7Lyw/WlJQhN4rSxJCG6oo2iYCJ1GyAEWiPg==}
+  '@appica/ui-react@1.2.0':
+    resolution: {integrity: sha512-vLlzbAJlV0j2l+AzPF4du42j6mdSCZPWLj3k+2e2iMQWaAWu6E9Pu2zflW310/wpcsAfzRXMYVorXy3hBRqlGQ==}
     engines: {node: '>=20'}
     peerDependencies:
       '@types/react': ^19.0.0
@@ -1480,54 +1480,54 @@ packages:
   electron-to-chromium@1.5.394:
     resolution: {integrity: sha512-Wmt2Gm0o8JWBuGgmc4XZ0u9s1RaCRqhxP47phplmfg04+qypTUurpeJGP45A7Fhv7jdrrVH44PLlR9qXo37cVQ==}
 
-  embla-carousel-accessibility@9.0.0-rc02:
-    resolution: {integrity: sha512-i5Q2+MgCgbHyFTx5RaMkcldKaf7rYUXKm66IstPxSB8j2+gyncy5WyHOqKkZv6yPedygLF1XY4HOOPfFGx2YyQ==}
+  embla-carousel-accessibility@9.0.0-rc03:
+    resolution: {integrity: sha512-IaFVaDNcllkrHT9EXP1p3IATZhqs8toFBqr0Uu0s859Wh6NLmvcf1XQE+jyLENjFZyad2d46G03CIAhC1ZeEEw==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-auto-height@9.0.0-rc02:
-    resolution: {integrity: sha512-BfYtpxPMJN+KjYdyWwlkPzo5IQvM4SZvw3Yvb+K1EZ1OOddiqAW8DmP8301XlQ1/2e+kyUS8kw9AnqImU5RsUw==}
+  embla-carousel-auto-height@9.0.0-rc03:
+    resolution: {integrity: sha512-i9twlWbmPB8fgqK1F5fpuAKd7s+x2AImnqgpnTYNBUXK6ovx/3DIIs5SiCzstYdyLKs3a5VQN09j+MFLYtq5Iw==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-auto-scroll@9.0.0-rc02:
-    resolution: {integrity: sha512-np1uEHeagZKm+1A6cdTaufgUooxxE2I+wfzoJ4S5OxfyRLj+mOBeJG18HOrrusK+FiDcsZ+6ZkLgFVh2z3/K8Q==}
+  embla-carousel-auto-scroll@9.0.0-rc03:
+    resolution: {integrity: sha512-D18xNrv/wVGAiSHy1H9I7ZebyJbCVZqz5ubYeEgL61+v6Wc2raS5oF+9x9q2sdKyb/HfRY94r4RGibcRDyv4Jw==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-autoplay@9.0.0-rc02:
-    resolution: {integrity: sha512-xmHUL/dVL0EN9Tf6EeWirc1eEYEr8uxEG4l4QxzRPrUbHhshTzPcKfB0DatAmOI6rcTldqQsslbffNqQmg9E3Q==}
+  embla-carousel-autoplay@9.0.0-rc03:
+    resolution: {integrity: sha512-zf3x+Z3MGQfyd6aRrk4XRpu6u7afb5shKvSlj4ZHQHQxjgNfrBj98bghZ0jaUlGKAmx4A/5FJ99MLthaJupoEQ==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-class-names@9.0.0-rc02:
-    resolution: {integrity: sha512-BYfYe2OnUvP4IyniFaiY+UDtrcYAOQi5M9k3LLKPOWxYC/G1eMPQ3FrnFlvAuMZCPqxPE0H9z2f4yJzYaVpYcQ==}
+  embla-carousel-class-names@9.0.0-rc03:
+    resolution: {integrity: sha512-cLiCvGx69kwQ/HDErOHjrUfpcw+zrEp92JbtcXBB36N4f3OyCQnmFMW/V06sTPGrKWe5xG0xafim8OKJGzyUlA==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-fade@9.0.0-rc02:
-    resolution: {integrity: sha512-k65hqC7I482aSJPfKFkAuBbVDsDLo/AgD9nTHtROCSNz///7xs2oKZcxsoRol70ZVWzb//KHVZ1BkJr7LQhKWg==}
+  embla-carousel-fade@9.0.0-rc03:
+    resolution: {integrity: sha512-pBKmHQ/64CyZ6Jn9+WB7dSDybkpyOm9k9/JebWf8lcNFp+c9t2hhYh3amut8s2lw2IKSFu1VJN2O6PE57tz+vg==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-react@9.0.0-rc02:
-    resolution: {integrity: sha512-DpcD0kTv6L31KvBcrx5d57E6T2rP/YceTGAdq7llkpKFdfM1of8YotHVEQTNIU3I9o5mjE/QxLi1ndJmm1DikA==}
+  embla-carousel-react@9.0.0-rc03:
+    resolution: {integrity: sha512-9+WG2RjzdapJe9m/v6n8XTVbJE6Ed5e/ZmuNM0GzNh5hnhJ31HSwZrjXSkvh3x57yi6q2AeQglPqEb9K+i1RsA==}
     peerDependencies:
       react: ^16.8.0 || ^17.0.1 || ^18.0.0 || ^19.0.0 || ^19.0.0-rc
 
-  embla-carousel-reactive-utils@9.0.0-rc02:
-    resolution: {integrity: sha512-H1c+yUbcVST9eJoGU+05L1vSDyBs0hf/Gf1OadHYIJ3asBfyvn6oaGCs2wXq1D8/f09y0wwCxeRxT9UZU/TxJA==}
+  embla-carousel-reactive-utils@9.0.0-rc03:
+    resolution: {integrity: sha512-NxACWnzteTmmpZJpvoi4mKxyTyw+B4uBV0sfjJYC4PXaO20e7hjBa05wE4s37lr5ZBgBDrl54PLWZhap3U3r1Q==}
     peerDependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-wheel-gestures@9.0.0-rc01:
-    resolution: {integrity: sha512-mFLzP98am00JfPle7k4gTTrAQkQ667g5muGfuyxOQVtTGsau76M3bWRSEHAZ+6d7dmUBdwzepH5ZeAbVa1e/+Q==}
+  embla-carousel-wheel-gestures@9.0.0-rc02:
+    resolution: {integrity: sha512-Df7m3QPvXL22KtezOmyi1ODYxOF88tpe6aOoEXcKIjxeM+RzmEiYoYM9wD0KWgJd59XziBNEazb+4Jb/vTLRJw==}
     engines: {node: '>=10'}
     peerDependencies:
-      embla-carousel: ^9.0.0 || ~9.0.0-rc01
+      embla-carousel: ^9.0.0 || ~9.0.0-rc03
 
-  embla-carousel@9.0.0-rc02:
-    resolution: {integrity: sha512-GOQBX6v5cNk/ptfuHUoHhW9rvl5KeSGsBoppaUqtihu2kDmQAyzvnH/95r3TaSScFSJTj68V9AM6E5nq3jUVcQ==}
+  embla-carousel@9.0.0-rc03:
+    resolution: {integrity: sha512-f36OvPQVCJl54m4nEWfPRd2fe3NQNGY671RzWvvaz9Uai1dpNWO2A8YRUL4fj2KgcYizaO3Wxhu9p0dDPh8Mug==}
 
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
@@ -1621,8 +1621,8 @@ packages:
   flatted@3.4.4:
     resolution: {integrity: sha512-5+ybhBZANEJxaH3X5evAFatUxLfEHSr7n6kYJ+1Qd0mUqr4eu9gIf6GDbWHf8RJijHrjjO8G+la14SlL2SeS1Q==}
 
-  framer-motion@13.4.0:
-    resolution: {integrity: sha512-HCpqKM9BTu6UYKtj0u6J1QNxojnnirNcghcSDZ+SkpiL3myxvtsgXPS3ZGEELC2eSma7YiA937rAEXtRyydSXQ==}
+  framer-motion@13.4.4:
+    resolution: {integrity: sha512-lbsZO95NGbulo6apz70zEt6Vxf/anoRwQI2ECEc/EQYWO5CGbITtl7plDW8P/VXgXw6e8wrbhH4a9i+ygke0Mg==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
@@ -2184,14 +2184,14 @@ packages:
     resolution: {integrity: sha512-PXwfBhYu0hBCPw8Dn0E+WDYb7af3dSLVWKi3HGv84IdF4TyFoC0ysxFd0Goxw7nSv4T/PzEJQxsYsEiFCKo2BA==}
     engines: {node: '>=8.6'}
 
-  motion-dom@13.3.0:
-    resolution: {integrity: sha512-AmAnB6pHdZ1vHGzWzuzteG6Q3j1lHKeX/lbST6jGlgm0cjvLUgaCk1xhOuPMOy5SgovN6wnnUdwFrkcsus7Ftg==}
+  motion-dom@13.4.4:
+    resolution: {integrity: sha512-z2qN3RUABSci4G7cr5aHTFhqPNCWJsEMMfRlzxqtANQsSCIbVJmHvMV288m5x7doEQBTYbRTWbKdztmquCn4Sw==}
 
   motion-utils@13.3.0:
     resolution: {integrity: sha512-sgSschQp7EseHInIlR7hBbMuvet3RA0bs28KPZAXJcGKGdxHGvh1ogpYDilY3bOMtl73EqPNmp75sAKHYPU5sg==}
 
-  motion@13.4.0:
-    resolution: {integrity: sha512-aiNSA29N+vgV5p5cJSB5cFzx8KTuuxB99z8zGtxsaqlwKtBK6sq8YgPRpkVQLkbJMOcLDU0q/ShdT95qpBy/0g==}
+  motion@13.4.4:
+    resolution: {integrity: sha512-lyX5kpAum2MmigecKWrFdIj3Sjn7pHek2EUrXY0WGZbOjJ1f5NfX0g4KQAb2Bp2EqL0a6dUzse11s1n7OYr5jg==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
       react-dom: ^18.0.0 || ^19.0.0
@@ -2537,6 +2537,9 @@ packages:
   tailwind-merge@3.6.0:
     resolution: {integrity: sha512-uxL7qAVQriqRQPAyK3pj66VqskWqoZ37PW94jwOTwNfq/z9oyu1V+eqrZqtR2+fCiXdYOZe/Modt8GtvqNzu+w==}
 
+  tailwind-merge@3.7.0:
+    resolution: {integrity: sha512-XPPUyAc+cvspz3lHTcR/QgPfW2A0lv/xQNIjX3HGhLR+Nq2lHaLq5MtTesHn8GUr3W3DguT2KT5x3NVgRtYwmA==}
+
   tailwindcss@4.3.3:
     resolution: {integrity: sha512-gOhV3P7ufE62QDGg1zVaTgCR+EtPv92k2nIhVcVKcLmxT1sUBsQGhnZj175j+MqRt4zLF7ic+sCYjfhxMxj7YQ==}
 
@@ -2773,26 +2776,26 @@ snapshots:
       package-manager-detector: 1.8.0
       tinyexec: 1.3.1
 
-  '@appica/ui-react@1.1.0(@date-fns/tz@1.5.0)(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@4.3.3)':
+  '@appica/ui-react@1.2.0(@date-fns/tz@1.5.0)(@types/react@19.2.17)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(tailwindcss@4.3.3)':
     dependencies:
       '@base-ui/react': 1.8.0(@date-fns/tz@1.5.0)(@types/react@19.2.17)(date-fns@4.4.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       class-variance-authority: 0.7.1
       clsx: 2.1.1
       date-fns: 4.4.0
-      embla-carousel: 9.0.0-rc02
-      embla-carousel-accessibility: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-auto-height: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-auto-scroll: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-autoplay: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-class-names: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-fade: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
-      embla-carousel-react: 9.0.0-rc02(react@19.2.7)
-      embla-carousel-wheel-gestures: 9.0.0-rc01(embla-carousel@9.0.0-rc02)
-      motion: 13.4.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      embla-carousel: 9.0.0-rc03
+      embla-carousel-accessibility: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-auto-height: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-auto-scroll: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-autoplay: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-class-names: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-fade: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
+      embla-carousel-react: 9.0.0-rc03(react@19.2.7)
+      embla-carousel-wheel-gestures: 9.0.0-rc02(embla-carousel@9.0.0-rc03)
+      motion: 13.4.4(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       react: 19.2.7
       react-day-picker: 10.0.1(@types/react@19.2.17)(react@19.2.7)
       react-dom: 19.2.7(react@19.2.7)
-      tailwind-merge: 3.6.0
+      tailwind-merge: 3.7.0
     optionalDependencies:
       '@types/react': 19.2.17
       tailwindcss: 4.3.3
@@ -4037,46 +4040,46 @@ snapshots:
 
   electron-to-chromium@1.5.394: {}
 
-  embla-carousel-accessibility@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-accessibility@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-auto-height@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-auto-height@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-auto-scroll@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-auto-scroll@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-autoplay@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-autoplay@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-class-names@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-class-names@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-fade@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-fade@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-react@9.0.0-rc02(react@19.2.7):
+  embla-carousel-react@9.0.0-rc03(react@19.2.7):
     dependencies:
-      embla-carousel: 9.0.0-rc02
-      embla-carousel-reactive-utils: 9.0.0-rc02(embla-carousel@9.0.0-rc02)
+      embla-carousel: 9.0.0-rc03
+      embla-carousel-reactive-utils: 9.0.0-rc03(embla-carousel@9.0.0-rc03)
       react: 19.2.7
 
-  embla-carousel-reactive-utils@9.0.0-rc02(embla-carousel@9.0.0-rc02):
+  embla-carousel-reactive-utils@9.0.0-rc03(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
 
-  embla-carousel-wheel-gestures@9.0.0-rc01(embla-carousel@9.0.0-rc02):
+  embla-carousel-wheel-gestures@9.0.0-rc02(embla-carousel@9.0.0-rc03):
     dependencies:
-      embla-carousel: 9.0.0-rc02
+      embla-carousel: 9.0.0-rc03
       wheel-gestures: 2.3.0
 
-  embla-carousel@9.0.0-rc02: {}
+  embla-carousel@9.0.0-rc03: {}
 
   emoji-regex@8.0.0: {}
 
@@ -4182,9 +4185,9 @@ snapshots:
 
   flatted@3.4.4: {}
 
-  framer-motion@13.4.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  framer-motion@13.4.4(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:
-      motion-dom: 13.3.0
+      motion-dom: 13.4.4
       motion-utils: 13.3.0
       tslib: 2.8.1
     optionalDependencies:
@@ -5006,15 +5009,15 @@ snapshots:
       braces: 3.0.3
       picomatch: 2.3.2
 
-  motion-dom@13.3.0:
+  motion-dom@13.4.4:
     dependencies:
       motion-utils: 13.3.0
 
   motion-utils@13.3.0: {}
 
-  motion@13.4.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
+  motion@13.4.4(react-dom@19.2.7(react@19.2.7))(react@19.2.7):
     dependencies:
-      framer-motion: 13.4.0(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
+      framer-motion: 13.4.4(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
       tslib: 2.8.1
     optionalDependencies:
       react: 19.2.7
@@ -5471,6 +5474,8 @@ snapshots:
       strip-ansi: 6.0.1
 
   tailwind-merge@3.6.0: {}
+
+  tailwind-merge@3.7.0: {}
 
   tailwindcss@4.3.3: {}
 
