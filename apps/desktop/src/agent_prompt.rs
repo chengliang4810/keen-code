@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 const UNKNOWN_OS_VERSION: &str = "unknown; query the operating system if needed";
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 const MAX_OS_VERSION_LEN: usize = 128;
 
 static DETECTED_OS_VERSION: OnceLock<String> = OnceLock::new();
@@ -181,6 +182,7 @@ fn probe_os_version() -> String {
 }
 
 /// 只接受有界单行文本，供 macOS 原生版本与 Windows 注册表字段共用。
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn normalize_os_version(value: &str) -> Option<String> {
     if value.chars().any(char::is_control) {
         return None;
