@@ -3854,7 +3854,7 @@ mod tests {
                     64 * 1024,
                 )
                 .await
-                .is_err()
+                .is_ok()
             );
             let evidence = inspect(protocol, Some("text/event-stream"), body.as_bytes());
             evidence.validate().expect("终态后空 data 证据必须自洽");
@@ -4088,7 +4088,7 @@ mod tests {
         );
     }
 
-    /// 验证 Responses 终态后的未知、缺失和不可解码事件都与 Adapter 拒绝行为一致。
+    /// Adapter 排空 Responses 终态后的尾帧，证据层仍记录异常结构且不保存原文。
     #[tokio::test]
     async fn responses_sse_终态后任意非空非_done_帧均留证() {
         let suffixes = [
@@ -4113,7 +4113,7 @@ mod tests {
                     64 * 1024,
                 )
                 .await
-                .is_err()
+                .is_ok()
             );
             let evidence = inspect(
                 ProviderProtocol::Responses,
