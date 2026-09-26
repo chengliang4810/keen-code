@@ -635,11 +635,23 @@ async fn real_write_edit_lifecycle_and_replay_diff() {
         )
         .expect("冷恢复 Agent Runtime 应创建"),
     );
-    let reopened = match replay_runtime
-        .runtime_manager()
-        .open("desktop-file-change-replay")
-        .expect("同一 Session 应重新打开")
-    {
+    let start = std::time::Instant::now();
+    let reopened = loop {
+        match replay_runtime
+            .runtime_manager()
+            .open("desktop-file-change-replay")
+        {
+            Err(keencode_runtime::RuntimeError::SessionBusy) => {
+                assert!(
+                    start.elapsed() < Duration::from_secs(5),
+                    "旧 Session lease 应及时释放"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            result => break result.expect("同一 Session 应重新打开"),
+        }
+    };
+    let reopened = match reopened {
         OpenSessionResult::Ready(session) => session,
         OpenSessionResult::Corrupt(report) => {
             panic!("文件变更 Journal 不应损坏：{:?}", report.issues)
