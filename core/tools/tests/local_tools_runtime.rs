@@ -301,6 +301,10 @@ async fn failed_shell_diagnostics_survive_agent_normalization() {
         let files = fs::read_dir(&artifacts)
             .unwrap()
             .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("keencode-stdout-") || name.starts_with("keencode-stderr-")
+            })
             .collect::<Vec<_>>();
         assert!(files.iter().any(|path| {
             path.file_name()
