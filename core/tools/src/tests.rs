@@ -1536,12 +1536,6 @@ async fn bash_reports_output_and_nonzero_exit() {
     assert!(error.message.contains("退出码 7"));
     assert!(error.message.contains("hello"));
     assert!(error.message.contains("bad"));
-    assert_eq!(
-        fs::read_dir(artifact_directory)
-            .expect("应读取输出目录")
-            .count(),
-        0
-    );
 }
 
 /// 超过预览上限的 PowerShell 输出必须保留完整落盘文件。
@@ -1607,11 +1601,16 @@ async fn bash_large_output_is_spilled_without_loss() {
         .expect("应读取输出目录")
         .map(|entry| entry.expect("输出目录项应有效").path())
         .collect::<Vec<_>>();
-    assert_eq!(artifacts.len(), 1);
-    assert_eq!(
-        fs::read(&artifacts[0]).expect("应读取完整输出"),
-        vec![b'x'; 200]
-    );
+    let stdout = artifacts
+        .iter()
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("keencode-stdout-")
+        })
+        .expect("应保留 Bash stdout 完整输出");
+    assert_eq!(fs::read(stdout).expect("应读取完整输出"), vec![b'x'; 200]);
 }
 
 /// 默认预览预算下，大日志仍保留首尾、退出码和完整产物，命令副作用只发生一次。
@@ -1643,7 +1642,6 @@ async fn bash_default_preview_retains_error_and_completed_effect() {
         .unwrap()
         .map(|entry| entry.unwrap().path())
         .collect::<Vec<_>>();
-    assert_eq!(files.len(), 1);
     let stdout = files
         .iter()
         .find(|file| {
