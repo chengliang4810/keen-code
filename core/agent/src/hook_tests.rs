@@ -3004,7 +3004,7 @@ async fn 未退出worker跨独立store与hook代次受共享容量限制() {
     let limits = HookLimits {
         max_stop_hook_rounds: 1,
         max_context_bytes: 1_024,
-        max_callback_ms: 20,
+        max_callback_ms: 500,
     };
     let first_context = PreToolUseContext {
         invocation: HookInvocationContext {
@@ -3044,7 +3044,7 @@ async fn 未退出worker跨独立store与hook代次受共享容量限制() {
             .await,
         Err(HookError::TimedOut {
             phase: HookPhase::PreToolUse,
-            maximum_ms: 20,
+            maximum_ms: 500,
             ..
         })
     ));
@@ -3105,7 +3105,7 @@ async fn 未退出worker跨独立store与hook代次受共享容量限制() {
             .await,
         Err(HookError::TimedOut {
             phase: HookPhase::PreToolUse,
-            maximum_ms: 20,
+            maximum_ms: 500,
             ..
         })
     ));

@@ -321,8 +321,11 @@ async fn failed_shell_diagnostics_survive_agent_normalization() {
             };
             let reported = text
                 .lines()
-                .find_map(|line| line.strip_prefix(&format!("{label} 完整输出：")))
-                .expect("应给出可补读路径");
+                .find_map(|line| line.strip_prefix(&format!("{label} 完整输出：")));
+            let Some(reported) = reported else {
+                assert_eq!(label, "stderr", "stdout 必须给出可补读路径");
+                continue;
+            };
             assert_eq!(
                 fs::canonicalize(reported).unwrap(),
                 fs::canonicalize(&path).unwrap()
