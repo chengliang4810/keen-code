@@ -10,9 +10,13 @@
 
 /// 本应用 WebView2 的进程名;WebView2 运行时会把宿主 exe 名写进命令行,
 /// 用户数据目录由 Tauri 标识符派生。
+#[cfg(windows)]
 const WEBVIEW_PROCESS_NAME: &str = "msedgewebview2.exe";
+#[cfg(windows)]
 const DESKTOP_PROCESS_NAME: &str = "keencode-desktop.exe";
+#[cfg(windows)]
 const COMMAND_FINGERPRINT: &str = "--webview-exe-name=keencode-desktop.exe";
+#[cfg(windows)]
 const DATA_DIR_FINGERPRINT: &str = "com.keencode.desktop\\EBWebView";
 
 use std::sync::atomic::{AtomicUsize, Ordering};
