@@ -256,7 +256,7 @@ fn capture_temp_file_path() -> Option<std::path::PathBuf> {
         .ok()?
         .as_nanos();
     Some(
-        keencode_tools::environment::long_form_temp_dir().join(format!(
+        keencode_tools::long_form_temp_dir().join(format!(
             "keencode-shell-env-{}-{nanos}.tmp",
             std::process::id()
         )),
