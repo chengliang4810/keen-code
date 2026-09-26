@@ -4815,6 +4815,25 @@ mod goal_loop_tests {
     }
 
     #[tokio::test]
+    async fn externally_scheduled_goal_finishes_its_current_turn() {
+        let state = state("session-runner", true);
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities::default(),
+            [text_reply("first iteration complete")],
+        ));
+        let result = goal_runner(provider.clone(), state.clone(), RunLimits::default())
+            .with_external_goal_continuation()
+            .run_turn(turn_request(PlanGuard::inactive()))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        assert_eq!(provider.requests().unwrap().len(), 1);
+        assert_eq!(
+            state.goal_snapshot().unwrap().goal.unwrap().status,
+            GoalStatus::Active
+        );
+    }
+
+    #[tokio::test]
     async fn goal_created_during_turn_also_continues() {
         let state = state("session-runner", false);
         let provider = Arc::new(ScriptedProvider::new(

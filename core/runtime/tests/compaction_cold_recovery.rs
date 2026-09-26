@@ -398,7 +398,7 @@ async fn goal_todo_and_child_survive_compaction_snapshot_and_cold_reopen() {
         .expect("Todo 应写入")
         .current;
     let scope = persistent.goal_scope().clone();
-    let goal_evidence_before = goal_file_evidence(&root.path().join(session_id), &scope);
+    let goal_evidence_before = goal_file_evidence(root.path(), &scope);
     assert!(goal_evidence_before.path.is_file());
     let stored_goal = goal_evidence_before
         .read
@@ -655,7 +655,7 @@ async fn goal_todo_and_child_survive_compaction_snapshot_and_cold_reopen() {
             .expect("压缩后 Plan 快照应可读取"),
         plan_before
     );
-    let goal_evidence_after = goal_file_evidence(&root.path().join(session_id), &scope);
+    let goal_evidence_after = goal_file_evidence(root.path(), &scope);
     assert_eq!(goal_evidence_after, goal_evidence_before);
 
     drop(persistent);
@@ -696,7 +696,7 @@ async fn goal_todo_and_child_survive_compaction_snapshot_and_cold_reopen() {
         plan_before
     );
     assert_eq!(
-        goal_file_evidence(&root.path().join(session_id), &scope),
+        goal_file_evidence(root.path(), &scope),
         goal_evidence_before
     );
     assert_summary_prompt_contract_with_scripted_provider().await;

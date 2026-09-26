@@ -6,7 +6,7 @@ use keencode_agent::{
     AgentId, GoalController, GoalDraft, GoalPatch, GoalStatus, GoalTransition, GoalUsageDelta,
     PlanController, RuntimeStateError, SessionId, TodoController, TodoItem, TodoStatus,
 };
-use keencode_resources::{PlanFileStore, SessionEvent};
+use keencode_resources::{GoalFileStore, PlanFileStore, SessionEvent};
 use tempfile::TempDir;
 
 use crate::{
@@ -440,6 +440,39 @@ fn goal_usage_is_restart_idempotent_and_rejects_conflicting_delta() {
     ));
 }
 
+/// Agent 创建的 Goal 必须被 ACP 使用的应用数据根直接读到，不能只存在于 Session 子目录。
+#[test]
+fn goal_is_visible_from_application_root_store() {
+    let storage_root = TempDir::new().expect("应用数据目录应创建");
+    let goal_root = TempDir::new().expect("ACP 应用数据根应创建");
+    let project_root = TempDir::new().expect("用户项目目录应创建");
+    let session = create_session(&storage_root, "session-goal-ui", &project_root);
+    let state = PersistentAgentState::open_with_goal_root(session, goal_root.path())
+        .expect("持久状态应打开");
+    let created = state
+        .create_goal(
+            "goal-ui-create",
+            GoalDraft {
+                title: "跨轮目标".to_owned(),
+                objective: "验收目标状态栏".to_owned(),
+                description: None,
+                token_budget: None,
+                progress_percent: None,
+            },
+        )
+        .expect("Agent 应创建 Goal");
+    let from_acp = GoalFileStore::open(goal_root.path())
+        .expect("ACP 存储应打开")
+        .read(state.goal_scope())
+        .expect("ACP 应读取 Goal")
+        .expect("Agent 写入的 Goal 必须存在于共享存储");
+    assert_eq!(from_acp.revision, created.current.revision);
+    assert_eq!(
+        from_acp.goal.as_ref().map(|goal| goal.objective.as_str()),
+        Some("验收目标状态栏")
+    );
+}
+
 /// Goal 创建、更新、终态和清除收据必须在后续状态变化后继续识别原始重试。
 #[test]
 fn goal_lifecycle_receipts_survive_later_state_changes() {
@@ -563,6 +596,73 @@ fn goal_lifecycle_receipts_survive_later_state_changes() {
         ),
         Err(RuntimeStateError::Conflict { .. })
     ));
+}
+
+/// 校验器的旧修订不能覆盖用户在模型请求期间修改的目标。
+#[test]
+fn goal_verifier_completion_requires_current_revision_and_objective() {
+    let storage_root = TempDir::new().expect("应用数据目录应创建");
+    let project_root = TempDir::new().expect("用户项目目录应创建");
+    let session = create_session(&storage_root, "session-goal-verifier", &project_root);
+    let state = PersistentAgentState::open(session).expect("持久状态应打开");
+    let created = state
+        .create_goal(
+            "goal-verifier-create",
+            GoalDraft {
+                title: "校验目标".to_owned(),
+                objective: "最初目标".to_owned(),
+                description: None,
+                token_budget: None,
+                progress_percent: None,
+            },
+        )
+        .expect("目标应创建");
+    let goal = created.current.goal.expect("应保留目标");
+    state
+        .update_goal(
+            "goal-verifier-edit",
+            GoalPatch {
+                objective: Some("修改后的目标".to_owned()),
+                ..GoalPatch::default()
+            },
+        )
+        .expect("用户修改应生效");
+    assert!(
+        state
+            .complete_goal_if_revision(
+                "goal-verifier-stale",
+                created.current.revision,
+                &goal.id,
+                &goal.objective,
+                "旧证据".to_owned()
+            )
+            .unwrap()
+            .is_none()
+    );
+    let latest = state.goal_snapshot().unwrap();
+    assert!(
+        state
+            .complete_goal_if_revision(
+                "goal-verifier-wrong-objective",
+                latest.revision,
+                &goal.id,
+                &goal.objective,
+                "旧证据".to_owned()
+            )
+            .unwrap()
+            .is_none()
+    );
+    let changed = state
+        .complete_goal_if_revision(
+            "goal-verifier-complete",
+            latest.revision,
+            &goal.id,
+            "修改后的目标",
+            "逐项证据已核实".to_owned(),
+        )
+        .unwrap()
+        .expect("当前修订应完成");
+    assert_eq!(changed.current.goal.unwrap().status, GoalStatus::Completed);
 }
 
 /// Plan 收据必须跨重启保留，并在后续正文变化后返回当前权威快照。

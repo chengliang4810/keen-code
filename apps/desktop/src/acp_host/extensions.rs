@@ -553,6 +553,9 @@ fn dispatch_goal_upsert(
     let timestamp = crate::analytics::now_ms();
     let next_goal = match current.as_ref().and_then(|value| value.goal.as_ref()) {
         Some(existing) => {
+            if existing.status == ResourceGoalStatus::Completed {
+                return Err(HostFailure::InvalidParams);
+            }
             let fields_changed = existing.title != goal_input.title
                 || existing.objective != goal_input.objective
                 || existing.description != goal_input.description
@@ -563,14 +566,23 @@ fn dispatch_goal_upsert(
                 owner_session_id: existing.owner_session_id.clone(),
                 title: goal_input.title,
                 scope: existing.scope.clone(),
-                status: ResourceGoalStatus::Active,
+                // 编辑暂停目标只更新内容；字段完全相同的 upsert 才是显式启动。
+                status: if fields_changed {
+                    existing.status
+                } else {
+                    ResourceGoalStatus::Active
+                },
                 description: goal_input.description,
                 progress_percent: goal_input.progress_percent,
                 objective: goal_input.objective,
                 token_budget: goal_input.token_budget,
                 tokens_used: existing.tokens_used,
                 time_used_seconds: existing.time_used_seconds,
-                blocked_reason: None,
+                blocked_reason: if fields_changed {
+                    existing.blocked_reason.clone()
+                } else {
+                    None
+                },
                 completion_evidence: None,
                 created_at_unix_ms: existing.created_at_unix_ms,
                 updated_at_unix_ms: if fields_changed {
@@ -622,6 +634,21 @@ fn dispatch_goal_upsert(
             revision,
             Some(goal_status_name(saved_goal.status).to_owned()),
         );
+        if current
+            .as_ref()
+            .and_then(|document| document.goal.as_ref())
+            .is_some_and(|goal| goal.status == ResourceGoalStatus::Paused)
+            && saved_goal.status == ResourceGoalStatus::Active
+        {
+            let runtime = std::sync::Arc::clone(&host.runtime);
+            let session = session_id.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = runtime.continue_active_goal(&session).await {
+                    tracing::warn!(session_id = %session, error = %error,
+                        "恢复 Goal 后的独立续跑未启动");
+                }
+            });
+        }
     }
     let response = GoalMutationResponse {
         session_id,

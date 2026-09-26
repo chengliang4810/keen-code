@@ -45,18 +45,85 @@ pub struct PersistentAgentState {
 }
 
 impl PersistentAgentState {
+    /// 校验器只能在其观察的 Goal 修订仍然有效时提交完成，用户暂停或编辑优先。
+    pub fn complete_goal_if_revision(
+        &self,
+        operation_id: &str,
+        expected_revision: u64,
+        goal_id: &str,
+        objective: &str,
+        evidence: String,
+    ) -> Result<Option<GoalChange>, RuntimeStateError> {
+        let transition = GoalTransition {
+            status: AgentGoalStatus::Completed,
+            blocked_reason: None,
+            completion_evidence: Some(evidence),
+        }
+        .normalized()?;
+        let document = self
+            .read_goal()?
+            .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+        if document.revision != expected_revision
+            || document.goal.as_ref().is_none_or(|goal| {
+                goal.id != goal_id
+                    || goal.objective != objective
+                    || goal.status != ResourceGoalStatus::Active
+                    || goal.owner_session_id != self.session.session_id().as_str()
+            })
+        {
+            return Ok(None);
+        }
+        let mut goal = document
+            .goal
+            .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+        goal.status = ResourceGoalStatus::Completed;
+        goal.completion_evidence = transition.completion_evidence.clone();
+        goal.updated_at_unix_ms = unix_time_ms()?.max(goal.updated_at_unix_ms);
+        let operation = ("goal_verifier_complete_v1", goal_id, objective, &transition);
+        match self.save_goal(
+            operation_id,
+            &operation,
+            expected_revision,
+            Some(goal),
+            document.retired_goal_ids,
+        ) {
+            Ok(outcome) => Ok(Some(goal_change_from_outcome(
+                GoalChangeKind::Transitioned,
+                outcome,
+                true,
+            ))),
+            Err(ResourceError::RevisionConflict { .. }) => Ok(None),
+            Err(error) => Err(state_resource_error(error)),
+        }
+    }
+
     /// 从 Session 自身的应用数据根与权威项目根创建生产状态控制器。
     pub fn open(session: RuntimeSession) -> Result<Self, RuntimeError> {
+        let storage_root = session
+            .inner
+            .journal
+            .session_dir()
+            .parent()
+            .ok_or_else(|| ResourceError::UnsafePath("Session 目录缺少资源根".to_owned()))?
+            .to_path_buf();
+        Self::open_with_goal_root(session, &storage_root)
+    }
+
+    /// 桌面宿主显式指定应用数据根，确保 ACP 与 Agent 共用唯一会话 Goal 文档。
+    pub fn open_with_goal_root(
+        session: RuntimeSession,
+        goal_root: &Path,
+    ) -> Result<Self, RuntimeError> {
         let snapshot = session.snapshot()?;
         let project_root = Path::new(&snapshot.state.project_root);
         let project_scope = project_scope_id(project_root)?;
         let goal_session = ResourceSessionId::new(session.session_id().as_str())?;
         let goal_scope = session_goal_scope_id(project_root, &goal_session)?;
-        let storage_root = session.inner.journal.session_dir().to_path_buf();
+        let session_dir = session.inner.journal.session_dir().to_path_buf();
         Ok(Self {
             session,
-            goal_store: GoalFileStore::open(&storage_root)?,
-            plan_store: PlanFileStore::open(&storage_root)?,
+            goal_store: GoalFileStore::open(goal_root)?,
+            plan_store: PlanFileStore::open(&session_dir)?,
             project_scope,
             goal_scope,
         })

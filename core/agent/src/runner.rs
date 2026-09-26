@@ -925,6 +925,8 @@ pub struct AgentRunner {
     tool_catalog_updates: Arc<dyn AgentToolCatalogUpdateSource>,
     /// 仅根任务注入；子 Agent 和普通独立 Runner 不承担项目 Goal 续跑。
     goal_controller: Option<Arc<dyn GoalController>>,
+    /// 由宿主调度独立 Goal Turn 时，当前 Turn 的正常回复可以结束。
+    goal_continuation_in_turn: bool,
     /// Todo 提醒的唯一状态来源；None 时不注入任何提醒。
     todo_controller: Option<Arc<dyn TodoController>>,
     /// 按 Provider 到达顺序接收可信实时事件且默认不产生副作用的出口。
@@ -951,6 +953,7 @@ impl AgentRunner {
             dynamic_input: Arc::new(NoopAgentDynamicInputSource),
             tool_catalog_updates: Arc::new(NoopAgentToolCatalogUpdateSource),
             goal_controller: None,
+            goal_continuation_in_turn: true,
             todo_controller: None,
             event_sink: Arc::new(NoopAgentEventSink),
             commit_sink: Arc::new(NoopAgentCommitSink),
@@ -1001,6 +1004,12 @@ impl AgentRunner {
     /// 给根任务绑定既有 Goal 状态控制器；实际续跑还必须匹配创建 Session 和 Goal ID。
     pub fn with_goal_controller(mut self, controller: Arc<dyn GoalController>) -> Self {
         self.goal_controller = Some(controller);
+        self
+    }
+
+    /// 宿主负责在终态后调度 Goal 时，禁止在当前 Turn 内无限追加模型轮。
+    pub fn with_external_goal_continuation(mut self) -> Self {
+        self.goal_continuation_in_turn = false;
         self
     }
 
@@ -3049,6 +3058,9 @@ impl AgentRunner {
             active.state.transition_to(TurnPhase::PreparingContext)?;
             return Ok(false);
         }
+        if !self.goal_continuation_in_turn {
+            return Ok(true);
+        }
         let Some(goal) = self.active_goal(request, active)? else {
             return Ok(true);
         };
@@ -3111,7 +3123,10 @@ impl AgentRunner {
             })?;
         let Some(goal) = snapshot.goal.filter(|goal| {
             goal.owner_session_id == request.session_id.as_str()
-                && goal.status == GoalStatus::Active
+                // 暂停只阻止下一次迭代，不截断已经绑定目标的当前 Turn。
+                && (goal.status == GoalStatus::Active
+                    || (goal.status == GoalStatus::Paused
+                        && active.goal_id.as_ref() == Some(&goal.id)))
                 && active.goal_id.as_ref().is_none_or(|id| *id == goal.id)
         }) else {
             return Ok(None);
