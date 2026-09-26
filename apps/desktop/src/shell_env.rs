@@ -255,12 +255,10 @@ fn capture_temp_file_path() -> Option<std::path::PathBuf> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_nanos();
-    Some(
-        keencode_tools::long_form_temp_dir().join(format!(
-            "keencode-shell-env-{}-{nanos}.tmp",
-            std::process::id()
-        )),
-    )
+    Some(keencode_tools::long_form_temp_dir().join(format!(
+        "keencode-shell-env-{}-{nanos}.tmp",
+        std::process::id()
+    )))
 }
 
 #[cfg(not(windows))]
