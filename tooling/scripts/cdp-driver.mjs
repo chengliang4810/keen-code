@@ -202,7 +202,7 @@ async function main() {
             const el = (${finders.css(step.css)});
             if (!el) return null;
             if ((el.value ?? el.innerText ?? "") === ${JSON.stringify(step.text)}) return true;
-            const proto = el.tagName === "TEXTAREA" || el.getAttribute("contenteditable") ? null : HTMLInputElement.prototype;
+            const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : el.getAttribute("contenteditable") ? null : HTMLInputElement.prototype;
             if (el.getAttribute("contenteditable") || el.tagName === "DIV") { el.innerText = ${JSON.stringify(step.text)}; el.dispatchEvent(new InputEvent("input", { bubbles: true })); return (el.innerText || "") === ${JSON.stringify(step.text)}; }
             if (proto) { const d = Object.getOwnPropertyDescriptor(proto, "value"); d && d.set && d.set.call(el, ${JSON.stringify(step.text)}); el.dispatchEvent(new Event("input", { bubbles: true })); return el.value === ${JSON.stringify(step.text)}; }
             return false;
