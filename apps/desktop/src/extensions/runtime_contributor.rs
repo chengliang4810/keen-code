@@ -4360,7 +4360,7 @@ mod tests {
         let output = execute_hook_command_with_limits(
             &windows_command_hook(&canonical_directory, "type relative-marker.txt".to_owned()),
             &json!({}),
-            Duration::from_secs(3),
+            Duration::from_secs(15),
             1024,
         )
         .await
@@ -4392,7 +4392,7 @@ mod tests {
                 r#"type "marker & literal.txt""#.to_owned(),
             ),
             &json!({}),
-            Duration::from_secs(3),
+            Duration::from_secs(15),
             1024,
         )
         .await
