@@ -147,6 +147,7 @@ export function ComposerToolbar({
   const sessionKey = session.sessionId ?? "__draft__";
   const currentGoalActive =
     acpSessionView?.session_id === session.sessionId &&
+    acpSessionView.goal.goal?.status !== "completed" &&
     acpSessionView.goal.goal;
   const goalActive = Boolean(
     currentGoalActive || goalModeSessionKey === sessionKey,

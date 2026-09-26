@@ -136,17 +136,14 @@ export function ComposerGoalProgress({
     running,
   ]);
 
-  if (!current) return null;
+  // 完成记录留在会话历史中，不再占据输入框的目标状态位。
+  if (!current || current.status === "completed") return null;
   const zh = locale !== "en";
   const statusLabel =
     current.status === "paused" || (current.status === "active" && !running)
       ? zh
-        ? "已暂停的目标"
-        : "Paused goal"
-      : current.status === "completed"
-      ? zh
-        ? "已完成的目标"
-        : "Completed goal"
+        ? (current.status === "paused" ? "已暂停的目标" : "待继续的目标")
+        : (current.status === "paused" ? "Paused goal" : "Goal awaiting continuation")
       : current.status === "blocked"
         ? zh
           ? "已阻塞的目标"
@@ -172,11 +169,11 @@ export function ComposerGoalProgress({
           variant="ghost"
           size="icon-md"
           className="composer-goal__action"
-          aria-label={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
-          title={current.status === "active" && running ? (zh ? "暂停目标" : "Pause goal") : (zh ? "继续目标" : "Resume goal")}
-          onClick={current.status === "active" && running ? onPause : onResume}
+          aria-label={current.status === "active" ? (zh ? "暂停目标" : "Pause goal") : (zh ? "启动目标" : "Start goal")}
+          title={current.status === "active" ? (zh ? "暂停目标" : "Pause goal") : (zh ? "启动目标" : "Start goal")}
+          onClick={current.status === "active" ? onPause : onResume}
         >
-          {current.status === "active" && running ? <IconPause size={15} /> : <IconPlay size={15} />}
+          {current.status === "active" ? <IconPause size={15} /> : <IconPlay size={15} />}
         </Button>
       ) : null}
       <Button

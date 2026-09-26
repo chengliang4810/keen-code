@@ -139,3 +139,58 @@ it("发送期间切走视图时不回填旧会话草稿", async () => {
   expect(options.ui.setGoalModeSessionKey).not.toHaveBeenCalledWith("s");
   expect(options.ui.setLocalError).not.toHaveBeenCalled();
 });
+
+it("活跃目标执行中的用户输入直接 steer，不停止也不另开队列轮次", async () => {
+  const steerQueuedItem = vi.fn().mockResolvedValue(undefined);
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "streaming", connecting: false,
+    draft: "接下来先核对文件内容", attachments: [], hasConfiguredModel: true,
+    goalModeSessionKey: null, planModeSessionKey: null, ultraModeSessionKey: null,
+    executeSend: vi.fn(),
+    runtime: { ...fakeRuntime({ sessionId: "s", epoch: 1 }),
+      acpWorkspaceRef: { current: { sessions: { s: { goal: { goal: { status: "active" } } } } } } as never },
+    sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    steerQueuedItem,
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+  await result.send();
+  expect(steerQueuedItem).toHaveBeenCalledWith(expect.objectContaining({
+    storedDisplay: "接下来先核对文件内容", createGoal: false,
+  }));
+  expect(options.sendQueue.enqueue).not.toHaveBeenCalled();
+  expect(options.executeSend).not.toHaveBeenCalled();
+  expect(options.ui.setDraft).toHaveBeenCalledWith("");
+});
+
+it("暂停目标的当前 Turn 仍接受方向纠正", async () => {
+  const steerQueuedItem = vi.fn().mockResolvedValue(undefined);
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "streaming", connecting: false,
+    draft: "先检查文本", attachments: [], hasConfiguredModel: true,
+    goalModeSessionKey: null, planModeSessionKey: null, ultraModeSessionKey: null,
+    executeSend: vi.fn(),
+    runtime: { ...fakeRuntime({ sessionId: "s", epoch: 1 }),
+      acpWorkspaceRef: { current: { sessions: { s: { goal: { goal: { status: "paused" } } } } } } as never },
+    sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    steerQueuedItem,
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+  await result.send();
+  expect(steerQueuedItem).toHaveBeenCalledTimes(1);
+  expect(options.sendQueue.enqueue).not.toHaveBeenCalled();
+  expect(options.executeSend).not.toHaveBeenCalled();
+});

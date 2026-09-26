@@ -107,6 +107,8 @@ export type MessageSegment =
 
 export interface ChatMessage {
   id: string;
+  /** 权威根 Turn 标识；时间线用它定位 Goal 续跑分割线。 */
+  turnId?: string;
   role: "user" | "assistant" | "tool";
   content: string;
   /** Journal 中合并后的思考正文；界面优先使用 thoughtPhases。 */

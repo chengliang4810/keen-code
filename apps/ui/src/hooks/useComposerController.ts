@@ -251,6 +251,7 @@ export interface ComposerController {
   goalToolCompletionSignature: string;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
+  saveCurrentGoal: (value: string, goalId: string, sessionId: string) => Promise<void>;
   pauseCurrentGoal: () => Promise<boolean>;
   resumeCurrentGoal: () => Promise<boolean>;
 }
@@ -511,6 +512,7 @@ export function useComposerController({
     goalToolCompletionSignature: modes.goalToolCompletionSignature,
     confirmClearCurrentGoal: modes.confirmClearCurrentGoal,
     editCurrentGoal: modes.editCurrentGoal,
+    saveCurrentGoal: modes.saveCurrentGoal,
     pauseCurrentGoal: modes.pauseCurrentGoal,
     resumeCurrentGoal: modes.resumeCurrentGoal,
   };

@@ -1175,7 +1175,8 @@
   padding: 4px 0 6px;
 }
 
-.lobe-chat-model-divider {
+.lobe-chat-model-divider,
+.lobe-chat-goal-divider {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -1186,7 +1187,9 @@
 }
 
 .lobe-chat-model-divider::before,
-.lobe-chat-model-divider::after {
+.lobe-chat-model-divider::after,
+.lobe-chat-goal-divider::before,
+.lobe-chat-goal-divider::after {
   height: 1px;
   flex: 1;
   background: var(--chat-divider);

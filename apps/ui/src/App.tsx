@@ -614,7 +614,7 @@ export default function App() {
     showStatusModal,
     setShowStatusModal,
     confirmClearCurrentGoal,
-    editCurrentGoal,
+    saveCurrentGoal,
     pauseCurrentGoal,
     resumeCurrentGoal,
   } = composer;
@@ -1132,7 +1132,6 @@ export default function App() {
   });
   const {
     ensureConnected,
-    executeSend,
     send,
     editAndResend: editAndResendLastUserMessage,
     stop,
@@ -1716,19 +1715,16 @@ export default function App() {
               openWorktreeCreate,
               openWorktreeGc,
               refreshGitWorktrees,
-              editCurrentGoal,
+              editCurrentGoal: () => {
+                if (!session.sessionId || !acpSessionView?.goal.goal) return;
+                setResourceOpenTarget({ type: "goal", sessionId: session.sessionId });
+                setLayout((current) => ({ ...current, asideCollapsed: false }));
+              },
               confirmClearCurrentGoal,
               pauseCurrentGoal: () => void pauseCurrentGoal(),
               resumeCurrentGoal: () => {
-                if (!session.sessionId) return;
-                void resumeCurrentGoal().then((resumed) => {
-                  if (!resumed || session.state === "streaming") return;
-                  void executeSend({
-                    storedDisplay: locale === "en" ? "Continue the current goal." : "继续执行当前目标。",
-                    att: [],
-                    targetSessionId: session.sessionId,
-                  });
-                });
+                // 恢复状态由后端按当前迭代终态调度，避免额外发送重复的根 Turn。
+                void resumeCurrentGoal();
               },
             },
             queue: {
@@ -1846,6 +1842,7 @@ export default function App() {
           setResizingAside={setResizingAside}
           resourceOpenTarget={resourceOpenTarget}
           setResourceOpenTarget={setResourceOpenTarget}
+          onSaveGoal={saveCurrentGoal}
           activeProject={activeProject}
           session={session}
           messages={messages}

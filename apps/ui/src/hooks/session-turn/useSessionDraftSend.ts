@@ -4,7 +4,7 @@ import { isDraftEmpty, parseStoredContent, serializeForAgent } from "@/lib/draft
 import { buildGoalDraft } from "@/lib/goalDraft";
 import { localizeUiError } from "@/lib/session";
 import type { Locale } from "@/i18n";
-import { shouldEnqueueSend } from "@/lib/sendQueue";
+import { makeQueuedSend, shouldEnqueueSend, type QueuedSend } from "@/lib/sendQueue";
 import { isViewingSendTarget } from "@/lib/viewFocus";
 import type { SessionSnapshot } from "@/lib/session";
 import type {
@@ -27,8 +27,10 @@ export interface UseSessionDraftSendOptions {
   planModeSessionKey: string | null;
   ultraModeSessionKey: string | null;
   executeSend: ExecuteSend;
-  runtime: Pick<SessionTurnRuntimePort, "currentViewFocus">;
+  runtime: Pick<SessionTurnRuntimePort, "currentViewFocus"> &
+    Partial<Pick<SessionTurnRuntimePort, "acpWorkspaceRef">>;
   sendQueue: SessionTurnQueuePort;
+  steerQueuedItem?: (item: QueuedSend) => Promise<void>;
   ui: Pick<
     SessionTurnUiPort,
     | "setDraft"
@@ -63,6 +65,7 @@ export function useSessionDraftSend({
   executeSend,
   runtime,
   sendQueue,
+  steerQueuedItem,
   ui,
 }: UseSessionDraftSendOptions): SessionDraftSendResult {
   const {
@@ -125,6 +128,23 @@ export function useSessionDraftSend({
       try { buildGoalDraft(serializeForAgent(segments)); }
       catch (error) { ui.setLocalError(localizeUiError(error, locale)); return; }
     }
+    // 暂停只阻止下一迭代；当前 Turn 运行期间的输入仍是方向纠正。
+    const goal = sessionId
+      ? runtime.acpWorkspaceRef?.current.sessions[sessionId]?.goal.goal
+      : null;
+    if (sessionId && sessionState === "streaming" &&
+      (goal?.status === "active" || goal?.status === "paused") &&
+      !createGoal && steerQueuedItem) {
+      try {
+        await steerQueuedItem(makeQueuedSend({
+          storedDisplay, attachments: att, createGoal: false, planMode, ultraMode,
+        }));
+        clearComposerAfterSubmit();
+      } catch (cause) {
+        ui.setLocalError(localizeUiError(cause, locale));
+      }
+      return;
+    }
     sendQueue.releaseFlushHold();
     if (shouldEnqueueSend(sessionState, connecting)) {
       sendQueue.enqueue({
@@ -175,6 +195,7 @@ export function useSessionDraftSend({
     hasConfiguredModel,
     planModeSessionKey,
     sendQueue,
+    steerQueuedItem,
     sessionId,
     sessionState,
     ultraModeSessionKey,

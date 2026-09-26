@@ -31,6 +31,7 @@ export interface ResourceAsideProps {
   setResizingAside: Dispatch<SetStateAction<boolean>>;
   resourceOpenTarget: ResourceOpenTarget | null;
   setResourceOpenTarget: Dispatch<SetStateAction<ResourceOpenTarget | null>>;
+  onSaveGoal: (value: string, goalId: string, sessionId: string) => Promise<void>;
   activeProject: Project | null;
   session: SessionSnapshot;
   messages: ChatMessage[];
@@ -55,6 +56,7 @@ export function ResourceAside({
   setResizingAside,
   resourceOpenTarget,
   setResourceOpenTarget,
+  onSaveGoal,
   activeProject,
   session,
   messages,
@@ -128,6 +130,8 @@ export function ResourceAside({
               syncRevision={resourceSyncRevision}
               openRequest={resourceOpenTarget}
               onOpenRequestConsumed={() => setResourceOpenTarget(null)}
+              goal={acpSessionView?.goal.goal ?? null}
+              onSaveGoal={onSaveGoal}
               trajectoryLive={{
                 sessionId: session.sessionId ?? null,
                 title: acpSessionView?.title ?? null,

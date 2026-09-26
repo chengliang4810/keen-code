@@ -94,9 +94,9 @@ describe("useComposerModes 的 Goal 查询竞态", () => {
     }
 
     renderToString(createElement(Harness));
-    expect(effects).toHaveLength(1);
-    effects[0]!();
-    effects[0]!();
+    expect(effects).toHaveLength(2);
+    effects[1]!();
+    effects[1]!();
     expect(goalGet).toHaveBeenCalledTimes(2);
 
     newer.resolve({ revision: 7 });

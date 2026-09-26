@@ -62,7 +62,7 @@ import {
   type ChatMessage,
   type MessageFileChange,
 } from "@/lib/session";
-import type { AcpSubagentInfo } from "@/lib/acp/store";
+import type { AcpGoalProjection, AcpSubagentInfo } from "@/lib/acp/store";
 import { agentNicknameLabel } from "@/lib/agentNicknames";
 import { isOfficeKind } from "@/lib/filePreviewSrc";
 import {
@@ -132,6 +132,7 @@ function clampTreeWidth(w: number, containerWidth: number): number {
 /** 从对话或其他入口请求在资源面板中打开文件、链接或变更。 */
 export type ResourceOpenTarget =
   | { type: "file"; path: string; title?: string }
+  | { type: "goal"; sessionId: string }
   | { type: "url"; url: string; title?: string }
   /** 打开工作区 Git 变更侧栏。 */
   | {
@@ -158,6 +159,9 @@ export interface ResourceViewerProps {
   showThinkingProcess?: boolean;
   /** 收到值时打开文件或链接，随后通知请求已消费。 */
   openRequest?: ResourceOpenTarget | null;
+  /** 编辑页保存目标时，由会话层执行带修订校验的权威写入。 */
+  goal?: AcpGoalProjection["goal"];
+  onSaveGoal?: (value: string, goalId: string, sessionId: string) => Promise<void>;
   onOpenRequestConsumed?: () => void;
   /** 右侧面板是否显示。 */
   paneActive?: boolean;
@@ -180,6 +184,7 @@ export interface ResourceViewerProps {
 /** 资源侧栏首版可见模式。 */
 type SideMode =
   | "files"
+  | "editor"
   | "web"
   | "changes"
   | "terminal"
@@ -308,6 +313,8 @@ export function ResourceViewer({
   terminalFontFamily,
   showThinkingProcess = true,
   openRequest,
+  goal,
+  onSaveGoal,
   onOpenRequestConsumed,
   paneActive = true,
   onTabsEmpty,
@@ -330,6 +337,11 @@ export function ResourceViewer({
   const [query, setQuery] = useState("");
   const [sideMode, setSideMode] = useSessionState<SideMode | null>(sessionKey, null);
   const [openSingletons, setOpenSingletons] = useSessionState<SingletonSideMode[]>(sessionKey, []);
+  const [goalEditor, setGoalEditor] = useSessionState<{
+    goalId: string; sessionId: string; baseline: string; draft: string;
+  } | null>(sessionKey, null);
+  const [goalEditorActive, setGoalEditorActive] = useSessionState(sessionKey, false);
+  const [goalSaving, setGoalSaving] = useState(false);
   const [terminalTabs, setTerminalTabs] = useSessionState<TerminalTab[]>(sessionKey, []);
   const [terminalActiveId, setTerminalActiveId] = useSessionState<string | null>(sessionKey, null);
   const [terminalCreateRequest, setTerminalCreateRequest] = useSessionState(sessionKey, 0);
@@ -1176,10 +1188,15 @@ export function ResourceViewer({
       setError(tr("resources.openFailed"));
       return;
     }
-    const existing = tabs.find(
-      (t) => t.tabKind !== "url" && t.relativePath === relativePath,
-    );
+    const existing = tabs.find((t) => t.tabKind !== "url" &&
+      (filePathsMatch(t.relativePath, relativePath, projectPath) ||
+        filePathsMatch(t.absolutePath, relativePath, projectPath)));
     if (existing) {
+      if (existing.preview && isResourceTextEditable(existing.preview)) {
+        setOpenSingletons((current) => current.includes("editor") ? current : [...current, "editor"]);
+      }
+      setGoalEditorActive(false);
+      setSideMode(existing.preview && isResourceTextEditable(existing.preview) ? "editor" : "files");
       setTabs((prev) => {
         const hit = prev.find((t) => t.id === existing.id);
         if (!hit) return prev;
@@ -1207,6 +1224,11 @@ export function ResourceViewer({
       const r = await api.fsReadFile(projectPath, relativePath);
       const src = await resolvePreviewSrc(r);
       applyReadResult(id, r, src, relativePath);
+      if (isResourceTextEditable(r)) {
+        setOpenSingletons((current) => current.includes("editor") ? current : [...current, "editor"]);
+      }
+      setGoalEditorActive(false);
+      setSideMode(isResourceTextEditable(r) ? "editor" : "files");
     } catch (e) {
       setTabs((prev) =>
         prev.map((t) =>
@@ -1235,12 +1257,18 @@ export function ResourceViewer({
       }
       const norm = absolutePath.trim();
       if (!norm) return;
+      setGoalEditorActive(false);
       const existing = tabs.find(
         (t) =>
           t.tabKind !== "url" &&
-          (t.absolutePath === norm || t.relativePath === norm),
+          (filePathsMatch(t.absolutePath, norm, projectPath) ||
+            filePathsMatch(t.relativePath, norm, projectPath)),
       );
       if (existing) {
+        if (existing.preview && isResourceTextEditable(existing.preview)) {
+          setOpenSingletons((current) => current.includes("editor") ? current : [...current, "editor"]);
+        }
+        setSideMode(existing.preview && isResourceTextEditable(existing.preview) ? "editor" : "files");
         // Move existing to front + activate (Chrome-like focus)
         setTabs((prev) => {
           const hit = prev.find((t) => t.id === existing.id);
@@ -1267,6 +1295,10 @@ export function ResourceViewer({
       try {
         const r = await api.fsOpenPath(norm, projectPath);
         const src = await resolvePreviewSrc(r);
+        if (isResourceTextEditable(r)) {
+          setOpenSingletons((current) => current.includes("editor") ? current : [...current, "editor"]);
+        }
+        setSideMode(isResourceTextEditable(r) ? "editor" : "files");
         // Prefer project-relative tab key when file is under project
         let relKey = r.relativePath || pathBasename(norm);
         if (projectPath && r.absolutePath) {
@@ -1413,9 +1445,17 @@ export function ResourceViewer({
   useEffect(() => {
     if (!openRequest) return;
     if (openRequest.type === "file") {
-      setOpenSingletons((current) => current.includes("files") ? current : [...current, "files"]);
-      setSideMode("files");
       void openAbsoluteFile(openRequest.path, openRequest.title);
+    } else if (openRequest.type === "goal") {
+      if (goal && openRequest.sessionId === sessionKey) {
+        setGoalEditor((current) => current?.goalId === goal.id
+          ? current
+          : { goalId: goal.id, sessionId: openRequest.sessionId,
+              baseline: goal.objective, draft: goal.objective });
+        setGoalEditorActive(true);
+        setOpenSingletons((current) => current.includes("editor") ? current : [...current, "editor"]);
+        setSideMode("editor");
+      }
     } else if (openRequest.type === "url") {
       setOpenSingletons((current) => current.includes("web") ? current : [...current, "web"]);
       setSideMode("web");
@@ -1448,6 +1488,8 @@ export function ResourceViewer({
     onOpenRequestConsumed?.();
   }, [
     openRequest,
+    goal,
+    sessionKey,
     openChangeDiff,
     openAbsoluteFile,
     openUrl,
@@ -1783,7 +1825,7 @@ export function ResourceViewer({
     if (canEdit && activeTab && activeTab.draftText != null) {
       const draftText = activeTab.draftText;
       const isMarkdown = preview.kind === "markdown";
-      const showEditor = activeTab.editMode || !isMarkdown;
+      const showEditor = sideMode === "editor" || activeTab.editMode || !isMarkdown;
       const dirty = isResourceDraftDirty(draftText, activeTab.baselineText);
       return (
         <div className="rp-editor">
@@ -2171,8 +2213,8 @@ export function ResourceViewer({
       >
       <TabsList className="rp-mode-tabs" aria-label={tr("resources.title")}>
         {openSingletons.map((mode) => {
-          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "web" ? <IconWorld size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
-          const label = mode === "files" ? tr("changes.files") : mode === "web" ? tr("resources.web") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
+          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "editor" ? <IconEdit size={14} /> : mode === "web" ? <IconWorld size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
+          const label = mode === "files" ? tr("changes.files") : mode === "editor" ? (locale === "en" ? "Editor" : "编辑") : mode === "web" ? tr("resources.web") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
           return (
             <TabsTrigger key={mode} value={`singleton:${mode}`} render={<div />} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
               {icon}<span className="rp-mode-tab__label">{label}</span>
@@ -2306,7 +2348,7 @@ export function ResourceViewer({
   ) : null;
 
   // No project and no open tabs → empty; allow absolute/url tabs without a project.
-  if (!projectPath && tabs.length === 0) {
+  if (!projectPath && tabs.length === 0 && !(sideMode === "editor" && goalEditorActive && goalEditor)) {
     return (
       <div className="rp" data-testid="resource-viewer">
         <div className="rp-chrome">
@@ -2352,7 +2394,7 @@ export function ResourceViewer({
     >
       <div className="rp-chrome">
         {modeTabs}
-        {absPath ? (
+        {absPath && !(sideMode === "editor" && goalEditorActive) ? (
           <div className="rp-chrome__actions">
             <OpenLocationButton
               path={absPath}
@@ -2382,17 +2424,27 @@ export function ResourceViewer({
 
       {tabPicker}
 
-      {sideMode === "files" || sideMode === "web" ? (
+      {sideMode === "files" || sideMode === "editor" || sideMode === "web" ? (
         <div className="rp-file-tabs">
           <Tabs
-            value={activeId ?? ""}
-            onValueChange={setActiveId}
+            value={sideMode === "editor" && goalEditorActive ? "goal-editor" : activeId ?? ""}
+            onValueChange={(id) => {
+              setGoalEditorActive(id === "goal-editor");
+              if (id !== "goal-editor") setActiveId(id);
+            }}
             variant="line"
             className="rp-tabs"
           >
           <div className="rp-tabs__scroll">
             <TabsList aria-label={tr("resources.files")}>
-            {visibleResourceTabs.length === 0 ? (
+            {sideMode === "editor" && goalEditor ? (
+              <TabsTrigger value="goal-editor" render={<div />} className="rp-tab">
+                <IconEdit size={14} />
+                <span className="rp-tab__name">{locale === "en" ? "Goal" : "目标"}</span>
+                {goalEditor.draft !== goalEditor.baseline ? <span className="rp-tab__dirty" aria-hidden>•</span> : null}
+              </TabsTrigger>
+            ) : null}
+            {visibleResourceTabs.length === 0 && !goalEditor ? (
               <div className="rp-tabs__placeholder">
                 <span className="rp-tabs__hint">{tr("resources.emptyPreview")}</span>
               </div>
@@ -2660,6 +2712,32 @@ export function ResourceViewer({
             ) : (
               <div className="rp__empty-state">{previewBody}</div>
             )
+          ) : sideMode === "editor" && goalEditorActive && goalEditor ? (
+            <div className="rp-goal-editor">
+              <div className="rp-goal-editor__toolbar">
+                <strong>{locale === "en" ? "Goal objective" : "目标内容"}</strong>
+                <Button type="button" variant="outline" size="md"
+                  disabled={goalSaving || !goalEditor.draft.trim() ||
+                    goalEditor.draft.trim() === goalEditor.baseline || goal?.status === "completed"}
+                  onClick={() => {
+                    if (!onSaveGoal) return;
+                    setGoalSaving(true);
+                    void onSaveGoal(goalEditor.draft, goalEditor.goalId, goalEditor.sessionId)
+                      .then(() => setGoalEditor((current) => current?.goalId === goalEditor.goalId
+                        ? { ...current, baseline: goalEditor.draft.trim() } : current))
+                      .catch((cause: unknown) => setError(String(cause)))
+                      .finally(() => setGoalSaving(false));
+                  }}>
+                  {goalSaving ? (locale === "en" ? "Saving" : "保存中") : (locale === "en" ? "Save" : "保存")}
+                </Button>
+              </div>
+              <Textarea aria-label={locale === "en" ? "Goal objective" : "目标内容"}
+                value={goalEditor.draft}
+                disabled={goal?.status === "completed"}
+                onChange={(event) => setGoalEditor((current) => current
+                  ? { ...current, draft: event.target.value } : current)}
+                className="rp-goal-editor__input" />
+            </div>
           ) : !activeTab ? (
             <div className="rp__empty-state">
               <div className="rp__empty-title">
@@ -2712,7 +2790,7 @@ export function ResourceViewer({
         </div>
 
           {/* 网页视图不含项目文件列表；激活网页标签时隐藏文件树与分隔条。 */}
-          {!activeTabIsWeb && (
+          {!activeTabIsWeb && sideMode !== "editor" && (
           <>
             <div
               className="rp-split__resizer"

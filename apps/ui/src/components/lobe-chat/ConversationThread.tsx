@@ -87,6 +87,7 @@ import { EndOfTurnChip } from "./EndOfTurnChip";
 import {
   TimelineToolRow,
   isComposerStateTool,
+  isGoalTool,
   latestSubagentToolCallIds,
   subagentForTool,
   toolSegmentFromMessage,
@@ -569,6 +570,66 @@ export function processingDurationAnchors(
   return anchors;
 }
 
+/** 从权威 Turn 身份定位分割线；不向 Transcript 注入虚构用户消息。 */
+export function goalIterationDividerIndices(
+  messages: ChatMessage[],
+  goalId?: string,
+  activeTurnId?: string,
+): Map<number, number> {
+  const markers = new Map<number, number>();
+  const firstContinuations = new Map<string, number>();
+  const seen = new Set<string>();
+  const anchorUserTurn = (index: number): number => {
+    const turnId = messages[index]?.turnId;
+    for (let previous = index - 1; previous >= 0; previous -= 1) {
+      const candidate = messages[previous]!;
+      if (candidate.role === "user" && (!turnId || candidate.turnId === turnId)) {
+        return previous;
+      }
+    }
+    return index;
+  };
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!;
+    if (message.role === "assistant" && message.segments?.some((segment) => {
+      if (segment.kind !== "tool" || !isGoalTool(segment) || !segment.input) return false;
+      try {
+        const input: unknown = JSON.parse(segment.input);
+        return input !== null && typeof input === "object" &&
+          "action" in input && input.action === "create" && !segment.isError;
+      } catch {
+        return false;
+      }
+    })) {
+      markers.set(anchorUserTurn(index), 1);
+    }
+    const turnId = message.turnId ?? message.turnMetrics?.turnId ??
+      (message.streaming ? activeTurnId : undefined);
+    if (!turnId || seen.has(turnId)) continue;
+    const match = /^turn-goal-(.+)-(\d+)-(\d+)-(\d+)$/u.exec(turnId);
+    if (!match) continue;
+    if (goalId && match[1] !== goalId) continue;
+    const iteration = Number(match[2]);
+    if (!Number.isSafeInteger(iteration) || iteration < 1) continue;
+    seen.add(turnId);
+    firstContinuations.set(match[1]!, Math.min(firstContinuations.get(match[1]!) ?? index, index));
+    markers.set(index, iteration + 1);
+  }
+
+  // Goal 工具位于首轮 Assistant 内；分割线回溯到该 Turn 的真实用户输入。
+  for (const firstContinuation of firstContinuations.values()) {
+    for (let index = firstContinuation - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (message.role !== "assistant" || !message.segments?.some(
+        (segment) => segment.kind === "tool" && isGoalTool(segment),
+      )) continue;
+      markers.set(anchorUserTurn(index), 1);
+      break;
+    }
+  }
+  return markers;
+}
+
 export function ConversationThread({
   locale,
   messages,
@@ -882,6 +943,10 @@ export function ConversationThread({
       }),
     [messages, inlinedToolIds],
   );
+  const goalDividers = useMemo(
+    () => goalIterationDividerIndices(transcriptMessages, undefined, activeTurnId),
+    [transcriptMessages, activeTurnId],
+  );
 
   /**
    * 强制保留查找目标和当前轮尾部；浏览历史时，虚拟列表会忽略距离过远的强制索引。
@@ -1018,19 +1083,29 @@ export function ConversationThread({
           ) : null}
 
           {visibleMessages.map(({ message: m, index: messageIndex }) => {
+            const iteration = goalDividers.get(messageIndex);
+            const divider = iteration == null ? null : (
+              <div className="lobe-chat-goal-divider" role="separator"
+                aria-label={locale === "en" ? `Iteration ${iteration}` : `第 ${iteration} 次迭代`}
+                data-goal-iteration={iteration}>
+                <span>{locale === "en" ? `Iteration ${iteration}` : `第 ${iteration} 次迭代`}</span>
+              </div>
+            );
             /** 为虚拟消息行提供稳定测量容器，短会话保持原 DOM 层级。 */
-            const wrap = (node: ReactNode) =>
-              virtualized ? (
+            const wrap = (node: ReactNode) => {
+              const content = divider ? <Fragment key={m.id}>{divider}{node}</Fragment> : node;
+              return virtualized ? (
                 <div
                   key={m.id}
                   ref={measureRef(messageIndex)}
                   data-virtual-message-index={messageIndex}
                 >
-                  {node}
+                  {content}
                 </div>
               ) : (
-                node
+                content
               );
+            };
 
             if (
               isEndOfTurnMarker(m.marker) ||

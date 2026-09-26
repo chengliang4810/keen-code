@@ -157,6 +157,15 @@ export function useSessionTurn({
   });
   executeSendFromQueueRef.current = executeSend;
 
+  const steerQueuedItem = useSessionQueueSteering({
+    tr,
+    sessionId: session.sessionId,
+    sessionState: session.state,
+    api,
+    runtime,
+    showToast,
+  });
+
   const { send, sendRef } = useSessionDraftSend({
     locale,
     sessionId: session.sessionId,
@@ -171,6 +180,7 @@ export function useSessionTurn({
     executeSend,
     runtime,
     sendQueue,
+    steerQueuedItem,
     ui,
   });
   const editAndResend = useSessionEditResend({
@@ -183,14 +193,6 @@ export function useSessionTurn({
     ui,
     state,
     executeSend,
-  });
-  const steerQueuedItem = useSessionQueueSteering({
-    tr,
-    sessionId: session.sessionId,
-    sessionState: session.state,
-    api,
-    runtime,
-    showToast,
   });
   const { stop, stopLatch, stopLatchRef } = useSessionStop({
     locale,

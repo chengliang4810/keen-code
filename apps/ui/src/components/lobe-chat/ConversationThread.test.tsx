@@ -6,7 +6,7 @@ import {
   buildComposerMentionMarkdown,
   encodeComposerMention,
 } from "@/lib/composerMentions";
-import { ConversationThread, formatRetryCountdown } from "./ConversationThread";
+import { ConversationThread, formatRetryCountdown, goalIterationDividerIndices } from "./ConversationThread";
 
 /** 测试用附件操作文案，满足 ConversationThread 的完整输入契约。 */
 const attachLabels = {
@@ -17,6 +17,66 @@ const attachLabels = {
   addToComposer: "添加到输入框",
   remove: "移除",
 };
+
+describe("Goal 多轮时间线", () => {
+  const goalId = "goal-1";
+  const messages: ChatMessage[] = [
+    { id: "prior", role: "assistant", content: "旧任务", turnId: "turn-prior" },
+    { id: "user", role: "user", content: "开始目标", turnId: "turn-start" },
+    { id: "first", role: "assistant", content: "第一轮结束", turnId: "turn-start",
+      segments: [
+        { kind: "tool", toolCallId: "goal-call", title: "Goal", toolKind: "Goal", status: "completed" },
+        { kind: "content", text: "第一轮结束" },
+      ] },
+    { id: "second", role: "assistant", content: "第二轮结束",
+      turnId: "turn-goal-goal-1-1-1000-1" },
+    { id: "third", role: "assistant", content: "第三轮结束",
+      turnId: "turn-goal-goal-1-2-1001-2" },
+  ];
+
+  it("首轮与每个自动续跑轮次各有一条分割线，不标记无关消息", () => {
+    expect([...goalIterationDividerIndices(messages, goalId)]).toEqual([
+      [3, 2], [4, 3], [1, 1],
+    ]);
+    const html = renderToString(<ConversationThread locale="zh" messages={messages}
+      sessionState="ready" attachLabels={attachLabels} />);
+    expect(html.match(/class="lobe-chat-goal-divider"/g)).toHaveLength(3);
+    expect(html.indexOf("第 1 次迭代")).toBeLessThan(html.indexOf("开始目标"));
+    expect(html.indexOf("第 2 次迭代")).toBeLessThan(html.indexOf("第二轮结束"));
+    expect(html.indexOf("第 3 次迭代")).toBeLessThan(html.indexOf("第三轮结束"));
+  });
+
+  it("未建立 Goal 或无可信创建轮次时不伪造首轮标记", () => {
+    expect(goalIterationDividerIndices(messages.slice(0, 1), goalId).size).toBe(0);
+    expect([...goalIterationDividerIndices(messages.slice(3), goalId)]).toEqual([[0, 2], [1, 3]]);
+  });
+
+  it("清除 Goal 状态后仍从历史 Turn 保留迭代分割线", () => {
+    const html = renderToString(<ConversationThread locale="zh" messages={messages}
+      sessionState="ready" attachLabels={attachLabels} />);
+    expect(html.match(/class="lobe-chat-goal-divider"/g)).toHaveLength(3);
+    expect(html.indexOf("第 1 次迭代")).toBeLessThan(html.indexOf("开始目标"));
+  });
+
+  it("仅有首轮时从成功的 Goal create 标记第一轮，update 不产生新标记", () => {
+    const singleTurn: ChatMessage[] = [
+      { id: "user", role: "user", content: "开始目标", turnId: "turn-start" },
+      { id: "assistant", role: "assistant", content: "已完成", turnId: "turn-start",
+        segments: [
+          { kind: "tool", toolCallId: "create", title: "Goal", toolKind: "Goal",
+            status: "completed", input: '{"action":"create"}' },
+          { kind: "tool", toolCallId: "update", title: "Goal", toolKind: "Goal",
+            status: "completed", input: '{"action":"update"}' },
+        ] },
+    ];
+    expect([...goalIterationDividerIndices(singleTurn)]).toEqual([[0, 1]]);
+    expect(goalIterationDividerIndices(singleTurn.slice(1)).get(0)).toBe(1);
+    expect(goalIterationDividerIndices([{ ...singleTurn[1]!, segments: [
+      { kind: "tool", toolCallId: "update", title: "Goal", toolKind: "Goal",
+        status: "completed", input: '{"action":"update"}' },
+    ] }]).size).toBe(0);
+  });
+});
 
 describe("ConversationThread 思考耗时", () => {
   it("流式空 reasoning segment 不再额外渲染思考状态行", () => {

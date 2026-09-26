@@ -396,6 +396,7 @@ export function projectAcpHistory(
           ? assistantTurnMessageId(sessionId, message.turnId)
           : `${sessionId}:history:${index}`),
       role,
+      turnId: message.turnId,
       content: role === "user" ? parsed.text : message.content,
       thought: segmentFields?.thought ?? message.thought,
       thoughtPhases:
@@ -453,6 +454,7 @@ export function projectAcpLiveMessage(
       view.active_root_turn_id,
     ),
     role: "assistant",
+    turnId: view.active_root_turn_id ?? undefined,
     content: fields.content,
     thought: fields.thought,
     thoughtPhases: fields.thoughtPhases,

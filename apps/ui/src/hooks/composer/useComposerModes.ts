@@ -25,6 +25,7 @@ export interface ComposerModesController {
   togglePlanMode: (sessionKey: string) => void;
   confirmClearCurrentGoal: () => void;
   editCurrentGoal: () => void;
+  saveCurrentGoal: (value: string, goalId: string, sessionId: string) => Promise<void>;
   pauseCurrentGoal: () => Promise<boolean>;
   resumeCurrentGoal: () => Promise<boolean>;
 }
@@ -51,6 +52,11 @@ export function useComposerModes({
   const [goalModeSessionKey, setGoalModeSessionKey] = useState<string | null>(
     null,
   );
+  useEffect(() => {
+    if (session.acpSessionView?.goal.goal?.status === "completed") {
+      setGoalModeSessionKey(null);
+    }
+  }, [session.acpSessionView?.goal.goal?.status]);
   const [planModeSessionKey, setPlanModeSessionKey] = useState<string | null>(
     null,
   );
@@ -187,6 +193,35 @@ export function useComposerModes({
     });
   }, [tr]);
 
+  /** 保存前重读会话 Goal，避免旧编辑页覆盖另一个目标或过期修订。 */
+  const saveCurrentGoal = useCallback(async (value: string, goalId: string, sessionId: string) => {
+    const ports = portsRef.current;
+    const objective = value.trim();
+    if (!objective) throw new Error("目标内容不能为空");
+    const snapshot = await ports.api.goals.get(sessionId);
+    const goal = snapshot.goal;
+    if (!goal || goal.id !== goalId || goal.status === "completed") {
+      throw new Error("目标已变更或完成，请重新打开编辑页");
+    }
+    if (goal.objective === objective) return;
+    const result = await ports.api.goals.upsert({
+      sessionId,
+      goal: {
+        title: objective,
+        objective,
+        ...(goal.description ? { description: goal.description } : {}),
+        ...(goal.progressPercent != null ? { progressPercent: goal.progressPercent } : {}),
+        ...(goal.tokenBudget != null ? { tokenBudget: goal.tokenBudget } : {}),
+      },
+      expectedRevision: snapshot.revision,
+      requestNonce: `keencode-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    });
+    const view = ports.workspace.acpWorkspaceRef.current.sessions[sessionId];
+    if (view && reduceGoalSnapshot(view, result.revision, result.goal)) {
+      ports.workspace.commitWorkspace();
+    }
+  }, []);
+
   const pauseCurrentGoal = useCallback(async () => {
     const ports = portsRef.current;
     const sessionId = ports.session.sessionId;
@@ -258,6 +293,7 @@ export function useComposerModes({
     togglePlanMode,
     confirmClearCurrentGoal,
     editCurrentGoal,
+    saveCurrentGoal,
     pauseCurrentGoal,
     resumeCurrentGoal,
   };
