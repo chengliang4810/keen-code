@@ -39,7 +39,7 @@ describe("ResourceViewer top tabs", () => {
     expect(source).toContain('mode === "web" ? tr("resources.web")');
     expect(source).toContain('current.includes("web") ? current : [...current, "web"]');
     expect(source).toContain('setSideMode("web")');
-    expect(source).toContain('sideMode === "files" || sideMode === "web"');
+    expect(source).toContain('sideMode === "files" || sideMode === "editor" || sideMode === "web"');
     expect(source).toContain('visibleResourceTabs.map((t)');
     expect(source.match(/onPointerDown=\{\(event\) => event\.stopPropagation\(\)\}/g)).toHaveLength(3);
     expect(source).toContain("onPointerDown={(e) => e.stopPropagation()}");

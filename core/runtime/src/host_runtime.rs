@@ -479,11 +479,7 @@ pub fn publish_discovery(
         serde_json::to_vec(record).map_err(|_| HostRuntimeError::InvalidDiscovery("json"))?;
     let mut builder = tempfile::Builder::new();
     builder.prefix(".keencode-host-discovery-");
-    #[cfg(unix)]
-    {
-        // 创建即 0600，不经过先建后改的中间权限状态。
-        builder.mode(0o600);
-    }
+    // tempfile 在 Unix 创建普通临时文件时默认使用 0600，避免先建后改的权限窗口。
     let mut temporary = builder
         .tempfile_in(data_root)
         .map_err(HostRuntimeError::Io)?;
@@ -675,6 +671,15 @@ mod tests {
         .unwrap();
         publish_discovery(root.path(), &record).unwrap();
         publish_discovery(root.path(), &record).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(discovery_path(root.path()))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "discovery 不能对组或其他用户开放");
+        }
         let decoded = HostRuntime::read_discovery(root.path()).unwrap();
         assert_eq!(decoded, record);
     }
