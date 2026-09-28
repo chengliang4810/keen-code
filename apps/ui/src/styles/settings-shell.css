@@ -99,7 +99,7 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  padding: 4px 4px 4px 0;
+  padding: 0;
   background: var(--bg-main);
 }
 
@@ -111,8 +111,6 @@
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-xl);
   background: var(--bg-main);
 }
 
@@ -200,16 +198,14 @@
   margin-top: 32px;
 }
 
-.settings-page__body > [data-slot="card"],
-.settings-page__body .settings-appearance-duo > [data-slot="card"] {
+.settings-page__body > [data-slot="card"] {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xl);
   background: var(--bg-card);
   box-shadow: none;
 }
 
-.settings-page__body > [data-slot="card"] + [data-slot="card"],
-.settings-page__body > [data-slot="card"] + .settings-appearance-duo {
+.settings-page__body > [data-slot="card"] + [data-slot="card"] {
   margin-top: 14px;
 }
 
@@ -221,7 +217,6 @@
 
 /* 行式设置卡贴边：横向内距与分隔线由 .settings-row 自带（含归档空态的内层 padding）。 */
 .settings-page__body > [data-slot="card"] > [data-slot="card-content"],
-.settings-page__body .settings-appearance-duo > [data-slot="card"] > [data-slot="card-content"],
 .settings-page__body [data-slot="card-content"]:has(> .settings-row),
 .settings-page__body [data-slot="card-content"]:has(> .settings-archived__empty) {
   padding: 0;
@@ -360,11 +355,6 @@
     display: none !important;
   }
 
-  .settings-page__content,
-  .platform-mac .settings-page__content {
-    padding: 4px;
-  }
-
   .settings-page__body,
   .platform-mac .settings-page__body {
     padding-right: 16px;
@@ -373,11 +363,6 @@
 }
 
 @media (max-width: 460px) {
-  .settings-page__content,
-  .platform-mac .settings-page__content {
-    padding: 2px;
-  }
-
   .settings-page__body,
   .platform-mac .settings-page__body {
     padding-right: 12px;
