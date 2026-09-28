@@ -8,14 +8,7 @@ import type {
 } from "@/lib/api";
 import type { Locale } from "@/i18n";
 import type { ThemePreference } from "@/lib/theme";
-import type {
-  ThemeSkinId,
-  WallpaperClip,
-  WallpaperFocus,
-  WallpaperKind,
-  WallpaperRecord,
-} from "@/lib/themeSkin";
-import type { WallpaperFocusApplyResult } from "@/components/WallpaperFocusEditor";
+import type { BaseColor, PrimaryColor } from "@/lib/themeColors";
 import type {
   ArchivedSessionItem,
   SettingsPageProps,
@@ -105,29 +98,18 @@ export interface SettingsRouteArchive {
   onDeleteArchivedSession?: (sessionId: string) => void;
 }
 
-/** 外观状态与壁纸资源操作。 */
+/** 外观设置。 */
 export interface SettingsRouteAppearance {
   themePreference: ThemePreference;
   onTheme: (value: ThemePreference) => void;
-  skin: ThemeSkinId;
-  onSkin: (value: ThemeSkinId) => void;
+  baseColor: BaseColor;
+  primaryColor: PrimaryColor;
+  onBaseColor: (value: BaseColor) => void;
+  onPrimaryColor: (value: PrimaryColor) => void;
   /** 用户选择的界面字号（12–20，默认 14）。 */
   uiFontSize: number;
   /** 保存并立即应用界面字号。 */
   onUiFontSize: (value: number) => void;
-  wallpaperUrl?: string | null;
-  wallpaperKind?: WallpaperKind | null;
-  wallpaperFocus?: WallpaperFocus | null;
-  wallpaperClip?: WallpaperClip | null;
-  wallpaperMediaSize?: { w: number; h: number } | null;
-  onWallpaper?: (record: WallpaperRecord | null) => void | Promise<void>;
-  onWallpaperAdjust?: (result: WallpaperFocusApplyResult) => void;
-  onWallpaperMediaSize?: (size: { w: number; h: number }) => void;
-  wallpaperScrim?: number;
-  onWallpaperScrim?: (value: number) => void;
-  wallpaperBlur?: number;
-  onWallpaperBlur?: (value: number) => void;
-  onWallpaperAppearanceReset?: () => void;
 }
 
 /** 更新信息与手动检查/安装动作。 */

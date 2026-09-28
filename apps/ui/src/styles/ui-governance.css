@@ -20,8 +20,7 @@
  * Appica styles load before this file and define the same unprefixed role
  * variables. This file is the sole KeenCode authority for those roles: the
  * bridge is kept after the Appica import so package defaults cannot win by
- * cascade. Product-only skin variables (`--accent`, `--border-focus`) remain
- * owned by tokens.css/skins.css and are intentionally not redeclared here.
+ * cascade. Product accent variables remain owned by tokens.css/theme-colors.css.
  */
 [data-theme="light"] {
   --foreground: #282828;
@@ -403,8 +402,7 @@
     padding-inline: clamp(var(--ui-mobile-inline-padding), 4vw, 20px);
   }
 
-  .settings-page__main > [data-slot="card"],
-  .settings-appearance-duo > [data-slot="card"] {
+  .settings-page__main > [data-slot="card"] {
     min-width: 0;
   }
 }

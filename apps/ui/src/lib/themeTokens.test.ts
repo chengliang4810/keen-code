@@ -13,7 +13,7 @@ const governance = readFileSync(
   new URL("../styles/ui-governance.css", import.meta.url),
   "utf8",
 ).replaceAll("\r\n", "\n");
-const skins = readFileSync(new URL("../styles/skins.css", import.meta.url), "utf8");
+const themeColors = readFileSync(new URL("../styles/theme-colors.css", import.meta.url), "utf8");
 const tailwind = readFileSync(new URL("../styles/tailwind.css", import.meta.url), "utf8");
 const settingsShell = readFileSync(
   new URL("../styles/settings-shell.css", import.meta.url),
@@ -183,13 +183,21 @@ describe("Appica theme token bridge", () => {
     expect(declaration(dark, "primary")).toBe("#ffffff");
   });
 
-  it("leaves accent and focus ownership to product skins", () => {
+  it("keeps primary button fill and foreground paired in both modes", () => {
+    expect(main).toContain('import "./styles/theme-colors.css";');
+    expect(themeColors).toContain('html[data-theme][data-primary-color] {');
+    expect(themeColors).toContain('--primary: var(--picked-primary);');
+    expect(themeColors).toContain('html[data-theme="dark"][data-primary-color] {');
+    expect(themeColors).toContain('--primary-foreground: oklch(1 0 0);');
+  });
+
+  it("leaves accent and focus ownership to product theme tokens", () => {
     expect(governance).not.toMatch(/^\s*--accent:/m);
     expect(governance).not.toMatch(/^\s*--border-focus:/m);
     expect(tokens).toMatch(/^\s*--accent:/m);
     expect(tokens).toMatch(/^\s*--border-focus:/m);
-    expect(skins).toMatch(/\[data-theme="dark"\]\[data-skin="rose"\][\s\S]*--accent:/);
-    expect(skins).toMatch(/\[data-theme="dark"\]\[data-skin="rose"\][\s\S]*--border-focus:/);
+    expect(themeColors).toContain("--accent: var(--picked-primary);");
+    expect(themeColors).toContain("--border-focus: var(--focus-ring-primary);");
   });
 
   it("keeps terminal and resource accents aligned with ZCode light/dark values", () => {

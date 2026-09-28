@@ -9,7 +9,6 @@ const SOURCE_ROOT = path.join(REPO_ROOT, "apps/ui/src");
 
 const CSS_TOKEN_ALLOWLIST = new Set([
   "apps/ui/src/styles/tokens.css",
-  "apps/ui/src/styles/skins.css",
   "apps/ui/src/styles/code-preview.css",
   "apps/ui/src/styles/tailwind.css",
   "apps/ui/src/styles/ui-governance.css",
@@ -26,7 +25,6 @@ const INLINE_STYLE_ALLOWLIST = [
   "apps/ui/src/components/TerminalPanel.tsx",
   "apps/ui/src/components/VideoUi.tsx",
   "apps/ui/src/components/VirtualList.tsx",
-  "apps/ui/src/components/WallpaperFocusEditor.tsx",
   "apps/ui/src/components/lobe-chat/ConversationThread.tsx",
   "apps/ui/src/features/app/MainStage.tsx",
   "apps/ui/src/features/app/ResourceAside.tsx",

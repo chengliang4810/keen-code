@@ -1,0 +1,68 @@
+html[data-base-color="gray"] { --base-hue: 264; --base-chroma: 0.012; }
+html[data-base-color="slate"] { --base-hue: 260; --base-chroma: 0.035; }
+html[data-base-color="zinc"] { --base-hue: 286; --base-chroma: 0.008; }
+html[data-base-color="neutral"] { --base-hue: 0; --base-chroma: 0; }
+html[data-base-color="stone"] { --base-hue: 56; --base-chroma: 0.015; }
+
+html[data-base-color][data-theme="light"] {
+  --background: oklch(0.98 var(--base-chroma) var(--base-hue));
+  --background-strong: oklch(0.93 var(--base-chroma) var(--base-hue));
+  --secondary: oklch(0.91 var(--base-chroma) var(--base-hue));
+  --dsw-alias-bg-base: var(--background);
+  --dsw-alias-bg-layer-2: oklch(1 var(--base-chroma) var(--base-hue));
+  --dsw-alias-bg-module-platform: var(--dsw-alias-bg-layer-2);
+  --dsw-specific-sidebar-fill: oklch(0.955 var(--base-chroma) var(--base-hue));
+  --dsw-specific-input-major: var(--dsw-alias-bg-layer-2);
+}
+
+html[data-base-color][data-theme="dark"] {
+  --background: oklch(0.19 var(--base-chroma) var(--base-hue));
+  --background-strong: oklch(0.29 var(--base-chroma) var(--base-hue));
+  --secondary: oklch(0.3 var(--base-chroma) var(--base-hue));
+  --dsw-alias-bg-base: var(--background);
+  --dsw-alias-bg-layer-2: oklch(0.27 var(--base-chroma) var(--base-hue));
+  --dsw-alias-bg-module-platform: var(--dsw-alias-bg-layer-2);
+  --dsw-specific-sidebar-fill: var(--background);
+  --dsw-specific-input-major: var(--dsw-alias-bg-layer-2);
+}
+
+html[data-primary-color="red"] { --picked-primary: oklch(63.7% 0.237 25.331); --picked-primary-muted: oklch(70.4% 0.191 22.216); --picked-primary-strong: oklch(57.7% 0.245 27.325); }
+html[data-primary-color="orange"] { --picked-primary: oklch(70.5% 0.213 47.604); --picked-primary-muted: oklch(75% 0.18 45); --picked-primary-strong: oklch(64% 0.22 47); }
+html[data-primary-color="amber"] { --picked-primary: oklch(76.9% 0.188 70.08); --picked-primary-muted: oklch(82% 0.16 70); --picked-primary-strong: oklch(68% 0.19 70); }
+html[data-primary-color="green"] { --picked-primary: oklch(62.7% 0.194 149.214); --picked-primary-muted: oklch(70% 0.17 149); --picked-primary-strong: oklch(55% 0.2 149); }
+html[data-primary-color="teal"] { --picked-primary: oklch(60% 0.118 184.704); --picked-primary-muted: oklch(68% 0.11 184); --picked-primary-strong: oklch(53% 0.12 184); }
+html[data-primary-color="blue"] { --picked-primary: oklch(62.3% 0.188 259.81); --picked-primary-muted: oklch(70.86% 0.1652 259.81); --picked-primary-strong: oklch(55.07% 0.1846 259.81); }
+html[data-primary-color="violet"] { --picked-primary: oklch(60.6% 0.25 292.717); --picked-primary-muted: oklch(68% 0.22 293); --picked-primary-strong: oklch(54% 0.26 293); }
+
+html[data-theme][data-primary-color] {
+  --primary: var(--picked-primary);
+  --primary-subtle: color-mix(in oklch, var(--picked-primary) 10%, transparent);
+  --primary-soft: color-mix(in oklch, var(--picked-primary) 20%, transparent);
+  --primary-muted: var(--picked-primary-muted);
+  --primary-strong: var(--picked-primary-strong);
+  --focus-ring-primary: color-mix(in oklch, var(--picked-primary) 30%, transparent);
+  --accent: var(--picked-primary);
+  --accent-muted: var(--primary-soft);
+  --accent-hover: var(--picked-primary-strong);
+  --border-focus: var(--focus-ring-primary);
+}
+
+html[data-theme="dark"][data-primary-color] {
+  --primary-foreground: oklch(1 0 0);
+  --focus-ring-primary: color-mix(in oklch, var(--picked-primary) 50%, transparent);
+}
+
+.settings-color-option { display: inline-flex; align-items: center; gap: var(--space-2); }
+.settings-color-option::before { content: ""; display: inline-block; width: 1em; height: 1em; border-radius: var(--radius-full); background: var(--swatch-color); }
+.settings-color-option[data-color="gray"] { --swatch-color: oklch(0.55 0.012 264); }
+.settings-color-option[data-color="slate"] { --swatch-color: oklch(0.55 0.035 260); }
+.settings-color-option[data-color="zinc"] { --swatch-color: oklch(0.55 0.008 286); }
+.settings-color-option[data-color="neutral"] { --swatch-color: oklch(0.55 0 0); }
+.settings-color-option[data-color="stone"] { --swatch-color: oklch(0.55 0.015 56); }
+.settings-color-option[data-color="red"] { --swatch-color: oklch(63.7% 0.237 25.331); }
+.settings-color-option[data-color="orange"] { --swatch-color: oklch(70.5% 0.213 47.604); }
+.settings-color-option[data-color="amber"] { --swatch-color: oklch(76.9% 0.188 70.08); }
+.settings-color-option[data-color="green"] { --swatch-color: oklch(62.7% 0.194 149.214); }
+.settings-color-option[data-color="teal"] { --swatch-color: oklch(60% 0.118 184.704); }
+.settings-color-option[data-color="blue"] { --swatch-color: oklch(62.3% 0.188 259.81); }
+.settings-color-option[data-color="violet"] { --swatch-color: oklch(60.6% 0.25 292.717); }

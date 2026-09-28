@@ -10,9 +10,9 @@ import {
 } from "./components/host";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import "./styles/tokens.css";
-import "./styles/skins.css";
 import "./styles/tailwind.css";
 import "./styles/app.css";
+import "./styles/theme-colors.css";
 import "./styles/setup-wizard.css";
 import {
   applyNativeWindowTheme,
@@ -24,17 +24,12 @@ import {
   THEME_STORAGE_KEY,
 } from "./lib/theme";
 import {
-  applySkinToDocument,
-  applyWallpaperScrimToDocument,
-  loadSkin,
-  loadWallpaperScrim,
-} from "./lib/themeSkin";
-import {
   installFrontendErrorHandlers,
   reportFrontendCrash,
   reportFrontendError,
 } from "./lib/frontendDiagnostics";
 import { applyUiFontSizeToDocument, loadUiFontSize } from "./lib/uiFontSize";
+import { applyThemeColors, BASE_COLORS, PRIMARY_COLORS, loadColor } from "./lib/themeColors";
 import { startupFrontendReady } from "./lib/api";
 
 const bootHostMode = resolveHostMode();
@@ -50,8 +45,10 @@ installFrontendErrorHandlers();
 const bootPref = loadThemePreference(localStorage);
 const bootTheme = resolveTheme(bootPref, getSystemTheme());
 applyThemeToDocument(bootTheme);
-applySkinToDocument(loadSkin(localStorage));
-applyWallpaperScrimToDocument(loadWallpaperScrim(localStorage));
+applyThemeColors(
+  loadColor("keencode.base-color", BASE_COLORS, "gray"),
+  loadColor("keencode.primary-color", PRIMARY_COLORS, "red"),
+);
 // 界面字号在首次绘制前生效，避免启动时字号跳变。
 applyUiFontSizeToDocument(loadUiFontSize(localStorage));
 // Native: null = follow OS (required for live system theme); light/dark locks chrome.

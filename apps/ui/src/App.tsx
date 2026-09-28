@@ -7,7 +7,6 @@ import {
   useState,
   type SetStateAction,
 } from "react";
-import { DEFAULT_WALLPAPER_FOCUS } from "@/lib/themeSkin";
 import { useThemeAppearance } from "@/hooks/useThemeAppearance";
 import { useWindowChrome } from "@/hooks/useWindowChrome";
 import { useAppUpdate } from "@/hooks/useAppUpdate";
@@ -16,7 +15,6 @@ import { useProviderModels } from "@/hooks/useProviderModels";
 import { useAppDialog } from "@/hooks/useAppDialog";
 import { useAppRoute } from "@/hooks/useAppRoute";
 import { useChatFind } from "@/hooks/useChatFind";
-import { useWallpaperAppearance } from "@/hooks/useWallpaperAppearance";
 import { useAcpSessionRuntime } from "@/hooks/useAcpSessionRuntime";
 import { useSessionTurn } from "@/hooks/useSessionTurn";
 import { useComposerController } from "@/hooks/useComposerController";
@@ -31,7 +29,6 @@ import { pruneUnprotectedSessionMessageCache } from "@/hooks/acp-runtime/message
 import { useProjectDialog } from "@/hooks/useProjectDialog";
 import { useWorktrees } from "@/hooks/useWorktrees";
 import { acpSessionApi, useSessionLifecycleActions } from "@/hooks/useSessionLifecycleActions";
-import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
   type SidebarResizeStart,
   loadInitialLayout,
@@ -145,10 +142,12 @@ export default function App() {
   }, []);
   const {
     themePreference,
-    skin,
+    baseColor,
+    primaryColor,
+    applyBaseColorChoice,
+    applyPrimaryColorChoice,
     uiFontSize,
     applyThemeChoice,
-    applySkinChoice,
     applyUiFontSizeChoice,
   } = useThemeAppearance();
   const [layout, setLayout] = useState(() => loadInitialLayout(localStorage, window.innerWidth));
@@ -459,24 +458,6 @@ export default function App() {
   /** Live drag-drop target for the add-project source control (null = not dragging). */
   const [dragZone, setDragZone] = useState<DragZone>(null);
   const [localError, setLocalError] = useState<string | null>(null);
-  const {
-    wallpaperRecord,
-    wallpaperUrl,
-    wallpaperScrim,
-    wallpaperBlur,
-    applyWallpaperChoice,
-    applyWallpaperAdjustChoice,
-    applyWallpaperMediaSize,
-    applyWallpaperScrimChoice,
-    applyWallpaperBlurChoice,
-    resetWallpaperAppearance,
-  } = useWallpaperAppearance({
-    locale,
-    onError: (message, source) => {
-      if (source === "clear" || source === "save") setToast(message);
-      else setLocalError(message);
-    },
-  });
   /** Expand technical dump under the compact error banner. */
   const [errorDetailOpen, setErrorDetailOpen] = useState(false);
   /** Host stream-stall prompt (I06); null when dismissed or not stalled. */
@@ -1412,20 +1393,6 @@ export default function App() {
           close: tr("window.close"),
         }}
       />
-      {wallpaperUrl && wallpaperRecord ? (
-        <WallpaperMediaLayer
-          url={wallpaperUrl}
-          kind={wallpaperRecord.kind}
-          focus={wallpaperRecord.focus ?? DEFAULT_WALLPAPER_FOCUS}
-          clip={wallpaperRecord.clip ?? null}
-          intrinsicSize={
-            wallpaperRecord.width && wallpaperRecord.height
-              ? { w: wallpaperRecord.width, h: wallpaperRecord.height }
-              : null
-          }
-          onIntrinsicSize={applyWallpaperMediaSize}
-        />
-      ) : null}
       {appBooting ? (
         <StartupScreen useCustomWindowChrome={useCustomWindowChrome} />
       ) : appView === "settings" ? (
@@ -1458,26 +1425,12 @@ export default function App() {
           appearance={{
             themePreference,
             onTheme: applyThemeChoice,
-            skin,
-            onSkin: applySkinChoice,
+            baseColor,
+            primaryColor,
+            onBaseColor: applyBaseColorChoice,
+            onPrimaryColor: applyPrimaryColorChoice,
             uiFontSize,
             onUiFontSize: applyUiFontSizeChoice,
-            wallpaperUrl,
-            wallpaperKind: wallpaperRecord?.kind ?? null,
-            wallpaperFocus: wallpaperRecord?.focus ?? null,
-            wallpaperClip: wallpaperRecord?.clip ?? null,
-            wallpaperMediaSize:
-              wallpaperRecord?.width && wallpaperRecord?.height
-                ? { w: wallpaperRecord.width, h: wallpaperRecord.height }
-                : null,
-            onWallpaper: applyWallpaperChoice,
-            onWallpaperAdjust: applyWallpaperAdjustChoice,
-            onWallpaperMediaSize: applyWallpaperMediaSize,
-            wallpaperScrim,
-            onWallpaperScrim: applyWallpaperScrimChoice,
-            wallpaperBlur,
-            onWallpaperBlur: applyWallpaperBlurChoice,
-            onWallpaperAppearanceReset: resetWallpaperAppearance,
           }}
           update={{
             versionFooter: appUpdateStatus

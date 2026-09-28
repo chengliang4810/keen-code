@@ -265,10 +265,10 @@ describe("SettingsPage 界面字号契约", () => {
   });
 });
 
-describe("SettingsPage 主题和皮肤选择契约", () => {
+describe("SettingsPage 主题颜色选择契约", () => {
   it("终端字体使用 Appica Input，并在失焦时保存非空字体族列表", () => {
     const start = source.indexOf('id="settings-anchor-terminal-font"');
-    const end = source.indexOf('className="settings-appearance-duo"', start);
+    const end = source.indexOf('{section === "account" && (', start);
     const fontSource = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);
@@ -304,18 +304,24 @@ describe("SettingsPage 主题和皮肤选择契约", () => {
     expect(themeSource).not.toContain('role="radiogroup"');
   });
 
-  it("皮肤选择使用受控 ColorSwatchPicker，并校验持久化标识", () => {
+  it("基础色与主色分别使用受控 Select", () => {
     const start = source.indexOf('id="settings-anchor-skin"');
-    const end = source.indexOf('id="settings-anchor-wallpaper"', start);
-    const skinSource = source.slice(start, end);
+    const end = source.indexOf('{section === "account" && (', start);
+    const colorSource = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
-    expect(source).toContain('from "@appica/ui-react/color-swatch-picker"');
-    expect(skinSource).toContain("<ColorSwatchPicker");
-    expect(skinSource).toContain("<ColorSwatchPickerItem");
-    expect(skinSource).toContain(
-      "if (selected && isThemeSkinId(selected.id)) onSkin(selected.id)",
-    );
+    expect(colorSource).toContain('value={baseColor}');
+    expect(colorSource).toContain('onBaseColor(value as BaseColor)');
+    expect(colorSource).toContain('value={primaryColor}');
+    expect(colorSource).toContain('onPrimaryColor(value as PrimaryColor)');
+    expect(colorSource).toContain('data-color={baseColor}');
+    expect(colorSource).toContain('data-color={primaryColor}');
+  });
+
+  it("外观设置不再提供背景媒体入口", () => {
+    expect(source).not.toContain("settings-anchor-wallpaper");
+    expect(source).not.toContain("WallpaperMediaLayer");
+    expect(source).not.toContain("WallpaperFocusEditor");
   });
 });

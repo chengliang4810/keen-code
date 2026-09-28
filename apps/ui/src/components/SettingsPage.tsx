@@ -1,10 +1,8 @@
 import { Card } from "@/components/ui/card";
-import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { SettingsNumberInput } from "@/components/ui/settings-number-input";
 import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
 import { Button } from "@appica/ui-react/button";
 import { Input } from "@/components/ui/input";
-import { Slider } from "@appica/ui-react/slider";
 import {
   MAX_UI_FONT_SIZE,
   MIN_UI_FONT_SIZE,
@@ -28,7 +26,6 @@ import {
   IconAppearance,
   IconArrowLeft,
   IconArchive,
-  IconCrop,
   IconChevronRight,
   IconDesktop,
   IconSun,
@@ -49,24 +46,6 @@ import {
   isThemePreference,
   type ThemePreference,
 } from "@/lib/theme";
-import {
-  DEFAULT_WALLPAPER_FOCUS,
-  THEME_SKINS,
-  WALLPAPER_ACCEPT,
-  WallpaperPrepareError,
-  isThemeSkinId,
-  prepareWallpaperFromFile,
-  type ThemeSkinId,
-  type WallpaperClip,
-  type WallpaperFocus,
-  type WallpaperKind,
-  type WallpaperRecord,
-} from "@/lib/themeSkin";
-import {
-  WallpaperFocusEditor,
-  type WallpaperFocusApplyResult,
-} from "@/components/WallpaperFocusEditor";
-import { WallpaperMediaLayer } from "@/components/WallpaperMediaLayer";
 import {
   AppUpdateSection,
   type AppUpdateBusy,
@@ -95,11 +74,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import {
-  ColorSwatchPicker,
-  ColorSwatchPickerItem,
-} from "@appica/ui-react/color-swatch-picker";
-import { formatColor } from "@appica/ui-react/color";
+import { BASE_COLORS, PRIMARY_COLORS, type BaseColor, type PrimaryColor } from "@/lib/themeColors";
 import { ToggleGroup } from "@appica/ui-react/toggle-group";
 import { Toggle } from "@appica/ui-react/toggle";
 
@@ -180,36 +155,14 @@ export interface SettingsPageProps {
   /** 用户选择的主题偏好，包含跟随系统。 */
   themePreference: ThemePreference;
   onTheme: (v: ThemePreference) => void;
-  /** 叠加在明暗主题上的颜色皮肤。 */
-  skin: ThemeSkinId;
-  /** 应用颜色皮肤。 */
-  onSkin: (v: ThemeSkinId) => void;
+  baseColor: BaseColor;
+  primaryColor: PrimaryColor;
+  onBaseColor: (v: BaseColor) => void;
+  onPrimaryColor: (v: PrimaryColor) => void;
   /** 用户选择的界面字号（12–20，默认 14）。 */
   uiFontSize: number;
   /** 保存并立即应用界面字号。 */
   onUiFontSize: (v: number) => void;
-  /** Custom wallpaper blob: URL (null/undefined = none). */
-  wallpaperUrl?: string | null;
-  /** Kind of the current wallpaper, to pick <video> vs <img> in the preview. */
-  wallpaperKind?: WallpaperKind | null;
-  /** Pan/zoom focus for the wallpaper (window-aspect crop). */
-  wallpaperFocus?: WallpaperFocus | null;
-  /** Video in/out clip (seconds). */
-  wallpaperClip?: WallpaperClip | null;
-  /** Intrinsic media size from meta (avoids video preview flash). */
-  wallpaperMediaSize?: { w: number; h: number } | null;
-  onWallpaper?: (record: WallpaperRecord | null) => void | Promise<void>;
-  /** Save focus crop + optional video clip (no blob rewrite). */
-  onWallpaperAdjust?: (result: WallpaperFocusApplyResult) => void;
-  /** 首次解码成功后保存媒体固有尺寸。 */
-  onWallpaperMediaSize?: (size: { w: number; h: number }) => void;
-  /** Wallpaper scrim strength 0–100 (only the dimming overlay; not chrome). */
-  wallpaperScrim?: number;
-  onWallpaperScrim?: (value: number) => void;
-  /** Wallpaper blur radius in CSS pixels. */
-  wallpaperBlur?: number;
-  onWallpaperBlur?: (value: number) => void;
-  onWallpaperAppearanceReset?: () => void;
   /** Windows WebView2 是否启用硬件加速。 */
   chromeHardwareAcceleration?: boolean;
   onChromeHardwareAcceleration?: (v: boolean) => void;
@@ -358,23 +311,12 @@ export function SettingsPage({
   onLocaleChange,
   themePreference,
   onTheme,
-  skin,
-  onSkin,
+  baseColor,
+  primaryColor,
+  onBaseColor,
+  onPrimaryColor,
   uiFontSize,
   onUiFontSize,
-  wallpaperUrl = null,
-  wallpaperKind = null,
-  wallpaperFocus = null,
-  wallpaperClip = null,
-  wallpaperMediaSize = null,
-  wallpaperScrim = 40,
-  onWallpaperScrim,
-  wallpaperBlur = 0,
-  onWallpaperBlur,
-  onWallpaperAppearanceReset,
-  onWallpaper,
-  onWallpaperAdjust,
-  onWallpaperMediaSize,
   chromeHardwareAcceleration = true,
   onChromeHardwareAcceleration,
   taskNotifications = true,
@@ -429,10 +371,6 @@ export function SettingsPage({
 }: SettingsPageProps) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   const previousSectionRef = useRef(section);
-  const wallpaperInputRef = useRef<HTMLInputElement>(null);
-  const [wallpaperBusy, setWallpaperBusy] = useState(false);
-  const [wallpaperError, setWallpaperError] = useState<string | null>(null);
-  const [wallpaperFocusOpen, setWallpaperFocusOpen] = useState(false);
   /** 已归档对话的本地查询词。 */
   const [archivedQuery, setArchivedQuery] = useState("");
   /** 正在恢复的对话标识，避免重复提交。 */
@@ -443,36 +381,6 @@ export function SettingsPage({
     (k: string, vars?: Vars) => tr(k as MessageKey, vars),
     [tr],
   );
-  const wallpaperErrorMessage = useCallback(
-    (err: unknown): string => {
-      if (err instanceof WallpaperPrepareError) {
-        const key = `settings.wallpaper.err.${err.code}` as MessageKey;
-        const msg = t(key);
-        return msg === key ? t("settings.wallpaper.err.generic") : msg;
-      }
-      return t("settings.wallpaper.err.generic");
-    },
-    [t],
-  );
-
-  const onWallpaperFile = useCallback(
-    async (file: File | null | undefined) => {
-      if (!file || !onWallpaper) return;
-      setWallpaperBusy(true);
-      setWallpaperError(null);
-      try {
-        const record = await prepareWallpaperFromFile(file);
-        await onWallpaper(record);
-      } catch (e) {
-        setWallpaperError(wallpaperErrorMessage(e));
-      } finally {
-        setWallpaperBusy(false);
-        if (wallpaperInputRef.current) wallpaperInputRef.current.value = "";
-      }
-    },
-    [onWallpaper, wallpaperErrorMessage],
-  );
-
   /** 跳转当前设置分区并同步唯一 Hash。 */
   const navigateTo = useCallback(
     (id: SettingsSectionId) => {
@@ -1095,6 +1003,20 @@ export function SettingsPage({
                   </Toggle>
                 </ToggleGroup>
               </div>
+              <div className="settings-row settings-row--stack" id="settings-anchor-skin">
+                <label className="settings-row__label" htmlFor="settings-base-color">{t("settings.baseColor")}</label>
+                <Select value={baseColor} onValueChange={(value) => onBaseColor(value as BaseColor)}>
+                  <SelectTrigger id="settings-base-color" className="settings-input"><SelectValue>{() => <span className="settings-color-option" data-color={baseColor}>{t(`settings.color.${baseColor}` as MessageKey)}</span>}</SelectValue></SelectTrigger>
+                  <SelectContent>{BASE_COLORS.map((color) => <SelectItem key={color} value={color}><span className="settings-color-option" data-color={color}>{t(`settings.color.${color}` as MessageKey)}</span></SelectItem>)}</SelectContent>
+                </Select>
+              </div>
+              <div className="settings-row settings-row--stack">
+                <label className="settings-row__label" htmlFor="settings-primary-color">{t("settings.primaryColor")}</label>
+                <Select value={primaryColor} onValueChange={(value) => onPrimaryColor(value as PrimaryColor)}>
+                  <SelectTrigger id="settings-primary-color" className="settings-input"><SelectValue>{() => <span className="settings-color-option" data-color={primaryColor}>{t(`settings.color.${primaryColor}` as MessageKey)}</span>}</SelectValue></SelectTrigger>
+                  <SelectContent>{PRIMARY_COLORS.map((color) => <SelectItem key={color} value={color}><span className="settings-color-option" data-color={color}>{t(`settings.color.${color}` as MessageKey)}</span></SelectItem>)}</SelectContent>
+                </Select>
+              </div>
               <div className="settings-row" id="settings-anchor-ui-font-size">
                 <div className="settings-row__text">
                   <label
@@ -1196,274 +1118,6 @@ export function SettingsPage({
                 </div>
               )}
             </Card>
-            <div className="settings-appearance-duo">
-              <Card
-                className="settings-appearance-card"
-                id="settings-anchor-skin"
-              >
-                <div className="settings-row settings-row--stack">
-                  <div className="settings-row__text">
-                    <div className="settings-row__label">
-                      {t("settings.skin")}
-                    </div>
-                    <div className="settings-row__desc">
-                      {t("settings.skinDesc")}
-                    </div>
-                  </div>
-                  <ColorSwatchPicker
-                    value={THEME_SKINS.find((pack) => pack.id === skin)?.swatch}
-                    aria-label={t("settings.skin")}
-                    className="settings-skin-grid"
-                    onValueChange={(value) => {
-                      const selected = THEME_SKINS.find(
-                        (pack) => pack.swatch.toLowerCase() === formatColor(value, "hex").toLowerCase(),
-                      );
-                      if (selected && isThemeSkinId(selected.id)) onSkin(selected.id);
-                    }}
-                    size="md"
-                  >
-                    {THEME_SKINS.map((pack) => {
-                      const label = t(
-                        `settings.skin.${pack.id}` as "settings.skin.default",
-                      );
-                      return (
-                        <ColorSwatchPickerItem
-                          key={pack.id}
-                          color={pack.swatch}
-                          colorName={label}
-                        />
-                      );
-                    })}
-                  </ColorSwatchPicker>
-                </div>
-              </Card>
-                {onWallpaper ? (
-                  <Card
-                    className="settings-appearance-card"
-                    id="settings-anchor-wallpaper"
-                  >
-                    <div className="settings-row settings-row--stack">
-                      <div className="settings-row__text">
-                        <div className="settings-row__label">
-                          {t("settings.wallpaper")}
-                        </div>
-                        <div className="settings-row__desc">
-                          {t("settings.wallpaperDesc")}
-                        </div>
-                      </div>
-                      <div className="settings-wallpaper">
-                        {/* 浏览器文件选择能力必须由不可见原生 input 承载。 */}
-                        <input
-                          ref={wallpaperInputRef}
-                          type="file"
-                          accept={WALLPAPER_ACCEPT}
-                          hidden
-                          onChange={(e) => {
-                            void onWallpaperFile(e.target.files?.[0]);
-                          }}
-                        />
-                        <div className="settings-wallpaper__preview-wrap">
-                          {wallpaperUrl ? (
-                            <div
-                              className={
-                                "settings-wallpaper__preview settings-wallpaper__preview--set" +
-                                (wallpaperBusy
-                                  ? " settings-wallpaper__preview--busy"
-                                  : "")
-                              }
-                            >
-                              <WallpaperMediaLayer
-                                url={wallpaperUrl}
-                                kind={wallpaperKind ?? "image"}
-                                focus={
-                                  wallpaperFocus ?? DEFAULT_WALLPAPER_FOCUS
-                                }
-                                clip={wallpaperClip}
-                                intrinsicSize={wallpaperMediaSize}
-                                onIntrinsicSize={onWallpaperMediaSize}
-                                className="settings-wallpaper__media"
-                                mediaClassName="settings-wallpaper__media-el"
-                              />
-                              {wallpaperBusy ? (
-                                <span
-                                  className="settings-wallpaper__busy"
-                                  aria-hidden
-                                >
-                                  {t("settings.wallpaperWorking")}
-                                </span>
-                              ) : null}
-                              <div className="settings-wallpaper__hover">
-                                <Button
-                                  type="button"
-                                  variant="primary" size="md"
-                                  disabled={wallpaperBusy}
-                                  onClick={() =>
-                                    wallpaperInputRef.current?.click()
-                                  }
-                                >
-                                  {t("settings.wallpaperReplace")}
-                                </Button>
-                                {onWallpaperAdjust ? (
-                                  <Button
-                                    type="button"
-                                    variant="primary" size="md"
-                                    disabled={wallpaperBusy}
-                                    onClick={() => setWallpaperFocusOpen(true)}
-                                  >
-                                    <IconCrop size={14} />
-                                    {t("settings.wallpaperFocus")}
-                                  </Button>
-                                ) : null}
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost" size="md" className="settings-wallpaper__clear"
-                                disabled={wallpaperBusy}
-                                onClick={() => {
-                                  setWallpaperError(null);
-                                  setWallpaperFocusOpen(false);
-                                  void onWallpaper(null);
-                                }}
-                              >
-                                {t("settings.wallpaperClear")}
-                              </Button>
-                            </div>
-                          ) : (
-                            <Button size="md"
-                              type="button"
-                              variant="outline"
-                              className={
-                                "settings-wallpaper__preview" +
-                                (wallpaperBusy
-                                  ? " settings-wallpaper__preview--busy"
-                                  : "")
-                              }
-                              disabled={wallpaperBusy}
-                              aria-label={
-                                wallpaperBusy
-                                  ? t("settings.wallpaperWorking")
-                                  : t("settings.wallpaperUpload")
-                              }
-                              onClick={() =>
-                                wallpaperInputRef.current?.click()
-                              }
-                            >
-                              <span className="settings-wallpaper__preview-empty">
-                                {wallpaperBusy
-                                  ? t("settings.wallpaperWorking")
-                                  : t("settings.wallpaperEmpty")}
-                              </span>
-                            </Button>
-                          )}
-                        </div>
-                        {wallpaperUrl && onWallpaperAdjust ? (
-                          <WallpaperFocusEditor
-                            open={wallpaperFocusOpen}
-                            onClose={() => setWallpaperFocusOpen(false)}
-                            onApply={(result) => onWallpaperAdjust(result)}
-                            mediaUrl={wallpaperUrl}
-                            kind={wallpaperKind ?? "image"}
-                            initialFocus={
-                              wallpaperFocus ?? DEFAULT_WALLPAPER_FOCUS
-                            }
-                            initialClip={wallpaperClip}
-                            labels={{
-                              title: t("settings.wallpaperFocusTitle"),
-                              hint: t("settings.wallpaperFocusHint"),
-                              hintVideo: t("settings.wallpaperFocusHintVideo"),
-                              zoom: t("settings.wallpaperFocusZoom"),
-                              clip: t("settings.wallpaperClip"),
-                              clipStart: t("settings.wallpaperClipStart"),
-                              clipEnd: t("settings.wallpaperClipEnd"),
-                              reset: t("settings.wallpaperFocusReset"),
-                              cancel: t("common.cancel"),
-                              apply: t("settings.wallpaperFocusApply"),
-                              close: t("common.close"),
-                            }}
-                          />
-                        ) : null}
-                        {wallpaperUrl && onWallpaperScrim && onWallpaperBlur ? (
-                          <div className="settings-wallpaper__scrim">
-                            <div className="settings-wallpaper__scrim-head">
-                              <label
-                                className="settings-wallpaper__scrim-label"
-                                htmlFor="settings-wallpaper-scrim"
-                              >
-                                {t("settings.wallpaperVisibility")}
-                              </label>
-                              <span
-                                className="settings-wallpaper__scrim-value"
-                                aria-hidden
-                              >
-                                {100 - Math.round(wallpaperScrim)}%
-                              </span>
-                            </div>
-                            <Slider
-                              id="settings-wallpaper-scrim"
-                              className="settings-wallpaper__scrim-range"
-                              min={0}
-                              max={100}
-                              step={1}
-                              value={100 - wallpaperScrim}
-                              thumbAriaLabel={t("settings.wallpaperVisibility")}
-                              tooltipVisibility="never"
-                              aria-valuemin={0}
-                              aria-valuemax={100}
-                              aria-valuenow={100 - Math.round(wallpaperScrim)}
-                              aria-label={t("settings.wallpaperVisibility")}
-                              onValueChange={(value) => {
-                                if (typeof value !== "number") return;
-                                onWallpaperScrim(100 - value);
-                              }}
-                            />
-                            <div className="settings-wallpaper__scrim-head">
-                              <label
-                                className="settings-wallpaper__scrim-label"
-                                htmlFor="settings-wallpaper-blur"
-                              >
-                                {t("settings.wallpaperBlur")}
-                              </label>
-                              <span
-                                className="settings-wallpaper__scrim-value"
-                                aria-hidden
-                              >
-                                {Math.round(wallpaperBlur)}px
-                              </span>
-                            </div>
-                            <Slider
-                              id="settings-wallpaper-blur"
-                              className="settings-wallpaper__scrim-range"
-                              min={0}
-                              max={24}
-                              step={1}
-                              value={wallpaperBlur}
-                              thumbAriaLabel={t("settings.wallpaperBlur")}
-                              tooltipVisibility="never"
-                              aria-label={t("settings.wallpaperBlur")}
-                              onValueChange={(value) => {
-                                if (typeof value === "number") onWallpaperBlur(value);
-                              }}
-                            />
-                            <p className="settings-wallpaper__scrim-hint">
-                              {t("settings.wallpaperScrimDesc")}
-                            </p>
-                            {onWallpaperAppearanceReset ? (
-                              <Button
-                                type="button"
-                                variant="ghost" size="md"
-                                onClick={onWallpaperAppearanceReset}
-                              >
-                                {t("settings.wallpaperAppearanceReset")}
-                              </Button>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        {wallpaperError ? <Alert variant="error"><AlertDescription>{wallpaperError}</AlertDescription></Alert> : null}
-                      </div>
-                    </div>
-                  </Card>
-                ) : null}
-            </div>
           </>
         )}
 

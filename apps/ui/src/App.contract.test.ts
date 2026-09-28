@@ -631,13 +631,6 @@ describe("设置页按需加载契约", () => {
   it("首次加载设置代码时保持设置页背景，避免窗口短暂露出黑色底层", () => {
     const source = readSource("./features/app/SettingsRoute.tsx");
     const cssSource = readSource("./styles/app.css");
-    const skinsSource = readSource("./styles/skins.css");
-    const wallpaperClearRule = skinsSource.indexOf(
-      'html[data-wallpaper="1"][data-wallpaper-clear="1"] .sidebar,',
-    );
-    const wallpaperFallbackRule = skinsSource.indexOf(
-      'html[data-wallpaper="1"] .settings-page.settings-page--fallback',
-    );
 
     expect(source).toContain(
       'className="settings-page settings-page--fallback" aria-busy="true"',
@@ -646,11 +639,6 @@ describe("设置页按需加载契约", () => {
     expect(source).not.toContain("<Suspense fallback={null}>");
     expect(cssSource).toMatch(
       /\.settings-page\.settings-page--fallback\s*\{[^}]*background:\s*var\(--bg-main\);/s,
-    );
-    expect(wallpaperClearRule).toBeGreaterThanOrEqual(0);
-    expect(wallpaperFallbackRule).toBeGreaterThan(wallpaperClearRule);
-    expect(skinsSource).toMatch(
-      /html\[data-wallpaper="1"\] \.settings-page\.settings-page--fallback\s*\{[^}]*background:\s*var\(--bg-main\)\s*!important;/s,
     );
   });
 });

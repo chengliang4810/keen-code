@@ -33,6 +33,13 @@ describe("ProvidersPanel 双栏布局", () => {
     expect(styles).toMatch(/\.prov-item\s*\{[^}]*flex-shrink: 0;/);
     expect(styles).toMatch(/\.prov-rail-empty\s*\{[^}]*flex-shrink: 0;/);
   });
+
+  it("选中态直接使用同一主色与不透明表面", () => {
+    const selected = styles.match(/\.prov-item\.is-selected\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(selected).toContain("var(--primary) 40%");
+    expect(selected).toContain("var(--primary) 8%, var(--bg-elevated)");
+    expect(selected).not.toContain("--accent-muted");
+  });
 });
 const settingsSource = readFileSync(new URL("./SettingsPage.tsx", import.meta.url), "utf8");
 

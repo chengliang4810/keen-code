@@ -1,4 +1,12 @@
 import { useEffect, useState } from "react";
+import {
+  applyThemeColors,
+  BASE_COLORS,
+  PRIMARY_COLORS,
+  loadColor,
+  type BaseColor,
+  type PrimaryColor,
+} from "@/lib/themeColors";
 import { useTheme } from "@appica/ui-react/hooks/use-theme";
 import {
   applyNativeWindowTheme,
@@ -10,13 +18,6 @@ import {
   type Theme,
   type ThemePreference,
 } from "@/lib/theme";
-import {
-  applySkinToDocument,
-  loadSkin,
-  saveSkin,
-  skinPreferredTheme,
-  type ThemeSkinId,
-} from "@/lib/themeSkin";
 import {
   applyUiFontSizeToDocument,
   loadUiFontSize,
@@ -41,7 +42,12 @@ export function useThemeAppearance() {
   const theme: Theme = isTheme(resolvedTheme)
     ? resolvedTheme
     : DEFAULT_RESOLVED_THEME;
-  const [skin, setSkin] = useState<ThemeSkinId>(() => loadSkin(localStorage));
+  const [baseColor, setBaseColor] = useState<BaseColor>(() =>
+    loadColor("keencode.base-color", BASE_COLORS, "gray"),
+  );
+  const [primaryColor, setPrimaryColor] = useState<PrimaryColor>(() =>
+    loadColor("keencode.primary-color", PRIMARY_COLORS, "red"),
+  );
   const [uiFontSize, setUiFontSize] = useState(() =>
     loadUiFontSize(localStorage),
   );
@@ -56,7 +62,9 @@ export function useThemeAppearance() {
     applyUiFontSizeToDocument(uiFontSize);
   }, [uiFontSize]);
 
-  useEffect(() => applySkinToDocument(skin), [skin]);
+  useEffect(() => {
+    applyThemeColors(baseColor, primaryColor);
+  }, [baseColor, primaryColor]);
 
   const applyThemeChoice = (next: ThemePreference) => {
     if (next === "system") {
@@ -76,14 +84,6 @@ export function useThemeAppearance() {
     setTheme(next);
   };
 
-  const applySkinChoice = (next: ThemeSkinId) => {
-    saveSkin(localStorage, next);
-    applySkinToDocument(next);
-    setSkin(next);
-    const preferred = skinPreferredTheme(next);
-    if (preferred && preferred !== theme) applyThemeChoice(preferred);
-  };
-
   const applyUiFontSizeChoice = (next: number) => {
     saveUiFontSize(localStorage, next);
     applyUiFontSizeToDocument(next);
@@ -92,10 +92,18 @@ export function useThemeAppearance() {
 
   return {
     themePreference,
-    skin,
+    baseColor,
+    primaryColor,
+    applyBaseColorChoice: (value: BaseColor) => {
+      localStorage.setItem("keencode.base-color", value);
+      setBaseColor(value);
+    },
+    applyPrimaryColorChoice: (value: PrimaryColor) => {
+      localStorage.setItem("keencode.primary-color", value);
+      setPrimaryColor(value);
+    },
     uiFontSize,
     applyThemeChoice,
-    applySkinChoice,
     applyUiFontSizeChoice,
   };
 }

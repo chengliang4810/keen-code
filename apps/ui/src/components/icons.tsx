@@ -35,7 +35,6 @@ import {
   IconCircleDashed as TbCircleDashed,
   IconCopy as TbCopy,
   IconDots as TbDots,
-  IconCrop as TbCrop,
   IconDownload as TbDownload,
   IconEdit as TbEdit,
   IconFileDiff as TbFileDiff,
@@ -139,8 +138,6 @@ export const IconNewChat = wrap(TbEdit);
 export const IconEdit = wrap(TbEdit);
 export const IconCode = wrap(TbCode);
 export const IconListNumbers = wrap(TbListNumbers);
-/** Wallpaper focus / crop frame editor. */
-export const IconCrop = wrap(TbCrop);
 export const IconClock = wrap(TbClock);
 export const IconDatabase = wrap(TbDatabase);
 export const IconPhoto = wrap(TbPhoto);

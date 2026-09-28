@@ -799,8 +799,8 @@
 }
 
 .prov-item.is-selected {
-  border-color: color-mix(in srgb, var(--accent) 50%, var(--border-subtle));
-  background: var(--accent-muted);
+  border-color: color-mix(in oklab, var(--primary) 40%, var(--border-subtle));
+  background: color-mix(in oklab, var(--primary) 8%, var(--bg-elevated));
 }
 
 .prov-item.is-active:not(.is-selected) {
