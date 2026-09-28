@@ -15,7 +15,7 @@
 /* ZCode 桌面会话列始终保留独立 frame；窄视口由媒体查询恢复无框全宽布局。 */
 @media (min-width: 761px) {
   .main.main--frame {
-    margin: 4px 4px 4px 0;
+    margin: 0 4px 4px 0;
     /* 面板底色与 app 背景同源，框体只留几何不留描边。 */
     overflow: hidden;
   }
@@ -24,11 +24,6 @@
   .platform-win .main.main--frame,
   .has-custom-chrome .main.main--frame {
     border-radius: var(--radius-workspace-win);
-  }
-
-  .platform-win .main.main--frame {
-    /* 左侧栏与右上窗口按钮从窗口顶缘起算，主栏不能再低 4px。 */
-    margin-top: 0;
   }
 
   .platform-mac .main.main--frame {

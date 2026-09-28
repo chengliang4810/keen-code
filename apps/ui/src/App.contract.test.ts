@@ -131,7 +131,8 @@ describe("Windows 标题栏与项目菜单定位契约", () => {
     expect(css).toMatch(/\.platform-win\.app-shell\s*\{[^}]*--titlebar-height:\s*32px;/s);
     expect(css).toMatch(/\.sidebar-chrome\s*\{[^}]*height:\s*var\(--titlebar-height, 48px\);/s);
     expect(header).toMatch(/\.platform-win \.main__top\s*\{[^}]*padding-block:\s*0;/s);
-    expect(header).toMatch(/\.platform-win \.main\.main--frame\s*\{[^}]*margin-top:\s*0;/s);
+    expect(header).toMatch(/\.main\.main--frame\s*\{[^}]*margin:\s*0 4px 4px 0;/s);
+    expect(css).not.toMatch(/\.platform-mac \.sidebar-chrome\s*\{/);
   });
 });
 
@@ -545,7 +546,7 @@ describe("App 顶栏布局契约", () => {
       /\.main__top\s*\{[\s\S]*?height: var\(--titlebar-height, 48px\);[\s\S]*?padding: 8px;[\s\S]*?border-bottom: 1px solid var\(--border-subtle\);/,
     );
     expect(cssSource).toMatch(
-      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame\s*\{[\s\S]*?margin: 4px 4px 4px 0;[\s\S]*?overflow: hidden;/,
+      /@media \(min-width: 761px\)[\s\S]*?\.main\.main--frame\s*\{[\s\S]*?margin: 0 4px 4px 0;[\s\S]*?overflow: hidden;/,
     );
     const frameBlock =
       cssSource.match(/\.main\.main--frame\s*\{([^}]*)\}/)?.[1] ?? "";
