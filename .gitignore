@@ -28,6 +28,7 @@ Thumbs.db
 
 # Tauri / Rust
 apps/desktop/gen/schemas
+apps/desktop/src-tauri/gen/schemas
 
 # Local runtime data & secrets
 *.db
