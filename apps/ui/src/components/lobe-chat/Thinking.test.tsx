@@ -17,11 +17,12 @@ import {
 } from "./Thinking";
 
 describe("Thinking processing duration", () => {
-  it("只在打开的流式思考上启动计时器，并在关闭动画缺失时兜底卸载正文", () => {
+  it("折叠时仍逐秒更新流式耗时，并在关闭动画缺失时兜底卸载正文", () => {
     const source = readFileSync(new URL("./Thinking.tsx", import.meta.url), "utf8");
 
     expect(REASONING_CONTENT_UNLOAD_DELAY_MS).toBe(300);
-    expect(source).toContain("if (!open) return;");
+    expect(source).toContain("const timer = window.setInterval(updateDuration, 1000)");
+    expect(source).not.toContain("if (!open) return;");
     expect(source).toMatch(
       /const unloadTimer = window\.setTimeout\([\s\S]*?REASONING_CONTENT_UNLOAD_DELAY_MS/,
     );

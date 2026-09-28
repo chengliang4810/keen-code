@@ -233,8 +233,6 @@ export function Thinking({
       if (startedAt != null && startedAt < startRef.current) {
         startRef.current = startedAt;
       }
-      // 折叠的 reasoning 不需要每秒触发父级重绘；打开时仍从同一锚点补齐耗时。
-      if (!open) return;
       const updateDuration = () => {
         if (startRef.current != null) {
           setLocalDuration(Date.now() - startRef.current);
@@ -247,7 +245,7 @@ export function Thinking({
       setLocalDuration(durationMs ?? Date.now() - startRef.current);
       startRef.current = null;
     }
-  }, [durationMs, startedAt, thinking, open, tracksProcessingDuration]);
+  }, [durationMs, startedAt, thinking, tracksProcessingDuration]);
 
   useEffect(() => {
     if (tracksProcessingDuration && durationMs != null) {
