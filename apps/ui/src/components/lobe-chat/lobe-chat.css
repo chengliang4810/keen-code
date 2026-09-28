@@ -1441,7 +1441,7 @@
 }
 .lobe-timeline-phase__title {
   min-width: 0;
-  flex: 1;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1457,7 +1457,6 @@
   align-items: center;
   color: var(--chat-text-3);
   flex-shrink: 0;
-  margin-left: auto;
   transition: transform 0.15s ease;
 }
 .lobe-timeline-phase__caret.is-open {

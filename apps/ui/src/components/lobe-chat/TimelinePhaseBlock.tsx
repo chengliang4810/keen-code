@@ -131,7 +131,7 @@ export function TimelinePhaseBlock({
       <Button size="md"
         type="button"
         variant="ghost"
-        className="lobe-timeline-phase__trigger"
+        className="lobe-timeline-phase__trigger not-data-popup-open:active:scale-100 not-data-popup-open:active:translate-y-0 transition-none"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >

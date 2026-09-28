@@ -33,7 +33,7 @@ export function TurnWorkGroup({
       <Button size="md"
         type="button"
         variant="ghost"
-        className="lobe-turn-work__trigger"
+        className="lobe-turn-work__trigger not-data-popup-open:active:scale-100 not-data-popup-open:active:translate-y-0 transition-none"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >

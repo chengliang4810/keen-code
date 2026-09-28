@@ -68,6 +68,14 @@ describe("TimelinePhaseBlock", () => {
     expect(css).toMatch(
       /\.lobe-timeline-phase__trigger\s*\{[^}]*padding:\s*2px 0;/s,
     );
+    expect(css).toMatch(
+      /\.lobe-timeline-phase__title\s*\{[^}]*flex:\s*0 1 auto;/s,
+    );
+    expect(css).not.toMatch(
+      /\.lobe-timeline-phase__caret\s*\{[^}]*margin-left:\s*auto;/s,
+    );
+    expect(fs.readFileSync(new URL("./TimelinePhaseBlock.tsx", import.meta.url), "utf8"))
+      .toContain("not-data-popup-open:active:scale-100 not-data-popup-open:active:translate-y-0 transition-none");
   });
 
   it("活动工具组默认折叠并在标题显示当前命令", () => {
