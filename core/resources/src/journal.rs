@@ -4092,8 +4092,16 @@ mod tests {
         })
         .join()
         .expect("追加线程应完成");
-        std::thread::sleep(JOURNAL_BATCH_MAX_DELAY + Duration::from_millis(80));
-        assert_eq!(journal.pending_flush_records().expect("窗口应读取"), 0);
+        // 轮询等待批量调度器完成 sync，而不是睡固定时长：慢 runner 上
+        // 180ms 固定睡眠可能早于后台线程的 flush 完成。
+        let settle_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if journal.pending_flush_records().expect("窗口应读取") == 0 {
+                break;
+            }
+            assert!(Instant::now() < settle_deadline, "批量窗口应在时限内排空");
+            std::thread::sleep(Duration::from_millis(20));
+        }
         assert_eq!(
             journal.state().expect("状态应读取").last_sequence,
             1 + JOURNAL_BATCH_MAX_RECORDS as u64
