@@ -73,7 +73,10 @@ export function EffortSlider({
     const root = rootRef.current;
     if (!root) return;
     const layout = () => {
-      const width = root.getBoundingClientRect().width;
+      // 用布局宽度而不是 getBoundingClientRect：弹层打开动画用 transform
+      // 缩放整棵子树，矩形跟着缩放，而 ResizeObserver 不监听 transform，
+      // 一旦在动画中量宽，档位坐标会永久偏小（旋钮到不了最高档）。
+      const width = root.offsetWidth;
       root.querySelectorAll<HTMLElement>(".effort-slider__stop").forEach((stop) => {
         stop.style.left = `${stopX(Number(stop.dataset.stop ?? "0"), width)}px`;
       });
