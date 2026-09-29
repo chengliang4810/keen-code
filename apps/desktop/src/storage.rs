@@ -118,6 +118,61 @@ pub(crate) fn open_readonly_regular_file(path: &Path) -> std::io::Result<File> {
 /// `~/.keencode` 下的 app 私有数据，始终强制 0600；而 workspace 版写用户项目
 /// 文件，覆盖时保留原文件权限、新建时走默认 umask。不要把两者合并成一条
 /// 无差别路径，也不要在这里把项目文件改成 0600。
+/// 按打开句柄有界读取普通文件，并复核路径在读取前后仍指向同一长度的普通文件。
+///
+/// 这是桌面私有持久化记录的统一读端：拒绝符号链接、目录和读取期间发生的
+/// 替换或增长；文件不存在时返回 `None`，由调用方决定默认值还是报错。
+pub(crate) fn read_private_bytes_bounded(
+    path: &Path,
+    max_bytes: u64,
+    label: &str,
+) -> Result<Option<Vec<u8>>> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("检查{label}失败：{}", path.display()));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("{label}路径不是普通文件：{}", path.display());
+    }
+    if metadata.len() > max_bytes {
+        anyhow::bail!("{label}超过 {max_bytes} 字节：{}", path.display());
+    }
+    let file = open_readonly_regular_file(path)
+        .with_context(|| format!("打开{label}失败：{}", path.display()))?;
+    let opened_metadata = file
+        .metadata()
+        .with_context(|| format!("读取已打开{label}元数据失败：{}", path.display()))?;
+    if !opened_metadata.is_file() || opened_metadata.len() != metadata.len() {
+        anyhow::bail!("{label}在打开期间发生变化：{}", path.display());
+    }
+    let mut bytes = Vec::new();
+    {
+        use std::io::Read;
+        file.take(max_bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("读取{label}失败：{}", path.display()))?;
+    }
+    let actual_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if actual_len > max_bytes || actual_len != opened_metadata.len() {
+        anyhow::bail!(
+            "{label}在读取期间发生变化或超过 {max_bytes} 字节：{}",
+            path.display()
+        );
+    }
+    let final_metadata = fs::symlink_metadata(path)
+        .with_context(|| format!("复核{label}失败：{}", path.display()))?;
+    if final_metadata.file_type().is_symlink()
+        || !final_metadata.is_file()
+        || final_metadata.len() != metadata.len()
+    {
+        anyhow::bail!("{label}在读取期间发生变化：{}", path.display());
+    }
+    Ok(Some(bytes))
+}
+
 pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let parent = path.parent().context("私有文件路径缺少父目录")?;
     fs::create_dir_all(parent)

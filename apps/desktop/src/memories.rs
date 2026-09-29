@@ -8,7 +8,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::future::Future;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -1392,54 +1391,8 @@ fn eligible_memory_source(
 
 /// 读取严格状态文件并在读取前后都限制字节数，避免超限文件耗尽内存。
 fn read_memory_state_bytes(path: &Path) -> Result<Vec<u8>> {
-    read_regular_file_bounded(path, MAX_MEMORY_STATE_BYTES, "本地记忆状态")?
+    crate::storage::read_private_bytes_bounded(path, MAX_MEMORY_STATE_BYTES, "本地记忆状态")?
         .ok_or_else(|| anyhow::anyhow!("本地记忆状态不存在：{}", path.display()))
-}
-
-/// 按打开句柄有界读取普通文件，并复核路径在读取前后仍指向同一长度的普通文件。
-fn read_regular_file_bounded(path: &Path, max_bytes: u64, label: &str) -> Result<Option<Vec<u8>>> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("检查{label}失败：{}", path.display()));
-        }
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("{label}路径不是普通文件：{}", path.display());
-    }
-    if metadata.len() > max_bytes {
-        anyhow::bail!("{label}超过 {max_bytes} 字节：{}", path.display());
-    }
-
-    let file = crate::storage::open_readonly_regular_file(path)
-        .with_context(|| format!("打开{label}失败：{}", path.display()))?;
-    let opened_metadata = file
-        .metadata()
-        .with_context(|| format!("读取已打开{label}元数据失败：{}", path.display()))?;
-    if !opened_metadata.is_file() || opened_metadata.len() != metadata.len() {
-        anyhow::bail!("{label}在打开期间发生变化：{}", path.display());
-    }
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("读取{label}失败：{}", path.display()))?;
-    let actual_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if actual_len > max_bytes || actual_len != opened_metadata.len() {
-        anyhow::bail!(
-            "{label}在读取期间发生变化或超过 {max_bytes} 字节：{}",
-            path.display()
-        );
-    }
-    let final_metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("复核{label}失败：{}", path.display()))?;
-    if final_metadata.file_type().is_symlink()
-        || !final_metadata.is_file()
-        || final_metadata.len() != metadata.len()
-    {
-        anyhow::bail!("{label}在读取期间发生变化：{}", path.display());
-    }
-    Ok(Some(bytes))
 }
 
 /// 校验模型或用户提供的文本字符数和 UTF-8 字节数上限。
@@ -1455,7 +1408,8 @@ fn validate_text_size(label: &str, value: &str, max_chars: usize, max_bytes: u64
 
 /// 受限读取普通 UTF-8 文件；缺失文件返回空字符串，符号链接一律拒绝。
 fn read_optional_bounded(path: &Path, max_bytes: u64) -> Result<String> {
-    let Some(bytes) = read_regular_file_bounded(path, max_bytes, "记忆文件")? else {
+    let Some(bytes) = crate::storage::read_private_bytes_bounded(path, max_bytes, "记忆文件")?
+    else {
         return Ok(String::new());
     };
     String::from_utf8(bytes).with_context(|| format!("记忆文件不是 UTF-8：{}", path.display()))
@@ -1463,7 +1417,7 @@ fn read_optional_bounded(path: &Path, max_bytes: u64) -> Result<String> {
 
 /// 读取事务回滚所需的旧文件内容，并限制其最大内存占用。
 fn read_existing_file_for_rollback(path: &Path) -> Result<Option<Vec<u8>>> {
-    read_regular_file_bounded(path, MAX_MEMORY_ROLLBACK_BYTES, "记忆事务旧文件")
+    crate::storage::read_private_bytes_bounded(path, MAX_MEMORY_ROLLBACK_BYTES, "记忆事务旧文件")
 }
 
 /// 删除普通文件目标；缺失目标视为已经完成，避免跟随符号链接。

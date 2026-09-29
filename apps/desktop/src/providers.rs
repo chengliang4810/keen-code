@@ -10,7 +10,6 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -777,19 +776,11 @@ fn load_state(app: &AppHandle) -> Result<ProviderState> {
 /// 配置一律忽略并记入诊断日志，不能让整份配置无法加载。结构性错误（非 JSON、
 /// schema/版本不符、记录自身非法）仍然失败关闭。
 fn load_state_from_path(path: &Path) -> Result<ProviderState> {
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(ProviderState::default());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取供应商配置失败：{}", path.display()));
-        }
+    let Some(bytes) =
+        crate::storage::read_private_bytes_bounded(path, MAX_PROVIDER_CONFIG_BYTES, "供应商配置")?
+    else {
+        return Ok(ProviderState::default());
     };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        anyhow::bail!("供应商配置路径不是普通文件：{}", path.display());
-    }
-    let bytes = read_provider_config_bytes(path)?;
     let value: Value = serde_json::from_slice(&bytes)
         .with_context(|| format!("供应商配置格式无效：{}", path.display()))?;
     let mut warnings = unknown_field_warnings(&value)
@@ -1246,31 +1237,6 @@ fn save_state_to_path(path: &Path, state: &ProviderState) -> Result<()> {
     }
     crate::storage::atomic_write_private(path, &bytes)
         .with_context(|| format!("保存供应商配置失败：{}", path.display()))
-}
-
-/// 在读取前后都限制供应商配置大小，避免损坏或竞态增长的文件耗尽内存。
-fn read_provider_config_bytes(path: &Path) -> Result<Vec<u8>> {
-    let metadata = fs::metadata(path)
-        .with_context(|| format!("读取供应商配置元数据失败：{}", path.display()))?;
-    if metadata.len() > MAX_PROVIDER_CONFIG_BYTES {
-        anyhow::bail!(
-            "供应商配置超过 {MAX_PROVIDER_CONFIG_BYTES} 字节：{}",
-            path.display()
-        );
-    }
-    let file =
-        fs::File::open(path).with_context(|| format!("打开供应商配置失败：{}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_PROVIDER_CONFIG_BYTES.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("读取供应商配置失败：{}", path.display()))?;
-    if bytes.len() as u64 > MAX_PROVIDER_CONFIG_BYTES {
-        anyhow::bail!(
-            "供应商配置超过 {MAX_PROVIDER_CONFIG_BYTES} 字节：{}",
-            path.display()
-        );
-    }
-    Ok(bytes)
 }
 
 /// 校验 API Key，不自动裁剪或修复输入。

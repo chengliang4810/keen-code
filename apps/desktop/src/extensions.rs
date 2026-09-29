@@ -2711,44 +2711,11 @@ fn read_text_limited(path: &Path) -> Result<String, String> {
         .map_err(|error| format!("文件不是 UTF-8 文本 {}：{error}", path.display()))
 }
 
-/// 按打开句柄有界读取普通文件，并复核读取期间路径未变成其他文件或符号链接。
+/// 按打开句柄有界读取普通文件；文件不存在按错误处理，由调用方区分场景。
 fn read_bytes_limited(path: &Path, max_bytes: u64, label: &str) -> Result<Vec<u8>, String> {
-    let metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("无法读取 {label} {}：{error}", path.display()))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(format!("{label}不是普通文件：{}", path.display()));
-    }
-    if metadata.len() > max_bytes {
-        return Err(format!("{label}超过 {max_bytes} 字节：{}", path.display()));
-    }
-    let file = crate::storage::open_readonly_regular_file(path)
-        .map_err(|error| format!("无法打开 {label} {}：{error}", path.display()))?;
-    let opened_metadata = file
-        .metadata()
-        .map_err(|error| format!("无法读取已打开{label}元数据 {}：{error}", path.display()))?;
-    if !opened_metadata.is_file() || opened_metadata.len() != metadata.len() {
-        return Err(format!("{label}在打开期间发生变化：{}", path.display()));
-    }
-    let mut bytes = Vec::new();
-    file.take(max_bytes.saturating_add(1))
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("无法读取 {label} {}：{error}", path.display()))?;
-    let actual_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-    if actual_len > max_bytes || actual_len != opened_metadata.len() {
-        return Err(format!(
-            "{label}在读取期间发生变化或超过 {max_bytes} 字节：{}",
-            path.display()
-        ));
-    }
-    let final_metadata = fs::symlink_metadata(path)
-        .map_err(|error| format!("无法复核 {label} {}：{error}", path.display()))?;
-    if final_metadata.file_type().is_symlink()
-        || !final_metadata.is_file()
-        || final_metadata.len() != metadata.len()
-    {
-        return Err(format!("{label}在读取期间发生变化：{}", path.display()));
-    }
-    Ok(bytes)
+    crate::storage::read_private_bytes_bounded(path, max_bytes, label)
+        .map_err(|error| format!("无法读取 {label} {}：{error}", path.display()))
+        .and_then(|bytes| bytes.ok_or_else(|| format!("{label}不存在：{}", path.display())))
 }
 
 /// 将可序列化对象以仅当前用户可读写的权限原子写入 JSON 文件。
