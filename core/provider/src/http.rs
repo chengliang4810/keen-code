@@ -234,7 +234,18 @@ fn classify_http_error_with_api_key(
             status_code: Some(status),
             retryable: true,
         },
-        400 | 409 | 422 => ModelError::InvalidRequest { message },
+        400 | 409 | 422 => {
+            // 输出上限被远端拒绝的 400 是可降级重试的信号：在归层用结构化
+            // 变体标记，Agent Loop 只依赖该变体去上限重试一次；关键词判定
+            // 收敛在 Provider 边界，厂商报错文案不进入中立层做控制流。
+            if classifier.contains("max_tokens")
+                || classifier.contains("max_output_tokens")
+                || classifier.contains("max_completion_tokens")
+            {
+                return ModelError::OutputLimitRejected { message };
+            }
+            ModelError::InvalidRequest { message }
+        }
         // 500/502/503/504、Anthropic 过载 529 与 Cloudflare 源站瞬时错误
         // 520、521、522、523、524、527 都表示远端源站或网关当前不可用，
         // 重试有实际收益；525/526 描述 TLS 握手与证书校验失败，通常不是
@@ -269,9 +280,9 @@ pub(crate) fn classify_in_band_provider_error(message: &str, code: Option<&str>)
         | ModelError::ProtocolUnsupported { .. }
         | ModelError::RateLimited { .. }
         | ModelError::ProviderUnavailable { .. } => without_in_band_status(classified),
-        ModelError::InvalidRequest { message } | ModelError::Protocol { message } => {
-            ModelError::Protocol { message }
-        }
+        ModelError::InvalidRequest { message }
+        | ModelError::OutputLimitRejected { message }
+        | ModelError::Protocol { message } => ModelError::Protocol { message },
         other => other,
     }
 }
@@ -415,6 +426,9 @@ pub(crate) fn redact_model_error(error: ModelError, api_key: Option<&ApiKey>) ->
             message: safe_error_message(api_key, &message),
         },
         ModelError::InvalidRequest { message } => ModelError::InvalidRequest {
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::OutputLimitRejected { message } => ModelError::OutputLimitRejected {
             message: safe_error_message(api_key, &message),
         },
         ModelError::UnsupportedCapability {
@@ -748,10 +762,46 @@ fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
 
 #[cfg(test)]
 mod tests {
+    use keencode_model::ModelError;
+
     use super::{
         ApiKey, MAX_ERROR_INPUT_BYTES, REDACTED_SECRET, classify_http_error,
         classify_in_band_provider_error, redact_api_key_bounded, safe_error_message,
     };
+
+    #[test]
+    fn output_limit_rejection_is_structured_for_agent_downgrade() {
+        for message in [
+            "max_tokens is greater than the model's maximum: 200000 > 64000",
+            "max_output_tokens must be at most 64000",
+            "'max_completion_tokens' is too large",
+        ] {
+            match classify_http_error(400, None, message.to_owned(), Some("invalid_request_error"))
+            {
+                ModelError::OutputLimitRejected { .. } => {}
+                other => panic!("输出上限 400 应归一为 OutputLimitRejected，实际为 {other:?}"),
+            }
+        }
+        // 普通无效请求保持 InvalidRequest，不携带降级重试信号。
+        assert!(matches!(
+            classify_http_error(
+                400,
+                None,
+                "temperature must be between 0 and 1".to_owned(),
+                Some("invalid_request_error")
+            ),
+            ModelError::InvalidRequest { .. }
+        ));
+        // 带内（HTTP 200 正文）错误缺状态语义：与 InvalidRequest 一致降级为
+        // Protocol，不触发 Agent 去上限重试。
+        assert!(matches!(
+            classify_in_band_provider_error(
+                "max_tokens is too large",
+                Some("invalid_request_error")
+            ),
+            ModelError::Protocol { .. }
+        ));
+    }
 
     #[test]
     fn safe_error_message_redacts_full_api_keys_before_generic_fields() {

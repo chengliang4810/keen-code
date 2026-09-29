@@ -217,15 +217,22 @@ impl MessagesAdapter {
             body.insert("max_tokens".to_owned(), Value::from(max_tokens));
         }
         if let Some(structured) = &request.structured_output {
-            body.insert(
-                "output_config".to_owned(),
-                json!({
-                    "format": {
-                        "type": "json_schema",
-                        "schema": structured.schema,
-                    }
-                }),
-            );
+            // 官方 Messages 结构化输出使用顶层 output_format（beta
+            // structured-outputs-2025-11-13 起，请求侧随结构化输出附加
+            // anthropic-beta 头）。name/strict 可选：仅显式提供时写入，
+            // 避免向严格网关发送 null 字段。
+            let mut format = json!({
+                "type": "json_schema",
+                "name": structured.name,
+                "schema": structured.schema,
+            });
+            if let Some(description) = &structured.description {
+                format["description"] = json!(description);
+            }
+            if structured.strict {
+                format["strict"] = json!(true);
+            }
+            body.insert("output_format".to_owned(), format);
         }
         if let Some(temperature) = request.temperature {
             body.insert("temperature".to_owned(), Value::from(temperature));
@@ -371,9 +378,14 @@ impl MessagesAdapter {
             return Err(protocol_error("Messages SSE 重复 message_start"));
         }
         // Bedrock 等网关会发不带 message 体（或全空）的 message_start；
-        // 按 rig 语义视为空开始，仅标记流已启动，后续内容块正常拼接。
+        // 按 rig 语义视为空开始：合成空元数据的 MessageStart 维持合法的
+        // 流骨架，后续内容块正常拼接（中立层要求内容事件之前先有
+        // MessageStart，仅标记内部状态会让整条流被判协议错误）。
         let Some(message) = value.get("message").and_then(Value::as_object) else {
             self.started = true;
+            output.push_back(ModelStreamEvent::MessageStart {
+                metadata: ResponseMetadata::default(),
+            });
             return Ok(());
         };
         let metadata = ResponseMetadata {
@@ -1029,3 +1041,7 @@ fn require_started(started: bool) -> Result<(), ModelError> {
 fn index_type_error(index: u32) -> ModelError {
     protocol_error(format!("内容块序号 {index} 被用于不同内容类型"))
 }
+
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod messages_tests;

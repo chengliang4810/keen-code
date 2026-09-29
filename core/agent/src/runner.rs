@@ -835,6 +835,7 @@ pub fn agent_run_error_category(error: &AgentRunError) -> &'static str {
             ModelError::ProtocolUnsupported { .. }
             | ModelError::ContextLengthExceeded { .. }
             | ModelError::InvalidRequest { .. }
+            | ModelError::OutputLimitRejected { .. }
             | ModelError::UnsupportedCapability { .. }
             | ModelError::StructuredOutput { .. } => "invalid_request",
             ModelError::ProviderUnavailable { .. }
@@ -2537,8 +2538,8 @@ impl AgentRunner {
                         // 压缩重试不在臂内嵌套采样：臂结束后由循环顶部换新调用
                         // 尝试重新发起同一请求，重试结果回到本循环按臂顺序重新
                         // 判定（forced_context_retry_used 已置位，再遇 CLE 落入
-                        // 下方已耗臂得到相同 StillExceeded 终态；命中 "max_tokens"
-                        // 400 时同样可进入降级臂，不因走压缩臂而绕过降级）。
+                        // 下方已耗臂得到相同 StillExceeded 终态；命中输出上限
+                        // 被拒的 400 时同样可进入降级臂，不因走压缩臂而绕过降级）。
                     }
                     Err(AgentRunError::Model(ModelError::ContextLengthExceeded { .. })) => {
                         active.state.transition_to(TurnPhase::Compacting)?;
@@ -2569,17 +2570,15 @@ impl AgentRunner {
                         }
                         active.state.transition_to(TurnPhase::RequestingModel)?;
                     }
-                    Err(AgentRunError::Model(ModelError::InvalidRequest { message }))
+                    Err(AgentRunError::Model(ModelError::OutputLimitRejected { .. }))
                         if !active.disable_configured_max_output
-                            && model_request.max_output_tokens.is_some()
-                            && message.to_ascii_lowercase().contains("max_tokens") =>
+                            && model_request.max_output_tokens.is_some() =>
                     {
                         // 厂商真实输出上限小于设置值时，携带超大 max_tokens 的请求
-                        // 会被 400 拒绝并归一为不可重试的 InvalidRequest，Turn 原本
-                        // 每轮复现同一失败且唯一出路是用户改设置。这里对厂商报错
-                        // 文案做启发式匹配（大小写不敏感，CCB 同款做法）：文案不含
-                        // "max_tokens" 时退化为既有终态行为。请求本就不携带输出
-                        // 上限时不匹配本臂，防止无限降级；本 Turn 只降级一次。
+                        // 会被 400 拒绝，并由 Provider 归层结构化为该变体，Turn 原本
+                        // 每轮复现同一失败且唯一出路是用户改设置。这里去掉输出
+                        // 上限后重试；请求本就不携带输出上限时不匹配本臂，防止
+                        // 无限降级；本 Turn 只降级一次。
                         active.disable_configured_max_output = true;
                         model_request.max_output_tokens = None;
                         // 与空响应重试一致：先经 Compacting 回到 RequestingModel，

@@ -383,6 +383,9 @@ impl ChatCompletionsAdapter {
         // 不发 finish_reason 的草率网关直接发 [DONE]：rig 同款把 [DONE] 视为
         // 完成依据，按默认 stop 收尾而不是让整条流失败。
         let stop_reason = self.finish_reason.take().unwrap_or(StopReason::Completed);
+        // 与 Responses 终态对齐：兜底收尾前补发未结束的工具调用，否则
+        // 已计费的整条响应会被中立层以「工具调用未结束」作废。
+        self.finish_tools(output)?;
         if let Some(event) = self.take_reasoning_continuation_event()? {
             output.push_back(event);
         }

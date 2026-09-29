@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 
 use keencode_model::{
     ContentBlock, Message, MessageRole, ModelRequest, ModelStreamEvent, OpaqueReasoningState,
-    ReasoningContent, ToolCall, ToolDefinition, ToolResult,
+    ReasoningContent, StopReason, ToolCall, ToolDefinition, ToolResult,
 };
 use serde_json::{Value, json};
 
@@ -227,6 +227,71 @@ fn streaming_reasoning_content_and_tool_call_are_replayed_after_done() {
     let assistant = encoded_assistant(&next_request(continuation));
     assert_eq!(assistant["reasoning_content"], "先");
     assert_eq!(assistant["tool_calls"][0]["id"], "call-1");
+}
+
+#[test]
+fn done_without_finish_reason_completes_pending_tool_calls() {
+    let mut adapter = ChatCompletionsAdapter::new();
+    let mut output = VecDeque::new();
+    for data in [
+        json!({
+            "id": "stream-2",
+            "model": "gateway-test",
+            "choices": [{
+                "index": 0,
+                "delta": { "role": "assistant" },
+                "finish_reason": null
+            }]
+        })
+        .to_string(),
+        json!({
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-9",
+                        "function": {
+                            "name": "lookup",
+                            "arguments": "{\"city\":\"杭州\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        })
+        .to_string(),
+    ] {
+        adapter
+            .consume_sse(SseFrame { event: None, data }, &mut output)
+            .expect("完整 Chat SSE 帧应可解码");
+    }
+    // 草率网关不发 finish_reason 直接 [DONE]：兜底收尾必须补发未结束的
+    // 工具调用，否则已计费的整条响应被中立层以「工具调用未结束」作废。
+    adapter
+        .consume_sse(
+            SseFrame {
+                event: None,
+                data: "[DONE]".to_owned(),
+            },
+            &mut output,
+        )
+        .expect("Chat SSE 应接受 DONE");
+    let events: Vec<_> = output.into_iter().collect();
+    let tool_end = events
+        .iter()
+        .find_map(|event| match event {
+            ModelStreamEvent::ToolCallEnd { index, id } => Some((*index, id.clone())),
+            _ => None,
+        })
+        .expect("无 finish_reason 的 [DONE] 兜底应补发 ToolCallEnd");
+    assert_eq!(tool_end, (0, "call-9".to_owned()));
+    assert!(matches!(
+        events.last(),
+        Some(ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::Completed
+        })
+    ));
 }
 
 #[test]

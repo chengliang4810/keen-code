@@ -3972,6 +3972,7 @@ pub(crate) fn normalize_error(provider: &ProviderEntry, error: &ModelError) -> N
         ModelError::RateLimited { status_code, .. } => ("rate_limit", *status_code),
         ModelError::ContextLengthExceeded { .. } => ("context_length", None),
         ModelError::InvalidRequest { .. } => ("invalid_request", None),
+        ModelError::OutputLimitRejected { .. } => ("output_limit_rejected", None),
         ModelError::UnsupportedCapability { .. } => ("unsupported_capability", None),
         ModelError::StructuredOutput {
             enforcement,

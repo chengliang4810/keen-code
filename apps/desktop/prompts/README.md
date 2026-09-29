@@ -211,6 +211,6 @@ cargo test -p keencode-desktop live_prompt_scope_and_cache --lib -- --ignored --
 | 长上下文检索 | 六个输入档位通过，最高实际输入 1,028,900 tokens；前、中、后三个合成事实均找回。更大的合成请求返回 400 / 1261 |
 | 压缩与恢复 | 20 轮、2 次压缩、冷恢复后 8 项事实及工具配对通过 |
 
-网关原生 `output_config.format=json_schema` 未满足 Schema，异常 `temperature=999` 未被拒绝，并有连接超时、502 及一次显式 thinking 探针波动。结构化结果继续使用已有工具模拟路径；不把远端缺失能力标成支持，不添加未经证实有收益的缓存参数，也不通过隐藏重试把失败改成成功。
+网关原生结构化输出（当时线字段 `output_config.format=json_schema`，现改为官方 `output_format`）未满足 Schema，异常 `temperature=999` 未被拒绝，并有连接超时、502 及一次显式 thinking 探针波动。结构化结果继续使用已有工具模拟路径；不把远端缺失能力标成支持，不添加未经证实有收益的缓存参数，也不通过隐藏重试把失败改成成功。
 
 最终相关离线验证：Provider 121 项，协议测试器 213 项（另 1 项 ignored），Tools 单元及集成 161 项（另 1 项 ignored），桌面 516 项（另 7 项 ignored），工具展示 59 项；前端 typecheck 通过。没有新生产依赖、模型名称分支或历史配置迁移；前端仅同步工具名识别及既有展示测试，未改布局或样式。

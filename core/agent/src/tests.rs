@@ -2532,9 +2532,17 @@ async fn empty_response_retry_resends_byte_identical_request() {
 }
 
 /// 创建模型流直接返回 400 InvalidRequest 错误的脚本响应，等价于
-/// Provider 层把 "max_tokens must be between 1 and N" 类 400 归一后的形态。
+/// Provider 层把普通 400 归一后的形态。
 fn invalid_request_error_reply(message: &str) -> ScriptedReply {
     ScriptedReply::new(vec![Err(ModelError::InvalidRequest {
+        message: message.to_owned(),
+    })])
+}
+
+/// 创建模型流直接返回输出上限被拒错误的脚本响应，等价于 Provider
+/// 归层把 "max_tokens must be between 1 and N" 类 400 结构化后的形态。
+fn output_limit_rejected_reply(message: &str) -> ScriptedReply {
+    ScriptedReply::new(vec![Err(ModelError::OutputLimitRejected {
         message: message.to_owned(),
     })])
 }
@@ -2595,7 +2603,7 @@ async fn max_tokens_invalid_request_degrades_to_none_and_completes_turn() {
         },
         [
             // 大写形态同时钉住启发式匹配的大小写不敏感语义。
-            invalid_request_error_reply("MAX_TOKENS must be between 1 and 8192"),
+            output_limit_rejected_reply("MAX_TOKENS must be between 1 and 8192"),
             text_reply("恢复成功"),
         ],
     ));
@@ -2620,7 +2628,7 @@ async fn max_tokens_degradation_wires_none_for_subsequent_rounds() {
             ..ProviderCapabilities::default()
         },
         [
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             tool_reply(&[("call-round-1", "record", json!({ "value": "work" }))]),
             text_reply("完成"),
         ],
@@ -2711,7 +2719,7 @@ async fn degraded_retry_context_overflow_walks_forced_compaction_arm() {
             ..ProviderCapabilities::default()
         },
         [
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             context_overflow_error_reply(),
             text_reply("强制摘要"),
             text_reply("恢复成功"),
@@ -2754,7 +2762,7 @@ async fn forced_compaction_retry_max_tokens_invalid_request_degrades_and_complet
         [
             context_overflow_error_reply(),
             text_reply("强制摘要"),
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             text_reply("恢复成功"),
         ],
     ));
@@ -2791,7 +2799,7 @@ async fn degraded_retry_cancelled_inside_retry_request_model() {
             ..ProviderCapabilities::default()
         },
         [
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             text_reply("取消后不应被归约成完整响应"),
         ],
     ));
@@ -2838,9 +2846,9 @@ async fn max_tokens_invalid_request_degrades_only_once_per_turn() {
             ..ProviderCapabilities::default()
         },
         [
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             tool_reply(&[("call-round-1", "record", json!({ "value": "work" }))]),
-            invalid_request_error_reply("max_tokens must be between 1 and 8192"),
+            output_limit_rejected_reply("max_tokens must be between 1 and 8192"),
             text_reply("不应被消费"),
         ],
     ));
@@ -2857,7 +2865,7 @@ async fn max_tokens_invalid_request_degrades_only_once_per_turn() {
 
     assert!(matches!(
         result.error,
-        Some(AgentRunError::Model(ModelError::InvalidRequest { .. }))
+        Some(AgentRunError::Model(ModelError::OutputLimitRejected { .. }))
     ));
     assert_eq!(result.state.terminal_reason(), Some(TerminalReason::Failed));
     let requests = provider.requests().expect("请求快照应可读取");

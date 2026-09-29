@@ -65,6 +65,25 @@ pub(crate) fn apply_session_routing_header(
     builder.header(SESSION_ROUTING_HEADER, session_id)
 }
 
+/// Messages 原生结构化输出以 beta 能力发布时的能力头。
+const MESSAGES_STRUCTURED_OUTPUT_BETA: &str = "structured-outputs-2025-11-13";
+
+/// 为 Messages 协议且携带结构化输出的请求附加 `anthropic-beta` 能力头。
+///
+/// 官方 Messages 端点的 `output_format` 需要该 beta 标记；其余协议与普通
+/// 请求保持原线格式，避免未知 Header 被严格网关拒绝。
+pub(crate) fn apply_structured_output_beta_header(
+    builder: reqwest::RequestBuilder,
+    protocol: ProviderProtocol,
+    structured_output: bool,
+) -> reqwest::RequestBuilder {
+    if structured_output && matches!(protocol, ProviderProtocol::Messages) {
+        builder.header("anthropic-beta", MESSAGES_STRUCTURED_OUTPUT_BETA)
+    } else {
+        builder
+    }
+}
+
 /// 在不修改 Runtime Transcript 的前提下，静默移除请求快照中最旧的超额图片。
 ///
 /// 绝大多数请求不超过上限，先只读计数即可保持分段消息零拷贝；只有确实超限时
@@ -1758,6 +1777,7 @@ fn classify_request_error(error: &ModelError) -> RequestErrorKind {
         | ModelError::ModelNotFound { .. }
         | ModelError::RateLimited { .. }
         | ModelError::ProviderUnavailable { .. } => RequestErrorKind::HttpStatus,
+        ModelError::OutputLimitRejected { .. } => RequestErrorKind::HttpStatus,
         ModelError::ContextLengthExceeded { .. }
         | ModelError::InvalidRequest { .. }
         | ModelError::UnsupportedCapability { .. }
@@ -1845,7 +1865,8 @@ fn is_retryable_failure(
     }
 }
 
-/// 计算一次失败后的重试等待：服务器建议优先并封顶 120 秒，否则按
+/// 计算一次失败后的重试等待：服务器建议优先并封顶 60 秒（与
+/// [`RETRY_AFTER_CAP_MS`] 对齐），否则按
 /// `base_delay × 2^(失败次数-1)` 指数退避并封顶 `max_delay`，最后叠加对称抖动。
 fn retry_delay(
     policy: &RetryConfig,
@@ -1971,12 +1992,19 @@ impl ModelProvider for ProviderClient {
                 collector.begin(request.clone(), client.config.max_event_bytes, body.clone())
             });
             let template = match client.authenticated_request(Method::POST, url) {
-                Ok(template) => apply_session_routing_header(
-                    template,
-                    client.config.base_url(),
-                    &request.metadata,
-                )
-                .json(&body),
+                Ok(template) => {
+                    let template = apply_session_routing_header(
+                        template,
+                        client.config.base_url(),
+                        &request.metadata,
+                    );
+                    apply_structured_output_beta_header(
+                        template,
+                        client.config.protocol,
+                        request.structured_output.is_some(),
+                    )
+                    .json(&body)
+                }
                 Err(error) => {
                     let error = record_terminal_error(
                         #[cfg(feature = "io-trace")]
@@ -2174,7 +2202,7 @@ mod retry_tests {
         }
     }
 
-    /// 服务器 retry_after 建议优先于指数退避，封顶 120 秒后仍叠加抖动。
+    /// 服务器 retry_after 建议优先于指数退避，封顶 60 秒后仍叠加抖动。
     #[test]
     fn retry_after_takes_precedence_and_caps_at_hard_stop() {
         let policy = RetryConfig::default();

@@ -121,6 +121,15 @@ pub enum ModelError {
         /// 指出无效字段或不变量的错误说明。
         message: String,
     },
+    /// 请求携带的输出上限被远端拒绝，通常是厂商真实上限小于设置值。
+    ///
+    /// 由 Provider 归层在错误分类时结构化标记；Agent Loop 依赖该变体
+    /// 做一次性去上限重试，不对厂商报错文案做字符串匹配。
+    #[error("模型请求无效：{message}")]
+    OutputLimitRejected {
+        /// 指出无效字段或不变量的错误说明。
+        message: String,
+    },
     /// 当前模型端点不支持调用方要求的能力。
     #[error("模型能力不受支持（{capability}）：{message}")]
     UnsupportedCapability {
@@ -200,6 +209,7 @@ impl ModelError {
             | Self::ProtocolUnsupported { .. }
             | Self::ContextLengthExceeded { .. }
             | Self::InvalidRequest { .. }
+            | Self::OutputLimitRejected { .. }
             | Self::UnsupportedCapability { .. }
             | Self::StructuredOutput { .. }
             | Self::Protocol { .. }
@@ -241,6 +251,7 @@ impl ModelError {
             | Self::RateLimited { message, .. }
             | Self::ContextLengthExceeded { message }
             | Self::InvalidRequest { message }
+            | Self::OutputLimitRejected { message }
             | Self::UnsupportedCapability { message, .. }
             | Self::StructuredOutput { message, .. }
             | Self::ProviderUnavailable { message, .. }

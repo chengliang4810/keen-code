@@ -1449,6 +1449,8 @@ fn context_overflow_覆盖常见厂商错误措辞() {
             ModelError::ContextLengthExceeded { .. }
         ));
     }
+    // 输出上限被拒的 400 归一为结构化 OutputLimitRejected，供 Agent Loop
+    // 去上限降级重试；不再依赖厂商文案进入中立层做控制流。
     assert!(matches!(
         classify_http_error(
             400,
@@ -1456,7 +1458,7 @@ fn context_overflow_覆盖常见厂商错误措辞() {
             "max_tokens must be between 1 and 4096".to_owned(),
             Some("invalid_parameter")
         ),
-        ModelError::InvalidRequest { .. }
+        ModelError::OutputLimitRejected { .. }
     ));
 }
 
@@ -1946,13 +1948,16 @@ fn three_protocols_encode_native_structured_output_in_their_own_wire_shape() {
         .encode_request(&request, true)
         .expect("Responses 结构化请求应当可编码");
 
-    assert_eq!(messages["output_config"]["format"]["type"], "json_schema");
+    assert_eq!(messages["output_format"]["type"], "json_schema");
+    assert_eq!(messages["output_format"]["name"], "answer");
+    assert_eq!(messages["output_format"]["description"], "返回合成答案");
     assert_eq!(
-        messages["output_config"]["format"]["schema"],
+        messages["output_format"]["schema"],
         request.structured_output.as_ref().unwrap().schema
     );
+    assert_eq!(messages["output_format"]["strict"], true);
     assert!(messages.get("response_format").is_none());
-    assert!(messages.get("text").is_none());
+    assert!(messages.get("output_config").is_none());
 
     assert_eq!(chat["response_format"]["type"], "json_schema");
     assert_eq!(chat["response_format"]["json_schema"]["name"], "answer");
@@ -1962,6 +1967,7 @@ fn three_protocols_encode_native_structured_output_in_their_own_wire_shape() {
     );
     assert_eq!(chat["response_format"]["json_schema"]["strict"], true);
     assert!(chat.get("output_config").is_none());
+    assert!(chat.get("output_format").is_none());
     assert!(chat.get("text").is_none());
 
     assert_eq!(responses["text"]["format"]["type"], "json_schema");
@@ -1970,6 +1976,7 @@ fn three_protocols_encode_native_structured_output_in_their_own_wire_shape() {
     assert_eq!(responses["text"]["format"]["strict"], true);
     assert!(responses.get("response_format").is_none());
     assert!(responses.get("output_config").is_none());
+    assert!(responses.get("output_format").is_none());
 }
 
 #[test]
