@@ -13,6 +13,7 @@ mod manager;
 mod persistent_state;
 mod prompt_driver;
 mod publisher;
+mod session_listing;
 
 #[cfg(test)]
 mod control_tests;
@@ -35,6 +36,10 @@ pub use prompt_driver::{NeedsInputBehavior, PromptQueueDriver};
 pub use publisher::{
     RuntimeCatchUpDirective, RuntimeControlEvent, RuntimeEventDelivery, RuntimeEventLag,
     RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,
+};
+pub use session_listing::{
+    InvalidListCursor, SESSION_LIST_PAGE_SIZE, paginate_sessions, rfc3339_from_ms,
+    session_info_from_metadata, title_source_wire,
 };
 
 use std::collections::{BTreeMap, BTreeSet};

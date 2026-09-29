@@ -1,7 +1,6 @@
 //! 桌面 Session 控制面：直接操作自研 Runtime，并向前端投影标准 ACP 语义。
 
 use crate::agent_runtime::AgentRuntime;
-use chrono::{SecondsFormat, TimeZone, Utc};
 use keencode_acp::schema::{SessionMode, SessionModeState};
 use keencode_resources::ResourceError;
 use keencode_runtime::{RuntimeError, RuntimeSession, StoredSessionMetadata};
@@ -73,15 +72,6 @@ fn required_identifier<'a>(value: &'a str, field: &str) -> Result<&'a str, Strin
         return Err(format!("{field} 超出长度限制或包含控制字符"));
     }
     Ok(value)
-}
-
-/// 把持久毫秒时间转换为稳定 UTC RFC 3339 文本。
-pub(crate) fn rfc3339_from_ms(value: u64) -> Result<String, String> {
-    let value = i64::try_from(value).map_err(|_| "Session 更新时间超出支持范围".to_owned())?;
-    Utc.timestamp_millis_opt(value)
-        .single()
-        .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
-        .ok_or_else(|| "Session 更新时间无效".to_owned())
 }
 
 /// 根据当前项目登记表授权持久 Session 的规范项目目录。

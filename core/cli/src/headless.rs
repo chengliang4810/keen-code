@@ -31,7 +31,7 @@ use keencode_provider::{
 };
 use keencode_resources::{
     MessageRole as ResourceMessageRole, ProviderProtocolSnapshot, ProviderSnapshot, ROOT_AGENT_ID,
-    SessionEvent, SessionEventRecord, SessionMessage, SessionState, StoredSessionMetadata,
+    SessionEvent, SessionEventRecord, SessionMessage, SessionState,
     ToolCompletionStatus as ResourceToolCompletionStatus, ToolLifecycle, ToolRequest,
     TurnStopReason,
 };
@@ -41,6 +41,7 @@ use keencode_runtime::{
     OpenSessionResult, OperationState, OperationStatus, OperationTerminal, PromptAdmissionRequest,
     PromptQueueDriver, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
     RuntimeEventSubscription, RuntimeManager, RuntimeSession, RuntimeTurnRequest,
+    paginate_sessions, session_info_from_metadata,
 };
 use keencode_tools::{ToolEnvironment, register_local_tools};
 use keencode_web::{
@@ -867,14 +868,27 @@ impl HeadlessInner {
             .and_then(Value::as_str)
             .map(canonical_directory)
             .transpose()?;
-        let sessions = self
+        let cursor = params.get("cursor").and_then(Value::as_str);
+        let metadata = self
             .runtime_manager
             .list_stored_sessions_for_project(requested_cwd.as_deref())
-            .map_err(map_runtime_error)?
-            .into_iter()
-            .map(session_metadata_value)
-            .collect::<Vec<_>>();
-        Ok(json!({"sessions":sessions}))
+            .map_err(map_runtime_error)?;
+        // 线格式投影与偏移分页由共享 session_listing 收敛：置顶/归档等
+        // Journal 偏好经 _meta 暴露，与 Desktop Host 同一契约。
+        let mut sessions = Vec::new();
+        for item in metadata {
+            let cwd = item.project_root.clone();
+            match session_info_from_metadata(item, cwd) {
+                Ok(Some(info)) => sessions.push(info),
+                Ok(None) => continue,
+                Err(_) => return Err(HandlerError::internal()),
+            }
+        }
+        let (page, next_cursor) = paginate_sessions(sessions, cursor)
+            .map_err(|_| HandlerError::new(-32602, "cursor 无效"))?;
+        let response =
+            keencode_acp::schema::ListSessionsResponse::new(page).next_cursor(next_cursor);
+        serde_json::to_value(response).map_err(|_| HandlerError::internal())
     }
 
     fn session_load(
@@ -1814,17 +1828,6 @@ fn map_runtime_error(error: RuntimeError) -> HandlerError {
         RuntimeError::RecoveryRequired => HandlerError::new(-32000, "Session 需要恢复"),
         _ => HandlerError::internal(),
     }
-}
-
-fn session_metadata_value(metadata: StoredSessionMetadata) -> Value {
-    json!({
-        "sessionId": metadata.session_id,
-        "cwd": metadata.project_root,
-        "title": metadata.title,
-        "status": metadata.status,
-        "updatedAtUnixMs": metadata.updated_at_unix_ms,
-        "corrupt": metadata.corrupt,
-    })
 }
 
 fn stop_reason_for_state(state: OperationState) -> &'static str {
@@ -3504,5 +3507,55 @@ mod tests {
             attached_events.recv().await.expect("attach 应收到事件")["params"]["value"],
             1
         );
+    }
+
+    #[tokio::test]
+    async fn session_list_uses_shared_session_info_wire_format() {
+        let root = tempfile::tempdir().expect("临时数据根应创建");
+        let runtime = match HostRuntime::acquire(root.path(), HostOwnerKind::Headless)
+            .expect("Host Runtime 应取得 owner")
+        {
+            HostRuntimeAcquire::Owned(runtime) => runtime,
+            HostRuntimeAcquire::Client(_) => panic!("测试不应连接既有 Host"),
+        };
+        let inner = HeadlessInner::new(runtime, None).expect("headless backend 应创建");
+        let cwd = root.path().to_string_lossy().into_owned();
+
+        let created = inner
+            .session_new(&json!({"cwd": cwd}))
+            .expect("session/new 应成功");
+        let session_id = created["sessionId"]
+            .as_str()
+            .expect("session/new 应返回 sessionId")
+            .to_owned();
+
+        let listed = inner
+            .session_list(&json!({"cwd": cwd}))
+            .expect("session/list 应成功");
+        let sessions = listed["sessions"].as_array().expect("sessions 应为数组");
+        assert_eq!(sessions.len(), 1);
+        let item = &sessions[0];
+        assert_eq!(item["sessionId"].as_str(), Some(session_id.as_str()));
+        assert!(item["cwd"].as_str().is_some());
+        // 标准线格式：RFC 3339 更新时间与 _meta 偏好，不输出私有 UnixMs 字段。
+        assert!(
+            item["updatedAt"]
+                .as_str()
+                .is_some_and(|value| value.ends_with('Z') && value.contains('T'))
+        );
+        assert!(item.get("updatedAtUnixMs").is_none());
+        assert!(item.get("corrupt").is_none());
+        let meta = item["_meta"].as_object().expect("偏好状态应经 _meta 暴露");
+        assert!(meta.contains_key("keencode/pinned"));
+        assert!(meta.contains_key("keencode/archived"));
+        assert!(meta.contains_key("keencode/titleSource"));
+        // 从未发送消息的 Session 不伪造用户消息时间。
+        assert!(!meta.contains_key("keencode/lastUserMessageAt"));
+        assert!(listed.get("nextCursor").is_none());
+
+        let invalid = inner
+            .session_list(&json!({"cursor": "abc"}))
+            .expect_err("无效游标必须失败");
+        assert_eq!(invalid.code, -32602);
     }
 }

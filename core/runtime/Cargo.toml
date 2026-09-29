@@ -17,6 +17,8 @@ description = "KeenCode Session Runtime 与 Agent 权威提交组合层"
 [dependencies]
 # 解码 Provider 中立消息中的内联 Base64 图片并写入 ArtifactStore。
 base64 = "0.22.1"
+# 把持久 Session 的毫秒时间投影为稳定 UTC RFC 3339 线格式。
+chrono = "0.4"
 # 复用跨 Desktop、Web 与 CLI 的 Host 生命周期、幂等和恢复协议类型。
 keencode-acp = { path = "../acp" }
 # 接收 Agent 六类权威事件与工具 Round 预检契约。

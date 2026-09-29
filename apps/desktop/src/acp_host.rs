@@ -16,9 +16,8 @@ use keencode_acp::schema;
 use keencode_acp::{
     AcpBoundaryError, AcpIncomingFrame, AcpNotification, AcpRequest, AcpRequestDecoder,
     AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload, META_DEFAULT_CWD, META_DETACHED,
-    META_LAST_USER_MESSAGE_AT, META_OPERATION_ID, META_REPLAY, META_SESSION_ARCHIVED,
-    META_SESSION_PINNED, META_SESSION_TITLE_SOURCE, META_SNAPSHOT, META_TITLE, META_TURN_ID,
-    META_ULTRA_MODE, OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId,
+    META_OPERATION_ID, META_REPLAY, META_SNAPSHOT, META_TITLE, META_TURN_ID, META_ULTRA_MODE,
+    OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId,
 };
 use keencode_agent::{CollaborationIdGenerator, UuidCollaborationIdGenerator};
 use keencode_resources::{
@@ -29,7 +28,7 @@ use keencode_runtime::{
     AdmissionDisposition, ExecutionIdentity, HostPromptQueue, HostRuntime, NeedsInputBehavior,
     OperationState, OperationStatus, OperationTerminal, PromptAdmissionRequest, PromptQueueDriver,
     RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,
-    RuntimeSession, RuntimeSnapshot,
+    RuntimeSession, RuntimeSnapshot, paginate_sessions, session_info_from_metadata,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -61,8 +60,6 @@ mod tests;
 
 /// 标准 ACP Host 只承诺实现协议版本 1。
 const SUPPORTED_PROTOCOL_VERSION: schema::ProtocolVersion = schema::ProtocolVersion::V1;
-/// `session/list` 单页的固定上限；客户端可用返回的 cursor 继续读取。
-const SESSION_LIST_PAGE_SIZE: usize = 100;
 /// 历史页必须保持根回合完整；长工具链单轮可超过协议默认的 1 MiB。
 const ACP_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// 单个 Session 加载阶段超过该时长时记录结构化慢日志。
@@ -71,16 +68,6 @@ const SLOW_SESSION_LOAD_PHASE: Duration = Duration::from_millis(500);
 const SLOW_SESSION_LOAD_TOTAL: Duration = Duration::from_secs(1);
 // `_meta` 键与 keencode/* 方法名常量统一由 keencode_acp 导出，与 headless
 // Host 共享同一份契约，避免两侧字符串漂移。
-
-/// 权威标题来源的线格式值；与 ACP `SessionTitleSource` 的 snake_case 一致。
-fn title_source_wire(source: keencode_resources::TitleSource) -> &'static str {
-    match source {
-        keencode_resources::TitleSource::Unspecified => "unspecified",
-        keencode_resources::TitleSource::Manual => "manual",
-        keencode_resources::TitleSource::Automatic => "automatic",
-        keencode_resources::TitleSource::MessagePrefix => "message_prefix",
-    }
-}
 /// 标准 Session 配置项：Provider 与模型的可逆选择。
 const CONFIG_MODEL_ID: &str = "model";
 /// 未选择实际 Provider/模型时的显式空选择，不代表任何可调用模型。
@@ -2052,7 +2039,6 @@ impl AcpHost {
             .as_deref()
             .map(|path| self.authorized_cwd(path))
             .transpose()?;
-        let start = parse_cursor(request.cursor.as_deref())?;
         let mut sessions = Vec::new();
         let started = std::time::Instant::now();
         let runtime = Arc::clone(&self.runtime);
@@ -2067,9 +2053,6 @@ impl AcpHost {
         .map_err(internal_failure)?;
         tracing::info!(target: "keencode_diagnostics", phase = "session_list_index", elapsed_ms = started.elapsed().as_millis(), sessions = metadata.len(), "session phase completed");
         for metadata in metadata {
-            if metadata.corrupt {
-                continue;
-            }
             let Ok(root) =
                 crate::session_commands::authorize_stored_root(&self.app, &metadata.project_root)
             else {
@@ -2078,49 +2061,16 @@ impl AcpHost {
             if cwd_filter.as_ref().is_some_and(|filter| filter != &root) {
                 continue;
             }
-            let updated_at = crate::session_commands::rfc3339_from_ms(metadata.updated_at_unix_ms)
-                .map_err(|error| internal_failure(error))?;
-            // 会话偏好经 _meta 暴露：置顶/归档是权威 Journal 状态，前端
-            // 只做投影，不再本地持久化。
-            let mut meta = Map::new();
-            meta.insert(META_SESSION_PINNED.to_owned(), Value::Bool(metadata.pinned));
-            meta.insert(
-                META_SESSION_ARCHIVED.to_owned(),
-                Value::Bool(metadata.archived),
-            );
-            meta.insert(
-                META_SESSION_TITLE_SOURCE.to_owned(),
-                Value::String(title_source_wire(metadata.title_source).to_owned()),
-            );
-            let mut info = schema::SessionInfo::new(
-                schema::SessionId::new(metadata.session_id.as_str().to_owned()),
-                root,
-            )
-            .title(Some(metadata.title))
-            .updated_at(Some(updated_at))
-            .meta(Some(meta));
-            // 从未发送消息的 Session 不伪造用户消息时间，由客户端回退到更新时间。
-            if metadata.last_user_message_at_unix_ms > 0 {
-                let last_user_message_at =
-                    crate::session_commands::rfc3339_from_ms(metadata.last_user_message_at_unix_ms)
-                        .map_err(|error| internal_failure(error))?;
-                if let Some(meta) = info.meta.as_mut() {
-                    meta.insert(
-                        META_LAST_USER_MESSAGE_AT.to_owned(),
-                        Value::String(last_user_message_at),
-                    );
-                }
+            // Journal 偏好状态与线格式投影由共享 session_listing 收敛；损坏
+            // 记录返回 None 跳过。
+            match session_info_from_metadata(metadata, root.to_string_lossy().into_owned()) {
+                Ok(Some(info)) => sessions.push(info),
+                Ok(None) => continue,
+                Err(error) => return Err(internal_failure(error)),
             }
-            sessions.push(info);
         }
-        if start > sessions.len() {
-            return Err(HostFailure::InvalidParams);
-        }
-        let end = start
-            .saturating_add(SESSION_LIST_PAGE_SIZE)
-            .min(sessions.len());
-        let page = sessions[start..end].to_vec();
-        let next_cursor = (end < sessions.len()).then(|| end.to_string());
+        let (page, next_cursor) = paginate_sessions(sessions, request.cursor.as_deref())
+            .map_err(|_| HostFailure::InvalidParams)?;
         Ok(schema::ListSessionsResponse::new(page).next_cursor(next_cursor))
     }
 
@@ -2778,21 +2728,6 @@ fn meta_bool(meta: Option<&schema::Meta>, key: &str) -> Result<bool, HostFailure
         return Ok(false);
     };
     value.as_bool().ok_or(HostFailure::InvalidParams)
-}
-
-/// 解析本 Host 自己生成的十进制偏移游标。
-fn parse_cursor(cursor: Option<&str>) -> Result<usize, HostFailure> {
-    cursor
-        .map(|cursor| {
-            if cursor.is_empty() || cursor.trim() != cursor {
-                return Err(HostFailure::InvalidParams);
-            }
-            cursor
-                .parse::<usize>()
-                .map_err(|_| HostFailure::InvalidParams)
-        })
-        .transpose()
-        .map(|cursor| cursor.unwrap_or(0))
 }
 
 /// 生成标准响应可携带的最小、无正文 Session 快照。
