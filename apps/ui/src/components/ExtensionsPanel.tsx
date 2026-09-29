@@ -12,13 +12,13 @@ import { cachedRead, invalidateReadCache } from "@/lib/readCache";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";
 import { GlassModal } from "@/components/GlassModal";
+import { McpDoctorDialog, type McpDoctorRequest } from "@/components/ExtensionsPanelDoctor";
 import {
   IconDoctor,
   IconFolder,
   IconPlus,
   IconPlug,
   IconPuzzle,
-  IconRefresh,
   IconSkills,
   IconTrash,
 } from "@/components/icons";
@@ -316,12 +316,10 @@ export function ExtensionsPanel({
   const [addEnv, setAddEnv] = useState("");
   const [addJson, setAddJson] = useState("");
   const [removeTarget, setRemoveTarget] = useState<api.McpDto | null>(null);
-  const [doctorOpen, setDoctorOpen] = useState(false);
-  const [doctorLoading, setDoctorLoading] = useState(false);
-  const [doctorReport, setDoctorReport] =
-    useState<api.McpDoctorReport | null>(null);
-  const [doctorError, setDoctorError] = useState<string | null>(null);
-  const [doctorFocus, setDoctorFocus] = useState<string | null>(null);
+  /** 当前诊断请求；非空即打开 McpDoctorDialog，置空关闭。 */
+  const [doctorRequest, setDoctorRequest] = useState<McpDoctorRequest | null>(
+    null,
+  );
 
   /** 同步更新 OAuth 长流程引用与界面状态。 */
   const commitMcpOauthFlow = useCallback((next: McpOauthFlowState | null) => {
@@ -914,28 +912,10 @@ export function ExtensionsPanel({
     }
   };
 
-  const runDoctor = useCallback(
-    async (focusName?: string | null) => {
-      if (!api.isTauri()) return;
-      setDoctorOpen(true);
-      setDoctorLoading(true);
-      setDoctorError(null);
-      setDoctorFocus(focusName?.trim() || null);
-      try {
-        const report = await api.mcpDoctor(
-          focusName?.trim() || null,
-          projectPath?.trim() || null,
-        );
-        setDoctorReport(report);
-      } catch (e) {
-        setDoctorReport(null);
-        setDoctorError(localizeUiError(e, locale));
-      } finally {
-        setDoctorLoading(false);
-      }
-    },
-    [locale, projectPath],
-  );
+  /** 触发一次 MCP Doctor 诊断；运行与展示由 McpDoctorDialog 自持。 */
+  const requestDoctor = useCallback((focusName?: string | null) => {
+    setDoctorRequest({ focus: focusName?.trim() || null });
+  }, []);
 
   const visiblePlugins = useMemo(
     () => filterPluginsByLoadState(plugins, pluginFilter),
@@ -1294,7 +1274,7 @@ export function ExtensionsPanel({
             type="button"
             variant="ghost" className="ext-bulk-btn"
             disabled={!!actionBusy || !!busyKey || !!mcpOauthFlow}
-            onClick={() => void runDoctor(null)}
+            onClick={() => requestDoctor(null)}
           >
             <IconDoctor size={14} />
             <span>{tr("ext.mcp.doctor")}</span>
@@ -1409,9 +1389,9 @@ export function ExtensionsPanel({
                       type="button"
                       variant="ghost" size="md"
                       disabled={
-                        !!actionBusy || doctorLoading || !!mcpOauthFlow
+                        !!actionBusy || !!doctorRequest || !!mcpOauthFlow
                       }
-                      onClick={() => void runDoctor(s.name)}
+                      onClick={() => requestDoctor(s.name)}
                     >
                       <IconDoctor size={13} />
                       <span>{tr("ext.mcp.doctor")}</span>
@@ -1815,139 +1795,12 @@ export function ExtensionsPanel({
         </p>
       </GlassModal>
 
-      <GlassModal
-        open={doctorOpen}
-        onClose={() => {
-          if (!doctorLoading) setDoctorOpen(false);
-        }}
-        title={
-          doctorFocus
-            ? `${tr("ext.mcp.doctorTitle")} · ${doctorFocus}`
-            : tr("ext.mcp.doctorTitle")
-        }
-        size="md"
-        closeLabel={tr("common.close")}
-        wrapBody
-        footer={
-          <>
-            <Button size="md"
-              type="button"
-              variant="ghost"
-              disabled={doctorLoading}
-              onClick={() => void runDoctor(doctorFocus)}
-            >
-              <IconRefresh size={14} />
-              <span>{tr("ext.mcp.doctorRerun")}</span>
-            </Button>
-            <Button size="md"
-              type="button"
-              variant="ghost"
-              disabled={doctorLoading}
-              onClick={() => setDoctorOpen(false)}
-            >
-              {tr("common.close")}
-            </Button>
-          </>
-        }
-      >
-        {doctorLoading && (
-          <p className="ext-empty">{tr("ext.mcp.doctorRunning")}</p>
-        )}
-        {!doctorLoading && doctorError && (
-          <Alert variant="error">
-            <AlertDescription>{doctorError}</AlertDescription>
-          </Alert>
-        )}
-        {!doctorLoading && doctorReport && (
-          <div className="ext-doctor">
-            <p className="ext-doctor__summary">
-              {tr("ext.mcp.doctorSummary", {
-                healthy: doctorReport.summary.healthy,
-                unhealthy: doctorReport.summary.unhealthy,
-                total: doctorReport.summary.total,
-              })}
-            </p>
-            {doctorReport.sources.length > 0 ? (
-              <div className="ext-doctor__sources">
-                <div className="ext-doctor__section-title">
-                  {tr("ext.mcp.doctorSources")}
-                </div>
-                <ul className="ext-doctor__source-list">
-                  {doctorReport.sources.map((src) => (
-                    <li key={src.path}>
-                      <code>{src.path}</code>
-                      <Badge size="md" variant="soft">
-                        {src.status} · {src.serverCount}
-                      </Badge>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-            {doctorReport.servers.length === 0 ? (
-              <p className="ext-empty">
-                {doctorReport.rawText?.trim() || tr("ext.mcp.doctorEmpty")}
-              </p>
-            ) : (
-              <ul className="ext-list ext-doctor__servers">
-                {doctorReport.servers.map((s) => (
-                  <li
-                    key={s.name}
-                    className={
-                      "ext-item" + (s.healthy ? "" : " ext-item--off")
-                    }
-                  >
-                    <div className="ext-item__head">
-                      <strong className="ext-item__name">{s.name}</strong>
-                      <Badge
-                        size="md"
-                        variant={s.healthy ? "success" : "error"}
-                      >
-                        {s.healthy
-                          ? tr("ext.mcp.doctorHealthy")
-                          : tr("ext.mcp.doctorUnhealthy")}
-                      </Badge>
-                      <Badge size="md" variant="soft">
-                        {s.transport}
-                      </Badge>
-                    </div>
-                    {s.target ? (
-                      <p className="ext-item__desc" title={s.target}>
-                        {shortPathLabel(s.target, 72)}
-                      </p>
-                    ) : null}
-                    {s.checks.length > 0 ? (
-                      <ul className="ext-doctor__checks">
-                        {s.checks.map((c, index) => (
-                          <li
-                            key={`${s.name}:${c.label}:${index}`}
-                            className={
-                              "ext-doctor__check" +
-                              (c.passed ? " is-pass" : " is-fail")
-                            }
-                          >
-                            <span className="ext-doctor__check-label">
-                              {c.passed ? "✓" : "✗"} {c.label}
-                            </span>
-                            {c.detail ? (
-                              <span className="ext-doctor__check-detail">
-                                {c.detail}
-                              </span>
-                            ) : null}
-                          </li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-            {doctorReport.rawText ? (
-              <pre className="ext-details-pre">{doctorReport.rawText}</pre>
-            ) : null}
-          </div>
-        )}
-      </GlassModal>
+      <McpDoctorDialog
+        locale={locale}
+        projectPath={projectPath}
+        request={doctorRequest}
+        onClose={() => setDoctorRequest(null)}
+      />
     </div>
   );
 }

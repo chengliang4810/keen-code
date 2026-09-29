@@ -21,6 +21,7 @@ import DOMPurify from "dompurify";
 import * as api from "@/lib/api";
 import { acpRequest } from "@/lib/acp/client";
 import { loadSnapshotDiff } from "@/lib/resourceFileChange";
+import { useWorkspaceChanges } from "@/hooks/useWorkspaceChanges";
 import { createT, type Locale } from "@/i18n";
 import { resolvePreviewSrc } from "@/lib/filePreviewSrc";
 import { HtmlBrowser } from "@/components/HtmlBrowser";
@@ -87,7 +88,6 @@ import {
   normalizePath,
 } from "@/lib/sessionChanges";
 import {
-  filterWorkspaceGitEntries,
   normalizeWorkspaceGitEntries,
   resolveWorkspaceAbsolutePath,
   workspaceGitKindBadge,
@@ -110,7 +110,6 @@ import {
   saveResourceTreeWidth,
 } from "@/lib/resourceViewerPreferences";
 import {
-  countWorkspaceChangeFiles,
   mergeLoadedTree,
   replaceWorkspaceDirectory,
   type ResourceTreeNode as TreeNode,
@@ -208,8 +207,6 @@ function useSessionState<T>(key: string, initial: T): [T, Dispatch<SetStateActio
   return [values.current.get(key) as T, setValue];
 }
 
-/** 工具状态连发时合并 Git 强制刷新的等待时间。 */
-const WORKSPACE_SYNC_DEBOUNCE_MS = 200;
 /** 工具状态连发时合并文件树刷新的等待时间。 */
 const TREE_SYNC_DEBOUNCE_MS = 200;
 
@@ -374,17 +371,12 @@ export function ResourceViewer({
   const treeLoadSeq = useRef(0);
   /** 当前项目共享的文件树刷新任务。 */
   const treeRefreshInFlight = useRef<TreeRefreshRequest | null>(null);
-  const workspaceLoadSeq = useRef(0);
   /** 每个未跟踪目录最近一次惰性读取的序号。 */
   const workspaceDirectoryLoadSeq = useRef<Record<string, number>>({});
   /** 最近一次已经纳入文件树查询的工具同步版本。 */
   const treeSyncRevision = useRef(syncRevision);
-  /** 最近一次已经纳入 Git 状态查询的工具同步版本。 */
-  const workspaceSyncRevision = useRef(syncRevision);
   /** 当前项目是否已有可展示的文件树快照。 */
   const treeHasSnapshot = useRef(false);
-  /** 当前项目是否已有可展示的 Git 状态快照。 */
-  const workspaceHasSnapshot = useRef(false);
   const snapshotProjectPath = useRef(projectPath);
   if (snapshotProjectPath.current !== projectPath) {
     snapshotReadController.current?.abort();
@@ -392,11 +384,8 @@ export function ResourceViewer({
     diffLoadSeq.current += 1;
     snapshotSelectionRef.current = false;
     treeLoadSeq.current += 1;
-    workspaceLoadSeq.current += 1;
     treeHasSnapshot.current = false;
-    workspaceHasSnapshot.current = false;
     treeSyncRevision.current = syncRevision;
-    workspaceSyncRevision.current = syncRevision;
   }
   if (snapshotSessionKey.current !== sessionKey) {
     snapshotReadController.current?.abort();
@@ -404,12 +393,25 @@ export function ResourceViewer({
     diffLoadSeq.current += 1;
     snapshotSelectionRef.current = false;
   }
-  /** 当前项目的 Git 工作区状态。 */
-  const [workspaceFiles, setWorkspaceFiles] = useState<WorkspaceGitFile[]>([]);
-  const [workspaceLoading, setWorkspaceLoading] = useState(false);
-  const [workspaceAvailable, setWorkspaceAvailable] = useState(false);
-  const [workspaceReason, setWorkspaceReason] = useState<string | null>(null);
-  const [workspaceBranch, setWorkspaceBranch] = useState<string | null>(null);
+  /** 当前项目的 Git 工作区状态；加载、防抖同步与重置由子域 hook 管理。 */
+  const {
+    files: workspaceFiles,
+    loading: workspaceLoading,
+    available: workspaceAvailable,
+    reason: workspaceReason,
+    branch: workspaceBranch,
+    count: workspaceCount,
+    filtered: filteredWorkspace,
+    setFiles: setWorkspaceFiles,
+  } = useWorkspaceChanges({
+    projectPath,
+    query,
+    paneActive,
+    changesActive: sideMode === "changes",
+    syncRevision,
+    locale,
+    onError: setError,
+  });
   /** 当前正在读取的未跟踪目录。 */
   const [loadingWorkspaceDirectories, setLoadingWorkspaceDirectories] =
     useState<Record<string, boolean>>({});
@@ -443,73 +445,7 @@ export function ResourceViewer({
         : tabs.filter((tab) => tab.tabKind !== "url"),
     [sideMode, tabs],
   );
-  const workspaceCount = countWorkspaceChangeFiles(workspaceFiles);
   const totalChangeBadge = workspaceCount;
-  const filteredWorkspace = useMemo(
-    () => filterWorkspaceGitEntries(workspaceFiles, query),
-    [workspaceFiles, query],
-  );
-
-  /** 读取 Git 状态；工具完成后的刷新可跳过短时缓存。 */
-  const refreshWorkspaceStatus = useCallback(async (force = false) => {
-    if (!projectPath || !api.isTauri()) {
-      workspaceLoadSeq.current += 1;
-      setWorkspaceFiles([]);
-      setWorkspaceAvailable(false);
-      setWorkspaceBranch(null);
-      setWorkspaceReason(null);
-      setWorkspaceLoading(false);
-      workspaceHasSnapshot.current = false;
-      return;
-    }
-    const seq = ++workspaceLoadSeq.current;
-    const showSpinner = !workspaceHasSnapshot.current;
-    if (showSpinner) setWorkspaceLoading(true);
-    try {
-      const res = await api.gitStatus(projectPath, { force });
-      if (seq !== workspaceLoadSeq.current) return;
-      if (!res.available) {
-        setWorkspaceFiles([]);
-        setWorkspaceAvailable(false);
-        setWorkspaceBranch(res.branch ?? null);
-        setWorkspaceReason(res.reason ?? "unavailable");
-      } else {
-        setWorkspaceFiles(
-          normalizeWorkspaceGitEntries(res.files ?? [], projectPath),
-        );
-        setWorkspaceAvailable(true);
-        setWorkspaceBranch(res.branch ?? null);
-        setWorkspaceReason(null);
-      }
-      workspaceHasSnapshot.current = true;
-    } catch (e) {
-      if (seq !== workspaceLoadSeq.current) return;
-      if (!workspaceHasSnapshot.current) {
-        setWorkspaceFiles([]);
-        setWorkspaceAvailable(false);
-        setWorkspaceBranch(null);
-        setWorkspaceReason(String(e));
-      } else {
-        setError(localizeUiError(e, locale));
-      }
-    } finally {
-      if (seq === workspaceLoadSeq.current) setWorkspaceLoading(false);
-    }
-  }, [projectPath]);
-
-  // 仅在变更模式可见时同步 Git；工具状态连发防抖后强制读取终态。
-  useEffect(() => {
-    if (!paneActive || sideMode !== "changes") return;
-    if (workspaceSyncRevision.current === syncRevision) {
-      void refreshWorkspaceStatus();
-      return;
-    }
-    const timer = window.setTimeout(() => {
-      workspaceSyncRevision.current = syncRevision;
-      void refreshWorkspaceStatus(true);
-    }, WORKSPACE_SYNC_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [paneActive, refreshWorkspaceStatus, sideMode, syncRevision]);
 
   // 仅普通工作区差异随 Git 状态清理；工具快照（包括加载中）独立于 Git 状态。
   useEffect(() => {
@@ -935,14 +871,10 @@ export function ResourceViewer({
     setActiveId(null);
     setExpanded({ "": true });
     setQuery("");
-    setWorkspaceFiles([]);
-    setWorkspaceAvailable(false);
-    setWorkspaceBranch(null);
-    setWorkspaceReason(null);
     setLoadingWorkspaceDirectories({});
     workspaceDirectoryLoadSeq.current = {};
     treeHasSnapshot.current = false;
-    workspaceHasSnapshot.current = false;
+    // Git 工作区状态由 useWorkspaceChanges 内部随 projectPath 变化重置。
   }, [projectPath]);
 
   // 仅在文件模式可见时同步文件树；工具状态连发防抖并由 refresh 合并并发。

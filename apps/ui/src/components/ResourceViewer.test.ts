@@ -199,36 +199,37 @@ describe("ResourceViewer controls", () => {
 
   it("打开面板时已有文件树和变更缓存则静默刷新", () => {
     const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
+    const changesSource = readSource(new URL("../hooks/useWorkspaceChanges.ts", import.meta.url));
 
     expect(source).toContain("mergeLoadedTree(prev, next)");
     expect(source).toContain("treeHasSnapshot");
-    expect(source).toContain("workspaceHasSnapshot");
     expect(source).toMatch(/const showSpinner = !treeHasSnapshot\.current/);
-    expect(source).toMatch(/const showSpinner = !workspaceHasSnapshot\.current/);
     expect(source).toContain("if (showSpinner) setLoadingTree(true)");
-    expect(source).toContain("if (showSpinner) setWorkspaceLoading(true)");
     expect(source).toContain("snapshotProjectPath");
+    expect(changesSource).toMatch(/const showSpinner = !hasSnapshot\.current/);
+    expect(changesSource).toContain("if (showSpinner) setLoading(true)");
   });
 
   it("仅为当前可见的文件或变更模式执行对应刷新", () => {
     const source = readSource(new URL("./ResourceViewer.tsx", import.meta.url));
+    const changesSource = readSource(new URL("../hooks/useWorkspaceChanges.ts", import.meta.url));
 
-    expect(source).toContain(
-      'if (!paneActive || sideMode !== "changes") return;',
+    expect(changesSource).toContain(
+      'if (!paneActive || !changesActive) return;',
     );
     expect(source).toContain(
       'if (!paneActive || sideMode !== "files" || !projectPath) return;',
     );
-    expect(source).toMatch(
-      /\[paneActive, refreshWorkspaceStatus, sideMode, syncRevision\]/,
+    expect(changesSource).toMatch(
+      /\[paneActive, changesActive, refresh, syncRevision\]/,
     );
     expect(source).toMatch(
       /\[paneActive, projectPath, refresh, sideMode, syncRevision\]/,
     );
-    expect(source).toContain("WORKSPACE_SYNC_DEBOUNCE_MS = 200");
-    expect(source).toContain("workspaceSyncRevision.current === syncRevision");
-    expect(source).toContain("void refreshWorkspaceStatus(true)");
-    expect(source).toContain("api.gitStatus(projectPath, { force })");
+    expect(changesSource).toContain("WORKSPACE_SYNC_DEBOUNCE_MS = 200");
+    expect(changesSource).toContain("lastSyncRevision.current === syncRevision");
+    expect(changesSource).toContain("void refresh(true)");
+    expect(changesSource).toContain("api.gitStatus(projectPath, { force })");
     expect(source).toContain("TREE_SYNC_DEBOUNCE_MS = 200");
     expect(source).toContain("treeRefreshInFlight");
     expect(source).toContain("existing.queued = true");
