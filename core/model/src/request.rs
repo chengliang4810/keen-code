@@ -667,12 +667,12 @@ impl ModelRequest {
                 message: "最大输出 Token 必须大于零".to_owned(),
             });
         }
-        if let Some(temperature) = self.temperature {
-            if !temperature.is_finite() || temperature < 0.0 {
-                return Err(ModelError::InvalidRequest {
-                    message: "采样温度必须是大于等于零的有限数值".to_owned(),
-                });
-            }
+        if let Some(temperature) = self.temperature
+            && (!temperature.is_finite() || temperature < 0.0)
+        {
+            return Err(ModelError::InvalidRequest {
+                message: "采样温度必须是大于等于零的有限数值".to_owned(),
+            });
         }
         if self.stop_sequences.iter().any(|item| item.is_empty()) {
             return Err(ModelError::InvalidRequest {

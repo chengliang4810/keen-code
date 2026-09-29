@@ -1588,11 +1588,11 @@ impl RuntimeSession {
             .map_err(|_| RuntimeError::StateUnavailable)?;
         let mut cancelled = 0_usize;
         for execution in control.turn_executions.values() {
-            if let RuntimeTurnExecution::Running { cancellation, .. } = execution {
-                if !cancellation.is_cancelled() {
-                    cancellation.cancel();
-                    cancelled = cancelled.saturating_add(1);
-                }
+            if let RuntimeTurnExecution::Running { cancellation, .. } = execution
+                && !cancellation.is_cancelled()
+            {
+                cancellation.cancel();
+                cancelled = cancelled.saturating_add(1);
             }
         }
         Ok(cancelled)
@@ -3430,12 +3430,12 @@ fn commit_agent_event(
         return Err(commit_indeterminate());
     }
     mark_event_confirmed(&mut control, &event_key);
-    if let Some(record) = appended_record {
-        if inner.publisher.publish_authoritative(record).is_err() {
-            control.hard_recovery_required = true;
-            refresh_recovery_required(&mut control);
-            return Err(commit_indeterminate());
-        }
+    if let Some(record) = appended_record
+        && inner.publisher.publish_authoritative(record).is_err()
+    {
+        control.hard_recovery_required = true;
+        refresh_recovery_required(&mut control);
+        return Err(commit_indeterminate());
     }
     if let AgentCommitEventKind::ToolCompleted { tool_call_id, .. } = event.kind()
         && let Some(round_key) = round_key.as_ref()
@@ -3961,12 +3961,12 @@ fn commit_runtime_lifecycle_event(
             }
             Err(error) => return Err(RuntimeError::Resource(error)),
         };
-        if let Some(record) = appended_record {
-            if inner.publisher.publish_authoritative(record).is_err() {
-                control.hard_recovery_required = true;
-                mark_event_indeterminate(control, &event_key);
-                return Err(RuntimeError::RecoveryRequired);
-            }
+        if let Some(record) = appended_record
+            && inner.publisher.publish_authoritative(record).is_err()
+        {
+            control.hard_recovery_required = true;
+            mark_event_indeterminate(control, &event_key);
+            return Err(RuntimeError::RecoveryRequired);
         }
         #[cfg(test)]
         if visible_indeterminate {
@@ -5231,7 +5231,7 @@ fn validate_inline_image_source(media_type: &str, data: &str) -> Result<(), Runt
 
 /// 严格解码标准有填充 Base64，并拒绝非规范尾位或解码后超限。
 fn decode_canonical_base64(data: &str) -> Result<Vec<u8>, RuntimeError> {
-    if data.is_empty() || data.len() % 4 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(4) {
         return Err(RuntimeError::InvalidImageData);
     }
     let bytes = BASE64_STANDARD

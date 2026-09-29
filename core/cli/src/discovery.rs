@@ -88,12 +88,11 @@ pub use keencode_acp::data_root_fingerprint;
 
 /// 返回与 Desktop `storage.rs` 一致的默认数据根。
 pub fn default_data_root() -> Result<PathBuf, EndpointRecordError> {
-    if std::env::var("KEENCODE_BENCHMARK").ok().as_deref() == Some("1") {
-        if let Some(path) =
+    if std::env::var("KEENCODE_BENCHMARK").ok().as_deref() == Some("1")
+        && let Some(path) =
             std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR").filter(|path| !path.is_empty())
-        {
-            return Ok(PathBuf::from(path));
-        }
+    {
+        return Ok(PathBuf::from(path));
     }
     let home = if cfg!(windows) {
         std::env::var_os("USERPROFILE")

@@ -904,17 +904,16 @@ pub(super) fn queue_turn(
             input_kind: "用户 steer",
         });
     }
-    if !matches!(queued.cause, AgentTurnCause::Retry { .. }) {
-        if let Some(steer) = agent
+    if !matches!(queued.cause, AgentTurnCause::Retry { .. })
+        && let Some(steer) = agent
             .steers
             .iter()
             .find(|steer| steer.turn_id != queued.turn_id)
-        {
-            return Err(CollaborationError::PendingUserSteers {
-                agent_id: queued.agent_id.clone(),
-                turn_id: steer.turn_id.clone(),
-            });
-        }
+    {
+        return Err(CollaborationError::PendingUserSteers {
+            agent_id: queued.agent_id.clone(),
+            turn_id: steer.turn_id.clone(),
+        });
     }
     let definition = agent.definition.clone();
     if !state_turn_belongs_to_root(state, &queued.root_agent_id, &queued.turn_id)

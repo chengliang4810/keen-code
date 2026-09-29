@@ -1512,11 +1512,10 @@ async fn read_server_messages<R>(
                 params.get("diagnostics").and_then(Value::as_array),
             )
             && let Ok(mut state) = diagnostics.lock()
+            && let Some(generation) = update_diagnostics_cache(&mut state, uri, items)
         {
-            if let Some(generation) = update_diagnostics_cache(&mut state, uri, items) {
-                drop(state);
-                updates.send_replace(generation);
-            }
+            drop(state);
+            updates.send_replace(generation);
         }
     }
 }

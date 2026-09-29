@@ -1086,8 +1086,8 @@ fn validate_token_set(
     } else if require_refresh_token {
         return Err(OAuthError::MissingRefreshToken);
     }
-    if let Some(scope) = &token_set.scope {
-        if scope.is_empty()
+    if let Some(scope) = &token_set.scope
+        && (scope.is_empty()
             || scope.len() > MAX_SCOPE_BYTES
             || scope.split(' ').any(str::is_empty)
             || !scope.bytes().all(|byte| {
@@ -1095,12 +1095,11 @@ fn validate_token_set(
                     || byte == 0x21
                     || (0x23..=0x5b).contains(&byte)
                     || (0x5d..=0x7e).contains(&byte)
-            })
-        {
-            return Err(OAuthError::InvalidCallback(
-                "scope 不是有界的 OAuth scope 字符串".to_owned(),
-            ));
-        }
+            }))
+    {
+        return Err(OAuthError::InvalidCallback(
+            "scope 不是有界的 OAuth scope 字符串".to_owned(),
+        ));
     }
     Ok(())
 }

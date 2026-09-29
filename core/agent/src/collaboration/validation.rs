@@ -87,10 +87,10 @@ pub(super) fn bounded_utf8_with_suffix(value: &str, maximum: usize, suffix: &str
 pub(super) fn validate_context_inheritance(
     inheritance: &ContextInheritance,
 ) -> Result<(), CollaborationError> {
-    if let ContextInheritance::RecentTurns { count } = inheritance {
-        if *count == 0 || *count > MAX_RECENT_TURNS {
-            return Err(CollaborationError::InvalidContextInheritance);
-        }
+    if let ContextInheritance::RecentTurns { count } = inheritance
+        && (*count == 0 || *count > MAX_RECENT_TURNS)
+    {
+        return Err(CollaborationError::InvalidContextInheritance);
     }
     Ok(())
 }
@@ -979,12 +979,12 @@ pub(super) fn validate_recovered_tree(
                 message: "已知 Agent 的所有者、深度、标识、Session 或路径不一致".to_owned(),
             });
         }
-        if let Some(worktree_lease) = &definition.profile.worktree_lease {
-            if !worktree_leases.insert(worktree_lease.clone()) {
-                return Err(CollaborationError::InvalidRecovery {
-                    message: "恢复树重复绑定同一 Worktree lease".to_owned(),
-                });
-            }
+        if let Some(worktree_lease) = &definition.profile.worktree_lease
+            && !worktree_leases.insert(worktree_lease.clone())
+        {
+            return Err(CollaborationError::InvalidRecovery {
+                message: "恢复树重复绑定同一 Worktree lease".to_owned(),
+            });
         }
         match definition.depth {
             depth if depth == AgentDepth::ROOT => {

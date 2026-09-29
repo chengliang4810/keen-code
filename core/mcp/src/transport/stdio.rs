@@ -122,15 +122,15 @@ impl StdioTransport {
         if let Ok(mut writer) = self.writer.try_lock() {
             writer.take();
         }
-        if let Ok(mut child_slot) = self.child.try_lock() {
-            if let Some(mut child) = child_slot.take() {
-                let _ = child.start_kill();
-            }
+        if let Ok(mut child_slot) = self.child.try_lock()
+            && let Some(mut child) = child_slot.take()
+        {
+            let _ = child.start_kill();
         }
-        if let Ok(mut reader_task) = self.reader_task.try_lock() {
-            if let Some(reader_task) = reader_task.take() {
-                reader_task.abort();
-            }
+        if let Ok(mut reader_task) = self.reader_task.try_lock()
+            && let Some(reader_task) = reader_task.take()
+        {
+            reader_task.abort();
         }
         fail_all(
             &self.pending,

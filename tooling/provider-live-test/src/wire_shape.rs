@@ -2149,13 +2149,10 @@ fn validate_messages_sse_event(
             let index = sse_required_u64(object, "index", &mut state.violation_bits);
             if let Some(block) =
                 sse_required_object(object, "content_block", &mut state.violation_bits)
+                && let Some(open) = validate_messages_stream_block(block, &mut state.violation_bits)
+                && let Some(index) = index
             {
-                if let Some(open) = validate_messages_stream_block(block, &mut state.violation_bits)
-                {
-                    if let Some(index) = index {
-                        state.messages_open_blocks.insert(index, open);
-                    }
-                }
+                state.messages_open_blocks.insert(index, open);
             }
         }
         KnownSseEvent::MessagesContentBlockDelta => {
@@ -2496,10 +2493,10 @@ fn inspect_responses_sse_frame(frame: &ParsedSseFrame, state: &mut SseInspection
         }
     };
     let data_type = value.get("type").and_then(Value::as_str);
-    if let (Some(frame_event), Some(data_type)) = (frame.event.as_deref(), data_type) {
-        if frame_event != data_type {
-            state.event_data_type_mismatch = true;
-        }
+    if let (Some(frame_event), Some(data_type)) = (frame.event.as_deref(), data_type)
+        && frame_event != data_type
+    {
+        state.event_data_type_mismatch = true;
     }
     let explicit_error = responses_explicit_error(&value);
     state.responses_provider_declared_error |= explicit_error;
@@ -2919,10 +2916,10 @@ fn responses_sse_unknown_key_present(event: KnownSseEvent, value: &Value) -> boo
     if let Some(part) = root.get("part").and_then(Value::as_object) {
         unknown |= has_unknown_key(part, &["type", "text", "refusal"]);
     }
-    if matches!(event, KnownSseEvent::ResponsesError) {
-        if let Some(error) = root.get("error").and_then(Value::as_object) {
-            unknown |= has_unknown_key(error, &["type", "code", "message", "param"]);
-        }
+    if matches!(event, KnownSseEvent::ResponsesError)
+        && let Some(error) = root.get("error").and_then(Value::as_object)
+    {
+        unknown |= has_unknown_key(error, &["type", "code", "message", "param"]);
     }
     unknown
 }

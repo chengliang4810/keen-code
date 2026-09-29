@@ -384,10 +384,10 @@ impl WebService {
         };
         if !status.is_success() {
             // 错误正文只为复用连接而有界排空，不允许异常大的正文掩盖真实 HTTP 状态。
-            if let Err(error) = read_response_limited(response, limit, cancellation).await {
-                if error.code == "cancelled" {
-                    return Err(error);
-                }
+            if let Err(error) = read_response_limited(response, limit, cancellation).await
+                && error.code == "cancelled"
+            {
+                return Err(error);
             }
             return Err(http_status_error(status));
         }

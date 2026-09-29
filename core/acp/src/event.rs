@@ -279,10 +279,9 @@ impl KeenCodeEventEnvelope {
             },
             Some(journal_sequence),
         ) = (&self.event, self.journal_sequence)
+            && *replaced_through_sequence >= journal_sequence
         {
-            if *replaced_through_sequence >= journal_sequence {
-                return Err(AcpBoundaryError::InvalidSemanticValue);
-            }
+            return Err(AcpBoundaryError::InvalidSemanticValue);
         }
         self.validate_identity()
     }
@@ -1132,13 +1131,13 @@ impl KeenCodeEvent {
                 if let Some(goal_id) = goal_id {
                     validate_identifier(goal_id, MAX_EVENT_IDENTIFIER_BYTES)?;
                 }
-                if let Some(status) = status {
-                    if !matches!(
+                if let Some(status) = status
+                    && !matches!(
                         status.as_str(),
                         "active" | "paused" | "completed" | "blocked"
-                    ) {
-                        return Err(AcpBoundaryError::InvalidSemanticValue);
-                    }
+                    )
+                {
+                    return Err(AcpBoundaryError::InvalidSemanticValue);
                 }
             }
             Self::SystemNotification { message, .. } => {

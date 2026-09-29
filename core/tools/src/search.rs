@@ -760,13 +760,13 @@ fn collect_search_files(
             if cancellation.is_cancelled() {
                 return WalkState::Quit;
             }
-            if let Ok(entry) = entry {
-                if entry.file_type().is_some_and(|kind| kind.is_file()) {
-                    files
-                        .lock()
-                        .expect("搜索路径收集锁不应损坏")
-                        .push(entry.into_path());
-                }
+            if let Ok(entry) = entry
+                && entry.file_type().is_some_and(|kind| kind.is_file())
+            {
+                files
+                    .lock()
+                    .expect("搜索路径收集锁不应损坏")
+                    .push(entry.into_path());
             }
             WalkState::Continue
         })

@@ -306,12 +306,11 @@ async fn execute_run(
     store
         .verify_committed_fixtures(&committed, &selected)
         .await?;
-    if let Some(selection) = &retry_selection {
-        if report.probes.len() != selection.cases.len()
-            || manifest.borrow().record_count() != selection.cases.len()
-        {
-            return Err("精确补测没有为选择清单中的每个 tuple 形成唯一终态".to_owned());
-        }
+    if let Some(selection) = &retry_selection
+        && (report.probes.len() != selection.cases.len()
+            || manifest.borrow().record_count() != selection.cases.len())
+    {
+        return Err("精确补测没有为选择清单中的每个 tuple 形成唯一终态".to_owned());
     }
     // 先结束只读借用，再进入可能更新恢复清单的失败分支，避免 RefCell 重入崩溃。
     let catalog_completion = {

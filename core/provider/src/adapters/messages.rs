@@ -679,13 +679,12 @@ impl MessagesAdapter {
 
 /// 把相邻同角色消息合并为一个 Messages 消息。
 fn append_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {
-    if let Some(last) = messages.last_mut() {
-        if last.get("role").and_then(Value::as_str) == Some(role) {
-            if let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut) {
-                existing.extend(content);
-                return;
-            }
-        }
+    if let Some(last) = messages.last_mut()
+        && last.get("role").and_then(Value::as_str) == Some(role)
+        && let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut)
+    {
+        existing.extend(content);
+        return;
     }
     messages.push(json!({ "role": role, "content": content }));
 }
@@ -867,10 +866,10 @@ fn encode_tool_choice(choice: &ToolChoice, parallel: Option<bool>) -> Value {
         ToolChoice::Required => json!({ "type": "any" }),
         ToolChoice::Specific { name } => json!({ "type": "tool", "name": name }),
     };
-    if let Some(disable) = parallel.map(|allowed| !allowed) {
-        if let Some(object) = value.as_object_mut() {
-            object.insert("disable_parallel_tool_use".to_owned(), Value::Bool(disable));
-        }
+    if let Some(disable) = parallel.map(|allowed| !allowed)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("disable_parallel_tool_use".to_owned(), Value::Bool(disable));
     }
     value
 }

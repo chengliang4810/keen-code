@@ -438,10 +438,9 @@ impl StreamableHttpTransport {
                 if listener
                     .as_ref()
                     .is_some_and(|handle| handle.cancellation.is_cancelled())
+                    && let Some(listener) = listener.take()
                 {
-                    if let Some(listener) = listener.take() {
-                        listener.task.abort();
-                    }
+                    listener.task.abort();
                 }
                 Err(McpError::Timeout {
                     method: "HTTP GET SSE listener".to_owned(),
@@ -453,11 +452,11 @@ impl StreamableHttpTransport {
 
     fn force_close_resources(&self) {
         self.closed.store(true, Ordering::Release);
-        if let Ok(mut listener) = self.listener_task.try_lock() {
-            if let Some(listener) = listener.take() {
-                listener.cancellation.cancel();
-                listener.task.abort();
-            }
+        if let Ok(mut listener) = self.listener_task.try_lock()
+            && let Some(listener) = listener.take()
+        {
+            listener.cancellation.cancel();
+            listener.task.abort();
         }
     }
 }

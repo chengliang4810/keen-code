@@ -329,12 +329,11 @@ impl CollaborationStore for RecordingStore {
     ) -> Result<(), CollaborationPortError> {
         let mut recovered = self.recovered.lock().expect("恢复锁不应中毒");
         let agent_id = checkpoint.agent.definition.agent_id.clone();
-        if let Some(previous) = recovered.get(&agent_id) {
-            if previous.revision > checkpoint.revision
-                || (previous.revision == checkpoint.revision && previous != checkpoint)
-            {
-                return Err(CollaborationPortError::new("checkpoint 局部修订号冲突"));
-            }
+        if let Some(previous) = recovered.get(&agent_id)
+            && (previous.revision > checkpoint.revision
+                || (previous.revision == checkpoint.revision && previous != checkpoint))
+        {
+            return Err(CollaborationPortError::new("checkpoint 局部修订号冲突"));
         }
         recovered.insert(agent_id, checkpoint.clone());
         Ok(())

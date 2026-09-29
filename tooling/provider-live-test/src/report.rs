@@ -6003,19 +6003,16 @@ impl ReportStore {
             {
                 return Err(validation_error);
             }
-            if !rerun {
-                if let Some(fixture) = fixture.as_ref() {
-                    if let Err(error) = verify_disk_fixture(record, fixture) {
-                        if legacy_contract
-                            && legacy_unreplayable_failed_cancellation_fixture(
-                                record, fixture, &error,
-                            )
-                        {
-                            rerun = true;
-                        } else {
-                            return Err(error);
-                        }
-                    }
+            if !rerun
+                && let Some(fixture) = fixture.as_ref()
+                && let Err(error) = verify_disk_fixture(record, fixture)
+            {
+                if legacy_contract
+                    && legacy_unreplayable_failed_cancellation_fixture(record, fixture, &error)
+                {
+                    rerun = true;
+                } else {
+                    return Err(error);
                 }
             }
             if rerun {
@@ -7696,12 +7693,11 @@ fn validate_probe_record_invariants(
         if record.attempts > 0 && record.cancellation.is_none() {
             return Err(format!("恢复记录 {key} 的取消能力缺少取消证据"));
         }
-        if let Some(cancellation) = &record.cancellation {
-            if cancellation.remote_termination_proven
-                || (cancellation.local_future_dropped && cancellation.completed_before_cancel)
-            {
-                return Err(format!("恢复记录 {key} 的取消边界事实互相冲突"));
-            }
+        if let Some(cancellation) = &record.cancellation
+            && (cancellation.remote_termination_proven
+                || (cancellation.local_future_dropped && cancellation.completed_before_cancel))
+        {
+            return Err(format!("恢复记录 {key} 的取消边界事实互相冲突"));
         }
     } else if record.cancellation.is_some() {
         return Err(format!("恢复记录 {key} 的非取消能力携带了取消证据"));
@@ -9702,7 +9698,12 @@ fn is_harness_text(text: &str, expected_marker: &str, allow_first_turn: bool) ->
             return false;
         };
         return tokens.len() == 1_100_000 * 2
-            && tokens.as_bytes().chunks_exact(2).all(|part| part == b"x ")
+            && tokens
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|part| part == b"x ")
             && marker_matches_expected(marker, expected_marker, allow_first_turn);
     }
     false

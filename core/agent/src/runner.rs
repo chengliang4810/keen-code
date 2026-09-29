@@ -1370,25 +1370,25 @@ impl AgentRunner {
             return Err(error);
         }
 
-        if let Some(record) = &outcome.pre_applied_micro {
-            if let Err(error) = self.commit_event(
+        if let Some(record) = &outcome.pre_applied_micro
+            && let Err(error) = self.commit_event(
                 request,
                 model_round,
                 AgentCommitEventKind::ContextCompactionApplied {
                     record: record.clone(),
                 },
-            ) {
-                self.deliver_context_compaction_event(
-                    request,
-                    model_round,
-                    AgentStreamEventKind::ContextCompactionFailed {
-                        failure_kind: ContextCompactionFailureKind::Storage,
-                    },
-                    false,
-                )
-                .await?;
-                return Err(error);
-            }
+            )
+        {
+            self.deliver_context_compaction_event(
+                request,
+                model_round,
+                AgentStreamEventKind::ContextCompactionFailed {
+                    failure_kind: ContextCompactionFailureKind::Storage,
+                },
+                false,
+            )
+            .await?;
+            return Err(error);
         }
 
         if let Err(error) = self.commit_event(
@@ -1992,8 +1992,7 @@ impl AgentRunner {
             && let (Some(error), Some(terminal_reason)) = (&error, active.state.terminal_reason())
             && terminal_reason != TerminalReason::Cancelled
             && terminal_reason != TerminalReason::Completed
-        {
-            if let Err(hook_error) = self
+            && let Err(hook_error) = self
                 .notify_on_error(
                     OnErrorHookContext {
                         invocation: hook_invocation_context(&request),
@@ -2003,15 +2002,14 @@ impl AgentRunner {
                     &request.cancellation,
                 )
                 .await
-            {
-                tracing::error!(
-                    session_id = %request.session_id,
-                    turn_id = %request.turn_id,
-                    source_agent_id = %request.source_agent_id,
-                    error = %hook_error,
-                    "OnError Hook 失败，保留原始 Turn 错误"
-                );
-            }
+        {
+            tracing::error!(
+                session_id = %request.session_id,
+                turn_id = %request.turn_id,
+                source_agent_id = %request.source_agent_id,
+                error = %hook_error,
+                "OnError Hook 失败，保留原始 Turn 错误"
+            );
         }
         TurnResult {
             state: active.state,
@@ -2196,37 +2194,36 @@ impl AgentRunner {
             // 重新准入；仍超限才给出各预算分项的结构化诊断，不进入压缩失败
             // 路径。存在可压缩历史的轮次（含 Provider 超限恢复）仍沿用既有
             // 触发线与压缩臂。
-            if !self.context.has_compressible_history(&model_request) {
-                if let AdmissionDecision::Blocked(breakdown) = self
+            if !self.context.has_compressible_history(&model_request)
+                && let AdmissionDecision::Blocked(breakdown) = self
                     .context
                     .admission_check(&budget_request, &provider_capabilities)
+            {
+                match self
+                    .recover_admission_with_projection(request, active, &mut model_request)
+                    .await
                 {
-                    match self
-                        .recover_admission_with_projection(request, active, &mut model_request)
-                        .await
-                    {
-                        Ok(true) => {
-                            budget_request = request_with_transient_message(
-                                &model_request,
-                                tool_catalog_message.as_ref(),
-                            );
-                            if let AdmissionDecision::Blocked(breakdown) = self
-                                .context
-                                .admission_check(&budget_request, &provider_capabilities)
-                            {
-                                return Err(AgentRunError::Context(
-                                    ContextError::InitialRequestOversized { breakdown },
-                                ));
-                            }
-                        }
-                        Ok(false) => {
+                    Ok(true) => {
+                        budget_request = request_with_transient_message(
+                            &model_request,
+                            tool_catalog_message.as_ref(),
+                        );
+                        if let AdmissionDecision::Blocked(breakdown) = self
+                            .context
+                            .admission_check(&budget_request, &provider_capabilities)
+                        {
                             return Err(AgentRunError::Context(
                                 ContextError::InitialRequestOversized { breakdown },
                             ));
                         }
-                        Err(AgentRunError::Cancelled) => return Err(AgentRunError::Cancelled),
-                        Err(error) => return Err(error),
                     }
+                    Ok(false) => {
+                        return Err(AgentRunError::Context(
+                            ContextError::InitialRequestOversized { breakdown },
+                        ));
+                    }
+                    Err(AgentRunError::Cancelled) => return Err(AgentRunError::Cancelled),
+                    Err(error) => return Err(error),
                 }
             }
             if let Some(target_tokens) = self
@@ -2970,14 +2967,14 @@ impl AgentRunner {
             );
             committed.extend(failure_reminders);
             committed.extend(progress_reminders);
-            if terminal_error.is_none() {
-                if let Some(error) = summary_error {
-                    active.limit_summary = Some(error);
-                    committed.push(Message::text(
-                        MessageRole::Developer,
-                        LIMIT_SUMMARY_INSTRUCTION,
-                    ));
-                }
+            if terminal_error.is_none()
+                && let Some(error) = summary_error
+            {
+                active.limit_summary = Some(error);
+                committed.push(Message::text(
+                    MessageRole::Developer,
+                    LIMIT_SUMMARY_INSTRUCTION,
+                ));
             }
             active.state.transition_to(TurnPhase::CommittingRound)?;
             self.commit_preflighted_tool_round(request, active, round_permit, committed)?;
@@ -4001,18 +3998,18 @@ impl AgentRunner {
                                     }
                                     results[index] = Some(raw.result.clone());
                                     result_budget_charged[index] = true;
-                                    if !round_permit.recovery_retained() {
-                                        if let Err(error) = self.emit_tool_completed(
+                                    if !round_permit.recovery_retained()
+                                        && let Err(error) = self.emit_tool_completed(
                                             request,
                                             active.state.round_count(),
                                             &mut round_permit,
                                             &mut prepared[index],
                                             raw.status,
                                             &raw.result,
-                                        ) {
-                                            segment_cancellation.cancel();
-                                            completion_error.get_or_insert(error);
-                                        }
+                                        )
+                                    {
+                                        segment_cancellation.cancel();
+                                        completion_error.get_or_insert(error);
                                     }
                                     post_context[index] = Some(post);
                                     // 非取消终态错误不再取消段内兄弟；terminal_error 仍在
@@ -4053,17 +4050,17 @@ impl AgentRunner {
                                     )?;
                                     results[index] = Some(result.clone());
                                     result_budget_charged[index] = true;
-                                    if !round_permit.recovery_retained() {
-                                        if let Err(delivery_error) = self.emit_tool_completed(
+                                    if !round_permit.recovery_retained()
+                                        && let Err(delivery_error) = self.emit_tool_completed(
                                             request,
                                             active.state.round_count(),
                                             &mut round_permit,
                                             &mut prepared[index],
                                             completion_status_for_run_error(&error),
                                             &result,
-                                        ) {
-                                            completion_error.get_or_insert(delivery_error);
-                                        }
+                                        )
+                                    {
+                                        completion_error.get_or_insert(delivery_error);
                                     }
                                     terminal_error.get_or_insert(error);
                                 }
@@ -5824,10 +5821,10 @@ fn normalize_immediate_round_result(
     result: ToolResult,
     budget: &mut ToolRoundOutputBudget,
 ) -> Result<ToolResult, AgentRunError> {
-    if let Ok(footprint) = measure_tool_result(&result) {
-        if budget.try_charge_result(footprint) {
-            return Ok(result);
-        }
+    if let Ok(footprint) = measure_tool_result(&result)
+        && budget.try_charge_result(footprint)
+    {
+        return Ok(result);
     }
     let result = output_limit_result(&result.tool_call_id, ToolEffect::ReadOnly);
     let footprint = measure_tool_result(&result).map_err(|_| AgentRunError::Internal {

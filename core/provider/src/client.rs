@@ -1597,13 +1597,13 @@ impl Stream for TimedModelStream {
                 if is_output_delta(&event) && this.first_output_ms.is_none() {
                     this.first_output_ms = Some(now);
                 }
-                if matches!(event, ModelStreamEvent::MessageEnd { .. }) {
-                    if let Some(first) = this.first_output_ms {
-                        this.pending_end = Some(event);
-                        return Poll::Ready(Some(Ok(ModelStreamEvent::DecodeTiming {
-                            duration_ms: now.saturating_sub(first),
-                        })));
-                    }
+                if matches!(event, ModelStreamEvent::MessageEnd { .. })
+                    && let Some(first) = this.first_output_ms
+                {
+                    this.pending_end = Some(event);
+                    return Poll::Ready(Some(Ok(ModelStreamEvent::DecodeTiming {
+                        duration_ms: now.saturating_sub(first),
+                    })));
                 }
                 Poll::Ready(Some(Ok(event)))
             }

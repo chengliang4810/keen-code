@@ -160,10 +160,10 @@ fn last_user_message_at(state: &SessionState) -> u64 {
         return scan_last_user_message_at(state);
     };
     let key = state.session_id.as_str().to_owned();
-    if let Some(&(memo_sequence, memo_value)) = memo.get(&key) {
-        if memo_sequence == state.last_sequence {
-            return memo_value;
-        }
+    if let Some(&(memo_sequence, memo_value)) = memo.get(&key)
+        && memo_sequence == state.last_sequence
+    {
+        return memo_value;
     }
     let value = scan_last_user_message_at(state);
     memo.insert(key, (state.last_sequence, value));

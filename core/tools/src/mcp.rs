@@ -589,13 +589,12 @@ pub(super) fn normalize_mcp_content(content: McpContent) -> Result<ToolResultCon
         if let Some(text) = content.text {
             return Ok(ToolResultContent::Text { text });
         }
-    } else if content.content_type == "image" {
-        if let (Some(data), Some(media_type)) = (content.data.as_ref(), content.mime_type.as_ref())
-        {
-            return Ok(ToolResultContent::Image {
-                image: ImageContent::from_base64(media_type.clone(), data.clone()),
-            });
-        }
+    } else if content.content_type == "image"
+        && let (Some(data), Some(media_type)) = (content.data.as_ref(), content.mime_type.as_ref())
+    {
+        return Ok(ToolResultContent::Image {
+            image: ImageContent::from_base64(media_type.clone(), data.clone()),
+        });
     }
     let text = serde_json::to_string(&content)
         .map_err(|_| ToolError::permanent("mcp_result_invalid", "MCP 内容块无法编码"))?;

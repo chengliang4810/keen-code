@@ -416,17 +416,17 @@ impl BoundedCommandRequest {
             return Ok(Self::new(program, cwd, timeout, max_output_bytes)
                 .with_args(vec!["-c".into(), script.into()]));
         }
-        if shell == Some("powershell") || (shell.is_none() && cfg!(windows)) {
-            if let Some(program) = resolve(powershell_candidates()) {
-                return Ok(
-                    Self::new(program, cwd, timeout, max_output_bytes).with_args(vec![
-                        "-NoProfile".into(),
-                        "-NonInteractive".into(),
-                        "-Command".into(),
-                        powershell_script(script).into(),
-                    ]),
-                );
-            }
+        if (shell == Some("powershell") || (shell.is_none() && cfg!(windows)))
+            && let Some(program) = resolve(powershell_candidates())
+        {
+            return Ok(
+                Self::new(program, cwd, timeout, max_output_bytes).with_args(vec![
+                    "-NoProfile".into(),
+                    "-NonInteractive".into(),
+                    "-Command".into(),
+                    powershell_script(script).into(),
+                ]),
+            );
         }
         Err(BoundedCommandError::new(
             "command_spawn_failed",
@@ -1214,20 +1214,20 @@ where
         };
         let bytes = &chunk[..read];
         total_bytes = total_bytes.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        if let Some(file) = artifact_file.as_mut() {
-            if let Err(error) = file.write_all(bytes).await {
-                artifact_error.get_or_insert_with(|| format!("保存完整输出失败：{error}"));
-                artifact_file = None;
-            }
+        if let Some(file) = artifact_file.as_mut()
+            && let Err(error) = file.write_all(bytes).await
+        {
+            artifact_error.get_or_insert_with(|| format!("保存完整输出失败：{error}"));
+            artifact_file = None;
         }
         retain_preview(bytes, &mut head, &mut tail, head_limit, tail_limit);
     }
 
-    if let Some(file) = artifact_file.as_mut() {
-        if let Err(error) = file.flush().await {
-            artifact_error.get_or_insert_with(|| format!("刷新完整输出失败：{error}"));
-            artifact_file = None;
-        }
+    if let Some(file) = artifact_file.as_mut()
+        && let Err(error) = file.flush().await
+    {
+        artifact_error.get_or_insert_with(|| format!("刷新完整输出失败：{error}"));
+        artifact_file = None;
     }
     drop(artifact_file);
 

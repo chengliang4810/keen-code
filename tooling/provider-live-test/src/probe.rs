@@ -985,18 +985,18 @@ fn read_local_probe_request(stream: &mut TcpStream) -> std::io::Result<()> {
                 "本地截断探测请求超过固定安全上限",
             ));
         }
-        if expected_size.is_none() {
-            if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                let body_start = header_end + 4;
-                let headers = String::from_utf8_lossy(&request[..header_end]);
-                let content_length = headers
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                    .unwrap_or(0);
-                expected_size = Some(body_start + content_length);
-            }
+        if expected_size.is_none()
+            && let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+        {
+            let body_start = header_end + 4;
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            expected_size = Some(body_start + content_length);
         }
         if expected_size.is_some_and(|size| request.len() >= size) {
             return Ok(());
@@ -1284,13 +1284,13 @@ async fn fetch_catalog(
         }
     }
 
-    if final_error.is_some() {
-        if let Some(partial) = best_partial {
-            pages = partial.pages;
-            raw_count = partial.raw_count;
-            invalid_count = partial.invalid_count;
-            discovered = partial.models.into_iter().map(|entry| entry.id).collect();
-        }
+    if final_error.is_some()
+        && let Some(partial) = best_partial
+    {
+        pages = partial.pages;
+        raw_count = partial.raw_count;
+        invalid_count = partial.invalid_count;
+        discovered = partial.models.into_iter().map(|entry| entry.id).collect();
     }
     discovered.extend(observed_models);
     discovered.sort();
@@ -1892,17 +1892,15 @@ async fn attach_fixture_evidence(
             .as_ref()
             .is_some_and(|evidence| evidence.completed_before_cancel)
         && record.normalized_error.is_none()
-    {
-        if let Some(FixtureExchangeOutcome::Response {
+        && let Some(FixtureExchangeOutcome::Response {
             response,
             actual_text_evidence,
         }) = final_outcome
-        {
-            record.response.get_or_insert_with(|| response.clone());
-            record
-                .actual_text_evidence
-                .get_or_insert_with(|| actual_text_evidence.clone());
-        }
+    {
+        record.response.get_or_insert_with(|| response.clone());
+        record
+            .actual_text_evidence
+            .get_or_insert_with(|| actual_text_evidence.clone());
     }
     let requirement_matches = match (requirement, exchanges.last(), final_outcome) {
         (
@@ -4051,10 +4049,10 @@ fn retry_delay(completed_attempts: usize, error: &ModelError) -> Duration {
     {
         return Duration::from_millis((*milliseconds).min(60_000));
     }
-    if matches!(error, ModelError::RateLimited { .. }) {
-        if let Some(seconds) = retry_seconds_from_message(error.message()) {
-            return Duration::from_secs(seconds.min(60));
-        }
+    if matches!(error, ModelError::RateLimited { .. })
+        && let Some(seconds) = retry_seconds_from_message(error.message())
+    {
+        return Duration::from_secs(seconds.min(60));
     }
     match completed_attempts {
         0 | 1 => Duration::from_secs(1),
@@ -4631,18 +4629,18 @@ mod tests {
                     "测试 HTTP 请求超过本地服务上限",
                 ));
             }
-            if expected_size.is_none() {
-                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
-                    let body_start = header_end + 4;
-                    let headers = String::from_utf8_lossy(&request[..header_end]);
-                    let content_length = headers
-                        .lines()
-                        .filter_map(|line| line.split_once(':'))
-                        .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-                        .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-                        .unwrap_or(0);
-                    expected_size = Some(body_start + content_length);
-                }
+            if expected_size.is_none()
+                && let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+            {
+                let body_start = header_end + 4;
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                expected_size = Some(body_start + content_length);
             }
             if expected_size.is_some_and(|size| request.len() >= size) {
                 break;

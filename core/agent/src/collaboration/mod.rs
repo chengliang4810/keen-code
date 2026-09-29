@@ -3153,12 +3153,12 @@ impl CollaborationCoordinator {
                         message: "多根恢复包含重复 Agent 或 Session 标识".to_owned(),
                     });
                 }
-                if let Some(worktree_lease) = &definition.profile.worktree_lease {
-                    if !worktree_leases.insert(worktree_lease.clone()) {
-                        return Err(CollaborationError::InvalidRecovery {
-                            message: "多根恢复重复绑定同一 Worktree lease".to_owned(),
-                        });
-                    }
+                if let Some(worktree_lease) = &definition.profile.worktree_lease
+                    && !worktree_leases.insert(worktree_lease.clone())
+                {
+                    return Err(CollaborationError::InvalidRecovery {
+                        message: "多根恢复重复绑定同一 Worktree lease".to_owned(),
+                    });
                 }
             }
             for agent in &recovered.agents {
@@ -5265,10 +5265,10 @@ impl CollaborationCoordinator {
         if result.is_err() {
             // Store 不确定或 checkpoint 失败时也必须保持当前实例 fail-closed；即使
             // 持久化水位尚未确认，后续领域命令仍不能继续产生新的副作用。
-            if let Ok(mut state) = self.inner.state.lock() {
-                if let Some(root) = state.roots.get_mut(&root_agent_id) {
-                    root.suspended = true;
-                }
+            if let Ok(mut state) = self.inner.state.lock()
+                && let Some(root) = state.roots.get_mut(&root_agent_id)
+            {
+                root.suspended = true;
             }
         }
         let (_output, actions) = result?;
@@ -5765,10 +5765,10 @@ impl CollaborationCoordinator {
             .lock()
             .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
         // 新批次入队即掏空前一个队尾的回滚快照：从现在起它失败只能冻结。
-        if let Some(previous) = dispatch.last_rollback.take() {
-            if let Ok(mut slot) = previous.lock() {
-                *slot = None;
-            }
+        if let Some(previous) = dispatch.last_rollback.take()
+            && let Ok(mut slot) = previous.lock()
+        {
+            *slot = None;
         }
         dispatch.last_rollback = Some(Arc::clone(&rollback));
         dispatch

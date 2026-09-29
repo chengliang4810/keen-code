@@ -507,11 +507,11 @@ impl BatchScheduler {
 
     /// 移除已经同步、关闭或失效的任务，并唤醒调度线程重算最早截止时间。
     fn cancel(&self, job_id: u64) {
-        if let Ok(mut state) = self.state.lock() {
-            if state.jobs.remove(&job_id).is_some() {
-                state.revision = state.revision.wrapping_add(1);
-                self.wake.notify_one();
-            }
+        if let Ok(mut state) = self.state.lock()
+            && state.jobs.remove(&job_id).is_some()
+        {
+            state.revision = state.revision.wrapping_add(1);
+            self.wake.notify_one();
         }
     }
 
@@ -797,16 +797,16 @@ impl SessionJournal {
             }
             sync_directory(&session_dir, true)?;
         }
-        if loaded.snapshot_needs_rebuild {
-            if let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes) {
-                let _ = write_snapshot_file(
-                    &snapshot_path,
-                    &loaded.state,
-                    anchor,
-                    config.durability == Durability::FlushAndSync,
-                    config.max_log_bytes,
-                );
-            }
+        if loaded.snapshot_needs_rebuild
+            && let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes)
+        {
+            let _ = write_snapshot_file(
+                &snapshot_path,
+                &loaded.state,
+                anchor,
+                config.durability == Durability::FlushAndSync,
+                config.max_log_bytes,
+            );
         }
         let loaded_sequence = loaded.state.last_sequence;
         let inner = Arc::new(Mutex::new(JournalInner {
@@ -931,16 +931,16 @@ impl SessionJournal {
         if !recovered.issues.is_empty() {
             return Err(ResourceError::CorruptReadOnly);
         }
-        if recovered.snapshot_needs_rebuild {
-            if let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes) {
-                let _ = write_snapshot_file(
-                    &snapshot_path,
-                    &recovered.state,
-                    anchor,
-                    config.durability == Durability::FlushAndSync,
-                    config.max_log_bytes,
-                );
-            }
+        if recovered.snapshot_needs_rebuild
+            && let Ok(anchor) = complete_log_anchor(&log_path, config.max_log_bytes)
+        {
+            let _ = write_snapshot_file(
+                &snapshot_path,
+                &recovered.state,
+                anchor,
+                config.durability == Durability::FlushAndSync,
+                config.max_log_bytes,
+            );
         }
         let preserved_bytes = tail.len() as u64;
         let recovered_sequence = recovered.state.last_sequence;
@@ -3448,7 +3448,7 @@ fn apply_durability(file: &mut fs::File, durability: Durability) -> Result<(), R
 fn snapshot_due(policy: SnapshotPolicy, sequence: u64) -> bool {
     match policy {
         SnapshotPolicy::Disabled => false,
-        SnapshotPolicy::Every { events } => sequence % events == 0,
+        SnapshotPolicy::Every { events } => sequence.is_multiple_of(events),
     }
 }
 

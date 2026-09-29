@@ -193,10 +193,9 @@ impl ResponsesAdapter {
         let frame_event_type = frame.event.as_deref();
         let data_event_type = value.get("type").and_then(Value::as_str);
         if let (Some(frame_event_type), Some(data_event_type)) = (frame_event_type, data_event_type)
+            && frame_event_type != data_event_type
         {
-            if frame_event_type != data_event_type {
-                return Err(protocol_error("Responses SSE event 与 data.type 不一致"));
-            }
+            return Err(protocol_error("Responses SSE event 与 data.type 不一致"));
         }
         if has_explicit_provider_failure(&value) {
             return Err(classify_provider_error(&value));

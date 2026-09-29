@@ -165,13 +165,13 @@ impl ChatCompletionsAdapter {
         } else if !matches!(request.tool_choice, ToolChoice::Auto | ToolChoice::None) {
             return Err(invalid_request("Chat Completions 工具选择要求非空工具列表"));
         }
-        if let Some(reasoning) = &request.reasoning {
-            if let Some(effort) = reasoning.effort {
-                body.insert(
-                    "reasoning_effort".to_owned(),
-                    Value::String(reasoning_effort(effort).to_owned()),
-                );
-            }
+        if let Some(reasoning) = &request.reasoning
+            && let Some(effort) = reasoning.effort
+        {
+            body.insert(
+                "reasoning_effort".to_owned(),
+                Value::String(reasoning_effort(effort).to_owned()),
+            );
         }
         if let Some(structured) = &request.structured_output {
             body.insert(
@@ -474,15 +474,15 @@ impl ChatCompletionsAdapter {
             return Ok(None);
         }
         let mut data = Map::new();
-        if let Some(text) = self.chat_reasoning_content.take() {
-            if !text.is_empty() {
-                data.insert("reasoning_content".to_owned(), Value::String(text));
-            }
+        if let Some(text) = self.chat_reasoning_content.take()
+            && !text.is_empty()
+        {
+            data.insert("reasoning_content".to_owned(), Value::String(text));
         }
-        if let Some(text) = self.chat_reasoning.take() {
-            if !text.is_empty() {
-                data.insert("reasoning".to_owned(), Value::String(text));
-            }
+        if let Some(text) = self.chat_reasoning.take()
+            && !text.is_empty()
+        {
+            data.insert("reasoning".to_owned(), Value::String(text));
         }
         if data.is_empty() {
             return Ok(None);

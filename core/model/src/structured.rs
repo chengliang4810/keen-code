@@ -658,10 +658,10 @@ fn validate_integer_range(
     });
     let lower = lower.transpose()?;
     let upper = upper.transpose()?;
-    if let (Some(lower), Some(upper)) = (lower, upper) {
-        if lower > upper {
-            return Err(format!("{path}/{minimum} 不能大于 {maximum}"));
-        }
+    if let (Some(lower), Some(upper)) = (lower, upper)
+        && lower > upper
+    {
+        return Err(format!("{path}/{minimum} 不能大于 {maximum}"));
     }
     Ok(())
 }

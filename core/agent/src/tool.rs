@@ -690,7 +690,7 @@ const fn is_media_type_restricted_name_byte(byte: u8) -> bool {
 
 /// 严格校验标准有填充 Base64，并返回不分配解码缓冲区的精确原始字节数。
 fn strict_base64_decoded_bytes(data: &str) -> Result<usize, ToolOutputRejection> {
-    if data.is_empty() || data.len() % 4 != 0 {
+    if data.is_empty() || !data.len().is_multiple_of(4) {
         return Err(ToolOutputRejection::Invalid);
     }
     if data.len() > TOOL_OUTPUT_LIMITS.max_base64_characters {
