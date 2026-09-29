@@ -35,12 +35,13 @@ use keencode_runtime::{
     AdmissionDisposition, AuthoritativeProjectionMode, ClaimedPrompt, CreateSessionRequest,
     DeliveryDraft, ElicitationAnswerDisposition, ExecutionIdentity, HostRuntime,
     HostRuntimeAcquire, HostRuntimeError, NeedsInputBehavior, OpenSessionResult, OperationState,
-    OperationStatus, OperationTerminal, PromptAdmissionRequest, PromptQueueDriver,
-    ProviderProjection, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
-    RuntimeEventSubscription, RuntimeManager, RuntimeSession, RuntimeTurnRequest,
-    map_authoritative_record_with_projection, paginate_sessions, session_info_from_metadata,
+    OperationStatus, OperationTerminal, PersistentAgentState, PromptAdmissionRequest,
+    PromptQueueDriver, ProviderProjection, RuntimeError, RuntimeEventPayload,
+    RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeManager, RuntimeSession,
+    RuntimeTurnRequest, map_authoritative_record_with_projection, paginate_sessions,
+    session_info_from_metadata,
 };
-use keencode_tools::{ToolEnvironment, register_local_tools};
+use keencode_tools::{ToolEnvironment, register_local_tools, register_state_tools};
 use keencode_web::{
     HostBusinessError, HostBusinessFuture, HostBusinessRouter, HostConnectionContext,
     HostWsAdapter, WebError, WebHost, WebHostConfig, WebServerOwner, WebToken,
@@ -1253,7 +1254,25 @@ impl HeadlessInner {
             Err(_) => return ExecutionOutcome::failed("tool_environment_unavailable"),
         };
         let mut tools = ToolRegistry::new();
-        if register_local_tools(&mut tools, environment).is_err() {
+        if register_local_tools(&mut tools, Arc::clone(&environment)).is_err() {
+            return ExecutionOutcome::failed("tool_registry_unavailable");
+        }
+        // 根回合装配会话级 Todo/Goal/Plan 状态工具，与桌面端能力集对齐。
+        let persistent_state = match PersistentAgentState::open_with_goal_root(
+            session.clone(),
+            self.runtime.data_root(),
+        ) {
+            Ok(state) => Arc::new(state),
+            Err(_) => return ExecutionOutcome::failed("persistent_state_unavailable"),
+        };
+        if register_state_tools(
+            &mut tools,
+            persistent_state.clone(),
+            persistent_state.clone(),
+            persistent_state.clone(),
+        )
+        .is_err()
+        {
             return ExecutionOutcome::failed("tool_registry_unavailable");
         }
         let (resolved, provider_snapshot) = match provider.resolve() {
@@ -1289,11 +1308,15 @@ impl HeadlessInner {
         request.set_cancellation(cancellation.clone());
         let turn = RuntimeTurnRequest::root(request, vec![input], prompt.to_owned())
             .with_provider_snapshot(provider_snapshot.clone());
-        let runner = AgentRunner::new(
+        let mut runner = AgentRunner::new(
             Arc::new(resolved) as Arc<dyn ModelProvider>,
             tools,
             RunLimits::default(),
         );
+        runner = runner
+            .with_goal_controller(persistent_state.clone())
+            .with_external_goal_continuation()
+            .with_todo_controller(persistent_state);
         let event_pump = match session.subscribe() {
             Ok(subscription) => {
                 let (stop_sender, stop_receiver) = oneshot::channel();
