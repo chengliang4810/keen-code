@@ -110,16 +110,7 @@ describe("侧栏层级与密度", () => {
     );
   });
 
-  it("归档模式保留置顶区，移动侧栏宽度不超过视口一半", () => {
-    const archiveStart = sidebarSource.indexOf("{showArchivedSessions ?");
-    const normalStart = sidebarSource.indexOf("          ) : (", archiveStart);
-
-    expect(archiveStart).toBeGreaterThanOrEqual(0);
-    expect(normalStart).toBeGreaterThan(archiveStart);
-    const archiveBranch = sidebarSource.slice(archiveStart, normalStart);
-    expect(archiveBranch.indexOf("<PinnedSessionList")).toBeLessThan(
-      archiveBranch.indexOf("<ArchivedSessionList"),
-    );
+  it("移动侧栏宽度不超过视口一半", () => {
     expect(governanceCss).toMatch(
       /\.sidebar \{[\s\S]*?width: min\(var\(--sidebar-width, 264px\), 50%\) !important;[\s\S]*?max-width: 50% !important;/,
     );
@@ -133,15 +124,13 @@ describe("侧栏层级与密度", () => {
         openSearch={vi.fn()}
         openPluginMarketplace={vi.fn()}
         searchTriggerRef={{ current: null }}
-        showArchivedSessions={false}
-        onToggleArchivedSessions={vi.fn()}
       />,
     );
 
     expect(html).toContain("sidebar.newSession");
     expect(html).toContain("sidebar.search");
     expect(html).toContain("sidebar.plugins");
-    expect(html).toContain("sidebar.archived");
+    expect(html).not.toContain("sidebar.archived");
     expect(html).not.toContain("Automations");
   });
 

@@ -126,13 +126,17 @@ describe("Windows 标题栏与项目菜单定位契约", () => {
   it("Windows 窗口按钮沿用系统标题按钮的点击区域", () => {
     const css = readSource("./styles/app-foundation.css");
     const header = readSource("./styles/app-conversation.css");
-    expect(css).toMatch(/.window-controls__btns*{[^}]*width:s*46px;[^}]*height:s*32px;/s);
-    expect(css).toMatch(/.window-controls__btn svgs*{[^}]*width:s*12px;[^}]*height:s*12px;/s);
-    expect(css).toMatch(/.platform-win.app-shells*{[^}]*--titlebar-height:s*32px;/s);
-    expect(css).toMatch(/.sidebar-chromes*{[^}]*height:s*var(--titlebar-height, 48px);/s);
-    expect(header).toMatch(/.platform-win .main__tops*{[^}]*padding-block:s*0;/s);
-    expect(header).toMatch(/.main.main--frames*{[^}]*margin:s*0 4px 4px 0;/s);
-    expect(css).not.toMatch(/.platform-mac .sidebar-chromes*{/);
+    const tokens = readSource("./styles/tokens.css");
+    expect(css).toMatch(/\.window-controls__btn\s*\{[^}]*width:\s*46px;[^}]*height:\s*100%;/s);
+    expect(css).toMatch(/\.window-controls__btn svg\s*\{[^}]*width:\s*12px;[^}]*height:\s*12px;/s);
+    // 标题栏高度跨平台统一为 tokens 的 48px，窗口按钮跟随容器高度，
+    // 不再保留平台专属的 32px 覆盖。
+    expect(tokens).toMatch(/--titlebar-height:\s*48px;/);
+    expect(css).not.toMatch(/\.platform-win\.app-shell\s*\{[^}]*--titlebar-height/s);
+    expect(css).toMatch(/\.sidebar-chrome\s*\{[^}]*height:\s*var\(--titlebar-height, 48px\);/s);
+    expect(header).toMatch(/\.platform-win \.main__top\s*\{[^}]*padding-block:\s*0;/s);
+    expect(header).toMatch(/\.main\.main--frame\s*\{[^}]*margin:\s*0 4px 4px 0;/s);
+    expect(css).not.toMatch(/\.platform-mac \.sidebar-chrome\s*\{/);
   });
 });
 
@@ -668,7 +672,7 @@ describe("左侧栏空栏目与快捷入口契约", () => {
     const navigationSource = readSource("./features/app/sidebar/SidebarNav.tsx");
     const userMenuSource = readSource("./components/UserMenu.tsx");
 
-    expect(navigationSource.match(/size="md"/g)).toHaveLength(4);
+    expect(navigationSource.match(/size="md"/g)).toHaveLength(3);
     // ZCode 的置顶区是始终展开的静态标题，不使用可交互 Appica 控件。
     expect(pinnedSource).toContain('role="heading"');
     expect(pinnedSource).not.toContain("setPinnedOpen(");

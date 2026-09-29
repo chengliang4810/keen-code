@@ -1,9 +1,9 @@
 
 /* ==========================================================================
  * Modals / overlays — GlassModal shell template
- * Structure: .overlay > .modal[.status-modal|glass-modal--*]
- *            .modal-head → title + close
- *            .modal-body (optional) / content
+ * Structure: .modal[.status-modal|glass-modal--*] > dialog-content
+ *            .modal-head → title (Appica owns the close button)
+ *            .modal-body → scrollable content
  *            .modal-actions → footer CTAs
  * 表面来自 Harness Modal；沿用 GlassModal 的组合接口和 --modal-* 布局令牌。
  * ========================================================================== */
@@ -25,14 +25,20 @@
   max-height: min(90vh, 720px);
   display: flex;
   flex-direction: column;
-  gap: var(--modal-gap, 16px);
   overflow: hidden;
   border-radius: var(--modal-radius);
-  padding: var(--modal-pad-y, 20px) var(--modal-pad-x, 24px);
   box-sizing: border-box;
   color: var(--text-primary);
-  background: var(--dsw-alias-bg-layer-2);
-  box-shadow: var(--dsw-elevation-prominent);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-pop);
+}
+
+.modal > [data-slot="dialog-content"] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--modal-gap);
+  min-height: 0;
+  padding: var(--modal-pad-y) var(--modal-pad-x);
 }
 
 .modal.glass-modal--sm,
@@ -60,22 +66,36 @@
 }
 
 .modal-body {
+  display: block;
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  padding: 0;
+}
+
+.modal-body > * + * {
+  margin-top: var(--modal-body-gap);
+}
+
+.modal-body--stacked {
   display: flex;
   flex-direction: column;
-  gap: var(--modal-body-gap, 12px);
-  min-height: 0;
-  flex: 1;
-  overflow: auto;
+  gap: var(--modal-body-gap);
+}
+
+.modal-body--stacked > * + * {
+  margin-top: 0;
 }
 
 /* Shared head: title + close */
 .modal-head {
   display: flex;
+  flex-direction: row;
   align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
   flex-shrink: 0;
   min-width: 0;
+  padding: 0;
+  padding-inline-end: calc(var(--control-height) + var(--space-2));
 }
 
 .modal-title {
@@ -94,13 +114,14 @@
 /* Shared footer actions — right-aligned cancel + primary (ref dialog) */
 .modal-actions {
   display: flex;
+  flex-direction: row;
   flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--modal-actions-gap, 8px);
   flex-shrink: 0;
-  margin-top: auto;
-  padding-top: var(--space-3, 12px);
+  margin-top: 0;
+  padding: 0;
   border-top: none;
 }
 
@@ -379,6 +400,17 @@
   max-width: var(--composer-model-max-width, 260px);
 }
 
+.cmm--model .cmm__trigger {
+  transition: none;
+  scale: 1;
+  translate: none;
+}
+
+.cmm--model .cmm__trigger::before,
+.cmm--model .cmm__trigger > .chevron {
+  transition: none;
+}
+
 .cmm__icon {
   display: inline-flex;
   align-items: center;
@@ -387,6 +419,16 @@
   flex-shrink: 0;
   line-height: 1;
   opacity: 0.9;
+}
+
+/* Ultra 委派开启时触发器最前的协作标记，位于脑图标与文本之前。 */
+.cmm__ultra-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ultra-ink);
+  flex-shrink: 0;
+  line-height: 1;
 }
 
 .cmm__trigger-text {

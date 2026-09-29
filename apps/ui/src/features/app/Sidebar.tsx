@@ -1,4 +1,4 @@
-import { useState, type RefObject } from "react";
+import type { RefObject } from "react";
 import { UserMenu, type UserMenuProps } from "@/components/UserMenu";
 import { OverlayScroll } from "@/components/OverlayScroll";
 import { saveLayout, type LayoutPrefs } from "@/lib/layout";
@@ -13,9 +13,6 @@ import { ProjectTree } from "./sidebar/ProjectTree";
 import type { ProjectTreeProps } from "./sidebar/ProjectTree";
 import { HistorySessionList } from "./sidebar/HistorySessionList";
 import type { HistorySessionListProps } from "./sidebar/HistorySessionList";
-import { ArchivedSessionList } from "./sidebar/ArchivedSessionList";
-import type { SidebarSortMode } from "@/lib/sidebarOrder";
-import type { SessionRow } from "@/features/app/models";
 import type { SidebarTranslator } from "./sidebar/types";
 
 export interface SidebarFrameProps {
@@ -30,20 +27,10 @@ export interface SidebarProps {
   frame: SidebarFrameProps;
   tr: SidebarTranslator;
   chrome: Omit<SidebarChromeProps, "layout" | "tr" | "sidebarRef">;
-  navigation: Omit<
-    SidebarNavProps,
-    "tr" | "showArchivedSessions" | "onToggleArchivedSessions"
-  >;
+  navigation: Omit<SidebarNavProps, "tr">;
   pinned: Omit<PinnedSessionListProps, "tr">;
   projectTree: Omit<ProjectTreeProps, "tr">;
   history: Omit<HistorySessionListProps, "tr">;
-  archive: {
-    sessions: SessionRow[];
-    sessionOrder: string[];
-    sessionSortMode: SidebarSortMode;
-    loadAllSessions: () => Promise<void>;
-    deleteArchivedSession: (sessionId: string) => void;
-  };
   user: SidebarUserProps;
 }
 
@@ -55,17 +42,9 @@ export function Sidebar({
   pinned,
   projectTree,
   history,
-  archive,
   user,
 }: SidebarProps) {
   const { sidebarRef, layout, resizingSidebar } = frame;
-  const [showArchivedSessions, setShowArchivedSessions] = useState(false);
-
-  const toggleArchivedSessions = () => {
-    const next = !showArchivedSessions;
-    setShowArchivedSessions(next);
-    if (next) void archive.loadAllSessions();
-  };
 
   const closeMobileSidebar = () => {
     chrome.setLayout((current) => {
@@ -111,28 +90,14 @@ export function Sidebar({
           sidebarRef={sidebarRef}
           tr={tr}
         />
-        <SidebarNav
-          {...navigation}
-          tr={tr}
-          showArchivedSessions={showArchivedSessions}
-          onToggleArchivedSessions={toggleArchivedSessions}
-        />
+        <SidebarNav {...navigation} tr={tr} />
         <OverlayScroll
           className="sidebar__scroll"
           viewportClassName="sidebar__scroll-inner"
         >
-          {showArchivedSessions ? (
-            <>
-              <PinnedSessionList {...pinned} tr={tr} />
-              <ArchivedSessionList {...pinned} {...archive} tr={tr} />
-            </>
-          ) : (
-            <>
-              <PinnedSessionList {...pinned} tr={tr} />
-              <ProjectTree {...projectTree} tr={tr} />
-              <HistorySessionList {...history} tr={tr} />
-            </>
-          )}
+          <PinnedSessionList {...pinned} tr={tr} />
+          <ProjectTree {...projectTree} tr={tr} />
+          <HistorySessionList {...history} tr={tr} />
         </OverlayScroll>
         <UserMenu {...user} />
       </aside>

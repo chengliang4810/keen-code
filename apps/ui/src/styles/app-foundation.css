@@ -245,11 +245,6 @@ textarea,
 }
 
 /* Win / frameless self-drawn chrome (mac uses Overlay traffic lights) */
-.platform-win.app-shell {
-  /* Windows 标题栏与窗口按钮共用高度，三个区域的图标中心保持一致。 */
-  --titlebar-height: 32px;
-}
-
 .window-controls {
   display: none;
   align-items: stretch;
@@ -257,7 +252,7 @@ textarea,
   top: 0;
   right: 0;
   z-index: 10040;
-  height: var(--titlebar-height, 40px);
+  height: var(--titlebar-height);
   -webkit-app-region: no-drag;
   app-region: no-drag;
 }
@@ -270,7 +265,7 @@ textarea,
 
 .window-controls__btn {
   width: 46px;
-  height: 32px;
+  height: 100%;
   border-radius: 0;
   display: flex;
   align-items: center;
@@ -516,6 +511,14 @@ textarea,
   text-align: left;
   background: transparent;
   border-radius: var(--radius-md);
+  transition: none;
+  scale: 1;
+  translate: none;
+}
+
+.tree-l1__head::before,
+.tree-l1__head .chevron--disclose {
+  transition: none;
 }
 
 .tree-l1__head:hover,
@@ -536,7 +539,7 @@ textarea,
   flex-shrink: 0;
   opacity: 0;
   pointer-events: none;
-  transition: opacity var(--motion-fast) var(--ease-out);
+  transition: none;
 }
 
 .tree-l1__action {

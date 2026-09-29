@@ -54,36 +54,34 @@ export function AppDialogPortal({
       title={appDialog.title}
       closeLabel={tr("common.close")}
       onClose={() => setAppDialog(null)}
-    >
-      {appDialog.kind === "confirm" ? (
-        <form
-          className="app-dialog__form"
-          onSubmit={(event) => {
-            event.preventDefault();
-            submitConfirm();
-          }}
-        >
-          <p className="app-dialog__msg">{appDialog.message}</p>
-          <div className="app-dialog__actions modal-actions">
-            <Button size="md"
-              type="button"
-              variant="ghost"
-              onClick={() => setAppDialog(null)}
-            >
-              {tr("common.cancel")}
-            </Button>
-            <Button size="md"
+      footer={
+        <>
+          <Button size="md" type="button" variant="ghost" onClick={() => setAppDialog(null)}>
+            {tr("common.cancel")}
+          </Button>
+          {appDialog.kind === "confirm" ? (
+            <Button
+              size="md"
               ref={confirmBtnRef}
               data-modal-autofocus
-              type="submit"
+              type="button"
               variant={appDialog.danger ? "destructive" : "primary"}
+              onClick={submitConfirm}
             >
               {appDialog.confirmLabel || tr("common.confirm")}
             </Button>
-          </div>
-        </form>
+          ) : (
+            <Button size="md" type="submit" form="app-dialog-prompt-form" variant="primary">
+              {appDialog.submitLabel || tr("common.save")}
+            </Button>
+          )}
+        </>
+      }
+    >
+      {appDialog.kind === "confirm" ? (
+        <p className="app-dialog__msg">{appDialog.message}</p>
       ) : (
-        <form className="app-dialog__form" onSubmit={submitPrompt}>
+        <form id="app-dialog-prompt-form" className="app-dialog__form" onSubmit={submitPrompt}>
           {appDialog.message ? (
             <p className="app-dialog__msg">{appDialog.message}</p>
           ) : null}
@@ -96,18 +94,6 @@ export function AppDialogPortal({
             onChange={(event) => setDialogInput(event.target.value)}
             autoComplete="off"
           />
-          <div className="app-dialog__actions modal-actions">
-            <Button size="md"
-              type="button"
-              variant="ghost"
-              onClick={() => setAppDialog(null)}
-            >
-              {tr("common.cancel")}
-            </Button>
-            <Button size="md" type="submit" variant="primary">
-              {appDialog.submitLabel || tr("common.save")}
-            </Button>
-          </div>
         </form>
       )}
     </GlassModal>

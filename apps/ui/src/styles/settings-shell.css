@@ -253,15 +253,31 @@
   color: var(--text-secondary);
 }
 
+.settings-color-option {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.settings-color-option__base {
+  display: inline-block;
+  width: var(--space-4);
+  aspect-ratio: 1;
+  flex: none;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-full);
+  background: var(--background-inverse);
+}
+
 /* Appica portals are kept behaviorally intact but use ZCode's solid surfaces. */
 [data-slot="dialog-backdrop"] {
   background: var(--bg-overlay);
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(2px);
 }
 
 [data-slot="dialog-popup"] {
   border: 1px solid var(--border-popover);
-  border-radius: var(--radius-xl);
+  border-radius: var(--modal-radius);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-pop);
 }

@@ -5,8 +5,6 @@ import type {
 } from "./types";
 import { Button } from "@appica/ui-react/button";
 import {
-  IconArchive,
-  IconClose,
   IconNewChat,
   IconPuzzle,
   IconSearch,
@@ -18,8 +16,6 @@ export interface SidebarNavProps {
   openSearch: () => void;
   openPluginMarketplace: () => void;
   searchTriggerRef: RefObject<HTMLButtonElement | null>;
-  showArchivedSessions: boolean;
-  onToggleArchivedSessions: () => void;
 }
 
 export function SidebarNav({
@@ -28,8 +24,6 @@ export function SidebarNav({
   openSearch,
   openPluginMarketplace,
   searchTriggerRef,
-  showArchivedSessions,
-  onToggleArchivedSessions,
 }: SidebarNavProps) {
   return (
     <div className="sidebar-nav">
@@ -69,26 +63,6 @@ export function SidebarNav({
           <IconPuzzle size={16} />
         </span>
         {tr("sidebar.plugins")}
-      </Button>
-      <Button
-        type="button"
-        variant="ghost"
-        size="md"
-        className="nav-new"
-        aria-pressed={showArchivedSessions}
-        aria-label={
-          showArchivedSessions
-            ? tr("sidebar.current")
-            : tr("sidebar.archived")
-        }
-        onClick={onToggleArchivedSessions}
-      >
-        <span className="nav-item__icon">
-          {showArchivedSessions ? <IconClose size={16} /> : <IconArchive size={16} />}
-        </span>
-        {showArchivedSessions
-          ? tr("sidebar.current")
-          : tr("sidebar.archived")}
       </Button>
     </div>
   );

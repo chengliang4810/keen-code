@@ -87,13 +87,9 @@ export function GlassModal({
           </DialogTitle>
         </DialogHeader>
 
-        {wrapBody || bodyClassName ? (
-          <DialogBody className={cx("modal-body", bodyClassName)}>
-            {children}
-          </DialogBody>
-        ) : (
-          children
-        )}
+        <DialogBody className={cx("modal-body", wrapBody && "modal-body--stacked", bodyClassName)}>
+          {children}
+        </DialogBody>
 
         {footer ? (
           <DialogFooter className="modal-actions">{footer}</DialogFooter>
