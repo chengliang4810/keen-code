@@ -12,9 +12,8 @@ use crate::server::{
 use keencode_acp::{
     AcpIncomingFrame, ConnectionId, HostDiscoveryRecord, HostLifecyclePhase, HostOwnerKind,
     HostTransportKind, KeenCodeEvent, KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams,
-    MAX_HOST_PROMPT_BYTES, META_SESSION_ARCHIVED, META_SESSION_PINNED, OPERATION_ADMIT_METHOD,
-    OPERATION_STATUS_METHOD, OperationId, SessionUpdateDeliveryEnvelope, WEB_START_METHOD,
-    WEB_STATUS_METHOD, WEB_STOP_METHOD,
+    MAX_HOST_PROMPT_BYTES, OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId,
+    SessionUpdateDeliveryEnvelope, WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD,
 };
 use keencode_agent::{
     AgentId, AgentRunner, AgentStreamEvent, AgentStreamEventKind, ContextCompactionFailureKind,
@@ -22,26 +21,24 @@ use keencode_agent::{
     TurnCancellation, TurnId as AgentTurnId, TurnRequest, TurnResult,
 };
 use keencode_model::{
-    ContentBlock, ImageSource, Message, MessageRole, ModelProvider, ModelStreamEvent,
-    ProviderCapabilities, ProviderProtocol, last_non_empty_text,
+    Message, MessageRole, ModelProvider, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
+    last_non_empty_text,
 };
 use keencode_provider::{
     ApiKey, ProviderConfig, ProviderModelPolicy, ProviderRegistration, ProviderRegistry,
     ResolvedProvider, WireResponseMode,
 };
 use keencode_resources::{
-    MessageRole as ResourceMessageRole, ProviderProtocolSnapshot, ProviderSnapshot, ROOT_AGENT_ID,
-    SessionEvent, SessionEventRecord, SessionMessage, SessionState,
-    ToolCompletionStatus as ResourceToolCompletionStatus, ToolLifecycle, ToolRequest,
-    TurnStopReason,
+    ProviderProtocolSnapshot, ProviderSnapshot, ROOT_AGENT_ID, SessionEventRecord, SessionState,
 };
 use keencode_runtime::{
-    AdmissionDisposition, ClaimedPrompt, CreateSessionRequest, ElicitationAnswerDisposition,
-    ExecutionIdentity, HostRuntime, HostRuntimeAcquire, HostRuntimeError, NeedsInputBehavior,
-    OpenSessionResult, OperationState, OperationStatus, OperationTerminal, PromptAdmissionRequest,
-    PromptQueueDriver, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
+    AdmissionDisposition, AuthoritativeProjectionMode, ClaimedPrompt, CreateSessionRequest,
+    DeliveryDraft, ElicitationAnswerDisposition, ExecutionIdentity, HostRuntime,
+    HostRuntimeAcquire, HostRuntimeError, NeedsInputBehavior, OpenSessionResult, OperationState,
+    OperationStatus, OperationTerminal, PromptAdmissionRequest, PromptQueueDriver,
+    ProviderProjection, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
     RuntimeEventSubscription, RuntimeManager, RuntimeSession, RuntimeTurnRequest,
-    paginate_sessions, session_info_from_metadata,
+    map_authoritative_record_with_projection, paginate_sessions, session_info_from_metadata,
 };
 use keencode_tools::{ToolEnvironment, register_local_tools};
 use keencode_web::{
@@ -936,7 +933,7 @@ impl HeadlessInner {
     ) -> Result<Value, RuntimeError> {
         let state = session.snapshot()?.state;
         let page = session.replay(None, keencode_resources::MAX_REPLAY_PAGE_RECORDS)?;
-        let mut provider_by_turn = BTreeMap::new();
+        let mut provider_projection = ProviderProjection::default();
         let mut replayed_events = 0_u64;
         let mut next_delivery_sequence = self.next_delivery_sequence(session.session_id().as_str());
         for record in &page.records {
@@ -945,7 +942,7 @@ impl HeadlessInner {
                 &state,
                 record,
                 self.provider.as_ref(),
-                &mut provider_by_turn,
+                &mut provider_projection,
                 &mut next_delivery_sequence,
             )?;
             replayed_events = replayed_events.saturating_add(deliveries.len() as u64);
@@ -1966,657 +1963,102 @@ const MAX_HEADLESS_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
 /// Journal sequence 和 headless delivery sequence 是两个不同的游标：前者用于
 /// 权威历史恢复，后者只表示本次 Host 投递顺序。原子批次内的多个更新共享同一个
 /// Journal sequence，但各自取得独立 delivery sequence。
+/// 将权威 Journal 记录投影为 headless NDJSON 投递；正文经 Provider 凭据脱敏。
 fn headless_authoritative_deliveries(
     session: &RuntimeSession,
     state: &SessionState,
     record: &SessionEventRecord,
     provider: Option<&HeadlessProvider>,
-    provider_by_turn: &mut BTreeMap<String, ProviderSnapshot>,
+    provider_projection: &mut ProviderProjection,
     next_delivery_sequence: &mut u64,
 ) -> Result<Vec<Value>, RuntimeError> {
-    headless_authoritative_event_deliveries(
+    let redactor = provider.map(|provider| move |text: &str| -> String { provider.redact(text) });
+    let mapped = map_authoritative_record_with_projection(
         session,
         state,
         record,
-        &record.event,
-        provider,
-        provider_by_turn,
-        next_delivery_sequence,
-    )
+        AuthoritativeProjectionMode::Replay,
+        provider_projection,
+        redactor
+            .as_ref()
+            .map(|redactor| redactor as &dyn Fn(&str) -> String),
+    )?;
+    let drafts = mapped.commit();
+    drafts
+        .into_iter()
+        .map(|draft| headless_delivery_value(record, next_delivery_sequence, draft))
+        .collect()
 }
 
-fn headless_authoritative_event_deliveries(
-    session: &RuntimeSession,
-    state: &SessionState,
+/// 把共享投影草稿编码为 headless 的 acp://delivery JSON-RPC Value 信封。
+fn headless_delivery_value(
     record: &SessionEventRecord,
-    event: &SessionEvent,
-    provider: Option<&HeadlessProvider>,
-    provider_by_turn: &mut BTreeMap<String, ProviderSnapshot>,
     next_delivery_sequence: &mut u64,
-) -> Result<Vec<Value>, RuntimeError> {
-    if let SessionEvent::AtomicBatch { events } = event {
-        let mut deliveries = Vec::new();
-        for nested in events {
-            deliveries.extend(headless_authoritative_event_deliveries(
-                session,
-                state,
-                record,
-                nested,
-                provider,
-                provider_by_turn,
-                next_delivery_sequence,
-            )?);
-        }
-        return Ok(deliveries);
-    }
-
-    let mut deliveries = Vec::new();
-    match event {
-        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title, .. } => {
-            push_headless_authoritative_update(
-                &mut deliveries,
-                record,
-                None,
-                None,
-                next_delivery_sequence,
-                keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
-                    keencode_acp::schema::SessionInfoUpdate::new().title(title.clone()),
-                ),
-            )?;
-        }
-        SessionEvent::SessionPreferenceSet { pinned, archived } => {
-            // 偏好变更经 _meta 投影，与桌面端映射保持同一键集。
-            let mut meta = serde_json::Map::new();
-            if let Some(pinned) = pinned {
-                meta.insert(
-                    META_SESSION_PINNED.to_owned(),
-                    serde_json::Value::Bool(*pinned),
-                );
-            }
-            if let Some(archived) = archived {
-                meta.insert(
-                    META_SESSION_ARCHIVED.to_owned(),
-                    serde_json::Value::Bool(*archived),
-                );
-            }
-            if !meta.is_empty() {
-                push_headless_authoritative_update(
-                    &mut deliveries,
-                    record,
-                    None,
-                    None,
-                    next_delivery_sequence,
-                    keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
-                        keencode_acp::schema::SessionInfoUpdate::new().meta(meta),
-                    ),
-                )?;
-            }
-        }
-        SessionEvent::TurnStarted {
+    draft: DeliveryDraft,
+) -> Result<Value, RuntimeError> {
+    let sequence = (*next_delivery_sequence).saturating_add(1).max(1);
+    *next_delivery_sequence = sequence;
+    match draft {
+        DeliveryDraft::SessionUpdate {
             turn_id,
             source_agent_id,
-            root_turn_id,
-            parent_turn_id,
-            ..
-        } => {
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(turn_id.as_str()),
-                Some(source_agent_id.as_str()),
-                next_delivery_sequence,
-                KeenCodeEvent::TurnStarted {
-                    root_turn_id: root_turn_id.as_str().to_owned(),
-                    parent_turn_id: parent_turn_id
-                        .as_ref()
-                        .map(|value| value.as_str().to_owned()),
-                },
-            )?;
-        }
-        SessionEvent::TurnCompleted { turn_id } => {
-            let agent_id = headless_turn_agent_id(state, turn_id.as_str())?;
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(turn_id.as_str()),
-                Some(&agent_id),
-                next_delivery_sequence,
-                KeenCodeEvent::TurnCompleted,
-            )?;
-        }
-        SessionEvent::TurnStopped {
-            turn_id,
-            reason,
-            message,
-        } => {
-            let agent_id = headless_turn_agent_id(state, turn_id.as_str())?;
-            let event = if *reason == TurnStopReason::Cancelled {
-                KeenCodeEvent::TurnCancelled
-            } else {
-                KeenCodeEvent::TurnFailed {
-                    failure_kind: keencode_acp::TurnFailureKind::Internal,
-                    message: keencode_model::redact_error_secrets_bounded(message, 4096),
-                }
-            };
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(turn_id.as_str()),
-                Some(&agent_id),
-                next_delivery_sequence,
-                event,
-            )?;
-        }
-        SessionEvent::MessageAdded { message } => {
-            deliveries.extend(headless_persisted_message_deliveries(
-                session,
-                state,
-                record,
-                message,
-                provider,
-                next_delivery_sequence,
-            )?);
-        }
-        SessionEvent::TranscriptSegmentCommitted { segment } => {
-            for message in &segment.messages {
-                deliveries.extend(headless_persisted_message_deliveries(
-                    session,
-                    state,
-                    record,
-                    message,
-                    provider,
-                    next_delivery_sequence,
-                )?);
-            }
-        }
-        SessionEvent::TurnProviderSnapshotRecorded {
-            turn_id, provider, ..
-        } => {
-            provider_by_turn.insert(turn_id.as_str().to_owned(), provider.clone());
-        }
-        SessionEvent::ModelRoundCompleted {
-            turn_id,
-            source_agent_id,
-            requested_model,
-            usage,
-            ..
-        } => {
-            let context_window = provider_by_turn
-                .get(turn_id.as_str())
-                .filter(|snapshot| snapshot.model == *requested_model)
-                .and_then(|snapshot| snapshot.context_window)
-                .filter(|value| *value > 0);
-            let used = usage.total_tokens.or_else(|| {
-                usage
-                    .input_tokens
-                    .zip(usage.output_tokens)
-                    .and_then(|(input, output)| input.checked_add(output))
-            });
-            if let (Some(used), Some(context_window)) = (used, context_window) {
-                push_headless_authoritative_update(
-                    &mut deliveries,
-                    record,
-                    Some(turn_id.as_str()),
-                    Some(source_agent_id.as_str()),
-                    next_delivery_sequence,
-                    keencode_acp::schema::SessionUpdate::UsageUpdate(
-                        keencode_acp::schema::UsageUpdate::new(used, context_window),
-                    ),
-                )?;
-            }
-        }
-        SessionEvent::ToolRequested { request } => {
-            push_headless_authoritative_update(
-                &mut deliveries,
-                record,
-                Some(request.turn_id.as_str()),
-                Some(request.agent_id.as_str()),
-                next_delivery_sequence,
-                keencode_acp::schema::SessionUpdate::ToolCall(
-                    keencode_acp::schema::ToolCall::new(
-                        request.model_tool_call_id.clone(),
-                        request.tool_name.clone(),
-                    )
-                    .raw_input(request.arguments.clone()),
-                ),
-            )?;
-        }
-        SessionEvent::ToolExecutionStarted { request_id } => {
-            let request = headless_tool_request(state, request_id.as_str())?;
-            push_headless_tool_update(
-                &mut deliveries,
-                record,
-                request,
-                next_delivery_sequence,
-                keencode_acp::schema::ToolCallUpdateFields::new()
-                    .status(keencode_acp::schema::ToolCallStatus::InProgress),
-            )?;
-        }
-        SessionEvent::ToolCompleted {
-            request_id,
-            outcome,
-        } => {
-            let request = headless_tool_request(state, request_id.as_str())?;
-            let status = match outcome.status {
-                ResourceToolCompletionStatus::Succeeded => {
-                    keencode_acp::schema::ToolCallStatus::Completed
-                }
-                ResourceToolCompletionStatus::Failed
-                | ResourceToolCompletionStatus::SideEffectUnknown
-                | ResourceToolCompletionStatus::Cancelled => {
-                    keencode_acp::schema::ToolCallStatus::Failed
-                }
-            };
-            let raw_output = serde_json::to_value(&outcome.result.content)
-                .map_err(|_| RuntimeError::InvalidControlOperation)?;
-            push_headless_tool_update(
-                &mut deliveries,
-                record,
-                request,
-                next_delivery_sequence,
-                keencode_acp::schema::ToolCallUpdateFields::new()
-                    .status(status)
-                    .raw_output(raw_output),
-            )?;
-        }
-        SessionEvent::ToolSideEffectUnknown { request_id, result } => {
-            let request = headless_tool_request(state, request_id.as_str())?;
-            let raw_output = serde_json::to_value(&result.content)
-                .map_err(|_| RuntimeError::InvalidControlOperation)?;
-            push_headless_tool_update(
-                &mut deliveries,
-                record,
-                request,
-                next_delivery_sequence,
-                keencode_acp::schema::ToolCallUpdateFields::new()
-                    .status(keencode_acp::schema::ToolCallStatus::Failed)
-                    .raw_output(raw_output),
-            )?;
-        }
-        SessionEvent::CompactionApplied {
-            turn_id,
-            source_agent_id,
-            compaction,
-            ..
-        } => {
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(turn_id.as_str()),
-                Some(source_agent_id.as_str()),
-                next_delivery_sequence,
-                KeenCodeEvent::ContextCompactionCompleted {
-                    replaced_through_sequence: record.sequence.saturating_sub(1),
-                    estimated_tokens: compaction.estimated_tokens_after,
-                },
-            )?;
-        }
-        SessionEvent::TodoReplaced {
-            items, revision, ..
-        } => {
-            let mut meta = keencode_acp::schema::Meta::new();
-            meta.insert("_keencode".to_owned(), json!({"todoRevision": revision}));
-            push_headless_authoritative_update(
-                &mut deliveries,
-                record,
-                None,
-                None,
-                next_delivery_sequence,
-                keencode_acp::schema::SessionUpdate::Plan(
-                    keencode_acp::schema::Plan::new(
-                        items
-                            .iter()
-                            .map(|item| {
-                                keencode_acp::schema::PlanEntry::new(
-                                    item.content.clone(),
-                                    keencode_acp::schema::PlanEntryPriority::Medium,
-                                    match item.status {
-                                        keencode_resources::TodoStatus::Pending => {
-                                            keencode_acp::schema::PlanEntryStatus::Pending
-                                        }
-                                        keencode_resources::TodoStatus::InProgress => {
-                                            keencode_acp::schema::PlanEntryStatus::InProgress
-                                        }
-                                        keencode_resources::TodoStatus::Completed => {
-                                            keencode_acp::schema::PlanEntryStatus::Completed
-                                        }
-                                    },
-                                )
-                            })
-                            .collect(),
-                    )
-                    .meta(meta),
-                ),
-            )?;
-        }
-        SessionEvent::PlanChanged { plan } => {
-            push_headless_authoritative_update(
-                &mut deliveries,
-                record,
-                None,
-                None,
-                next_delivery_sequence,
-                keencode_acp::schema::SessionUpdate::CurrentModeUpdate(
-                    keencode_acp::schema::CurrentModeUpdate::new(if plan.enabled {
-                        "plan"
-                    } else {
-                        "default"
-                    }),
-                ),
-            )?;
-        }
-        SessionEvent::SubAgentSpawned { agent } => {
-            if let Some(turn_id) = agent.current_turn_id.as_ref()
-                && let Some(turn) = state.turns.get(turn_id)
-                && let Some(parent_turn_id) = turn.parent_turn_id.as_ref()
-            {
-                push_headless_authoritative_event(
-                    &mut deliveries,
-                    record,
-                    Some(parent_turn_id.as_str()),
-                    Some(agent.parent_agent_id.as_str()),
-                    next_delivery_sequence,
-                    KeenCodeEvent::AgentSpawned {
-                        agent_id: agent.agent_id.as_str().to_owned(),
-                        parent_agent_id: agent.parent_agent_id.as_str().to_owned(),
-                        agent_path: agent.agent_path.clone(),
-                        task: agent.task.clone(),
-                        parent_turn_id: parent_turn_id.as_str().to_owned(),
-                        root_turn_id: turn.root_turn_id.as_str().to_owned(),
-                    },
-                )?;
-            }
-        }
-        SessionEvent::SubAgentStatusChanged {
-            agent_id,
-            turn_id: Some(turn_id),
-            status,
-            ..
-        } => {
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(turn_id.as_str()),
-                Some(agent_id.as_str()),
-                next_delivery_sequence,
-                KeenCodeEvent::AgentStatusChanged {
-                    agent_id: agent_id.as_str().to_owned(),
-                    status: headless_agent_status(status),
-                },
-            )?;
-        }
-        SessionEvent::SubAgentStatusChanged { turn_id: None, .. } => {}
-        SessionEvent::MailboxMessageQueued { message } => {
-            push_headless_authoritative_event(
-                &mut deliveries,
-                record,
-                Some(message.related_turn_id.as_str()),
-                Some(message.from.as_str()),
-                next_delivery_sequence,
-                KeenCodeEvent::AgentMessageQueued {
-                    message_id: message.message_id.as_str().to_owned(),
-                    from_agent_id: message.from.as_str().to_owned(),
-                    to_agent_id: message.to.as_str().to_owned(),
-                },
-            )?;
-        }
-        SessionEvent::SessionStatusChanged { .. }
-        | SessionEvent::ToolFileChangePrepared { .. }
-        | SessionEvent::ToolFileChangeApplied { .. }
-        | SessionEvent::TerminalStarted { .. }
-        | SessionEvent::TerminalOutputRecorded { .. }
-        | SessionEvent::TerminalExited { .. }
-        | SessionEvent::DynamicInputReceiptCommitted { .. }
-        | SessionEvent::OnErrorHookQueued { .. }
-        | SessionEvent::OnErrorHookReceiptCommitted { .. }
-        | SessionEvent::ProviderSnapshotUpdated { .. }
-        | SessionEvent::TitleGenerated { .. }
-        | SessionEvent::MailboxMessageDelivered { .. }
-        | SessionEvent::WorktreeAssigned { .. }
-        | SessionEvent::WorktreeReleased { .. }
-        | SessionEvent::SessionClosed {}
-        | SessionEvent::AtomicBatch { .. } => unreachable!("AtomicBatch 已在递归入口处理"),
-    }
-    Ok(deliveries)
-}
-
-fn headless_persisted_message_deliveries(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
-    message: &SessionMessage,
-    provider: Option<&HeadlessProvider>,
-    next_delivery_sequence: &mut u64,
-) -> Result<Vec<Value>, RuntimeError> {
-    if message.is_meta
-        || matches!(
-            message.role,
-            ResourceMessageRole::System | ResourceMessageRole::Developer
-        )
-    {
-        return Ok(Vec::new());
-    }
-    let materialized = session.materialize_message(message)?;
-    let turn_id = message.turn_id.as_ref().map(|value| value.as_str());
-    let agent_id = message
-        .agent_id
-        .as_ref()
-        .map(|value| value.as_str().to_owned())
-        .or_else(|| turn_id.and_then(|value| headless_turn_agent_id(state, value).ok()));
-    let mut deliveries = Vec::new();
-    for block in materialized.content {
-        let update = match (&message.role, block) {
-            (ResourceMessageRole::User, ContentBlock::Text { text }) => {
-                let text = provider.map_or(text.clone(), |provider| provider.redact(&text));
-                keencode_acp::schema::SessionUpdate::UserMessageChunk(
-                    keencode_acp::schema::ContentChunk::new(
-                        keencode_acp::schema::ContentBlock::from(text),
-                    )
-                    .meta(Some(headless_message_meta(&message.message_id))),
-                )
-            }
-            (ResourceMessageRole::User, ContentBlock::Image { image }) => {
-                let content = match image.source {
-                    ImageSource::Base64 { media_type, data } => {
-                        keencode_acp::schema::ContentBlock::Image(
-                            keencode_acp::schema::ImageContent::new(data, media_type),
-                        )
-                    }
-                    ImageSource::Url { url } => keencode_acp::schema::ContentBlock::ResourceLink(
-                        keencode_acp::schema::ResourceLink::new("image", url),
-                    ),
-                };
-                keencode_acp::schema::SessionUpdate::UserMessageChunk(
-                    keencode_acp::schema::ContentChunk::new(content)
-                        .meta(Some(headless_message_meta(&message.message_id))),
-                )
-            }
-            (ResourceMessageRole::Assistant, ContentBlock::Text { text }) => {
-                let text = provider.map_or(text.clone(), |provider| provider.redact(&text));
-                keencode_acp::schema::SessionUpdate::AgentMessageChunk(
-                    keencode_acp::schema::ContentChunk::new(
-                        keencode_acp::schema::ContentBlock::from(text),
-                    )
-                    .meta(Some(headless_message_meta(&message.message_id))),
-                )
-            }
-            (ResourceMessageRole::Assistant, ContentBlock::Reasoning { reasoning }) => {
-                let text = provider.map_or(reasoning.text.clone(), |provider| {
-                    provider.redact(&reasoning.text)
-                });
-                keencode_acp::schema::SessionUpdate::AgentThoughtChunk(
-                    keencode_acp::schema::ContentChunk::new(
-                        keencode_acp::schema::ContentBlock::from(text),
-                    )
-                    .meta(Some(headless_message_meta(&message.message_id))),
-                )
-            }
-            (ResourceMessageRole::Assistant, ContentBlock::ToolCall { tool_call }) => {
-                keencode_acp::schema::SessionUpdate::ToolCall(
-                    keencode_acp::schema::ToolCall::new(tool_call.id, tool_call.name)
-                        .raw_input(tool_call.arguments),
-                )
-            }
-            (ResourceMessageRole::Tool, ContentBlock::ToolResult { tool_result }) => {
-                let status = if tool_result.is_error {
-                    keencode_acp::schema::ToolCallStatus::Failed
-                } else {
-                    keencode_acp::schema::ToolCallStatus::Completed
-                };
-                let raw_output = serde_json::to_value(&tool_result.content)
-                    .map_err(|_| RuntimeError::InvalidControlOperation)?;
-                keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-                    keencode_acp::schema::ToolCallUpdate::new(
-                        tool_result.tool_call_id,
-                        keencode_acp::schema::ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(raw_output),
-                    ),
-                )
-            }
-            _ => continue,
-        };
-        if !matches!(message.role, ResourceMessageRole::User)
-            && (turn_id.is_none() || agent_id.is_none())
-        {
-            return Err(RuntimeError::InvalidControlOperation);
-        }
-        push_headless_authoritative_update(
-            &mut deliveries,
-            record,
-            turn_id,
-            agent_id.as_deref(),
-            next_delivery_sequence,
+            occurred_at_ms,
             update,
-        )?;
-    }
-    Ok(deliveries)
-}
-
-fn headless_message_meta(message_id: &str) -> keencode_acp::schema::Meta {
-    serde_json::Map::from_iter([(
-        "keencode/messageId".to_owned(),
-        Value::String(message_id.to_owned()),
-    )])
-}
-
-fn push_headless_authoritative_update(
-    deliveries: &mut Vec<Value>,
-    record: &SessionEventRecord,
-    turn_id: Option<&str>,
-    source_agent_id: Option<&str>,
-    next_delivery_sequence: &mut u64,
-    update: keencode_acp::schema::SessionUpdate,
-) -> Result<(), RuntimeError> {
-    *next_delivery_sequence = next_delivery_sequence.saturating_add(1).max(1);
-    let envelope = SessionUpdateDeliveryEnvelope::new(
-        record.session.as_str(),
-        turn_id.map(str::to_owned),
-        source_agent_id.map(str::to_owned),
-        *next_delivery_sequence,
-        record.time_unix_ms.max(1),
-        update,
-    )
-    .map_err(|_| RuntimeError::InvalidControlOperation)?;
-    deliveries.push(json!({
-        "jsonrpc":"2.0",
-        "method":"acp://delivery",
-        "params":{"type":"session_update","envelope":envelope}
-    }));
-    Ok(())
-}
-
-fn push_headless_authoritative_event(
-    deliveries: &mut Vec<Value>,
-    record: &SessionEventRecord,
-    turn_id: Option<&str>,
-    source_agent_id: Option<&str>,
-    next_delivery_sequence: &mut u64,
-    event: KeenCodeEvent,
-) -> Result<(), RuntimeError> {
-    *next_delivery_sequence = next_delivery_sequence.saturating_add(1).max(1);
-    let params = match (turn_id, source_agent_id) {
-        (Some(turn_id), Some(source_agent_id)) => KeenCodeEventEnvelopeParams::for_turn(
-            record.session.as_str(),
+            ..
+        } => {
+            let envelope = SessionUpdateDeliveryEnvelope::new(
+                record.session.as_str(),
+                turn_id.clone(),
+                source_agent_id.clone(),
+                sequence,
+                occurred_at_ms.max(1),
+                *update,
+            )
+            .map_err(|_| RuntimeError::InvalidControlOperation)?;
+            Ok(json!({
+                "jsonrpc": "2.0",
+                "method": "acp://delivery",
+                "params": {"type": "session_update", "envelope": envelope}
+            }))
+        }
+        DeliveryDraft::KeenCodeEvent {
             turn_id,
             source_agent_id,
-            *next_delivery_sequence,
-            record.time_unix_ms.max(1),
+            journal_sequence,
+            occurred_at_ms,
             event,
-        ),
-        (None, None) => KeenCodeEventEnvelopeParams::for_session(
-            record.session.as_str(),
-            *next_delivery_sequence,
-            record.time_unix_ms.max(1),
-            event,
-        ),
-        _ => return Err(RuntimeError::InvalidControlOperation),
-    };
-    let envelope = KeenCodeEventEnvelope::new_authoritative(record.sequence, params)
-        .map_err(|_| RuntimeError::InvalidControlOperation)?;
-    deliveries.push(json!({
-        "jsonrpc":"2.0",
-        "method":"acp://delivery",
-        "params":{"type":"keencode_event","envelope":envelope}
-    }));
-    Ok(())
-}
-
-fn push_headless_tool_update(
-    deliveries: &mut Vec<Value>,
-    record: &SessionEventRecord,
-    request: &ToolRequest,
-    next_delivery_sequence: &mut u64,
-    fields: keencode_acp::schema::ToolCallUpdateFields,
-) -> Result<(), RuntimeError> {
-    push_headless_authoritative_update(
-        deliveries,
-        record,
-        Some(request.turn_id.as_str()),
-        Some(request.agent_id.as_str()),
-        next_delivery_sequence,
-        keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-            keencode_acp::schema::ToolCallUpdate::new(request.model_tool_call_id.clone(), fields),
-        ),
-    )
-}
-
-fn headless_turn_agent_id(state: &SessionState, turn_id: &str) -> Result<String, RuntimeError> {
-    state
-        .turns
-        .iter()
-        .find(|(known, _)| known.as_str() == turn_id)
-        .map(|(_, turn)| turn.source_agent_id.as_str().to_owned())
-        .ok_or(RuntimeError::InvalidControlOperation)
-}
-
-fn headless_tool_request<'a>(
-    state: &'a SessionState,
-    request_id: &str,
-) -> Result<&'a ToolRequest, RuntimeError> {
-    state
-        .tools
-        .iter()
-        .find(|(known, _)| known.as_str() == request_id)
-        .map(|(_, lifecycle): (&_, &ToolLifecycle)| &lifecycle.request)
-        .ok_or(RuntimeError::InvalidControlOperation)
-}
-
-fn headless_agent_status(
-    status: &keencode_resources::SubAgentStatus,
-) -> keencode_acp::AgentLifecycleStatus {
-    match status {
-        keencode_resources::SubAgentStatus::Pending => keencode_acp::AgentLifecycleStatus::Pending,
-        keencode_resources::SubAgentStatus::Running => keencode_acp::AgentLifecycleStatus::Running,
-        keencode_resources::SubAgentStatus::Waiting => keencode_acp::AgentLifecycleStatus::Waiting,
-        keencode_resources::SubAgentStatus::Completed => {
-            keencode_acp::AgentLifecycleStatus::Completed
+            ..
+        } => {
+            let params = match (turn_id, source_agent_id) {
+                (Some(turn_id), Some(agent_id)) => KeenCodeEventEnvelopeParams::for_turn(
+                    record.session.as_str(),
+                    turn_id,
+                    agent_id,
+                    sequence,
+                    occurred_at_ms.max(1),
+                    event,
+                ),
+                (None, None) => KeenCodeEventEnvelopeParams::for_session(
+                    record.session.as_str(),
+                    sequence,
+                    occurred_at_ms.max(1),
+                    event,
+                ),
+                _ => return Err(RuntimeError::InvalidControlOperation),
+            };
+            let envelope = match journal_sequence {
+                Some(journal_sequence) => {
+                    KeenCodeEventEnvelope::new_authoritative(journal_sequence, params)
+                }
+                None => KeenCodeEventEnvelope::new_transient(params),
+            }
+            .map_err(|_| RuntimeError::InvalidControlOperation)?;
+            Ok(json!({
+                "jsonrpc": "2.0",
+                "method": "acp://delivery",
+                "params": {"type": "keencode_event", "envelope": envelope}
+            }))
         }
-        keencode_resources::SubAgentStatus::Failed => keencode_acp::AgentLifecycleStatus::Failed,
-        keencode_resources::SubAgentStatus::Interrupted => {
-            keencode_acp::AgentLifecycleStatus::Interrupted
-        }
-        keencode_resources::SubAgentStatus::Stopped => keencode_acp::AgentLifecycleStatus::Stopped,
     }
 }
 
@@ -3047,7 +2489,7 @@ mod tests {
             .replay(None, keencode_resources::MAX_REPLAY_PAGE_RECORDS)
             .expect("Journal 页面应可读取");
         assert!(!page.records.is_empty());
-        let mut provider_by_turn = BTreeMap::new();
+        let mut provider_projection = ProviderProjection::default();
         let mut delivery_sequence = 0;
         let mut deliveries = Vec::new();
         for record in &page.records {
@@ -3057,7 +2499,7 @@ mod tests {
                     &state,
                     record,
                     None,
-                    &mut provider_by_turn,
+                    &mut provider_projection,
                     &mut delivery_sequence,
                 )
                 .expect("Journal 记录应能投影"),

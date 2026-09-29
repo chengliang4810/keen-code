@@ -158,6 +158,8 @@ pub struct AuthoritativeRecordContext<'a> {
     state: &'a SessionState,
     record: &'a SessionEventRecord,
     mode: AuthoritativeProjectionMode,
+    /// 会话正文脱敏钩子；headless 等纯文本宿主用它移除回显中的凭据。
+    secret_redactor: Option<&'a dyn Fn(&str) -> String>,
 }
 /// 一条物理记录的投影结果；调用方必须在接受或拒绝该记录后显式提交或回滚。
 #[must_use]
@@ -188,6 +190,7 @@ pub fn map_authoritative_record_with_projection(
     record: &SessionEventRecord,
     mode: AuthoritativeProjectionMode,
     provider: &mut ProviderProjection,
+    secret_redactor: Option<&dyn Fn(&str) -> String>,
 ) -> Result<MappedAuthoritativeRecord, RuntimeError> {
     let mut provider_delta = ProviderProjectionDelta::default();
     let drafts = match map_authoritative_event(
@@ -196,6 +199,7 @@ pub fn map_authoritative_record_with_projection(
             state,
             record,
             mode,
+            secret_redactor,
         },
         &record.event,
         provider,
@@ -227,6 +231,7 @@ pub fn map_authoritative_event(
         state,
         record,
         mode,
+        secret_redactor,
     } = context;
     if mode == AuthoritativeProjectionMode::Replay {
         if replay_hides_root_turn_lifecycle(state, event) {
@@ -369,7 +374,7 @@ pub fn map_authoritative_event(
             )]
         }
         SessionEvent::MessageAdded { message } => {
-            map_persisted_message(session, state, record, message, mode, None)?
+            map_persisted_message(session, state, record, message, mode, None, secret_redactor)?
         }
         SessionEvent::TranscriptSegmentCommitted { segment } => {
             let mut drafts = Vec::new();
@@ -381,6 +386,7 @@ pub fn map_authoritative_event(
                     message,
                     mode,
                     Some(segment),
+                    secret_redactor,
                 )?);
             }
             drafts
@@ -730,6 +736,7 @@ pub fn replay_hides_root_turn_lifecycle(state: &SessionState, event: &SessionEve
             )
         })
 }
+
 /// 通过标准 ACP 扩展槽携带资源锚点，不冒充要求 UUID 的未启用 messageId 字段。
 pub fn persisted_message_meta(message_id: &str) -> keencode_acp::schema::Meta {
     serde_json::Map::from_iter([(
@@ -738,6 +745,10 @@ pub fn persisted_message_meta(message_id: &str) -> keencode_acp::schema::Meta {
     )])
 }
 
+/// 会话正文脱敏；无钩子时原样返回，纯文本宿主用来移除回显中的凭据。
+fn redact_session_text(redactor: Option<&dyn Fn(&str) -> String>, text: &str) -> String {
+    redactor.map_or_else(|| text.to_owned(), |redact| redact(text))
+}
 /// 将一条已物化的持久消息拆为标准用户、Agent 或推理内容更新。
 pub fn map_persisted_message(
     session: &RuntimeSession,
@@ -746,6 +757,7 @@ pub fn map_persisted_message(
     message: &SessionMessage,
     mode: AuthoritativeProjectionMode,
     segment: Option<&TranscriptSegment>,
+    secret_redactor: Option<&dyn Fn(&str) -> String>,
 ) -> Result<Vec<DeliveryDraft>, RuntimeError> {
     if message.is_meta
         || matches!(
@@ -766,8 +778,14 @@ pub fn map_persisted_message(
     for block in materialized.content {
         if mode == AuthoritativeProjectionMode::Replay
             && let Some(segment) = segment
-            && let Some(tool_drafts) =
-                replay_segment_tool_drafts(session, state, record, segment, &block)?
+            && let Some(tool_drafts) = replay_segment_tool_drafts(
+                session,
+                state,
+                record,
+                segment,
+                &block,
+                secret_redactor,
+            )?
         {
             drafts.extend(tool_drafts);
             continue;
@@ -780,6 +798,7 @@ pub fn map_persisted_message(
                 {
                     continue;
                 }
+                let text = redact_session_text(secret_redactor, &text);
                 let chunk = keencode_acp::schema::ContentChunk::new(
                     keencode_acp::schema::ContentBlock::from(text),
                 )
@@ -796,9 +815,10 @@ pub fn map_persisted_message(
                 {
                     continue;
                 }
+                let reasoning_text = redact_session_text(secret_redactor, &reasoning.text);
                 keencode_acp::schema::SessionUpdate::AgentThoughtChunk(
                     keencode_acp::schema::ContentChunk::new(
-                        keencode_acp::schema::ContentBlock::from(reasoning.text),
+                        keencode_acp::schema::ContentBlock::from(reasoning_text),
                     )
                     .meta(Some(persisted_message_meta(&message.message_id))),
                 )
@@ -900,6 +920,7 @@ pub fn replay_segment_tool_drafts(
     record: &SessionEventRecord,
     segment: &TranscriptSegment,
     block: &ContentBlock,
+    secret_redactor: Option<&dyn Fn(&str) -> String>,
 ) -> Result<Option<Vec<DeliveryDraft>>, RuntimeError> {
     let (tool_call_id, is_request) = match block {
         ContentBlock::ToolCall { tool_call } => (tool_call.id.as_str(), true),
@@ -975,6 +996,7 @@ pub fn replay_segment_tool_drafts(
                 state,
                 record: &projected,
                 mode: AuthoritativeProjectionMode::Live,
+                secret_redactor,
             },
             &projected.event,
             &mut provider,

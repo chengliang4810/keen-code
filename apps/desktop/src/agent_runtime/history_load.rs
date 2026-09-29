@@ -138,6 +138,7 @@ impl AgentRuntime {
                         &record,
                         AuthoritativeProjectionMode::Replay,
                         &mut provider,
+                        None,
                     )
                     .map_err(from_runtime)?
                     .commit();
@@ -276,6 +277,7 @@ fn history_window_drafts(
                 &record,
                 AuthoritativeProjectionMode::Replay,
                 provider,
+                None,
             )
             .map_err(from_runtime)?
             .commit();

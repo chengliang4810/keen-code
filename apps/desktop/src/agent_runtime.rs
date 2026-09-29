@@ -8070,6 +8070,7 @@ impl AgentRuntime {
                 &record,
                 AuthoritativeProjectionMode::Replay,
                 &mut historical_provider,
+                None,
             )
             .map_err(from_runtime)?;
             if mapped.drafts.len() > MAX_REPLAY_EVENTS as usize {
@@ -9719,6 +9720,7 @@ async fn run_runtime_event_pump(
                         &record,
                         AuthoritativeProjectionMode::Live,
                         &mut provider_projection,
+                        None,
                     ) {
                         Ok(mapped) => mapped.commit(),
                         Err(error) => {
@@ -10202,7 +10204,7 @@ fn map_authoritative_record(
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
     let mut provider = ProviderProjection::default();
     Ok(
-        map_authoritative_record_with_projection(session, state, record, mode, &mut provider)
+        map_authoritative_record_with_projection(session, state, record, mode, &mut provider, None)
             .map_err(from_runtime)?
             .commit(),
     )
@@ -21794,6 +21796,7 @@ mod tests {
                 record,
                 mode,
                 &mut projection,
+                None,
             )
             .map(|mapped| mapped.commit())
         };
@@ -22028,6 +22031,7 @@ mod tests {
                 &record(sequence, event),
                 AuthoritativeProjectionMode::Replay,
                 &mut projection,
+                None,
             )
             .expect("Turn Provider 事件应可投影")
             .commit();
@@ -22051,6 +22055,7 @@ mod tests {
             &round(5, turn_a.clone(), "model-a"),
             AuthoritativeProjectionMode::Replay,
             &mut projection,
+            None,
         )
         .expect("Turn A 首轮应可投影")
         .commit();
@@ -22061,6 +22066,7 @@ mod tests {
             &round(6, turn_b.clone(), "model-b"),
             AuthoritativeProjectionMode::Replay,
             &mut projection,
+            None,
         )
         .expect("Turn B 轮次应可投影")
         .commit();
@@ -22071,6 +22077,7 @@ mod tests {
             &round(7, turn_a, "model-a"),
             AuthoritativeProjectionMode::Replay,
             &mut projection,
+            None,
         )
         .expect("Turn A 后续轮次应可投影")
         .commit();
@@ -22227,6 +22234,7 @@ mod tests {
                 &record,
                 AuthoritativeProjectionMode::Live,
                 &mut projection,
+                None,
             )
             .is_err()
         );
@@ -22300,6 +22308,7 @@ mod tests {
             &record,
             AuthoritativeProjectionMode::Live,
             &mut projection,
+            None,
         )
         .expect("新 Turn Provider 应增量投影");
         assert!(Arc::ptr_eq(&projection.indexed, &indexed));
@@ -22321,6 +22330,7 @@ mod tests {
             &record,
             AuthoritativeProjectionMode::Replay,
             &mut projection,
+            None,
         )
         .expect("回滚后同一 Turn Provider 应可重新投影");
         assert!(committed.commit().is_empty());
