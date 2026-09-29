@@ -26,9 +26,10 @@ use keencode_resources::{
     SessionId, TurnStatus, TurnStopReason,
 };
 use keencode_runtime::{
-    AdmissionDisposition, ExecutionIdentity, HostPromptQueue, HostRuntime, OperationState,
-    OperationStatus, OperationTerminal, PromptAdmissionRequest, RuntimeError, RuntimeEventPayload,
-    RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeSession, RuntimeSnapshot,
+    AdmissionDisposition, ExecutionIdentity, HostPromptQueue, HostRuntime, NeedsInputBehavior,
+    OperationState, OperationStatus, OperationTerminal, PromptAdmissionRequest, PromptQueueDriver,
+    RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,
+    RuntimeSession, RuntimeSnapshot,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -39,7 +40,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::broadcast;
 use tracing::Instrument;
 
 #[cfg(feature = "benchmark")]
@@ -232,8 +233,8 @@ pub(crate) struct AcpHost {
     prompt_queue: Arc<HostPromptQueue>,
     /// Desktop 所有权、连接生命周期与 Prompt queue 的统一事实源。
     host_runtime: Arc<HostRuntime>,
-    /// Session active slot 释放后唤醒排队 Prompt。
-    queue_wakeup: Arc<Notify>,
+    /// 共享的 Prompt 队列驱动原语：claim 等待、终态等待与迁移后唤醒。
+    prompt_driver: PromptQueueDriver,
     /// 序列化新 Session 创建；已知 Session 的控制操作使用独立锁。
     control_gate: tokio::sync::Mutex<()>,
     /// 不同 Session 可并行恢复；同一 Session 的重放和修改仍有序。
@@ -272,6 +273,7 @@ pub(crate) fn install(
     let encoder =
         AcpResponseEncoder::with_limits(response_limits).map_err(|error| error.to_string())?;
     let prompt_queue = Arc::clone(host_runtime.prompt_queue());
+    let prompt_driver = PromptQueueDriver::new(Arc::clone(&prompt_queue));
     let notification_runtime = Arc::clone(&runtime);
     let host = Arc::new_cyclic(|self_ref| AcpHost {
         app: app.clone(),
@@ -281,7 +283,7 @@ pub(crate) fn install(
         connections: Mutex::new(BTreeMap::new()),
         prompt_queue,
         host_runtime,
-        queue_wakeup: Arc::new(Notify::new()),
+        prompt_driver,
         control_gate: tokio::sync::Mutex::new(()),
         session_controls: Mutex::new(BTreeMap::new()),
         event_sinks: Mutex::new(BTreeMap::new()),
@@ -739,17 +741,16 @@ impl AcpHost {
             )
         {
             let _ = self
-                .prompt_queue
+                .prompt_driver
                 .mark_needs_input(&status.operation_id, request_id.clone())
                 .map_err(|error| error.to_string())?;
             let digest = format!("{:x}", Sha256::digest(response_json.as_bytes()));
             let answer_id =
                 OperationId::new(format!("answer-{digest}")).map_err(|error| error.to_string())?;
             let _ = self
-                .prompt_queue
+                .prompt_driver
                 .answer_elicitation(&status.operation_id, request_id, answer_id, digest)
                 .map_err(|error| error.to_string())?;
-            self.queue_wakeup.notify_waiters();
         }
         Ok(())
     }
@@ -1430,7 +1431,10 @@ impl AcpHost {
             })
             .await?;
         let execution = status.execution.ok_or(HostFailure::Internal)?;
-        self.wait_for_operation_terminal(&operation_id).await?;
+        self.prompt_driver
+            .wait_for_terminal(&operation_id, NeedsInputBehavior::Wait)
+            .await
+            .map_err(map_prompt_queue_failure)?;
         let (_, project_root) = authorized_metadata(&self.runtime, &self.app, &session_id)
             .map_err(|_| HostFailure::ResourceNotFound)?;
         let session = self
@@ -1489,8 +1493,10 @@ impl AcpHost {
                 host.drive_prompt(request).await;
             });
         }
-        self.wait_for_operation_execution(&admission.operation_id)
+        self.prompt_driver
+            .wait_for_execution(&admission.operation_id)
             .await
+            .map_err(map_prompt_queue_failure)
     }
 
     /// 启动并观察一个已 admission 的 Prompt；传输断开不会取消该后台任务。
@@ -1511,27 +1517,14 @@ impl AcpHost {
         &self,
         request: &PromptDriveRequest,
     ) -> Result<(), (HostFailure, &'static str)> {
-        loop {
-            let notified = self.queue_wakeup.notified();
-            match self
-                .prompt_queue
-                .claim_operation(&request.session_id, &request.operation_id)
-                .map_err(|error| (map_prompt_queue_failure(error), "operation_claim_failed"))?
-            {
-                Some(_) => break,
-                None => {
-                    let status =
-                        self.prompt_queue
-                            .status(&request.operation_id)
-                            .map_err(|error| {
-                                (map_prompt_queue_failure(error), "operation_status_failed")
-                            })?;
-                    if status.state.is_terminal() {
-                        return Ok(());
-                    }
-                    notified.await;
-                }
-            }
+        let claimed = self
+            .prompt_driver
+            .claim_when_ready(&request.session_id, &request.operation_id)
+            .await
+            .map_err(|error| (map_prompt_queue_failure(error), "operation_claim_failed"))?;
+        if claimed.is_none() {
+            // 排队期间已被取消或重复收口；admission 账本已是终态。
+            return Ok(());
         }
         self.ensure_extensions(&request.project_root)
             .await
@@ -1583,10 +1576,9 @@ impl AcpHost {
             request.turn_id.clone(),
         )
         .map_err(|error| (internal_failure(error), "execution_identity_failed"))?;
-        self.prompt_queue
+        self.prompt_driver
             .bind_execution(&request.operation_id, execution)
             .map_err(|error| (internal_failure(error), "execution_bind_failed"))?;
-        self.queue_wakeup.notify_waiters();
         drop(prompt_start_control);
         if matches!(outcome, RootTurnStartOutcome::Started)
             && memory_settings.local_memories
@@ -1610,24 +1602,6 @@ impl AcpHost {
             .map_err(|failure| (failure, "runtime_terminal_wait_failed"))?;
         self.finish_operation_terminal(&request.operation_id, &terminal)
             .map_err(|failure| (failure, "operation_finish_failed"))
-    }
-
-    /// 等到 operation 已绑定稳定执行身份，供 detach 调用安全返回。
-    async fn wait_for_operation_execution(
-        &self,
-        operation_id: &OperationId,
-    ) -> Result<OperationStatus, HostFailure> {
-        loop {
-            let notified = self.queue_wakeup.notified();
-            let status = self
-                .prompt_queue
-                .status(operation_id)
-                .map_err(map_prompt_queue_failure)?;
-            if status.execution.is_some() || status.state.is_terminal() {
-                return Ok(status);
-            }
-            notified.await;
-        }
     }
 
     /// 顺序执行一个 /workflow 的全部步骤。
@@ -1688,8 +1662,10 @@ impl AcpHost {
                 })
                 .await?;
             let terminal_status = self
-                .wait_for_operation_terminal(&admitted.operation_id)
-                .await?;
+                .prompt_driver
+                .wait_for_terminal(&admitted.operation_id, NeedsInputBehavior::Wait)
+                .await
+                .map_err(map_prompt_queue_failure)?;
             let executed_turn_id = terminal_status
                 .execution
                 .as_ref()
@@ -1736,40 +1712,21 @@ impl AcpHost {
         Ok(outcomes)
     }
 
-    /// 等到后台 driver 写入终态；连接 future 被取消不影响 driver 自身。
-    async fn wait_for_operation_terminal(
-        &self,
-        operation_id: &OperationId,
-    ) -> Result<OperationStatus, HostFailure> {
-        loop {
-            let notified = self.queue_wakeup.notified();
-            let status = self
-                .prompt_queue
-                .status(operation_id)
-                .map_err(map_prompt_queue_failure)?;
-            if status.state.is_terminal() {
-                return Ok(status);
-            }
-            notified.await;
-        }
-    }
-
     /// 将启动/等待阶段失败收口为 operation 终态；失败摘要不包含 Prompt 正文。
     fn finish_operation_failure(&self, operation_id: &OperationId, code: &str) {
         let Ok(terminal) = OperationTerminal::new(code, None::<String>) else {
             return;
         };
-        match self
-            .prompt_queue
-            .finish(operation_id, OperationState::Failed, terminal)
+        if let Err(error) =
+            self.prompt_driver
+                .finish_operation(operation_id, OperationState::Failed, terminal)
         {
-            Ok(_) => self.queue_wakeup.notify_waiters(),
-            Err(error) => tracing::error!(
+            tracing::error!(
                 target: "keencode_diagnostics",
                 operation_id = %operation_id,
                 %error,
                 "failed to finalize Prompt operation"
-            ),
+            );
         }
     }
 
@@ -1779,15 +1736,6 @@ impl AcpHost {
         operation_id: &OperationId,
         terminal: &TerminalTurn,
     ) -> Result<(), HostFailure> {
-        if self
-            .prompt_queue
-            .status(operation_id)
-            .map_err(map_prompt_queue_failure)?
-            .state
-            .is_terminal()
-        {
-            return Ok(());
-        }
         let state = match terminal.status {
             TurnStatus::Completed => OperationState::Completed,
             TurnStatus::Cancelled => OperationState::Cancelled,
@@ -1806,11 +1754,9 @@ impl AcpHost {
         };
         let receipt = OperationTerminal::new(code, None::<String>)
             .map_err(|error| internal_failure(error))?;
-        self.prompt_queue
-            .finish(operation_id, state, receipt)
-            .map_err(|error| internal_failure(error))?;
-        self.queue_wakeup.notify_waiters();
-        Ok(())
+        self.prompt_driver
+            .finish_operation(operation_id, state, receipt)
+            .map_err(|error| internal_failure(error))
     }
 
     /// 构造标准 Session 配置目录；只公开无凭据的 Provider、模型和推理强度。
@@ -2279,16 +2225,15 @@ impl AcpHost {
                 return;
             }
             if status.state == OperationState::Admitted {
-                if let Ok(terminal) = OperationTerminal::new("cancelled", None::<String>) {
-                    match self.prompt_queue.cancel_pending(&operation_id, terminal) {
-                        Ok(_) => self.queue_wakeup.notify_waiters(),
-                        Err(error) => tracing::error!(
-                            target: "keencode_diagnostics",
-                            operation_id = %operation_id,
-                            %error,
-                            "取消排队 Prompt 失败"
-                        ),
-                    }
+                if let Ok(terminal) = OperationTerminal::new("cancelled", None::<String>)
+                    && let Err(error) = self.prompt_driver.cancel_pending(&operation_id, terminal)
+                {
+                    tracing::error!(
+                        target: "keencode_diagnostics",
+                        operation_id = %operation_id,
+                        %error,
+                        "取消排队 Prompt 失败"
+                    );
                 }
                 return;
             }
@@ -2337,16 +2282,16 @@ impl AcpHost {
         if matches!(
             status.state,
             OperationState::Claimed | OperationState::Running
-        ) {
-            match self.prompt_queue.mark_needs_input(operation_id, request_id) {
-                Ok(_) => self.queue_wakeup.notify_waiters(),
-                Err(error) => tracing::debug!(
-                    target: "keencode_diagnostics",
-                    operation_id = %operation_id,
-                    %error,
-                    "Prompt NeedsInput 状态已由其他路径收口"
-                ),
-            }
+        ) && let Err(error) = self
+            .prompt_driver
+            .mark_needs_input(operation_id, request_id)
+        {
+            tracing::debug!(
+                target: "keencode_diagnostics",
+                operation_id = %operation_id,
+                %error,
+                "Prompt NeedsInput 状态已由其他路径收口"
+            );
         }
         Ok(())
     }

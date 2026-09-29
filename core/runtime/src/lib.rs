@@ -11,6 +11,7 @@ mod host_core;
 mod host_runtime;
 mod manager;
 mod persistent_state;
+mod prompt_driver;
 mod publisher;
 
 #[cfg(test)]
@@ -30,6 +31,7 @@ pub use host_runtime::{
 };
 pub use manager::RuntimeManager;
 pub use persistent_state::PersistentAgentState;
+pub use prompt_driver::{NeedsInputBehavior, PromptQueueDriver};
 pub use publisher::{
     RuntimeCatchUpDirective, RuntimeControlEvent, RuntimeEventDelivery, RuntimeEventLag,
     RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,

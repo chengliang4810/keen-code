@@ -36,11 +36,11 @@ use keencode_resources::{
     TurnStopReason,
 };
 use keencode_runtime::{
-    AdmissionDisposition, CreateSessionRequest, ElicitationAnswerDisposition, ExecutionIdentity,
-    HostRuntime, HostRuntimeAcquire, HostRuntimeError, OpenSessionResult, OperationState,
-    OperationStatus, OperationTerminal, PromptAdmissionRequest, RuntimeError, RuntimeEventPayload,
-    RuntimeEventReceiveError, RuntimeEventSubscription, RuntimeManager, RuntimeSession,
-    RuntimeTurnRequest,
+    AdmissionDisposition, ClaimedPrompt, CreateSessionRequest, ElicitationAnswerDisposition,
+    ExecutionIdentity, HostRuntime, HostRuntimeAcquire, HostRuntimeError, NeedsInputBehavior,
+    OpenSessionResult, OperationState, OperationStatus, OperationTerminal, PromptAdmissionRequest,
+    PromptQueueDriver, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
+    RuntimeEventSubscription, RuntimeManager, RuntimeSession, RuntimeTurnRequest,
 };
 use keencode_tools::{ToolEnvironment, register_local_tools};
 use keencode_web::{
@@ -56,7 +56,7 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot, watch};
 use tokio::task::JoinHandle;
 use zeroize::Zeroizing;
@@ -397,6 +397,8 @@ struct HeadlessInner {
     provider: Option<HeadlessProvider>,
     state: Arc<Mutex<HeadlessState>>,
     web_runtime: Arc<AsyncMutex<Option<HeadlessWebRuntime>>>,
+    /// 共享 Prompt 队列驱动原语；必须在所有 Clone 间共享同一实例。
+    driver: PromptQueueDriver,
 }
 
 struct HeadlessState {
@@ -656,6 +658,7 @@ impl HeadlessInner {
         let runtime_manager = RuntimeManager::new(keencode_runtime::RuntimeConfig::new(
             runtime.data_root().join("sessions"),
         ))?;
+        let driver = PromptQueueDriver::new(Arc::clone(runtime.prompt_queue()));
         Ok(Self {
             runtime,
             runtime_manager: Arc::new(runtime_manager),
@@ -674,6 +677,7 @@ impl HeadlessInner {
                 },
             })),
             web_runtime: Arc::new(AsyncMutex::new(None)),
+            driver,
         })
     }
 
@@ -787,8 +791,7 @@ impl HeadlessInner {
         let answer_id = OperationId::new(format!("answer-{answer_digest}"))
             .map_err(|_| HostDispatchError::Internal)?;
         let receipt = self
-            .runtime
-            .prompt_queue()
+            .driver
             .answer_elicitation(&operation_id, elicitation_id, answer_id, answer_digest)
             .map_err(|_| HostDispatchError::Internal)?;
         if receipt.disposition != ElicitationAnswerDisposition::Accepted {
@@ -999,7 +1002,11 @@ impl HeadlessInner {
         if status.state == OperationState::NeedsInput {
             return Err(HandlerError::new(-32006, "Prompt 需要用户输入"));
         }
-        let status = self.wait_for_terminal(&status.operation_id).await?;
+        let status = self
+            .driver
+            .wait_for_terminal(&status.operation_id, NeedsInputBehavior::Return)
+            .await
+            .map_err(map_core_error)?;
         if status.state == OperationState::NeedsInput {
             return Err(HandlerError::new(-32006, "Prompt 需要用户输入"));
         }
@@ -1084,31 +1091,78 @@ impl HeadlessInner {
             })
             .map_err(map_core_error)?;
         if receipt.disposition != AdmissionDisposition::Duplicate {
-            self.start_next(&session_id)?;
+            let inner = self.clone();
+            let driven_operation = operation_id.clone();
+            tokio::spawn(async move {
+                inner
+                    .drive_pending_operation(session_id, driven_operation)
+                    .await;
+            });
         }
         let mut status = receipt.status;
         if status.execution.is_none() {
-            status = self.wait_for_execution(&operation_id).await?;
+            status = self
+                .driver
+                .wait_for_execution(&operation_id)
+                .await
+                .map_err(map_core_error)?;
         }
         Ok(status)
     }
 
-    fn start_next(&self, session_id: &str) -> Result<(), HandlerError> {
-        let Some(claimed) = self
-            .runtime
-            .prompt_queue()
-            .claim_next(session_id)
-            .map_err(map_core_error)?
-        else {
-            return Ok(());
+    /// 后台驱动一个已 admission 的 Prompt：等到自己位于队首再启动执行。
+    ///
+    /// 与 Desktop Host 共用 [`PromptQueueDriver`] 的 claim 等待循环；排队中
+    /// 被取消的 operation 直接结束，不再进入执行。
+    async fn drive_pending_operation(self, session_id: String, operation_id: OperationId) {
+        let claimed = match self
+            .driver
+            .claim_when_ready(&session_id, &operation_id)
+            .await
+        {
+            Ok(Some(claimed)) => claimed,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::error!(
+                    target: "keencode_diagnostics",
+                    operation_id = %operation_id,
+                    %error,
+                    "headless Prompt claim 失败"
+                );
+                if let Ok(terminal) = OperationTerminal::new("driver_claim_failed", None::<String>)
+                {
+                    let _ = self.driver.finish_operation(
+                        &operation_id,
+                        OperationState::Failed,
+                        terminal,
+                    );
+                }
+                return;
+            }
         };
+        if let Err(error) = self.launch_claimed(claimed) {
+            tracing::error!(
+                target: "keencode_diagnostics",
+                operation_id = %operation_id,
+                code = error.code,
+                "headless Prompt 启动失败"
+            );
+            if let Ok(terminal) = OperationTerminal::new("driver_launch_failed", None::<String>) {
+                let _ =
+                    self.driver
+                        .finish_operation(&operation_id, OperationState::Failed, terminal);
+            }
+        }
+    }
+
+    /// 启动一个刚 claim 的 Prompt：绑定执行身份并交给后台执行任务。
+    fn launch_claimed(&self, claimed: ClaimedPrompt) -> Result<(), HandlerError> {
         let turn_id = next_id("turn");
         let task_id = next_id("task");
         let execution =
             ExecutionIdentity::new(claimed.session_id.clone(), turn_id.clone(), task_id)
                 .map_err(map_core_error)?;
-        self.runtime
-            .prompt_queue()
+        self.driver
             .bind_execution(&claimed.operation_id, execution)
             .map_err(map_core_error)?;
         let connection_id = claimed.connection_id.clone();
@@ -1124,11 +1178,11 @@ impl HeadlessInner {
             cancellation: cancellation.clone(),
             elicitation_id: None,
         };
-        self.state
-            .lock()
-            .map_err(|_| HandlerError::internal())?
-            .operations
-            .insert(claimed.operation_id.clone(), control.clone());
+        if let Ok(mut state) = self.state.lock() {
+            state
+                .operations
+                .insert(claimed.operation_id.clone(), control.clone());
+        }
         let operation_id = claimed.operation_id;
         self.spawn_execution(operation_id, control, prompt, cancelled);
         Ok(())
@@ -1367,9 +1421,8 @@ impl HeadlessInner {
         let terminal = OperationTerminal::new(outcome.code, None::<String>);
         if let Ok(terminal) = terminal {
             let _ = self
-                .runtime
-                .prompt_queue()
-                .finish(operation_id, outcome.state, terminal);
+                .driver
+                .finish_operation(operation_id, outcome.state, terminal);
         }
         if let Ok(mut state) = self.state.lock() {
             state.operations.remove(operation_id);
@@ -1387,7 +1440,6 @@ impl HeadlessInner {
                 state.operation_results.remove(&oldest);
             }
         }
-        let _ = self.start_next(session_id);
     }
 
     fn publish_terminal_event(
@@ -1465,43 +1517,6 @@ impl HeadlessInner {
         }
     }
 
-    async fn wait_for_execution(
-        &self,
-        operation_id: &OperationId,
-    ) -> Result<OperationStatus, HandlerError> {
-        loop {
-            let status = self
-                .runtime
-                .prompt_queue()
-                .status(operation_id)
-                .map_err(map_core_error)?;
-            if status.execution.is_some() || status.state.is_terminal() {
-                return Ok(status);
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
-    async fn wait_for_terminal(
-        &self,
-        operation_id: &OperationId,
-    ) -> Result<OperationStatus, HandlerError> {
-        loop {
-            let status = self
-                .runtime
-                .prompt_queue()
-                .status(operation_id)
-                .map_err(map_core_error)?;
-            if status.state.is_terminal() {
-                return Ok(status);
-            }
-            if status.state == OperationState::NeedsInput {
-                return Ok(status);
-            }
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    }
-
     fn session_cancel(&self, params: &Value) -> Result<Value, HandlerError> {
         let session_id = string_param(params, "sessionId")?;
         let operation_id = operation_id(params)
@@ -1523,11 +1538,9 @@ impl HeadlessInner {
             if status.state == OperationState::Admitted {
                 let terminal =
                     OperationTerminal::new("cancelled", None::<String>).map_err(map_core_error)?;
-                self.runtime
-                    .prompt_queue()
+                self.driver
                     .cancel_pending(operation_id, terminal)
                     .map_err(map_core_error)?;
-                let _ = self.start_next(&session_id);
                 return Ok(json!({"cancelled":true,"operationId":operation_id}));
             }
         }
@@ -2853,6 +2866,7 @@ fn rpc_error(id: Value, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn headless_runtime_transient_text_reaches_session_update_delivery() {
