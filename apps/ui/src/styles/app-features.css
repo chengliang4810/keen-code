@@ -1029,9 +1029,7 @@ div.composer__input:empty::before {
 .ext-plugin-install {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 12px 14px 10px;
-  border-bottom: 1px solid var(--border-subtle);
+  gap: var(--space-2);
 }
 
 .ext-plugin-install__label {
@@ -1173,11 +1171,6 @@ div.composer__input:empty::before {
   }
 }
 
-.ext-plugin-install__input {
-  flex: 1;
-  min-width: 0;
-}
-
 .ext-plugin-filters {
   display: flex;
   flex-wrap: wrap;
@@ -1220,6 +1213,13 @@ div.composer__input:empty::before {
   min-width: 0;
 }
 
+.ext-market-plugin__description {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .ext-market-plugin > .ext-item__actions {
   margin-top: 0;
   align-self: center;
@@ -1231,6 +1231,11 @@ div.composer__input:empty::before {
   flex-wrap: wrap;
   gap: 6px;
   padding: 0 14px 10px;
+}
+
+.glass-modal .ext-folder-actions,
+.glass-modal .ext-field-hint {
+  padding: 0;
 }
 
 .ext-details-pre {

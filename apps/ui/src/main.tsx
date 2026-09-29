@@ -29,7 +29,18 @@ import {
   reportFrontendError,
 } from "./lib/frontendDiagnostics";
 import { applyUiFontSizeToDocument, loadUiFontSize } from "./lib/uiFontSize";
-import { applyThemeColors, BASE_COLORS, PRIMARY_COLORS, loadColor } from "./lib/themeColors";
+import {
+  applyThemeColors,
+  BASE_COLORS,
+  DEFAULT_BASE_COLOR,
+  DEFAULT_PRIMARY_COLOR,
+  DEFAULT_SECONDARY_COLOR,
+  PRIMARY_COLORS,
+  SECONDARY_COLORS,
+  loadBrandColor,
+  loadColor,
+} from "./lib/themeColors";
+import { applyEffortColor, loadEffortColor } from "./lib/effortColor";
 import { startupFrontendReady } from "./lib/api";
 
 const bootHostMode = resolveHostMode();
@@ -46,9 +57,12 @@ const bootPref = loadThemePreference(localStorage);
 const bootTheme = resolveTheme(bootPref, getSystemTheme());
 applyThemeToDocument(bootTheme);
 applyThemeColors(
-  loadColor("keencode.base-color", BASE_COLORS, "gray"),
-  loadColor("keencode.primary-color", PRIMARY_COLORS, "red"),
+  loadColor("keencode.base-color", BASE_COLORS, DEFAULT_BASE_COLOR),
+  loadBrandColor("keencode.primary-color", PRIMARY_COLORS, DEFAULT_PRIMARY_COLOR),
+  loadBrandColor("keencode.secondary-color", SECONDARY_COLORS, DEFAULT_SECONDARY_COLOR),
 );
+// 思考强度色在首次绘制前生效，避免滑块颜色闪回默认紫。
+applyEffortColor(loadEffortColor());
 // 界面字号在首次绘制前生效，避免启动时字号跳变。
 applyUiFontSizeToDocument(loadUiFontSize(localStorage));
 // Native: null = follow OS (required for live system theme); light/dark locks chrome.

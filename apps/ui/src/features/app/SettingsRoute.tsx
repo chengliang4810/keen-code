@@ -8,7 +8,8 @@ import type {
 } from "@/lib/api";
 import type { Locale } from "@/i18n";
 import type { ThemePreference } from "@/lib/theme";
-import type { BaseColor, PrimaryColor } from "@/lib/themeColors";
+import type { BaseColor, PrimaryColor, SecondaryColor } from "@/lib/themeColors";
+import type { EffortColor } from "@/lib/effortColor";
 import type {
   ArchivedSessionItem,
   SettingsPageProps,
@@ -104,8 +105,13 @@ export interface SettingsRouteAppearance {
   onTheme: (value: ThemePreference) => void;
   baseColor: BaseColor;
   primaryColor: PrimaryColor;
+  secondaryColor: SecondaryColor;
   onBaseColor: (value: BaseColor) => void;
   onPrimaryColor: (value: PrimaryColor) => void;
+  onSecondaryColor: (value: SecondaryColor) => void;
+  /** 思考强度滑块的品牌色预设。 */
+  effortColor: EffortColor;
+  onEffortColor: (value: EffortColor) => void;
   /** 用户选择的界面字号（12–20，默认 14）。 */
   uiFontSize: number;
   /** 保存并立即应用界面字号。 */

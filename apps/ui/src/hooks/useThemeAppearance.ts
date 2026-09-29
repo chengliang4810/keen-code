@@ -2,11 +2,22 @@ import { useEffect, useState } from "react";
 import {
   applyThemeColors,
   BASE_COLORS,
+  DEFAULT_BASE_COLOR,
+  DEFAULT_PRIMARY_COLOR,
+  DEFAULT_SECONDARY_COLOR,
   PRIMARY_COLORS,
+  SECONDARY_COLORS,
   loadColor,
+  loadBrandColor,
   type BaseColor,
   type PrimaryColor,
+  type SecondaryColor,
 } from "@/lib/themeColors";
+import {
+  applyEffortColor,
+  loadEffortColor,
+  type EffortColor,
+} from "@/lib/effortColor";
 import { useTheme } from "@appica/ui-react/hooks/use-theme";
 import {
   applyNativeWindowTheme,
@@ -43,10 +54,16 @@ export function useThemeAppearance() {
     ? resolvedTheme
     : DEFAULT_RESOLVED_THEME;
   const [baseColor, setBaseColor] = useState<BaseColor>(() =>
-    loadColor("keencode.base-color", BASE_COLORS, "gray"),
+    loadColor("keencode.base-color", BASE_COLORS, DEFAULT_BASE_COLOR),
   );
   const [primaryColor, setPrimaryColor] = useState<PrimaryColor>(() =>
-    loadColor("keencode.primary-color", PRIMARY_COLORS, "red"),
+    loadBrandColor("keencode.primary-color", PRIMARY_COLORS, DEFAULT_PRIMARY_COLOR),
+  );
+  const [secondaryColor, setSecondaryColor] = useState<SecondaryColor>(() =>
+    loadBrandColor("keencode.secondary-color", SECONDARY_COLORS, DEFAULT_SECONDARY_COLOR),
+  );
+  const [effortColor, setEffortColor] = useState<EffortColor>(() =>
+    loadEffortColor(),
   );
   const [uiFontSize, setUiFontSize] = useState(() =>
     loadUiFontSize(localStorage),
@@ -63,8 +80,12 @@ export function useThemeAppearance() {
   }, [uiFontSize]);
 
   useEffect(() => {
-    applyThemeColors(baseColor, primaryColor);
-  }, [baseColor, primaryColor]);
+    applyThemeColors(baseColor, primaryColor, secondaryColor);
+  }, [baseColor, primaryColor, secondaryColor]);
+
+  useEffect(() => {
+    applyEffortColor(effortColor);
+  }, [effortColor]);
 
   const applyThemeChoice = (next: ThemePreference) => {
     if (next === "system") {
@@ -94,6 +115,7 @@ export function useThemeAppearance() {
     themePreference,
     baseColor,
     primaryColor,
+    secondaryColor,
     applyBaseColorChoice: (value: BaseColor) => {
       localStorage.setItem("keencode.base-color", value);
       setBaseColor(value);
@@ -101,6 +123,15 @@ export function useThemeAppearance() {
     applyPrimaryColorChoice: (value: PrimaryColor) => {
       localStorage.setItem("keencode.primary-color", value);
       setPrimaryColor(value);
+    },
+    applySecondaryColorChoice: (value: SecondaryColor) => {
+      localStorage.setItem("keencode.secondary-color", value);
+      setSecondaryColor(value);
+    },
+    effortColor,
+    applyEffortColorChoice: (value: EffortColor) => {
+      localStorage.setItem("keencode.effort-color", value);
+      setEffortColor(value);
     },
     uiFontSize,
     applyThemeChoice,

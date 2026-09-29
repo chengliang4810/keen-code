@@ -51,13 +51,18 @@
   --terminal-canvas: var(--terminal-bg);
   --surface-tint-light: #eef0f3;
   --ext-warn: #e0b44a;
-  /* 思考强度滑块的品牌色与“快速”色。轨道与旋钮在深浅主题下都使用这组固定值，
-   * 与画面动效的取值同源，避免画布与 DOM 出现两套颜色。 */
-  --effort-brand: #cc6b47;
-  --effort-brand-ink: #ed9470;
-  --effort-fast: #ffd65c;
-  --effort-fast-ink: #eda821;
+  /* 思考强度滑块色板（默认紫）。完整预设组见下方 html[data-effort-color] 规则；
+   * 画布只读 -solid/-fast/-spark 三个固定 hex，DOM 侧的 -brand 可用渐变。 */
+  --effort-brand: #8c57f7;
+  --effort-brand-solid: #8c57f7;
+  --effort-brand-ink: #6f38d1;
+  --effort-fast: #d9b8ff;
+  --effort-fast-ink: #6f38d1;
   --effort-spark: #ffffff;
+  --effort-stop-ink: color-mix(in srgb, var(--ink-on-media) 60%, transparent);
+  --effort-thumb-ring: color-mix(in srgb, var(--ink-on-media) 18%, transparent);
+  /* Ultra 委派开启时触发器上的闪电标记；深金色取自上游 Fast 的填充色系。 */
+  --ultra-ink: #eda821;
   /* Analytics 使用固定的可区分色板；业务组件只引用语义变量。 */
   --analytics-model-1: #1683f8;
   --analytics-model-2: #209447;
@@ -142,8 +147,8 @@
   --bg-input: var(--dsw-specific-input-major);
   --bg-code: var(--dsw-alias-markdown-code-block);
   --bg-user-bubble: var(--dsw-specific-bubble);
-  /* ZCode portal backdrops use a fixed black/60 scrim in both themes. */
-  --bg-overlay: rgba(0, 0, 0, 0.6);
+  /* Dialog scrim is lighter in light mode to retain page context. */
+  --bg-overlay: rgba(0, 0, 0, 0.46);
   --bg-hover: var(--dsw-alias-interactive-bg-hover);
   --bg-active: var(--dsw-specific-sidebar-nav-item-active);
   --border-subtle: var(--dsw-alias-border-l1);
@@ -268,13 +273,16 @@
 }
 
 [data-theme="dark"] {
+  --effort-brand-ink: #bd8cff;
+  --effort-fast-ink: #d9b8ff;
+  --ultra-ink: #ffd65c;
   /*
    * ZCode Zai Dark palette, Apache-2.0.
    * Source: D:/projects/ZCode/packages/ui/src/styles.css (.theme-zai-dark).
    * KeenCode keeps its own semantic names so existing components share the
    * same contrast hierarchy without importing ZCode component code.
    */
-  --bg-overlay: rgba(0, 0, 0, 0.6);
+  --bg-overlay: rgba(0, 0, 0, 0.56);
   --border-popover: var(--border-subtle);
   --change-added: #46bf72;
   --change-new: #46bf72;
@@ -331,4 +339,72 @@
 
 @media (prefers-reduced-motion: reduce) {
   :root { --motion-fast: 0ms; --motion-enter: 0ms; }
+}
+
+/* 思考强度色预设（设置页「思考强度色」）。色板对照 Droppy Code 的供应商品牌色：
+ * 陶土橙 = Claude，蓝紫 = DeepSeek，蓝色渐变 = Meta，三色渐变 = Gemini，
+ * 银白 = 黑白品牌组（Codex、Cursor、Grok 等），紫色为无供应商默认。
+ * 渐变预设只用于 DOM 填充；画布取 -solid 单色。银白组的浅色填充把粒子、
+ * 速度线、闪电芯与停靠点反成深色（对照上游 silver 的 isLight 反色分支）。 */
+html[data-effort-color="terracotta"] {
+  --effort-brand: #cc6b47;
+  --effort-brand-solid: #cc6b47;
+  --effort-brand-ink: #a3542f;
+  --effort-fast: #ed9470;
+  --effort-fast-ink: #a3542f;
+}
+
+html[data-theme="dark"][data-effort-color="terracotta"] {
+  --effort-brand-ink: #ed9470;
+  --effort-fast-ink: #f2b491;
+}
+
+html[data-effort-color="indigo"] {
+  --effort-brand: #3d5cfa;
+  --effort-brand-solid: #3d5cfa;
+  --effort-brand-ink: #2f46c8;
+  --effort-fast: #8f9dff;
+  --effort-fast-ink: #2f46c8;
+}
+
+html[data-theme="dark"][data-effort-color="indigo"] {
+  --effort-brand-ink: #8f9dff;
+  --effort-fast-ink: #a8b4ff;
+}
+
+html[data-effort-color="azure"] {
+  --effort-brand: linear-gradient(90deg, #0063e0, #0082fa);
+  --effort-brand-solid: #0063e0;
+  --effort-brand-ink: #0e56bd;
+  --effort-fast: #6db2ff;
+  --effort-fast-ink: #0e56bd;
+}
+
+html[data-theme="dark"][data-effort-color="azure"] {
+  --effort-brand-ink: #4d9aff;
+  --effort-fast-ink: #9cc9ff;
+}
+
+html[data-effort-color="spectrum"] {
+  --effort-brand: linear-gradient(90deg, #4285f5, #9c73cc, #d96670);
+  --effort-brand-solid: #9c73cc;
+  --effort-brand-ink: #7c4ab8;
+  --effort-fast: #d9a8e8;
+  --effort-fast-ink: #7c4ab8;
+}
+
+html[data-theme="dark"][data-effort-color="spectrum"] {
+  --effort-brand-ink: #b895e0;
+  --effort-fast-ink: #e3bfef;
+}
+
+html[data-effort-color="silver"] {
+  --effort-brand: linear-gradient(90deg, #ffffff, #e0e0e8);
+  --effort-brand-solid: #e6e6ec;
+  --effort-brand-ink: var(--text-primary);
+  --effort-fast: #6d6d7e;
+  --effort-fast-ink: #8e8e99;
+  --effort-spark: #1f1f26;
+  --effort-stop-ink: color-mix(in srgb, var(--ink-black) 35%, transparent);
+  --effort-thumb-ring: color-mix(in srgb, var(--ink-black) 14%, transparent);
 }

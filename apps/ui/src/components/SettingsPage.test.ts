@@ -287,7 +287,7 @@ describe("SettingsPage 主题颜色选择契约", () => {
 
   it("主题 segmented 使用受控 ToggleGroup，并由原语提供键盘导航", () => {
     const start = source.indexOf('id="settings-anchor-theme"');
-    const end = source.indexOf('id="settings-anchor-skin"', start);
+    const end = source.indexOf('anchorId="settings-anchor-skin"', start);
     const themeSource = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);
@@ -304,19 +304,31 @@ describe("SettingsPage 主题颜色选择契约", () => {
     expect(themeSource).not.toContain('role="radiogroup"');
   });
 
-  it("基础色与主色分别使用受控 Select", () => {
-    const start = source.indexOf('id="settings-anchor-skin"');
+  it("基础色、主色与次色使用受控 Select，并为品牌色提供自由拾色器", () => {
+    const start = source.indexOf('anchorId="settings-anchor-skin"');
     const end = source.indexOf('{section === "account" && (', start);
     const colorSource = source.slice(start, end);
 
     expect(start).toBeGreaterThanOrEqual(0);
     expect(end).toBeGreaterThan(start);
+    expect(source).toContain('from "@appica/ui-react/color-picker"');
+    expect(source).toContain("<ColorPicker");
+    expect(source).toContain("<SelectTrigger id={id}");
+    expect(source.match(/<SettingsColorRow\b/g)?.length).toBe(4);
     expect(colorSource).toContain('value={baseColor}');
-    expect(colorSource).toContain('onBaseColor(value as BaseColor)');
+    expect(colorSource).toContain('onBaseColor(color)');
+    // 思考强度色是固定预设行，不提供自由拾色器。
+    expect(colorSource).toContain('value={effortColor}');
+    expect(colorSource).toContain('onEffortColor(color)');
     expect(colorSource).toContain('value={primaryColor}');
-    expect(colorSource).toContain('onPrimaryColor(value as PrimaryColor)');
-    expect(colorSource).toContain('data-color={baseColor}');
-    expect(colorSource).toContain('data-color={primaryColor}');
+    expect(colorSource).toContain('onChange={onPrimaryColor}');
+    expect(colorSource).toContain('customFallback={DEFAULT_CUSTOM_PRIMARY}');
+    expect(colorSource).toContain('value={secondaryColor}');
+    expect(colorSource).toContain('onChange={onSecondaryColor}');
+    expect(colorSource).toContain('customFallback={DEFAULT_CUSTOM_SECONDARY}');
+    expect(colorSource).toContain('onBaseColor(DEFAULT_BASE_COLOR)');
+    expect(colorSource).toContain('onPrimaryColor(DEFAULT_PRIMARY_COLOR)');
+    expect(colorSource).toContain('onSecondaryColor(DEFAULT_SECONDARY_COLOR)');
   });
 
   it("外观设置不再提供背景媒体入口", () => {

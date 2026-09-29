@@ -35,6 +35,7 @@ import {
   IconList,
   IconPlug,
   IconPuzzle,
+  IconRefresh,
   IconSettings,
   IconSkills,
   IconSubagent,
@@ -74,7 +75,35 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { BASE_COLORS, PRIMARY_COLORS, type BaseColor, type PrimaryColor } from "@/lib/themeColors";
+import {
+  BASE_COLORS,
+  DEFAULT_BASE_COLOR,
+  DEFAULT_PRIMARY_COLOR,
+  DEFAULT_SECONDARY_COLOR,
+  PRIMARY_COLORS,
+  SECONDARY_COLORS,
+  isCustomColor,
+  type BaseColor,
+  type CustomColor,
+  type PrimaryColor,
+  type SecondaryColor,
+} from "@/lib/themeColors";
+import {
+  DEFAULT_EFFORT_COLOR,
+  EFFORT_COLORS,
+  EFFORT_COLOR_SWATCHES,
+  type EffortColor,
+} from "@/lib/effortColor";
+import {
+  BASE_COLOR_SWATCHES,
+  BRAND_COLOR_SWATCHES,
+  DEFAULT_CUSTOM_PRIMARY,
+  DEFAULT_CUSTOM_SECONDARY,
+  initialCustomColor,
+} from "@/lib/themeColorSwatches";
+import { ColorPicker } from "@appica/ui-react/color-picker";
+import { ColorSwatch } from "@appica/ui-react/color-swatch";
+import { formatColor } from "@appica/ui-react/color";
 import { ToggleGroup } from "@appica/ui-react/toggle-group";
 import { Toggle } from "@appica/ui-react/toggle";
 
@@ -157,8 +186,13 @@ export interface SettingsPageProps {
   onTheme: (v: ThemePreference) => void;
   baseColor: BaseColor;
   primaryColor: PrimaryColor;
+  secondaryColor: SecondaryColor;
   onBaseColor: (v: BaseColor) => void;
   onPrimaryColor: (v: PrimaryColor) => void;
+  onSecondaryColor: (v: SecondaryColor) => void;
+  /** 思考强度滑块的品牌色预设。 */
+  effortColor: EffortColor;
+  onEffortColor: (v: EffortColor) => void;
   /** 用户选择的界面字号（12–20，默认 14）。 */
   uiFontSize: number;
   /** 保存并立即应用界面字号。 */
@@ -303,6 +337,104 @@ function SettingsSwitch({
   );
 }
 
+function SettingsColorOption({
+  label,
+  color,
+}: {
+  label: string;
+  color: string | null;
+}) {
+  return (
+    <span className="settings-color-option">
+      {color ? (
+        <ColorSwatch color={color} size="3xs" shape="circle" aria-hidden="true" />
+      ) : (
+        <span className="settings-color-option__base" aria-hidden="true" />
+      )}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function SettingsColorRow<T extends string>({
+  id,
+  anchorId,
+  label,
+  value,
+  choices,
+  swatches,
+  colorName,
+  onChange,
+  customFallback,
+  defaultPreset,
+  customLabel,
+}: {
+  id: string;
+  anchorId?: string;
+  label: string;
+  value: T | CustomColor;
+  choices: readonly T[];
+  swatches: Partial<Record<T, string>>;
+  colorName: (color: T) => string;
+  onChange: (color: T | CustomColor) => void;
+  customFallback?: CustomColor;
+  defaultPreset?: T;
+  customLabel: string;
+}) {
+  const lastCustom = useRef<CustomColor | null>(isCustomColor(value) ? value : null);
+  useEffect(() => {
+    if (isCustomColor(value)) lastCustom.current = value;
+  }, [value]);
+  const selectedIsCustom = isCustomColor(value);
+  const selectedLabel = selectedIsCustom ? customLabel : colorName(value as T);
+  const selectedColor = selectedIsCustom ? value : swatches[value as T] ?? null;
+
+  return (
+    <div className="settings-row settings-row--stack" id={anchorId}>
+      <label className="settings-row__label" htmlFor={id}>{label}</label>
+      <Select
+        value={selectedIsCustom ? "custom" : value}
+        onValueChange={(next) => {
+          if (next === "custom" && customFallback) {
+            onChange(initialCustomColor(value, defaultPreset, customFallback, swatches, lastCustom.current));
+          } else if (typeof next === "string" && choices.includes(next as T)) {
+            onChange(next as T);
+          }
+        }}
+      >
+        <SelectTrigger id={id} className="settings-input" aria-label={label}>
+          <SelectValue>{() => <SettingsColorOption label={selectedLabel} color={selectedColor} />}</SelectValue>
+        </SelectTrigger>
+        <SelectContent>
+          {customFallback && (
+            <SelectItem value="custom">
+              <SettingsColorOption label={customLabel} color={lastCustom.current ?? customFallback} />
+            </SelectItem>
+          )}
+          {choices.map((choice) => (
+            <SelectItem key={choice} value={choice}>
+              <SettingsColorOption label={colorName(choice)} color={swatches[choice] ?? null} />
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      {selectedIsCustom && (
+        <ColorPicker
+          value={value}
+          label={value}
+          aria-label={`${label}: ${customLabel}`}
+          size="md"
+          variant="outline"
+          onValueChange={(color) => {
+            const next = formatColor(color, "hex");
+            if (isCustomColor(next)) onChange(next);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
 export function SettingsPage({
   section,
   onSection,
@@ -313,8 +445,12 @@ export function SettingsPage({
   onTheme,
   baseColor,
   primaryColor,
+  secondaryColor,
   onBaseColor,
   onPrimaryColor,
+  onSecondaryColor,
+  effortColor,
+  onEffortColor,
   uiFontSize,
   onUiFontSize,
   chromeHardwareAcceleration = true,
@@ -1003,19 +1139,71 @@ export function SettingsPage({
                   </Toggle>
                 </ToggleGroup>
               </div>
-              <div className="settings-row settings-row--stack" id="settings-anchor-skin">
-                <label className="settings-row__label" htmlFor="settings-base-color">{t("settings.baseColor")}</label>
-                <Select value={baseColor} onValueChange={(value) => onBaseColor(value as BaseColor)}>
-                  <SelectTrigger id="settings-base-color" className="settings-input"><SelectValue>{() => <span className="settings-color-option" data-color={baseColor}>{t(`settings.color.${baseColor}` as MessageKey)}</span>}</SelectValue></SelectTrigger>
-                  <SelectContent>{BASE_COLORS.map((color) => <SelectItem key={color} value={color}><span className="settings-color-option" data-color={color}>{t(`settings.color.${color}` as MessageKey)}</span></SelectItem>)}</SelectContent>
-                </Select>
-              </div>
-              <div className="settings-row settings-row--stack">
-                <label className="settings-row__label" htmlFor="settings-primary-color">{t("settings.primaryColor")}</label>
-                <Select value={primaryColor} onValueChange={(value) => onPrimaryColor(value as PrimaryColor)}>
-                  <SelectTrigger id="settings-primary-color" className="settings-input"><SelectValue>{() => <span className="settings-color-option" data-color={primaryColor}>{t(`settings.color.${primaryColor}` as MessageKey)}</span>}</SelectValue></SelectTrigger>
-                  <SelectContent>{PRIMARY_COLORS.map((color) => <SelectItem key={color} value={color}><span className="settings-color-option" data-color={color}>{t(`settings.color.${color}` as MessageKey)}</span></SelectItem>)}</SelectContent>
-                </Select>
+              <SettingsColorRow
+                id="settings-base-color"
+                anchorId="settings-anchor-skin"
+                label={t("settings.baseColor")}
+                value={baseColor}
+                choices={BASE_COLORS}
+                swatches={BASE_COLOR_SWATCHES}
+                colorName={(color) => t(`settings.color.${color}` as MessageKey)}
+                customLabel={t("settings.color.custom")}
+                onChange={(color) => {
+                  if (!isCustomColor(color)) onBaseColor(color);
+                }}
+              />
+              <SettingsColorRow
+                id="settings-primary-color"
+                label={t("settings.primaryColor")}
+                value={primaryColor}
+                choices={PRIMARY_COLORS}
+                swatches={BRAND_COLOR_SWATCHES}
+                colorName={(color) => t(`settings.color.${color}` as MessageKey)}
+                onChange={onPrimaryColor}
+                customFallback={DEFAULT_CUSTOM_PRIMARY}
+                defaultPreset={DEFAULT_PRIMARY_COLOR}
+                customLabel={t("settings.color.custom")}
+              />
+              <SettingsColorRow
+                id="settings-secondary-color"
+                label={t("settings.secondaryColor")}
+                value={secondaryColor}
+                choices={SECONDARY_COLORS}
+                swatches={BRAND_COLOR_SWATCHES}
+                colorName={(color) => t(`settings.color.${color}` as MessageKey)}
+                onChange={onSecondaryColor}
+                customFallback={DEFAULT_CUSTOM_SECONDARY}
+                defaultPreset={DEFAULT_SECONDARY_COLOR}
+                customLabel={t("settings.color.custom")}
+              />
+              <SettingsColorRow
+                id="settings-effort-color"
+                label={t("settings.effortColor")}
+                value={effortColor}
+                choices={EFFORT_COLORS}
+                swatches={EFFORT_COLOR_SWATCHES}
+                colorName={(color) => t(`settings.effortColor.${color}` as MessageKey)}
+                onChange={(color) => {
+                  if (!isCustomColor(color)) onEffortColor(color);
+                }}
+                customLabel={t("settings.color.custom")}
+              />
+              <div className="settings-row">
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="md"
+                  disabled={baseColor === DEFAULT_BASE_COLOR && primaryColor === DEFAULT_PRIMARY_COLOR && secondaryColor === DEFAULT_SECONDARY_COLOR && effortColor === DEFAULT_EFFORT_COLOR}
+                  onClick={() => {
+                    onBaseColor(DEFAULT_BASE_COLOR);
+                    onPrimaryColor(DEFAULT_PRIMARY_COLOR);
+                    onSecondaryColor(DEFAULT_SECONDARY_COLOR);
+                    onEffortColor(DEFAULT_EFFORT_COLOR);
+                  }}
+                >
+                  <IconRefresh size={16} />
+                  {t("settings.resetColors")}
+                </Button>
               </div>
               <div className="settings-row" id="settings-anchor-ui-font-size">
                 <div className="settings-row__text">
