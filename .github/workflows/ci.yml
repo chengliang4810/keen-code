@@ -56,7 +56,7 @@ jobs:
   # MSRV 回归：根 Cargo.toml 声明 rust-version，仅验证可编译性；
   # lint 与测试语义由 stable job 覆盖。
   msrv:
-    name: Rust MSRV (1.85)
+    name: Rust MSRV (1.95)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,7 +72,7 @@ jobs:
             librsvg2-dev \
             patchelf
 
-      - uses: dtolnay/rust-toolchain@1.85
+      - uses: dtolnay/rust-toolchain@1.95
 
       - name: Cache Rust workspace
         uses: Swatinem/rust-cache@v2
