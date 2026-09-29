@@ -19,8 +19,7 @@ use crate::atomic::{
 };
 use crate::canonical::canonical_json_sha256;
 use crate::reducer::{
-    reduce_record_for_snapshot_validation, reduce_record_from_valid_state,
-    validate_atomic_batch_shape, validate_owned_atomic_batch_shape,
+    reduce_record_from_valid_state, validate_atomic_batch_shape, validate_owned_atomic_batch_shape,
 };
 use crate::{
     ArtifactId, ArtifactMaterialization, ArtifactUse, ArtifactValidator, CorruptionIssue,
@@ -2728,6 +2727,11 @@ fn read_replay_record(
 }
 
 /// 验证 Snapshot 被日志前缀和自身状态摘要同时锚定。
+///
+/// 信任模型：日志前缀哈希链与末事件哈希共同密码学锚定快照声称的截点，
+/// `state_sha256` 锚定快照正文未损坏；"状态确实等于前缀归约结果"的语义
+/// 一致性由快照写入端与归约器一致性测试保障，不再在每次打开时全量重放，
+/// 否则快照永远无法降低打开成本。
 fn snapshot_is_valid(
     session_id: &SessionId,
     snapshot: &SessionSnapshot,
@@ -2752,28 +2756,12 @@ fn snapshot_is_valid(
         .checked_sub(1)
         .and_then(|index| read.prefix_hashes.get(index))
         .cloned();
-    let anchors_match = sequence <= read.records.len()
+    sequence <= read.records.len()
         && snapshot.through_event_sha256 == expected_event_hash
         && snapshot.through_log_sha256 == expected_log_hash
         && snapshot.state.last_sequence == snapshot.through_sequence
         && state_hash(&snapshot.state).is_ok_and(|hash| hash == snapshot.state_sha256)
-        && validate_state_collections(&snapshot.state, config.max_state_collection_items).is_ok();
-    if !anchors_match {
-        return false;
-    }
-    let mut replayed = SessionState::empty(session_id.clone());
-    for (index, record) in read.records.iter().take(sequence).enumerate() {
-        if reduce_record_for_snapshot_validation(&mut replayed, record).is_err() {
-            return false;
-        }
-        if (index + 1) % JOURNAL_BATCH_MAX_RECORDS == 0
-            && validate_state_collections(&replayed, config.max_state_collection_items).is_err()
-        {
-            return false;
-        }
-    }
-    validate_state_collections(&replayed, config.max_state_collection_items).is_ok()
-        && replayed == snapshot.state
+        && validate_state_collections(&snapshot.state, config.max_state_collection_items).is_ok()
 }
 
 /// 读取并反序列化 Snapshot。

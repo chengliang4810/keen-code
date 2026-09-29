@@ -1133,6 +1133,53 @@ fn corrupt_snapshot_is_ignored_and_rebuilt_from_healthy_journal() {
     assert!(rebuilt["throughLogSha256"].as_str().is_some());
 }
 
+/// 验证快照信任边界：日志前缀哈希链与末事件哈希锚定截点，快照正文由
+/// 自身 stateSha256 锚定；打开不再全量重放比对，自洽的状态偏差被信任。
+#[test]
+fn anchored_snapshot_state_is_trusted_without_full_replay() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let journal = ready(
+        root.path(),
+        "snapshot-trust",
+        SnapshotPolicy::Every { events: 1 },
+    );
+    create_session(&journal);
+    let path = journal.snapshot_path().to_owned();
+    drop(journal);
+    let mut snapshot: Value =
+        serde_json::from_slice(&fs::read(&path).expect("Snapshot 应读取")).expect("JSON 应有效");
+    // 模拟写入端语义偏差（而非文件损坏）：修改状态正文并重算自哈希，
+    // 使快照保持 schema、锚点与自洽哈希全部有效。
+    let mut state: SessionState =
+        serde_json::from_value(snapshot["state"].clone()).expect("状态应反序列化");
+    state.title = "锚定信任".to_owned();
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, &state).expect("状态应序列化");
+    let digest = hasher.finalize();
+    let state_sha256: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    snapshot["state"] = serde_json::to_value(&state).expect("状态应回写");
+    snapshot["stateSha256"] = json!(state_sha256);
+    fs::write(
+        &path,
+        serde_json::to_vec_pretty(&snapshot).expect("Snapshot 应编码"),
+    )
+    .expect("Snapshot 应写入");
+    let opened = SessionJournal::open(
+        root.path(),
+        SessionId::new("snapshot-trust").expect("ID 应有效"),
+        config(SnapshotPolicy::Every { events: 1 }),
+    )
+    .expect("锚定快照应可打开");
+    let SessionOpen::Ready(recovered) = opened else {
+        panic!("信任锚点的快照不得触发重建降级");
+    };
+    assert_eq!(
+        recovered.state().expect("状态应读取").title,
+        "锚定信任",
+        "锚点与自洽哈希通过时必须直接信任快照状态，不得重放覆盖"
+    );
+}
+
 /// 验证旧 v3 Snapshot 仅作为可丢弃缓存忽略，并由当前 v6 权威日志完整重建。
 #[test]
 fn v3_snapshot_is_ignored_and_rebuilt_from_v6_journal() {
@@ -1171,43 +1218,6 @@ fn v3_snapshot_is_ignored_and_rebuilt_from_v6_journal() {
     assert_eq!(rebuilt["version"], json!(4));
     assert_eq!(rebuilt["throughSequence"], json!(2));
     assert_eq!(rebuilt["state"]["lastSequence"], json!(2));
-}
-
-/// 验证即使同步伪造状态正文和自 Hash，Snapshot 也必须服从日志前缀的真实归约结果。
-#[test]
-fn self_consistent_but_log_inconsistent_snapshot_is_rebuilt() {
-    let root = TempDir::new().expect("临时目录应创建");
-    let journal = ready(
-        root.path(),
-        "snapshot-semantic-forgery",
-        SnapshotPolicy::Every { events: 1 },
-    );
-    create_session(&journal);
-    let snapshot_path = journal.snapshot_path().to_owned();
-    drop(journal);
-
-    let mut snapshot: Value =
-        serde_json::from_slice(&fs::read(&snapshot_path).expect("Snapshot 应读取"))
-            .expect("Snapshot JSON 应有效");
-    snapshot["state"]["title"] = json!("自洽但不属于日志的标题");
-    let forged_state: keencode_resources::SessionState =
-        serde_json::from_value(snapshot["state"].clone()).expect("伪造状态仍应结构有效");
-    let state_bytes = serde_json::to_vec(&forged_state).expect("状态应编码");
-    snapshot["stateSha256"] = json!(format!("{:x}", Sha256::digest(state_bytes)));
-    let mut encoded = serde_json::to_vec_pretty(&snapshot).expect("Snapshot 应编码");
-    encoded.push(b'\n');
-    fs::write(&snapshot_path, encoded).expect("伪造 Snapshot 应写入");
-
-    let reopened = ready(
-        root.path(),
-        "snapshot-semantic-forgery",
-        SnapshotPolicy::Every { events: 1 },
-    );
-    assert_eq!(reopened.state().expect("状态应恢复").title, "测试会话");
-    let rebuilt: Value =
-        serde_json::from_slice(&fs::read(snapshot_path).expect("重建 Snapshot 应读取"))
-            .expect("重建 Snapshot 应有效");
-    assert_eq!(rebuilt["state"]["title"], json!("测试会话"));
 }
 
 /// 验证 Windows 可用的同实例并发 append 会得到无缺口唯一 sequence。

@@ -123,13 +123,6 @@ pub(crate) fn reduce_record_from_valid_state(
     reduce_record_from_valid_state_with_atomic_mode(state, record, true)
 }
 
-pub(crate) fn reduce_record_for_snapshot_validation(
-    state: &mut SessionState,
-    record: &SessionEventRecord,
-) -> Result<(), ReductionError> {
-    reduce_record_from_valid_state_with_atomic_mode(state, record, false)
-}
-
 fn reduce_record_from_valid_state_with_atomic_mode(
     state: &mut SessionState,
     record: &SessionEventRecord,
