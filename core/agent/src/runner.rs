@@ -5987,8 +5987,10 @@ async fn execute_one_raw(
                             &call.id,
                             output,
                             &call.name,
-                            artifact_sink.as_deref(),
-                        ) {
+                            artifact_sink.clone(),
+                        )
+                        .await
+                        {
                             Some((result, artifact)) => (
                                 result,
                                 ToolCompletionStatus::Succeeded,
@@ -6099,28 +6101,36 @@ async fn execute_one_raw(
 ///
 /// 截断按单结果硬上限执行：文本块收缩为首尾各有界预览并附加指向完整
 /// 工件的截断说明，副作用工具因此不再因输出超限进入 Turn 终态。
-fn truncate_over_limit_output(
+/// Sink 契约是纯阻塞文件操作且完整输出可达单结果上限量级：落盘在
+/// `spawn_blocking` 中执行，不阻塞异步执行线程。
+async fn truncate_over_limit_output(
     call_id: &str,
     output: ToolOutput,
     label: &str,
-    sink: Option<&dyn ToolOutputArtifactSink>,
+    sink: Option<Arc<dyn ToolOutputArtifactSink>>,
 ) -> Option<(ToolResult, TruncatedOutputArtifact)> {
     let sink = sink?;
-    let (output, artifact) = truncate_tool_output_with_artifact(
-        call_id,
-        output,
-        label,
-        sink,
-        (
-            crate::TOOL_OUTPUT_LIMITS.max_content_blocks,
-            usize::MAX,
-            crate::TOOL_OUTPUT_LIMITS.max_result_json_bytes,
-        ),
-    )?;
-    let result = ToolResult::new(call_id, output.content, false);
-    // 截断结果必须能通过自身硬上限；否则回退既有固定拒绝语义。
-    measure_tool_result(&result).ok()?;
-    Some((result, artifact))
+    let call_id = call_id.to_owned();
+    let label = label.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let (output, artifact) = truncate_tool_output_with_artifact(
+            &call_id,
+            output,
+            &label,
+            sink.as_ref(),
+            (
+                crate::TOOL_OUTPUT_LIMITS.max_content_blocks,
+                usize::MAX,
+                crate::TOOL_OUTPUT_LIMITS.max_result_json_bytes,
+            ),
+        )?;
+        let result = ToolResult::new(&call_id, output.content, false);
+        // 截断结果必须能通过自身硬上限；否则回退既有固定拒绝语义。
+        measure_tool_result(&result).ok()?;
+        Some((result, artifact))
+    })
+    .await
+    .ok()?
 }
 
 /// 一次工具执行在 Turn 取消之外的两种结局。
