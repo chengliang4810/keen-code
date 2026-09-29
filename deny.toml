@@ -6,6 +6,17 @@
 [advisories]
 # 已撤回（yanked）的依赖版本一律拒绝。
 yanked = "deny"
+# 传递依赖的维护状态公告，上游未提供替代版本前暂时豁免：
+# - proc-macro-error：经 syn 1 / thiserror 1 / tauri-macros 间接引入，
+#   等待 tauri 生态切换 thiserror 2（已随桌面直接依赖落地）后自然消失。
+# - serial：portable-pty 唯一依赖，无替代版本。
+# - quick-xml：plist 1.8 钉住 ^0.38，修复版 0.41 需 plist 上游先动；
+#   该路径只在构建期解析本地 Tauri 配置/图标，不处理不可信输入。
+ignore = [
+  { crate = "proc-macro-error", reason = "RUSTSEC-2024-0370：传递依赖，等待 tauri 生态升级" },
+  { crate = "serial", reason = "RUSTSEC-2017-0008：portable-pty 唯一依赖，无替代" },
+  { crate = "quick-xml", reason = "RUSTSEC-2026-0194 / RUSTSEC-2026-0195：plist 钉住 0.38，构建期专用，不解析不可信输入" },
+]
 
 [bans]
 # 628 个 crate 的依赖图难免出现重复版本：先警告观察，收敛后再收紧。
