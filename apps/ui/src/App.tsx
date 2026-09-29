@@ -440,15 +440,25 @@ export default function App() {
   const summaryTriggerRef = useRef<HTMLButtonElement>(null);
   /** 关闭任务摘要浮层，避免流式更新期间反复重绑文档监听。 */
   const closeSummary = useCallback(() => setSummaryOpen(false), []);
-  /** Agent 工具状态变化时驱动右侧文件树与 Git 状态同步。 */
+  /** Agent 工具状态变化时驱动右侧文件树与 Git 状态同步。
+   *
+   * 只折叠工具段的状态序数与标识短后缀：流式期间 messages 每帧变化，
+   * 全量逐字符哈希长会话的成本不可接受；状态迁移必然改变签名，标识
+   * 后缀碰撞最多漏一次文件树刷新，属可接受的触发器语义。 */
   const resourceSyncRevision = useMemo(
     () =>
       messages.reduce((revision, message) => {
         for (const segment of message.segments ?? []) {
           if (segment.kind !== "tool") continue;
-          for (const char of `${segment.toolCallId}:${segment.status}:${segment.streaming ?? false}`) {
-            revision = (revision * 31 + char.charCodeAt(0)) >>> 0;
-          }
+          const id = segment.toolCallId.slice(-8);
+          let toolHash = 0;
+          for (const char of id) toolHash = (toolHash * 31 + char.charCodeAt(0)) >>> 0;
+          revision =
+            (revision * 31 +
+              toolHash +
+              segment.status.length +
+              (segment.streaming ? 1 : 0)) >>>
+            0;
         }
         return revision;
       }, 0),

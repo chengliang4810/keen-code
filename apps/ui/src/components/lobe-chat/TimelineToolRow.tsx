@@ -1,3 +1,4 @@
+import { memo, useMemo } from "react";
 import { Button } from "@appica/ui-react/button";
 import { Badge } from "@appica/ui-react/badge";
 import {
@@ -650,7 +651,9 @@ export function TimelineToolDetailBody({
 }
 
 /** 单条可展开的工具证据行。 */
-export function TimelineToolRow({
+export const TimelineToolRow = memo(TimelineToolRowImpl);
+
+function TimelineToolRowImpl({
   tool,
   locale = "en",
   onOpenResource,
@@ -668,7 +671,12 @@ export function TimelineToolRow({
   const failed = isToolSegmentFailed(tool);
   const cancelled = isToolSegmentCancelled(tool);
   const running = isToolSegmentRunning(tool);
-  const inputFields = extractToolInputFields(tool.input);
+  // 工具入参 JSON 解析按 input 引用缓存：流式期间父级每帧重渲染时，
+  // 历史工具行不再重复 JSON.parse 大输入。
+  const inputFields = useMemo(
+    () => extractToolInputFields(tool.input),
+    [tool.input],
+  );
   const category = timelineToolCategory(tool);
   const renderer = timelineToolRenderer(tool);
   const planTool = isPlanTool(tool);
