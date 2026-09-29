@@ -299,7 +299,12 @@ impl MessagesAdapter {
             "message_stop" => self.consume_message_stop(output),
             "ping" => Ok(()),
             "error" => Err(classify_provider_error(&value)),
-            other => Err(protocol_error(format!("Messages SSE 包含未知事件 {other}"))),
+            // 与 Responses 对齐：上游新增事件类型（如服务端工具生命周期）或
+            // 兼容网关注入自定义事件时跳过，不让已计费整条流失败。
+            other => {
+                let _ = other;
+                Ok(())
+            }
         }
     }
 

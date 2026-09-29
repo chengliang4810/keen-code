@@ -6990,3 +6990,57 @@ async fn watchdog_计时按事件重置慢速活跃流不切断() {
         "慢速流应恰好一次请求"
     );
 }
+
+/// Responses 混入未知 output item / content part 时跳过，不影响已知通道。
+#[test]
+fn responses_sse_skips_unknown_output_items_and_content_parts() {
+    let raw = concat!(
+        "event: response.created\n",
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp-1\",\"model\":\"test-model\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\"}}\n\n",
+        "event: response.output_item.added\n",
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"web_search_call\",\"id\":\"ws-1\"}}\n\n",
+        "event: response.content_part.added\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"part\":{\"type\":\"output_text\",\"text\":\"KC\"}}\n\n",
+        "event: response.content_part.added\n",
+        "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"part\":{\"type\":\"summary_text\",\"text\":\"skip\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"!\"}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\"}}\n\n",
+        "event: response.output_item.done\n",
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"web_search_call\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp-1\",\"usage\":{\"input_tokens\":5,\"output_tokens\":5}}}\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Responses, &[raw.as_bytes()]);
+    let response = collect_events(events);
+
+    assert_eq!(response.content, vec![ContentBlock::text("KC!")]);
+}
+
+/// Messages 混入未知 SSE 事件时跳过，与 Responses 对齐。
+#[test]
+fn messages_sse_skips_unknown_events() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-1\",\"model\":\"test-model\"}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"KC\"}}\n\n",
+        "event: custom_vendor_event\n",
+        "data: {\"type\":\"custom_vendor_event\",\"payload\":\"whatever\"}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":3}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Messages, &[raw.as_bytes()]);
+    let response = collect_events(events);
+
+    assert_eq!(response.content, vec![ContentBlock::text("KC")]);
+}

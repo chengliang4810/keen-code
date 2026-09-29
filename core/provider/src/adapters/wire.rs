@@ -4,6 +4,16 @@
 //! 这里只收纳在多个 Adapter 中逐字重复、或仅差一个协议文案前缀的实现；带协议
 //! 分支逻辑的 helper（如各自的 tool_choice 编码、Usage 解码）保留在各自文件中。
 //! 错误文案通过前缀或消息参数注入，保证各协议 wire 错误字节级不变。
+//!
+//! # 未知协议元素策略（所有 Adapter 统一）
+//!
+//! - **内容类**（模型说了但我们不认识的东西：未知内容块类型、未知 output
+//!   item 类型、未知 content part 类型、未知 SSE 事件类型）→ **跳过**。响应
+//!   已经生成并计费，为"展示层不认识"作废整条流是过度反应；跳过的语义等价
+//!   于"这部分内容不渲染"。Messages 用 `ignored_blocks` 追踪跳过的块序号，
+//!   Responses 直接跳过（不分配本地索引，后续该索引的事件同样跳过）。
+//! - **结构类**（事件顺序违例、终态缺失、身份字段错误、index 类型混用）→
+//!   **维持报错**。这类错误说明流本身损坏，继续消费会破坏中立层不变量。
 
 use keencode_model::{ImageSource, ModelError, ReasoningEffort, ResponseMetadata};
 use serde_json::{Map, Value};

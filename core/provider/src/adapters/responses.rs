@@ -359,9 +359,12 @@ impl ResponsesAdapter {
             "message" => self
                 .streaming_output_index(index, StreamingBlockKind::Text)
                 .map(|_| ()),
-            other => Err(protocol_error(format!(
-                "Responses 包含未知 output item 类型 {other}"
-            ))),
+            // web_search_call 等服务端工具 item：按 Messages 的
+            // ignored_blocks 语义跳过，不让已计费整条流失败。
+            other => {
+                let _ = other;
+                Ok(())
+            }
         }
     }
 
@@ -407,9 +410,10 @@ impl ResponsesAdapter {
             "message" => self
                 .streaming_output_index(index, StreamingBlockKind::Text)
                 .map(|_| ()),
-            other => Err(protocol_error(format!(
-                "Responses 包含未知完成 item 类型 {other}"
-            ))),
+            other => {
+                let _ = other;
+                Ok(())
+            }
         }
     }
 
@@ -469,9 +473,10 @@ impl ResponsesAdapter {
                 }
                 Ok(())
             }
-            other => Err(protocol_error(format!(
-                "Responses 包含未知 content part 类型 {other}"
-            ))),
+            other => {
+                let _ = other;
+                Ok(())
+            }
         }
     }
 
