@@ -14,8 +14,17 @@ mod error;
 mod event;
 mod file_change;
 mod json;
+mod meta;
 mod protocol;
 mod sequence;
+
+/// KeenCode 扩展协议共享常量（`_meta` 键与非标准方法名）。
+pub use meta::{
+    META_DEFAULT_CWD, META_DETACHED, META_LAST_USER_MESSAGE_AT, META_OPERATION_ID, META_REPLAY,
+    META_SESSION_ARCHIVED, META_SESSION_PINNED, META_SESSION_TITLE_SOURCE, META_SNAPSHOT,
+    META_TITLE, META_TURN_ID, META_ULTRA_MODE, OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD,
+    WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD,
+};
 
 /// 官方 ACP Schema，供桌面 Host 与 Runtime 共享同一套标准类型。
 pub use agent_client_protocol_schema as schema;

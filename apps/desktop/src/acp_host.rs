@@ -15,7 +15,10 @@ use crate::session_commands::{
 use keencode_acp::schema;
 use keencode_acp::{
     AcpBoundaryError, AcpIncomingFrame, AcpNotification, AcpRequest, AcpRequestDecoder,
-    AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload, OperationId,
+    AcpResponseEncoder, AcpResponseLimits, AcpResponsePayload, META_DEFAULT_CWD, META_DETACHED,
+    META_LAST_USER_MESSAGE_AT, META_OPERATION_ID, META_REPLAY, META_SESSION_ARCHIVED,
+    META_SESSION_PINNED, META_SESSION_TITLE_SOURCE, META_SNAPSHOT, META_TITLE, META_TURN_ID,
+    META_ULTRA_MODE, OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId,
 };
 use keencode_agent::{CollaborationIdGenerator, UuidCollaborationIdGenerator};
 use keencode_resources::{
@@ -65,31 +68,8 @@ const ACP_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 const SLOW_SESSION_LOAD_PHASE: Duration = Duration::from_millis(500);
 /// 完整 Session 加载超过该时长时记录结构化慢日志。
 const SLOW_SESSION_LOAD_TOTAL: Duration = Duration::from_secs(1);
-/// ACP `_meta` 中可选的稳定创建操作标识。
-const META_OPERATION_ID: &str = "keencode/operationId";
-/// ACP `_meta` 中可选的精确 Turn 标识。
-const META_TURN_ID: &str = "keencode/turnId";
-/// ACP `_meta` 中可选的本轮 Ultra 开关。
-const META_ULTRA_MODE: &str = "keencode/ultraMode";
-/// Prompt 是否要求客户端断开后继续由 Host 托管；CLI detach 使用该元数据。
-const META_DETACHED: &str = "keencode/detached";
-/// 非交互 CLI 在绑定稳定执行身份后即可断开的 admission 方法。
-const OPERATION_ADMIT_METHOD: &str = "keencode/operation/admit";
-/// 跨连接查询 Prompt operation 状态的方法。
-const OPERATION_STATUS_METHOD: &str = "keencode/operation/status";
-/// ACP `_meta` 中可选的 Fork 标题。
-const META_TITLE: &str = "keencode/title";
-/// ACP 响应 `_meta` 中的最小 Session 快照键。
-const META_SNAPSHOT: &str = "keencode/snapshot";
-/// ACP 响应 `_meta` 中完整 `session/load` 历史恢复的最终游标事实。
-const META_REPLAY: &str = "keencode/replay";
-/// ACP 初始化响应 `_meta` 中的默认 Session cwd。
-const META_DEFAULT_CWD: &str = "keencode/defaultCwd";
-/// ACP `session/list` 每项 `_meta` 中的最近用户消息时间。
-const META_LAST_USER_MESSAGE_AT: &str = "keencode/lastUserMessageAt";
-const META_SESSION_PINNED: &str = "keencode/pinned";
-const META_SESSION_ARCHIVED: &str = "keencode/archived";
-const META_SESSION_TITLE_SOURCE: &str = "keencode/titleSource";
+// `_meta` 键与 keencode/* 方法名常量统一由 keencode_acp 导出，与 headless
+// Host 共享同一份契约，避免两侧字符串漂移。
 
 /// 权威标题来源的线格式值；与 ACP `SessionTitleSource` 的 snake_case 一致。
 fn title_source_wire(source: keencode_resources::TitleSource) -> &'static str {

@@ -23,16 +23,12 @@ use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// 当前 Host adapter 预留的 Prompt admission 方法；它返回稳定执行三元组。
-pub const DETACHED_PROMPT_METHOD: &str = "keencode/operation/admit";
-/// 当前 Host adapter 预留的操作状态查询方法。
-pub const OPERATION_STATUS_METHOD: &str = "keencode/operation/status";
-/// Web 控制面方法前缀；Web server 仍由 Host 所有权和配置决定。
-pub const WEB_START_METHOD: &str = "keencode/web/start";
-/// Web 停止方法。
-pub const WEB_STOP_METHOD: &str = "keencode/web/stop";
-/// Web 状态方法。
-pub const WEB_STATUS_METHOD: &str = "keencode/web/status";
+// keencode/* 方法名契约统一由 keencode_acp 导出；DETACHED_PROMPT_METHOD
+// 保留 CLI 侧的历史名称作为别名，内部消费者无需改名。
+pub use keencode_acp::OPERATION_ADMIT_METHOD as DETACHED_PROMPT_METHOD;
+pub use keencode_acp::{
+    OPERATION_STATUS_METHOD, WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD,
+};
 
 static NEXT_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 

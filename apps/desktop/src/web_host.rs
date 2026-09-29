@@ -28,12 +28,8 @@ pub const WEB_TOKEN_ENV: &str = "KEENCODE_WEB_TOKEN";
 const WEB_KEYRING_SERVICE: &str = "com.keencode.desktop.web";
 /// Desktop Web Host 系统密钥库账户名。
 const WEB_KEYRING_ACCOUNT: &str = "host-token";
-/// CLI 与 Desktop ACP facade 共享的 Web 控制方法。
-pub const WEB_START_METHOD: &str = "keencode/web/start";
-/// 停止 Web Host 控制方法。
-pub const WEB_STOP_METHOD: &str = "keencode/web/stop";
-/// 查询 Web Host 状态控制方法。
-pub const WEB_STATUS_METHOD: &str = "keencode/web/status";
+// CLI 与 Desktop ACP facade 共享的 Web 控制方法，契约由 keencode_acp 统一导出。
+pub use keencode_acp::{WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD};
 
 /// Web Host 的非秘密配置；Token 永远由 [`SystemCredentialProvider`] 读取。
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

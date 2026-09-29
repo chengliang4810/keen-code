@@ -12,7 +12,9 @@ use crate::server::{
 use keencode_acp::{
     AcpIncomingFrame, ConnectionId, HostDiscoveryRecord, HostLifecyclePhase, HostOwnerKind,
     HostTransportKind, KeenCodeEvent, KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams,
-    MAX_HOST_PROMPT_BYTES, OperationId, SessionUpdateDeliveryEnvelope,
+    MAX_HOST_PROMPT_BYTES, META_SESSION_ARCHIVED, META_SESSION_PINNED, OPERATION_ADMIT_METHOD,
+    OPERATION_STATUS_METHOD, OperationId, SessionUpdateDeliveryEnvelope, WEB_START_METHOD,
+    WEB_STATUS_METHOD, WEB_STOP_METHOD,
 };
 use keencode_agent::{
     AgentId, AgentRunner, AgentStreamEvent, AgentStreamEventKind, ContextCompactionFailureKind,
@@ -730,11 +732,11 @@ impl HeadlessInner {
             "session/load" => self.session_load(&connection_id, &params),
             "session/prompt" => self.session_prompt(connection_id, &params).await,
             "session/cancel" => self.session_cancel(&params),
-            "keencode/operation/admit" => self.operation_admit(connection_id, &params).await,
-            "keencode/operation/status" => self.operation_status(&params),
-            "keencode/web/start" => self.web_start(&params).await,
-            "keencode/web/stop" => self.web_stop().await,
-            "keencode/web/status" => self.web_status().await,
+            OPERATION_ADMIT_METHOD => self.operation_admit(connection_id, &params).await,
+            OPERATION_STATUS_METHOD => self.operation_status(&params),
+            WEB_START_METHOD => self.web_start(&params).await,
+            WEB_STOP_METHOD => self.web_stop().await,
+            WEB_STATUS_METHOD => self.web_status().await,
             _ => Err(HandlerError::new(-32601, "Host 不支持该方法")),
         };
         let Some(id) = id else {
@@ -2011,13 +2013,13 @@ fn headless_authoritative_event_deliveries(
             let mut meta = serde_json::Map::new();
             if let Some(pinned) = pinned {
                 meta.insert(
-                    "keencode/pinned".to_owned(),
+                    META_SESSION_PINNED.to_owned(),
                     serde_json::Value::Bool(*pinned),
                 );
             }
             if let Some(archived) = archived {
                 meta.insert(
-                    "keencode/archived".to_owned(),
+                    META_SESSION_ARCHIVED.to_owned(),
                     serde_json::Value::Bool(*archived),
                 );
             }
