@@ -1,0 +1,33 @@
+# cargo-deny 供应链审计配置；CI 的 supply-chain job 执行：
+#   cargo deny check advisories bans licenses sources
+# 策略从宽起步：漏洞与来路不明的来源硬失败，重复版本仅警告，
+# 许可证白名单按 Cargo.lock 实际出现的宽松许可证维护。
+
+[advisories]
+# 已撤回（yanked）的依赖版本一律拒绝。
+yanked = "deny"
+
+[bans]
+# 628 个 crate 的依赖图难免出现重复版本：先警告观察，收敛后再收紧。
+multiple-versions = "warn"
+
+[licenses]
+allow = [
+  "MIT",
+  "MIT-0",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "CC0-1.0",
+]
+
+[sources]
+# 只允许 crates.io 与系统注册表来源，禁止未知 git 依赖。
+unknown-registry = "deny"
+unknown-git = "deny"

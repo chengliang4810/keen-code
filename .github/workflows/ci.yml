@@ -32,8 +32,58 @@ jobs:
         run: corepack pnpm@10.14.0 test
       - name: Build frontend
         run: corepack pnpm@10.14.0 build
+      - name: Lint CSS
+        run: corepack pnpm@10.14.0 lint:css
+      - name: Check design system
+        run: corepack pnpm@10.14.0 check:design-system
       - name: Check diff formatting
         run: git diff --check
+
+  # 依赖供应链审计：只读 Cargo.lock 与清单，不需要编译 Rust 代码。
+  supply-chain:
+    name: Cargo deny (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Deny advisories, bans, licenses and sources
+        run: cargo deny --log-level info check advisories bans licenses sources
+
+  # MSRV 回归：根 Cargo.toml 声明 rust-version，仅验证可编译性；
+  # lint 与测试语义由 stable job 覆盖。
+  msrv:
+    name: Rust MSRV (1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Tauri Linux native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@1.85
+
+      - name: Cache Rust workspace
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Ensure frontend dist placeholder
+        run: mkdir -p apps/ui/dist
+
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --all-targets
 
   rust:
     name: Rust (${{ matrix.os }})
