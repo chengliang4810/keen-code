@@ -2001,6 +2001,13 @@ fn git_failure_reason(output: &Output) -> String {
     }
 }
 
+/// 生成进入诊断日志的有界 Git 失败摘要；不携带完整 stdout/stderr。
+fn summarize_git_failure(output: &Output) -> String {
+    let raw = combined_git_output(output);
+    let truncated: String = raw.chars().take(200).collect();
+    truncated.trim().to_owned()
+}
+
 /// 合并 Git 命令的标准输出与标准错误。
 fn combined_git_output(output: &Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -2735,10 +2742,16 @@ fn git_commit_blocking(
         .output()
         .map_err(|error| format!("无法执行 git commit：{error}"))?;
     if !output.status.success() {
+        // 审计只记退出码与有界摘要，不携带完整 stdout/stderr：失败的
+        // hook 或远端可能输出用户内容（文件片段、密钥扫描结果等）。
         diagnostics.log(
             "error",
             "ipc.git_commit",
-            format!("提交失败: {}", git_failure_reason(&output)),
+            format!(
+                "提交失败 exit_code={:?} summary={}",
+                output.status.code(),
+                summarize_git_failure(&output)
+            ),
         );
         return Err(git_failure_reason(&output));
     }
@@ -2791,7 +2804,11 @@ fn git_push_blocking(app: AppHandle, project_path: String) -> Result<GitPushResu
         diagnostics.log(
             "error",
             "ipc.git_push",
-            format!("推送失败: {}", git_failure_reason(&output)),
+            format!(
+                "推送失败 exit_code={:?} summary={}",
+                output.status.code(),
+                summarize_git_failure(&output)
+            ),
         );
         return Err(git_failure_reason(&output));
     }

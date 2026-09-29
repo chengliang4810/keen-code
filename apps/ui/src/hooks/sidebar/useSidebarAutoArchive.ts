@@ -37,9 +37,6 @@ export function useSidebarAutoArchive({
         Date.parse(item.updatedAt) <= cutoff,
     );
     if (expired.length > 0) {
-      for (const item of expired) {
-        archivedRef.current.add(item.id);
-      }
       void (async () => {
         try {
           for (const item of expired) {
@@ -48,6 +45,8 @@ export function useSidebarAutoArchive({
               archived: true,
               operationId: createOperationId("session-auto-archive"),
             });
+            // 只在提交成功后标记，失败时下次 effect 仍会重试。
+            archivedRef.current.add(item.id);
           }
           await refreshSessions();
         } catch (error) {

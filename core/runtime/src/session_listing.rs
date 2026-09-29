@@ -36,7 +36,7 @@ pub fn title_source_wire(source: TitleSource) -> &'static str {
         TitleSource::Unspecified => "unspecified",
         TitleSource::Manual => "manual",
         TitleSource::Automatic => "automatic",
-        TitleSource::MessagePrefix => "message_prefix",
+        TitleSource::MessagePrefix => "message-prefix",
     }
 }
 

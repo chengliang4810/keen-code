@@ -2199,7 +2199,7 @@ pub struct RenameSessionRequest {
 
 /// 会话标题写入来源的线格式枚举；与权威事件 `TitleSource` 一一对应。
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 pub enum SessionTitleSource {
     /// 用户手动改名。
     Manual,
