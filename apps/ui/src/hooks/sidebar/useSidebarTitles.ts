@@ -8,10 +8,6 @@ import {
   sanitizeGeneratedSessionTitle,
 } from "@/lib/sessionTitle";
 import {
-  loadSessionPreferencesSafe,
-  updateSessionPreference,
-} from "@/lib/sessionPreferences";
-import {
   createOperationId,
   sessionGenerateTitle,
   sessionRename as acpSessionRename,
@@ -62,9 +58,16 @@ export function useSidebarTitles({
     [setSession, setSessions],
   );
 
+  /** 读取权威投影中的标题来源；行缺失时按未记录处理。 */
+  const titleSourceOf = useCallback(
+    (sessionId: string) =>
+      sessionsRef.current.find((row) => row.id === sessionId)?.titleSource,
+    [sessionsRef],
+  );
+
   const applyMessagePrefixTitle = useCallback(
     (sessionId: string, userText: string) => {
-      const source = loadSessionPreferencesSafe()[sessionId]?.titleSource;
+      const source = titleSourceOf(sessionId);
       if (
         source === "manual" ||
         source === "automatic" ||
@@ -89,20 +92,17 @@ export function useSidebarTitles({
       ) {
         return;
       }
-      updateSessionPreference(sessionId, {
-        title,
-        titleSource: "message-prefix",
-      });
       applySessionTitle(sessionId, title);
       void acpSessionRename({
         id: sessionId,
         title,
         operationId: createOperationId("session-rename"),
+        source: "message-prefix",
       }).catch((error) =>
         console.warn("persist message-prefix session title failed", error),
       );
     },
-    [applySessionTitle, sessionsRef, tr],
+    [applySessionTitle, sessionsRef, titleSourceOf, tr],
   );
 
   const applyAutomaticSessionTitle = useCallback(
@@ -123,7 +123,7 @@ export function useSidebarTitles({
         expectedTitle;
       const canReplaceCurrentTitle = canGenerateAutomaticSessionTitle({
         currentTitle,
-        titleSource: loadSessionPreferencesSafe()[sessionId]?.titleSource,
+        titleSource: titleSourceOf(sessionId),
         localizedPlaceholders: [
           tr("session.new"),
           tr("session.placeholderTitle"),
@@ -143,14 +143,13 @@ export function useSidebarTitles({
         const title = sanitizeGeneratedSessionTitle(candidate);
         if (!title) return;
 
-        const latestPreferences = loadSessionPreferencesSafe()[sessionId];
         const latestTitle =
           sessionTitleOverridesRef.current.get(sessionId) ??
           sessionsRef.current.find((row) => row.id === sessionId)?.title ??
           expectedTitle;
         const canReplaceLatestTitle = canGenerateAutomaticSessionTitle({
           currentTitle: latestTitle,
-          titleSource: latestPreferences?.titleSource,
+          titleSource: titleSourceOf(sessionId),
           localizedPlaceholders: [
             tr("session.new"),
             tr("session.placeholderTitle"),
@@ -159,16 +158,13 @@ export function useSidebarTitles({
         });
         if (!canReplaceLatestTitle) return;
 
-        updateSessionPreference(sessionId, {
-          title,
-          titleSource: "automatic",
-        });
         applySessionTitle(sessionId, title);
         try {
           await acpSessionRename({
             id: sessionId,
             title,
             operationId: createOperationId("session-rename"),
+            source: "automatic",
           });
         } catch (error) {
           console.warn("persist generated session title failed", error);
@@ -179,7 +175,7 @@ export function useSidebarTitles({
         autoTitleInFlightRef.current.delete(sessionId);
       }
     },
-    [applySessionTitle, sessionsRef, tr],
+    [applySessionTitle, sessionsRef, titleSourceOf, tr],
   );
 
   return {

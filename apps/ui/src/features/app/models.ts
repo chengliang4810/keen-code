@@ -15,6 +15,8 @@ export interface SessionRow {
   archived: boolean;
   /** Pinned chats float to the top of the sidebar */
   pinned: boolean;
+  /** 当前标题写入来源；权威 Journal 状态投影，约束自动标题不覆盖手动标题。 */
+  titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }
 
 export function projectPathPreview(parent: string, name: string): string {

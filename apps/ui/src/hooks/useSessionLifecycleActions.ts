@@ -45,7 +45,6 @@ import {
   createAcpWorkspaceState,
   type AcpWorkspaceState,
 } from "@/lib/acp/store";
-import { removeSessionPreference } from "@/lib/sessionPreferences";
 import {
   sessionExportFilename,
   sessionToMarkdown,
@@ -265,7 +264,7 @@ export function useSessionLifecycleActions({
         updatedAt: new Date().toISOString(),
         lastUserMessageAt: null,
         archived: false,
-        pinned: false,
+        pinned: false, titleSource: "unspecified" as const,
       };
       const project = row.projectId
         ? current.projects.find((item) => item.id === row.projectId) ?? null
@@ -418,7 +417,6 @@ export function useSessionLifecycleActions({
             id: archivedSession.id,
             operationId: createOperationId("session-delete"),
           });
-          removeSessionPreference(archivedSession.id);
           current.runtime.dropQueuedSessionsRef.current([archivedSession.id]);
           current.runtime.messagesBySessionRef.current.delete(archivedSession.id);
           current.runtime.activeTurnIdBySessionRef.current.delete(

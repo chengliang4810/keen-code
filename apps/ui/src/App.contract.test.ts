@@ -474,8 +474,9 @@ describe("App 编辑重发契约", () => {
       'currentView.subagents.some((agent) => agent.status === "running")',
     );
     expect(editSource).toContain(
-      "updateSessionPreference(prepared.archivedSessionId, { archived: true })",
+      "acpSessionSetPreference({",
     );
+    expect(editSource).toContain("archived: true,");
     expect(editSource).toMatch(
       /executeSend\(\{[\s\S]*?storedDisplay: content,[\s\S]*?targetSessionId: sessionId,/,
     );
@@ -515,9 +516,7 @@ describe("App 启动工作台契约", () => {
     expect(toggleEnd).toBeGreaterThan(toggleStart);
     expect(toggleSource).toContain("const rows = await sessionsList(checked.path)");
     expect(toggleSource).not.toContain("const rows = await sessionsList();");
-    expect(toggleSource).toContain(
-      "projectSidebar(rows, loadSessionPreferencesSafe(), [checked])",
-    );
+    expect(toggleSource).toContain("projectSidebar(rows, [checked])");
   });
 });
 

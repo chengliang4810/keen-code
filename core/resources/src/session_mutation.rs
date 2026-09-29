@@ -829,6 +829,8 @@ fn target_records(
         time_unix_ms: target_time_unix_ms.max(state.updated_at_unix_ms),
         event: SessionEvent::SessionRenamed {
             title: target_title.to_owned(),
+            // fork/edit 的标题覆盖不声明来源，保留源会话继承的 title_source。
+            source: None,
         },
     });
     let final_state = reduce_records(target_session_id, &records)?;
@@ -896,6 +898,7 @@ fn collect_request_id_binding(
         }
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionPreferenceSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -996,6 +999,7 @@ fn rebind_event_request_ids(
         }
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionPreferenceSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2306,6 +2310,7 @@ mod tests {
             "edit-control-rename",
             SessionEvent::SessionRenamed {
                 title: "保留后的标题".to_owned(),
+                source: None,
             },
         );
         append(

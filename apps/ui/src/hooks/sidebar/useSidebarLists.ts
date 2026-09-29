@@ -17,9 +17,6 @@ import {
   type SidebarSortMode,
 } from "@/lib/sidebarOrder";
 import {
-  loadSessionPreferencesSafe,
-} from "@/lib/sessionPreferences";
-import {
   projectSidebar,
   projectsFromSessions,
 } from "@/lib/sessionProjection";
@@ -168,10 +165,7 @@ export function useSidebarLists({
         ? await api.projectsList()
         : projectsFromSessions(rows);
       if (!mounted.current) return;
-      const projection = projectSidebar(
-        rows,
-        loadSessionPreferencesSafe(),
-        persistedProjects,
+      const projection = projectSidebar(rows, persistedProjects,
       );
       setProjects(projection.projects);
       setSessions(
@@ -247,7 +241,7 @@ export function useSidebarLists({
       // 孤儿并落入下方合并，旧孤儿副本不被过滤，导致"对话"分区重复累积。
       const rows = await sessionsList(checked.path);
       if (!isCurrentProject(project)) return;
-      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), [checked]);
+      const projection = projectSidebar(rows, [checked]);
       setProjects((previous) => previous.map((item) => item.id === project.id ? checked : item));
       setSessions((previous) => [...previous.filter((item) => item.projectId !== project.id), ...projection.sessions]);
       loadedProjects.current.add(project.id);
@@ -264,10 +258,7 @@ export function useSidebarLists({
       if (!canUseAcpHost(api.isTauri())) return;
       if (!api.isTauri()) {
         const rows = await sessionsList();
-        const projection = projectSidebar(
-          rows,
-          loadSessionPreferencesSafe(),
-          projectsFromSessions(rows),
+        const projection = projectSidebar(rows, projectsFromSessions(rows),
         );
         setProjects(projection.projects);
         setSessions(projection.sessions);
@@ -280,7 +271,7 @@ export function useSidebarLists({
       }
       const targets = projects.filter((project) => project.id === projectId || loadedProjects.current.has(project.id) || expandedProjects[project.id]);
       const rows = (await Promise.all(targets.map((project) => sessionsList(project.path)))).flat();
-      const projection = projectSidebar(rows, loadSessionPreferencesSafe(), projects);
+      const projection = projectSidebar(rows, projects);
       const ids = new Set(targets.map((project) => project.id));
       ids.forEach((id) => loadedProjects.current.add(id));
       setSessions((previous) => [...previous.filter((item) => !item.projectId || !ids.has(item.projectId)), ...projection.sessions]);
@@ -310,10 +301,7 @@ export function useSidebarLists({
         const sourceProjects = api.isTauri()
           ? currentProjects
           : projectsFromSessions(rows);
-        const projection = projectSidebar(
-          rows,
-          loadSessionPreferencesSafe(),
-          sourceProjects,
+        const projection = projectSidebar(rows, sourceProjects,
         );
         setProjects(projection.projects);
         setSessions(projection.sessions);

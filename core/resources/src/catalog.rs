@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::atomic::{prepare_root, sync_directory};
-use crate::{ROOT_AGENT_ID, ResourceError, SessionId, SessionState, SessionStatus};
+use crate::{ROOT_AGENT_ID, ResourceError, SessionId, SessionState, SessionStatus, TitleSource};
 use serde::{Deserialize, Serialize};
 
 /// 按稳定标识排序列出当前存储根中的全部 Session 目录。
@@ -100,6 +100,15 @@ pub struct StoredSessionMetadata {
     pub title: String,
     /// Session 创建时绑定的项目根目录。
     pub project_root: String,
+    /// 用户置顶标记。
+    #[serde(default)]
+    pub pinned: bool,
+    /// 用户归档标记。
+    #[serde(default)]
+    pub archived: bool,
+    /// 当前标题的写入来源。
+    #[serde(default)]
+    pub title_source: TitleSource,
     /// 权威日志归约得到的当前状态。
     pub status: SessionStatus,
     /// SessionCreated 事件的 Unix Epoch 毫秒时间。
@@ -124,6 +133,9 @@ impl StoredSessionMetadata {
             session_id: state.session_id.clone(),
             title: state.title.clone(),
             project_root: state.project_root.clone(),
+            pinned: state.pinned,
+            archived: state.archived,
+            title_source: state.title_source,
             status: state.status.clone(),
             created_at_unix_ms: state.created_at_unix_ms,
             updated_at_unix_ms: state.updated_at_unix_ms,

@@ -788,6 +788,21 @@ pub struct ModelRoundState {
     pub completed_at_unix_ms: u64,
 }
 
+/// 会话标题的写入来源，用于约束自动标题不覆盖手动标题。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TitleSource {
+    /// 未记录来源（历史事件缺省）；按可被显式来源覆盖处理。
+    #[default]
+    Unspecified,
+    /// 用户手动改名。
+    Manual,
+    /// 模型生成的自动标题。
+    Automatic,
+    /// 首条用户消息前缀派生。
+    MessagePrefix,
+}
+
 /// 事件记录中 `type` 与 `payload` 对应的类型化权威事件。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(
@@ -808,6 +823,16 @@ pub enum SessionEvent {
     SessionRenamed {
         /// 去除首尾空白后必须非空的新标题。
         title: String,
+        /// 本次标题写入来源；历史事件缺省为未记录。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<TitleSource>,
+    },
+    /// 更新用户会话偏好（置顶/归档）。
+    SessionPreferenceSet {
+        /// 新的置顶标记；`None` 表示保持不变。
+        pinned: Option<bool>,
+        /// 新的归档标记；`None` 表示保持不变。
+        archived: Option<bool>,
     },
     /// 更新 Session 生命周期状态。
     SessionStatusChanged {
@@ -1097,6 +1122,15 @@ pub struct SessionState {
     pub title: String,
     /// 项目根目录展示文本。
     pub project_root: String,
+    /// 用户置顶标记；由 `SessionPreferenceSet` 维护的权威状态。
+    #[serde(default)]
+    pub pinned: bool,
+    /// 用户归档标记；由 `SessionPreferenceSet` 维护的权威状态。
+    #[serde(default)]
+    pub archived: bool,
+    /// 当前标题的写入来源；自动标题不得覆盖手动标题。
+    #[serde(default)]
+    pub title_source: TitleSource,
     /// 当前生命周期状态。
     pub status: SessionStatus,
     /// 已应用的最后一个 sequence。
@@ -1145,6 +1179,9 @@ impl SessionState {
             created: false,
             title: String::new(),
             project_root: String::new(),
+            pinned: false,
+            archived: false,
+            title_source: TitleSource::default(),
             status: SessionStatus::Idle,
             last_sequence: 0,
             created_at_unix_ms: 0,

@@ -229,12 +229,29 @@ async function listRemoteSessions(transport: HostTransportAdapter): Promise<Sess
         throw new Error("远程 Session 列表项无效。");
       }
       const lastUserMessageAt = item._meta?.["keencode/lastUserMessageAt"];
+      const pinned = item._meta?.["keencode/pinned"];
+      const archived = item._meta?.["keencode/archived"];
+      const titleSource = item._meta?.["keencode/titleSource"];
+      if (
+        (pinned !== undefined && typeof pinned !== "boolean") ||
+        (archived !== undefined && typeof archived !== "boolean") ||
+        (titleSource !== undefined &&
+          titleSource !== "unspecified" &&
+          titleSource !== "manual" &&
+          titleSource !== "automatic" &&
+          titleSource !== "message-prefix")
+      ) {
+        throw new Error("远程 Session 列表项偏好元数据无效。");
+      }
       sessions.push({
         id: item.sessionId,
         title: typeof item.title === "string" ? item.title : null,
         cwd: item.cwd,
         updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : "",
         lastUserMessageAt: typeof lastUserMessageAt === "string" ? lastUserMessageAt : null,
+        pinned: pinned ?? false,
+        archived: archived ?? false,
+        titleSource: titleSource ?? "unspecified",
       });
     }
     cursor = page.nextCursor;

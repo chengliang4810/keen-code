@@ -1292,6 +1292,7 @@ fn cross_instance_flush_refreshes_before_and_after_external_append() {
                     expected,
                     SessionEvent::SessionRenamed {
                         title: title.to_owned(),
+                        source: None,
                     },
                 )
                 .expect("跨实例事件应追加"),

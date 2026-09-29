@@ -63,7 +63,6 @@ import type {
 } from "@/lib/draftNavigation";
 import { ImageViewerProvider } from "@/components/ImageViewer";
 import { StartupScreen } from "@/components/StartupScreen";
-import { updateSessionPreference } from "@/lib/sessionPreferences";
 import { extractFirstUserMessageText } from "@/lib/sessionTitle";
 import { createAcpWorkspaceState, type AcpWorkspaceState } from "@/lib/acp/store";
 import { projectAcpConversation } from "@/lib/sessionProjection";
@@ -1072,7 +1071,6 @@ export default function App() {
       applyMessagePrefixTitle,
       applyAutomaticSessionTitle,
       markSessionUserMessage,
-      updateSessionPreference,
       clearDraftNavigationSnapshot: () => {
         draftNavigationSnapshotRef.current = null;
       },

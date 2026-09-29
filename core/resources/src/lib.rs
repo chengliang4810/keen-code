@@ -65,10 +65,10 @@ pub use types::{
     OnErrorHookInvocation, PersistedToolResult, PlanState, ProviderProtocolSnapshot,
     ProviderSnapshot, ReasoningContinuation, ReasoningEffortSnapshot, SessionEvent,
     SessionEventRecord, SessionMessage, SessionState, SessionStatus, SubAgentState, SubAgentStatus,
-    TerminalRecord, TodoItem, TodoSnapshot, TodoStatus, ToolCompletionStatus, ToolEffect,
-    ToolFileChange, ToolLifecycle, ToolOutcome, ToolRequest, ToolResultPart, ToolResultProjection,
-    TranscriptRecord, TranscriptSegment, TranscriptSegmentReference, TurnState, TurnStatus,
-    TurnStopReason, WorktreeRecord,
+    TerminalRecord, TitleSource, TodoItem, TodoSnapshot, TodoStatus, ToolCompletionStatus,
+    ToolEffect, ToolFileChange, ToolLifecycle, ToolOutcome, ToolRequest, ToolResultPart,
+    ToolResultProjection, TranscriptRecord, TranscriptSegment, TranscriptSegmentReference,
+    TurnState, TurnStatus, TurnStopReason, WorktreeRecord,
 };
 pub use types::{ROOT_AGENT_ID, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION};
 pub use types::{SIDE_EFFECT_UNKNOWN_RESULT_TEXT, side_effect_unknown_result};

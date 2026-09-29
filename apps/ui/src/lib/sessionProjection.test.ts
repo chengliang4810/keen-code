@@ -24,6 +24,9 @@ describe("sessionProjection", () => {
         cwd: "D:\\Projects\\Demo\\",
         updatedAt: "",
         lastUserMessageAt: null,
+        pinned: false,
+        archived: false,
+        titleSource: "unspecified",
       },
       {
         id: "two",
@@ -31,6 +34,9 @@ describe("sessionProjection", () => {
         cwd: "d:/projects/demo",
         updatedAt: "",
         lastUserMessageAt: null,
+        pinned: false,
+        archived: false,
+        titleSource: "unspecified",
       },
       {
         id: "three",
@@ -38,6 +44,9 @@ describe("sessionProjection", () => {
         cwd: "D:/Projects/Other",
         updatedAt: "",
         lastUserMessageAt: null,
+        pinned: false,
+        archived: false,
+        titleSource: "unspecified",
       },
     ]);
 
@@ -51,7 +60,7 @@ describe("sessionProjection", () => {
     expect(projects[1]?.name).toBe("Other");
   });
 
-  it("按 Session cwd 关联项目，并只从当前偏好读取展示状态", () => {
+  it("按 Session cwd 关联项目，并从权威状态读取展示标记", () => {
     const projection = projectSidebar(
       [
         {
@@ -60,14 +69,11 @@ describe("sessionProjection", () => {
           cwd: "/tmp/demo",
           updatedAt: "2026-08-01T00:00:00Z",
           lastUserMessageAt: null,
+          pinned: true,
+          archived: true,
+          titleSource: "manual",
         },
       ],
-      {
-        "session-1": {
-          archived: true,
-          pinned: true,
-        },
-      },
       [
         {
           id: "project-1",
@@ -84,6 +90,7 @@ describe("sessionProjection", () => {
       updatedAt: "2026-08-01T00:00:00Z",
       archived: true,
       pinned: true,
+      titleSource: "manual",
     });
     expect(projection.sessions[0]).not.toHaveProperty("scheduled");
   });
@@ -97,9 +104,11 @@ describe("sessionProjection", () => {
           cwd: "\\\\?\\D:\\test\\demo",
           updatedAt: "2026-08-30T00:00:00Z",
           lastUserMessageAt: null,
+          pinned: false,
+          archived: false,
+          titleSource: "unspecified",
         },
       ],
-      {},
       [
         {
           id: "project-windows",

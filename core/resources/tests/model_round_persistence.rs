@@ -861,6 +861,7 @@ fn reducer_rejects_regressing_event_timestamps_transactionally() {
         500,
         SessionEvent::SessionRenamed {
             title: "相同时间合法".to_owned(),
+            source: None,
         },
     );
     reduce_record(&mut state, equal_time_record).expect("相同毫秒时间应允许");
@@ -871,6 +872,7 @@ fn reducer_rejects_regressing_event_timestamps_transactionally() {
         499,
         SessionEvent::SessionRenamed {
             title: "倒退时间必须拒绝".to_owned(),
+            source: None,
         },
     );
     assert!(reduce_record(&mut state, regressing).is_err());
@@ -912,6 +914,7 @@ fn journal_append_clamps_regressing_system_clock() {
         "event-renamed",
         SessionEvent::SessionRenamed {
             title: "墙钟回退后标题".to_owned(),
+            source: None,
         },
     );
     assert_eq!(appended.time_unix_ms, future_time_unix_ms);

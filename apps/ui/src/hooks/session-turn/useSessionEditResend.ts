@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import type { SessionSnapshot, ChatMessage } from "@/lib/session";
 import { buildAgentPrompt } from "@/lib/attachments";
 import { localizeUiError } from "@/lib/session";
-import { createOperationId } from "@/lib/acp/api";
+import { createOperationId, sessionSetPreference as acpSessionSetPreference } from "@/lib/acp/api";
 import { beginSessionRecovery } from "@/lib/acp/store";
 import type {
   ExecuteSend,
@@ -39,7 +39,6 @@ export function useSessionEditResend({
     acpWorkspaceRef,
     replayHistory,
     refreshSessions,
-    updateSessionPreference,
   } = runtime;
   const { setLocalError } = ui;
   const { sendInFlightRef } = state;
@@ -92,7 +91,14 @@ export function useSessionEditResend({
               ),
               operationId: createOperationId("session-rewind"),
             });
-            updateSessionPreference(prepared.archivedSessionId, { archived: true });
+            // rewind 派生的归档分支写入权威 Journal；失败只记录，不阻断恢复。
+            void acpSessionSetPreference({
+              id: prepared.archivedSessionId,
+              archived: true,
+              operationId: createOperationId("session-archive"),
+            }).catch((error) =>
+              console.warn("archive rewound session failed", error),
+            );
           } catch (cause) {
             // Rewind 可能已在 Host 完成事务后才丢失响应；无论 API 成功与否都必须
             // 继续标准恢复，成功时建立新投递世代，失败时也重建当前权威历史。
@@ -142,7 +148,6 @@ export function useSessionEditResend({
       session.state,
       setLocalError,
       ultraModeSessionKey,
-      updateSessionPreference,
     ],
   );
 }

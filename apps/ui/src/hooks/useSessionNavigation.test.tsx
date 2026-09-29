@@ -63,7 +63,7 @@ it("从备用模型会话新建草稿时恢复保存的主模型，保留原会�
 it("连续导航隔离两会话草稿、附件和失败气泡，迟到恢复不清空新输入", async () => {
   vi.stubGlobal("window", {});
   const { navigation, options } = createHarness();
-  const row = (id: string) => ({ id, title: id, projectId: null, updatedAt: "", lastUserMessageAt: null, archived: false, pinned: false });
+  const row = (id: string) => ({ id, title: id, projectId: null, updatedAt: "", lastUserMessageAt: null, archived: false, pinned: false, titleSource: "unspecified" as const });
   const file = { path: "D:/cart/a.txt", name: "a.txt", isDir: false };
   options.composer.draftRef.current = "CART";
   options.composer.attachmentsRef.current = [file];

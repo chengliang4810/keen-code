@@ -122,6 +122,7 @@ fn replay_pages_match_full_read_for_multiple_cursors_and_limits() {
             events: vec![
                 SessionEvent::SessionRenamed {
                     title: "批次标题".to_owned(),
+                    source: None,
                 },
                 SessionEvent::SessionStatusChanged {
                     status: SessionStatus::Idle,
@@ -163,6 +164,7 @@ fn replay_keeps_noop_and_atomic_batch_as_physical_records() {
         SessionEvent::AtomicBatch {
             events: vec![SessionEvent::SessionRenamed {
                 title: "批次标题".to_owned(),
+                source: None,
             }],
         },
     );

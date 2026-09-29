@@ -1281,6 +1281,7 @@ mod tests {
                 &format!("runtime-batch-{index}"),
                 SessionEvent::SessionRenamed {
                     title: format!("批量标题-{index}"),
+                    source: None,
                 },
             );
             max_pending = max_pending.max(
@@ -1322,6 +1323,7 @@ mod tests {
             "prepared-barrier-marker",
             SessionEvent::SessionRenamed {
                 title: "Prepared barrier marker".to_owned(),
+                source: None,
             },
         );
         assert!(

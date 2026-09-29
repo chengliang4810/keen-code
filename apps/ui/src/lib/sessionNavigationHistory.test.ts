@@ -17,7 +17,7 @@ const row = (id: string) => ({
   updatedAt: "",
   lastUserMessageAt: null,
   archived: false,
-  pinned: false,
+  pinned: false, titleSource: "unspecified" as const,
 });
 
 describe("session navigation history", () => {

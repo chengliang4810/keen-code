@@ -310,6 +310,9 @@ describe("ACP Session 标准 API 映射", () => {
         title: null,
         updatedAt: "",
         lastUserMessageAt: null,
+        pinned: false,
+        archived: false,
+        titleSource: "unspecified",
       },
       {
         id: "session-2",
@@ -317,6 +320,9 @@ describe("ACP Session 标准 API 映射", () => {
         title: "第二个",
         updatedAt: "2026-09-05T00:00:00Z",
         lastUserMessageAt: "2026-09-04T00:00:00Z",
+        pinned: false,
+        archived: false,
+        titleSource: "unspecified",
       },
     ]);
     expect(clientMocks.acpRequest).toHaveBeenNthCalledWith(

@@ -92,10 +92,10 @@ fn control_retry_with_identical_payload_is_idempotent() {
     let session = create_session(&root, "control-identical");
 
     let first = session
-        .rename("operation-1", "新标题")
+        .rename("operation-1", "新标题", None)
         .expect("首次重命名应提交");
     let retried = session
-        .rename("operation-1", "新标题")
+        .rename("operation-1", "新标题", None)
         .expect("相同操作重试应幂等命中");
 
     assert_eq!(retried.title, "新标题");
@@ -115,10 +115,10 @@ fn control_retry_with_different_payload_conflicts_without_freezing_session() {
     let session = create_session(&root, "control-conflict");
 
     session
-        .rename("operation-1", "标题一")
+        .rename("operation-1", "标题一", None)
         .expect("首次重命名应提交");
     assert!(matches!(
-        session.rename("operation-1", "标题二"),
+        session.rename("operation-1", "标题二", None),
         Err(RuntimeError::ControlOperationConflict)
     ));
 
@@ -126,7 +126,7 @@ fn control_retry_with_different_payload_conflicts_without_freezing_session() {
     assert_eq!(snapshot.state.title, "标题一");
     assert!(!snapshot.recovery_required);
     let recovered = session
-        .rename("operation-2", "标题三")
+        .rename("operation-2", "标题三", None)
         .expect("独立控制操作不应被冲突冻结");
     assert_eq!(recovered.title, "标题三");
 }
@@ -138,7 +138,7 @@ fn control_operation_id_is_bound_across_methods() {
     let session = create_session(&root, "control-method-conflict");
 
     session
-        .rename("operation-shared", "新标题")
+        .rename("operation-shared", "新标题", None)
         .expect("首次控制操作应提交");
     assert!(matches!(
         session.set_plan(
@@ -168,7 +168,7 @@ fn visible_indeterminate_control_retry_reconciles_before_new_work() {
     inject_runtime_lifecycle_visible_indeterminate(&event_id);
 
     assert!(matches!(
-        session.rename("operation-1", "已写入标题"),
+        session.rename("operation-1", "已写入标题", None),
         Err(RuntimeError::RecoveryRequired)
     ));
     let uncertain = session.snapshot().expect("不确定提交快照应读取");
@@ -176,12 +176,12 @@ fn visible_indeterminate_control_retry_reconciles_before_new_work() {
     assert!(uncertain.recovery_required);
     assert_eq!(uncertain.pending_indeterminate_events, 1);
     assert!(matches!(
-        session.rename("operation-2", "不应写入"),
+        session.rename("operation-2", "不应写入", None),
         Err(RuntimeError::RecoveryRequired)
     ));
 
     let reconciled = session
-        .rename("operation-1", "已写入标题")
+        .rename("operation-1", "已写入标题", None)
         .expect("原操作重试应对账成功");
     assert_eq!(reconciled.title, "已写入标题");
     let healthy = session.snapshot().expect("对账后快照应读取");
@@ -197,13 +197,13 @@ fn control_operation_id_validation_is_bounded_and_unambiguous() {
 
     for operation_id in ["", " operation", "operation ", "operation\n"] {
         assert!(matches!(
-            session.rename(operation_id, "标题"),
+            session.rename(operation_id, "标题", None),
             Err(RuntimeError::InvalidControlOperation)
         ));
     }
     let oversized = "x".repeat(129);
     assert!(matches!(
-        session.rename(&oversized, "标题"),
+        session.rename(&oversized, "标题", None),
         Err(RuntimeError::InvalidControlOperation)
     ));
 }

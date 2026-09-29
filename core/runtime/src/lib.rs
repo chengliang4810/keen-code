@@ -65,9 +65,9 @@ use keencode_resources::{
     PersistedToolResult, PlanState, ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId,
     ResourceError, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId,
     SessionEventRecord, SessionId, SessionJournal, SessionLease, SessionLeaseAcquire,
-    SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus, ToolCompletionStatus,
-    ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason,
-    reduce_record, side_effect_unknown_result,
+    SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus, TitleSource,
+    ToolCompletionStatus, ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment, TurnId,
+    TurnStatus, TurnStopReason, reduce_record, side_effect_unknown_result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1366,12 +1366,27 @@ impl RuntimeSession {
         &self,
         operation_id: &str,
         title: impl Into<String>,
+        source: Option<TitleSource>,
     ) -> Result<SessionState, RuntimeError> {
         self.commit_control_event(
             operation_id,
             SessionEvent::SessionRenamed {
                 title: title.into(),
+                source,
             },
+        )
+    }
+
+    /// 更新用户会话偏好（置顶/归档）并返回提交后的权威状态。
+    pub fn set_preference(
+        &self,
+        operation_id: &str,
+        pinned: Option<bool>,
+        archived: Option<bool>,
+    ) -> Result<SessionState, RuntimeError> {
+        self.commit_control_event(
+            operation_id,
+            SessionEvent::SessionPreferenceSet { pinned, archived },
         )
     }
 
@@ -5639,6 +5654,7 @@ fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
         | SessionEvent::OnErrorHookReceiptCommitted { .. } => StateCollectionItems::default(),
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionPreferenceSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnStopped { .. }

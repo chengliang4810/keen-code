@@ -113,6 +113,12 @@ export interface SessionListItem {
   updatedAt: string;
   /** RFC 3339 最近一条用户消息时间；从未发送消息时为空。 */
   lastUserMessageAt: string | null;
+  /** 用户置顶标记；权威 Journal 状态经 `_meta` 投影。 */
+  pinned: boolean;
+  /** 用户归档标记；权威 Journal 状态经 `_meta` 投影。 */
+  archived: boolean;
+  /** 当前标题写入来源；约束自动标题不覆盖手动标题。 */
+  titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }
 
 /** 返回后端诊断日志路径，供启动门禁和错误页展示。 */
@@ -335,6 +341,8 @@ export async function sessionRename(args: {
   title: string;
   /** 标题 Journal 提交的业务幂等标识，放在 ACP 保留元数据中。 */
   operationId: string;
+  /** 标题写入来源；manual 绝不允许被自动标题覆盖。 */
+  source?: "manual" | "automatic" | "message-prefix";
 }): Promise<{
   /** 已持久化标题的会话标识。 */
   sessionId: string;
@@ -346,6 +354,33 @@ export async function sessionRename(args: {
   return acpRequest("keencode/session/rename", {
     sessionId: args.id,
     title: args.title,
+    ...(args.source === undefined ? {} : { source: args.source }),
+    _meta: { "keencode/operationId": args.operationId },
+  });
+}
+
+/** 更新会话偏好（置顶/归档）；权威状态写入 Journal，前端只做投影。 */
+export async function sessionSetPreference(args: {
+  id: string;
+  /** 新置顶标记；缺省表示保持不变。 */
+  pinned?: boolean;
+  /** 新归档标记；缺省表示保持不变。 */
+  archived?: boolean;
+  /** 偏好 Journal 提交的业务幂等标识，放在 ACP 保留元数据中。 */
+  operationId: string;
+}): Promise<{
+  /** 已更新偏好的会话标识。 */
+  sessionId: string;
+  /** 偏好提交后的 Journal 水位。 */
+  journalSequence: number;
+}> {
+  if (args.pinned === undefined && args.archived === undefined) {
+    throw new Error("会话偏好更新必须至少携带一个变更");
+  }
+  return acpRequest("keencode/session/preference", {
+    sessionId: args.id,
+    ...(args.pinned === undefined ? {} : { pinned: args.pinned }),
+    ...(args.archived === undefined ? {} : { archived: args.archived }),
     _meta: { "keencode/operationId": args.operationId },
   });
 }
@@ -497,12 +532,33 @@ export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
       if (lastUserMessageAt !== undefined && typeof lastUserMessageAt !== "string") {
         throw new Error("ACP Session 列表项用户消息时间无效");
       }
+      const pinned = item._meta?.["keencode/pinned"];
+      if (pinned !== undefined && typeof pinned !== "boolean") {
+        throw new Error("ACP Session 列表项置顶标记无效");
+      }
+      const archived = item._meta?.["keencode/archived"];
+      if (archived !== undefined && typeof archived !== "boolean") {
+        throw new Error("ACP Session 列表项归档标记无效");
+      }
+      const titleSource = item._meta?.["keencode/titleSource"];
+      if (
+        titleSource !== undefined &&
+        titleSource !== "unspecified" &&
+        titleSource !== "manual" &&
+        titleSource !== "automatic" &&
+        titleSource !== "message-prefix"
+      ) {
+        throw new Error("ACP Session 列表项标题来源无效");
+      }
       sessions.push({
         id: item.sessionId,
         cwd: item.cwd,
         title: item.title ?? null,
         updatedAt: item.updatedAt ?? "",
         lastUserMessageAt: lastUserMessageAt ?? null,
+        pinned: pinned ?? false,
+        archived: archived ?? false,
+        titleSource: titleSource ?? "unspecified",
       });
     }
     cursor = page.nextCursor;

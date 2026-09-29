@@ -2995,6 +2995,7 @@ fn validate_non_batch_event_artifacts(
         | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionPreferenceSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -3946,6 +3947,7 @@ mod tests {
                 &format!("event-rename-{sequence}"),
                 SessionEvent::SessionRenamed {
                     title: format!("标题-{sequence}"),
+                    source: None,
                 },
             );
         }
@@ -4026,6 +4028,7 @@ mod tests {
                     index as u64,
                     SessionEvent::SessionRenamed {
                         title: format!("标题-{index}"),
+                        source: None,
                     },
                 )
                 .expect("重命名事件应追加");
@@ -4076,6 +4079,7 @@ mod tests {
                     index as u64,
                     SessionEvent::SessionRenamed {
                         title: format!("竞速-{index}"),
+                        source: None,
                     },
                 )
                 .expect("竞速前缀应追加");
@@ -4093,6 +4097,7 @@ mod tests {
                     JOURNAL_BATCH_MAX_RECORDS as u64,
                     SessionEvent::SessionRenamed {
                         title: "竞速-64".to_owned(),
+                        source: None,
                     },
                 )
                 .expect("第 64 条应追加")
@@ -4156,6 +4161,7 @@ mod tests {
                         sequence,
                         SessionEvent::SessionRenamed {
                             title: format!("标题-{round}-{index}"),
+                            source: None,
                         },
                     )
                     .expect("重命名事件应追加");
@@ -4211,6 +4217,7 @@ mod tests {
                 1,
                 SessionEvent::SessionRenamed {
                     title: "待刷".to_owned(),
+                    source: None,
                 },
             )
             .expect("待刷事件应追加");
@@ -4325,6 +4332,7 @@ mod tests {
                 1,
                 SessionEvent::SessionRenamed {
                     title: "外部新增".to_owned(),
+                    source: None,
                 },
             )
             .expect("外部事件应追加");
@@ -4388,6 +4396,7 @@ mod tests {
                     expected_sequence,
                     SessionEvent::SessionRenamed {
                         title: format!("rearm-{cycle}-first"),
+                        source: None,
                     },
                 )
                 .expect("重新 arm 后事件应追加");
@@ -4407,6 +4416,7 @@ mod tests {
                     expected_sequence,
                     SessionEvent::SessionRenamed {
                         title: format!("rearm-{cycle}-second"),
+                        source: None,
                     },
                 )
                 .expect("同一批次后续事件应追加");
@@ -4478,6 +4488,7 @@ mod tests {
                 } else {
                     SessionEvent::SessionRenamed {
                         title: format!("并发 Journal {index} round {round}"),
+                        source: None,
                     }
                 };
                 journal
@@ -4593,6 +4604,7 @@ mod tests {
                 1,
                 SessionEvent::SessionRenamed {
                     title: "最终落盘".to_owned(),
+                    source: None,
                 },
             )
             .expect("待刷事件应追加");
@@ -4661,6 +4673,7 @@ mod tests {
                 1,
                 SessionEvent::SessionRenamed {
                     title: "待确认".to_owned(),
+                    source: None,
                 },
             )
             .expect("待刷事件应追加");
@@ -4678,6 +4691,7 @@ mod tests {
                 2,
                 SessionEvent::SessionRenamed {
                     title: "不得追加".to_owned(),
+                    source: None,
                 },
             )
             .expect("sticky 栅栏应返回结构化结果");
@@ -4851,6 +4865,7 @@ mod tests {
                 1,
                 SessionEvent::SessionRenamed {
                     title: "已锚定".to_owned(),
+                    source: None,
                 },
             )
             .expect("Snapshot 边界事件应追加");

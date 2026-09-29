@@ -1,6 +1,6 @@
 //! ACP Host 的 KeenCode 扩展请求路由。
 //!
-//! 该模块只处理已经由 [`keencode_acp::AcpRequestDecoder`] 验证过的 DTO，所有
+//! 该模块只处理已经由 [keencode_acp::AcpRequestDecoder] 验证过的 DTO，所有
 //! 成功值仍通过父 Host 的封闭响应编码器输出。它不为尚未存在 Runtime 业务
 //! 实现的能力制造“已接受”或“已完成”状态。
 
@@ -22,7 +22,7 @@ use keencode_acp::{
 use keencode_resources::{
     GoalDocument, GoalFileStore, GoalRecord as ResourceGoalRecord,
     GoalStatus as ResourceGoalStatus, MessagePart, MessageRole, ROOT_AGENT_ID, ScopeId,
-    SessionEvent, SessionId, SessionMessage, session_goal_scope_id,
+    SessionEvent, SessionId, SessionMessage, TitleSource, session_goal_scope_id,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -100,6 +100,9 @@ pub(super) async fn dispatch(
             dispatch_session_mcp_unload(host, id, request).await
         }
         AcpRequest::RenameSession(request) => dispatch_rename(host, id, request).await,
+        AcpRequest::SetSessionPreference(request) => {
+            dispatch_session_preference(host, id, request).await
+        }
         AcpRequest::GenerateSessionTitle(request) => {
             dispatch_generate_title(host, id, request).await
         }
@@ -190,7 +193,7 @@ async fn dispatch_session_mcp_unload(
     host.result_value(id, &response)
 }
 
-/// 接通用户 steer；只有 Runtime 实际写入动态输入后才返回 `accepted=true`。
+/// 接通用户 steer；只有 Runtime 实际写入动态输入后才返回 accepted=true。
 fn dispatch_steer(
     host: &AcpHost,
     id: schema::RequestId,
@@ -220,7 +223,44 @@ async fn dispatch_rename(
     let operation_id = request_operation_id(request.meta.as_ref())?;
     let session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
-    let response = rename_session_with_receipt(&session, session_id, &operation_id, request.title)?;
+    let response = rename_session_with_receipt(
+        &session,
+        session_id,
+        &operation_id,
+        request.title,
+        request.source.map(map_title_source),
+    )?;
+    host.result_value(id, &response)
+}
+
+/// 把 ACP 线格式的标题来源映射为权威事件枚举。
+fn map_title_source(source: keencode_acp::SessionTitleSource) -> TitleSource {
+    match source {
+        keencode_acp::SessionTitleSource::Manual => TitleSource::Manual,
+        keencode_acp::SessionTitleSource::Automatic => TitleSource::Automatic,
+        keencode_acp::SessionTitleSource::MessagePrefix => TitleSource::MessagePrefix,
+    }
+}
+
+/// 接通会话偏好（置顶/归档）变更，返回提交后的 Journal 水位。
+async fn dispatch_session_preference(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: keencode_acp::SetSessionPreferenceRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let session_id = request.session_id;
+    let _control = host.lock_session_control(&session_id).await?;
+    let operation_id = request_operation_id(request.meta.as_ref())?;
+    let session = open_authorized_session(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    let response = preference_session_with_receipt(
+        &session,
+        session_id,
+        &operation_id,
+        request.pinned,
+        request.archived,
+    )?;
     host.result_value(id, &response)
 }
 
@@ -251,6 +291,7 @@ fn rename_session_with_receipt(
     session_id: String,
     operation_id: &str,
     requested_title: String,
+    requested_source: Option<TitleSource>,
 ) -> Result<RenameSessionResponse, HostFailure> {
     if let Some(record) = session
         .committed_control_event(operation_id)
@@ -258,7 +299,8 @@ fn rename_session_with_receipt(
     {
         let same_request = matches!(
             &record.event,
-            SessionEvent::SessionRenamed { title } if title == &requested_title
+            SessionEvent::SessionRenamed { title, source }
+                if title == &requested_title && *source == requested_source
         );
         if !same_request {
             return Err(HostFailure::InvalidParams);
@@ -271,11 +313,46 @@ fn rename_session_with_receipt(
     }
 
     let state = session
-        .rename(operation_id, requested_title)
+        .rename(operation_id, requested_title, requested_source)
         .map_err(|error| internal_failure(error))?;
     Ok(RenameSessionResponse {
         session_id,
         title: state.title,
+        journal_sequence: state.last_sequence,
+    })
+}
+
+/// 提交或恢复一次会话偏好变更的权威响应；重试只复用正文完全匹配的收据。
+fn preference_session_with_receipt(
+    session: &keencode_runtime::RuntimeSession,
+    session_id: String,
+    operation_id: &str,
+    requested_pinned: Option<bool>,
+    requested_archived: Option<bool>,
+) -> Result<keencode_acp::SetSessionPreferenceResponse, HostFailure> {
+    if let Some(record) = session
+        .committed_control_event(operation_id)
+        .map_err(|error| internal_failure(error))?
+    {
+        let same_request = matches!(
+            &record.event,
+            SessionEvent::SessionPreferenceSet { pinned, archived }
+                if *pinned == requested_pinned && *archived == requested_archived
+        );
+        if !same_request {
+            return Err(HostFailure::InvalidParams);
+        }
+        return Ok(keencode_acp::SetSessionPreferenceResponse {
+            session_id,
+            journal_sequence: record.sequence,
+        });
+    }
+
+    let state = session
+        .set_preference(operation_id, requested_pinned, requested_archived)
+        .map_err(|error| internal_failure(error))?;
+    Ok(keencode_acp::SetSessionPreferenceResponse {
+        session_id,
         journal_sequence: state.last_sequence,
     })
 }
@@ -400,7 +477,7 @@ fn dispatch_background_list(
     )
 }
 
-/// 精确授权并取消一个后台任务；没有任务时返回明确的 `cancelled=false`。
+/// 精确授权并取消一个后台任务；没有任务时返回明确的 cancelled=false。
 async fn dispatch_background_cancel(
     host: &AcpHost,
     id: schema::RequestId,
@@ -482,10 +559,10 @@ async fn resume_background_after_extensions(
     ))
 }
 
-/// 只有底层本次首次发出取消信号时才报告 `cancelled=true`。
+/// 只有底层本次首次发出取消信号时才报告 cancelled=true。
 ///
 /// 不先读取后台任务列表，避免任务在“列表读取”和实际取消之间结束而产生
-/// 虚假的成功；`AlreadyRequested` 和 `NotRunning` 都保留 Runtime 的真实结果。
+/// 虚假的成功；AlreadyRequested 和 NotRunning 都保留 Runtime 的真实结果。
 fn cancellation_was_requested(outcome: BackgroundTaskCancellationOutcome) -> bool {
     matches!(outcome, BackgroundTaskCancellationOutcome::Requested)
 }
@@ -907,7 +984,7 @@ async fn dispatch_mcp_list(
 
 /// 用已发布候选的实际 MCP 运行态覆盖配置推导的初始状态。
 fn apply_mcp_runtime_status(configured: &mut McpServerStatus, runtime: RuntimeMcpServerSnapshot) {
-    // `enabled` 只能来自当前配置；候选只包含构建时启用的 Server，不能用旧
+    // enabled 只能来自当前配置；候选只包含构建时启用的 Server，不能用旧
     // 候选快照覆盖用户刚刚切换后的开关状态。
     if !configured.enabled {
         return;
@@ -2145,6 +2222,7 @@ mod tests {
             request.session_id.clone(),
             &operation_id,
             request.title,
+            None,
         )
         .expect("首次标题变更应提交");
         let _second = rename_session_with_receipt(
@@ -2152,6 +2230,7 @@ mod tests {
             "session-json".to_owned(),
             "rename-b",
             "B".to_owned(),
+            None,
         )
         .expect("后续标题变更应提交");
         let retry = rename_session_with_receipt(
@@ -2159,6 +2238,7 @@ mod tests {
             "session-json".to_owned(),
             &operation_id,
             "A".to_owned(),
+            None,
         )
         .expect("相同 operationId 应恢复原收据");
 

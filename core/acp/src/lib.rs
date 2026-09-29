@@ -61,8 +61,9 @@ pub use protocol::{
     RewindCandidatesRequest, RewindCandidatesResponse, RewindSessionRequest, RewindSessionResponse,
     SessionConfigUpdateNotification, SessionMcpLoadRequest, SessionMcpMutationResponse,
     SessionMcpServerPhase, SessionMcpServerStatus, SessionMcpStatusRequest,
-    SessionMcpStatusResponse, SessionMcpUnloadRequest, SteerSessionRequest, SteerSessionResponse,
-    ValidateAcpParams,
+    SessionMcpStatusResponse, SessionMcpUnloadRequest, SessionTitleSource,
+    SetSessionPreferenceRequest, SetSessionPreferenceResponse, SteerSessionRequest,
+    SteerSessionResponse, ValidateAcpParams,
 };
 pub use protocol::{
     ConnectionId, DATA_ROOT_FINGERPRINT_HEX_BYTES, DEFAULT_CWD_META_KEY, EventRecoveryPlan,

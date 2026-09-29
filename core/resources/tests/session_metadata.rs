@@ -105,6 +105,7 @@ fn physical_record_time_drives_session_metadata() {
             events: vec![
                 SessionEvent::SessionRenamed {
                     title: "批次标题".to_owned(),
+                    source: None,
                 },
                 SessionEvent::SessionStatusChanged {
                     status: SessionStatus::Idle,
@@ -133,9 +134,11 @@ fn failed_atomic_batch_preserves_all_session_metadata() {
             events: vec![
                 SessionEvent::SessionRenamed {
                     title: "不得泄漏的标题".to_owned(),
+                    source: None,
                 },
                 SessionEvent::SessionRenamed {
                     title: " \t\r\n ".to_owned(),
+                    source: None,
                 },
             ],
         },
@@ -159,6 +162,7 @@ fn rename_enforces_title_and_session_lifecycle() {
         10,
         SessionEvent::SessionRenamed {
             title: "过早标题".to_owned(),
+            source: None,
         },
     );
     assert!(reduce_record(&mut state, before_created).is_err());
@@ -172,6 +176,7 @@ fn rename_enforces_title_and_session_lifecycle() {
         30,
         SessionEvent::SessionRenamed {
             title: " \n\t ".to_owned(),
+            source: None,
         },
     );
     assert!(reduce_record(&mut state, blank).is_err());
@@ -183,6 +188,7 @@ fn rename_enforces_title_and_session_lifecycle() {
         40,
         SessionEvent::SessionRenamed {
             title: "  规范标题  \n".to_owned(),
+            source: None,
         },
     );
     assert_eq!(state.title, "规范标题");
@@ -202,6 +208,7 @@ fn rename_enforces_title_and_session_lifecycle() {
         60,
         SessionEvent::SessionRenamed {
             title: "关闭后标题".to_owned(),
+            source: None,
         },
     );
     assert!(reduce_record(&mut state, after_closed).is_err());
@@ -210,6 +217,7 @@ fn rename_enforces_title_and_session_lifecycle() {
     assert_eq!(
         serde_json::to_value(SessionEvent::SessionRenamed {
             title: "原始标题".to_owned(),
+            source: None,
         })
         .expect("重命名事件应可编码"),
         json!({"type": "session_renamed", "payload": {"title": "原始标题"}})
@@ -239,6 +247,7 @@ fn journal_and_snapshot_round_trip_session_metadata() {
     let renamed = journal
         .append(SessionEvent::SessionRenamed {
             title: "  持久标题  ".to_owned(),
+            source: None,
         })
         .expect("Session 重命名事件应写入");
     let expected = journal.state().expect("Session 状态应读取");

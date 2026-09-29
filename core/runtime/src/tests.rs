@@ -5197,6 +5197,7 @@ fn snapshot_failure_does_not_reclassify_committed_journal_event() {
         "event-snapshot-failure-committed",
         SessionEvent::SessionRenamed {
             title: "Journal 已提交".to_owned(),
+            source: None,
         },
     );
     let snapshot = session.snapshot().expect("Journal 提交后的状态应读取");
@@ -5577,6 +5578,7 @@ fn runtime_manager_close_flushes_pending_records_before_unregistering() {
         "event-manager-close-pending",
         SessionEvent::SessionRenamed {
             title: "关闭前待刷".to_owned(),
+            source: None,
         },
     );
     assert_eq!(
@@ -5628,6 +5630,7 @@ fn runtime_manager_close_flush_failure_keeps_registration_for_retry() {
         "event-manager-close-retry-pending",
         SessionEvent::SessionRenamed {
             title: "关闭重试待刷".to_owned(),
+            source: None,
         },
     );
     set_append_fault(AppendFault::Sync);
@@ -6322,6 +6325,7 @@ async fn runtime_live_subscription_reports_lag_and_catch_up_contract() {
         SessionEventId::new("delivery-after-catch-up").expect("事件 ID 应有效"),
         SessionEvent::SessionRenamed {
             title: "追赶后继续收敛".to_owned(),
+            source: None,
         },
     )
     .expect("追赶后的权威事件应追加");

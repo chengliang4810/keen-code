@@ -19,7 +19,6 @@ import type {
   SessionSnapshot as AcpSessionSnapshot,
 } from "@/lib/acp/api";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
-import type { SessionPreferencePatch } from "@/lib/sessionPreferences";
 import type { TurnLatencyState } from "@/lib/turnLatency";
 import type { ViewFocus } from "@/lib/viewFocus";
 import type { SessionPromptContentBlock } from "@/lib/remotePrompt";
@@ -137,10 +136,6 @@ export interface SessionTurnRuntimePort {
     firstUserMessage: string,
     expectedTitle?: string | null,
   ) => Promise<void>;
-  updateSessionPreference: (
-    sessionId: string,
-    patch: SessionPreferencePatch,
-  ) => void;
   /** 草稿发送成功后失效“恢复未发送草稿”的导航快照，防止已发送文字回填输入框。 */
   clearDraftNavigationSnapshot: () => void;
 }

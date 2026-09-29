@@ -1293,6 +1293,7 @@ impl AcpResponsePayload for ListSessionsResponse {
 impl_validated_response_payload!(
     SteerSessionResponse,
     RenameSessionResponse,
+    SetSessionPreferenceResponse,
     GenerateSessionTitleResponse,
     RewindCandidatesResponse,
     RewindSessionResponse,
@@ -1341,6 +1342,8 @@ pub enum AcpRequest {
     SessionMcpUnload(SessionMcpUnloadRequest),
     /// 修改 Session 用户可见标题。
     RenameSession(RenameSessionRequest),
+    /// 更新 Session 用户偏好（置顶/归档）。
+    SetSessionPreference(SetSessionPreferenceRequest),
     /// 使用当前 Session 的 Provider 生成短标题候选。
     GenerateSessionTitle(GenerateSessionTitleRequest),
     /// 查询可以回退的用户消息锚点。
@@ -1394,6 +1397,7 @@ impl AcpRequest {
             Self::SessionMcpStatus(_) => "keencode/session/mcp/status",
             Self::SessionMcpUnload(_) => "keencode/session/mcp/unload",
             Self::RenameSession(_) => "keencode/session/rename",
+            Self::SetSessionPreference(_) => "keencode/session/preference",
             Self::GenerateSessionTitle(_) => "keencode/session/title",
             Self::RewindCandidates(_) => "keencode/session/rewind_candidates",
             Self::RewindSession(_) => "keencode/session/rewind",
@@ -1559,6 +1563,7 @@ fn request_params_value(request: AcpRequest) -> Result<Value, AcpBoundaryError> 
         AcpRequest::SessionMcpStatus(value) => serde_json::to_value(value),
         AcpRequest::SessionMcpUnload(value) => serde_json::to_value(value),
         AcpRequest::RenameSession(value) => serde_json::to_value(value),
+        AcpRequest::SetSessionPreference(value) => serde_json::to_value(value),
         AcpRequest::GenerateSessionTitle(value) => serde_json::to_value(value),
         AcpRequest::RewindCandidates(value) => serde_json::to_value(value),
         AcpRequest::RewindSession(value) => serde_json::to_value(value),
@@ -1698,6 +1703,9 @@ impl AcpRequestDecoder {
             "keencode/session/rename" => {
                 self.decode_extension(params).map(AcpRequest::RenameSession)
             }
+            "keencode/session/preference" => self
+                .decode_extension(params)
+                .map(AcpRequest::SetSessionPreference),
             "keencode/session/title" => self
                 .decode_extension(params)
                 .map(AcpRequest::GenerateSessionTitle),
@@ -2181,9 +2189,62 @@ pub struct RenameSessionRequest {
     pub session_id: String,
     /// 新用户可见标题。
     pub title: String,
+    /// 本次标题写入来源；自动标题不得覆盖手动标题。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<SessionTitleSource>,
     /// ACP 为调用双方保留的扩展元数据；KeenCode 从中读取稳定 operationId。
     #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
     pub meta: Option<Meta>,
+}
+
+/// 会话标题写入来源的线格式枚举；与权威事件 `TitleSource` 一一对应。
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionTitleSource {
+    /// 用户手动改名。
+    Manual,
+    /// 模型生成的自动标题。
+    Automatic,
+    /// 首条用户消息前缀派生。
+    MessagePrefix,
+}
+
+/// 更新 Session 用户偏好（置顶/归档）。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSessionPreferenceRequest {
+    /// 目标 Session 标识。
+    pub session_id: String,
+    /// 新的置顶标记；缺省表示保持不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned: Option<bool>,
+    /// 新的归档标记；缺省表示保持不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived: Option<bool>,
+    /// ACP 为调用双方保留的扩展元数据；KeenCode 从中读取稳定 operationId。
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
+/// `keencode/session/preference` 完成后的类型化响应。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSessionPreferenceResponse {
+    /// 已更新偏好的 Session 标识。
+    pub session_id: String,
+    /// 偏好变化写入权威 Journal 后的序号。
+    pub journal_sequence: u64,
+}
+
+impl SetSessionPreferenceResponse {
+    /// 校验响应中的 Session 与权威 Journal 水位。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        if self.journal_sequence == 0 {
+            return Err(AcpBoundaryError::InvalidSemanticValue);
+        }
+        Ok(())
+    }
 }
 
 /// 根据首轮用户消息生成标题，不在同一请求中执行重命名。
@@ -2477,6 +2538,17 @@ impl ValidateAcpParams for RenameSessionRequest {
     fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_text(&self.title, MAX_TITLE_BYTES)
+    }
+}
+
+impl ValidateAcpParams for SetSessionPreferenceRequest {
+    /// 校验 Session 标识且至少携带一个偏好变更。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        if self.pinned.is_none() && self.archived.is_none() {
+            return Err(AcpBoundaryError::InvalidSemanticValue);
+        }
+        Ok(())
     }
 }
 

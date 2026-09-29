@@ -182,12 +182,23 @@ fn reduce_record_inner(
             state.project_root = project_root.clone();
             state.status = SessionStatus::Idle;
         }
-        SessionEvent::SessionRenamed { title } => {
+        SessionEvent::SessionRenamed { title, source } => {
             let title = title.trim();
             if title.is_empty() {
                 return Err(ReductionError::new("Session 标题不能为空"));
             }
             state.title = title.to_owned();
+            if let Some(source) = source {
+                state.title_source = *source;
+            }
+        }
+        SessionEvent::SessionPreferenceSet { pinned, archived } => {
+            if let Some(pinned) = pinned {
+                state.pinned = *pinned;
+            }
+            if let Some(archived) = archived {
+                state.archived = *archived;
+            }
         }
         SessionEvent::AtomicBatch { events } => {
             validate_atomic_batch_shape(&record.event)?;
@@ -1311,6 +1322,7 @@ fn validate_standalone_sub_agent_turn_event(
         }
         SessionEvent::SessionCreated { .. }
         | SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionPreferenceSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::AtomicBatch { .. }
         | SessionEvent::MessageAdded { .. }
@@ -1493,6 +1505,7 @@ fn validate_atomic_sub_agent_turn_pairing(
             }
             SessionEvent::SessionCreated { .. }
             | SessionEvent::SessionRenamed { .. }
+            | SessionEvent::SessionPreferenceSet { .. }
             | SessionEvent::SessionStatusChanged { .. }
             | SessionEvent::AtomicBatch { .. }
             | SessionEvent::MessageAdded { .. }
@@ -1642,6 +1655,7 @@ fn validate_atomic_model_round_pairing(events: &[SessionEvent]) -> Result<(), Re
             | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
             SessionEvent::SessionCreated { .. }
             | SessionEvent::SessionRenamed { .. }
+            | SessionEvent::SessionPreferenceSet { .. }
             | SessionEvent::SessionStatusChanged { .. }
             | SessionEvent::SessionClosed {}
             | SessionEvent::TurnStarted { .. }

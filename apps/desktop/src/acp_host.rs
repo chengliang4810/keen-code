@@ -87,6 +87,19 @@ const META_REPLAY: &str = "keencode/replay";
 const META_DEFAULT_CWD: &str = "keencode/defaultCwd";
 /// ACP `session/list` 每项 `_meta` 中的最近用户消息时间。
 const META_LAST_USER_MESSAGE_AT: &str = "keencode/lastUserMessageAt";
+const META_SESSION_PINNED: &str = "keencode/pinned";
+const META_SESSION_ARCHIVED: &str = "keencode/archived";
+const META_SESSION_TITLE_SOURCE: &str = "keencode/titleSource";
+
+/// 权威标题来源的线格式值；与 ACP `SessionTitleSource` 的 snake_case 一致。
+fn title_source_wire(source: keencode_resources::TitleSource) -> &'static str {
+    match source {
+        keencode_resources::TitleSource::Unspecified => "unspecified",
+        keencode_resources::TitleSource::Manual => "manual",
+        keencode_resources::TitleSource::Automatic => "automatic",
+        keencode_resources::TitleSource::MessagePrefix => "message_prefix",
+    }
+}
 /// 标准 Session 配置项：Provider 与模型的可逆选择。
 const CONFIG_MODEL_ID: &str = "model";
 /// 未选择实际 Provider/模型时的显式空选择，不代表任何可调用模型。
@@ -2141,23 +2154,36 @@ impl AcpHost {
             }
             let updated_at = crate::session_commands::rfc3339_from_ms(metadata.updated_at_unix_ms)
                 .map_err(|error| internal_failure(error))?;
+            // 会话偏好经 _meta 暴露：置顶/归档是权威 Journal 状态，前端
+            // 只做投影，不再本地持久化。
+            let mut meta = Map::new();
+            meta.insert(META_SESSION_PINNED.to_owned(), Value::Bool(metadata.pinned));
+            meta.insert(
+                META_SESSION_ARCHIVED.to_owned(),
+                Value::Bool(metadata.archived),
+            );
+            meta.insert(
+                META_SESSION_TITLE_SOURCE.to_owned(),
+                Value::String(title_source_wire(metadata.title_source).to_owned()),
+            );
             let mut info = schema::SessionInfo::new(
                 schema::SessionId::new(metadata.session_id.as_str().to_owned()),
                 root,
             )
             .title(Some(metadata.title))
-            .updated_at(Some(updated_at));
+            .updated_at(Some(updated_at))
+            .meta(Some(meta));
             // 从未发送消息的 Session 不伪造用户消息时间，由客户端回退到更新时间。
             if metadata.last_user_message_at_unix_ms > 0 {
                 let last_user_message_at =
                     crate::session_commands::rfc3339_from_ms(metadata.last_user_message_at_unix_ms)
                         .map_err(|error| internal_failure(error))?;
-                let mut meta = Map::new();
-                meta.insert(
-                    META_LAST_USER_MESSAGE_AT.to_owned(),
-                    Value::String(last_user_message_at),
-                );
-                info = info.meta(Some(meta));
+                if let Some(meta) = info.meta.as_mut() {
+                    meta.insert(
+                        META_LAST_USER_MESSAGE_AT.to_owned(),
+                        Value::String(last_user_message_at),
+                    );
+                }
             }
             sessions.push(info);
         }

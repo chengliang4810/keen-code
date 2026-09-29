@@ -1994,7 +1994,7 @@ fn headless_authoritative_event_deliveries(
 
     let mut deliveries = Vec::new();
     match event {
-        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title } => {
+        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title, .. } => {
             push_headless_authoritative_update(
                 &mut deliveries,
                 record,
@@ -2005,6 +2005,34 @@ fn headless_authoritative_event_deliveries(
                     keencode_acp::schema::SessionInfoUpdate::new().title(title.clone()),
                 ),
             )?;
+        }
+        SessionEvent::SessionPreferenceSet { pinned, archived } => {
+            // 偏好变更经 _meta 投影，与桌面端映射保持同一键集。
+            let mut meta = serde_json::Map::new();
+            if let Some(pinned) = pinned {
+                meta.insert(
+                    "keencode/pinned".to_owned(),
+                    serde_json::Value::Bool(*pinned),
+                );
+            }
+            if let Some(archived) = archived {
+                meta.insert(
+                    "keencode/archived".to_owned(),
+                    serde_json::Value::Bool(*archived),
+                );
+            }
+            if !meta.is_empty() {
+                push_headless_authoritative_update(
+                    &mut deliveries,
+                    record,
+                    None,
+                    None,
+                    next_delivery_sequence,
+                    keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
+                        keencode_acp::schema::SessionInfoUpdate::new().meta(meta),
+                    ),
+                )?;
+            }
         }
         SessionEvent::TurnStarted {
             turn_id,

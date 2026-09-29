@@ -77,6 +77,7 @@ fn next_record(state: &SessionState, event_id: &str) -> SessionEventRecord {
         time_unix_ms: 1,
         event: SessionEvent::SessionRenamed {
             title: "状态摘要验证".to_owned(),
+            source: None,
         },
     }
 }

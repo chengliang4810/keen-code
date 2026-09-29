@@ -9,10 +9,10 @@ import type { ResourceOpenTarget } from "@/components/ResourceViewer";
 import type { Locale } from "@/i18n";
 import * as api from "@/lib/api";
 import { localizeUiError } from "@/lib/session";
-import { updateSessionPreference } from "@/lib/sessionPreferences";
 import {
   createOperationId,
   sessionRename as acpSessionRename,
+  sessionSetPreference as acpSessionSetPreference,
 } from "@/lib/acp/api";
 import { saveLayout, type LayoutPrefs } from "@/lib/layout";
 import type {
@@ -137,10 +137,7 @@ export function useSidebarActions({
               id: target.id,
               title: next,
               operationId: createOperationId("session-rename"),
-            });
-            updateSessionPreference(target.id, {
-              title: next,
-              titleSource: "manual",
+              source: "manual",
             });
             applySessionTitle(target.id, next);
             await refreshSessions();
@@ -263,7 +260,11 @@ export function useSidebarActions({
         (currentSessionId === target.id ||
           viewingSessionIdRef.current === target.id);
       try {
-        updateSessionPreference(target.id, { archived });
+        await acpSessionSetPreference({
+          id: target.id,
+          archived,
+          operationId: createOperationId("session-archive"),
+        });
         await refreshSessions();
         if (wasViewing) {
           const project = target.projectId
@@ -297,7 +298,11 @@ export function useSidebarActions({
     async (target: SessionRow, pinned = true) => {
       setCtxMenu(null);
       try {
-        updateSessionPreference(target.id, { pinned });
+        await acpSessionSetPreference({
+          id: target.id,
+          pinned,
+          operationId: createOperationId("session-pin"),
+        });
         await refreshSessions();
       } catch (error) {
         setLocalError(localizeUiError(error, locale));

@@ -216,9 +216,9 @@ export function useSidebarController({
 
   useSidebarAutoArchive({
     sessions,
-    setSessions,
     autoArchiveConversations,
     archiveRetentionDays,
+    refreshSessions,
   });
 
   const search = useSidebarSearch({

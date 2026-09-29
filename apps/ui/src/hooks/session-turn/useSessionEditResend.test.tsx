@@ -62,7 +62,6 @@ function makeOptions(
         completeSessionRecovery(view);
       }),
       refreshSessions: vi.fn().mockResolvedValue(undefined),
-      updateSessionPreference: vi.fn(),
     },
     ui: { setLocalError: vi.fn() },
     state: { sendInFlightRef: { current: false } },

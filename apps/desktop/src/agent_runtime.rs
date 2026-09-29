@@ -10547,13 +10547,41 @@ fn map_authoritative_event(
             }
             drafts
         }
-        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title } => {
+        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title, .. } => {
             vec![session_update_draft(
                 record,
                 None,
                 None,
                 keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
                     keencode_acp::schema::SessionInfoUpdate::new().title(title.clone()),
+                ),
+            )]
+        }
+        SessionEvent::SessionPreferenceSet { pinned, archived } => {
+            // 偏好变更经 _meta 投影给前端；标题键不参与，键集与既有
+            // session_info_update 白名单保持兼容。
+            let mut meta = serde_json::Map::new();
+            if let Some(pinned) = pinned {
+                meta.insert(
+                    "keencode/pinned".to_owned(),
+                    serde_json::Value::Bool(*pinned),
+                );
+            }
+            if let Some(archived) = archived {
+                meta.insert(
+                    "keencode/archived".to_owned(),
+                    serde_json::Value::Bool(*archived),
+                );
+            }
+            if meta.is_empty() {
+                return Ok(Vec::new());
+            }
+            vec![session_update_draft(
+                record,
+                None,
+                None,
+                keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
+                    keencode_acp::schema::SessionInfoUpdate::new().meta(meta),
                 ),
             )]
         }
@@ -19736,7 +19764,7 @@ mod tests {
             .state
             .last_sequence;
         session
-            .rename("replay-zero-rename", "重放后的标题")
+            .rename("replay-zero-rename", "重放后的标题", None)
             .expect("尾部投影事件应提交");
         let tail_sequence = session
             .snapshot()
@@ -19769,7 +19797,7 @@ mod tests {
 
         // 第一页发出后追加的状态不能改变第二页的历史快照和固定水位。
         session
-            .rename("replay-zero-after-waterline", "水位之后的新标题")
+            .rename("replay-zero-after-waterline", "水位之后的新标题", None)
             .expect("分页之间的实时记录应能提交");
         let last = runtime
             .replay_session(session.session_id().as_str(), Some(first.next_after), 1)

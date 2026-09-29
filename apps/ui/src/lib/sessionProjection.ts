@@ -1,6 +1,5 @@
 import type { SessionListItem } from "./acp/api";
 import type { Locale } from "@/i18n";
-import type { SessionPreferences } from "./sessionPreferences";
 import { parseStoredContent, serializeForAgent } from "./draftDoc";
 import {
   mergeAttachments,
@@ -93,6 +92,8 @@ export interface SessionRowView {
   archived: boolean;
   /** Session 是否置顶。 */
   pinned: boolean;
+  /** 当前标题写入来源。 */
+  titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }
 
 /** 侧栏所需的当前投影。 */
@@ -121,10 +122,9 @@ function normalizeSessionProjectPath(path: string): string {
   return normalized.replace(/\/+$/, "");
 }
 
-/** 将当前项目、Session 和本地展示偏好投影到侧栏。 */
+/** 将当前项目与 Session 权威状态投影到侧栏。 */
 export function projectSidebar(
   sessions: SessionListItem[],
-  preferences: SessionPreferences,
   projects: ProjectView[],
 ): SidebarProjection {
   const projectByPath = new Map(
@@ -135,19 +135,17 @@ export function projectSidebar(
   );
   return {
     projects: projects.map((project) => ({ ...project })),
-    sessions: sessions.map((session) => {
-      const preference = preferences[session.id];
-      return {
-        id: session.id,
-        title: preference?.title?.trim() || session.title?.trim() || "新对话",
-        projectId:
-          projectByPath.get(normalizeSessionProjectPath(session.cwd)) ?? null,
-        updatedAt: session.updatedAt,
-        lastUserMessageAt: session.lastUserMessageAt,
-        archived: preference?.archived ?? false,
-        pinned: preference?.pinned ?? false,
-      };
-    }),
+    sessions: sessions.map((session) => ({
+      id: session.id,
+      title: session.title?.trim() || "新对话",
+      projectId:
+        projectByPath.get(normalizeSessionProjectPath(session.cwd)) ?? null,
+      updatedAt: session.updatedAt,
+      lastUserMessageAt: session.lastUserMessageAt,
+      archived: session.archived,
+      pinned: session.pinned,
+      titleSource: session.titleSource,
+    })),
   };
 }
 
