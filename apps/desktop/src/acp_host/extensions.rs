@@ -1647,7 +1647,7 @@ mod tests {
         let observed = Arc::new(AtomicUsize::new(0));
         let server_observed = Arc::clone(&observed);
         let server = thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + Duration::from_secs(120);
             let mut requests = Vec::with_capacity(4);
             let mut root_requests = 0_usize;
             let mut child_requests = 0_usize;
@@ -1764,12 +1764,16 @@ mod tests {
     }
 
     /// 等待真实 Runtime 的根/子 Agent、Runner 与 Session Journal 全部收敛。
+    ///
+    /// CI 的 Windows runner 只有 2 核且与 --workspace 全量测试并发，冷启动
+    /// （扩展候选重建 + Journal 重放 + Provider 解析）的墙钟抖动远超本地；
+    /// 本地实测该测试 <1s 完成，超时只作为挂起检测的最后防线。
     async fn wait_for_session_idle(
         runtime: &Arc<AgentRuntime>,
         session_id: &str,
         observed_requests: &AtomicUsize,
     ) {
-        const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+        const IDLE_WAIT_TIMEOUT: Duration = Duration::from_secs(240);
         let deadline = Instant::now() + IDLE_WAIT_TIMEOUT;
         loop {
             let active_work = runtime
