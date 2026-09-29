@@ -3705,23 +3705,12 @@ fn messages_sse_text_delta_requires_string_field() {
     }
 }
 
-/// 验证空文本增量不能绕过内容序号、内容类型和 stop 生命周期校验。
+/// 验证空文本增量不能绕过内容类型和 stop 生命周期校验。
+///
+/// 缺失 `content_block_start` 的孤立增量不再按序号错误终止整条流，
+/// 相关行为由 [`messages_sse_skips_orphan_content_block_delta`] 覆盖。
 #[test]
-fn messages_sse_empty_text_delta_keeps_index_type_and_lifecycle_checks() {
-    let wrong_index = concat!(
-        "event: message_start\n",
-        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-wrong-index\",\"model\":\"test-model\"}}\n\n",
-        "event: content_block_start\n",
-        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
-        "event: content_block_delta\n",
-        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"\"}}\n\n"
-    );
-    assert!(
-        malformed_sse_error(ProviderProtocol::Messages, wrong_index)
-            .message()
-            .contains("尚未开始")
-    );
-
+fn messages_sse_empty_text_delta_keeps_type_and_lifecycle_checks() {
     let wrong_type = concat!(
         "event: message_start\n",
         "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-wrong-type\",\"model\":\"test-model\"}}\n\n",
@@ -3751,6 +3740,83 @@ fn messages_sse_empty_text_delta_keeps_index_type_and_lifecycle_checks() {
             .message()
             .contains("未结束内容块")
     );
+}
+
+/// 验证缺失 `content_block_start` 的孤立增量被整体降级为忽略块：
+/// 增量与 stop 一并跳过，同响应其余内容正常输出，整条流正常完成。
+///
+/// 线上故障形态：兼容网关丢弃 start 事件后，一条 64 秒的长响应以
+/// 「内容块 0 尚未开始」终止整轮会话。静默丢弃无法归属的增量，
+/// 优于让已计费的响应作废。
+#[test]
+fn messages_sse_skips_orphan_content_block_delta() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-orphan\",\"model\":\"test-model\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"孤立文本\"}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"正常\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Messages, &[raw.as_bytes()]);
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ModelStreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["正常"], "孤立块的增量应被丢弃");
+    assert!(matches!(
+        events.last(),
+        Some(ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::Completed,
+            ..
+        })
+    ));
+}
+
+/// 验证极端乱序流中 start 在孤立增量之后到达时解除忽略：
+/// 该块恢复正常生命周期，后续增量与 stop 走正常路径。
+#[test]
+fn messages_sse_resumes_block_after_late_start() {
+    let raw = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg-late\",\"model\":\"test-model\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"孤立\"}}\n\n",
+        "event: content_block_start\n",
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"恢复\"}}\n\n",
+        "event: content_block_stop\n",
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        "event: message_delta\n",
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n"
+    );
+    let events = decode_sse(ProviderProtocol::Messages, &[raw.as_bytes()]);
+
+    let texts: Vec<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            ModelStreamEvent::TextDelta { delta, .. } => Some(delta.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(texts, vec!["恢复"], "start 之后的增量应正常输出");
 }
 
 #[test]

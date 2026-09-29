@@ -33,8 +33,10 @@ pub(crate) struct MessagesAdapter {
     stop_reason: Option<StopReason>,
     /// 按远端内容块序号记录尚未结束的内容，防止缺失或重复 stop 被静默接受。
     active_blocks: BTreeMap<u32, ActiveContentBlock>,
-    /// 收到未知类型（如 server_tool_use、web_search_tool_result）的内容块序号：
-    /// 按 rig 语义跳过其开始/增量/结束，而不是让整条流失败。
+    /// 收到需要整体跳过的内容块序号：未知类型块（如 server_tool_use、
+    /// web_search_tool_result），或缺失 `content_block_start` 的孤立增量块
+    /// （常见于兼容网关丢事件）。按 rig 语义跳过其开始/增量/结束，
+    /// 而不是让已计费的整条流失败。
     ignored_blocks: BTreeSet<u32>,
     tool_calls: BTreeMap<u32, String>,
     thinking_signatures: BTreeMap<u32, String>,
@@ -436,6 +438,9 @@ impl MessagesAdapter {
                 return Ok(());
             }
         };
+        // 极端乱序流中 start 可能在孤立增量之后才到达：解除忽略并恢复
+        // 该块的正常生命周期，保证后续增量与 stop 走同一条处理路径。
+        self.ignored_blocks.remove(&index);
         if self.active_blocks.insert(index, block_kind).is_some() {
             return Err(protocol_error(format!(
                 "Messages 内容块序号 {index} 重复开始"
@@ -529,11 +534,14 @@ impl MessagesAdapter {
         if self.ignored_blocks.contains(&index) {
             return Ok(());
         }
-        let active_kind = self
-            .active_blocks
-            .get(&index)
-            .copied()
-            .ok_or_else(|| protocol_error(format!("内容块 {index} 尚未开始")))?;
+        let Some(active_kind) = self.active_blocks.get(&index).copied() else {
+            // 兼容网关偶发丢失 content_block_start（下游已观察到孤立增量
+            // 终止整轮会话的线上故障）：把该序号整体降级为忽略块，后续
+            // 增量与 stop 一并跳过，保持流的其余部分可用。此处的增量无法
+            // 归属到任何已声明内容，静默丢弃优于让已计费的响应作废。
+            self.ignored_blocks.insert(index);
+            return Ok(());
+        };
         match delta_type {
             "text_delta" => {
                 if active_kind != ActiveContentBlock::Text {
