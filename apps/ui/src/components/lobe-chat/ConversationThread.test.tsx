@@ -450,17 +450,17 @@ describe("ConversationThread 思考耗时", () => {
     expect(chatCss).not.toMatch(/\.chat-md li::before/);
     expect(chatCss).toMatch(/--chat-prose-fs:\s*var\(--text-md\);/);
     expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-family:\s*var\(--chat-font\);/s);
-    // 对话区字体完全对齐 ZCode：正文常规 400 字重，字族为 ZCode 生效的默认 sans 栈与 CJK 等宽栈。
+    // 对话区沿用现有字族与常规字重，正文大小和对比度单独优化。
     expect(chatCss).toMatch(/\.chat-md\s*\{[^}]*font-weight:\s*400;/s);
     expect(chatCss).toMatch(/--chat-font:\s*ui-sans-serif,\s*system-ui,\s*sans-serif,/);
     expect(chatCss).toMatch(/--chat-mono:[^;]*'Noto Sans CJK SC',\s*monospace;/s);
     expect(chatCss).not.toMatch(/\.chat-md\s*\{[^}]*font:\s*var\(--dsw-font-markdown-base\);/s);
     expect(chatCss).toMatch(
-      /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--text-primary\);/,
+      /\[data-theme="light"\] \.lobe-chat\s*\{[\s\S]*?--chat-prose-text:\s*var\(--foreground-emphasis\);/,
     );
   });
 
-  it("Markdown 标题字号对齐 ZCode 的 18/16/14px token，行距与字距继承正文", () => {
+  it("Markdown 标题字号保持 18/16/14px 层级，行距与字距继承正文", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(
@@ -481,16 +481,16 @@ describe("ConversationThread 思考耗时", () => {
     expect(chatCss).toMatch(
       /\.chat-md h3\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-base\);/s,
     );
-    // ZCode 标题不自带行高与字距：两者都继承容器的 leading-1.75 / tracking-wide。
+    // 标题继承正文的行高与零字距。
     expect(chatCss).not.toMatch(/\.chat-md h[1-6]\s*\{[^}]*line-height:/s);
     expect(chatCss).not.toMatch(/\.chat-md h1,\s*\.chat-md h2,[^}]*letter-spacing:\s*0;/s);
   });
 
-  it("Markdown 正文使用 ZCode 的 unitless 行高和 tracking-wide，表格继承正文行高", () => {
+  it("Markdown 正文保留 unitless 行高并使用零字距，表格继承正文行高", () => {
     const chatCss = readSource(new URL("./lobe-chat.css", import.meta.url));
 
     expect(chatCss).toMatch(
-      /\.chat-md\s*\{[^}]*font-size:\s*var\(--chat-prose-fs\);[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0\.025em;/s,
+      /\.chat-md\s*\{[^}]*font-size:\s*var\(--chat-prose-fs\);[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0;/s,
     );
     expect(chatCss).toMatch(
       /\.chat-code__pre\s*\{[^}]*line-height:\s*calc\(var\(--spacing\) \* 5\);/s,

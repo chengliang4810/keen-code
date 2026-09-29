@@ -635,7 +635,8 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 450;
+  color: var(--foreground-emphasis);
+  font-weight: 500;
   line-height: 32px;
   display: inline-flex;
   align-items: center;
@@ -1037,13 +1038,8 @@ textarea,
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  /* 任务标题使用主文字层级，项目名继续保持次级以突出对话。 */
-  color: var(--text-primary);
-  font-weight: 450;
-}
-
-/* 当前任务只使用轻量底色和正文常规字重，避免与正文竞争。 */
-.tree-l3--active .tree-l3__name {
+  /* 项目与任务标题使用同一清晰文字层级，选中态由底色区分。 */
+  color: var(--foreground-emphasis);
   font-weight: 500;
 }
 

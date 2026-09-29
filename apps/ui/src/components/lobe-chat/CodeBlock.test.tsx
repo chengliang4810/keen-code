@@ -87,7 +87,7 @@ describe("chat code block", () => {
     const html = renderToString(<MarkdownChat>{"# Heading\n\nBody"}</MarkdownChat>);
 
     expect(html).toContain("<h1>Heading</h1>");
-    expect(css).toMatch(/\.chat-md\s*\{[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0\.025em;/s);
+    expect(css).toMatch(/\.chat-md\s*\{[^}]*line-height:\s*1\.75;[^}]*letter-spacing:\s*0;/s);
     expect(css).toMatch(/\.chat-code__pre\s*\{[^}]*line-height:\s*calc\(var\(--spacing\)\s*\*\s*5\)/s);
     expect(css).toMatch(/\.chat-md h1\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-xl\)/s);
     expect(css).toMatch(/\.chat-md h2\s*\{[^}]*font-size:\s*var\(--chat-prose-heading-lg\)/s);

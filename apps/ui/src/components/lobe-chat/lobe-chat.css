@@ -13,7 +13,7 @@
     'Courier New', 'Microsoft YaHei UI', 'Microsoft YaHei', 'PingFang SC', 'Noto Sans CJK SC',
     monospace;
 
-  /* 对话字号跟随界面字号：默认 14px 时与改动前逐像素一致。 */
+  /* 对话字号跟随界面字号设置。 */
   --chat-fs: var(--text-md);
   --chat-prose-fs: var(--text-md);
   /* 对齐 ZCode MessageResponse 的 text-ui-xl/lg/base：18/16/14px。 */
@@ -35,7 +35,7 @@
    * light theme and made fenced code unreadable (dark bg + wrong fg).
    */
   --chat-text: var(--text-primary, #e8e8ea);
-  --chat-prose-text: var(--chat-text);
+  --chat-prose-text: var(--foreground-emphasis);
   --chat-text-2: var(--text-secondary, #a1a1a6);
   --chat-text-3: var(--text-tertiary, #6e6e73);
   --chat-link: var(--accent, #6db3f2);
@@ -88,7 +88,7 @@
    * skin-tinted application foreground. Keep activity chrome on the shared
    * secondary tokens so process and answer remain visually distinct.
    */
-  --chat-prose-text: var(--text-primary);
+  --chat-prose-text: var(--foreground-emphasis);
   --chat-code-bg: var(--bg-code, #f0f0f2);
   --chat-code-fg: var(--text-primary, #1d1d1f);
   --chat-code-bar: color-mix(in srgb, var(--chat-code-bg) 92%, #000 8%);
@@ -471,7 +471,7 @@
   font-size: var(--chat-prose-fs);
   /* 对齐 ZCode MessageResponse：正文使用 unitless 行高，字号变化时保持比例。 */
   line-height: 1.75;
-  letter-spacing: 0.025em;
+  letter-spacing: 0;
   color: var(--chat-prose-text);
   word-break: break-word;
   min-width: 0;
