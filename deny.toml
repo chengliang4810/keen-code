@@ -7,15 +7,21 @@
 # 已撤回（yanked）的依赖版本一律拒绝。
 yanked = "deny"
 # 传递依赖的维护状态公告，上游未提供替代版本前暂时豁免：
-# - proc-macro-error：经 syn 1 / thiserror 1 / tauri-macros 间接引入，
-#   等待 tauri 生态切换 thiserror 2（已随桌面直接依赖落地）后自然消失。
+# - proc-macro-error：经 syn 1 / thiserror 1 / tauri-macros 间接引入。
 # - serial：portable-pty 唯一依赖，无替代版本。
 # - quick-xml：plist 1.8 钉住 ^0.38，修复版 0.41 需 plist 上游先动；
 #   该路径只在构建期解析本地 Tauri 配置/图标，不处理不可信输入。
+# - unic-* 系列：经 tauri-utils 的 urlpattern 间接引入，等待上游更新。
 ignore = [
-  { crate = "proc-macro-error", reason = "RUSTSEC-2024-0370：传递依赖，等待 tauri 生态升级" },
-  { crate = "serial", reason = "RUSTSEC-2017-0008：portable-pty 唯一依赖，无替代" },
-  { crate = "quick-xml", reason = "RUSTSEC-2026-0194 / RUSTSEC-2026-0195：plist 钉住 0.38，构建期专用，不解析不可信输入" },
+  "RUSTSEC-2024-0370", # proc-macro-error unmaintained
+  "RUSTSEC-2017-0008", # serial unmaintained
+  "RUSTSEC-2026-0194", # quick-xml quadratic runtime（构建期专用）
+  "RUSTSEC-2026-0195", # quick-xml NsReader DoS（构建期专用）
+  "RUSTSEC-2025-0081", # unic-char-property unmaintained
+  "RUSTSEC-2025-0075", # unic-char-range unmaintained
+  "RUSTSEC-2025-0080", # unic-common unmaintained
+  "RUSTSEC-2025-0100", # unic-ucd-ident unmaintained
+  "RUSTSEC-2025-0098", # unic-ucd-version unmaintained
 ]
 
 [bans]
