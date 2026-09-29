@@ -1,5 +1,6 @@
 //! 显式启用的开发评测入口，复用桌面装配，不启动窗口或加载个人扩展。
 use super::*;
+use serde_json::json;
 use std::io::{Read, Write};
 use std::time::Instant;
 
