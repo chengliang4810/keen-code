@@ -4,7 +4,7 @@ import { Slider } from "@appica/ui-react/slider";
 import {
   drawEffortTrackFrame,
   readEffortPaletteFromElement,
-  resolveEffortTrackKind,
+  resolveFixedEffortTrackKind,
   trackFrameIntervalMs,
 } from "@/lib/effortTrack";
 import { cn } from "@/lib/utils";
@@ -13,7 +13,6 @@ export interface EffortSliderProps {
   count: number;
   index: number;
   onIndexChange: (index: number) => void;
-  fast: boolean;
   label: string;
   id?: string;
 }
@@ -34,12 +33,11 @@ export function effortIndexFromSliderValue(value: number, count: number): number
   return Math.min(count - 1, Math.max(0, Math.round(value / effortSliderStep(count))));
 }
 
-/** Appica Slider 负责行为和无障碍；覆盖层恢复 KeenCode 的四态专用视觉。 */
+/** Appica Slider 负责行为和无障碍；覆盖层按档位呈现固定的快速视觉效果。 */
 export function EffortSlider({
   count,
   index,
   onIndexChange,
-  fast,
   label,
   id,
 }: EffortSliderProps) {
@@ -51,7 +49,7 @@ export function EffortSlider({
   const [settling, setSettling] = useState(false);
 
   const isMax = count > 1 && index === count - 1;
-  const kind = resolveEffortTrackKind(isMax, fast);
+  const kind = resolveFixedEffortTrackKind(isMax);
   const disabled = count < 2;
   const visualStep = count > 1 ? 1 / (count - 1) : 0;
   const sliderStep = effortSliderStep(count);
@@ -70,6 +68,8 @@ export function EffortSlider({
   }, []);
 
   useEffect(() => {
+    // 拖拽中由 pointermove 直接驱动位置，不与指针争抢；松手后回到这里按档位吸附。
+    if (dragging) return;
     const root = rootRef.current;
     if (!root) return;
     const layout = () => {
@@ -83,13 +83,18 @@ export function EffortSlider({
     const observer = new ResizeObserver(layout);
     observer.observe(root);
     return () => observer.disconnect();
-  }, [count, index, layoutVisual, stopX]);
+  }, [count, index, dragging, layoutVisual, stopX]);
 
   useEffect(() => {
+    // 松手（或键盘换档）后播放回落动画；拖拽期间旋钮保持放大，不定格。
+    if (dragging) {
+      setSettling(false);
+      return;
+    }
     setSettling(true);
     const timer = window.setTimeout(() => setSettling(false), 240);
     return () => window.clearTimeout(timer);
-  }, [index]);
+  }, [index, dragging]);
 
   useEffect(() => {
     if (kind === "plain") return;
@@ -97,16 +102,18 @@ export function EffortSlider({
     const root = rootRef.current;
     const context = canvas?.getContext("2d");
     if (!canvas || !root || !context) return;
-    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+    const reducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
-    const palette = readEffortPaletteFromElement(root);
+    let palette = readEffortPaletteFromElement(root);
     const startedAt = performance.now();
     const interval = trackFrameIntervalMs(kind);
     let frame = 0;
     let lastPaint = 0;
     const paint = (now: number) => {
-      frame = requestAnimationFrame(paint);
-      if (now - lastPaint < interval) return;
+      frame = 0;
+      if (document.hidden) return;
+      if (!reducedMotion) frame = requestAnimationFrame(paint);
+      if (!reducedMotion && now - lastPaint < interval) return;
       lastPaint = now;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
@@ -123,21 +130,59 @@ export function EffortSlider({
         kind,
         width,
         height,
-        time: (now - startedAt) / 1000,
+        time: reducedMotion ? 0.1 : (now - startedAt) / 1000,
         palette,
       });
     };
-    frame = requestAnimationFrame(paint);
-    return () => cancelAnimationFrame(frame);
+    const syncVisibility = () => {
+      if (document.hidden) {
+        cancelAnimationFrame(frame);
+        frame = 0;
+      } else if (!frame) {
+        if (reducedMotion) paint(startedAt);
+        else frame = requestAnimationFrame(paint);
+      }
+    };
+    document.addEventListener("visibilitychange", syncVisibility);
+    syncVisibility();
+    // 设置页切换思考强度色预设时令牌变化，画布需要重读调色板并立即重绘。
+    const paletteObserver = new MutationObserver(() => {
+      palette = readEffortPaletteFromElement(root);
+      syncVisibility();
+    });
+    paletteObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-effort-color"],
+    });
+    const observer = reducedMotion ? new ResizeObserver(syncVisibility) : null;
+    if (observer) observer.observe(root);
+    return () => {
+      cancelAnimationFrame(frame);
+      document.removeEventListener("visibilitychange", syncVisibility);
+      paletteObserver.disconnect();
+      observer?.disconnect();
+    };
   }, [kind]);
 
   useEffect(() => {
     if (!dragging) return;
     const root = rootRef.current;
     if (!root) return;
+    let lastNearest = -1;
     const move = (event: PointerEvent) => {
       const bounds = root.getBoundingClientRect();
-      layoutVisual(Math.min(bounds.width - INSET, Math.max(INSET, event.clientX - bounds.left)));
+      const x = Math.min(bounds.width - INSET, Math.max(INSET, event.clientX - bounds.left));
+      layoutVisual(x);
+      // 拖拽中档位跟随最近停靠点（对照上游 DragGesture 的 nearestStop），
+      // 松手吸附与标题都以这里的最新档位为准。
+      if (count > 1) {
+        const step = (bounds.width - INSET * 2) / (count - 1);
+        const nearest = Math.min(count - 1, Math.max(0, Math.round((x - INSET) / step)));
+        if (nearest !== lastNearest) {
+          lastNearest = nearest;
+          onIndexChange(nearest);
+        }
+      }
     };
     const stop = () => setDragging(false);
     window.addEventListener("pointermove", move);
@@ -146,7 +191,7 @@ export function EffortSlider({
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", stop);
     };
-  }, [dragging, layoutVisual]);
+  }, [dragging, count, layoutVisual, onIndexChange]);
 
   if (count < 1) return null;
 
@@ -161,6 +206,7 @@ export function EffortSlider({
     >
       <span className="effort-slider__track" aria-hidden>
         <span className="effort-slider__clip">
+          {/* 画布只覆盖填充，动效不越过旋钮（对照上游 TrackEffect 挂在填充胶囊上）。 */}
           <span ref={fillRef} className="effort-slider__fill">
             {kind === "plain" ? null : (
               <canvas ref={effectRef} className="effort-slider__effect" />

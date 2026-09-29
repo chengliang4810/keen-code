@@ -1,4 +1,4 @@
-import { IconBrain, IconBolt, IconChevronDown } from "@/components/icons";
+import { IconBrain, IconChevronDown, IconUsersGroup } from "@/components/icons";
 import { Button } from "@appica/ui-react/button";
 import {
   DropdownMenu,
@@ -12,7 +12,7 @@ import {
   effortsForModel,
   type ModelOption,
 } from "@/lib/modelCatalog";
-import { resolveEffortTrackKind } from "@/lib/effortTrack";
+import { resolveFixedEffortTrackKind } from "@/lib/effortTrack";
 import "@/styles/effort-slider.css";
 
 export interface ComposerReasoningMenuProps {
@@ -54,12 +54,9 @@ function effortLabel(
   });
 }
 
-/** 标题样式类：与滑块的四态同源，最高档、快速与融合各有颜色。 */
-export function effortTitleClass(
-  isMax: boolean,
-  fast: boolean,
-): string {
-  const kind = resolveEffortTrackKind(isMax, fast);
+/** 标题与滑块共用固定快速视觉，Ultra 委派设置不改变颜色。 */
+export function effortTitleClass(isMax: boolean): string {
+  const kind = resolveFixedEffortTrackKind(isMax);
   return `effort-title effort-title--${kind}`;
 }
 
@@ -82,18 +79,25 @@ export function ComposerReasoningMenu({
   const currentLabel = hasEffort
     ? effortLabel(effortList[Math.max(0, effortIndex)]!.id, model, labels)
     : labels.reasoningUnsupported;
-  // 标题与滑块共用四态：最高档由档位决定，快速复用 Ultra 开关。
+  // Ultra 是委派策略；思考强度的动效只由档位决定。
   const isMax = hasEffort && effortList.length > 1 && effortIndex === effortList.length - 1;
+  const triggerLabel = ultra ? `${currentLabel} · ${labels.ultra}` : currentLabel;
 
   const trigger = (
-      <Tip label={`${labels.reasoning}: ${currentLabel}`}>
+    <Tip label={`${labels.reasoning}: ${triggerLabel}`}>
       <DropdownMenuTrigger render={<Button
         type="button"
         variant="ghost"
         size="md"
         className="cmm__trigger"
-        aria-label={`${labels.reasoning}: ${currentLabel}`}
+        aria-label={`${labels.reasoning}: ${triggerLabel}`}
       />}>
+        {/* Ultra 开启时触发器最前带多智能体协作标记（主动委派给子 Agent）。 */}
+        {ultra ? (
+          <span className="cmm__ultra-mark" aria-hidden>
+            <IconUsersGroup size={13} />
+          </span>
+        ) : null}
         <span className="cmm__icon" aria-hidden>
           <IconBrain size={14} />
         </span>
@@ -126,18 +130,18 @@ export function ComposerReasoningMenu({
             >
               {labels.reasoning}
             </label>
-            <span className={effortTitleClass(isMax, ultra)}>{currentLabel}</span>
+            <span className={effortTitleClass(isMax)}>{currentLabel}</span>
             <Tip label={labels.ultra}>
               <Button
                 type="button"
                 className="effort-panel__fast"
-                variant={ultra ? "primary" : "ghost"}
+                variant="ghost"
                 size="icon-md"
                 aria-pressed={ultra}
                 aria-label={labels.ultra}
                 onClick={() => onUltra(!ultra)}
               >
-                <IconBolt size={15} />
+                <IconUsersGroup size={15} />
               </Button>
             </Tip>
           </div>
@@ -149,7 +153,6 @@ export function ComposerReasoningMenu({
               const entry = effortList[next];
               if (entry) onEffort(entry.id);
             }}
-            fast={ultra}
             label={labels.reasoning}
           />
         </div>

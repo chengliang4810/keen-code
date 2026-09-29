@@ -5,14 +5,16 @@
  * 与「是否快速」两个布尔量组合而来；所有动效都是时间的纯函数，逐帧重算而不
  * 保存粒子状态，因此同一时刻的画面可复现。
  *
- * 与上游的三处有意差异：
+ * 与上游的有意差异：
  * 1. 不使用 `CanvasRenderingContext2D.filter`（Safari 18 才支持，本项目的
  *    WebView 目标更旧），辉光改用 `shadowBlur` 与径向渐变。
  * 2. 上游在 fusion 态把扫光画了两遍（`drawFusion` 内一次、`body` 内又一次），
- *    此处只画一遍。
- * 3. 上游按供应商切换品牌色并支持「亮填充反色」（银白品牌）；本项目的供应商
- *    ID 是用户自定义字符串，无法可靠映射，因此品牌色固定为陶土橙，亮填充
- *    分支随之取消。
+ *    此处只画一遍；fast 态上游本就不画扫光。
+ * 3. 上游按供应商自动切换品牌色；本项目的供应商是用户自定义字符串，映射不了
+ *    品牌，改为设置页的固定预设色板（`html[data-effort-color]`），并始终启用
+ *    快速视觉效果。渐变预设只在 DOM 上呈现，画布读 `--effort-brand-solid`；
+ *    银白组的浅色填充把粒子、速度线与闪电芯换成深色 spark（对应上游 silver
+ *    的 isLight 反色分支）。
  */
 
 /** 轨道的四种外观；`plain` 不绘制动效。 */
@@ -44,8 +46,8 @@ export interface EffortTrackFrame {
 
 /** 令牌缺失时的兜底色，与 `tokens.css` 中的取值一致。 */
 export const EFFORT_TRACK_FALLBACK_PALETTE: EffortTrackPalette = {
-  brand: "#cc6b47",
-  fast: "#ffd65c",
+  brand: "#8c57f7",
+  fast: "#d9b8ff",
   spark: "#ffffff",
 };
 
@@ -69,6 +71,11 @@ export function resolveEffortTrackKind(
   if (isMax) return "supercharged";
   if (fast) return "fast";
   return "plain";
+}
+
+/** 产品没有 Fast 服务档位；速度感是思考强度控件的固定视觉状态。 */
+export function resolveFixedEffortTrackKind(isMax: boolean): EffortTrackKind {
+  return resolveEffortTrackKind(isMax, true);
 }
 
 /**
@@ -146,7 +153,8 @@ export function readEffortTrackPalette(
     return value || fallback;
   };
   return {
-    brand: read("--effort-brand", EFFORT_TRACK_FALLBACK_PALETTE.brand),
+    // 渐变预设的 --effort-brand 是 linear-gradient()，画布只认 -solid 单色。
+    brand: read("--effort-brand-solid", EFFORT_TRACK_FALLBACK_PALETTE.brand),
     fast: read("--effort-fast", EFFORT_TRACK_FALLBACK_PALETTE.fast),
     spark: read("--effort-spark", EFFORT_TRACK_FALLBACK_PALETTE.spark),
   };
@@ -178,6 +186,7 @@ export type TrackCanvas = Pick<
   | "lineTo"
   | "closePath"
   | "arc"
+  | "rect"
   | "fill"
   | "stroke"
   | "save"
@@ -202,9 +211,10 @@ export function drawEffortTrackFrame(
     drawParticles(ctx, size, time, palette.spark);
   }
   if (kind === "fast" || kind === "fusion") {
-    drawStreaks(ctx, size, time);
-    drawBolts(ctx, size, time, palette.fast);
-    drawSheen(ctx, size, time, palette.spark);
+    drawStreaks(ctx, size, time, palette.spark);
+    // 闪电辉光用亮色变体（上游是比填充更亮的同系色），白芯换成 spark：
+    // 银白组的浅色填充上白芯不可见，spark 为深色。
+    drawBolts(ctx, size, time, palette.fast, palette.spark);
   }
 }
 
@@ -240,13 +250,15 @@ function drawParticles(
   }
 }
 
-/** 冲向旋钮的细速度线，头部明亮、拖尾透明。 */
+/** 冲向旋钮的细速度线，头部明亮、拖尾透明；颜色跟随 spark 预设。 */
 function drawStreaks(
   ctx: TrackCanvas,
   size: EffortTrackSize,
   time: number,
+  spark: string,
 ): void {
-  const white = { r: 255, g: 255, b: 255 };
+  const head = parseColor(spark);
+  if (!head) return;
   const width = size.width;
   const count = Math.max(5, Math.floor(width / 14));
   for (let index = 0; index < count; index += 1) {
@@ -260,8 +272,8 @@ function drawStreaks(
     const brightness = (0.35 + 0.55 * noise(seed, 6)) * edgeFade(x + length, width);
     if (brightness <= 0.02) continue;
     const gradient = ctx.createLinearGradient(x, y, x + length, y);
-    gradient.addColorStop(0, withAlpha(white, 0));
-    gradient.addColorStop(1, withAlpha(white, brightness));
+    gradient.addColorStop(0, withAlpha(head, 0));
+    gradient.addColorStop(1, withAlpha(head, brightness));
     ctx.fillStyle = gradient;
     roundedRectPath(ctx, x, y - thickness / 2, length, thickness, thickness / 2);
     ctx.fill();
@@ -274,9 +286,11 @@ function drawBolts(
   size: EffortTrackSize,
   time: number,
   color: string,
+  core: string,
 ): void {
   const rgb = parseColor(color);
-  if (!rgb) return;
+  const coreRgb = parseColor(core);
+  if (!rgb || !coreRgb) return;
   const width = size.width;
   const height = size.height;
   for (let slot = 0; slot < 2; slot += 1) {
@@ -304,7 +318,7 @@ function drawBolts(
     boltPath(ctx, x, lean, height);
     ctx.stroke();
     ctx.shadowBlur = 0;
-    ctx.strokeStyle = withAlpha({ r: 255, g: 255, b: 255 }, intensity);
+    ctx.strokeStyle = withAlpha(coreRgb, intensity);
     ctx.lineWidth = 1.5;
     ctx.stroke();
     ctx.restore();

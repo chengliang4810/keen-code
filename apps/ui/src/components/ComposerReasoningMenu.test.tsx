@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import { ComposerReasoningMenu } from "./ComposerReasoningMenu";
+import { ComposerReasoningMenu, effortTitleClass } from "./ComposerReasoningMenu";
 
 const labels = {
   reasoning: "推理强度",
@@ -18,6 +18,11 @@ const labels = {
 };
 
 describe("ComposerReasoningMenu", () => {
+  it("Ultra 不控制思考强度动效，标题只随最高档变化", () => {
+    expect(effortTitleClass(false)).toBe("effort-title effort-title--fast");
+    expect(effortTitleClass(true)).toBe("effort-title effort-title--fusion");
+  });
+
   it("未选择模型时不显示思考强度入口，即使面板状态为打开", () => {
     for (const open of [false, true]) {
       expect(renderToString(
@@ -64,11 +69,12 @@ describe("ComposerReasoningMenu", () => {
     );
 
     expect(source).toContain("<EffortSlider");
-    expect(source).toContain('<Tip label={`${labels.reasoning}: ${currentLabel}`}>');
+    expect(source).toContain('<Tip label={`${labels.reasoning}: ${triggerLabel}`}>');
     expect(source).not.toContain("disabled={open}");
     expect(source).not.toContain("<Slider ");
-    expect(source).toContain("fast={ultra}");
-    expect(source).toContain('variant={ultra ? "primary" : "ghost"}');
+    expect(source).not.toContain("fast={ultra}");
+    // Ultra 开启态走柔和品牌色圆底（CSS），不再切主色实心变体。
+    expect(source).not.toContain('variant={ultra ? "primary"');
     expect(source).toContain('size="icon-md"');
     expect(source).toContain("aria-pressed={ultra}");
     expect(source).toContain("onUltra(!ultra)");
@@ -76,5 +82,31 @@ describe("ComposerReasoningMenu", () => {
     expect(source).not.toContain("<Switch");
     expect(source).not.toContain("ultraDescription");
     expect(source.match(/<DropdownMenuSeparator/g)).toBeNull();
+  });
+
+  it("Ultra 开启时触发器带闪电标记并把状态并入可读名称，关闭时不出现", () => {
+    const render = (ultra: boolean) => renderToString(
+      <ComposerReasoningMenu
+        open={false}
+        onOpenChange={() => {}}
+        model={{
+          id: "gpt-5",
+          label: "GPT-5",
+          reasoningSupported: true,
+          reasoningEfforts: [{ id: "low" }, { id: "medium" }, { id: "high" }],
+        }}
+        effort="medium"
+        ultra={ultra}
+        labels={labels}
+        onEffort={() => {}}
+        onUltra={() => {}}
+      />,
+    );
+    const on = render(true);
+    expect(on).toContain("cmm__ultra-mark");
+    expect(on).toContain('aria-label="推理强度: 中 · Ultra"');
+    const off = render(false);
+    expect(off).not.toContain("cmm__ultra-mark");
+    expect(off).toContain('aria-label="推理强度: 中"');
   });
 });

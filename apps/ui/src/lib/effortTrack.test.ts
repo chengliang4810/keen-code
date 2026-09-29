@@ -4,6 +4,7 @@ import {
   edgeFade,
   noise,
   parseColor,
+  resolveFixedEffortTrackKind,
   resolveEffortTrackKind,
   trackFrameIntervalMs,
   withAlpha,
@@ -16,6 +17,13 @@ describe("resolveEffortTrackKind", () => {
     expect(resolveEffortTrackKind(true, false)).toBe("supercharged");
     expect(resolveEffortTrackKind(false, true)).toBe("fast");
     expect(resolveEffortTrackKind(true, true)).toBe("fusion");
+  });
+});
+
+describe("resolveFixedEffortTrackKind", () => {
+  it("所有档位都有速度动效，最高档再叠加融合效果", () => {
+    expect(resolveFixedEffortTrackKind(false)).toBe("fast");
+    expect(resolveFixedEffortTrackKind(true)).toBe("fusion");
   });
 });
 
@@ -56,7 +64,7 @@ describe("edgeFade", () => {
 
 describe("parseColor / withAlpha", () => {
   it("解析 hex 与 rgb 字面量", () => {
-    expect(parseColor("#cc6b47")).toEqual({ r: 204, g: 107, b: 71 });
+    expect(parseColor("#8c57f7")).toEqual({ r: 140, g: 87, b: 247 });
     expect(parseColor("#fff")).toEqual({ r: 255, g: 255, b: 255 });
     expect(parseColor("rgb(12, 34, 56)")).toEqual({ r: 12, g: 34, b: 56 });
   });
@@ -67,8 +75,8 @@ describe("parseColor / withAlpha", () => {
   });
 
   it("withAlpha 生成 rgba 字面量", () => {
-    expect(withAlpha({ r: 204, g: 107, b: 71 }, 0.5)).toBe(
-      "rgba(204, 107, 71, 0.5)",
+    expect(withAlpha({ r: 140, g: 87, b: 247 }, 0.5)).toBe(
+      "rgba(140, 87, 247, 0.5)",
     );
   });
 });
@@ -114,6 +122,7 @@ function recordingContext() {
     lineTo: () => ops.push("lineTo"),
     closePath: () => ops.push("closePath"),
     arc: () => ops.push("arc"),
+    rect: () => ops.push("rect"),
     fill: () => ops.push("fill"),
     stroke: () => ops.push("stroke"),
     save: () => ops.push("save"),
@@ -125,7 +134,7 @@ function recordingContext() {
   return { fills, strokes, ops, ctx };
 }
 
-const PALETTE = { brand: "#cc6b47", fast: "#ffd65c", spark: "#ffffff" };
+const PALETTE = { brand: "#8c57f7", fast: "#d9b8ff", spark: "#ffffff" };
 
 function frame(kind: EffortTrackFrame["kind"], width = 240): EffortTrackFrame {
   return { kind, width, height: 34, time: 1.37, palette: PALETTE };
@@ -152,6 +161,24 @@ describe("drawEffortTrackFrame", () => {
     // 每条速度线一个 fill；闪烁中的闪电辉光 + 白芯各一次 stroke。
     expect(ops.filter((op) => op === "fill").length).toBeGreaterThanOrEqual(5);
     expect(ops.filter((op) => op === "stroke").length).toBe(2);
+  });
+
+  it("fast 态不画扫光（上游只在融合态画）", () => {
+    const { ctx, ops } = recordingContext();
+    drawEffortTrackFrame(ctx, frame("fast"));
+    // 扫光是三段渐变（0/0.5/1 三个 stop）；速度线只有 0/1 两个 stop。
+    expect(ops.filter((op) => op.startsWith("stop:0.5"))).toEqual([]);
+  });
+
+  it("速度线与闪电芯的颜色跟随 spark（银白预设的浅色填充用深色）", () => {
+    const { ctx, ops } = recordingContext();
+    drawEffortTrackFrame(ctx, {
+      ...frame("fast"),
+      time: 0.1,
+      palette: { ...PALETTE, spark: "#1f1f26" },
+    });
+    expect(ops.join("\n")).toContain("rgba(31, 31, 38,");
+    expect(ops.join("\n")).not.toContain("rgba(255, 255, 255,");
   });
 
   it("闪电只在自己的窗口内出现", () => {

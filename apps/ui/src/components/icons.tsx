@@ -78,6 +78,7 @@ import {
   IconTrash as TbTrash,
   IconUpload as TbUpload,
   IconUser as TbUser,
+  IconUsersGroup as TbUsersGroup,
   IconWorld as TbWorld,
   IconX as TbX,
 } from "@tabler/icons-react";
@@ -284,5 +285,7 @@ export const IconSummary = wrap(TbListDetails);
 export const IconGitCommit = wrap(TbGitCommit);
 /** 子智能体。 */
 export const IconSubagent = wrap(TbRobot);
+/** 多智能体协作。 */
+export const IconUsersGroup = wrap(TbUsersGroup);
 /** 推送到远端。 */
 export const IconPush = wrap(TbUpload);
