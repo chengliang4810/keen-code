@@ -185,10 +185,24 @@ describe("Appica theme token bridge", () => {
 
   it("keeps primary button fill and foreground paired in both modes", () => {
     expect(main).toContain('import "./styles/theme-colors.css";');
-    expect(themeColors).toContain('html[data-theme][data-primary-color] {');
+    expect(themeColors).toContain('html[data-theme][data-primary-color]:not([data-primary-color="base"]) {');
     expect(themeColors).toContain('--primary: var(--picked-primary);');
-    expect(themeColors).toContain('html[data-theme="dark"][data-primary-color] {');
-    expect(themeColors).toContain('--primary-foreground: oklch(1 0 0);');
+    expect(themeColors).toContain('html[data-primary-color="custom"] {');
+    expect(themeColors).toContain('html[data-theme][data-primary-color]:not([data-primary-color="base"]) {');
+    expect(themeColors).toContain('--primary-foreground: var(--custom-primary-foreground);');
+  });
+
+  it("provides named and custom secondary roles in both modes", () => {
+    expect(main).toContain('loadBrandColor("keencode.secondary-color", SECONDARY_COLORS, DEFAULT_SECONDARY_COLOR)');
+    const light = scopeBody(themeColors, 'html[data-theme="light"][data-secondary-color]:not([data-secondary-color="custom"]) {');
+    const dark = scopeBody(themeColors, 'html[data-theme="dark"][data-secondary-color]:not([data-secondary-color="custom"]) {');
+    for (const body of [light, dark]) {
+      expect(body).toContain("--secondary:");
+      expect(body).toContain("--secondary-foreground:");
+      expect(body).toContain("--focus-ring-secondary:");
+    }
+    expect(themeColors).toContain('html[data-theme="light"][data-secondary-color="custom"] {');
+    expect(themeColors).toContain('html[data-theme="dark"][data-secondary-color="custom"] {');
   });
 
   it("leaves accent and focus ownership to product theme tokens", () => {
@@ -323,10 +337,10 @@ describe("Appica theme token bridge", () => {
   });
 
   it("keeps Settings portal surfaces on semantic ZCode roles", () => {
-    expect(declaration(tokens, "bg-overlay")).toBe("rgba(0, 0, 0, 0.6)");
+    expect(declaration(tokens, "bg-overlay")).toBe("rgba(0, 0, 0, 0.46)");
     expect(declaration(tokens, "border-popover")).toBe("var(--border-subtle)");
     const dark = lastScopeBody(tokens, '[data-theme="dark"] {');
-    expect(declaration(dark, "bg-overlay")).toBe("rgba(0, 0, 0, 0.6)");
+    expect(declaration(dark, "bg-overlay")).toBe("rgba(0, 0, 0, 0.56)");
     expect(declaration(dark, "border-popover")).toBe("var(--border-subtle)");
     expect(settingsShell).toContain('background: var(--bg-overlay);');
     expect(settingsShell).toContain('border: 1px solid var(--border-popover);');

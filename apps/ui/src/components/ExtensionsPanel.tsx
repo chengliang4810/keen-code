@@ -926,7 +926,7 @@ export function ExtensionsPanel({
 
   return (
     <div className="ext-panel" data-testid="extensions-panel">
-      <p className="settings-page__lead">{tr("ext.lead")}</p>
+      {tab !== "market" ? <p className="settings-page__lead">{tr("ext.lead")}</p> : null}
 
       {onTabChange ? (
         <Tabs

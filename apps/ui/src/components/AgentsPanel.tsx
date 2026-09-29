@@ -598,12 +598,18 @@ export function AgentsPanel({ locale, projectPath = null }: AgentsPanelProps) {
         {detail ? <AgentDetailView locale={locale} detail={detail} /> : null}
       </GlassModal>
 
-      <GlassModal open={!!removeTarget} title={tr("agents.removeTitle")} onClose={() => !busy && setRemoveTarget(null)}>
+      <GlassModal
+        open={!!removeTarget}
+        title={tr("agents.removeTitle")}
+        onClose={() => !busy && setRemoveTarget(null)}
+        footer={
+          <>
+            <Button size="md" type="button" variant="ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
+            <Button size="md" type="button" variant="primary" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
+          </>
+        }
+      >
         <p>{tr("agents.removeConfirm", { name: removeTarget?.name ?? "" })}</p>
-        <div className="ext-item__actions">
-          <Button size="md" type="button" variant="ghost" disabled={busy} onClick={() => setRemoveTarget(null)}>{tr("common.cancel")}</Button>
-          <Button size="md" type="button" variant="primary" disabled={busy} onClick={() => void removeAgent()}>{tr("agents.remove")}</Button>
-        </div>
       </GlassModal>
     </div>
   );

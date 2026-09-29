@@ -425,7 +425,9 @@ export function ExtensionsBuildExtras({
                       ) : null}
                     </div>
                     {plugin.description ? (
-                      <div className="ext-item__desc">{plugin.description}</div>
+                      <div className="ext-item__desc ext-market-plugin__description" title={plugin.description}>
+                        {plugin.description}
+                      </div>
                     ) : null}
                     {meta ? <div className="ext-item__meta">{meta}</div> : null}
                     {hasLspServers ? (
@@ -494,7 +496,7 @@ export function ExtensionsBuildExtras({
         open={sourcesOpen}
         onClose={() => setSourcesOpen(false)}
         title={tr("ext.market.sourcesTitle")}
-        size="md"
+        size="sm"
         closeLabel={tr("common.close")}
         wrapBody
       >
@@ -561,7 +563,7 @@ export function ExtensionsBuildExtras({
           if (busy === null) setAddSourceOpen(false);
         }}
         title={tr("ext.market.addLabel")}
-        size="md"
+        size="sm"
         closeLabel={tr("common.close")}
         wrapBody
         footer={
@@ -590,14 +592,13 @@ export function ExtensionsBuildExtras({
             className="ext-plugin-install__label"
             htmlFor="ext-market-source"
           >
-            {tr("ext.market.addLabel")}
+            {tr("ext.market.sourceAddress")}
           </label>
           <Input
             id="ext-market-source"
+            data-modal-autofocus
             type="text"
-            className="settings-input ext-plugin-install__input"
             value={addSource}
-            placeholder="/absolute/path/to/marketplace"
             disabled={busy !== null}
             autoComplete="off"
             spellCheck={false}
