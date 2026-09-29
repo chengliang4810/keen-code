@@ -126,13 +126,13 @@ describe("Windows 标题栏与项目菜单定位契约", () => {
   it("Windows 窗口按钮沿用系统标题按钮的点击区域", () => {
     const css = readSource("./styles/app-foundation.css");
     const header = readSource("./styles/app-conversation.css");
-    expect(css).toMatch(/\.window-controls__btn\s*\{[^}]*width:\s*46px;[^}]*height:\s*32px;/s);
-    expect(css).toMatch(/\.window-controls__btn svg\s*\{[^}]*width:\s*12px;[^}]*height:\s*12px;/s);
-    expect(css).toMatch(/\.platform-win\.app-shell\s*\{[^}]*--titlebar-height:\s*32px;/s);
-    expect(css).toMatch(/\.sidebar-chrome\s*\{[^}]*height:\s*var\(--titlebar-height, 48px\);/s);
-    expect(header).toMatch(/\.platform-win \.main__top\s*\{[^}]*padding-block:\s*0;/s);
-    expect(header).toMatch(/\.main\.main--frame\s*\{[^}]*margin:\s*0 4px 4px 0;/s);
-    expect(css).not.toMatch(/\.platform-mac \.sidebar-chrome\s*\{/);
+    expect(css).toMatch(/.window-controls__btns*{[^}]*width:s*46px;[^}]*height:s*32px;/s);
+    expect(css).toMatch(/.window-controls__btn svgs*{[^}]*width:s*12px;[^}]*height:s*12px;/s);
+    expect(css).toMatch(/.platform-win.app-shells*{[^}]*--titlebar-height:s*32px;/s);
+    expect(css).toMatch(/.sidebar-chromes*{[^}]*height:s*var(--titlebar-height, 48px);/s);
+    expect(header).toMatch(/.platform-win .main__tops*{[^}]*padding-block:s*0;/s);
+    expect(header).toMatch(/.main.main--frames*{[^}]*margin:s*0 4px 4px 0;/s);
+    expect(css).not.toMatch(/.platform-mac .sidebar-chromes*{/);
   });
 });
 
@@ -153,10 +153,10 @@ describe("App ACP 投递契约", () => {
 
 describe("App 扩展查询项目上下文契约", () => {
   it("会话摘要查询子智能体时携带当前活动项目路径", () => {
-    const source = readSource("./App.tsx");
+    const source = readSource("./hooks/useSubagentMetadata.ts");
 
-    expect(source).toContain(".agentsList(activeProject?.path ?? null)");
-    expect(source).toContain("[activeProject?.path, subagentIdentityKey]");
+    expect(source).toContain("agentsList(projectPath)");
+    expect(source).toContain("[projectPath, subagentIdentityKey]");
   });
 });
 

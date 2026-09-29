@@ -27,6 +27,10 @@ import { useFrontendObservability } from "@/hooks/useFrontendObservability";
 import { useVisualViewportLayout } from "@/hooks/useVisualViewportLayout";
 import { pruneUnprotectedSessionMessageCache } from "@/hooks/acp-runtime/messageCache";
 import { useProjectDialog } from "@/hooks/useProjectDialog";
+import { useAskUserGate } from "@/hooks/useAskUserGate";
+import { useSessionUsagePanel } from "@/hooks/useSessionUsagePanel";
+import { useStreamStatusBanner } from "@/hooks/useStreamStatusBanner";
+import { useSubagentMetadata } from "@/hooks/useSubagentMetadata";
 import { useWorktrees } from "@/hooks/useWorktrees";
 import { acpSessionApi, useSessionLifecycleActions } from "@/hooks/useSessionLifecycleActions";
 import {
@@ -37,10 +41,8 @@ import type { DragZone } from "@/lib/dragZone";
 import {
   isSessionLiveStreaming,
   localizeUiError,
-  presentErrorBanner,
   type ErrorBannerView,
   IDLE_SNAPSHOT,
-  type AskUserPayload,
   type ChatMessage,
   type SessionSnapshot,
 } from "@/lib/session";
@@ -84,7 +86,7 @@ import { ShortcutsModal } from "@/features/app/overlays/ShortcutsModal";
 import { WorktreeCreateModal } from "@/features/app/overlays/WorktreeCreateModal";
 import { WorktreeGcModal } from "@/features/app/overlays/WorktreeGcModal";
 import { StatusModal } from "@/components/StatusModal";
-import type { Project, SessionContextUsage } from "@/features/app/models";
+import type { Project } from "@/features/app/models";
 export default function App() {
   const projectWritesAllowed = canWriteProjects(api.isTauri());
   useVisualViewportLayout();
@@ -162,17 +164,15 @@ export default function App() {
   const liveMapRef = useRef(liveMap);
   liveMapRef.current = liveMap;
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  /** 当前可见 Session 最近一次由 ACP 上报的上下文用量。 */
-  const [contextUsage, setContextUsage] =
-    useState<SessionContextUsage | null>(null);
-  /** 每个 Session 最近一次由 ACP 上报的真实上下文用量。 */
-  const contextUsageBySessionRef = useRef<Map<string, SessionContextUsage>>(
-    new Map(),
-  );
-  /** 从本地请求记录恢复的当前任务整体缓存用量，可跨应用重启。 */
-  const [taskCacheUsage, setTaskCacheUsage] =
-    useState<api.TaskCacheUsage | null>(null);
-  const taskCacheUsageRequestSeqRef = useRef(0);
+  /** 可见会话上下文用量与任务缓存用量投影。 */
+  const {
+    contextUsage,
+    setContextUsage,
+    contextUsageBySessionRef,
+    taskCacheUsage,
+    setTaskCacheUsage,
+    taskCacheUsageRequestSeqRef,
+  } = useSessionUsagePanel();
   const draftKeyRef = useRef(0);
   const draftNavigationSnapshotRef = useRef<DraftNavigationSnapshot | null>(null);
   const navigationActionsRef = useRef<{
@@ -190,9 +190,6 @@ export default function App() {
   /** 每个会话最后确认的模型，避免切换对话时复用全局 composer 模型。 */
   const modelBySessionRef = useRef<Map<string, string>>(new Map());
   const viewingSessionIdRef = useRef<string | null>(null);
-  const [subagentDescriptions, setSubagentDescriptions] = useState<
-    Record<string, string>
-  >({});
   /** 当前渲染 Session 的 ACP 原生视图；草稿没有持久化视图。 */
   const acpSessionView = useMemo(
     () =>
@@ -201,6 +198,16 @@ export default function App() {
         : null,
     [acpWorkspace, session.sessionId],
   );
+  const subagentIdentityKey = (acpSessionView?.subagents ?? [])
+    .map((agent) => `${agent.agent_id}:${agent.agent_name}`)
+    .join("|");
+  const {
+    descriptions: subagentDescriptions,
+    modelLabels: subagentModelLabels,
+  } = useSubagentMetadata({
+    projectPath: activeProject?.path ?? null,
+    subagentIdentityKey,
+  });
   const displayedSubagents = useMemo(
     () => (acpSessionView?.subagents ?? []).map((agent) => ({
       ...agent,
@@ -241,7 +248,17 @@ export default function App() {
     confirmBtnRef,
     appDialogRef,
   } = useAppDialog();
-  const askUserWrapRef = useRef<HTMLDivElement>(null);
+  /** AskUser 追问门与按会话未回答问题账本。 */
+  const {
+    askUser,
+    setAskUser,
+    askUserWrapRef,
+    pendingAskUserBySessionRef,
+    pendingAskUserSessionIds,
+    setPendingAskUserSessionIds,
+    clearPendingAskUser,
+    clearPendingAskUserRef,
+  } = useAskUserGate();
   /** Desktop Connect panel (AC7) — close does not stop host. */
   /** While openSession loads, do not let session.sessionId effect clobber viewing id. */
   const openingSessionIdRef = useRef<string | null>(null);
@@ -289,42 +306,7 @@ export default function App() {
     sessionId: session.sessionId,
     dialogOpen: appDialog !== null,
   });
-  const [askUser, setAskUser] = useState<AskUserPayload | null>(null);
-  /**
-   * Unanswered gates per session (`sessionId` → payload).
-   *
-   * 后台任务也可以在用户查看其他任务时提出问题。这里按 Session 暂存未回答问题，
-   * 切回任务时恢复显示，回答或本轮结束后删除。
-   */
-  const pendingAskUserBySessionRef = useRef<Map<string, AskUserPayload>>(
-    new Map(),
-  );
-  /** 触发侧栏重渲染，使后台等待输入的任务显示状态点。 */
-  const [pendingAskUserSessionIds, setPendingAskUserSessionIds] = useState<Set<string>>(
-    new Set(),
-  );
-  /** 清除指定 Session 尚未回答的问题；请求标识不同时保留后来到达的新问题。 */
-  const clearPendingAskUser = useCallback(
-    (sessionId?: string | null, rpcId?: string | number) => {
-      if (!sessionId) return;
-      const pending = pendingAskUserBySessionRef.current.get(sessionId);
-      if (rpcId != null && pending?.rpcId !== rpcId) return;
-      pendingAskUserBySessionRef.current.delete(sessionId);
-      setPendingAskUserSessionIds((previous) => {
-        if (!previous.has(sessionId)) return previous;
-        const next = new Set(previous);
-        next.delete(sessionId);
-        return next;
-      });
-    },
-    [],
-  );
-  /** 为只挂载一次的事件监听保存最新问题清理函数。 */
-  const clearPendingAskUserRef = useRef(clearPendingAskUser);
-  clearPendingAskUserRef.current = clearPendingAskUser;
   /** Polite SR announce for stream start/stop (not every token). */
-  const [streamA11yNote, setStreamA11yNote] = useState("");
-  const wasStreamingRef = useRef(false);
   const appSettings = useAppSettings({
     appBooting,
     onSaveError: showToast,
@@ -391,39 +373,6 @@ export default function App() {
     },
     [setEffort],
   );
-  const [subagentModelLabels, setSubagentModelLabels] = useState<
-    Record<string, string>
-  >({});
-  const subagentIdentityKey = displayedSubagents
-    .map((agent) => `${agent.agent_id}:${agent.agent_name}`)
-    .join("|");
-  useEffect(() => {
-    if (!api.isTauri() || !subagentIdentityKey) return;
-    let cancelled = false;
-    void api
-      .agentsList(activeProject?.path ?? null)
-      .then(({ agents }) => {
-        if (cancelled) return;
-        setSubagentDescriptions(
-          Object.fromEntries(
-            agents.map((agent) => [agent.name, agent.description.trim()]),
-          ),
-        );
-        setSubagentModelLabels(
-          Object.fromEntries(
-            agents.flatMap((agent) => {
-              if (!agent.model) return [];
-              const model = agent.model.split("::").at(-1)?.trim();
-              return model ? [[agent.name, model]] : [];
-            }),
-          ),
-        );
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [activeProject?.path, subagentIdentityKey]);
   /** Chat file/url card → open in right resource pane. */
   const [resourceOpenTarget, setResourceOpenTarget] =
     useState<ResourceOpenTarget | null>(null);
@@ -466,24 +415,25 @@ export default function App() {
   );
   /** Live drag-drop target for the add-project source control (null = not dragging). */
   const [dragZone, setDragZone] = useState<DragZone>(null);
-  const [localError, setLocalError] = useState<string | null>(null);
-  /** Expand technical dump under the compact error banner. */
-  const [errorDetailOpen, setErrorDetailOpen] = useState(false);
-  /** Host stream-stall prompt (I06); null when dismissed or not stalled. */
-  const [streamStall, setStreamStall] = useState<{
-    sessionId?: string;
-    stallSeconds: number;
-    tier?: string;
-    sawModelOutput?: boolean;
-    sawToolActivity?: boolean;
-  } | null>(null);
-  /** Live provider retry progress (session://retry); cleared on success/stop/error. */
-  const [retryStatus, setRetryStatus] = useState<{
-    attempt: number;
-    maxAttempts: number;
-    delayMs: number;
-    reason: string;
-  } | null>(null);
+  /** 顶部流状态横幅：本地错误卡、流卡顿、重试进度与无障碍播报。 */
+  const {
+    streamA11yNote,
+    setLocalError,
+    errorDetailOpen,
+    setErrorDetailOpen,
+    streamStall,
+    setStreamStall,
+    retryStatus,
+    setRetryStatus,
+    errorBanner,
+  } = useStreamStatusBanner({
+    locale,
+    streaming:
+      session.state === "streaming" ||
+      messages.some((m) => m.role === "assistant" && m.streaming),
+    a11yStreaming: tr("a11y.assistantStreaming"),
+    a11yDone: tr("a11y.assistantDone"),
+  });
   const [resizingAside, setResizingAside] = useState(false);
   const [resizingSidebar, setResizingSidebar] = useState(false);
   const { platform, useCustomWindowChrome, windowMaximized, windowFullscreen } =
@@ -665,7 +615,6 @@ export default function App() {
     visibleSessionsByProject,
     setVisibleSessionsByProject,
     sessionSortMode,
-    sessionOrder,
     setSessionSortMode,
     markSessionUserMessage,
     projectDropHint,
@@ -1318,35 +1267,11 @@ export default function App() {
       : appUpdateAction === "retry"
         ? tr("settings.updateRetry")
         : tr("sidebar.updatePreparing", { version: availableUpdateVersion });
-  // Agent 回合错误只进入对话气泡；顶部错误卡仅承载无法归属到回合的本地错误。
-  const errorBanner = useMemo(
-    () => presentErrorBanner(null, localError, locale),
-    [localError, locale],
-  );
   /** Prefer in-thread turn error; avoid stacking with the top error banner. */
   const hasChatTurnError = useMemo(
     () => messages.some((m) => m.isError),
     [messages],
   );
-  // Collapse technical dump whenever the visible error changes.
-  useEffect(() => {
-    setErrorDetailOpen(false);
-  }, [errorBanner?.code, errorBanner?.summary, errorBanner?.detail]);
-  // T15: announce stream start/end once (avoid token-level noise).
-  useEffect(() => {
-    const streaming =
-      session.state === "streaming" ||
-      messages.some((m) => m.role === "assistant" && m.streaming);
-    if (streaming && !wasStreamingRef.current) {
-      setStreamA11yNote(tr("a11y.assistantStreaming"));
-    } else if (!streaming && wasStreamingRef.current) {
-      setStreamA11yNote(tr("a11y.assistantDone"));
-      const t = window.setTimeout(() => setStreamA11yNote(""), 2500);
-      wasStreamingRef.current = streaming;
-      return () => window.clearTimeout(t);
-    }
-    wasStreamingRef.current = streaming;
-  }, [session.state, messages, tr]);
   /** T04 错误卡片操作：重连、打开设置或关闭。 */
   const runErrorBannerAction = useCallback(
     (action: NonNullable<ErrorBannerView["primary"]>) => {
@@ -1435,8 +1360,6 @@ export default function App() {
             onTheme: applyThemeChoice,
             baseColor,
             primaryColor,
-            onBaseColor: applyBaseColorChoice,
-            onPrimaryColor: applyPrimaryColorChoice,
             uiFontSize,
             onUiFontSize: applyUiFontSizeChoice,
           }}
@@ -1543,11 +1466,6 @@ export default function App() {
             openSessionMenu,
             archiveSession,
             pinSession,
-          }}
-          archive={{ sessions,
-            sessionOrder, sessionSortMode,
-            loadAllSessions,
-            deleteArchivedSession,
           }}
           user={{
             labels: {
