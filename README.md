@@ -42,8 +42,6 @@ KeenCode 启动后会立即检查 GitHub Releases，并在运行期间每 30 分
 
 首次使用时，在「设置 → 模型设置」中添加自己的模型供应商、API 地址、密钥和模型。密钥只保存在 KeenCode 本机应用配置中。
 
-加入项目即授予应用及 Agent 进程按当前系统用户权限工作的能力。文件修改、命令执行和网络访问不会逐次弹出审批框，请在发送任务前确认项目目录和指令范围，并在执行后审查工具记录与 Diff。
-
 ## 命令行与外部编排
 
 除桌面应用外，KeenCode 提供非交互命令行入口 `keencode`，可在终端、CI 或脚本中运行一次性任务：
@@ -59,7 +57,7 @@ keencode session list
 
 ## 本地开发
 
-需要 Node.js 20、pnpm 10.14.0、Rust stable，以及 Tauri 2 对应平台的系统构建工具。
+需要 Node.js 24、pnpm 10.14.0、Rust stable，以及 Tauri 2 对应平台的系统构建工具。
 
 ```bash
 git clone https://github.com/chengliang4810/keen-code.git

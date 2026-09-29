@@ -220,7 +220,7 @@ pub trait SystemCredentialProvider: Send + Sync {
 pub struct WebHostConfig {
     /// Web 默认关闭；关闭时不创建监听器。
     pub enabled: bool,
-    /// 监听的本机地址。`0.0.0.0` 仅应在用户明确开启局域网访问时使用。
+    /// 监听的本机地址；只应传入回环或局域网 IP，未指定（如 `0.0.0.0`）与公网地址由宿主入口负责拒绝。
     pub bind: IpAddr,
     /// 用户固定端口；禁止使用 0，冲突必须报错而不能随机换端口。
     pub port: u16,

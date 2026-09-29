@@ -24,7 +24,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与 ci.yml、README 的 Node 主版本保持一致。
+          node-version: 24
           cache: pnpm
 
       - run: corepack pnpm@10.14.0 install --frozen-lockfile
@@ -140,7 +141,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          # 与 ci.yml、README 的 Node 主版本保持一致。
+          node-version: 24
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable

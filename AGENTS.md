@@ -2,19 +2,26 @@
 
 本文指导在本仓库中开发 KeenCode 的 Agent。产品内 Agent 的权限、Plan 模式和子 Agent 机制是实现要求，不代表开发本仓库时自动获得额外授权或必须进入 Plan 模式。
 
-## 开始任务
+## 核心原则
 
 - 用中文沟通。先确认用户要的是分析、计划还是实现；分析与评审请求不自动授权修改文件。
+- 行为变更先明确产品规则、状态所有者、接口和验收场景，再实现代码；涉及协议契约或主题对照时，同步更新 `docs/protocols/`、`docs/frontend-harness-theme.md` 等对应文档。
+- 以当前检出的源码、`package.json`、根 `Cargo.toml` 和 CI 为准；遇到文档与实现不一致，核实当前代码、清单和 CI，并明确指出差异，不复制过期说明。
+- 定位问题时，未明确要求修改代码就先调查原因；结合源码、日志和运行时证据，区分已确认原因与待验证假设。
+- 在共同原因处做最小完整修改，不顺手重构无关模块，不增加假设中的扩展点。
+- 保留与任务无关的本地改动，不自行恢复已移除的模块或内部依赖。
+
+## 开始任务
+
 - 先看 `git status --short`，保留已有改动；搜索优先使用 `rg` / `rg --files`。
 - 先读目标模块、调用方、相邻测试和依赖清单，再修改。下表用于定位，不要求每次通读整个仓库。
-- 在共同原因处做最小完整修改，不顺手重构无关模块，不增加假设中的扩展点。
-- 遇到文档与实现不一致，核实当前代码、清单和 CI，并明确指出差异；不要复制过期说明。
+- 修改界面前先读 `DESIGN.md`（UI 设计规范）与 `docs/frontend-harness-theme.md`（主题与 Harness 来源）；修改模型协议前先读 `docs/protocols/` 下的对应参考。
 
 ## 当前技术栈与入口
 
 KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite 6 前端，Tauri 2 桌面外壳，进程内自研 Rust Agent 运行时。浏览器开发服务器只用于前端开发，不能代替原生桌面验收。
 
-仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` Tauri 桌面宿主 crate 根、`cli/` 命令行）、`core/`（共享 Rust 库，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
+仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` Tauri 桌面宿主 crate 根）、`core/`（共享 Rust 库，含 `cli/` 命令行入口，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
 
 | 改动内容 | 优先检查的位置 |
 | --- | --- |
@@ -24,6 +31,7 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 | 业务视图与聊天渲染 | `apps/ui/src/components/`、`apps/ui/src/components/lobe-chat/` |
 | 通用控件、样式与翻译 | `apps/ui/src/components/ui/`、`apps/ui/src/styles/`、`apps/ui/src/i18n/` |
 | 前端纯规则 | `apps/ui/src/lib/`；测试通常与实现同目录 |
+| UI 设计规范、令牌与设计门禁 | `DESIGN.md`、`apps/ui/src/styles/`、`tooling/scripts/design-system-gate.mjs` |
 | Tauri 命令注册与桌面集成 | `apps/desktop/src/lib.rs` 及同目录业务模块 |
 | 桌面会话接入、历史加载、工具投影 | `apps/desktop/src/agent_runtime.rs`、`apps/desktop/src/agent_runtime/` |
 | ACP 方法、事件与协议契约 | `core/acp/` |
@@ -57,7 +65,6 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 ### 产品语义
 
 - 会话相互隔离：Goal、Todo、Plan 状态属于单个对话，不能提升为项目共享状态。子 Agent 只支持单层，不加入递归或 DAG 工作流。
-- 产品内工具执行不维护信任状态、权限模式或审批分支。加入项目后可在宿主进程权限内访问项目内外路径；文件修改、命令和网络行为必须可审查。
 - Plan 开启时只读调研；用户关闭并发起实施后执行，不增加独立计划审批。只读方案与报告放 `~/.keencode` 下按项目划分的沙箱，不写入用户项目。
 - 本地记忆正文和索引放 `~/.keencode/memories`，不增加独立 Memory Sideagent、Ambient Memory 或本地 Embedding。
 - 插件市场、Skills、MCP 是同级入口。模型设置只管理自定义供应商，不实现厂商官方账户、套餐、额度或官方 Key。
@@ -66,10 +73,11 @@ KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite
 
 ## 界面修改
 
-- 直接复用当前 `apps/ui/src/`、`apps/ui/public/` 的组件、DOM、CSS、设计令牌和资源，不根据截图重写近似实现。
-- 可见交互控件使用 `apps/ui/src/components/ui/` 中的 shadcn/ui 组件。业务代码不新增原生 `button`、`input`、`textarea`、`select`、`dialog`，也不重复实现已有控件；缺失时先查询当前版本文档，优先组合已有组件或使用正常包依赖，遵守下文的源码来源边界。
+- 遵守 `DESIGN.md`。直接复用当前 `apps/ui/src/`、`apps/ui/public/` 的组件、DOM、CSS、设计令牌和资源，不根据截图重写近似实现。
+- 可见交互控件优先使用 `apps/ui/src/components/ui/` 中对 `@appica/ui-react` 的产品化包装；没有包装时按 Appica 强制规则从子路径引入组件。业务代码不新增原生 `button`、`input`、`textarea`、`select`、`dialog`，也不重复实现已有控件；缺失时先查询当前版本文档，优先组合已有组件或使用正常包依赖，遵守下文的源码来源边界。
 - 原生控件仅限 UI 组件底层、浏览器要求的隐藏控件，以及 `contenteditable`、媒体等无等价组件的宿主；在代码中解释原因，不另建可见控件样式。
 - 使用组件既有变体、尺寸和语义化令牌。业务 `className` 只负责必要布局与产品结构，不覆盖控件颜色、字体、边框、圆角和交互状态。
+- 界面文案经 `apps/ui/src/i18n/`（zh、zh-TW、en，en 为键权威）；删除调用点时同步删除三种语言的键，布局容忍翻译长度变化。
 - 后端或协议调整不得无意改变界面。品牌或文案变化保留原盒模型与层级，并记录有意差异。
 - 可见界面修改在提交说明中记录基线提交或源码快照、运行环境、截图位置、复现命令；在相同状态、视口和 `deviceScaleFactor` 下比较截图与像素差异。
 - 缺失基线先尝试隔离重建；无法重建则记录原因和未验证范围，继续其他验证。历史记录和浏览器截图不能代替本次原生桌面验收。
@@ -90,8 +98,8 @@ pnpm dev           # 仅前端开发
 | --- | --- |
 | 仅文档或 Agent 规则 | 引用路径、命令与结构检查，`git diff --check`；不启动无关构建 |
 | 前端逻辑或组件 | `pnpm run typecheck`，`pnpm exec vitest run --root apps/ui <apps/ui 内测试文件路径>` |
-| 样式 | 上述相关检查，加 `pnpm run lint:css` 与界面基线比较 |
-| 完整前端验证 | `pnpm test`、`pnpm build`；`pnpm test` 包含脚本测试、clean-room 检查与 Vitest |
+| 样式或可见界面 | 上述相关检查，加 `pnpm run lint:css`、`pnpm run check:design-system` 与界面基线比较 |
+| 完整前端验证 | `pnpm test`、`pnpm build`；`pnpm test` 包含脚本测试、clean-room 与设计系统门禁检查和 Vitest |
 | 核心 Rust crate | `cargo test -p <包名>` |
 | Tauri 后端 | `cargo test -p keencode-desktop` |
 | 跨 crate 或公共协议 | 检查所有受影响的包；涉及桌面接入时另跑 `cargo test -p keencode-desktop` |
@@ -107,10 +115,16 @@ cargo clippy -p <包名> --all-targets -- -D warnings
 
 完整 CI 的 workspace、all-targets 和 doctest 矩阵见 `.github/workflows/ci.yml`。真实模型测试入口在 `tooling/provider-live-test/`，不要把需要凭据和网络的测试当作离线单测。
 
+## 日志与诊断
+
+- 前端统一诊断通道是 `apps/ui/src/lib/frontendDiagnostics.ts`：`reportFrontendError` / `reportFrontendCrash` 经 Tauri `diagnostics_*` 命令落盘，`installFrontendErrorHandlers` 兜底全局错误；诊断机制与字段见 `docs/diagnostics.md`。
+- 业务代码不新增 `console.log`；catch 路径的 `console.error` / `console.warn` 带 `[组件名]` 前缀并保持精简，不做高频逐条输出。
+- 不在日志、诊断、示例或提交中写入凭据、真实用户数据和内部服务地址。
+
 ## 依赖与参考项目边界
 
 - 允许通过 npm/pnpm、Cargo 正常声明和使用第三方依赖，遵守其许可证；优先复用已有依赖。
-- 经用户明确授权，KeenCode 前端可以直接复用 Apache-2.0 许可的 ZCode UI 组件与 CSS，以 ZCode 作为桌面和 Web 界面的视觉基线；复用范围不扩展到协议、运行时、提示词、凭据或产品数据。
+- 经用户明确授权，KeenCode 前端可以直接复用 Apache-2.0 许可的 ZCode UI 组件与 CSS，以 ZCode 作为桌面和 Web 界面的视觉基线；`DESIGN.md` 的规范结构同样参考 ZCode 设计规范并按本仓库令牌体系改写。复用范围不扩展到协议、运行时、提示词、凭据或产品数据。
 - 复制或改编第三方源码时，必须核对许可证，保留必要的版权与许可证文本，并在对应源码附近记录来源和影响范围。不得通过改名、删除声明或放宽门禁隐藏来源。
 - 其他未获明确授权的外部项目仍仅用于参考；需要引入其源码时必须先确认许可与归属要求。
 - `pnpm run check:clean-room` 仅检查部分来源名称与参考描述，不能证明源码原创，也不能把所有关键词命中认定为复制。来源判断需要结合文件内容、引入历史和实际引用。
@@ -125,7 +139,6 @@ cargo clippy -p <包名> --all-targets -- -D warnings
 - 完成前审查 `git diff` 和 `git diff --check`。报告改了什么、验证结果及未验证范围，不把尝试执行当作通过。
 - 仅在用户要求时提交或推送。获准提交后按功能点拆分，提交信息使用中英双语，只暂存本次相关改动；不擅自 amend、重写历史或绕过 hooks。
 
-
 ## Appica UI（强制规则）
 
 Appica UI component index (fetch before using a component you haven't used before):
@@ -139,7 +152,7 @@ https://appica.dev/ui/react/llms.txt
 - React 19 is a hard requirement. No `forwardRef` - `ref` is a plain prop.
 - Import from the subpath, one component per import:
   `import { Button } from '@appica/ui-react/button'`.
-- 尺寸默认统一设置为为 `md`
+- 尺寸默认统一设置为 `md`
 - Never write hex colors, px radii, or duration literals. Use the role-based tokens:
   `bg-background-muted`, `text-foreground-intense`, `border-border-strong`, `var(--radius-md)`.
   Full list: https://appica.dev/ui/docs/react/colors.md

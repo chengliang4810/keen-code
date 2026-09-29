@@ -2595,10 +2595,11 @@ fn read_records(
                     break;
                 }
             };
-            // 读端容忍更旧版本的事件（schema 演进靠 serde 字段兼容；首次不兼容
-            // 的版本 bump 时必须在 types.rs 登记按版本归一）。只拒绝来自更新
-            // 版本应用的记录：严格相等会让每次版本升级都把全部历史会话判为
-            // Corrupt 并从会话列表消失。
+            // 版本契约：只拒绝来自更新版本应用的记录（record.version 大于当前
+            // SESSION_EVENT_VERSION 即 EnvelopeMismatch）。同版本及更旧版本的
+            // 记录交给 serde 反序列化——字段集变动的版本 bump 会先在反序列化
+            // 失败并被判为 InvalidJson，即 bump 即作废旧数据；本项目定位不做
+            // 旧字段迁移，不存在按版本归一的读路径。
             if record.schema != crate::types::SESSION_EVENT_SCHEMA
                 || record.version > crate::types::SESSION_EVENT_VERSION
                 || record.session != *session_id

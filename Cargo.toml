@@ -5,7 +5,7 @@ members = [
     "core/acp",
     # 独立本地 ACP Client 与非交互命令行入口。
     "core/cli",
-    # 本机 Host 提供的认证 Web、资源和移动端传输安全边界。
+    # 本机 Host 提供的认证 Web、资源与移动端访问边界；不做 TLS，绑定仅限回环与局域网。
     "core/web-host",
     "core/agent",
     "core/model",
