@@ -35,7 +35,7 @@ git diff -- apps/ui/src/styles/harness
 | 外观选项 | `ui-theme/src/client/AppearanceRow.module.css` | 现有 ToggleGroup 的 `appearance` 变体；`flex: 1 1 180px`、内边距 20px/32px、圆角 20px、图文间隔 4px，空间不足时自然换行 |
 | 模型设置 | `ui-settings-models/src/client/ModelsSection.module.css` | 纵向提供商列表与编辑区；字段标签 12px/18px、字重 500，提示 12px/18px；沿用 KeenCode 模型协议与保存流程 |
 | 按钮 / 输入框 | `ui-primitives/src/Button.module.css`、`Input.module.css` | 标准按钮高 36px、圆角 18px（胶囊）、内边距 0/14px、间隔 4px、14px/22px；小按钮高 28px、12px/18px；输入框高 32px、圆角 8px、0.5px 边框、14px/22px |
-| 通用菜单 / 弹窗 | `ui-primitives/src/Menu.module.css`、`Modal.module.css` | 菜单圆角 20px、内边距 4px；弹窗圆角 24px、layer-2 表面、prominent 阴影、标题 16px/24px 与字重 500 |
+| 通用菜单 / 弹窗 | `ui-primitives/src/Menu.module.css`、`Modal.module.css` | 菜单圆角 20px、内边距 4px；弹窗按当前 `--modal-radius` 使用 15px 圆角、layer-2 表面、统一内容内边距与左对齐标题、16px/24px 标题和字重 500 |
 | 消息 / Markdown / 代码块 | `ui-chat/src/client/chat/MessageItem.module.css`、`ui-primitives/src/markdown/` | `lobe-chat.css`；用户气泡圆角 22px、内边距 10px/16px、14px/22px；Markdown 正文 14px/24px、标题使用原始排版变量，代码块圆角 12px、头部内边距 9px/14px、代码内边距 16px |
 
 字体完整栈：
@@ -49,10 +49,14 @@ git diff -- apps/ui/src/styles/harness
 
 - KeenCode 品牌、中文文案、Tabler 图标体系和现有业务入口继续使用。未把参考项目的账户、服务端、权限或模型配置逻辑接入桌面应用。
 - 已保存的侧栏宽度继续生效；280px 是新布局的默认值，不覆盖用户拖动后的尺寸。本次前后截图沿用相同的 260px 已保存侧栏。
-- Windows 自定义窗口保留 40px 标题栏空间；设置作为独立全窗口页面显示，顶部可拖动。返回入口为左侧导航顶部的“← 返回应用”，独立于可滚动目录；内容标题行不再显示关闭图标。正文保留 960px 最大阅读宽度；不超过 680px 时使用既有的下拉式设置导航及左侧返回按钮，满足产品 680×620 最小窗口尺寸。
+- Windows 主窗口使用无边框与自绘三键，和侧栏、会话栏、资源栏共用 48px 标题栏；macOS 保留原生 Overlay 红绿灯，位置与 48px 标题栏对齐。设置作为独立全窗口页面显示，顶部可拖动。返回入口为左侧导航顶部的“← 返回应用”，独立于可滚动目录；内容标题行不再显示关闭图标。正文保留 960px 最大阅读宽度；不超过 680px 时使用既有的下拉式设置导航及左侧返回按钮，满足产品 680×620 最小窗口尺寸。
 - 终端字体设置、Git 状态色和文件类型色保留。
 - 保留键盘焦点环与现有 shadcn/ui / Radix 控件语义。欢迎标题移入输入区域正常流；输入高度由 CSS 管理，删除两处旧的 22px × 10 行硬上限。
 - 弹窗中的具体表单和额外设置项按 KeenCode 业务内容排版，不能将两款不同产品的整页像素差解读为复制误差。
+
+## 2026-09-29 外观色板
+
+主题页参考 Appica UI 官方主题定制器的基础色、主色、次色三个选择轴，使用已有 Appica Select 展示色样。默认组合与官方一致，为 Gray / Base / Blue；主色 Base 沿用 KeenCode 原有无彩色主操作令牌。主色和次色的 Custom 选项打开 Appica ColorPicker，规范化六位 hex 保存在本机并在首次绘制前应用；基础色沿用中性色预设。自定义色通过 CSS 自定义属性生成主色或次色家族，未增加包依赖或远程请求。
 
 ## 验证与资源影响
 
