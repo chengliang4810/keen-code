@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
@@ -2698,6 +2698,19 @@ fn git_commit_blocking(
     include_unstaged: bool,
 ) -> Result<GitCommitResult, String> {
     let root = registered_project_root(&app, &project_path)?;
+    let diagnostics = app.state::<Arc<crate::diagnostics::Diagnostics>>();
+    // 审计不携带提交消息正文，只记录字节量，避免用户内容或其中的敏感
+    // 信息进入诊断日志。
+    diagnostics.log(
+        "info",
+        "ipc.git_commit",
+        format!(
+            "命令进入 project_root={} include_unstaged={} message_bytes={}",
+            root.display(),
+            include_unstaged,
+            message.len()
+        ),
+    );
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
     }
@@ -2722,6 +2735,11 @@ fn git_commit_blocking(
         .output()
         .map_err(|error| format!("无法执行 git commit：{error}"))?;
     if !output.status.success() {
+        diagnostics.log(
+            "error",
+            "ipc.git_commit",
+            format!("提交失败: {}", git_failure_reason(&output)),
+        );
         return Err(git_failure_reason(&output));
     }
     let head_output = run_git(&root, &["rev-parse", "--short", "HEAD"])?;
@@ -2732,9 +2750,19 @@ fn git_commit_blocking(
     } else {
         return Err(git_failure_reason(&head_output));
     };
+    let branch = git_current_branch(&root);
+    diagnostics.log(
+        "info",
+        "ipc.git_commit",
+        format!(
+            "命令完成 commit={} branch={}",
+            commit,
+            branch.as_deref().unwrap_or("")
+        ),
+    );
     Ok(GitCommitResult {
         commit,
-        branch: git_current_branch(&root),
+        branch,
         output: combined_git_output(&output),
     })
 }
@@ -2749,15 +2777,32 @@ pub async fn git_push(app: AppHandle, project_path: String) -> Result<GitPushRes
 
 fn git_push_blocking(app: AppHandle, project_path: String) -> Result<GitPushResult, String> {
     let root = registered_project_root(&app, &project_path)?;
+    let diagnostics = app.state::<Arc<crate::diagnostics::Diagnostics>>();
+    diagnostics.log(
+        "info",
+        "ipc.git_push",
+        format!("命令进入 project_root={}", root.display()),
+    );
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
     }
     let output = run_git_with_timeout(&root, &["push"])?;
     if !output.status.success() {
+        diagnostics.log(
+            "error",
+            "ipc.git_push",
+            format!("推送失败: {}", git_failure_reason(&output)),
+        );
         return Err(git_failure_reason(&output));
     }
+    let branch = git_current_branch(&root);
+    diagnostics.log(
+        "info",
+        "ipc.git_push",
+        format!("命令完成 branch={}", branch.as_deref().unwrap_or("")),
+    );
     Ok(GitPushResult {
-        branch: git_current_branch(&root),
+        branch,
         output: combined_git_output(&output),
     })
 }
