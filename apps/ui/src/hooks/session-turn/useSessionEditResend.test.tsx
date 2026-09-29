@@ -136,6 +136,21 @@ describe("useSessionEditResend recovery barrier", () => {
     expect(executeSend).toHaveBeenCalledWith(expect.objectContaining({
       storedDisplay: "修改后",
       targetSessionId: "session-edit",
+      planMode: false,
+      ultraMode: false,
+    }));
+  });
+
+  it("编辑重发按当前会话键传递计划与 Ultra 开关", async () => {
+    const { options, executeSend } = makeOptions("ready");
+    options.planModeSessionKey = "session-edit";
+    options.ultraModeSessionKey = "session-edit";
+    const edit = renderEditResend(options);
+
+    await expect(edit(message, "修改后")).resolves.toBe(true);
+    expect(executeSend).toHaveBeenCalledWith(expect.objectContaining({
+      planMode: true,
+      ultraMode: true,
     }));
   });
 

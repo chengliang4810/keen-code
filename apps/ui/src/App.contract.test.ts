@@ -354,29 +354,10 @@ describe("App 添加项目契约", () => {
 });
 
 describe("App 计划模式契约", () => {
-  it("会话级开关贯穿发送链并在草稿转正时迁移", () => {
-    const draftSource = readSource("./hooks/session-turn/useSessionDraftSend.ts");
-    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
-    const composerSource = readSource("./hooks/useComposerController.ts");
-    const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
-
-    // 发送链：send → enqueue/executeSend → session_send。
-    expect(draftSource).toContain("const planMode = planModeSessionKey === key");
-    expect(draftSource).toMatch(/sendQueue\.enqueue\(\{[\s\S]*?planMode,/s);
-    expect(draftSource).toMatch(/executeSend\(\{[\s\S]*?planMode,/s);
-    expect(sendSource).toContain("planMode = false");
-    expect(sendSource).toMatch(/api\.send\(\{[\s\S]*?planMode,/s);
-    // 队列快照保存当前会话的真实计划模式，而不是固定关闭。
-    // 草稿首发建立的会话继承开关。
-    expect(sendSource).toContain(
-      "if (planMode) setPlanModeSessionKey(resolvedSessionId)",
-    );
-    // /plan slash 命令与 composer chip 均可切换。
-    expect(composerSource).toContain('case "plan"');
-    expect(stageSource).toContain("ComposerPlanModeChip");
-    expect(stageSource).not.toContain("ComposerPlanModeHint");
-  });
-
+  // 发送链的行为契约（开关贯穿 enqueue/executeSend/api.send、草稿转正继承
+  // 会话键、Prompt 层 set_mode 与 ultraMode _meta 映射）已由行为测试锁定：
+  // useSessionDraftSend / useSessionSend / useSessionEditResend / lib/acp/prompt
+  // 的测试文件；这里只保留无法行为化的 UI 装配断言。
   it("计划 chip 与目标 chip 同显示逻辑，且两模式互斥", () => {
     const composerSource = readSource("./hooks/useComposerController.ts");
     const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
@@ -399,13 +380,6 @@ describe("App 计划模式契约", () => {
       "setGoalModeSessionKey(null)",
     );
   });
-
-  it("Prompt 层将 planMode 映射到标准 session/set_mode", () => {
-    const promptSource = readSource("./lib/acp/prompt.ts");
-    expect(promptSource).toContain(
-      'modeId: args.planMode === true ? "plan" : "default"',
-    );
-  });
 });
 
 describe("App Ultra 模式契约", () => {
@@ -426,25 +400,14 @@ describe("App Ultra 模式契约", () => {
     );
   });
 
-  it("与 Goal 和推理强度独立，并贯穿直接发送、队列和编辑重发", () => {
-    const draftSource = readSource("./hooks/session-turn/useSessionDraftSend.ts");
-    const sendSource = readSource("./hooks/session-turn/useSessionSend.ts");
-    const editSource = readSource("./hooks/session-turn/useSessionEditResend.ts");
+  // Ultra 开关贯穿直接发送、队列、编辑重发与 Prompt _meta 的行为契约已由
+  // useSessionDraftSend / useSessionSend / useSessionEditResend / lib/acp/prompt
+  // 的行为测试锁定；这里只保留无法行为化的工具栏装配与互斥断言。
+  it("与 Goal 和推理强度独立，工具栏入口不联动其他模式", () => {
     const stageSource = readSource("./features/app/main/ComposerToolbar.tsx");
-    const promptSource = readSource("./lib/acp/prompt.ts");
 
     expect(stageSource).toContain("<ComposerReasoningMenu");
     expect(stageSource).toContain("ultra={");
-    expect(draftSource).toMatch(/sendQueue\.enqueue\(\{[\s\S]*?ultraMode,/s);
-    expect(draftSource).toMatch(/executeSend\(\{[\s\S]*?ultraMode,/s);
-    expect(sendSource).toMatch(/api\.send\(\{[\s\S]*?ultraMode,/s);
-    expect(sendSource).toContain(
-      "if (ultraMode) setUltraModeSessionKey(resolvedSessionId)",
-    );
-    expect(editSource).toContain("ultraMode: ultraModeSessionKey === sessionId");
-    expect(promptSource).toContain(
-      '"keencode/ultraMode": args.ultraMode === true',
-    );
 
     const ultraToggleStart = stageSource.indexOf("onUltra={(enabled)");
     const ultraToggle = stageSource.slice(

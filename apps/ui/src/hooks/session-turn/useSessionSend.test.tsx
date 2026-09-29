@@ -420,6 +420,27 @@ describe("useSessionSend local error recovery", () => {
     expect(fixture.api.send.mock.calls[0]![0].text).not.toContain("remote-attachment");
   });
 
+  it("计划与 Ultra 开关贯穿发送参数并在草稿转正时继承会话键", async () => {
+    const fixture = makeOptions({ visibleSessionId: null, targetSessionId: null });
+    fixture.options.ensureConnected = async () => "session-new";
+    const send = renderSend(fixture.options);
+    await expect(
+      send({
+        ...validSend("mode-flags"),
+        planMode: true,
+        ultraMode: true,
+      }),
+    ).resolves.toBe(true);
+    expect(fixture.api.send).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "session-new",
+      planMode: true,
+      ultraMode: true,
+    }));
+    // 目标会话键为空的草稿发送：实体化后把当前开关固化为新会话键。
+    expect(fixture.options.ui.setPlanModeSessionKey).toHaveBeenCalledWith("session-new");
+    expect(fixture.options.ui.setUltraModeSessionKey).toHaveBeenCalledWith("session-new");
+  });
+
   it("Desktop 发送继续使用本机附件文本契约", async () => {
     const fixture = makeOptions();
     fixture.api.isTauri = () => true;

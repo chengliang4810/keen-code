@@ -82,6 +82,57 @@ it("直接发送成功时不回填", async () => {
   expect(options.ui.setDraft).toHaveBeenCalledWith("");
 });
 
+it("连接中的输入按当前会话的计划与 Ultra 开关入队", async () => {
+  const enqueue = vi.fn();
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "connecting", connecting: true,
+    draft: "排队内容", attachments: [], hasConfiguredModel: true,
+    goalModeSessionKey: null, planModeSessionKey: "s", ultraModeSessionKey: null,
+    executeSend: vi.fn(),
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
+    sendQueue: { enqueue, releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+  await result.send();
+  expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+    storedDisplay: "排队内容",
+    planMode: true,
+    ultraMode: false,
+  }));
+});
+
+it("直接发送把当前会话的计划与 Ultra 开关原样传给执行层", async () => {
+  const executeSend = vi.fn().mockResolvedValue(true);
+  const options: UseSessionDraftSendOptions = {
+    locale: "zh", sessionId: "s", sessionState: "ready", connecting: false,
+    draft: "直接发送", attachments: [], hasConfiguredModel: true,
+    goalModeSessionKey: null, planModeSessionKey: "s", ultraModeSessionKey: "s",
+    executeSend,
+    runtime: fakeRuntime({ sessionId: "s", epoch: 1 }),
+    sendQueue: { enqueue: vi.fn(), releaseFlushHold: vi.fn(), bindDraft: vi.fn() },
+    ui: {
+      setDraft: vi.fn(), setAttachments: vi.fn(), setGoalModeSessionKey: vi.fn(), setLocalError: vi.fn(),
+      promptHistoryIndexRef: { current: null }, setPromptHistoryIndex: vi.fn(), setPromptHistoryOpen: vi.fn(),
+      setPromptHistoryFilter: vi.fn(), setPromptHistoryActive: vi.fn(), setPromptHistoryFocusFilter: vi.fn(),
+    },
+  };
+  let result!: ReturnType<typeof useSessionDraftSend>;
+  function Harness() { result = useSessionDraftSend(options); return null; }
+  renderToString(createElement(Harness));
+  await result.send();
+  expect(executeSend).toHaveBeenCalledWith(expect.objectContaining({
+    planMode: true,
+    ultraMode: true,
+  }));
+});
+
 it("附件仍在上传或失败时不发送也不入队", async () => {
   const options: UseSessionDraftSendOptions = {
     locale: "zh", sessionId: "s", sessionState: "ready", connecting: false,
