@@ -928,6 +928,12 @@ struct SessionCollaborationStore {
     runtime_session: OnceLock<RuntimeSession>,
     /// 串行化读取、比较和原子替换，保证单进程内线性化。
     commit_gate: Mutex<()>,
+    /// 测试注入：让提交泵线程内的下一次未启动失败 Journal 发布立即失败。
+    ///
+    /// 协作批次落盘已移入后台提交泵线程，线程局部的 Journal 故障注入无法
+    /// 覆盖该线程；该开关用于在测试中模拟"发布失败、receipt 留盘"窗口。
+    #[cfg(test)]
+    fail_next_unstarted_publish: std::sync::atomic::AtomicBool,
 }
 
 impl SessionCollaborationStore {
@@ -945,6 +951,8 @@ impl SessionCollaborationStore {
             agent_checkpoint_directory: session_directory.join("collaboration-v2-agents"),
             runtime_session: OnceLock::new(),
             commit_gate: Mutex::new(()),
+            #[cfg(test)]
+            fail_next_unstarted_publish: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -1321,6 +1329,16 @@ impl SessionCollaborationStore {
             .cloned()
             .collect::<Vec<_>>();
         if failures.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        if self
+            .fail_next_unstarted_publish
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            // 模拟 Journal 发布失败：receipt 已随批次原子落盘，Journal 对账
+            // 留待后续屏障重试，与真实 Journal 故障的持久化语义一致。
+            tracing::warn!(target: "agent_runtime", "测试注入：未启动失败 Journal 发布延后");
             return;
         }
         let result = self.bound_runtime_session().and_then(|session| {
@@ -16126,9 +16144,11 @@ mod tests {
                 PlanGuard::inactive(),
             )
             .unwrap();
-        keencode_resources::test_support::set_append_fault(
-            keencode_resources::test_support::AppendFault::Flush,
-        );
+        // 协作批次由提交泵线程落盘，Journal 发布失败改用 Store 实例开关注入，
+        // 模拟"flush 后尚未 ack 的崩溃窗口"：receipt 留盘、Journal 对账延后。
+        store
+            .fail_next_unstarted_publish
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let rejected = coordinator.spawn_agent(
             &root_id,
             &root_turn,
@@ -16300,9 +16320,11 @@ mod tests {
         let mut request = test_spawn_request("rejected_child", project.path());
         request.profile.tool_snapshot = vec!["UnavailableFixtureTool".to_owned()];
         if journal_fault {
-            keencode_resources::test_support::set_append_fault(
-                keencode_resources::test_support::AppendFault::Flush,
-            );
+            // 协作批次由提交泵线程落盘，Journal 发布失败改用 Store 实例开关注入。
+            collaboration
+                .store
+                .fail_next_unstarted_publish
+                .store(true, std::sync::atomic::Ordering::SeqCst);
         }
         let result = collaboration.coordinator.spawn_agent(
             &collaboration.root_agent_id,
@@ -16310,7 +16332,6 @@ mod tests {
             &ToolCallId::new("spawn-rejected-child").unwrap(),
             request,
         );
-        keencode_resources::test_support::clear_append_fault();
         if journal_fault {
             let pending = collaboration
                 .store
@@ -16322,7 +16343,20 @@ mod tests {
                 1,
                 "Journal 不确定时失败 receipt 必须仍在磁盘"
             );
+            // Journal 真实故障改在测试线程的显式对账路径注入；注入面与原先
+            // spawn 内联发布完全相同（同一条未启动失败 record 的追加）。
+            keencode_resources::test_support::set_append_fault(
+                keencode_resources::test_support::AppendFault::Flush,
+            );
+            assert!(
+                collaboration
+                    .store
+                    .reconcile_pending_unstarted_turns()
+                    .is_err(),
+                "Journal flush 故障应让对账失败并保留 Store pending"
+            );
             assert!(session.snapshot().unwrap().recovery_required);
+            keencode_resources::test_support::clear_append_fault();
             collaboration
                 .store
                 .reconcile_pending_unstarted_turns()
