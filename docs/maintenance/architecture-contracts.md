@@ -78,6 +78,15 @@ cargo test -p keencode-provider --lib retry_
 注意 in-band 路径（HTTP 200 正文携带错误）用固定状态码调用分类器，因此关键词
 层必须能独立识别 `overloaded`；只加状态码分支不足以覆盖该路径。
 
+**响应协议错误的边界**（`retry_protocol` 开关，默认开启）：`ModelError::Protocol`
+仅在下游尚未收到任何事件时可重试——`is_retryable_failure` 的调用方守卫
+（`forwarded_output`）保证已转发任意 Ok 事件（含 MessageStart）后不再重试，
+避免下游收到重复开始事件。`ProtocolUnsupported` 表达端点不支持该协议族，
+重试无收益，保持不重试。兼容网关偶发丢弃 SSE `content_block_start` 导致的
+「内容块 N 尚未开始」即此场景：Messages 适配器同时把缺失 start 的孤立增量
+降级为忽略块（跳过该序号的增量与 stop），整条流通常可继续完成，重试只是
+流仍以协议错误收场时的兜底。
+
 ---
 
 ## ARC-MODEL-STREAM-PARTIAL-001：已流出的正文不得因中断而丢失

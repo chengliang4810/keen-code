@@ -1826,7 +1826,10 @@ fn rate_limit_is_exhausted(message: &str, retry_after_ms: Option<u64>) -> bool {
 /// 传输失败与流中断沿用归一化阶段的 `retryable` 标记；HTTP 408、429 与 5xx
 /// 已归类为携带 `retryable: true` 的 `RateLimited` 或 `ProviderUnavailable`；
 /// HTTP 409 冲突在线上归类为 `InvalidRequest`，仅在失败点确实观察到 409
-/// 状态时重试。取消、上下文超限、认证授权与其他 4xx 一律不重试。
+/// 状态时重试。响应协议错误按 `retry_protocol` 重试：兼容网关偶发丢弃
+/// SSE 事件（如 `content_block_start`）属于上游瞬时故障，且此时尚未转发
+/// 任何事件，重发不会产生重复输出。取消、上下文超限、认证授权与其他
+/// 4xx 一律不重试。
 ///
 /// 与拍板清单「408/409/429/5xx 可重试」相比的已接受偏差（除额度耗尽外
 /// 均为保守方向、继承既有分类器，不在此处扩大或收窄分类）：
@@ -1842,6 +1845,10 @@ fn rate_limit_is_exhausted(message: &str, retry_after_ms: Option<u64>) -> bool {
 ///   既有分类器而不为「5xx 全重试」新增特判。
 /// - 520-524、527 等 Cloudflare 源站瞬时状态已由分类器归为
 ///   `retryable: true` 的 `ProviderUnavailable`，这里随开关放行自动重试。
+/// - `Protocol` 表达远端响应违反线协议。已向下游转发事件后的协议失败
+///   仍由调用方守卫（`forwarded_output`）阻断，本分类不构成放行；
+///   `ProtocolUnsupported` 表达协议族本身不被端点支持，重试无收益，
+///   继续走默认不重试路径。
 fn is_retryable_failure(
     error: &ModelError,
     http_status: Option<u16>,
@@ -1861,6 +1868,7 @@ fn is_retryable_failure(
         } => policy.retry_http_status && !rate_limit_is_exhausted(message, *retry_after_ms),
         ModelError::ProviderUnavailable { retryable, .. } => *retryable && policy.retry_http_status,
         ModelError::InvalidRequest { .. } => policy.retry_http_status && http_status == Some(409),
+        ModelError::Protocol { .. } => policy.retry_protocol,
         _ => false,
     }
 }
@@ -2275,8 +2283,9 @@ mod retry_tests {
         assert!(cancelled.is_none(), "注册失败不应留下取消标志");
     }
 
-    /// 重试分类只放行传输失败、408/409/429/5xx 与可见输出前的流中断，
-    /// 并受逐类开关约束；取消、上下文超限、认证授权与其他 4xx 一律拒绝。
+    /// 重试分类只放行传输失败、408/409/429/5xx、可见输出前的流中断与
+    /// 协议错误，并受逐类开关约束；取消、上下文超限、认证授权与其他
+    /// 4xx 一律拒绝。
     #[test]
     fn retry_classification_follows_error_variants_and_flags() {
         let policy = RetryConfig::default();
@@ -2379,7 +2388,22 @@ mod retry_tests {
             },
             None
         ));
-        let non_retryable: [ModelError; 7] = [
+        // 响应协议错误默认重试：网关丢事件属上游瞬时故障，且重试守卫保证
+        // 只发生在尚未转发任何事件时。协议族不受支持仍然不重试。
+        assert!(retryable(
+            &ModelError::Protocol {
+                message: "内容块 0 尚未开始".to_owned()
+            },
+            None
+        ));
+        assert!(!retryable(
+            &ModelError::ProtocolUnsupported {
+                message: "unsupported".to_owned(),
+                status_code: None,
+            },
+            None
+        ));
+        let non_retryable: [ModelError; 6] = [
             ModelError::Cancelled {
                 message: "cancelled".to_owned(),
             },
@@ -2398,9 +2422,6 @@ mod retry_tests {
                 message: "quota".to_owned(),
                 status_code: Some(402),
             },
-            ModelError::Protocol {
-                message: "protocol".to_owned(),
-            },
             ModelError::StructuredOutput {
                 enforcement: keencode_model::StructuredOutputEnforcement::Native,
                 failure: keencode_model::StructuredOutputFailureKind::InvalidJson,
@@ -2416,6 +2437,7 @@ mod retry_tests {
             retry_transport: false,
             retry_http_status: false,
             retry_stream_interrupted: false,
+            retry_protocol: false,
             ..RetryConfig::default()
         };
         assert!(!is_retryable_failure(&transport(true), None, &muted));
@@ -2447,6 +2469,13 @@ mod retry_tests {
                 message: "conflict".to_owned()
             },
             Some(409),
+            &muted
+        ));
+        assert!(!is_retryable_failure(
+            &ModelError::Protocol {
+                message: "内容块 0 尚未开始".to_owned()
+            },
+            None,
             &muted
         ));
     }

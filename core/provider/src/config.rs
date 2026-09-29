@@ -45,6 +45,12 @@ pub struct RetryConfig {
     pub retry_http_status: bool,
     /// 是否自动重试下游尚未收到可见输出时的流中断。
     pub retry_stream_interrupted: bool,
+    /// 是否自动重试下游尚未收到任何事件时的响应协议错误。
+    ///
+    /// 兼容网关偶发丢弃 SSE 事件（如 `content_block_start`）会以协议错误
+    /// 终止整条流；在尚未转发任何事件前重试整次请求是安全的，已转发后
+    /// 由 [`crate::client`] 的转发守卫继续阻止。
+    pub retry_protocol: bool,
 }
 
 impl Default for RetryConfig {
@@ -57,6 +63,7 @@ impl Default for RetryConfig {
             retry_transport: true,
             retry_http_status: true,
             retry_stream_interrupted: true,
+            retry_protocol: true,
         }
     }
 }
