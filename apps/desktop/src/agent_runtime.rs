@@ -9,8 +9,9 @@ pub(crate) use session_mcp::{SessionMcpError, SuspendedSessionMcp};
 pub mod benchmark;
 mod file_changes;
 #[cfg(test)]
+use keencode_resources::SessionEventRecord;
+#[cfg(test)]
 mod live_prompt_tests;
-mod tool_projection;
 
 use crate::{
     analytics::{AnalyticsRecorder, ModelRetryNotice},
@@ -22,10 +23,10 @@ use crate::{
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
 use keencode_acp::{
-    AcpClientRequestFrame, AgentLifecycleStatus, BackgroundTaskInfo, BackgroundTaskKind,
-    BackgroundTaskTerminalStatus, CompactionFailureKind, ConnectionId, KeenCodeEvent,
-    KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse,
-    SessionSequence, SessionUpdateDeliveryEnvelope, TurnFailureKind,
+    AcpClientRequestFrame, BackgroundTaskInfo, BackgroundTaskKind, BackgroundTaskTerminalStatus,
+    CompactionFailureKind, ConnectionId, KeenCodeEvent, KeenCodeEventEnvelope,
+    KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse, SessionSequence,
+    SessionUpdateDeliveryEnvelope,
 };
 use keencode_agent::{
     AgentCapabilities, AgentCommitSinkError, AgentDepth, AgentDynamicInputAcknowledgement,
@@ -48,9 +49,9 @@ use keencode_agent::{
     root_turn_prompt_digest,
 };
 use keencode_model::{
-    ContentBlock, ImageSource, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
-    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
-    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
+    ContentBlock, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider, ModelRequest,
+    ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol, ReasoningConfig,
+    ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
 };
 use keencode_provider::{
     ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
@@ -62,9 +63,9 @@ use keencode_resources::{
     DynamicInputKind as ResourceDynamicInputKind, MailboxMessage as ResourceMailboxMessage,
     MailboxMessageId as ResourceMailboxMessageId, MailboxState, MessagePart as ResourceMessagePart,
     MessageRole as ResourceMessageRole, ProviderProtocolSnapshot, ProviderSnapshot,
-    ReasoningEffortSnapshot, SessionEvent, SessionEventRecord, SessionMessage, SessionState,
-    SubAgentState, SubAgentStatus, TodoStatus, ToolCompletionStatus, TranscriptRecord,
-    TranscriptSegment, TurnId as ResourceTurnId, TurnStatus, TurnStopReason,
+    ReasoningEffortSnapshot, SessionEvent, SessionMessage, SessionState, SubAgentState,
+    SubAgentStatus, ToolCompletionStatus, TranscriptRecord, TranscriptSegment,
+    TurnId as ResourceTurnId, TurnStatus, TurnStopReason,
 };
 use keencode_runtime::{
     CreateSessionRequest, OpenSessionResult, PersistentAgentState, RuntimeConfig,
@@ -72,6 +73,12 @@ use keencode_runtime::{
     RuntimeEventSubscription, RuntimeManager, RuntimeModelRoundUsageSink, RuntimeSession,
     RuntimeSnapshot, RuntimeTurnRequest, StoredSessionMetadata, TurnCancellationOutcome,
     UnstartedTurnTermination, UnstartedTurnTerminationRequest,
+};
+// 权威事件→ACP 投影已下沉 core/runtime，桌面只保留投递物化与 Tauri 传输。
+use keencode_runtime::{
+    AuthoritativeProjectionMode, DeliveryDraft, ProviderProjection,
+    map_authoritative_record_with_projection, tool_request,
+    validated_background_task_completion_event,
 };
 use keencode_tools::{
     AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus, BashTool,
@@ -83,7 +90,7 @@ use keencode_tools::{
     register_web_tools,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
@@ -134,7 +141,6 @@ const RUNTIME_TURN_COMPLETION_TIMEOUT: Duration = Duration::from_secs(5);
 /// 执行失败进入协作终态时允许保留的最大 UTF-8 字节数。
 const MAX_COLLABORATION_FAILURE_BYTES: usize = 64 * 1024;
 /// 终态错误投影进入 ACP/UI 事件时允许保留的最大 UTF-8 字节数。
-const MAX_UI_ERROR_MESSAGE_BYTES: usize = 4 * 1024;
 /// 单条扩展诊断日志允许保留的最大 UTF-8 字节数。
 const MAX_EXTENSION_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// 协调器提交文件允许累积保留的等待容量取消证据数量。
@@ -200,8 +206,14 @@ pub enum AgentRuntimeError {
     StateUnavailable,
 }
 
-/// 保留底层失败原因，避免转换成公开枚举时丢失诊断证据。
 #[track_caller]
+fn from_runtime(error: RuntimeError) -> AgentRuntimeError {
+    match error {
+        RuntimeError::ProjectionInconsistent => AgentRuntimeError::RuntimeOperationFailed,
+        other => runtime_operation_failed(other),
+    }
+}
+
 fn runtime_operation_failed(error: impl fmt::Display) -> AgentRuntimeError {
     tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Runtime operation failed");
     AgentRuntimeError::RuntimeOperationFailed
@@ -2495,7 +2507,7 @@ impl RuntimeAgentExecution {
         }
         drop(state);
         shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 判断命令层准备、Runner 执行或后台 Shell 是否仍持有活动工作。
@@ -2511,7 +2523,7 @@ impl RuntimeAgentExecution {
         self.background_tasks
             .list_running()
             .map(|tasks| !tasks.is_empty())
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 关闭 Session 时取消并清空本地执行账本，后台进程由同一边界统一回收。
@@ -2538,7 +2550,7 @@ impl RuntimeAgentExecution {
             let _ = prepared.completion.send(Err(()));
         }
         shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 为指定扩展候选登记一次性日志，避免每个子 Agent 重复记录。
@@ -2905,7 +2917,7 @@ fn validated_dynamic_input_marker(
         return Ok(None);
     }
     let marker: DynamicInputMarker =
-        serde_json::from_value(value).map_err(|error| runtime_operation_failed(error))?;
+        serde_json::from_value(value).map_err(runtime_operation_failed)?;
     if marker.session_id != session_id
         || marker.agent_id != segment.source_agent_id.as_str()
         || marker.turn_id != segment.turn_id.as_str()
@@ -2957,7 +2969,7 @@ fn recovered_dynamic_input_claims(
                 .iter()
                 .map(|message| {
                     ResourceMailboxMessageId::new(message.message_id.as_str().to_owned())
-                        .map_err(|error| runtime_operation_failed(error))
+                        .map_err(runtime_operation_failed)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             claims.push(RecoveredDynamicInputClaim {
@@ -3125,10 +3137,10 @@ fn authoritative_recovered_turn_outcome(
     turn_id: &AgentTurnId,
     session: Option<&RuntimeSession>,
 ) -> Result<Option<AgentTurnOutcome>, AgentRuntimeError> {
-    let resource_agent_id = ResourceAgentId::new(agent_id.as_str().to_owned())
-        .map_err(|error| runtime_operation_failed(error))?;
-    let resource_turn_id = ResourceTurnId::new(turn_id.as_str().to_owned())
-        .map_err(|error| runtime_operation_failed(error))?;
+    let resource_agent_id =
+        ResourceAgentId::new(agent_id.as_str().to_owned()).map_err(runtime_operation_failed)?;
+    let resource_turn_id =
+        ResourceTurnId::new(turn_id.as_str().to_owned()).map_err(runtime_operation_failed)?;
     let Some(turn) = state.turns.get(&resource_turn_id) else {
         return Ok(None);
     };
@@ -3580,9 +3592,7 @@ fn recover_dynamic_input_acknowledgements(
     if claims.is_empty() {
         return Ok(());
     }
-    let snapshot = session
-        .snapshot()
-        .map_err(|error| runtime_operation_failed(error))?;
+    let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
     for claim in claims {
         let was_committed = validate_dynamic_input_claim(session, &snapshot.state, claim)?;
         if !was_committed {
@@ -3593,7 +3603,7 @@ fn recover_dynamic_input_acknowledgements(
                 for message_id in &claim.mailbox_message_ids {
                     session
                         .deliver_mailbox_message(message_id.clone())
-                        .map_err(|error| runtime_operation_failed(error))?;
+                        .map_err(runtime_operation_failed)?;
                 }
                 coordinator.acknowledge_mailbox(
                     &claim.agent_id,
@@ -3607,7 +3617,7 @@ fn recover_dynamic_input_acknowledgements(
                 claim.through_sequence,
             ),
         }
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
     }
     Ok(())
 }
@@ -3624,7 +3634,7 @@ fn reconcile_live_dynamic_input_acknowledgements(
 ) -> Result<(), AgentRuntimeError> {
     let checkpoint = coordinator
         .checkpoint_coordinator()
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
     let claims = recovered_dynamic_input_claims(Some(&checkpoint))?;
     if let Err(error) = recover_dynamic_input_acknowledgements(session, coordinator, &claims) {
         return Err(if error == AgentRuntimeError::RuntimeOperationFailed {
@@ -3635,7 +3645,7 @@ fn reconcile_live_dynamic_input_acknowledgements(
     }
     let checkpoint_after = coordinator
         .checkpoint_coordinator()
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
     let remaining = recovered_dynamic_input_claims(Some(&checkpoint_after))?;
     if remaining.is_empty() {
         Ok(())
@@ -3744,8 +3754,7 @@ fn expected_mailbox_dynamic_input_text(
         kind: DynamicInputMarkerKind::Mailbox,
         through_sequence: claim.through_sequence,
     };
-    let mut body =
-        dynamic_input_marker_line(&marker).map_err(|error| runtime_operation_failed(error))?;
+    let mut body = dynamic_input_marker_line(&marker).map_err(runtime_operation_failed)?;
     body.push_str("\n以下是本轮安全边界前已持久排队的 Agent mailbox 消息：");
     for message in &claim.mailbox_messages {
         let kind = match &message.kind {
@@ -3818,7 +3827,7 @@ fn validate_dynamic_input_claim(
     for stored in &segment.messages {
         let materialized = session
             .materialize_message(stored)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         if let Some(marker) = validated_dynamic_input_marker(
             session.session_id().as_str(),
             segment,
@@ -4830,7 +4839,7 @@ impl AgentRuntime {
         let background_agent_limit = DEFAULT_BACKGROUND_AGENT_LIMIT as usize;
         let collaboration_global_turn_limiter = Arc::new(
             CollaborationGlobalTurnLimiter::new(background_agent_limit)
-                .map_err(|error| runtime_operation_failed(error))?,
+                .map_err(runtime_operation_failed)?,
         );
         Ok(Self {
             provider_registry,
@@ -4920,7 +4929,7 @@ impl AgentRuntime {
         let report = self
             .collaboration_global_turn_limiter
             .update_limits_atomically(&root_refs, limit, limit)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         self.background_agent_limit.store(limit, Ordering::Release);
         for failure in report.dispatch_errors() {
             let session_id = failure
@@ -5003,7 +5012,7 @@ impl AgentRuntime {
                                 title,
                                 project_root: project_root.to_string_lossy().into_owned(),
                             })
-                            .map_err(|error| runtime_operation_failed(error))?,
+                            .map_err(runtime_operation_failed)?,
                         Err(error) => return Err(runtime_operation_failed(error)),
                     }
                 }
@@ -5020,7 +5029,7 @@ impl AgentRuntime {
         self.runtime_manager
             .get(session_id.to_owned())
             .and_then(|session| session.snapshot())
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 读取已打开 Session 的工具图片；引用和字节完整性由 Runtime 校验。
@@ -5150,7 +5159,7 @@ impl AgentRuntime {
         let session_ids = self
             .runtime_manager
             .registered_session_ids()
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let mut active = Vec::new();
         for session_id in session_ids {
             if self.session_has_active_work(session_id.as_str())? {
@@ -5170,7 +5179,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         if session
             .has_active_work()
-            .map_err(|error| runtime_operation_failed(error))?
+            .map_err(runtime_operation_failed)?
         {
             return Ok(true);
         }
@@ -5190,7 +5199,7 @@ impl AgentRuntime {
             .coordinator
             .capacity()
             .map(|capacity| capacity.global_in_use > 0)
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 向产生变化的 Session 发布 Goal 变化；Goal 状态按 Session 隔离。
@@ -5273,13 +5282,11 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         if let Some(title) = session
             .cached_generated_title(operation_id, &input_sha256)
-            .map_err(|error| runtime_operation_failed(error))?
+            .map_err(runtime_operation_failed)?
         {
             return Ok(title);
         }
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         let provider = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
         let title = tokio::select! {
             biased;
@@ -5296,7 +5303,7 @@ impl AgentRuntime {
         let title = validate_generated_title(&title)?;
         session
             .cache_generated_title(operation_id, &input_sha256, title)
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 执行不带业务工具的隔离模型调用，并只接受 Runtime 内部固定用途。
@@ -5570,7 +5577,7 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .revoke_mcp_tools()
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate.mcp_revoked.store(true, Ordering::Release);
             self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
@@ -5597,7 +5604,7 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .revoke_mcp_tools()
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate.mcp_revoked.store(true, Ordering::Release);
             self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
@@ -5672,7 +5679,7 @@ impl AgentRuntime {
         candidate
             .contributor
             .resolve_agent(name, parent)
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)
     }
 
     /// 冻结当前项目候选代次并返回供本 Turn spawn_agent 使用的模板解析器。
@@ -5707,13 +5714,11 @@ impl AgentRuntime {
         if let Some(runtime) = runtimes.get(&session_id) {
             return Ok(Arc::clone(runtime));
         }
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         let project_root = canonical_project_root(Path::new(&snapshot.state.project_root))?;
         let persistent_state = Arc::new(
             PersistentAgentState::open_with_goal_root(session.clone(), &self.storage_root)
-                .map_err(|error| runtime_operation_failed(error))?,
+                .map_err(runtime_operation_failed)?,
         );
         let background_tasks = Arc::new(
             BackgroundTaskManager::new(
@@ -5721,18 +5726,18 @@ impl AgentRuntime {
                     .join("background-tasks"),
                 BACKGROUND_OUTPUT_CHUNK_BYTES,
             )
-            .map_err(|error| runtime_operation_failed(error))?,
+            .map_err(runtime_operation_failed)?,
         );
         let worktrees = Arc::new(
             GitWorktreeLeaseManager::open(
                 self.session_storage_directory(&session_id)?
                     .join("worktrees"),
             )
-            .map_err(|error| runtime_operation_failed(error))?,
+            .map_err(runtime_operation_failed)?,
         );
         worktrees
             .recover_stale()
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let store = Arc::new(SessionCollaborationStore::new(
             &self.storage_root,
             &session_id,
@@ -5759,7 +5764,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::InvalidSession)?;
         let recovered_transition = store
             .load_transition_snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let recovered = recovered_transition
             .as_ref()
             .map(|transition| transition.commit.checkpoint.clone());
@@ -5774,9 +5779,7 @@ impl AgentRuntime {
             recovered.as_ref(),
             &waiting_capacity_records,
         )?;
-        let refreshed_snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let refreshed_snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         let waiting_capacity_turns = waiting_capacity_records
             .iter()
             .map(|record| record.turn_id.clone())
@@ -5794,7 +5797,7 @@ impl AgentRuntime {
                     checkpoint.clone(),
                     &authoritative_outcomes,
                 )
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
         } else {
             Vec::new()
         };
@@ -5808,7 +5811,7 @@ impl AgentRuntime {
         if !handles.is_empty() {
             coordinator
                 .update_root_turn_limit(&root_agent_id, turn_limit)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         }
         if handles.is_empty() {
             let provisional_profile = AgentProfile {
@@ -5845,12 +5848,12 @@ impl AgentRuntime {
                         per_root_turn_limit: turn_limit,
                     },
                 )
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         }
         recover_dynamic_input_acknowledgements(session, &coordinator, &recovered_claims)?;
         coordinator
             .reconcile_outbox()
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let completion_events = background_tasks.subscribe_completions();
         let (background_completion_cancel, background_completion_cancelled) = oneshot::channel();
         let runtime = Arc::new(SessionCollaborationRuntime {
@@ -5905,7 +5908,7 @@ impl AgentRuntime {
             let snapshot = execution
                 .session
                 .snapshot()
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             let resolved = self.resolve_child_agent_provider(
                 snapshot.state.provider.as_ref(),
                 &launch.agent.profile.model,
@@ -5951,12 +5954,12 @@ impl AgentRuntime {
 
         let source_resource_id =
             keencode_resources::AgentId::new(launch.agent.agent_id.as_str().to_owned())
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         let transcript_with_turn_ids = if is_root {
             execution
                 .session
                 .model_transcript_for_agent_with_turn_ids(&source_resource_id)
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
         } else {
             let mut inherited = launch
                 .agent
@@ -5965,7 +5968,7 @@ impl AgentRuntime {
                 .map(|message| {
                     serde_json::from_str::<Message>(message)
                         .map(|message| (None, message))
-                        .map_err(|error| runtime_operation_failed(error))
+                        .map_err(runtime_operation_failed)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if !matches!(launch.cause, AgentTurnCause::InitialTask) {
@@ -5973,7 +5976,7 @@ impl AgentRuntime {
                     execution
                         .session
                         .model_transcript_for_agent_with_turn_ids(&source_resource_id)
-                        .map_err(|error| runtime_operation_failed(error))?,
+                        .map_err(runtime_operation_failed)?,
                 );
             }
             inherited
@@ -5996,9 +5999,7 @@ impl AgentRuntime {
         // 动态上下文只在 Provider 边界装配，持久输入仍按原顺序进入 Runtime Journal。
         transcript.extend(input_messages.clone());
 
-        let coordinator = execution
-            .coordinator()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let coordinator = execution.coordinator().map_err(runtime_operation_failed)?;
         let (registry, hooks, catalog) = if small_context {
             self.assemble_small_context_tools(execution, &launch.agent.profile)?
         } else {
@@ -6022,7 +6023,7 @@ impl AgentRuntime {
         let tool_snapshot = request_tool_snapshot(&launch.agent.profile, is_root, small_context);
         let tools = registry
             .select_exact(&tool_snapshot)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let can_spawn = tools
             .definitions()
             .iter()
@@ -6061,7 +6062,7 @@ impl AgentRuntime {
             .read_state(|state| {
                 interruption_context::previous_turn_stop_notice(state, &source_resource_id)
             })
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         if let Some(notice) = previous_stop_notice {
             request_context.push(notice);
         }
@@ -6179,7 +6180,7 @@ impl AgentRuntime {
                                 .as_str()
                                 .to_owned(),
                         )
-                        .map_err(|error| runtime_operation_failed(error))?,
+                        .map_err(runtime_operation_failed)?,
                         agent_path: launch.agent.path.as_str().to_owned(),
                         task: launch
                             .prompt
@@ -6368,7 +6369,7 @@ impl AgentRuntime {
                         environment
                     }
                 })
-                .map_err(|error| runtime_operation_failed(error))?,
+                .map_err(runtime_operation_failed)?,
         );
         let mut tools = ToolRegistry::new();
         register_local_tools_with_background(
@@ -6376,14 +6377,14 @@ impl AgentRuntime {
             environment.clone(),
             Arc::clone(&execution.background_tasks),
         )
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
         register_state_tools(
             &mut tools,
             execution.persistent_state.clone(),
             execution.persistent_state.clone(),
             execution.persistent_state.clone(),
         )
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
         // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
         if self
             .elicitations
@@ -6409,7 +6410,7 @@ impl AgentRuntime {
             );
             tools
                 .register(Arc::new(AskUserTool::new(question_handler)))
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         }
         if let Some(web_service) = self
             .web_service
@@ -6418,7 +6419,7 @@ impl AgentRuntime {
             .clone()
         {
             register_web_tools(&mut tools, environment.clone(), web_service)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         }
         let tool_context = RuntimeToolContext {
             agent_type: agent_type.to_owned(),
@@ -6450,22 +6451,21 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .prepare_lsp_runtime(&tool_context)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate
                 .contributor
                 .register_tools(&mut tools, &tool_context)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate
                 .contributor
                 .build_hook_runtime(&tool_context)
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
         } else {
             HookRuntime::empty()
         };
         let (deferred_catalog, _) =
             self.session_mcp_bindings(&execution.session_id, &project_root)?;
-        register_deferred_tools(&mut tools, deferred_catalog)
-            .map_err(|error| runtime_operation_failed(error))?;
+        register_deferred_tools(&mut tools, deferred_catalog).map_err(runtime_operation_failed)?;
         let context_source: Arc<dyn SpawnAgentContextSource> =
             Arc::new(RuntimeSpawnAgentContextSource {
                 session: execution.session.clone(),
@@ -6481,7 +6481,7 @@ impl AgentRuntime {
                     contributor: Arc::clone(&candidate.contributor),
                 }),
             )
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         } else {
             register_collaboration_tools(
                 &mut tools,
@@ -6490,7 +6490,7 @@ impl AgentRuntime {
                 capabilities,
                 context_source,
             )
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         }
         #[cfg(feature = "benchmark")]
         let tools = if capabilities.can_spawn_agent {
@@ -6554,11 +6554,11 @@ impl AgentRuntime {
                 .and_then(|environment| {
                     environment.with_artifact_directory(output_directory.clone())
                 })
-                .map_err(|error| runtime_operation_failed(error))?,
+                .map_err(runtime_operation_failed)?,
         );
         let mut tools = ToolRegistry::new();
         keencode_tools::register_local_tools(&mut tools, Arc::clone(&environment))
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         if let Some(web_service) = self
             .web_service
             .read()
@@ -6566,7 +6566,7 @@ impl AgentRuntime {
             .clone()
         {
             register_web_tools(&mut tools, environment, web_service)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
         }
         let context = RuntimeToolContext {
             agent_type: "general-purpose".to_owned(),
@@ -6585,21 +6585,20 @@ impl AgentRuntime {
             candidate
                 .contributor
                 .prepare_lsp_runtime(&context)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate
                 .contributor
                 .register_tools(&mut tools, &context)
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             candidate
                 .contributor
                 .build_hook_runtime(&context)
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
         } else {
             HookRuntime::empty()
         };
         let (deferred_catalog, _) = self.session_mcp_bindings(session_id, &project_root)?;
-        register_deferred_tools(&mut tools, deferred_catalog)
-            .map_err(|error| runtime_operation_failed(error))?;
+        register_deferred_tools(&mut tools, deferred_catalog).map_err(runtime_operation_failed)?;
         Ok((tools, hooks))
     }
 
@@ -6894,9 +6893,7 @@ impl AgentRuntime {
                 )
             },
         );
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         if let Some(continuation) = continuation.as_ref() {
             let state = self.ensure_collaboration_runtime(
                 &session,
@@ -7014,7 +7011,7 @@ impl AgentRuntime {
         collaboration
             .coordinator
             .update_root_profile(&collaboration.root_agent_id, root_profile)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let agent_turn_id =
             AgentTurnId::new(turn_id.to_owned()).map_err(|_| AgentRuntimeError::InvalidSession)?;
         let completed_receiver = collaboration.execution.prepare_root_turn(
@@ -7025,9 +7022,7 @@ impl AgentRuntime {
             request_context,
             summary,
         )?;
-        let mut barrier_subscription = session
-            .subscribe()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let mut barrier_subscription = session.subscribe().map_err(runtime_operation_failed)?;
         if snapshot.state.plan.enabled != options.plan_enabled
             && let Err(error) = session.set_plan(
                 &control_operation_id("plan", session_id, turn_id),
@@ -7077,7 +7072,7 @@ impl AgentRuntime {
                     Ok(Ok(())) => {
                         tokio::time::timeout(Duration::from_secs(1), &mut wait_for_started)
                             .await
-                            .map_err(|error| runtime_operation_failed(error))??;
+                            .map_err(runtime_operation_failed)??;
                     }
                 }
             }
@@ -7105,7 +7100,7 @@ impl AgentRuntime {
         // 不把后来由 effort 操作更新的 Provider 其他字段视为正文冲突。
         if let Some(record) = session
             .committed_control_event_in_domain(OPERATION_DOMAIN, operation_id)
-            .map_err(|error| runtime_operation_failed(error))?
+            .map_err(runtime_operation_failed)?
         {
             let same_target = matches!(
                 &record.event,
@@ -7113,9 +7108,7 @@ impl AgentRuntime {
                     if provider.provider_id == provider_id && provider.model == model
             );
             if same_target {
-                return session
-                    .snapshot()
-                    .map_err(|error| runtime_operation_failed(error));
+                return session.snapshot().map_err(runtime_operation_failed);
             }
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
@@ -7131,7 +7124,7 @@ impl AgentRuntime {
         };
         let reasoning_effort = session
             .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?
+            .map_err(runtime_operation_failed)?
             .state
             .provider
             .and_then(|snapshot| snapshot.reasoning_effort);
@@ -7148,10 +7141,8 @@ impl AgentRuntime {
                     reasoning_effort,
                 },
             )
-            .map_err(|error| runtime_operation_failed(error))?;
-        session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))
+            .map_err(runtime_operation_failed)?;
+        session.snapshot().map_err(runtime_operation_failed)
     }
 
     /// 原子修改 Session 推理强度；尚未绑定 Provider 时同时冻结当前默认 Provider。
@@ -7175,7 +7166,7 @@ impl AgentRuntime {
         // 保留后来模型切换已更新的 Provider、模型和其他快照字段。
         if let Some(record) = session
             .committed_control_event_in_domain(OPERATION_DOMAIN, operation_id)
-            .map_err(|error| runtime_operation_failed(error))?
+            .map_err(runtime_operation_failed)?
         {
             let same_target = matches!(
                 &record.event,
@@ -7188,9 +7179,7 @@ impl AgentRuntime {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
 
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         let mut provider = match snapshot.state.provider {
             Some(provider) => provider_snapshot(&self.resolve_session_provider(Some(&provider))?),
             None => provider_snapshot(&self.resolve_default_provider()?),
@@ -7198,7 +7187,7 @@ impl AgentRuntime {
         provider.reasoning_effort = requested_reasoning_effort;
         session
             .set_provider_snapshot_in_domain(OPERATION_DOMAIN, operation_id, provider)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         Ok(())
     }
 
@@ -7246,9 +7235,7 @@ impl AgentRuntime {
         if pumps.contains_key(session_id) {
             return Ok(delivery);
         }
-        let subscription = session
-            .subscribe()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let subscription = session.subscribe().map_err(runtime_operation_failed)?;
         // 先订阅再读取可重建索引：两者之间追加的事件至少存在于订阅中，
         // 而索引失败会直接拒绝建立实时泵，不会伪装成空 Provider 历史。
         let provider_projection = provider_projection_from_history(&session)?;
@@ -7599,8 +7586,8 @@ impl AgentRuntime {
             .runtime_manager
             .get(session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        let requested_turn_id = AgentTurnId::new(turn_id.to_owned())
-            .map_err(|error| runtime_operation_failed(error))?;
+        let requested_turn_id =
+            AgentTurnId::new(turn_id.to_owned()).map_err(runtime_operation_failed)?;
         let collaboration = self
             .collaboration_sessions
             .lock()
@@ -7610,7 +7597,7 @@ impl AgentRuntime {
         let Some(collaboration) = collaboration else {
             let exists = session
                 .snapshot()
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
                 .state
                 .turns
                 .keys()
@@ -7633,7 +7620,7 @@ impl AgentRuntime {
             Err(keencode_agent::CollaborationError::TurnMismatch { .. }) => {
                 let exists = session
                     .snapshot()
-                    .map_err(|error| runtime_operation_failed(error))?
+                    .map_err(runtime_operation_failed)?
                     .state
                     .turns
                     .keys()
@@ -7674,7 +7661,7 @@ impl AgentRuntime {
                 .execution
                 .background_tasks
                 .list_running()
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
             {
                 let started_at_unix_ms = task.started_at_unix_ms;
                 tasks.push((
@@ -7731,7 +7718,7 @@ impl AgentRuntime {
                     .execution
                     .session
                     .read_state(|state| queued_agent_started_at(state, &agent).ok())
-                    .map_err(|error| runtime_operation_failed(error))?
+                    .map_err(runtime_operation_failed)?
                     .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
                 tasks.push((
                     started_at_unix_ms,
@@ -7791,7 +7778,7 @@ impl AgentRuntime {
         } else {
             let Some(transition) = SessionCollaborationStore::new(&self.storage_root, session_id)?
                 .load_transition_snapshot()
-                .map_err(|error| runtime_operation_failed(error))?
+                .map_err(runtime_operation_failed)?
             else {
                 return Ok(None);
             };
@@ -7833,9 +7820,7 @@ impl AgentRuntime {
             .runtime_manager
             .get(session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        let snapshot = session
-            .snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         self.ensure_session_delivery(session_id)?;
         let existing_collaboration = self
             .collaboration_sessions
@@ -7851,7 +7836,7 @@ impl AgentRuntime {
             // 丢失已经提交的新 Turn。全新 Session 仍必须要求当前 Provider。
             let persisted = SessionCollaborationStore::new(&self.storage_root, session_id)?
                 .load_transition_snapshot()
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             let seed = if let Some(transition) = persisted.as_ref() {
                 recovered_root_agent_seed(&transition.commit.checkpoint)
                     .ok_or(AgentRuntimeError::InvalidResumeTarget)?
@@ -7902,7 +7887,7 @@ impl AgentRuntime {
         let before_snapshot = runtime
             .store
             .load_transition_snapshot()
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let agent_target =
             current_child_agent_turns_for_root(&runtime.coordinator, &runtime.root_agent_id)?
                 .into_iter()
@@ -7999,8 +7984,8 @@ impl AgentRuntime {
         text: &str,
     ) -> Result<(), AgentRuntimeError> {
         validate_session_id(session_id)?;
-        let operation_id = ToolCallId::new(operation_id.to_owned())
-            .map_err(|error| runtime_operation_failed(error))?;
+        let operation_id =
+            ToolCallId::new(operation_id.to_owned()).map_err(runtime_operation_failed)?;
         let collaboration = self
             .collaboration_sessions
             .lock()
@@ -8011,7 +7996,7 @@ impl AgentRuntime {
         collaboration
             .coordinator
             .steer_active_agent_with_operation(&collaboration.root_agent_id, &operation_id, text)
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         Ok(())
     }
 
@@ -8044,9 +8029,7 @@ impl AgentRuntime {
             && next_cursor.through_sequence.is_some()
             && next_cursor.next_after == start_after;
         if !continuous {
-            let snapshot = session
-                .snapshot()
-                .map_err(|error| runtime_operation_failed(error))?;
+            let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
             let provider_projection = provider_projection_from_history(&session)?;
             next_cursor.next_after = start_after;
             next_cursor.providers_by_turn = provider_projection.into_indexed();
@@ -8064,7 +8047,7 @@ impl AgentRuntime {
                 (start_after != 0).then_some(start_after),
                 MAX_REPLAY_EVENTS as usize,
             )
-            .map_err(|error| runtime_operation_failed(error))?;
+            .map_err(runtime_operation_failed)?;
         let through_journal_sequence = next_cursor
             .through_sequence
             .unwrap_or(page.through_sequence);
@@ -8087,7 +8070,8 @@ impl AgentRuntime {
                 &record,
                 AuthoritativeProjectionMode::Replay,
                 &mut historical_provider,
-            )?;
+            )
+            .map_err(from_runtime)?;
             if mapped.drafts.len() > MAX_REPLAY_EVENTS as usize {
                 mapped.rollback(&mut historical_provider);
                 return Err(AgentRuntimeError::RuntimeOperationFailed);
@@ -8108,8 +8092,7 @@ impl AgentRuntime {
         }
         next_cursor.next_after = next_after;
         next_cursor.providers_by_turn = historical_provider.into_indexed();
-        let replayed_events =
-            u32::try_from(drafts.len()).map_err(|error| runtime_operation_failed(error))?;
+        let replayed_events = u32::try_from(drafts.len()).map_err(runtime_operation_failed)?;
         let has_more = next_after < through_journal_sequence;
         let through_delivery_sequence = delivery
             .send_replay_batch(drafts, through_journal_sequence, !has_more)
@@ -8123,9 +8106,7 @@ impl AgentRuntime {
             replayed_events,
             has_more,
         };
-        response
-            .validate()
-            .map_err(|error| runtime_operation_failed(error))?;
+        response.validate().map_err(runtime_operation_failed)?;
         if !response.has_more {
             // 完整恢复结束后释放整份 Transcript 快照，不给空闲 Session 留第二份正文。
             next_cursor.frozen_state = None;
@@ -8201,7 +8182,7 @@ impl AgentRuntime {
             let registered = self
                 .runtime_manager
                 .registered_session_ids()
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             let mut session_ids = registered
                 .into_iter()
                 .map(|session_id| session_id.as_str().to_owned())
@@ -8515,7 +8496,7 @@ async fn wait_for_turn_started(
             let delivery = subscription
                 .recv()
                 .await
-                .map_err(|error| runtime_operation_failed(error))?;
+                .map_err(runtime_operation_failed)?;
             let RuntimeEventPayload::Authoritative(record) = delivery.payload else {
                 continue;
             };
@@ -8526,7 +8507,7 @@ async fn wait_for_turn_started(
     };
     tokio::time::timeout(Duration::from_secs(30), waited)
         .await
-        .map_err(|error| runtime_operation_failed(error))?
+        .map_err(runtime_operation_failed)?
 }
 
 /// 判断普通事件或原子批次是否包含目标 Turn 的权威起点。
@@ -8687,90 +8668,6 @@ fn provider_snapshot(provider: &ResolvedProvider) -> ProviderSnapshot {
         config_fingerprint: provider.config_identity().to_owned(),
         reasoning_effort: None,
     }
-}
-
-/// 权威事件投影使用的 Provider 状态。
-///
-/// Session 默认 Provider 不能代表历史 Turn 实际使用的配置。模型 Round 只按
-/// `turn_id` 读取原子持久的快照；缺失时保持未知，不回退到其他 Turn 或当前默认值。
-/// 历史索引作为不可变基线，实时新事件只增量写入 `observed`，避免每条事件复制整张表。
-#[derive(Debug, Default)]
-struct ProviderProjection {
-    /// 从完整 Journal 可重建索引获得的不可变 Turn 快照。
-    indexed: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>,
-    /// 建立基线后从实时事件观察到的新 Turn 快照。
-    observed: HashMap<ResourceTurnId, ProviderSnapshot>,
-}
-
-impl ProviderProjection {
-    /// 从共享历史索引创建增量投影。
-    fn from_indexed(indexed: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>) -> Self {
-        Self {
-            indexed,
-            observed: HashMap::new(),
-        }
-    }
-
-    /// 返回指定 Turn 的权威 Provider，缺失时绝不回退到 Session 默认值。
-    fn for_turn(&self, turn_id: &ResourceTurnId) -> Option<&ProviderSnapshot> {
-        self.observed
-            .get(turn_id)
-            .or_else(|| self.indexed.get(turn_id))
-    }
-
-    /// 按 Journal 事件顺序增量更新 Turn Provider，并记录可回滚的当条事件变更。
-    fn observe_event(
-        &mut self,
-        event: &SessionEvent,
-        delta: &mut ProviderProjectionDelta,
-    ) -> Result<(), AgentRuntimeError> {
-        match event {
-            SessionEvent::AtomicBatch { events } => {
-                for nested in events {
-                    self.observe_event(nested, delta)?;
-                }
-            }
-            SessionEvent::TurnProviderSnapshotRecorded {
-                turn_id, provider, ..
-            } => {
-                if let Some(existing) = self.for_turn(turn_id) {
-                    if existing != provider {
-                        return Err(AgentRuntimeError::RuntimeOperationFailed);
-                    }
-                } else {
-                    self.observed.insert(turn_id.clone(), provider.clone());
-                    delta.inserted.push(turn_id.clone());
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// 撤销当条物理记录导入的增量，不触碰其他 Turn 快照。
-    fn rollback(&mut self, delta: ProviderProjectionDelta) {
-        for turn_id in delta.inserted.into_iter().rev() {
-            self.observed.remove(&turn_id);
-        }
-    }
-
-    /// 将索引基线和实时增量合并为新的共享基线。
-    fn into_indexed(self) -> Arc<HashMap<ResourceTurnId, ProviderSnapshot>> {
-        if self.observed.is_empty() {
-            return self.indexed;
-        }
-        let mut providers =
-            Arc::try_unwrap(self.indexed).unwrap_or_else(|shared| (*shared).clone());
-        providers.extend(self.observed);
-        Arc::new(providers)
-    }
-}
-
-/// 一条物理 Journal 记录对 Provider 投影的有界变更。
-#[derive(Debug, Default)]
-struct ProviderProjectionDelta {
-    /// 本记录首次观察到的 Turn；回滚时只删除这些增量。
-    inserted: Vec<ResourceTurnId>,
 }
 
 /// 一次连续 replay 分页共享的历史 Provider 游标。
@@ -9128,36 +9025,6 @@ impl SessionDeliverySender {
             }
         }
     }
-}
-
-/// 一个尚未分配当前桌面世代序号的投递草稿。
-pub enum DeliveryDraft {
-    /// 标准 ACP Session 更新草稿。
-    SessionUpdate {
-        /// 产生更新的可选 Turn。
-        turn_id: Option<String>,
-        /// 产生更新的可选 Agent。
-        source_agent_id: Option<String>,
-        /// 更新发生时的 UTC Unix 毫秒时间。
-        occurred_at_ms: u64,
-        /// 权威重放事件的 Journal 序号；实时增量为空。
-        journal_sequence: Option<u64>,
-        /// 原样保留的标准 ACP 更新。
-        update: Box<keencode_acp::schema::SessionUpdate>,
-    },
-    /// KeenCode 生命周期扩展事件草稿。
-    KeenCodeEvent {
-        /// 产生事件的可选 Turn。
-        turn_id: Option<String>,
-        /// 产生事件的可选 Agent。
-        source_agent_id: Option<String>,
-        /// 权威事件的 Journal 序号；临时事件为空。
-        journal_sequence: Option<u64>,
-        /// 事件发生时的 UTC Unix 毫秒时间。
-        occurred_at_ms: u64,
-        /// 生命周期事件正文。
-        event: KeenCodeEvent,
-    },
 }
 
 /// 恢复门内缓存的实时批次及其终态通知元数据；历史重放永远不携带通知。
@@ -9565,90 +9432,6 @@ fn background_task_completion_event(
         completion.duration_ms,
         Some(&completion.summary),
     )
-}
-
-/// 构造一个通过 ACP 严格校验的后台完成事件；不安全摘要会被单独省略。
-fn validated_background_task_completion_event(
-    task_id: &str,
-    task_kind: BackgroundTaskKind,
-    agent_id: Option<&str>,
-    status: BackgroundTaskTerminalStatus,
-    duration_ms: u64,
-    summary: Option<&str>,
-) -> Option<KeenCodeEvent> {
-    let summary = summary
-        .map(str::trim)
-        .filter(|summary| !summary.is_empty())
-        .map(str::to_owned);
-    let event = KeenCodeEvent::BackgroundTaskCompleted {
-        task_id: task_id.to_owned(),
-        task_kind,
-        agent_id: agent_id.map(str::to_owned),
-        status,
-        duration_ms,
-        summary,
-    };
-    if event.validate().is_ok() {
-        return Some(event);
-    }
-    let fallback = KeenCodeEvent::BackgroundTaskCompleted {
-        task_id: task_id.to_owned(),
-        task_kind,
-        agent_id: agent_id.map(str::to_owned),
-        status,
-        duration_ms,
-        summary: None,
-    };
-    fallback.validate().is_ok().then_some(fallback)
-}
-
-/// 从子 Agent 权威终态与 Turn 时间生成 Session 级后台完成草稿。
-fn agent_background_task_completion_draft(
-    state: &SessionState,
-    record: &SessionEventRecord,
-    agent_id: &ResourceAgentId,
-    turn_id: &ResourceTurnId,
-    status: &SubAgentStatus,
-    result_summary: Option<&str>,
-) -> Result<Option<DeliveryDraft>, AgentRuntimeError> {
-    let (terminal_status, expected_turn_status) = match status {
-        SubAgentStatus::Completed => (
-            BackgroundTaskTerminalStatus::Succeeded,
-            TurnStatus::Completed,
-        ),
-        SubAgentStatus::Failed => (BackgroundTaskTerminalStatus::Failed, TurnStatus::Failed),
-        SubAgentStatus::Interrupted | SubAgentStatus::Stopped => (
-            BackgroundTaskTerminalStatus::Cancelled,
-            TurnStatus::Cancelled,
-        ),
-        SubAgentStatus::Pending | SubAgentStatus::Running | SubAgentStatus::Waiting => {
-            return Ok(None);
-        }
-    };
-    let turn = state
-        .turns
-        .get(turn_id)
-        .filter(|turn| turn.source_agent_id == *agent_id && turn.status == expected_turn_status)
-        .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-    let completed_at_unix_ms = turn
-        .completed_at_unix_ms
-        .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-    let event = validated_background_task_completion_event(
-        turn_id.as_str(),
-        BackgroundTaskKind::Agent,
-        Some(agent_id.as_str()),
-        terminal_status,
-        completed_at_unix_ms.saturating_sub(turn.started_at_unix_ms),
-        result_summary,
-    )
-    .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-    Ok(Some(DeliveryDraft::KeenCodeEvent {
-        turn_id: None,
-        source_agent_id: None,
-        journal_sequence: None,
-        occurred_at_ms: record.time_unix_ms,
-        event,
-    }))
 }
 
 /// 仅记录执行元数据；工具正文仍由带 sequence 的权威 Journal 保留。
@@ -10182,7 +9965,7 @@ pub(crate) fn unix_time_ms() -> u64 {
 
 /// 将后台任务的 Unix 毫秒启动时间格式化为 UTC RFC 3339 毫秒文本。
 fn background_task_started_at(unix_ms: u64) -> Result<String, AgentRuntimeError> {
-    let unix_ms = i64::try_from(unix_ms).map_err(|error| runtime_operation_failed(error))?;
+    let unix_ms = i64::try_from(unix_ms).map_err(runtime_operation_failed)?;
     Utc.timestamp_millis_opt(unix_ms)
         .single()
         .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
@@ -10201,7 +9984,7 @@ fn current_child_agent_turns_for_root(
 ) -> Result<Vec<CollaborationAgentSummary>, AgentRuntimeError> {
     coordinator
         .list_agents_for_root(root_agent_id)
-        .map_err(|error| runtime_operation_failed(error))
+        .map_err(runtime_operation_failed)
         .map(|agents| {
             agents
                 .into_iter()
@@ -10222,7 +10005,7 @@ fn reconcile_waiting_capacity_cancel(
     let snapshot = runtime
         .store
         .load_transition_snapshot()
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
     let Some(snapshot) = snapshot else {
         return Ok(false);
     };
@@ -10252,7 +10035,7 @@ fn reconcile_waiting_capacity_cancel_by_turn(
     let snapshot = runtime
         .store
         .load_transition_snapshot()
-        .map_err(|error| runtime_operation_failed(error))?;
+        .map_err(runtime_operation_failed)?;
     let Some(snapshot) = snapshot else {
         return Ok(false);
     };
@@ -10410,44 +10193,6 @@ fn materialize_delivery(
     }
 }
 
-/// 权威消息在实时流与历史重放中的投影方式。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AuthoritativeProjectionMode {
-    /// 实时投影跳过已由模型增量发送的 Assistant 文本与推理。
-    Live,
-    /// 历史重放从持久 Transcript 重建完整 Assistant 内容。
-    Replay,
-}
-
-/// 同一物理 Journal 记录递归投影其普通事件或原子批次时共享的只读上下文。
-#[derive(Clone, Copy)]
-struct AuthoritativeRecordContext<'a> {
-    session: &'a RuntimeSession,
-    state: &'a SessionState,
-    record: &'a SessionEventRecord,
-    mode: AuthoritativeProjectionMode,
-}
-
-/// 一条物理记录的投影结果；调用方必须在接受或拒绝该记录后显式提交或回滚。
-#[must_use]
-struct MappedAuthoritativeRecord {
-    drafts: Vec<DeliveryDraft>,
-    provider_delta: ProviderProjectionDelta,
-}
-
-impl MappedAuthoritativeRecord {
-    /// 接受当前记录的 Provider 增量并返回投影草稿。
-    fn commit(self) -> Vec<DeliveryDraft> {
-        self.drafts
-    }
-
-    /// 拒绝当前记录，撤销它已导入的 Provider 增量。
-    fn rollback(self, provider: &mut ProviderProjection) {
-        provider.rollback(self.provider_delta);
-    }
-}
-
-/// 将一条权威 Journal 记录映射为 live 与 replay 共用语义的 ACP 草稿集合。
 #[cfg(test)]
 fn map_authoritative_record(
     session: &RuntimeSession,
@@ -10457,944 +10202,11 @@ fn map_authoritative_record(
 ) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
     let mut provider = ProviderProjection::default();
     Ok(
-        map_authoritative_record_with_projection(session, state, record, mode, &mut provider)?
+        map_authoritative_record_with_projection(session, state, record, mode, &mut provider)
+            .map_err(from_runtime)?
             .commit(),
     )
 }
-
-/// 使用指定 Provider 投影映射一条权威 Journal 记录，错误时立即回滚当条增量。
-fn map_authoritative_record_with_projection(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
-    mode: AuthoritativeProjectionMode,
-    provider: &mut ProviderProjection,
-) -> Result<MappedAuthoritativeRecord, AgentRuntimeError> {
-    let mut provider_delta = ProviderProjectionDelta::default();
-    let drafts = match map_authoritative_event(
-        AuthoritativeRecordContext {
-            session,
-            state,
-            record,
-            mode,
-        },
-        &record.event,
-        provider,
-        &mut provider_delta,
-        None,
-    ) {
-        Ok(drafts) => drafts,
-        Err(error) => {
-            provider.rollback(provider_delta);
-            return Err(error);
-        }
-    };
-    Ok(MappedAuthoritativeRecord {
-        drafts,
-        provider_delta,
-    })
-}
-
-/// 递归映射普通事件或原子批次，并让批次内全部投递共享同一 Journal sequence。
-fn map_authoritative_event(
-    context: AuthoritativeRecordContext<'_>,
-    event: &SessionEvent,
-    provider: &mut ProviderProjection,
-    provider_delta: &mut ProviderProjectionDelta,
-    atomic_siblings: Option<&[SessionEvent]>,
-) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    let AuthoritativeRecordContext {
-        session,
-        state,
-        record,
-        mode,
-    } = context;
-    if mode == AuthoritativeProjectionMode::Replay {
-        if replay_hides_root_turn_lifecycle(state, event) {
-            // 编辑重发会保留根 Turn 的终态骨架，以维持子 Agent 与 Mailbox
-            // 控制面引用；没有对应真实用户消息时，这个骨架不属于对话投影。
-            return Ok(Vec::new());
-        }
-        let request_id = match event {
-            SessionEvent::ToolRequested { request } => Some(&request.request_id),
-            SessionEvent::ToolExecutionStarted { request_id }
-            | SessionEvent::ToolFileChangePrepared { request_id, .. }
-            | SessionEvent::ToolFileChangeApplied { request_id }
-            | SessionEvent::ToolCompleted { request_id, .. }
-            | SessionEvent::ToolSideEffectUnknown { request_id, .. } => Some(request_id),
-            _ => None,
-        };
-        if request_id
-            .and_then(|request_id| state.tools.get(request_id))
-            .is_some_and(|lifecycle| lifecycle.transcript_segment.is_some())
-        {
-            // 完整轮次按 Transcript 中推理、文本、工具的语义顺序恢复；尚未提交
-            // Transcript 的崩溃/在途工具仍由各自权威生命周期事件正常投影。
-            return Ok(Vec::new());
-        }
-    }
-    let drafts = match event {
-        SessionEvent::AtomicBatch { events } => {
-            let mut drafts = Vec::new();
-            for nested in events {
-                drafts.extend(map_authoritative_event(
-                    context,
-                    nested,
-                    provider,
-                    provider_delta,
-                    Some(events),
-                )?);
-            }
-            drafts
-        }
-        SessionEvent::SessionCreated { title, .. } | SessionEvent::SessionRenamed { title, .. } => {
-            vec![session_update_draft(
-                record,
-                None,
-                None,
-                keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
-                    keencode_acp::schema::SessionInfoUpdate::new().title(title.clone()),
-                ),
-            )]
-        }
-        SessionEvent::SessionPreferenceSet { pinned, archived } => {
-            // 偏好变更经 _meta 投影给前端；标题键不参与，键集与既有
-            // session_info_update 白名单保持兼容。
-            let mut meta = serde_json::Map::new();
-            if let Some(pinned) = pinned {
-                meta.insert(
-                    "keencode/pinned".to_owned(),
-                    serde_json::Value::Bool(*pinned),
-                );
-            }
-            if let Some(archived) = archived {
-                meta.insert(
-                    "keencode/archived".to_owned(),
-                    serde_json::Value::Bool(*archived),
-                );
-            }
-            if meta.is_empty() {
-                return Ok(Vec::new());
-            }
-            vec![session_update_draft(
-                record,
-                None,
-                None,
-                keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
-                    keencode_acp::schema::SessionInfoUpdate::new().meta(meta),
-                ),
-            )]
-        }
-        SessionEvent::TurnStarted {
-            turn_id,
-            source_agent_id,
-            root_turn_id,
-            parent_turn_id,
-            ..
-        } => {
-            vec![keencode_event_draft(
-                record,
-                Some(turn_id.as_str()),
-                Some(source_agent_id.as_str()),
-                KeenCodeEvent::TurnStarted {
-                    root_turn_id: root_turn_id.as_str().to_owned(),
-                    parent_turn_id: parent_turn_id
-                        .as_ref()
-                        .map(|turn_id| turn_id.as_str().to_owned()),
-                },
-            )]
-        }
-        SessionEvent::TurnCompleted { turn_id } => {
-            let agent_id = turn_agent_id(state, turn_id.as_str())?;
-            vec![keencode_event_draft(
-                record,
-                Some(turn_id.as_str()),
-                Some(agent_id),
-                KeenCodeEvent::TurnCompleted,
-            )]
-        }
-        SessionEvent::TurnStopped {
-            turn_id,
-            reason,
-            message,
-        } => {
-            let agent_id = turn_agent_id(state, turn_id.as_str())?;
-            let message =
-                keencode_model::redact_error_secrets_bounded(message, MAX_UI_ERROR_MESSAGE_BYTES);
-            let event = match reason {
-                TurnStopReason::Cancelled => KeenCodeEvent::TurnCancelled,
-                TurnStopReason::Failed => KeenCodeEvent::TurnFailed {
-                    failure_kind: batch_failure_kind(atomic_siblings, turn_id),
-                    message: message.clone(),
-                },
-                TurnStopReason::LimitReached => KeenCodeEvent::TurnFailed {
-                    failure_kind: TurnFailureKind::Internal,
-                    message: message.clone(),
-                },
-                TurnStopReason::ContextBlocked => KeenCodeEvent::TurnFailed {
-                    failure_kind: TurnFailureKind::Context,
-                    message: message.clone(),
-                },
-                TurnStopReason::ModelOutputLimit | TurnStopReason::ModelRefusal => {
-                    KeenCodeEvent::TurnFailed {
-                        failure_kind: TurnFailureKind::Model,
-                        message: message.clone(),
-                    }
-                }
-            };
-            vec![keencode_event_draft(
-                record,
-                Some(turn_id.as_str()),
-                Some(agent_id),
-                event,
-            )]
-        }
-        SessionEvent::MessageAdded { message } => {
-            map_persisted_message(session, state, record, message, mode, None)?
-        }
-        SessionEvent::TranscriptSegmentCommitted { segment } => {
-            let mut drafts = Vec::new();
-            for message in &segment.messages {
-                drafts.extend(map_persisted_message(
-                    session,
-                    state,
-                    record,
-                    message,
-                    mode,
-                    Some(segment),
-                )?);
-            }
-            drafts
-        }
-        SessionEvent::DynamicInputReceiptCommitted { .. } => Vec::new(),
-        SessionEvent::ToolRequested { request } => vec![session_update_draft(
-            record,
-            Some(request.turn_id.as_str()),
-            Some(request.agent_id.as_str()),
-            keencode_acp::schema::SessionUpdate::ToolCall(
-                keencode_acp::schema::ToolCall::new(
-                    request.model_tool_call_id.clone(),
-                    request.tool_name.clone(),
-                )
-                .raw_input(request.arguments.clone()),
-            ),
-        )],
-        SessionEvent::ToolExecutionStarted { request_id } => {
-            let request = tool_request(state, request_id.as_str())?;
-            vec![session_update_draft(
-                record,
-                Some(request.turn_id.as_str()),
-                Some(request.agent_id.as_str()),
-                keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-                    keencode_acp::schema::ToolCallUpdate::new(
-                        request.model_tool_call_id.clone(),
-                        keencode_acp::schema::ToolCallUpdateFields::new()
-                            .status(keencode_acp::schema::ToolCallStatus::InProgress),
-                    ),
-                ),
-            )]
-        }
-        SessionEvent::ToolFileChangePrepared { request_id, change } => {
-            file_changes::change_update_drafts(session, state, record, request_id, change)?
-        }
-        SessionEvent::ToolFileChangeApplied { request_id } => {
-            let change = state
-                .tools
-                .get(request_id)
-                .and_then(|tool| tool.file_change.as_ref())
-                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            file_changes::change_update_drafts(session, state, record, request_id, change)?
-        }
-        SessionEvent::ToolCompleted {
-            request_id,
-            outcome,
-        } => {
-            let request = tool_request(state, request_id.as_str())?;
-            let fields = file_changes::with_change_content(
-                session,
-                state,
-                request_id,
-                tool_projection::completed_fields(outcome.status, &outcome.result)?,
-            )?;
-            vec![session_update_draft(
-                record,
-                Some(request.turn_id.as_str()),
-                Some(request.agent_id.as_str()),
-                keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-                    keencode_acp::schema::ToolCallUpdate::new(
-                        request.model_tool_call_id.clone(),
-                        fields,
-                    )
-                    .meta(Some(tool_projection::outcome_meta(outcome.status)?)),
-                ),
-            )]
-        }
-        SessionEvent::ToolSideEffectUnknown { request_id, result } => {
-            let request = tool_request(state, request_id.as_str())?;
-            let fields = file_changes::with_change_content(
-                session,
-                state,
-                request_id,
-                tool_projection::completed_fields(ToolCompletionStatus::SideEffectUnknown, result)?,
-            )?;
-            vec![session_update_draft(
-                record,
-                Some(request.turn_id.as_str()),
-                Some(request.agent_id.as_str()),
-                keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-                    keencode_acp::schema::ToolCallUpdate::new(
-                        request.model_tool_call_id.clone(),
-                        fields,
-                    )
-                    .meta(Some(tool_projection::outcome_meta(
-                        ToolCompletionStatus::SideEffectUnknown,
-                    )?)),
-                ),
-            )]
-        }
-        SessionEvent::CompactionApplied {
-            turn_id,
-            source_agent_id,
-            compaction,
-            ..
-        } => vec![keencode_event_draft(
-            record,
-            Some(turn_id.as_str()),
-            Some(source_agent_id.as_str()),
-            KeenCodeEvent::ContextCompactionCompleted {
-                replaced_through_sequence: record.sequence.saturating_sub(1),
-                estimated_tokens: compaction.estimated_tokens_after,
-            },
-        )],
-        SessionEvent::SubAgentSpawned { agent } => {
-            let siblings = atomic_siblings.ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            let mut matching_turns = siblings.iter().filter_map(|sibling| match sibling {
-                SessionEvent::TurnStarted {
-                    turn_id,
-                    source_agent_id,
-                    root_turn_id,
-                    parent_turn_id: Some(parent_turn_id),
-                    ..
-                } if source_agent_id == &agent.agent_id => {
-                    Some((turn_id, root_turn_id, parent_turn_id))
-                }
-                _ => None,
-            });
-            let (_child_turn_id, root_turn_id, parent_turn_id) = matching_turns
-                .next()
-                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            if matching_turns.next().is_some() {
-                return Err(AgentRuntimeError::RuntimeOperationFailed);
-            }
-            vec![keencode_event_draft(
-                record,
-                Some(parent_turn_id.as_str()),
-                Some(agent.parent_agent_id.as_str()),
-                KeenCodeEvent::AgentSpawned {
-                    agent_id: agent.agent_id.as_str().to_owned(),
-                    parent_agent_id: agent.parent_agent_id.as_str().to_owned(),
-                    agent_path: agent.agent_path.clone(),
-                    task: agent.task.clone(),
-                    parent_turn_id: parent_turn_id.as_str().to_owned(),
-                    root_turn_id: root_turn_id.as_str().to_owned(),
-                },
-            )]
-        }
-        SessionEvent::SubAgentStatusChanged {
-            agent_id,
-            turn_id,
-            status,
-            result_summary,
-        } => {
-            let Some(turn_id) = turn_id.as_ref() else {
-                return Ok(Vec::new());
-            };
-            let mut drafts = vec![keencode_event_draft(
-                record,
-                Some(turn_id.as_str()),
-                Some(agent_id.as_str()),
-                KeenCodeEvent::AgentStatusChanged {
-                    agent_id: agent_id.as_str().to_owned(),
-                    status: map_agent_status(status),
-                },
-            )];
-            if let Some(completion) = agent_background_task_completion_draft(
-                state,
-                record,
-                agent_id,
-                turn_id,
-                status,
-                result_summary.as_deref(),
-            )? {
-                drafts.push(completion);
-            }
-            drafts
-        }
-        SessionEvent::MailboxMessageQueued { message } => vec![keencode_event_draft(
-            record,
-            Some(message.related_turn_id.as_str()),
-            Some(message.from.as_str()),
-            KeenCodeEvent::AgentMessageQueued {
-                message_id: message.message_id.as_str().to_owned(),
-                from_agent_id: message.from.as_str().to_owned(),
-                to_agent_id: message.to.as_str().to_owned(),
-            },
-        )],
-        SessionEvent::ModelRoundCompleted {
-            turn_id,
-            source_agent_id,
-            requested_model,
-            usage,
-            metadata,
-            ..
-        } => {
-            let mut drafts = model_round_usage_draft(
-                record,
-                provider.for_turn(turn_id),
-                turn_id,
-                source_agent_id,
-                requested_model,
-                usage,
-            );
-            // 每个原子批次至多提交一个模型 Round；记录 ID 在 live/replay 中稳定。
-            // 即使用量全未知也保留这次请求，避免把部分请求之和冒充整轮总量。
-            drafts.push(keencode_event_draft(
-                record,
-                Some(turn_id.as_str()),
-                Some(source_agent_id.as_str()),
-                KeenCodeEvent::ModelUsageReported {
-                    observation_id: record.event_id.as_str().to_owned(),
-                    input_tokens: usage.input_tokens,
-                    output_tokens: usage.output_tokens,
-                    total_tokens: usage.total_tokens,
-                    reasoning_tokens: usage.reasoning_tokens,
-                    cache_read_tokens: usage.cache_read_tokens,
-                    cache_creation_tokens: usage.cache_write_tokens,
-                    decode_duration_ms: metadata.decode_duration_ms,
-                },
-            ));
-            drafts
-        }
-        SessionEvent::SessionStatusChanged { .. }
-        | SessionEvent::TerminalStarted { .. }
-        | SessionEvent::TerminalOutputRecorded { .. }
-        | SessionEvent::TerminalExited { .. } => Vec::new(),
-        SessionEvent::TodoReplaced {
-            items, revision, ..
-        } => {
-            let mut meta = keencode_acp::schema::Meta::new();
-            meta.insert("_keencode".to_owned(), json!({ "todoRevision": revision }));
-            vec![session_update_draft(
-                record,
-                None,
-                None,
-                keencode_acp::schema::SessionUpdate::Plan(
-                    keencode_acp::schema::Plan::new(
-                        items
-                            .iter()
-                            .map(|item| {
-                                keencode_acp::schema::PlanEntry::new(
-                                    item.content.clone(),
-                                    keencode_acp::schema::PlanEntryPriority::Medium,
-                                    match item.status {
-                                        TodoStatus::Pending => {
-                                            keencode_acp::schema::PlanEntryStatus::Pending
-                                        }
-                                        TodoStatus::InProgress => {
-                                            keencode_acp::schema::PlanEntryStatus::InProgress
-                                        }
-                                        TodoStatus::Completed => {
-                                            keencode_acp::schema::PlanEntryStatus::Completed
-                                        }
-                                    },
-                                )
-                            })
-                            .collect(),
-                    )
-                    .meta(meta),
-                ),
-            )]
-        }
-        SessionEvent::PlanChanged { plan } => vec![session_update_draft(
-            record,
-            None,
-            None,
-            keencode_acp::schema::SessionUpdate::CurrentModeUpdate(
-                keencode_acp::schema::CurrentModeUpdate::new(if plan.enabled {
-                    "plan"
-                } else {
-                    "default"
-                }),
-            ),
-        )],
-        SessionEvent::ProviderSnapshotUpdated { .. } => Vec::new(),
-        SessionEvent::TurnProviderSnapshotRecorded { .. } => {
-            provider.observe_event(event, provider_delta)?;
-            Vec::new()
-        }
-        SessionEvent::OnErrorHookQueued { .. }
-        | SessionEvent::OnErrorHookReceiptCommitted { .. } => Vec::new(),
-        SessionEvent::TitleGenerated { .. }
-        | SessionEvent::MailboxMessageDelivered { .. }
-        | SessionEvent::WorktreeAssigned { .. }
-        | SessionEvent::WorktreeReleased { .. }
-        | SessionEvent::SessionClosed {} => Vec::new(),
-    };
-    Ok(drafts)
-}
-
-/// 从与 Turn 终态同批提交的 OnError outbox 推导 UI 失败分类。
-///
-/// `TurnStopped` 只携带停止原因，Provider 中立分类由同批 `OnErrorHookQueued` 提供；
-/// 只有 Provider 边界失败属于模型失败，缺失或未知分类保守归为内部错误。
-fn batch_failure_kind(
-    siblings: Option<&[SessionEvent]>,
-    turn_id: &ResourceTurnId,
-) -> TurnFailureKind {
-    let category = siblings.and_then(|events| {
-        events.iter().find_map(|event| match event {
-            SessionEvent::OnErrorHookQueued { invocation } if &invocation.turn_id == turn_id => {
-                Some(invocation.error_category.as_str())
-            }
-            _ => None,
-        })
-    });
-    match category {
-        Some(
-            "authentication_failed"
-            | "billing_error"
-            | "model_not_found"
-            | "rate_limit"
-            | "overloaded"
-            | "invalid_request"
-            | "server_error",
-        ) => TurnFailureKind::Model,
-        _ => TurnFailureKind::Internal,
-    }
-}
-
-/// 回放时隐藏仅为控制面引用保留、但已没有独立真实用户消息的根 Turn 生命周期。
-fn replay_hides_root_turn_lifecycle(state: &SessionState, event: &SessionEvent) -> bool {
-    let turn_id = match event {
-        SessionEvent::TurnStarted { turn_id, .. }
-        | SessionEvent::TurnCompleted { turn_id }
-        | SessionEvent::TurnStopped { turn_id, .. } => turn_id,
-        _ => return false,
-    };
-    let Some(turn) = state.turns.get(turn_id) else {
-        return false;
-    };
-    let is_root_turn = turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
-        && turn.root_turn_id == turn.turn_id
-        && turn.parent_turn_id.is_none();
-    // Goal 自动续跑只有模型专用输入，但已有真实 Assistant 轨迹时仍须回放轮次边界。
-    if is_root_turn
-        && turn_id.as_str().starts_with("turn-goal-")
-        && state.transcript.iter().any(|record| {
-            matches!(record, TranscriptRecord::SegmentCommitted(segment)
-            if segment.turn_id == *turn_id
-                && segment.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
-                && segment.messages.iter().any(|message| {
-                    !message.is_meta && message.role == ResourceMessageRole::Assistant
-                }))
-        })
-    {
-        return false;
-    }
-    is_root_turn
-        && !state.transcript.iter().any(|record| {
-            matches!(
-                record,
-                TranscriptRecord::MessageAdded(message)
-                    if !message.is_meta
-                        && message.role == ResourceMessageRole::User
-                        && message.agent_id.is_none()
-                        && message.turn_id.as_ref() == Some(turn_id)
-            )
-        })
-}
-
-/// 通过标准 ACP 扩展槽携带资源锚点，不冒充要求 UUID 的未启用 messageId 字段。
-fn persisted_message_meta(message_id: &str) -> keencode_acp::schema::Meta {
-    serde_json::Map::from_iter([(
-        "keencode/messageId".to_owned(),
-        serde_json::Value::String(message_id.to_owned()),
-    )])
-}
-
-/// 将一条已物化的持久消息拆为标准用户、Agent 或推理内容更新。
-fn map_persisted_message(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
-    message: &SessionMessage,
-    mode: AuthoritativeProjectionMode,
-    segment: Option<&TranscriptSegment>,
-) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    if message.is_meta
-        || matches!(
-            message.role,
-            ResourceMessageRole::System | ResourceMessageRole::Developer
-        )
-    {
-        return Ok(Vec::new());
-    }
-    let materialized = session
-        .materialize_message(message)
-        .map_err(|error| runtime_operation_failed(error))?;
-    let turn_id = message.turn_id.as_ref().map(|turn_id| turn_id.as_str());
-    let agent_id = match (message.agent_id.as_ref(), turn_id) {
-        (Some(agent_id), _) => Some(agent_id.as_str()),
-        (None, Some(turn_id)) => Some(turn_agent_id(state, turn_id)?),
-        (None, None) => None,
-    };
-    let mut drafts = Vec::new();
-    for block in materialized.content {
-        if mode == AuthoritativeProjectionMode::Replay
-            && let Some(segment) = segment
-            && let Some(tool_drafts) =
-                replay_segment_tool_drafts(session, state, record, segment, &block)?
-        {
-            drafts.extend(tool_drafts);
-            continue;
-        }
-        let update = match block {
-            ContentBlock::Text { text } => {
-                if message.role == ResourceMessageRole::Tool
-                    || (message.role == ResourceMessageRole::Assistant
-                        && mode == AuthoritativeProjectionMode::Live)
-                {
-                    continue;
-                }
-                let chunk = keencode_acp::schema::ContentChunk::new(
-                    keencode_acp::schema::ContentBlock::from(text),
-                )
-                .meta(Some(persisted_message_meta(&message.message_id)));
-                if message.role == ResourceMessageRole::User {
-                    keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk)
-                } else {
-                    keencode_acp::schema::SessionUpdate::AgentMessageChunk(chunk)
-                }
-            }
-            ContentBlock::Reasoning { reasoning } => {
-                if message.role != ResourceMessageRole::Assistant
-                    || mode == AuthoritativeProjectionMode::Live
-                {
-                    continue;
-                }
-                keencode_acp::schema::SessionUpdate::AgentThoughtChunk(
-                    keencode_acp::schema::ContentChunk::new(
-                        keencode_acp::schema::ContentBlock::from(reasoning.text),
-                    )
-                    .meta(Some(persisted_message_meta(&message.message_id))),
-                )
-            }
-            ContentBlock::Image { image } => {
-                if !matches!(
-                    message.role,
-                    ResourceMessageRole::User | ResourceMessageRole::Assistant
-                ) {
-                    continue;
-                }
-                let content = match image.source {
-                    ImageSource::Base64 { media_type, data } => {
-                        keencode_acp::schema::ContentBlock::Image(
-                            keencode_acp::schema::ImageContent::new(data, media_type),
-                        )
-                    }
-                    ImageSource::Url { url } => keencode_acp::schema::ContentBlock::ResourceLink(
-                        keencode_acp::schema::ResourceLink::new("image", url),
-                    ),
-                };
-                let chunk = keencode_acp::schema::ContentChunk::new(content)
-                    .meta(Some(persisted_message_meta(&message.message_id)));
-                if message.role == ResourceMessageRole::User {
-                    keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk)
-                } else {
-                    keencode_acp::schema::SessionUpdate::AgentMessageChunk(chunk)
-                }
-            }
-            ContentBlock::ToolCall { tool_call } => {
-                if message.role != ResourceMessageRole::Assistant
-                    || (mode == AuthoritativeProjectionMode::Live
-                        && persisted_tool_lifecycle_exists(state, turn_id, agent_id, &tool_call.id))
-                {
-                    continue;
-                }
-                keencode_acp::schema::SessionUpdate::ToolCall(
-                    keencode_acp::schema::ToolCall::new(tool_call.id, tool_call.name)
-                        .raw_input(tool_call.arguments),
-                )
-            }
-            ContentBlock::ToolResult { tool_result } => {
-                if message.role != ResourceMessageRole::Tool
-                    || (mode == AuthoritativeProjectionMode::Live
-                        && persisted_tool_lifecycle_exists(
-                            state,
-                            turn_id,
-                            agent_id,
-                            &tool_result.tool_call_id,
-                        ))
-                {
-                    continue;
-                }
-                let status = if tool_result.is_error {
-                    keencode_acp::schema::ToolCallStatus::Failed
-                } else {
-                    keencode_acp::schema::ToolCallStatus::Completed
-                };
-                // raw_output 统一为 camelCase 的完整 ToolResult 信封（toolCallId/content/isError），
-                // 与 tool_projection::completed_fields 的形状约定一致；裸数组形状会让前端的
-                // 图片/Artifact 识别退化为原始 JSON 文本。错误正文同样脱敏。
-                let mut projected = tool_result.clone();
-                if projected.is_error {
-                    for part in &mut projected.content {
-                        if let keencode_model::ToolResultContent::Text { text } = part {
-                            *text = keencode_model::redact_error_secrets(text);
-                        }
-                    }
-                }
-                let raw_output = serde_json::to_value(projected)
-                    .map_err(|error| runtime_operation_failed(error))?;
-                keencode_acp::schema::SessionUpdate::ToolCallUpdate(
-                    keencode_acp::schema::ToolCallUpdate::new(
-                        tool_result.tool_call_id,
-                        keencode_acp::schema::ToolCallUpdateFields::new()
-                            .status(status)
-                            .raw_output(raw_output),
-                    ),
-                )
-            }
-        };
-        // Session 级用户消息按资源层契约可以省略 Turn 与 Agent 身份；Assistant/Tool
-        // 更新仍必须具备可审查的来源边界。
-        if !matches!(message.role, ResourceMessageRole::User)
-            && (turn_id.is_none() || agent_id.is_none())
-        {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        drafts.push(session_update_draft(record, turn_id, agent_id, update));
-    }
-    Ok(drafts)
-}
-
-/// 在已提交段的语义位置重建工具生命周期，精确绑定 Round/段而非仅凭可能复用的模型 ID。
-fn replay_segment_tool_drafts(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
-    segment: &TranscriptSegment,
-    block: &ContentBlock,
-) -> Result<Option<Vec<DeliveryDraft>>, AgentRuntimeError> {
-    let (tool_call_id, is_request) = match block {
-        ContentBlock::ToolCall { tool_call } => (tool_call.id.as_str(), true),
-        ContentBlock::ToolResult { tool_result } => (tool_result.tool_call_id.as_str(), false),
-        _ => return Ok(None),
-    };
-    let lifecycle = state.tools.values().find(|lifecycle| {
-        lifecycle.request.model_tool_call_id == tool_call_id
-            && lifecycle
-                .transcript_segment
-                .as_ref()
-                .is_some_and(|reference| {
-                    reference.turn_id == segment.turn_id
-                        && reference.source_agent_id == segment.source_agent_id
-                        && reference.model_round == segment.model_round
-                        && reference.segment_index == segment.segment_index
-                        && Some(reference.transcript_revision)
-                            == segment.expected_transcript_revision.checked_add(1)
-                })
-    });
-    let Some(lifecycle) = lifecycle else {
-        // 未进入执行生命周期的模型可见错误仍由 Transcript 工具块自身恢复。
-        return Ok(None);
-    };
-    let mut events = Vec::with_capacity(2);
-    if is_request {
-        events.push((
-            lifecycle.requested_at_unix_ms,
-            SessionEvent::ToolRequested {
-                request: lifecycle.request.clone(),
-            },
-        ));
-        if let Some(started_at) = lifecycle.execution_started_at_unix_ms {
-            events.push((
-                started_at,
-                SessionEvent::ToolExecutionStarted {
-                    request_id: lifecycle.request.request_id.clone(),
-                },
-            ));
-        }
-    } else {
-        events.push((
-            lifecycle
-                .completed_at_unix_ms
-                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?,
-            SessionEvent::ToolCompleted {
-                request_id: lifecycle.request.request_id.clone(),
-                outcome: lifecycle
-                    .outcome
-                    .clone()
-                    .ok_or(AgentRuntimeError::RuntimeOperationFailed)?,
-            },
-        ));
-    }
-    let mut drafts = Vec::new();
-    let mut provider = ProviderProjection::default();
-    let mut provider_delta = ProviderProjectionDelta::default();
-    for (time_unix_ms, event) in events {
-        // 保留生命周期真实时间和与 live 相同的 raw output；Journal 游标则归属于
-        // 当前原子段，不能倒退到已被前页消费的物理请求记录。
-        let projected = SessionEventRecord {
-            schema: record.schema.clone(),
-            version: record.version,
-            event_id: record.event_id.clone(),
-            session: record.session.clone(),
-            sequence: record.sequence,
-            time_unix_ms,
-            event,
-        };
-        drafts.extend(map_authoritative_event(
-            AuthoritativeRecordContext {
-                session,
-                state,
-                record: &projected,
-                mode: AuthoritativeProjectionMode::Live,
-            },
-            &projected.event,
-            &mut provider,
-            &mut provider_delta,
-            None,
-        )?);
-    }
-    Ok(Some(drafts))
-}
-
-/// 判断一个 Transcript 工具块是否已有完整资源层 lifecycle，存在时由专用事件投影。
-fn persisted_tool_lifecycle_exists(
-    state: &SessionState,
-    turn_id: Option<&str>,
-    agent_id: Option<&str>,
-    model_tool_call_id: &str,
-) -> bool {
-    let (Some(turn_id), Some(agent_id)) = (turn_id, agent_id) else {
-        return false;
-    };
-    state.tools.values().any(|lifecycle| {
-        lifecycle.request.turn_id.as_str() == turn_id
-            && lifecycle.request.agent_id.as_str() == agent_id
-            && lifecycle.request.model_tool_call_id == model_tool_call_id
-    })
-}
-
-/// 构造带权威 Journal sequence 的标准 Session 更新草稿。
-fn session_update_draft(
-    record: &SessionEventRecord,
-    turn_id: Option<&str>,
-    source_agent_id: Option<&str>,
-    update: keencode_acp::schema::SessionUpdate,
-) -> DeliveryDraft {
-    DeliveryDraft::SessionUpdate {
-        turn_id: turn_id.map(str::to_owned),
-        source_agent_id: source_agent_id.map(str::to_owned),
-        occurred_at_ms: record.time_unix_ms,
-        journal_sequence: Some(record.sequence),
-        update: Box::new(update),
-    }
-}
-
-/// 将权威模型 Round 的明确用量投影为标准 ACP 上下文用量更新。
-///
-/// `total_tokens` 优先使用 Provider 明确报告的总数；缺少总数时才在输入和
-/// 输出都明确报告时相加。上下文窗口或用量任一未知都不生成更新，避免把
-/// 未知值伪造成零或把不完整的 Token 统计展示为事实。
-fn model_round_usage_draft(
-    record: &SessionEventRecord,
-    provider: Option<&ProviderSnapshot>,
-    turn_id: &ResourceTurnId,
-    source_agent_id: &ResourceAgentId,
-    requested_model: &str,
-    usage: &keencode_model::TokenUsage,
-) -> Vec<DeliveryDraft> {
-    let Some(context_window) = provider
-        .filter(|provider| provider.model == requested_model)
-        .and_then(|provider| provider.context_window)
-        .filter(|context_window| *context_window > 0)
-    else {
-        return Vec::new();
-    };
-    let used = usage.total_tokens.or_else(|| {
-        usage
-            .input_tokens
-            .zip(usage.output_tokens)
-            .and_then(|(input, output)| input.checked_add(output))
-    });
-    let Some(used) = used else {
-        return Vec::new();
-    };
-    vec![session_update_draft(
-        record,
-        Some(turn_id.as_str()),
-        Some(source_agent_id.as_str()),
-        keencode_acp::schema::SessionUpdate::UsageUpdate(keencode_acp::schema::UsageUpdate::new(
-            used,
-            context_window,
-        )),
-    )]
-}
-
-/// 构造带权威 Journal sequence 的 KeenCode 生命周期草稿。
-fn keencode_event_draft(
-    record: &SessionEventRecord,
-    turn_id: Option<&str>,
-    source_agent_id: Option<&str>,
-    event: KeenCodeEvent,
-) -> DeliveryDraft {
-    DeliveryDraft::KeenCodeEvent {
-        turn_id: turn_id.map(str::to_owned),
-        source_agent_id: source_agent_id.map(str::to_owned),
-        journal_sequence: Some(record.sequence),
-        occurred_at_ms: record.time_unix_ms,
-        event,
-    }
-}
-
-/// 从当前一致快照解析 Turn 的 Agent 身份。
-fn turn_agent_id<'a>(state: &'a SessionState, turn_id: &str) -> Result<&'a str, AgentRuntimeError> {
-    state
-        .turns
-        .iter()
-        .find(|(known_turn_id, _)| known_turn_id.as_str() == turn_id)
-        .map(|(_, turn)| turn.source_agent_id.as_str())
-        .ok_or(AgentRuntimeError::RuntimeOperationFailed)
-}
-
-/// 从当前一致快照解析工具生命周期的不可变请求。
-fn tool_request<'a>(
-    state: &'a SessionState,
-    request_id: &str,
-) -> Result<&'a keencode_resources::ToolRequest, AgentRuntimeError> {
-    state
-        .tools
-        .iter()
-        .find(|(known_request_id, _)| known_request_id.as_str() == request_id)
-        .map(|(_, lifecycle)| &lifecycle.request)
-        .ok_or(AgentRuntimeError::RuntimeOperationFailed)
-}
-
-/// 将资源层单层 Agent 状态映射为桌面生命周期状态。
-fn map_agent_status(status: &SubAgentStatus) -> AgentLifecycleStatus {
-    match status {
-        SubAgentStatus::Pending => AgentLifecycleStatus::Pending,
-        SubAgentStatus::Running => AgentLifecycleStatus::Running,
-        SubAgentStatus::Waiting => AgentLifecycleStatus::Waiting,
-        SubAgentStatus::Completed => AgentLifecycleStatus::Completed,
-        SubAgentStatus::Failed => AgentLifecycleStatus::Failed,
-        SubAgentStatus::Interrupted => AgentLifecycleStatus::Interrupted,
-        SubAgentStatus::Stopped => AgentLifecycleStatus::Stopped,
-    }
-}
-
 /// 将 Agent Goal 状态转换为 ACP GoalChanged 使用的稳定小写名称。
 fn goal_status_name(status: GoalStatus) -> &'static str {
     match status {
@@ -11488,9 +10300,7 @@ fn ensure_session_project(
     session: &RuntimeSession,
     expected_project_root: &Path,
 ) -> Result<(), AgentRuntimeError> {
-    let snapshot = session
-        .snapshot()
-        .map_err(|error| runtime_operation_failed(error))?;
+    let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
     let stored = canonical_project_root(Path::new(&snapshot.state.project_root))?;
     if stored != expected_project_root {
         return Err(AgentRuntimeError::SessionProjectMismatch);
@@ -11503,13 +10313,12 @@ mod tests {
     use super::{
         AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
         DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        LifecycleStartState, MAX_UI_ERROR_MESSAGE_BYTES, ProviderProjection,
-        RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS, RecoveredRootLifecycle, RootAgentSeed,
-        RootTaskTerminalNotice, RootTurnOptions, RootTurnStartOutcome, RunnerAgentId,
-        RuntimeAgentTemplate, RuntimeAgentTemplateContext, RuntimeExtensionCandidate,
-        RuntimeExtensionContributor, RuntimeExtensionDiagnostic, RuntimeGoalUsageSink,
-        RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender, TurnBoundProvider,
-        authoritative_recovered_turn_outcome, background_task_completion_event,
+        LifecycleStartState, ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
+        RecoveredRootLifecycle, RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions,
+        RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
+        RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
+        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
+        TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
         clear_historical_reasoning_state, commit_goal_turn_elapsed, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
@@ -11547,6 +10356,7 @@ mod tests {
         ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
         UuidCollaborationIdGenerator,
     };
+    use keencode_runtime::MAX_UI_ERROR_MESSAGE_BYTES;
 
     /// 取消后旧 worker 的迟到成功不能提交，也不能清掉重载候选的新租约。
     #[test]

@@ -1,6 +1,7 @@
 //! 真实 Messages 模型经过桌面装配、ACP 投递、MCP 和持久化的隔离验证。
 
 use super::*;
+use crate::providers::{CustomProvider, ProvidersListResult};
 
 #[derive(Default)]
 struct LiveEmitter(Mutex<Vec<Value>>);

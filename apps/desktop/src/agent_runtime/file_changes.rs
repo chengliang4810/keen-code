@@ -4,23 +4,13 @@ use std::fmt;
 use std::path::Path;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use keencode_acp::{
-    FILE_CHANGE_META_KEY, FileChangeReference, FileChangeSide, FileSnapshotInfo,
-    ReadFileChangeRequest, ReadFileChangeResponse, schema,
-};
+use keencode_acp::{FileChangeSide, ReadFileChangeRequest, ReadFileChangeResponse};
 use keencode_agent::{ToolContext, ToolError};
-use keencode_resources::{
-    RequestId, SessionEventRecord, SessionState, ToolEffect, ToolFileChange, existing_file_readonly,
-};
+use keencode_resources::{RequestId, ToolEffect, existing_file_readonly};
 use keencode_runtime::RuntimeSession;
 use keencode_tools::{FileMutationRecorder, PreparedFileMutation};
 
-use super::{AgentRuntime, AgentRuntimeError, DeliveryDraft, session_update_draft, tool_request};
-
-/// 内联快照的原始和编码后预算；较大或二进制快照仅通过资源引用按需读取。
-const INLINE_FILE_CHANGE_BYTES: u64 = 32 * 1024;
-/// 单次 Diff JSON 内容预算，为整个 ACP 投递及工具状态预留足够空间。
-const INLINE_FILE_CHANGE_JSON_BYTES: usize = 64 * 1024;
+use super::{AgentRuntime, AgentRuntimeError};
 
 /// 绑定单个 Session 的真实文件变更记录器。
 pub(super) struct RuntimeFileMutationRecorder {
@@ -189,132 +179,8 @@ fn read_file_change_page(
     })
 }
 
-/// 构造不含正文或内部 Artifact 路径的持久文件变更引用。
-fn change_reference(
-    session: &RuntimeSession,
-    request_id: &RequestId,
-    change: &ToolFileChange,
-) -> FileChangeReference {
-    let info = |snapshot: &keencode_resources::FileSnapshot| FileSnapshotInfo {
-        size_bytes: snapshot.size_bytes,
-        sha256: snapshot.sha256.clone(),
-    };
-    FileChangeReference {
-        session_id: session.session_id().as_str().to_owned(),
-        request_id: request_id.as_str().to_owned(),
-        path: change.path.clone(),
-        before: change.before.as_ref().map(info),
-        after: info(&change.after),
-        applied: change.applied,
-    }
-}
-
-/// 小型已应用 UTF-8 变更使用标准 Diff，其余使用标准 ResourceLink 和命名空间元数据。
-fn change_content(
-    session: &RuntimeSession,
-    request_id: &RequestId,
-    change: &ToolFileChange,
-) -> Result<Vec<schema::ToolCallContent>, AgentRuntimeError> {
-    let total_bytes = change
-        .before
-        .as_ref()
-        .map_or(0, |before| before.size_bytes)
-        .saturating_add(change.after.size_bytes);
-    if change.applied && total_bytes <= INLINE_FILE_CHANGE_BYTES {
-        let before = change
-            .before
-            .as_ref()
-            .map(|before| session.read_file_snapshot(before))
-            .transpose()
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        let after = session
-            .read_file_snapshot(&change.after)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        let before_text = before.map(String::from_utf8).transpose();
-        let after_text = String::from_utf8(after);
-        if let (Ok(before_text), Ok(after_text)) = (before_text, after_text)
-            && !before_text
-                .as_ref()
-                .is_some_and(|value| value.contains('\0'))
-            && !after_text.contains('\0')
-        {
-            let content = vec![schema::ToolCallContent::Diff(
-                schema::Diff::new(&change.path, after_text).old_text(before_text),
-            )];
-            if serde_json::to_vec(&content)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?
-                .len()
-                <= INLINE_FILE_CHANGE_JSON_BYTES
-            {
-                return Ok(content);
-            }
-        }
-    }
-    let reference = change_reference(session, request_id, change);
-    // Session 和 Request ID 已由资源层约束为单个安全 ASCII 路径段。
-    let uri = format!(
-        "keencode://sessions/{}/file-changes/{}",
-        reference.session_id, reference.request_id
-    );
-    let mut meta = schema::Meta::new();
-    meta.insert(
-        FILE_CHANGE_META_KEY.to_owned(),
-        serde_json::to_value(reference).map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
-    );
-    Ok(vec![schema::ToolCallContent::Content(
-        schema::Content::new(schema::ContentBlock::ResourceLink(
-            schema::ResourceLink::new("文件变更快照", uri)
-                .meta(meta)
-                .description(if change.applied {
-                    "已应用的持久文件快照"
-                } else {
-                    "已准备快照，尚未确认文件应用结果"
-                }),
-        )),
-    )])
-}
-
-/// 工具终态更新始终携带权威快照，确保 live、在途恢复和 Transcript 冷重放语义一致。
-pub(super) fn with_change_content(
-    session: &RuntimeSession,
-    state: &SessionState,
-    request_id: &RequestId,
-    mut fields: schema::ToolCallUpdateFields,
-) -> Result<schema::ToolCallUpdateFields, AgentRuntimeError> {
-    match state
-        .tools
-        .get(request_id)
-        .and_then(|tool| tool.file_change.as_ref())
-    {
-        Some(change) => {
-            let mut content = fields.content.take().unwrap_or_default();
-            content.extend(change_content(session, request_id, change)?);
-            Ok(fields.content(content))
-        }
-        None => Ok(fields),
-    }
-}
-
-/// 以标准工具更新投递 Prepared/Applied，不把准备阶段误报成实际文件变更。
-pub(super) fn change_update_drafts(
-    session: &RuntimeSession,
-    state: &SessionState,
-    record: &SessionEventRecord,
-    request_id: &RequestId,
-    change: &ToolFileChange,
-) -> Result<Vec<DeliveryDraft>, AgentRuntimeError> {
-    let request = tool_request(state, request_id.as_str())?;
-    Ok(vec![session_update_draft(
-        record,
-        Some(request.turn_id.as_str()),
-        Some(request.agent_id.as_str()),
-        schema::SessionUpdate::ToolCallUpdate(schema::ToolCallUpdate::new(
-            request.model_tool_call_id.clone(),
-            schema::ToolCallUpdateFields::new()
-                .content(change_content(session, request_id, change)?),
-        )),
-    )])
-}
-
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use keencode_runtime::change_content;

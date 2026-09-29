@@ -6,6 +6,7 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+mod acp_projection;
 mod file_changes;
 mod host_core;
 mod host_runtime;
@@ -14,6 +15,15 @@ mod persistent_state;
 mod prompt_driver;
 mod publisher;
 mod session_listing;
+
+/// 权威 Journal 事件到 ACP 客户端投递的中立投影；桌面与 headless 共享。
+pub use acp_projection::{
+    AuthoritativeProjectionMode, AuthoritativeRecordContext, DeliveryDraft,
+    MAX_UI_ERROR_MESSAGE_BYTES, MappedAuthoritativeRecord, ProviderProjection,
+    ProviderProjectionDelta, change_content, keencode_event_draft,
+    map_authoritative_record_with_projection, session_update_draft, tool_request,
+    validated_background_task_completion_event,
+};
 
 #[cfg(test)]
 mod control_tests;
@@ -407,6 +417,9 @@ pub enum RuntimeError {
     /// 底层资源路径、日志、Artifact 或文件锁操作失败。
     #[error(transparent)]
     Resource(#[from] ResourceError),
+    /// 权威 Journal 状态在投影为 ACP 交付时违反内部不变量。
+    #[error("权威状态投影遇到不一致的会话状态")]
+    ProjectionInconsistent,
     /// 另一个进程或句柄已经持有目标 Session 的独占 Runtime lease。
     #[error("Session Runtime 正被另一个进程或句柄占用")]
     SessionBusy,

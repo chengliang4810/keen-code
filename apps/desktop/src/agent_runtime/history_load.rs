@@ -138,7 +138,8 @@ impl AgentRuntime {
                         &record,
                         AuthoritativeProjectionMode::Replay,
                         &mut provider,
-                    )?
+                    )
+                    .map_err(from_runtime)?
                     .commit();
                     context.extend(mapped.into_iter().filter(|draft| match draft {
                         DeliveryDraft::KeenCodeEvent {
@@ -275,7 +276,8 @@ fn history_window_drafts(
                 &record,
                 AuthoritativeProjectionMode::Replay,
                 provider,
-            )?
+            )
+            .map_err(from_runtime)?
             .commit();
             drafts.extend(mapped);
             after = record.sequence;

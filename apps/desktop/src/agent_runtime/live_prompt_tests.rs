@@ -6,7 +6,6 @@ use keencode_agent::{
     AgentCommitEvent, AgentCommitSink, AgentToolRoundPreflight, AgentToolRoundPreflightError,
     AgentToolRoundReservation, NoopAgentCommitSink,
 };
-use keencode_tools::{EditTool, ReadTool};
 use serde_json::json;
 
 #[path = "live_messages_agent_tests.rs"]
