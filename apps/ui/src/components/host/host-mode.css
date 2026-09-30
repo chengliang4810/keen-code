@@ -321,9 +321,9 @@
 }
 
 .mobile-remote-shell__composer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
   gap: var(--space-2);
   padding-top: var(--space-2);
   padding-right: max(0px, env(safe-area-inset-right, 0px));
@@ -333,7 +333,7 @@
 }
 
 .mobile-remote-shell__composer > textarea {
-  flex: 1 1 auto;
+  width: 100%;
   min-width: 0;
 }
 
@@ -349,7 +349,7 @@
 
 .mobile-remote-attachments {
   display: grid;
-  flex: 1 0 100%;
+  grid-column: 1 / -1;
   width: 100%;
   gap: var(--space-2);
 }
@@ -422,6 +422,11 @@
 }
 
 @media (max-width: 480px) {
+  .mobile-remote-shell__sidebar {
+    width: 100%;
+    border-right: 0;
+  }
+
   .host-startup-shell {
     padding: var(--space-3);
   }
@@ -441,12 +446,7 @@
     padding-left: max(var(--space-3), calc(var(--space-3) + env(safe-area-inset-left, 0px)));
   }
 
-  .mobile-remote-shell__composer {
-    flex-wrap: wrap;
-  }
-
   .mobile-remote-shell__composer-actions {
-    width: 100%;
     justify-content: flex-end;
   }
 
