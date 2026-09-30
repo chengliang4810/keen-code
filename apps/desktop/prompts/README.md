@@ -1,5 +1,15 @@
 # 提示词职责与维护
 
+## 本次行为调整（2026-09-30）
+
+工具描述新增 Windows shell 分工引导。真实桌面会话中模型在 Bash 工具里运行 `tasklist /FI "PID eq …"`，Git Bash 的 MSYS 参数改写把 `/FI` 当作 POSIX 路径转换成 Git 安装根下的路径，命令以 `Invalid argument/option` 失败。这正是 Bash（POSIX 语义）与 PowerShell（Windows 语义，仅 Windows 注册）两个工具的分工场景，参考提示词 `docs/prompts/claude-code-system-prompt.zh-CN.md` 也早已写明「Windows 上终端操作优先使用 PowerShell」，但该分工此前未进入工具 schema，模型在工具层面不可见。本次改动：
+
+- `Bash` 工具 description 在 Windows 构建下追加「Windows shell notes」段：说明 MSYS 参数改写机制与失败样例，指引 Windows 原生命令（tasklist、reg、netsh、sc、wmic、ipconfig、robocopy、cmd 等）改用 PowerShell 工具，确需在 Bash 中执行时以 `MSYS_NO_PATHCONV=1` 前缀禁用本次调用的路径改写；非 Windows 构建的描述不变。
+- `PowerShell` 工具 description 补充对偶引导：Windows 原生命令优先使用本工具。
+- 未采用向 Bash 子进程全局注入 `MSYS_NO_PATHCONV=1` 的方案：那会把 Git Bash 的 POSIX 路径契约整体改掉，POSIX 风格路径（如 tilde 展开后的 `~/...`）传给原生可执行文件时不再转换且失败得更隐蔽，属静默语义变更；按命令前缀的逃生舱保留在描述里交给模型。
+
+描述文本为本次独立撰写，描述 `core/tools/src/command.rs` 的真实执行机制；新增测试锁定两个描述在 Windows/非 Windows 构建下的关键内容。
+
 ## 本次行为调整（2026-09-25）
 
 两条行为规则来自 harness-bench 基准 168 题考试的失败归因，均为独立撰写、描述 KeenCode 真实机制的通用行为约束（与具体考题无关，同类条款存在于多个公开产品的提示词中）：

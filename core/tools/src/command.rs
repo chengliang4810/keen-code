@@ -69,20 +69,7 @@ impl AgentTool for BashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "Bash",
-            "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.\n\n\
-Working rules:\n\
-- Quote every path and argument; never interpolate untrusted text into an executable position.\n\
-- Do not start interactive commands (editors, pagers, prompts). Pass non-interactive flags such as -y or --yes, and feed input through files or stdin instead of a terminal.\n\
-- Prefer file tools for reading and editing files, and this tool for builds, tests, version control and system commands.\n\
-- Filter or redirect noisy output so the returned preview carries evidence rather than volume. A truncated preview keeps the head and tail and saves the complete output to a file you can read.\n\
-- Set timeout_ms for commands that can legitimately run long. A command that exceeds its timeout is killed with its process tree, so raise the limit instead of retrying blindly.\n\
-- Use run_in_background only when other work can proceed while it runs; collect the result with TaskOutput before depending on it.\n\n\
-Version control safety:\n\
-- Never rewrite published history: no force push, and no rebase or commit --amend on commits that are not yours alone.\n\
-- Do not commit, push, tag or open pull requests unless the user asked for it.\n\
-- Never bypass hooks or checks with --no-verify, and never discard work with destructive commands (checkout --, reset --hard, clean -f, branch -D) unless the user explicitly asked.\n\
-- Inspect downloaded scripts before executing them.\n\
-- When a command fails, read the error and change the approach; repeat an identical invocation only when conditions have changed or the failure is demonstrably transient.",
+            bash_description(),
             shell_schema(&self.environment, self.background_tasks.is_some()),
         )
     }
@@ -210,7 +197,7 @@ impl AgentTool for PowerShellTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::new(
             "PowerShell",
-            "Run a command using system PowerShell without profiles or interaction, forcing UTF-8 pipeline output. Commands are always treated as side-effecting tools. Cancellation or timeout terminates the entire process tree.",
+            "Run a command using system PowerShell without profiles or interaction, forcing UTF-8 pipeline output. Prefer this tool over Bash for Windows-native commands and for commands whose slash switches Git Bash path conversion would corrupt. Commands are always treated as side-effecting tools. Cancellation or timeout terminates the entire process tree.",
             shell_schema(&self.environment, self.background_tasks.is_some()),
         )
     }
@@ -680,6 +667,37 @@ fn command_timeout(
         ));
     }
     Ok(Duration::from_millis(milliseconds))
+}
+
+/// 返回 Bash 工具的模型可见描述；Windows 构建追加 Git Bash 路径转换说明。
+///
+/// Windows 上该 Shell 通常是 Git Bash，其 MSYS 层会把看似 POSIX 路径的参数
+/// 在传给原生可执行文件前改写为 Windows 路径，`/FI` 这类原生命令开关因此
+/// 被破坏；分工规则与按命令的逃生舱在这里交给模型，而不全局改写环境变量。
+fn bash_description() -> String {
+    let mut description = String::from(
+        "Run a command non-interactively using system Bash with -lc. Commands may change state inside or outside the project and are always treated as side-effecting tools. Cancellation or timeout terminates the entire process group.\n\n\
+Working rules:\n\
+- Quote every path and argument; never interpolate untrusted text into an executable position.\n\
+- Do not start interactive commands (editors, pagers, prompts). Pass non-interactive flags such as -y or --yes, and feed input through files or stdin instead of a terminal.\n\
+- Prefer file tools for reading and editing files, and this tool for builds, tests, version control and system commands.\n\
+- Filter or redirect noisy output so the returned preview carries evidence rather than volume. A truncated preview keeps the head and tail and saves the complete output to a file you can read.\n\
+- Set timeout_ms for commands that can legitimately run long. A command that exceeds its timeout is killed with its process tree, so raise the limit instead of retrying blindly.\n\
+- Use run_in_background only when other work can proceed while it runs; collect the result with TaskOutput before depending on it.\n\n\
+Version control safety:\n\
+- Never rewrite published history: no force push, and no rebase or commit --amend on commits that are not yours alone.\n\
+- Do not commit, push, tag or open pull requests unless the user asked for it.\n\
+- Never bypass hooks or checks with --no-verify, and never discard work with destructive commands (checkout --, reset --hard, clean -f, branch -D) unless the user explicitly asked.\n\
+- Inspect downloaded scripts before executing them.\n\
+- When a command fails, read the error and change the approach; repeat an identical invocation only when conditions have changed or the failure is demonstrably transient.",
+    );
+    #[cfg(windows)]
+    description.push_str(
+        "\n\nWindows shell notes:\n\
+- On Windows this shell is typically Git Bash, whose MSYS layer rewrites arguments that look like POSIX paths; slash switches of native Windows commands get corrupted (for example `tasklist /FI \"PID eq 1\"` fails with `Invalid argument/option - 'C:/Program Files/Git/FI'`).\n\
+- Run Windows-native commands (tasklist, reg, netsh, sc, wmic, ipconfig, robocopy, cmd, ...) with the PowerShell tool instead. When one must run here, prefix the command with `MSYS_NO_PATHCONV=1`.",
+    );
+    description
 }
 
 /// 返回当前平台可尝试的 Bash 可执行文件。

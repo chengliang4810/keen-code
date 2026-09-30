@@ -10,6 +10,7 @@
 | ACP | `acp.request` 的开始、完成/失败、耗时、方法、请求 ID、Session/Turn/操作 ID；公开错误转换前保留内部原因和源码位置 |
 | 模型 | 请求失败的模型、HTTP 状态、失败分类、请求 ID、尝试次数及 Session/Turn/Agent；详细请求观测仍在 `model-request-records.jsonl` |
 | 执行 | 回合开始/终态、工具失败、后台 Shell 失败、模型回合/上下文压缩失败、事件投递失败或订阅滞后 |
+| WebView 生命周期 | `webview.page_load` 的首次加载、意外重载与重载完成；进程存活期间的第二次页面加载表示渲染进程疑似崩溃后被 WebView2 自动恢复（tauri/wry 未暴露 ProcessFailed，这是唯一直接信号，系统层无崩溃事件与转储） |
 | 后台服务 | 后台 `tracing` 的 WARN/ERROR、本地记忆流水线失败、系统通知失败和 Rust panic |
 
 工具失败只在诊断文件中写入身份、状态和 `sequence`，避免复制命令输出或项目内容。完整工具结果通过同一 Session 下 `events.jsonl` 的序号查找。诊断日志不保存完整模型请求、响应、工具参数或认证头。

@@ -216,6 +216,34 @@ fn local_tool_registration_is_stable() {
     assert_eq!(names, expected);
 }
 
+/// Shell 工具描述必须传达 Windows shell 分工：Bash 侧说明 MSYS 路径转换
+/// 陷阱并指向 PowerShell，PowerShell 侧承接 Windows 原生命令职责。
+#[test]
+fn shell_descriptions_teach_windows_shell_split() {
+    let directory = tempdir().expect("应创建临时目录");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+
+    let bash_description = crate::BashTool::new(environment.clone())
+        .definition()
+        .description;
+    assert!(bash_description.contains("Working rules:"));
+    #[cfg(windows)]
+    {
+        assert!(bash_description.contains("Windows shell notes:"));
+        assert!(bash_description.contains("MSYS_NO_PATHCONV=1"));
+        assert!(bash_description.contains("PowerShell tool"));
+    }
+    #[cfg(not(windows))]
+    assert!(!bash_description.contains("MSYS_NO_PATHCONV"));
+
+    #[cfg(windows)]
+    {
+        let powershell_description = PowerShellTool::new(environment).definition().description;
+        assert!(powershell_description.contains("Windows-native"));
+        assert!(powershell_description.contains("Git Bash path conversion"));
+    }
+}
+
 /// Write 必须创建父目录、原子写入内容并识别完全相同的重复写入。
 #[tokio::test]
 async fn write_creates_parent_and_skips_identical_content() {

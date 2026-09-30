@@ -49,7 +49,7 @@ use keencode_cli::{
 use keencode_runtime::{HostRuntime, HostRuntimeAcquire};
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -776,6 +776,61 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
+    // WebView2 渲染进程异常不会留下崩溃转储或系统事件，宿主唯一能直接观察到的
+    // 现象是页面被自动整页重载；进程存活期间出现第二次页面加载即是渲染进程疑似
+    // 崩溃的落盘信号（tauri/wry 未向 Windows 暴露 ProcessFailed）。
+    let page_load_started = Arc::new(AtomicU64::new(0));
+    let page_load_finished = Arc::new(AtomicU64::new(0));
+    let page_load_boot = startup_started_at;
+    let builder = builder.on_page_load(move |webview, payload| {
+        // 只监测主窗口；浏览器面板等子 webview 的正常导航不属于本信号。
+        if webview.label() != "main" {
+            return;
+        }
+        use tauri::Manager;
+        let Some(diagnostics) = webview
+            .app_handle()
+            .try_state::<Arc<diagnostics::Diagnostics>>()
+        else {
+            return;
+        };
+        let elapsed_ms = page_load_boot.elapsed().as_millis();
+        match payload.event() {
+            tauri::webview::PageLoadEvent::Started => {
+                let load_seq = page_load_started.fetch_add(1, Ordering::Relaxed) + 1;
+                if load_seq == 1 {
+                    diagnostics.log(
+                        "info",
+                        "webview.page_load",
+                        format!(
+                            "主窗口首次页面加载 elapsed_ms={elapsed_ms} url={}",
+                            payload.url()
+                        ),
+                    );
+                } else {
+                    diagnostics.log(
+                        "error",
+                        "webview.page_load",
+                        format!(
+                            "主窗口页面在进程存活期间重载，渲染进程可能已崩溃并被自动恢复 \
+                             load_seq={load_seq} elapsed_ms={elapsed_ms} url={}",
+                            payload.url()
+                        ),
+                    );
+                }
+            }
+            tauri::webview::PageLoadEvent::Finished => {
+                let finished_seq = page_load_finished.fetch_add(1, Ordering::Relaxed) + 1;
+                if finished_seq > 1 {
+                    diagnostics.log(
+                        "info",
+                        "webview.page_load",
+                        format!("主窗口页面重载完成 elapsed_ms={elapsed_ms}"),
+                    );
+                }
+            }
+        }
+    });
     // 应用菜单栏是 macOS 专属界面；其他平台保持无菜单栏的原有工作台布局。
     #[cfg(target_os = "macos")]
     let builder = builder.on_menu_event(app_menu::handle_menu_event);
