@@ -1,6 +1,5 @@
 import { Textarea } from "@/components/ui/textarea";
 import { Button } from "@/components/ui/button";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toolbar, ToolbarButton } from "@appica/ui-react/toolbar";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { projectSubagentConversation } from "@/lib/sessionProjection";
@@ -54,6 +53,8 @@ import { TerminalPanel, type TerminalTab } from "@/components/TerminalPanel";
 import { ConversationThread } from "@/components/lobe-chat/ConversationThread";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { SubagentRow } from "@/components/SubagentRow";
+import { SidePaneLauncher } from "@/components/resource-viewer/SidePaneLauncher";
+import { SidePaneTabOverview } from "@/components/resource-viewer/SidePaneTabOverview";
 import {
   TrajectoryLedger,
   type TrajectoryLiveSource,
@@ -1471,58 +1472,6 @@ export function ResourceViewer({
     [closeTabForced, tabs],
   );
 
-  /** Chrome-style: close every tab except `id`. */
-  const closeOtherTabs = useCallback(
-    (id: string) => {
-      setTabs((prev) => prev.filter((t) => t.id === id));
-      setActiveId(id);
-    },
-    [],
-  );
-
-  /** Close tabs visually to the right of `id` (higher index; older tabs). */
-  const closeTabsToRight = useCallback(
-    (id: string) => {
-      setTabs((prev) => {
-        const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) return prev;
-        const next = prev.slice(0, idx + 1);
-        if (activeId && !next.some((t) => t.id === activeId)) {
-          setActiveId(id);
-        }
-        return next;
-      });
-    },
-    [activeId],
-  );
-
-  /** Close tabs visually to the left of `id` (lower index; newer tabs). */
-  const closeTabsToLeft = useCallback(
-    (id: string) => {
-      setTabs((prev) => {
-        const idx = prev.findIndex((t) => t.id === id);
-        if (idx < 0) return prev;
-        const next = prev.slice(idx);
-        if (activeId && !next.some((t) => t.id === activeId)) {
-          setActiveId(id);
-        }
-        return next;
-      });
-    },
-    [activeId],
-  );
-
-  const closeAllTabs = useCallback(() => {
-    setTabs([]);
-    setActiveId(null);
-  }, []);
-
-  const [tabMenu, setTabMenu] = useState<{
-    x: number;
-    y: number;
-    tabId: string;
-  } | null>(null);
-
   const absPath =
     (diffView && sideMode === "changes" ? diffView.path : "") ||
     activeTab?.absolutePath ||
@@ -2099,110 +2048,225 @@ export function ResourceViewer({
     if (sideMode === "subagent" && subagentId === id) focusRemainingMode(id);
   };
   const openSubagents = subagents.filter((agent) => openSubagentIds.includes(agent.agent_id));
-  const modeTabKeys = [
+  const [modeTabMenu, setModeTabMenu] = useState<{ x: number; y: number; key: string } | null>(null);
+  /** 标签条上全部标签的键，顺序与 tabItems 一致。 */
+  const tabItemKeys = [
+    ...(sideMode === "editor" && goalEditor ? ["goal:editor"] : []),
     ...openSingletons.map((mode) => `singleton:${mode}`),
     ...terminalTabs.map((tab) => `terminal:${tab.id}`),
     ...openSubagents.map((agent) => `subagent:${agent.agent_id}`),
+    ...visibleResourceTabs.map((t) => `file:${t.id}`),
   ];
-  const [modeTabMenu, setModeTabMenu] = useState<{ x: number; y: number; key: string } | null>(null);
-  const closeModeTabByKey = (key: string) => {
+  /**
+   * 文件标签的激活态由 activeId 承载，其余形态由 sideMode 承载；
+   * 二者合并成标签条上唯一的激活键。
+   */
+  const activeTabKey =
+    sideMode === "editor" && goalEditorActive && goalEditor
+      ? "goal:editor"
+      : sideMode === "terminal" && terminalActiveId
+      ? `terminal:${terminalActiveId}`
+      : sideMode === "subagent" && subagentId
+        ? `subagent:${subagentId}`
+        : activeId && visibleResourceTabs.some((tab) => tab.id === activeId)
+          ? `file:${activeId}`
+          : sideMode
+            ? `singleton:${sideMode}`
+            : "";
+  const closeTabItemByKey = (key: string) => {
     const [kind, id] = key.split(":", 2);
-    if (kind === "singleton") closeModeTab(id as SingletonSideMode);
+    // 目标是编辑器内的特殊标签，没有独立的关闭路径，交给统一的回退逻辑。
+    if (kind === "goal") closeTabKeys([key]);
+    else if (kind === "singleton") closeModeTab(id as SingletonSideMode);
     else if (kind === "terminal") closeTerminalTab(id);
+    else if (kind === "file") closeTab(id);
     else closeSubagentTab(id);
   };
-  const focusModeTabByKey = (key: string) => {
+  const focusTabItemByKey = (key: string) => {
     const [kind, id] = key.split(":", 2);
-    if (kind === "singleton") openSingleton(id as SingletonSideMode);
+    if (kind === "goal") { setGoalEditorActive(true); setSideMode("editor"); }
+    else if (kind === "singleton") openSingleton(id as SingletonSideMode);
     else if (kind === "terminal") { setTerminalActiveId(id); setSideMode("terminal"); }
+    else if (kind === "file") {
+      const target = tabs.find((t) => t.id === id);
+      setActiveId(id);
+      setSideMode(target?.preview && isResourceTextEditable(target.preview) ? "editor" : "files");
+    }
     else { setSubagentId(id); setSideMode("subagent"); }
   };
-  const closeModeTabKeys = (keys: string[], focusKey?: string) => {
-    keys.forEach(closeModeTabByKey);
-    if (focusKey) focusModeTabByKey(focusKey);
+  /** 关闭一组标签；focusKey 仍在则聚焦它，否则回退到首个剩余标签。 */
+  const closeTabKeys = (keys: string[], focusKey?: string) => {
+    if (keys.length === 0) return;
+    const keySet = new Set(keys);
+    const remaining = tabItemKeys.filter((item) => !keySet.has(item));
+    const focus = focusKey && !keySet.has(focusKey) ? focusKey : remaining[0];
+    if (focus) focusTabItemByKey(focus);
     else {
       setSideMode(null);
       onTabsEmpty?.();
     }
+    keys.forEach((key) => {
+      const [kind, id] = key.split(":", 2);
+      if (kind === "goal") {
+        setGoalEditorActive(false);
+      } else if (kind === "singleton") {
+        setOpenSingletons((current) => current.filter((item) => item !== id));
+      } else if (kind === "terminal") {
+        setTerminalCloseRequests((current) => current.includes(id) ? current : [...current, id]);
+      } else if (kind === "subagent") {
+        setOpenSubagentIds((current) => current.filter((item) => item !== id));
+      } else {
+        closeTabForced(id);
+      }
+    });
   };
-  const hasModeTabs = openSingletons.length > 0 || terminalTabs.length > 0 || subagents.some((agent) => openSubagentIds.includes(agent.agent_id));
-  const activeModeTabKey =
-    sideMode === "terminal" && terminalActiveId
-      ? `terminal:${terminalActiveId}`
-      : sideMode === "subagent" && subagentId
-        ? `subagent:${subagentId}`
-        : sideMode
-          ? `singleton:${sideMode}`
-          : "";
 
-  const modeTabs = (
+  /** 全部已打开标签；顺序：单例模式 → 终端 → 子 Agent → 文件/网页。 */
+  const tabItems = [
+    ...(sideMode === "editor" && goalEditor
+      ? [{
+          key: "goal:editor",
+          label: locale === "en" ? "Goal" : "目标",
+          title: locale === "en" ? "Goal objective" : "目标内容",
+          icon: <IconEdit size={14} />,
+          badge: goalEditor.draft !== goalEditor.baseline ? "•" : null,
+        }]
+      : []),
+    ...openSingletons.map((mode) => ({
+      key: `singleton:${mode}`,
+      label: mode === "files" ? tr("changes.files") : mode === "editor" ? (locale === "en" ? "Editor" : "编辑") : mode === "web" ? tr("resources.web") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title"),
+      title: mode,
+      icon: mode === "files" ? <IconFiles size={14} /> : mode === "editor" ? <IconEdit size={14} /> : mode === "web" ? <IconWorld size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />,
+      badge: mode === "changes" && totalChangeBadge > 0 ? (totalChangeBadge > 99 ? "99+" : String(totalChangeBadge)) : null,
+    })),
+    ...terminalTabs.map((tab) => ({
+      key: `terminal:${tab.id}`,
+      label: tab.title + (tab.exited ? `（${tr("terminal.exited")}）` : ""),
+      title: tab.title,
+      icon: <IconTerminal size={14} />,
+      badge: null,
+    })),
+    ...openSubagents.map((agent) => ({
+      key: `subagent:${agent.agent_id}`,
+      label: agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name,
+      title: agent.task_title || agent.agent_name,
+      icon: <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} />,
+      badge: null,
+    })),
+    ...visibleResourceTabs.map((t) => ({
+      key: `file:${t.id}`,
+      label: isResourceDraftDirty(t.draftText, t.baselineText) ? `• ${t.name}` : t.name,
+      title: t.relativePath || t.name,
+      icon: <FileKindMark name={t.tabKind === "url" ? "web.html" : t.name} isDir={false} />,
+      badge: null,
+    })),
+  ];
+
+  const tabStrip = (
     <>
-      <Tabs
-        value={activeModeTabKey}
-        onValueChange={focusModeTabByKey}
-        variant="line"
-        className="rp-mode-tabs-root"
-      >
-      <TabsList className="rp-mode-tabs" aria-label={tr("resources.title")}>
-        {openSingletons.map((mode) => {
-          const icon = mode === "files" ? <IconFiles size={14} /> : mode === "editor" ? <IconEdit size={14} /> : mode === "web" ? <IconWorld size={14} /> : mode === "changes" ? <IconFileDiff size={14} /> : mode === "agents" ? <IconSubagent size={14} /> : <IconListTree size={14} />;
-          const label = mode === "files" ? tr("changes.files") : mode === "editor" ? (locale === "en" ? "Editor" : "编辑") : mode === "web" ? tr("resources.web") : mode === "changes" ? tr("changes.title") : mode === "agents" ? tr("summary.subagents.title") : tr("trajectory.title");
-          return (
-            <TabsTrigger key={mode} value={`singleton:${mode}`} render={<div />} className={"rp-mode-tab" + (sideMode === mode ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `singleton:${mode}` }); }}>
-              {icon}<span className="rp-mode-tab__label">{label}</span>
-              {mode === "changes" && totalChangeBadge > 0 ? <span className="rp-mode-tab__count">{totalChangeBadge > 99 ? "99+" : totalChangeBadge}</span> : null}
-              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeModeTab(mode); }}><IconClose size={11} /></Button></Tip>
-            </TabsTrigger>
-          );
-        })}
-        {terminalTabs.map((tab) => {
-          const selected = sideMode === "terminal" && terminalActiveId === tab.id;
-          return (
-            <TabsTrigger key={tab.id} value={`terminal:${tab.id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `terminal:${tab.id}` }); }}>
-              <IconTerminal size={14} /><span className="rp-mode-tab__label">{tab.title}{tab.exited ? `（${tr("terminal.exited")}）` : ""}</span>
-              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeTerminalTab(tab.id); }}><IconClose size={11} /></Button></Tip>
-            </TabsTrigger>
-          );
-        })}
-        {openSubagents.map((agent) => {
-          const selected = sideMode === "subagent" && subagentId === agent.agent_id;
-          const displayName = agent.nickname ? agentNicknameLabel(agent.nickname, locale) : agent.agent_name;
-          return (
-            <TabsTrigger key={agent.agent_id} value={`subagent:${agent.agent_id}`} render={<div />} className={"rp-mode-tab" + (selected ? " is-active" : "")} onContextMenu={(event) => { event.preventDefault(); setModeTabMenu({ x: event.clientX, y: event.clientY, key: `subagent:${agent.agent_id}` }); }}>
-              <AgentAvatar nickname={agent.nickname} agentId={agent.agent_id} size={16} status={agent.status} className="rp-mode-tab__agent-avatar" /><span className="rp-mode-tab__label">{displayName}</span>
-              <Tip label={tr("resources.tabClose")}><Button type="button" variant="ghost" size="icon-md" className="rp-mode-tab__close" aria-label={tr("resources.tabClose")} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); closeSubagentTab(agent.agent_id); }}><IconClose size={11} /></Button></Tip>
-            </TabsTrigger>
-          );
-        })}
-        {hasModeTabs ? (
+      <div className="rp-tabs-root">
+        <div className="rp-tabs-bar">
+          <SidePaneTabOverview
+            items={tabItems.map(({ key, label, title, icon }) => ({ key, label, title, icon }))}
+            activeKey={activeTabKey}
+            labels={{
+              trigger: tr("resources.tabOverview"),
+              search: tr("resources.tabOverviewSearch"),
+              group: tr("resources.tabOverviewOpen"),
+              noResults: tr("resources.tabOverviewNoResults"),
+              closeTab: tr("resources.tabClose"),
+            }}
+            onActivate={focusTabItemByKey}
+            onClose={closeTabItemByKey}
+          />
+          <div className="rp-tabs-scroll" role="tablist" aria-label={tr("resources.title")}>
+            {tabItems.map((item) => (
+              <div
+                key={item.key}
+                role="tab"
+                tabIndex={item.key === activeTabKey ? 0 : -1}
+                aria-selected={item.key === activeTabKey}
+                data-tab-key={item.key}
+                className={"rp-tab" + (item.key === activeTabKey ? " is-active" : " is-inactive") + (item.key.startsWith("file:") ? " rp-tab--file" : "")}
+                onClick={() => focusTabItemByKey(item.key)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    focusTabItemByKey(item.key);
+                    return;
+                  }
+                  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                  event.preventDefault();
+                  const nodes = Array.from(
+                    event.currentTarget.parentElement?.querySelectorAll<HTMLElement>("[role='tab']") ?? [],
+                  );
+                  const delta = event.key === "ArrowRight" ? 1 : -1;
+                  const next = nodes[(nodes.indexOf(event.currentTarget) + delta + nodes.length) % nodes.length];
+                  if (!next?.dataset.tabKey) return;
+                  focusTabItemByKey(next.dataset.tabKey);
+                  next.focus();
+                }}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setModeTabMenu({ x: event.clientX, y: event.clientY, key: item.key });
+                }}
+                onAuxClick={(event) => {
+                  // 中键关闭；阻止默认自动滚动，且不改变当前激活标签。
+                  if (event.button !== 1) return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeTabItemByKey(item.key);
+                }}
+              >
+                <span className="rp-tab__icon" aria-hidden>{item.icon}</span>
+                <span className="rp-tab__name">{item.label}</span>
+                {item.badge ? <span className="rp-tab__count">{item.badge}</span> : null}
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-md"
+                  className="rp-tab__x"
+                  title={tr("resources.tabClose")}
+                  aria-label={tr("resources.tabClose")}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    closeTabItemByKey(item.key);
+                  }}
+                >
+                  <IconClose size={11} />
+                </Button>
+              </div>
+            ))}
+            {tabItems.length === 0 ? (
+              <div className="rp-tabs__placeholder">
+                <span className="rp-tabs__hint">{tr("resources.emptyPreview")}</span>
+              </div>
+            ) : null}
+          </div>
           <DropdownMenu>
             <Tip label={tr("resources.newTab")}>
-              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-md" className="rp-mode-tabs__add" aria-label={tr("resources.newTab")} />}><IconPlus size={15} /></DropdownMenuTrigger>
+              <DropdownMenuTrigger render={<Button type="button" variant="ghost" size="icon-md" className="rp-tabs__add" aria-label={tr("resources.newTab")} />}><IconPlus size={15} /></DropdownMenuTrigger>
             </Tip>
-            <DropdownMenuContent
-              align="end"
-              sideOffset={6}
-              className="ext-agent-model__menu"
-            >
-              <DropdownMenuItem onClick={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
+            <DropdownMenuContent align="end" sideOffset={6} className="ext-agent-model__menu">
+              <DropdownMenuItem disabled={openSingletons.includes("files")} onClick={() => openSingleton("files")}><IconFiles size={14} /> {tr("changes.files")}</DropdownMenuItem>
+              <DropdownMenuItem disabled={openSingletons.includes("changes")} onClick={() => openSingleton("changes")}><IconFileDiff size={14} /> {tr("changes.title")}</DropdownMenuItem>
               <DropdownMenuItem disabled={!projectPath} onClick={openTerminal}><IconTerminal size={14} /> {tr("terminal.new")}</DropdownMenuItem>
-              <DropdownMenuItem onClick={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
+              <DropdownMenuItem disabled={openSingletons.includes("trajectory")} onClick={() => openSingleton("trajectory")}><IconListTree size={14} /> {tr("trajectory.title")}</DropdownMenuItem>
               <DropdownMenuItem onClick={openBlankWebTab}><IconWorld size={14} /> {tr("resources.browserNewTab")}</DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        ) : null}
-      </TabsList>
-      </Tabs>
+        </div>
+      </div>
       {(() => {
-        const index = modeTabMenu ? modeTabKeys.indexOf(modeTabMenu.key) : -1;
+        const index = modeTabMenu ? tabItemKeys.indexOf(modeTabMenu.key) : -1;
         const key = modeTabMenu?.key ?? "";
         const items: ContextMenuItem[] = [
-          { id: "close", label: tr("resources.tabClose"), onClick: () => closeModeTabByKey(key) },
-          { id: "close-others", label: tr("resources.tabCloseOthers"), disabled: modeTabKeys.length < 2, onClick: () => closeModeTabKeys(modeTabKeys.filter((item) => item !== key), key) },
-          { id: "close-right", label: tr("resources.tabCloseRight"), disabled: index < 0 || index === modeTabKeys.length - 1, onClick: () => closeModeTabKeys(modeTabKeys.slice(index + 1), key) },
-          { id: "close-left", label: tr("resources.tabCloseLeft"), disabled: index <= 0, onClick: () => closeModeTabKeys(modeTabKeys.slice(0, index), key) },
-          { id: "close-all", label: tr("resources.tabCloseAll"), onClick: () => closeModeTabKeys(modeTabKeys) },
+          { id: "close", label: tr("resources.tabClose"), onClick: () => closeTabItemByKey(key) },
+          { id: "close-others", label: tr("resources.tabCloseOthers"), disabled: tabItemKeys.length < 2, onClick: () => closeTabKeys(tabItemKeys.filter((item) => item !== key), key) },
+          { id: "close-right", label: tr("resources.tabCloseRight"), disabled: index < 0 || index === tabItemKeys.length - 1, onClick: () => closeTabKeys(tabItemKeys.slice(index + 1), key) },
+          { id: "close-left", label: tr("resources.tabCloseLeft"), disabled: index <= 0, onClick: () => closeTabKeys(tabItemKeys.slice(0, index), key) },
+          { id: "close-all", label: tr("resources.tabCloseAll"), onClick: () => closeTabKeys(tabItemKeys) },
         ];
         return <ContextMenu open={!!modeTabMenu} x={modeTabMenu?.x ?? 0} y={modeTabMenu?.y ?? 0} onClose={() => setModeTabMenu(null)} items={items} />;
       })()}
@@ -2250,41 +2314,26 @@ export function ResourceViewer({
     </div>
   );
 
+  /** 无标签时的启动器；条目与标签条“新建标签”菜单保持一致。 */
   const tabPicker = sideMode === null ? (
-    <div className="rp-tab-picker">
-      <div className="rp-tab-picker__title">{tr("resources.openTab")}</div>
-      <div className="rp-tab-picker__desc">{tr("resources.openTabHint")}</div>
-      <div className="rp-tab-picker__grid">
-        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("files")}>
-          <IconFiles size={20} />
-          <span>{tr("changes.files")}</span>
-        </Button>
-        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("changes")}>
-          <IconFileDiff size={20} />
-          <span>{tr("changes.title")}</span>
-        </Button>
-        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" disabled={!projectPath} onClick={openTerminal}>
-          <IconTerminal size={20} />
-          <span>{tr("terminal.new")}</span>
-        </Button>
-        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={() => openSingleton("trajectory")}>
-          <IconListTree size={20} />
-          <span>{tr("trajectory.title")}</span>
-        </Button>
-        <Button size="md" type="button" variant="outline" className="rp-tab-picker__item" onClick={openBlankWebTab}>
-          <IconWorld size={20} />
-          <span>{tr("resources.browserNewTab")}</span>
-        </Button>
-      </div>
-    </div>
+    <SidePaneLauncher
+      title={tr("resources.openTab")}
+      description={tr("resources.openTabHint")}
+      items={[
+        { id: "files", label: tr("changes.files"), icon: <IconFiles size={16} />, onOpen: () => openSingleton("files") },
+        { id: "changes", label: tr("changes.title"), icon: <IconFileDiff size={16} />, onOpen: () => openSingleton("changes") },
+        { id: "terminal", label: tr("terminal.new"), icon: <IconTerminal size={16} />, disabled: !projectPath, onOpen: openTerminal },
+        { id: "trajectory", label: tr("trajectory.title"), icon: <IconListTree size={16} />, onOpen: () => openSingleton("trajectory") },
+        { id: "browser", label: tr("resources.browserNewTab"), icon: <IconWorld size={16} />, onOpen: openBlankWebTab },
+      ]}
+    />
   ) : null;
-
   // No project and no open tabs → empty; allow absolute/url tabs without a project.
   if (!projectPath && tabs.length === 0 && !(sideMode === "editor" && goalEditorActive && goalEditor)) {
     return (
       <div className="rp" data-testid="resource-viewer">
         <div className="rp-chrome">
-          {modeTabs}
+          {tabStrip}
         </div>
         {tabPicker ?? (sideMode === "trajectory" ? (
           <TrajectoryLedger
@@ -2325,7 +2374,7 @@ export function ResourceViewer({
       aria-label={projectName ?? tr("resources.title")}
     >
       <div className="rp-chrome">
-        {modeTabs}
+        {tabStrip}
         {absPath && !(sideMode === "editor" && goalEditorActive) ? (
           <div className="rp-chrome__actions">
             <OpenLocationButton
@@ -2355,102 +2404,6 @@ export function ResourceViewer({
       </div>
 
       {tabPicker}
-
-      {sideMode === "files" || sideMode === "editor" || sideMode === "web" ? (
-        <div className="rp-file-tabs">
-          <Tabs
-            value={sideMode === "editor" && goalEditorActive ? "goal-editor" : activeId ?? ""}
-            onValueChange={(id) => {
-              setGoalEditorActive(id === "goal-editor");
-              if (id !== "goal-editor") setActiveId(id);
-            }}
-            variant="line"
-            className="rp-tabs"
-          >
-          <div className="rp-tabs__scroll">
-            <TabsList aria-label={tr("resources.files")}>
-            {sideMode === "editor" && goalEditor ? (
-              <TabsTrigger value="goal-editor" render={<div />} className="rp-tab">
-                <IconEdit size={14} />
-                <span className="rp-tab__name">{locale === "en" ? "Goal" : "目标"}</span>
-                {goalEditor.draft !== goalEditor.baseline ? <span className="rp-tab__dirty" aria-hidden>•</span> : null}
-              </TabsTrigger>
-            ) : null}
-            {visibleResourceTabs.length === 0 && !goalEditor ? (
-              <div className="rp-tabs__placeholder">
-                <span className="rp-tabs__hint">{tr("resources.emptyPreview")}</span>
-              </div>
-            ) : (
-              visibleResourceTabs.map((t) => {
-                const active = t.id === activeId;
-                return (
-                  <Tip
-                    key={t.id}
-                    label={
-                      active
-                        ? t.relativePath || t.name
-                        : `${t.name}\n${t.relativePath || ""}`
-                    }
-                  >
-                    <TabsTrigger
-                      value={t.id}
-                      render={<div />}
-                      title={t.relativePath || t.name}
-                      className={
-                        "rp-tab" +
-                        (active ? " is-active" : " is-inactive") +
-                        (t.tabKind === "url" ? " rp-tab--url" : "")
-                      }
-                      onContextMenu={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        setTabMenu({
-                          x: e.clientX,
-                          y: e.clientY,
-                          tabId: t.id,
-                        });
-                      }}
-                    >
-                      <FileKindMark
-                        name={t.tabKind === "url" ? "web.html" : t.name}
-                        isDir={false}
-                      />
-                      <span className="rp-tab__name">
-                        {isResourceDraftDirty(t.draftText, t.baselineText)
-                          ? `• ${t.name}`
-                          : t.name}
-                      </span>
-                      {active ? (
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-md"
-                            className="rp-tab__x"
-                            title={tr("resources.tabClose")}
-                            aria-label={tr("resources.tabClose")}
-                            onPointerDown={(e) => e.stopPropagation()}
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              closeTab(t.id);
-                            }}
-                          >
-                            ×
-                          </Button>
-                      ) : isResourceDraftDirty(t.draftText, t.baselineText) ? (
-                        <span className="rp-tab__dirty" aria-hidden>
-                          •
-                        </span>
-                      ) : null}
-                    </TabsTrigger>
-                  </Tip>
-                );
-              })
-            )}
-            </TabsList>
-          </div>
-          </Tabs>
-        </div>
-      ) : null}
 
       {error && (
         <Alert variant="error" layout="inline">
@@ -2809,56 +2762,6 @@ export function ResourceViewer({
           </>
           )}
       </div>
-
-      {/* Chrome-style tab context menu */}
-      {(() => {
-        const idx = tabMenu
-          ? tabs.findIndex((t) => t.id === tabMenu.tabId)
-          : -1;
-        const hasLeft = idx > 0;
-        const hasRight = idx >= 0 && idx < tabs.length - 1;
-        const hasOthers = tabs.length > 1;
-        const tabId = tabMenu?.tabId ?? "";
-        const items: ContextMenuItem[] = [
-          {
-            id: "close",
-            label: tr("resources.tabClose"),
-            onClick: () => closeTab(tabId),
-          },
-          {
-            id: "close-others",
-            label: tr("resources.tabCloseOthers"),
-            disabled: !hasOthers,
-            onClick: () => closeOtherTabs(tabId),
-          },
-          {
-            id: "close-right",
-            label: tr("resources.tabCloseRight"),
-            disabled: !hasRight,
-            onClick: () => closeTabsToRight(tabId),
-          },
-          {
-            id: "close-left",
-            label: tr("resources.tabCloseLeft"),
-            disabled: !hasLeft,
-            onClick: () => closeTabsToLeft(tabId),
-          },
-          {
-            id: "close-all",
-            label: tr("resources.tabCloseAll"),
-            onClick: () => closeAllTabs(),
-          },
-        ];
-        return (
-          <ContextMenu
-            open={!!tabMenu}
-            x={tabMenu?.x ?? 0}
-            y={tabMenu?.y ?? 0}
-            onClose={() => setTabMenu(null)}
-            items={items}
-          />
-        );
-      })()}
 
       <GlassModal
         open={!!conflictTabId}

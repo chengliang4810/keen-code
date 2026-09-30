@@ -203,6 +203,17 @@
 }
 
 /*
+ * 产品 Button 包装（components/ui/button.tsx）用它把 md / icon-md 按钮文字
+ * 对齐 DESIGN.md 的 --text-md。必须用普通 CSS 类而不是 Tailwind 的
+ * text-ui-base：官方 Button 内部的 tailwind-merge 不认识该自定义字号类，
+ * 会把它当作文字颜色类并删掉 text-primary-foreground 等官方前景色类。
+ */
+.button-type-md {
+  font-size: var(--text-md);
+  line-height: var(--leading-normal);
+}
+
+/*
  * Appica 基础层会给全局文本加选中底色，并通过 `focus-visible:outline-3`
  * 给所有元素加焦点轮廓。普通文本回退到浏览器/产品默认选中表现，终端
  * 选中仍由 xterm 运行时主题独立维护；焦点 ring 只由具体组件自己的
