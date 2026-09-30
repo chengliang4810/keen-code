@@ -9016,7 +9016,10 @@ impl SessionDeliverySender {
         }
     }
 
-    /// 发送一条带 oneshot 回执的泵命令并等待实际投递完成。
+    /// 发送一条带 oneshot 回执的泵命令并等待 pump 接受。
+    ///
+    /// 实时增量批次的回执表示「已被 pump 攒批缓冲接受」；实际投递最多延迟
+    /// 一个 flush 窗口，投递失败会冻结当前投递世代，后续命令据此停止。
     async fn send_command<T>(
         &self,
         command: impl FnOnce(oneshot::Sender<Result<T, AgentRuntimeError>>) -> DeliveryCommand,
@@ -9065,7 +9068,7 @@ enum DeliveryCommand {
         drafts: Vec<DeliveryDraft>,
         /// 仅实时根 Turn 终态批次携带的通知信息；普通和历史投影为空。
         terminal_notice: Option<RootTaskTerminalNotice>,
-        /// 最后一条实际 emit 完成后的回执。
+        /// pump 接受批次后的回执；攒批投递失败由投递世代冻结兜底。
         acknowledged: oneshot::Sender<Result<(), AgentRuntimeError>>,
     },
     /// 与普通事件共享 FIFO 的完整 Client Request。
@@ -9125,6 +9128,15 @@ pub(crate) trait DeliveryEmitter: Send + Sync {
     /// 只有事件被目标边界接受后才能返回成功。
     fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError>;
 
+    /// 把一批投递合并为单次桌面边界调用，避免流式增量逐条跨越 IPC。
+    /// 默认退化为逐条 `emit`；生产投递器覆写为一次批量事件。
+    fn emit_all(&self, deliveries: &[AcpDelivery]) -> Result<(), AgentRuntimeError> {
+        for delivery in deliveries {
+            self.emit(delivery)?;
+        }
+        Ok(())
+    }
+
     /// 在实时根 Turn 终态已经成功投递后触发桌面通知；测试投递器默认保持静默。
     fn notify_task_terminal(
         &self,
@@ -9171,7 +9183,7 @@ impl DeliveryEmitter for TauriDeliveryEmitter {
             if connection_id.as_str() == "embedded-desktop" {
                 return self
                     .app
-                    .emit(ACP_DELIVERY_EVENT, delivery)
+                    .emit(ACP_DELIVERY_EVENT, std::slice::from_ref(delivery))
                     .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
             }
             let session_id = client_request_session_id(request)
@@ -9188,7 +9200,7 @@ impl DeliveryEmitter for TauriDeliveryEmitter {
         }
         let result = self
             .app
-            .emit(ACP_DELIVERY_EVENT, delivery)
+            .emit(ACP_DELIVERY_EVENT, std::slice::from_ref(delivery))
             .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
         if result.is_ok()
             && let Some((session_id, journal_sequence, payload)) = web_delivery_parts(delivery)
@@ -9199,6 +9211,36 @@ impl DeliveryEmitter for TauriDeliveryEmitter {
             // Web 浏览器是可选的旁路消费者；慢连接应收到 gap，而不能反向令
             // 桌面 Runtime 的权威投递世代失败。
             tracing::warn!(%error, session_id, "Web Host 事件旁路投递失败");
+        }
+        result
+    }
+
+    /// 批量投递：ACP Host bridge 与 Web 旁路保持逐条语义，Tauri 事件合并为
+    /// 单次跨进程调用；这是流式 CPU 占用治理的关键路径，负载来自每次
+    /// `evaluateJavaScript` 注入的固定成本而非 payload 体积。
+    fn emit_all(&self, deliveries: &[AcpDelivery]) -> Result<(), AgentRuntimeError> {
+        for delivery in deliveries {
+            if let Ok(payload) = serde_json::to_value(delivery) {
+                crate::acp_host::publish_delivery(payload, None);
+            }
+        }
+        let result = self
+            .app
+            .emit(ACP_DELIVERY_EVENT, deliveries)
+            .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
+        if result.is_ok() {
+            for delivery in deliveries {
+                if let Some((session_id, journal_sequence, payload)) = web_delivery_parts(delivery)
+                    && let Some(web_host) =
+                        self.app.try_state::<Arc<crate::web_host::WebHostManager>>()
+                    && let Err(error) =
+                        web_host.publish_session_event(&session_id, journal_sequence, payload)
+                {
+                    // Web 浏览器是可选的旁路消费者；慢连接应收到 gap，而不能
+                    // 反向令桌面 Runtime 的权威投递世代失败。
+                    tracing::warn!(%error, session_id, "Web Host 事件旁路投递失败");
+                }
+            }
         }
         result
     }
@@ -9768,6 +9810,31 @@ mod tests {
             update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
                 ContentBlock::from(text),
             ))),
+        }
+    }
+
+    /// 独立 Turn 的文本草稿：同一攒批窗口内也不会被相邻同流增量合并。
+    fn unmerged_text_draft(turn: &str, text: &str) -> DeliveryDraft {
+        DeliveryDraft::SessionUpdate {
+            turn_id: Some(turn.to_owned()),
+            source_agent_id: Some("agent-root".to_owned()),
+            occurred_at_ms: 1,
+            journal_sequence: None,
+            update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                ContentBlock::from(text),
+            ))),
+        }
+    }
+
+    /// 生命周期屏障草稿：到达泵即同步清空攒批缓冲并零延迟投递，
+    /// 用于在断言前确定性地完成缓冲增量投递。
+    fn stream_barrier_draft() -> DeliveryDraft {
+        DeliveryDraft::KeenCodeEvent {
+            turn_id: Some("turn-a".to_owned()),
+            source_agent_id: Some("agent-root".to_owned()),
+            journal_sequence: None,
+            occurred_at_ms: 2,
+            event: KeenCodeEvent::ModelFirstStreamObserved,
         }
     }
 
@@ -10776,8 +10843,13 @@ mod tests {
             )
             .await
             .expect("成功的实时根 Turn 应完成投递");
+        // 屏障草稿同步 flush 缓冲：投影投递先于终态通知完成。
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
         let calls = emitter.calls_snapshot();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert!(matches!(
             &calls[0],
             EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "completed"
@@ -10810,10 +10882,22 @@ mod tests {
             )
             .await
             .expect("空投影应作为无操作成功");
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
         let calls = emitter.calls_snapshot();
-        assert_eq!(calls.len(), 3);
+        // 取消投递先于通知语义保持；取消与空投影通知保持静默。
+        assert_eq!(calls.len(), 5);
         assert!(
-            matches!(&calls[2], EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "cancelled")
+            matches!(&calls[3], EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "cancelled")
+        );
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|call| matches!(call, EmitterCall::Notify { .. }))
+                .count(),
+            1
         );
         sender.shutdown().await.expect("成功投递器应关闭");
 
@@ -10822,7 +10906,7 @@ mod tests {
         assert_eq!(
             failing_sender
                 .send_live_batch(
-                    vec![text_draft("failed emit")],
+                    vec![stream_barrier_draft()],
                     Some(RootTaskTerminalNotice {
                         task_title: "失败任务".to_owned(),
                         stop_reason: Some(TurnStopReason::Failed),
@@ -14654,9 +14738,18 @@ mod tests {
             .send_batch(vec![text_draft("b")])
             .await
             .expect("第二个 Session 应发送");
+        // 屏障草稿触发各自攒批缓冲的同步 flush，使序号断言观察到实际投递。
+        first
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("首个 Session 屏障应发送");
+        second
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("第二个 Session 屏障应发送");
         let values = emitter.snapshot();
         assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[1]["envelope"]["deliverySequence"], 1);
+        assert_eq!(values[2]["envelope"]["deliverySequence"], 1);
     }
 
     /// 单 Session 批次内序号严格递增且回执晚于最后一次 emit。
@@ -14665,15 +14758,24 @@ mod tests {
         let emitter = RecordingEmitter::successful();
         let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
         sender
-            .send_batch(vec![text_draft("one"), text_draft("two")])
+            .send_batch(vec![
+                unmerged_text_draft("turn-a", "one"),
+                unmerged_text_draft("turn-b", "two"),
+            ])
             .await
             .expect("完整批次应发送");
+        // 屏障草稿同步 flush 缓冲：屏障 ack 返回时全部投递已完成。
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
         let values = emitter.snapshot();
-        assert_eq!(values.len(), 2);
+        assert_eq!(values.len(), 3);
         assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
         assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
         assert_eq!(values[0]["envelope"]["update"]["content"]["text"], "one");
         assert_eq!(values[1]["envelope"]["update"]["content"]["text"], "two");
+        assert_eq!(values[2]["type"], "keencode_event");
     }
 
     /// 两个并发生产者也不能把单条更新插入另一个生产者的原子批次。
@@ -14684,11 +14786,18 @@ mod tests {
         let batch_sender = sender.clone();
         let batch = tokio::spawn(async move {
             batch_sender
-                .send_batch(vec![text_draft("batch-one"), text_draft("batch-two")])
+                .send_batch(vec![
+                    unmerged_text_draft("turn-b1", "batch-one"),
+                    unmerged_text_draft("turn-b2", "batch-two"),
+                ])
                 .await
         });
-        let single =
-            tokio::spawn(async move { sender.send_batch(vec![text_draft("single")]).await });
+        let single_sender = sender.clone();
+        let single = tokio::spawn(async move {
+            single_sender
+                .send_batch(vec![unmerged_text_draft("turn-s", "single")])
+                .await
+        });
         batch
             .await
             .expect("批次任务不应 panic")
@@ -14697,10 +14806,15 @@ mod tests {
             .await
             .expect("单条任务不应 panic")
             .expect("单条应发送");
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
 
         let texts = emitter
             .snapshot()
             .into_iter()
+            .filter(|value| value["type"] == "session_update")
             .map(|value| {
                 value["envelope"]["update"]["content"]["text"]
                     .as_str()
@@ -14731,6 +14845,10 @@ mod tests {
             .send_batch(vec![text_draft("after")])
             .await
             .expect("后置更新应发送");
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
         let values = emitter.snapshot();
         assert_eq!(values[0]["type"], "session_update");
         assert_eq!(values[1]["type"], "client_request");
@@ -14743,10 +14861,17 @@ mod tests {
     async fn emit_failure_poison_stops_later_delivery() {
         let emitter = RecordingEmitter::failing_at(2);
         let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
+        // 独立 Turn 草稿不会被攒批合并；纯增量批次入缓冲即确认。
+        sender
+            .send_batch(vec![
+                unmerged_text_draft("turn-a", "one"),
+                unmerged_text_draft("turn-b", "two"),
+            ])
+            .await
+            .expect("缓冲入队应成功");
+        // 屏障 flush 触发实际投递：第二个桌面投递失败并传播原始错误。
         assert_eq!(
-            sender
-                .send_batch(vec![text_draft("one"), text_draft("two")])
-                .await,
+            sender.send_batch(vec![stream_barrier_draft()]).await,
             Err(AgentRuntimeError::DesktopEmitFailed)
         );
         assert_eq!(
@@ -17185,7 +17310,8 @@ mod tests {
         );
         let first = tokio::spawn({
             let sender = sender.clone();
-            async move { sender.send_batch(vec![text_draft("first")]).await }
+            // 屏障草稿立即投递并阻塞泵，为队列占满场景建立前提。
+            async move { sender.send_batch(vec![stream_barrier_draft()]).await }
         });
         emitter.wait_for_calls(1);
 
@@ -17210,7 +17336,12 @@ mod tests {
         emitter.release();
         assert_eq!(first.await.expect("首个发送任务不应 panic"), Ok(()));
         assert_eq!(second.await.expect("第二个发送任务不应 panic"), Ok(()));
-        assert_eq!(emitter.deliveries().len(), 2);
+        // 末尾屏障同步 flush second 的缓冲增量：屏障 + 增量 + 屏障 = 3。
+        sender
+            .send_batch(vec![stream_barrier_draft()])
+            .await
+            .expect("屏障应投出缓冲增量");
+        assert_eq!(emitter.deliveries().len(), 3);
         sender.shutdown().await.expect("队列恢复后应可关闭投递泵");
     }
 
@@ -17895,8 +18026,9 @@ mod tests {
         let poisoned = runtime
             .ensure_session_delivery(session_id)
             .expect("首次 ensure 应建立投递");
+        // 屏障草稿绕过攒批立即投递：首个桌面投递按预期失败。
         assert_eq!(
-            poisoned.send_batch(vec![text_draft("failed")]).await,
+            poisoned.send_batch(vec![stream_barrier_draft()]).await,
             Err(AgentRuntimeError::DesktopEmitFailed)
         );
 
@@ -20565,7 +20697,10 @@ mod tests {
             .attach_session_delivery("session-a")
             .expect("首个世代应建立");
         first
-            .send_batch(vec![text_draft("one"), text_draft("two")])
+            .send_batch(vec![
+                unmerged_text_draft("turn-a", "one"),
+                unmerged_text_draft("turn-b", "two"),
+            ])
             .await
             .expect("首个世代应发送");
         let second = runtime

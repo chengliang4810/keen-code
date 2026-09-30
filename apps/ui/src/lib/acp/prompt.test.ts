@@ -65,16 +65,18 @@ function delivery(
   };
 }
 
-/** 让监听注册完成，并返回可以投递事件的处理器和清理桩。 */
+/** 让监听注册完成，并返回投递单条事件的处理器（内部包装为批量帧）和清理桩。 */
 async function waitForListener(): Promise<{
   handler: (value: AcpTauriDelivery) => void;
   unlisten: ReturnType<typeof vi.fn>;
 }> {
   await vi.waitFor(() => expect(apiMocks.listenAcp).toHaveBeenCalledOnce());
-  const handler = apiMocks.listenAcp.mock.calls[0]?.[1] as
-    | ((value: AcpTauriDelivery) => void)
+  const batchHandler = apiMocks.listenAcp.mock.calls[0]?.[1] as
+    | ((value: readonly AcpTauriDelivery[]) => void)
     | undefined;
-  if (!handler) throw new Error("监听桩未收到处理器");
+  if (!batchHandler) throw new Error("监听桩未收到处理器");
+  // 单帧批量契约：便捷入口按真实批量帧形状包装单条投递。
+  const handler = (value: AcpTauriDelivery) => batchHandler([value]);
   const unlisten = apiMocks.listenAcp.mock.results[0]?.value;
   if (!(unlisten instanceof Promise)) throw new Error("监听桩未返回 Promise");
   return { handler, unlisten: await unlisten };

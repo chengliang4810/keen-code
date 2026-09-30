@@ -20,8 +20,12 @@ import type {
 
 /** KeenCode 当前只通过一个串行 Tauri 事件向界面投递 ACP 数据。 */
 export interface AcpEventPayloads {
-  /** 标准更新、KeenCode 事件和 Client 请求的唯一有序通道。 */
-  "acp://delivery": AcpTauriDelivery;
+  /**
+   * 标准更新、KeenCode 事件和 Client 请求的唯一有序通道。
+   * 单帧载荷为按投递顺序排列的批量数组：实时文本增量会由 Runtime 攒批，
+   * 其余投递保持每帧一条或与屏障混合的批次形状。
+   */
+  "acp://delivery": readonly AcpTauriDelivery[];
 }
 
 /** 为一次可重试的用户操作生成稳定标识；调用方必须在重试期间复用返回值。 */
@@ -761,7 +765,10 @@ export async function listenAcp<EventName extends keyof AcpEventPayloads>(
     if (!transport?.subscribeDelivery) {
       throw new Error("Web Host transport adapter 尚未注入");
     }
-    return transport.subscribeDelivery(handler as (delivery: unknown) => void);
+    // Web 宿主旁路仍逐条投递；在边界包装为批量数组，与 Tauri 批量帧同形。
+    return transport.subscribeDelivery((delivery: unknown) => {
+      handler([delivery as AcpTauriDelivery]);
+    });
   }
   const { listen } = await import("@tauri-apps/api/event");
   const unlisten = await listen<AcpEventPayloads[EventName]>(event, (e) => {

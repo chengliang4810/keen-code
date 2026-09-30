@@ -664,8 +664,13 @@ export function useAcpRuntimeEvents({
       flushProjection(envelope.sessionId);
     };
 
-    void listenAcp("acp://delivery", (delivery) => {
-      if (!disposed) handleDelivery(delivery);
+    void listenAcp("acp://delivery", (deliveries) => {
+      if (disposed) return;
+      // 单帧载荷为有序批量数组：逐条复用既有严格解析与共享 Reducer，
+      // 保证攒批帧内的投递顺序与逐条投递完全一致。
+      for (const raw of deliveries) {
+        handleDelivery(raw);
+      }
     }).then((registered) => {
       if (disposed) registered();
       else unlisten = registered;

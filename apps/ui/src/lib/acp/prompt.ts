@@ -188,7 +188,12 @@ export function startSessionPrompt(
       if (!args.sessionId.trim()) throw new Error("sessionId 不能为空");
 
       await acpInitialize();
-      const registered = await listenAcp("acp://delivery", handleDelivery);
+      const registered = await listenAcp("acp://delivery", (deliveries) => {
+        // 单帧载荷为有序批量数组：逐条处理，保持生命周期事件顺序。
+        for (const delivery of deliveries) {
+          handleDelivery(delivery);
+        }
+      });
       if (listenerCleaned) {
         // 监听注册与回调可能在同一个微任务中竞态完成，不能遗留句柄。
         registered();

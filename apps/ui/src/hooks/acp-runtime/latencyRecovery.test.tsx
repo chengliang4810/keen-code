@@ -123,10 +123,9 @@ async function harness() {
 }
 
 /** 向生产订阅回调投递合法信封，并使用可控的前端单调接收时钟。 */
-function deliver(sequence: number, payload: KeenCodeEvent | SessionUpdate, atMs: number, turnId = "turn-1") {
-  ports.now = atMs;
+function delivery(sequence: number, payload: KeenCodeEvent | SessionUpdate, turnId = "turn-1") {
   const standard = "sessionUpdate" in payload;
-  ports.receive!({
+  return {
     type: standard ? "session_update" : "keencode_event",
     envelope: {
       schemaVersion: 1, sessionId: "session-1", turnId, sourceAgentId: "root",
@@ -134,7 +133,12 @@ function deliver(sequence: number, payload: KeenCodeEvent | SessionUpdate, atMs:
       deliverySequence: sequence, occurredAtMs: 999_999 + sequence * 10,
       ...(standard ? { update: payload } : { event: payload, journalSequence: sequence }),
     },
-  });
+  };
+}
+
+function deliver(sequence: number, payload: KeenCodeEvent | SessionUpdate, atMs: number, turnId = "turn-1") {
+  ports.now = atMs;
+  ports.receive!([delivery(sequence, payload, turnId)]);
 }
 
 /** 构造根正文或思考，不把工具/子 Agent 的内容冒充根文本。 */
@@ -185,6 +189,24 @@ afterEach(() => {
 });
 
 describe("ACP 接收与恢复计时的真实订阅接线", () => {
+  it("同一批量帧按顺序处理开始、正文和终态", async () => {
+    const { options } = await harness();
+    ports.now = 1020;
+    ports.receive!([
+      delivery(1, { type: "turn_started", rootTurnId: "turn-1" }),
+      delivery(2, textChunk("首段")),
+      delivery(3, textChunk("后续")),
+      delivery(4, { type: "turn_completed" }),
+    ]);
+
+    const view = options.acpWorkspaceRef.current.sessions["session-1"]!;
+    expect(view.history.at(-1)?.content).toBe("首段后续");
+    expect(view.history.at(-1)?.turnMetrics).toMatchObject({ timeToFirstTokenMs: 20 });
+    expect(projectAcpSnapshot(view).state).toBe("ready");
+    expect(options.liveHostRef.current.state).toBe("ready");
+    expect(options.recoverSession).not.toHaveBeenCalled();
+  });
+
   it("历史回调消费完成前不能放行 load 后紧接着发送的新回合", async () => {
     const { options, history } = await harness();
     ports.load.mockResolvedValue(loaded(3));
