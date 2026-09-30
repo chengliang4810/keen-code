@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 /**
  * Local media preview via Plyr + Tauri asset:// URL.

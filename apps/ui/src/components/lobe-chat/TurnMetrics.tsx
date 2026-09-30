@@ -2,7 +2,7 @@
 import { Fragment } from "react";
 import { createT, type Locale } from "@/i18n";
 import { IconClock, IconDatabase } from "@/components/icons";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@appica/ui-react/popover";
 import type { TurnLatencySummary } from "@/lib/turnLatency";
 import { formatMetricTokens, formatTurnLatency, formatRunDuration, formatTokensPerSecond } from "@/lib/turnMetricsPresentation";

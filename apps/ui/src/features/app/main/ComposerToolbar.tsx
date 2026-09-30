@@ -21,7 +21,7 @@ import {
 } from "@/lib/modelCatalog";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SettingsSectionId } from "@/lib/settingsCatalog";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
 import {
   IconPlus,

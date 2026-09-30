@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription, AlertIcon } from "@appica/ui-react/alert";
 import { FieldError } from "@appica/ui-react/field";
 import { Separator } from "@appica/ui-react/separator";

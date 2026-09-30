@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import type { Project, SessionRow } from "@/features/app/models";
 import type { SessionSearchHits } from "@/lib/sessionSearch";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,

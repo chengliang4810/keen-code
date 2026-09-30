@@ -1,7 +1,7 @@
 /** MCP Doctor 诊断对话框；运行状态自持，由外部请求触发。 */
 
 import { useCallback, useEffect, useState } from "react";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { createT, type Locale } from "@/i18n";
 import { localizeUiError } from "@/lib/session";

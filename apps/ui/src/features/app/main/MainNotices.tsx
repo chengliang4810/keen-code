@@ -10,7 +10,7 @@ import type {
 } from "@/lib/session";
 import type { StreamStallState } from "@/hooks/useSessionTurn";
 import type { SessionLiveMap } from "@/lib/sessionLiveStore";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   Alert,
   AlertAction,

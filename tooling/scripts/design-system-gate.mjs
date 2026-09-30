@@ -166,6 +166,14 @@ function inspectAppicaSizes(relativePath, content, violations) {
                 ts.isStringLiteral(value.expression) &&
                 value.expression.text));
           if (literal && sizeRule.allowed.includes(literal)) continue;
+          // Product wrappers forward a typed size prop; business call sites still require a literal.
+          if (
+            relativePath.startsWith("apps/ui/src/components/ui/") &&
+            ts.isJsxExpression(value) &&
+            value.expression &&
+            ts.isIdentifier(value.expression) &&
+            value.expression.text === attributeName
+          ) continue;
 
           const line = sourceFile.getLineAndCharacterOfPosition(attribute.getStart(sourceFile)).line + 1;
           violations.push({

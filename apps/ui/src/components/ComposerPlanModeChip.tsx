@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { useMemo } from "react";
 import { createT, type Locale } from "@/i18n";
 import { IconClose, IconListNumbers } from "@/components/icons";

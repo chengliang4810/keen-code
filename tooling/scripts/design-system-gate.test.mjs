@@ -98,3 +98,9 @@ test("design-system gate rejects pixel expressions and non-literal sizes", () =>
   );
   assert.equal(violations.filter((item) => item.rule === "DSG005").length, 1);
 });
+
+test("design-system gate permits typed size forwarding only in product wrappers", () => {
+  const source = 'import { Button as AppicaButton } from "@appica/ui-react/button"; <AppicaButton size={size} />;';
+  assert.deepEqual(inspectSource("apps/ui/src/components/ui/button.tsx", source), []);
+  assert.equal(inspectSource("apps/ui/src/components/Example.tsx", source).filter((item) => item.rule === "DSG005").length, 1);
+});

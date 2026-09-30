@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { IconChevronLeft, IconChevronRight, IconClose, IconRename } from "@/components/icons";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Radio, RadioGroup } from "@/components/ui/radio-group";
 import { Checkbox, CheckboxGroup } from "@/components/ui/checkbox-group";

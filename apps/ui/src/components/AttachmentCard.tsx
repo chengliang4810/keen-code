@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Thumbnail } from "@appica/ui-react/thumbnail";
 /**

@@ -4,7 +4,7 @@ import type { DragZone } from "@/lib/dragZone";
 import { pathBasename } from "@/lib/filePath";
 import { projectPathPreview } from "@/features/app/models";
 import type { AddProjectIntent } from "@/hooks/useProjectDialog";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Spinner } from "@appica/ui-react/spinner";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";

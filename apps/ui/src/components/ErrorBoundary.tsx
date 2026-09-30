@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { reportFrontendError } from "@/lib/frontendDiagnostics";
 
 /**

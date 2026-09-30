@@ -1,7 +1,7 @@
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";
 import { Input } from "@/components/ui/input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { IconWorld } from "@/components/icons";
 import type { HostMode } from "./hostMode";
 import "./host-mode.css";

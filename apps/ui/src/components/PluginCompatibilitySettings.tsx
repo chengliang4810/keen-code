@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { GlassModal } from "@/components/GlassModal";
 import { AgentModelSelect } from "@/components/AgentsPanel";

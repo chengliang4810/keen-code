@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /**
  * Collapsible work phase for KeenCode tool activity.
  * Header: summary · caret right.

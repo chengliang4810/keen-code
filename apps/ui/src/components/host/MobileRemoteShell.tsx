@@ -3,7 +3,7 @@ import { Badge } from "@appica/ui-react/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AskUserModal } from "@/components/AskUserModal";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   IconArrowLeft,
   IconChevronDown,

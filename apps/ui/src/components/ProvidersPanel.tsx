@@ -1,6 +1,6 @@
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";
 import { Avatar, AvatarFallback } from "@appica/ui-react/avatar";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";

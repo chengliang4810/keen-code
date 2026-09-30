@@ -1,5 +1,5 @@
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toolbar, ToolbarButton } from "@appica/ui-react/toolbar";
 import { Alert, AlertAction, AlertDescription } from "@appica/ui-react/alert";

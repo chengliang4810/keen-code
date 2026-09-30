@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Button, type ButtonProps } from "@appica/ui-react/button";
+import { Button, type ButtonProps } from "@/components/ui/button";
 import { IconCheck, IconChevronDown } from "@/components/icons";
 import {
   DropdownMenu,

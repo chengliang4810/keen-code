@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from "react";
 import * as api from "@/lib/api";
 import { GlassModal } from "@/components/GlassModal";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@appica/ui-react/checkbox";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import type { SetState, Translator } from "./types";

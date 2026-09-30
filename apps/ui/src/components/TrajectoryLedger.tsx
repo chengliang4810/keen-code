@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /** 轨迹台账：右侧停靠栏的会话记录流水（dsh Trajectory 台账的本地化版本）。 */
 
 import {

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   composerMentionTriggerForKind,
   type ComposerMention,

@@ -49,7 +49,7 @@ import {
   IconPuzzle,
   IconRename,
 } from "@/components/icons";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Spinner } from "@appica/ui-react/spinner";
 import { formatMessageTime } from "@/lib/messageTime";

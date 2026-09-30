@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { SettingsNumberInput } from "@/components/ui/settings-number-input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { IconPlay, IconRefresh, IconStop } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";

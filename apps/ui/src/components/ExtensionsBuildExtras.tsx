@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { PluginCompatibilitySettings } from "@/components/PluginCompatibilitySettings";
 import { Input } from "@/components/ui/input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { ToggleGroup } from "@appica/ui-react/toggle-group";
 import { Toggle } from "@appica/ui-react/toggle";
 import { Badge } from "@appica/ui-react/badge";

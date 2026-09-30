@@ -1,5 +1,5 @@
 import { IconBrain, IconChevronDown, IconUsersGroup } from "@/components/icons";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,

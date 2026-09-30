@@ -1,5 +1,5 @@
 import { Input } from "@/components/ui/input";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /**
  * 当前 Session 的提示词历史选择器。
  * Newest-first list + optional fuzzy filter; Enter/click selects into composer.

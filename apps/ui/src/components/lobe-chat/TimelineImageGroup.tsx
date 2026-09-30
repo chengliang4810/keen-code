@@ -2,7 +2,7 @@ import { useState } from "react";
 import { createT, type Locale } from "@/i18n";
 import { ImageUi, imageUiLabels } from "@/components/ImageUi";
 import { IconPhoto, IconChevronDown, IconChevronRight } from "@/components/icons";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@appica/ui-react/collapsible";
 import type { MessageToolSegment } from "@/lib/session";
 

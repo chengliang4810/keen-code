@@ -1,7 +1,7 @@
 import { Card } from "@/components/ui/card";
 import { SettingsNumberInput } from "@/components/ui/settings-number-input";
 import { Navigation, NavigationItem, NavigationLink, NavigationList } from "@appica/ui-react/navigation";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   MAX_UI_FONT_SIZE,

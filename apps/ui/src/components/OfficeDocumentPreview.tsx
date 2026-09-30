@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /**
  * Rich local document preview:
  * - DOCX → docx-preview (styled Word layout)

@@ -3,7 +3,7 @@ import type { Locale, MessageKey, Vars } from "@/i18n";
 import type { QueuedSend } from "@/lib/sendQueue";
 import type { SessionSnapshot } from "@/lib/session";
 import type { SessionTurnResult } from "@/hooks/useSessionTurn";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import {
   DropdownMenu,

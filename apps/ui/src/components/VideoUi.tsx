@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /**
  * Inline video card for chat: session-relative / local paths.
  * Plays via Tauri asset://; right-click: open / reveal / copy path.

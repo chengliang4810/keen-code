@@ -1,6 +1,6 @@
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card } from "@/components/ui/card";
 import { Field, FieldDescription, FieldLabel } from "@appica/ui-react/field";

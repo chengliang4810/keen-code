@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@appica/ui-react/progress";
 import { Alert, AlertDescription } from "@appica/ui-react/alert";
 import { useMemo } from "react";

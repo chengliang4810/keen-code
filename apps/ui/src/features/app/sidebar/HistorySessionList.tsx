@@ -1,5 +1,5 @@
 import type { SessionRow } from "@/features/app/models";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   Collapsible,
   CollapsibleContent,

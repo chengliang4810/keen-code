@@ -1,4 +1,4 @@
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 /**
  * Unified composer command panel (+ button and `/` slash).
  *

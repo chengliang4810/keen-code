@@ -7,7 +7,7 @@ import {
   SIDEBAR_SESSION_ROW_HEIGHT,
   SIDEBAR_TOUCH_SESSION_ROW_HEIGHT,
 } from "@/lib/virtualList";
-import { Button } from "@appica/ui-react/button";
+import { Button } from "@/components/ui/button";
 import {
   Collapsible,
   CollapsibleContent,
