@@ -101,6 +101,7 @@ portable-pty = "=0.8.1"
 keepawake = "0.6.0"
 # 将插件敏感 userConfig 保存到系统密钥库（Keychain、Credential Manager 或 Secret Service）。
 keyring = "=4.1.6"
+getrandom = "0.3"
 tauri-plugin-single-instance = "2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 

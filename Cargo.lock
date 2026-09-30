@@ -2374,6 +2374,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "flate2",
+ "getrandom 0.3.4",
  "iana-time-zone",
  "keencode-acp",
  "keencode-agent",

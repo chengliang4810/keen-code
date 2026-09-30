@@ -863,6 +863,10 @@ export function webHostStatus(): Promise<WebHostStatus> {
   return invoke<WebHostStatus>("web_host_status");
 }
 
+export function webHostGetToken(): Promise<string> {
+  return invoke<string>("web_host_get_token");
+}
+
 /** 将 Web Token 写入系统凭据库并轮换运行中 Host 会话。 */
 export function webHostSetToken(token: string): Promise<WebHostStatus> {
   return invoke<WebHostStatus>("web_host_set_token", { token });

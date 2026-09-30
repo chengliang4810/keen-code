@@ -65,6 +65,10 @@ export function WebHostSettingsPanel({
   }, [t]);
 
   useEffect(() => {
+    void api.webHostGetToken().then(setToken).catch(() => setError(t("settings.webHost.tokenError")));
+  }, [t]);
+
+  useEffect(() => {
     void refreshStatus();
   }, [refreshStatus]);
 
@@ -118,7 +122,6 @@ export function WebHostSettingsPanel({
     try {
       invalidateReadCache("web_host_status");
       setStatus(await api.webHostSetToken(value));
-      setToken("");
       setTokenSaved(true);
     } catch {
       setError(t("settings.webHost.tokenError"));
@@ -256,7 +259,7 @@ export function WebHostSettingsPanel({
         <div className="web-host-settings__token">
           <Input
             id="settings-web-host-token"
-            type="password"
+            type="text"
             value={token}
             maxLength={512}
             autoComplete="new-password"
@@ -289,11 +292,6 @@ export function WebHostSettingsPanel({
           ) : null}
         </div>
       </div>
-      {status?.tokenVersion && status.tokenVersion > 0 ? (
-        <div className="web-host-settings__token-version">
-          {t("settings.webHost.tokenVersion", { version: status.tokenVersion })}
-        </div>
-      ) : null}
       {error ? <div className="web-host-settings__error" role="alert">{error}</div> : null}
     </Card>
   );

@@ -486,6 +486,18 @@ async fn web_host_status(
     Ok(web_host.status().await)
 }
 
+/// 仅通过本地 Tauri IPC 向设置页提供当前 Token，Web ACP 不开放此方法。
+#[tauri::command]
+async fn web_host_get_token(
+    web_host: State<'_, Arc<web_host::WebHostManager>>,
+) -> Result<String, String> {
+    let manager = Arc::clone(web_host.inner());
+    tokio::task::spawn_blocking(move || manager.token_for_local_settings())
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())
+}
+
 /// 保存新的 Web Token；正文只在命令调用栈与系统凭据 provider 中出现。
 #[tauri::command]
 async fn web_host_set_token(
@@ -842,12 +854,18 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                 .web_host_settings(app.handle())
                 .map_err(|error| error.to_string())?;
             let web_host_enabled = web_settings.enabled;
+            let web_credentials =
+                web_host::credential_provider().map_err(|error| error.to_string())?;
+            if let Err(error) = web_credentials.load_web_token() {
+                diagnostics.log(
+                    "warn",
+                    "web_host.token",
+                    format!("初始化 Web Token 失败：{error}"),
+                );
+            }
             let web_manager = Arc::new(
-                web_host::WebHostManager::new(
-                    web_settings,
-                    web_host::credential_provider().map_err(|error| error.to_string())?,
-                )
-                .map_err(|error| error.to_string())?,
+                web_host::WebHostManager::new(web_settings, web_credentials)
+                    .map_err(|error| error.to_string())?,
             );
             web_manager
                 .set_observability(diagnostics.observability())
@@ -947,6 +965,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             web_host_start,
             web_host_stop,
             web_host_status,
+            web_host_get_token,
             web_host_set_token,
             diagnostics_log_path,
             diagnostics_record,

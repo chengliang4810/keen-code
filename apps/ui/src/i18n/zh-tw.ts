@@ -504,7 +504,7 @@ export const zhTW: Record<MessageKey, string> = {
     "連接埠修改會在下次啟動 Web Host 時生效；除非連接埠被占用，否則建議保留預設值。",
   "settings.webHost.status": "執行狀態",
   "settings.webHost.statusDesc":
-    "Web Host 只繫結設定的位址，不會回傳瀏覽器 Token。",
+    "Web Host 只繫結設定的位址。",
   "settings.webHost.state.unknown": "無法使用",
   "settings.webHost.state.disabled": "已停用",
   "settings.webHost.state.stopped": "已停止",
@@ -519,12 +519,11 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.webHost.refresh": "重新整理狀態",
   "settings.webHost.token": "Web Host Token",
   "settings.webHost.tokenDesc":
-    "Token 儲存在作業系統憑據庫中，不會寫入一般設定、記錄或回應。",
+    "啟動軟體時產生並儲存在作業系統憑據庫中，可在此手動修改。",
   "settings.webHost.tokenPlaceholder": "輸入至少 8 個字元的 Token",
   "settings.webHost.tokenSave": "儲存 Token",
   "settings.webHost.tokenSaving": "正在儲存…",
   "settings.webHost.tokenSaved": "Token 已儲存",
-  "settings.webHost.tokenVersion": "目前驗證版本 {version}",
   "settings.webHost.tokenInvalid": "Token 必須為 8–512 個 UTF-8 位元組，且不能包含空白或控制字元。",
   "settings.webHost.statusError": "無法讀取 Web Host 狀態。",
   "settings.webHost.startError": "無法啟動 Web Host。",

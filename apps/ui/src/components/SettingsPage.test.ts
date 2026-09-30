@@ -223,8 +223,9 @@ describe("Desktop Web Host 设置契约", () => {
     expect(panelSource).toContain("webHostStatus()");
     expect(panelSource).toContain("webHostStart(settings.port)");
     expect(panelSource).toContain("webHostStop()");
+    expect(panelSource).toContain("webHostGetToken()");
     expect(panelSource).toContain("webHostSetToken(value)");
-    expect(panelSource).toContain('type="password"');
+    expect(panelSource).toContain('type="text"');
     expect(panelSource).toContain('id="settings-web-host-bind"');
     expect(panelSource).toContain("onSettingsChange({ ...settings, enabled })");
     expect(panelSource).not.toContain('settingsSet({ token');

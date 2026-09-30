@@ -5,6 +5,7 @@
 //! Journal 或 Runtime 事实，也不把 Provider 凭据暴露给浏览器。
 
 use crate::acp_host;
+use base64::Engine;
 use keencode_acp::AcpIncomingFrame;
 use keencode_web::{
     HostBusinessError, HostBusinessFuture, HostBusinessRouter, HostConnectionContext,
@@ -198,9 +199,21 @@ impl KeyringCredentialProvider {
 
 impl SystemCredentialProvider for KeyringCredentialProvider {
     fn load_web_token(&self) -> Result<WebToken, WebError> {
-        let password = Self::entry()?
-            .get_password()
-            .map_err(|_| WebError::Credential("读取 Web Token 失败".to_owned()))?;
+        let entry = Self::entry()?;
+        let password = match entry.get_password() {
+            Ok(password) => password,
+            Err(keyring::Error::NoEntry) => {
+                let mut random = [0u8; 6];
+                getrandom::fill(&mut random)
+                    .map_err(|_| WebError::Credential("生成 Web Token 失败".to_owned()))?;
+                let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(random);
+                entry
+                    .set_password(&token)
+                    .map_err(|_| WebError::Credential("写入 Web Token 失败".to_owned()))?;
+                token
+            }
+            Err(_) => return Err(WebError::Credential("读取 Web Token 失败".to_owned())),
+        };
         WebToken::try_from(password)
             .map_err(|_| WebError::Credential("系统凭据中的 Web Token 无效".to_owned()))
     }
@@ -292,6 +305,11 @@ impl std::fmt::Debug for WebHostManager {
 }
 
 impl WebHostManager {
+    pub fn token_for_local_settings(&self) -> Result<String, WebError> {
+        self.provider
+            .load_web_token()
+            .map(|token| token.with_secret(str::to_owned))
+    }
     /// 创建尚未启动的 Desktop Web Host owner。
     pub fn new(
         settings: WebHostSettings,
