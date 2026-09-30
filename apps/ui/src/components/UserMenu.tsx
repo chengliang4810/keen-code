@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-/** 侧栏底部固定操作：手机远控、设置入口以及按需显示的更新入口。 */
+/** 侧栏底部固定操作：设置、按需显示的更新入口以及手机远控。 */
 
 import {
   IconDeviceMobile,
@@ -35,20 +35,6 @@ export function UserMenu({
   return (
     <div className="user-menu user-menu--inline">
       <div className="user-menu__actions">
-        {remoteControl ? (
-          <Tip label={remoteControl.label}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-md"
-              className="sidebar-remote-action"
-              onClick={remoteControl.onClick}
-              aria-label={remoteControl.label}
-            >
-              <IconDeviceMobile size={17} />
-            </Button>
-          </Tip>
-        ) : null}
         <Button
           type="button"
           variant="ghost"
@@ -73,6 +59,20 @@ export function UserMenu({
               aria-busy={updateBusy || undefined}
             >
               <IconDownload size={17} />
+            </Button>
+          </Tip>
+        ) : null}
+        {remoteControl ? (
+          <Tip label={remoteControl.label}>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-md"
+              className="sidebar-remote-action"
+              onClick={remoteControl.onClick}
+              aria-label={remoteControl.label}
+            >
+              <IconDeviceMobile size={17} />
             </Button>
           </Tip>
         ) : null}

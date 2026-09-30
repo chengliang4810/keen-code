@@ -79,12 +79,12 @@ describe("UserMenu", () => {
     expect(html).not.toContain("sidebar-remote-action");
   });
 
-  it("传入远控入口时在设置左侧渲染手机远控图标按钮", () => {
+  it.each([false, true])("传入远控入口时在设置右侧渲染手机远控图标按钮（更新可用：%s）", (updateAvailable) => {
     const html = renderToStaticMarkup(
       <UserMenu
         labels={labels}
         remoteControl={{ label: "手机远程连接", onClick: vi.fn() }}
-        updateAvailable={false}
+        updateAvailable={updateAvailable}
         updateBusy={false}
         onSettings={vi.fn()}
         onUpdate={vi.fn()}
@@ -93,8 +93,18 @@ describe("UserMenu", () => {
 
     expect(html).toContain("sidebar-remote-action");
     expect(html).toContain('aria-label="手机远程连接"');
-    expect(html.indexOf("sidebar-remote-action")).toBeLessThan(
+    expect(html.indexOf("sidebar-remote-action")).toBeGreaterThan(
       html.indexOf("sidebar-footer-action"),
     );
+    if (updateAvailable) {
+      expect(html.indexOf("sidebar-update-action")).toBeGreaterThan(
+        html.indexOf("sidebar-footer-action"),
+      );
+      expect(html.indexOf("sidebar-remote-action")).toBeGreaterThan(
+        html.indexOf("sidebar-update-action"),
+      );
+    } else {
+      expect(html).not.toContain("sidebar-update-action");
+    }
   });
 });
