@@ -495,13 +495,13 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.webHost.title": "桌面 Web Host",
   "settings.webHost.enabled": "允許瀏覽器存取",
   "settings.webHost.enabledDesc":
-    "為遠端工作台開放經過驗證的本機 Web Host。開啟後，桌面啟動時會自動開放監聽。",
+    "開放經過驗證的 Web Host；此開關會立即啟動或關閉監聽。",
   "settings.webHost.bind": "監聽位址",
   "settings.webHost.bindDesc":
     "僅本機使用 127.0.0.1；手機存取請填寫電腦的具體區域網路 IP。公網位址和 0.0.0.0 會被拒絕。",
   "settings.webHost.port": "監聽連接埠",
   "settings.webHost.portDesc":
-    "連接埠修改會在下次啟動 Web Host 時生效；除非連接埠被占用，否則建議保留預設值。",
+    "除非連接埠被占用，否則建議保留預設值。修改前先關閉瀏覽器存取。",
   "settings.webHost.status": "執行狀態",
   "settings.webHost.statusDesc":
     "Web Host 只繫結設定的位址。",
@@ -512,10 +512,6 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.webHost.state.stopping": "正在停止",
   "settings.webHost.state.failed": "啟動失敗",
   "settings.webHost.connections": "{count} 個作用中連線",
-  "settings.webHost.start": "啟動 Web Host",
-  "settings.webHost.starting": "正在啟動…",
-  "settings.webHost.stop": "停止 Web Host",
-  "settings.webHost.stopping": "正在停止…",
   "settings.webHost.refresh": "重新整理狀態",
   "settings.webHost.token": "Web Host Token",
   "settings.webHost.tokenDesc":
@@ -526,9 +522,8 @@ export const zhTW: Record<MessageKey, string> = {
   "settings.webHost.tokenSaved": "Token 已儲存",
   "settings.webHost.tokenInvalid": "Token 必須為 8–512 個 UTF-8 位元組，且不能包含空白或控制字元。",
   "settings.webHost.statusError": "無法讀取 Web Host 狀態。",
-  "settings.webHost.startError": "無法啟動 Web Host。",
-  "settings.webHost.stopError": "無法停止 Web Host。",
   "settings.webHost.tokenError": "無法儲存 Web Host Token。",
+  "settings.webHost.applyFailed": "無法套用 Web Host 設定：{error}",
   "settings.archive.auto": "自動封存舊對話",
   "settings.archive.autoDesc": "定時掃描對話，將超過保留期的非置頂對話自動封存。",
   "settings.archive.retention": "封存保留時長",

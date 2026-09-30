@@ -157,6 +157,91 @@ describe("persistLatestAppSetting", () => {
 
     expect(applied).toEqual(["JetBrains Mono", "monospace"]);
     expect(onError).toHaveBeenCalledTimes(1);
+    expect((onError.mock.calls[0] as unknown[])[0]).toBeInstanceOf(Error);
+    expect((onError.mock.calls[0] as unknown[])[0]).toHaveProperty(
+      "message",
+      "保存失败",
+    );
+  });
+
+  it("rethrow 把最新修订的后端失败原因抛给调用方，且不破坏顺序写入尾任务", async () => {
+    const first = deferred<AppSettings>();
+    const second = deferred<AppSettings>();
+    const pending = [first, second];
+    const applied: boolean[] = [];
+    const onError = vi.fn();
+    const states: AppSettingPersistenceMap = new Map();
+    const persist = vi.fn(() => pending.shift()!.promise);
+
+    const failedRequest = persistLatestAppSetting(
+      {
+        key: "taskNotifications",
+        value: false,
+        optimistic: false,
+        previous: true,
+        apply: (value) => applied.push(value),
+        rethrow: true,
+      },
+      { states, persist, onError },
+    );
+    first.reject("后端启停失败");
+    await expect(failedRequest).rejects.toBe("后端启停失败");
+
+    // 尾任务必须仍是已完成状态：下一次保存照常执行而不是被短路。
+    const retriedRequest = persistLatestAppSetting(
+      {
+        key: "taskNotifications",
+        value: true,
+        optimistic: true,
+        previous: true,
+        apply: (value) => applied.push(value),
+        rethrow: true,
+      },
+      { states, persist, onError },
+    );
+    second.resolve(settings({ taskNotifications: true }));
+    await retriedRequest;
+
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(applied).toEqual([false, true, true]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith("后端启停失败");
+  });
+
+  it("rethrow 不为已过期的失败请求抛出错误", async () => {
+    const first = deferred<AppSettings>();
+    const second = deferred<AppSettings>();
+    const pending = [first, second];
+    const states: AppSettingPersistenceMap = new Map();
+    const persist = vi.fn(() => pending.shift()!.promise);
+
+    const staleRequest = persistLatestAppSetting(
+      {
+        key: "taskNotifications",
+        value: false,
+        optimistic: false,
+        previous: true,
+        apply: () => {},
+        rethrow: true,
+      },
+      { states, persist, onError: vi.fn() },
+    );
+    const latestRequest = persistLatestAppSetting(
+      {
+        key: "taskNotifications",
+        value: true,
+        optimistic: true,
+        previous: false,
+        apply: () => {},
+        rethrow: true,
+      },
+      { states, persist, onError: vi.fn() },
+    );
+
+    first.reject(new Error("旧请求失败"));
+    await expect(staleRequest).resolves.toBeUndefined();
+    second.resolve(settings({ taskNotifications: true }));
+    await latestRequest;
   });
 
   it("连续请求都失败时回滚到后端最后确认值", async () => {

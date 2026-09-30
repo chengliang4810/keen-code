@@ -36,6 +36,11 @@ export interface LatestAppSettingUpdate<
   apply: (value: State) => void;
   /** 把后端规范化后的完整设置映射回当前字段状态。 */
   normalizeSaved?: (settings: AppSettings) => State;
+  /**
+   * 最新修订保存失败时把后端失败原因抛给调用方就近展示；
+   * 回滚与全局错误上报仍先执行，顺序写入尾任务保持已完成。
+   */
+  rethrow?: boolean;
 }
 
 /** 设置持久化所需的可替换依赖，供 Hook 与测试共享。 */
@@ -44,8 +49,8 @@ export interface AppSettingPersistenceDependencies {
   states: AppSettingPersistenceMap;
   /** 将单字段补丁写入后端。 */
   persist: (patch: AppSettingsPatch) => Promise<AppSettings>;
-  /** 最新请求保存失败时报告一次界面错误。 */
-  onError: () => void;
+  /** 最新请求保存失败时报告一次界面错误，携带后端原始失败原因。 */
+  onError: (error: unknown) => void;
 }
 
 /**
@@ -71,6 +76,7 @@ export async function persistLatestAppSetting<
   state.revision = revision;
   update.apply(update.optimistic);
 
+  const rethrown: { error?: unknown } = {};
   const operation = state.tail.then(async () => {
     try {
       const saved = await dependencies.persist({
@@ -83,12 +89,18 @@ export async function persistLatestAppSetting<
       if (state.revision === revision && update.normalizeSaved) {
         update.apply(confirmed);
       }
-    } catch {
+    } catch (error) {
       if (state.revision !== revision) return;
       update.apply(state.confirmed as State);
-      dependencies.onError();
+      dependencies.onError(error);
+      if (update.rethrow) {
+        rethrown.error = error;
+      }
     }
   });
   state.tail = operation;
   await operation;
+  if (rethrown.error !== undefined) {
+    throw rethrown.error;
+  }
 }

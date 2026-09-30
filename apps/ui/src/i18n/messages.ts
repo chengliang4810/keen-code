@@ -521,13 +521,13 @@ const en = {
   "settings.webHost.title": "Desktop Web Host",
   "settings.webHost.enabled": "Allow browser access",
   "settings.webHost.enabledDesc":
-    "Expose a local authenticated Web Host for the remote workbench. When enabled, the listener starts automatically on desktop launch.",
+    "Expose an authenticated Web Host. This switch starts and stops the listener immediately.",
   "settings.webHost.bind": "Listen address",
   "settings.webHost.bindDesc":
     "Use 127.0.0.1 for this computer, or a specific private LAN IP for phone access. Public and wildcard addresses are rejected.",
   "settings.webHost.port": "Listening port",
   "settings.webHost.portDesc":
-    "Changes apply the next time the Web Host starts. Keep the default port unless another service is using it.",
+    "Keep the default port unless another service is using it. Turn browser access off before changing the port.",
   "settings.webHost.status": "Runtime status",
   "settings.webHost.statusDesc":
     "The Web Host binds only to its configured address.",
@@ -538,10 +538,6 @@ const en = {
   "settings.webHost.state.stopping": "Stopping",
   "settings.webHost.state.failed": "Failed",
   "settings.webHost.connections": "{count} active connections",
-  "settings.webHost.start": "Start Web Host",
-  "settings.webHost.starting": "Starting…",
-  "settings.webHost.stop": "Stop Web Host",
-  "settings.webHost.stopping": "Stopping…",
   "settings.webHost.refresh": "Refresh status",
   "settings.webHost.token": "Web Host Token",
   "settings.webHost.tokenDesc":
@@ -552,9 +548,8 @@ const en = {
   "settings.webHost.tokenSaved": "Token saved",
   "settings.webHost.tokenInvalid": "Token must be 8–512 UTF-8 bytes with no spaces or control characters.",
   "settings.webHost.statusError": "Unable to read Web Host status.",
-  "settings.webHost.startError": "Unable to start the Web Host.",
-  "settings.webHost.stopError": "Unable to stop the Web Host.",
   "settings.webHost.tokenError": "Unable to save the Web Host Token.",
+  "settings.webHost.applyFailed": "Could not apply the Web Host setting: {error}",
   "settings.archive.auto": "Automatically archive old chats",
   "settings.archive.autoDesc": "Archive unpinned chats after their retention period.",
   "settings.archive.retention": "Archive retention",
@@ -1829,13 +1824,13 @@ const zh: Record<MessageKey, string> = {
   "settings.webHost.title": "桌面 Web Host",
   "settings.webHost.enabled": "允许浏览器访问",
   "settings.webHost.enabledDesc":
-    "为远程工作台开放经过认证的本机 Web Host。开启后，桌面启动时会自动开放监听。",
+    "开放经过认证的 Web Host；此开关会立即启动或关闭监听。",
   "settings.webHost.bind": "监听地址",
   "settings.webHost.bindDesc":
     "仅本机使用 127.0.0.1；手机访问请填写电脑的具体局域网 IP。公网地址和 0.0.0.0 会被拒绝。",
   "settings.webHost.port": "监听端口",
   "settings.webHost.portDesc":
-    "端口修改会在下次启动 Web Host 时生效；除非端口被占用，否则建议保留默认值。",
+    "除非端口被占用，否则建议保留默认值。修改前先关闭浏览器访问。",
   "settings.webHost.status": "运行状态",
   "settings.webHost.statusDesc":
     "Web Host 只绑定配置的地址。",
@@ -1846,10 +1841,6 @@ const zh: Record<MessageKey, string> = {
   "settings.webHost.state.stopping": "正在停止",
   "settings.webHost.state.failed": "启动失败",
   "settings.webHost.connections": "{count} 个活动连接",
-  "settings.webHost.start": "启动 Web Host",
-  "settings.webHost.starting": "正在启动…",
-  "settings.webHost.stop": "停止 Web Host",
-  "settings.webHost.stopping": "正在停止…",
   "settings.webHost.refresh": "刷新状态",
   "settings.webHost.token": "Web Host Token",
   "settings.webHost.tokenDesc":
@@ -1860,9 +1851,8 @@ const zh: Record<MessageKey, string> = {
   "settings.webHost.tokenSaved": "Token 已保存",
   "settings.webHost.tokenInvalid": "Token 必须为 8–512 个 UTF-8 字节，且不能包含空白或控制字符。",
   "settings.webHost.statusError": "无法读取 Web Host 状态。",
-  "settings.webHost.startError": "无法启动 Web Host。",
-  "settings.webHost.stopError": "无法停止 Web Host。",
   "settings.webHost.tokenError": "无法保存 Web Host Token。",
+  "settings.webHost.applyFailed": "无法应用 Web Host 设置：{error}",
   "settings.archive.auto": "自动归档旧对话",
   "settings.archive.autoDesc": "定时扫描对话，将超过保留期的非置顶对话自动归档。",
   "settings.archive.retention": "归档保留时长",

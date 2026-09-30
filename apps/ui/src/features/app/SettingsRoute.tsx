@@ -74,7 +74,7 @@ export interface SettingsRouteSettings {
   onWebServiceUrl: (value: string) => void;
   /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
   webHostSettings: WebHostSettings;
-  onWebHostSettings: (value: WebHostSettings) => void;
+  onWebHostSettings: (value: WebHostSettings) => Promise<void>;
 }
 
 /** 设置页中依赖当前工作区/供应商状态的会话上下文。 */

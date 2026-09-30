@@ -237,7 +237,7 @@ export interface SettingsPageProps {
   onWebServiceUrl: (value: string) => void;
   /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
   webHostSettings: WebHostSettings;
-  onWebHostSettings: (value: WebHostSettings) => void;
+  onWebHostSettings: (value: WebHostSettings) => Promise<void>;
   /** 当前持久化的已归档对话。 */
   archivedSessions?: readonly ArchivedSessionItem[];
   /** 将指定对话恢复到工作台。 */

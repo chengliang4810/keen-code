@@ -221,13 +221,15 @@ describe("Desktop Web Host 设置契约", () => {
     expect(source).toContain("WebHostSettingsPanel");
     expect(source).toContain('id="settings-anchor-web-host"');
     expect(panelSource).toContain("webHostStatus()");
-    expect(panelSource).toContain("webHostStart(settings.port)");
-    expect(panelSource).toContain("webHostStop()");
+    expect(panelSource).not.toContain("webHostStart(");
+    expect(panelSource).not.toContain("webHostStop(");
+    expect(panelSource).toContain("await onSettingsChange(next)");
+    expect(panelSource).toContain("await applySettings({ ...settings, enabled })");
     expect(panelSource).toContain("webHostGetToken()");
     expect(panelSource).toContain("webHostSetToken(value)");
     expect(panelSource).toContain('type="text"');
     expect(panelSource).toContain('id="settings-web-host-bind"');
-    expect(panelSource).toContain("onSettingsChange({ ...settings, enabled })");
+    expect(panelSource).toContain('t("settings.webHost.applyFailed", { error: detail })');
     expect(panelSource).not.toContain('settingsSet({ token');
     expect(panelSource).not.toMatch(/<input(?:\s|>)/);
   });

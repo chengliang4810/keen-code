@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { SettingsNumberInput } from "@/components/ui/settings-number-input";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { IconPlay, IconRefresh, IconStop } from "@/components/icons";
+import { IconRefresh } from "@/components/icons";
 import { createT, type Locale } from "@/i18n";
 import * as api from "@/lib/api";
 
@@ -14,12 +14,12 @@ const MAX_WEB_HOST_PORT = 65_535;
 const MIN_WEB_HOST_TOKEN_BYTES = 8;
 const MAX_WEB_HOST_TOKEN_BYTES = 512;
 
-type WebHostAction = "status" | "start" | "stop" | "token" | null;
+type WebHostAction = "status" | "token" | null;
 
 interface WebHostSettingsPanelProps {
   locale: Locale;
   settings: api.WebHostSettings;
-  onSettingsChange: (settings: api.WebHostSettings) => void;
+  onSettingsChange: (settings: api.WebHostSettings) => Promise<void>;
 }
 
 function isRunning(status: api.WebHostStatus | null): boolean {
@@ -68,48 +68,45 @@ export function WebHostSettingsPanel({
     void api.webHostGetToken().then(setToken).catch(() => setError(t("settings.webHost.tokenError")));
   }, [t]);
 
-  useEffect(() => {
-    void refreshStatus();
-  }, [refreshStatus]);
+  /** 应用非秘密配置；启停失败时把后端原因就近展示，成功返回 true。 */
+  const applySettings = useCallback(
+    async (next: api.WebHostSettings): Promise<boolean> => {
+      try {
+        await onSettingsChange(next);
+        return true;
+      } catch (error) {
+        const detail =
+          typeof error === "string" ? error.trim() : error instanceof Error ? error.message.trim() : "";
+        setError(
+          detail
+            ? t("settings.webHost.applyFailed", { error: detail })
+            : t("settings.saveFailed"),
+        );
+        return false;
+      }
+    },
+    [onSettingsChange, t],
+  );
 
   const handleEnabledChange = useCallback(
     async (enabled: boolean) => {
       setError(null);
-      if (!enabled && status?.state === "running") {
-        setBusy("stop");
-        try {
-          invalidateReadCache("web_host_status");
-          setStatus(await api.webHostStop());
-        } catch {
-          setError(t("settings.webHost.stopError"));
-          return;
-        } finally {
-          setBusy(null);
-        }
-      }
-      onSettingsChange({ ...settings, enabled });
-    },
-    [onSettingsChange, settings, status, t],
-  );
-
-  const runLifecycleAction = useCallback(
-    async (action: "start" | "stop") => {
-      setBusy(action);
-      setError(null);
+      setBusy("status");
       try {
-        const next = action === "start"
-          ? await api.webHostStart(settings.port)
-          : await api.webHostStop();
-      invalidateReadCache("web_host_status");
-        setStatus(next);
-      } catch {
-        setError(t(action === "start" ? "settings.webHost.startError" : "settings.webHost.stopError"));
+        // 保存失败时后端已回滚配置，跳过状态刷新保留面板内错误提示。
+        if (!(await applySettings({ ...settings, enabled }))) return;
+        invalidateReadCache("web_host_status");
+        await refreshStatus();
       } finally {
         setBusy(null);
       }
     },
-    [settings.port, t],
+    [applySettings, refreshStatus, settings],
   );
+
+  useEffect(() => {
+    void refreshStatus();
+  }, [refreshStatus]);
 
   const saveToken = useCallback(async () => {
     const value = token;
@@ -134,7 +131,6 @@ export function WebHostSettingsPanel({
     ? t(`settings.webHost.state.${status.state}` as Parameters<typeof t>[0])
     : t("settings.webHost.state.unknown");
   const running = isRunning(status);
-  const canStart = settings.enabled && status?.state !== "running" && status?.state !== "stopping";
   const statusUrl = status && status.state === "running"
     ? `http://${displayHost(status.bind)}:${status.port}`
     : null;
@@ -173,7 +169,7 @@ export function WebHostSettingsPanel({
           onBlur={(event) => {
             const value = event.currentTarget.value.trim();
             if (value && value !== settings.bind) {
-              onSettingsChange({ ...settings, bind: value });
+              void applySettings({ ...settings, bind: value });
             }
           }}
           onKeyDown={(event) => {
@@ -195,9 +191,9 @@ export function WebHostSettingsPanel({
           min={MIN_WEB_HOST_PORT}
           max={MAX_WEB_HOST_PORT}
           value={settings.port}
-          disabled={busy !== null}
+          disabled={busy !== null || running}
           aria-describedby="settings-web-host-port-desc"
-          onCommit={(value) => onSettingsChange({ ...settings, port: value })}
+          onCommit={(value) => void applySettings({ ...settings, port: value })}
         />
       </div>
       <div className="settings-row settings-row--stack">
@@ -218,22 +214,6 @@ export function WebHostSettingsPanel({
               {t("settings.webHost.connections", { count: status.activeConnections })}
             </span>
           ) : null}
-          <Button
-            type="button"
-            size="md"
-            variant={running ? "ghost" : "primary"}
-            disabled={busy !== null || (!running && !canStart)}
-            onClick={() => void runLifecycleAction(running ? "stop" : "start")}
-          >
-            {running ? <IconStop size={15} /> : <IconPlay size={15} />}
-            {busy === "start"
-              ? t("settings.webHost.starting")
-              : busy === "stop"
-                ? t("settings.webHost.stopping")
-                : running
-                  ? t("settings.webHost.stop")
-                  : t("settings.webHost.start")}
-          </Button>
           <Button
             type="button"
             size="md"

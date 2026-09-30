@@ -53,7 +53,7 @@ export interface AppSettingsController extends SettingsRouteSettings {
   onArchiveRetentionDays: (value: number) => void;
   /** Desktop Web Host 的非秘密配置；Token 通过独立命令保存。 */
   webHostSettings: api.WebHostSettings;
-  onWebHostSettings: (value: api.WebHostSettings) => void;
+  onWebHostSettings: (value: api.WebHostSettings) => Promise<void>;
 }
 
 /**
@@ -110,9 +110,19 @@ export function useAppSettings({
     document.documentElement.lang = locale;
   }, [locale]);
 
-  const reportSaveError = useCallback(() => {
-    onSaveErrorRef.current?.(tr("settings.saveFailed"));
-  }, [tr]);
+  /** 优先展示后端返回的具体失败原因，无法解析时回退通用保存失败文案。 */
+  const reportSaveError = useCallback(
+    (error: unknown) => {
+      const detail =
+        typeof error === "string"
+          ? error.trim()
+          : error instanceof Error
+            ? error.message.trim()
+            : "";
+      onSaveErrorRef.current?.(detail || tr("settings.saveFailed"));
+    },
+    [tr],
+  );
 
   /** 刷新失败保持最后确认值，避免将读取故障展示为空记忆。 */
   const onMemoryFileRefresh = useCallback(async () => {
@@ -129,7 +139,7 @@ export function useAppSettings({
     <Key extends AppSettingKey, State>(
       update: LatestAppSettingUpdate<Key, State>,
     ) => {
-      void persistLatestAppSetting(update, {
+      return persistLatestAppSetting(update, {
         states: settingPersistenceRef.current,
         persist: api.settingsSet,
         onError: reportSaveError,
@@ -363,9 +373,9 @@ export function useAppSettings({
     try {
       const saved = await api.settingsSet({ projectDirectory: path });
       setProjectDirectory(saved.projectDirectory);
-    } catch {
+    } catch (error) {
       setProjectDirectory(previous);
-      reportSaveError();
+      reportSaveError(error);
     }
   }, [projectDirectory, reportSaveError]);
 
@@ -376,9 +386,9 @@ export function useAppSettings({
       setProjectDirectory(path);
       const saved = await api.settingsSet({ projectDirectory: path });
       setProjectDirectory(saved.projectDirectory);
-    } catch {
+    } catch (error) {
       setProjectDirectory(previous);
-      reportSaveError();
+      reportSaveError(error);
     }
   }, [projectDirectory, reportSaveError]);
 
@@ -422,16 +432,18 @@ export function useAppSettings({
     [webServiceUrl, updateSetting],
   );
 
-  /** Web Host 只持久化非秘密配置；运行时启停由设置面板单独控制。 */
+  /** Web Host 只持久化非秘密配置；后端随 enabled 变更启停监听。
+   *  启停失败的原因需要就近展示在设置面板，因此向调用方重新抛出。 */
   const onWebHostSettings = useCallback(
     (value: api.WebHostSettings) => {
-      updateSetting({
+      return updateSetting({
         key: "webHost",
         value,
         optimistic: value,
         previous: webHostSettings,
         apply: setWebHostSettings,
         normalizeSaved: (saved) => saved.webHost ?? DEFAULT_WEB_HOST_SETTINGS,
+        rethrow: true,
       });
     },
     [webHostSettings, updateSetting],

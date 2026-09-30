@@ -425,9 +425,31 @@ async fn settings_set(
         Ok(saved) => {
             if let Some(web_settings) = web_host_update {
                 web_host
-                    .set_settings(web_settings)
+                    .set_settings(web_settings.clone())
                     .await
                     .map_err(|error| error.to_string())?;
+                let lifecycle = if web_settings.enabled {
+                    web_host.start(None).await
+                } else {
+                    web_host.stop().await
+                };
+                if let Err(error) = lifecycle {
+                    let _ = web_host
+                        .set_settings(
+                            previous
+                                .web_host_settings(&app)
+                                .map_err(|error| error.to_string())?,
+                        )
+                        .await;
+                    let _ = app_settings::set(
+                        &app,
+                        app_settings::AppSettingsPatch {
+                            web_host: Some(previous.web_host.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    return Err(error.to_string());
+                }
             }
             memories.set_enabled(saved.local_memories);
             if saved.interface_language != previous.interface_language {

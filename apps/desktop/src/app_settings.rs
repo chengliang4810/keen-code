@@ -256,7 +256,7 @@ impl AppSettings {
 }
 
 /// 应用设置局部更新；只允许修改当前界面实际暴露的字段。
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct AppSettingsPatch {
     /// 更新界面语言。
