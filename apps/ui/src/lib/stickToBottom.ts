@@ -33,6 +33,16 @@ export const STICK_ESCAPE_MIN_DELTA_PX = 14;
  */
 export const STICK_ESCAPE_WHEEL_DELTA = 10;
 
+/**
+ * 指针按住（文本拖选）期间判定用户向上浏览所需的最小位移。
+ *
+ * 拖选时浏览器会为扩展选区自动滚动，单步位移远小于滚轮或滚动条手势；
+ * 按住状态下没有弹性回弹之类的伪向上位移，因此亚像素级阈值即可。
+ * 沿用常规手势阈值会让缓慢的自动滚动永远无法脱离吸底，视口被钳回底部，
+ * 历史内容选不中。
+ */
+export const STICK_ESCAPE_SELECTION_MIN_DELTA_PX = 0.5;
+
 type ProgrammaticStickScroll = { top: number; at: number };
 
 const PROGRAMMATIC_STICK_SCROLL_TTL_MS = 100;
@@ -65,21 +75,38 @@ export function isMeaningfulScrollUp(
 
 /**
  * 仅把真正离开底部的向上滚动视为用户脱离；内容收缩导致浏览器钳制到新底部不算。
+ *
+ * 滚动条拖动与文本拖选的自动滚动都是用户手势，但两者的位移粒度不同：
+ * 拖选时浏览器为扩展选区逐步滚动，单步位移远小于滚动条手势，因此允许
+ * 调用方通过 `minDeltaPx` 指定阈值，默认仍为滚动条级别的常规阈值。
  */
 export function shouldReleaseStickOnScrollUp(input: {
-  /** 是否已有滚轮、触摸或滚动条手势作为本次滚动的来源。 */
+  /** 是否已有滚轮、触摸、滚动条或拖选手势作为本次滚动的来源。 */
   userInitiated: boolean;
   pinned: boolean;
   scrollTop: number;
   previousScrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  /** 覆盖最小向上位移阈值；缺省使用 `STICK_ESCAPE_MIN_DELTA_PX`。 */
+  minDeltaPx?: number;
+  /** 覆盖底部保护带；拖选时允许首个有效滚动立即解除吸底。 */
+  hardBottomPx?: number;
 }): boolean {
   return (
     input.userInitiated &&
     input.pinned &&
-    isMeaningfulScrollUp(input.scrollTop, input.previousScrollTop) &&
-    !isHardBottom(input.scrollTop, input.scrollHeight, input.clientHeight)
+    isMeaningfulScrollUp(
+      input.scrollTop,
+      input.previousScrollTop,
+      input.minDeltaPx,
+    ) &&
+    !isHardBottom(
+      input.scrollTop,
+      input.scrollHeight,
+      input.clientHeight,
+      input.hardBottomPx,
+    )
   );
 }
 

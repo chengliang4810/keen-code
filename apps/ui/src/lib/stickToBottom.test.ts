@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   STICK_ESCAPE_MIN_DELTA_PX,
+  STICK_ESCAPE_SELECTION_MIN_DELTA_PX,
   STICK_HEIGHT_NOISE_PX,
   STICK_HARD_BOTTOM_PX,
   STICK_TO_BOTTOM_THRESHOLD_PX,
@@ -143,6 +144,64 @@ describe("shouldReleaseStickOnScrollUp", () => {
         scrollTop: 1_022,
         scrollHeight: 2_320,
         clientHeight: 700,
+      }),
+    ).toBe(false);
+  });
+
+  it("ignores sub-pixel selection autoscrolled without the small threshold", () => {
+    // 拖选自动滚动单步位移小于常规手势阈值；未传小阈值时不脱离。
+    expect(
+      shouldReleaseStickOnScrollUp({
+        userInitiated: true,
+        pinned: true,
+        previousScrollTop: 600,
+        scrollTop: 599.7,
+        scrollHeight: 1_000,
+        clientHeight: 400,
+      }),
+    ).toBe(false);
+  });
+
+  it("releases pin on selection autoscroll with the small selection threshold", () => {
+    // 正文按住拖选时传亚像素阈值，自动滚动累积离开硬底带后即脱离吸底。
+    expect(
+      shouldReleaseStickOnScrollUp({
+        userInitiated: true,
+        pinned: true,
+        previousScrollTop: 600,
+        scrollTop: 597,
+        scrollHeight: 1_000,
+        clientHeight: 400,
+        minDeltaPx: STICK_ESCAPE_SELECTION_MIN_DELTA_PX,
+      }),
+    ).toBe(true);
+  });
+
+  it("releases on the first small selection scroll before pinning resets it", () => {
+    expect(
+      shouldReleaseStickOnScrollUp({
+        userInitiated: true,
+        pinned: true,
+        previousScrollTop: 600,
+        scrollTop: 599.3,
+        scrollHeight: 1_000,
+        clientHeight: 400,
+        minDeltaPx: STICK_ESCAPE_SELECTION_MIN_DELTA_PX,
+        hardBottomPx: 0,
+      }),
+    ).toBe(true);
+  });
+
+  it("does not release pin on selection autoscroll moving toward the bottom", () => {
+    expect(
+      shouldReleaseStickOnScrollUp({
+        userInitiated: true,
+        pinned: true,
+        previousScrollTop: 599,
+        scrollTop: 600,
+        scrollHeight: 1_000,
+        clientHeight: 400,
+        minDeltaPx: STICK_ESCAPE_SELECTION_MIN_DELTA_PX,
       }),
     ).toBe(false);
   });

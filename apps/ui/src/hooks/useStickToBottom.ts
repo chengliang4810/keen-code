@@ -16,6 +16,7 @@ import {
 } from "react";
 import {
   STICK_ESCAPE_MIN_DELTA_PX,
+  STICK_ESCAPE_SELECTION_MIN_DELTA_PX,
   STICK_ESCAPE_WHEEL_DELTA,
   STICK_TO_BOTTOM_THRESHOLD_PX,
   bottomScrollTop,
@@ -96,6 +97,12 @@ export function useStickToBottom(
   const resizeDifferenceRef = useRef(0);
   /** 仅在用户拖动原生滚动条时允许 scroll 事件解除吸底。 */
   const scrollbarDragRef = useRef(false);
+  /**
+   * 鼠标在正文内按住（文本拖选）期间，允许其触发的自动滚动解除吸底。
+   * 拖选扩展选区到视口边缘时，浏览器产生的滚动没有独立手势标记，
+   * 若不视为用户手势，吸底钳制会把视口拉回底部，历史内容选不中。
+   */
+  const selectionDragRef = useRef(false);
   const thresholdRef = useRef(thresholdPx);
   thresholdRef.current = thresholdPx;
   const enabledRef = useRef(enabled);
@@ -292,14 +299,20 @@ export function useStickToBottom(
       }
 
       const maxTop = bottomScrollTop(el.scrollHeight, el.clientHeight);
+      const selectionDrag = selectionDragRef.current;
       const meaningfulUp = isMeaningfulScrollUp(scrollTop, lastScrollTop);
       const shouldEscape = shouldReleaseStickOnScrollUp({
-        userInitiated: scrollbarDragRef.current,
+        userInitiated: scrollbarDragRef.current || selectionDrag,
         pinned: isPinnedRef.current,
         scrollTop,
         previousScrollTop: lastScrollTop,
         scrollHeight: el.scrollHeight,
         clientHeight: el.clientHeight,
+        // 拖选自动滚动单步位移远小于滚动条手势，亚像素阈值即可判定。
+        minDeltaPx: selectionDrag
+          ? STICK_ESCAPE_SELECTION_MIN_DELTA_PX
+          : undefined,
+        hardBottomPx: selectionDrag ? 0 : undefined,
       });
       const meaningfulDown =
         scrollTop - lastScrollTop >= STICK_ESCAPE_MIN_DELTA_PX;
@@ -505,13 +518,17 @@ export function useStickToBottom(
         cancelAnimationFrame(scrollbarPointerEndFrame);
         scrollbarPointerEndFrame = 0;
       }
-      // 原生滚动条以滚动视口自身为事件目标；正文内的点击不算滚动手势。
-      scrollbarDragRef.current =
-        event.pointerType === "mouse" && event.target === el;
+      // 原生滚动条以滚动视口自身为事件目标；正文内的点击可能是拖选起点。
+      const onScrollbar = event.pointerType === "mouse" && event.target === el;
+      scrollbarDragRef.current = onScrollbar;
+      // 正文内按住鼠标通常开始文本拖选；此后浏览器为扩展选区的自动滚动
+      // 也属于用户手势，必须允许脱离吸底，否则无法向上选中历史消息。
+      selectionDragRef.current = !onScrollbar && event.pointerType === "mouse";
     };
     const onPointerEnd = () => {
       scrollbarPointerEndFrame = requestAnimationFrame(() => {
         scrollbarDragRef.current = false;
+        selectionDragRef.current = false;
         scrollbarPointerEndFrame = 0;
       });
     };
@@ -542,6 +559,7 @@ export function useStickToBottom(
         cancelAnimationFrame(scrollbarPointerEndFrame);
       }
       scrollbarDragRef.current = false;
+      selectionDragRef.current = false;
     };
   }, [
     enabled,
