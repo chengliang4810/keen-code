@@ -127,3 +127,23 @@ export function getInjectedHostTransportAdapter(): HostTransportAdapter | null {
   }
   return adapter;
 }
+
+/** 扫码/链接配对 URL 携带的 Web Token 参数名。 */
+const URL_AUTH_TOKEN_PARAM = "token";
+
+/** 读取配对 URL 中的 Web Token；其余 query 一律不当作凭据。 */
+export function readUrlAuthToken(search?: string): string | null {
+  const query = search ?? (
+    typeof window === "undefined" || !window.location ? "" : window.location.search
+  );
+  const value = new URLSearchParams(query).get(URL_AUTH_TOKEN_PARAM)?.trim();
+  return value ? value : null;
+}
+
+/** 返回移除 token 参数后的查询串（保留其余参数），供 replaceState 清理地址栏。 */
+export function stripUrlAuthToken(search: string): string {
+  const params = new URLSearchParams(search);
+  params.delete(URL_AUTH_TOKEN_PARAM);
+  const next = params.toString();
+  return next ? `?${next}` : "";
+}

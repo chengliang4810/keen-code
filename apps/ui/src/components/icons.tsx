@@ -12,6 +12,8 @@ import {
   IconArrowRight as TbArrowRight,
   IconArrowUp as TbArrowUp,
   IconDeviceDesktop as TbDeviceDesktop,
+  IconDeviceMobile as TbDeviceMobile,
+  IconQrcode as TbQrcode,
   IconSun as TbSun,
   IconMoon as TbMoon,
   IconArrowsMinimize as TbArrowsMinimize,
@@ -205,6 +207,9 @@ export const IconArrowRight = wrap(TbArrowRight);
 export const IconArrowUp = wrap(TbArrowUp);
 export const IconWorld = wrap(TbWorld);
 export const IconDesktop = wrap(TbDeviceDesktop);
+/** 侧栏底部手机远控入口与配对弹窗。 */
+export const IconDeviceMobile = wrap(TbDeviceMobile);
+export const IconQrcode = wrap(TbQrcode);
 export const IconSun = wrap(TbSun);
 export const IconMoon = wrap(TbMoon);
 export const IconUser = wrap(TbUser);

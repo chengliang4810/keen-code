@@ -83,6 +83,7 @@ import { AppUpdateModal } from "@/features/app/overlays/AppUpdateModal";
 import { SessionContextMenu } from "@/features/app/overlays/SessionContextMenu";
 import { SessionSearchPortal } from "@/features/app/overlays/SessionSearchPortal";
 import { ShortcutsModal } from "@/features/app/overlays/ShortcutsModal";
+import { RemoteControlModal } from "@/features/app/overlays/RemoteControlModal";
 import { WorktreeCreateModal } from "@/features/app/overlays/WorktreeCreateModal";
 import { WorktreeGcModal } from "@/features/app/overlays/WorktreeGcModal";
 import { StatusModal } from "@/components/StatusModal";
@@ -290,6 +291,7 @@ export default function App() {
     }, ms);
   }, []);
   const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showRemoteControl, setShowRemoteControl] = useState(false);
   /** In-conversation find (Cmd/Ctrl+F) — not the palette/session search. */
   const {
     showChatFind,
@@ -1482,6 +1484,10 @@ export default function App() {
               settings: tr("sidebar.settings"),
               update: sidebarUpdateLabel,
             },
+            remoteControl: {
+              label: tr("sidebar.remoteControl"),
+              onClick: () => setShowRemoteControl(true),
+            },
             updateAvailable: appUpdateStatus?.available === true,
             updateBusy: appUpdateBusy !== null,
             onSettings: () => navigateSettings("general"),
@@ -1801,6 +1807,15 @@ export default function App() {
         open={showShortcuts}
         setOpen={setShowShortcuts}
         platform={platform}
+      />
+      <RemoteControlModal
+        tr={tr}
+        open={showRemoteControl}
+        setOpen={setShowRemoteControl}
+        onOpenSettings={() => {
+          setShowRemoteControl(false);
+          navigateSettings("general");
+        }}
       />
       <StatusModal
         open={showStatusModal}

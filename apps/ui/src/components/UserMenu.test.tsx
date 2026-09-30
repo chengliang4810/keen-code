@@ -64,4 +64,37 @@ describe("UserMenu", () => {
     expect(html).toContain("disabled");
     expect(html).toContain('aria-busy="true"');
   });
+
+  it("未传远控入口时不渲染手机远控按钮", () => {
+    const html = renderToStaticMarkup(
+      <UserMenu
+        labels={labels}
+        updateAvailable={false}
+        updateBusy={false}
+        onSettings={vi.fn()}
+        onUpdate={vi.fn()}
+      />,
+    );
+
+    expect(html).not.toContain("sidebar-remote-action");
+  });
+
+  it("传入远控入口时在设置左侧渲染手机远控图标按钮", () => {
+    const html = renderToStaticMarkup(
+      <UserMenu
+        labels={labels}
+        remoteControl={{ label: "手机远程连接", onClick: vi.fn() }}
+        updateAvailable={false}
+        updateBusy={false}
+        onSettings={vi.fn()}
+        onUpdate={vi.fn()}
+      />,
+    );
+
+    expect(html).toContain("sidebar-remote-action");
+    expect(html).toContain('aria-label="手机远程连接"');
+    expect(html.indexOf("sidebar-remote-action")).toBeLessThan(
+      html.indexOf("sidebar-footer-action"),
+    );
+  });
 });

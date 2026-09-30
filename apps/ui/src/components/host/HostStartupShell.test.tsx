@@ -53,4 +53,16 @@ describe("HostStartupShell", () => {
     expect(hostStartupSource).toContain("useVisualViewportLayout");
     expect(hostStartupSource).toContain("Remote 根壳独立同步 visual viewport");
   });
+
+  it("扫码配对只消费一次 URL token，并立即从地址栏清除", () => {
+    expect(hostStartupSource).toContain("readUrlAuthToken()");
+    expect(hostStartupSource).toContain("urlTokenConsumedRef.current = true");
+    expect(hostStartupSource).toContain("stripUrlAuthToken(search)");
+    expect(hostStartupSource).toContain("window.history.replaceState");
+  });
+
+  it("URL token 认证失败回落手动登录，不伪造已登录", () => {
+    expect(hostStartupSource).toContain('setStatus("error")');
+    expect(hostStartupSource).toContain("setErrorMessage(result.error ?? null)");
+  });
 });

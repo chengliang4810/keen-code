@@ -1353,6 +1353,15 @@ textarea,
   height: 32px;
 }
 
+.sidebar-remote-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 32px;
+  width: 32px;
+  height: 32px;
+}
+
 .sidebar-footer-action span {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1793,6 +1802,183 @@ textarea,
 
 .web-host-settings__error {
   padding-top: 12px;
+  color: var(--danger);
+}
+
+/* 手机远程连接配对弹窗：单栏布局，面板内状态行 + 二维码。 */
+.remote-control {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.remote-control__desc {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+.remote-control__panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.remote-control__panel-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.remote-control__panel-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+}
+
+.remote-control__panel-heading {
+  min-width: 0;
+}
+
+.remote-control__panel-title {
+  margin: 0;
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.remote-control__panel-desc {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+.remote-control__status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-main);
+}
+
+.remote-control__status-text {
+  min-width: 0;
+}
+
+.remote-control__status-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-md);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.remote-control__status-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--text-tertiary);
+}
+
+.remote-control__status[data-state="running"] .remote-control__status-dot {
+  background: var(--success);
+}
+
+.remote-control__status[data-state="failed"] .remote-control__status-dot {
+  background: var(--danger);
+}
+
+.remote-control__status[data-state="stopping"] .remote-control__status-dot {
+  background: var(--warning);
+}
+
+.remote-control__status-hint {
+  margin: 4px 0 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+.remote-control__warning {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.remote-control__warning p {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+.remote-control__urlbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.remote-control__urlbar-hint {
+  margin: 0;
+  min-width: 0;
+  flex: 1 1 auto;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
+  color: var(--text-secondary);
+}
+
+.remote-control__urlbar-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.remote-control__qr {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.remote-control__qr-image {
+  width: 240px;
+  height: 240px;
+}
+
+.remote-control__qr-loading {
+  width: 240px;
+  height: 240px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-hover);
+}
+
+.remote-control__error {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-normal);
   color: var(--danger);
 }
 

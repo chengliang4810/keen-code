@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { MobileRemoteShell, type MobileRemoteSessionSummary } from "./MobileRemoteShell";
 import { WebLoginPanel, type WebLoginStatus } from "./WebLoginPanel";
 import {
   getInjectedHostTransportAdapter,
+  readUrlAuthToken,
   resolveHostMode,
+  stripUrlAuthToken,
   type HostMode,
   type HostTransportAdapter,
 } from "./hostMode";
@@ -45,6 +47,7 @@ function RemoteStartupShell({
   const [status, setStatus] = useState<WebLoginStatus>("signed-out");
   const [token, setToken] = useState("");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const urlTokenConsumedRef = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -52,6 +55,32 @@ function RemoteStartupShell({
       if (active && snapshot?.connection === "connected") setStatus("signed-in");
     }).catch(() => {});
     return () => { active = false; };
+  }, [transport]);
+
+  // 扫码/链接配对：URL 携带的 token 只消费一次，随后立即从地址栏清除。
+  useEffect(() => {
+    if (urlTokenConsumedRef.current || !transport?.authenticate) return;
+    const urlToken = readUrlAuthToken();
+    if (!urlToken) return;
+    urlTokenConsumedRef.current = true;
+    if (typeof window !== "undefined" && window.location && window.history) {
+      const { pathname, search, hash } = window.location;
+      window.history.replaceState(null, "", pathname + stripUrlAuthToken(search) + hash);
+    }
+    setStatus("submitting");
+    void Promise.resolve(transport.authenticate(urlToken))
+      .then((result) => {
+        if (result.authenticated) {
+          setStatus("signed-in");
+          return;
+        }
+        setErrorMessage(result.error ?? null);
+        setStatus("error");
+      })
+      .catch((error) => {
+        setErrorMessage(error instanceof Error ? error.message : String(error));
+        setStatus("error");
+      });
   }, [transport]);
 
   const submit = async () => {
