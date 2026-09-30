@@ -13,8 +13,13 @@
 import { cjk, type CjkPlugin } from "@streamdown/cjk";
 import { createMathPlugin } from "@streamdown/math";
 import remarkCjkFriendlyGfmStrikethrough from "remark-cjk-friendly-gfm-strikethrough";
-import { defaultRemarkPlugins, type PluginConfig } from "streamdown";
-import type { Pluggable, PluggableList } from "unified";
+import {
+  defaultRehypePlugins,
+  defaultRemarkPlugins,
+  type PluginConfig,
+} from "streamdown";
+import type { Pluggable, PluggableList, Plugin } from "unified";
+import { isAbsoluteFsPath } from "@/lib/filePath";
 
 function disableSingleTilde(plugin: Pluggable): Pluggable {
   if (!Array.isArray(plugin)) {
@@ -86,6 +91,74 @@ export function buildStreamdownRemarkPlugins(
   return [...defaults, ...extra];
 }
 
+interface HtmlNode {
+  type: string;
+  tagName?: string;
+  properties?: Record<string, unknown>;
+  children?: HtmlNode[];
+}
+
+function localFileHref(url: string): string | null {
+  let path = url;
+  try {
+    path = decodeURIComponent(url);
+  } catch {
+    path = url;
+  }
+  return isAbsoluteFsPath(path) && !path.startsWith("//") ? path : null;
+}
+
+const WINDOWS_DRIVE_PROTOCOLS = Array.from(
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+);
+const [sanitizePlugin, sanitizeSchema] = defaultRehypePlugins.sanitize as [
+  Plugin,
+  { protocols: Record<string, string[]> },
+];
+const [hardenPlugin, hardenOptions] = defaultRehypePlugins.harden as [
+  (options: unknown) => (tree: HtmlNode) => void,
+  unknown,
+];
+
+function rehypeHardenWithFilePaths() {
+  const harden = hardenPlugin(hardenOptions);
+  return (tree: HtmlNode) => {
+    const localLinks: { node: HtmlNode; href: string }[] = [];
+    function preserveLocalLinks(node: HtmlNode) {
+      const href = node.properties?.href;
+      if (
+        node.tagName === "a" &&
+        typeof href === "string" &&
+        localFileHref(href) !== null
+      ) {
+        localLinks.push({ node, href });
+        node.properties!.href = "#keencode-local-file";
+      }
+      node.children?.forEach(preserveLocalLinks);
+    }
+    preserveLocalLinks(tree);
+    harden(tree);
+    for (const { node, href } of localLinks) {
+      node.properties!.href = href;
+    }
+  };
+}
+
+export const streamdownRehypePlugins: PluggableList = [
+  defaultRehypePlugins.raw,
+  [
+    sanitizePlugin,
+    {
+      ...sanitizeSchema,
+      protocols: {
+        ...sanitizeSchema.protocols,
+        href: [...sanitizeSchema.protocols.href, ...WINDOWS_DRIVE_PROTOCOLS],
+      },
+    },
+  ],
+  rehypeHardenWithFilePaths,
+];
+
 const SAFE_URL_PROTOCOLS = new Set(["http", "https", "mailto", "tel"]);
 
 /**
@@ -97,6 +170,8 @@ const SAFE_URL_PROTOCOLS = new Set(["http", "https", "mailto", "tel"]);
  * `file://` 维持旧行为不透传(WebView 会拦截本地协议,透传只会产生加载失败)。
  */
 export function chatUrlTransform(url: string): string {
+  const path = localFileHref(url);
+  if (path !== null) return path;
   const colon = url.indexOf(":");
   if (colon < 0) return url;
   const slash = url.indexOf("/");
@@ -110,6 +185,5 @@ export function chatUrlTransform(url: string): string {
   if (isRelative) return url;
   const protocol = url.slice(0, colon).toLowerCase();
   if (SAFE_URL_PROTOCOLS.has(protocol)) return url;
-  if (/^[a-z]$/.test(protocol)) return url;
   return "";
 }

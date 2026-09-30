@@ -31,16 +31,14 @@ describe("FilePathCard", () => {
       <FilePathCard path={fileUrl} kind="url" labels={labels} />,
     );
 
-    expect(directoryHtml).toContain(
-      `class="file-path-link__name">${directoryUrl}</span>`,
-    );
-    expect(fileHtml).toContain(
-      'class="file-path-link__name">plugin.json</span>',
-    );
-    expect(fileHtml).not.toMatch(/<button[^>]*\sdisabled(?:=|\s|>)/);
+    // 完整地址留在 title 与 href 上，链接文字只显示文件名。
+    expect(directoryHtml).toContain(`title="${directoryUrl}"`);
+    expect(directoryHtml).toContain(`>${directoryUrl}</a>`);
+    expect(fileHtml).toContain(">plugin.json</a>");
+    expect(fileHtml).not.toContain("aria-disabled");
   });
 
-  it("Markdown 自定义链接文本覆盖显示名，但文件类型图标仍依据真实路径", () => {
+  it("Markdown 自定义链接文本覆盖显示名，且链接不带前置图标", () => {
     const fileUrl = "https://github.com/example/keencode-plugins/blob/main/demo/plugin.json";
     const html = renderToString(
       <FilePathCard
@@ -51,32 +49,50 @@ describe("FilePathCard", () => {
       />,
     );
 
-    expect(html).toContain('class="file-path-link__name">插件配置</span>');
-    expect(html).not.toContain('class="file-path-link__name">plugin.json</span>');
+    expect(html).toContain(">插件配置</a>");
+    expect(html).not.toContain(">plugin.json</a>");
+    // 超链接形态：纯文字，无图标节点、无内层 meta 盒。
+    expect(html).not.toContain("<svg");
+    expect(html).not.toContain("file-path-link__icon");
+    expect(html).not.toContain("file-path-link__name");
+  });
+
+  it("锚点提供原生链接语义，点击一律拦截后由资源面板打开", () => {
+    const html = renderToString(
+      <FilePathCard
+        path="https://github.com/example/repo/blob/main/plugin.json"
+        kind="url"
+        labels={labels}
+      />,
+    );
+    // 主 webview 不能被外链顶掉：新标签 + 隔离 opener。
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('rel="noreferrer noopener"');
+
     const source = readFileSync(
       new URL("./FilePathCard.tsx", import.meta.url),
       "utf8",
     );
-    expect(source).toContain("<FileTypeIcon name={path} size={16} />");
+    // 本地 file:// 只用于悬浮预览，左键与中键都不允许触发 webview 导航。
+    expect(source).toContain("e.preventDefault()");
+    expect(source).toContain("if (e.button !== 0) e.preventDefault()");
+    expect(source).toContain("pathToFileUrl(resolvedAbs || path)");
   });
 
-  it("保留行内路径布局并由 Appica Button 管理视觉状态", () => {
+  it("呈现为正文超链接而非按钮盒：无悬浮底色、无阴影", () => {
     const css = readCssSource(new URL("../styles/app.css", import.meta.url));
-    const linkRule = css.match(/\.file-path-link__main\s*\{([^}]*)\}/)?.[1];
-    const wrapperRule = css.match(/\.file-path-link\s*\{([^}]*)\}/)?.[1];
-    expect(wrapperRule).toMatch(/display:\s*inline-block/);
-    expect(linkRule).toMatch(/display:\s*inline-flex/);
-    expect(linkRule).toMatch(/align-items:\s*baseline/);
-    expect(css).toMatch(/\.file-path-link__icon\s*\{[^}]*align-self:\s*center;/s);
-    expect(linkRule).toMatch(/vertical-align:\s*baseline/);
-    expect(linkRule).not.toMatch(/(?:color|background|border|outline):/);
-    expect(css).not.toMatch(/\.file-path-link__main:(?:hover|focus-visible|disabled)/);
+    const linkRule = css.match(/\.file-path-link\s*\{([^}]*)\}/)?.[1];
+    expect(linkRule).toMatch(/color:\s*var\(--chat-link\);/);
+    expect(linkRule).toMatch(/text-decoration:\s*underline;/);
+    expect(linkRule).toMatch(/text-decoration-style:\s*dotted;/);
+    expect(linkRule).not.toMatch(/(?:background|box-shadow|border-radius|height|padding|display):/);
     expect(css).toMatch(
-      /\.file-path-link__name\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*white-space:\s*normal;/s,
+      /\.file-path-link:hover,\s*\.file-path-link:focus-visible\s*\{[^}]*color:\s*var\(--chat-link-hover\);/s,
     );
-    expect(css).toMatch(
-      /\.chat-md ul > li:has\(\.file-path-link\)::before\s*\{[^}]*top:\s*8px;[^}]*width:\s*5px;[^}]*height:\s*5px;/s,
-    );
+    // 链接已是普通行内文字，不再需要为它改写段落与列表标记几何。
+    expect(css).not.toMatch(/:has\(\.file-path-link\)/);
+    // 旧的按钮胶囊结构整体退役。
+    expect(css).not.toMatch(/\.file-path-link__(?:main|icon|meta|name)\b/);
   });
 
   it("URL 主点击在右侧面板打开，无面板宿主时回退系统浏览器", () => {
@@ -85,7 +101,7 @@ describe("FilePathCard", () => {
       "utf8",
     );
 
-    expect(source).toContain("onClick={() => void openInPanel()}");
+    expect(source).toContain("void openInPanel();");
     expect(source).toContain("onOpenInPanel({ type: \"url\", url: path, title: name })");
     expect(source).toContain("await openExternal();");
     expect(source).toContain("await api.urlOpen(path)");

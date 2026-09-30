@@ -59,6 +59,25 @@ function cancelledTool(
 }
 
 describe("TimelinePhaseBlock", () => {
+  it("摘要行悬浮不显示底色，仅增强文字与箭头，键盘焦点也增强对比", () => {
+    const css = fs.readFileSync(
+      new URL("./lobe-chat.css", import.meta.url),
+      "utf8",
+    );
+
+    expect(css).toMatch(
+      /\.lobe-timeline-phase__trigger:hover::before,\s*\.lobe-turn-work__trigger:hover::before\s*\{\s*background:\s*transparent;\s*\}/,
+    );
+    for (const group of ["lobe-timeline-phase", "lobe-turn-work"]) {
+      for (const part of ["title", "caret"]) {
+        const selector = `.${group}__trigger:is(:hover, :focus-visible) .${group}__${part}`;
+        expect(css).toContain(selector);
+        const rule = css.slice(css.indexOf(selector)).split("}")[0];
+        expect(rule).toContain("color: var(--chat-text);");
+      }
+    }
+  });
+
   it("工具组标题与对话正文左侧对齐", () => {
     const css = fs.readFileSync(
       new URL("./lobe-chat.css", import.meta.url),

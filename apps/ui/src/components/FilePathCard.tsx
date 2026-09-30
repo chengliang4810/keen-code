@@ -29,7 +29,7 @@ import {
 } from "@/components/icons";
 import { ContextMenu, type ContextMenuItem } from "@/components/ContextMenu";
 import { GlassModal } from "@/components/GlassModal";
-import { Tip } from "@/components/ui/tooltip";
+import { pathToFileUrl } from "@/lib/filePreviewSrc";
 import { resolveCodeBlockDescriptor } from "@/components/lobe-chat/codeBlockMeta";
 
 export type FilePathCardKind = "file" | "url" | "dir";
@@ -347,41 +347,36 @@ export function FilePathCard({
 
   return (
     <>
-      <div
+      <a
         className={
           "file-path-link" +
           (isUrl ? " file-path-link--url" : "") +
           (kind === "dir" ? " file-path-link--dir" : "")
         }
+        href={isUrl ? path : pathToFileUrl(resolvedAbs || path)}
+        {...(isUrl ? { target: "_blank", rel: "noreferrer noopener" } : {})}
+        title={isUrl ? path : (resolvedAbs || name)}
+        aria-disabled={busy || undefined}
         onContextMenu={(e) => {
           e.preventDefault();
           e.stopPropagation();
           setMenu({ x: e.clientX, y: e.clientY });
         }}
+        onMouseDown={(e) => {
+          // 中键不会触发 click，但会直接导航；本地 file:// 会让主 webview
+          // 离开会话，所以非左键一律拦下。
+          if (e.button !== 0) e.preventDefault();
+        }}
+        onClick={(e) => {
+          // 点击始终走右侧资源面板：本地 file:// 地址只用于悬浮预览与
+          // 「复制链接」，不能让主 webview 导航离开会话。
+          e.preventDefault();
+          if (busy) return;
+          void openInPanel();
+        }}
       >
-        <Tip label={isUrl ? path : name}>
-      <Button size="md"
-        type="button"
-        variant="ghost"
-        className="file-path-link__main"
-            onClick={() => void openInPanel()}
-            disabled={busy}
-          >
-            <span className="file-path-link__icon" aria-hidden>
-              {kind === "dir" ? (
-                <IconFolder size={16} />
-              ) : isUrl ? (
-                <IconExternalLink size={16} />
-              ) : (
-                <FileTypeIcon name={path} size={16} />
-              )}
-            </span>
-            <span className="file-path-link__meta">
-              <span className="file-path-link__name">{name}</span>
-            </span>
-          </Button>
-        </Tip>
-      </div>
+        {name}
+      </a>
 
       <ContextMenu
         open={!!menu}

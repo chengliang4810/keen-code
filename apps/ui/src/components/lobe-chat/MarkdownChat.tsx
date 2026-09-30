@@ -229,7 +229,9 @@ export const MarkdownChat = memo(function MarkdownChat({
     const rawIn = token.trim().replace(/^<|>$/g, "");
     if (!rawIn) return null;
     // Prefer ellipsis-stripped form for open/search; keep original for display map
-    const raw = normalizePathToken(rawIn) || rawIn;
+    const raw = isAbsoluteFsPath(rawIn)
+      ? rawIn
+      : normalizePathToken(rawIn) || rawIn;
 
     if (isHttpUrl(rawIn) || isHttpUrl(raw)) {
       const url = isHttpUrl(rawIn) ? rawIn : raw;

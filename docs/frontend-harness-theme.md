@@ -47,10 +47,12 @@ git diff -- apps/ui/src/styles/harness
 
 ## 有意保留的产品差异
 
+- 聊天 Markdown 的完整本地文件链接（Windows 盘符、反斜杠、UNC，以及 Unix 全路径）保留自定义标题并复用现有 `FilePathCard`，点击经宿主校验后打开资源面板，不交给 WebView 导航。共享 Streamdown 渲染链仅在 `href` 清洗规则中加入大小写盘符；已清洗的绝对文件链接在 URL harden 阶段暂用安全片段地址，随后恢复路径，避免 URL 规范化改变盘符、中文或空格。路径百分号转义只解码一次；网页链接及其他 HTML 清洗保持原规则，`javascript:`、`data:`、`vbscript:`、`file://` 和非绝对盘符协议仍不放行。
 - KeenCode 品牌、中文文案、Tabler 图标体系和现有业务入口继续使用。未把参考项目的账户、服务端、权限或模型配置逻辑接入桌面应用。
 - 已保存的侧栏宽度继续生效；280px 是新布局的默认值，不覆盖用户拖动后的尺寸。本次前后截图沿用相同的 260px 已保存侧栏。
 - Windows 主窗口使用无边框与自绘三键，和侧栏、会话栏、资源栏共用 48px 标题栏；macOS 保留原生 Overlay 红绿灯，位置与 48px 标题栏对齐。设置作为独立全窗口页面显示，顶部可拖动。返回入口为左侧导航顶部的“← 返回应用”，独立于可滚动目录；内容标题行不再显示关闭图标。正文保留 960px 最大阅读宽度；不超过 680px 时使用既有的下拉式设置导航及左侧返回按钮，满足产品 680×620 最小窗口尺寸。
 - 终端字体设置、Git 状态色和文件类型色保留。
+- 对话中的工具组与整轮工作摘要在悬浮时不显示整行底色，标题与箭头改用主文字色增强对比；键盘焦点同样增强文字，保留原有键盘操作、盒模型与展开行为。
 - 保留键盘焦点环与现有 shadcn/ui / Radix 控件语义。欢迎标题移入输入区域正常流；输入高度由 CSS 管理，删除两处旧的 22px × 10 行硬上限。
 - 弹窗中的具体表单和额外设置项按 KeenCode 业务内容排版，不能将两款不同产品的整页像素差解读为复制误差。
 
@@ -71,3 +73,11 @@ git diff -- apps/ui/src/styles/harness
 ## 2026-09-07 输出速度
 
 已核实 Harness turn-metrics.ts、event-projection.ts、assistant.ts 和 message-chrome.ts 的 TPS 口径：具备输出量与计时的请求累计输出 Token / 累计首段输出至完成耗时；用时弹层按总用时、TPS、首Token延迟排列，>=10 TPS显示整数。输出计时在本机SSE边界采集并随Journal保存。缓存写入Token已从用量明细移除，底层计数保留。来源、公式、原生截图和验证边界见 design-qa.md 同日记录。
+
+## 2026-09-30 Markdown 完整文件链接
+
+- 基础提交：`f7fa3e338d7f367ccda133d5e923ec9e799869b9`。复现基线是任务开始时工作区使用的 Streamdown 2.6.0 默认 rehype 链；工作区已有的性能测量、资源面板和其他并行改动不属于本次修复。
+- 运行环境：Windows、Node.js 24.19.0、Vitest 3.2.7。未新增依赖或样式，也未修改桌面文件打开接口；完整路径保留根目录，继续由现有宿主进行文件存在性校验。
+- 回归命令：`node node_modules/vitest/vitest.mjs run --root apps/ui src/components/lobe-chat src/lib/attachments.test.ts src/lib/filePath.test.ts src/components/ResourceViewer.tabs.test.ts`，14 个文件、238 项测试通过。覆盖流式及完成态、真实问题文本、大小写盘符、反斜杠、UNC、Unix 全路径、中文、空格、百分号、打开资源面板回调，以及危险协议和 HTML 属性清洗。
+- 类型、样式和设计门禁：`node node_modules/typescript/bin/tsc -b apps/ui/tsconfig.json --pretty false`、`node node_modules/stylelint/bin/stylelint.mjs "apps/ui/src/**/*.css"`、`node tooling/scripts/design-system-gate.mjs` 与 `git diff --check` 通过。
+- 截图与原生验收：已尝试隔离重建默认渲染器与修复后的对照页面，预设相同 `1000×480` 视口、`deviceScaleFactor=1`，但本机验证工具未找到 Playwright Chromium/Edge 执行文件，浏览器连接也未成功，因此未生成前后截图或像素差。运行中的 `D:\dev\KeenCode\keencode-desktop.exe` 是安装版，不能将其当作当前源码的原生验收；本次未重建或替换该安装版。测试中的宿主与打开回调为模拟，不能代替 Tauri/WebView2 的实际点击验收。

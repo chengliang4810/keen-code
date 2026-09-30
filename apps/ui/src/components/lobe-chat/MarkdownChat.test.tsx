@@ -123,6 +123,18 @@ describe("MarkdownChat streaming", () => {
 
 
 describe("MarkdownChat URL punctuation", () => {
+  it.each([false, true])("完整 Windows 文件链接走快速打开卡片 (streaming=%s)", (streaming) => {
+    const html = renderToString(
+      <MarkdownChat streaming={streaming}>
+        {"已整理完成：[KeenCode 系统提示词完整中文整理稿](D:/projects/keen-code/docs/prompts/current-system-prompt.zh-CN.md)。"}
+      </MarkdownChat>,
+    );
+
+    expect(html).toContain("KeenCode 系统提示词完整中文整理稿");
+    expect(html).not.toContain("[blocked]");
+    expect(html).not.toContain('href="D:');
+  });
+
   it("将对话中的网页链接渲染为无图标的普通超链接", () => {
     const html = renderToString(
       <MarkdownChat>{"[Node.js](https://nodejs.org)"}</MarkdownChat>,

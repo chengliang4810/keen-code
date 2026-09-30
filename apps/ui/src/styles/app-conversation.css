@@ -2011,87 +2011,35 @@ button.composer__context-item {
 
 /* Streamdown / markdown may wrap replaced code/link in p — keep block */
 .chat-md p:has(> .md-body__img-frame),
-.chat-md p:has(> .md-body__video-card),
-.chat-md p:has(> .file-path-link) {
+.chat-md p:has(> .md-body__video-card) {
   margin-block: 0.35em;
 }
 
-/* File / URL path link — inline chat-theme link (name only; path in details / copy menu) */
+/* File / URL path link — 与正文超链接同一形态：纯文字 + 点状下划线，
+ * 无前置图标、无悬浮底色。锚点保持原生可聚焦与键盘可达。 */
 .file-path-link {
-  display: inline-block;
-  max-width: 100%;
-  vertical-align: baseline;
-}
-
-.file-path-link__main {
-  display: inline-flex;
-  /* Use the text baseline, not the leading SVG baseline, in prose. */
-  align-items: baseline;
-  max-width: 100%;
-  vertical-align: baseline;
-  text-align: start;
+  color: var(--chat-link);
   text-decoration: underline;
   text-decoration-style: dotted;
   text-underline-offset: 4px;
-}
-
-.file-path-link__icon {
-  align-self: center;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0 4px 0 0;
-  color: var(--chat-link);
-  flex-shrink: 0;
-}
-
-.file-path-link--dir .file-path-link__icon {
-  color: var(--dir-accent);
-}
-
-.file-path-link__meta {
-  display: block;
-  min-width: 0;
-}
-
-.file-path-link__name {
-  display: block;
-  font-size: calc(13px + var(--ui-font-delta));
-  font-weight: 550;
-  color: var(--chat-link);
   overflow-wrap: anywhere;
-  white-space: normal;
-  line-height: 1.35;
 }
 
-.chat-md ul > li:has(.file-path-link) {
-  position: relative;
-  list-style: none;
+.file-path-link:hover,
+.file-path-link:focus-visible {
+  color: var(--chat-link-hover);
 }
 
-.chat-md ul > li:has(.file-path-link)::before {
-  position: absolute;
-  /* 与通用列表标记同一几何（top 8px / -0.95em），保证横向、纵向都对齐。 */
-  top: 8px;
-  inset-inline-start: -0.95em;
-  font-size: inherit;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: var(--chat-prose-text);
-  content: "";
+/* 解析中（busy）：锚点没有原生 disabled，用 aria-disabled 表达，等待期间
+ * 降为次级文字色提示不可再点。`--chat-text-3` 只在 .lobe-chat 上有定义，
+ * 这里回落到全局令牌，保证资源面板复用同一组件时不失效。 */
+.file-path-link[aria-disabled="true"] {
+  cursor: default;
+  color: var(--chat-text-3, var(--text-tertiary));
 }
 
-/* 链接图标按字号取 1em 并块化：16px 基线对齐的 svg 会撑高行盒，
- * 使文字基线下移、列表圆点错位。 */
-.file-path-link__icon svg {
-  display: block;
-  width: 1em;
-  height: 1em;
-}
-
-.file-path-link--url .file-path-link__icon {
-  color: var(--chat-link);
+.file-path-link--dir {
+  color: var(--dir-accent);
 }
 
 /* Path never shown on link */

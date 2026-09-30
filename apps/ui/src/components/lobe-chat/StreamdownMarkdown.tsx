@@ -7,7 +7,7 @@
  *   (React 报错 185 一类更新风暴问题的第一道闸)。
  * - 单条 markdown 渲染异常时降级为 `whitespace-pre-wrap` 纯文本,错误不冒泡
  *   到会话区边界;内容变化(FNV hash)自动清除错误态重试。
- * - `recordMarkdownParse` 埋点以 remark 插件形式注入,保持旧观测口径。
+ * - `recordMarkdownParse` 埋点以 remark 插件形式注入,口径见 markdownMeasure.ts。
  */
 
 import {
@@ -18,7 +18,6 @@ import {
 } from "react";
 import { Streamdown, type Components } from "streamdown";
 import type { PluggableList } from "unified";
-import { recordMarkdownParse } from "@/lib/frontendPerformance";
 import { cn } from "@/lib/utils";
 import {
   buildStreamdownRemarkPlugins,
@@ -26,7 +25,9 @@ import {
   streamdownControlsDisabled,
   streamdownLinkSafety,
   streamdownPlugins,
+  streamdownRehypePlugins,
 } from "./streamdownSetup";
+import { createMeasureRemarkPlugin } from "./markdownMeasure";
 
 const EMPTY_REMARK_PLUGINS: PluggableList = [];
 
@@ -38,33 +39,6 @@ function hashMarkdownSource(markdown: string): string {
     hash = Math.imul(hash, 16777619);
   }
   return `${markdown.length}:${hash >>> 0}`;
-}
-
-/**
- * 测量插件:attacher 记起点、transformer 结束时上报。streamdown 会按块复用
- * processor 缓存,因此口径是"该插件视角的解析时长",与旧
- * react-markdown 版 measureMarkdownParse 的相对趋势一致。
- */
-function createMeasureRemarkPlugin(turnId: string, fullParse: boolean) {
-  return function measurePlugin() {
-    const started =
-      typeof performance === "undefined" ? 0 : performance.now();
-    return (
-      _tree: unknown,
-      file: { value?: unknown },
-    ) => {
-      const durationMs =
-        typeof performance === "undefined"
-          ? 0
-          : performance.now() - started;
-      recordMarkdownParse({
-        turnId,
-        durationMs,
-        sourceChars: String(file?.value ?? "").length,
-        fullParse,
-      });
-    };
-  };
 }
 
 interface MarkdownBoundaryProps {
@@ -176,6 +150,7 @@ export const StreamdownMarkdown = memo(function StreamdownMarkdown({
         mode={streaming ? "streaming" : "static"}
         parseIncompleteMarkdown={streaming}
         plugins={streamdownPlugins}
+        rehypePlugins={streamdownRehypePlugins}
         remarkPlugins={remarkPlugins}
         urlTransform={chatUrlTransform}
       >

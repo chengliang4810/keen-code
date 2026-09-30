@@ -147,6 +147,7 @@ export function recordFrontendProjection(sessionId: string, durationMs: number):
   if (turn) add(turn.projection, durationMs);
 }
 
+/** 聚合单条 markdown 的解析耗时;时长口径由埋点方定义(当前为单次 remark parse 真实耗时)。 */
 export function recordMarkdownParse(input: {
   turnId?: string;
   durationMs: number;
