@@ -28,6 +28,8 @@ pub const META_SESSION_PINNED: &str = "keencode/pinned";
 pub const META_SESSION_ARCHIVED: &str = "keencode/archived";
 /// `session/list` 每项 `_meta` 中的标题写入来源。
 pub const META_SESSION_TITLE_SOURCE: &str = "keencode/titleSource";
+/// `session/list` 每项 `_meta` 中当前进程是否仍在执行该 Session。
+pub const META_SESSION_RUNNING: &str = "keencode/running";
 
 /// 非交互 CLI 在绑定稳定执行身份后即可断开的 admission 方法。
 pub const OPERATION_ADMIT_METHOD: &str = "keencode/operation/admit";

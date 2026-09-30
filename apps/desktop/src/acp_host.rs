@@ -2052,6 +2052,14 @@ impl AcpHost {
         .map_err(internal_failure)?
         .map_err(internal_failure)?;
         tracing::info!(target: "keencode_diagnostics", phase = "session_list_index", elapsed_ms = started.elapsed().as_millis(), sessions = metadata.len(), "session phase completed");
+        let active_turns: std::collections::HashSet<_> = self
+            .runtime
+            .runtime_manager()
+            .active_turns()
+            .map_err(internal_failure)?
+            .into_iter()
+            .map(|turn| turn.session_id)
+            .collect();
         for metadata in metadata {
             let Ok(root) =
                 crate::session_commands::authorize_stored_root(&self.app, &metadata.project_root)
@@ -2063,8 +2071,17 @@ impl AcpHost {
             }
             // Journal 偏好状态与线格式投影由共享 session_listing 收敛；损坏
             // 记录返回 None 跳过。
+            let running = active_turns.contains(&metadata.session_id);
             match session_info_from_metadata(metadata, root.to_string_lossy().into_owned()) {
-                Ok(Some(info)) => sessions.push(info),
+                Ok(Some(mut info)) => {
+                    if let Some(meta) = info.meta.as_mut() {
+                        meta.insert(
+                            keencode_acp::META_SESSION_RUNNING.to_owned(),
+                            serde_json::Value::Bool(running),
+                        );
+                    }
+                    sessions.push(info);
+                }
                 Ok(None) => continue,
                 Err(error) => return Err(internal_failure(error)),
             }

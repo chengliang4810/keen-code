@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionUpdateDeliveryEnvelope } from "@/lib/acp/events";
 import {
   buildRemotePrompt,
+  listRemoteSessions,
   redactRemoteText,
   reduceRemoteActivities,
   reduceRemoteMessages,
@@ -29,6 +30,22 @@ function textEnvelope(
 }
 
 describe("remote session projection", () => {
+  it("从 Host 会话列表读取其他正在运行的会话", async () => {
+    const sessions = await listRemoteSessions({
+      dispatch: async (request) => ({
+        jsonrpc: "2.0",
+        id: (request as { id: string }).id,
+        result: {
+          sessions: [
+            { sessionId: "session-a", cwd: "/project", _meta: { "keencode/running": true } },
+            { sessionId: "session-b", cwd: "/project", _meta: { "keencode/running": false } },
+          ],
+        },
+      }),
+    });
+    expect(sessions.map((session) => session.running)).toEqual([true, false]);
+  });
+
   it("附件发送只使用 Host 签发的标准 resource_link", () => {
     expect(buildRemotePrompt("请分析", [{
       resourceId: "resource_1",

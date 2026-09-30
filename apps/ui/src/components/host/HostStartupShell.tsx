@@ -155,7 +155,7 @@ function RemoteWorkspace({
     const current = item.id === remote.selectedSessionId ? remote.current : null;
     const status = remote.pendingAsk && item.id === remote.selectedSessionId
       ? "waiting"
-      : current?.status ?? "idle";
+      : current?.status ?? (item.running ? "running" : "idle");
     const updated = item.updatedAt ? new Date(item.updatedAt) : null;
     const summary = updated && !Number.isNaN(updated.getTime())
       ? `更新于 ${updated.toLocaleString("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })}`

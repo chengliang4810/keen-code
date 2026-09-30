@@ -32,6 +32,8 @@ interface RemoteSessionState {
   lastUserTurnId: string | null;
 }
 
+type RemoteSessionItem = SessionListItem & { running: boolean };
+
 function upsertActivity(
   activities: MobileRemoteActivity[],
   activity: MobileRemoteActivity,
@@ -208,8 +210,8 @@ async function rpcNotify(
   await transport.dispatch({ jsonrpc: "2.0", method, params });
 }
 
-async function listRemoteSessions(transport: HostTransportAdapter): Promise<SessionListItem[]> {
-  const sessions: SessionListItem[] = [];
+export async function listRemoteSessions(transport: HostTransportAdapter): Promise<RemoteSessionItem[]> {
+  const sessions: RemoteSessionItem[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
   do {
@@ -232,9 +234,11 @@ async function listRemoteSessions(transport: HostTransportAdapter): Promise<Sess
       const pinned = item._meta?.["keencode/pinned"];
       const archived = item._meta?.["keencode/archived"];
       const titleSource = item._meta?.["keencode/titleSource"];
+      const running = item._meta?.["keencode/running"];
       if (
         (pinned !== undefined && typeof pinned !== "boolean") ||
         (archived !== undefined && typeof archived !== "boolean") ||
+        (running !== undefined && typeof running !== "boolean") ||
         (titleSource !== undefined &&
           titleSource !== "unspecified" &&
           titleSource !== "manual" &&
@@ -252,6 +256,7 @@ async function listRemoteSessions(transport: HostTransportAdapter): Promise<Sess
         pinned: pinned ?? false,
         archived: archived ?? false,
         titleSource: titleSource ?? "unspecified",
+        running: running === true,
       });
     }
     cursor = page.nextCursor;
@@ -295,7 +300,7 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
   const [connection, setConnection] = useState<MobileRemoteConnection>(
     transport ? "connecting" : "unauthorized",
   );
-  const [sessions, setSessions] = useState<SessionListItem[]>([]);
+  const [sessions, setSessions] = useState<RemoteSessionItem[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [sessionStates, setSessionStates] = useState<Record<string, RemoteSessionState>>({});
   const [pendingAsk, setPendingAsk] = useState<AskUserPayload | null>(null);
@@ -303,7 +308,7 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
   const [restoring, setRestoring] = useState(false);
   const [sending, setSending] = useState(false);
   const selectedRef = useRef<string | null>(null);
-  const sessionsRef = useRef<SessionListItem[]>([]);
+  const sessionsRef = useRef<RemoteSessionItem[]>([]);
   const deliverySequenceRef = useRef(new Map<string, number>());
   const recoveringRef = useRef(new Set<string>());
   const recoveryRef = useRef<(sessionId: string) => Promise<void>>(async () => {});
@@ -330,7 +335,10 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
     setRestoring(true);
     setError(null);
     setPendingAsk((current) => current?.sessionId === sessionId ? null : current);
-    updateSession(sessionId, () => emptySessionState());
+    updateSession(sessionId, () => ({
+      ...emptySessionState(),
+      status: session.running ? "running" : "idle",
+    }));
     try {
       await rpcRequest(transport, "session/load", {
         sessionId,
@@ -338,6 +346,14 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
         mcpServers: [],
         _meta: { "keencode/history": { limit: recovery ? -1 : 100 } },
       });
+      const freshSessions = await listRemoteSessions(transport);
+      sessionsRef.current = freshSessions;
+      setSessions(freshSessions);
+      const running = freshSessions.find((item) => item.id === sessionId)?.running ?? false;
+      updateSession(sessionId, (state) => ({
+        ...state,
+        status: running ? "running" : state.status === "running" ? "idle" : state.status,
+      }));
     } finally {
       recoveringRef.current.delete(sessionId);
       setRestoring(false);
@@ -490,6 +506,23 @@ export function useHostRemoteSession(transport: HostTransportAdapter | null) {
       unsubscribeSnapshot?.();
     };
   }, [handleDelivery, loadSession, transport]);
+
+  useEffect(() => {
+    if (!transport || connection !== "connected") return;
+    const refreshOnFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      void listRemoteSessions(transport).then((nextSessions) => {
+        sessionsRef.current = nextSessions;
+        setSessions(nextSessions);
+      }).catch((cause) => setError(errorMessage(cause)));
+    };
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnFocus);
+    return () => {
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnFocus);
+    };
+  }, [connection, transport]);
 
   const selectSession = useCallback(async (sessionId: string) => {
     selectedRef.current = sessionId;
