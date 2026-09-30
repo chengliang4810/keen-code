@@ -30,6 +30,7 @@ import {
 import {
   createOperationId,
   diagnosticsRecord,
+  performanceRecord,
   type SessionSnapshot as AcpSessionSnapshot,
 } from "@/lib/acp/api";
 import { ensureAcpSession } from "@/lib/acp/projection";
@@ -245,7 +246,7 @@ export function useSessionNavigation({
     if (typeof requestAnimationFrame !== "function") return;
     requestAnimationFrame(() => requestAnimationFrame(() => {
       if (navigationTimingRef.current !== timing) return;
-      void diagnosticsRecord("session_navigation", JSON.stringify({
+      void performanceRecord("session_navigation", JSON.stringify({
         sessionId: timing.sessionId, phase: "first_frame",
         commitMs: Math.round(timing.firstCommit! - timing.started),
         frameMs: Math.round(performance.now() - timing.started),
@@ -466,7 +467,7 @@ export function useSessionNavigation({
           ? { ...projected, state: hostState }
           : projected;
         current.ui.setSession(snapshot);
-        void diagnosticsRecord("session_navigation", JSON.stringify({
+        void performanceRecord("session_navigation", JSON.stringify({
           sessionId: row.id, phase: "ready", cached: cachedView?.replay.loaded === true,
           connectMs: Math.round(connectMs), replayMs: Math.round(replayMs),
           readyMs: Math.round(performance.now() - started),

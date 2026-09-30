@@ -23,7 +23,7 @@ function session(
     updatedAt,
     lastUserMessageAt: updatedAt,
     archived,
-    pinned: false, titleSource: "unspecified" as const,
+    pinned: false, running: false, titleSource: "unspecified" as const,
   };
 }
 

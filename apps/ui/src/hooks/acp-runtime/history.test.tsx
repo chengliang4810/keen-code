@@ -124,6 +124,7 @@ function createHistoryHarness(
   let hookResult: AcpRuntimeHistoryResult | undefined;
   const modelBySessionRef = { current: new Map<string, string>() };
   const setSessionModelReference = vi.fn();
+  const observeHostActiveTurn = vi.fn();
 
   /** 在合法 React 渲染上下文中捕获 Hook 返回的恢复入口。 */
   function Harness() {
@@ -138,6 +139,7 @@ function createHistoryHarness(
       setPlanModeSessionKey,
       modelBySessionRef,
       setSessionModelReference,
+      observeHostActiveTurn,
     });
     return null;
   }
@@ -148,6 +150,7 @@ function createHistoryHarness(
     ...hookResult,
     modelBySessionRef,
     setSessionModelReference,
+    observeHostActiveTurn,
     workspaceRef,
     composer,
     events,
@@ -205,6 +208,20 @@ describe("useAcpRuntimeHistory 的 Plan 模式恢复", () => {
     await harness.connectSession({ sessionId: null, operationId: "op-new" });
     expect(harness.modelBySessionRef.current.get("session-new")).toBe("fix-local::hy3");
     expect(harness.workspaceRef.current.sessions["session-new"]?.replay.loaded).toBe(true);
+  });
+
+  it("恢复成功时用权威快照回填 active turn 观测", async () => {
+    const harness = createHistoryHarness({ sessionId: "session-live", epoch: 1 });
+    const result = loadResult("session-live", "default");
+    const snapshotMeta = result._meta!["keencode/snapshot"] as {
+      activeTurnId: string | null;
+    };
+    snapshotMeta.activeTurnId = "turn-running";
+    apiMocks.sessionLoad.mockResolvedValue(result);
+    await harness.recoverSession("session-live", { sessionId: "session-live", epoch: 1 });
+    expect(harness.observeHostActiveTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: "session-live", activeTurnId: "turn-running" }),
+    );
   });
   beforeEach(() => {
     apiMocks.sessionLoad.mockReset();

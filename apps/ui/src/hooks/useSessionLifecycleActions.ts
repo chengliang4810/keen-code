@@ -264,7 +264,7 @@ export function useSessionLifecycleActions({
         updatedAt: new Date().toISOString(),
         lastUserMessageAt: null,
         archived: false,
-        pinned: false, titleSource: "unspecified" as const,
+        pinned: false, running: false, titleSource: "unspecified" as const,
       };
       const project = row.projectId
         ? current.projects.find((item) => item.id === row.projectId) ?? null

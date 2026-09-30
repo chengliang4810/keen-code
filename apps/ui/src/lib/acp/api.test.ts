@@ -312,6 +312,7 @@ describe("ACP Session 标准 API 映射", () => {
         lastUserMessageAt: null,
         pinned: false,
         archived: false,
+        running: false,
         titleSource: "unspecified",
       },
       {
@@ -322,6 +323,7 @@ describe("ACP Session 标准 API 映射", () => {
         lastUserMessageAt: "2026-09-04T00:00:00Z",
         pinned: false,
         archived: false,
+        running: false,
         titleSource: "unspecified",
       },
     ]);
@@ -345,6 +347,37 @@ describe("ACP Session 标准 API 映射", () => {
 
     await expect(sessionsList()).rejects.toThrow("ACP Session 列表游标未推进");
     expect(clientMocks.acpRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("session/list 的运行中元数据投影为 running 标记", async () => {
+    clientMocks.acpRequest.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: "session-running",
+          cwd: "D:/workspace",
+          _meta: { "keencode/running": true },
+        },
+        {
+          sessionId: "session-idle",
+          cwd: "D:/workspace",
+        },
+      ],
+    });
+    await expect(sessionsList()).resolves.toMatchObject([
+      { id: "session-running", running: true },
+      { id: "session-idle", running: false },
+    ]);
+
+    clientMocks.acpRequest.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: "session-bad",
+          cwd: "D:/workspace",
+          _meta: { "keencode/running": "yes" },
+        },
+      ],
+    });
+    await expect(sessionsList()).rejects.toThrow("ACP Session 列表项运行标记无效");
   });
 
   it("用标准 session/set_config_option 设置模型和推理强度", async () => {

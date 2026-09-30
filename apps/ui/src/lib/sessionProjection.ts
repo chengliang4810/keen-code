@@ -92,6 +92,8 @@ export interface SessionRowView {
   archived: boolean;
   /** Session 是否置顶。 */
   pinned: boolean;
+  /** Session 是否有正在执行的回合；权威 Runtime 状态，供侧栏运行中标记。 */
+  running: boolean;
   /** 当前标题写入来源。 */
   titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }
@@ -144,6 +146,7 @@ export function projectSidebar(
       lastUserMessageAt: session.lastUserMessageAt,
       archived: session.archived,
       pinned: session.pinned,
+      running: session.running,
       titleSource: session.titleSource,
     })),
   };

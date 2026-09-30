@@ -4,11 +4,12 @@ import { afterEach, expect, it, vi } from "vitest";
 import { useSessionNavigation, type UseSessionNavigationOptions } from "./useSessionNavigation";
 import { createAcpWorkspaceState } from "@/lib/acp/store";
 import { IDLE_SNAPSHOT } from "@/lib/session";
-import { diagnosticsRecord } from "@/lib/acp/api";
+import { performanceRecord } from "@/lib/acp/api";
 
 vi.mock("@/lib/acp/api", async (original) => ({
   ...await original<typeof import("@/lib/acp/api")>(),
   diagnosticsRecord: vi.fn().mockResolvedValue(undefined),
+  performanceRecord: vi.fn().mockResolvedValue(undefined),
 }));
 
 function createHarness() {
@@ -63,7 +64,7 @@ it("从备用模型会话新建草稿时恢复保存的主模型，保留原会�
 it("连续导航隔离两会话草稿、附件和失败气泡，迟到恢复不清空新输入", async () => {
   vi.stubGlobal("window", {});
   const { navigation, options } = createHarness();
-  const row = (id: string) => ({ id, title: id, projectId: null, updatedAt: "", lastUserMessageAt: null, archived: false, pinned: false, titleSource: "unspecified" as const });
+  const row = (id: string) => ({ id, title: id, projectId: null, updatedAt: "", lastUserMessageAt: null, archived: false, pinned: false, running: false, titleSource: "unspecified" as const });
   const file = { path: "D:/cart/a.txt", name: "a.txt", isDir: false };
   options.composer.draftRef.current = "CART";
   options.composer.attachmentsRef.current = [file];
@@ -83,7 +84,7 @@ it("连续导航隔离两会话草稿、附件和失败气泡，迟到恢复不�
   const finishDashboard = finish;
   options.runtime.connect = vi.fn().mockResolvedValue({ sessionId: "hy4-session", state: "ready" });
   await navigation.openSession(row("hy4-session"));
-  expect(diagnosticsRecord).toHaveBeenCalledWith("session_navigation", expect.stringContaining('"phase":"ready"'));
+  expect(performanceRecord).toHaveBeenCalledWith("session_navigation", expect.stringContaining('"phase":"ready"'));
   expect(options.composer.draftRef.current).toBe("CART");
   expect(options.composer.attachmentsRef.current).toEqual([file]);
   finishDashboard({ sessionId: "dashboard", state: "ready" } as Awaited<ReturnType<typeof options.runtime.connect>>);

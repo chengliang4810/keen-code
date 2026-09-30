@@ -50,6 +50,7 @@ import * as api from "@/lib/api";
 import { type ViewFocus } from "@/lib/viewFocus";
 import {
   busySessionIds,
+  fillAuthoritativeBusyIds,
   type SessionLiveMap,
 } from "@/lib/sessionLiveStore";
 import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
@@ -775,14 +776,20 @@ export default function App() {
   /**
    * 多会话忙碌标识，用于侧栏运行中状态。
    * Uses liveMap projection + liveHost fallback. Excludes connecting.
+   * 崩溃恢复或未重新连接的后台会话没有 live 投影，由 session/list 的权威
+   * running 元数据补齐；已有 live 投影的会话以 live 状态为准。
    */
+  const runningSessionIds = useMemo(
+    () => new Set(sessions.filter((session) => session.running).map((session) => session.id)),
+    [sessions],
+  );
   const busyIds = useMemo(() => {
-    const set = busySessionIds(liveMap);
+    const set = fillAuthoritativeBusyIds(busySessionIds(liveMap), liveMap, runningSessionIds);
     if (liveHost.sessionId && isSessionLiveStreaming(liveHost.state)) {
       set.add(liveHost.sessionId);
     }
     return set;
-  }, [liveMap, liveHost.sessionId, liveHost.state]);
+  }, [liveMap, liveHost.sessionId, liveHost.state, runningSessionIds]);
   /** 轨迹台账的数据源：内存缓存优先，其次通过标准 Session 恢复链重建。 */
   const loadTrajectoryMessages = useCallback(
     async (id: string): Promise<ChatMessage[]> => {

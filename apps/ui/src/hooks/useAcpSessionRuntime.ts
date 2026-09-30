@@ -10,6 +10,7 @@ import { useAcpRuntimeProjection } from "./acp-runtime/projection";
 import { useAcpRuntimeTaskCache } from "./acp-runtime/taskCache";
 import { useAcpRuntimeTurnMetrics } from "./acp-runtime/turnMetrics";
 import { invalidateSessionContextUsage } from "@/lib/contextUsage";
+import { reconcileHostActiveTurnSnapshot } from "@/lib/activeTurn";
 
 export type {
   UseAcpSessionRuntimeOptions,
@@ -120,6 +121,16 @@ export function useAcpSessionRuntime(
     modelBySessionRef,
     setSessionModelReference,
     applyHostConfigOptions,
+    // 恢复成功时用同一组 ref 回填权威 active turn，口径与发送/连接路径一致。
+    observeHostActiveTurn: (snapshot) => {
+      reconcileHostActiveTurnSnapshot(snapshot, {
+        turnLatencyBySession: turnLatencyBySessionRef.current,
+        activeTurnIdBySession: activeTurnIdBySessionRef.current,
+        recoverableCompletedTurnIdBySession:
+          recoverableCompletedTurnIdBySessionRef.current,
+        completedTurnIdBySession: completedTurnIdBySessionRef.current,
+      });
+    },
   });
 
   useAcpRuntimeEvents({

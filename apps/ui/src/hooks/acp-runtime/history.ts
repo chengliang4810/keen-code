@@ -65,6 +65,14 @@ export interface AcpRuntimeHistoryOptions {
   setSessionModelReference: (reference: string) => void;
   /** 将恢复/新建返回的 Host 配置目录交给统一 Composer 投影。 */
   applyHostConfigOptions?: (options: SessionConfigOption[], sessionId?: string) => void;
+  /**
+   * 恢复成功时用权威快照回填易失 active turn 关联；页面重载后恢复路径是
+   * 唯一重新得知"该 Session 仍有运行回合"的机会，缺失会导致运行状态丢失。
+   */
+  observeHostActiveTurn?: (snapshot: {
+    sessionId?: string | null;
+    activeTurnId?: string | null;
+  }) => void;
 }
 
 /** 一次恢复公开的两个入口。 */
@@ -95,6 +103,7 @@ export function useAcpRuntimeHistory({
   modelBySessionRef,
   setSessionModelReference,
   applyHostConfigOptions,
+  observeHostActiveTurn,
 }: AcpRuntimeHistoryOptions): AcpRuntimeHistoryResult {
   /** 每个 Session 当前唯一恢复任务。 */
   const recoveryBySessionRef = useRef(new Map<string, Promise<void>>());
@@ -294,6 +303,9 @@ export function useAcpRuntimeHistory({
             throw new Error("Session 恢复 Goal 快照修订号落后");
           }
           if (!isCurrentProjection()) throw new Error("Session 恢复 Goal 投影已替换");
+          // 恢复接受的权威快照携带 Host 当前活跃回合；不回填会让恢复后的
+          // 会话丢失运行中状态，且回合作用域事件无法路由。
+          observeHostActiveTurn?.(snapshot);
           completeSessionRecovery(current);
           current.replay.hasMore = page.hasMore;
           publish();

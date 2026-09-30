@@ -2,7 +2,6 @@ import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 
 import type { Project, SessionRow } from "@/features/app/models";
 import { Button } from "@/components/ui/button";
 import { Tip } from "@/components/ui/tooltip";
-import { Spinner } from "@appica/ui-react/spinner";
 import { Badge } from "@appica/ui-react/badge";
 import { TaskTitleOverflowText } from "@/components/TaskTitleOverflowText";
 import type { UnreadTerminalResult } from "@/lib/sessionCompletion";
@@ -28,7 +27,6 @@ interface SidebarSessionRowProps extends SidebarSessionActions {
   project: Project | null;
   activeSessionId: string | null;
   working: boolean;
-  loading?: boolean;
   unreadResult: UnreadTerminalResult | null;
   needsInput: boolean;
   variant: SidebarSessionRowVariant;
@@ -61,7 +59,6 @@ export function SidebarSessionRow({
   project,
   activeSessionId,
   working,
-  loading = false,
   unreadResult,
   needsInput,
   variant,
@@ -168,13 +165,19 @@ export function SidebarSessionRow({
     >
       {/* 状态槽固定在左侧；动作显隐和 metadata 隐藏不能让状态消失。 */}
       <span className="tree-l3__leading tree-l3__kind">
-        {working || loading ? (
+        {working ? (
           <Tip label={tr("sidebar.sessionWorking")}>
             <span
-              className="tree-l3__status tree-l3__status--loading"
+              className="tree-l3__status tree-l3__status--working"
+              role="status"
               aria-label={tr("sidebar.sessionWorking")}
             >
-              <Spinner currentColor className="tree-l3__spinner text-sm" />
+              {/* 三点跳动表示 Agent 正在推进；纯装饰，状态语义由上面的 aria-label 承担。 */}
+              <span className="tree-l3__working-dots" aria-hidden>
+                <span className="tree-l3__working-dot" />
+                <span className="tree-l3__working-dot" />
+                <span className="tree-l3__working-dot" />
+              </span>
             </span>
           </Tip>
         ) : unreadResult ? (

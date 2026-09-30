@@ -22,10 +22,13 @@ describe("SidebarSessionRow metadata and actions", () => {
       source.indexOf('className="tree-l3__leading tree-l3__kind"'),
       source.indexOf('className="tree-l3__title"'),
     );
-    expect(leading).toContain("working || loading");
+    // 运行中只看 working：恢复历史的 connecting 属于对话区的加载语义，
+    // 不能借侧栏“工作中”图标短暂闪现。
+    expect(leading).toContain("{working ? (");
+    expect(leading).not.toContain("loading");
     expect(leading).toContain("unreadResult ?");
     expect(leading).toContain("session.pinned ?");
-    expect(leading.indexOf("working || loading")).toBeLessThan(
+    expect(leading.indexOf("{working ? (")).toBeLessThan(
       leading.indexOf("unreadResult ?"),
     );
     expect(leading.indexOf("unreadResult ?")).toBeLessThan(
@@ -41,9 +44,51 @@ describe("SidebarSessionRow metadata and actions", () => {
 
     const metadata = source.slice(source.indexOf('className="tree-l3__meta"'));
     expect(metadata).toContain("relativeTime ?");
-    expect(metadata).not.toContain("working || loading");
+    expect(metadata).not.toContain("{working ? (");
     expect(metadata).not.toContain("unreadResult ?");
     expect(metadata).not.toContain("needsInput ?");
+  });
+
+  it("运行中使用三点跳动动效，并提供无障碍标签与 reduced-motion 降级", () => {
+    const working = source.slice(
+      source.indexOf('className="tree-l3__status tree-l3__status--working"'),
+      source.indexOf(") : unreadResult ? ("),
+    );
+    // role=status 挂在带 aria-label 的槽上，装饰性圆点自身对读屏隐藏。
+    expect(working).toContain('role="status"');
+    expect(working).toContain('aria-label={tr("sidebar.sessionWorking")}');
+    expect(working).toContain('className="tree-l3__working-dots" aria-hidden');
+    expect(working.match(/tree-l3__working-dot"/g)).toHaveLength(3);
+    expect(source).not.toContain("tree-l3__spinner");
+
+    // 着色来自 --working 修饰类，避免动效换掉后丢失 accent 色。
+    expect(foundationCss).toMatch(
+      /\.tree-l3__status--working \{[\s\S]*?color:\s*var\(--accent/,
+    );
+    expect(foundationCss).not.toMatch(/tree-l3__status--loading/);
+    expect(foundationCss).toMatch(
+      /\.tree-l3__working-dot \{[\s\S]*?animation:\s*tree-l3-working-bounce/,
+    );
+    expect(foundationCss).toMatch(
+      /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.tree-l3__working-dot \{[\s\S]*?animation:\s*none;/,
+    );
+  });
+
+  it("四个会话列表都只按 busyIds 判定运行中，不再传入恢复态 loading", () => {
+    for (const file of [
+      "./ProjectTree.tsx",
+      "./HistorySessionList.tsx",
+      "./PinnedSessionList.tsx",
+      "./ArchivedSessionList.tsx",
+    ]) {
+      const listSource = readFileSync(
+        new URL(file, import.meta.url),
+        "utf8",
+      );
+      expect(listSource).toContain("working={busyIds.has(item.id)}");
+      expect(listSource).not.toContain("loading={");
+      expect(listSource).not.toContain('session.state === "connecting"');
+    }
   });
 
   it("长标题使用渐隐和延迟走马灯，右侧 metadata 不固定占用标题宽度", () => {

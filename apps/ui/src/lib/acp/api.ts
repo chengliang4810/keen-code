@@ -121,6 +121,8 @@ export interface SessionListItem {
   pinned: boolean;
   /** 用户归档标记；权威 Journal 状态经 `_meta` 投影。 */
   archived: boolean;
+  /** 会话是否有正在执行的回合；权威 Runtime 状态经 `_meta` 投影。 */
+  running: boolean;
   /** 当前标题写入来源；约束自动标题不覆盖手动标题。 */
   titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }
@@ -544,6 +546,10 @@ export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
       if (archived !== undefined && typeof archived !== "boolean") {
         throw new Error("ACP Session 列表项归档标记无效");
       }
+      const running = item._meta?.["keencode/running"];
+      if (running !== undefined && typeof running !== "boolean") {
+        throw new Error("ACP Session 列表项运行标记无效");
+      }
       const titleSource = item._meta?.["keencode/titleSource"];
       if (
         titleSource !== undefined &&
@@ -562,6 +568,7 @@ export async function sessionsList(cwd?: string): Promise<SessionListItem[]> {
         lastUserMessageAt: lastUserMessageAt ?? null,
         pinned: pinned ?? false,
         archived: archived ?? false,
+        running: running ?? false,
         titleSource: titleSource ?? "unspecified",
       });
     }

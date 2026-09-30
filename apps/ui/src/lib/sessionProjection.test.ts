@@ -26,6 +26,7 @@ describe("sessionProjection", () => {
         lastUserMessageAt: null,
         pinned: false,
         archived: false,
+        running: false,
         titleSource: "unspecified",
       },
       {
@@ -36,6 +37,7 @@ describe("sessionProjection", () => {
         lastUserMessageAt: null,
         pinned: false,
         archived: false,
+        running: false,
         titleSource: "unspecified",
       },
       {
@@ -46,6 +48,7 @@ describe("sessionProjection", () => {
         lastUserMessageAt: null,
         pinned: false,
         archived: false,
+        running: false,
         titleSource: "unspecified",
       },
     ]);
@@ -71,6 +74,7 @@ describe("sessionProjection", () => {
           lastUserMessageAt: null,
           pinned: true,
           archived: true,
+          running: true,
           titleSource: "manual",
         },
       ],
@@ -90,6 +94,7 @@ describe("sessionProjection", () => {
       updatedAt: "2026-08-01T00:00:00Z",
       archived: true,
       pinned: true,
+      running: true,
       titleSource: "manual",
     });
     expect(projection.sessions[0]).not.toHaveProperty("scheduled");
@@ -106,6 +111,7 @@ describe("sessionProjection", () => {
           lastUserMessageAt: null,
           pinned: false,
           archived: false,
+          running: false,
           titleSource: "unspecified",
         },
       ],

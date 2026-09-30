@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   busySessionIds,
   emptyLiveSnapshot,
+  fillAuthoritativeBusyIds,
   inferTurnProgressFromMessages,
   isSessionLiveBusy,
   markSawModelOutput,
@@ -33,6 +34,28 @@ describe("sessionLiveStore", () => {
     expect(busy.has("b")).toBe(true);
     expect(busy.has("c")).toBe(false);
     expect(isSessionLiveBusy(map, "a")).toBe(true);
+  });
+
+  it("权威 running 元数据只补齐没有 live 投影的会话", () => {
+    let map = {};
+    map = projectHostIntoLiveMap(map, {
+      sessionId: "live-idle",
+      state: "ready",
+    });
+    map = projectHostIntoLiveMap(map, {
+      sessionId: "live-busy",
+      state: "streaming",
+    });
+
+    const busy = fillAuthoritativeBusyIds(busySessionIds(map), map, new Set([
+      "recovered-running",
+      "live-idle",
+      "live-busy",
+    ]));
+    // 未连接的运行中会话由权威元数据补齐；已有 live 投影的会话以 live 为准。
+    expect(busy.has("recovered-running")).toBe(true);
+    expect(busy.has("live-busy")).toBe(true);
+    expect(busy.has("live-idle")).toBe(false);
   });
 
   it("clears live tool when host leaves streaming", () => {

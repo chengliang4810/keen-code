@@ -15,6 +15,8 @@ export interface SessionRow {
   archived: boolean;
   /** Pinned chats float to the top of the sidebar */
   pinned: boolean;
+  /** 是否有正在执行的回合；权威 Runtime 状态经 session/list 投影，驱动侧栏运行中标记。 */
+  running: boolean;
   /** 当前标题写入来源；权威 Journal 状态投影，约束自动标题不覆盖手动标题。 */
   titleSource: "unspecified" | "manual" | "automatic" | "message-prefix";
 }

@@ -260,6 +260,22 @@ export function busySessionIds(map: SessionLiveMap): Set<string> {
   return out;
 }
 
+/**
+ * 用权威运行中会话补齐侧栏忙碌标记：页面重载或崩溃恢复后，尚未重新连接的
+ * 后台会话没有 live 投影，只有 session/list 的 running 元数据可用；已有
+ * live 投影的会话以 live 状态为准，避免过期元数据留下假运行中标记。
+ */
+export function fillAuthoritativeBusyIds(
+  busy: Set<string>,
+  map: SessionLiveMap,
+  runningIds: ReadonlySet<string>,
+): Set<string> {
+  for (const sessionId of runningIds) {
+    if (!(sessionId in map)) busy.add(sessionId);
+  }
+  return busy;
+}
+
 export function isSessionLiveBusy(
   map: SessionLiveMap,
   sessionId: string | null | undefined,

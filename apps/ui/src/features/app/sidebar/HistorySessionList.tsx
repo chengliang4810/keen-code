@@ -99,7 +99,6 @@ export function HistorySessionList({
               project={null}
               activeSessionId={session.sessionId}
               working={busyIds.has(item.id)}
-              loading={session.sessionId === item.id && session.state === "connecting"}
               unreadResult={unreadTerminalResults.get(item.id) ?? null}
               needsInput={pendingAskUserSessionIds.has(item.id)}
               variant="history"
