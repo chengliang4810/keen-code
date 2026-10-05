@@ -1,0 +1,46 @@
+{
+  "deliveryKind": "online",
+  "frame": {
+    "fromSeq": 8,
+    "payload": {
+      "deltas": [
+        {
+          "op": "row.upserted",
+          "row": {
+            "actions": {
+              "canFork": true,
+              "canRetry": true
+            },
+            "assistantResponseId": "contract-assistant-message",
+            "createdAt": 4197,
+            "createdAtSeq": 4097,
+            "entityId": "contract-assistant-message",
+            "kind": "assistantText",
+            "rowId": 4097,
+            "state": "streaming",
+            "text": "contract response",
+            "turnId": "contract-turn",
+            "visibility": "visible"
+          }
+        },
+        {
+          "append": " stream",
+          "op": "row.delta",
+          "path": "text",
+          "rowId": 4097
+        }
+      ],
+      "kind": "deltas"
+    },
+    "sentAt": 124,
+    "subscriptionId": "contract-subscription",
+    "toSeq": 9,
+    "topic": "conversation/contract-session"
+  },
+  "kind": "complete",
+  "logicalFrameId": "contract-subscription:2",
+  "logicalFrameOrdinal": 2,
+  "subscriptionId": "contract-subscription",
+  "topic": "conversation/contract-session",
+  "wireVersion": 3
+}

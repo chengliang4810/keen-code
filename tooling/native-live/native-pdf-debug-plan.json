@@ -1,0 +1,176 @@
+{
+  "name": "native-live-pptx-pdf-debug",
+  "description": "Native42 PDF 失败诊断计划：保留真实 PPTX 预览和导出按钮，只增加受限 CSP/打印媒体 probe。probe 不读取正文、provider 或路径，不替换一页断言。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "PPTX/PDF 原生验收隔离项目基线\n"
+  },
+  "binaryFixtures": [
+    {
+      "source": "tooling/native-live/fixtures/native-live-presentation.pptx",
+      "target": "native-live-presentation.pptx",
+      "sha256": "1FD0C603AD3EC120BCAFECD9EA621621BCCF087B9C95EF82F7B373DA24623724",
+      "sha256Algorithm": "sha256",
+      "copy": "binary",
+      "verify": "source-before-copy-and-target-after-copy",
+      "format": "ooxml-pptx",
+      "required": true
+    }
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button')",
+      "description": "隔离新配置进入首次启动引导"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成职业选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('UI 模式') || document.body.innerText.includes('UI mode'))",
+      "description": "进入 UI 模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成模式选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('按需开启以下功能') || document.body.innerText.includes('Enable the features you need') || document.body.innerText.includes('助手偏好'))",
+      "description": "进入首次启动偏好确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "保存首次启动设置"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示 Source 项目操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏显示 workspace 文件树入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦当前 workspace 挂载文件树入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开当前 workspace 文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')",
+      "timeoutMs": 30000,
+      "description": "文件树面板已挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('native-live-presentation.pptx')",
+      "timeoutMs": 30000,
+      "description": "从文件树发现预置的真实 OOXML PPTX 夹具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$=\"native-live-presentation.pptx\"]",
+      "description": "从文件树打开真实 PPTX 预览"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"preview-pane\"]') && !!document.querySelector('[data-zcode-pptx-render-surface=\"true\"]')",
+      "timeoutMs": 60000,
+      "description": "PPTX 真实 render surface 挂载"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"preview-pane\"]')?.innerText.includes('NATIVE_PPTX_FIXTURE_42')",
+      "description": "预览内容来自真实 PPTX XML marker"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]') && !document.querySelector('[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]')?.hasAttribute('disabled')",
+      "timeoutMs": 30000,
+      "description": "Source 仅在 native print/save capability 可用时显示 PDF 导出按钮"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const old=window.__zcodePdfDebug; old?.dispose?.(); const records=[]; const redactCsp=(value)=>String(value||'').replace(/nonce-[^'\\s;]+/gi,'nonce-<redacted>').replace(/sha(?:256|384|512)-[^'\\s;]+/gi,'sha-<redacted>'); const csp=()=>[...document.querySelectorAll('meta[http-equiv]')].filter(e=>String(e.httpEquiv).toLowerCase()==='content-security-policy').map(e=>redactCsp(e.content)); const snapshot=(phase)=>{ const style=document.querySelector('[data-zcode-pptx-print-style]'); const host=document.querySelector('[data-zcode-pptx-print-host]'); let sheetAccessible=false,ruleCount=0,hasPrint=false,hasPage=false,stylesheetError; try { const rules=style?.sheet?.cssRules; sheetAccessible=!!rules; ruleCount=rules?.length??0; for(const rule of rules??[]) { const text=String(rule.cssText||''); if(text.includes('@media print')||rule.conditionText==='print') hasPrint=true; if(text.includes('@page')) hasPage=true; } } catch(error) { stylesheetError=error?.name||'stylesheet_error'; } const computed=host?getComputedStyle(host):null; const rect=host?.getBoundingClientRect(); records.push({kind:'snapshot',phase,mediaPrint:matchMedia('(print)').matches,stylePresent:!!style,hostPresent:!!host,styleSheetAccessible:sheetAccessible,ruleCount,hasPrintRule:hasPrint,hasPageRule:hasPage,stylesheetError:stylesheetError||null,hostStyle:computed?{position:computed.position,transform:computed.transform,display:computed.display,visibility:computed.visibility,zIndex:computed.zIndex,width:rect?.width??0,height:rect?.height??0}:null,csp:csp()}); if(records.length>32) records.shift(); }; const onViolation=(event)=>{ records.push({kind:'securitypolicyviolation',blockedURI:String(event.blockedURI||''),violatedDirective:String(event.violatedDirective||''),effectiveDirective:String(event.effectiveDirective||'')}); }; const onBefore=()=>snapshot('beforeprint'); const onAfter=()=>snapshot('afterprint'); const observer=new MutationObserver((mutations)=>{ if(mutations.some(m=>[...m.addedNodes,...m.removedNodes].some(node=>node.nodeType===1&&((node.matches?.('[data-zcode-pptx-print-style]'))||(node.matches?.('[data-zcode-pptx-print-host]')))))) snapshot('mutation'); }); addEventListener('securitypolicyviolation',onViolation); addEventListener('beforeprint',onBefore); addEventListener('afterprint',onAfter); observer.observe(document.documentElement,{childList:true,subtree:true}); window.__zcodePdfDebug={records,capture:()=>snapshot('probe'),dispose:()=>{removeEventListener('securitypolicyviolation',onViolation);removeEventListener('beforeprint',onBefore);removeEventListener('afterprint',onAfter);observer.disconnect();}}; snapshot('setup'); })()"
+    },
+    {
+      "action": "click",
+      "selector": "[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]",
+      "description": "通过真实 PPTX Preview UI 触发 native print-to-PDF"
+    },
+    {
+      "action": "wait",
+      "expression": "document.body.innerText.includes('PDF 已保存到') || document.body.innerText.includes('PDF saved to') || document.body.innerText.includes('PDF 导出失败') || document.body.innerText.includes('Failed to export PDF')",
+      "timeoutMs": 60000,
+      "description": "等待 Source 对真实 native print/save 返回结果作出可见反馈"
+    },
+    {
+      "action": "pageProbe",
+      "name": "pdf-print-debug-probe",
+      "expression": "(() => { const state=window.__zcodePdfDebug; state?.capture?.(); return {records:state?.records??[],runtimeCspMeta:[...document.querySelectorAll('meta[http-equiv]')].filter(e=>String(e.httpEquiv).toLowerCase()==='content-security-policy').map(e=>String(e.content||'').replace(/nonce-[^'\\s;]+/gi,'nonce-<redacted>').replace(/sha(?:256|384|512)-[^'\\s;]+/gi,'sha-<redacted>'))}; })()",
+      "description": "只读保存 CSP、打印 style/cssRules、媒体状态和 host 计算样式"
+    },
+    {
+      "action": "screenshot",
+      "name": "native-pptx-pdf-debug-result",
+      "description": "保存真实按钮执行后的 renderer 状态，不替代 PDF 字节验收"
+    },
+    {
+      "action": "pdfValidate",
+      "name": "native-pptx-pdf-bytes",
+      "path": "${DATA}/exports/native-live-presentation.pdf",
+      "expectedPageCount": 1,
+      "expectedPageWidthPoints": 960,
+      "expectedPageHeightPoints": 540,
+      "pageSizeTolerancePoints": 0.02,
+      "captureSha256As": "native-live-presentation-pdf-sha256",
+      "minBytes": 1,
+      "requireHeader": "%PDF-",
+      "requireEof": "%%EOF",
+      "requireCrossReference": true,
+      "description": "保持原计划的一页 PDF 断言；不得因 debug 降低期望"
+    }
+  ]
+}

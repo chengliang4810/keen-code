@@ -11,6 +11,56 @@ import {
   writeTauriReleaseConfig,
 } from "./release-version.mjs";
 
+function usesWindowsWslBash() {
+  if (process.platform !== "win32") {
+    return false;
+  }
+  try {
+    const firstBash = execFileSync("where.exe", ["bash"], {
+      encoding: "utf8",
+    })
+      .split(/\r?\n/)
+      .map((path) => path.trim())
+      .find(Boolean);
+    return /[\\/]Windows(?:[\\/]System32|Apps)[\\/]bash\.exe$/i.test(firstBash ?? "");
+  } catch {
+    return false;
+  }
+}
+
+function wslPath(path) {
+  const drivePath = /^([A-Za-z]):[\\/](.*)$/.exec(path);
+  if (!drivePath) {
+    return path.replaceAll("\\", "/");
+  }
+  return `/mnt/${drivePath[1].toLowerCase()}/${drivePath[2].replaceAll("\\", "/")}`;
+}
+
+function shellQuote(value) {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function runBashScript(script, environment) {
+  if (!usesWindowsWslBash()) {
+    return execFileSync("bash", ["-eu", "-c", script], {
+      env: { ...process.env, ...environment },
+    });
+  }
+
+  // Windows 的 bash.exe 是 WSL 启动器：它不会透传本测试的临时环境变量，
+  // 还会在外层 shell 展开 -c 参数中的 `$`。显式导出 WSL 路径并延迟一层
+  // 展开，才能让同一份工作流脚本在 Windows 与 Linux 上执行同样的断言。
+  const exports = Object.entries(environment)
+    .map(([name, value]) => {
+      const normalized = name === "RUNNER_TEMP" || name === "GITHUB_OUTPUT"
+        ? wslPath(value)
+        : value;
+      return `export ${name}=${shellQuote(normalized)}`;
+    })
+    .join("\n");
+  return execFileSync("bash", ["-eu", "-c", `${exports}\n${script.replaceAll("$", "\\$")}`]);
+}
+
 test("prepares one release ID and reuses it for every matrix job and rerun", async () => {
   // Windows Git 检出为 CRLF 时，先统一换行再提取 Bash 脚本。
   const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replaceAll("\r\n", "\n");
@@ -40,16 +90,13 @@ test("prepares one release ID and reuses it for every matrix job and rerun", asy
     `;
     const output = join(directory, "output");
     for (let attempt = 0; attempt < 2; attempt++) {
-      execFileSync("bash", ["-eu", "-c", `${mock}\n${script}`], {
-        env: {
-          ...process.env,
-          RUNNER_TEMP: directory.replaceAll("\\", "/"),
-          GITHUB_OUTPUT: output.replaceAll("\\", "/"),
-          GITHUB_REPOSITORY: "example/keencode",
-          GITHUB_SHA: "abcdef0",
-          RELEASE_TAG: "v20260907-abcdef0",
-          RELEASE_NAME: "KeenCode test",
-        },
+      runBashScript(`${mock}\n${script}`, {
+        RUNNER_TEMP: directory,
+        GITHUB_OUTPUT: output,
+        GITHUB_REPOSITORY: "example/keencode",
+        GITHUB_SHA: "abcdef0",
+        RELEASE_TAG: "v20260907-abcdef0",
+        RELEASE_NAME: "KeenCode test",
       });
     }
     assert.equal(readFileSync(output, "utf8"), "release_id=12345\nrelease_id=12345\n");

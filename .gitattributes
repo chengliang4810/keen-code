@@ -3,3 +3,6 @@
 packages/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 apps/ui/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
 third-party/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# 原生验收计划和 PowerShell 脚本保留 Windows 行尾，并继续检查真实空白错误。
+tooling/native-live/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+tooling/scripts/*.ps1 -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

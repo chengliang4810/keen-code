@@ -1,0 +1,459 @@
+{
+  "name": "native-live-selection-side-rewind",
+  "description": "通过原生 WebView2 UI 验证 selection side session 与文件撤销的真实 Rust 路由、CAS、快照恢复和冷启动不重放；不注入状态、不直接调用 RPC。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "原生验收初始内容\n",
+    "NATIVE_REWIND.txt": "NATIVE_REWIND_BEFORE_OK\n"
+  },
+  "coverage": [
+    {
+      "id": "selection-side-session",
+      "status": "covered",
+      "testIds": [
+        "side-pane-toggle",
+        "side-pane-open-tab-item=selection-side-conversation",
+        "side-pane-add-tab-trigger",
+        "side-pane-add-item=selection-side-conversation",
+        "data-side-pane-tab-id^=selection-side-chat:",
+        "v4-composer-input",
+        "v4-composer-send"
+      ],
+      "notes": "通过原生侧栏入口创建真实子 Session，在 active side pane 中发送真实模型请求并读取回复。"
+    },
+    {
+      "id": "selection-side-exact-scope",
+      "status": "native-observer-ready",
+      "testIds": [
+        "side-pane-open-tab-item=selection-side-conversation",
+        "data-side-pane-tab-id^=selection-side-chat:",
+        "role=tabpanel[data-state=active]",
+        "journalWait captureSessionAs=selection-side-session"
+      ],
+      "notes": "packages/ui 的 focused opener 测试覆盖 workspaceKey + parentSessionId 精确键、pending opener 重放和无关 workspace 隔离；原生计划在 active side tab 发送后，读取父 Journal 的 session:<parentSessionId> 作用域 createSelectionSideSession 完成收据、ACK 返回的 child sessionId，以及父/子 Journal 唯一 session_created.project_root，三者必须绑定到当前捕获的父/子 Session 和隔离项目。报告的 selectionSideIdentities 只保存身份与布尔结果，不保存原始路径。"
+    },
+    {
+      "id": "file-rewind",
+      "status": "covered",
+      "testIds": [
+        "v4-composer-input",
+        "v4-composer-send",
+        "button[title=\"撤销\"]",
+        "dialog-footer",
+        "data-permission-option-kind=allowOnce"
+      ],
+      "notes": "模型使用真实 Write/Edit 工具修改隔离项目文件；文件摘要预览、确认撤销、CAS 写回和磁盘正文均由 UI/Journal 证明。"
+    },
+    {
+      "id": "cold-recovery-no-repeat",
+      "status": "covered",
+      "testIds": [
+        "journalCapture",
+        "restart",
+        "journalUnchanged"
+      ],
+      "notes": "重启同一隔离 data 根后比较权威 turn_completed 摘要，确认 side 请求和写文件回合没有被冷恢复重放。"
+    }
+  ],
+  "knownGaps": [
+    "当前固定 binary 不包含最新 PTY exit watcher；本计划只把 PTY 当作已有前端/模型链路的依赖，不将其退出行为记为本计划通过项。",
+    "Rust 当前没有名为 ChildSessionLaunched/ChildSessionStarted 的 selection-side 事件；实际权威链是父 Session 的 createSelectionSideSession CommandReceipt 与 child Session 的 SessionCreated。该计划不把 UI tab id 当作会话身份，native observer 会对这条实际链做关联断言；跨 workspace 的 opener 路由仍由 selectionSideChatRuntime focused tests 覆盖。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区以显示真实新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "打开文件夹",
+        "Open folder"
+      ],
+      "exact": true,
+      "description": "从原生菜单选择本次隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实项目 Session 和 Composer 已建立"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实模型选择器完成加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开聊天模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 分组真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开真实 provider 模型分组"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "等待完整 custom model item ID"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离 provider 的真实模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "模型选择回写聊天工具栏"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭已选择模型的原菜单，恢复Composer真实交互焦点"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "使用真实 Write 或 Edit 工具，只修改当前隔离项目根的 NATIVE_REWIND.txt，将正文改为 NATIVE_REWIND_AFTER_OK，然后读取该文件确认内容。不要修改其他文件，不要使用 Bash。最后回复 NATIVE_REWIND_WRITE_OK。",
+      "description": "请求真实文件工具写入撤销夹具"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-rewind-tool",
+      "eventType": "tool_requested",
+      "captureEventSequence": true,
+      "description": "固定文件工具发送前各 Session 的 Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送真实文件修改请求"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-permission-option-kind=\"allowOnce\"][data-permission-request-id]') && !!document.querySelector('[data-permission-option-kind=\"rejectOnce\"][data-permission-request-id]')",
+      "timeoutMs": 120000,
+      "description": "真实文件工具权限选项和 interactionId 已挂载"
+    },
+    {
+      "action": "file",
+      "path": "NATIVE_REWIND.txt",
+      "contains": "NATIVE_REWIND_BEFORE_OK",
+      "description": "权限卡片可见且尚未确认时基线文件仍未被修改"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-rewind-allow-receipt",
+      "eventType": "command_receipt_committed",
+      "capturePermissionInteraction": true,
+      "description": "记录本次文件工具 allowOnce interactionId 与既有收据"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestContains": "NATIVE_REWIND.txt",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-rewind-tool",
+      "captureSessionAs": "rewind-tool-session",
+      "timeoutMs": 120000,
+      "approvePermissions": true,
+      "description": "基线文件与待审批身份确认后批准权限，再核验进入执行门的真实工具请求"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_execution_started",
+      "requestContains": "NATIVE_REWIND.txt",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-rewind-tool",
+      "sessionEqualsCaptured": "rewind-tool-session",
+      "timeoutMs": 120000,
+      "approvePermissions": true,
+      "description": "真实文件工具执行开始并经过权限门"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_REWIND_WRITE_OK')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "真实模型回合完成并显示写入结果"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "通过真实鼠标展开撤销任务所在项目分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 30000,
+      "description": "等待文件写入任务的持久任务行挂载"
+    },
+    {
+      "action": "captureTask",
+      "name": "rewindTask",
+      "selector": "[data-testid^=\"task-item-\"]",
+      "description": "捕获本次文件撤销任务的稳定 Source 行身份，供冷启动后重新打开"
+    },
+    {
+      "action": "file",
+      "path": "NATIVE_REWIND.txt",
+      "contains": "NATIVE_REWIND_AFTER_OK",
+      "description": "隔离项目磁盘正文已被真实工具修改"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "requestContains": "NATIVE_REWIND.txt",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-rewind-tool",
+      "sessionEqualsCaptured": "rewind-tool-session",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "timeoutMs": 120000,
+      "description": "确认真实文件工具以成功结果写入权威 Journal"
+    },
+    {
+      "action": "journal",
+      "eventType": "command_receipt_committed",
+      "receiptCommandType": "resolveInteraction",
+      "receiptStatus": "completed",
+      "receiptOptionId": "allowOnce",
+      "receiptAckStatus": "accepted",
+      "sessionEqualsCaptured": "rewind-tool-session",
+      "receiptNewSince": "before-rewind-allow-receipt",
+      "receiptInteractionSince": "before-rewind-allow-receipt",
+      "description": "文件工具 allowOnce 答复以对应 interactionId 的真实收据写入 Journal"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[title=\"撤销\"],button[title=\"Undo\"]')",
+      "timeoutMs": 60000,
+      "description": "文件变更摘要显示真实撤销入口"
+    },
+    {
+      "action": "journalCapture",
+      "name": "rewind-before-cold",
+      "eventType": "tool_execution_started",
+      "description": "记录撤销前真实工具执行事件摘要"
+    },
+    {
+      "action": "click",
+      "selector": "button[title=\"撤销\"],button[title=\"Undo\"]",
+      "description": "通过原生文件摘要打开撤销预览"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const dialog = document.querySelector('[role=\"dialog\"][data-state=\"open\"]'); const text = dialog?.innerText ?? ''; return !!dialog?.querySelector('[data-slot=\"dialog-footer\"] button') && (text.includes('可安全撤销') || text.includes('Safe to undo')); })()",
+      "timeoutMs": 60000,
+      "description": "撤销预览确认真实安全文件和 CAS 状态"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"dialog\"][data-state=\"open\"] [data-slot=\"dialog-footer\"] button",
+      "description": "确认真实文件撤销"
+    },
+    {
+      "action": "wait",
+      "expression": "document.body.innerText.includes('已撤销') || document.body.innerText.includes('Undone')",
+      "timeoutMs": 60000,
+      "description": "等待权威文件摘要已撤销投影后，再读取真实磁盘正文"
+    },
+    {
+      "action": "file",
+      "path": "NATIVE_REWIND.txt",
+      "contains": "NATIVE_REWIND_BEFORE_OK",
+      "description": "撤销后磁盘正文恢复到变更前快照"
+    },
+    {
+      "action": "restart",
+      "description": "从相同隔离 data 根冷启动恢复"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 90000,
+      "description": "冷启动后的 Source 草稿已挂载，等待重新打开持久任务"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "通过真实鼠标展开持久撤销任务所属项目分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 30000,
+      "description": "冷启动后等待持久撤销任务行挂载"
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "rewindTask",
+      "description": "通过真实任务行重新打开撤销历史，而不是假设 Source 自动选中历史"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_REWIND_WRITE_OK')) && (document.body.innerText.includes('已撤销') || document.body.innerText.includes('Undone'))",
+      "timeoutMs": 90000,
+      "description": "重新打开持久任务后读取撤销后的权威会话投影"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "rewind-before-cold",
+      "eventType": "tool_execution_started",
+      "description": "冷恢复未重新执行已完成的真实写工具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏准备创建 selection side session"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const visible = (e) => { if (!e) return false; const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.display !== \"none\" && s.visibility !== \"hidden\" && Number(s.opacity) !== 0; }; return visible(document.querySelector('[data-side-pane-open-tab-item=\"selection-side-conversation\"]')) || visible(document.querySelector('[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-side-pane-add-item=\"selection-side-conversation\"]')) || visible(document.querySelector('[data-side-pane-add-tab-trigger]')); })()",
+      "timeoutMs": 30000,
+      "description": "等待空侧栏启动器或已有标签栏真实挂载后再选择辅助对话"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-side-pane-add-tab-trigger]",
+      "condition": "(() => { const visible = (e) => { if (!e) return false; const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.display !== \"none\" && s.visibility !== \"hidden\" && Number(s.opacity) !== 0; }; const launcher = document.querySelector('[data-side-pane-open-tab-item=\"selection-side-conversation\"]'); const item = document.querySelector('[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-side-pane-add-item=\"selection-side-conversation\"]'); const trigger = document.querySelector('[data-side-pane-add-tab-trigger]'); return !visible(launcher) && !visible(item) && visible(trigger); })()",
+      "description": "仅在已有标签栏且辅助对话选项尚未展开时打开真实新增标签菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const visible = (e) => { if (!e) return false; const r = e.getBoundingClientRect(), s = getComputedStyle(e); return r.width > 0 && r.height > 0 && s.display !== \"none\" && s.visibility !== \"hidden\" && Number(s.opacity) !== 0; }; return visible(document.querySelector('[data-side-pane-open-tab-item=\"selection-side-conversation\"]')) || visible(document.querySelector('[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-side-pane-add-item=\"selection-side-conversation\"]')); })()",
+      "timeoutMs": 30000,
+      "description": "等待真实辅助对话启动器或下拉菜单选项可见"
+    },
+    {
+      "action": "clickText",
+      "texts": [
+        "辅助对话",
+        "Side conversation"
+      ],
+      "selector": "[data-side-pane-open-tab-item=\"selection-side-conversation\"], [data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-side-pane-add-item=\"selection-side-conversation\"]",
+      "exact": true,
+      "description": "通过真实可见的辅助对话入口创建 selection side session；此点击必须成功，不以 clickIf 跳过"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); const composer = panel?.querySelector('[data-testid=\"v4-composer\"]'); const input = panel?.querySelector('[data-testid=\"v4-composer-input\"]'); const modelConfig = panel?.querySelector('[data-testid=\"v4-model-config\"]'); const modelTrigger = panel?.querySelector('[data-testid=\"chat-model-select-trigger\"]'); const routing = composer?.getAttribute('data-input-routing')?.trim(); const provider = modelConfig?.getAttribute('data-provider')?.trim(); const model = modelConfig?.getAttribute('data-model')?.trim(); return !!document.querySelector('[data-side-pane-tab-id^=\"selection-side-chat:\"][data-state=\"active\"]') && !!panel && !!composer && !!input && input.getAttribute('contenteditable') === \"true\" && input.getAttribute('data-e2e-lexical-bridge') === \"ready\" && !!routing && routing !== \"reject\" && !!provider && !!model && !!modelTrigger && !modelTrigger.matches(':disabled,[aria-disabled=\"true\"],[data-disabled]:not([data-disabled=\"false\"])'); })()",
+      "timeoutMs": 90000,
+      "description": "真实 side child Session 的模型、输入路由和 Lexical Composer 均已进入可编辑状态"
+    },
+    {
+      "action": "type",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"v4-composer-input\"]",
+      "text": "不要调用任何工具，直接回复 NATIVE_SELECTION_SIDE_OK。",
+      "description": "在真实 side child Session 输入消息"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-selection-side-turn",
+      "eventType": "turn_completed",
+      "captureEventSequence": true,
+      "description": "固定 selection side 发送前各 Session 的 Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"v4-composer-send\"]",
+      "description": "发送 side child Session 真实模型请求"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]')?.innerText.includes('NATIVE_SELECTION_SIDE_OK') && !document.querySelector('[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"v4-stop\"]')",
+      "timeoutMs": 120000,
+      "approvePermissions": true,
+      "description": "side child Session 显示真实模型回复"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "before-selection-side-turn",
+      "captureSessionAs": "selection-side-session",
+      "timeoutMs": 30000,
+      "description": "确认 selection side 模型回合以权威 turn_completed 收口"
+    },
+    {
+      "action": "journalSelectionSideIdentity",
+      "name": "selection-side-identity",
+      "parentSessionCaptured": "rewind-tool-session",
+      "childSessionCaptured": "selection-side-session",
+      "timeoutMs": 30000,
+      "description": "从父 Journal 的 createSelectionSideSession 完成收据关联 child sessionId，并确认 child SessionCreated 的 cwd 属于当前隔离项目"
+    },
+    {
+      "action": "journalCapture",
+      "name": "side-and-rewind-before-cold",
+      "eventType": "turn_completed",
+      "description": "记录 side 与撤销后的完整回合终态摘要"
+    },
+    {
+      "action": "restart",
+      "description": "第二次冷启动验证 side/rewind 完成事实不重放"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 90000,
+      "description": "冷启动后的主 Session 重新挂载"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "side-and-rewind-before-cold",
+      "eventType": "turn_completed",
+      "description": "冷启动没有重复 side 模型回合或其他已完成回合"
+    },
+    {
+      "action": "file",
+      "path": "NATIVE_REWIND.txt",
+      "contains": "NATIVE_REWIND_BEFORE_OK",
+      "description": "第二次冷启动后撤销结果仍保持"
+    },
+    {
+      "action": "screenshot",
+      "name": "selection-side-rewind-complete",
+      "description": "保存 side session、文件撤销和冷恢复证据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

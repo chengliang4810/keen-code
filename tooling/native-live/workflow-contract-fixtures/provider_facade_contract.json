@@ -1,0 +1,508 @@
+{
+  "modelSelectionGetView": {
+    "preferredSelection": {
+      "modelId": "fixture-model",
+      "options": {},
+      "providerId": "fixture-provider"
+    },
+    "providers": [
+      {
+        "config": {
+          "access": {
+            "type": "api-key"
+          },
+          "api": {
+            "baseUrl": "https://example.invalid/v1/responses",
+            "type": "openai-responses"
+          },
+          "group": "standard-personal",
+          "modelOrder": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "personalModelIds": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "visibility": "visible"
+        },
+        "models": [
+          {
+            "config": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 8192
+                }
+              },
+              "properties": {
+                "contextWindow": 128000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": true,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "modelId": "fixture-model"
+          }
+        ],
+        "providerId": "fixture-provider",
+        "providerName": "Fixture Provider",
+        "templateId": "custom-fixture"
+      }
+    ],
+    "revision": 7
+  },
+  "settingsEvent": {
+    "providerOrder": [
+      "fixture-provider"
+    ],
+    "providerTemplates": [],
+    "providers": [
+      {
+        "effectiveConfig": {
+          "access": {
+            "type": "api-key"
+          },
+          "api": {
+            "baseUrl": "https://example.invalid/v1/responses",
+            "type": "openai-responses"
+          },
+          "group": "standard-personal",
+          "modelOrder": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "personalModelIds": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "visibility": "visible"
+        },
+        "enabled": true,
+        "executable": true,
+        "issues": [],
+        "models": [
+          {
+            "builtin": false,
+            "effectiveBuiltinConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                }
+              },
+              "properties": {
+                "contextWindow": 128000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": true,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "effectiveConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 8192
+                }
+              },
+              "properties": {
+                "contextWindow": 128000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": true,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "enabled": true,
+            "executable": true,
+            "issues": [],
+            "kind": "candidate",
+            "modelId": "fixture-model",
+            "personalExactConfig": {
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "max": 8192
+                }
+              },
+              "properties": {
+                "inputFormat": {
+                  "supportsImage": true
+                }
+              }
+            },
+            "selectable": true,
+            "useRecommendedConfig": false
+          },
+          {
+            "builtin": false,
+            "effectiveBuiltinConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                },
+                "reasoningLevel": {
+                  "map": "{\"reasoning_effort\": reasoningLevel}",
+                  "values": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "properties": {
+                "contextWindow": 200000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": false,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "effectiveConfig": {
+              "enabled": false,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                },
+                "reasoningLevel": {
+                  "map": "{\"reasoning_effort\": reasoningLevel}",
+                  "values": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "properties": {
+                "contextWindow": 200000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": false,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "enabled": false,
+            "executable": false,
+            "issues": [],
+            "kind": "candidate",
+            "modelId": "disabled-model",
+            "selectable": false
+          }
+        ],
+        "personalConfig": {
+          "access": {
+            "type": "api-key"
+          },
+          "api": {
+            "baseUrl": "https://example.invalid/v1/responses",
+            "type": "openai-responses"
+          },
+          "group": "standard-personal",
+          "modelOrder": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "personalModelIds": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "visibility": "visible"
+        },
+        "providerId": "fixture-provider",
+        "providerName": "Fixture Provider",
+        "templateId": "custom-fixture"
+      }
+    ],
+    "revision": 7
+  },
+  "settingsGetView": {
+    "providerOrder": [
+      "fixture-provider"
+    ],
+    "providerTemplates": [],
+    "providers": [
+      {
+        "effectiveConfig": {
+          "access": {
+            "type": "api-key"
+          },
+          "api": {
+            "baseUrl": "https://example.invalid/v1/responses",
+            "type": "openai-responses"
+          },
+          "group": "standard-personal",
+          "modelOrder": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "personalModelIds": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "visibility": "visible"
+        },
+        "enabled": true,
+        "executable": true,
+        "issues": [],
+        "models": [
+          {
+            "builtin": false,
+            "effectiveBuiltinConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                }
+              },
+              "properties": {
+                "contextWindow": 128000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": true,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "effectiveConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 8192
+                }
+              },
+              "properties": {
+                "contextWindow": 128000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": true,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "enabled": true,
+            "executable": true,
+            "issues": [],
+            "kind": "candidate",
+            "modelId": "fixture-model",
+            "personalExactConfig": {
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "max": 8192
+                }
+              },
+              "properties": {
+                "inputFormat": {
+                  "supportsImage": true
+                }
+              }
+            },
+            "selectable": true,
+            "useRecommendedConfig": false
+          },
+          {
+            "builtin": false,
+            "effectiveBuiltinConfig": {
+              "enabled": true,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                },
+                "reasoningLevel": {
+                  "map": "{\"reasoning_effort\": reasoningLevel}",
+                  "values": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "properties": {
+                "contextWindow": 200000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": false,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "effectiveConfig": {
+              "enabled": false,
+              "optionSpecs": {
+                "maxOutputTokens": {
+                  "map": "{\"max_output_tokens\": maxOutputTokens}",
+                  "max": 128000
+                },
+                "reasoningLevel": {
+                  "map": "{\"reasoning_effort\": reasoningLevel}",
+                  "values": [
+                    "none",
+                    "minimal",
+                    "low",
+                    "medium",
+                    "high",
+                    "xhigh",
+                    "max"
+                  ]
+                }
+              },
+              "properties": {
+                "contextWindow": 200000,
+                "inputFormat": {
+                  "supportsAudio": false,
+                  "supportsImage": false,
+                  "supportsPdf": false,
+                  "supportsText": true,
+                  "supportsVideo": false
+                },
+                "outputFormat": {
+                  "supportsText": true
+                },
+                "requiresMfjsToolSchema": false,
+                "supportsJsonSchemaOutput": true,
+                "supportsMidConversationSystem": true,
+                "supportsNativeWebSearch": false,
+                "supportsToolCall": true
+              }
+            },
+            "enabled": false,
+            "executable": false,
+            "issues": [],
+            "kind": "candidate",
+            "modelId": "disabled-model",
+            "selectable": false
+          }
+        ],
+        "personalConfig": {
+          "access": {
+            "type": "api-key"
+          },
+          "api": {
+            "baseUrl": "https://example.invalid/v1/responses",
+            "type": "openai-responses"
+          },
+          "group": "standard-personal",
+          "modelOrder": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "personalModelIds": [
+            "fixture-model",
+            "disabled-model"
+          ],
+          "visibility": "visible"
+        },
+        "providerId": "fixture-provider",
+        "providerName": "Fixture Provider",
+        "templateId": "custom-fixture"
+      }
+    ],
+    "revision": 7
+  }
+}

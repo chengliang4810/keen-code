@@ -1,0 +1,160 @@
+{
+  "name": "native-live-ui-layout-frozen31-final",
+  "description": "Native31 冻结版外观页的原生截图对照；沿用固定来源的外观步骤与 DPR1 视口，运行后与既有 Source/Native 基线做共同区域比较，不改产品源码。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "设置页视觉验收初始内容\n"
+  },
+  "baseline": {
+    "sourceCommit": "29628c9acdb81b703bbd4080c207a0e7ce5e276e",
+    "sourceScreenshot": "out/native-live/zcode-source-baseline-29628c9-dpr2/source-appearance-dpr1.png",
+    "sourceLayout": "out/native-live/zcode-source-baseline-29628c9-dpr2/source-appearance-layout-dpr1.json",
+    "referenceNativeAttempt": "out/native-live/ui-layout-baseline-attempt-03",
+    "referenceNativeScreenshot": "out/native-live/ui-layout-baseline-attempt-03/01-settings-zai-dark.png",
+    "referenceNativeLayout": "out/native-live/ui-layout-baseline-attempt-03/appearance-layout.json",
+    "referenceDiff": "out/native-live/ui-layout-baseline-attempt-03/appearance-pixel-diff.json",
+    "comparisonScript": "out/native-live/ui-layout-baseline-attempt-03/appearance-pixel-diff.ps1",
+    "viewport": {
+      "width": 1280,
+      "height": 820,
+      "deviceScaleFactor": 1
+    },
+    "comparisonScope": "仅比较 Source 与 Native 共同出现的外观卡片和结构化布局；不得将该局部结果表述为全页像素等价。"
+  },
+  "runtime": {
+    "frontendDistTreeSha256": "7BF7C7E1E7E5C61FF2DDB448A74BB32ECE386D3555DCE2471764ECAD5C4CBE6E",
+    "entryAsset": "apps/ui/dist/assets/index-1n0XUMHI.js",
+    "entryAssetSha256": "EBE03DDF5AC7BD23006475B3DE5C02F445F8EF68B8C75DF07AF157E416BEC1B1",
+    "nativeBinarySha256": "97AA9F55EBB7F871654D67580571E0856E1F1225B4D7273A9122056B12DF8DA3",
+    "frontendBuildLog": "out/frontend-build-native31-final.log",
+    "nativeBuildLog": "out/native-build-native31.log"
+  },
+  "acceptance": [
+    "隔离 data 根启动并通过原始 onboarding/project/composer 流程进入设置页。",
+    "在 1280x820、DPR1 下通过原始外观选择器选择 Zai 深色主题，截图和 appearanceLayout 必须来自真实 DOM/CSS。",
+    "运行后使用 baseline.referenceDiff/comparisonScript 对齐共同外观卡片；记录结构化布局和局部像素 diff，不能省略截图或扩大比较范围。",
+    "最终报告同时记录 runtime 的 dist tree、entry asset 和 native31 binary SHA-256；旧 attempt 仅作 reference，不冒充当前冻结31产物。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button')",
+      "description": "隔离新配置进入原始首次启动引导"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "跳过职业选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && document.body.innerText.includes('UI 模式')"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "跳过模式选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('助手偏好') || document.body.innerText.includes('按需开启以下功能'))"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面保存首次启动设置"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "通过原界面选择隔离测试项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "本地项目激活后显示原 Composer"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "NATIVE_SETTINGS_DRAFT_20261003",
+      "description": "在真实 Composer 写入待保留草稿"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"v4-composer-input\"]')?.textContent?.includes('NATIVE_SETTINGS_DRAFT_20261003') === true",
+      "description": "设置操作前 Composer 草稿可见"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "打开真实设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "description": "设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-appearance\"]",
+      "description": "打开外观设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'appearance' && !!document.querySelector('[data-testid=\"settings-page\"][data-active-section=\"appearance\"] [data-slot=\"select-trigger\"]')",
+      "description": "外观设置真实控件加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"appearance\"] [data-slot=\"select-trigger\"]",
+      "description": "打开主题选择器"
+    },
+    {
+      "action": "click",
+      "selector": "[data-slot=\"select-item\"]:nth-child(2)",
+      "description": "选择 Zai 深色主题"
+    },
+    {
+      "action": "wait",
+      "expression": "document.documentElement.classList.contains('dark') && document.documentElement.classList.contains('theme-zai-dark') && !document.documentElement.classList.contains('theme-zai-light')",
+      "description": "深色主题真实应用到文档根"
+    },
+    {
+      "action": "screenshot",
+      "name": "01-settings-zai-dark"
+    },
+    {
+      "action": "appearanceLayout",
+      "description": "记录真实外观页DOM及CSS几何"
+    }
+  ],
+  "viewport": {
+    "width": 1280,
+    "height": 820,
+    "deviceScaleFactor": 1
+  }
+}

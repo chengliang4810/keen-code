@@ -26,16 +26,21 @@ jobs:
 
       - name: Install frontend dependencies
         run: corepack pnpm@10.14.0 install --frozen-lockfile
-      - name: Typecheck frontend
-        run: corepack pnpm@10.14.0 typecheck
-      - name: Test frontend
+      - name: Verify UI source layout
+        run: |
+          test -d packages/ui/src
+          test -f packages/ui/src/styles.css
+          node --version
+          corepack pnpm@10.14.0 --version
+      - name: Typecheck frontend source projects
+        run: corepack pnpm@10.14.0 run typecheck
+      - name: Test frontend and protocol contracts
+        # 默认入口包含真实 IPC 契约、来源门禁和脚本测试；零测试不能作为迁移通过。
         run: corepack pnpm@10.14.0 test
       - name: Build frontend
         run: corepack pnpm@10.14.0 build
       - name: Lint CSS
-        run: corepack pnpm@10.14.0 lint:css
-      - name: Check design system
-        run: corepack pnpm@10.14.0 check:design-system
+        run: corepack pnpm@10.14.0 run lint:css
       - name: Check diff formatting
         run: git diff --check
 

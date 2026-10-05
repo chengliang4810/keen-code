@@ -1,0 +1,1391 @@
+{
+  "name": "native-live-local-resources-crud",
+  "description": "只用原生设置 UI、真实 Rust RPC 和一次性隔离目录验收本地 Plugin marketplace、Memory viewer 与 User Subagent；通过 Source 的 / 面板选择 User Agent（选中后序列化为 @agent），保存并回读真实颜色、仅 Bash 的自定义工具集合和 injectAgentsMd=false；再验证 custom 空工具数组保存后不会继承全部权限，并恢复 Bash 后继续以 Journal 的 spawn_agent、真实子 Agent 回合和固定 marker 验证真实执行；同时验证禁用 Agent 不进入 mention 候选、user 与 canonical project scope 的文件隔离；不发送外部消息，不安装云端插件，不注入 renderer store 或 IPC。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    ".claude-plugin/marketplace.json": "{\"name\":\"native-local-market\",\"plugins\":[{\"name\":\"native-local-plugin\",\"source\":\"./plugins/native-local-plugin\",\"description\":\"Isolated local plugin\",\"version\":\"1.0.0\"}]}\n",
+    "plugins/native-local-plugin/.claude-plugin/plugin.json": "{\"name\":\"native-local-plugin\",\"version\":\"1.0.0\",\"description\":\"Isolated local plugin package\"}\n"
+  },
+  "offlineContracts": [
+    "apps/desktop/src/extensions.rs::marketplace_add_blocking + frontend_rpc/services.rs::install_plugin/set_plugin_enabled/uninstall_plugin：本计划的本地 marketplace 由隔离项目清单解析，插件包复制到隔离应用缓存；启停与 removeCache=false 卸载经真实 PluginManagementService，来源缓存继续保留。",
+    "apps/desktop/src/frontend_rpc/services.rs::memory_call：Memory 事实源是隔离 data/memories 下的 Markdown；Source MemorySettingsViewer 只能 list/read catalog、search、refresh。",
+    "apps/desktop/src/frontend_rpc/services.rs::subagents_call + packages/ui/src/settings/SubagentsSection.tsx：User Agent 通过 createAgent/updateAgent/setEnabled/deleteAgent 持久化到隔离 data/agents；workspace scope 只接受已登记项目的 canonical root，内置/插件 Agent 不进入编辑路径。"
+  ],
+  "coverage": [
+    {
+      "id": "plugins-local-manifest-crud",
+      "status": "covered",
+      "testIds": [
+        "settings-section-nav-plugin",
+        "plugin-store-browse",
+        "plugin-settings-add",
+        "plugin-store-add-source-dialog",
+        "plugin-store-add-source-input",
+        "plugin-store-add-source-submit",
+        "plugin-store-segment-personal",
+        "plugin-store-card",
+        "plugin-store-install",
+        "plugin-store-item-menu",
+        "plugin-store-menu-enabled",
+        "plugin-store-menu-uninstall",
+        "plugin-store-uninstall-dialog",
+        "plugin-store-uninstall-confirm"
+      ],
+      "notes": "创建本地 source、安装、enable/disable 和 delete 均使用真实 UI；UI 卸载明确传 removeCache=false，只移除安装状态并保留 marketplace 来源缓存。"
+    },
+    {
+      "id": "memory-viewer-persistence",
+      "status": "partial",
+      "testIds": [
+        "settings-section-nav-memory",
+        "settings-memory-switch",
+        "settings-memory-file-*",
+        "settings-memory-search-input",
+        "settings-memory-refresh"
+      ],
+      "notes": "真实隔离 data/memories fixture 由可见 PTY 创建，UI 读取、搜索、刷新并重启验证开关和 catalog 冷恢复；Source 没有 Memory 内容编辑、保存或删除控件。"
+    },
+    {
+      "id": "subagents-user-crud",
+      "status": "covered",
+      "testIds": [
+        "settings-section-nav-subagents",
+        "subagent-row-*",
+        "confirm-dialog-confirm"
+      ],
+      "notes": "只创建 source=user 的 User Agent，真实 UI 完成 create/edit/disable/enable、重启回读和 delete；创建时将工具模式切到 custom，仅保留 Bash，显式关闭 injectAgentsMd，并回读颜色、工具 checkbox 和开关状态。自定义 system prompt 要求子 Agent 使用已保存的 Bash 配置执行真实目录命令，再通过 Source / 面板插入 @agent token。Rust 将已启用目录中的 @agent 解析为受控路由提示，由根模型调用已有 spawn_agent；Journal 必须看到 spawn_agent(agent)、真实子 Agent 的 TurnStarted/TurnCompleted，且 marker 只能来自持久 User Agent prompt；不修改内置/插件 Agent，不创建嵌套 actor，权限边界由 Rust subagents_call 校验。"
+    },
+    {
+      "id": "subagents-user-project-scope-isolation",
+      "status": "covered",
+      "testIds": [
+        "data-plugin-scope-trigger",
+        "subagent-row-native-workspace-agent",
+        "subagent-row-native-user-agent"
+      ],
+      "notes": "先在同一隔离项目的真实 scope 菜单切换到 workspace，再创建并删除 project-scoped Agent；列表回读依赖 Rust 返回的 canonical projectPath 与当前 workspacePath 相等，随后切回 user scope 验证 user Agent 仍存在且 workspace Agent 不泄漏到 user 列表。"
+    }
+  ],
+  "knownGaps": [
+    "MemorySettingsViewer.tsx 只有 scope/search/refresh 和外部编辑器入口，没有编辑器或保存按钮；本计划不把外部编辑器启动冒充为 UI 编辑保存。",
+    "进入 PluginStorePage 时现有官方 marketplace 自动刷新逻辑可能触发后台目录取得；本计划只向 UI 提交隔离本地 marketplace 路径，不选择官方插件、不发送模型或外部消息。",
+    "Memory 与 Plugin 的来源边界仍按各自 Source 页面语义验收；User Agent 的 Bash 工具事件则通过同一 childId、childTurnId 和 requestId 绑定，避免把 Root 或历史工具事件当作本次执行。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "隔离工作区入口完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示添加菜单按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "打开文件夹",
+        "Open folder"
+      ],
+      "exact": true,
+      "description": "通过真实鼠标打开文件夹并选择隔离资源项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目 Composer 已挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "打开真实 workspace PTY 创建隔离 Memory fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"terminal\"] .xterm-screen') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "PowerShell PTY 已就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '${DATA}\\memories' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${DATA}\\memories\\NATIVE_MEMORY.md' -Value '# NATIVE_MEMORY_V1' -Encoding utf8 -ErrorAction Stop; if (-not (Test-Path -LiteralPath '${DATA}\\memories\\NATIVE_MEMORY.md')) { throw 'memory fixture missing' }; Write-Output NATIVE_MEMORY_FIXTURE_READY\"",
+      "description": "通过可见 PTY 在隔离 data 根创建真实 Markdown Memory fixture"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行隔离 Memory fixture 命令"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_MEMORY_FIXTURE_READY')",
+      "timeoutMs": 30000,
+      "description": "确认 Memory fixture 已写入隔离数据目录"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "exit",
+      "description": "结束 PTY fixture 会话"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交 PowerShell 退出"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "等待 PTY 收口"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"terminal\"] .xterm-screen')",
+      "timeoutMs": 30000,
+      "description": "PTY 会话从 UI 卸载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "进入设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页由真实 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-plugin\"]",
+      "description": "打开 Plugin 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'plugin' && !!document.querySelector('[data-testid=\"plugin-settings-add\"]')",
+      "timeoutMs": 30000,
+      "description": "读取本地 Plugin 管理入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-add\"]",
+      "description": "打开 Plugin 添加菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-add-source-menu-item\"]",
+      "description": "通过原生菜单进入本地 marketplace source 对话框"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-add-source-dialog\"]') && !!document.querySelector('[data-testid=\"plugin-store-add-source-input\"]')",
+      "timeoutMs": 30000,
+      "description": "本地 marketplace source 表单真实挂载"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"plugin-store-add-source-input\"]",
+      "text": "${PROJECT}\\.claude-plugin\\marketplace.json",
+      "description": "填写隔离项目内 marketplace.json 路径"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-add-source-submit\"]",
+      "description": "通过 Rust RPC 登记隔离本地 marketplace"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-root\"]') && !document.querySelector('[data-testid=\"plugin-store-add-source-dialog\"]')",
+      "timeoutMs": 60000,
+      "description": "本地 marketplace 添加完成并返回真实商店"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-segment-personal\"]",
+      "description": "打开个人 marketplace 分段"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-card\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 60000,
+      "description": "个人分段读取隔离本地 manifest 插件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-install\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "通过真实 Plugin Store 安装隔离本地插件"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 60000,
+      "description": "安装结果从 Rust 插件状态回读为已安装"
+    },
+    {
+      "action": "file",
+      "path": "plugins/native-local-plugin/.claude-plugin/plugin.json",
+      "contains": "native-local-plugin",
+      "description": "读取隔离来源缓存清单并确认安装没有改写来源内容"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "打开隔离插件真实动作菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]'); return !!e && /禁用|Disable/.test(e.textContent ?? ''); })()",
+      "timeoutMs": 30000,
+      "description": "确认新安装插件当前为启用态"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "通过真实 UI 禁用隔离本地插件"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 30000,
+      "description": "禁用动作菜单已关闭"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "重新读取隔离插件动作菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]'); return !!e && /启用|Enable/.test(e.textContent ?? ''); })()",
+      "timeoutMs": 30000,
+      "description": "确认禁用状态由 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "通过真实 UI 重新启用隔离本地插件"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"plugin-store-menu-enabled\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 30000,
+      "description": "启用动作菜单已关闭"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "打开隔离插件卸载动作菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-menu-uninstall\"][data-plugin-id=\"native-local-plugin@native-local-market\"]",
+      "description": "通过真实 UI 请求删除隔离插件"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-uninstall-dialog\"]') && !!document.querySelector('[data-testid=\"plugin-store-uninstall-confirm\"]')",
+      "timeoutMs": 30000,
+      "description": "插件删除显示真实确认弹窗"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-uninstall-confirm\"]",
+      "description": "确认插件删除请求"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-install\"][data-plugin-id=\"native-local-plugin@native-local-market\"]') && !document.querySelector('[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 45000,
+      "description": "确认真实卸载只移除安装状态并回到可安装态"
+    },
+    {
+      "action": "assert",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-card\"][data-plugin-id=\"native-local-plugin@native-local-market\"]') && !document.querySelector('[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "description": "确认本地 marketplace 条目保留且插件不再处于已安装态"
+    },
+    {
+      "action": "file",
+      "path": "plugins/native-local-plugin/.claude-plugin/plugin.json",
+      "contains": "native-local-plugin",
+      "description": "卸载后再次读取隔离来源缓存清单，确认 removeCache=false 保留缓存"
+    },
+    {
+      "action": "screenshot",
+      "name": "plugin-delete-success",
+      "description": "保存本地 Plugin create/install/enable/disable/delete 成功证据"
+    },
+    {
+      "action": "restart",
+      "description": "重启隔离桌面进程验证 Plugin 卸载状态冷恢复"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "Plugin 卸载后重启恢复工作区"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "冷恢复后打开设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "冷恢复后设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-plugin\"]",
+      "description": "冷恢复后重新进入 Plugin 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'plugin' && !document.querySelector('[data-testid=\"plugin-settings-plugin-row\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 45000,
+      "description": "确认已卸载插件不再从 Rust 安装状态投影到管理列表"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-browse\"]",
+      "description": "打开本地 marketplace 商店"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-root\"]')",
+      "timeoutMs": 45000,
+      "description": "冷恢复后 Plugin Store 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-store-segment-personal\"]",
+      "description": "冷恢复后读取个人 marketplace 分段"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-store-install\"][data-plugin-id=\"native-local-plugin@native-local-market\"]') && !document.querySelector('[data-testid=\"plugin-store-item-menu\"][data-plugin-id=\"native-local-plugin@native-local-market\"]')",
+      "timeoutMs": 60000,
+      "description": "确认卸载状态在冷恢复后仍是可安装且来源缓存保留"
+    },
+    {
+      "action": "file",
+      "path": "plugins/native-local-plugin/.claude-plugin/plugin.json",
+      "contains": "native-local-plugin",
+      "description": "冷恢复后读取隔离来源缓存清单，确认卸载没有删除来源"
+    },
+    {
+      "action": "screenshot",
+      "name": "plugin-delete-cold-recovery",
+      "description": "保存 Plugin 卸载冷恢复证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"desktop-top-nav-back\"]",
+      "description": "从 Plugin Store 主视图通过桌面顶栏返回 Settings Plugin"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]') && document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'plugin'",
+      "timeoutMs": 30000,
+      "description": "Plugin Store 返回后的 Settings Plugin 页面真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "从 Settings Plugin 返回工作区继续 Memory 验收"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "工作区恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "重新打开设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页重新挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-memory\"]",
+      "description": "打开 Memory 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'memory' && !!document.querySelector('[data-testid=\"settings-memory-switch\"]')",
+      "timeoutMs": 30000,
+      "description": "Memory 开关由真实 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-memory-switch\"]",
+      "description": "启用隔离 Memory viewer"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-memory-switch\"]')?.getAttribute('aria-checked') === 'true' && !!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "Memory viewer 读取真实隔离 Markdown fixture"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"settings-memory-search-input\"]",
+      "text": "NATIVE_MEMORY",
+      "description": "通过真实 viewer 搜索隔离 Memory 文件"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]') && document.querySelector('[data-testid=\"settings-memory-count\"]')?.textContent?.includes('1')",
+      "timeoutMs": 30000,
+      "description": "搜索与数量由 Memory catalog 投影回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-memory-refresh\"]",
+      "description": "刷新 Memory catalog"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "刷新后仍读取同一隔离文件"
+    },
+    {
+      "action": "screenshot",
+      "name": "memory-viewer-before-restart",
+      "description": "保存 Memory viewer 与开关证据"
+    },
+    {
+      "action": "restart",
+      "description": "重启隔离桌面进程验证 Memory 开关和 catalog 冷恢复"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "重启后隔离项目恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "冷恢复后打开设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "冷恢复后设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-memory\"]",
+      "description": "冷恢复后重新进入 Memory"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-memory-switch\"]')?.getAttribute('aria-checked') === 'true' && !!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "确认开关与真实 Memory 文件从 Rust 持久状态冷恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-memory-switch\"]",
+      "description": "通过真实 UI 关闭隔离 Memory viewer"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-memory-switch\"]')?.getAttribute('aria-checked') === 'false' && !document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "确认关闭状态不再显示 Memory viewer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-subagents\"]",
+      "description": "打开 Subagents 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'subagents' && !!document.querySelector('button[aria-label=\"新建\"],button[aria-label=\"New\"]')",
+      "timeoutMs": 45000,
+      "description": "User Subagent 管理入口由真实 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"新建\"],button[aria-label=\"New\"]",
+      "description": "打开 User Agent 创建表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) input[placeholder=\"code-reviewer\"]') && !!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]')",
+      "timeoutMs": 30000,
+      "description": "User Agent 表单控件完整挂载"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开 User Agent 的真实模型覆盖选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "模型菜单显示当前隔离 provider 分组"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开当前隔离 provider 的 User Agent 模型列表"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "模型列表显示当前真实验收模型"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "通过真实 UI 将 User Agent 绑定到当前隔离模型"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-model-select-trigger\"]') && document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-thought-level-select-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "模型覆盖保存控件回写并显示真实 reasoning 控件"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-thought-level-select-trigger\"]",
+      "description": "打开 User Agent 的真实 reasoning 档位选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-thought-level-select-item-none\"]')",
+      "timeoutMs": 30000,
+      "description": "当前模型目录公布 none reasoning 档位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-thought-level-select-item-none\"]",
+      "description": "通过真实 UI 为固定文本 child 选择 none reasoning"
+    },
+    {
+      "action": "pageProbe",
+      "name": "user-agent-reasoning-after-none",
+      "expression": "(() => { const form = document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const trigger = form?.querySelector('[data-testid=\"chat-thought-level-select-trigger\"]'); const select = [...(form?.querySelectorAll('select[aria-hidden=\"true\"]') ?? [])].find((candidate) => [...candidate.options].some((option) => option.value === 'none')); return { trigger: trigger ? { dataState: trigger.getAttribute('data-state'), ariaExpanded: trigger.getAttribute('aria-expanded'), disabled: trigger.matches(':disabled,[aria-disabled=\"true\"],[data-disabled]') } : null, rawThoughtLevel: select?.value ?? null, optionValues: select ? [...select.options].map((option) => option.value).slice(0, 16) : [] }; })()",
+      "description": "有界读取 User Agent 表单的 reasoning 原始控件值，不记录 provider 或凭据"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form = document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const select = [...(form?.querySelectorAll('select[aria-hidden=\"true\"]') ?? [])].find((candidate) => [...candidate.options].some((option) => option.value === 'none')); return select?.value === 'none'; })()",
+      "timeoutMs": 30000,
+      "description": "确认 User Agent 草稿受控 reasoning 原始值为 none"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) input[placeholder=\"code-reviewer\"]",
+      "text": "native-user-agent",
+      "description": "填写隔离 User Agent 名称"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"简短\"],form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"description\"]",
+      "text": "native-agent",
+      "description": "填写 User Agent 描述"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) textarea[placeholder*=\"描述这个子智能体\"],form:has(input[placeholder=\"code-reviewer\"]) textarea[placeholder*=\"Describe this subagent\"]",
+      "text": "NATIVE_USER_AGENT_PROMPT_42: In the isolated project, use only the configured Bash tool. Bash is POSIX/Git Bash, so do not run bare Get-ChildItem as the first command. The first and only directory-listing command must be exactly MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command 'Get-ChildItem -Name'; report that real command output, then include NATIVE_USER_AGENT_REPLY_42 as a label with no fabricated file contents. Keep one agent layer.",
+      "description": "填写明确 Bash 为 POSIX/Git Bash、首次命令通过 powershell.exe 执行真实目录读取且禁止伪造正文的 User Agent system prompt"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [data-slot=\"select-trigger\"]",
+      "texts": [
+        "默认所有权限",
+        "Default all permissions"
+      ],
+      "exact": false,
+      "description": "打开 User Agent 的真实可用工具模式选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[role=\"option\"]')).some(e => { const s=getComputedStyle(e); const r=e.getBoundingClientRect(); const t=e.textContent?.trim(); return ['自定义可用工具','Custom allowed tools'].includes(t) && r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' && !e.closest('[aria-hidden=\"true\"]'); })",
+      "timeoutMs": 30000,
+      "description": "确认 Source 工具模式菜单以可见 option 提供自定义可用工具选项"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"option\"]",
+      "texts": [
+        "自定义可用工具",
+        "Custom allowed tools"
+      ],
+      "exact": true,
+      "description": "通过真实 UI 选择自定义可用工具模式"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]').length >= 9",
+      "timeoutMs": 30000,
+      "description": "确认 Source 已挂载完整的可用工具 checkbox 列表"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Read"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 Read"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Grep"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 Grep"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Glob"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 Glob"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Edit"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 Edit"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Write"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 Write"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "WebFetch"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 WebFetch"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "WebSearch"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 WebSearch"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "TodoWrite"
+      ],
+      "exact": true,
+      "description": "从新建 User Agent 的 custom 工具集合移除 TodoWrite"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"radiogroup\"] [role=\"radio\"][aria-label=\"蓝色\"],form:has(input[placeholder=\"code-reviewer\"]) [role=\"radiogroup\"] [role=\"radio\"][aria-label=\"Blue\"]",
+      "description": "通过真实 UI 保存 User Agent 的颜色选择"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"switch\"][aria-label=\"注入 AGENTS.md\"],form:has(input[placeholder=\"code-reviewer\"]) [role=\"switch\"][aria-label=\"Inject AGENTS.md\"]",
+      "description": "通过真实 UI 将 User Agent 的 injectAgentsMd 明确关闭"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const known=['Read','Grep','Glob','Bash','Edit','Write','WebFetch','WebSearch','TodoWrite']; const checks=Object.fromEntries([...form.querySelectorAll('[role=\"checkbox\"]')].map(e=>[e.textContent?.trim(),e.getAttribute('aria-checked') === 'true'])); const inject=form.querySelector('[role=\"switch\"]'); const color=[...form.querySelectorAll('[role=\"radio\"]')].find(e=>e.getAttribute('aria-checked') === 'true'); return known.every(tool => checks[tool] === (tool === 'Bash')) && inject?.getAttribute('aria-checked') === 'false' && ['蓝色','Blue'].includes(color?.getAttribute('aria-label') ?? ''); })()",
+      "timeoutMs": 30000,
+      "description": "严格确认新建表单仅保留 Bash、injectAgentsMd=false 且颜色已选蓝色"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]",
+      "description": "通过真实 Rust RPC 创建 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const row = document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]'); return !!row && row.innerText.includes('native-agent'); })()",
+      "timeoutMs": 45000,
+      "description": "创建结果从 Rust agents 目录回读到 User 行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"]",
+      "description": "打开真实 User Agent 编辑表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) input[placeholder=\"code-reviewer\"]') && document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"简短\"],form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"description\"]')?.value?.includes('native-agent')",
+      "timeoutMs": 30000,
+      "description": "编辑表单读取 Rust 已保存字段"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) [data-testid=\"chat-thought-level-select-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "编辑表单从 Rust 回读模型绑定与 reasoning 控件"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form = document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const select = [...(form?.querySelectorAll('select[aria-hidden=\"true\"]') ?? [])].find((candidate) => [...candidate.options].some((option) => option.value === 'none')); return select?.value === 'none'; })()",
+      "timeoutMs": 30000,
+      "description": "确认 Rust 回读的 User Agent reasoning 原始值仍为 none"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const known=['Read','Grep','Glob','Bash','Edit','Write','WebFetch','WebSearch','TodoWrite']; const checks=Object.fromEntries([...form.querySelectorAll('[role=\"checkbox\"]')].map(e=>[e.textContent?.trim(),e.getAttribute('aria-checked') === 'true'])); const inject=form.querySelector('[role=\"switch\"]'); const color=[...form.querySelectorAll('[role=\"radio\"]')].find(e=>e.getAttribute('aria-checked') === 'true'); return known.every(tool => checks[tool] === (tool === 'Bash')) && inject?.getAttribute('aria-checked') === 'false' && ['蓝色','Blue'].includes(color?.getAttribute('aria-label') ?? ''); })()",
+      "timeoutMs": 30000,
+      "description": "严格回读已保存的仅 Bash 工具、injectAgentsMd=false 与蓝色配置"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"简短\"],form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"description\"]",
+      "text": "-edited",
+      "description": "在 User Agent 描述中写入编辑标记"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]",
+      "description": "通过真实 Rust RPC 保存 User Agent 编辑"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')?.innerText.includes('edited')",
+      "timeoutMs": 45000,
+      "description": "编辑结果重新从 Rust agents 目录投影"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"]",
+      "description": "重新打开 User Agent 表单清除现有 Bash 工具"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const trigger=[...(form?.querySelectorAll('[data-slot=\"select-trigger\"]') ?? [])].find(e => ['自定义可用工具','Custom allowed tools'].includes(e.textContent?.trim() ?? '')); const bash=[...(form?.querySelectorAll('[role=\"checkbox\"]') ?? [])].find(e => e.textContent?.trim() === 'Bash'); return !!form && !!trigger && !!bash && bash.getAttribute('aria-checked') === 'true'; })()",
+      "timeoutMs": 30000,
+      "description": "确认编辑表单仍以 custom 模式回读仅 Bash 配置"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Bash"
+      ],
+      "exact": true,
+      "description": "通过真实 UI 清除 User Agent 唯一的 Bash 工具"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const trigger=[...(form?.querySelectorAll('[data-slot=\"select-trigger\"]') ?? [])].find(e => ['自定义可用工具','Custom allowed tools'].includes(e.textContent?.trim() ?? '')); const checks=[...(form?.querySelectorAll('[role=\"checkbox\"]') ?? [])]; return !!trigger && checks.length === 9 && checks.every(e => e.getAttribute('aria-checked') === 'false'); })()",
+      "timeoutMs": 30000,
+      "description": "确认 custom 空工具草稿为 9 个 checkbox 全部关闭"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]",
+      "description": "通过真实 Rust RPC 保存空 custom 工具集合"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')?.innerText.includes('edited')",
+      "timeoutMs": 45000,
+      "description": "空 custom 工具保存结果重新从 Rust agents 目录投影"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"]",
+      "description": "重新打开 User Agent 表单回读空 custom 工具集合"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const trigger=[...(form?.querySelectorAll('[data-slot=\"select-trigger\"]') ?? [])].find(e => ['自定义可用工具','Custom allowed tools'].includes(e.textContent?.trim() ?? '')); const checks=[...(form?.querySelectorAll('[role=\"checkbox\"]') ?? [])]; const inject=form?.querySelector('[role=\"switch\"]'); const color=[...(form?.querySelectorAll('[role=\"radio\"]') ?? [])].find(e => e.getAttribute('aria-checked') === 'true'); return !!form && !!trigger && checks.length === 9 && checks.every(e => e.getAttribute('aria-checked') === 'false') && inject?.getAttribute('aria-checked') === 'false' && ['蓝色','Blue'].includes(color?.getAttribute('aria-label') ?? ''); })()",
+      "timeoutMs": 30000,
+      "description": "严格回读 Rust 保存的 custom 空工具、injectAgentsMd=false 与蓝色配置"
+    },
+    {
+      "action": "clickText",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) [role=\"checkbox\"]",
+      "texts": [
+        "Bash"
+      ],
+      "exact": true,
+      "description": "通过真实 UI 恢复 User Agent 的 Bash 工具"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const form=document.querySelector('form:has(input[placeholder=\"code-reviewer\"])'); const checks=Object.fromEntries([...(form?.querySelectorAll('[role=\"checkbox\"]') ?? [])].map(e => [e.textContent?.trim(), e.getAttribute('aria-checked') === 'true'])); return Object.keys(checks).length === 9 && checks.Bash === true && Object.entries(checks).filter(([name]) => name !== 'Bash').every(([,checked]) => checked === false); })()",
+      "timeoutMs": 30000,
+      "description": "确认恢复后的 custom 草稿仅重新启用 Bash"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]",
+      "description": "通过真实 Rust RPC 保存恢复后的 Bash 工具集合"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')?.innerText.includes('edited')",
+      "timeoutMs": 45000,
+      "description": "恢复 Bash 后从 Rust agents 目录重新回读 User Agent"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]",
+      "description": "通过真实 UI 禁用 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]')?.getAttribute('aria-checked') === 'false'",
+      "timeoutMs": 30000,
+      "description": "User Agent 禁用状态由 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回工作区检查禁用 User Agent 的真实 mention 可见性"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "禁用验收返回 Composer"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "/native-user-agent",
+      "description": "通过真实 slash 入口搜索已禁用 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"prompt-suggestion-panel\"]') && !Array.from(document.querySelectorAll('[data-testid^=\"prompt-suggestion-option-subagent:\"]')).some(e => e.innerText.includes('native-user-agent'))",
+      "timeoutMs": 30000,
+      "description": "确认禁用 User Agent 不出现在 Source mention 候选中"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "description": "清除禁用 Agent 的 slash 搜索草稿"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "返回设置页重新启用 User Agent"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'subagents' || !!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "重新挂载 Subagents 设置页"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-subagents\"]",
+      "description": "回到 User Agent 列表"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]')?.getAttribute('aria-checked') === 'false'",
+      "timeoutMs": 30000,
+      "description": "确认重新启用前仍读取禁用状态"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]",
+      "description": "通过真实 UI 重新启用 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]')?.getAttribute('aria-checked') === 'true'",
+      "timeoutMs": 30000,
+      "description": "User Agent 启用状态由 Rust 配置回写"
+    },
+    {
+      "action": "restart",
+      "description": "重启隔离桌面进程验证 User Agent 持久化"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "重启后隔离项目恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "冷恢复后打开设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "冷恢复后设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-subagents\"]",
+      "description": "冷恢复后重新进入 Subagents"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"subagent-row-native-user-agent\"] [role=\"switch\"]')?.getAttribute('aria-checked') === 'true' && document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')?.innerText.includes('edited')",
+      "timeoutMs": 45000,
+      "description": "确认 User Agent 编辑内容与启用状态冷恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-plugin-scope-trigger=\"true\"]",
+      "description": "打开 Subagent 的真实作用域菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('[role=\"menuitemradio\"]').length >= 2",
+      "timeoutMs": 30000,
+      "description": "确认菜单同时提供本机 user 与当前已登记项目 workspace 作用域"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitemradio\"]",
+      "texts": [
+        "project"
+      ],
+      "exact": true,
+      "description": "按隔离项目名称选择其 canonical workspace 作用域，避免误选 conversation"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-plugin-scope-trigger=\"true\"]')?.getAttribute('data-plugin-scope-key') !== 'user' && document.querySelector('[data-plugin-scope-trigger=\"true\"]')?.textContent?.includes('project') && !!document.querySelector('button[aria-label=\"新建\"],button[aria-label=\"New\"]')",
+      "timeoutMs": 45000,
+      "description": "确认真实 scope key 指向 project 而非 conversation，且创建入口可用"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"新建\"],button[aria-label=\"New\"]",
+      "description": "打开 project-scoped User Agent 创建表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) input[placeholder=\"code-reviewer\"]') && !!document.querySelector('form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]')",
+      "timeoutMs": 30000,
+      "description": "project-scoped User Agent 表单真实挂载"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) input[placeholder=\"code-reviewer\"]",
+      "text": "native-workspace-agent",
+      "description": "填写隔离项目 scope Agent 名称"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"简短\"],form:has(input[placeholder=\"code-reviewer\"]) input[placeholder*=\"description\"]",
+      "text": "native-workspace-agent",
+      "description": "填写 project-scoped Agent 描述"
+    },
+    {
+      "action": "type",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) textarea[placeholder*=\"描述这个子智能体\"],form:has(input[placeholder=\"code-reviewer\"]) textarea[placeholder*=\"Describe this subagent\"]",
+      "text": "NATIVE_WORKSPACE_AGENT_PROMPT_42: keep this project scope isolated and reply only with NATIVE_WORKSPACE_AGENT_REPLY_42.",
+      "description": "填写 project-scoped Agent system prompt"
+    },
+    {
+      "action": "click",
+      "selector": "form:has(input[placeholder=\"code-reviewer\"]) button[type=\"submit\"]",
+      "description": "通过真实 Rust RPC 创建 project-scoped Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"subagent-row-native-workspace-agent\"]') && document.querySelector('[data-testid=\"subagent-row-native-workspace-agent\"]')?.innerText.includes('native-workspace-agent')",
+      "timeoutMs": 45000,
+      "description": "project-scoped Agent 仅在其 canonical workspace 列表回读"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-workspace-agent\"] button[title=\"Delete\"],[data-testid=\"subagent-row-native-workspace-agent\"] button[title=\"删除\"]",
+      "description": "通过真实 UI 请求删除 project-scoped Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 30000,
+      "description": "project-scoped Agent 删除显示真实确认弹窗"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除 project-scoped Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"subagent-row-native-workspace-agent\"]')",
+      "timeoutMs": 45000,
+      "description": "project-scoped Agent 删除结果从 canonical project agents 目录回读为空"
+    },
+    {
+      "action": "click",
+      "selector": "[data-plugin-scope-trigger=\"true\"]",
+      "description": "重新打开作用域菜单检查 user 与 workspace 隔离"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('[role=\"menuitemradio\"]').length >= 2",
+      "timeoutMs": 30000,
+      "description": "确认作用域菜单仍保留本机 user 选项"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitemradio\"]",
+      "texts": [
+        "用户",
+        "User"
+      ],
+      "exact": true,
+      "description": "按明确的 User 选项切回本机 user 作用域"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-plugin-scope-trigger=\"true\"]')?.getAttribute('data-plugin-scope-key') === 'user' && !!document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]') && !document.querySelector('[data-testid=\"subagent-row-native-workspace-agent\"]')",
+      "timeoutMs": 45000,
+      "description": "确认 user Agent 保留且 project-scoped Agent 不泄漏到 user 列表"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回工作区执行一次真实 User Agent mention"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "User Agent 冷恢复后 Composer 已就绪"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-thought-level-select-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "等待 Root Composer reasoning 控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-thought-level-select-trigger\"]",
+      "description": "打开 Root Composer reasoning 档位选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-thought-level-select-item-none\"]')",
+      "timeoutMs": 30000,
+      "description": "确认当前模型公布 none reasoning 档位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-thought-level-select-item-none\"]",
+      "description": "通过真实 UI 将 Root Composer reasoning 设为 none"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-testid=\"chat-thought-level-select-trigger\"]'); const label=e?.getAttribute('aria-label')?.trim().toLowerCase(); return !!e && ['关闭', 'off', 'none'].some(value => label === value || label?.includes(value)); })()",
+      "timeoutMs": 30000,
+      "description": "严格回读 Root Composer 已保存的 none reasoning"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "/native-user-agent",
+      "description": "通过 Source 原生 slash 入口搜索已启用 User Agent（选中后 canonical markdown 为 @agent）"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"prompt-suggestion-panel\"]') && !!document.querySelector('[data-testid^=\"prompt-suggestion-option-subagent:\"][role=\"option\"]')",
+      "timeoutMs": 30000,
+      "description": "真实 Source slash 面板显示 User Agent 候选"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"option\"]",
+      "texts": [
+        "native-user-agent"
+      ],
+      "exact": false,
+      "description": "通过真实鼠标选择 User Agent mention"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const node = document.querySelector('[data-testid=\"v4-composer-input\"] [data-mention-category=\"subagents\"]'); return !!node && node.textContent?.includes('native-user-agent'); })()",
+      "description": "确认 Composer 写入结构化 subagent token，而非普通文本"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请调用 spawn_agent，使用 agent native-user-agent 处理本次请求；Bash 是 POSIX/Git Bash，子 Agent 第一次且唯一的目录读取命令必须只使用已保存的 Bash 工具执行 MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -NonInteractive -Command 'Get-ChildItem -Name'，返回该命令的真实输出，不要先执行裸 Get-ChildItem，不要伪造文件内容或 marker；等待子 Agent 完成后转述其回复。",
+      "description": "明确要求根模型调用 spawn_agent，并让子 Agent 首次 Bash 请求使用 PowerShell 包装命令取得真实目录输出"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-user-agent-dispatch",
+      "eventType": "sub_agent_spawned",
+      "captureEventSequence": true,
+      "description": "固定本次 User Agent 发送前的 Journal 高水位，后续只采信同一次 spawn 的新事件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "通过真实 Composer 发送 User Agent mention"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "payloadContains": {
+        "source_agent_id": "root"
+      },
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "timeoutMs": 30000,
+      "description": "Journal 记录主会话已接受 User Agent mention 请求",
+      "captureSessionAs": "native-user-agent-parent-session",
+      "capturePayloadPath": "turn_id",
+      "captureAs": "native-user-agent-root-turn-id",
+      "approvePermissions": true
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestToolName": "spawn_agent",
+      "requestContains": "\"agent\":\"native-user-agent\"",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "Journal 证明根模型实际调用现有 spawn_agent 并选择启用的 User Agent 配置",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "sub_agent_spawned",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "capturePayloadPath": "agent.agentId",
+      "captureAs": "native-user-agent-child-id",
+      "approvePermissions": true,
+      "timeoutMs": 30000,
+      "description": "Journal 记录本次 spawn 的一层 User Agent child agentId，后续 Turn 必须绑定同一身份",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "payloadEqualsCaptured": {
+        "source_agent_id": "native-user-agent-child-id"
+      },
+      "capturePayloadPath": "turn_id",
+      "captureAs": "native-user-agent-child-turn-id",
+      "approvePermissions": true,
+      "timeoutMs": 30000,
+      "description": "Journal 证明本次 spawn 的 child agentId 实际启动了对应子 Turn；外层 Journal 仍按父 Session 归档",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestToolName": "Bash",
+      "requestAgentIdEqualsCaptured": "native-user-agent-child-id",
+      "requestTurnIdEqualsCaptured": "native-user-agent-child-turn-id",
+      "capturePayloadPath": "request.requestId",
+      "captureAs": "native-user-agent-bash-request-id",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "Journal 严格确认同一 User Agent child/turn 只通过已保存的 Bash 工具发起真实请求并捕获 requestId",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "requestToolName": "Bash",
+      "requestAgentIdEqualsCaptured": "native-user-agent-child-id",
+      "requestTurnIdEqualsCaptured": "native-user-agent-child-turn-id",
+      "requestIdEqualsCaptured": "native-user-agent-bash-request-id",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "Journal 以同一 requestId 严格确认 Bash 工具成功完成，不接受 Root 或历史工具结果",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.innerText.includes('NATIVE_USER_AGENT_REPLY_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "真实 Deepseek 主会话执行 User Agent 配置并返回固定 marker"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "timeoutMs": 30000,
+      "approvePermissions": true,
+      "description": "Journal 记录本次 User Agent 请求对应的根 Turn 完成",
+      "sessionEqualsCaptured": "native-user-agent-parent-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "native-user-agent-root-turn-id"
+      }
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "before-user-agent-dispatch",
+      "payloadEqualsCaptured": {
+        "turn_id": "native-user-agent-child-turn-id"
+      },
+      "timeoutMs": 30000,
+      "approvePermissions": true,
+      "description": "Journal 记录同一 child agentId/turnId 的 User Agent 子 Turn 完成",
+      "sessionEqualsCaptured": "native-user-agent-parent-session"
+    },
+    {
+      "action": "screenshot",
+      "name": "user-agent-mention-execution"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "返回设置页继续 User Agent 删除验收"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页重新挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-subagents\"]",
+      "description": "重新进入 User Agent 管理"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')",
+      "timeoutMs": 30000,
+      "description": "读取待删除 User Agent"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-row-native-user-agent\"] button[title=\"Delete\"],[data-testid=\"subagent-row-native-user-agent\"] button[title=\"删除\"]",
+      "description": "通过真实 UI 请求删除 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 30000,
+      "description": "User Agent 删除显示真实确认弹窗"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除 User Agent"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"subagent-row-native-user-agent\"]')",
+      "timeoutMs": 45000,
+      "description": "User Agent 删除结果从 Rust agents 目录回读为空"
+    },
+    {
+      "action": "screenshot",
+      "name": "local-resources-crud-complete",
+      "description": "保存 User Agent CRUD、Memory 冷恢复和 Plugin 卸载成功证据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

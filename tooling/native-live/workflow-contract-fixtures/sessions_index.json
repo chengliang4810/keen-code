@@ -1,0 +1,18 @@
+{
+  "logEpoch": "workspace-local:C:/contract-workspace",
+  "protocolVersion": 1,
+  "sessions": [
+    {
+      "createdAt": 1791025611388,
+      "hasBackgroundWork": false,
+      "lastActivityAt": 1791025611388,
+      "phase": "draft",
+      "sessionEnded": false,
+      "sessionId": "session-ca1fed40979c54f3994e2332ebd1d483d60bba260a4f0fdc139c4b6263aac394",
+      "title": "新对话",
+      "titleSource": "default",
+      "workspaceId": "local:C:/contract-workspace"
+    }
+  ],
+  "workspaceId": "local:C:/contract-workspace"
+}

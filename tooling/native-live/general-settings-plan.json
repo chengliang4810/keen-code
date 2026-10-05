@@ -1,0 +1,460 @@
+{
+  "name": "native-live-general-settings",
+  "description": "通过原生 General 设置、真实 PTY、冷重启和真实模型回复验证保留的本地设置链路。计划只包含合成代理地址与 No Proxy 规则，不包含 endpoint、凭据或其他用户配置。当前来源选择器在 Windows 上实际暴露 Command Prompt/Git Bash；若宿主提供 PowerShell 选项，clickText 会优先选择该选项，否则选择 Command Prompt，不把不可见选项当作通过。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "General 设置与真实 PTY 原生验收初始文件\n"
+  },
+  "coverage": [
+    {
+      "id": "integrated-shell-and-pty",
+      "status": "covered",
+      "notes": "通过原 General 选择器保存 Windows shell，随后由真实 terminal-toggle 创建 PTY，读取真实 prompt 和命令输出；当前源契约不把 PowerShell 作为集成 Bash shell 选项暴露。"
+    },
+    {
+      "id": "proxy-no-proxy-cold-restart",
+      "status": "covered",
+      "notes": "保存 http://127.0.0.1:1 与 No Proxy *，冷重启后以真实 deepseek 回复证明请求绕过合成死代理；随后清空两项并再次冷读回空值。"
+    },
+    {
+      "id": "ask-user-auto-resolution",
+      "status": "covered-by-existing-plan",
+      "notes": "AskUser pending、真实暂停/恢复与超时路径由 permission-mode-plan.json/zcode-desktop-plan.json 覆盖，本计划不注入或模拟结果。"
+    }
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "通过原界面选择隔离测试项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "本地项目激活后显示原 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "打开原 General 设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general' && !!document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)",
+      "timeoutMs": 30000,
+      "description": "General shell 与代理控件真实挂载"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] [data-slot=\"select-trigger\"]",
+      "texts": [
+        "自动选择",
+        "Auto"
+      ],
+      "description": "打开集成终端 shell 选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-slot=\"select-item\"]')).some(e => ['PowerShell', 'Windows PowerShell', 'Command Prompt', '命令提示符', 'Git Bash'].some(label => e.textContent?.trim() === label))",
+      "timeoutMs": 30000,
+      "description": "确认宿主实际列出可用 Windows shell"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-slot=\"select-item\"]",
+      "texts": [
+        "PowerShell",
+        "Windows PowerShell",
+        "Command Prompt",
+        "命令提示符",
+        "Git Bash"
+      ],
+      "description": "通过原 shell 菜单选择 PowerShell 或当前契约暴露的 Command Prompt/Git Bash"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-testid=\"settings-page\"][data-active-section=\"general\"] [data-slot=\"select-trigger\"]')).some(e => ['PowerShell', 'Windows PowerShell', 'Command Prompt', '命令提示符', 'Git Bash'].some(label => e.textContent?.includes(label)))",
+      "timeoutMs": 30000,
+      "description": "shell 选择经真实 settings service 回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回工作区创建新的 PTY"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "通过原终端入口创建真实 PTY"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = [...document.querySelectorAll('[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"]')].find((element) => { const r = element.getBoundingClientRect(); const s = getComputedStyle(element); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; }); const e = panel?.querySelector('.xterm-screen'); if (!panel || !e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "真实 PTY surface 已挂载"
+    },
+    {
+      "action": "wait",
+      "timeoutMs": 5000,
+      "description": "等待真实 PTY 完成启动，输出通过隔离文件事实验证",
+      "expression": "(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); return true; })()"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"] .xterm-screen",
+      "text": "echo NATIVE_GENERAL_PTY_OK > pty-marker.txt",
+      "description": "通过真实 PTY 写入隔离项目 marker"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行真实 PTY 命令"
+    },
+    {
+      "action": "wait",
+      "timeoutMs": 5000,
+      "description": "等待真实 PTY 命令完成",
+      "expression": "(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); return true; })()"
+    },
+    {
+      "action": "file",
+      "path": "pty-marker.txt",
+      "contains": "NATIVE_GENERAL_PTY_OK",
+      "description": "隔离项目文件证明真实 PTY 命令已执行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "关闭 PTY 返回原工作区布局"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "返回 General 设置写入网络策略"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general'",
+      "timeoutMs": 30000,
+      "description": "General 设置页已挂载"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']",
+      "text": "http://127.0.0.1:1",
+      "description": "在原 HTTP Proxy 输入框写入合成死代理地址"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "通过原输入控件保存 HTTP Proxy"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)?.value === 'http://127.0.0.1:1' && (document.body.innerText.includes('网络代理设置已保存') || document.body.innerText.includes('Network proxy settings saved'))",
+      "timeoutMs": 10000,
+      "description": "HTTP Proxy 真实保存提示与输入值一致"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']",
+      "text": "*",
+      "description": "在原 No Proxy 输入框写入全量直连规则"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "通过原输入控件保存 No Proxy"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']`)?.value === '*' && (document.body.innerText.includes('网络代理设置已保存') || document.body.innerText.includes('Network proxy settings saved'))",
+      "timeoutMs": 10000,
+      "description": "No Proxy 真实保存提示与输入值一致"
+    },
+    {
+      "action": "screenshot",
+      "name": "01-general-proxy-saved"
+    },
+    {
+      "action": "restart",
+      "description": "冷重启隔离桌面进程使 shell 与网络设置实际生效"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "冷重启后本地项目和原 Composer 恢复"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "冷重启后重新打开 General"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "冷重启后的设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "冷重启后通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general' && document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)?.value === 'http://127.0.0.1:1' && document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']`)?.value === '*' && Array.from(document.querySelectorAll('[data-testid=\"settings-page\"][data-active-section=\"general\"] [data-slot=\"select-trigger\"]')).some(e => ['PowerShell', 'Windows PowerShell', 'Command Prompt', '命令提示符', 'Git Bash'].some(label => e.textContent?.includes(label)))",
+      "timeoutMs": 30000,
+      "description": "冷读回 shell、HTTP Proxy 与 No Proxy 的本地配置"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回工作区验证冷启动后的新 PTY"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "冷启动后创建第二个真实 PTY"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = [...document.querySelectorAll('[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"]')].find((element) => { const r = element.getBoundingClientRect(); const s = getComputedStyle(element); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; }); const e = panel?.querySelector('.xterm-screen'); if (!panel || !e) return false; const r = e.getBoundingClientRect(); const text = panel.innerText ?? ''; return r.width > 0 && r.height > 0 && text.split('\\n').some((line) => { const prompt = line.trimEnd(); return /^[A-Za-z]:/.test(prompt) && prompt.endsWith('>'); }); })()",
+      "timeoutMs": 30000,
+      "description": "冷启动后的活动 CMD PTY surface 与真实 prompt 已就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"] .xterm-screen",
+      "text": "echo NATIVE_GENERAL_PTY_AFTER_RESTART_OK",
+      "description": "验证冷启动后的 PTY 仍能接受真实命令"
+    },
+    {
+      "action": "key",
+      "key": "Enter"
+    },
+    {
+      "action": "wait",
+      "expression": "[...document.querySelectorAll('[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"]')].some((panel) => panel.innerText.includes('NATIVE_GENERAL_PTY_AFTER_RESTART_OK'))",
+      "timeoutMs": 30000,
+      "description": "冷启动后收到真实 PTY 输出"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实模型选择控件完成 provider/session 加载并启用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开真实聊天模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "真实 provider 分组加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开真实 provider 模型子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择真实 deepseek-v4.1-flash"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "这是 HTTP Proxy 与 No Proxy 的真实链路验收。只回复精确字符串 NATIVE_GENERAL_PROXY_OK，不要调用工具，不要添加解释。",
+      "description": "在真实 Composer 发起绕过合成代理的模型请求"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_GENERAL_PROXY_OK')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "真实 deepseek 回复证明 No Proxy * 绕过合成死代理"
+    },
+    {
+      "action": "screenshot",
+      "name": "02-proxy-model-reply"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "打开 General 清空网络配置"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "清空前设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "清空前通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general'",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']",
+      "description": "使用真实 Ctrl+A/Backspace 清空 HTTP Proxy"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "通过原输入控件提交空 HTTP Proxy"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']",
+      "description": "使用真实 Ctrl+A/Backspace 清空 No Proxy"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "通过原输入控件提交空 No Proxy"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)?.value === '' && document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']`)?.value === ''",
+      "timeoutMs": 10000,
+      "description": "界面回写已清空的代理字段"
+    },
+    {
+      "action": "restart",
+      "description": "再次冷重启确认空值被真正持久化"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "最终冷读设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "最终冷读通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general' && document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)?.value === '' && document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='localhost']`)?.value === ''",
+      "timeoutMs": 30000,
+      "description": "冷读回空代理配置，结束本地 General 验收"
+    },
+    {
+      "action": "screenshot",
+      "name": "03-general-proxy-cleared"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

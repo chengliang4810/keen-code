@@ -1,0 +1,174 @@
+{
+  "name": "native-live-docx-preview-debug",
+  "description": "独立诊断真实 OOXML DOCX 预览的段落与 run 样式。沿用原生文件树和 docx-preview 流程，把只读 pageProbe 放在严格语义断言之前；probe 只记录 marker 子树内有限的 p/span/strong/b 计算样式、class、样式表可读性和页面几何，不读取正文或凭据，不注入样式，不调用模型或 inline invoke。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "DOCX 原生预览样式诊断隔离项目基线\n"
+  },
+  "binaryFixtures": [
+    {
+      "source": "tooling/native-live/fixtures/native-live-document.docx",
+      "target": "native-live-document.docx",
+      "sha256": "EE5661B5EDE2776E4099AFE2E42B88062C21878F92259AE10AA6AB99BE783146",
+      "sha256Algorithm": "sha256",
+      "copy": "binary",
+      "verify": "source-before-copy-and-target-after-copy",
+      "format": "ooxml-docx",
+      "required": true
+    }
+  ],
+  "coverage": [
+    {
+      "id": "docx-render",
+      "status": "pending",
+      "evidence": "workspace-file-tree-row-native-live-document.docx、preview-pane、data-docx-render-root、唯一 marker"
+    },
+    {
+      "id": "docx-style-debug",
+      "status": "pending",
+      "evidence": "严格断言前的受限 pageProbe，记录每个 style 的 sheet/nonce/cssRules 状态和 marker 子树 p/span/strong/b 的计算样式"
+    },
+    {
+      "id": "docx-csp-style-attachment",
+      "status": "pending",
+      "evidence": "真实 docx-render-styles 容器中的样式表有效，不能由 probe 注入或以正文文本代替"
+    }
+  ],
+  "docxValidator": {
+    "renderRootSelector": "[data-docx-render-root]",
+    "stylesSelector": "[data-docx-render-styles]",
+    "bodySelector": "[data-docx-render-body]",
+    "marker": "NATIVE_DOCX_FIXTURE_43",
+    "styleRequirements": [
+      "所有 style.sheet 可读取且 nonce 非空",
+      "至少存在 custom 与 generated 两类 style，generated cssRules 总数大于 0",
+      "至少一个渲染页面 getBoundingClientRect 的宽高大于 0",
+      "严格断言仍要求夹具 Heading1 的蓝色、粗体与约 18.67px computed style"
+    ],
+    "pageProbe": "只记录布尔值、样式表数量/规则数量、marker 子树有限节点的 tag/class/计算样式和页面几何，不写入正文内容"
+  },
+  "knownGaps": [
+    "本计划只诊断 Tauri renderer 内真实 docx-preview；不宣称系统 Word 或 Office 桌面应用打开成功。",
+    "probe 不修改 DOM/CSS，不读取 provider、路径或正文，不将可见文本存在当作样式通过。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button')",
+      "description": "隔离新配置进入首次启动引导"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成职业选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('UI 模式') || document.body.innerText.includes('UI mode'))",
+      "description": "进入 UI 模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成模式选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('按需开启以下功能') || document.body.innerText.includes('Enable the features you need') || document.body.innerText.includes('助手偏好'))",
+      "description": "进入首次启动偏好确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "保存首次启动设置"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示 Source 项目操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏显示 workspace 文件树入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦当前 workspace 挂载文件树入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开当前 workspace 文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')",
+      "timeoutMs": 30000,
+      "description": "文件树面板已挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('native-live-document.docx')",
+      "timeoutMs": 30000,
+      "description": "从文件树发现预置的真实 OOXML DOCX 夹具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$=\"native-live-document.docx\"]",
+      "description": "从文件树打开真实 DOCX 预览"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const root=document.querySelector('[data-testid=\"preview-pane\"] [data-docx-render-root]'); const body=root?.querySelector('[data-docx-render-body]'); const styles=[...root?.querySelectorAll('[data-docx-render-styles] style') ?? []]; const generated=styles.filter(style => !style.hasAttribute('data-docx-page-surface-style')); const allReadable=styles.length >= 2 && styles.every(style => { try { return !!style.sheet && style.nonce.trim().length > 0; } catch { return false; } }); const generatedRules=generated.reduce((total, style) => { try { return total + (style.sheet?.cssRules?.length ?? 0); } catch { return total; } }, 0); const pages=[...body?.querySelectorAll('section, .docx') ?? []]; const marker=root?.textContent?.includes('NATIVE_DOCX_FIXTURE_43') === true; return !!root && !!body && marker && allReadable && generated.length > 0 && generatedRules > 0 && pages.some(page => { const rect=page.getBoundingClientRect(); return rect.width > 0 && rect.height > 0; }); })()",
+      "timeoutMs": 60000,
+      "description": "等待真实 docx-preview render root、正文 marker、style.sheet/cssRules 与非空页面 bounds"
+    },
+    {
+      "action": "pageProbe",
+      "name": "native-docx-semantic-debug-probe",
+      "expression": "(() => { const preview=document.querySelector('[data-testid=\"preview-pane\"]'); const root=preview?.querySelector('[data-docx-render-root]'); const styles=[...root?.querySelectorAll('[data-docx-render-styles] style') ?? []]; const stylesheets=styles.map((style,index) => { let cssRules=0; let readable=false; let hasNonce=false; try { cssRules=style.sheet?.cssRules?.length ?? 0; readable=!!style.sheet; hasNonce=style.nonce.trim().length > 0; } catch {} return { index, readable, cssRules, hasNonce, customPageSurface:style.hasAttribute('data-docx-page-surface-style') }; }); const generatedRuleCount=stylesheets.filter(style => !style.customPageSurface).reduce((total, style) => total + style.cssRules, 0); const body=root?.querySelector('[data-docx-render-body]'); const pages=[...body?.querySelectorAll('section, .docx') ?? []].map(page => { const rect=page.getBoundingClientRect(); return { width:Math.round(rect.width), height:Math.round(rect.height), display:getComputedStyle(page).display }; }).filter(page => page.width > 0 && page.height > 0); const markerNode=[...body?.querySelectorAll('*') ?? []].find(node => [...node.childNodes].some(child => child.nodeType === 3 && child.nodeValue?.includes('NATIVE_DOCX_FIXTURE_43'))); const heading=[...body?.querySelectorAll('p,h1,h2,h3,h4,h5,h6,span,strong,b') ?? []].find(node => node.textContent?.includes('真实 DOCX 预览样式验收')); const semanticRoot=heading ?? markerNode; const leafNodes=[semanticRoot, ...semanticRoot?.querySelectorAll('p,span,strong,b') ?? []].filter((node,index,nodes) => node && nodes.indexOf(node) === index).slice(0,16); const leafStyles=leafNodes.map(node => { const computed=getComputedStyle(node); return { tag:node.tagName.toLowerCase(), className:String(node.className ?? '').slice(0,160), isHeadingCandidate:node===heading, isMarkerNode:node===markerNode, computed:{ color:computed.color, fontWeight:computed.fontWeight, fontSize:computed.fontSize, display:computed.display } }; }); return { marker:Boolean(root?.textContent?.includes('NATIVE_DOCX_FIXTURE_43')), headingFound:Boolean(heading), markerNodeFound:Boolean(markerNode), stylesheets, generatedRuleCount, pages, leafStyles }; })()",
+      "description": "严格断言前只读采集 marker 子树有限 p/span/strong/b 的 class、color、fontWeight、fontSize、display，以及每个样式表的 sheet/nonce/cssRules 状态"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const root=document.querySelector('[data-testid=\"preview-pane\"] [data-docx-render-root]'); const body=root?.querySelector('[data-docx-render-body]'); const styles=[...root?.querySelectorAll('[data-docx-render-styles] style') ?? []]; const generated=styles.filter(style => !style.hasAttribute('data-docx-page-surface-style')); const allReadable=styles.length >= 2 && styles.every(style => { try { return !!style.sheet && style.nonce.trim().length > 0; } catch { return false; } }); const generatedRules=generated.reduce((total, style) => { try { return total + (style.sheet?.cssRules?.length ?? 0); } catch { return total; } }, 0); const heading=[...body?.querySelectorAll('p') ?? []].find(element => element.textContent?.includes('真实 DOCX 预览样式验收')); const computed=heading ? getComputedStyle(heading) : null; const size=Number.parseFloat(computed?.fontSize ?? '0'); const blue=(computed?.color ?? '').replace(/\\s/g, '').toLowerCase() === 'rgb(31,78,121)'; const bold=Number.parseInt(computed?.fontWeight ?? '0', 10) >= 700; const headingStyle=!!heading && !!computed && computed.display !== 'none' && blue && bold && Math.abs(size - 18.6667) < 1; return !!root && !!body && root.textContent?.includes('NATIVE_DOCX_FIXTURE_43') && allReadable && generated.length > 0 && generatedRules > 0 && headingStyle; })()",
+      "description": "保留原严格断言：所有样式表带 nonce 且 generated 规则有效，并匹配夹具 Heading1 的蓝色粗体约 18.67px computed style"
+    },
+    {
+      "action": "screenshot",
+      "name": "native-docx-preview-debug-render",
+      "description": "保存真实 DOCX renderer 状态；不替代语义样式断言"
+    }
+  ]
+}

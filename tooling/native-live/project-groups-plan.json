@@ -1,0 +1,722 @@
+{
+  "name": "native-live-project-groups",
+  "description": "通过真实桌面 UI、Rust RPC、隔离项目目录和 Journal 验收项目打开/移除、项目分区折叠、任务分组创建/重命名/折叠、已有任务移动、取消分组、分组成员持久化与冷恢复。Source 的项目入口只有打开文件夹和移除（移除入口，不删除历史），分组的删除语义是取消分组；项目重命名、项目置顶、分组置顶保留为明确的契约缺口，不用 DOM 事件或第二状态源冒充成功。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "project-groups-evidence.txt": "PROJECT_GROUPS_FIXTURE_42\n"
+  },
+  "offlineContracts": [
+    "packages/ui/src/WorkspaceSidebar.tsx::WorkspacePurposeSection：项目分区由 Source Collapsible 持久保存展开态；project-add 菜单只有打开文件夹。",
+    "packages/ui/src/WorkspaceSidebarItem.tsx::handleRemoveWorkspace：移除只关闭项目入口、释放 runtime 并使列表缓存失效，Source 文案明确历史任务不会被删除。",
+    "packages/ui/src/WorkspaceGroupedTasksSection.tsx + packages/ui/src/hooks/useGroupedTaskView.ts：新建分组通过 zcodeTaskService.createTaskGroup，首个分组自动进入真实标题编辑；在分组中新建任务通过同一 Composer 产生真实任务。",
+    "apps/desktop/src/frontend_rpc/session/task_extras.rs::task-groups.json：分组标题、成员、顶层顺序是 Rust 持久组织投影；任务正文和生命周期仍由 Session Journal/Runtime 提供。",
+    "packages/ui/src/lib/groupedTaskExpansionPreference.ts：分组折叠态属于当前 WebView localStorage 偏好，与 Rust task-groups membership 分开验证。"
+  ],
+  "coverage": [
+    {
+      "id": "project-open-remove-reopen",
+      "status": "covered",
+      "testIds": [
+        "project-add",
+        "project-section",
+        "workspace-item-*",
+        "workspace-list"
+      ],
+      "notes": "通过项目分区的打开文件夹菜单激活隔离目录；通过项目行更多菜单的移除动作关闭入口，再用同一 Source 打开文件夹重开，确认历史分组/任务仍由 Rust 恢复。移除不是物理删除项目目录。"
+    },
+    {
+      "id": "project-section-collapse-cold-recovery",
+      "status": "covered",
+      "testIds": [
+        "project-section",
+        "workspace-list"
+      ],
+      "notes": "项目分区的 aria-expanded 和重启后的同一 aria-expanded 由真实 UI 断言；这是浏览器偏好持久化，不混同 task-groups。"
+    },
+    {
+      "id": "group-create-rename-collapse-cold-recovery",
+      "status": "covered",
+      "testIds": [
+        "taskGroup.newGroup",
+        "data-grouped-group-item-id",
+        "data-grouped-group-header-id"
+      ],
+      "notes": "新建分组后使用 Source 自动聚焦的 input 完成标题写入；左键折叠标题并重启，验证 group title、collapsed aria 和成员结构。"
+    },
+    {
+      "id": "grouped-task-membership-isolation",
+      "status": "covered",
+      "testIds": [
+        "data-grouped-task-key",
+        "data-grouped-group-item-id"
+      ],
+      "notes": "一个真实顶层任务和一个从分组 New task 入口创建的真实任务分别绑定 Journal turn；冷恢复后断言分组内恰有一个 task、顶层恰有一个 task，避免把整个列表或前端临时行当作 membership。"
+    },
+    {
+      "id": "group-existing-task-move-and-ungroup-cold-recovery",
+      "status": "covered",
+      "testIds": [
+        "data-grouped-task-key",
+        "taskGroup.moveToGroup",
+        "taskGroup.ungroup"
+      ],
+      "notes": "使用 harness 的真实 CDP 右键打开 Source ContextMenu，把现有顶层任务移入已创建分组，再用取消分组并删除恢复两个顶层任务；重启后断言 group 不再存在且两条任务仍由 Rust 投影恢复。"
+    },
+    {
+      "id": "project-and-group-pin",
+      "status": "pending",
+      "testIds": [
+        "taskList.pin"
+      ],
+      "notes": "Source 没有项目 pin 或分组 pin 字段；pin 只属于 task，且不属于本计划的 project/group CRUD 验收。"
+    }
+  ],
+  "knownGaps": [
+    "Source WorkspaceSidebar 的项目菜单只有打开文件夹，WorkspaceSidebarItem 只有移除；没有项目重命名或项目置顶控件。最小补充是产品先提供明确的 rename/pin DTO 和 UI，而不是在计划中假造入口。",
+    "Source ZCodeTaskGroup 只有 id/title/color/createdAt/updatedAt，没有 pinned 字段；task pin 属于另一条 task context-menu 语义，本计划不把它冒充成 group pin。现有分组取消和已有任务移动已使用 native-live-e2e 的真实 CDP 右键及可见 role=menuitem。",
+    "KEENCODE_NATIVE_TEST_DIRECTORY 为本计划唯一隔离项目根；因此本计划证明同一 project scope 内 group membership 与 top-level task 隔离，不能声称跨两个 project root 的隔离。最小 harness 补充是显式创建并按顺序打开第二个隔离目录，且以 workspacePath/workspaceIdentity 绑定断言。",
+    "项目分区折叠和分组折叠由 WebView localStorage 保存；标题、成员和顶层顺序由 Rust task-groups.json 保存，报告必须分别归因。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "项目分区入口完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区显示添加按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开 Source 项目菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "打开文件夹",
+        "Open folder"
+      ],
+      "exact": true,
+      "description": "通过真实鼠标选择隔离项目目录"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目和 Composer 由真实 Source 挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('${MODEL}')",
+      "timeoutMs": 60000,
+      "description": "确认本轮真实回合使用计划指定的 provider model"
+    },
+    {
+      "action": "file",
+      "path": "project-groups-evidence.txt",
+      "contains": "PROJECT_GROUPS_FIXTURE_42",
+      "description": "确认真实隔离项目夹具已创建"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "beforeProjectTask",
+      "eventType": "turn_started",
+      "captureEventSequence": true,
+      "description": "按每个 Session 保存首次真实任务前的 Journal 高水位"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "GROUP_SCOPE_A_42\n请直接回复 GROUP_SCOPE_A_REPLY_42，不调用工具、不修改文件。",
+      "description": "通过真实 Composer 创建顶层任务"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送顶层任务"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('GROUP_SCOPE_A_REPLY_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 120000,
+      "description": "顶层任务真实模型回合完成并出现 assistant 回复"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_started",
+      "newSinceBaseline": "beforeProjectTask",
+      "minCount": 1,
+      "captureAs": "projectTaskTurn",
+      "capturePayloadPath": "turn_id",
+      "captureSessionAs": "projectTaskSession",
+      "description": "绑定顶层任务的唯一真实 turn 和 session"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "beforeProjectTask",
+      "minCount": 1,
+      "sessionEqualsCaptured": "projectTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "projectTaskTurn"
+      },
+      "description": "Journal 证明顶层任务终态，而不是只看 UI 文本"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"tab\"]",
+      "texts": [
+        "分组",
+        "Group"
+      ],
+      "exact": true,
+      "description": "通过 Source 视图切换打开真正 grouped task 列表"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-grouped-layout-key]') || !!document.querySelector('[data-testid=\"taskGroup.newGroup\"]') || !!document.querySelector('button[aria-label=\"新建分组\"],button[aria-label=\"New group\"]')",
+      "timeoutMs": 60000,
+      "description": "grouped task 容器完成权威列表加载"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"新建分组\"],button[aria-label=\"New group\"]",
+      "description": "通过真实 UI 调用 createTaskGroup"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-grouped-group-item-id] input')",
+      "timeoutMs": 30000,
+      "description": "新建分组进入 Source 自动标题编辑态"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-grouped-group-item-id] input",
+      "description": "清空 Source 新分组标题草稿"
+    },
+    {
+      "action": "type",
+      "selector": "[data-grouped-group-item-id] input",
+      "text": "Native Group 42",
+      "description": "填写真实分组标题"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交 Source 分组重命名"
+    },
+    {
+      "action": "wait",
+      "expression": "(async () => { await new Promise((resolve) => setTimeout(resolve, 500)); return true; })()",
+      "timeoutMs": 2000,
+      "description": "等待 Source 新建分组初始焦点保护窗口结束"
+    },
+    {
+      "action": "click",
+      "selector": "[data-grouped-group-item-id] button[aria-label=\"分组颜色\"],[data-grouped-group-item-id] button[aria-label=\"Group color\"]",
+      "description": "通过真实颜色菜单触发器结束标题编辑并收起菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const group = document.querySelector('[data-grouped-group-item-id]'); return !!group && !!group.querySelector('[aria-label=\"Native Group 42\"]') && !group.querySelector('input'); })()",
+      "timeoutMs": 30000,
+      "description": "确认分组标题从 Rust mutation 回到 Source"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "beforeGroupedTask",
+      "eventType": "turn_started",
+      "captureEventSequence": true,
+      "description": "保存分组任务回合前每个 Session 的 Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-grouped-group-item-id] button[aria-label=\"新建任务\"],[data-grouped-group-item-id] button[aria-label=\"New task\"]",
+      "description": "从真实分组 New task 入口创建分组内草稿"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 30000,
+      "description": "分组内真实 Composer 草稿已激活"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "GROUP_SCOPE_C_42\n请直接回复 GROUP_SCOPE_C_REPLY_42，不调用工具、不修改文件。",
+      "description": "从分组草稿发送真实任务"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "提交分组内任务"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.innerText.includes('GROUP_SCOPE_C_REPLY_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 120000,
+      "description": "分组内任务真实模型回合完成"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_started",
+      "newSinceBaseline": "beforeGroupedTask",
+      "minCount": 1,
+      "captureAs": "groupedTaskTurn",
+      "capturePayloadPath": "turn_id",
+      "captureSessionAs": "groupedTaskSession",
+      "description": "绑定分组任务的唯一真实 turn 和 session"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "beforeGroupedTask",
+      "minCount": 1,
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "Journal 证明分组任务已完成并可被 task membership 关联"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const group = document.querySelector('[data-grouped-group-item-id]'); if (!group || !group.querySelector('[aria-label=\"Native Group 42\"]')) return false; const grouped = group.querySelectorAll('[data-grouped-task-key]').length; const top = [...document.querySelectorAll('[data-grouped-task-key]')].filter(e => !e.closest('[data-grouped-group-item-id]')).length; return grouped === 1 && top === 1; })()",
+      "description": "确认一个真实任务在分组、另一个真实任务仍在顶层"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-before-collapse",
+      "description": "保存项目与分组成员结构证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-grouped-group-header-id]",
+      "description": "通过真实鼠标折叠分组"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-grouped-group-item-id]')?.getAttribute('data-group-collapsed') === 'true' && document.querySelector('[data-grouped-group-header-id]')?.getAttribute('aria-expanded') === 'false' && document.querySelector('[data-grouped-group-content-id]')?.getAttribute('aria-hidden') === 'true'",
+      "timeoutMs": 30000,
+      "description": "确认 Source 分组折叠状态"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-collapsed",
+      "description": "保存分组折叠偏好证据"
+    },
+    {
+      "action": "restart",
+      "description": "冷重启验证 Rust 分组 membership 与 UI 折叠偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "冷恢复后 Composer 已就绪"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"tab\"]",
+      "texts": [
+        "分组",
+        "Group"
+      ],
+      "exact": true,
+      "description": "冷恢复后回到 Source grouped 视图"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-grouped-group-item-id]') && !!document.querySelector('[data-grouped-group-item-id] [aria-label=\"Native Group 42\"]')",
+      "timeoutMs": 60000,
+      "description": "冷恢复后分组标题从 Rust task-groups 恢复"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-grouped-group-item-id]')?.getAttribute('data-group-collapsed') === 'true' && document.querySelector('[data-grouped-group-header-id]')?.getAttribute('aria-expanded') === 'false'",
+      "description": "冷恢复后分组折叠偏好保持"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "冷恢复后的 Journal 仍含本次分组真实回合"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-grouped-group-header-id]",
+      "condition": "document.querySelector('[data-grouped-group-header-id]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "展开分组读取冷恢复后的成员"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const group = document.querySelector('[data-grouped-group-item-id]'); if (!group) return false; const grouped = group.querySelectorAll('[data-grouped-task-key]').length; const top = [...document.querySelectorAll('[data-grouped-task-key]')].filter(e => !e.closest('[data-grouped-group-item-id]')).length; return !!group.querySelector('[aria-label=\"Native Group 42\"]') && grouped === 1 && top === 1; })()",
+      "timeoutMs": 30000,
+      "description": "冷恢复后确认分组成员和顶层任务仍隔离"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-cold-recovery",
+      "description": "保存分组标题、成员和冷恢复证据"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"tab\"]",
+      "texts": [
+        "项目",
+        "Project"
+      ],
+      "exact": true,
+      "description": "回到 Source 项目视图"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "项目分区控件重新挂载"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]",
+      "condition": "document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')?.getAttribute('aria-expanded') === 'true'",
+      "description": "通过真实鼠标收起项目分区"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')?.getAttribute('aria-expanded') === 'false'",
+      "timeoutMs": 30000,
+      "description": "确认项目分区已收起"
+    },
+    {
+      "action": "restart",
+      "description": "冷重启验证项目分区折叠偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')",
+      "timeoutMs": 60000,
+      "description": "冷恢复后项目分区控件挂载"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')?.getAttribute('aria-expanded') === 'false'",
+      "description": "冷恢复后项目分区仍收起"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]",
+      "condition": "document.querySelector('[data-testid=\"project-section\"] [data-slot=\"collapsible-trigger\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "展开项目分区以执行 Source 移除入口"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-testid=\"workspace-list\"] [data-testid^=\"workspace-item-\"][role=\"button\"]')).some((element) => { const rect = element.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return false; for (let node = element; node; node = node.parentElement) { const style = getComputedStyle(node); if (node.hidden || node.getAttribute('aria-hidden') === 'true' || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false; } return true; })",
+      "timeoutMs": 30000,
+      "description": "项目行可见"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"workspace-list\"] [data-testid^=\"workspace-item-\"][role=\"button\"]",
+      "description": "悬停真实可见项目行显示 Source 操作菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-list\"] [data-testid^=\"workspace-item-\"] button[aria-label=\"更多\"],[data-testid=\"workspace-list\"] [data-testid^=\"workspace-item-\"] button[aria-label=\"More\"]",
+      "description": "打开 Source 项目更多菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "移除",
+        "Remove"
+      ],
+      "exact": true,
+      "description": "通过真实鼠标移除项目入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"workspace-list\"] [data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 45000,
+      "description": "确认项目入口已移除，历史目录仍未被声称删除"
+    },
+    {
+      "action": "file",
+      "path": "project-groups-evidence.txt",
+      "contains": "PROJECT_GROUPS_FIXTURE_42",
+      "description": "确认 Source 移除入口没有删除隔离项目文件"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "重新悬停项目分区打开同一 Source 项目入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "重新打开项目菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "打开文件夹",
+        "Open folder"
+      ],
+      "exact": true,
+      "description": "重开同一隔离目录验证 project removal 只移除入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "同一项目重新从 Source 恢复"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"tab\"]",
+      "texts": [
+        "分组",
+        "Group"
+      ],
+      "exact": true,
+      "description": "重开项目后查看真实分组投影"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-grouped-group-item-id] [aria-label=\"Native Group 42\"]')",
+      "timeoutMs": 60000,
+      "description": "重开项目后分组标题仍存在"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-grouped-group-header-id]",
+      "condition": "document.querySelector('[data-grouped-group-header-id]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "展开重开项目中的分组以读取成员"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const group = document.querySelector('[data-grouped-group-item-id]'); if (!group) return false; const grouped = group.querySelectorAll('[data-grouped-task-key]').length; const top = [...document.querySelectorAll('[data-grouped-task-key]')].filter(e => !e.closest('[data-grouped-group-item-id]')).length; return grouped === 1 && top === 1; })()",
+      "timeoutMs": 30000,
+      "description": "重开项目后 membership 与顶层隔离仍由 Rust 投影恢复"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "projectTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "projectTaskTurn"
+      },
+      "description": "重开项目后顶层任务 Journal 事实仍存在"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "重开项目后分组任务 Journal 事实仍存在"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-reopen-success",
+      "description": "保存项目重开和分组 membership 最终证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-grouped-group-header-id]",
+      "description": "折叠分组，让真实顶层任务行成为唯一可右键任务"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-grouped-group-item-id]')?.getAttribute('data-group-collapsed') === 'true' && document.querySelectorAll('[data-grouped-task-key]').length === 1",
+      "timeoutMs": 30000,
+      "description": "确认分组任务内容已卸载且顶层任务仍可见"
+    },
+    {
+      "action": "rightClick",
+      "selector": "[data-grouped-task-key]",
+      "description": "使用真实鼠标右键打开现有顶层任务菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]') && Array.from(document.querySelectorAll('[role=\"menuitem\"]')).some(e => e.innerText === '移动到分组' || e.innerText === 'Move to group')",
+      "timeoutMs": 30000,
+      "description": "确认现有任务 ContextMenu 已由真实右键打开"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "移动到分组",
+        "Move to group"
+      ],
+      "exact": true,
+      "description": "打开 Source 移动到分组子菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "Native Group 42"
+      ],
+      "exact": true,
+      "description": "通过真实鼠标把已有顶层任务加入 Native Group 42"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-grouped-group-header-id]",
+      "condition": "document.querySelector('[data-grouped-group-header-id]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "展开分组检查已有任务移动后的 membership"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const group = document.querySelector('[data-grouped-group-item-id]'); if (!group) return false; const grouped = group.querySelectorAll('[data-grouped-task-key]').length; const top = [...document.querySelectorAll('[data-grouped-task-key]')].filter(e => !e.closest('[data-grouped-group-item-id]')).length; return grouped === 2 && top === 0; })()",
+      "timeoutMs": 45000,
+      "description": "确认现有顶层任务已持久移动到分组"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "projectTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "projectTaskTurn"
+      },
+      "description": "移动 membership 不改变顶层任务的 Journal 身份"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "移动 membership 不改变分组任务的 Journal 身份"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-after-existing-task-move",
+      "description": "保存已有任务移动到分组的真实 UI 证据"
+    },
+    {
+      "action": "rightClick",
+      "selector": "[data-grouped-group-header-id]",
+      "description": "使用真实鼠标右键打开分组 ContextMenu"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]') && Array.from(document.querySelectorAll('[role=\"menuitem\"]')).some(e => e.innerText === '取消分组并删除' || e.innerText === 'Ungroup and delete')",
+      "timeoutMs": 30000,
+      "description": "确认 Source 分组删除语义为取消分组并删除"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "取消分组并删除",
+        "Ungroup and delete"
+      ],
+      "exact": true,
+      "description": "通过真实鼠标执行取消分组并删除"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-grouped-group-item-id]') && document.querySelectorAll('[data-grouped-task-key]').length === 2",
+      "timeoutMs": 45000,
+      "description": "确认 group 记录删除但两条任务恢复为顶层任务"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "projectTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "projectTaskTurn"
+      },
+      "description": "取消分组不删除原顶层任务 Journal"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "取消分组不删除原分组任务 Journal"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-after-ungroup",
+      "description": "保存取消分组后两个顶层任务的真实 UI 证据"
+    },
+    {
+      "action": "restart",
+      "description": "冷重启验证取消分组和任务恢复状态"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "取消分组冷恢复后 Composer 已就绪"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"tab\"]",
+      "texts": [
+        "分组",
+        "Group"
+      ],
+      "exact": true,
+      "description": "冷恢复后回到 Source grouped 视图"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-grouped-group-item-id]') && document.querySelectorAll('[data-grouped-task-key]').length === 2",
+      "timeoutMs": 60000,
+      "description": "冷恢复后分组记录消失且两条任务仍由 Rust 投影为顶层"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "projectTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "projectTaskTurn"
+      },
+      "description": "冷恢复后顶层任务 Journal 仍存在"
+    },
+    {
+      "action": "journal",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "groupedTaskSession",
+      "payloadEqualsCaptured": {
+        "turn_id": "groupedTaskTurn"
+      },
+      "description": "冷恢复后原分组任务 Journal 仍存在"
+    },
+    {
+      "action": "screenshot",
+      "name": "project-groups-ungroup-cold-recovery",
+      "description": "保存取消分组后的冷恢复证据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

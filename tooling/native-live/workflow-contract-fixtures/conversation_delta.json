@@ -1,0 +1,19 @@
+{
+  "op": "row.upserted",
+  "row": {
+    "actions": {
+      "canFork": true,
+      "canRetry": true
+    },
+    "assistantResponseId": "contract-assistant-message",
+    "createdAt": 4197,
+    "createdAtSeq": 4097,
+    "entityId": "contract-assistant-message",
+    "kind": "assistantText",
+    "rowId": 4097,
+    "state": "streaming",
+    "text": "contract response",
+    "turnId": "contract-turn",
+    "visibility": "visible"
+  }
+}

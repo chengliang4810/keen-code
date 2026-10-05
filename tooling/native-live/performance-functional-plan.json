@@ -1,0 +1,521 @@
+{
+  "name": "native-performance-functional",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "NATIVE_PERFORMANCE_FILE_OK_41\n",
+    "preview.rs": "pub fn before_update() {} // PREVIEW_BEFORE_41\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实项目激活后显示 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待隔离 provider/model 加载完成"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 分组加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开 provider 模型菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型出现在真实模型菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "模型选择回写聊天工具栏"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏以显示 workspace 文件树入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦当前 workspace 行以挂载其真实操作入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口随侧栏展开"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开当前 workspace 文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')",
+      "timeoutMs": 30000,
+      "description": "文件树面板已挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('evidence.txt')",
+      "timeoutMs": 30000,
+      "description": "从文件树实际发现隔离夹具"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]",
+      "text": "evidence.txt"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes(\"evidence.txt\")",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "projectFileChange",
+      "operation": "write",
+      "path": "event-new.rs",
+      "text": "pub fn event_new() {}"
+    },
+    {
+      "action": "measure",
+      "name": "native-index-event",
+      "durationMs": 1000,
+      "settleMs": 1000
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]",
+      "text": "event-new.rs"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes(\"event-new.rs\")",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "projectFileChange",
+      "operation": "rename",
+      "path": "event-new.rs",
+      "to": "moved.rs"
+    },
+    {
+      "action": "measure",
+      "name": "native-index-rename",
+      "durationMs": 1000,
+      "settleMs": 1000
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]",
+      "text": "moved.rs"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes(\"moved.rs\")",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "projectFileChange",
+      "operation": "write",
+      "path": ".zcodeignore",
+      "text": "*.rs\n"
+    },
+    {
+      "action": "measure",
+      "name": "native-index-ignore",
+      "durationMs": 1000,
+      "settleMs": 1000
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]",
+      "text": "moved.rs"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('没有匹配的文件')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "projectFileChange",
+      "operation": "remove",
+      "path": ".zcodeignore"
+    },
+    {
+      "action": "measure",
+      "name": "native-index-unignore",
+      "durationMs": 1000,
+      "settleMs": 1000
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] input[type=\"text\"]",
+      "text": "preview.rs"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes(\"preview.rs\")",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$=\"preview.rs\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const collect = root => (root.textContent ?? '') + Array.from(root.querySelectorAll('*')).map(e => e.shadowRoot ? collect(e.shadowRoot) : '').join(''); return collect(document.body); })().includes('PREVIEW_BEFORE_41')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "projectFileChange",
+      "operation": "write",
+      "path": "preview.rs",
+      "text": "pub fn after_update() {} // PREVIEW_AFTER_41\n"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-file-tree-refresh-button\"]"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$=\"preview.rs\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const collect = root => (root.textContent ?? '') + Array.from(root.querySelectorAll('*')).map(e => e.shadowRoot ? collect(e.shadowRoot) : '').join(''); return collect(document.body); })().includes('PREVIEW_AFTER_41')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "clickText",
+      "selector": "button",
+      "texts": [
+        "返回任务",
+        "Back to tasks"
+      ],
+      "exact": true
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('button')).some(e=>e.innerText.includes('搜索')&&e.innerText.includes('Ctrl')&&e.getBoundingClientRect().width>0)",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "clickText",
+      "selector": "button",
+      "texts": [
+        "搜索",
+        "Search"
+      ],
+      "exact": false
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"dialog\"] input')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "type",
+      "selector": "[role=\"dialog\"] input",
+      "text": "preview.rs"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[role=\"dialog\"]')?.innerText.includes('preview.rs')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "write-command",
+      "eventType": "turn_started",
+      "captureEventSequence": true
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "在当前隔离项目完成三步：Read 读取 evidence.txt；Write 新建 result.txt，内容严格为 NATIVE_WRITE_PERF_OK_41；Bash 执行 echo NATIVE_SHELL_PERF_OK_41。不得修改其他文件，不调用其他工具。全部成功后回复 NATIVE_CONTINUATION_PERF_DONE_41。"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "newSinceBaseline": "write-command",
+      "captureSessionAs": "write-session",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "newSinceBaseline": "write-command",
+      "sessionEqualsCaptured": "write-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "requestToolName": "Write",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "newSinceBaseline": "write-command",
+      "sessionEqualsCaptured": "write-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "requestToolName": "Bash",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "write-command",
+      "sessionEqualsCaptured": "write-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true
+    },
+    {
+      "action": "file",
+      "path": "result.txt",
+      "contains": "NATIVE_WRITE_PERF_OK_41"
+    },
+    {
+      "action": "wait",
+      "expression": "document.body.innerText.includes('NATIVE_CONTINUATION_PERF_DONE_41') && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "captureTask",
+      "name": "performance-history",
+      "selector": "[data-testid^=\"task-item-\"]"
+    },
+    {
+      "action": "restart"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 90000,
+      "approvePermissions": false
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'"
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "performance-history"
+    },
+    {
+      "action": "wait",
+      "expression": "document.body.innerText.includes('NATIVE_CONTINUATION_PERF_DONE_41') && !!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 90000,
+      "approvePermissions": false
+    },
+    {
+      "action": "journalBaseline",
+      "name": "continuation-turn",
+      "eventType": "turn_started",
+      "captureEventSequence": true
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "延续上一轮，对话中刚才 Write 的文件名是什么？只回复 result.txt。禁止工具。"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "continuation-turn",
+      "sessionEqualsCaptured": "write-session",
+      "timeoutMs": 120000
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e=>e.classList.contains('group/assistant-row')&&e.innerText.trim().includes('result.txt')) && !document.querySelector('[data-testid=\"v4-stop\"]') && !(document.querySelector('[data-testid=\"v4-composer-input\"]')?.innerText??'').trim()",
+      "timeoutMs": 120000,
+      "approvePermissions": false
+    },
+    {
+      "action": "journalBaseline",
+      "name": "stop-turn",
+      "eventType": "turn_started",
+      "captureEventSequence": true
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"v4-composer-input\"]"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "逐行输出 PERF_STOP_LINE_41:1 到 PERF_STOP_LINE_41:500，每行至少二十个汉字。不要工具，不要省略。"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('PERF_STOP_LINE_41:1'))",
+      "timeoutMs": 120000
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-stop\"]"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_stopped",
+      "newSinceBaseline": "stop-turn",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 60000,
+      "approvePermissions": false
+    },
+    {
+      "action": "runtimeEvidence",
+      "name": "after-stop"
+    },
+    {
+      "action": "measure",
+      "name": "after-stop",
+      "durationMs": 10000,
+      "settleMs": 3000,
+      "activeSessionCount": 0
+    },
+    {
+      "action": "screenshot",
+      "name": "after-stop-and-recovery"
+    },
+    {
+      "action": "heapEvidence",
+      "name": "after-stop-gc"
+    },
+    {
+      "action": "runtimeEvidence",
+      "name": "after-stop-gc"
+    },
+    {
+      "action": "measure",
+      "name": "idle-after-stop-gc",
+      "durationMs": 30000,
+      "settleMs": 1000,
+      "activeSessionCount": 0
+    },
+    {
+      "action": "heapEvidence",
+      "name": "idle-after-stop-gc"
+    },
+    {
+      "action": "runtimeEvidence",
+      "name": "idle-after-stop-gc"
+    }
+  ]
+}

@@ -1,0 +1,157 @@
+{
+  "name": "native-live-general-cmd-bootstrap",
+  "description": "隔离验证 Source General 选择 Command Prompt 后首次终端 bootstrap 与显式新建终端行为。仅执行真实 UI 与隔离 marker 文件，不发送模型请求。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "CMD bootstrap acceptance fixture\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "通过原界面选择隔离测试项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "本地项目激活后显示原 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "打开原 General 设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general' && !!document.querySelector(`[data-testid=\"settings-page\"][data-active-section=\"general\"] input[placeholder*='127.0.0.1']`)",
+      "timeoutMs": 30000,
+      "description": "General shell 控件真实挂载"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-testid=\"settings-page\"][data-active-section=\"general\"] [data-slot=\"select-trigger\"]",
+      "texts": [
+        "自动选择",
+        "Auto"
+      ],
+      "description": "打开集成终端 shell 选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-slot=\"select-item\"]')).some(e => e.textContent?.trim() === 'Command Prompt' || e.textContent?.trim() === '命令提示符')",
+      "timeoutMs": 30000,
+      "description": "确认宿主实际列出 Command Prompt"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-slot=\"select-item\"]",
+      "texts": [
+        "Command Prompt",
+        "命令提示符"
+      ],
+      "exact": true,
+      "description": "通过原 shell 菜单选择 Command Prompt"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-testid=\"settings-page\"][data-active-section=\"general\"] [data-slot=\"select-trigger\"]')).some(e => e.textContent?.includes('Command Prompt') || e.textContent?.includes('命令提示符'))",
+      "timeoutMs": 30000,
+      "description": "Command Prompt 选择经真实 settings service 回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回工作区"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "通过原终端入口打开真实终端面板"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"terminal\"]') && !!document.querySelector('[data-testid=\"terminal-close-button\"]')",
+      "timeoutMs": 30000,
+      "description": "终端面板真实打开"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"新建终端\"]",
+      "description": "通过 Source 新建终端按钮显式创建 CMD 会话"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = [...document.querySelectorAll('[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"]')].find((element) => { const r = element.getBoundingClientRect(); const s = getComputedStyle(element); return r.width > 0 && r.height > 0 && s.display !== 'none' && s.visibility !== 'hidden'; }); const e = panel?.querySelector('.xterm-screen'); if (!panel || !e) return false; const r = e.getBoundingClientRect(); const text = panel.innerText ?? ''; return r.width > 0 && r.height > 0 && text.split('\\n').some((line) => { const prompt = line.trimEnd(); return /^[A-Za-z]:/.test(prompt) && prompt.endsWith('>'); }); })()",
+      "timeoutMs": 30000,
+      "description": "显式新建后的活动 CMD PTY surface 与真实 prompt 已就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] [role=\"tabpanel\"][data-state=\"active\"] .xterm-screen",
+      "text": "echo NATIVE_GENERAL_CMD_BOOTSTRAP_OK > cmd-bootstrap-marker.txt",
+      "description": "通过当前 CMD PTY 写入隔离 marker"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 CMD marker 命令"
+    },
+    {
+      "action": "wait",
+      "timeoutMs": 5000,
+      "expression": "(async () => { await new Promise((resolve) => setTimeout(resolve, 1000)); return true; })()",
+      "description": "等待 CMD marker 命令完成"
+    },
+    {
+      "action": "file",
+      "path": "cmd-bootstrap-marker.txt",
+      "contains": "NATIVE_GENERAL_CMD_BOOTSTRAP_OK",
+      "description": "隔离文件证明显式 CMD PTY 已执行命令"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

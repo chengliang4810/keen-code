@@ -1,0 +1,618 @@
+{
+  "name": "native-live-worktree-gui",
+  "description": "通过 KeenCode 新增的 workspace Composer worktree 菜单验证本地 Git worktree 的创建、会话交接、Journal 回执归档和移除；菜单复用固定 Source 的 Dropdown/Input/Dialog 控件与 DOM 语义。计划先用真实 UI 建立隔离项目，再用可见 PTY 准备 Git fixture，验证 UI 能读到主 checkout 的真实状态、隔离目录不泄漏且全局 Git 配置不变；PTY 只负责 fixture 准备和收尾，不能替代 GUI 生命周期证据。KeenCode 菜单接线发生在 Native30 binary 之后，所有 GUI coverage 仍须 Native31 新 binary 重验。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "NATIVE_WORKTREE_MAIN_BASE\n"
+  },
+  "coverage": [
+    {
+      "id": "isolated-git-fixture",
+      "status": "pending",
+      "testIds": [
+        "terminal-toggle",
+        "terminal",
+        "workspace-file-tree-panel",
+        "git-pane"
+      ],
+      "notes": "通过真实 PTY 只在本次临时 PROJECT 初始化 Git、提交基线并创建 linked worktree；fixture 会比较 global user.email 前后值，工作树专属文件只写入 sibling checkout。"
+    },
+    {
+      "id": "ui-worktree-create",
+      "status": "pending",
+      "testIds": [
+        "workspace-worktree-create",
+        "workspace-worktree-create-dialog",
+        "workspace-worktree-create-name",
+        "workspace-worktree-create-submit",
+        "workspace-worktree-current"
+      ],
+      "notes": "通过 workspace-worktree-create 对话框调用 typed platform 的 ui_git_worktree_create，结果必须在真实菜单中投影 path/branch 并切换到新 workspace；不能把 PTY 的 git worktree add 计为通过。"
+    },
+    {
+      "id": "ui-session-handoff",
+      "status": "pending",
+      "testIds": [
+        "workspace-session-handoff",
+        "workspace-worktree-open",
+        "workspace-worktree-current"
+      ],
+      "notes": "通过 workspace-session-handoff 从当前真实会话发起 ui_thread_session_stop + ui_git_handoff，验证新关联 worktree 可见且当前 session 仍由 UI 选择；不通过 Journal 或直接 RPC 回填身份。"
+    },
+    {
+      "id": "ui-worktree-archive-remove",
+      "status": "pending",
+      "testIds": [
+        "workspace-worktree-archive",
+        "workspace-worktree-remove",
+        "workspace-worktree-current"
+      ],
+      "notes": "通过 workspace-worktree-archive 使用 archiveTaskWithReceipt 的精确 Journal operationId/sequence，再调用 ui_git_archive_cleanup；通过 workspace-worktree-remove 调用 ui_git_worktree_remove。任务归档回执和工作树清理必须同一次 UI 操作完成。先验证脏 linked worktree 被 force=false 安全拒绝并保留，再清理已知 fixture 文件后验证干净工作树的 UI 删除。"
+    },
+    {
+      "id": "main-repository-and-user-config-isolation",
+      "status": "pending",
+      "testIds": [
+        "terminal",
+        "workspace-file-tree-panel",
+        "git-pane"
+      ],
+      "notes": "fixture 只使用临时 PROJECT 与其 sibling worktree；计划断言主 checkout 不出现 worktree-only.txt，脏 linked worktree 的 UI 删除不会删除该文件或 Git 注册，随后只删除已知隔离路径中的该 fixture 文件，再验证干净删除；git config --global user.email 在创建和清理前后保持相同。"
+    }
+  ],
+  "knownGaps": [
+    "packages/services/src/git/git.ts 仍不承担 worktree 生命周期；本入口使用 IPlatformService 的 typed Tauri commands，并由 Rust 校验 managed worktree 身份、workspace root 与 Journal receipt。",
+    "创建、handoff、归档和移除的 KeenCode 菜单已在 Native30 binary 之后接入；Native31 必须以新 binary 重新验证，Native30 结果不能回写这些 coverage。",
+    "当前 native-live-e2e runner 不允许用业务 RPC 或 CDP 状态注入补齐 GUI 证据；所有后续断言都从 workspace-worktree-open 菜单和真实结果投影读取。",
+    "本计划的 PTY Git 创建和清理仅用于隔离 fixture 准备/收尾，不是 GUI worktree 创建或 GUI remove 的证据。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "桌面工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "显示真实项目新增入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择本次隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目会话和 workspace 行由真实 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开侧栏查看当前 workspace"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦隔离 workspace"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口由真实 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开隔离项目文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]') && document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('evidence.txt')",
+      "timeoutMs": 30000,
+      "description": "文件树读取本次隔离 fixture"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$='evidence.txt']",
+      "description": "打开基线文件的真实预览"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const pane = document.querySelector('[data-testid=\"preview-pane\"]'); if (!pane) return false; const hasText = (root) => { if ((root.textContent ?? '').includes('NATIVE_WORKTREE_MAIN_BASE')) return true; return Array.from(root.querySelectorAll('*')).some((element) => element.shadowRoot && hasText(element.shadowRoot)); }; return hasText(pane); })()",
+      "timeoutMs": 30000,
+      "description": "预览显示隔离项目初始内容"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "打开真实 PTY 准备 Git fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"terminal\"] .xterm-screen') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待隔离项目 PowerShell PTY 就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"$globalBefore = (git config --global --get user.email | Out-String).Trim(); git -C '${PROJECT}' init; if ($LASTEXITCODE -ne 0) { throw 'git init failed' }; git -C '${PROJECT}' config user.name NativeLive; git -C '${PROJECT}' config user.email native-live@example.invalid; git -C '${PROJECT}' add evidence.txt; if ($LASTEXITCODE -ne 0) { throw 'git add failed' }; git -C '${PROJECT}' commit -m 'Native worktree GUI fixture'; if ($LASTEXITCODE -ne 0) { throw 'git commit failed' }; git -C '${PROJECT}' worktree add -b native-live-gui-worktree '${PROJECT}\\\\..\\\\native-live-gui-worktree' HEAD; if ($LASTEXITCODE -ne 0) { throw 'git worktree add failed' }; Set-Content -LiteralPath '${PROJECT}\\\\..\\\\native-live-gui-worktree\\\\worktree-only.txt' -Value 'NATIVE_WORKTREE_ONLY' -Encoding utf8 -ErrorAction Stop; Add-Content -LiteralPath '${PROJECT}\\\\evidence.txt' -Value 'NATIVE_MAIN_EDIT' -Encoding utf8 -ErrorAction Stop; $globalAfter = (git config --global --get user.email | Out-String).Trim(); if ($globalBefore -ne $globalAfter) { throw 'global Git config changed' }; if (Test-Path '${PROJECT}\\\\worktree-only.txt') { throw 'worktree file leaked into main checkout' }; $list = git -C '${PROJECT}' worktree list --porcelain | Out-String; if ($list -notmatch 'native-live-gui-worktree') { throw 'fixture worktree missing from Git list' }; Write-Output NATIVE_WORKTREE_GUI_FIXTURE_READY; Write-Output NATIVE_GLOBAL_GIT_UNCHANGED\"",
+      "description": "通过可见 PTY 准备隔离 Git 主 checkout、linked worktree 和主目录修改"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行隔离 Git fixture 命令"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_GUI_FIXTURE_READY') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_GLOBAL_GIT_UNCHANGED')",
+      "timeoutMs": 60000,
+      "description": "确认 fixture worktree 隔离且 global Git 配置未变"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"$list = git -C '${PROJECT}' worktree list --porcelain | Out-String; if ($list -notmatch 'native-live-gui-worktree') { throw 'linked worktree was not listed' }; git -C '${PROJECT}\\\\..\\\\native-live-gui-worktree' status --porcelain; Write-Output NATIVE_WORKTREE_LISTED\"",
+      "description": "通过 PTY 读取 Git linked worktree 身份，作为 fixture 准备记录"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 worktree list 检查"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_LISTED')",
+      "timeoutMs": 30000,
+      "description": "确认 Git 返回真实 linked worktree"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "exit",
+      "description": "请求关闭 fixture PTY"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交 PTY 退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"terminal\"] .xterm-screen')",
+      "timeoutMs": 30000,
+      "description": "确认 PTY 从 UI 卸载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-file-tree-refresh-button\"]",
+      "description": "刷新文件树读取主 checkout 的修改"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('evidence.txt')",
+      "timeoutMs": 30000,
+      "description": "文件树保持当前隔离 workspace"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-add-tab-trigger]",
+      "description": "从真实侧栏打开 Git Review 菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "审查",
+        "Review"
+      ],
+      "exact": false,
+      "description": "通过现有 Source Git 入口打开变更面板"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"git-pane\"]')",
+      "timeoutMs": 30000,
+      "description": "GitPane 由真实 UI 挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"git-pane\"]')?.innerText.includes('evidence.txt') && !!document.querySelector('[data-git-pane-change-virtual-row]')",
+      "timeoutMs": 30000,
+      "description": "GitPane 读取主 checkout 的真实未提交修改"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-open\"]')",
+      "timeoutMs": 30000,
+      "description": "工作区 Composer 真实挂载 Git worktree 菜单入口"
+    },
+    {
+      "action": "pageProbe",
+      "name": "draft-header-controls",
+      "expression": "(() => { const c=document.querySelector('[data-testid=\"v4-composer\"]'); const w=c?.querySelector('[data-testid=\"workspace-worktree-open\"]'); return { branchSelectors:c?.querySelectorAll(\"[data-branch-switcher-primary-icon]\").length, branchLabels:[...(c?.querySelectorAll(\"button:has([data-branch-switcher-primary-icon])\") ?? [])].map(x=>x.innerText),worktreeLabel:w?.innerText,worktreeBranch:w?.getAttribute(\"data-worktree-branch\"),worktreeIcon:w?.querySelector(\"svg\")?.getAttribute(\"class\") }; })()",
+      "description": "记录真实 Composer 控件，工作树列表按菜单打开时加载"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const c=document.querySelector('[data-testid=\"v4-composer\"]'); const w=c?.querySelector('[data-testid=\"workspace-worktree-open\"]'); return c?.querySelectorAll(\"[data-branch-switcher-primary-icon]\").length === 1 && w?.innerText.trim() === \"工作树\" && !!w?.querySelector(\"svg.lucide-folder-git-2\"); })()",
+      "description": "新建对话只显示一个分支选择器，工作树为独立名称和图标"
+    },
+    {
+      "action": "screenshot",
+      "name": "draft-single-branch-and-worktree",
+      "description": "记录修复后的真实 draft Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer\"] button:has([data-branch-switcher-primary-icon])",
+      "description": "原有分支入口仍能打开"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[cmdk-input]\") && !!document.querySelector(\"[cmdk-item]\")",
+      "timeoutMs": 30000,
+      "description": "真实 Git 分支目录加载"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭分支菜单再验收工作树生命周期"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-open\"]",
+      "description": "打开当前 workspace 的真实 worktree 菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-menu\"]') && !!document.querySelector('[data-testid=\"workspace-worktree-create\"]') && !!document.querySelector('[data-testid=\"workspace-session-handoff\"]') && !!document.querySelector('[data-testid=\"workspace-worktree-archive\"]') && !!document.querySelector('[data-testid=\"workspace-worktree-remove\"]')",
+      "timeoutMs": 30000,
+      "description": "真实菜单同时暴露创建、会话交接、归档和移除操作"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"workspace-worktree-menu\"]')?.innerText.includes('native-live-gui-worktree') && document.querySelectorAll('[data-testid=\"workspace-worktree-remove\"]').length >= 1",
+      "description": "菜单读取 Rust git_worktrees_list 返回的隔离 linked worktree"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-create\"]",
+      "description": "从真实 worktree 菜单打开创建对话框"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-create-dialog\"]') && !!document.querySelector('[data-testid=\"workspace-worktree-create-name\"]')",
+      "timeoutMs": 30000,
+      "description": "创建对话框由 KeenCode worktree 组件按 Source 控件语义真实挂载"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"workspace-worktree-create-name\"]",
+      "text": "native-live-ui-worktree"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-create-submit\"]",
+      "description": "确认真实 UI 创建并打开 managed worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-open\"]') && document.querySelector('[data-testid=\"workspace-worktree-open\"]')?.getAttribute('data-worktree-branch')?.includes('native-live-ui-worktree')",
+      "timeoutMs": 60000,
+      "description": "创建结果通过 Root workspace 选择链切换到新 worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid=\"v4-composer-send\"]')",
+      "timeoutMs": 30000,
+      "description": "新 worktree 草稿 Composer 已就绪，准备建立真实会话"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-worktree-session",
+      "eventType": "turn_started",
+      "captureEventSequence": true,
+      "description": "记录 worktree 会话发送前的 Journal 水位，随后只绑定本次真实会话身份"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请只回复 NATIVE_WORKTREE_SESSION_READY，不要调用工具或添加解释。",
+      "description": "在 UI 创建的 worktree 中建立真实会话以验证 handoff"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送真实 worktree 会话请求"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_WORKTREE_SESSION_READY')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "真实会话完成，活动状态面板中的 handoff 入口可用"
+    },
+    {
+      "action": "journalWait",
+      "name": "worktree-session-started",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-worktree-session",
+      "minCount": 1,
+      "exactCount": 1,
+      "captureSessionAs": "worktree-session",
+      "timeoutMs": 30000,
+      "description": "从本次真实 turn_started 捕获 handoff/归档回执的稳定 Session owner"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-open\"]",
+      "description": "重新打开新 worktree 的真实菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-current\"]') && !!document.querySelector('[data-testid=\"workspace-session-handoff\"]')",
+      "timeoutMs": 30000,
+      "description": "新 worktree 成为当前受管 workspace 并保留会话交接入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-session-handoff\"]",
+      "description": "从真实会话菜单先停止当前 Session，再交接到新 managed worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-worktree-open\"]')?.getAttribute('data-worktree-branch')?.includes('handoff') && document.querySelector('[data-testid=\"workspace-path\"]')?.getAttribute('aria-label')?.includes('worktree-')",
+      "timeoutMs": 60000,
+      "description": "handoff 完成后返回新的 workspace Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-open\"]",
+      "description": "打开 handoff 结果的真实 worktree 菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-worktree-current\"]')?.innerText.includes('handoff') && !!document.querySelector('[data-testid=\"workspace-worktree-archive\"]')",
+      "timeoutMs": 30000,
+      "description": "handoff 结果保持当前会话关联并允许受管归档"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-archive\"]",
+      "description": "从真实 UI 先停止当前 Session，再提交 Journal receipt、归档并移除当前 worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-worktree-open\"]')?.getAttribute('data-worktree-branch') === 'master'",
+      "timeoutMs": 60000,
+      "description": "归档完成后 Root 选择回主 workspace；draft Composer 不要求隐藏的 workspace-path 元素"
+    },
+    {
+      "action": "archiveEvidence",
+      "name": "native-live-ui-worktree-archive",
+      "sessionEqualsCaptured": "worktree-session",
+      "timeoutMs": 60000,
+      "description": "按本次真实 Session owner 选择归档回执，核对 removed、目标目录不存在、同一 Git worktree 无目标且删除事实已落盘"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-open\"]",
+      "description": "打开主 workspace 的 worktree 菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-current\"]') && document.querySelectorAll('[data-testid=\"workspace-worktree-remove\"]').length >= 2",
+      "timeoutMs": 30000,
+      "description": "主 workspace 菜单保留源 UI worktree 与 fixture 两个未归档 linked worktree，不能把 handoff 目标误当源分支"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-ui-worktree\"]",
+      "description": "通过真实 UI 移除归档后仍保留的源 UI linked worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('[data-testid=\"workspace-worktree-remove\"]').length === 1 && !!document.querySelector('[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-gui-worktree\"]')",
+      "timeoutMs": 60000,
+      "description": "ui_git_worktree_remove 完成，源 UI worktree 已消失且 fixture 仍等待后续清理"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-gui-worktree\"]",
+      "description": "通过真实 UI 移除归档后仍保留的 fixture linked worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const menu = document.querySelector('[data-testid=\"workspace-worktree-menu\"]'); const remove = menu?.querySelector('[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-gui-worktree\"]'); if (!menu || !remove || !menu.innerText.includes('native-live-gui-worktree')) return false; const pending = remove.matches('[data-disabled]:not([data-disabled=\"false\"])') || remove.matches(':disabled') || remove.getAttribute('aria-disabled') === 'true'; if (pending) return false; const message = '工作树操作失败：工作树包含未提交修改或忽略文件，未删除'; const host = document.querySelector('#zcode-toast-host'); const toast = host ? Array.from(host.querySelectorAll('*')).find((node) => node.textContent?.trim() === message) : null; if (!toast) return false; const rect = toast.getBoundingClientRect(); return getComputedStyle(toast).opacity !== '0' && rect.width > 0 && rect.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "等待 force=false 脏删除请求结束：fixture 菜单项仍在且移除按钮恢复启用，同时真实 Toast 显示“工作树包含未提交修改或忽略文件，未删除”"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭脏删除结果仍保持打开的 worktree 菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"workspace-worktree-menu\"]')",
+      "timeoutMs": 30000,
+      "description": "确认 worktree 菜单卸载后再操作背景 PTY 控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "打开真实 PTY 核验脏删除未改变隔离 fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"terminal\"] .xterm-screen') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待脏删除核验 PTY 就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "& { $target = '${PROJECT}\\\\..\\\\native-live-gui-worktree'; $status = git -C $target status --porcelain; if ($status -notmatch 'worktree-only.txt') { throw 'dirty fixture file unexpectedly changed' }; if (-not (Test-Path -LiteralPath (Join-Path $target 'worktree-only.txt'))) { throw 'dirty fixture file missing' }; $list = git -C '${PROJECT}' worktree list --porcelain | Out-String; if ($list -notmatch 'native-live-gui-worktree') { throw 'dirty fixture worktree registration missing' }; Write-Output ('NATIVE_'+'WORKTREE_REMOVE_REFUSED_DIRTY') }",
+      "description": "只读核验脏删除保留已知隔离文件和 Git linked worktree 注册"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行脏删除核验命令"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_REMOVE_REFUSED_DIRTY')",
+      "timeoutMs": 30000,
+      "description": "确认脏删除安全边界的真实文件和 Git 证据"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "& { $target = '${PROJECT}\\\\..\\\\native-live-gui-worktree'; Remove-Item -LiteralPath (Join-Path $target 'worktree-only.txt') -Force -ErrorAction Stop; $status = git -C $target status --porcelain; if ($status) { throw 'fixture worktree is still dirty' }; Write-Output ('NATIVE_'+'WORKTREE_FIXTURE_CLEAN') }",
+      "description": "仅删除已知隔离 fixture 的 worktree-only.txt，准备干净 UI 删除"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行隔离 fixture 文件清理"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_FIXTURE_CLEAN')",
+      "timeoutMs": 30000,
+      "description": "确认 fixture worktree 已真实变为 clean"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "exit",
+      "description": "请求关闭脏删除核验 PTY"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交脏删除核验 PTY 退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"terminal\"] .xterm-screen')",
+      "timeoutMs": 30000,
+      "description": "确认脏删除核验 PTY 从 UI 卸载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-open\"]",
+      "description": "重新打开 worktree 菜单验证 clean fixture 删除"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-worktree-menu\"]') && !!document.querySelector('[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-gui-worktree\"]')",
+      "timeoutMs": 30000,
+      "description": "确认 clean fixture 仍由真实菜单列出并可移除"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-worktree-remove\"][data-worktree-branch=\"native-live-gui-worktree\"]",
+      "description": "通过真实 UI 删除已清洁的 fixture linked worktree"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('[data-testid=\"workspace-worktree-remove\"]').length === 0",
+      "timeoutMs": 60000,
+      "description": "ui_git_worktree_remove 完成且 Git 菜单不再列出 fixture linked worktree"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭 clean 删除后的 worktree 菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"workspace-worktree-menu\"]')",
+      "timeoutMs": 30000,
+      "description": "确认 worktree 菜单卸载后再打开最终清理 PTY"
+    },
+    {
+      "action": "screenshot",
+      "name": "worktree-gui-current-surface",
+      "description": "保存真实 GitPane 与当前 UI 可见入口证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "重新打开真实 PTY 清理隔离 fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"terminal\"] .xterm-screen') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待清理 PTY 就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "& { $before = (git config --global --get user.email | Out-String).Trim(); if (Test-Path '${PROJECT}\\\\..\\\\native-live-gui-worktree') { throw 'worktree directory remains after UI remove' }; $list = git -C '${PROJECT}' worktree list --porcelain | Out-String; if ($list -match 'native-live-gui-worktree') { throw 'worktree registration remains after UI remove' }; $after = (git config --global --get user.email | Out-String).Trim(); if ($before -ne $after) { throw 'global Git config changed during cleanup verification' }; Write-Output ('NATIVE_'+'WORKTREE_GUI_CLEANUP_VERIFIED') }",
+      "description": "通过可见 PTY 只读复核 UI 已移除 fixture，不把 PTY 检查算作 UI remove"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 fixture 清理结果的只读复核"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_GUI_CLEANUP_VERIFIED')",
+      "timeoutMs": 30000,
+      "description": "确认 linked worktree 目录和 Git 注册项已清理"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "exit",
+      "description": "请求结束清理 PTY"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交清理 PTY 退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"terminal\"] .xterm-screen')",
+      "timeoutMs": 30000,
+      "description": "确认清理 PTY 从 UI 卸载"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "NATIVE_MAIN_EDIT",
+      "description": "从隔离项目根确认主 checkout 文件正文仍在本次临时项目内"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。",
+  "worktreeTriggerRevision": "2026-10-04：触发器显示工作树名称，当前分支断言改读真实 worktree projection 属性；历史快照不变。"
+}

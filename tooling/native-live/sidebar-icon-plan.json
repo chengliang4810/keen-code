@@ -1,0 +1,100 @@
+{
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[data-testid=\\\"onboarding-page\\\"] footer > button\")"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[aria-label=\"切换侧边栏\"] svg.lucide-panel-left-close')"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg');return !!b && b.querySelectorAll('svg').length === 1 && !b.querySelector('img') && getComputedStyle(s).opacity === '1';})()",
+      "description": "默认展开时只显示可见的侧边栏图标，无 Logo"
+    },
+    {
+      "action": "pageProbe",
+      "name": "expanded-idle",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg'); const r=b?.getBoundingClientRect(); return {hasLogo:!!b?.querySelector('img'),icon:s?.getAttribute('class'),opacity:s?getComputedStyle(s).opacity:null,left:r?.left,top:r?.top};})()"
+    },
+    {
+      "action": "hover",
+      "selector": "button[aria-label=\"切换侧边栏\"]"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg');return !!b && b.querySelectorAll('svg').length === 1 && !b.querySelector('img') && getComputedStyle(s).opacity === '1';})()",
+      "description": "展开状态 hover 不改变图标或透明度"
+    },
+    {
+      "action": "pageProbe",
+      "name": "expanded-hover",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg'); const r=b?.getBoundingClientRect(); return {hasLogo:!!b?.querySelector('img'),icon:s?.getAttribute('class'),opacity:s?getComputedStyle(s).opacity:null,left:r?.left,top:r?.top};})()"
+    },
+    {
+      "action": "screenshot",
+      "name": "expanded-sidebar-icon"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"切换侧边栏\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[aria-label=\"切换侧边栏\"] svg.lucide-panel-left-open')"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"window-control-maximize\"]",
+      "description": "将真实鼠标移到固定标题栏按钮，离开侧边栏图标"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg');return !!b && b.querySelectorAll('svg').length === 1 && !b.querySelector('img') && getComputedStyle(s).opacity === '1';})()",
+      "description": "收起后不 hover 也显示侧边栏图标"
+    },
+    {
+      "action": "pageProbe",
+      "name": "collapsed-idle",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg'); const r=b?.getBoundingClientRect(); return {hasLogo:!!b?.querySelector('img'),icon:s?.getAttribute('class'),opacity:s?getComputedStyle(s).opacity:null,left:r?.left,top:r?.top};})()"
+    },
+    {
+      "action": "hover",
+      "selector": "button[aria-label=\"切换侧边栏\"]"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg');return !!b && b.querySelectorAll('svg').length === 1 && !b.querySelector('img') && getComputedStyle(s).opacity === '1';})()",
+      "description": "收起状态 hover 不切换为 Logo"
+    },
+    {
+      "action": "pageProbe",
+      "name": "collapsed-hover",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg'); const r=b?.getBoundingClientRect(); return {hasLogo:!!b?.querySelector('img'),icon:s?.getAttribute('class'),opacity:s?getComputedStyle(s).opacity:null,left:r?.left,top:r?.top};})()"
+    },
+    {
+      "action": "screenshot",
+      "name": "collapsed-sidebar-icon"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"切换侧边栏\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[aria-label=\"切换侧边栏\"] svg.lucide-panel-left-close')"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => {const b=document.querySelector('button[aria-label=\"切换侧边栏\"]');const s=b?.querySelector('svg');return !!b && b.querySelectorAll('svg').length === 1 && !b.querySelector('img') && getComputedStyle(s).opacity === '1';})()",
+      "description": "真实鼠标点击恢复侧栏，操作图标继续可见"
+    }
+  ]
+}

@@ -1,0 +1,690 @@
+{
+  "name": "native-live-browser-only-local-features",
+  "description": "基于历史 local-features-plan 浏览器/工作区范围；首次启动已适配单步偏好页，其余动作保持原有范围。历史源索引保存在 historicalSourcePlan，当前索引见 coverage。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "原生验收初始内容\n",
+    "browser.html": "<!doctype html><meta charset=\"utf-8\"><title>Native browser fixture</title><h1>NATIVE_BROWSER_OK</h1><a href=\"/popup.html\" target=\"_blank\">NATIVE_POPUP_LINK</a>",
+    "popup.html": "<!doctype html><meta charset=\"utf-8\"><title>Native popup fixture</title><h1>NATIVE_POPUP_OK</h1>"
+  },
+  "coverage": [
+    {
+      "id": "workspace-file-tree",
+      "status": "covered",
+      "stepRange": [
+        3,
+        16
+      ],
+      "testIds": [
+        "project-section",
+        "project-add",
+        "side-pane-toggle",
+        "workspace-item-*",
+        "workspace-file-tree-button-*",
+        "workspace-file-tree-panel",
+        "workspace-file-tree-row-*",
+        "preview-pane"
+      ],
+      "notes": "通过原始项目选择、workspace 文件树、隔离 evidence.txt 预览和只读预览断言验证真实本地文件链路。"
+    },
+    {
+      "id": "git-review-and-worktree-pty",
+      "status": "covered",
+      "stepRange": [
+        32,
+        43
+      ],
+      "secondaryStepRange": [
+        63,
+        67
+      ],
+      "testIds": [
+        "terminal",
+        "side-pane-add-tab-trigger",
+        "git-pane",
+        "data-git-pane-change-virtual-row"
+      ],
+      "notes": "所有 Git init/commit/worktree/add/list/diff/remove 和 Git Review 展示均由真实 PTY 与 UI 驱动；不使用 RPC 伪造结果。"
+    },
+    {
+      "id": "pty",
+      "status": "covered",
+      "stepRange": [
+        26,
+        31
+      ],
+      "secondaryStepRange": [
+        68,
+        73
+      ],
+      "testIds": [
+        "terminal-toggle",
+        "terminal",
+        "terminal-close-button"
+      ],
+      "notes": "验证真实 PTY prompt、命令回显、退出卸载及浏览器夹具 HTTP 服务启动。"
+    },
+    {
+      "id": "browser-child-webview",
+      "status": "covered",
+      "stepRange": [
+        70,
+        90
+      ],
+      "testIds": [
+        "browser-address-input",
+        "browser-webview",
+        "side-pane-add-tab-trigger",
+        "browser-surface-state"
+      ],
+      "screenshots": [
+        "browser-child-webview",
+        "browser-overlay"
+      ],
+      "notes": "通过真实 child WebView CDP 内容、原生 surface 可见性、target=_blank 新标签、popup 遮挡隐藏及菜单关闭恢复断言浏览器运行时。"
+    },
+    {
+      "id": "settings-return",
+      "status": "covered",
+      "stepRange": [
+        91,
+        94
+      ],
+      "testIds": [
+        "workspace-file-tree-panel",
+        "task-settings-button",
+        "settings-page"
+      ],
+      "notes": "从文件树真实返回任务并打开本地设置页，作为浏览器/文件链路的结束状态。"
+    },
+    {
+      "id": "model-selection",
+      "status": "covered",
+      "stepRange": [
+        17,
+        25
+      ],
+      "testIds": [
+        "chat-model-select-trigger",
+        "chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash",
+        "v4-composer-input",
+        "v4-composer-send"
+      ],
+      "notes": "通过真实模型选择器选择隔离 provider/model 并验证 Composer 可用；本计划不发送模型请求。"
+    }
+  ],
+  "expectedScreenshots": [
+    "browser-child-webview",
+    "browser-overlay"
+  ],
+  "knownGaps": [
+    "固定 0-98 原步骤中的 48-50 仅创建隔离本地 Skill/Memory 夹具作为原始 PTY 前置动作；它们不构成本计划的 Skills 或 Memory coverage。",
+    "固定 0-98 截止于设置页打开；原计划 99 之后的 MCP、Skills/Memory 读取、Plugins、工作流和其他后半段动作不复制、不运行、不计入本计划结果。",
+    "PreviewPane 仍按原计划断言为只读预览；本计划不把缺少内置编辑器误报为编辑能力通过。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择本次隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 45000,
+      "description": "项目会话和 Composer 由真实桌面 UI 建立"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"]') && !document.querySelector('[data-testid=\"composer-workspace-trigger\"]')?.textContent?.includes('选择项目')",
+      "timeoutMs": 30000,
+      "description": "项目选择完成后真实 workspace 行挂载并绑定 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏以显示 workspace 文件树入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦当前 workspace 行以挂载其真实操作入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口随侧栏展开"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开当前 workspace 文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')",
+      "description": "文件树面板已挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('evidence.txt')",
+      "timeoutMs": 30000,
+      "description": "从文件树实际发现隔离夹具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$='evidence.txt']",
+      "description": "从文件树打开文件预览"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const pane = document.querySelector('[data-testid=\"preview-pane\"]'); if (!pane) return false; const hasText = (root) => { if ((root.textContent ?? '').includes('原生验收初始内容')) return true; return Array.from(root.querySelectorAll('*')).some((element) => element.shadowRoot && hasText(element.shadowRoot)); }; return hasText(pane); })()",
+      "timeoutMs": 30000,
+      "description": "PreviewPane 读取真实项目文件"
+    },
+    {
+      "action": "assert",
+      "expression": "!!document.querySelector('[data-testid=\"preview-pane\"]') && !document.querySelector('[data-testid=\"preview-pane\"] textarea,[data-testid=\"preview-pane\"] [contenteditable=\"true\"]')",
+      "description": "记录当前源码为只读预览，避免把缺少编辑器误报为通过"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开聊天模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "等待隔离 provider 分组真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开真实 Deepseek provider 分组"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "等待自定义 provider 的完整模型 ID"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "通过原生菜单选择配置模型"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "通过原键盘语义关闭模型弹层，不点击被弹层隐藏的触发器"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const input = document.querySelector('[data-testid=\"v4-composer-input\"]'); const rect = input?.getBoundingClientRect(); return document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]') && !!input && !input.closest('[aria-hidden=\"true\"]') && !!rect && rect.width > 0 && rect.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "等待模型选择结果回写聊天工具栏"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "native-live-readiness",
+      "description": "在真实 Composer 输入就绪文本以验证发送入口状态"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const input = document.querySelector('[data-testid=\"v4-composer-input\"]'); const rect = input?.getBoundingClientRect(); const send = document.querySelector('[data-testid=\"v4-composer-send\"]'); return document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]') && !!input && !input.closest('[aria-hidden=\"true\"]') && !!rect && rect.width > 0 && rect.height > 0 && !!send && !send.hasAttribute('disabled'); })()",
+      "timeoutMs": 30000,
+      "description": "模型已选定且真实发送控件进入可用状态"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "打开真实 workspace PTY"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"terminal\"] .xterm-screen'); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "PTY 输入面真实挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待 PowerShell 真实提示符和 PTY 输入就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "echo NATIVE_PTY_ECHO_OK",
+      "description": "向真实 PTY 写入回显命令"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 PTY 回显命令"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_PTY_ECHO_OK')",
+      "timeoutMs": 30000,
+      "description": "收到真实 PTY 输出"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"git -C '${PROJECT}' init; if (`$LASTEXITCODE -ne 0) { throw 'git init failed' }; git -C '${PROJECT}' config user.name NativeLive; if (`$LASTEXITCODE -ne 0) { throw 'git user.name failed' }; git -C '${PROJECT}' config user.email native-live@example.invalid; if (`$LASTEXITCODE -ne 0) { throw 'git user.email failed' }; git -C '${PROJECT}' add evidence.txt; if (`$LASTEXITCODE -ne 0) { throw 'git add failed' }; git -C '${PROJECT}' commit -m '原生验收基线 / Native acceptance baseline'; if (`$LASTEXITCODE -ne 0) { throw 'git commit failed' }; git -C '${PROJECT}' worktree add -b native-live-worktree '${PROJECT}\\..\\native-live-worktree' HEAD; if (`$LASTEXITCODE -ne 0) { throw 'git worktree add failed' }; Set-Content -LiteralPath '${PROJECT}\\..\\native-live-worktree\\isolated.txt' -Value 'NATIVE_WORKTREE_ONLY' -Encoding utf8 -ErrorAction Stop; if (Test-Path '${PROJECT}\\isolated.txt') { throw 'worktree leaked into main project' }; Write-Output NATIVE_GIT_READY; Write-Output NATIVE_WORKTREE_ISOLATED\"",
+      "description": "通过可见 PTY 在隔离项目初始化 Git 并建立本地 worktree"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行本地 Git/worktree 准备"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_GIT_READY') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_ISOLATED')",
+      "timeoutMs": 60000,
+      "description": "确认 Git 提交和 worktree 文件隔离"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"`$worktreeList = git -C '${PROJECT}' worktree list --porcelain | Out-String; if (`$LASTEXITCODE -ne 0) { throw 'git worktree list failed' }; if (`$worktreeList -notmatch 'native-live-worktree') { throw 'worktree was not listed' }; git -C '${PROJECT}\\..\\native-live-worktree' add isolated.txt; if (`$LASTEXITCODE -ne 0) { throw 'worktree git add failed' }; git -C '${PROJECT}\\..\\native-live-worktree' grep --cached --fixed-strings --quiet -- NATIVE_WORKTREE_ONLY -- isolated.txt; if (`$LASTEXITCODE -ne 0) { throw 'staged worktree content missing' }; git -C '${PROJECT}\\..\\native-live-worktree' diff --cached --quiet -- isolated.txt; if (`$LASTEXITCODE -eq 0) { throw 'worktree diff unexpectedly empty' }; if (`$LASTEXITCODE -ne 1) { throw 'worktree diff failed' }; Write-Output NATIVE_WORKTREE_LISTED; Write-Output NATIVE_WORKTREE_DIFF\"",
+      "description": "通过真实 PTY 读取 worktree 列表并检查其暂存差异"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 worktree list/diff 检查"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_LISTED') && document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_DIFF')",
+      "timeoutMs": 30000,
+      "description": "确认 worktree 列表与差异来自真实 Git 输出"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"git -C '${PROJECT}' worktree remove --force '${PROJECT}\\..\\native-live-worktree'; if (`$LASTEXITCODE -ne 0) { throw 'git worktree remove failed' }; if (Test-Path '${PROJECT}\\..\\native-live-worktree') { throw 'worktree directory remains' }; `$remainingWorktrees = git -C '${PROJECT}' worktree list --porcelain | Out-String; if (`$LASTEXITCODE -ne 0) { throw 'git worktree list after remove failed' }; if (`$remainingWorktrees -match 'native-live-worktree') { throw 'worktree registration remains' }; Write-Output NATIVE_WORKTREE_REMOVED\"",
+      "description": "通过真实 Git 删除隔离 worktree 并确认注册项清除"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 worktree remove"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_WORKTREE_REMOVED')",
+      "timeoutMs": 30000,
+      "description": "确认 worktree 目录和 Git 注册项均已移除"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"Set-Content -LiteralPath '${PROJECT}\\evidence.txt' -Value 'NATIVE_FILE_SAVED_OK' -Encoding utf8 -ErrorAction Stop; if ((Get-Content -LiteralPath '${PROJECT}\\evidence.txt' -Raw) -notmatch 'NATIVE_FILE_SAVED_OK') { throw 'file content verification failed' }; Write-Output NATIVE_FILE_SAVED\"",
+      "description": "用真实本地 UI 操作修改文件，覆盖当前没有内置编辑器的路径"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "保存真实磁盘文件"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_FILE_SAVED')",
+      "timeoutMs": 30000,
+      "description": "确认 PTY 写文件命令完成"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '${PROJECT}\\.agents\\skills\\native-live-fixture' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${PROJECT}\\.agents\\skills\\native-live-fixture\\SKILL.md' -Value @('---','name: native-live-fixture','description: Local native acceptance fixture','---','# Native skill fixture') -Encoding utf8 -ErrorAction Stop; New-Item -ItemType Directory -Force -Path '${DATA}\\memories' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${DATA}\\memories\\NATIVE_MEMORY.md' -Value '# Native memory fixture' -Encoding utf8 -ErrorAction Stop; if (-not (Test-Path '${PROJECT}\\.agents\\skills\\native-live-fixture\\SKILL.md')) { throw 'skill fixture missing' }; if (-not (Test-Path '${DATA}\\memories\\NATIVE_MEMORY.md')) { throw 'memory fixture missing' }; Write-Output NATIVE_LOCAL_RESOURCES_CREATED\"",
+      "description": "通过真实隔离 PTY 创建本地 Skill 和 Memory 夹具"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行本地资源创建"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_LOCAL_RESOURCES_CREATED')",
+      "timeoutMs": 30000,
+      "description": "确认 Skill/Memory 文件已落到本次隔离根"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "exit",
+      "description": "请求真实 shell 退出"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "结束 PTY 会话"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "再次提交退出命令并等待真实 PTY 收口"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"terminal\"] .xterm-screen')",
+      "timeoutMs": 30000,
+      "description": "PTY 退出后终端会话从 UI 卸载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-file-tree-refresh-button\"]",
+      "description": "刷新文件树读取磁盘变更"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('evidence.txt')",
+      "timeoutMs": 30000,
+      "description": "文件树刷新后仍显示真实项目内容"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-tab-id*=\"evidence.txt\"] button[aria-label=\"关闭 evidence.txt\"]",
+      "description": "关闭旧文件预览标签，强制下一次打开重新读取磁盘内容"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-side-pane-tab-id*=\"evidence.txt\"]')",
+      "description": "确认旧文件预览标签已由真实 UI 卸载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$='evidence.txt']",
+      "description": "重新打开已保存文件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-tab-id*=\"evidence.txt\"]",
+      "description": "点击真实 evidence.txt 侧栏标签切换到已保存文件"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-side-pane-tab-id*=\"evidence.txt\"][data-state=\"active\"]'); const pane = document.querySelector('[data-testid=\"preview-pane\"]'); if (!trigger || !pane) return false; const hasText = (root) => { if ((root.textContent ?? '').includes('NATIVE_FILE_SAVED_OK')) return true; return Array.from(root.querySelectorAll('*')).some((element) => element.shadowRoot && hasText(element.shadowRoot)); }; return hasText(pane); })()",
+      "timeoutMs": 30000,
+      "description": "预览读取保存后的文件内容"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "NATIVE_FILE_SAVED_OK",
+      "description": "从隔离项目根再次确认文件正文"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-add-tab-trigger]",
+      "description": "从已打开的文件预览面板打开新增标签菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[role=\"menuitem\"]')).some((item) => item.textContent?.trim() === '审查')",
+      "timeoutMs": 30000,
+      "description": "右侧面板显示 Git Review 入口"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "text": "审查",
+      "description": "从原生面板打开 Git Review"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"git-pane\"]')",
+      "timeoutMs": 30000,
+      "description": "GitPane 由真实 UI 挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"git-pane\"]')?.innerText.includes('evidence.txt') && !!document.querySelector('[data-git-pane-change-virtual-row]')",
+      "timeoutMs": 30000,
+      "description": "GitPane 显示真实未提交文件变更"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "在切换浏览器前打开真实 workspace PTY"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"terminal\"] .xterm-screen'); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "浏览器测试使用真实 PTY 服务进程"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待浏览器 PTY 的 PowerShell 提示符就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"python -m http.server 8765 --bind 127.0.0.1 --directory '${PROJECT}'\"",
+      "description": "启动仅监听隔离项目的本地 HTTP 服务"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行本地 HTTP 服务"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('Serving HTTP')",
+      "timeoutMs": 30000,
+      "description": "确认本地服务已在真实 PTY 中运行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-add-tab-trigger]",
+      "description": "从真实 PTY 面板打开侧栏新增标签菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-add-item=\"browser\"]",
+      "description": "通过原生侧栏添加浏览器标签"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"browser-address-input\"]') && !!document.querySelector('[data-testid=\"browser-webview\"]')",
+      "timeoutMs": 30000,
+      "description": "真实 child WebView 宿主和地址栏出现"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"browser-address-input\"]",
+      "text": "http://127.0.0.1:8765/browser.html",
+      "description": "从地址栏导航本地页面"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交浏览器导航"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"browser-address-input\"]')?.value.includes('127.0.0.1:8765/browser.html')",
+      "timeoutMs": 30000,
+      "description": "地址栏收到真实导航状态"
+    },
+    {
+      "action": "browserSurface",
+      "url": "http://127.0.0.1:8765/browser.html",
+      "contains": "NATIVE_BROWSER_OK",
+      "name": "browser-native-content",
+      "timeoutMs": 30000,
+      "description": "通过真实子 WebView CDP 断言本地页面内容并保存 surface 证据"
+    },
+    {
+      "action": "browserSurfaceState",
+      "url": "http://127.0.0.1:8765/browser.html",
+      "visible": true,
+      "name": "browser-surface-visible",
+      "description": "确认原生浏览器页面实际可见，而非只存在 DOM 占位层"
+    },
+    {
+      "action": "browserSurface",
+      "url": "http://127.0.0.1:8765/browser.html",
+      "contains": "NATIVE_BROWSER_OK",
+      "name": "browser-native-popup-link",
+      "clickSelector": "a[target=\"_blank\"]",
+      "description": "原页面可见性确认后，再用真实鼠标打开 target=_blank 链接"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"browser-address-input\"]')?.value.includes('127.0.0.1:8765/popup.html')",
+      "timeoutMs": 30000,
+      "description": "原网页 target=_blank 通过 Rust 事件打开原界面新标签"
+    },
+    {
+      "action": "browserSurface",
+      "url": "http://127.0.0.1:8765/popup.html",
+      "contains": "NATIVE_POPUP_OK",
+      "name": "browser-native-popup",
+      "timeoutMs": 30000,
+      "description": "真实新子 WebView 加载 popup，原网页窗口请求未逃逸到外部宿主"
+    },
+    {
+      "action": "browserSurfaceState",
+      "url": "http://127.0.0.1:8765/popup.html",
+      "visible": true,
+      "name": "popup-surface-visible",
+      "sameOwnerAs": "browser-surface-visible",
+      "description": "确认 target=_blank 打开的 popup 原生表面实际可见"
+    },
+    {
+      "action": "browserSurfaceState",
+      "url": "http://127.0.0.1:8765/browser.html",
+      "visible": false,
+      "name": "browser-surface-hidden-after-popup",
+      "description": "确认切换到 popup 后原网页原生表面已隐藏"
+    },
+    {
+      "action": "screenshot",
+      "name": "browser-child-webview",
+      "description": "保存 child WebView 本地页面证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-side-pane-add-tab-trigger]",
+      "description": "打开会遮挡 child WebView 的侧栏弹窗"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-side-pane-add-item=\"browser\"]')",
+      "description": "确认弹窗在主 WebView 中可见"
+    },
+    {
+      "action": "browserSurfaceState",
+      "url": "http://127.0.0.1:8765/popup.html",
+      "visible": false,
+      "name": "popup-surface-hidden-by-menu",
+      "description": "确认侧栏新增标签菜单展开时 popup 原生表面被遮挡并隐藏"
+    },
+    {
+      "action": "screenshot",
+      "name": "browser-overlay",
+      "description": "记录弹窗出现时 native browser surface 的遮挡证据"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭遮挡弹窗"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-side-pane-add-item=\"browser\"]')",
+      "description": "弹窗关闭并恢复浏览器面板"
+    },
+    {
+      "action": "browserSurfaceState",
+      "url": "http://127.0.0.1:8765/popup.html",
+      "visible": true,
+      "name": "popup-surface-restored",
+      "description": "确认关闭菜单后 popup 原生表面恢复可见"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-testid=\"workspace-file-tree-panel\"] button",
+      "texts": [
+        "返回任务",
+        "Back to tasks"
+      ],
+      "exact": true,
+      "description": "通过文件树的真实返回控件恢复任务导航与设置入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"task-settings-button\"]')",
+      "timeoutMs": 30000,
+      "description": "任务导航已恢复设置入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "进入本地设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页通过真实 UI 打开"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。",
+  "historicalSourcePlan": {
+    "path": "tooling/native-live/local-features-plan.json",
+    "originalStepCount": 184,
+    "selectedStepRange": {
+      "first": 0,
+      "last": 98,
+      "inclusive": true
+    },
+    "selectedStepCount": 99,
+    "selectionRule": "steps[0..98] 按原顺序原样复制；不改动作、选择器、断言、截图动作或超时。",
+    "fixedBaseline": "Native31 local50 report 的 0-98 步骤通过记录；本计划用于 Source32 的独立重验。"
+  }
+}

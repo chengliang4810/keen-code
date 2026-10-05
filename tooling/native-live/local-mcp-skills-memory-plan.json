@@ -1,0 +1,1050 @@
+{
+  "name": "native-live-local-mcp-skills-memory",
+  "description": "独立验证保留的本地 MCP、Skills、Memory UI；覆盖 user/workspace Skill scope 隔离、真实 Skill mention/tool 消费、MCP/Skill 删除和 Memory 启用状态的冷重启回读。Skills scope 只决定 catalog 目录，不改变活动 Composer；mention 前通过项目行真实新建 project draft，避免把 project Skill 误测为内部 conversation workspace。沿用原生引导、工作区、模型和 PTY 夹具步骤，跳过 local-features 的浏览器段。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "原生验收初始内容\n",
+    "mcp-fixture.ps1": "param(\n  [Parameter(Mandatory = $true)]\n  [string]$IsolatedProject\n)\n\n# This fixture is deliberately stdio-only: every response is a single JSON-RPC line.\nSet-StrictMode -Version Latest\n$root = [IO.Path]::GetFullPath($IsolatedProject)\nif (-not (Test-Path -LiteralPath $root -PathType Container)) {\n  throw \"isolated project does not exist\"\n}\n$rootPrefix = if ($root.EndsWith([IO.Path]::DirectorySeparatorChar) -or $root.EndsWith([IO.Path]::AltDirectorySeparatorChar)) {\n  $root\n} else {\n  $root + [IO.Path]::DirectorySeparatorChar\n}\n$evidence = [IO.Path]::GetFullPath((Join-Path $root \"evidence.txt\"))\nif (-not $evidence.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)) {\n  throw \"evidence path escapes isolated project\"\n}\n\nfunction Write-RpcResponse([object]$Response) {\n  $json = $Response | ConvertTo-Json -Depth 12 -Compress\n  [Console]::Out.WriteLine($json)\n  [Console]::Out.Flush()\n}\n\nfunction New-RpcError([object]$Id, [int]$Code, [string]$Message) {\n  return [ordered]@{\n    jsonrpc = \"2.0\"\n    id = $Id\n    error = [ordered]@{ code = $Code; message = $Message }\n  }\n}\n\nfunction New-ToolsListResult {\n  return [ordered]@{\n    tools = @(\n      [ordered]@{\n        name = \"read_evidence\"\n        description = \"Read the evidence.txt file inside the isolated project.\"\n        inputSchema = [ordered]@{\n          type = \"object\"\n          properties = [ordered]@{}\n          required = @()\n          additionalProperties = $false\n        }\n        annotations = [ordered]@{ readOnlyHint = $true }\n      }\n    )\n  }\n}\n\nwhile ($null -ne ($line = [Console]::In.ReadLine())) {\n  if ([string]::IsNullOrWhiteSpace($line)) { continue }\n  $request = $null\n  $id = $null\n  try {\n    $request = $line | ConvertFrom-Json\n    $hasId = $request.PSObject.Properties.Name -contains \"id\"\n    if ($hasId) { $id = $request.id }\n    $method = [string]$request.method\n    if (-not $hasId) {\n      # Notifications, including notifications/initialized, have no response.\n      continue\n    }\n\n    $result = switch ($method) {\n      \"initialize\" {\n        [ordered]@{\n          protocolVersion = \"2025-11-25\"\n          capabilities = [ordered]@{ tools = [ordered]@{} }\n          serverInfo = [ordered]@{ name = \"keencode-native-fixture\"; version = \"1.0.0\" }\n        }\n        break\n      }\n      \"ping\" {\n        [ordered]@{}\n        break\n      }\n      \"tools/list\" {\n        New-ToolsListResult\n        break\n      }\n      \"tools/call\" {\n        $params = $request.params\n        if ($null -eq $params -or [string]$params.name -ne \"read_evidence\") {\n          throw [System.ArgumentException]::new(\"unknown MCP tool\")\n        }\n        $arguments = $params.arguments\n        if ($null -ne $arguments -and @($arguments.PSObject.Properties).Count -gt 0) {\n          throw [System.ArgumentException]::new(\"read_evidence does not accept a path or other arguments\")\n        }\n        $text = [IO.File]::ReadAllText($evidence)\n        [ordered]@{\n          content = @([ordered]@{ type = \"text\"; text = $text })\n          isError = $false\n        }\n        break\n      }\n      default {\n        throw [System.NotSupportedException]::new(\"unsupported MCP method\")\n      }\n    }\n    Write-RpcResponse ([ordered]@{ jsonrpc = \"2.0\"; id = $id; result = $result })\n  } catch [System.ArgumentException] {\n    Write-RpcResponse (New-RpcError $id -32602 $_.Exception.Message)\n  } catch [System.NotSupportedException] {\n    Write-RpcResponse (New-RpcError $id -32601 $_.Exception.Message)\n  } catch {\n    Write-RpcResponse (New-RpcError $id -32603 \"MCP fixture request failed\")\n  }\n}\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "真实悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择本次隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 45000,
+      "description": "项目会话和 Composer 由真实桌面 UI 建立"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"]') && !document.querySelector('[data-testid=\"composer-workspace-trigger\"]')?.textContent?.includes('选择项目')",
+      "timeoutMs": 30000,
+      "description": "项目选择完成后真实 workspace 行挂载并绑定 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开聊天模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "等待隔离 provider 分组真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开真实 Deepseek provider 分组"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "等待自定义 provider 的完整模型 ID"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "通过原生菜单选择配置模型"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "若模型菜单仍保持打开，通过真实触发器关闭菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const input = document.querySelector('[data-testid=\"v4-composer-input\"]'); const rect = input?.getBoundingClientRect(); return document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]') && !!input && !input.closest('[aria-hidden=\"true\"]') && !!rect && rect.width > 0 && rect.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "等待模型选择结果回写聊天工具栏"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "native-live-readiness",
+      "description": "在真实 Composer 输入就绪文本以验证发送入口状态"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const input = document.querySelector('[data-testid=\"v4-composer-input\"]'); const rect = input?.getBoundingClientRect(); const send = document.querySelector('[data-testid=\"v4-composer-send\"]'); return document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]') && !!input && !input.closest('[aria-hidden=\"true\"]') && !!rect && rect.width > 0 && rect.height > 0 && !!send && !send.hasAttribute('disabled'); })()",
+      "timeoutMs": 30000,
+      "description": "模型已选定且真实发送控件进入可用状态"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"terminal-toggle\"]",
+      "description": "打开真实 workspace PTY"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"terminal\"] .xterm-screen'); if (!e) return false; const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; })()",
+      "timeoutMs": 30000,
+      "description": "PTY 输入面真实挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('PS ')",
+      "timeoutMs": 30000,
+      "description": "等待 PowerShell 真实提示符和 PTY 输入就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "echo NATIVE_PTY_ECHO_OK",
+      "description": "向真实 PTY 写入回显命令"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行 PTY 回显命令"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_PTY_ECHO_OK')",
+      "timeoutMs": 30000,
+      "description": "收到真实 PTY 输出"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"Set-Content -LiteralPath '${PROJECT}\\evidence.txt' -Value 'NATIVE_FILE_SAVED_OK' -Encoding utf8 -ErrorAction Stop; if ((Get-Content -LiteralPath '${PROJECT}\\evidence.txt' -Raw) -notmatch 'NATIVE_FILE_SAVED_OK') { throw 'file content verification failed' }; Write-Output NATIVE_FILE_SAVED\"",
+      "description": "用真实本地 UI 操作修改文件，覆盖当前没有内置编辑器的路径"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "保存真实磁盘文件"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_FILE_SAVED')",
+      "timeoutMs": 30000,
+      "description": "确认 PTY 写文件命令完成"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"terminal\"] .xterm-screen",
+      "text": "powershell -NoProfile -Command \"New-Item -ItemType Directory -Force -Path '${PROJECT}\\.agents\\skills\\native-live-fixture' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${PROJECT}\\.agents\\skills\\native-live-fixture\\SKILL.md' -Value @('---','name: native-live-fixture','description: Local native acceptance fixture','---','# Native skill fixture','When invoked, use the Skill tool and reply exactly NATIVE_SKILL_CONSUMED_41.') -Encoding utf8 -ErrorAction Stop; New-Item -ItemType Directory -Force -Path '${DATA}\\skills\\native-user-fixture' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${DATA}\\skills\\native-user-fixture\\SKILL.md' -Value @('---','name: native-user-fixture','description: Local user-scope native acceptance fixture','---','# Native user skill fixture','When invoked, use the Skill tool and reply exactly NATIVE_USER_SKILL_CONSUMED_41.') -Encoding utf8 -ErrorAction Stop; New-Item -ItemType Directory -Force -Path '${DATA}\\memories' -ErrorAction Stop | Out-Null; Set-Content -LiteralPath '${DATA}\\memories\\NATIVE_MEMORY.md' -Value '# Native memory fixture' -Encoding utf8 -ErrorAction Stop; if (-not (Test-Path '${PROJECT}\\.agents\\skills\\native-live-fixture\\SKILL.md')) { throw 'workspace skill fixture missing' }; if (-not (Test-Path '${DATA}\\skills\\native-user-fixture\\SKILL.md')) { throw 'user skill fixture missing' }; if (-not (Test-Path '${DATA}\\memories\\NATIVE_MEMORY.md')) { throw 'memory fixture missing' }; Write-Output NATIVE_LOCAL_RESOURCES_CREATED\"",
+      "description": "通过真实隔离 PTY 创建本地 Skill 和 Memory 夹具"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "执行本地资源创建"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"terminal\"]')?.innerText.includes('NATIVE_LOCAL_RESOURCES_CREATED')",
+      "timeoutMs": 30000,
+      "description": "确认 Skill/Memory 文件已落到本次隔离根"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "进入本地设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页通过真实 UI 打开"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-plugin\"]",
+      "description": "打开插件设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'plugin' && !!document.querySelector('[data-testid=\"plugin-settings-add\"]')",
+      "timeoutMs": 30000,
+      "description": "读取本地插件管理入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-add\"]",
+      "description": "打开插件本地创建菜单但不触发外部安装"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-add-menu\"]') && !!document.querySelector('[data-testid=\"plugin-create-menu-item\"]')",
+      "description": "确认插件创建入口由真实 DOM 提供"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭插件菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-mcp\"]",
+      "description": "打开 MCP 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'mcp' && !!document.querySelector('[data-settings-create-action=\"settings.mcp.create.open\"]')",
+      "timeoutMs": 30000,
+      "description": "读取 MCP 本地创建入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-settings-create-action=\"settings.mcp.create.open\"]",
+      "description": "在设置 UI 新建本地 stdio MCP"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('input[placeholder=\"my-mcp-server\"]')",
+      "timeoutMs": 30000,
+      "description": "MCP 表单真实挂载"
+    },
+    {
+      "action": "type",
+      "selector": "input[placeholder=\"my-mcp-server\"]",
+      "text": "native-local-mcp",
+      "description": "填写隔离 MCP 名称"
+    },
+    {
+      "action": "type",
+      "selector": "input[placeholder=\"npx\"]",
+      "text": "powershell.exe",
+      "description": "使用本机 PowerShell 启动隔离 stdio MCP fixture"
+    },
+    {
+      "action": "type",
+      "selector": "input[placeholder=\"-y @modelcontextprotocol/server-memory\"]",
+      "text": "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"${PROJECT}\\mcp-fixture.ps1\" \"${PROJECT}\"",
+      "description": "传入隔离项目路径，fixture 只读取 evidence.txt 并拒绝越界"
+    },
+    {
+      "action": "click",
+      "selector": "div.rounded-xl.border.border-border.p-4 > div:last-child > div > button:first-child",
+      "description": "保存本地 MCP 配置"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"mcp-server-row-native-local-mcp\"]')",
+      "timeoutMs": 30000,
+      "description": "MCP 列表显示刚保存的本地条目"
+    },
+    {
+      "action": "click",
+      "selector": "[data-mcp-plugin-installed-actions=\"true\"] button[aria-label=\"刷新\"]",
+      "description": "按 MCP 设置资源头的明确 aria-label 点击真实连接/刷新动作"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const row = document.querySelector('[data-testid=\"mcp-server-row-native-local-mcp\"]'); return row?.dataset.mcpStatus === 'connected' && row?.dataset.mcpToolCount === '1'; })()",
+      "timeoutMs": 60000,
+      "description": "确认 stdio initialize/tools-list 成功并显示一个真实工具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "从 MCP 设置返回工作区，准备真实聊天调用"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "返回当前隔离项目的真实 Composer"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"conversation-section\"]",
+      "description": "真实 hover 对话分区，显示 Source 新建任务按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"conversation-new-task\"]",
+      "description": "通过原生侧栏新建独立 MCP 验收会话"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]') && !!document.querySelector('[data-testid=\"chat-model-select-trigger\"]')",
+      "timeoutMs": 60000,
+      "description": "新会话保持隔离 workspace 并挂载真实模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待新会话的真实模型目录加载完成"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开新会话模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "等待隔离 Deepseek provider 分组真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开隔离 provider 的模型子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "等待完整 deepseek-v4.1-flash 模型 ID"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "显式选择真实 deepseek-v4.1-flash"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "新会话模型选择结果回写工具栏"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "只完成本地 MCP 读取验收。必须调用已连接的 native-local-mcp Server 的 read_evidence 工具，读取当前隔离项目 evidence.txt。禁止使用 Bash、Read、Edit、Write 或其他直接文件工具，也不要猜测内容。工具返回后，只回复 NATIVE_MCP_CALL_OK_41，并逐字包含返回正文 NATIVE_FILE_SAVED_OK。",
+      "description": "要求真实模型只通过隔离 MCP 读取证据文件"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-mcp-tools-call",
+      "eventType": "tool_requested",
+      "captureEventSequence": true,
+      "description": "固定 MCP tools/call 发送前各 Session 的 Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送真实 MCP tools/call 验收请求"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-permission-option-kind=\"allowOnce\"][data-permission-request-id]') && !!document.querySelector('[data-permission-option-kind=\"rejectOnce\"][data-permission-request-id]')",
+      "timeoutMs": 120000,
+      "description": "MCP 工具的真实权限选项和 interactionId 已挂载"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-mcp-allow-receipt",
+      "eventType": "command_receipt_committed",
+      "capturePermissionInteraction": true,
+      "description": "记录本次 MCP allowOnce interactionId 与既有收据"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestContains": "read_evidence",
+      "requestToolName": "ExecuteExtraTool",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-mcp-tools-call",
+      "captureSessionAs": "mcp-tools-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "先通过真实 allowOnce 权限门，再确认权威 Journal 请求 ExecuteExtraTool；MCP 目标名称在包装器参数中保留"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_execution_started",
+      "requestContains": "read_evidence",
+      "requestToolName": "ExecuteExtraTool",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-mcp-tools-call",
+      "sessionEqualsCaptured": "mcp-tools-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "确认 ExecuteExtraTool 获得权限并真实开始执行其 MCP stdio tools/call"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "requestContains": "read_evidence",
+      "requestToolName": "ExecuteExtraTool",
+      "requestEffect": "changes_state",
+      "newSinceBaseline": "before-mcp-tools-call",
+      "sessionEqualsCaptured": "mcp-tools-session",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "timeoutMs": 180000,
+      "description": "确认 ExecuteExtraTool 以成功结果写入权威 Journal；最终正文继续证明 MCP tools/call"
+    },
+    {
+      "action": "journal",
+      "eventType": "command_receipt_committed",
+      "receiptCommandType": "resolveInteraction",
+      "receiptStatus": "completed",
+      "receiptOptionId": "allowOnce",
+      "receiptAckStatus": "accepted",
+      "sessionEqualsCaptured": "mcp-tools-session",
+      "receiptNewSince": "before-mcp-allow-receipt",
+      "receiptInteractionSince": "before-mcp-allow-receipt",
+      "description": "MCP allowOnce 答复以对应 interactionId 的真实收据写入 Journal"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_MCP_CALL_OK_41') && e.innerText.includes('NATIVE_FILE_SAVED_OK')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "助手只能在收到 fixture 实际正文后完成 MCP 验收"
+    },
+    {
+      "action": "screenshot",
+      "name": "mcp-tools-call-real",
+      "description": "保存真实 MCP tools/call、Journal 与返回正文证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "返回设置页清理本次隔离 MCP"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页重新由真实 UI 打开"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-mcp\"]",
+      "description": "重新打开 MCP 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'mcp' && !!document.querySelector('[data-testid=\"mcp-server-row-native-local-mcp\"]')",
+      "timeoutMs": 30000,
+      "description": "读取仍由 Rust 保存的隔离 MCP 条目"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"mcp-server-row-native-local-mcp\"]",
+      "description": "从列表打开已保存 MCP 编辑表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('input[placeholder=\"my-mcp-server\"]')",
+      "description": "读取已保存 MCP 配置"
+    },
+    {
+      "action": "clickText",
+      "selector": "div.space-y-4.rounded-xl.border.border-border.p-4 button",
+      "texts": [
+        "删除",
+        "Delete"
+      ],
+      "description": "从设置 UI 删除本地 MCP"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 10000,
+      "description": "删除操作要求明确确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除本地 MCP"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"mcp-server-row-native-local-mcp\"]')",
+      "timeoutMs": 30000,
+      "description": "MCP 删除结果从列表消失"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-skill\"]",
+      "description": "打开 Skills 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'skill' && !!document.querySelector('[data-settings-create-action=\"settings.skills.create.open\"]')",
+      "timeoutMs": 30000,
+      "description": "读取 Skills 新建入口和本地资源列表"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-trigger\"]",
+      "description": "打开 Skills 的作用域菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"plugin-settings-scope-option-\"]')",
+      "timeoutMs": 10000,
+      "description": "发现当前隔离项目的 workspace scope 选项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"plugin-settings-scope-option-\"]",
+      "description": "通过原设置 UI 切换到当前 workspace scope"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"plugin-settings-scope-trigger\"]')?.getAttribute('data-plugin-scope-key') !== 'user'",
+      "timeoutMs": 10000,
+      "description": "确认 Skills 正在读取项目级目录"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-trigger\"]",
+      "description": "打开 Skills 作用域菜单切换到 user"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-settings-scope-user-option\"]')",
+      "timeoutMs": 10000,
+      "description": "确认 Skills 菜单提供本机 user scope"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-user-option\"]",
+      "description": "选择 Skills 的本机 user scope"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"plugin-settings-scope-trigger\"]')?.getAttribute('data-plugin-scope-key') === 'user' && Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-user-fixture'))",
+      "timeoutMs": 30000,
+      "description": "确认 user Skill 从隔离 data/skills 目录回读，未混入项目 Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[role=\"switch\"]')",
+      "timeoutMs": 10000,
+      "description": "确认 user Skill 行提供真实启用开关"
+    },
+    {
+      "action": "click",
+      "selector": "button[role=\"switch\"]",
+      "description": "通过 Skills 设置禁用 user Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('button[role=\"switch\"]')?.getAttribute('aria-checked') === 'false'",
+      "timeoutMs": 30000,
+      "description": "确认 user Skill 禁用状态从 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "button[role=\"switch\"]",
+      "description": "通过 Skills 设置重新启用 user Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('button[role=\"switch\"]')?.getAttribute('aria-checked') === 'true'",
+      "timeoutMs": 30000,
+      "description": "确认 user Skill 启用状态从 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-trigger\"]",
+      "description": "返回 Skills 的 project workspace scope 执行真实 mention"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"plugin-settings-scope-option-\"]')",
+      "timeoutMs": 10000,
+      "description": "确认当前隔离项目 workspace scope 选项仍可用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"plugin-settings-scope-option-\"]",
+      "description": "切回当前 project workspace scope"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"plugin-settings-scope-trigger\"]')?.getAttribute('data-plugin-scope-key') !== 'user' && Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-live-fixture'))",
+      "timeoutMs": 30000,
+      "description": "确认 workspace Skill 与 user Skill 按 scope 隔离显示"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-live-fixture'))",
+      "timeoutMs": 30000,
+      "description": "Skills 设置读取真实项目 fixture"
+    },
+    {
+      "action": "clickText",
+      "selector": "div[role=\"button\"] > div > span",
+      "texts": [
+        "native-live-fixture"
+      ],
+      "description": "打开真实 Skill 详情"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"dialog\"]') && document.body.innerText.includes('SKILL.md')",
+      "timeoutMs": 30000,
+      "description": "详情显示实际 Skill 文件路径"
+    },
+    {
+      "action": "key",
+      "key": "Escape",
+      "description": "关闭 Skill 详情"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('button[role=\"switch\"]')",
+      "timeoutMs": 10000,
+      "description": "确认本地 Skill 行提供真实启用开关"
+    },
+    {
+      "action": "click",
+      "selector": "button[role=\"switch\"]",
+      "description": "通过 Skills 设置禁用本地 fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('button[role=\"switch\"]')?.getAttribute('aria-checked') === 'false'",
+      "timeoutMs": 30000,
+      "description": "确认 Skill 禁用状态从 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "button[role=\"switch\"]",
+      "description": "通过 Skills 设置重新启用本地 fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('button[role=\"switch\"]')?.getAttribute('aria-checked') === 'true'",
+      "timeoutMs": 30000,
+      "description": "确认 Skill 启用状态从 Rust 配置回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回真实会话调用已启用 Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 30000,
+      "description": "会话 Composer 重新挂载"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "悬停隔离项目行，显示 Source 原生新建任务操作"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"] button[aria-label=\"新建任务\"], [data-testid^=\"workspace-item-\"] button[aria-label=\"New task\"]')",
+      "timeoutMs": 10000,
+      "description": "等待项目行真实新建任务按钮挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"] button[aria-label=\"新建任务\"], [data-testid^=\"workspace-item-\"] button[aria-label=\"New task\"]",
+      "description": "通过项目行真实新建任务入口切回项目并建立 project draft"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const input = document.querySelector('[data-testid=\"v4-composer-input\"]'); const trigger = document.querySelector('[data-testid=\"composer-workspace-trigger\"]'); const detach = document.querySelector('[data-testid=\"composer-project-detach\"]'); return !!input && !!trigger && trigger.textContent?.trim() === 'project' && !!detach; })()",
+      "timeoutMs": 30000,
+      "description": "确认 Composer 已绑定项目 workspace 而非内部 conversation"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "description": "清空前一阶段的就绪草稿，确保 Skill $mention 位于真实触发边界"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "$native-live-fixture",
+      "description": "输入 Source 约定的 Skill $mention"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"prompt-suggestion-panel\"]') && !!document.querySelector('[data-testid^=\"prompt-suggestion-option-skill:\"][role=\"option\"]')",
+      "timeoutMs": 30000,
+      "description": "等待真实 Skills mention 候选项"
+    },
+    {
+      "action": "clickText",
+      "selector": "[data-testid^=\"prompt-suggestion-option-skill:\"][role=\"option\"]",
+      "texts": [
+        "native-live-fixture"
+      ],
+      "exact": false,
+      "description": "从 Source mention 面板选择隔离 Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const node = document.querySelector('[data-testid=\"v4-composer-input\"] [data-mention-category=\"skills\"]'); return !!node && node.textContent?.includes('native-live-fixture'); })()",
+      "timeoutMs": 30000,
+      "description": "确认 Composer 保存结构化 Skill mention"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请调用刚选中的 Skill 完成本次请求。必须使用 Skill 工具读取其说明，并在收到说明后只回复由 Skill 指定的结果。",
+      "description": "发送不包含验收标记的用户文本，要求模型真实消费 Skill"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-skill-tool",
+      "eventType": "tool_requested",
+      "captureEventSequence": true,
+      "description": "固定 Skill 工具调用前各 Session Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "通过 Composer 发送真实 Skill mention"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestToolName": "Skill",
+      "requestContains": "native-live-fixture",
+      "newSinceBaseline": "before-skill-tool",
+      "timeoutMs": 180000,
+      "description": "确认 Rust Agent 通过 Skill 工具读取隔离 SKILL.md"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "requestToolName": "Skill",
+      "requestContains": "native-live-fixture",
+      "newSinceBaseline": "before-skill-tool",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "timeoutMs": 180000,
+      "description": "确认 Skill 工具成功完成且绑定本轮调用"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_SKILL_CONSUMED_41')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "确认模型读取 Skill 指令并输出夹具中的固定结果"
+    },
+    {
+      "action": "screenshot",
+      "name": "skill-mention-real",
+      "description": "保存真实 Skill mention、工具调用和模型结果证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "返回设置删除已消费的隔离 Skill"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页重新打开"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-skill\"]",
+      "description": "重新定位到 Skills 设置"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-trigger\"]",
+      "description": "打开 Skills 作用域菜单回到项目范围"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"plugin-settings-scope-option-\"]')",
+      "timeoutMs": 10000,
+      "description": "等待当前项目 workspace scope 选项真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"plugin-settings-scope-option-\"]",
+      "description": "通过原生作用域菜单切换到项目 workspace"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"plugin-settings-scope-trigger\"]')?.getAttribute('data-plugin-scope-key') !== 'user'",
+      "timeoutMs": 30000,
+      "description": "确认设置页已切换回项目 workspace scope"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'skill' && Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-live-fixture'))",
+      "timeoutMs": 30000,
+      "description": "确认待删除 Skill 仍由设置页回读"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"删除\"],button[aria-label=\"Delete\"]",
+      "description": "通过 Skills 设置删除本地 fixture"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 10000,
+      "description": "Skill 删除要求明确确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除本地 Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-live-fixture'))",
+      "timeoutMs": 30000,
+      "description": "Skill 删除结果从列表消失"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-trigger\"]",
+      "description": "打开 Skills 作用域菜单删除 user Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"plugin-settings-scope-user-option\"]')",
+      "timeoutMs": 10000,
+      "description": "确认 user Skill 作用域入口仍可用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"plugin-settings-scope-user-option\"]",
+      "description": "切换到 user Skill 列表"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"plugin-settings-scope-trigger\"]')?.getAttribute('data-plugin-scope-key') === 'user' && Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-user-fixture'))",
+      "timeoutMs": 30000,
+      "description": "读取待删除的 user Skill"
+    },
+    {
+      "action": "click",
+      "selector": "button[aria-label=\"删除\"],button[aria-label=\"Delete\"]",
+      "description": "通过 Skills 设置删除 user Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 10000,
+      "description": "user Skill 删除要求明确确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除 user Skill"
+    },
+    {
+      "action": "wait",
+      "expression": "!Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-user-fixture'))",
+      "timeoutMs": 30000,
+      "description": "user Skill 删除结果从 user scope 列表消失"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-memory\"]",
+      "description": "打开 Memory 设置"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'memory' && !!document.querySelector('[data-testid=\"settings-memory-switch\"]')",
+      "timeoutMs": 30000,
+      "description": "读取本地 Memory 开关"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-memory-switch\"]",
+      "description": "启用本次隔离的本地 Memory viewer"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "Memory viewer 读取隔离 data/memories 文件"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"settings-memory-search-input\"]",
+      "text": "NATIVE_MEMORY",
+      "description": "按文件名筛选本地 Memory"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]') && document.querySelector('[data-testid=\"settings-memory-count\"]')?.textContent?.includes('1')",
+      "timeoutMs": 30000,
+      "description": "搜索和计数反映真实 Memory 条目"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-memory-refresh\"]",
+      "description": "刷新本地 Memory catalog"
+    },
+    {
+      "action": "screenshot",
+      "name": "local-settings-memory",
+      "description": "保存插件/MCP/Skills/Memory 本地设置证据"
+    },
+    {
+      "action": "restart",
+      "description": "重启隔离原生程序验证本地资源状态来自持久存储"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"]') && !!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "冷启动恢复工作区和会话界面"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "冷启动后打开设置"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "冷启动后设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-mcp\"]",
+      "description": "冷启动后检查 MCP 删除持久化"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'mcp' && !document.querySelector('[data-testid=\"mcp-server-row-native-local-mcp\"]')",
+      "timeoutMs": 30000,
+      "description": "冷恢复后已删除 MCP 不重新出现"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-skill\"]",
+      "description": "冷启动后检查 Skill 删除持久化"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'skill' && !Array.from(document.querySelectorAll('div[role=\"button\"]')).some((node) => node.textContent?.includes('native-live-fixture'))",
+      "timeoutMs": 30000,
+      "description": "冷恢复后已删除 Skill 不重新出现"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-memory\"]",
+      "description": "冷启动后检查 Memory 启用状态和文件"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.dataset.activeSection === 'memory' && document.querySelector('[data-testid=\"settings-memory-switch\"]')?.getAttribute('aria-checked') === 'true' && !!document.querySelector('[data-testid=\"settings-memory-file-NATIVE_MEMORY.md\"]')",
+      "timeoutMs": 30000,
+      "description": "冷恢复后 Memory viewer 开关和文件来自持久状态"
+    },
+    {
+      "action": "screenshot",
+      "name": "local-settings-cold-recovery",
+      "description": "保存本地 MCP/Skill 删除与 Memory 冷恢复证据"
+    }
+  ],
+  "coverage": [
+    {
+      "id": "mcp",
+      "status": "covered",
+      "testIds": [
+        "settings-section-nav-mcp",
+        "mcp-server-row-native-local-mcp",
+        "conversation-new-task",
+        "chat-model-select-trigger",
+        "chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash",
+        "v4-composer-input",
+        "v4-composer-send",
+        "journalBaseline",
+        "journalWait",
+        "command_receipt_committed"
+      ],
+      "notes": "通过设置 UI 保存、initialize/tools/list、真实 MCP tools/call、同 Session Journal、allowOnce receipt 及 UI 删除；重启后断言删除条目不回归。"
+    },
+    {
+      "id": "skills",
+      "status": "covered",
+      "testIds": [
+        "settings-section-nav-skill",
+        "settings.skills.create.open",
+        "plugin-settings-scope-trigger",
+        "plugin-settings-scope-option-*",
+        "prompt-suggestion-panel",
+        "prompt-suggestion-option-skill:*",
+        "v4-composer-input",
+        "v4-composer-send",
+        "data-mention-category=skills",
+        "tool_requested/Skill",
+        "confirm-dialog-confirm"
+      ],
+      "notes": "通过真实 PTY 创建隔离 workspace Skill，再由 Skills 设置读取、详情查看、禁用、启用、$mention 调用和删除；Journal 绑定 Skill 工具与夹具指令，冷启动确认删除不回归。"
+    },
+    {
+      "id": "memory",
+      "status": "partial",
+      "testIds": [
+        "settings-section-nav-memory",
+        "settings-memory-switch",
+        "settings-memory-search-input",
+        "settings-memory-refresh",
+        "settings-memory-file-*"
+      ],
+      "notes": "通过真实 PTY 创建隔离 data/memories 文件，由设置 UI 启用 viewer、读取、搜索和刷新，并在冷启动回读启用状态与文件；当前 Source 没有 Memory 内容编辑/删除控件。"
+    }
+  ],
+  "knownGaps": [
+    "本计划独立跳过原 local-features 的 child WebView、popup 和遮挡断言；原计划保留这些完整断言，不能以本计划替代浏览器验收。",
+    "Memory 当前只有 viewer、搜索和刷新入口，没有内容编辑/删除控件；本计划只验真实可见的启用与冷恢复。"
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

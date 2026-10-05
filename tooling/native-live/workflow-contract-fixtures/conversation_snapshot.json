@@ -1,0 +1,337 @@
+{
+  "availability": {
+    "compact": {
+      "allowed": true
+    },
+    "fork": {
+      "allowed": true
+    },
+    "pauseGoal": {
+      "allowed": true
+    },
+    "queueEdit": {
+      "allowed": true
+    },
+    "resumeGoal": {
+      "allowed": false,
+      "reasonCode": "goal.notPaused"
+    },
+    "sendQueuedNow": {
+      "allowed": true
+    },
+    "setFollowupMode": {
+      "allowed": true
+    },
+    "switchModelConfig": {
+      "allowed": true
+    }
+  },
+  "backgroundWorks": [
+    {
+      "anchorRowId": null,
+      "cancellable": true,
+      "kind": "workflow",
+      "startedAt": 124,
+      "status": "running",
+      "title": "契约活动工作流",
+      "workId": "contract-workflow-live"
+    }
+  ],
+  "config": {
+    "followupMode": "queue",
+    "mode": "build",
+    "model": "model-contract",
+    "modelSelection": {
+      "modelId": "model-contract",
+      "options": {
+        "reasoningLevel": "low"
+      },
+      "providerId": "provider-contract"
+    },
+    "planEnabled": false,
+    "provider": "provider-contract",
+    "thought": "low",
+    "thoughtLevels": [
+      "low"
+    ]
+  },
+  "control": {
+    "activeWorks": [],
+    "apiRetry": {
+      "attempt": 2,
+      "maxAttempts": 4,
+      "nextRetryAt": 10750,
+      "reasonCode": "provider_retry"
+    },
+    "canStop": false,
+    "lastError": null,
+    "phase": "draft",
+    "sessionEnded": false,
+    "stopState": "idle",
+    "stopTargetKind": "unknown"
+  },
+  "goal": {
+    "activeRunStartedAtMs": null,
+    "iteration": 1,
+    "iterations": [],
+    "objective": "验证 Goal projection contract",
+    "status": "active",
+    "summaryTitle": "Contract goal",
+    "targetId": "contract-goal",
+    "timeUsedSeconds": 12,
+    "verifications": []
+  },
+  "inputRouting": {
+    "mode": "startNow"
+  },
+  "logEpoch": "epoch-contract",
+  "meta": {
+    "title": "Contract fixture",
+    "titleSource": "default"
+  },
+  "modelTransition": null,
+  "pendingCommands": [],
+  "pendingInteractions": [
+    {
+      "anchorRowId": null,
+      "createdAt": 123,
+      "interactionId": "elicitation-contract",
+      "kind": "userInput",
+      "payload": {
+        "answerDrafts": {},
+        "currentQuestionIndex": 0,
+        "freeText": true,
+        "kind": "userInput",
+        "options": [
+          {
+            "label": "测试",
+            "optionId": "测试"
+          }
+        ],
+        "prompt": "选择契约测试路径",
+        "questions": [
+          {
+            "header": "contract-choice",
+            "multiSelect": false,
+            "options": [
+              {
+                "description": "执行严格 schema 校验",
+                "label": "测试",
+                "value": "测试"
+              }
+            ],
+            "question": "选择契约测试路径"
+          }
+        ],
+        "toolCallId": "tool-contract-ask",
+        "toolName": "AskUserQuestion"
+      }
+    }
+  ],
+  "plan": null,
+  "protocolVersion": 1,
+  "queue": {
+    "autoDrain": true,
+    "items": []
+  },
+  "revision": 2,
+  "rows": {
+    "firstRowId": 1,
+    "totalCount": 3,
+    "window": [
+      {
+        "actions": {
+          "canEdit": true
+        },
+        "createdAt": 101,
+        "createdAtSeq": 1,
+        "entityId": "contract-user-message",
+        "kind": "userInput",
+        "origin": "realUser",
+        "rowId": 1,
+        "sourceCommandId": "contract-user-message",
+        "text": "contract input",
+        "turnId": "contract-turn",
+        "visibility": "visible"
+      },
+      {
+        "actions": {
+          "canFork": true,
+          "canRetry": true
+        },
+        "assistantResponseId": "contract-assistant-message",
+        "createdAt": 4197,
+        "createdAtSeq": 4097,
+        "entityId": "contract-assistant-message",
+        "kind": "assistantText",
+        "rowId": 4097,
+        "state": "complete",
+        "text": "contract response",
+        "turnId": "contract-turn",
+        "visibility": "visible"
+      },
+      {
+        "assistantResponseId": "contract-workflow-call-message",
+        "createdAt": 8293,
+        "createdAtSeq": 8193,
+        "display": {
+          "causalityGraph": {
+            "handoffs": [
+              {
+                "from": "agent:Researcher",
+                "to": "workspace"
+              }
+            ],
+            "lanes": [
+              {
+                "id": "agent:Researcher",
+                "name": "agent:Researcher"
+              },
+              {
+                "id": "workspace",
+                "name": "workspace"
+              }
+            ],
+            "participants": [
+              {
+                "id": "agent:Researcher",
+                "lane": "agent:Researcher",
+                "phase": "unphased",
+                "steps": [
+                  "ask"
+                ]
+              },
+              {
+                "id": "workspace",
+                "lane": "workspace",
+                "phase": "unphased",
+                "steps": [
+                  "read"
+                ]
+              }
+            ],
+            "steps": [
+              {
+                "id": "ask",
+                "kind": "ask",
+                "label": "Researcher",
+                "lane": "agent:Researcher"
+              },
+              {
+                "id": "read",
+                "kind": "world-read",
+                "label": "Read",
+                "lane": "workspace"
+              }
+            ]
+          },
+          "diagnostics": [],
+          "errorCount": 0,
+          "kind": "create_workflow",
+          "ok": true
+        },
+        "entityId": "contract-workflow-call",
+        "input": {
+          "definition": {
+            "body": [
+              {
+                "effect": "read_only",
+                "input": {
+                  "type": "literal",
+                  "value": null
+                },
+                "name": "Researcher",
+                "node_id": "ask",
+                "type": "agent"
+              },
+              {
+                "effect": "read_only",
+                "input": {
+                  "type": "literal",
+                  "value": null
+                },
+                "name": "Read",
+                "node_id": "read",
+                "type": "tool"
+              }
+            ],
+            "inputs": {},
+            "meta": {
+              "name": "contract-graph"
+            },
+            "version": 1
+          }
+        },
+        "inputText": "{\"definition\":{\"body\":[{\"effect\":\"read_only\",\"input\":{\"type\":\"literal\",\"value\":null},\"name\":\"Researcher\",\"node_id\":\"ask\",\"type\":\"agent\"},{\"effect\":\"read_only\",\"input\":{\"type\":\"literal\",\"value\":null},\"name\":\"Read\",\"node_id\":\"read\",\"type\":\"tool\"}],\"inputs\":{},\"meta\":{\"name\":\"contract-graph\"},\"version\":1}}",
+        "kind": "toolCall",
+        "output": {
+          "text": "workflow saved"
+        },
+        "rowId": 8193,
+        "status": "success",
+        "toolCallId": "contract-workflow-call",
+        "toolName": "CreateWorkflow",
+        "turnId": "contract-turn",
+        "visibility": "visible"
+      }
+    ]
+  },
+  "seq": 8,
+  "sessionId": "contract-session",
+  "subagents": {
+    "childSessionIds": [
+      "agent:contract-session:contract-child-ended",
+      "agent:contract-session:contract-child-waiting"
+    ],
+    "endedTotal": 1,
+    "revision": 8,
+    "running": [
+      {
+        "agentId": "contract-child-waiting",
+        "childSessionId": "agent:contract-session:contract-child-waiting",
+        "status": "waiting",
+        "subagentType": "agent",
+        "title": "/root/contract-waiting"
+      }
+    ]
+  },
+  "usage": {
+    "contextWindow": null,
+    "cumulative": {
+      "cacheReadTokens": 0,
+      "cacheWriteTokens": 0,
+      "inputTokens": 0,
+      "outputTokens": 0
+    }
+  },
+  "workflowRuns": {
+    "revision": 8,
+    "runs": [
+      {
+        "actors": [],
+        "lastEventSequence": 6,
+        "nodes": [],
+        "runId": "contract-workflow-live",
+        "status": "running",
+        "toolCallId": "tool-workflow-live",
+        "usage": {
+          "nodesUsed": 0,
+          "spentTokens": 0
+        }
+      },
+      {
+        "actors": [],
+        "lastEventSequence": 8,
+        "nodes": [],
+        "runId": "contract-workflow-completed",
+        "status": "completed",
+        "toolCallId": "tool-workflow-completed",
+        "usage": {
+          "nodesUsed": 0,
+          "spentTokens": 0
+        }
+      }
+    ]
+  },
+  "workspaceHookAdmission": null
+}

@@ -1,0 +1,275 @@
+{
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "title-test.txt": "标题回归隔离项目\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示添加菜单按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "通过真实鼠标打开文件夹并选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实工作区和 Composer 已就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "本次话题是修复项目文件读取缓存。请只回复 TITLE_AUTOGEN_REPLY_OK，不调用工具、不修改文件。",
+      "description": "新前端通过 Rust 发送真实模型首轮，主题用于自动命名"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll(\"[data-row-id]\")).some(e => e.innerText.includes(\"TITLE_AUTOGEN_REPLY_OK\")) && !document.querySelector(\"[data-testid=\\\"v4-stop\\\"]\")",
+      "timeoutMs": 120000
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "captureSessionAs": "titleSession",
+      "timeoutMs": 120000
+    },
+    {
+      "action": "journalWait",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "payloadContains": {
+        "source": "automatic"
+      },
+      "timeoutMs": 90000,
+      "description": "真实模型隔离标题写入同一会话 Journal"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector(\"[data-testid^=\\\"workspace-item-\\\"]\")?.getAttribute(\"aria-expanded\") !== \"true\""
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\") && !document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.textContent?.includes(\"新对话\")",
+      "timeoutMs": 30000,
+      "description": "侧栏真实投影收到自动标题"
+    },
+    {
+      "action": "captureTask",
+      "name": "titleTask",
+      "selector": "[data-testid^=\"task-item-\"]"
+    },
+    {
+      "action": "journalCapture",
+      "eventType": "title_generated",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "titleGeneration",
+      "exactCount": 1
+    },
+    {
+      "action": "journalCapture",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "automaticRename",
+      "exactCount": 1
+    },
+    {
+      "action": "pageProbe",
+      "name": "automatic-title",
+      "expression": "({title:document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.innerText,task:document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.getAttribute(\"data-testid\")})"
+    },
+    {
+      "action": "screenshot",
+      "name": "automatic-title"
+    },
+    {
+      "action": "restart",
+      "description": "冷启动复用 Journal 自动标题，不重复请求"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[data-testid=\\\"v4-composer-input\\\"]\")",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector(\"[data-testid^=\\\"workspace-item-\\\"]\")?.getAttribute(\"aria-expanded\") !== \"true\""
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "titleTask"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll(\"[data-row-id]\")).some(e => e.innerText.includes(\"TITLE_AUTOGEN_REPLY_OK\"))",
+      "timeoutMs": 30000
+    },
+    {
+      "action": "journalUnchanged",
+      "eventType": "title_generated",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "titleGeneration",
+      "exactCount": 1
+    },
+    {
+      "action": "journalUnchanged",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "automaticRename",
+      "exactCount": 1
+    },
+    {
+      "action": "rightClick",
+      "selector": "[data-testid^=\"task-item-\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[role=menu]\")"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "重命名任务",
+        "Rename task"
+      ],
+      "exact": false
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"input[placeholder=\\\"任务名称\\\"]\")"
+    },
+    {
+      "action": "clear",
+      "selector": "input[placeholder=\"任务名称\"]"
+    },
+    {
+      "action": "type",
+      "selector": "input[placeholder=\"任务名称\"]",
+      "text": "手工标题保留验收"
+    },
+    {
+      "action": "key",
+      "key": "Enter"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.textContent?.includes(\"手工标题保留验收\")"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "payloadContains": {
+        "source": "manual",
+        "title": "手工标题保留验收"
+      }
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "连续对话确认：只回复 TITLE_MANUAL_RETAINED_OK，不调用工具、不修改文件。"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll(\"[data-row-id]\")).some(e => e.innerText.includes(\"TITLE_MANUAL_RETAINED_OK\")) && !document.querySelector(\"[data-testid=\\\"v4-stop\\\"]\")",
+      "timeoutMs": 120000
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "sessionEqualsCaptured": "titleSession",
+      "minCount": 2
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.textContent?.includes(\"手工标题保留验收\")"
+    },
+    {
+      "action": "journalCapture",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "manualRename",
+      "exactCount": 2
+    },
+    {
+      "action": "restart",
+      "description": "手工标题冷恢复且不被命名任务覆盖"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(\"[data-testid=\\\"v4-composer-input\\\"]\")",
+      "timeoutMs": 60000
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector(\"[data-testid^=\\\"workspace-item-\\\"]\")?.getAttribute(\"aria-expanded\") !== \"true\""
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "titleTask"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(\"[data-testid^=\\\"task-item-\\\"]\")?.textContent?.includes(\"手工标题保留验收\") && Array.from(document.querySelectorAll(\"[data-row-id]\")).some(e => e.innerText.includes(\"TITLE_MANUAL_RETAINED_OK\"))"
+    },
+    {
+      "action": "journalUnchanged",
+      "eventType": "title_generated",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "titleGeneration",
+      "exactCount": 1
+    },
+    {
+      "action": "journalUnchanged",
+      "eventType": "session_renamed",
+      "sessionEqualsCaptured": "titleSession",
+      "name": "manualRename",
+      "exactCount": 2
+    },
+    {
+      "action": "screenshot",
+      "name": "manual-title-cold-recovery"
+    },
+    {
+      "action": "measure",
+      "name": "title-idle",
+      "durationMs": 1000,
+      "settleMs": 500
+    }
+  ]
+}

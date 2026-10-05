@@ -1,0 +1,218 @@
+{
+  "name": "native-live-pptx-pdf-export",
+  "description": "使用真实 OOXML PPTX 夹具打开 Source PreviewPane，确认 PPTX render surface 后通过可见的导出 PDF 控件触发真实 Windows print-to-PDF 与隔离保存服务。UI 触发、PDF 字节服务校验、系统 Save Picker 分开记账；不把改扩展名、浏览器 Blob、模拟 invoke 或截图当作 PDF 通过。该计划不依赖模型。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "PPTX/PDF 原生验收隔离项目基线\n"
+  },
+  "binaryFixtures": [
+    {
+      "source": "tooling/native-live/fixtures/native-live-presentation.pptx",
+      "target": "native-live-presentation.pptx",
+      "sha256": "1FD0C603AD3EC120BCAFECD9EA621621BCCF087B9C95EF82F7B373DA24623724",
+      "sha256Algorithm": "sha256",
+      "copy": "binary",
+      "verify": "source-before-copy-and-target-after-copy",
+      "format": "ooxml-pptx",
+      "required": true
+    }
+  ],
+  "coverage": [
+    {
+      "id": "pptx-render",
+      "status": "pending",
+      "evidence": "workspace-file-tree-row-native-live-presentation.pptx、preview-pane、data-zcode-pptx-render-surface=true、唯一 marker"
+    },
+    {
+      "id": "native-print-pdf-bytes",
+      "status": "pending",
+      "evidence": "真实 platform_file_print_page_to_pdf 返回的字节，不接受 renderer 生成的文本或浏览器下载"
+    },
+    {
+      "id": "isolated-save",
+      "status": "pending",
+      "evidence": "native-desktop-tests + KEENCODE_BENCHMARK=1 的隔离保存目标、返回路径和 PDF 文件字节"
+    },
+    {
+      "id": "os-save-picker",
+      "status": "manual",
+      "evidence": "CDP 只能控制 Tauri renderer；Windows 原生 Save Picker 不能由当前 harness 自动点击或冒称通过"
+    }
+  ],
+  "pdfValidator": {
+    "action": "pdfValidate",
+    "path": "${DATA}/exports/native-live-presentation.pdf",
+    "scope": "只读校验同一次真实 print-to-PDF 返回/保存的 bytes",
+    "input": "已渲染的 native-live-presentation.pptx 单页",
+    "expectedPageCount": 1,
+    "expectedPageWidthPoints": 960,
+    "expectedPageHeightPoints": 540,
+    "pageSizeTolerancePoints": 0.02,
+    "captureSha256As": "native-live-presentation-pdf-sha256",
+    "minBytes": 1,
+    "requireHeader": "%PDF-",
+    "requireEof": "%%EOF",
+    "requireCrossReference": true,
+    "checks": [
+      {
+        "id": "pdf-header",
+        "rule": "字节前 5 个 ASCII 字节必须为 %PDF-"
+      },
+      {
+        "id": "pdf-eof",
+        "rule": "去除末尾 ASCII 空白后必须以 %%EOF 结束；不能只搜索任意文本中的 EOF"
+      },
+      {
+        "id": "pdf-structure",
+        "rule": "必须存在 xref 表或 xref stream，并存在 trailer 或等价 startxref 结构"
+      },
+      {
+        "id": "pdf-page-count",
+        "rule": "按 PDF 对象结构解析 /Type /Page，页数必须为 1；不能用字符串出现次数替代解析"
+      },
+      {
+        "id": "pdf-page-size",
+        "rule": "逐页读取 MediaBox（含 PageTree 继承），宽 960、高 540 point，误差不得超过 0.02；缺失或无效几何尺寸必须失败"
+      },
+      {
+        "id": "pdf-size-and-hash",
+        "rule": "字节长度大于 0，记录本次实际 SHA-256；只用于同一运行的保存前后比对，不预置跨打印引擎固定 hash"
+      }
+    ],
+    "negativeChecks": [
+      "拒绝纯文本改名为 .pdf",
+      "拒绝仅检查文件扩展名或 UI 成功 toast",
+      "拒绝把 DOM canvas、截图或浏览器 Blob 作为 native PDF bytes"
+    ]
+  },
+  "knownGaps": [
+    "benchmark 隔离保存服务可以验证真实 bytes 和原子保存结果，但这不等同于 Windows 系统 Save Picker 被自动操作。",
+    "OS Save Picker 需要人工或专用原生自动化环境；当前 CDP/NativeCUA 限制下保持 manual，不把失败改写为通过。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示 Source 项目操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"side-pane-toggle\"]",
+      "description": "展开原生侧栏显示 workspace 文件树入口"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "description": "聚焦当前 workspace 挂载文件树入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-file-tree-button-\"]')",
+      "timeoutMs": 30000,
+      "description": "workspace 文件树入口真实挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-button-\"]",
+      "description": "打开当前 workspace 文件树"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')",
+      "timeoutMs": 30000,
+      "description": "文件树面板已挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"workspace-file-tree-panel\"]')?.innerText.includes('native-live-presentation.pptx')",
+      "timeoutMs": 30000,
+      "description": "从文件树发现预置的真实 OOXML PPTX 夹具"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"workspace-file-tree-row-\"][data-testid$=\"native-live-presentation.pptx\"]",
+      "description": "从文件树打开真实 PPTX 预览"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"preview-pane\"]') && !!document.querySelector('[data-zcode-pptx-render-surface=\"true\"]')",
+      "timeoutMs": 60000,
+      "description": "PPTX 真实 render surface 挂载"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"preview-pane\"]')?.innerText.includes('NATIVE_PPTX_FIXTURE_42')",
+      "description": "预览内容来自真实 PPTX XML marker"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]') && !document.querySelector('[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]')?.hasAttribute('disabled')",
+      "timeoutMs": 30000,
+      "description": "Source 仅在 native print/save capability 可用时显示 PDF 导出按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[aria-label=\"导出为 PDF\"],[aria-label=\"Export as PDF\"]",
+      "description": "通过真实 PPTX Preview UI 触发 native print-to-PDF"
+    },
+    {
+      "action": "wait",
+      "expression": "document.body.innerText.includes('PDF 已保存到') || document.body.innerText.includes('PDF saved to') || document.body.innerText.includes('PDF 导出失败') || document.body.innerText.includes('Failed to export PDF')",
+      "timeoutMs": 60000,
+      "description": "等待 Source 对真实 native print/save 返回结果作出可见反馈"
+    },
+    {
+      "action": "pdfValidate",
+      "name": "native-pptx-pdf-bytes",
+      "path": "${DATA}/exports/native-live-presentation.pdf",
+      "expectedPageCount": 1,
+      "expectedPageWidthPoints": 960,
+      "expectedPageHeightPoints": 540,
+      "pageSizeTolerancePoints": 0.02,
+      "captureSha256As": "native-live-presentation-pdf-sha256",
+      "minBytes": 1,
+      "requireHeader": "%PDF-",
+      "requireEof": "%%EOF",
+      "requireCrossReference": true,
+      "description": "只读解析 benchmark 隔离保存的真实 PDF bytes、页数、EOF、xref/trailer 与 SHA-256"
+    },
+    {
+      "action": "screenshot",
+      "name": "native-pptx-pdf-export-result"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

@@ -1,0 +1,245 @@
+{
+  "name": "native-live-desktop-controls",
+  "description": "在隔离 Tauri/WebView2 窗口中先通过真实 onboarding UI 完成启动，再验证窗口状态、缩放档位边界、资源诊断快照、权限拒绝和 WorkspaceHelpMenu 导出日志；不发送模型请求、不读取外部凭据。",
+  "acceptance": {
+    "cdpPort": 9239,
+    "viewport": "1280x820",
+    "deviceScaleFactor": 2,
+    "isolatedDataAndProject": true,
+    "modelRequests": "none"
+  },
+  "manualChecks": [
+    {
+      "id": "about-dialog",
+      "status": "not-run",
+      "reason": "About 原生对话框需要人工确认；Computer Use 自动审核当前拒绝，不能用 CDP 冒充。"
+    },
+    {
+      "id": "os-coordinate-window-drag",
+      "status": "not-run",
+      "reason": "CDP 没有可信 OS 坐标拖拽；有效 start_dragging 和窗口位移保留人工原生验收。"
+    }
+  ],
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 60000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "真实 onboarding 完成并挂载项目入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"desktop-window-controls\"]')",
+      "timeoutMs": 60000,
+      "description": "主窗口自绘控制区已就绪"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"desktop-window-controls\"]",
+      "description": "真实悬停自绘窗口控制区，确认原生按钮可见"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsChrome = await window.__TAURI_INTERNALS__.invoke('desktop_window_chrome_state'); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsChrome && typeof window.__desktopControlsChrome.isMaximized === 'boolean' && typeof window.__desktopControlsChrome.supportsNativeRoundedCorners === 'boolean'",
+      "description": "窗口状态返回共享契约字段"
+    },
+    {
+      "action": "screenshot",
+      "name": "desktop-controls-window-state",
+      "description": "保存自绘窗口控制区和当前窗口状态证据"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsDragRejected = await window.__TAURI_INTERNALS__.invoke('desktop_start_window_drag', { button: 1 }).then(() => false).catch((error) => String(error).includes('主键')); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsDragRejected === true",
+      "description": "窗口拖拽拒绝非主键输入；有效 OS 坐标拖拽留给人工验收"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'zoomIn' }); window.__desktopControlsZoom = await window.__TAURI_INTERNALS__.invoke('desktop_zoom_level'); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsZoom?.zoomLevel === 1",
+      "description": "缩放命令实际修改当前 WebView 并返回档位"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'zoomOut' }); await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'resetZoom' }); window.__desktopControlsZoom = await window.__TAURI_INTERNALS__.invoke('desktop_zoom_level'); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsZoom?.zoomLevel === 0",
+      "description": "缩小与恢复默认档位可逆"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsZoomBounds = await (async () => { for (let i = 0; i < 3; i++) await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'zoomOut' }); const min = await window.__TAURI_INTERNALS__.invoke('desktop_zoom_level'); for (let i = 0; i < 8; i++) await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'zoomIn' }); const max = await window.__TAURI_INTERNALS__.invoke('desktop_zoom_level'); await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'resetZoom' }); return { min: min.zoomLevel, max: max.zoomLevel }; })(); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsZoomBounds?.min === -3 && window.__desktopControlsZoomBounds?.max === 5",
+      "description": "缩放边界严格限制在 -3 到 5"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsResource = await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'openResourceManager' }); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsResource?.productName === 'KeenCode' && Number.isInteger(window.__desktopControlsResource?.diagnostics?.schema) && window.__desktopControlsResource?.resourceSnapshot?.processes?.length > 0",
+      "description": "资源管理器命令返回进程内脱敏诊断和资源快照"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"resource-manager-overlay\"]') && !!document.querySelector('[data-testid=\"resource-manager\"]')",
+      "timeoutMs": 10000,
+      "description": "主窗口实际挂载 ResourceManagerApp 可见覆盖层"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"resource-manager-cpu\"]') && !!document.querySelector('[data-testid=\"resource-manager-process-row\"]') && !!document.querySelector('[data-testid=\"resource-manager-cpu-app\"]')",
+      "timeoutMs": 10000,
+      "description": "ResourceManagerApp CPU 页显示 Rust 真实快照"
+    },
+    {
+      "action": "screenshot",
+      "name": "resource-manager-cpu",
+      "description": "保存 ResourceManagerApp CPU 页真实渲染证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"resource-manager-tab-storage\"]",
+      "description": "打开 ResourceManagerApp 的真实存储页"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"resource-manager-storage-section\"]')?.querySelector('[data-testid=\"resource-manager-storage-status\"]')?.getAttribute('data-state') === 'complete'",
+      "timeoutMs": 10000,
+      "description": "存储页完成真实受限应用数据目录扫描"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsStorage = await window.__TAURI_INTERNALS__.invoke('desktop_resource_manager_storage_get_snapshot'); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsStorage?.status === 'complete' && Array.isArray(window.__desktopControlsStorage?.roots) && Array.isArray(window.__desktopControlsStorage?.roots?.[0]?.categories) && window.__desktopControlsStorage?.roots?.[0]?.categories.length === 11",
+      "description": "存储页与 Rust 快照均返回 11 类真实受限目录数据"
+    },
+    {
+      "action": "screenshot",
+      "name": "resource-manager-storage",
+      "description": "保存 ResourceManagerApp 存储页真实渲染证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"resource-manager\"] button[aria-label='Close resource manager']",
+      "description": "关闭资源管理器覆盖层并释放轮询"
+    },
+    {
+      "action": "setup",
+      "expression": "(async () => { window.__desktopControlsRejected = await window.__TAURI_INTERNALS__.invoke('desktop_execute_command', { command: 'toggleDevTools' }).then(() => false).catch(() => true); })()"
+    },
+    {
+      "action": "assert",
+      "expression": "window.__desktopControlsRejected === true",
+      "description": "未列入 allowlist 的宿主命令明确拒绝"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workspace-help-menu-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "WorkspaceHelpMenu 的真实帮助入口已挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workspace-help-menu-trigger\"]",
+      "description": "通过真实 WorkspaceHelpMenu 打开帮助菜单，不调用导出 RPC"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menu\"] [role=\"menuitem\"]",
+      "texts": [
+        "导出日志",
+        "Export logs"
+      ],
+      "exact": true,
+      "description": "点击 Source WorkspaceHelpMenu 的真实导出日志菜单项"
+    },
+    {
+      "action": "jsonEvidence",
+      "name": "desktop-diagnostics-export",
+      "path": "${DATA}/exports/keencode-diagnostics.json",
+      "timeoutMs": 30000,
+      "maxBytes": 262144,
+      "expectedSchema": 1,
+      "requiredTopLevelKeys": [
+        "schema",
+        "capturedAtMs",
+        "retention",
+        "counters",
+        "gauges",
+        "metricPoints",
+        "histograms",
+        "traces",
+        "resourceSamples",
+        "startupPhases",
+        "crashes",
+        "events",
+        "droppedRealtimeEvents"
+      ],
+      "requiredNonEmpty": [
+        "schema",
+        "capturedAtMs",
+        "retention"
+      ],
+      "forbiddenKeyNames": [
+        "apiKey",
+        "api_key",
+        "baseUrl",
+        "baseURL",
+        "authorization",
+        "password",
+        "secret",
+        "token"
+      ],
+      "forbiddenValuePatterns": [
+        "(?i)bearer\\s+[A-Za-z0-9._~+/=-]+",
+        "(?i)sk-[A-Za-z0-9._-]+"
+      ],
+      "captureSha256As": "desktop-diagnostics-export-sha256",
+      "reportFields": [
+        "exists",
+        "validJson",
+        "schemaValid",
+        "secretFree",
+        "bytes",
+        "sha256"
+      ],
+      "reportBody": false,
+      "description": "只读校验 benchmark 原生保存的脱敏诊断 JSON；报告仅含 bool、字节数和 SHA-256，不输出正文或凭据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

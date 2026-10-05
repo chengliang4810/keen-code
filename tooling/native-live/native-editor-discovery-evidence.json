@@ -1,0 +1,25 @@
+{
+  "capturedAt": "2026-10-03T12:16:21.9145289Z",
+  "os": "Microsoft Windows NT 10.0.26100.0",
+  "windir": "C:\\Windows",
+  "method": "PowerShell Test-Path checks for the ui_editors known Windows candidates plus a PATH scan for code.exe, code-insiders.exe, cursor.exe, and zed.exe",
+  "resolvedCandidates": {
+    "explorer": [
+      "C:\\Windows\\explorer.exe"
+    ],
+    "vscode": [],
+    "vscodeInsiders": [],
+    "cursor": [],
+    "zed": []
+  },
+  "pathCandidates": {
+    "code.exe": [],
+    "code-insiders.exe": [],
+    "cursor.exe": [],
+    "zed.exe": []
+  },
+  "discoveredEditorIds": [
+    "explorer"
+  ],
+  "scope": "Filesystem evidence only; no editor was launched and no user editor configuration was changed."
+}

@@ -1,0 +1,96 @@
+[
+  {
+    "schema": "keencode/session-event",
+    "version": 8,
+    "eventId": "contract-0",
+    "session": "parent",
+    "sequence": 1,
+    "timeUnixMs": 1000,
+    "type": "atomic_batch",
+    "payload": {
+      "events": [
+        {
+          "type": "workflow_event_committed",
+          "payload": {
+            "record": {
+              "runId": "contract-run",
+              "toolCallId": "contract-tool",
+              "sequence": 1,
+              "eventType": "actor-started",
+              "payload": {},
+              "artifacts": [],
+              "actorSessionId": "actor-left",
+              "launchInputId": null
+            }
+          }
+        },
+        {
+          "type": "workflow_event_committed",
+          "payload": {
+            "record": {
+              "runId": "contract-run",
+              "toolCallId": "contract-tool",
+              "sequence": 2,
+              "eventType": "actor-started",
+              "payload": {},
+              "artifacts": [],
+              "actorSessionId": "actor-right",
+              "launchInputId": null
+            }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "schema": "keencode/session-event",
+    "version": 8,
+    "eventId": "contract-1",
+    "session": "actor-left",
+    "sequence": 1,
+    "timeUnixMs": 1001,
+    "type": "atomic_batch",
+    "payload": {
+      "events": [
+        {
+          "type": "turn_started",
+          "payload": {
+            "turn_id": "left-turn",
+            "source_agent_id": "root",
+            "root_turn_id": "left-turn",
+            "parent_turn_id": null,
+            "prompt_summary": "fixture"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "schema": "keencode/session-event",
+    "version": 8,
+    "eventId": "contract-2",
+    "session": "actor-right",
+    "sequence": 1,
+    "timeUnixMs": 1002,
+    "type": "turn_started",
+    "payload": {
+      "turn_id": "right-turn",
+      "source_agent_id": "root",
+      "root_turn_id": "right-turn",
+      "parent_turn_id": null,
+      "prompt_summary": "fixture"
+    }
+  },
+  {
+    "schema": "keencode/session-event",
+    "version": 8,
+    "eventId": "contract-3",
+    "session": "actor-left",
+    "sequence": 2,
+    "timeUnixMs": 1003,
+    "type": "turn_completed",
+    "payload": {
+      "turn_id": "left-turn"
+    }
+  }
+]

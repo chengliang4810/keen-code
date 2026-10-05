@@ -1,0 +1,6 @@
+{
+  "attempt": 2,
+  "maxAttempts": 4,
+  "nextRetryAt": 10750,
+  "reasonCode": "provider_retry"
+}

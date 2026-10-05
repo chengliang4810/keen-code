@@ -1,0 +1,365 @@
+{
+  "name": "native-live-session-reconnect",
+  "description": "独立验证真实模型流式期间 renderer 页面 reload 的连接收口、同一 Session/Turn 重连和 Journal 水位恢复。动作只经过原生 UI、CDP 页面 reload 与隔离 Journal 只读断言，不主动调用业务 RPC、不注入会话状态。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "NATIVE_RECONNECT_FILE_OK_41\n"
+  },
+  "coverage": [
+    {
+      "id": "renderer-reload-during-stream",
+      "status": "covered",
+      "testIds": [
+        "v4-composer-input",
+        "v4-composer-send",
+        "v4-stop"
+      ],
+      "notes": "真实 Read 工具完成后，只在同一 Journal Session/Turn 仍未终态且 Source v4-stop 可见时执行 Page.reload；provider 不要求先提交某个分片 marker。"
+    },
+    {
+      "id": "journal-reconnect-integrity",
+      "status": "covered",
+      "testIds": [
+        "tool_requested",
+        "tool_execution_started",
+        "tool_completed",
+        "turn_started",
+        "turn_completed"
+      ],
+      "notes": "按每 Session sequence 建立基线，捕获同一 session/turn；reload 前后比较 Read 三类权威事实、唯一 turn_started 和唯一 turn_completed，避免工具或 Turn 重复执行。"
+    }
+  ],
+  "knownGaps": [
+    "该计划证明一次真实 renderer reload 造成的连接关闭/重建和运行时继续完成；它不模拟任意 TCP 丢包、延迟或中途只丢部分事件，因此不能单独证明所有网络故障下的 backfill。",
+    "计划只使用一次只读 Read 工具，不包含写工具、命令工具或权限交互；副作用命令的 receipt 重放仍由 workflow/command receipt 计划覆盖。",
+    "同一页面 reload 由 CDP Page.reload 触发，Rust 进程保持运行；计划报告中的 session/turn/Journal sequence 是可证明的恢复边界。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实项目激活后显示 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待隔离 provider/model 加载完成"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 分组加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开 provider 模型菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型出现在真实模型菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "模型选择回写聊天工具栏"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-reconnect-turn",
+      "eventType": "turn_started",
+      "captureEventSequence": true,
+      "description": "固定 reload 前每个 Session 的 Journal sequence 高水位"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "只完成断线重连验收。必须先调用一次 Read 工具读取当前隔离项目的 evidence.txt，并确认其中包含 NATIVE_RECONNECT_FILE_OK_41。只允许这一次 Read，禁止调用其他工具、命令或写入操作。Read 成功后，持续流式输出从 RECONNECT_STREAM_41:1 到 RECONNECT_STREAM_41:160 的 160 行，每行至少二十个汉字；全部输出后最后单独回复 NATIVE_RECONNECT_DONE_41。不要在 Read 前开始输出。",
+      "description": "发起真实只读工具与长流式回合"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "通过原生 UI 发送真实模型请求"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-reconnect-turn",
+      "captureSessionAs": "reconnect-session",
+      "captureAs": "reconnect-turn",
+      "capturePayloadPath": "turn_id",
+      "timeoutMs": 90000,
+      "description": "捕获本轮真实 Session 和 Turn 身份"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestToolName": "Read",
+      "requestContains": "evidence.txt",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "timeoutMs": 120000,
+      "description": "确认同一 Session 只发起目标 Read 请求"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_execution_started",
+      "requestToolName": "Read",
+      "requestContains": "evidence.txt",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "timeoutMs": 120000,
+      "description": "确认 Read 在 Rust 工具执行边界真实开始"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_completed",
+      "requestToolName": "Read",
+      "requestContains": "evidence.txt",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "timeoutMs": 120000,
+      "description": "确认 Read 成功后才允许进入流式输出"
+    },
+    {
+      "action": "waitTurnInFlightAndStop",
+      "sessionEqualsCaptured": "reconnect-session",
+      "turnEqualsCaptured": "reconnect-turn",
+      "selector": "[data-testid=\"v4-stop\"]",
+      "timeoutMs": 120000,
+      "description": "只在同一 Journal Session/Turn 仍未终态且 Source v4-stop 真实可见时执行 renderer reload"
+    },
+    {
+      "action": "journalCapture",
+      "name": "read-request-before-reload",
+      "eventType": "tool_requested",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "exactCount": 1,
+      "description": "保存 reload 前目标工具请求的权威摘要"
+    },
+    {
+      "action": "journalCapture",
+      "name": "read-start-before-reload",
+      "eventType": "tool_execution_started",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "exactCount": 1,
+      "description": "保存 reload 前目标工具执行开始事实"
+    },
+    {
+      "action": "journalCapture",
+      "name": "read-complete-before-reload",
+      "eventType": "tool_completed",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "exactCount": 1,
+      "description": "保存 reload 前目标工具完成事实"
+    },
+    {
+      "action": "journalCapture",
+      "name": "turn-start-before-reload",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "reconnect-turn"
+      },
+      "exactCount": 1,
+      "description": "保存 reload 前同一 Turn 的唯一启动事实，防止重载重开回合"
+    },
+    {
+      "action": "screenshot",
+      "name": "before-renderer-reload",
+      "description": "记录 reload 前仍在输出的真实页面"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 30000,
+      "description": "流式回合期间等待真实任务行持久身份挂载"
+    },
+    {
+      "action": "captureTask",
+      "name": "reconnect-visible-task",
+      "selector": "[data-testid^=\"task-item-\"]",
+      "description": "只从原任务行捕获当前唯一任务，不用 Journal 驱动界面身份"
+    },
+    {
+      "action": "pageReload",
+      "description": "只重载 renderer 页面，保持 Rust Runtime 进程和隔离数据根"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 90000,
+      "description": "页面重连后等待 Source 草稿与项目行挂载"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "按真实项目展开状态打开任务目录"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "重连后持久任务目录可操作"
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "reconnect-visible-task",
+      "description": "通过真实任务行重开重载前的同一会话"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('RECONNECT_STREAM_41:1'))",
+      "timeoutMs": 90000,
+      "description": "同一任务重连后恢复已渲染的真实回复内容"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "read-request-before-reload",
+      "eventType": "tool_requested",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "description": "reload 后目标 Read 请求没有重复写入 Journal"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "read-start-before-reload",
+      "eventType": "tool_execution_started",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "description": "reload 后目标 Read 没有重复开始执行"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "read-complete-before-reload",
+      "eventType": "tool_completed",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "description": "reload 后目标 Read 没有重复完成或生成第二份工具事实"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "turn-start-before-reload",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "description": "reload 后没有为同一 UI 会话重新启动第二个 Turn"
+    },
+    {
+      "action": "screenshot",
+      "name": "after-renderer-reload",
+      "description": "记录页面重连后的真实会话恢复状态"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "reconnect-turn"
+      },
+      "timeoutMs": 180000,
+      "description": "同一 Session/Turn 以权威 Journal turn_completed 收口"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('RECONNECT_STREAM_41:160') && e.innerText.includes('NATIVE_RECONNECT_DONE_41')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "页面重连后显示同一 Turn 的最终完整内容"
+    },
+    {
+      "action": "journalAbsent",
+      "eventType": "turn_stopped",
+      "reason": "cancelled",
+      "sessionEqualsCaptured": "reconnect-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "reconnect-turn"
+      },
+      "description": "同一 Turn 没有被 renderer reload 错误取消"
+    },
+    {
+      "action": "journalAbsent",
+      "eventType": "turn_cancelled",
+      "sessionEqualsCaptured": "reconnect-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "reconnect-turn"
+      },
+      "description": "同一 Turn 没有被 renderer reload 转为取消终态"
+    },
+    {
+      "action": "journalCapture",
+      "name": "completed-turn-after-reload",
+      "eventType": "turn_completed",
+      "newSinceBaseline": "before-reconnect-turn",
+      "sessionEqualsCaptured": "reconnect-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "reconnect-turn"
+      },
+      "exactCount": 1,
+      "description": "保存同一 Turn 完成事件的实际 Journal sequence，供报告复核"
+    },
+    {
+      "action": "screenshot",
+      "name": "reconnect-complete",
+      "description": "保存同一 Session/Turn 完成后的最终页面"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

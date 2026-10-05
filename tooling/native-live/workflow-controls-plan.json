@@ -1,0 +1,592 @@
+{
+  "name": "native-live-workflow-controls",
+  "description": "独立验证 Source 可见的工作流取消、Resume 和 Configure/amend 控件；使用真实保存的 WorkflowDefinitionV1、真实运行侧板和 Journal 收据，不注入状态或直接调用业务 RPC。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "runtimeArtifactLimit": 2048,
+  "workflowFile": "recoverable-read.workflow.json",
+  "files": {
+    "evidence.txt": "NATIVE_FILE_OK_41\n"
+  },
+  "coverage": [
+    {
+      "id": "workflow-controls",
+      "status": "pending",
+      "testIds": [
+        "automations-open",
+        "automations-page-tab-workflow",
+        "workflow-card-run-native_recoverable_read",
+        "workflow-launch-dialog",
+        "workflow-launch-arg-label",
+        "workflow-launch-submit",
+        "v4-composer-background-work-trigger",
+        "workflow-run-cancel",
+        "workflow-run-resume",
+        "workflow-run-configure",
+        "workflow-run-settings-popover",
+        "workflow-run-settings-model-trigger",
+        "workflow-run-settings-apply"
+      ],
+      "notes": "第一轮 run 通过只读 Read 节点的真实取消和 Resume Journal 事实验证安全恢复；第二轮 run 通过配置弹层、真实 amendWorkflowRunSettings command receipt 验证可修改设置。"
+    }
+  ],
+  "knownGaps": [
+    "工作流运行使用隔离 provider 和 recoverable-read.workflow.json；计划只验证 Source 已暴露的控制面，不替代 Agent 并行资源验收。",
+    "Configure 的真实 ACK 由 Rust Host 决定；计划严格要求 amendWorkflowRunSettings 收据被接受，拒绝或缺少收据均保留为产品失败。全图均为 Read/read_only 时，运行中的单独 maxConcurrency 修订会安全取消前驱并以冻结定义、输入创建带新预算的 successor；包含 Agent、写工具、产物或未知副作用的运行仍明确拒绝自动重跑。",
+    "第一轮只取消 Read 工具节点。Agent 节点即使声明 read_only 也仍按 runtime_journal::run_is_resumable 判定为不可安全恢复；本计划不把不确定副作用的 Agent 恢复当作通过。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示真实新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "从原生菜单选择隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实项目激活后显示 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实 provider/model 加载完成"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 分组加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开 provider 模型菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型出现在真实模型菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "模型选择回写聊天工具栏"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "调用 CreateWorkflow 工具，把下面原样的 WorkflowDefinitionV1 JSON 保存到 project scope。不要执行工作流，不要替换结构。保存成功后回复 NATIVE_WORKFLOW_SAVED_41。定义：${WORKFLOW_JSON}",
+      "description": "通过真实模型保存隔离工作流定义"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送保存工作流请求"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('NATIVE_WORKFLOW_SAVED_41')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "确认真实 Agent 保存工作流并结束回合"
+    },
+    {
+      "action": "journal",
+      "eventType": "tool_requested",
+      "requestContains": "CreateWorkflow",
+      "description": "工作流定义通过真实 Agent 工具提交"
+    },
+    {
+      "action": "journal",
+      "eventType": "tool_completed",
+      "requestToolName": "CreateWorkflow",
+      "requestContains": "native_recoverable_read",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "description": "只读控制工作流必须取得真实成功保存结果，模型回复标记不能替代定义落盘"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-open\"]",
+      "description": "打开 Source 自动化入口"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-automations-content]') && !!document.querySelector('[data-testid=\"automations-page-tab-workflow\"]')",
+      "timeoutMs": 45000,
+      "description": "自动化页面挂载工作流页签"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-page-tab-workflow\"]",
+      "description": "打开已保存工作流列表"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workflow-card-run-native_recoverable_read\"]')",
+      "timeoutMs": 60000,
+      "description": "Source 工作流列表回读 Rust 保存的定义"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-card-run-native_recoverable_read\"]",
+      "description": "从真实工作流卡打开启动参数"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workflow-launch-dialog\"]') && !!document.querySelector('[data-testid=\"workflow-launch-submit\"]')",
+      "timeoutMs": 30000,
+      "description": "工作流启动对话框挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const field = document.querySelector('[data-testid=\"workflow-launch-arg-label\"]'); return !!field && field.value === 'NATIVE_RECOVERABLE_READ_41'; })()",
+      "timeoutMs": 30000,
+      "description": "启动参数界面显示真实 label 默认值"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-launch-submit\"]",
+      "description": "从 Source 启动第一轮真实工作流"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-testid=\"v4-composer-background-work-trigger\"]'); return !!trigger && !trigger.hasAttribute('disabled') && trigger.getAttribute('data-background-workflow-count') === '1'; })()",
+      "timeoutMs": 60000,
+      "approvePermissions": true,
+      "description": "后台入口显示唯一第一轮真实工作流"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-background-work-trigger\"]",
+      "description": "从 Source 后台入口打开第一轮运行侧板"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-side-pane-tab-id^=\"workflow-run:\"][data-state=\"active\"]'); const panelId = trigger?.getAttribute('aria-controls'); const panel = panelId ? document.getElementById(panelId) : null; return !!trigger && !!panel && !!panel.querySelector('[data-workflow-run-id]') && !!panel.querySelector('[data-testid=\"workflow-run-phases\"]'); })()",
+      "timeoutMs": 45000,
+      "description": "第一轮真实运行侧板打开"
+    },
+    {
+      "action": "captureWorkflowRun",
+      "name": "workflow-resume-run",
+      "approvePermissions": false,
+      "description": "从可见侧板捕获第一轮真实 runId"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "node-started",
+      "minCount": 1,
+      "workflowRun": "workflow-resume-run",
+      "timeoutMs": 90000,
+      "approvePermissions": false,
+      "description": "第一轮 Journal 确认真实只读 Read 节点已进入执行；ReadOnly 按 Runner 契约不触发权限审批，保持等待不自动批准"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); const run = panel?.querySelector('[data-workflow-run-id]'); const button = panel?.querySelector('[data-testid=\"workflow-run-cancel\"]'); return !!run && !!button && !button.disabled && panel.querySelector('[data-workflow-run-status=\"running\"]') !== null; })()",
+      "timeoutMs": 30000,
+      "approvePermissions": false,
+      "description": "第一轮运行侧板的取消控件真实可用；在 1024 次有界真实 Read 重复执行完成前观察取消窗口"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"workflow-run-cancel\"]",
+      "description": "从真实运行侧板取消第一轮工作流"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-settled",
+      "workflowStatus": "cancelled",
+      "workflowRun": "workflow-resume-run",
+      "timeoutMs": 90000,
+      "approvePermissions": false,
+      "description": "第一轮取消写入 cancelled 终态 Journal"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); return !!panel?.querySelector('[data-workflow-run-id]') && panel.querySelector('[data-workflow-run-status]')?.getAttribute('data-workflow-run-status') === 'stopped' && !!panel.querySelector('[data-testid=\"workflow-run-resume\"]'); })()",
+      "timeoutMs": 60000,
+      "description": "Source 终态投影显示 stopped 并暴露 Resume 控件"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-workflow-resume",
+      "eventType": "workflow_event_committed",
+      "captureEventSequence": true,
+      "workflowRun": "workflow-resume-run",
+      "description": "固定第一轮 Resume 前工作流 Journal 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"workflow-run-resume\"]",
+      "description": "从真实 stopped 侧板点击 Resume"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-resumed",
+      "workflowRun": "workflow-resume-run",
+      "newSinceBaseline": "before-workflow-resume",
+      "timeoutMs": 90000,
+      "approvePermissions": false,
+      "description": "确认 Resume 写入当前 run 的 run-resumed Journal 事实"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); return !!panel?.querySelector('[data-workflow-run-id]') && (panel.querySelector('[data-workflow-run-status]')?.getAttribute('data-workflow-run-status') !== 'stopped' || !panel.querySelector('[data-testid=\"workflow-run-resume\"]')); })()",
+      "timeoutMs": 60000,
+      "description": "Resume 后 Source 移除 stopped 专属 Resume 控件"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-settled",
+      "workflowStatus": "succeeded",
+      "workflowRun": "workflow-resume-run",
+      "timeoutMs": 300000,
+      "approvePermissions": false,
+      "description": "等待第一轮 Resume 后真实工作流完成，避免第二轮混淆后台计数"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-open\"]",
+      "description": "返回工作流列表启动第二轮配置验收"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"automations-page-tab-workflow\"]')",
+      "timeoutMs": 45000,
+      "description": "第二轮工作流列表挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-page-tab-workflow\"]",
+      "description": "重新打开工作流页签"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-card-run-native_recoverable_read\"]",
+      "description": "启动第二轮工作流参数对话框"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workflow-launch-submit\"]')",
+      "timeoutMs": 30000,
+      "description": "第二轮启动控件挂载"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const field = document.querySelector('[data-testid=\"workflow-launch-arg-label\"]'); return !!field && field.value === 'NATIVE_RECOVERABLE_READ_41'; })()",
+      "timeoutMs": 30000,
+      "description": "第二轮参数界面保留真实 label 默认值"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-launch-submit\"]",
+      "description": "从 Source 启动第二轮真实工作流"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-testid=\"v4-composer-background-work-trigger\"]'); return !!trigger && trigger.getAttribute('data-background-workflow-count') === '1'; })()",
+      "timeoutMs": 60000,
+      "approvePermissions": false,
+      "description": "第二轮后台工作入口显示唯一运行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-background-work-trigger\"]",
+      "description": "打开第二轮运行侧板"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-side-pane-tab-id^=\"workflow-run:\"][data-state=\"active\"]'); const panelId = trigger?.getAttribute('aria-controls'); const panel = panelId ? document.getElementById(panelId) : null; return !!trigger && !!panel && !!panel.querySelector('[data-workflow-run-id]') && !!panel.querySelector('[data-testid=\"workflow-run-phases\"]'); })()",
+      "timeoutMs": 45000,
+      "description": "第二轮运行侧板挂载"
+    },
+    {
+      "action": "captureWorkflowRun",
+      "name": "workflow-config-run",
+      "approvePermissions": false,
+      "description": "从可见侧板捕获第二轮真实 runId"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "node-started",
+      "minCount": 1,
+      "workflowRun": "workflow-config-run",
+      "timeoutMs": 90000,
+      "approvePermissions": false,
+      "description": "第二轮 Journal 确认 Configure 作用于已启动的真实只读 run"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); return !!panel?.querySelector('[data-workflow-run-id]') && !!panel.querySelector('[data-testid=\"workflow-run-configure\"]') && panel.querySelector('[data-workflow-run-status]')?.getAttribute('data-workflow-run-status') === 'running'; })()",
+      "timeoutMs": 30000,
+      "description": "运行中 Configure 控件真实可见"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"workflow-run-configure\"]",
+      "description": "打开真实工作流配置弹层"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workflow-run-settings-popover\"]') && !!document.querySelector('[data-testid=\"workflow-run-settings-model-trigger\"]') && !!document.querySelector('[data-testid=\"workflow-run-settings-apply\"]')",
+      "timeoutMs": 30000,
+      "description": "配置弹层显示模型和 Apply 控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-run-settings-model-trigger\"]",
+      "description": "打开配置弹层的真实模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "配置弹层读取隔离 provider catalog"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "真实 hover 配置 provider SubTrigger，触发 Source Radix 子菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开配置模型 provider"
+    },
+    {
+      "action": "key",
+      "key": "ArrowRight",
+      "description": "沿 Source 原生键盘语义打开 provider 子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const visible = (element) => { if (!element) return false; const rect = element.getBoundingClientRect(); if (rect.width <= 0 || rect.height <= 0) return false; for (let current = element; current; current = current.parentElement) { const style = getComputedStyle(current); if (current.hidden || current.getAttribute('aria-hidden') === 'true' || style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false; } return true; }; const itemSelector = '[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]'; const provider = [...document.querySelectorAll('[data-model-provider-key=\"registry-provider:native-live-deepseek\"][data-state=\"open\"][aria-controls]')].find((element) => { const panelId = element.getAttribute('aria-controls'); const submenu = panelId ? document.getElementById(panelId) : null; const item = submenu?.querySelector(itemSelector); return !!submenu && submenu.matches('[data-slot=\"dropdown-menu-sub-content\"][data-state=\"open\"]') && visible(submenu) && visible(item); }); return !!provider; })()",
+      "timeoutMs": 30000,
+      "description": "仅在当前 provider aria-controls 指向的 open 子菜单中找到真实可见模型项时继续"
+    },
+    {
+      "action": "key",
+      "key": "Home",
+      "description": "沿当前 Source Radix provider 子菜单键盘语义聚焦第一个真实模型项"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const itemSelector = '[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]'; const provider = [...document.querySelectorAll('[data-model-provider-key=\"registry-provider:native-live-deepseek\"][data-state=\"open\"][aria-controls]')].find((element) => { const panelId = element.getAttribute('aria-controls'); const submenu = panelId ? document.getElementById(panelId) : null; const item = submenu?.querySelector(itemSelector); return !!submenu && submenu.matches('[data-slot=\"dropdown-menu-sub-content\"][data-state=\"open\"]') && !!item && document.activeElement === item && !item.matches(':disabled,[aria-disabled=\"true\"],[data-disabled]:not([data-disabled=\"false\"])'); }); return !!provider; })()",
+      "description": "确认焦点严格位于当前 provider aria-controls 指向的 open 子菜单模型项"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "沿 Source Radix 键盘语义提交当前聚焦的隔离模型"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"workflow-run-settings-apply\"]') && !document.querySelector('[data-testid=\"workflow-run-settings-apply\"]')?.hasAttribute('disabled')",
+      "timeoutMs": 30000,
+      "description": "模型变更使真实 Apply 控件可用"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-workflow-amend",
+      "eventType": "command_receipt_committed",
+      "captureEventSequence": true,
+      "description": "固定 amendWorkflowRunSettings 前 CommandReceipt 高水位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"workflow-run-settings-apply\"]",
+      "description": "通过 Source UI 提交真实 amendWorkflowRunSettings"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "command_receipt_committed",
+      "receiptCommandType": "amendWorkflowRunSettings",
+      "receiptStatus": "completed",
+      "receiptAckStatus": "accepted",
+      "newSinceBaseline": "before-workflow-amend",
+      "timeoutMs": 90000,
+      "description": "确认 Rust 接受 Configure 并写入 amendWorkflowRunSettings 收据"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"workflow-run-settings-popover\"]')",
+      "timeoutMs": 30000,
+      "description": "Apply 成功后配置弹层由 Source 关闭"
+    },
+    {
+      "action": "screenshot",
+      "name": "workflow-controls-complete",
+      "description": "保存 Resume 与 Configure/amend 原生证据"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-settled",
+      "workflowStatus": "cancelled",
+      "workflowRun": "workflow-config-run",
+      "newSinceBaseline": "before-workflow-amend",
+      "timeoutMs": 90000,
+      "approvePermissions": true,
+      "description": "确认 Configure/amend 先将旧 run 写入 cancelled 终态，而不是只以收据宣布成功"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-started",
+      "workflowPredecessorRun": "workflow-config-run",
+      "newSinceBaseline": "before-workflow-amend",
+      "captureWorkflowRunAs": "workflow-successor-journal-run",
+      "timeoutMs": 90000,
+      "approvePermissions": true,
+      "description": "从 amend 后唯一 run-started Journal 事实捕获 successor 身份，并绑定旧 run"
+    },
+    {
+      "action": "assertWorkflowSuccessor",
+      "name": "workflow-successor-frozen",
+      "predecessorWorkflowRun": "workflow-config-run",
+      "successorJournalRun": "workflow-successor-journal-run",
+      "requireSelectedModel": true,
+      "description": "只读校验 successor 的 predecessor、定义、inputs、预算、工作区和模型语义均按冻结契约保留"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-testid=\"v4-composer-background-work-trigger\"]'); return !!trigger && !trigger.hasAttribute('disabled') && trigger.getAttribute('data-background-workflow-count') === '1'; })()",
+      "timeoutMs": 60000,
+      "approvePermissions": true,
+      "description": "等待 successor 通过 Source 后台入口可见，准备以 UI 身份绑定 Journal run"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-background-work-trigger\"]",
+      "description": "从 Source 后台入口打开 successor 运行详情"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const trigger = document.querySelector('[data-side-pane-tab-id^=\"workflow-run:\"][data-state=\"active\"]'); const panelId = trigger?.getAttribute('aria-controls'); const panel = panelId ? document.getElementById(panelId) : null; return !!trigger && !!panel && !!panel.querySelector('[data-workflow-run-id]') && !!panel.querySelector('[data-testid=\"workflow-run-phases\"]'); })()",
+      "timeoutMs": 45000,
+      "description": "successor 运行详情侧板挂载"
+    },
+    {
+      "action": "captureWorkflowRun",
+      "name": "workflow-successor-run",
+      "equalsCapturedAs": "workflow-successor-journal-run",
+      "approvePermissions": true,
+      "description": "捕获可见 successor runId，并要求它与前一步 Journal 身份严格相等"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel = document.querySelector('[role=\"tabpanel\"][data-state=\"active\"]'); const run = panel?.querySelector('[data-workflow-run-id]'); const button = panel?.querySelector('[data-testid=\"workflow-run-cancel\"]'); return !!run && !!button && !button.disabled && panel.querySelector('[data-workflow-run-status=\"running\"]') !== null; })()",
+      "timeoutMs": 60000,
+      "approvePermissions": true,
+      "description": "在 successor 真实运行窗口内观察取消控件，而不是取消父聊天"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"tabpanel\"][data-state=\"active\"] [data-testid=\"workflow-run-cancel\"]",
+      "description": "从 successor 运行详情取消新 run"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "workflow_event_committed",
+      "workflowEventType": "run-settled",
+      "workflowStatus": "cancelled",
+      "workflowRun": "workflow-successor-run",
+      "timeoutMs": 90000,
+      "approvePermissions": false,
+      "description": "确认 successor 取消也写入自身 cancelled 终态"
+    },
+    {
+      "action": "journalCapture",
+      "name": "workflow-config-events-before-cold",
+      "eventType": "workflow_event_committed",
+      "workflowRun": "workflow-config-run",
+      "description": "保存旧 run 的权威事件摘要，作为冷恢复不重放基线"
+    },
+    {
+      "action": "journalCapture",
+      "name": "workflow-successor-events-before-cold",
+      "eventType": "workflow_event_committed",
+      "workflowRun": "workflow-successor-run",
+      "description": "保存 successor 的权威事件摘要，作为冷恢复不重放基线"
+    },
+    {
+      "action": "restart",
+      "description": "冷重启隔离宿主，验证 amend 的两轮 run 不被自动重放"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]') && !!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "approvePermissions": false,
+      "description": "等待冷启动后的真实 Composer 可交互"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "workflow-config-events-before-cold",
+      "eventType": "workflow_event_committed",
+      "workflowRun": "workflow-config-run",
+      "description": "冷恢复后旧 run Journal 事件摘要保持不变，已完成/取消节点未重放"
+    },
+    {
+      "action": "journalUnchanged",
+      "name": "workflow-successor-events-before-cold",
+      "eventType": "workflow_event_committed",
+      "workflowRun": "workflow-successor-run",
+      "description": "冷恢复后 successor Journal 事件摘要保持不变，取消节点未重放"
+    },
+    {
+      "action": "screenshot",
+      "name": "workflow-controls-after-amend-cold",
+      "description": "保存 successor 取消与冷恢复不重放的原生证据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

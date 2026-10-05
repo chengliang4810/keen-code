@@ -1,0 +1,303 @@
+{
+  "name": "native-live-permission-mode",
+  "description": "使用真实原生启动、项目、模型与权限控件验证 Plan 硬拒绝、Build 拒绝和 Build 一次性批准；所有文件写入只发生在隔离项目。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "原生权限验收初始内容\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "将鼠标移动到项目分区以显示真实新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离测试项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实模型选择控件完成 provider/session 加载并启用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开原生模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型菜单显示 native-live-deepseek provider 分组"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开隔离 provider 的模型子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 子菜单显示完整 custom 模型项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离 provider 的验收模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !!document.querySelector('[data-testid=\"chat-mode-select-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "模型和真实模式菜单已回写工具栏"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-mode-select-trigger\"]",
+      "description": "打开原生权限模式菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-mode-select-item-plan\"]')",
+      "timeoutMs": 10000,
+      "description": "显示真实 Plan 勾选项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-mode-select-item-plan\"]",
+      "description": "通过原生菜单切换 Plan"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"v4-model-config\"]')?.dataset.mode === 'build' && document.querySelector('[data-testid=\"v4-model-config\"]')?.dataset.planEnabled === 'true'",
+      "timeoutMs": 10000,
+      "description": "确认当前提交配置为 Build 加 Plan 只读守卫"
+    },
+    {
+      "action": "wait",
+      "expression": "new Promise(resolve => setTimeout(() => resolve(true), 5000))",
+      "timeoutMs": 10000,
+      "description": "等待草稿预热 Session 完成 Runtime 注册"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "当前处于 Plan mode。请立即调用真实 Write 工具，把项目根目录 evidence.txt 的内容改为 PLAN_WRITE_MUST_BE_BLOCKED_42，不要只给计划，必须发起工具调用。如果 Rust 计划守卫拒绝，请最后回复 PLAN_PERMISSION_DENIED_42。",
+      "description": "在 Plan 模式请求真实 Write"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('PLAN_PERMISSION_DENIED_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "Plan 请求经 Rust 硬拒绝后完成回合"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "原生权限验收初始内容",
+      "description": "Plan 硬拒绝后隔离文件未改变"
+    },
+    {
+      "action": "assert",
+      "expression": "!document.querySelector('[data-permission-option-kind]')",
+      "description": "Plan 硬拒绝不创建可批准权限请求"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-plan-marker\"] button",
+      "description": "通过原生 Plan 标记关闭只读模式回到 Build"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"v4-model-config\"]')?.dataset.planEnabled === 'false'",
+      "timeoutMs": 10000,
+      "description": "确认 Plan 已关闭"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-mode-select-trigger\"]",
+      "description": "打开模式菜单确认 Build"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-mode-select-item-build\"]')",
+      "timeoutMs": 10000,
+      "description": "显示真实 Build 选项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-mode-select-item-build\"]",
+      "description": "通过原生菜单切换 Build"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"v4-model-config\"]')?.dataset.mode === 'build' && document.querySelector('[data-testid=\"v4-model-config\"]')?.dataset.planEnabled === 'false'",
+      "timeoutMs": 10000,
+      "description": "确认当前提交配置为 Build"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请立即调用真实 Write 工具，把项目根目录 evidence.txt 的内容改为 BUILD_WRITE_REJECTED_42，不要只解释，必须发起工具调用并等待权限选择。得到拒绝后请最后回复 BUILD_WRITE_REJECTED_42。",
+      "description": "在 Build 模式请求待审批 Write"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-permission-option-kind=\"allowOnce\"][data-permission-request-id]') && !!document.querySelector('[data-permission-option-kind=\"rejectOnce\"][data-permission-request-id]')",
+      "timeoutMs": 120000,
+      "description": "Build 写工具在副作用前显示真实权限请求"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-build-reject-receipt",
+      "eventType": "command_receipt_committed",
+      "capturePermissionInteraction": true,
+      "description": "记录当前权限请求 interactionId 与已有收据，后续只接受对应的新 resolveInteraction"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "原生权限验收初始内容",
+      "description": "未回答权限前隔离文件未改变"
+    },
+    {
+      "action": "screenshot",
+      "name": "01-build-before-reject"
+    },
+    {
+      "action": "click",
+      "selector": "[data-permission-option-kind=\"rejectOnce\"]",
+      "description": "选择真实 rejectOnce 权限选项"
+    },
+    {
+      "action": "key",
+      "key": "Enter",
+      "description": "提交真实拒绝答复"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('BUILD_WRITE_REJECTED_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "拒绝后模型回合完成"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "原生权限验收初始内容",
+      "description": "rejectOnce 后真实文件仍未改变"
+    },
+    {
+      "action": "journal",
+      "eventType": "command_receipt_committed",
+      "receiptCommandType": "resolveInteraction",
+      "receiptStatus": "completed",
+      "receiptOptionId": "deny",
+      "receiptAckStatus": "accepted",
+      "receiptNewSince": "before-build-reject-receipt",
+      "receiptInteractionSince": "before-build-reject-receipt",
+      "description": "拒绝的 Build 权限答复以真实 resolveInteraction 收据写入 Journal"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请立即调用真实 Write 工具，把项目根目录 evidence.txt 的内容改为 BUILD_WRITE_ALLOWED_42，不要只解释，必须发起工具调用并等待一次性权限选择。得到允许并写入成功后请最后回复 BUILD_WRITE_ALLOWED_42。",
+      "description": "再次请求待批准 Write"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-permission-option-kind=\"allowOnce\"][data-permission-request-id]') && !!document.querySelector('[data-permission-option-kind=\"rejectOnce\"][data-permission-request-id]')",
+      "timeoutMs": 120000,
+      "description": "第二次 Build 写工具显示新的真实权限请求"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-build-allow-receipt",
+      "eventType": "command_receipt_committed",
+      "capturePermissionInteraction": true,
+      "description": "记录第二次 Build 权限请求的 interactionId，隔离第一轮拒绝收据"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('BUILD_WRITE_ALLOWED_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "通过真实 allowOnce 后完成写入回合"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "BUILD_WRITE_ALLOWED_42",
+      "description": "allowOnce 后隔离文件真实写入成功"
+    },
+    {
+      "action": "journal",
+      "eventType": "tool_completed",
+      "requestToolName": "Write",
+      "requestEffect": "changes_state",
+      "requestContains": "BUILD_WRITE_ALLOWED_42",
+      "outcomeStatus": "succeeded",
+      "outcomeIsError": false,
+      "description": "批准的 Build Write 以成功 ToolResult 写入真实 Journal"
+    },
+    {
+      "action": "journal",
+      "eventType": "command_receipt_committed",
+      "receiptCommandType": "resolveInteraction",
+      "receiptStatus": "completed",
+      "receiptOptionId": "allowOnce",
+      "receiptAckStatus": "accepted",
+      "receiptNewSince": "before-build-allow-receipt",
+      "receiptInteractionSince": "before-build-allow-receipt",
+      "description": "批准的 Build 权限答复以对应 interactionId 的 resolveInteraction 收据写入 Journal"
+    },
+    {
+      "action": "screenshot",
+      "name": "02-build-after-allow"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

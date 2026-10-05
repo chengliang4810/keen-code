@@ -1,0 +1,487 @@
+{
+  "name": "goal-and-subagents-native-acceptance",
+  "description": "在隔离项目中使用真实模型验证普通子 Agent 的可见隔离目录、结束状态和冷恢复，以及 /goal 的长任务、暂停和继续。Journal 只用于确认事实，不用于寻找或驱动 UI 身份。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "subagent-evidence.txt": "SUBAGENT_CHUNK_01 ordinary-child-read-01\nSUBAGENT_CHUNK_02 ordinary-child-read-02\nSUBAGENT_CHUNK_03 ordinary-child-read-03\nSUBAGENT_CHUNK_04 ordinary-child-read-04\nSUBAGENT_CHUNK_05 ordinary-child-read-05\nSUBAGENT_CHUNK_06 ordinary-child-read-06\nSUBAGENT_CHUNK_07 ordinary-child-read-07\nSUBAGENT_CHUNK_08 ordinary-child-read-08\nSUBAGENT_CHUNK_09 ordinary-child-read-09\nSUBAGENT_CHUNK_10 ordinary-child-read-10\nSUBAGENT_CHUNK_11 ordinary-child-read-11\nSUBAGENT_CHUNK_12 ordinary-child-read-12\nSUBAGENT_CHUNK_13 ordinary-child-read-13\nSUBAGENT_CHUNK_14 ordinary-child-read-14\nSUBAGENT_CHUNK_15 ordinary-child-read-15\nSUBAGENT_CHUNK_16 ordinary-child-read-16\nSUBAGENT_FILE_OK_43\n",
+    "goal-evidence.txt": "GOAL_CHUNK_01 long-goal-read-01\nGOAL_CHUNK_02 long-goal-read-02\nGOAL_CHUNK_03 long-goal-read-03\nGOAL_CHUNK_04 long-goal-read-04\nGOAL_CHUNK_05 long-goal-read-05\nGOAL_CHUNK_06 long-goal-read-06\nGOAL_CHUNK_07 long-goal-read-07\nGOAL_CHUNK_08 long-goal-read-08\nGOAL_CHUNK_09 long-goal-read-09\nGOAL_CHUNK_10 long-goal-read-10\nGOAL_CHUNK_11 long-goal-read-11\nGOAL_CHUNK_12 long-goal-read-12\nGOAL_CHUNK_13 long-goal-read-13\nGOAL_CHUNK_14 long-goal-read-14\nGOAL_CHUNK_15 long-goal-read-15\nGOAL_CHUNK_16 long-goal-read-16\nGOAL_FILE_OK_43\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 30000,
+      "description": "等待项目入口"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区，显示 Source 原操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "text": "Open folder",
+      "texts": [
+        "打开文件夹",
+        "Open folder"
+      ],
+      "exact": true,
+      "description": "打开隔离项目目录"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 30000,
+      "description": "等待项目会话和 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled')!=='true' && e.getAttribute('data-disabled')!=='true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待模型选择控件启用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开模型选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "选择隔离 Provider"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择精确模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "确认会话模型冻结选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-thought-level-select-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "等待真实 Composer reasoning 控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-thought-level-select-trigger\"]",
+      "description": "打开真实 Composer reasoning 档位选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-thought-level-select-item-none\"]')",
+      "timeoutMs": 30000,
+      "description": "确认当前模型公布 none reasoning 档位"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-thought-level-select-item-none\"]",
+      "description": "通过真实 Composer 选择 none reasoning"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-testid=\"chat-thought-level-select-trigger\"]'); const label=e?.getAttribute('aria-label')?.trim().toLowerCase(); return !!e && ['关闭', 'off', 'none'].some(value => label === value || label?.includes(value)); })()",
+      "timeoutMs": 30000,
+      "description": "回读 Composer 已保存的 none reasoning"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请使用普通 Agent 工具（不要使用 Workflow、CreateWorkflow 或任何工作流能力）创建一个单层独立子任务。让子 Agent 只读读取当前项目的 subagent-evidence.txt，必须分 16 次使用独立 Read 工具调用读取不同编号区段，并逐一核对 SUBAGENT_CHUNK_01 到 SUBAGENT_CHUNK_16；不得修改文件。子任务完成后必须在自己的答复中输出 SUBAGENT_CHILD_DONE_43。父任务必须等待这个普通子 Agent 的 Journal completed 后，在自己的最终 assistant 文本中只回复 PARENT_SUBAGENT_DONE_43；完成条件到达后禁止再调用 Read、Bash、list_agents、send_message 或任何其他工具，也不要输出额外解释。",
+      "description": "提交普通子 Agent 请求"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-native-goal-subagent",
+      "eventType": "sub_agent_spawned",
+      "captureEventSequence": true,
+      "description": "固定普通子 Agent 发送前的 Journal 高水位，后续只采信本次 spawn 的新事实"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送普通子 Agent 请求"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "payloadContains": {
+        "source_agent_id": "root"
+      },
+      "newSinceBaseline": "before-native-goal-subagent",
+      "captureSessionAs": "native-goal-subagent-parent-session",
+      "capturePayloadPath": "turn_id",
+      "captureAs": "native-goal-subagent-parent-turn-id",
+      "timeoutMs": 30000,
+      "description": "Journal 绑定本次普通子 Agent 请求的父 Turn"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "tool_requested",
+      "requestToolName": "spawn_agent",
+      "newSinceBaseline": "before-native-goal-subagent",
+      "sessionEqualsCaptured": "native-goal-subagent-parent-session",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "Journal 证明根模型实际调用普通 spawn_agent 工具"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "sub_agent_spawned",
+      "newSinceBaseline": "before-native-goal-subagent",
+      "sessionEqualsCaptured": "native-goal-subagent-parent-session",
+      "capturePayloadPath": "agent.agentId",
+      "captureAs": "native-goal-subagent-child-id",
+      "timeoutMs": 30000,
+      "description": "Journal 捕获本次 spawn 的唯一 child agentId"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "payloadEqualsCaptured": {
+        "source_agent_id": "native-goal-subagent-child-id"
+      },
+      "newSinceBaseline": "before-native-goal-subagent",
+      "sessionEqualsCaptured": "native-goal-subagent-parent-session",
+      "capturePayloadPath": "turn_id",
+      "captureAs": "native-goal-subagent-child-turn-id",
+      "timeoutMs": 30000,
+      "description": "Journal 证明同一 child agentId 已启动子 Turn"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-summary-panel\"][data-running-agent-count=\"1\"]')",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "等待真实普通子 Agent 运行投影"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"chat-summary-panel\"] > div:last-child button",
+      "condition": "(() => { const panel=document.querySelector('[data-testid=\"chat-summary-panel\"]'); const b=panel?.querySelector(':scope > div:last-child button'); if(!b || panel?.getAttribute('data-display-mode')==='panel') return false; const r=b.getBoundingClientRect(),s=getComputedStyle(b); return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden' && Number(s.opacity)!==0; })()",
+      "description": "展开状态面板（兼容 auto 布局的可见摘要）"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-status-section=\"agent\"]'); const r=e?.getBoundingClientRect(); return !!e && !!r && r.width>0 && r.height>0; })()",
+      "timeoutMs": 30000,
+      "description": "等待 Agent 状态分区"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-status-section=\"agent\"] button[aria-expanded=\"false\"]",
+      "condition": "!!document.querySelector('[data-status-section=\"agent\"] button[aria-expanded=\"false\"]')",
+      "description": "展开运行中的 Agent 列表"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-running-subagent-session-trigger][data-child-session-id]'); const r=e?.getBoundingClientRect(); const s=e&&getComputedStyle(e); return !!e && !!r && r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden'; })()",
+      "timeoutMs": 30000,
+      "description": "等待可见的子 Agent 会话入口"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const visible=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'&&s.opacity!=='0'}; const panes=[...document.querySelectorAll('[data-testid^=\"v4-session-pane-\"][data-session-id]')].filter(visible); const trigger=[...document.querySelectorAll('[data-running-subagent-session-trigger][data-child-session-id]')].find(visible); if(panes.length!==1||!trigger) throw new Error('普通子 Agent 的 UI 身份不唯一'); window.__nativeGoalSubagentParentSessionId=panes[0].getAttribute('data-session-id'); window.__nativeGoalSubagentChildSessionId=trigger.getAttribute('data-child-session-id'); return true; })()",
+      "description": "从可见 UI 捕获父子会话身份"
+    },
+    {
+      "action": "click",
+      "selector": "[data-running-subagent-session-trigger][data-child-session-id]",
+      "description": "打开普通子 Agent 会话"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const id=window.__nativeGoalSubagentChildSessionId; const tab=document.querySelector('[data-side-pane-tab-id^=\"subagent-session:\"][data-state=\"active\"]'); const e=[...document.querySelectorAll('[data-testid^=\"v4-session-pane-\"][data-session-id]')].find(x=>x.getAttribute('data-session-id')===id); const r=e?.getBoundingClientRect(),s=e&&getComputedStyle(e); return !!tab && !!e && !!r && r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden'; })()",
+      "timeoutMs": 30000,
+      "description": "确认子 Agent 在隔离会话面板中打开"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const id=window.__nativeGoalSubagentChildSessionId; const parent=window.__nativeGoalSubagentParentSessionId; const e=[...document.querySelectorAll('[data-testid^=\"v4-session-pane-\"][data-session-id]')].find(x=>x.getAttribute('data-session-id')===id); return !!e && id!==parent && e.getAttribute('data-session-id')===id; })()",
+      "description": "确认子 Agent 与父会话身份隔离"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const id=window.__nativeGoalSubagentChildSessionId; const pane=[...document.querySelectorAll('[data-testid^=\"v4-session-pane-\"][data-session-id]')].find(x=>x.getAttribute('data-session-id')===id); return !!pane && [...pane.querySelectorAll('[data-row-id]')].some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('SUBAGENT_CHILD_DONE_43')); })()",
+      "timeoutMs": 240000,
+      "approvePermissions": true,
+      "description": "等待子 Agent 的真实只读结果"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "sub_agent_status_changed",
+      "payloadContains": {
+        "status": "completed"
+      },
+      "payloadEqualsCaptured": {
+        "agent_id": "native-goal-subagent-child-id"
+      },
+      "newSinceBaseline": "before-native-goal-subagent",
+      "sessionEqualsCaptured": "native-goal-subagent-parent-session",
+      "minCount": 1,
+      "timeoutMs": 30000,
+      "description": "Journal 证明本次 child agentId 已完成，辅助 UI 结束目录断言"
+    },
+    {
+      "action": "wait",
+      "expression": "[...document.querySelectorAll('[data-row-id]')].some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('PARENT_SUBAGENT_DONE_43'))",
+      "timeoutMs": 240000,
+      "description": "等待父任务收敛"
+    },
+    {
+      "action": "screenshot",
+      "name": "ordinary-subagent-isolated-session"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "等待真实 workspace 行挂载后再读取任务目录",
+      "approvePermissions": true
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "仅在项目分区未展开时按 Source aria-expanded 状态展开任务目录"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "等待当前持久任务行出现在目录",
+      "approvePermissions": true
+    },
+    {
+      "action": "captureTask",
+      "selector": "[data-testid^=\"task-item-\"]",
+      "name": "ordinary-subagent-parent-task",
+      "description": "从任务目录捕获父任务 UI 身份"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid^=\"task-item-\"]",
+      "description": "真实 hover 持久任务行，确认父任务入口可操作"
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "ordinary-subagent-parent-task",
+      "description": "warm 路径强制打开此前捕获的真实父任务，避免停留在新对话草稿"
+    },
+    {
+      "action": "wait",
+      "expression": "[...document.querySelectorAll('[data-row-id]')].some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('PARENT_SUBAGENT_DONE_43'))",
+      "timeoutMs": 60000,
+      "description": "确认 warm 路径已进入真实父任务会话"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"chat-summary-panel\"] > div:last-child button,[data-testid=\"chat-summary-panel\"] button[aria-label=\"展开状态\"],[data-testid=\"chat-summary-panel\"] button[aria-label=\"Expand status\"]",
+      "condition": "(() => { const panel=document.querySelector('[data-testid=\"chat-summary-panel\"]'); if(!panel || panel.getAttribute('data-display-mode')==='panel') return false; const buttons=[...panel.querySelectorAll(':scope > div:last-child button,button[aria-label=\"展开状态\"],button[aria-label=\"Expand status\"]')]; return buttons.some((b) => { const r=b.getBoundingClientRect(),s=getComputedStyle(b); if(r.width<=0||r.height<=0||s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0) return false; for(let p=b;p;p=p.parentElement){const ps=getComputedStyle(p); if(p.hidden||p.getAttribute('aria-hidden')==='true'||ps.display==='none'||ps.visibility==='hidden'||Number(ps.opacity)===0) return false;} return true; }); })()",
+      "description": "仅在状态面板尚未展开时打开父任务状态面板"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-summary-panel\"]')?.getAttribute('data-display-mode')==='panel'",
+      "timeoutMs": 30000,
+      "description": "确认父任务状态面板已实际展开"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-status-section=\"agent\"] button[aria-expanded=\"false\"]",
+      "condition": "!!document.querySelector('[data-status-section=\"agent\"] button[aria-expanded=\"false\"]')",
+      "description": "展开父任务 Agent 状态分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"subagent-directory-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "等待真实已结束子 Agent 目录入口挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-directory-trigger\"]",
+      "description": "强制点击父任务真实已结束子 Agent 目录入口"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel=[...document.querySelectorAll('[role=\"tabpanel\"][data-state=\"active\"]')].find(e=>e.innerText.includes('SUBAGENT_CHILD_DONE_43')); const ended=panel&&[...panel.querySelectorAll('h3')].some(e=>/·\\s*1\\s*$/.test(e.textContent||'')); return !!document.querySelector('[data-side-pane-tab-id^=\"subagent-directory:\"][data-state=\"active\"]') && !!panel && ended; })()",
+      "timeoutMs": 30000,
+      "description": "确认结束计数和子 Agent 结果进入目录"
+    },
+    {
+      "action": "screenshot",
+      "name": "ordinary-subagent-ended-directory"
+    },
+    {
+      "action": "restart",
+      "description": "重启原生窗口验证冷恢复"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "等待冷恢复后的 Composer 与真实 workspace 行挂载",
+      "approvePermissions": true
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "冷恢复后仅按 Source aria-expanded 状态展开项目目录"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "等待冷恢复后真实持久任务行挂载",
+      "approvePermissions": true
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid^=\"task-item-\"]",
+      "description": "真实 hover 冷恢复任务行，确认同一持久入口可操作"
+    },
+    {
+      "action": "clickCapturedTask",
+      "name": "ordinary-subagent-parent-task",
+      "description": "通过真实任务目录重新打开父会话"
+    },
+    {
+      "action": "wait",
+      "expression": "[...document.querySelectorAll('[data-row-id]')].some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('PARENT_SUBAGENT_DONE_43'))",
+      "timeoutMs": 60000,
+      "description": "确认父会话冷恢复内容"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"chat-summary-panel\"] > div:last-child button,[data-testid=\"chat-summary-panel\"] button[aria-label=\"展开状态\"],[data-testid=\"chat-summary-panel\"] button[aria-label=\"Expand status\"]",
+      "condition": "(() => { const panel=document.querySelector('[data-testid=\"chat-summary-panel\"]'); if(!panel || panel.getAttribute('data-display-mode')==='panel') return false; const buttons=[...panel.querySelectorAll(':scope > div:last-child button,button[aria-label=\"展开状态\"],button[aria-label=\"Expand status\"]')]; return buttons.some((b) => { const r=b.getBoundingClientRect(),s=getComputedStyle(b); if(r.width<=0||r.height<=0||s.display==='none'||s.visibility==='hidden'||Number(s.opacity)===0) return false; for(let p=b;p;p=p.parentElement){const ps=getComputedStyle(p); if(p.hidden||p.getAttribute('aria-hidden')==='true'||ps.display==='none'||ps.visibility==='hidden'||Number(ps.opacity)===0) return false;} return true; }); })()",
+      "description": "冷恢复后仅在状态面板尚未展开时打开它"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-summary-panel\"]')?.getAttribute('data-display-mode')==='panel'",
+      "timeoutMs": 30000,
+      "description": "确认冷恢复父任务状态面板已实际展开"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-status-section=\"agent\"] button[aria-expanded=\"false\"]",
+      "condition": "!!document.querySelector('[data-status-section=\"agent\"] button[aria-expanded=\"false\"]')",
+      "description": "展开冷恢复父任务 Agent 状态分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"subagent-directory-trigger\"]')",
+      "timeoutMs": 30000,
+      "description": "等待冷恢复真实已结束子 Agent 目录入口挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"subagent-directory-trigger\"]",
+      "description": "强制点击冷恢复父任务真实已结束子 Agent 目录入口"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const panel=[...document.querySelectorAll('[role=\"tabpanel\"][data-state=\"active\"]')].find(e=>e.innerText.includes('SUBAGENT_CHILD_DONE_43')); const ended=panel&&[...panel.querySelectorAll('h3')].some(e=>/·\\s*1\\s*$/.test(e.textContent||'')); return !!document.querySelector('[data-side-pane-tab-id^=\"subagent-directory:\"][data-state=\"active\"]') && !!panel && ended; })()",
+      "timeoutMs": 30000,
+      "description": "确认冷恢复保留子 Agent 结束状态"
+    },
+    {
+      "action": "screenshot",
+      "name": "ordinary-subagent-cold-recovery"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "/goal 只读完成长时间分段核验：必须使用 Read 工具分 16 次独立读取当前项目的 goal-evidence.txt，每次读取不同编号区段并核对 GOAL_CHUNK_01 到 GOAL_CHUNK_16；在全部区段核验完成前保持 Goal active，不提前总结或结束；全部完成后只回复 GOAL_CHECK_DONE_43。",
+      "description": "输入真实 /goal 长任务"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送 /goal"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-testid=\"chat-summary-panel\"]'); const s=e?.getAttribute('data-goal-status'); return !!e && (s==='active'||s==='verifying'||s==='notSatisfied'); })()",
+      "timeoutMs": 180000,
+      "approvePermissions": true,
+      "description": "等待 Goal 进入可暂停状态"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid=\"chat-summary-panel\"] > div:last-child button",
+      "condition": "(() => { const panel=document.querySelector('[data-testid=\"chat-summary-panel\"]'); const b=panel?.querySelector(':scope > div:last-child button'); if(!b || panel?.getAttribute('data-display-mode')==='panel') return false; const r=b.getBoundingClientRect(),s=getComputedStyle(b); return r.width>0 && r.height>0 && s.display!=='none' && s.visibility!=='hidden' && Number(s.opacity)!==0; })()",
+      "description": "展开 Goal 状态面板（兼容 auto 布局的可见摘要）"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e=document.querySelector('[data-goal-action=\"pause\"]'); const r=e?.getBoundingClientRect(); const s=e&&getComputedStyle(e); return !!e&&!!r&&r.width>0&&r.height>0&&s.display!=='none'&&s.visibility!=='hidden'; })()",
+      "timeoutMs": 30000,
+      "description": "等待可见的 Goal 暂停操作"
+    },
+    {
+      "action": "click",
+      "selector": "[data-goal-action=\"pause\"]",
+      "description": "暂停真实 Goal"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-summary-panel\"]')?.getAttribute('data-goal-status')==='paused' && (() => { const e=document.querySelector('[data-goal-action=\"resume\"]'); const r=e?.getBoundingClientRect(); return !!e&&!!r&&r.width>0&&r.height>0; })()",
+      "timeoutMs": 30000,
+      "description": "确认 Goal 已暂停并显示继续操作"
+    },
+    {
+      "action": "screenshot",
+      "name": "goal-paused"
+    },
+    {
+      "action": "click",
+      "selector": "[data-goal-action=\"resume\"]",
+      "description": "继续真实 Goal"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const s=document.querySelector('[data-testid=\"chat-summary-panel\"]')?.getAttribute('data-goal-status'); return s==='active'||s==='verifying'||s==='notSatisfied'||s==='verified'; })()",
+      "timeoutMs": 30000,
+      "description": "确认 Goal 继续执行"
+    },
+    {
+      "action": "wait",
+      "expression": "[...document.querySelectorAll('[data-row-id]')].some(e=>e.classList.contains('group/assistant-row')&&e.innerText.includes('GOAL_CHECK_DONE_43')) || document.querySelector('[data-testid=\"chat-summary-panel\"]')?.getAttribute('data-goal-status')==='verified'",
+      "timeoutMs": 240000,
+      "approvePermissions": true,
+      "description": "等待 Goal 完成真实分段核验"
+    },
+    {
+      "action": "screenshot",
+      "name": "goal-resumed-complete"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

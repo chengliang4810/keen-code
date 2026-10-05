@@ -1,0 +1,338 @@
+{
+  "name": "native-live-hook-trust",
+  "description": "使用隔离项目和真实模型验证 workspace Hook 未审核时不执行、Trust 经过真实 session review 后执行、配置摘要变化后再次失去信任；marker 只写入隔离项目。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "hook-trust-marker.txt": "HOOK_TRUST_UNTOUCHED_20261003\n",
+    ".agents/settings.json": "{\n  \"hooks\": {\n    \"enabled\": true,\n    \"events\": {\n      \"UserPromptSubmit\": [\n        {\n          \"matcher\": \"*\",\n          \"hooks\": [\n            {\n              \"type\": \"command\",\n              \"command\": \"Set-Content -LiteralPath hook-trust-marker.txt -Value HOOK_TRUST_APPROVED_20261003 -NoNewline\",\n              \"shell\": \"powershell\",\n              \"timeout\": 30\n            }\n          ]\n        }\n      ]\n    }\n  }\n}\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "将鼠标移动到项目分区以显示真实新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离测试项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实模型选择控件完成加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开原生模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型菜单显示 provider 分组"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开隔离 provider 的模型子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离 provider 子菜单显示完整模型项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择隔离 provider 的验收模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash') && !!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 30000,
+      "description": "模型回写工具栏"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请不要调用任何工具、不要读取或修改工作区。只回复 HOOK_TRUST_UNREVIEWED_MODEL_OK_20261003。",
+      "description": "在未审核状态发起真实模型请求"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送未审核状态的真实请求"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('HOOK_TRUST_UNREVIEWED_MODEL_OK_20261003')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "未审核状态真实模型回合完成"
+    },
+    {
+      "action": "file",
+      "path": "hook-trust-marker.txt",
+      "contains": "HOOK_TRUST_UNTOUCHED_20261003",
+      "description": "未审核 Hook 未执行，marker 保持初始内容"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "打开真实设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "description": "设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-hooks\"]",
+      "description": "打开 Hooks 设置分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"hooks-settings-section\"]') && !!document.querySelector('[data-plugin-scope-trigger]')",
+      "timeoutMs": 30000,
+      "description": "Hooks 设置分区加载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-plugin-scope-trigger]",
+      "description": "打开 Hook 作用域菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelectorAll('[role=\"menuitemradio\"]').length >= 2",
+      "timeoutMs": 10000,
+      "description": "作用域菜单显示用户与隔离项目"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitemradio\"]",
+      "text": "project",
+      "exact": true,
+      "description": "通过真实 workspace 文本切换到隔离项目 Hook 作用域"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-plugin-scope-trigger]')?.textContent?.includes('project') === true && !!document.querySelector('[data-testid=\"configured-hook-row\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离项目 Hook 行加载"
+    },
+    {
+      "action": "assert",
+      "expression": "(() => { const row = document.querySelector('[data-testid=\"configured-hook-row\"]'); return !!row && row.innerText.includes('UserPromptSubmit') && row.innerText.includes('HOOK_TRUST_APPROVED_20261003') && !!document.querySelector('[data-testid=\"workspace-hook-trust-notice\"]'); })()",
+      "description": "确认未审核 Hook 的真实配置与风险提示"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"configured-hook-row\"] button[data-variant=\"outline\"]",
+      "description": "通过真实 Settings 行内 Trust 发起审核并批准 Hook"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"workspace-hook-trust-notice\"]') && !document.querySelector('[data-testid=\"configured-hook-row\"] button[data-variant=\"outline\"]')",
+      "timeoutMs": 30000,
+      "description": "确认真实 session review 完成并刷新 trust 快照"
+    },
+    {
+      "action": "restart",
+      "description": "重启隔离桌面进程验证已批准 Hook 的冷恢复"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "批准后的隔离项目和 Composer 恢复"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请不要调用任何工具、不要读取或修改工作区。只回复 HOOK_TRUST_APPROVED_MODEL_OK_20261003。",
+      "description": "发起批准后真实模型请求"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送批准后真实请求"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('HOOK_TRUST_APPROVED_MODEL_OK_20261003')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "批准后真实模型回合完成"
+    },
+    {
+      "action": "file",
+      "path": "hook-trust-marker.txt",
+      "contains": "HOOK_TRUST_APPROVED_20261003",
+      "description": "批准后的 Hook 真实执行并写入隔离 marker"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "重新打开 Hooks 设置"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "description": "重新挂载设置页"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-hooks\"]",
+      "description": "重新打开 Hooks 分区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"hooks-settings-section\"]') && !!document.querySelector('[data-plugin-scope-trigger]')",
+      "timeoutMs": 30000,
+      "description": "重新加载 Hooks 设置"
+    },
+    {
+      "action": "click",
+      "selector": "[data-plugin-scope-trigger]",
+      "description": "重新打开 Hook 作用域菜单"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitemradio\"]",
+      "text": "project",
+      "exact": true,
+      "description": "通过真实 workspace 文本重新切换到隔离项目 Hook 作用域"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-plugin-scope-trigger]')?.textContent?.includes('project') === true && !!document.querySelector('[data-testid=\"configured-hook-row\"]')",
+      "timeoutMs": 30000,
+      "description": "重新加载已批准 Hook 行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"configured-hook-row\"]",
+      "description": "打开 Hook 编辑表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"hooks-form\"]') && !!document.querySelector('[data-testid=\"hooks-form\"] #command')",
+      "timeoutMs": 10000,
+      "description": "Hook 编辑表单加载"
+    },
+    {
+      "action": "setup",
+      "expression": "document.querySelector('[data-testid=\"hooks-form\"] #command')?.select()",
+      "description": "选择 Hook 命令内容"
+    },
+    {
+      "action": "key",
+      "key": "Backspace",
+      "description": "清除旧 Hook 命令"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"hooks-form\"] #command",
+      "text": "Set-Content -LiteralPath hook-trust-marker.txt -Value HOOK_TRUST_CHANGED_20261003 -NoNewline",
+      "description": "通过真实编辑表单修改 Hook 命令以改变摘要"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"hooks-form\"] [data-slot=\"button\"][data-variant=\"default\"]",
+      "description": "通过真实 Save 写入变更后的 Hook"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"hooks-form\"]') && !!document.querySelector('[data-testid=\"workspace-hook-trust-notice\"]') && document.querySelector('[data-testid=\"configured-hook-row\"]')?.innerText.includes('HOOK_TRUST_CHANGED_20261003')",
+      "timeoutMs": 30000,
+      "description": "配置摘要变化后 Hook 恢复待审核状态"
+    },
+    {
+      "action": "file",
+      "path": "hook-trust-marker.txt",
+      "contains": "HOOK_TRUST_APPROVED_20261003",
+      "description": "摘要变化后未重放旧 Hook，marker 保持批准阶段结果"
+    },
+    {
+      "action": "restart",
+      "description": "重启验证摘要变化后的冷恢复仍默认拒绝执行"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "变更后的隔离项目和 Composer 恢复"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请不要调用任何工具、不要读取或修改工作区。只回复 HOOK_TRUST_CHANGED_MODEL_OK_20261003。",
+      "description": "发起摘要失效后的真实模型请求"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送摘要失效后的真实请求"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.classList.contains('group/assistant-row') && e.innerText.includes('HOOK_TRUST_CHANGED_MODEL_OK_20261003')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "摘要失效后的真实模型回合完成"
+    },
+    {
+      "action": "file",
+      "path": "hook-trust-marker.txt",
+      "contains": "HOOK_TRUST_APPROVED_20261003",
+      "description": "摘要失效后未执行变更 Hook，marker 保持旧值"
+    },
+    {
+      "action": "screenshot",
+      "name": "hook-trust-final"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

@@ -1,0 +1,306 @@
+{
+  "name": "native-live-scheduled-automation",
+  "description": "通过原生 WebView2 UI 创建一个下一分钟触发、只运行一次的本地定时任务；以 Rust 台账的定时触发来源、完成状态、绑定会话和模型结果证明 scheduler future wake，不调用手动运行入口。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "原生 scheduled automation 验收夹具\n"
+  },
+  "coverage": [
+    {
+      "id": "local-scheduled-automation-future-wake",
+      "status": "pending",
+      "testIds": [
+        "automations-open",
+        "automations-page-tab-automation",
+        "automation-create-manually",
+        "automation-form-title",
+        "automation-form-schedule",
+        "automation-form-prompt",
+        "form [role=\"switch\"]",
+        "form input[inputmode=\"numeric\"][pattern=\"[0-9]*\"]",
+        "automation-form-submit",
+        "automation-card-menu",
+        "automation-action-history",
+        "automation-run-row-*",
+        "automation-run-open-session",
+        "automation-action-delete"
+      ],
+      "notes": "使用 * * * * * 和 recurring=false/maxRuns=1，把下一次合法触发限制在下一个本地分钟边界；运行历史必须显示定时/Scheduled，不能以手动 run 替代。模型提示不调用工具，只返回固定标记，避免无连接权限审批干扰。"
+    }
+  ],
+  "knownGaps": [
+    "表单没有相对分钟数控件，因此计划使用合法的每分钟 cron 作为最短 UI 可达 future wake；实际等待上限为 180 秒，覆盖分钟边界和模型响应。",
+    "计划验证本地 scheduler 的一次真实派发和会话结果，不直接读取 automations.json、不直接调用 RPC，也不覆盖多次 recurring 或重启恢复。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "timeoutMs": 30000,
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 45000,
+      "description": "原生工作区完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区以显示真实新增项目控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-slot=\"dropdown-menu-item\"]",
+      "description": "从原生菜单选择隔离项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "项目 workspace 激活"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"automations-open\"]')",
+      "timeoutMs": 30000,
+      "description": "自动化入口由原生侧栏挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-open\"]",
+      "description": "打开自动化页面"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-automations-content]') && !!document.querySelector('[data-testid=\"automations-page-tab-automation\"]')",
+      "timeoutMs": 45000,
+      "description": "自动化页面和页签由原生 UI 挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-page-tab-automation\"]",
+      "description": "选择本地 automation 页签"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"automations-page-tab-automation\"]')?.getAttribute('aria-selected') === 'true' && !!document.querySelector('[data-testid=\"automations-list\"]')",
+      "timeoutMs": 45000,
+      "description": "automation 列表状态真实回写"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automation-create-manually\"]",
+      "description": "通过 UI 打开本地 automation 创建表单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"automation-form-title\"]') && !!document.querySelector('[data-testid=\"automation-form-schedule\"]') && !!document.querySelector('[data-testid=\"automation-form-prompt\"]') && !!document.querySelector('[data-testid=\"automation-form-submit\"]')",
+      "timeoutMs": 30000,
+      "description": "创建表单控件完整挂载"
+    },
+    {
+      "action": "clear",
+      "selector": "[data-testid=\"automation-form-schedule\"]",
+      "description": "清除默认调度"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"automation-form-schedule\"]",
+      "text": "* * * * *",
+      "description": "填写下一分钟触发的合法本地 cron"
+    },
+    {
+      "action": "click",
+      "selector": "form [role=\"switch\"]",
+      "description": "关闭 recurring，创建只运行一次的 scheduled automation"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('form [role=\"switch\"]')?.getAttribute('aria-checked') === 'false' && !!document.querySelector('form input[inputmode=\"numeric\"][pattern=\"[0-9]*\"]')",
+      "timeoutMs": 10000,
+      "description": "有限运行表单显示 maxRuns 输入"
+    },
+    {
+      "action": "type",
+      "selector": "form input[inputmode=\"numeric\"][pattern=\"[0-9]*\"]",
+      "text": "1",
+      "description": "设置 scheduler 只允许一次运行"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"automation-form-title\"]",
+      "text": "NATIVE_SCHEDULED_AUTOMATION",
+      "description": "填写隔离 scheduled automation 标题"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"automation-form-prompt\"]",
+      "text": "请只回复 NATIVE_SCHEDULED_AUTOMATION_OK，不调用任何工具。",
+      "description": "填写无工具权限依赖的真实模型指令"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"automation-form-schedule\"]')?.value === '* * * * *' && document.querySelector('form [role=\"switch\"]')?.getAttribute('aria-checked') === 'false' && document.querySelector('form input[inputmode=\"numeric\"][pattern=\"[0-9]*\"]')?.value === '1'",
+      "description": "创建前确认 schedule、recurring 和 maxRuns 都由真实表单持有"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automation-form-submit\"]",
+      "description": "通过 Rust RPC 创建本地 scheduled automation"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-automation-id]') && document.body.innerText.includes('NATIVE_SCHEDULED_AUTOMATION') && (document.body.innerText.includes('下次运行') || document.body.innerText.includes('Next run'))",
+      "timeoutMs": 60000,
+      "description": "创建结果从 Rust 台账回读并显示未来运行时间"
+    },
+    {
+      "action": "screenshot",
+      "name": "scheduled-automation-created",
+      "description": "保存 future wake 创建时的真实 UI 证据"
+    },
+    {
+      "action": "setup",
+      "expression": "window.__nativeScheduledAutomationRefreshAt = Date.now() + 90000; true",
+      "description": "为下一分钟边界和 scheduler 派发保留真实等待窗口"
+    },
+    {
+      "action": "wait",
+      "expression": "Date.now() >= (window.__nativeScheduledAutomationRefreshAt ?? Number.POSITIVE_INFINITY)",
+      "timeoutMs": 120000,
+      "description": "等待 scheduler 的合法未来触发窗口结束"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-refresh\"]",
+      "description": "通过现有 UI 刷新按钮重新读取 Rust automation 台账"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-automation-id]')).some((card) => card.innerText.includes('NATIVE_SCHEDULED_AUTOMATION') && /已完成|Completed/.test(card.innerText) && /已运行 1\\/1 次|Ran 1\\/1 times/.test(card.innerText))",
+      "timeoutMs": 60000,
+      "description": "刷新后确认 Rust scheduler 已只派发一次并完成"
+    },
+    {
+      "action": "screenshot",
+      "name": "scheduled-automation-completed",
+      "description": "保存 scheduler future wake 完成状态和一次性计数证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-automation-id] [data-testid=\"automation-card-menu\"]",
+      "description": "打开已完成 scheduled automation 菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-testid=\"automation-action-history\"]",
+      "description": "从原生 UI 打开定时运行历史"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"automations-refresh\"]')",
+      "timeoutMs": 30000,
+      "description": "运行历史页面完成挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-refresh\"]",
+      "description": "从 Rust 台账重新读取 scheduled run"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-testid^=\"automation-run-row-\"]')).some((row) => /定时|Scheduled/.test(row.innerText) && !!row.querySelector('[data-testid=\"automation-run-open-session\"]'))",
+      "timeoutMs": 180000,
+      "description": "确认运行历史来源为定时而非手动，并已绑定真实 session"
+    },
+    {
+      "action": "screenshot",
+      "name": "scheduled-automation-history",
+      "description": "保存定时触发来源和 session 绑定证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid^=\"automation-run-row-\"] [data-testid=\"automation-run-open-session\"]",
+      "description": "从定时运行历史打开对应真实会话"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some((row) => row.classList.contains('group/assistant-row') && row.innerText.includes('NATIVE_SCHEDULED_AUTOMATION_OK')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 180000,
+      "description": "确认定时派发的 Agent 会话返回固定模型结果"
+    },
+    {
+      "action": "screenshot",
+      "name": "scheduled-automation-session",
+      "description": "保存 scheduled session 的真实模型结果证据"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-open\"]",
+      "description": "返回本地 automation 管理页"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"automations-page-tab-automation\"]')",
+      "timeoutMs": 60000,
+      "description": "automation 管理页重新挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"automations-page-tab-automation\"]",
+      "description": "重新打开本地 automation 页签"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-automation-id]') && document.body.innerText.includes('NATIVE_SCHEDULED_AUTOMATION')",
+      "timeoutMs": 30000,
+      "description": "回到 scheduled automation 卡片"
+    },
+    {
+      "action": "click",
+      "selector": "[data-automation-id] [data-testid=\"automation-card-menu\"]",
+      "description": "打开 scheduled automation 删除菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[data-slot=\"dropdown-menu-content\"][data-state=\"open\"] [data-testid=\"automation-action-delete\"]",
+      "description": "通过真实 UI 删除隔离 scheduled automation"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"confirm-dialog-confirm\"]') || !!document.querySelector('[data-testid=\"confirm-dialog-confirm\"]')",
+      "timeoutMs": 10000,
+      "description": "删除操作要求明确确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "确认删除隔离 scheduled automation"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-automation-id]')",
+      "timeoutMs": 30000,
+      "description": "确认 scheduled automation 从 Rust 台账列表消失"
+    },
+    {
+      "action": "screenshot",
+      "name": "scheduled-automation-cleaned",
+      "description": "保存删除后的真实 UI 证据"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

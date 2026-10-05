@@ -1,0 +1,365 @@
+{
+  "name": "native-live-exit-confirmation",
+  "description": "通过真实 Source 设置关闭窗口时不隐藏到托盘，使用真实 Deepseek 发起停在 Write 权限门前的长回合，然后用可见窗口关闭按钮验证退出弹框取消保留窗口和同一 Turn，再次确认后等待原生进程退出并以同一 Session 的 Journal 终态、未执行工具和未修改文件收尾。Runner 在审批等待完成前不会提交 tool_requested；本计划以真实权限 modal 作为审批门证据，并以 tool_execution_started 缺失和文件字节不变证明未批准工具未越过门。模型只负责产生真实运行中的 Turn；退出、取消、确认和所有终态判断均由 Source UI、RPC runner 与隔离 Journal 完成，不模拟模型或直接 invoke 业务命令。",
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "evidence.txt": "退出确认验收初始内容，不应被等待中的 Write 修改。\n"
+  },
+  "coverage": [
+    {
+      "id": "close-to-tray-disabled",
+      "status": "pending",
+      "testIds": [
+        "settings-page",
+        "settings-section-nav-general",
+        "settings-close-to-tray-switch"
+      ],
+      "notes": "closeToTrayOnWindows 默认值必须先由真实 General 设置显示为 true，再通过 Source 控件改为 false 并等待 aria-checked=false。settings-close-to-tray-switch 是共享 test-ids.ts 与 Windows General Switch 的稳定契约。"
+    },
+    {
+      "id": "real-deepseek-in-flight-turn",
+      "status": "pending",
+      "journal": [
+        "turn_started",
+        "turn_stopped"
+      ],
+      "notes": "只接受本次 baseline 之后、同一 captured session/turn 的真实运行回合。Write 的权限 modal 是审批等待中的投影；Runner 只有审批通过后才提交 tool_requested，因此未批准路径必须保持 tool_execution_started 缺失。"
+    },
+    {
+      "id": "exit-confirm-cancel",
+      "status": "pending",
+      "testIds": [
+        "window-control-close",
+        "app-exit-confirm-dialog"
+      ],
+      "locale": {
+        "zh-CN": {
+          "title": "退出 KeenCode？",
+          "cancel": "取消",
+          "confirm": "退出"
+        },
+        "en-US": {
+          "title": "Quit KeenCode?",
+          "cancel": "Cancel",
+          "confirm": "Quit"
+        }
+      },
+      "notes": "取消按钮当前没有独立 test ID；计划只在 app-exit-confirm-dialog 内点击排除 confirm-dialog-confirm 的第一个真实按钮，并以弹框消失、窗口仍可见、同一 Journal 快照不变作为结果。zh-CN 使用取消/退出，en-US 使用 Cancel/Quit。"
+    },
+    {
+      "id": "exit-confirm-accept",
+      "status": "pending",
+      "testIds": [
+        "window-control-close",
+        "app-exit-confirm-dialog",
+        "confirm-dialog-confirm"
+      ],
+      "notes": "确认由真实 Source UI 触发；nativeExited 必须经 RPC/进程协议等待原生子进程退出，不能以 renderer 的 window.__TAURI_INTERNALS__.invoke 替代。"
+    }
+  ],
+  "knownGaps": [
+    "nativeExited 已由共享 runner/RPC 实现并通过脚本验证；本计划的真实退出结果仍待 Native42 实测。",
+    "系统托盘本身及 Windows shell close-to-tray 行为不在 CDP runner 可控范围内；本计划验证 closeToTray=false 时的可见窗口退出路径。",
+    "PPTX/PDF 另有独立验收方案；本计划不把模型生成或文件扩展名当作 PPTX/PDF 证据。"
+  ],
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button')",
+      "description": "隔离新配置进入原始首次启动引导"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成职业选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('UI 模式') || document.body.innerText.includes('UI mode'))",
+      "description": "进入 UI 模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原界面完成模式选择"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && (document.body.innerText.includes('按需开启以下功能') || document.body.innerText.includes('Enable the features you need') || document.body.innerText.includes('助手偏好'))",
+      "description": "进入首次启动偏好确认"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "保存首次启动设置"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')",
+      "timeoutMs": 60000,
+      "description": "原生桌面界面完成启动"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示 Source 项目操作按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开原项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "隔离项目激活并显示原 Composer"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"task-settings-button\"]",
+      "description": "通过原设置入口打开设置页"
+    },
+    {
+      "action": "clickIf",
+      "condition": "!!document.querySelector('[data-testid=\"sidebar-settings-menu\"][data-state=\"open\"]')",
+      "selector": "[data-testid=\"sidebar-open-settings\"]",
+      "description": "设置入口展开菜单时，再通过真实菜单项进入设置；返回工作区不执行此步"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"settings-page\"]')",
+      "timeoutMs": 30000,
+      "description": "设置页挂载"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-section-nav-general\"]",
+      "description": "通过原设置导航进入 General"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-page\"]')?.getAttribute('data-active-section') === 'general' && !!document.querySelector('[data-testid=\"settings-close-to-tray-switch\"]')",
+      "timeoutMs": 30000,
+      "description": "General 的 close-to-tray Source 控件真实挂载"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"settings-close-to-tray-switch\"]')?.getAttribute('aria-checked') === 'true'",
+      "description": "确认隔离配置默认启用关闭时隐藏到托盘"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-close-to-tray-switch\"]",
+      "description": "通过真实设置控件关闭隐藏到托盘"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"settings-close-to-tray-switch\"]')?.getAttribute('aria-checked') === 'false'",
+      "timeoutMs": 10000,
+      "description": "等待 closeToTrayOnWindows=false 回写到可见控件"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"settings-back-button\"]",
+      "description": "返回原工作区"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 30000,
+      "description": "设置保存后返回同一 Composer"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const e = document.querySelector('[data-testid=\"chat-model-select-trigger\"]'); return !!e && !e.hasAttribute('disabled') && e.getAttribute('aria-disabled') !== 'true' && e.getAttribute('data-disabled') !== 'true'; })()",
+      "timeoutMs": 60000,
+      "description": "等待真实模型选择控件启用"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-trigger\"]",
+      "description": "打开原生模型选择器"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-model-provider-key=\"registry-provider:native-live-deepseek\"]')",
+      "timeoutMs": 30000,
+      "description": "隔离模型菜单显示 native-live-deepseek provider"
+    },
+    {
+      "action": "click",
+      "selector": "[data-model-provider-key=\"registry-provider:native-live-deepseek\"]",
+      "description": "展开隔离 provider 模型子菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]')",
+      "timeoutMs": 30000,
+      "description": "显示完整 custom 模型项"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"chat-model-select-item-custom:native-live-deepseek:deepseek-v4.1-flash\"]",
+      "description": "选择真实 Deepseek 验收模型"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector('[data-testid=\"chat-model-select-trigger\"]')?.textContent?.includes('deepseek-v4.1-flash')",
+      "timeoutMs": 30000,
+      "description": "模型选择经真实 Source 状态回写"
+    },
+    {
+      "action": "journalBaseline",
+      "name": "before-exit-confirmation-turn",
+      "eventType": "turn_started",
+      "captureEventSequence": true,
+      "description": "固定退出验收真实 Turn 发送前的 Journal 高水位"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "请立即调用真实 Write 工具，把项目根目录 evidence.txt 改为 EXIT_CONFIRMATION_WRITE_42，然后保持回合等待工具结果，不要只解释。当前验收会在权限批准前关闭窗口。",
+      "description": "发送要求真实 Write 的 Deepseek 长回合"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]",
+      "description": "发送真实模型请求"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_started",
+      "newSinceBaseline": "before-exit-confirmation-turn",
+      "captureSessionAs": "exit-confirmation-session",
+      "captureAs": "exit-confirmation-turn",
+      "capturePayloadPath": "turn_id",
+      "timeoutMs": 60000,
+      "description": "捕获本次真实 Turn 的唯一 Session 与 turn_id"
+    },
+    {
+      "action": "wait",
+      "expression": "(() => { const options = [...document.querySelectorAll('[data-permission-option-kind]')]; return options.length > 0 && options.some(e => e.getAttribute('data-permission-option-kind') === 'allowOnce') && document.body.innerText.includes('Write') && document.body.innerText.includes('evidence.txt'); })()",
+      "timeoutMs": 180000,
+      "description": "真实 Source 权限 modal 显示 Write 与 allowOnce，确认同一 Turn 已停在未批准权限门；不把 modal 冒充 Journal tool_requested"
+    },
+    {
+      "action": "waitTurnInFlightAndStop",
+      "turnEqualsCaptured": "exit-confirmation-turn",
+      "sessionEqualsCaptured": "exit-confirmation-session",
+      "selector": "[data-permission-option-kind=\"allowOnce\"]",
+      "timeoutMs": 30000,
+      "description": "权限 modal 覆盖 Composer 时，以当前可见 allowOnce 控件确认同一 Session/Turn 仍在 Journal 中等待；不批准权限，也不把被 aria-hidden 的背景停止控件当作可操作证据"
+    },
+    {
+      "action": "journalAbsent",
+      "eventType": "tool_execution_started",
+      "newSinceBaseline": "before-exit-confirmation-turn",
+      "sessionEqualsCaptured": "exit-confirmation-session",
+      "description": "审批尚未通过时同一 Session 不应出现任何工具执行起点"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "退出确认验收初始内容，不应被等待中的 Write 修改。",
+      "description": "权限 modal 等待期间隔离文件保持原始字节"
+    },
+    {
+      "action": "assert",
+      "expression": "!document.querySelector('[data-testid=\"settings-page\"]') && !!document.querySelector('[data-testid=\"v4-stop\"]')",
+      "description": "退出前已回到运行中的工作区且 Turn 仍可停止"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"window-control-close\"]",
+      "description": "通过可见窗口关闭按钮请求退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"app-exit-confirm-dialog\"]')",
+      "timeoutMs": 10000,
+      "description": "真实 app://exit-requested 显示退出确认弹框"
+    },
+    {
+      "action": "assert",
+      "expression": "document.querySelector('[data-testid=\"app-exit-confirm-dialog\"]')?.textContent?.includes('退出 KeenCode？') || document.querySelector('[data-testid=\"app-exit-confirm-dialog\"]')?.textContent?.includes('Quit KeenCode?')",
+      "description": "确认弹框使用当前 locale 的退出标题"
+    },
+    {
+      "action": "screenshot",
+      "name": "exit-confirmation-cancel-dialog"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"app-exit-confirm-dialog\"] button:not([data-testid=\"confirm-dialog-confirm\"]):first-of-type",
+      "description": "通过弹框真实取消按钮取消退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector('[data-testid=\"app-exit-confirm-dialog\"]') && !!document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 10000,
+      "description": "取消后窗口和同一 in-flight Turn 仍保留"
+    },
+    {
+      "action": "journalAbsent",
+      "eventType": "tool_execution_started",
+      "newSinceBaseline": "before-exit-confirmation-turn",
+      "sessionEqualsCaptured": "exit-confirmation-session",
+      "description": "取消退出没有让未批准 Write 越过权限门执行"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"window-control-close\"]",
+      "description": "再次通过可见窗口关闭按钮请求退出"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"app-exit-confirm-dialog\"]')",
+      "timeoutMs": 10000,
+      "description": "再次显示退出确认弹框"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"confirm-dialog-confirm\"]",
+      "description": "通过真实退出确认按钮确认停止任务并退出"
+    },
+    {
+      "action": "nativeExited",
+      "timeoutMs": 30000,
+      "expectedExitCode": 0,
+      "description": "经 RPC/进程协议等待真实桌面进程退出，不使用 renderer inline invoke"
+    },
+    {
+      "action": "journalWait",
+      "eventType": "turn_stopped",
+      "reason": "cancelled",
+      "sessionEqualsCaptured": "exit-confirmation-session",
+      "payloadEqualsCaptured": {
+        "turn_id": "exit-confirmation-turn"
+      },
+      "timeoutMs": 30000,
+      "description": "进程退出后 Journal 写入同一 Turn 的停止终态"
+    },
+    {
+      "action": "journalAbsent",
+      "eventType": "tool_execution_started",
+      "requestToolName": "Write",
+      "requestContains": "EXIT_CONFIRMATION_WRITE_42",
+      "sessionEqualsCaptured": "exit-confirmation-session",
+      "newSinceBaseline": "before-exit-confirmation-turn",
+      "description": "确认退出清理没有让待审批 Write 越过权限门执行"
+    },
+    {
+      "action": "file",
+      "path": "evidence.txt",
+      "contains": "退出确认验收初始内容，不应被等待中的 Write 修改。",
+      "description": "确认实际退出后的隔离文件仍未被未批准工具修改"
+    }
+  ]
+}

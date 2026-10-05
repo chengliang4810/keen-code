@@ -1,0 +1,275 @@
+{
+  "providerId": "native-live-deepseek",
+  "model": "deepseek-v4.1-flash",
+  "files": {
+    "task-menu-plan-evidence.txt": "任务菜单验收初始内容\n"
+  },
+  "steps": [
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"onboarding-page\"] footer > button') && !/主要工作方向|UI 模式|UI mode/.test(document.querySelector('[data-testid=\"onboarding-page\"]')?.innerText ?? \"\")",
+      "description": "隔离新配置直接进入偏好页，无职业或模式选择"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"onboarding-page\"] footer > button",
+      "description": "通过原生 UI 一次完成首次启动偏好"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"project-add\"]')"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-testid=\"project-section\"]",
+      "description": "悬停项目分区显示添加菜单按钮"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"project-add\"]",
+      "description": "打开项目选择菜单"
+    },
+    {
+      "action": "click",
+      "selector": "[role=\"menuitem\"]",
+      "description": "通过真实鼠标打开文件夹并选择隔离验收项目"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]') && !!document.querySelector('[data-testid^=\"workspace-item-\"]')",
+      "timeoutMs": 60000,
+      "description": "真实工作区和 Composer 已就绪"
+    },
+    {
+      "action": "type",
+      "selector": "[data-testid=\"v4-composer-input\"]",
+      "text": "创建一条菜单验收任务。请直接回复 TASK_MENU_READY_42，不要调用工具或修改文件。",
+      "description": "创建用于菜单持久化验收的真实任务"
+    },
+    {
+      "action": "click",
+      "selector": "[data-testid=\"v4-composer-send\"]"
+    },
+    {
+      "action": "wait",
+      "expression": "Array.from(document.querySelectorAll('[data-row-id]')).some(e => e.innerText.includes('TASK_MENU_READY_42')) && !document.querySelector('[data-testid=\"v4-stop\"]')",
+      "timeoutMs": 120000,
+      "description": "真实 Rust 会话完成并显示回复"
+    },
+    {
+      "action": "restart",
+      "description": "重启后从 Journal 冷恢复菜单任务"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid=\"v4-composer-input\"]')",
+      "timeoutMs": 60000,
+      "description": "冷恢复后 Composer 已就绪"
+    },
+    {
+      "action": "clickIf",
+      "selector": "[data-testid^=\"workspace-item-\"]",
+      "condition": "document.querySelector('[data-testid^=\"workspace-item-\"]')?.getAttribute('aria-expanded') !== 'true'",
+      "description": "通过真实鼠标展开实际项目任务列表"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[data-testid^=\"task-item-\"]')",
+      "timeoutMs": 30000,
+      "description": "等待任务行挂载"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = Array.from(document.querySelectorAll('[data-testid^=\"task-item-\"]')).at(-1); if (!row) throw new Error('未找到新建任务行'); window.__nativeTaskMenuTestId = row.getAttribute('data-testid'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "真实 hover 任务行，展开 Source 行级动作区后再打开菜单"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('任务行已丢失'); row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 180 })); return true; })()",
+      "description": "打开真实任务右键菜单"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]')"
+    },
+    {
+      "action": "assert",
+      "expression": "Array.from(document.querySelectorAll('[role=\"menuitem\"]')).some(e => e.textContent?.includes('置顶任务'))"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "置顶任务",
+        "Pin task"
+      ],
+      "exact": false,
+      "description": "通过真实鼠标菜单写入置顶状态"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`)"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('置顶后任务行已丢失'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "再次 hover 任务行后读取置顶菜单"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 180 })); return !!row; })()"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]')"
+    },
+    {
+      "action": "assert",
+      "expression": "Array.from(document.querySelectorAll('[role=\"menuitem\"]')).some(e => e.textContent?.includes('取消置顶任务'))"
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('重命名前任务行已丢失'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "真实 hover 任务行后打开重命名菜单"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 180 })); return !!row; })()"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]')"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "重命名任务",
+        "Rename task"
+      ],
+      "exact": false,
+      "description": "通过真实鼠标打开重命名对话框"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('input[placeholder=\"任务名称\"]')"
+    },
+    {
+      "action": "type",
+      "selector": "input[placeholder=\"任务名称\"]",
+      "text": "菜单持久化验收任务_42",
+      "description": "提交真实任务标题"
+    },
+    {
+      "action": "key",
+      "key": "Enter"
+    },
+    {
+      "action": "wait",
+      "expression": "document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`)?.textContent?.includes('菜单持久化验收任务_42')"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('未读前任务行已丢失'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "真实 hover 任务行后打开未读菜单"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 180 })); return !!row; })()"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]')"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "标记为未读",
+        "Mark as unread"
+      ],
+      "exact": false,
+      "description": "通过真实鼠标菜单写入 task-groups 未读事实"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"] [data-unread-indicator=\"true\"]`)"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('已读前任务行已丢失'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "真实 hover 未读任务行后准备打开任务"
+    },
+    {
+      "action": "click",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "点击未读任务，走 expectedUnreadAt CAS 已读路径"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"] [data-unread-indicator=\"true\"]`)"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); if (!row) throw new Error('归档前任务行已丢失'); row.setAttribute('data-native-task-menu-target', 'true'); return true; })()"
+    },
+    {
+      "action": "hover",
+      "selector": "[data-native-task-menu-target=\"true\"]",
+      "description": "真实 hover 任务行后打开归档菜单"
+    },
+    {
+      "action": "setup",
+      "expression": "(() => { const row = document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`); row?.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: 180, clientY: 180 })); return !!row; })()"
+    },
+    {
+      "action": "wait",
+      "expression": "!!document.querySelector('[role=\"menu\"]')"
+    },
+    {
+      "action": "clickText",
+      "selector": "[role=\"menuitem\"]",
+      "texts": [
+        "归档任务",
+        "Archive task"
+      ],
+      "exact": false,
+      "description": "通过真实鼠标菜单归档任务"
+    },
+    {
+      "action": "wait",
+      "expression": "!document.querySelector(`[data-testid=\"${window.__nativeTaskMenuTestId}\"]`)",
+      "timeoutMs": 30000,
+      "description": "归档后任务从当前列表移除"
+    },
+    {
+      "action": "screenshot",
+      "name": "task-menu-persistence"
+    }
+  ],
+  "onboardingRevision": "2026-10-04 preferences-only；历史报告和执行快照保持不变，当前计划需重新执行方可认定通过。"
+}

@@ -1,0 +1,70 @@
+{
+  "config": {
+    "configOptions": [
+      {
+        "category": "mode",
+        "currentValue": "build",
+        "id": "mode",
+        "name": "Mode",
+        "options": [
+          {
+            "description": "Ask before each file changes.",
+            "name": "Ask before changes",
+            "value": "build"
+          },
+          {
+            "description": "Edit selected files or relevant workspace files automatically.",
+            "name": "Edit automatically",
+            "value": "edit"
+          },
+          {
+            "description": "Inspect the code and present a plan before editing.",
+            "name": "Plan mode",
+            "value": "plan"
+          },
+          {
+            "description": "Edit and run commands with fewer confirmations.",
+            "name": "Full access",
+            "value": "yolo"
+          }
+        ],
+        "type": "select"
+      }
+    ],
+    "slashCommands": [
+      {
+        "description": "Show or set the current session goal.",
+        "inputHint": "/goal [pause|resume|clear|replace <objective>|<objective>]",
+        "name": "goal",
+        "source": "builtin"
+      },
+      {
+        "description": "Design and launch a dynamic workflow for a task.",
+        "inputHint": "/workflow [what the workflow should accomplish]",
+        "name": "workflow",
+        "source": "builtin"
+      },
+      {
+        "description": "Compact the current conversation with optional instructions.",
+        "inputHint": "/compact [instructions]",
+        "name": "compact",
+        "source": "builtin"
+      },
+      {
+        "description": "Create or update workspace AGENTS.md instructions.",
+        "inputHint": "/init [notes]",
+        "name": "init",
+        "source": "builtin"
+      },
+      {
+        "description": "Switch to Plan mode and optionally send a task.",
+        "inputHint": "/plan [task]",
+        "name": "plan",
+        "source": "builtin"
+      }
+    ]
+  },
+  "logEpoch": "workspace-local:C:/contract-workspace",
+  "protocolVersion": 1,
+  "workspaceId": "local:C:/contract-workspace"
+}
