@@ -19,6 +19,8 @@ members = [
     # 组合 Session 独占租约、权威日志、Artifact 与 Agent 提交出口。
     "core/runtime",
     "core/tools",
+    # 纯 Rust JSON 工作流编译、控制执行与保守恢复，不依赖 JS 引擎。
+    "core/workflow",
     # 原生桌面宿主：窗口、托盘、命令、事件与本地系统能力。
     "apps/desktop",
     # 真实模型兼容性探测与报告；仅按需运行，不参与默认构建。

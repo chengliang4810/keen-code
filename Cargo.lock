@@ -2567,6 +2567,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "keencode-workflow"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "keepawake"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
