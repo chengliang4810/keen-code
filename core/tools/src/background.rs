@@ -1027,6 +1027,9 @@ where
             break;
         }
         file.write_all(&chunk[..read]).await?;
+        // Tokio File 的 write_all 可能只提交异步写任务就返回；必须先等待该任务
+        // 完成，再发布字节游标，否则 Windows 读取端会看到已发布长度但读到 EOF。
+        file.flush().await?;
         total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
         retain_utf8_tail(&mut utf8_tail, &chunk[..read]);
         let pending = incomplete_utf8_suffix_len(&utf8_tail);

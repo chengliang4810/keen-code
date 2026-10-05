@@ -33,6 +33,26 @@ impl SkillCatalog {
         &self.diagnostics
     }
 
+    /// 返回目录记录对应的规范 `SKILL.md` 路径，不读取正文。
+    ///
+    /// 路径来自发现时冻结的安全根和相对 manifest；调用时会重新校验根、
+    /// 每个路径组件及最终文件，防止目录变更后把 UI 指向符号链接或根外文件。
+    pub fn source_path(&self, name: &str) -> Result<PathBuf, SkillLoadError> {
+        let lookup = normalized_name(name);
+        let record = self
+            .records
+            .get(&lookup)
+            .ok_or_else(|| SkillLoadError::NotFound {
+                name: name.to_string(),
+            })?;
+        if !record.entry.enabled {
+            return Err(SkillLoadError::Disabled {
+                name: record.entry.name.clone(),
+            });
+        }
+        validated_manifest_path(record)
+    }
+
     /// 按名称重新校验路径并读取一个 Skill 的 Markdown 正文。
     ///
     /// 查找对 ASCII 大小写不敏感。正文不会在 `discover_skills` 中缓存，
@@ -51,65 +71,7 @@ impl SkillCatalog {
             });
         }
 
-        let current_root_metadata =
-            fs::symlink_metadata(&record.root).map_err(|_| SkillLoadError::RootChanged {
-                name: record.entry.name.clone(),
-            })?;
-        if current_root_metadata.file_type().is_symlink() || !current_root_metadata.is_dir() {
-            return Err(SkillLoadError::RootChanged {
-                name: record.entry.name.clone(),
-            });
-        }
-        let current_root =
-            fs::canonicalize(&record.root).map_err(|_| SkillLoadError::RootChanged {
-                name: record.entry.name.clone(),
-            })?;
-        if current_root != record.root {
-            return Err(SkillLoadError::RootChanged {
-                name: record.entry.name.clone(),
-            });
-        }
-        if !is_safe_relative_manifest(&record.manifest_relative) {
-            return Err(SkillLoadError::UnsafePath {
-                name: record.entry.name.clone(),
-            });
-        }
-
-        let mut current = record.root.clone();
-        let component_count = record.manifest_relative.components().count();
-        for (index, component) in record.manifest_relative.components().enumerate() {
-            let Component::Normal(segment) = component else {
-                return Err(SkillLoadError::UnsafePath {
-                    name: record.entry.name.clone(),
-                });
-            };
-            current.push(segment);
-            let metadata =
-                fs::symlink_metadata(&current).map_err(|_| SkillLoadError::Unavailable {
-                    name: record.entry.name.clone(),
-                })?;
-            if metadata.file_type().is_symlink() {
-                return Err(SkillLoadError::UnsafePath {
-                    name: record.entry.name.clone(),
-                });
-            }
-            let is_final = index + 1 == component_count;
-            if (!is_final && !metadata.is_dir()) || (is_final && !metadata.is_file()) {
-                return Err(SkillLoadError::Unavailable {
-                    name: record.entry.name.clone(),
-                });
-            }
-        }
-
-        let canonical_manifest =
-            fs::canonicalize(&current).map_err(|_| SkillLoadError::Unavailable {
-                name: record.entry.name.clone(),
-            })?;
-        if !canonical_manifest.starts_with(&record.root) {
-            return Err(SkillLoadError::UnsafePath {
-                name: record.entry.name.clone(),
-            });
-        }
+        let canonical_manifest = validated_manifest_path(record)?;
         let bytes = read_limited(&canonical_manifest, self.max_skill_bytes).map_err(|error| {
             map_load_read_error(&record.entry.name, self.max_skill_bytes, error)
         })?;
@@ -158,6 +120,68 @@ impl SkillCatalog {
             source: record.entry.source,
         })
     }
+}
+
+/// 重新验证目录记录并返回规范 manifest 路径；正文读取和 UI 路径查询共用此边界。
+fn validated_manifest_path(record: &SkillRecord) -> Result<PathBuf, SkillLoadError> {
+    let current_root_metadata =
+        fs::symlink_metadata(&record.root).map_err(|_| SkillLoadError::RootChanged {
+            name: record.entry.name.clone(),
+        })?;
+    if current_root_metadata.file_type().is_symlink() || !current_root_metadata.is_dir() {
+        return Err(SkillLoadError::RootChanged {
+            name: record.entry.name.clone(),
+        });
+    }
+    let current_root = fs::canonicalize(&record.root).map_err(|_| SkillLoadError::RootChanged {
+        name: record.entry.name.clone(),
+    })?;
+    if current_root != record.root {
+        return Err(SkillLoadError::RootChanged {
+            name: record.entry.name.clone(),
+        });
+    }
+    if !is_safe_relative_manifest(&record.manifest_relative) {
+        return Err(SkillLoadError::UnsafePath {
+            name: record.entry.name.clone(),
+        });
+    }
+
+    let mut current = record.root.clone();
+    let component_count = record.manifest_relative.components().count();
+    for (index, component) in record.manifest_relative.components().enumerate() {
+        let Component::Normal(segment) = component else {
+            return Err(SkillLoadError::UnsafePath {
+                name: record.entry.name.clone(),
+            });
+        };
+        current.push(segment);
+        let metadata = fs::symlink_metadata(&current).map_err(|_| SkillLoadError::Unavailable {
+            name: record.entry.name.clone(),
+        })?;
+        if metadata.file_type().is_symlink() {
+            return Err(SkillLoadError::UnsafePath {
+                name: record.entry.name.clone(),
+            });
+        }
+        let is_final = index + 1 == component_count;
+        if (!is_final && !metadata.is_dir()) || (is_final && !metadata.is_file()) {
+            return Err(SkillLoadError::Unavailable {
+                name: record.entry.name.clone(),
+            });
+        }
+    }
+
+    let canonical_manifest =
+        fs::canonicalize(&current).map_err(|_| SkillLoadError::Unavailable {
+            name: record.entry.name.clone(),
+        })?;
+    if !canonical_manifest.starts_with(&record.root) {
+        return Err(SkillLoadError::UnsafePath {
+            name: record.entry.name.clone(),
+        });
+    }
+    Ok(canonical_manifest)
 }
 
 /// 从配置数据目录和项目目录发现 Skills，并建立不含正文的目录。

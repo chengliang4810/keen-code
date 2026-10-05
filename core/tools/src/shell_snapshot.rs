@@ -140,18 +140,8 @@ fn run_with_timeout(
 
 /// 返回当前平台可尝试的登录 Shell。
 fn shell_candidates() -> Vec<std::ffi::OsString> {
-    #[cfg(windows)]
-    {
-        vec![
-            std::ffi::OsString::from("bash.exe"),
-            std::ffi::OsString::from(r"C:\Program Files\Git\bin\bash.exe"),
-            std::ffi::OsString::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
-        ]
-    }
-    #[cfg(not(windows))]
-    {
-        vec![std::ffi::OsString::from("bash")]
-    }
+    // 环境快照和真正执行工具必须使用同一宿主，不能由快照偷偷启动 WSL。
+    crate::command::bash_candidates()
 }
 
 /// 把登录 Shell 的输出整理成可复放的快照脚本。

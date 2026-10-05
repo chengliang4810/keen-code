@@ -103,6 +103,12 @@ fn discovery_returns_metadata_and_loads_body_lazily() {
     assert_eq!(catalog.entries().len(), 2);
     assert_eq!(catalog.entries()[0].name, "data-only");
     assert_eq!(catalog.entries()[1].name, "lazy");
+    assert_eq!(
+        catalog
+            .source_path("LAZY")
+            .expect("应返回安全 manifest 路径"),
+        fs::canonicalize(skill_directory.join("SKILL.md")).expect("manifest 应存在")
+    );
 
     write_skill(&skill_directory, "lazy", "按需读取", "第二版正文\n");
     let loaded = catalog.load("LAZY").expect("名称查找应忽略 ASCII 大小写");

@@ -700,19 +700,129 @@ Version control safety:\n\
     description
 }
 
-/// 返回当前平台可尝试的 Bash 可执行文件。
-fn bash_candidates() -> Vec<OsString> {
+/// 返回当前平台可尝试的本机 Bash；Windows 不调用会切换文件系统的 WSL 代理。
+pub(crate) fn bash_candidates() -> Vec<OsString> {
     #[cfg(windows)]
     {
-        vec![
-            OsString::from("bash.exe"),
-            OsString::from(r"C:\Program Files\Git\bin\bash.exe"),
-            OsString::from(r"C:\Program Files\Git\usr\bin\bash.exe"),
+        let paths = std::env::var_os("PATH")
+            .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
+            .unwrap_or_default();
+        let windows_root = std::env::var_os("SystemRoot").map(PathBuf::from);
+        let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let mut candidates =
+            native_bash_paths(&paths, windows_root.as_deref(), local_app_data.as_deref());
+        // Git 不一定安装在系统盘。先从实际 PATH 中的 git.exe 找同一安装根，
+        // 再补充标准安装目录；不能让 PATH 中更靠前的系统 bash.exe 抢占它。
+        for root in [
+            std::env::var_os("ProgramFiles").map(|path| PathBuf::from(path).join("Git")),
+            local_app_data.map(|path| path.join("Programs/Git")),
         ]
+        .into_iter()
+        .flatten()
+        {
+            for relative in ["bin/bash.exe", "usr/bin/bash.exe"] {
+                let candidate = root.join(relative);
+                if candidate.is_file() && !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+        candidates
+            .into_iter()
+            .map(PathBuf::into_os_string)
+            .collect()
     }
     #[cfg(not(windows))]
     {
         vec![OsString::from("bash")]
+    }
+}
+
+/// 只从本机文件系统解析 Shell。系统目录和 WindowsApps 的 bash.exe 是 WSL
+/// 启动器，即使存在也不适用于当前 Windows workspace 和权限边界。
+#[cfg(windows)]
+fn native_bash_paths(
+    paths: &[PathBuf],
+    windows_root: Option<&Path>,
+    local_app_data: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for base in paths {
+        if base.join("git.exe").is_file()
+            && let Some(root) = base.parent()
+        {
+            for relative in ["bin/bash.exe", "usr/bin/bash.exe"] {
+                let candidate = root.join(relative);
+                if candidate.is_file() && !candidates.contains(&candidate) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+    for base in paths {
+        let candidate = base.join("bash.exe");
+        let windows_stub =
+            windows_root.is_some_and(|root| windows_path_is_within(&candidate, root));
+        let apps_stub = local_app_data.is_some_and(|root| {
+            windows_path_is_within(&candidate, &root.join("Microsoft/WindowsApps"))
+        });
+        if !windows_stub && !apps_stub && candidate.is_file() && !candidates.contains(&candidate) {
+            candidates.push(candidate);
+        }
+    }
+    candidates
+}
+
+/// Windows 路径按组件忽略大小写，避免 SystemRoot 与 PATH 的拼写差异放行代理。
+#[cfg(windows)]
+fn windows_path_is_within(path: &Path, root: &Path) -> bool {
+    let path = path.components().collect::<Vec<_>>();
+    let root = root.components().collect::<Vec<_>>();
+    path.len() >= root.len()
+        && path.iter().zip(root.iter()).all(|(part, base)| {
+            part.as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&base.as_os_str().to_string_lossy())
+        })
+}
+
+#[cfg(all(test, windows))]
+mod native_bash_selection_tests {
+    use super::native_bash_paths;
+
+    #[test]
+    fn portable_git_is_selected_before_system_wsl_launchers() {
+        let directory = tempfile::tempdir().unwrap();
+        let windows = directory.path().join("Windows");
+        let local = directory.path().join("Local");
+        let git = directory.path().join("portable-git");
+        let system = windows.join("System32");
+        let apps = local.join("Microsoft/WindowsApps");
+        for folder in [&system, &apps, &git.join("cmd"), &git.join("bin")] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        for executable in [
+            system.join("bash.exe"),
+            apps.join("bash.exe"),
+            git.join("cmd/git.exe"),
+            git.join("bin/bash.exe"),
+        ] {
+            std::fs::write(executable, []).unwrap();
+        }
+        let paths = [system, apps, git.join("cmd")];
+        let selected = native_bash_paths(&paths, Some(&windows), Some(&local));
+        assert_eq!(selected, [git.join("bin/bash.exe")]);
+        // 不安装本机 Bash 时应报告不可用，而不是退回存在的系统代理。
+        assert!(native_bash_paths(&paths[..2], Some(&windows), Some(&local)).is_empty());
+        let differently_cased_root = windows.to_string_lossy().to_uppercase();
+        assert!(
+            native_bash_paths(
+                &paths[..1],
+                Some(std::path::Path::new(&differently_cased_root)),
+                None
+            )
+            .is_empty()
+        );
     }
 }
 

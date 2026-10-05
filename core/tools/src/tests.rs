@@ -21,7 +21,6 @@ use crate::{
     register_local_tools, run_bounded_command,
 };
 
-#[cfg(not(windows))]
 use crate::BashTool;
 #[cfg(windows)]
 use crate::PowerShellTool;
@@ -1540,8 +1539,7 @@ async fn powershell_reports_utf8_and_nonzero_exit() {
     );
 }
 
-/// 非 Windows Bash 必须保留 stdout、stderr 和真实非零退出码。
-#[cfg(not(windows))]
+/// 本机 Bash 必须保留 stdout、stderr 和真实非零退出码，Windows 使用 Git Bash。
 #[tokio::test]
 async fn bash_reports_output_and_nonzero_exit() {
     let directory = tempdir().expect("应创建临时目录");
@@ -1564,6 +1562,37 @@ async fn bash_reports_output_and_nonzero_exit() {
     assert!(error.message.contains("退出码 7"));
     assert!(error.message.contains("hello"));
     assert!(error.message.contains("bad"));
+}
+
+/// Windows 本机 Bash 必须读取权限边界内同一目录的文件，不切到 WSL 文件系统。
+#[cfg(windows)]
+#[tokio::test]
+async fn bash_reads_native_windows_workspace() {
+    let directory = tempdir().expect("应创建隔离 Windows workspace");
+    fs::write(
+        directory.path().join("native evidence.txt"),
+        "WINDOWS_NATIVE_BASH_OK",
+    )
+    .expect("应写入原生文件");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+    let expected_cwd = environment
+        .working_directory()
+        .to_string_lossy()
+        .replace('\\', "/");
+    let expected_cwd = expected_cwd.trim_start_matches("//?/").to_lowercase();
+    let output = BashTool::new(environment)
+        .execute(
+            tool_context(),
+            json!({"command": "cat 'native evidence.txt'; pwd -W"}),
+        )
+        .await
+        .expect("Git Bash 应读取真实 Windows workspace");
+    let text = output_text(&output);
+    assert!(text.contains("WINDOWS_NATIVE_BASH_OK"));
+    assert!(
+        text.to_lowercase().contains(&expected_cwd),
+        "原生目录应与工具授权目录一致：{text}"
+    );
 }
 
 /// 超过预览上限的 PowerShell 输出必须保留完整落盘文件。
@@ -2111,6 +2140,28 @@ async fn workspace_guard_confines_file_tools() {
     );
     let context = tool_context();
 
+    // 守卫必须保留工作区内的绝对路径；工作流 actor 的模型不能因为使用绝对形式
+    // 而被误拒绝，后续真实 Write 仍通过同一环境进入权限与变更记录路径。
+    let inside_absolute = workspace.path().join("inside.txt");
+    let inside_absolute_read = ReadTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({ "file_path": inside_absolute.to_string_lossy() }),
+        )
+        .await
+        .expect("工作区内绝对路径读取应放行");
+    assert!(output_text(&inside_absolute_read).contains("inside"));
+    WriteTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "file_path": workspace.path().join("created.txt").to_string_lossy(),
+                "content": "created"
+            }),
+        )
+        .await
+        .expect("工作区内绝对路径写入应放行");
+
     let inside_read = ReadTool::new(Arc::clone(&environment))
         .execute(context.clone(), json!({ "file_path": "inside.txt" }))
         .await
@@ -2155,6 +2206,77 @@ async fn workspace_guard_confines_file_tools() {
         .err()
         .unwrap_or_else(|| panic!("工作区外编辑应被拒绝"));
     assert_eq!(outside_edit.code, "path_outside_workspace");
+
+    // 显式 cwd 也必须受同一白名单约束；否则 Shell 可以避开文件工具的路径检查，
+    // 把 actor 的进程工作目录切到另一个父 Session 的工作区。
+    #[cfg(windows)]
+    let outside_cwd = PowerShellTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "command": "Get-Location",
+                "cwd": outside.to_string_lossy()
+            }),
+        )
+        .await
+        .expect_err("工作区外绝对 cwd 应被拒绝");
+    #[cfg(not(windows))]
+    let outside_cwd = BashTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "command": "pwd -P",
+                "cwd": outside.to_string_lossy()
+            }),
+        )
+        .await
+        .expect_err("工作区外绝对 cwd 应被拒绝");
+    assert_eq!(outside_cwd.code, "path_outside_workspace");
+
+    #[cfg(windows)]
+    let inside_cwd = PowerShellTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "command": "Get-Location",
+                "cwd": workspace.path().to_string_lossy()
+            }),
+        )
+        .await
+        .expect("工作区内绝对 cwd 应放行");
+    #[cfg(not(windows))]
+    let inside_cwd = BashTool::new(Arc::clone(&environment))
+        .execute(
+            context.clone(),
+            json!({
+                "command": "pwd -P",
+                "cwd": workspace.path().to_string_lossy()
+            }),
+        )
+        .await
+        .expect("工作区内绝对 cwd 应放行");
+    assert!(
+        output_text(&inside_cwd)
+            .replace('\\', "/")
+            .contains(&workspace.path().to_string_lossy().replace('\\', "/")),
+        "Shell 应在冻结工作区内运行"
+    );
+
+    // 两个父工作区各自拥有独立的守卫根；B 可以读自己的文件，但 A 不能借用 B 的
+    // 环境句柄放行同一绝对路径。
+    let other_environment = Arc::new(
+        ToolEnvironment::new(&outside)
+            .expect("第二父工作区环境应有效")
+            .with_workspace_guard(),
+    );
+    let other_read = ReadTool::new(other_environment)
+        .execute(
+            context.clone(),
+            json!({ "file_path": outside.join("secret.txt") }),
+        )
+        .await
+        .expect("第二父工作区读取自己的绝对路径应放行");
+    assert!(output_text(&other_read).contains("secret"));
 
     // 长名临时目录豁免：离树草稿（变异验证等）是合法落点。
     let scratch = long_form_temp_dir().join("keencode-guard-scratch");
