@@ -85,7 +85,7 @@ impl ResponsesAdapter {
         }
         let mut input = Vec::new();
         for message in request.messages.iter() {
-            encode_input_message(message.role, &message.content, &mut input)?;
+            encode_input_message(message.role, &message.wire_content(), &mut input)?;
         }
         let mut body = Map::new();
         body.insert("model".to_owned(), Value::String(request.model.clone()));

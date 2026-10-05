@@ -179,6 +179,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
         expected_transcript_revision: state.transcript_revision,
         messages: vec![
             SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: format!("tool-call-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
@@ -191,6 +192,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
                 }],
             },
             SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: format!("tool-result-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
@@ -236,6 +238,7 @@ fn append_first_turn_start(
                 },
                 SessionEvent::MessageAdded {
                     message: SessionMessage {
+                        references: Vec::new(),
                         is_meta: false,
                         message_id: user_message_id.to_owned(),
                         turn_id: Some(turn_id.clone()),
@@ -267,6 +270,7 @@ fn append_second_turn(journal: &SessionJournal, turn_id: &TurnId) -> Result<(), 
                 },
                 SessionEvent::MessageAdded {
                     message: SessionMessage {
+                        references: Vec::new(),
                         is_meta: false,
                         message_id: "user-message-turn-2".to_owned(),
                         turn_id: Some(turn_id.clone()),
@@ -643,6 +647,7 @@ fn fork_cold_recovery_copies_file_change_snapshots_across_sessions() {
             source_session_id: fixture.session_id.clone(),
             operation_id: "fork-file-snapshot".to_owned(),
             title: Some("文件快照分支".to_owned()),
+            through_turn_id: None,
         },
     )
     .expect("fork 应完成");

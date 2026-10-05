@@ -1,13 +1,14 @@
 //! 进程内 Session 注册、隔离查找、关闭与精确取消控制面。
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 use keencode_resources::{
     SessionEditUserRequest, SessionEditUserResult, SessionForkRequest, SessionForkResult,
     SessionId, SessionJournal, SessionLease, SessionLeaseAcquire, SessionMessage, SessionOpen,
-    delete_session_storage, fork_session, list_session_ids, prepare_edit_user,
-    recover_session_mutations,
+    SessionWorkspaceRequest, change_session_workspace, delete_session_storage, fork_session,
+    list_session_ids, prepare_edit_user, recover_session_mutations, recover_session_workspaces,
 };
 
 use crate::{
@@ -48,6 +49,8 @@ impl RuntimeManager {
             &self.config.storage_root,
             &request.project_root,
         )?;
+        // 稳定 ID 被重新创建时，旧删除 tombstone 不再代表当前任务。
+        keencode_resources::remove_deleted_session(&self.config.storage_root, &session_id)?;
         keencode_resources::register_session_location(
             &self.config.storage_root,
             &session_id,
@@ -97,21 +100,17 @@ impl RuntimeManager {
         self.list_stored_sessions_for_project(None)
     }
 
-    /// 只读取指定项目的数据目录，不枚举其他项目的会话。
+    /// 按权威执行目录过滤；目录切换不搬动物理历史，不能拿 locator 的目录过滤。
     pub fn list_stored_sessions_for_project(
         &self,
         project_root: Option<&str>,
     ) -> Result<Vec<StoredSessionMetadata>, RuntimeError> {
-        let directories = if let Some(path) = project_root {
-            keencode_resources::project_storage_for_path(&self.config.storage_root, path)?
-                .into_iter()
-                .collect()
-        } else {
-            keencode_resources::project_storage_directories(&self.config.storage_root)?
-        };
+        let directories =
+            keencode_resources::project_storage_directories(&self.config.storage_root)?;
         let mut listed = Vec::new();
         for directory in directories {
             recover_session_mutations(&directory, self.config.journal, self.config.artifacts)?;
+            recover_session_workspaces(&directory, self.config.journal, self.config.artifacts)?;
             for session_id in list_session_ids(&directory)? {
                 keencode_resources::register_session_location(
                     &self.config.storage_root,
@@ -120,6 +119,8 @@ impl RuntimeManager {
                 )?;
                 if let Some(metadata) =
                     SessionJournal::read_metadata(&directory, session_id, self.config.journal)?
+                    && project_root
+                        .is_none_or(|root| project_roots_match(&metadata.project_root, root))
                 {
                     listed.push(metadata);
                 }
@@ -161,6 +162,26 @@ impl RuntimeManager {
         }
     }
 
+    /// 读取持久 Session 的完整权威快照，但不把冷恢复的只读句柄登记进 Manager。
+    ///
+    /// sessions-index 的 phase 需要 turns 才能区分 completed 与 cancelled；只读
+    /// metadata 只有 status，不能用它伪造终态。已登记 Session 直接读取现有句柄，
+    /// 未登记 Session 临时打开 Journal 后立即释放，保持列表投影没有第二份状态。
+    pub fn stored_session_snapshot(
+        &self,
+        session_id: &str,
+    ) -> Result<crate::RuntimeSnapshot, RuntimeError> {
+        let session_id = SessionId::new(session_id.to_owned())?;
+        if let Ok(session) = self.get(session_id.as_str()) {
+            return session.snapshot();
+        }
+        let config = self.session_config(&session_id)?;
+        match RuntimeSession::open_session(config, session_id.as_str())? {
+            OpenSessionResult::Ready(session) => session.snapshot(),
+            OpenSessionResult::Corrupt(_) => Err(RuntimeError::SessionCorrupt),
+        }
+    }
+
     fn session_config(&self, id: &SessionId) -> Result<RuntimeConfig, RuntimeError> {
         let directory =
             keencode_resources::session_project_directory(&self.config.storage_root, id)?
@@ -174,6 +195,7 @@ impl RuntimeManager {
         }
         let mut config = self.config.clone();
         config.storage_root = directory;
+        recover_session_workspaces(&config.storage_root, config.journal, config.artifacts)?;
         Ok(config)
     }
 
@@ -319,14 +341,62 @@ impl RuntimeManager {
         if !list_session_ids(&config.storage_root)?.contains(&session_id) {
             return Ok(false);
         }
+        let metadata = SessionJournal::read_metadata(
+            &config.storage_root,
+            session_id.clone(),
+            config.journal,
+        )?
+        .ok_or(RuntimeError::SessionNotCreated)?;
         let lease = match SessionLease::try_acquire(&config.storage_root, session_id.clone())? {
             SessionLeaseAcquire::Acquired(lease) => lease,
             SessionLeaseAcquire::Busy { .. } => return Err(RuntimeError::SessionBusy),
         };
         drop(lease);
-        let deleted = delete_session_storage(&config.storage_root, &session_id)?;
+        // 先提交负向 membership，再删除正文。这样进程若在物理清理后崩溃，冷启动
+        // 仍能识别该任务已删除；删除失败时立即撤销 tombstone，避免制造假事实。
+        keencode_resources::record_deleted_session(
+            &self.config.storage_root,
+            &session_id,
+            &metadata.project_root,
+        )?;
+        let deleted = match delete_session_storage(&config.storage_root, &session_id) {
+            Ok(deleted) => deleted,
+            Err(error) => {
+                let _ = keencode_resources::remove_deleted_session(
+                    &self.config.storage_root,
+                    &session_id,
+                );
+                return Err(error.into());
+            }
+        };
+        if !deleted {
+            keencode_resources::remove_deleted_session(&self.config.storage_root, &session_id)?;
+            return Ok(false);
+        }
         keencode_resources::remove_session_location(&self.config.storage_root, &session_id)?;
         Ok(deleted)
+    }
+
+    /// 在会话已经关闭且无活动资源时持久切换执行目录，保留稳定 ID 与物理历史。
+    pub fn change_closed_session_workspace(
+        &self,
+        request: SessionWorkspaceRequest,
+    ) -> Result<(), RuntimeError> {
+        let sessions = self
+            .sessions
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if sessions.contains_key(&request.session_id) {
+            return Err(RuntimeError::SessionBusy);
+        }
+        let config = self.session_config(&request.session_id)?;
+        change_session_workspace(
+            &config.storage_root,
+            config.journal,
+            config.artifacts,
+            request,
+        )?;
+        Ok(())
     }
 
     /// 对已经从当前注册表关闭的源 Session 执行可恢复完整分支事务。
@@ -391,5 +461,181 @@ impl RuntimeManager {
     ) -> Result<TurnCancellationOutcome, RuntimeError> {
         let session = self.get(session_id)?;
         session.cancel_turn(turn_id)
+    }
+}
+
+/// Session 元数据和 RPC workspace 都经过路径授权，但 Windows 扩展路径、盘符路径
+/// 与无意义的 `.` 片段可能保留不同文本；列表过滤必须按规范目录身份比较，不能误丢真实会话。
+fn project_roots_match(stored_root: &str, requested_root: &str) -> bool {
+    if stored_root == requested_root {
+        return true;
+    }
+    match (
+        std::fs::canonicalize(Path::new(stored_root)),
+        std::fs::canonicalize(Path::new(requested_root)),
+    ) {
+        (Ok(stored), Ok(requested)) => stored == requested,
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    /// locator 留在旧存储目录，列表、精确打开和冷恢复都必须使用 Journal 的新 cwd。
+    #[test]
+    fn workspace_change_lists_by_authoritative_root_and_reopens_with_stable_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let old = std::fs::canonicalize(old)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let new = std::fs::canonicalize(new)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let storage = temp.path().join("data");
+        let manager = RuntimeManager::new(RuntimeConfig::new(&storage)).unwrap();
+        let session = manager
+            .create(CreateSessionRequest {
+                session_id: "workspace-session".into(),
+                title: "同一会话".into(),
+                project_root: old.clone(),
+            })
+            .unwrap();
+        drop(session);
+        manager.close("workspace-session").unwrap();
+        let request = SessionWorkspaceRequest {
+            session_id: SessionId::new("workspace-session").unwrap(),
+            operation_id: "move".into(),
+            expected_project_root: old.clone(),
+            project_root: new.clone(),
+        };
+        manager
+            .change_closed_session_workspace(request.clone())
+            .unwrap();
+        assert!(
+            manager
+                .list_stored_sessions_for_project(Some(&old))
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            manager
+                .list_stored_sessions_for_project(Some(&new))
+                .unwrap()
+                .len(),
+            1
+        );
+        let stored = manager
+            .stored_session_metadata("workspace-session")
+            .unwrap();
+        assert_eq!(stored.project_root, new);
+        assert_eq!(stored.title, "同一会话");
+        let locator = keencode_resources::session_project_storage(&storage, &request.session_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            locator.path, old,
+            "locator 保留物理存储根，不能充当执行授权"
+        );
+        drop(manager);
+        let cold = RuntimeManager::new(RuntimeConfig::new(&storage)).unwrap();
+        let session = match cold.open("workspace-session").unwrap() {
+            OpenSessionResult::Ready(session) => session,
+            _ => panic!("应健康打开"),
+        };
+        assert_eq!(session.snapshot().unwrap().state.project_root, new);
+        drop(session);
+        cold.close("workspace-session").unwrap();
+        cold.change_closed_session_workspace(request).unwrap();
+        assert_eq!(
+            cold.stored_session_metadata("workspace-session")
+                .unwrap()
+                .project_root,
+            new
+        );
+    }
+
+    /// 目录别名只改变文本表示；tasks-index 与 sessions-index 都必须仍能列出该会话。
+    #[test]
+    fn stored_session_listing_matches_equivalent_workspace_path_alias() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let canonical = std::fs::canonicalize(&project)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let alias = project.join(".").to_string_lossy().into_owned();
+        let storage = temp.path().join("data");
+        let manager = RuntimeManager::new(RuntimeConfig::new(&storage)).unwrap();
+        let session = manager
+            .create(CreateSessionRequest {
+                session_id: "path-alias-session".into(),
+                title: "路径别名".into(),
+                project_root: canonical.clone(),
+            })
+            .unwrap();
+        drop(session);
+        manager.close("path-alias-session").unwrap();
+
+        let listed = manager
+            .list_stored_sessions_for_project(Some(&alias))
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].project_root, canonical);
+    }
+
+    /// 物理删除后冷启动列表只能依赖删除 membership；重复删除不能重新创建正文或移除
+    /// 另一条会话的 membership。
+    #[test]
+    fn physical_delete_stays_deleted_after_cold_list_and_duplicate_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let project = temp.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let project = std::fs::canonicalize(project)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let storage = temp.path().join("data");
+        let manager = RuntimeManager::new(RuntimeConfig::new(&storage)).unwrap();
+        let session_id = SessionId::new("deleted-cold-session").unwrap();
+        let session = manager
+            .create(CreateSessionRequest {
+                session_id: session_id.as_str().to_owned(),
+                title: "待删除会话".to_owned(),
+                project_root: project.clone(),
+            })
+            .unwrap();
+        drop(session);
+        manager.close(session_id.as_str()).unwrap();
+
+        assert!(manager.delete(session_id.as_str()).unwrap());
+        assert!(
+            keencode_resources::list_deleted_session_ids(&storage, &project)
+                .unwrap()
+                .contains(&session_id)
+        );
+        drop(manager);
+
+        let cold = RuntimeManager::new(RuntimeConfig::new(&storage)).unwrap();
+        assert!(
+            cold.list_stored_sessions_for_project(Some(&project))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!cold.delete(session_id.as_str()).unwrap());
+        assert_eq!(
+            keencode_resources::list_deleted_session_ids(&storage, &project)
+                .unwrap()
+                .as_slice(),
+            std::slice::from_ref(&session_id)
+        );
     }
 }

@@ -3599,7 +3599,12 @@ fn steer_operation_ids_are_isolated_across_turns() {
         .unwrap();
     let first = fixture
         .coordinator
-        .steer_active_agent_with_operation(&fixture.root_agent_id, &operation_id, "第一条 steer")
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            "第一条 steer",
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(first.turn_id, first_turn);
     let claimed = fixture
@@ -3631,14 +3636,24 @@ fn steer_operation_ids_are_isolated_across_turns() {
         .unwrap();
     let second = fixture
         .coordinator
-        .steer_active_agent_with_operation(&fixture.root_agent_id, &operation_id, "第二条 steer")
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            "第二条 steer",
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(second.turn_id, second_turn);
     assert_ne!(first, second);
 
     let replayed = fixture
         .coordinator
-        .steer_active_agent_with_operation(&fixture.root_agent_id, &operation_id, "第二条 steer")
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &operation_id,
+            "第二条 steer",
+            Vec::new(),
+        )
         .unwrap();
     assert_eq!(replayed, second);
 }
@@ -11588,4 +11603,208 @@ fn worktree_lease_rejects_invalid_or_oversized_ids() {
     let lease = WorktreeLease::new("managed-worktree_01").unwrap();
     assert_eq!(lease.as_str(), "managed-worktree_01");
     assert_eq!(lease.to_string(), "managed-worktree_01");
+}
+
+/// 相同正文不能借幂等 operation 调换市场；claim 的身份冷恢复后仍完整保留。
+#[test]
+fn user_steer_references_survive_restore_and_bind_operation_identity() {
+    let fixture = fixture(2, 2);
+    let turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "资源追加", NO_PLAN)
+        .unwrap();
+    let references = vec![keencode_model::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@local".into(),
+    }];
+    let operation = fixed_tool_call_id("resource-steer");
+    let first = fixture
+        .coordinator
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &operation,
+            "@proof 原文",
+            references.clone(),
+        )
+        .unwrap();
+    assert_eq!(first.content, "@proof 原文");
+    assert_eq!(first.references, references);
+    assert_eq!(
+        fixture
+            .coordinator
+            .steer_active_agent_with_operation(
+                &fixture.root_agent_id,
+                &operation,
+                "@proof 原文",
+                references.clone()
+            )
+            .unwrap(),
+        first
+    );
+    let other = vec![keencode_model::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@other".into(),
+    }];
+    assert!(matches!(
+        fixture.coordinator.steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &operation,
+            "@proof 原文",
+            other.clone()
+        ),
+        Err(CollaborationError::IdempotencyConflict { .. })
+    ));
+    let claimed = fixture
+        .coordinator
+        .consume_user_steers(&fixture.root_agent_id, &turn)
+        .unwrap();
+    assert_eq!(claimed, vec![first.clone()]);
+    fixture
+        .coordinator
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &fixed_tool_call_id("resource-steer-other"),
+            "@proof 另一个市场",
+            other.clone(),
+        )
+        .unwrap();
+    let checkpoint = fixture.coordinator.checkpoint_coordinator().unwrap();
+    // 冷恢复必须拒绝非法资源结构，不能用空引用继续。
+    let mut invalid = checkpoint.clone();
+    invalid.roots[0].agents[0].pending_steers[0]
+        .references
+        .push(references[0].clone());
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 2, 95_000).restore_coordinator(invalid),
+        Err(CollaborationError::InvalidRecovery { .. })
+    ));
+    let mut forged_receipt = checkpoint.clone();
+    if let super::collaboration::CollaborationInvocationOutput::UserSteer(steer) =
+        &mut forged_receipt.invocations[0].output
+    {
+        steer.references[0].path = "plugin://proof@changed".into();
+    } else {
+        panic!("首条幂等结果应为 steer");
+    }
+    assert!(matches!(
+        restore_coordinator(fixture.store.clone(), 2, 95_500).restore_coordinator(forged_receipt),
+        Err(CollaborationError::InvalidRecovery { .. })
+    ));
+    let restored = restore_coordinator(fixture.store.clone(), 2, 96_000);
+    restored.restore_coordinator(checkpoint).unwrap();
+    assert_eq!(
+        restored
+            .steer_active_agent_with_operation(
+                &fixture.root_agent_id,
+                &operation,
+                "@proof 原文",
+                references
+            )
+            .unwrap(),
+        first
+    );
+    restored
+        .acknowledge_user_steers(&fixture.root_agent_id, &turn, first.sequence)
+        .unwrap();
+    let root = restored.checkpoint_root(&fixture.root_agent_id).unwrap();
+    let pending = &root
+        .agents
+        .iter()
+        .find(|a| a.definition.agent_id == fixture.root_agent_id)
+        .unwrap()
+        .pending_steers;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].references, other);
+}
+
+/// 引用编码计入队列上限；确认退款后同容量可以再次入队，非法选择不占序号。
+#[test]
+fn user_steer_references_obey_capacity_and_ack_refund() {
+    let fixture = fixture(2, 2);
+    let turn = fixture
+        .coordinator
+        .begin_root_turn(&fixture.root_agent_id, "资源容量", NO_PLAN)
+        .unwrap();
+    let reference = keencode_model::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@local".into(),
+    };
+    assert!(matches!(
+        fixture.coordinator.steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &fixed_tool_call_id("invalid-resource"),
+            "@proof",
+            vec![reference.clone(), reference.clone()]
+        ),
+        Err(CollaborationError::InvalidInputReferences)
+    ));
+    let refs = vec![reference];
+    let first = fixture
+        .coordinator
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &fixed_tool_call_id("capacity-first"),
+            "x".repeat(4 * 1024 * 1024),
+            refs.clone(),
+        )
+        .unwrap();
+    assert_eq!(first.sequence, 1);
+    assert!(matches!(
+        fixture.coordinator.steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &fixed_tool_call_id("capacity-second"),
+            "x".repeat(4 * 1024 * 1024),
+            refs.clone()
+        ),
+        Err(CollaborationError::ResourceLimitExceeded {
+            resource: "未消费用户 Steer 总字节数",
+            ..
+        })
+    ));
+    fixture
+        .coordinator
+        .consume_user_steers(&fixture.root_agent_id, &turn)
+        .unwrap();
+    fixture
+        .coordinator
+        .acknowledge_user_steers(&fixture.root_agent_id, &turn, first.sequence)
+        .unwrap();
+    let next = fixture
+        .coordinator
+        .steer_active_agent_with_operation(
+            &fixture.root_agent_id,
+            &fixed_tool_call_id("capacity-second"),
+            "x".repeat(4 * 1024 * 1024),
+            refs,
+        )
+        .unwrap();
+    assert_eq!(next.sequence, 2);
+}
+
+/// Workflow actor 使用的外部 permit 与普通子 Agent 共用容量，热更新后应被唤醒。
+#[tokio::test]
+async fn external_global_turn_permit_observes_shared_capacity_updates() {
+    let limiter = Arc::new(CollaborationGlobalTurnLimiter::new(1).unwrap());
+    let held = limiter.try_acquire_external().unwrap().unwrap();
+    assert!(limiter.try_acquire_external().unwrap().is_none());
+
+    let waiter_limiter = Arc::clone(&limiter);
+    let waiter = tokio::spawn(async move {
+        loop {
+            let changed = waiter_limiter.capacity_change();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(permit) = waiter_limiter.try_acquire_external().unwrap() {
+                return permit;
+            }
+            changed.await;
+        }
+    });
+    limiter.update_limit(2).unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(1), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(second);
+    drop(held);
 }

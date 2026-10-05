@@ -16,6 +16,32 @@ fn user_request() -> ModelRequest {
     )
 }
 
+/// 完整身份仅在模型请求投影中补充；序列化和历史保持原正文，不能把引用变成系统权限。
+#[test]
+fn user_input_references_preserve_original_text_and_reject_invalid_identity() {
+    let references = vec![crate::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@local".into(),
+    }];
+    let mut message = Message::text(MessageRole::User, "@proof 原请求");
+    message.references = references.clone();
+    message.validate().unwrap();
+    let wire = message.wire_content();
+    assert_eq!(wire[0], ContentBlock::text("@proof 原请求"));
+    assert!(
+        matches!(&wire[1], ContentBlock::Text { text } if text.contains("plugin://proof@local"))
+    );
+    assert_eq!(message.content, vec![ContentBlock::text("@proof 原请求")]);
+    let restored: Message =
+        serde_json::from_value(serde_json::to_value(&message).unwrap()).unwrap();
+    assert_eq!(restored, message);
+    message.references.push(references[0].clone());
+    assert!(message.validate().is_err());
+    message.references = references;
+    message.role = MessageRole::System;
+    assert!(message.validate().is_err());
+}
+
 fn message_start() -> ModelStreamEvent {
     ModelStreamEvent::MessageStart {
         metadata: ResponseMetadata {

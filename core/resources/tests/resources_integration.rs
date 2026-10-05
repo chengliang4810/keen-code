@@ -231,6 +231,7 @@ fn turn_provider_snapshot_rejects_non_adjacent_and_duplicate_records() {
             segment_index: 0,
             expected_transcript_revision: 0,
             messages: vec![SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "provider-ordering-response".to_owned(),
                 turn_id: Some(turn_id.clone()),
@@ -357,6 +358,7 @@ fn create_session(journal: &SessionJournal) {
 fn message_event(index: usize) -> SessionEvent {
     SessionEvent::MessageAdded {
         message: SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: format!("message-{index}"),
             turn_id: None,
@@ -673,6 +675,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                         expected_transcript_revision: 2,
                         messages: vec![
                             SessionMessage {
+                                references: Vec::new(),
                                 is_meta: false,
                                 message_id: "message-tool-call".to_owned(),
                                 turn_id: Some(turn_id.clone()),
@@ -685,6 +688,7 @@ fn snapshot_replay_matches_live_state_for_authoritative_events() {
                                 }],
                             },
                             SessionMessage {
+                                references: Vec::new(),
                                 is_meta: false,
                                 message_id: "message-tool-result".to_owned(),
                                 turn_id: Some(turn_id.clone()),
@@ -1675,6 +1679,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     create_session(&journal);
     let unresolved = SessionEvent::MessageAdded {
         message: SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "artifact-message-unresolved".to_owned(),
             turn_id: None,
@@ -1705,6 +1710,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "artifact-message-size".to_owned(),
                 turn_id: None,
@@ -1725,6 +1731,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "artifact-message-missing".to_owned(),
                 turn_id: None,
@@ -1745,6 +1752,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "artifact-message-hash".to_owned(),
                 turn_id: None,
@@ -1758,6 +1766,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     let receipt = journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "artifact-message-valid".to_owned(),
                 turn_id: None,
@@ -1792,6 +1801,7 @@ fn journal_rejects_unresolved_or_mismatched_artifact_references() {
     assert!(matches!(
         foreign_journal.append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "artifact-message-scope".to_owned(),
                 turn_id: None,

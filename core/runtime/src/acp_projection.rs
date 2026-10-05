@@ -281,6 +281,22 @@ pub fn map_authoritative_event(
                 ),
             )]
         }
+        SessionEvent::SessionWorkspaceChanged { project_root, .. } => {
+            let mut meta = serde_json::Map::new();
+            meta.insert(
+                "keencode/projectRoot".to_owned(),
+                serde_json::Value::String(project_root.clone()),
+            );
+            vec![session_update_draft(
+                record,
+                None,
+                None,
+                keencode_acp::schema::SessionUpdate::SessionInfoUpdate(
+                    keencode_acp::schema::SessionInfoUpdate::new().meta(meta),
+                ),
+            )]
+        }
+        SessionEvent::CommandReceiptCommitted { .. } => Vec::new(),
         SessionEvent::SessionPreferenceSet { pinned, archived } => {
             // 偏好变更经 _meta 投影给前端；标题键不参与，键集与既有
             // session_info_update 白名单保持兼容。
@@ -391,7 +407,38 @@ pub fn map_authoritative_event(
             }
             drafts
         }
-        SessionEvent::DynamicInputReceiptCommitted { .. } => Vec::new(),
+        SessionEvent::DynamicInputReceiptCommitted {
+            turn_id,
+            source_agent_id,
+            user_inputs,
+            ..
+        } => {
+            user_inputs
+                .iter()
+                .map(|input| {
+                    // 稳定身份来自已消费的权威队列，不从正文或当前插件目录推断。
+                    let mut meta = schema::Meta::new();
+                    meta.insert(
+                        "keencode/messageId".into(),
+                        json!(format!("{}:steer:{}", turn_id.as_str(), input.sequence)),
+                    );
+                    meta.insert("keencode/startsNewTurn".into(), json!(false));
+                    if !input.references.is_empty() {
+                        meta.insert("keencode/messageReferences".into(), json!(input.references));
+                    }
+                    let text = redact_session_text(secret_redactor, &input.text);
+                    session_update_draft(
+                        record,
+                        Some(turn_id.as_str()),
+                        Some(source_agent_id.as_str()),
+                        schema::SessionUpdate::UserMessageChunk(
+                            schema::ContentChunk::new(schema::ContentBlock::from(text))
+                                .meta(Some(meta)),
+                        ),
+                    )
+                })
+                .collect()
+        }
         SessionEvent::ToolRequested { request } => vec![session_update_draft(
             record,
             Some(request.turn_id.as_str()),
@@ -638,6 +685,9 @@ pub fn map_authoritative_event(
                 ),
             )]
         }
+        // Assistant 反馈是桌面行元数据，不映射为 ACP 标准会话更新；V4 snapshot
+        // 会在同一权威 Journal 事件后重新投影该行。
+        SessionEvent::AssistantFeedbackSet { .. } => Vec::new(),
         SessionEvent::PlanChanged { plan } => vec![session_update_draft(
             record,
             None,
@@ -650,6 +700,9 @@ pub fn map_authoritative_event(
                 }),
             ),
         )],
+        SessionEvent::FollowupModeChanged { .. } | SessionEvent::InputQueueChanged { .. } => {
+            Vec::new()
+        }
         SessionEvent::ProviderSnapshotUpdated { .. } => Vec::new(),
         SessionEvent::TurnProviderSnapshotRecorded { .. } => {
             provider.observe_event(event, provider_delta)?;
@@ -657,6 +710,8 @@ pub fn map_authoritative_event(
         }
         SessionEvent::OnErrorHookQueued { .. }
         | SessionEvent::OnErrorHookReceiptCommitted { .. } => Vec::new(),
+        // 工作流的 JSON 契约由桌面网关直接投影，ACP 标准会话更新没有对应的控制节点类型。
+        SessionEvent::WorkflowEventCommitted { .. } => Vec::new(),
         SessionEvent::TitleGenerated { .. }
         | SessionEvent::MailboxMessageDelivered { .. }
         | SessionEvent::WorktreeAssigned { .. }
@@ -745,6 +800,18 @@ pub fn persisted_message_meta(message_id: &str) -> keencode_acp::schema::Meta {
     )])
 }
 
+/// 引用随每个消息块携带，冷回放和实时投递采用同一权威元数据，不能从当前目录反推历史身份。
+fn persisted_message_references_meta(message: &SessionMessage) -> schema::Meta {
+    let mut meta = persisted_message_meta(&message.message_id);
+    if !message.references.is_empty() {
+        meta.insert(
+            "keencode/messageReferences".into(),
+            json!(message.references),
+        );
+    }
+    meta
+}
+
 /// 会话正文脱敏；无钩子时原样返回，纯文本宿主用来移除回显中的凭据。
 fn redact_session_text(redactor: Option<&dyn Fn(&str) -> String>, text: &str) -> String {
     redactor.map_or_else(|| text.to_owned(), |redact| redact(text))
@@ -802,7 +869,7 @@ pub fn map_persisted_message(
                 let chunk = keencode_acp::schema::ContentChunk::new(
                     keencode_acp::schema::ContentBlock::from(text),
                 )
-                .meta(Some(persisted_message_meta(&message.message_id)));
+                .meta(Some(persisted_message_references_meta(message)));
                 if message.role == ResourceMessageRole::User {
                     keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk)
                 } else {
@@ -820,7 +887,7 @@ pub fn map_persisted_message(
                     keencode_acp::schema::ContentChunk::new(
                         keencode_acp::schema::ContentBlock::from(reasoning_text),
                     )
-                    .meta(Some(persisted_message_meta(&message.message_id))),
+                    .meta(Some(persisted_message_references_meta(message))),
                 )
             }
             ContentBlock::Image { image } => {
@@ -841,7 +908,7 @@ pub fn map_persisted_message(
                     ),
                 };
                 let chunk = keencode_acp::schema::ContentChunk::new(content)
-                    .meta(Some(persisted_message_meta(&message.message_id)));
+                    .meta(Some(persisted_message_references_meta(message)));
                 if message.role == ResourceMessageRole::User {
                     keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk)
                 } else {

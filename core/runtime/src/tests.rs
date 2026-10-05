@@ -22,11 +22,12 @@ use keencode_model::{
 };
 use keencode_resources::test_support::{AppendFault, clear_append_fault, set_append_fault};
 use keencode_resources::{
-    AgentId, ArtifactMaterialization, ArtifactStore, MailboxMessage, MailboxMessageId,
-    MailboxState, MessageImageSource, MessagePart, PlanState, SessionEvent, SessionEventId,
-    SessionEventRecord, SessionId, SessionMessage, SessionStatus, SnapshotPolicy, SubAgentStatus,
+    AgentId, ArtifactMaterialization, ArtifactStore, AssistantFeedback,
+    MAX_WORKFLOW_JSON_COLLECTION_ITEMS, MailboxMessage, MailboxMessageId, MailboxState,
+    MessageImageSource, MessagePart, PlanState, SessionEvent, SessionEventId, SessionEventRecord,
+    SessionId, SessionMessage, SessionState, SessionStatus, SnapshotPolicy, SubAgentStatus,
     TerminalRecord, ToolCompletionStatus, ToolEffect, ToolRequest, ToolResultPart,
-    TranscriptRecord, TurnStatus, TurnStopReason,
+    TranscriptRecord, TurnStatus, TurnStopReason, WorkflowJournalEvent,
 };
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -35,12 +36,13 @@ use super::{
     ArtifactMode, ArtifactProbe, ControlState, CreateSessionRequest, MAX_PERSISTED_IMAGE_URL_BYTES,
     MAX_RUNTIME_TERMINAL_MESSAGE_BYTES, OpenSessionResult, RoundKey, RuntimeCatchUpDirective,
     RuntimeConfig, RuntimeControlEvent, RuntimeError, RuntimeEventPayload,
-    RuntimeEventReceiveError, RuntimeManager, RuntimeModelRoundUsageSink, RuntimeSession,
-    RuntimeTurnRequest, StateCollectionItems, TurnCancellationOutcome, UnstartedTurnTermination,
-    UnstartedTurnTerminationOutcome, UnstartedTurnTerminationRequest, append_resource_event,
-    append_runtime_resource_event, charge_confirmed_reservation_event,
-    charge_materialized_reservation_artifacts, commit_agent_event, encoded_record_len,
-    ensure_commit_capacity, inject_runtime_input_commit_fault, inject_runtime_input_commit_faults,
+    RuntimeEventReceiveError, RuntimeManager, RuntimeModelRetryScheduled,
+    RuntimeModelRoundUsageSink, RuntimeSession, RuntimeTurnRequest, StateCollectionItems,
+    TurnCancellationOutcome, UnstartedTurnTermination, UnstartedTurnTerminationOutcome,
+    UnstartedTurnTerminationRequest, append_resource_event, append_runtime_resource_event,
+    charge_confirmed_reservation_event, charge_materialized_reservation_artifacts,
+    commit_agent_event, encoded_record_len, ensure_commit_capacity,
+    inject_runtime_input_commit_fault, inject_runtime_input_commit_faults,
     inject_runtime_lifecycle_failure, inject_runtime_lifecycle_indeterminate,
     inject_runtime_lifecycle_visible_indeterminate, journal_len, map_image_source, map_message,
     map_tool_result, mark_event_confirmed, mark_event_indeterminate, materialized_probe_artifacts,
@@ -673,6 +675,120 @@ fn journal_records(session: &RuntimeSession) -> Vec<SessionEventRecord> {
         .lines()
         .map(|line| serde_json::from_str(line).expect("Runtime Journal 记录应可反序列化"))
         .collect()
+}
+
+/// Assistant 反馈必须走 Journal 事实：取消、冷恢复、CAS 和相同 operationId 重试
+/// 都不能依赖进程内缓存，也不能产生第二条事件。
+#[test]
+fn assistant_feedback_persists_cancels_and_rejects_stale_cas() {
+    let root = TempDir::new().expect("反馈测试目录应创建");
+    let session_id = "runtime-assistant-feedback";
+    let session = create(&root, session_id);
+    let project_root = root.path().display().to_string();
+
+    let liked = session
+        .set_assistant_feedback(
+            "feedback-like",
+            1,
+            "assistant-message",
+            Some(AssistantFeedback::Like),
+            0,
+            &project_root,
+        )
+        .expect("反馈应写入 Journal");
+    assert_eq!(liked.assistant_feedback.len(), 1);
+    let event_count = journal_records(&session).len();
+    let duplicate = session
+        .set_assistant_feedback(
+            "feedback-like",
+            1,
+            "assistant-message",
+            Some(AssistantFeedback::Like),
+            999,
+            &project_root,
+        )
+        .expect("相同 operationId 应复用已有反馈");
+    assert_eq!(duplicate.assistant_feedback.len(), 1);
+    assert_eq!(journal_records(&session).len(), event_count);
+
+    // 先验证正向反馈跨进程边界可恢复，再继续测试 revision 变化和取消反应。
+    drop(session);
+    let OpenSessionResult::Ready(session) =
+        RuntimeSession::open_session(config(&root), session_id).expect("反馈应可重新打开")
+    else {
+        panic!("反馈 Session 重新打开不应进入恢复态");
+    };
+    assert_eq!(
+        session
+            .snapshot()
+            .expect("反馈冷恢复快照")
+            .state
+            .assistant_feedback
+            .as_slice(),
+        &[keencode_resources::AssistantFeedbackRecord {
+            row_id: 1,
+            entity_id: "assistant-message".to_owned(),
+            feedback: AssistantFeedback::Like,
+        }]
+    );
+
+    append(
+        &session,
+        "feedback-revision-bump",
+        SessionEvent::MessageAdded {
+            message: SessionMessage {
+                is_meta: false,
+                references: Vec::new(),
+                message_id: "feedback-user-message".to_owned(),
+                turn_id: None,
+                agent_id: None,
+                role: keencode_resources::MessageRole::User,
+                content: vec![MessagePart::Text {
+                    text: "推进 revision".to_owned(),
+                }],
+            },
+        },
+    );
+    let records_after_revision = journal_records(&session).len();
+    assert!(matches!(
+        session.set_assistant_feedback(
+            "feedback-stale",
+            1,
+            "assistant-message",
+            Some(AssistantFeedback::Dislike),
+            0,
+            &project_root,
+        ),
+        Err(RuntimeError::StaleTranscriptRevision { .. })
+    ));
+    assert_eq!(journal_records(&session).len(), records_after_revision);
+
+    let cancelled = session
+        .set_assistant_feedback(
+            "feedback-cancel",
+            1,
+            "assistant-message",
+            None,
+            1,
+            &project_root,
+        )
+        .expect("取消反馈应删除事实记录");
+    assert!(cancelled.assistant_feedback.is_empty());
+    drop(session);
+
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config(&root), session_id).expect("反馈应可冷恢复")
+    else {
+        panic!("反馈 Session 应健康冷恢复");
+    };
+    assert!(
+        reopened
+            .snapshot()
+            .expect("冷恢复快照")
+            .state
+            .assistant_feedback
+            .is_empty()
+    );
 }
 
 /// 断言子 Agent 停止原因与状态变化存在于同一条 AtomicBatch 物理记录。
@@ -4641,6 +4757,69 @@ fn large_message_and_tool_text_use_stable_utf8_artifacts() {
     );
 }
 
+/// 插件选择经 Journal 冷恢复后仍绑定原正文，live/replay 不展示模型级身份补充文本。
+#[test]
+fn user_input_references_survive_journal_and_live_replay_projection() {
+    use crate::acp_projection::{
+        AuthoritativeProjectionMode, DeliveryDraft, map_persisted_message,
+    };
+    let root = TempDir::new().unwrap();
+    let session = create(&root, "runtime-input-references");
+    let key = start_turn(&session, "input-references-turn", 0);
+    let mut original = Message::text(ModelMessageRole::User, "@proof 原请求");
+    original.references = vec![keencode_model::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@local".into(),
+    }];
+    let message = map_message(
+        &session.inner,
+        &key,
+        0,
+        &original,
+        ArtifactMode::Commit,
+        &mut ArtifactProbe::default(),
+    )
+    .unwrap();
+    append(
+        &session,
+        "event-input-references",
+        SessionEvent::MessageAdded { message },
+    );
+    drop(session);
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config(&root), "runtime-input-references").unwrap()
+    else {
+        panic!("引用消息应可健康冷恢复")
+    };
+    assert_eq!(reopened.model_transcript().unwrap(), vec![original.clone()]);
+    let record = journal_records(&reopened)
+        .into_iter()
+        .find(|record| matches!(record.event, SessionEvent::MessageAdded { .. }))
+        .unwrap();
+    let SessionEvent::MessageAdded { message } = &record.event else {
+        unreachable!()
+    };
+    let state = reopened.snapshot().unwrap().state;
+    for mode in [
+        AuthoritativeProjectionMode::Live,
+        AuthoritativeProjectionMode::Replay,
+    ] {
+        let drafts =
+            map_persisted_message(&reopened, &state, &record, message, mode, None, None).unwrap();
+        assert_eq!(drafts.len(), 1);
+        let DeliveryDraft::SessionUpdate { update, .. } = &drafts[0] else {
+            panic!("必须投递原用户消息")
+        };
+        let value = serde_json::to_value(update).unwrap();
+        assert_eq!(value["content"]["text"], "@proof 原请求");
+        assert_eq!(
+            value["_meta"]["keencode/messageReferences"],
+            serde_json::json!(original.references)
+        );
+        assert_eq!(value["_meta"]["keencode/messageId"], message.message_id);
+    }
+}
+
 /// 权威 Transcript 恢复必须完整物化 UTF-8 与图片 Artifact，而不是向 Provider 发送引用。
 #[test]
 fn model_transcript_materializes_text_and_image_artifacts() {
@@ -4665,6 +4844,7 @@ fn model_transcript_materializes_text_and_image_artifacts() {
         "event-model-transcript-text",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-model-transcript-text".to_owned(),
                 turn_id: None,
@@ -4682,6 +4862,7 @@ fn model_transcript_materializes_text_and_image_artifacts() {
         "event-model-transcript-image",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-model-transcript-image".to_owned(),
                 turn_id: None,
@@ -4816,6 +4997,7 @@ fn model_transcript_rejects_binary_artifact_materialization() {
         "event-model-transcript-binary",
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-model-transcript-binary".to_owned(),
                 turn_id: None,
@@ -6104,6 +6286,90 @@ async fn runtime_delivery_orders_authoritative_and_transient_payloads() {
             ..
         }))
     ));
+}
+
+/// 模型重试只进入 Runtime 热广播，使用同一 Session 投递序号且拒绝非法尝试范围。
+#[tokio::test]
+async fn runtime_model_retry_delivery_is_typed_and_ordered() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let session = create(&root, "delivery-model-retry");
+    let mut subscription = session.subscribe().expect("Session 应订阅");
+    session
+        .publish_model_retry(RuntimeModelRetryScheduled {
+            turn_id: "retry-turn".to_owned(),
+            source_agent_id: "root".to_owned(),
+            attempt: 2,
+            max_attempts: 10,
+            delay_ms: 750,
+            occurred_at_ms: 1234,
+            message: "已脱敏摘要".to_owned(),
+        })
+        .expect("合法 retry 应发布");
+    let delivery = subscription.recv().await.expect("retry 应送达");
+    assert_eq!(delivery.delivery_sequence, 1);
+    assert!(matches!(
+        delivery.payload,
+        RuntimeEventPayload::ModelRetryScheduled(RuntimeModelRetryScheduled {
+            attempt: 2,
+            max_attempts: 10,
+            ..
+        })
+    ));
+    assert!(
+        session
+            .publish_model_retry(RuntimeModelRetryScheduled {
+                turn_id: "retry-turn".to_owned(),
+                source_agent_id: "root".to_owned(),
+                attempt: 0,
+                max_attempts: 10,
+                delay_ms: 750,
+                occurred_at_ms: 1234,
+                message: "invalid".to_owned(),
+            })
+            .is_err()
+    );
+}
+
+/// retry 热状态可供同一 Session 重同步读取，但冷打开的新 Publisher 不会伪造它。
+#[tokio::test]
+async fn runtime_model_retry_hot_state_is_not_cold_recovered() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let config = config(&root);
+    let session = RuntimeSession::create_session(
+        config.clone(),
+        manager_create_request(&root, "delivery-model-retry-cold"),
+    )
+    .expect("Session 应创建");
+    session
+        .publish_model_retry(RuntimeModelRetryScheduled {
+            turn_id: "retry-turn".to_owned(),
+            source_agent_id: "root".to_owned(),
+            attempt: 2,
+            max_attempts: 10,
+            delay_ms: 1_000,
+            occurred_at_ms: 2_000,
+            message: "热状态".to_owned(),
+        })
+        .expect("retry 应进入热 authority");
+    assert!(
+        session
+            .model_retry_for_turn("retry-turn", "root")
+            .expect("热 retry 应读取")
+            .is_some()
+    );
+    drop(session);
+    let OpenSessionResult::Ready(reopened) =
+        RuntimeSession::open_session(config, "delivery-model-retry-cold")
+            .expect("Session 应冷打开")
+    else {
+        panic!("热 retry 不应影响 Journal 冷打开");
+    };
+    assert!(
+        reopened
+            .model_retry_for_turn("retry-turn", "root")
+            .expect("冷 Publisher 应读取")
+            .is_none()
+    );
 }
 
 /// 验证下游拒绝临时事件时 Publisher 不会提前暴露该临时载荷。
@@ -7466,5 +7732,47 @@ fn hot_tool_settlement_respects_turn_filter() {
         write_a_tool.outcome.as_ref().map(|outcome| outcome.status),
         Some(ToolCompletionStatus::SideEffectUnknown),
         "副作用工具以未知副作用收账（语义与冷恢复一致）"
+    );
+}
+
+/// 工作流生命周期 JSON 使用独立预算；普通会话 50,000 项预算仍可保持收紧。
+#[test]
+fn workflow_payload_budget_is_independent_and_bounded() {
+    let mut state = SessionState::empty(SessionId::new("workflow-json-budget").unwrap());
+    let payload = serde_json::Value::Object(
+        (0..50_001)
+            .map(|index| (format!("field-{index}"), serde_json::Value::Null))
+            .collect(),
+    );
+    state.workflow_events.insert(
+        "workflow-run".to_owned(),
+        vec![WorkflowJournalEvent {
+            run_id: "workflow-run".to_owned(),
+            tool_call_id: "workflow-tool".to_owned(),
+            sequence: 1,
+            event_type: "node-started".to_owned(),
+            payload,
+            artifacts: Vec::new(),
+            actor_session_id: None,
+            launch_input_id: None,
+        }],
+    );
+    let items = crate::state_collection_items(&state);
+    assert_eq!(items.json_collection_items, 0);
+    assert_eq!(items.workflow_json_collection_items, 50_001);
+    let event_items = crate::state_collection_event_items(&SessionEvent::WorkflowEventCommitted {
+        record: state
+            .workflow_events
+            .get("workflow-run")
+            .and_then(|events| events.first())
+            .cloned()
+            .expect("工作流事件应存在"),
+    });
+    assert_eq!(event_items.json_collection_items, 0);
+    assert_eq!(event_items.workflow_json_collection_items, 50_001);
+    assert!(items.fits_limit(1), "调用方仍可将普通会话预算收紧到 1");
+    assert!(
+        items.workflow_json_collection_items <= MAX_WORKFLOW_JSON_COLLECTION_ITEMS,
+        "合法工作流 payload 应落在独立硬上限内"
     );
 }

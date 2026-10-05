@@ -46,6 +46,7 @@ pub use prompt_driver::{NeedsInputBehavior, PromptQueueDriver};
 pub use publisher::{
     RuntimeCatchUpDirective, RuntimeControlEvent, RuntimeEventDelivery, RuntimeEventLag,
     RuntimeEventPayload, RuntimeEventReceiveError, RuntimeEventSubscription,
+    RuntimeModelRetryScheduled,
 };
 pub use session_listing::{
     InvalidListCursor, SESSION_LIST_PAGE_SIZE, paginate_sessions, rfc3339_from_ms,
@@ -56,6 +57,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -76,15 +78,18 @@ use keencode_model::{
 };
 use keencode_resources::{
     ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactRef, ArtifactStore, ArtifactUse,
-    CompactionRecord, ContextCompressionTrigger, DynamicInputKind, GeneratedTitleRecord,
-    IdempotentAppendOutcome, JournalConfig, MAX_REPLAY_PAGE_RECORDS, MailboxMessage,
-    MailboxMessageId, MessageImageSource, MessagePart, MessageRole, OnErrorHookInvocation,
-    PersistedToolResult, PlanState, ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId,
-    ResourceError, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId,
-    SessionEventRecord, SessionId, SessionJournal, SessionLease, SessionLeaseAcquire,
-    SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus, TitleSource,
-    ToolCompletionStatus, ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment, TurnId,
-    TurnStatus, TurnStopReason, reduce_record, side_effect_unknown_result,
+    AssistantFeedback, COMMAND_RECEIPT_SCHEMA, CommandReceipt, CommandReceiptStatus,
+    CompactionRecord, ContextCompressionTrigger, DynamicInputKind, FollowupMode,
+    GeneratedTitleRecord, IdempotentAppendOutcome, JournalConfig, MAX_REPLAY_PAGE_RECORDS,
+    MAX_WORKFLOW_JSON_COLLECTION_ITEMS, MailboxMessage, MailboxMessageId, MessageImageSource,
+    MessagePart, MessageRole, OnErrorHookInvocation, PersistedToolResult, PlanState,
+    ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId, ResourceError,
+    SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
+    SessionId, SessionInputCompletion, SessionInputDispatch, SessionInputKind,
+    SessionInputQueueItem, SessionInputQueueState, SessionJournal, SessionLease,
+    SessionLeaseAcquire, SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus,
+    TitleSource, ToolCompletionStatus, ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment,
+    TurnId, TurnStatus, TurnStopReason, reduce_record, side_effect_unknown_result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -438,9 +443,23 @@ pub enum RuntimeError {
     /// Session 控制操作缺少可跨响应丢失重试的受信请求标识。
     #[error("Session 控制操作标识无效")]
     InvalidControlOperation,
+    /// 命令收据身份、payload 摘要或 ACK 不满足持久化边界。
+    #[error("命令收据参数无效")]
+    InvalidCommandReceipt,
     /// 相同 Session 控制操作标识已经绑定到不同方法或正文。
     #[error("Session 控制操作标识与既有正文冲突")]
     ControlOperationConflict,
+    /// 反馈命令基于已经变化的 Transcript revision，拒绝覆盖新投影。
+    #[error("Session Transcript revision 已变化（期望 {expected}，当前 {current}）")]
+    StaleTranscriptRevision {
+        /// 命令读取到的 Transcript revision。
+        expected: u64,
+        /// 控制锁内观察到的最新 Transcript revision。
+        current: u64,
+    },
+    /// 反馈命令基于已经变化的项目根/log epoch，拒绝写入旧窗口。
+    #[error("Session project root 已变化，反馈命令基于旧 log epoch")]
+    StaleProjectRoot,
     /// 标题生成缓存的输入摘要或标题正文不满足持久化约束。
     #[error("标题生成缓存参数无效")]
     InvalidTitleGeneration,
@@ -490,6 +509,15 @@ pub enum RuntimeError {
 pub struct RuntimeSession {
     /// 允许绑定 Runner、控制操作与快照句柄共享同一独占资源所有权。
     inner: Arc<RuntimeSessionInner>,
+}
+
+/// Runtime 对命令收据 admission 的原子裁决。
+#[derive(Clone, Debug, PartialEq)]
+pub enum CommandReceiptAdmission {
+    /// 本次调用成功写入 `Admitted`，调用方拥有唯一执行权。
+    Execute(CommandReceipt),
+    /// Journal 已有相同命令身份；调用方不得再次执行副作用。
+    Existing(CommandReceipt),
 }
 
 /// RuntimeSession 中必须共同存活且共享同一 Session 身份的资源。
@@ -893,7 +921,7 @@ struct ToolRoundPersistenceBudget {
     state_items: StateCollectionItems,
 }
 
-/// 与资源层 `max_state_collection_items` 一一对应的十九维状态集合计量。
+/// 与资源层集合校验一一对应的状态集合计量；工作流 JSON payload 使用独立上限。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct StateCollectionItems {
     /// Turn 状态映射项数。
@@ -926,8 +954,13 @@ struct StateCollectionItems {
     worktrees: usize,
     /// 独立标题生成结果缓存项数。
     generated_titles: usize,
+    /// 工作流运行事件与其产物引用占用独立的集合预算。
+    workflow_events: usize,
+    workflow_artifacts: usize,
     /// 动态输入权威消费回执项数。
     dynamic_input_receipts: usize,
+    /// 持久后续输入队列项数。
+    input_queue_items: usize,
     /// 全部原始消息的内容块项数。
     message_parts: usize,
     /// Transcript 内 ToolResult 的结果内容项数。
@@ -938,6 +971,8 @@ struct StateCollectionItems {
     terminal_output_artifacts: usize,
     /// 工具参数与推理续传 JSON 的递归集合成员项数。
     json_collection_items: usize,
+    /// 工作流 Journal payload 的递归集合成员项数，使用独立的更高固定上限。
+    workflow_json_collection_items: usize,
 }
 
 /// Runtime Round reservation 的三种显式结束方式。
@@ -973,9 +1008,16 @@ impl StateCollectionItems {
             mailbox: self.mailbox.saturating_add(other.mailbox),
             worktrees: self.worktrees.saturating_add(other.worktrees),
             generated_titles: self.generated_titles.saturating_add(other.generated_titles),
+            workflow_events: self.workflow_events.saturating_add(other.workflow_events),
+            workflow_artifacts: self
+                .workflow_artifacts
+                .saturating_add(other.workflow_artifacts),
             dynamic_input_receipts: self
                 .dynamic_input_receipts
                 .saturating_add(other.dynamic_input_receipts),
+            input_queue_items: self
+                .input_queue_items
+                .saturating_add(other.input_queue_items),
             message_parts: self.message_parts.saturating_add(other.message_parts),
             message_tool_result_content: self
                 .message_tool_result_content
@@ -989,6 +1031,9 @@ impl StateCollectionItems {
             json_collection_items: self
                 .json_collection_items
                 .saturating_add(other.json_collection_items),
+            workflow_json_collection_items: self
+                .workflow_json_collection_items
+                .saturating_add(other.workflow_json_collection_items),
         }
     }
 
@@ -1010,7 +1055,10 @@ impl StateCollectionItems {
             self.mailbox,
             self.worktrees,
             self.generated_titles,
+            self.workflow_events,
+            self.workflow_artifacts,
             self.dynamic_input_receipts,
+            self.input_queue_items,
             self.message_parts,
             self.message_tool_result_content,
             self.tool_outcome_result_content,
@@ -1019,6 +1067,7 @@ impl StateCollectionItems {
         ]
         .into_iter()
         .all(|actual| actual <= limit)
+            && self.workflow_json_collection_items <= MAX_WORKFLOW_JSON_COLLECTION_ITEMS
     }
 
     /// 从剩余预算原子扣除一个已确认事件的实际集合增长，任一维度不足则不修改。
@@ -1057,9 +1106,21 @@ impl StateCollectionItems {
                 .generated_titles
                 .checked_sub(consumed.generated_titles)
                 .ok_or(())?,
+            workflow_events: self
+                .workflow_events
+                .checked_sub(consumed.workflow_events)
+                .ok_or(())?,
+            workflow_artifacts: self
+                .workflow_artifacts
+                .checked_sub(consumed.workflow_artifacts)
+                .ok_or(())?,
             dynamic_input_receipts: self
                 .dynamic_input_receipts
                 .checked_sub(consumed.dynamic_input_receipts)
+                .ok_or(())?,
+            input_queue_items: self
+                .input_queue_items
+                .checked_sub(consumed.input_queue_items)
                 .ok_or(())?,
             message_parts: self
                 .message_parts
@@ -1080,6 +1141,10 @@ impl StateCollectionItems {
             json_collection_items: self
                 .json_collection_items
                 .checked_sub(consumed.json_collection_items)
+                .ok_or(())?,
+            workflow_json_collection_items: self
+                .workflow_json_collection_items
+                .checked_sub(consumed.workflow_json_collection_items)
                 .ok_or(())?,
         };
         *self = remaining;
@@ -1160,6 +1225,15 @@ impl RuntimeSession {
         self.inner.artifacts.session_id()
     }
 
+    /// 返回父会话 ArtifactStore 的当前容量快照。
+    ///
+    /// 这是工作流启动/恢复前的 fail-closed 预检，不是跨进程 reservation；快照
+    /// 返回后其他已持有同一 Session lease 的运行仍可能消耗槽位，最终写入必须再次
+    /// 经过 ArtifactStore 自身的容量门禁。
+    pub fn artifact_capacity(&self) -> Result<keencode_resources::ArtifactCapacity, RuntimeError> {
+        self.inner.artifacts.capacity().map_err(Into::into)
+    }
+
     /// 在当前独占 Session 的 ArtifactStore 中原子保存一份应用数据产物。
     ///
     /// 该入口供 Plan 等 Runtime 内部产物复用同一内容寻址、容量和冷恢复边界；
@@ -1172,6 +1246,131 @@ impl RuntimeSession {
         self.inner
             .artifacts
             .put(bytes, media_type)
+            .map_err(Into::into)
+    }
+
+    /// 工作流宿主只通过父会话的控制提交出口写事实，重试使用稳定 operationId 去重。
+    pub fn commit_workflow_event(
+        &self,
+        operation_id: &str,
+        record: keencode_resources::WorkflowJournalEvent,
+    ) -> Result<SessionState, RuntimeError> {
+        self.commit_control_event_in_domain(
+            "keencode/workflow/event",
+            operation_id,
+            SessionEvent::WorkflowEventCommitted { record },
+        )
+    }
+
+    /// 并行工作流在唯一 Session 控制锁内分配序号和提交，调用方不得先读尾序号。
+    /// 稳定 operationId 的重试比较完整正文，仅归一序号；不一致重试按恢复错误拒绝。
+    pub fn append_workflow_event(
+        &self,
+        operation_id: &str,
+        mut record: keencode_resources::WorkflowJournalEvent,
+    ) -> Result<keencode_resources::WorkflowJournalEvent, RuntimeError> {
+        validate_control_operation_id(operation_id)?;
+        let event_id = runtime_control_event_id_in_domain(
+            self.session_id(),
+            "keencode/workflow/event",
+            operation_id,
+        )?;
+        let mut control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        if let Some(committed) = find_committed_event(&self.inner.journal, &event_id)? {
+            let SessionEvent::WorkflowEventCommitted { record: existing } = committed.event else {
+                return Err(RuntimeError::RecoveryRequired);
+            };
+            record.sequence = existing.sequence;
+            if record != existing {
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            // 复用既有事件提交路径补齐可能尚未完成的 durability / publisher 屏障。
+            commit_runtime_lifecycle_event(
+                &self.inner,
+                &mut control,
+                event_id,
+                SessionEvent::WorkflowEventCommitted {
+                    record: existing.clone(),
+                },
+                true,
+            )?;
+            return Ok(existing);
+        }
+        let state = self.inner.journal.state()?;
+        record.sequence = state
+            .workflow_events
+            .get(&record.run_id)
+            .and_then(|events| events.last())
+            .map_or(Ok(1), |last| {
+                last.sequence
+                    .checked_add(1)
+                    .ok_or(RuntimeError::InvalidControlOperation)
+            })?;
+        commit_runtime_lifecycle_event(
+            &self.inner,
+            &mut control,
+            event_id,
+            SessionEvent::WorkflowEventCommitted {
+                record: record.clone(),
+            },
+            true,
+        )?;
+        Ok(record)
+    }
+
+    /// 读取当前 Session 已确认 Plan 的产物正文；调用方不能指定任意 Artifact ID。
+    pub fn read_plan_artifact(&self) -> Result<Option<Vec<u8>>, RuntimeError> {
+        self.inner
+            .journal
+            .state()?
+            .plan
+            .plan_artifact
+            .as_ref()
+            .map(|reference| self.inner.artifacts.read_use(reference).map_err(Into::into))
+            .transpose()
+    }
+
+    /// 工作流执行者的身份来自其自己的权威 Journal，冷启动后也不能恢复创建子 Agent 的能力。
+    pub fn is_workflow_actor(&self) -> Result<bool, RuntimeError> {
+        self.read_state(|state| {
+            state
+                .workflow_events
+                .values()
+                .flatten()
+                .any(|event| event.event_type == "actor-bound")
+        })
+    }
+
+    /// 只允许读取当前父会话、指定运行已经确认引用的产物，再由 ArtifactStore 校验字节。
+    pub fn read_workflow_artifact(
+        &self,
+        run_id: &str,
+        artifact_id: &ArtifactId,
+    ) -> Result<Vec<u8>, RuntimeError> {
+        let reference = self
+            .read_state(|state| {
+                state
+                    .workflow_events
+                    .get(run_id)
+                    .and_then(|events| {
+                        events
+                            .iter()
+                            .flat_map(|event| &event.artifacts)
+                            .find(|reference| &reference.artifact_id == artifact_id)
+                    })
+                    .cloned()
+            })?
+            .ok_or(RuntimeError::InvalidControlOperation)?;
+        self.inner
+            .artifacts
+            .read_use(&reference)
             .map_err(Into::into)
     }
 
@@ -1243,6 +1442,19 @@ impl RuntimeSession {
     /// 从可选 Journal sequence 独占游标之后读取一页有界类型化权威事件。
     pub fn history_index(&self) -> Result<keencode_resources::SessionHistoryIndex, RuntimeError> {
         Ok(self.inner.journal.history_index()?)
+    }
+
+    /// 从已有 Journal 历史索引读取每个 Turn 终态的物理提交顺序。
+    ///
+    /// `TurnState` 只保存生命周期时间，历史索引在 Journal 追加/恢复时已经同步维护；
+    /// 桌面投影读取这份索引即可避免每次 snapshot 重放完整日志。
+    pub fn turn_terminal_sequences(&self) -> Result<BTreeMap<String, (u64, u32)>, RuntimeError> {
+        Ok(self
+            .history_index()?
+            .terminal_sequences
+            .into_iter()
+            .map(|(turn_id, sequence)| (turn_id.as_str().to_owned(), sequence))
+            .collect())
     }
 
     /// 按物理事件游标读取一页。
@@ -1397,6 +1609,55 @@ impl RuntimeSession {
         )
     }
 
+    /// 在同一控制锁内核对生成时的标题与来源，再写入自动标题。
+    /// 网络等待期间的手工改名、其他自动结果或关闭都不能被迟到结果覆盖。
+    pub fn rename_generated_title(
+        &self,
+        operation_id: &str,
+        expected_title: &str,
+        expected_source: TitleSource,
+        title: &str,
+    ) -> Result<bool, RuntimeError> {
+        validate_control_operation_id(operation_id)?;
+        let event_id = runtime_control_event_id(self.session_id(), operation_id)?;
+        let mut control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        if let Some(record) = find_committed_event(&self.inner.journal, &event_id)? {
+            return if matches!(&record.event, SessionEvent::SessionRenamed { title: saved, source: Some(TitleSource::Automatic) } if saved == title)
+            {
+                Ok(false)
+            } else {
+                Err(RuntimeError::ControlOperationConflict)
+            };
+        }
+        let state = self.inner.journal.state()?;
+        if !matches!(
+            expected_source,
+            TitleSource::Unspecified | TitleSource::MessagePrefix
+        ) || state.title != expected_title
+            || state.title_source != expected_source
+        {
+            return Ok(false);
+        }
+        commit_runtime_lifecycle_event(
+            &self.inner,
+            &mut control,
+            event_id,
+            SessionEvent::SessionRenamed {
+                title: title.to_owned(),
+                source: Some(TitleSource::Automatic),
+            },
+            true,
+        )?;
+        Ok(true)
+    }
+
     /// 更新用户会话偏好（置顶/归档）并返回提交后的权威状态。
     pub fn set_preference(
         &self,
@@ -1410,6 +1671,50 @@ impl RuntimeSession {
         )
     }
 
+    /// 以同一个控制锁原子保存 Assistant 行反馈，避免 CAS 检查和 Journal 追加之间
+    /// 被并发 Transcript 改写；反馈只进入 Session 投影元数据，不会送入模型。
+    pub fn set_assistant_feedback(
+        &self,
+        operation_id: &str,
+        row_id: u64,
+        entity_id: &str,
+        feedback: Option<AssistantFeedback>,
+        expected_transcript_revision: u64,
+        expected_project_root: &str,
+    ) -> Result<SessionState, RuntimeError> {
+        validate_control_operation_id(operation_id)?;
+        let event_id = runtime_control_event_id(self.session_id(), operation_id)?;
+        let event = SessionEvent::AssistantFeedbackSet {
+            row_id,
+            entity_id: entity_id.to_owned(),
+            feedback,
+        };
+        let mut control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        // 重试同一个 operationId 必须先复用既有事件；否则其原始 revision 已可能
+        // 被后续消息推进，会把本应返回 duplicate 的请求误报为 stale。
+        if find_committed_event(&self.inner.journal, &event_id)?.is_none() {
+            let state = self.inner.journal.state()?;
+            if state.transcript_revision != expected_transcript_revision {
+                return Err(RuntimeError::StaleTranscriptRevision {
+                    expected: expected_transcript_revision,
+                    current: state.transcript_revision,
+                });
+            }
+            if state.project_root != expected_project_root {
+                return Err(RuntimeError::StaleProjectRoot);
+            }
+        }
+        commit_runtime_lifecycle_event(&self.inner, &mut control, event_id, event, true)?;
+        self.inner.journal.state().map_err(RuntimeError::from)
+    }
+
     /// 原子替换 Session 的只读 Plan 状态并返回提交后的权威状态。
     pub fn set_plan(
         &self,
@@ -1417,6 +1722,412 @@ impl RuntimeSession {
         plan: PlanState,
     ) -> Result<SessionState, RuntimeError> {
         self.commit_control_event(operation_id, SessionEvent::PlanChanged { plan })
+    }
+
+    /// 持久切换 Session 的后续输入模式，并以控制操作域提供跨重启幂等。
+    pub fn set_followup_mode(
+        &self,
+        operation_id: &str,
+        mode: FollowupMode,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("setFollowupMode", mode))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        self.commit_control_event_in_domain(
+            "input-queue",
+            operation_id,
+            SessionEvent::FollowupModeChanged {
+                operation_id: operation_id.to_owned(),
+                operation_payload_sha256,
+                mode,
+            },
+        )
+    }
+
+    /// 读取当前 Session 的持久后续输入模式和队列状态。
+    pub fn input_queue_state(
+        &self,
+    ) -> Result<(FollowupMode, SessionInputQueueState), RuntimeError> {
+        self.inner
+            .journal
+            .read_state(|state| (state.followup_mode, state.input_queue.clone()))
+            .map_err(RuntimeError::from)
+    }
+
+    /// 将一条用户后续输入追加到权威队列；admission 序号只在 Journal 状态中分配。
+    pub fn enqueue_input(
+        &self,
+        operation_id: &str,
+        mut item: SessionInputQueueItem,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = input_queue_payload_sha256(&item)?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        // 自动排放可能已经用独立 drain operation 完成了该 admission；保留
+        // sourceCommandId 收据，令原始 sendText 丢 ACK 后重试不重复入队。
+        if let Some(completion) = queue
+            .completions
+            .iter()
+            .find(|completion| completion.source_command_id == item.source_command_id)
+        {
+            if completion.source_input_payload_sha256.as_deref()
+                == Some(operation_payload_sha256.as_str())
+            {
+                return Ok(self.inner.journal.state()?);
+            }
+            return Err(RuntimeError::ControlOperationConflict);
+        }
+        if queue.items.iter().any(|existing| {
+            existing.queue_item_id == item.queue_item_id
+                || existing.source_command_id == item.source_command_id
+        }) || queue.completions.iter().any(|existing| {
+            existing.queue_item_id == item.queue_item_id
+                || existing.source_command_id == item.source_command_id
+        }) {
+            return Err(RuntimeError::ControlOperationConflict);
+        }
+        item.admission_seq = queue.next_admission_seq;
+        queue.next_admission_seq = queue
+            .next_admission_seq
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidControlOperation)?;
+        queue.items.push(item);
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 修改队列中尚未保留或提升的输入正文。
+    pub fn edit_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+        new_text: String,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("edit", queue_item_id, &new_text))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(item) = queue
+            .items
+            .iter_mut()
+            .find(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        if item.dispatch != SessionInputDispatch::Queued || new_text.trim().is_empty() {
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        item.text = new_text;
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 在队列中把一项移动到另一项之前；`None` 表示移动到队尾。
+    pub fn reorder_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+        before_queue_item_id: Option<&str>,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 =
+            canonical_sha256(&("reorder", queue_item_id, before_queue_item_id))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(index) = queue
+            .items
+            .iter()
+            .position(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        if queue.items[index].dispatch != SessionInputDispatch::Queued {
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        let item = queue.items.remove(index);
+        let insertion = before_queue_item_id
+            .map(|before| {
+                queue
+                    .items
+                    .iter()
+                    .position(|candidate| candidate.queue_item_id == before)
+                    .ok_or(RuntimeError::InvalidControlOperation)
+            })
+            .transpose()?
+            .unwrap_or(queue.items.len());
+        queue.items.insert(insertion, item);
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 删除一项仍处于队列等待状态的输入。
+    pub fn delete_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("delete", queue_item_id))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(index) = queue
+            .items
+            .iter()
+            .position(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        if queue.items[index].dispatch != SessionInputDispatch::Queued {
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        queue.items.remove(index);
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 持久切换空闲时是否自动消费队列。
+    pub fn set_input_queue_auto_drain(
+        &self,
+        operation_id: &str,
+        auto_drain: bool,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("setAutoDrain", auto_drain))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        queue.auto_drain = auto_drain;
+        queue.pause_reason = (!auto_drain).then(|| "manual".to_owned());
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 把指定队列项保留给显式 `sendQueuedNow`，避免与自动排放并发抢同一项。
+    pub fn reserve_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+        target_turn_id: &str,
+    ) -> Result<(SessionState, SessionInputQueueItem), RuntimeError> {
+        let target_turn_id = TurnId::new(target_turn_id.to_owned())
+            .map_err(|_| RuntimeError::InvalidControlOperation)?;
+        let operation_payload_sha256 =
+            canonical_sha256(&("reserve", queue_item_id, &target_turn_id))?;
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(item) = queue
+            .items
+            .iter_mut()
+            .find(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        // 当前项已保留时，只能重放创建该 reservation 的那次尝试；release
+        // 会把 reserve_attempt 保留在项上，下一次消费自然取得新的操作身份。
+        if item.dispatch != SessionInputDispatch::Queued {
+            let previous_attempt = item.reserve_attempt.checked_sub(1);
+            if item.promoted_turn_id.as_ref() == Some(&target_turn_id)
+                && let Some(previous_attempt) = previous_attempt
+            {
+                let replay_operation_id = input_queue_attempt_operation_id(
+                    "reserve",
+                    operation_id,
+                    queue_item_id,
+                    previous_attempt,
+                )?;
+                if let Some(state) =
+                    self.committed_input_operation(&replay_operation_id, &operation_payload_sha256)?
+                {
+                    let item = state
+                        .input_queue
+                        .items
+                        .iter()
+                        .find(|item| item.queue_item_id == queue_item_id)
+                        .cloned()
+                        .ok_or(RuntimeError::InvalidControlOperation)?;
+                    return Ok((state, item));
+                }
+            }
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        let attempt = item.reserve_attempt;
+        let next_attempt = attempt
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidControlOperation)?;
+        let effective_operation_id =
+            input_queue_attempt_operation_id("reserve", operation_id, queue_item_id, attempt)?;
+        item.dispatch = SessionInputDispatch::Reserved;
+        item.promoted_turn_id = Some(target_turn_id);
+        item.reserve_attempt = next_attempt;
+        let reserved = item.clone();
+        let state =
+            self.commit_input_queue(&effective_operation_id, &operation_payload_sha256, queue)?;
+        Ok((state, reserved))
+    }
+
+    /// 在队列项已经成功启动对应 Turn 后从权威队列移除它。
+    pub fn complete_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("complete", queue_item_id))?;
+        if let Some(state) =
+            self.committed_input_operation(operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(index) = queue
+            .items
+            .iter()
+            .position(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        if !matches!(
+            queue.items[index].dispatch,
+            SessionInputDispatch::Reserved | SessionInputDispatch::Promoting
+        ) {
+            return Err(RuntimeError::InvalidControlOperation);
+        }
+        let completed = queue.items.remove(index);
+        let completed_at_unix_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+            .unwrap_or(completed.admitted_at_unix_ms);
+        let source_input_payload_sha256 = input_queue_payload_sha256(&completed)?;
+        queue.completions.push(SessionInputCompletion {
+            queue_item_id: completed.queue_item_id,
+            source_command_id: completed.source_command_id,
+            source_input_payload_sha256: Some(source_input_payload_sha256),
+            completion_operation_id: operation_id.to_owned(),
+            admitted_delivery: completed.admitted_delivery,
+            completed_at_unix_ms,
+        });
+        const MAX_INPUT_COMPLETIONS: usize = 512;
+        if queue.completions.len() > MAX_INPUT_COMPLETIONS {
+            let excess = queue.completions.len() - MAX_INPUT_COMPLETIONS;
+            queue.completions.drain(..excess);
+        }
+        self.commit_input_queue(operation_id, &operation_payload_sha256, queue)
+    }
+
+    /// 队列项启动失败时恢复其可消费状态，使用独立 operationId 保留审计边界。
+    pub fn release_queued_input(
+        &self,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<SessionState, RuntimeError> {
+        let operation_payload_sha256 = canonical_sha256(&("release", queue_item_id))?;
+        let mut queue = self
+            .inner
+            .journal
+            .read_state(|state| state.input_queue.clone())?;
+        let Some(item) = queue
+            .items
+            .iter_mut()
+            .find(|item| item.queue_item_id == queue_item_id)
+        else {
+            return Err(RuntimeError::InvalidControlOperation);
+        };
+        if item.dispatch == SessionInputDispatch::Queued {
+            return Ok(self.inner.journal.state()?);
+        }
+        let effective_operation_id = input_queue_attempt_operation_id(
+            "release",
+            operation_id,
+            queue_item_id,
+            item.reserve_attempt,
+        )?;
+        if let Some(state) =
+            self.committed_input_operation(&effective_operation_id, &operation_payload_sha256)?
+        {
+            return Ok(state);
+        }
+        item.dispatch = SessionInputDispatch::Queued;
+        item.promoted_turn_id = None;
+        item.reserve_attempt = item
+            .reserve_attempt
+            .checked_add(1)
+            .ok_or(RuntimeError::InvalidControlOperation)?;
+        self.commit_input_queue(&effective_operation_id, &operation_payload_sha256, queue)
+    }
+
+    fn commit_input_queue(
+        &self,
+        operation_id: &str,
+        operation_payload_sha256: &str,
+        queue: SessionInputQueueState,
+    ) -> Result<SessionState, RuntimeError> {
+        self.commit_control_event_in_domain(
+            "input-queue",
+            operation_id,
+            SessionEvent::InputQueueChanged {
+                operation_id: operation_id.to_owned(),
+                operation_payload_sha256: operation_payload_sha256.to_owned(),
+                queue,
+            },
+        )
+    }
+
+    fn committed_input_operation(
+        &self,
+        operation_id: &str,
+        operation_payload_sha256: &str,
+    ) -> Result<Option<SessionState>, RuntimeError> {
+        let Some(record) = self.committed_control_event_in_domain("input-queue", operation_id)?
+        else {
+            return Ok(None);
+        };
+        let matches = match record.event {
+            SessionEvent::FollowupModeChanged {
+                operation_payload_sha256: existing,
+                ..
+            }
+            | SessionEvent::InputQueueChanged {
+                operation_payload_sha256: existing,
+                ..
+            } => existing == operation_payload_sha256,
+            _ => false,
+        };
+        if !matches {
+            return Err(RuntimeError::ControlOperationConflict);
+        }
+        self.inner.journal.state().map(Some).map_err(Into::into)
     }
 
     /// 获取计划沙箱与权威 `PlanChanged` 事件共用的进程内提交锁。
@@ -1546,6 +2257,131 @@ impl RuntimeSession {
         find_committed_event(&self.inner.journal, &event_id)
     }
 
+    /// 原子登记一条桌面命令收据，并返回唯一执行权或既有持久结果。
+    ///
+    /// admission 与 Journal append 共用 Runtime 控制锁。这样同一进程内的
+    /// 并发重连最多一个调用者会得到 `Execute`，其他调用者只能观察 `Existing`；
+    /// 连接关闭不会影响这条业务收据。
+    pub fn admit_command_receipt(
+        &self,
+        scope: &str,
+        command_id: &str,
+        command_type: &str,
+        payload_sha256: &str,
+    ) -> Result<CommandReceiptAdmission, RuntimeError> {
+        let candidate = new_command_receipt(
+            scope,
+            command_id,
+            command_type,
+            payload_sha256,
+            CommandReceiptStatus::Admitted,
+        )?;
+        let key = candidate.storage_key();
+        let mut control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        let state = self.inner.journal.state()?;
+        if let Some(existing) = state.command_receipts.get(&key) {
+            if !existing.same_identity(&candidate) {
+                return Err(RuntimeError::ControlOperationConflict);
+            }
+            return Ok(CommandReceiptAdmission::Existing(existing.clone()));
+        }
+
+        let event_id = command_receipt_event_id(self.session_id(), &candidate, "admitted")?;
+        commit_runtime_lifecycle_event(
+            &self.inner,
+            &mut control,
+            event_id,
+            SessionEvent::CommandReceiptCommitted { receipt: candidate },
+            true,
+        )?;
+        let state = self.inner.journal.state()?;
+        let receipt = state
+            .command_receipts
+            .get(&key)
+            .cloned()
+            .ok_or(RuntimeError::RecoveryRequired)?;
+        Ok(CommandReceiptAdmission::Execute(receipt))
+    }
+
+    /// 记录命令的可证明终态；未知副作用也必须以 `Unknown` 持久化并阻止重放。
+    pub fn finish_command_receipt(
+        &self,
+        scope: &str,
+        command_id: &str,
+        command_type: &str,
+        payload_sha256: &str,
+        status: CommandReceiptStatus,
+    ) -> Result<CommandReceipt, RuntimeError> {
+        if !status.is_terminal() {
+            return Err(RuntimeError::InvalidCommandReceipt);
+        }
+        let candidate =
+            new_command_receipt(scope, command_id, command_type, payload_sha256, status)?;
+        let key = candidate.storage_key();
+        let mut control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        let state = self.inner.journal.state()?;
+        let Some(existing) = state.command_receipts.get(&key) else {
+            return Err(RuntimeError::ControlOperationConflict);
+        };
+        if !existing.same_identity(&candidate) {
+            return Err(RuntimeError::ControlOperationConflict);
+        }
+        if existing.status.is_terminal() {
+            return if existing.status == candidate.status {
+                Ok(existing.clone())
+            } else {
+                Err(RuntimeError::ControlOperationConflict)
+            };
+        }
+
+        let event_id = command_receipt_event_id(self.session_id(), &candidate, "terminal")?;
+        commit_runtime_lifecycle_event(
+            &self.inner,
+            &mut control,
+            event_id,
+            SessionEvent::CommandReceiptCommitted { receipt: candidate },
+            true,
+        )?;
+        self.inner
+            .journal
+            .state()?
+            .command_receipts
+            .get(&key)
+            .cloned()
+            .ok_or(RuntimeError::RecoveryRequired)
+    }
+
+    /// 从权威 Journal 查询一条命令收据，供 ACK 丢失后的重连恢复使用。
+    pub fn command_receipt(
+        &self,
+        scope: &str,
+        command_id: &str,
+    ) -> Result<Option<CommandReceipt>, RuntimeError> {
+        validate_command_receipt_identity(scope, command_id)?;
+        let key = format!("{scope}\0{command_id}");
+        Ok(self
+            .inner
+            .journal
+            .state()?
+            .command_receipts
+            .get(&key)
+            .cloned())
+    }
+
     /// 原子保存一次成功标题生成结果；相同 operationId 和输入只会保留一个结果。
     pub fn cache_generated_title(
         &self,
@@ -1611,6 +2447,58 @@ impl RuntimeSession {
         let subscription = self.inner.publisher.subscribe();
         drop(control);
         subscription
+    }
+
+    /// 将当前已由 Provider retry policy 确认的重试安排发布到本 Session 热事件世代。
+    ///
+    /// 该事件只用于在线投影，不能在冷恢复或新的订阅首帧中伪造为持久事实；
+    /// 终态权威事件仍由同一 Session Journal 负责清除 UI 状态。
+    pub fn publish_model_retry(
+        &self,
+        event: RuntimeModelRetryScheduled,
+    ) -> Result<(), RuntimeError> {
+        let control = self
+            .inner
+            .control
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if control.lifecycle != RuntimeSessionLifecycle::Open {
+            return Err(RuntimeError::SessionClosed);
+        }
+        self.inner.publisher.publish_model_retry(event)
+    }
+
+    /// 读取当前热 Runtime 中仍有效的指定 Turn retry；冷恢复与新 Publisher 默认为空。
+    pub fn model_retry_for_turn(
+        &self,
+        turn_id: &str,
+        source_agent_id: &str,
+    ) -> Result<Option<RuntimeModelRetryScheduled>, RuntimeError> {
+        self.inner
+            .publisher
+            .model_retry_for_turn(turn_id, source_agent_id)
+    }
+
+    /// 读取当前 Agent 仍在运行的 Turn 上的热 retry；无活动 Turn 或冷 Publisher 返回空。
+    pub fn model_retry_for_active_agent(
+        &self,
+        source_agent_id: &str,
+    ) -> Result<Option<RuntimeModelRetryScheduled>, RuntimeError> {
+        let candidate = self.read_state(|state| {
+            state
+                .turns
+                .values()
+                .filter(|turn| {
+                    turn.status == TurnStatus::Running
+                        && turn.source_agent_id.as_str() == source_agent_id
+                })
+                .max_by_key(|turn| (turn.started_at_unix_ms, turn.turn_id.as_str()))
+                .map(|turn| (turn.turn_id.clone(), turn.source_agent_id.clone()))
+        })?;
+        let Some((turn_id, source_agent_id)) = candidate else {
+            return Ok(None);
+        };
+        self.model_retry_for_turn(turn_id.as_str(), source_agent_id.as_str())
     }
 
     /// 返回当前共享句柄是否仍接受 Session 写操作。
@@ -1960,12 +2848,86 @@ impl RuntimeSession {
         recover_tool_outcomes(&self.inner)?;
         recover_tool_transcript(&self.inner)?;
         recover_turns(&self.inner)?;
+        self.recover_pending_input_queue()?;
         recover_pending_sub_agents(&self.inner)?;
+        Ok(())
+    }
+
+    /// 冷恢复队列消费屏障：已存在对应 Turn 的保留项收口移除，否则恢复为 queued。
+    ///
+    /// `sendQueuedNow` 先写入 reserved 再启动 Turn。进程可能在两步之间退出，
+    /// 因此不能把 reserved 当作成功或直接丢弃；通过稳定的 sourceCommandId 查找
+    /// Turn 后作出唯一裁决，恢复动作本身也使用 Journal 控制事件幂等。
+    fn recover_pending_input_queue(&self) -> Result<(), RuntimeError> {
+        let state = self.inner.journal.state()?;
+        let pending = state
+            .input_queue
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item.dispatch,
+                    SessionInputDispatch::Reserved | SessionInputDispatch::Promoting
+                )
+            })
+            .map(|item| {
+                let operation_digest = canonical_sha256(&(
+                    "recover-input",
+                    &item.queue_item_id,
+                    &item.promoted_turn_id,
+                ))
+                .unwrap_or_else(|_| item.queue_item_id.clone());
+                let operation_id = format!(
+                    "recover-input-{}",
+                    &operation_digest[..operation_digest.len().min(32)]
+                );
+                let turn_exists = item.promoted_turn_id.as_ref().is_some_and(|turn_id| {
+                    state.turns.get(turn_id).is_some_and(|turn| {
+                        turn.turn_id == *turn_id
+                            && turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
+                            && turn.root_turn_id == turn.turn_id
+                            && turn.parent_turn_id.is_none()
+                    })
+                });
+                // Compact 的维护 Turn 只证明“已启动”并不足以确认队列消费；必须
+                // 同时存在同一 Turn 的 ContextCompactionApplied，避免进程在压缩
+                // 前崩溃时把输入误判为已发送。
+                let compaction_succeeded = item.kind != SessionInputKind::Compact
+                    || item.promoted_turn_id.as_ref().is_some_and(|turn_id| {
+                        state
+                            .applied_compactions()
+                            .any(|record| &record.turn_id == turn_id)
+                    });
+                (
+                    item.queue_item_id.clone(),
+                    operation_id,
+                    turn_exists && compaction_succeeded,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (queue_item_id, operation_id, turn_exists) in pending {
+            if turn_exists {
+                self.complete_queued_input(&operation_id, &queue_item_id)?;
+            } else {
+                self.release_queued_input(&operation_id, &queue_item_id)?;
+            }
+        }
         Ok(())
     }
 }
 
 impl RuntimeAgentRunner {
+    /// 执行一次不依赖模型回合的受控工具调用。
+    ///
+    /// Workflow 等宿主通过此入口复用 AgentRunner 的输入 Schema、Hook、PlanGuard、
+    /// 取消、超时和输出归一边界；该调用不会伪造模型请求或 ModelRound。
+    pub async fn execute_controlled_tool(
+        &self,
+        request: keencode_agent::ControlledToolRequest,
+    ) -> Result<keencode_agent::ControlledToolResult, keencode_agent::AgentRunError> {
+        self.runner.execute_controlled_tool(request).await
+    }
+
     /// 执行当前 Session Journal 中所有尚未确认的 OnError Hook 调用。
     ///
     /// 调用保持幂等：同一 `invocation_id` 在 receipt 确认前只会被当前进程领取一次；
@@ -2491,6 +3453,200 @@ impl RuntimeAgentRunner {
         .await
     }
 
+    /// 在一个独立的真实 Runtime Turn 内执行手动上下文压缩。
+    ///
+    /// 手动 compact 不追加用户消息，也不运行普通模型回合；它先写入
+    /// `TurnStarted`，再由 AgentRunner 的 `ContextManager` 提交压缩事实，最后写入
+    /// `TurnCompleted` 或 `TurnStopped`。这样摘要模型调用、压缩记录和会话生命周期
+    /// 仍共享同一 Journal 与恢复栅栏，调用方只能在完整成功后确认队列消费。
+    pub async fn compact_turn(
+        &self,
+        request: TurnRequest,
+        provider_snapshot: ProviderSnapshot,
+        prompt_summary: String,
+        target_tokens: u64,
+    ) -> Result<keencode_agent::ContextCompressionOutcome, RuntimeError> {
+        if request.session_id().as_str() != self.inner.artifacts.session_id().as_str()
+            || request.source_agent_id().as_str() != keencode_resources::ROOT_AGENT_ID
+            || prompt_summary.trim().is_empty()
+        {
+            return Err(RuntimeError::InvalidTurnRequest);
+        }
+        let turn_id = TurnId::new(request.turn_id().as_str())?;
+        let source_agent_id =
+            keencode_resources::AgentId::new(request.source_agent_id().as_str().to_owned())?;
+        let start_event_id = runtime_lifecycle_event_id(
+            self.inner.artifacts.session_id(),
+            &turn_id,
+            "turn-started",
+        )?;
+        let terminal_event_id = runtime_lifecycle_event_id(
+            self.inner.artifacts.session_id(),
+            &turn_id,
+            "turn-terminal",
+        )?;
+        let start_event = SessionEvent::AtomicBatch {
+            events: vec![
+                SessionEvent::TurnStarted {
+                    turn_id: turn_id.clone(),
+                    source_agent_id: source_agent_id.clone(),
+                    root_turn_id: turn_id.clone(),
+                    parent_turn_id: None,
+                    prompt_summary,
+                },
+                SessionEvent::TurnProviderSnapshotRecorded {
+                    turn_id: turn_id.clone(),
+                    source_agent_id: source_agent_id.clone(),
+                    provider: provider_snapshot,
+                },
+            ],
+        };
+        let terminal_success = SessionEvent::TurnCompleted {
+            turn_id: turn_id.clone(),
+        };
+        // 失败终态包含有界错误正文，按最坏的 TurnStopped 预留容量；否则
+        // 压缩失败时可能无法持久化终态，恢复栅栏也无法收口。
+        let terminal_journal_bytes = runtime_terminal_reservation_bytes(
+            self.inner.artifacts.session_id(),
+            &terminal_event_id,
+            &turn_id,
+            &source_agent_id,
+            self.inner.config.journal.max_event_bytes,
+        )?;
+        let request_sha256 = canonical_sha256(&(
+            "keencode/runtime-manual-compaction/v1",
+            request.session_id().as_str(),
+            request.turn_id().as_str(),
+            request.source_agent_id().as_str(),
+            request.model_request(),
+            target_tokens,
+        ))?;
+        let execution_id;
+        {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            if control.lifecycle != RuntimeSessionLifecycle::Open {
+                return Err(RuntimeError::SessionClosed);
+            }
+            if control.recovery_required || control.hard_recovery_required {
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            let state = self.inner.journal.state()?;
+            if state.turns.contains_key(&turn_id)
+                || control.turn_executions.contains_key(turn_id.as_str())
+            {
+                return Err(RuntimeError::TurnAlreadyFinished);
+            }
+            validate_runtime_event_candidate(&state, &start_event_id, &start_event)?;
+            execution_id = control
+                .next_turn_execution_id
+                .checked_add(1)
+                .ok_or(RuntimeError::StateUnavailable)?;
+            control.next_turn_execution_id = execution_id;
+            control.turn_executions.insert(
+                turn_id.as_str().to_owned(),
+                RuntimeTurnExecution::Running {
+                    request_sha256: request_sha256.clone(),
+                    terminal_journal_bytes,
+                    execution_id,
+                    cancellation: request.cancellation().clone(),
+                },
+            );
+            if let Err(error) = ensure_control_event_capacity(
+                &self.inner,
+                &control,
+                &state,
+                &start_event_id,
+                &start_event,
+            ) {
+                control.turn_executions.remove(turn_id.as_str());
+                return Err(error);
+            }
+            if let Err(error) = commit_runtime_lifecycle_event(
+                &self.inner,
+                &mut control,
+                start_event_id,
+                start_event,
+                true,
+            ) {
+                control.turn_executions.remove(turn_id.as_str());
+                return Err(error);
+            }
+        }
+
+        let mut guard =
+            RuntimeTurnGuard::new(&self.inner, &turn_id, request_sha256.clone(), execution_id);
+        let outcome = self.runner.compact_turn(request, target_tokens).await;
+        let terminal = match &outcome {
+            Ok(_) => terminal_success,
+            Err(error) => SessionEvent::TurnStopped {
+                turn_id: turn_id.clone(),
+                reason: match error {
+                    AgentRunError::Cancelled => TurnStopReason::Cancelled,
+                    AgentRunError::Context(_) => TurnStopReason::ContextBlocked,
+                    _ => TurnStopReason::Failed,
+                },
+                message: truncate_runtime_terminal_message(&redact_error_secrets_bounded(
+                    &error.to_string(),
+                    MAX_RUNTIME_TERMINAL_MESSAGE_BYTES,
+                )),
+            },
+        };
+        let terminal_result = {
+            let mut control = self
+                .inner
+                .control
+                .lock()
+                .map_err(|_| RuntimeError::StateUnavailable)?;
+            let running_matches =
+                control
+                    .turn_executions
+                    .get(turn_id.as_str())
+                    .is_some_and(|execution| {
+                        execution.request_sha256() == request_sha256
+                            && matches!(
+                                execution,
+                                RuntimeTurnExecution::Running {
+                                    execution_id: current,
+                                    ..
+                                } if *current == execution_id
+                            )
+                    });
+            if !running_matches {
+                guard.disarm();
+                return Err(RuntimeError::RecoveryRequired);
+            }
+            let state = self.inner.journal.state()?;
+            ensure_control_event_capacity(
+                &self.inner,
+                &control,
+                &state,
+                &terminal_event_id,
+                &terminal,
+            )?;
+            let result = commit_runtime_lifecycle_event(
+                &self.inner,
+                &mut control,
+                terminal_event_id,
+                terminal,
+                true,
+            );
+            if result.is_ok() {
+                control.turn_executions.remove(turn_id.as_str());
+            }
+            result
+        };
+        terminal_result?;
+        guard.disarm();
+        match outcome {
+            Ok(outcome) => Ok(outcome),
+            Err(error) => Err(ResourceError::Json(format!("手动上下文压缩失败：{error}")).into()),
+        }
+    }
+
     /// 执行已经确认原子起点的 Agent Loop，并提交冻结的唯一终态。
     #[allow(clippy::too_many_arguments)]
     async fn finish_running_turn(
@@ -2828,7 +3984,6 @@ fn acquire_lease(root: &Path, session_id: &SessionId) -> Result<SessionLease, Ru
     }
 }
 
-/// 为资源层内部事件执行稳定 ID 与 sequence CAS 追加。
 fn append_resource_event(
     journal: &SessionJournal,
     event_id: SessionEventId,
@@ -4810,6 +5965,24 @@ fn map_agent_event(
                     AgentDynamicInputKind::Mailbox => DynamicInputKind::Mailbox,
                     AgentDynamicInputKind::UserSteer => DynamicInputKind::UserSteer,
                 };
+                let mut user_inputs = Vec::with_capacity(receipt.user_messages().len());
+                for (sequence, message) in receipt.user_messages() {
+                    // 展示回执只接受普通原始用户文本，不能把内部信封或工具内容变成发言。
+                    message
+                        .validate()
+                        .map_err(|_| RuntimeError::RecoveryRequired)?;
+                    let [ContentBlock::Text { text }] = message.content.as_slice() else {
+                        return Err(RuntimeError::RecoveryRequired);
+                    };
+                    if message.role != ModelMessageRole::User || message.is_meta {
+                        return Err(RuntimeError::RecoveryRequired);
+                    }
+                    user_inputs.push(keencode_resources::DynamicUserInput {
+                        sequence: *sequence,
+                        text: text.clone(),
+                        references: message.references.clone(),
+                    });
+                }
                 events.push(SessionEvent::DynamicInputReceiptCommitted {
                     turn_id: turn_id.clone(),
                     source_agent_id: source_agent_id.clone(),
@@ -4817,6 +5990,7 @@ fn map_agent_event(
                     segment_index: *segment_index,
                     kind,
                     through_sequence: receipt.through_sequence(),
+                    user_inputs,
                 });
             }
             Ok(SessionEvent::AtomicBatch { events })
@@ -4884,6 +6058,7 @@ fn map_message(
     }
     Ok(SessionMessage {
         is_meta: message.is_meta,
+        references: message.references.clone(),
         message_id: stable_message_id(key, position, message)?,
         turn_id: Some(TurnId::new(key.turn_id.clone())?),
         agent_id,
@@ -4969,6 +6144,7 @@ fn materialize_model_message(
     }
     let mut materialized = Message::new(role, content);
     materialized.is_meta = message.is_meta;
+    materialized.references = message.references.clone();
     let message = materialized;
     message
         .validate()
@@ -5413,6 +6589,70 @@ fn validate_control_operation_domain(operation_domain: &str) -> Result<(), Runti
     Ok(())
 }
 
+/// 校验命令收据作用域和 renderer 命令身份的有界格式。
+fn validate_command_receipt_identity(scope: &str, command_id: &str) -> Result<(), RuntimeError> {
+    let valid = |value: &str, max_bytes: usize| {
+        !value.is_empty()
+            && value.len() <= max_bytes
+            && value.trim() == value
+            && !value.chars().any(char::is_control)
+    };
+    if !valid(scope, 4096) || !valid(command_id, 128) {
+        return Err(RuntimeError::InvalidCommandReceipt);
+    }
+    Ok(())
+}
+
+/// 构造并完整校验一条待写入 Journal 的命令收据。
+fn new_command_receipt(
+    scope: &str,
+    command_id: &str,
+    command_type: &str,
+    payload_sha256: &str,
+    status: CommandReceiptStatus,
+) -> Result<CommandReceipt, RuntimeError> {
+    validate_command_receipt_identity(scope, command_id)?;
+    if command_type.is_empty()
+        || command_type.len() > 128
+        || command_type.trim() != command_type
+        || command_type.chars().any(char::is_control)
+        || !valid_sha256_hex(payload_sha256)
+    {
+        return Err(RuntimeError::InvalidCommandReceipt);
+    }
+    let receipt = CommandReceipt {
+        schema: COMMAND_RECEIPT_SCHEMA.to_owned(),
+        scope: scope.to_owned(),
+        command_id: command_id.to_owned(),
+        command_type: command_type.to_owned(),
+        payload_sha256: payload_sha256.to_owned(),
+        status,
+    };
+    receipt
+        .is_valid()
+        .then_some(receipt)
+        .ok_or(RuntimeError::InvalidCommandReceipt)
+}
+
+/// 为同一命令的 admission 和终态追加生成稳定且分阶段的事件身份。
+fn command_receipt_event_id(
+    session_id: &SessionId,
+    receipt: &CommandReceipt,
+    phase: &'static str,
+) -> Result<SessionEventId, RuntimeError> {
+    let digest = canonical_sha256(&(
+        "keencode/runtime-command-receipt/v1",
+        session_id.as_str(),
+        receipt.scope.as_str(),
+        receipt.command_id.as_str(),
+        receipt.command_type.as_str(),
+        receipt.payload_sha256.as_str(),
+        phase,
+    ))?;
+    SessionEventId::new(format!("runtime-command-receipt-{phase}-{digest}"))
+        .map_err(RuntimeError::from)
+}
+
 /// 判断字符串是否为资源层可接受的固定 64 位小写十六进制 SHA-256。
 fn valid_sha256_hex(value: &str) -> bool {
     value.len() == 64
@@ -5425,6 +6665,47 @@ fn valid_sha256_hex(value: &str) -> bool {
 fn canonical_sha256(value: &impl Serialize) -> Result<String, RuntimeError> {
     let bytes = serde_json::to_vec(value).map_err(|_| RuntimeError::RecoveryRequired)?;
     Ok(digest_hex(&bytes))
+}
+
+/// 计算队列 admission 的稳定正文摘要。
+///
+/// Client、时间戳和调度字段属于 Runtime 生成状态，重连重试时可能变化，不能
+/// 参与 commandId 冲突判断；用户正文、附件和冻结配置才构成同一输入意图。
+fn input_queue_payload_sha256(item: &SessionInputQueueItem) -> Result<String, RuntimeError> {
+    canonical_sha256(&(
+        "keencode/runtime-input-queue-payload/v1",
+        &item.queue_item_id,
+        &item.source_command_id,
+        item.kind,
+        &item.text,
+        &item.attachments,
+        &item.model_selection,
+        &item.mode,
+        item.plan_enabled,
+        item.requested_delivery,
+        item.admitted_delivery,
+    ))
+}
+
+/// 为一次队列 reserve/release 尝试生成有界且跨重启稳定的内部操作身份。
+///
+/// 调用方 operationId 仍是幂等边界；这里把 reserve 后 release 的再次尝试
+/// 分到新的 Journal eventId，避免同一 operationId 既代表旧 reserve 又代表新
+/// reserve，导致失败重试只能读到已经释放的旧状态。
+fn input_queue_attempt_operation_id(
+    action: &'static str,
+    operation_id: &str,
+    queue_item_id: &str,
+    attempt: u64,
+) -> Result<String, RuntimeError> {
+    let digest = canonical_sha256(&(
+        "keencode/runtime-input-queue-attempt/v1",
+        action,
+        operation_id,
+        queue_item_id,
+        attempt,
+    ))?;
+    Ok(format!("input-{action}-{digest}"))
 }
 
 /// 把字节摘要编码成固定小写十六进制。
@@ -5489,7 +6770,7 @@ fn journal_len(journal: &SessionJournal) -> Result<u64, RuntimeError> {
     }
 }
 
-/// 按资源层 `validate_state_collections` 的二十一 个独立维度计算当前状态精确占用。
+/// 按资源层 `validate_state_collections` 的独立维度计算当前状态精确占用。
 fn state_collection_items(state: &SessionState) -> StateCollectionItems {
     let transcript_messages = state.raw_transcript_messages();
     let message_items = transcript_messages
@@ -5544,7 +6825,22 @@ fn state_collection_items(state: &SessionState) -> StateCollectionItems {
         mailbox: state.mailbox.len(),
         worktrees: state.worktrees.len(),
         generated_titles: state.generated_titles.len(),
+        workflow_events: state.workflow_events.values().map(Vec::len).sum(),
+        workflow_artifacts: state
+            .workflow_events
+            .values()
+            .flatten()
+            .map(|event| event.artifacts.len())
+            .sum(),
+        workflow_json_collection_items: state
+            .workflow_events
+            .values()
+            .flatten()
+            .fold(0_usize, |total, event| {
+                total.saturating_add(json_collection_items(&event.payload))
+            }),
         dynamic_input_receipts: state.dynamic_input_receipts.len(),
+        input_queue_items: state.input_queue.items.len(),
         message_parts: message_items.message_parts,
         message_tool_result_content: message_items.message_tool_result_content,
         tool_outcome_result_content,
@@ -5580,7 +6876,7 @@ fn state_collection_message_items(message: &SessionMessage) -> StateCollectionIt
     }
 }
 
-/// 计算单个资源事件一旦确认后可能增加的二十一维状态集合项数。
+/// 计算单个资源事件一旦确认后可能增加的状态集合项数。
 fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
     match event {
         SessionEvent::TurnStarted { .. } => StateCollectionItems {
@@ -5666,15 +6962,28 @@ fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
             generated_titles: 1,
             ..StateCollectionItems::default()
         },
+        SessionEvent::CommandReceiptCommitted { .. } => StateCollectionItems::default(),
+        SessionEvent::WorkflowEventCommitted { record } => StateCollectionItems {
+            workflow_events: 1,
+            workflow_artifacts: record.artifacts.len(),
+            workflow_json_collection_items: json_collection_items(&record.payload),
+            ..StateCollectionItems::default()
+        },
         SessionEvent::DynamicInputReceiptCommitted { .. } => StateCollectionItems {
             dynamic_input_receipts: 1,
+            ..StateCollectionItems::default()
+        },
+        SessionEvent::InputQueueChanged { queue, .. } => StateCollectionItems {
+            input_queue_items: queue.items.len(),
             ..StateCollectionItems::default()
         },
         SessionEvent::OnErrorHookQueued { .. }
         | SessionEvent::OnErrorHookReceiptCommitted { .. } => StateCollectionItems::default(),
         SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionPreferenceSet { .. }
+        | SessionEvent::AssistantFeedbackSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnCompleted { .. }
         | SessionEvent::TurnStopped { .. }
@@ -5682,6 +6991,7 @@ fn state_collection_event_items(event: &SessionEvent) -> StateCollectionItems {
         | SessionEvent::ToolFileChangeApplied { .. }
         | SessionEvent::TerminalExited { .. }
         | SessionEvent::PlanChanged { .. }
+        | SessionEvent::FollowupModeChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageDelivered { .. }
@@ -6303,6 +7613,7 @@ fn recover_tool_transcript(inner: &RuntimeSessionInner) -> Result<(), RuntimeErr
             .ok_or(RuntimeError::RecoveryRequired)?;
         let identity = format!("{}:{}:{}", turn_id.as_str(), agent_id.as_str(), model_round);
         let assistant = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: recovery_message_id("assistant", &identity),
             turn_id: Some(turn_id.clone()),
@@ -6318,6 +7629,7 @@ fn recover_tool_transcript(inner: &RuntimeSessionInner) -> Result<(), RuntimeErr
                 .collect(),
         };
         let results = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: recovery_message_id("tool", &identity),
             turn_id: Some(turn_id.clone()),

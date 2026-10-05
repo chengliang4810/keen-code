@@ -58,6 +58,22 @@ impl CanonicalDigest {
     }
 }
 
+/// 非空引用进入所有摘要边界；无引用请求保持原来的正文摘要。
+fn encode_input_references(
+    encoder: &mut CanonicalDigest,
+    references: &[keencode_model::InputReference],
+) {
+    if references.is_empty() {
+        return;
+    }
+    encoder.tag(254);
+    encoder.u64(references.len() as u64);
+    for reference in references {
+        encoder.text(&reference.name);
+        encoder.text(&reference.path);
+    }
+}
+
 /// 规范编码一个可选文本。
 pub(super) fn encode_optional_text(encoder: &mut CanonicalDigest, value: Option<&str>) {
     encoder.bool(value.is_some());
@@ -128,6 +144,7 @@ pub(super) fn encode_agent_template_snapshot(
 ) {
     encoder.bool(template.is_some());
     if let Some(template) = template {
+        encoder.bool(template.inject_agents_md);
         encoder.text(&template.name);
         encoder.text(&template.system_prompt);
         encoder.bool(template.max_turns.is_some());
@@ -209,10 +226,12 @@ pub(super) fn encode_collaboration_invocation_input(
         CollaborationInvocationInput::SteerAgent {
             target_agent_id,
             content,
+            references,
         } => {
             encoder.tag(3);
             encoder.text(target_agent_id.as_str());
             encoder.text(content);
+            encode_input_references(encoder, references);
         }
         CollaborationInvocationInput::RetryAgent { target_agent_id } => {
             encoder.tag(4);
@@ -275,6 +294,7 @@ pub(super) fn encode_collaboration_invocation_output(
             encoder.u64(steer.sequence);
             encoder.text(steer.turn_id.as_str());
             encoder.text(&steer.content);
+            encode_input_references(encoder, &steer.references);
         }
         CollaborationInvocationOutput::RetriedAgent {
             target_agent_id,
@@ -492,6 +512,7 @@ pub(super) fn encode_collaboration_event(
             encoder.u64(steer.sequence);
             encoder.text(steer.turn_id.as_str());
             encoder.text(&steer.content);
+            encode_input_references(encoder, &steer.references);
         }
         CollaborationEventKind::AgentUserSteersConsumed { sequences } => {
             encoder.tag(12);
@@ -584,6 +605,7 @@ pub(super) fn encode_recovered_agent(encoder: &mut CanonicalDigest, agent: &Reco
         encoder.u64(steer.sequence);
         encoder.text(steer.turn_id.as_str());
         encoder.text(&steer.content);
+        encode_input_references(encoder, &steer.references);
     }
     encoder.bool(agent.start_pending);
 }
@@ -713,7 +735,7 @@ pub(super) fn collaboration_invocation_text_bytes(
             .turn_id
             .as_str()
             .len()
-            .saturating_add(steer.content.len()),
+            .saturating_add(steer.payload_bytes()),
         CollaborationInvocationOutput::RetriedAgent {
             target_agent_id,
             retry_turn_id,

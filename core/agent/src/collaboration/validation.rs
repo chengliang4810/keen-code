@@ -2,6 +2,14 @@
 
 use super::*;
 
+/// 协作层使用模型中立的资源边界；插件安装与启用状态由宿主验证。
+pub(super) fn validate_input_references(
+    references: &[keencode_model::InputReference],
+) -> Result<(), CollaborationError> {
+    keencode_model::InputReference::validate_all(references)
+        .map_err(|_| CollaborationError::InvalidInputReferences)
+}
+
 /// 校验可以稳定嵌入 AgentPath 的子 Agent 名称。
 pub(super) fn validate_child_name(name: &str) -> Result<(), AgentPathError> {
     let valid = !name.is_empty()
@@ -692,7 +700,20 @@ pub(super) fn validate_recovered_collaboration_invocation(
             CollaborationInvocationOutput::UserSteer(steer),
         ) => {
             validate_required_text(&steer.content, "恢复用户 steer")?;
-            if steer.sequence == 0 || steer.turn_id != invocation.key.source_turn_id {
+            validate_input_references(&steer.references).map_err(|error| {
+                CollaborationError::InvalidRecovery {
+                    message: error.to_string(),
+                }
+            })?;
+            let input = CollaborationInvocationInput::SteerAgent {
+                target_agent_id: invocation.key.source_agent_id.clone(),
+                content: steer.content.clone(),
+                references: steer.references.clone(),
+            };
+            if steer.sequence == 0
+                || steer.turn_id != invocation.key.source_turn_id
+                || invocation.input_digest != collaboration_invocation_input_digest(&input)
+            {
                 return Err(CollaborationError::InvalidRecovery {
                     message: "SteerAgent 幂等结果与来源 Turn 或序号不一致".to_owned(),
                 });
@@ -1298,6 +1319,11 @@ pub(super) fn validate_recovered_tree(
                     message: error.to_string(),
                 }
             })?;
+            validate_input_references(&steer.references).map_err(|error| {
+                CollaborationError::InvalidRecovery {
+                    message: error.to_string(),
+                }
+            })?;
             if steer.sequence <= last_steer_sequence
                 || steer_turn_id != Some(&steer.turn_id)
                 || !turn_belongs(&steer.turn_id)
@@ -1307,7 +1333,7 @@ pub(super) fn validate_recovered_tree(
                 });
             }
             steer_bytes = steer_bytes
-                .checked_add(steer.content.len())
+                .checked_add(steer.payload_bytes())
                 .ok_or(CollaborationError::SequenceExhausted)?;
             last_steer_sequence = steer.sequence;
         }

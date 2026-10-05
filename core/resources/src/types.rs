@@ -15,9 +15,19 @@ pub const SESSION_EVENT_SCHEMA: &str = "keencode/session-event";
 pub const SESSION_EVENT_VERSION: u32 = 8;
 /// Session 内唯一根 Agent 使用的固定标识。
 pub const ROOT_AGENT_ID: &str = "root";
+/// Runtime 通用命令收据的稳定 schema 名称。
+pub const COMMAND_RECEIPT_SCHEMA: &str = "keencode.command-receipt.v1";
+/// 单条命令收据允许保留的 ACK 最大 JSON 字节数。
+pub const MAX_COMMAND_RECEIPT_BYTES: usize = 64 * 1024;
 /// 冷恢复时返回给模型的唯一副作用未知错误文本。
 pub const SIDE_EFFECT_UNKNOWN_RESULT_TEXT: &str =
     "工具在崩溃前已经开始，副作用状态未知，禁止自动重试";
+/// 工作流事件 payload 使用的独立递归 JSON 集合预算。
+///
+/// 普通会话继续受 `JournalConfig::max_state_collection_items`（默认 50,000）约束；
+/// 1,024 次有界节点执行会产生多条生命周期事件，需要更大的固定上限，但仍拒绝
+/// 无界的深度或恶意大 payload。
+pub const MAX_WORKFLOW_JSON_COLLECTION_ITEMS: usize = 250_000;
 
 /// Session 当前生命周期状态。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -94,6 +104,28 @@ pub enum MessageRole {
     Developer,
     /// 工具执行结果。
     Tool,
+}
+
+/// Assistant 消息的本地反馈；只服务于会话行投影，不会进入模型上下文。
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "lowercase")]
+pub enum AssistantFeedback {
+    /// 用户认为该 Assistant 回复有帮助。
+    Like,
+    /// 用户认为该 Assistant 回复没有帮助。
+    Dislike,
+}
+
+/// 按 V4 行稳定身份保存的一条 Assistant 反馈事实。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AssistantFeedbackRecord {
+    /// 会话内稳定、不可复用的展示行标识。
+    pub row_id: u64,
+    /// 与 rowId 成对校验的持久实体标识。
+    pub entity_id: String,
+    /// 当前保留的反馈值；取消反馈时整条记录删除。
+    pub feedback: AssistantFeedback,
 }
 
 /// 持久化图片可恢复的来源。
@@ -228,6 +260,9 @@ pub struct SessionMessage {
     /// 内部上下文不进入对话界面投影。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_meta: bool,
+    /// 用户已选择的资源身份，随权威消息复制、回放和恢复，不建立独立 UI 消息存储。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<keencode_model::InputReference>,
     /// 消息稳定标识。
     pub message_id: String,
     /// 消息所属 Turn；Session 级消息为 `None`。
@@ -564,6 +599,163 @@ pub struct PlanState {
     pub plan_artifact: Option<ArtifactUse>,
 }
 
+/// Session 后续输入的处理模式。
+///
+/// 该值属于 Session Journal，前端只能请求切换，不能在本地保留第二份模式状态。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum FollowupMode {
+    /// 忙碌时把后续输入加入持久队列。
+    #[default]
+    Queue,
+    /// 忙碌时把后续输入作为引导项加入队列，等待用户明确发送。
+    Guide,
+}
+
+/// 可持久化的后续输入类型。
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub enum SessionInputKind {
+    /// 普通用户文本。
+    #[serde(rename = "sendText")]
+    SendText,
+    /// Goal/任务控制面的用户命令。
+    #[serde(rename = "sendGoalCommand")]
+    SendGoalCommand,
+    /// 请求一次上下文压缩。
+    Compact,
+}
+
+/// 后续输入在 admission 时采用的交付方式。
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum SessionInputDelivery {
+    /// 加入队列并按队列策略等待发送。
+    Queue,
+    /// 加入引导队列，等待显式发送。
+    Guide,
+}
+
+/// 后续输入当前在持久队列中的调度状态。
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum SessionInputDispatch {
+    /// 等待被发送。
+    Queued,
+    /// 已被一个显式发送操作保留。
+    Reserved,
+    /// 已进入启动流程，尚未完成消费确认。
+    Promoting,
+}
+
+/// 一条可冷恢复的用户后续输入。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionInputQueueItem {
+    /// 由 admission 操作生成且永不复用的队列项标识。
+    pub queue_item_id: String,
+    /// 产生该项的前端 commandId，用于响应丢失后的幂等核对。
+    pub source_command_id: String,
+    /// 可选前端 Client 标识，不用于权限判断。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// 输入类型。
+    pub kind: SessionInputKind,
+    /// 用户输入正文；compact 项为空字符串。
+    pub text: String,
+    /// 已通过边界校验的附件引用。
+    #[serde(default)]
+    pub attachments: Vec<Value>,
+    /// admission 时冻结的模型选择。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_selection: Option<Value>,
+    /// admission 时冻结的协作模式。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    /// admission 时冻结的 Plan 开关。
+    #[serde(default)]
+    pub plan_enabled: bool,
+    /// 原始请求希望采用的交付方式。
+    pub requested_delivery: SessionInputDelivery,
+    /// 经过当前 Session 策略实际采用的交付方式。
+    pub admitted_delivery: SessionInputDelivery,
+    /// Session 内单调递增的 admission 序号。
+    pub admission_seq: u64,
+    /// 已经发生过的 reserve 尝试数；release 后重试必须生成新的持久操作身份。
+    #[serde(default)]
+    pub reserve_attempt: u64,
+    /// 当前队列调度状态。
+    pub dispatch: SessionInputDispatch,
+    /// 队列项进入提升流程后绑定的真实 Runtime Turn；用于冷恢复归属校验。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub promoted_turn_id: Option<TurnId>,
+    /// admission 的 Unix Epoch 毫秒时间。
+    pub admitted_at_unix_ms: u64,
+}
+
+/// 一条已成功提升为 Turn 的有界消费收据。
+///
+/// 队列项从当前列表移除后仍保留最小结果事实，供 commandId 丢失响应后的
+/// 冷重试返回真实的去重结果；该列表有硬上限，不能演变成第二份历史。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionInputCompletion {
+    /// 已消费队列项的稳定标识。
+    pub queue_item_id: String,
+    /// 原 admission commandId，亦用于绑定 sendQueuedNow 的重试。
+    pub source_command_id: String,
+    /// admission 时冻结的稳定输入摘要；不包含连接、时间和调度字段，供跨重连冲突检测。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_input_payload_sha256: Option<String>,
+    /// 完成该项的 sendQueuedNow commandId，用于只对同一命令去重。
+    pub completion_operation_id: String,
+    /// 原队列项实际采用的交付模式。
+    pub admitted_delivery: SessionInputDelivery,
+    /// 消费确认的 Unix 毫秒时间。
+    pub completed_at_unix_ms: u64,
+}
+
+/// Session 后续输入队列的权威快照。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionInputQueueState {
+    /// 按 admissionSeq 排序的可恢复输入。
+    #[serde(default)]
+    pub items: Vec<SessionInputQueueItem>,
+    /// 已成功提升项的有界收据，仅用于 command 重试去重，不是可展示历史。
+    #[serde(default)]
+    pub completions: Vec<SessionInputCompletion>,
+    /// 是否允许空闲时自动消费队首。
+    #[serde(default = "default_true")]
+    pub auto_drain: bool,
+    /// 队列暂停原因；正常可消费时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pause_reason: Option<String>,
+    /// 下一个 admission 所需的序号水位。
+    #[serde(default = "default_one")]
+    pub next_admission_seq: u64,
+}
+
+impl Default for SessionInputQueueState {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            completions: Vec::new(),
+            auto_drain: true,
+            pause_reason: None,
+            next_admission_seq: 1,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_one() -> u64 {
+    1
+}
+
 /// Provider Snapshot 使用的三种厂商协议。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
@@ -624,6 +816,109 @@ pub struct GeneratedTitleRecord {
     pub input_sha256: String,
     /// 已成功生成且去除首尾空白的标题。
     pub title: String,
+}
+
+/// 一条命令收据在 Journal 中的生命周期状态。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum CommandReceiptStatus {
+    /// 已原子登记命令，但副作用尚未产生可确认终态。
+    Admitted,
+    /// 副作用及其 RPC ACK 已被确认并持久化。
+    Completed {
+        /// 可在响应丢失后原样重放的 ACK。
+        ack: Value,
+    },
+    /// 命令被确定拒绝，重试只能重放该拒绝结果。
+    Rejected {
+        /// 可在响应丢失后原样重放的拒绝 ACK。
+        ack: Value,
+    },
+    /// 副作用可能已经发生，但没有可证明的终态；禁止自动重放。
+    Unknown {
+        /// 要求上层查询或人工处理的稳定原因码。
+        reason_code: String,
+    },
+}
+
+impl CommandReceiptStatus {
+    /// 判断该状态是否已经离开可执行的 admission 阶段。
+    pub fn is_terminal(&self) -> bool {
+        !matches!(self, Self::Admitted)
+    }
+}
+
+// serde_json::Value 只表示 RFC 8259 JSON（不包含 NaN/Infinity），因此其
+// PartialEq 在收据已通过 is_valid 校验后满足 Eq 的语义要求。
+impl Eq for CommandReceiptStatus {}
+
+/// 可跨连接、进程和冷恢复复用的命令收据。
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CommandReceipt {
+    /// 收据契约版本。
+    pub schema: String,
+    /// 连接外稳定作用域；同一 commandId 在不同 Session/Workspace 不冲突。
+    pub scope: String,
+    /// Renderer 生成的稳定命令身份。
+    pub command_id: String,
+    /// 业务命令类型。
+    pub command_type: String,
+    /// 规范化命令 payload 的小写 SHA-256。
+    pub payload_sha256: String,
+    /// 当前收据状态。
+    pub status: CommandReceiptStatus,
+}
+
+// 收据 ACK 经过 JSON 有界校验后是确定性的 JSON 值，可作为 SessionEvent 的 Eq 成员。
+impl Eq for CommandReceipt {}
+
+impl CommandReceipt {
+    /// 返回 Journal 状态表使用的稳定键。
+    pub fn storage_key(&self) -> String {
+        format!("{}\0{}", self.scope, self.command_id)
+    }
+
+    /// 判断两个收据是否绑定相同命令意图，不比较生命周期状态。
+    pub fn same_identity(&self, other: &Self) -> bool {
+        self.schema == other.schema
+            && self.scope == other.scope
+            && self.command_id == other.command_id
+            && self.command_type == other.command_type
+            && self.payload_sha256 == other.payload_sha256
+    }
+
+    /// 检查收据是否满足资源层有界契约。
+    pub fn is_valid(&self) -> bool {
+        self.schema == COMMAND_RECEIPT_SCHEMA
+            && valid_receipt_text(&self.scope, 4096)
+            && valid_receipt_text(&self.command_id, 128)
+            && valid_receipt_text(&self.command_type, 128)
+            && valid_receipt_sha256(&self.payload_sha256)
+            && match &self.status {
+                CommandReceiptStatus::Admitted => true,
+                CommandReceiptStatus::Completed { ack }
+                | CommandReceiptStatus::Rejected { ack } => serde_json::to_vec(ack)
+                    .is_ok_and(|bytes| bytes.len() <= MAX_COMMAND_RECEIPT_BYTES),
+                CommandReceiptStatus::Unknown { reason_code } => {
+                    valid_receipt_text(reason_code, 128)
+                }
+            }
+    }
+}
+
+fn valid_receipt_text(value: &str, max_bytes: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_bytes
+        && value.trim() == value
+        && !value.chars().any(char::is_control)
+}
+
+fn valid_receipt_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// 子 Agent 生命周期状态。
@@ -707,6 +1002,20 @@ pub enum DynamicInputKind {
 }
 
 /// 已写入 Transcript 且等待外部 Coordinator 确认的动态输入消费回执。
+/// 追加原文只用于展示；模型上下文仍由同批 Transcript 信封承担。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DynamicUserInput {
+    /// 所属 Coordinator 队列中的稳定序号。
+    pub sequence: u64,
+    /// 用户输入的原始正文，不含内部协议说明。
+    pub text: String,
+    /// 原输入框显式选择的准确资源身份。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<keencode_model::InputReference>,
+}
+
+/// 已写入 Transcript 且等待外部 Coordinator 确认的动态输入消费回执。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DynamicInputReceipt {
@@ -722,6 +1031,9 @@ pub struct DynamicInputReceipt {
     pub kind: DynamicInputKind,
     /// 本批实际写入的最大单调序号。
     pub through_sequence: u64,
+    /// 已消费的用户原文和引用；不会作为第二条模型消息再次采样。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_inputs: Vec<DynamicUserInput>,
     /// 关联 Transcript 段应用后的全局 revision。
     pub transcript_revision: u64,
 }
@@ -803,6 +1115,28 @@ pub enum TitleSource {
     MessagePrefix,
 }
 
+/// 工作流宿主提交到父会话的有序事实；产物引用显式列出以参与冷恢复和归属校验。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkflowJournalEvent {
+    /// 同一个父会话内唯一的工作流运行身份。
+    pub run_id: String,
+    /// 原始启动工具或显式界面启动的稳定关联身份。
+    pub tool_call_id: String,
+    /// 从 1 开始的运行内序号，独立于 Session Journal 的物理序号。
+    pub sequence: u64,
+    /// 由工作流领域定义的事件类型；界面只接收对应的展示投影。
+    pub event_type: String,
+    /// 已冻结定义、输入或节点执行结果；不得携带供应商凭据。
+    pub payload: serde_json::Value,
+    /// 当前事件引用的内容寻址产物，不能仅把摘要藏在 JSON 正文中。
+    pub artifacts: Vec<ArtifactUse>,
+    /// 可选的单层执行者会话身份。
+    pub actor_session_id: Option<String>,
+    /// 与问答或节点启动输入对应的稳定身份。
+    pub launch_input_id: Option<String>,
+}
+
 /// 事件记录中 `type` 与 `payload` 对应的类型化权威事件。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(
@@ -827,12 +1161,31 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<TitleSource>,
     },
+    /// 在会话静止且持久变更事务保护下切换执行目录；不改变存储位置和历史身份。
+    SessionWorkspaceChanged {
+        /// 乐观校验的旧执行目录，防止并发操作覆盖其他切换。
+        expected_project_root: String,
+        /// 宿主已经授权并规范化的新执行目录。
+        project_root: String,
+    },
     /// 更新用户会话偏好（置顶/归档）。
     SessionPreferenceSet {
         /// 新的置顶标记；`None` 表示保持不变。
         pinned: Option<bool>,
         /// 新的归档标记；`None` 表示保持不变。
         archived: Option<bool>,
+    },
+    /// 设置或取消一个 Assistant 展示行的本地反馈。
+    ///
+    /// 反馈只写入 Session Journal 的投影元数据，不会复制到 Transcript 或 Provider
+    /// 请求；`None` 表示删除既有反应，确保取消反应在冷恢复后仍然生效。
+    AssistantFeedbackSet {
+        /// V4 行标识，必须和 entity_id 共同定位同一条 Assistant 行。
+        row_id: u64,
+        /// V4 持久实体标识。
+        entity_id: String,
+        /// 新反馈；空值代表取消反应。
+        feedback: Option<AssistantFeedback>,
     },
     /// 更新 Session 生命周期状态。
     SessionStatusChanged {
@@ -918,6 +1271,9 @@ pub enum SessionEvent {
         kind: DynamicInputKind,
         /// 本批实际写入的最大单调序号。
         through_sequence: u64,
+        /// 同批消费的用户原文；mailbox 回执不得携带此字段。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        user_inputs: Vec<DynamicUserInput>,
     },
     /// 原子记录一个完整 Provider 模型 Round 的元数据与用量。
     ModelRoundCompleted {
@@ -1018,6 +1374,24 @@ pub enum SessionEvent {
         /// 新 Plan 状态。
         plan: PlanState,
     },
+    /// 记录后续输入模式的持久切换。
+    FollowupModeChanged {
+        /// 绑定本次命令的稳定 operationId；控制层使用同一域做幂等去重。
+        operation_id: String,
+        /// 命令参数摘要，用于拒绝 operationId 绑定不同正文。
+        operation_payload_sha256: String,
+        /// 新的后续输入处理模式。
+        mode: FollowupMode,
+    },
+    /// 原子替换后续输入队列，覆盖入队、编辑、排序、删除和消费状态变化。
+    InputQueueChanged {
+        /// 绑定本次命令的稳定 operationId；不能被不同正文复用。
+        operation_id: String,
+        /// 命令参数摘要，用于拒绝 operationId 绑定不同正文。
+        operation_payload_sha256: String,
+        /// 变更后的完整队列快照，便于冷恢复而不依赖进程内缓存。
+        queue: SessionInputQueueState,
+    },
     /// 保存当前实际使用的 Provider 快照。
     ProviderSnapshotUpdated {
         /// 不含凭据的配置快照。
@@ -1027,6 +1401,16 @@ pub enum SessionEvent {
     TitleGenerated {
         /// 可按 operationId 跨重启复用的完整结果。
         result: GeneratedTitleRecord,
+    },
+    /// 原子登记或完成一条跨连接命令收据。
+    CommandReceiptCommitted {
+        /// 绑定命令意图和 ACK 的完整持久记录。
+        receipt: CommandReceipt,
+    },
+    /// 工作流事件先获得 Journal 确认，再向订阅者发布。
+    WorkflowEventCommitted {
+        /// 有序、可恢复且归属于当前 Session 的工作流事实。
+        record: WorkflowJournalEvent,
     },
     /// 创建一个单层子 Agent。
     SubAgentSpawned {
@@ -1128,6 +1512,9 @@ pub struct SessionState {
     /// 用户归档标记；由 `SessionPreferenceSet` 维护的权威状态。
     #[serde(default)]
     pub archived: bool,
+    /// 按 V4 row/entity 身份保存的 Assistant 反馈；旧快照缺省为空。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assistant_feedback: Vec<AssistantFeedbackRecord>,
     /// 当前标题的写入来源；自动标题不得覆盖手动标题。
     #[serde(default)]
     pub title_source: TitleSource,
@@ -1159,10 +1546,22 @@ pub struct SessionState {
     pub todos: TodoSnapshot,
     /// 当前 Plan 模式状态。
     pub plan: PlanState,
+    /// 当前后续输入处理模式；由 Journal 事件恢复。
+    #[serde(default)]
+    pub followup_mode: FollowupMode,
+    /// 当前后续输入队列；由 Journal 事件恢复。
+    #[serde(default)]
+    pub input_queue: SessionInputQueueState,
     /// 当前 Provider 配置快照。
     pub provider: Option<ProviderSnapshot>,
     /// 按 operationId 保存的标题生成结果缓存。
     pub generated_titles: BTreeMap<String, GeneratedTitleRecord>,
+    /// 按作用域和 commandId 保存的跨重启命令收据。
+    #[serde(default)]
+    pub command_receipts: BTreeMap<String, CommandReceipt>,
+    /// 工作流恢复与展示的唯一事实源；每次运行内按序保存确认事件。
+    #[serde(default)]
+    pub workflow_events: BTreeMap<String, Vec<WorkflowJournalEvent>>,
     /// 单层子 Agent 状态。
     pub sub_agents: BTreeMap<AgentId, SubAgentState>,
     /// 尚在状态历史中的邮箱消息。
@@ -1181,6 +1580,7 @@ impl SessionState {
             project_root: String::new(),
             pinned: false,
             archived: false,
+            assistant_feedback: Vec::new(),
             title_source: TitleSource::default(),
             status: SessionStatus::Idle,
             last_sequence: 0,
@@ -1196,8 +1596,12 @@ impl SessionState {
             terminals: BTreeMap::new(),
             todos: TodoSnapshot::default(),
             plan: PlanState::default(),
+            followup_mode: FollowupMode::default(),
+            input_queue: SessionInputQueueState::default(),
             provider: None,
             generated_titles: BTreeMap::new(),
+            command_receipts: BTreeMap::new(),
+            workflow_events: BTreeMap::new(),
             sub_agents: BTreeMap::new(),
             mailbox: BTreeMap::new(),
             worktrees: BTreeMap::new(),

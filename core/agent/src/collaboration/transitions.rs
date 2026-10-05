@@ -253,6 +253,7 @@ impl CollaborationCoordinator {
                 &agent_id,
                 &turn_id,
                 content.clone(),
+                Vec::new(),
                 &mut events,
                 &mut actions,
             )?;
@@ -270,15 +271,18 @@ impl CollaborationCoordinator {
         agent_id: &AgentId,
         operation_id: &ToolCallId,
         content: impl Into<String>,
+        references: Vec<keencode_model::InputReference>,
     ) -> Result<UserSteer, CollaborationError> {
         let content = content.into();
         validate_required_text(&content, "用户 Steer")?;
+        validate_input_references(&references)?;
         let agent_id = agent_id.clone();
         let operation_id = operation_id.clone();
         self.apply_transition(|state| {
             let invocation_input = CollaborationInvocationInput::SteerAgent {
                 target_agent_id: agent_id.clone(),
                 content: content.clone(),
+                references: references.clone(),
             };
             let active_turn_id = match &resident_agent(state, &agent_id)?.status {
                 CollaborationAgentStatus::Running { turn_id } => Some(turn_id.clone()),
@@ -326,6 +330,7 @@ impl CollaborationCoordinator {
                 &agent_id,
                 &turn_id,
                 content.clone(),
+                references.clone(),
                 &mut events,
                 &mut actions,
             )?;
@@ -484,10 +489,7 @@ impl CollaborationCoordinator {
                 .iter()
                 .map(|steer| steer.sequence)
                 .collect::<Vec<_>>();
-            let consumed_bytes = steers
-                .iter()
-                .map(|steer| steer.content.len())
-                .sum::<usize>();
+            let consumed_bytes = steers.iter().map(UserSteer::payload_bytes).sum::<usize>();
             let agent = state.agents.get_mut(&agent_id).expect("Agent 在上方已校验");
             agent
                 .steers
@@ -541,6 +543,7 @@ pub(super) fn queue_user_steer(
     agent_id: &AgentId,
     turn_id: &TurnId,
     content: String,
+    references: Vec<keencode_model::InputReference>,
     events: &mut Vec<CollaborationEvent>,
     actions: &mut Vec<PostCommitAction>,
 ) -> Result<UserSteer, CollaborationError> {
@@ -571,9 +574,15 @@ pub(super) fn queue_user_steer(
             maximum: MAX_PENDING_STEERS_PER_AGENT,
         });
     }
+    let steer = UserSteer {
+        sequence: agent.next_steer_sequence,
+        turn_id: turn_id.clone(),
+        content,
+        references,
+    };
     let next_steer_bytes = agent
         .steer_bytes
-        .checked_add(content.len())
+        .checked_add(steer.payload_bytes())
         .ok_or(CollaborationError::SequenceExhausted)?;
     if next_steer_bytes > MAX_PENDING_STEER_BYTES_PER_AGENT {
         return Err(CollaborationError::ResourceLimitExceeded {
@@ -586,11 +595,6 @@ pub(super) fn queue_user_steer(
         .checked_add(1)
         .ok_or(CollaborationError::SequenceExhausted)?;
     let definition = agent.definition.clone();
-    let steer = UserSteer {
-        sequence,
-        turn_id: turn_id.clone(),
-        content,
-    };
     let agent = state.agents.get_mut(agent_id).expect("Agent 在上方已校验");
     agent.next_steer_sequence = next_sequence;
     agent.steer_bytes = next_steer_bytes;
@@ -1372,7 +1376,7 @@ pub(super) fn complete_turn_transition(
             &steer.turn_id != turn_id
                 || claimed_through.is_some_and(|through| steer.sequence <= through)
         });
-        agent.steer_bytes = agent.steers.iter().map(|steer| steer.content.len()).sum();
+        agent.steer_bytes = agent.steers.iter().map(UserSteer::payload_bytes).sum();
     }
     mark_activity(state, agent_id, &mut actions)?;
 

@@ -638,6 +638,17 @@ fn state_artifact_references(state: &SessionState) -> Vec<StateArtifactReference
             });
         }
     }
+    for event in state.workflow_events.values().flatten() {
+        references.extend(
+            event
+                .artifacts
+                .iter()
+                .map(|artifact| StateArtifactReference {
+                    artifact,
+                    materialization: None,
+                }),
+        );
+    }
     references
 }
 
@@ -1518,6 +1529,7 @@ mod tests {
         state
             .transcript
             .push(TranscriptRecord::MessageAdded(SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-cold-gc".to_owned(),
                 turn_id: None,

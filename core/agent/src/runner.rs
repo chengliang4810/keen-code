@@ -21,16 +21,22 @@ use crate::context::{
     AdmissionDecision, context_error_is_cancelled, context_error_model_usage,
     context_error_without_summary_usage, post_compaction_read_hint_message,
 };
+use crate::controlled_tools::{
+    ControlledToolError, ControlledToolEvent, ControlledToolIdentity, ControlledToolPreflight,
+    ControlledToolRequest, ControlledToolReservation, ControlledToolResult,
+};
 use crate::event::AgentToolRoundBinding;
 use crate::progress::ReadOnlyProgressObserver;
 use crate::structured_output::{
     STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputCorrectionBudget, StructuredOutputMode,
 };
 use crate::tool::{
-    NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT, TOOL_OUTPUT_LIMIT_RESULT, ToolError,
-    ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputValidation, ToolResultFootprint,
-    ToolRoundOutputBudget, TruncatedOutputArtifact, measure_tool_result, normalize_tool_error,
-    truncate_tool_output_to_capacity, truncate_tool_output_with_artifact, validate_tool_output,
+    AllowAllToolApprovalGate, NormalizedToolError, SIDE_EFFECT_TOOL_OUTPUT_LIMIT_RESULT,
+    TOOL_OUTPUT_LIMIT_RESULT, ToolApprovalDecision, ToolApprovalGate, ToolApprovalRequest,
+    ToolError, ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputValidation,
+    ToolResultFootprint, ToolRoundOutputBudget, TruncatedOutputArtifact, measure_tool_result,
+    normalize_tool_error, truncate_tool_output_to_capacity, truncate_tool_output_with_artifact,
+    validate_tool_output,
 };
 use crate::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
@@ -920,6 +926,8 @@ pub struct AgentRunner {
     context: ContextManager,
     /// 按注册顺序运行并带硬预算的 Hook 运行时。
     hooks: HookRuntime,
+    /// 在真实工具执行前等待用户或宿主授权的 Provider 中立端口。
+    approval_gate: Arc<dyn ToolApprovalGate>,
     /// 每次模型采样前 claim mailbox 与用户 Steer 的持久输入端口。
     dynamic_input: Arc<dyn AgentDynamicInputSource>,
     /// 每个普通模型 Round 在预算判断前读取一次的瞬时工具目录变化端口。
@@ -951,6 +959,7 @@ impl AgentRunner {
             limits,
             context,
             hooks: HookRuntime::empty(),
+            approval_gate: Arc::new(AllowAllToolApprovalGate),
             dynamic_input: Arc::new(NoopAgentDynamicInputSource),
             tool_catalog_updates: Arc::new(NoopAgentToolCatalogUpdateSource),
             goal_controller: None,
@@ -973,6 +982,37 @@ impl AgentRunner {
         &self.context
     }
 
+    /// 在已经由 Runtime 建立的 Running Turn 内执行一次真实上下文压缩。
+    ///
+    /// 该入口只提交 `ContextCompactionApplied` 权威事件，不调用普通模型回合，
+    /// 因而适合桌面控制面的手动 compact。调用方必须先把 TurnStarted 写入同一
+    /// Runtime Journal；压缩摘要仍通过当前 Provider，并沿用既有 Hook、用量和
+    /// `ContextManager` 的事务语义。
+    pub async fn compact_turn(
+        &self,
+        request: TurnRequest,
+        target_tokens: u64,
+    ) -> Result<ContextCompressionOutcome, AgentRunError> {
+        self.context.clear_usage_anchor();
+        let capabilities = self.provider.capabilities(&request.model_request.model);
+        let outcome = self
+            .compact_context(
+                &request,
+                &request.model_request,
+                &capabilities,
+                1,
+                ContextCompressionTrigger::Budget,
+                target_tokens.max(1),
+            )
+            .await?;
+        match outcome {
+            LogicalCompactionOutcome::Applied(outcome) => Ok(*outcome),
+            LogicalCompactionOutcome::Blocked => {
+                Err(AgentRunError::Context(ContextError::NothingCompressible))
+            }
+        }
+    }
+
     /// 覆盖默认空 Hook 运行时，并在后续 Turn 中冻结其顺序和硬预算。
     pub fn with_hook_runtime(mut self, hooks: HookRuntime) -> Self {
         self.hooks = hooks;
@@ -982,6 +1022,20 @@ impl AgentRunner {
     /// 返回当前 Runner 冻结后的 Hook 运行时。
     pub const fn hook_runtime(&self) -> &HookRuntime {
         &self.hooks
+    }
+
+    /// 注入真实的 Session 权限 Coordinator。
+    ///
+    /// 默认端口只用于保持纯领域 Runner 的构造兼容；Desktop Runtime 应在组装
+    /// Session Agent 时注入能持久化 pending interaction 的实现。
+    pub fn with_tool_approval_gate(mut self, approval_gate: Arc<dyn ToolApprovalGate>) -> Self {
+        self.approval_gate = approval_gate;
+        self
+    }
+
+    /// 返回当前 Runner 使用的工具审批端口。
+    pub fn tool_approval_gate(&self) -> &Arc<dyn ToolApprovalGate> {
+        &self.approval_gate
     }
 
     /// 注入每次模型采样前使用的持久动态输入端口。
@@ -1059,6 +1113,310 @@ impl AgentRunner {
         cancellation: &TurnCancellation,
     ) -> Result<(), HookError> {
         self.hooks.run_on_error(context, cancellation).await
+    }
+
+    /// 在工具越过真实执行起点前等待审批，并用 Turn 取消打断任意挂起端口。
+    ///
+    /// 只读工具不应弹出权限交互；未知 effect 必须在工具实现侧归类为
+    /// `ChangesState`，从而沿用同一保守审批路径。
+    async fn await_tool_approval(
+        &self,
+        request: ToolApprovalRequest,
+        cancellation: &TurnCancellation,
+    ) -> ToolApprovalDecision {
+        if request.effect == ToolEffect::ReadOnly {
+            return ToolApprovalDecision::Approved;
+        }
+        if cancellation.is_cancelled() {
+            return ToolApprovalDecision::Cancelled;
+        }
+        let approval = self.approval_gate.request(request, cancellation.clone());
+        match select(Box::pin(cancellation.cancelled()), approval).await {
+            Either::Left(((), _)) => ToolApprovalDecision::Cancelled,
+            Either::Right((Ok(decision), _)) => decision,
+            Either::Right((Err(error), _)) => ToolApprovalDecision::Denied {
+                reason: format!("工具审批未完成：{error}"),
+            },
+        }
+    }
+
+    /// 执行一次不依赖模型 Provider 的受控工具调用。
+    ///
+    /// 该入口只复用 Runner 已有的工具注册表、Schema/effect 校验、Pre/PostToolUse
+    /// Hook、PlanGuard、取消、超时和输出归一边界。它使用独立的
+    /// [`ControlledToolLifecycleSink`]，不会伪造 `AgentCommitEvent`、模型响应或
+    /// `model_round`；Workflow 等宿主应在自己的 Journal 中保存节点事实。
+    pub async fn execute_controlled_tool(
+        &self,
+        request: ControlledToolRequest,
+    ) -> Result<ControlledToolResult, AgentRunError> {
+        request
+            .identity
+            .validate()
+            .map_err(controlled_tool_request_error)?;
+        request
+            .call
+            .validate()
+            .map_err(|error| AgentRunError::InvalidResponse {
+                message: format!("受控工具调用无效：{error}"),
+            })?;
+        ensure_not_cancelled(&request.cancellation)?;
+
+        let identity = request.identity.clone();
+        let mut call = request.call;
+        let Some(tool) = self.tools.get(&call.name) else {
+            let tool_name = call.name.clone();
+            return Ok(controlled_tool_rejection_text(
+                call,
+                None,
+                format!("工具不存在：{tool_name}"),
+            ));
+        };
+        let definition =
+            self.tools
+                .definition(&call.name)
+                .ok_or_else(|| AgentRunError::Internal {
+                    message: format!("已解析工具 {} 缺少冻结定义", call.name),
+                })?;
+        if let Err(error) = definition.validate_input(&call.arguments) {
+            return Ok(controlled_tool_rejection_text(
+                call,
+                None,
+                format!("工具输入无效：{error}"),
+            ));
+        }
+        let mut effect = match tool.effect(&call.arguments) {
+            Ok(effect) => effect,
+            Err(error) => {
+                let result = tool_error_result(&call.id, &error);
+                return Ok(controlled_tool_rejection(call, None, result));
+            }
+        };
+
+        let pre_hook = self
+            .hooks
+            .run_pre_tool_use(
+                PreToolUseContext {
+                    invocation: controlled_hook_invocation(&identity),
+                    tool_call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    input: call.arguments.clone(),
+                },
+                &request.cancellation,
+            )
+            .await
+            .map_err(AgentRunError::from)?;
+        if let Some(message) = pre_hook.blocked {
+            return Ok(controlled_tool_rejection_text(
+                call,
+                Some(effect),
+                format!("PreToolUse Hook 阻止了工具执行：{message}"),
+            ));
+        }
+        if pre_hook.modified {
+            call.arguments = pre_hook.input;
+            if let Err(error) = definition.validate_input(&call.arguments) {
+                return Ok(controlled_tool_rejection_text(
+                    call,
+                    Some(effect),
+                    format!("Hook 修改后的工具输入无效：{error}"),
+                ));
+            }
+            effect = match tool.effect(&call.arguments) {
+                Ok(effect) => effect,
+                Err(error) => {
+                    let result = tool_error_result(&call.id, &error);
+                    return Ok(controlled_tool_rejection(call, None, result));
+                }
+            };
+        }
+        if request.plan_guard.authorize(effect).is_err() {
+            return Ok(controlled_tool_rejection_text(
+                call,
+                Some(effect),
+                "计划模式禁止执行会改变状态的工具",
+            ));
+        }
+
+        let tool_call_id = crate::ToolCallId::new(call.id.clone()).map_err(|error| {
+            AgentRunError::InvalidResponse {
+                message: format!("受控工具调用 ID 无效：{error}"),
+            }
+        })?;
+        let approval = self
+            .await_tool_approval(
+                ToolApprovalRequest {
+                    session_id: identity.session_id.clone(),
+                    turn_id: identity.turn_id.clone(),
+                    source_agent_id: identity.source_agent_id.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name: call.name.clone(),
+                    input: call.arguments.clone(),
+                    effect,
+                    operation_id: Some(identity.operation_id.clone()),
+                },
+                &request.cancellation,
+            )
+            .await;
+        match approval {
+            ToolApprovalDecision::Approved => {
+                ensure_not_cancelled(&request.cancellation)?;
+            }
+            ToolApprovalDecision::Denied { reason } => {
+                return Ok(controlled_tool_rejection_text(
+                    call,
+                    Some(effect),
+                    format!("工具审批拒绝：{reason}"),
+                ));
+            }
+            ToolApprovalDecision::Cancelled => {
+                return Ok(ControlledToolResult {
+                    call: call.clone(),
+                    effect: Some(effect),
+                    status: ToolCompletionStatus::Cancelled,
+                    result: ToolResult::text(call.id, "工具审批在真实执行前因取消而中止", true),
+                    execution_started: false,
+                    duration_ms: 0,
+                });
+            }
+        }
+        let fingerprint = ToolCallFingerprint {
+            tool_name: call.name.clone(),
+            input_hash: canonical_input_hash(&call.arguments)?,
+        };
+        let concurrency = tool
+            .concurrency_for(&call.arguments)
+            .unwrap_or(ToolConcurrency::Exclusive);
+        let prepared = PreparedCall::execute(
+            0,
+            PreparedExecution {
+                call: call.clone(),
+                tool_call_id: tool_call_id.clone(),
+                tool,
+                effect,
+                concurrency,
+                fingerprint,
+            },
+            pre_hook.context,
+        );
+
+        let preflight = ControlledToolPreflight {
+            identity: identity.clone(),
+            call: call.clone(),
+            effect,
+        };
+        let mut reservation = Some(
+            request
+                .lifecycle
+                .preflight(&preflight)
+                .map_err(commit_sink_run_error)?,
+        );
+        ensure_not_cancelled(&request.cancellation).inspect_err(|_error| {
+            if let Some(reservation) = reservation.take() {
+                reservation.release();
+            }
+        })?;
+        commit_controlled_lifecycle_event(
+            &mut reservation,
+            ControlledToolEvent::Requested {
+                identity: identity.clone(),
+                call: call.clone(),
+                effect,
+            },
+        )?;
+
+        if request.cancellation.is_cancelled() {
+            let result =
+                ToolResult::text(call.id.clone(), "工具调用在真实执行前因取消而中止", true);
+            commit_controlled_lifecycle_event(
+                &mut reservation,
+                ControlledToolEvent::Completed {
+                    identity,
+                    tool_call_id,
+                    status: ToolCompletionStatus::Cancelled,
+                    result: result.clone(),
+                },
+            )?;
+            reservation
+                .take()
+                .expect("受控工具完成后必须仍持有 reservation")
+                .consume();
+            return Ok(ControlledToolResult {
+                call,
+                effect: Some(effect),
+                status: ToolCompletionStatus::Cancelled,
+                result,
+                execution_started: false,
+                duration_ms: 0,
+            });
+        }
+
+        commit_controlled_lifecycle_event(
+            &mut reservation,
+            ControlledToolEvent::ExecutionStarted {
+                identity: identity.clone(),
+                tool_call_id: tool_call_id.clone(),
+            },
+        )?;
+        let raw = execute_one_raw_with_identity(
+            &identity.session_id,
+            &identity.turn_id,
+            &identity.source_agent_id,
+            prepared.clone(),
+            request.cancellation.child_token(),
+            Duration::from_millis(self.limits.tool_cancel_grace_ms),
+        )
+        .await
+        .inspect_err(|_error| {
+            // Started 已经可靠提交，但执行边界本身失败时，不能释放 reservation
+            // 让恢复流程误以为工具从未进入外部状态；交给宿主按 started 未 settled
+            // 规则对账。
+            if let Some(reservation) = reservation.take() {
+                reservation.retain_indeterminate(ControlledToolEvent::ExecutionStarted {
+                    identity: identity.clone(),
+                    tool_call_id: tool_call_id.clone(),
+                });
+            }
+        })?;
+        let post_hook = run_post_tool_hook_with_identity(
+            controlled_hook_invocation(&identity),
+            &request.cancellation,
+            &prepared,
+            &raw,
+            &self.hooks,
+        )
+        .await;
+        let mut terminal_error = raw.terminal_error.clone();
+        let mut post_hook_budget = PostHookOutputBudget::default();
+        if let Err(error) = post_hook_budget.charge(&post_hook.context) {
+            terminal_error.get_or_insert_with(|| AgentRunError::from(error));
+        }
+        let status = raw.status;
+        let result = raw.result.clone();
+        commit_controlled_lifecycle_event(
+            &mut reservation,
+            ControlledToolEvent::Completed {
+                identity,
+                tool_call_id,
+                status,
+                result: result.clone(),
+            },
+        )?;
+        reservation
+            .take()
+            .expect("受控工具完成后必须仍持有 reservation")
+            .consume();
+        if let Some(error) = terminal_error {
+            return Err(error);
+        }
+        Ok(ControlledToolResult {
+            call,
+            effect: Some(effect),
+            status,
+            result,
+            execution_started: true,
+            duration_ms: raw.duration_ms,
+        })
     }
 
     /// 同步、幂等提交一次具有稳定用途的模型调用用量与实际耗时。
@@ -3685,6 +4043,43 @@ impl AgentRunner {
                     continue;
                 }
             };
+            let approval = self
+                .await_tool_approval(
+                    ToolApprovalRequest {
+                        session_id: request.session_id.clone(),
+                        turn_id: request.turn_id.clone(),
+                        source_agent_id: request.source_agent_id.clone(),
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: call.name.clone(),
+                        input: call.arguments.clone(),
+                        effect,
+                        operation_id: None,
+                    },
+                    &request.cancellation,
+                )
+                .await;
+            match approval {
+                ToolApprovalDecision::Approved => {
+                    ensure_not_cancelled(&request.cancellation)?;
+                }
+                ToolApprovalDecision::Denied { reason } => {
+                    prepared.push(PreparedCall::immediate_with_context(
+                        index,
+                        ToolResult::text(call.id, format!("工具审批拒绝：{reason}"), true),
+                        hook_context,
+                    ));
+                    continue;
+                }
+                ToolApprovalDecision::Cancelled => {
+                    prepared.push(PreparedCall::immediate_with_context(
+                        index,
+                        ToolResult::text(call.id, "工具审批在真实执行前因取消而中止", true),
+                        hook_context,
+                    ));
+                    preparation_error = Some(AgentRunError::Cancelled);
+                    continue;
+                }
+            }
             // 并发方式按本次输入判定；判定失败按最保守的独占处理，
             // 绝不让"判定不出来"的调用进入并行批次。
             let concurrency = tool
@@ -5897,6 +6292,29 @@ async fn execute_one_raw(
     execution_cancellation: TurnCancellation,
     cancel_grace: Duration,
 ) -> Result<RawExecutedTool, AgentRunError> {
+    execute_one_raw_with_identity(
+        &request.session_id,
+        &request.turn_id,
+        &request.source_agent_id,
+        prepared,
+        execution_cancellation,
+        cancel_grace,
+    )
+    .await
+}
+
+/// 执行一个不依赖模型请求模板的冻结调用。
+///
+/// Workflow 受控入口与普通 Agent Round 共用同一取消、超时、输出归一和 panic
+/// 边界，但不构造伪造的 `ModelRequest` 或模型 Round 身份。
+async fn execute_one_raw_with_identity(
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    source_agent_id: &AgentId,
+    prepared: PreparedCall,
+    execution_cancellation: TurnCancellation,
+    cancel_grace: Duration,
+) -> Result<RawExecutedTool, AgentRunError> {
     let PreparedDisposition::Execute {
         call,
         tool_call_id,
@@ -5914,9 +6332,9 @@ async fn execute_one_raw(
     // 只取消本调用，不会波及并行只读段中的兄弟调用。
     let call_cancellation = execution_cancellation.child_token();
     let context = ToolContext {
-        session_id: request.session_id.clone(),
-        turn_id: request.turn_id.clone(),
-        source_agent_id: request.source_agent_id.clone(),
+        session_id: session_id.clone(),
+        turn_id: turn_id.clone(),
+        source_agent_id: source_agent_id.clone(),
         tool_call_id,
         cancellation: call_cancellation.child_token(),
     };
@@ -6167,6 +6585,24 @@ async fn run_post_tool_hook(
     executed: &RawExecutedTool,
     hooks: &HookRuntime,
 ) -> PostToolHookOutcome {
+    run_post_tool_hook_with_identity(
+        hook_invocation_context(request),
+        &request.cancellation,
+        prepared,
+        executed,
+        hooks,
+    )
+    .await
+}
+
+/// 在没有模型请求模板的受控入口运行相同的 PostToolUse Hook 链。
+async fn run_post_tool_hook_with_identity(
+    invocation: HookInvocationContext,
+    cancellation: &TurnCancellation,
+    prepared: &PreparedCall,
+    executed: &RawExecutedTool,
+    hooks: &HookRuntime,
+) -> PostToolHookOutcome {
     let Some(call) = prepared.execution_call() else {
         return PostToolHookOutcome {
             context: Vec::new(),
@@ -6175,7 +6611,6 @@ async fn run_post_tool_hook(
             }),
         };
     };
-    let invocation = hook_invocation_context(request);
     let hook_context = match executed.failure {
         Some(failure) => {
             hooks
@@ -6189,7 +6624,7 @@ async fn run_post_tool_hook(
                         failure,
                         duration_ms: executed.duration_ms,
                     },
-                    &request.cancellation,
+                    cancellation,
                 )
                 .await
         }
@@ -6204,7 +6639,7 @@ async fn run_post_tool_hook(
                         result: executed.result.clone(),
                         duration_ms: executed.duration_ms,
                     },
-                    &request.cancellation,
+                    cancellation,
                 )
                 .await
         }
@@ -6509,6 +6944,88 @@ fn canonicalize_json(input: &Value) -> Value {
 fn tool_error_result(call_id: &str, error: &crate::ToolError) -> ToolResult {
     let error = normalize_tool_error(error);
     normalized_tool_error_result(call_id, &error)
+}
+
+/// 把受控入口请求校验失败转换为不暴露参数正文的 Runner 错误。
+fn controlled_tool_request_error(error: ControlledToolError) -> AgentRunError {
+    AgentRunError::InvalidResponse {
+        message: format!("受控工具请求无效：{error}"),
+    }
+}
+
+/// 创建尚未越过真实执行边界的固定失败结果。
+fn controlled_tool_rejection_text(
+    call: ToolCall,
+    effect: Option<ToolEffect>,
+    message: impl Into<String>,
+) -> ControlledToolResult {
+    let result = ToolResult::text(call.id.clone(), message.into(), true);
+    controlled_tool_rejection(call, effect, result)
+}
+
+/// 创建已经通过统一 ToolResult 配对边界的受控失败结果。
+fn controlled_tool_rejection(
+    call: ToolCall,
+    effect: Option<ToolEffect>,
+    result: ToolResult,
+) -> ControlledToolResult {
+    ControlledToolResult {
+        call,
+        effect,
+        status: ToolCompletionStatus::Failed,
+        result,
+        execution_started: false,
+        duration_ms: 0,
+    }
+}
+
+/// 将受控调用身份映射为 Hook 可观察但不能修改的稳定身份。
+fn controlled_hook_invocation(identity: &ControlledToolIdentity) -> HookInvocationContext {
+    HookInvocationContext {
+        session_id: identity.session_id.clone(),
+        turn_id: identity.turn_id.clone(),
+        source_agent_id: identity.source_agent_id.clone(),
+    }
+}
+
+/// 以有界同步重试提交一个受控生命周期事件。
+///
+/// rejected 表示本事件明确没有写入，可以释放 reservation；indeterminate
+/// 表示 Sink 无法证明写入与否，必须把事件交给宿主恢复对账，禁止自动重放工具。
+fn commit_controlled_lifecycle_event(
+    reservation: &mut Option<Box<dyn ControlledToolReservation>>,
+    event: ControlledToolEvent,
+) -> Result<(), AgentRunError> {
+    let outcome = {
+        let Some(reservation_ref) = reservation.as_deref_mut() else {
+            return Err(AgentRunError::Internal {
+                message: "受控工具生命周期缺少 reservation".to_owned(),
+            });
+        };
+        let mut latest_rejected = None;
+        let mut latest_indeterminate = None;
+        for _ in 0..AUTHORITATIVE_EVENT_MAX_COMMIT_ATTEMPTS {
+            match reservation_ref.commit(event.clone()) {
+                Ok(()) => return Ok(()),
+                Err(error) if error.kind() == AgentCommitSinkErrorKind::Indeterminate => {
+                    latest_indeterminate = Some(error);
+                }
+                Err(error) => latest_rejected = Some(error),
+            }
+        }
+        latest_indeterminate
+            .or(latest_rejected)
+            .unwrap_or_else(|| AgentCommitSinkError::rejected("受控工具生命周期提交没有返回结果"))
+    };
+
+    if outcome.kind() == AgentCommitSinkErrorKind::Indeterminate {
+        if let Some(reservation) = reservation.take() {
+            reservation.retain_indeterminate(event);
+        }
+    } else if let Some(reservation) = reservation.take() {
+        reservation.release();
+    }
+    Err(commit_sink_run_error(outcome))
 }
 
 /// 把已通过字段硬上限的工具错误转换为固定结构的配对结果。

@@ -303,6 +303,9 @@ pub struct SteerSessionResponse {
     pub session_id: String,
     /// Runtime 是否已把引导放入当前 Turn 的安全边界队列。
     pub accepted: bool,
+    /// 接收的追加消息稳定展示标识，用于消除原页面的乐观气泡与权威回显重复。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 impl SteerSessionResponse {
@@ -311,12 +314,16 @@ impl SteerSessionResponse {
         Self {
             session_id: session_id.into(),
             accepted: true,
+            message_id: None,
         }
     }
 
     /// 校验 Session 标识且只允许成功响应声明已接管。
     pub fn validate(&self) -> Result<(), AcpBoundaryError> {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        if let Some(message_id) = &self.message_id {
+            validate_identifier(message_id, MAX_IDENTIFIER_BYTES)?;
+        }
         if !self.accepted {
             return Err(AcpBoundaryError::InvalidSemanticValue);
         }
@@ -429,6 +436,24 @@ pub struct RewindSessionResponse {
     pub archived_session_id: String,
     /// 回退完成后权威 Journal 的最后序号。
     pub through_journal_sequence: u64,
+}
+
+/// 执行目录切换完成后的真实会话身份与目录。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionWorkspaceResponse {
+    /// 保持不变的 Session 标识。
+    pub session_id: String,
+    /// 来自 Journal 的真实当前执行目录。
+    pub project_root: String,
+}
+
+impl SessionWorkspaceResponse {
+    /// 限制响应身份与目录大小，不允许空目录成功值。
+    pub fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        validate_text(&self.project_root, 16 * 1024)
+    }
 }
 
 impl RewindSessionResponse {
@@ -1297,6 +1322,7 @@ impl_validated_response_payload!(
     GenerateSessionTitleResponse,
     RewindCandidatesResponse,
     RewindSessionResponse,
+    SessionWorkspaceResponse,
     ReplaySessionResponse,
     CancelBackgroundTaskResponse,
     ResumeBackgroundTaskResponse,
@@ -1350,6 +1376,8 @@ pub enum AcpRequest {
     RewindCandidates(RewindCandidatesRequest),
     /// 将 Session Transcript 回退到指定消息锚点。
     RewindSession(RewindSessionRequest),
+    /// 改变空闲 Session 的执行目录，保留稳定历史身份。
+    SetSessionWorkspace(SetSessionWorkspaceRequest),
     /// 从权威事件日志分页重放 Session。
     ReplaySession(ReplaySessionRequest),
     /// 取消 Session 内一个明确后台任务。
@@ -1401,6 +1429,7 @@ impl AcpRequest {
             Self::GenerateSessionTitle(_) => "keencode/session/title",
             Self::RewindCandidates(_) => "keencode/session/rewind_candidates",
             Self::RewindSession(_) => "keencode/session/rewind",
+            Self::SetSessionWorkspace(_) => "keencode/session/set_workspace",
             Self::ReplaySession(_) => "keencode/session/replay",
             Self::CancelBackgroundTask(_) => "keencode/background/cancel",
             Self::ResumeBackgroundTask(_) => "keencode/background/resume",
@@ -1567,6 +1596,7 @@ fn request_params_value(request: AcpRequest) -> Result<Value, AcpBoundaryError> 
         AcpRequest::GenerateSessionTitle(value) => serde_json::to_value(value),
         AcpRequest::RewindCandidates(value) => serde_json::to_value(value),
         AcpRequest::RewindSession(value) => serde_json::to_value(value),
+        AcpRequest::SetSessionWorkspace(value) => serde_json::to_value(value),
         AcpRequest::ReplaySession(value) => serde_json::to_value(value),
         AcpRequest::CancelBackgroundTask(value) => serde_json::to_value(value),
         AcpRequest::ResumeBackgroundTask(value) => serde_json::to_value(value),
@@ -1715,6 +1745,9 @@ impl AcpRequestDecoder {
             "keencode/session/rewind" => {
                 self.decode_extension(params).map(AcpRequest::RewindSession)
             }
+            "keencode/session/set_workspace" => self
+                .decode_extension(params)
+                .map(AcpRequest::SetSessionWorkspace),
             "keencode/session/replay" => {
                 self.decode_extension(params).map(AcpRequest::ReplaySession)
             }
@@ -2283,6 +2316,21 @@ pub struct RewindSessionRequest {
     pub meta: Option<Meta>,
 }
 
+/// KeenCode 的空闲会话目录切换扩展；两侧 cwd 都必须通过宿主授权。
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetSessionWorkspaceRequest {
+    /// 稳定目标 Session。
+    pub session_id: String,
+    /// 调用方观察到的原目录，参与幂等输入绑定。
+    pub expected_cwd: String,
+    /// 已经存在的目标目录；此方法不创建或搬动 Git checkout。
+    pub cwd: String,
+    /// 通过标准扩展元数据携带 operationId。
+    #[serde(skip_serializing_if = "Option::is_none", rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
 /// 从权威事件日志分页重放 Session。
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -2565,6 +2613,15 @@ impl ValidateAcpParams for RewindSessionRequest {
         validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
         validate_identifier(&self.target_message_id, MAX_IDENTIFIER_BYTES)?;
         validate_text(&self.expected_text, MAX_USER_TEXT_BYTES)
+    }
+}
+
+impl ValidateAcpParams for SetSessionWorkspaceRequest {
+    /// 严格验证会话与有界目录文本，绝对路径和项目归属由宿主进一步验证。
+    fn validate(&self) -> Result<(), AcpBoundaryError> {
+        validate_identifier(&self.session_id, MAX_IDENTIFIER_BYTES)?;
+        validate_text(&self.expected_cwd, 16 * 1024)?;
+        validate_text(&self.cwd, 16 * 1024)
     }
 }
 

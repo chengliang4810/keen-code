@@ -1,23 +1,51 @@
 //! Session 隔离的实时事件投递与显式追赶契约。
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use keencode_agent::{AgentEventFuture, AgentEventSink, AgentEventSinkError, AgentStreamEvent};
-use keencode_resources::SessionEventRecord;
+use keencode_resources::{AgentId, SessionEvent, SessionEventRecord, TurnId};
 use thiserror::Error;
 use tokio::sync::broadcast;
 
 use crate::RuntimeError;
+
+/// 单个 Runtime Session 可保留的在线 retry 投影数量上限；该表不进入 Journal。
+const MAX_MODEL_RETRY_STATES: usize = 128;
 
 /// Runtime 统一实时序列中保持类型边界的临时流、权威 Journal 事实或控制信号。
 #[derive(Clone, Debug, PartialEq)]
 pub enum RuntimeEventPayload {
     /// 尚未成为权威 Session 事实的 Provider/Agent 实时流事件。
     Transient(AgentStreamEvent),
+    /// Runtime 已确认当前 Turn 仍可继续执行的模型重试安排。
+    ///
+    /// 该状态只存在于热实时投递世代；下一次权威快照或冷恢复不会从中恢复，
+    /// 因而不能替代 Journal 中的 Turn 生命周期事实。
+    ModelRetryScheduled(RuntimeModelRetryScheduled),
     /// 已经成功追加到 Session Journal 的唯一权威事件记录。
     Authoritative(SessionEventRecord),
     /// Runtime 投递通道自身的生命周期控制信号。
     Control(RuntimeControlEvent),
+}
+
+/// 由 Runtime 发布给桌面投影的 provider 中立模型重试状态。
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeModelRetryScheduled {
+    /// 仍处于重试生命周期中的 Turn 标识。
+    pub turn_id: String,
+    /// 产生该模型请求的根 Agent 或单层子 Agent 标识。
+    pub source_agent_id: String,
+    /// 当前即将开始的请求尝试序号，从 1 开始并包含首次请求。
+    pub attempt: u32,
+    /// 该 Turn 的最大请求尝试数。
+    pub max_attempts: u32,
+    /// 下一次请求前等待的毫秒数。
+    pub delay_ms: u64,
+    /// Runtime 接收重试安排时的 Unix Epoch 毫秒时间。
+    pub occurred_at_ms: u64,
+    /// 已脱敏的短错误摘要；不会进入 V4 snapshot 的事实字段。
+    pub message: String,
 }
 
 /// 不属于 Session Journal、只描述本地实时通道生命周期的控制信号。
@@ -128,6 +156,8 @@ struct PublisherState {
     last_delivery_sequence: u64,
     /// SessionClosed 控制信号是否已经作为最后一条投递发送。
     closed: bool,
+    /// 当前仍有效的热 retry 投影，按 Turn 与 Agent 双重身份隔离。
+    model_retries: BTreeMap<(String, String), RuntimeModelRetryScheduled>,
 }
 
 /// 可由 Session 内多个绑定 Runner 共享的顺序化实时事件 Publisher。
@@ -149,6 +179,7 @@ impl SessionEventPublisher {
                 sender,
                 last_delivery_sequence: 0,
                 closed: false,
+                model_retries: BTreeMap::new(),
             })),
         }
     }
@@ -173,8 +204,78 @@ impl SessionEventPublisher {
                 "Runtime Publisher 拒绝跨 Session 实时事件",
             ));
         }
-        self.publish(RuntimeEventPayload::Transient(event.clone()))
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| AgentEventSinkError::new("Runtime Publisher 状态不可用"))?;
+        if state.closed {
+            return Err(AgentEventSinkError::new("Runtime Publisher 已关闭"));
+        }
+        // 任一真实模型流事件表示该 Turn 已重新进入执行；旧 retry 仅是等待态，
+        // 不能继续覆盖当前响应。
+        state.model_retries.remove(&(
+            event.turn_id().as_str().to_owned(),
+            event.source_agent_id().as_str().to_owned(),
+        ));
+        self.publish_locked(&mut state, RuntimeEventPayload::Transient(event.clone()))
             .map_err(|_| AgentEventSinkError::new("Runtime Publisher 状态不可用"))
+    }
+
+    /// 校验并发布一次仅存在于热 Runtime 投递世代的模型重试安排。
+    pub(crate) fn publish_model_retry(
+        &self,
+        event: RuntimeModelRetryScheduled,
+    ) -> Result<(), RuntimeError> {
+        // 这条入口只接受已通过 Provider retry policy 的受信 Runtime 数据，
+        // 仍在 publisher 边界拒绝非法身份和不可能的尝试范围。
+        TurnId::new(event.turn_id.clone())?;
+        AgentId::new(event.source_agent_id.clone())?;
+        if event.attempt == 0
+            || event.max_attempts == 0
+            || event.attempt > event.max_attempts
+            || event.message.len() > 16 * 1024
+        {
+            return Err(RuntimeError::InvalidTurnRequest);
+        }
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if state.closed {
+            return Err(RuntimeError::SessionClosed);
+        }
+        if state.model_retries.len() >= MAX_MODEL_RETRY_STATES
+            && let Some(oldest) = state
+                .model_retries
+                .iter()
+                .min_by_key(|(key, retry)| (retry.occurred_at_ms, key.0.as_str(), key.1.as_str()))
+                .map(|(key, _)| key.clone())
+        {
+            // Bounded memory uses the retry's observed time as the eviction order; key fields
+            // only make equal timestamps deterministic and are not a freshness signal.
+            state.model_retries.remove(&oldest);
+        }
+        state.model_retries.insert(
+            (event.turn_id.clone(), event.source_agent_id.clone()),
+            event.clone(),
+        );
+        self.publish_locked(&mut state, RuntimeEventPayload::ModelRetryScheduled(event))
+    }
+
+    /// 读取当前热 retry；新订阅和 resync 只能从这份 Runtime authority 重建它。
+    pub(crate) fn model_retry_for_turn(
+        &self,
+        turn_id: &str,
+        source_agent_id: &str,
+    ) -> Result<Option<RuntimeModelRetryScheduled>, RuntimeError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        Ok(state
+            .model_retries
+            .get(&(turn_id.to_owned(), source_agent_id.to_owned()))
+            .cloned())
     }
 
     /// 仅在 Journal 新追加得到明确回执时发布一次权威记录。
@@ -185,7 +286,15 @@ impl SessionEventPublisher {
         if record.session.as_str() != self.session_id.as_ref() {
             return Err(RuntimeError::InvalidTurnRequest);
         }
-        self.publish(RuntimeEventPayload::Authoritative(record))
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| RuntimeError::StateUnavailable)?;
+        if state.closed {
+            return Err(RuntimeError::SessionClosed);
+        }
+        clear_model_retry_for_event(&mut state.model_retries, &record.event);
+        self.publish_locked(&mut state, RuntimeEventPayload::Authoritative(record))
     }
 
     /// 以当前 Session 最后一条有序投递显式通知全部既有订阅者关闭。
@@ -212,12 +321,12 @@ impl SessionEventPublisher {
         Ok(())
     }
 
-    /// 在 Publisher 锁内为一种类型化载荷分配严格递增序号并广播。
-    fn publish(&self, payload: RuntimeEventPayload) -> Result<(), RuntimeError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| RuntimeError::StateUnavailable)?;
+    /// 在调用方已持有 Publisher 锁时分配序号并广播一条载荷。
+    fn publish_locked(
+        &self,
+        state: &mut PublisherState,
+        payload: RuntimeEventPayload,
+    ) -> Result<(), RuntimeError> {
         if state.closed {
             return Err(RuntimeError::SessionClosed);
         }
@@ -233,6 +342,26 @@ impl SessionEventPublisher {
         state.last_delivery_sequence = delivery_sequence;
         let _ = state.sender.send(delivery);
         Ok(())
+    }
+}
+
+fn clear_model_retry_for_event(
+    retries: &mut BTreeMap<(String, String), RuntimeModelRetryScheduled>,
+    event: &SessionEvent,
+) {
+    match event {
+        SessionEvent::TurnStarted {
+            source_agent_id, ..
+        } => retries.retain(|(_, agent_id), _| agent_id != source_agent_id.as_str()),
+        SessionEvent::TurnCompleted { turn_id } | SessionEvent::TurnStopped { turn_id, .. } => {
+            retries.retain(|(retry_turn_id, _), _| retry_turn_id != turn_id.as_str())
+        }
+        SessionEvent::AtomicBatch { events } => {
+            for event in events {
+                clear_model_retry_for_event(retries, event);
+            }
+        }
+        _ => {}
     }
 }
 

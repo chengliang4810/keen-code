@@ -61,6 +61,7 @@ fn journal_with_messages(
             &format!("event-message-{index}"),
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: format!("message-{index}"),
                     turn_id: Some(turn_id.clone()),

@@ -121,6 +121,7 @@ fn complete_provider_neutral_transcript_round_trips() {
 
     let messages = vec![
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-developer".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -131,6 +132,7 @@ fn complete_provider_neutral_transcript_round_trips() {
             }],
         },
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-user".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -148,6 +150,7 @@ fn complete_provider_neutral_transcript_round_trips() {
             ],
         },
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-assistant".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -170,6 +173,7 @@ fn complete_provider_neutral_transcript_round_trips() {
             ],
         },
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-tool".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -242,6 +246,7 @@ fn malformed_transcript_parts_are_rejected_before_append() {
     let (journal, _artifacts, _session_id, turn_id) = journal_with_artifacts(root.path());
     let cases = vec![
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "bad-role".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -254,6 +259,7 @@ fn malformed_transcript_parts_are_rejected_before_append() {
             }],
         },
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "bad-reasoning".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -269,6 +275,7 @@ fn malformed_transcript_parts_are_rejected_before_append() {
             }],
         },
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "bad-tool-input".to_owned(),
             turn_id: Some(turn_id),
@@ -313,6 +320,7 @@ fn nested_image_artifact_requires_real_entity() {
     let error = journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "missing-image".to_owned(),
                 turn_id: Some(turn_id),

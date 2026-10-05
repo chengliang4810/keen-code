@@ -19,8 +19,8 @@ mod usage;
 
 pub use error::{ModelError, StructuredOutputEnforcement, StructuredOutputFailureKind};
 pub use message::{
-    ContentBlock, ImageContent, ImageSource, Message, MessageRole, OpaqueReasoningState,
-    ReasoningContent, last_non_empty_text,
+    ContentBlock, ImageContent, ImageSource, InputReference, Message, MessageRole,
+    OpaqueReasoningState, ReasoningContent, last_non_empty_text,
 };
 pub use provider::{
     ModelFuture, ModelProvider, ModelStream, ProviderCapabilities, ProviderProtocol,

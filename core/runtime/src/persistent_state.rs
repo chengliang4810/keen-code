@@ -205,6 +205,90 @@ impl PersistentAgentState {
             });
         Ok((snapshot, document))
     }
+
+    /// 暂停当前 Session 的 Goal；状态和 operationId 均由 GoalFileStore 持久化。
+    pub fn pause_goal(
+        &self,
+        operation_id: &str,
+    ) -> Result<keencode_agent::GoalChange, RuntimeStateError> {
+        self.set_goal_paused(operation_id, true)
+    }
+
+    /// 恢复当前 Session 的 Goal，并返回可供宿主决定是否续跑的真实变化。
+    pub fn resume_goal(
+        &self,
+        operation_id: &str,
+    ) -> Result<keencode_agent::GoalChange, RuntimeStateError> {
+        self.set_goal_paused(operation_id, false)
+    }
+
+    /// Goal pause/resume 不是 Agent 工具的终态迁移，单独复用同一份 CAS 文档事务。
+    fn set_goal_paused(
+        &self,
+        operation_id: &str,
+        paused: bool,
+    ) -> Result<keencode_agent::GoalChange, RuntimeStateError> {
+        let target = if paused {
+            ResourceGoalStatus::Paused
+        } else {
+            ResourceGoalStatus::Active
+        };
+        let operation = (
+            "goal_pause_resume_v1",
+            self.session.session_id().as_str(),
+            target,
+        );
+        for _ in 0..MAX_DOCUMENT_CAS_ATTEMPTS {
+            let document = self.read_goal()?;
+            if let Some(change) = deduplicated_goal_change(
+                document.as_ref(),
+                operation_id,
+                &operation,
+                GoalChangeKind::Transitioned,
+            )? {
+                return Ok(change);
+            }
+            let revision = document.as_ref().map_or(0, |document| document.revision);
+            let retired_goal_ids = document
+                .as_ref()
+                .map_or_else(Vec::new, |document| document.retired_goal_ids.clone());
+            let mut goal = document
+                .as_ref()
+                .and_then(|document| document.goal.clone())
+                .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+            if goal.owner_session_id != self.session.session_id().as_str() {
+                return Err(RuntimeStateError::Conflict {
+                    message: "Goal 不属于当前 Session".to_owned(),
+                });
+            }
+            if goal.status.is_terminal() {
+                return Err(RuntimeStateError::Terminal { entity: "Goal" });
+            }
+            let changed = goal.status != target;
+            if changed {
+                goal.status = target;
+                goal.updated_at_unix_ms = unix_time_ms()?.max(goal.updated_at_unix_ms);
+            }
+            match self.save_goal(
+                operation_id,
+                &operation,
+                revision,
+                Some(goal),
+                retired_goal_ids,
+            ) {
+                Ok(outcome) => {
+                    return Ok(goal_change_from_outcome(
+                        GoalChangeKind::Transitioned,
+                        outcome,
+                        changed,
+                    ));
+                }
+                Err(ResourceError::RevisionConflict { .. }) => continue,
+                Err(error) => return Err(state_resource_error(error)),
+            }
+        }
+        Err(document_contention("Goal pause/resume"))
+    }
 }
 
 impl TodoController for PersistentAgentState {

@@ -24,7 +24,7 @@ use crate::{
 /// Session 变更事务记录使用的固定 schema。
 const MUTATION_SCHEMA: &str = "keencode/session-mutation";
 /// Session 变更事务记录的唯一格式版本。
-const MUTATION_VERSION: u32 = 5;
+const MUTATION_VERSION: u32 = 6;
 /// 单个事务记录允许占用的最大字节数。
 const MAX_MUTATION_RECORD_BYTES: u64 = 64 * 1024;
 /// 启动恢复一次允许扫描的最大事务记录数。
@@ -32,7 +32,7 @@ const MAX_MUTATION_RECORDS: usize = 10_000;
 /// Session 变更 operationId 允许的最大 UTF-8 字节数。
 const MAX_OPERATION_ID_BYTES: usize = 128;
 
-/// 创建完整 Session 分支所需的不可变输入。
+/// 创建完整历史或指定根 Turn 前缀分支所需的不可变输入。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionForkRequest {
     /// 被复制的现有 Session。
@@ -41,6 +41,8 @@ pub struct SessionForkRequest {
     pub operation_id: String,
     /// 可选的新标题；为空时保留源 Session 当前标题。
     pub title: Option<String>,
+    /// 包含该已结束根 Turn 的历史前缀；为空时复制全部历史。
+    pub through_turn_id: Option<TurnId>,
 }
 
 /// 已完成 Session 分支事务的稳定结果。
@@ -88,6 +90,8 @@ enum MutationKind {
     Fork {
         /// 调用方请求的新标题；`None` 表示保留源标题。
         title: Option<String>,
+        /// 恢复事务时重建同一历史边界，不能退回复制全部历史。
+        through_turn_id: Option<TurnId>,
     },
     /// 保存完整归档后，把源日志截断到指定根用户 Turn 之前。
     EditUser {
@@ -148,15 +152,15 @@ struct MutationRecord {
 }
 
 /// 已取得源 Session 独占 lease 的健康历史与 Artifact 句柄。
-struct SourceBundle {
+pub(super) struct SourceBundle {
     /// 保持源 Session 跨进程独占的 lease。
     _lease: SessionLease,
     /// 用于读取并复核目标引用内容的源 ArtifactStore。
-    artifacts: std::sync::Arc<ArtifactStore>,
+    pub(super) artifacts: std::sync::Arc<ArtifactStore>,
     /// 源 Session 的全部物理 Journal 记录。
-    records: Vec<SessionEventRecord>,
+    pub(super) records: Vec<SessionEventRecord>,
     /// 与全部记录一致的权威状态。
-    state: SessionState,
+    pub(super) state: SessionState,
 }
 
 /// 在资源层完成一个可崩溃恢复的完整 Session 分支。
@@ -196,8 +200,10 @@ pub fn fork_session(
         .clone()
         .unwrap_or_else(|| source.state.title.clone());
     let target_time_unix_ms = mutation_time_ms(source.state.updated_at_unix_ms)?;
+    let fork_records = fork_source_records(&source, request.through_turn_id.as_ref())?;
     let target_records = target_records(
-        &source.records,
+        fork_records,
+        &source.state.project_root,
         &target_session_id,
         &target_title,
         &operation_key,
@@ -212,6 +218,7 @@ pub fn fork_session(
         request_sha256,
         kind: MutationKind::Fork {
             title: request.title,
+            through_turn_id: request.through_turn_id,
         },
         target_session_id,
         target_title,
@@ -223,6 +230,8 @@ pub fn fork_session(
         state: MutationState::Prepared,
     };
     write_record(&record_path, &record)?;
+    #[cfg(test)]
+    fail_mutation_if(&operation_key, MutationFault::AfterForkPrepared)?;
     resume_prepared(
         &root,
         &layout,
@@ -298,6 +307,7 @@ pub fn prepare_edit_user(
     let target_time_unix_ms = mutation_time_ms(source.state.updated_at_unix_ms)?;
     let target_records = target_records(
         &source.records,
+        &source.state.project_root,
         &target_session_id,
         &target_title,
         &operation_key,
@@ -412,7 +422,7 @@ impl MutationLayout {
 }
 
 /// 校验 operationId 具有稳定的有限文本身份。
-fn validate_operation_id(operation_id: &str) -> Result<(), ResourceError> {
+pub(super) fn validate_operation_id(operation_id: &str) -> Result<(), ResourceError> {
     if operation_id.is_empty()
         || operation_id.len() > MAX_OPERATION_ID_BYTES
         || operation_id.trim() != operation_id
@@ -450,7 +460,7 @@ fn validate_optional_title(title: Option<&str>) -> Result<(), ResourceError> {
 }
 
 /// 打开并完整验证源 Session，同时保持跨进程 lease 存活。
-fn open_source(
+pub(super) fn open_source(
     root: &Path,
     session_id: &SessionId,
     journal_config: JournalConfig,
@@ -499,7 +509,7 @@ fn acquire_session_lease(
 }
 
 /// 拒绝仍有活动工作或已经关闭的源状态。
-fn ensure_mutable_source(state: &SessionState) -> Result<(), ResourceError> {
+pub(super) fn ensure_mutable_source(state: &SessionState) -> Result<(), ResourceError> {
     let active = state
         .turns
         .values()
@@ -560,32 +570,136 @@ fn reduce_records(
     Ok(state)
 }
 
-/// 定位最后一条权威根用户消息，并精确校验稳定标识与完整文本。
+/// 只接受已结束根 Turn 的完整物理日志前缀，保持批次及其关联工具事件原子性。
+fn fork_source_records<'a>(
+    source: &'a SourceBundle,
+    through_turn_id: Option<&TurnId>,
+) -> Result<&'a [SessionEventRecord], ResourceError> {
+    let Some(turn_id) = through_turn_id else {
+        return Ok(&source.records);
+    };
+    let turn = source.state.turns.get(turn_id).ok_or_else(|| {
+        ResourceError::SessionMutationNotApplicable("分叉边界 Turn 不存在".to_owned())
+    })?;
+    if turn.source_agent_id.as_str() != crate::ROOT_AGENT_ID || turn.status == TurnStatus::Running {
+        return Err(ResourceError::SessionMutationNotApplicable(
+            "只能从已结束的根 Turn 分叉".to_owned(),
+        ));
+    }
+    let index = source
+        .records
+        .iter()
+        .position(|record| event_ends_turn(&record.event, turn_id))
+        .ok_or_else(|| {
+            ResourceError::SessionMutationNotApplicable("分叉边界缺少终态事件".to_owned())
+        })?;
+    let records = &source.records[..=index];
+    let state = reduce_records(&source.state.session_id, records)?;
+    ensure_mutable_source(&state)?;
+    // 同一 AtomicBatch 若还包含后续根 Turn，则无法以物理记录为单位安全分叉。
+    if state.turns.values().any(|other| {
+        other.source_agent_id.as_str() == crate::ROOT_AGENT_ID
+            && other.turn_id != *turn_id
+            && !source.records[..index]
+                .iter()
+                .any(|record| event_ends_turn(&record.event, &other.turn_id))
+    }) {
+        return Err(ResourceError::SessionMutationNotApplicable(
+            "分叉边界批次包含其他根 Turn".to_owned(),
+        ));
+    }
+    Ok(records)
+}
+
+/// 递归检查原子批次内的 Turn 终态，不把子 Agent 的完成误作根边界。
+fn event_ends_turn(event: &SessionEvent, target: &TurnId) -> bool {
+    match event {
+        SessionEvent::AtomicBatch { events } => {
+            events.iter().any(|event| event_ends_turn(event, target))
+        }
+        SessionEvent::TurnCompleted { turn_id } | SessionEvent::TurnStopped { turn_id, .. } => {
+            turn_id == target
+        }
+        _ => false,
+    }
+}
+
+/// 定位最后一条权威根用户输入，并精确校验稳定标识与完整文本。
+/// 追加属于原 Turn；编辑时仍归档并回退整个 Turn，不截断到内部模型信封中间。
 fn target_root_user_sequence(
     records: &[SessionEventRecord],
     artifacts: &ArtifactStore,
     target_message_id: &str,
     expected_text: &str,
 ) -> Result<EditTarget, ResourceError> {
-    let (record, message) = last_root_user_message(records)?;
-    if message.message_id != target_message_id {
+    let (target, actual_id, actual) = last_root_user_input(records, artifacts)?;
+    if actual_id != target_message_id {
         return Err(ResourceError::SessionMutationNotApplicable(
             "只能编辑最后一条权威用户消息".to_owned(),
         ));
     }
-    let actual = materialize_user_text(message, artifacts)?;
     if actual != expected_text {
         return Err(ResourceError::SessionMutationNotApplicable(
             "目标用户消息已变化".to_owned(),
         ));
     }
+    Ok(target)
+}
+
+/// 初次编辑与中断恢复共用同一原文锚点；回退边界保持根 Turn 起点。
+fn last_root_user_input(
+    records: &[SessionEventRecord],
+    artifacts: &ArtifactStore,
+) -> Result<(EditTarget, String, String), ResourceError> {
+    let (record, message) = last_root_user_message(records)?;
     let root_turn_id = message.turn_id.clone().ok_or_else(|| {
         ResourceError::SessionMutationNotApplicable("目标用户消息缺少根 Turn 标识".to_owned())
     })?;
-    Ok(EditTarget {
-        cutoff_sequence: record.sequence,
-        root_turn_id,
-    })
+    let latest_steer = records
+        .iter()
+        .filter(|candidate| candidate.sequence >= record.sequence)
+        .filter_map(|candidate| last_root_steer_input(&candidate.event, &root_turn_id))
+        .next_back();
+    // 新追加必须关闭旧起点的编辑入口；不能用相同正文绕过最后输入的稳定身份。
+    let actual_id = latest_steer.map_or_else(
+        || message.message_id.clone(),
+        |input| format!("{}:steer:{}", root_turn_id.as_str(), input.sequence),
+    );
+    let actual = match latest_steer {
+        Some(input) => input.text.clone(),
+        None => materialize_user_text(message, artifacts)?,
+    };
+    Ok((
+        EditTarget {
+            cutoff_sequence: record.sequence,
+            root_turn_id,
+        },
+        actual_id,
+        actual,
+    ))
+}
+
+/// 只使用根 Agent 已提交回执中的展示输入；邮箱、子 Agent 和内部信封不是编辑目标。
+fn last_root_steer_input<'a>(
+    event: &'a SessionEvent,
+    root_turn_id: &TurnId,
+) -> Option<&'a crate::DynamicUserInput> {
+    match event {
+        SessionEvent::AtomicBatch { events } => events
+            .iter()
+            .rev()
+            .find_map(|event| last_root_steer_input(event, root_turn_id)),
+        SessionEvent::DynamicInputReceiptCommitted {
+            turn_id,
+            source_agent_id,
+            kind: crate::DynamicInputKind::UserSteer,
+            user_inputs,
+            ..
+        } if turn_id == root_turn_id && source_agent_id.as_str() == crate::ROOT_AGENT_ID => {
+            user_inputs.last()
+        }
+        _ => None,
+    }
 }
 
 /// 返回唯一合法批次中的最后一条权威根用户消息。
@@ -689,10 +803,14 @@ fn retain_edit_control_event(
             Some(event.clone())
         }
         SessionEvent::SessionRenamed { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
+        | SessionEvent::FollowupModeChanged { .. }
+        | SessionEvent::InputQueueChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::TitleGenerated { .. }
+        | SessionEvent::WorkflowEventCommitted { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageQueued { .. }
@@ -790,6 +908,7 @@ fn materialize_user_text(
 /// 将源记录重绑定到目标 Session，并追加确定性标题覆盖事件。
 fn target_records(
     source: &[SessionEventRecord],
+    project_root: &str,
     target_session_id: &SessionId,
     target_title: &str,
     operation_key: &str,
@@ -805,7 +924,28 @@ fn target_records(
             Ok(record)
         })
         .collect::<Result<Vec<_>, ResourceError>>()?;
-    let state = reduce_records(target_session_id, &records)?;
+    let mut state = reduce_records(target_session_id, &records)?;
+    // 指定回复前缀可能早于工作目录切换；历史前缀保持原样，新的分叉仍在当前真实 cwd 继续。
+    if state.project_root != project_root {
+        let event_id = SessionEventId::new(format!("session-mutation-workspace-{operation_key}"))?;
+        let sequence = state
+            .last_sequence
+            .checked_add(1)
+            .ok_or(ResourceError::SessionMutationConflict)?;
+        let record = SessionEventRecord::new(
+            event_id,
+            target_session_id.clone(),
+            sequence,
+            target_time_unix_ms.max(state.updated_at_unix_ms),
+            SessionEvent::SessionWorkspaceChanged {
+                expected_project_root: state.project_root.clone(),
+                project_root: project_root.to_owned(),
+            },
+        );
+        reduce_record(&mut state, record.clone())
+            .map_err(|error| ResourceError::Reduction(error.message))?;
+        records.push(record);
+    }
     let title_event_id = SessionEventId::new(format!("session-mutation-title-{operation_key}"))?;
     if records
         .iter()
@@ -897,8 +1037,10 @@ fn collect_request_id_binding(
             }
         }
         SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionPreferenceSet { .. }
+        | SessionEvent::AssistantFeedbackSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -920,9 +1062,13 @@ fn collect_request_id_binding(
         | SessionEvent::CompactionApplied { .. }
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
+        | SessionEvent::FollowupModeChanged { .. }
+        | SessionEvent::InputQueueChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
+        | SessionEvent::CommandReceiptCommitted { .. }
+        | SessionEvent::WorkflowEventCommitted { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageQueued { .. }
@@ -998,8 +1144,10 @@ fn rebind_event_request_ids(
             Ok(SessionEvent::TerminalStarted { terminal })
         }
         SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionPreferenceSet { .. }
+        | SessionEvent::AssistantFeedbackSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -1015,9 +1163,13 @@ fn rebind_event_request_ids(
         | SessionEvent::CompactionApplied { .. }
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
+        | SessionEvent::FollowupModeChanged { .. }
+        | SessionEvent::InputQueueChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
+        | SessionEvent::CommandReceiptCommitted { .. }
+        | SessionEvent::WorkflowEventCommitted { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageQueued { .. }
@@ -1144,8 +1296,15 @@ fn resume_prepared(
                 "源日志已截断但归档分支缺失".to_owned(),
             ));
         }
+        let selected_records = match &record.kind {
+            MutationKind::Fork {
+                through_turn_id, ..
+            } => fork_source_records(source, through_turn_id.as_ref())?,
+            MutationKind::EditUser { .. } => &source.records,
+        };
         let target_records = target_records(
-            &source.records,
+            selected_records,
+            &source.state.project_root,
             &record.target_session_id,
             &record.target_title,
             &operation_key(&record.source_session_id, &record.operation_id),
@@ -1176,6 +1335,7 @@ fn resume_prepared(
             MutationFault::AfterArchivePublished,
         )?;
         if let Some(truncated) = edit_effects {
+            archive_rewound_collaboration(root, record)?;
             rewrite_source_log(root, &record.source_session_id, journal_config, &truncated)?;
             #[cfg(test)]
             fail_mutation_if(
@@ -1190,6 +1350,65 @@ fn resume_prepared(
     )
 }
 
+/// 回退会使协作 checkpoint 引用的 Turn 失效；把它们移入归档的证据目录，
+/// 让源 Session 从截断后的 Journal 重新装配。必须在 Prepared 事务内完成，
+/// 崩溃恢复可继续移动，完成后的幂等重试不能移走新一轮产生的 checkpoint。
+fn archive_rewound_collaboration(
+    root: &Path,
+    record: &MutationRecord,
+) -> Result<(), ResourceError> {
+    let source = secure_existing_session_dir(root, &record.source_session_id)?;
+    let target = secure_existing_session_dir(root, &record.target_session_id)?;
+    let archive = secure_child_dir(&target, "edit-runtime-evidence")?;
+    for (name, directory) in [
+        ("collaboration-v2.json", false),
+        ("collaboration-v2-agents", true),
+    ] {
+        let from = source.join(name);
+        let to = archive.join(name);
+        let metadata = match fs::symlink_metadata(&from) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(ResourceError::io("inspect_rewound_collaboration", error)),
+        };
+        if metadata.file_type().is_symlink()
+            || if directory {
+                !metadata.is_dir()
+            } else {
+                !metadata.is_file()
+            }
+        {
+            return Err(ResourceError::UnsafePath(
+                "协作恢复证据不是安全文件或目录".to_owned(),
+            ));
+        }
+        match fs::symlink_metadata(&to) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(ResourceError::SessionMutationRecoveryRequired(
+                    "回退协作证据的源与归档同时存在，拒绝覆盖".to_owned(),
+                ));
+            }
+            Err(error) => {
+                return Err(ResourceError::io(
+                    "inspect_rewound_collaboration_archive",
+                    error,
+                ));
+            }
+        }
+        fs::rename(&from, &to)
+            .map_err(|error| ResourceError::io("archive_rewound_collaboration", error))?;
+        sync_directory(&archive, true)?;
+        sync_directory(&source, true)?;
+        #[cfg(test)]
+        fail_mutation_if(
+            &operation_key(&record.source_session_id, &record.operation_id),
+            MutationFault::AfterCollaborationArchived,
+        )?;
+    }
+    Ok(())
+}
+
 /// 从冻结的原始源日志重新定位编辑锚点，并核对持久事务中的脱敏参数。
 fn prepared_edit_target(
     source: &SourceBundle,
@@ -1197,23 +1416,16 @@ fn prepared_edit_target(
     expected_text_sha256: &str,
     cutoff_sequence: u64,
 ) -> Result<EditTarget, ResourceError> {
-    let (record, message) = last_root_user_message(&source.records)?;
-    if record.sequence != cutoff_sequence
-        || message.message_id != target_message_id
-        || sha256_hex(materialize_user_text(message, &source.artifacts)?.as_bytes())
-            != expected_text_sha256
+    let (target, actual_id, actual) = last_root_user_input(&source.records, &source.artifacts)?;
+    if target.cutoff_sequence != cutoff_sequence
+        || actual_id != target_message_id
+        || sha256_hex(actual.as_bytes()) != expected_text_sha256
     {
         return Err(ResourceError::SessionMutationRecoveryRequired(
             "编辑锚点与冻结事务记录不一致".to_owned(),
         ));
     }
-    let root_turn_id = message.turn_id.clone().ok_or_else(|| {
-        ResourceError::SessionMutationRecoveryRequired("编辑锚点缺少根 Turn 标识".to_owned())
-    })?;
-    Ok(EditTarget {
-        cutoff_sequence,
-        root_turn_id,
-    })
+    Ok(target)
 }
 
 /// 构建并原子发布一个不会被 Session 列表观察到半成品的目标目录。
@@ -1365,7 +1577,7 @@ fn rewrite_source_log(
 }
 
 /// 返回已存在且未越过 sessions 根的源目录。
-fn secure_existing_session_dir(
+pub(super) fn secure_existing_session_dir(
     sessions_root: &Path,
     session_id: &SessionId,
 ) -> Result<PathBuf, ResourceError> {
@@ -1648,10 +1860,14 @@ fn validate_record(record: &MutationRecord) -> Result<(), ResourceError> {
         ));
     }
     let expected_request_sha256 = match &record.kind {
-        MutationKind::Fork { title } => fork_request_sha256_parts(
+        MutationKind::Fork {
+            title,
+            through_turn_id,
+        } => fork_request_sha256_parts(
             &record.source_session_id,
             &record.operation_id,
             title.as_deref(),
+            through_turn_id.as_ref(),
         ),
         MutationKind::EditUser {
             target_message_id,
@@ -1880,7 +2096,7 @@ fn cleanup_staging(layout: &MutationLayout, operation_key: &str) -> Result<(), R
 }
 
 /// 生成源 Session 内 operationId 唯一且跨方法共享的事务键。
-fn operation_key(source_session_id: &SessionId, operation_id: &str) -> String {
+pub(super) fn operation_key(source_session_id: &SessionId, operation_id: &str) -> String {
     sha256_parts(&[
         b"keencode/session-mutation-operation/v1",
         source_session_id.as_str().as_bytes(),
@@ -1911,6 +2127,7 @@ fn fork_request_sha256(request: &SessionForkRequest) -> String {
         &request.source_session_id,
         &request.operation_id,
         request.title.as_deref(),
+        request.through_turn_id.as_ref(),
     )
 }
 
@@ -1919,16 +2136,19 @@ fn fork_request_sha256_parts(
     source_session_id: &SessionId,
     operation_id: &str,
     title: Option<&str>,
+    through_turn_id: Option<&TurnId>,
 ) -> String {
     let (presence, title) = title.map_or((b"none".as_slice(), b"".as_slice()), |title| {
         (b"some".as_slice(), title.as_bytes())
     });
     sha256_parts(&[
-        b"keencode/session-fork-request/v1",
+        b"keencode/session-fork-request/v2",
         source_session_id.as_str().as_bytes(),
         operation_id.as_bytes(),
         presence,
         title,
+        through_turn_id.map_or(b"none".as_slice(), |_| b"some".as_slice()),
+        through_turn_id.map_or(b"".as_slice(), |id| id.as_str().as_bytes()),
     ])
 }
 
@@ -1960,7 +2180,7 @@ fn edit_request_sha256_parts(
 }
 
 /// 对记录的规范 JSON 编码计算语义摘要。
-fn records_sha256(records: &[SessionEventRecord]) -> Result<String, ResourceError> {
+pub(super) fn records_sha256(records: &[SessionEventRecord]) -> Result<String, ResourceError> {
     let bytes =
         serde_json::to_vec(records).map_err(|error| ResourceError::Json(error.to_string()))?;
     Ok(sha256_hex(&bytes))
@@ -2006,8 +2226,12 @@ fn is_sha256(value: &str) -> bool {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum MutationFault {
+    /// 分叉边界已冻结但目标尚未发布。
+    AfterForkPrepared,
     /// 归档已发布但源日志尚未截断。
     AfterArchivePublished,
+    /// 第一份协作证据已移入归档，源 Journal 尚未改写。
+    AfterCollaborationArchived,
     /// 源日志已截断但完成墓碑尚未提交。
     AfterSourceRewritten,
     /// 目标效果均完成但完成墓碑尚未提交。
@@ -2076,6 +2300,91 @@ mod tests {
         create_source_with_texts(root, session_id, "第一条用户消息", "第二条用户消息");
     }
 
+    /// 目录切换之后按旧回复分叉，历史仍是旧前缀，执行目录继承当前真实根。
+    #[test]
+    fn workspace_prefix_fork_and_edit_keep_current_execution_root() {
+        let root = tempdir().unwrap();
+        create_source(root.path(), "source");
+        let current = root.path().join("checkout").to_string_lossy().into_owned();
+        crate::change_session_workspace(
+            root.path(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+            crate::SessionWorkspaceRequest {
+                session_id: SessionId::new("source").unwrap(),
+                operation_id: "move".into(),
+                expected_project_root: root.path().to_string_lossy().into_owned(),
+                project_root: current.clone(),
+            },
+        )
+        .unwrap();
+        let result = fork_session(
+            root.path(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+            SessionForkRequest {
+                source_session_id: SessionId::new("source").unwrap(),
+                operation_id: "prefix-after-move".into(),
+                title: None,
+                through_turn_id: Some(TurnId::new("turn-1").unwrap()),
+            },
+        )
+        .unwrap();
+        let source = super::open_source(
+            root.path(),
+            &result.session_id,
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(source.state.project_root, current);
+        assert!(
+            source
+                .state
+                .turns
+                .contains_key(&TurnId::new("turn-1").unwrap())
+        );
+        assert!(
+            !source
+                .state
+                .turns
+                .contains_key(&TurnId::new("turn-2").unwrap())
+        );
+        drop(source);
+        let source = super::open_source(
+            root.path(),
+            &SessionId::new("source").unwrap(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+        )
+        .unwrap();
+        let (record, message) = super::last_root_user_message(&source.records).unwrap();
+        assert!(record.sequence > 0);
+        let target_message_id = message.message_id.clone();
+        let expected_text = super::materialize_user_text(message, &source.artifacts).unwrap();
+        drop(source);
+        prepare_edit_user(
+            root.path(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+            SessionEditUserRequest {
+                source_session_id: SessionId::new("source").unwrap(),
+                target_message_id,
+                expected_text,
+                operation_id: "edit-after-move".into(),
+            },
+        )
+        .unwrap();
+        let source = super::open_source(
+            root.path(),
+            &SessionId::new("source").unwrap(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(source.state.project_root, current);
+    }
+
     /// 在临时存储根创建可自定义用户正文的健康 Session。
     fn create_source_with_texts(
         root: &Path,
@@ -2123,6 +2432,7 @@ mod tests {
             "assistant-1",
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "assistant-message-1".to_owned(),
                     turn_id: Some(TurnId::new("turn-1").expect("TurnId 应有效")),
@@ -2148,6 +2458,7 @@ mod tests {
             "assistant-2",
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "assistant-message-2".to_owned(),
                     turn_id: Some(TurnId::new("turn-2").expect("TurnId 应有效")),
@@ -2219,6 +2530,7 @@ mod tests {
                     },
                     SessionEvent::MessageAdded {
                         message: SessionMessage {
+                            references: Vec::new(),
                             is_meta: false,
                             message_id: message_id.to_owned(),
                             turn_id: Some(turn_id),
@@ -2530,6 +2842,7 @@ mod tests {
     /// 构造只用于纯定位测试的文本用户消息。
     fn user_message(message_id: &str, turn_id: &str, text: &str) -> SessionMessage {
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: message_id.to_owned(),
             turn_id: Some(TurnId::new(turn_id).expect("测试 TurnId 应有效")),
@@ -2555,6 +2868,18 @@ mod tests {
             "重复用户消息",
         );
         let source_id = SessionId::new(source_session_name).expect("SessionId 应有效");
+        let source_dir = root.path().join(source_id.as_str());
+        fs::write(
+            source_dir.join("collaboration-v2.json"),
+            b"old-turn-checkpoint",
+        )
+        .unwrap();
+        fs::create_dir(source_dir.join("collaboration-v2-agents")).unwrap();
+        fs::write(
+            source_dir.join("collaboration-v2-agents/root.json"),
+            b"old-agent",
+        )
+        .unwrap();
         let operation_key = operation_key(&source_id, operation_id);
         inject_mutation_fault(&operation_key, fault);
         let request = SessionEditUserRequest {
@@ -2611,6 +2936,26 @@ mod tests {
 
         let archive_id = super::derived_session_id("edit-archive", &source_id, operation_id)
             .expect("归档 SessionId 应有效");
+        let evidence = root
+            .path()
+            .join(archive_id.as_str())
+            .join("edit-runtime-evidence");
+        assert_eq!(
+            fs::read(evidence.join("collaboration-v2.json")).unwrap(),
+            b"old-turn-checkpoint"
+        );
+        assert_eq!(
+            fs::read(evidence.join("collaboration-v2-agents/root.json")).unwrap(),
+            b"old-agent"
+        );
+        assert!(!source_dir.join("collaboration-v2.json").exists());
+        assert!(!source_dir.join("collaboration-v2-agents").exists());
+        // 完成墓碑保护新一轮恢复状态，旧 operationId 重试不能再次移动它。
+        fs::write(
+            source_dir.join("collaboration-v2.json"),
+            b"new-turn-checkpoint",
+        )
+        .unwrap();
         let (archive, archive_records, _) = load_session(root.path(), &archive_id);
         assert_eq!(archive.title, "原会话 · 编辑前版本");
         assert_eq!(
@@ -2661,6 +3006,10 @@ mod tests {
         .expect("相同 operationId 重试应幂等");
         assert_eq!(first_retry, repeated, "重试必须返回同一归档结果");
         assert_eq!(
+            fs::read(source_dir.join("collaboration-v2.json")).unwrap(),
+            b"new-turn-checkpoint"
+        );
+        assert_eq!(
             load_session(root.path(), &source_id).1,
             source_records_before_repeat,
             "重复 operationId 不得再次改写源日志"
@@ -2695,6 +3044,7 @@ mod tests {
             source_session_id: SessionId::new("session-source-fork").expect("SessionId 应有效"),
             operation_id: "fork-operation".to_owned(),
             title: Some("分支会话".to_owned()),
+            through_turn_id: None,
         };
         let first = fork_session(
             root.path(),
@@ -2725,6 +3075,93 @@ mod tests {
         );
     }
 
+    /// 历史前缀分叉及崩溃恢复必须保留选中 Turn，且绝不带入后续消息。
+    #[test]
+    fn fork_prefix_recovers_same_boundary_and_binds_retry() {
+        for fault in [
+            None,
+            Some(MutationFault::AfterForkPrepared),
+            Some(MutationFault::BeforeCompletion),
+        ] {
+            let root = tempdir().unwrap();
+            create_source(root.path(), "prefix-source");
+            let source_id = SessionId::new("prefix-source").unwrap();
+            let before = load_session(root.path(), &source_id).1;
+            let request = SessionForkRequest {
+                source_session_id: source_id.clone(),
+                operation_id: "prefix-fork".into(),
+                title: Some("前缀分叉".into()),
+                through_turn_id: Some(TurnId::new("turn-1").unwrap()),
+            };
+            if let Some(fault) = fault {
+                inject_mutation_fault(&operation_key(&source_id, &request.operation_id), fault);
+                assert!(
+                    fork_session(
+                        root.path(),
+                        JournalConfig::default(),
+                        ArtifactLimits::default(),
+                        request.clone()
+                    )
+                    .is_err()
+                );
+                assert_eq!(
+                    recover_session_mutations(
+                        root.path(),
+                        JournalConfig::default(),
+                        ArtifactLimits::default()
+                    )
+                    .unwrap(),
+                    1
+                );
+            }
+            let fork = fork_session(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default(),
+                request.clone(),
+            )
+            .unwrap();
+            let (state, _, artifacts) = load_session(root.path(), &fork.session_id);
+            assert_eq!(state.raw_transcript_messages().len(), 2);
+            assert!(state.turns.contains_key(&TurnId::new("turn-1").unwrap()));
+            assert!(!state.turns.contains_key(&TurnId::new("turn-2").unwrap()));
+            let MessagePart::Artifact { artifact, .. } =
+                &state.raw_transcript_messages()[1].content[0]
+            else {
+                panic!("附件必须保留");
+            };
+            assert_eq!(artifacts.read_use(artifact).unwrap(), b"artifact-body");
+            assert_eq!(load_session(root.path(), &source_id).1, before);
+            let full_retry = SessionForkRequest {
+                through_turn_id: None,
+                ..request.clone()
+            };
+            assert!(matches!(
+                fork_session(
+                    root.path(),
+                    JournalConfig::default(),
+                    ArtifactLimits::default(),
+                    full_retry
+                ),
+                Err(ResourceError::SessionMutationConflict)
+            ));
+            let invalid = SessionForkRequest {
+                operation_id: "invalid-boundary".into(),
+                through_turn_id: Some(TurnId::new("missing").unwrap()),
+                ..request
+            };
+            assert!(matches!(
+                fork_session(
+                    root.path(),
+                    JournalConfig::default(),
+                    ArtifactLimits::default(),
+                    invalid
+                ),
+                Err(ResourceError::SessionMutationNotApplicable(_))
+            ));
+        }
+    }
+
     /// 同一 operationId 不能用不同标题重新绑定 fork 请求。
     #[test]
     fn fork_rejects_operation_id_reuse_with_different_request() {
@@ -2740,6 +3177,7 @@ mod tests {
                 source_session_id: source_session_id.clone(),
                 operation_id: "same-operation".to_owned(),
                 title: Some("标题一".to_owned()),
+                through_turn_id: None,
             },
         )
         .expect("首次 fork 应成功");
@@ -2751,6 +3189,7 @@ mod tests {
                 source_session_id,
                 operation_id: "same-operation".to_owned(),
                 title: Some("标题二".to_owned()),
+                through_turn_id: None,
             },
         )
         .expect_err("相同 operationId 的不同正文应失败");
@@ -2938,6 +3377,176 @@ mod tests {
         assert_eq!(
             fs::read(&project_file).expect("项目文件应仍可读"),
             b"outside-session-state"
+        );
+    }
+
+    /// 同正文追加仍按稳定序号区分；编辑整轮归档，不能绕过追加去改旧起点。
+    #[test]
+    fn edit_last_steer_archives_whole_turn_and_rejects_stale_inputs() {
+        let root = tempdir().unwrap();
+        let source_id = SessionId::new("session-edit-steer").unwrap();
+        create_source(root.path(), source_id.as_str());
+        let (_, before_turn, _) = load_session(root.path(), &source_id);
+        let source = super::open_source(
+            root.path(),
+            &source_id,
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+        )
+        .unwrap();
+        let SessionOpen::Ready(journal) = SessionJournal::open_with_artifact_validator(
+            root.path(),
+            source_id.clone(),
+            JournalConfig::default(),
+            source.artifacts.clone(),
+        )
+        .unwrap() else {
+            panic!("测试日志应健康")
+        };
+        let turn_id = TurnId::new("turn-steer").unwrap();
+        append_root_turn_start(&journal, turn_id.as_str(), "回合起点");
+        let inputs = vec![
+            crate::DynamicUserInput {
+                sequence: 1,
+                text: "追加正文 @proof".into(),
+                references: vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@one".into(),
+                }],
+            },
+            crate::DynamicUserInput {
+                sequence: 2,
+                text: "追加正文 @proof".into(),
+                references: vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@two".into(),
+                }],
+            },
+        ];
+        let mut envelope = user_message("internal-steer", turn_id.as_str(), "内部追加信封");
+        envelope.is_meta = true;
+        append(
+            &journal,
+            "steer-batch",
+            SessionEvent::AtomicBatch {
+                events: vec![
+                    SessionEvent::TranscriptSegmentCommitted {
+                        segment: TranscriptSegment {
+                            turn_id: turn_id.clone(),
+                            source_agent_id: AgentId::new("root").unwrap(),
+                            model_round: 1,
+                            segment_index: 0,
+                            expected_transcript_revision: journal
+                                .state()
+                                .unwrap()
+                                .transcript_revision,
+                            messages: vec![envelope],
+                        },
+                    },
+                    SessionEvent::DynamicInputReceiptCommitted {
+                        turn_id: turn_id.clone(),
+                        source_agent_id: AgentId::new("root").unwrap(),
+                        model_round: 1,
+                        segment_index: 0,
+                        kind: crate::DynamicInputKind::UserSteer,
+                        through_sequence: 2,
+                        user_inputs: inputs.clone(),
+                    },
+                ],
+            },
+        );
+        append(
+            &journal,
+            "steer-completed",
+            SessionEvent::TurnCompleted {
+                turn_id: turn_id.clone(),
+            },
+        );
+        drop(journal);
+        drop(source);
+        let (_, complete, _) = load_session(root.path(), &source_id);
+        let request = SessionEditUserRequest {
+            source_session_id: source_id.clone(),
+            target_message_id: "turn-steer:steer:2".into(),
+            expected_text: "追加正文 @proof".into(),
+            operation_id: "edit-steer".into(),
+        };
+        for (id, text) in [
+            ("user-message-turn-steer", "回合起点"),
+            ("turn-steer:steer:1", "追加正文 @proof"),
+            ("turn-steer:steer:2", "篡改正文 @proof"),
+        ] {
+            assert!(matches!(
+                prepare_edit_user(
+                    root.path(),
+                    JournalConfig::default(),
+                    ArtifactLimits::default(),
+                    SessionEditUserRequest {
+                        target_message_id: id.into(),
+                        expected_text: text.into(),
+                        ..request.clone()
+                    }
+                ),
+                Err(ResourceError::SessionMutationNotApplicable(_))
+            ));
+            assert_eq!(
+                load_session(root.path(), &source_id).1,
+                complete,
+                "拒绝不得改写日志"
+            );
+        }
+        inject_mutation_fault(
+            &operation_key(&source_id, &request.operation_id),
+            MutationFault::AfterArchivePublished,
+        );
+        assert!(
+            prepare_edit_user(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default(),
+                request.clone()
+            )
+            .is_err()
+        );
+        assert_eq!(
+            recover_session_mutations(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default()
+            )
+            .unwrap(),
+            1
+        );
+        let result = prepare_edit_user(
+            root.path(),
+            JournalConfig::default(),
+            ArtifactLimits::default(),
+            request.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_session(root.path(), &source_id).1,
+            before_turn,
+            "追加编辑回退完整根 Turn"
+        );
+        let (archive, _, _) = load_session(root.path(), &result.archived_session_id);
+        assert_eq!(
+            archive.dynamic_input_receipts.last().unwrap().user_inputs,
+            inputs,
+            "归档保留准确市场引用"
+        );
+        assert_eq!(archive.status, crate::SessionStatus::Idle);
+        assert_eq!(
+            prepare_edit_user(
+                root.path(),
+                JournalConfig::default(),
+                ArtifactLimits::default(),
+                request
+            )
+            .unwrap()
+            .archived_session_id,
+            result.archived_session_id,
+            "恢复后重试不得重复归档或回退"
         );
     }
 
@@ -3139,6 +3748,16 @@ mod tests {
         );
     }
 
+    /// 协作证据只移动了一部分时，恢复必须补齐归档并完成 Journal 截断。
+    #[test]
+    fn recovery_finishes_edit_after_collaboration_archive() {
+        assert_recovered_edit_case(
+            MutationFault::AfterCollaborationArchived,
+            "session-source-recovery-collaboration-turn-2",
+            "recover-after-collaboration-turn-2",
+        );
+    }
+
     /// 源日志提交后的崩溃必须只补写完成墓碑，不重复截断或创建分支。
     #[test]
     fn recovery_reconciles_edit_after_source_rewrite() {
@@ -3262,6 +3881,7 @@ mod tests {
             source_session_id: source_id,
             operation_id: operation_id.to_owned(),
             title: Some("恢复分支".to_owned()),
+            through_turn_id: None,
         };
         assert!(
             fork_session(

@@ -743,12 +743,14 @@ impl AgentDynamicInputKind {
 }
 
 /// 动态输入批次中可由持久层核验的单条消费水位。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct AgentDynamicInputReceipt {
     /// 动态输入的权威来源类别。
     kind: AgentDynamicInputKind,
     /// 本批实际写入模型上下文的最大单调序号。
     through_sequence: u64,
+    /// 已消费的原用户输入及序号；用于历史投影，不再次加入模型上下文。
+    user_messages: Vec<(u64, keencode_model::Message)>,
 }
 
 impl AgentDynamicInputReceipt {
@@ -757,17 +759,29 @@ impl AgentDynamicInputReceipt {
         Self {
             kind,
             through_sequence,
+            user_messages: Vec::new(),
         }
     }
 
     /// 返回动态输入来源类别。
-    pub const fn kind(self) -> AgentDynamicInputKind {
+    pub const fn kind(&self) -> AgentDynamicInputKind {
         self.kind
     }
 
     /// 返回本批实际写入的最大单调序号。
-    pub const fn through_sequence(self) -> u64 {
+    pub const fn through_sequence(&self) -> u64 {
         self.through_sequence
+    }
+
+    /// 为用户追加回执绑定实际消费的原文；Runtime 在持久边界验证角色及资源约束。
+    pub fn with_user_messages(mut self, messages: Vec<(u64, keencode_model::Message)>) -> Self {
+        self.user_messages = messages;
+        self
+    }
+
+    /// 返回只用于权威展示投影的用户输入，不能用它替代动态模型信封。
+    pub fn user_messages(&self) -> &[(u64, keencode_model::Message)] {
+        &self.user_messages
     }
 }
 

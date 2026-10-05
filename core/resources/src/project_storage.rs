@@ -11,6 +11,21 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+const DELETED_SESSIONS_FILE: &str = "deleted-sessions.json";
+
+/// 删除后仍需保留的 Session 负向 membership。
+///
+/// Session Journal 会在删除操作完成后物理清理；任务列表仍需要一个有界、可冷恢复
+/// 的删除事实，避免下一次列表 join 把已删除任务当成普通 active 行。该记录只保存
+/// 稳定 ID 和原项目根，不保存会话正文，也不作为 Session Runtime 状态的替代品。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct DeletedSessionRecord {
+    session_id: SessionId,
+    project_root: String,
+    deleted_at_unix_ms: u64,
+}
+
 /// 一个稳定项目的数据目录描述。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -235,6 +250,66 @@ pub fn remove_session_location(root: &Path, session_id: &SessionId) -> Result<()
     }
 }
 
+/// 记录一个已经通过 Runtime 删除的 Session；同一 ID 的重复写入保持幂等。
+pub fn record_deleted_session(
+    root: &Path,
+    session_id: &SessionId,
+    project_root: &str,
+) -> Result<(), ResourceError> {
+    let root = prepare_root(root)?;
+    let _guard = exclusive_lock(&root.join("deleted-sessions.lock"))?;
+    let path = root.join(DELETED_SESSIONS_FILE);
+    let mut records = read_json::<Vec<DeletedSessionRecord>>(&path)?.unwrap_or_default();
+    records.retain(|record| record.session_id != *session_id);
+    records.push(DeletedSessionRecord {
+        session_id: session_id.clone(),
+        project_root: project_root.to_owned(),
+        deleted_at_unix_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64,
+    });
+    records.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    write_json(&path, &records)
+}
+
+/// 新建同一稳定 ID 的 Session 时收掉旧删除事实，避免 ID 复用污染任务列表。
+pub fn remove_deleted_session(root: &Path, session_id: &SessionId) -> Result<(), ResourceError> {
+    let root = prepare_root(root)?;
+    let _guard = exclusive_lock(&root.join("deleted-sessions.lock"))?;
+    let path = root.join(DELETED_SESSIONS_FILE);
+    let Some(mut records) = read_json::<Vec<DeletedSessionRecord>>(&path)? else {
+        return Ok(());
+    };
+    let original_len = records.len();
+    records.retain(|record| record.session_id != *session_id);
+    if records.len() == original_len {
+        return Ok(());
+    }
+    write_json(&path, &records)
+}
+
+/// 按权威项目根读取删除 Session ID；返回值不包含其他项目或未知记录。
+pub fn list_deleted_session_ids(
+    root: &Path,
+    project_root: &str,
+) -> Result<Vec<SessionId>, ResourceError> {
+    let root = prepare_root(root)?;
+    let path = root.join(DELETED_SESSIONS_FILE);
+    let Some(records) = read_json::<Vec<DeletedSessionRecord>>(&path)? else {
+        return Ok(Vec::new());
+    };
+    let mut ids = records
+        .into_iter()
+        .filter(|record| record.project_root == project_root)
+        .map(|record| record.session_id)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +374,35 @@ mod tests {
                 .is_none()
         );
         assert!(session_storage_directory(root.path(), &id).is_err());
+    }
+
+    #[test]
+    fn deleted_session_membership_survives_cold_read_and_is_project_scoped() {
+        let root = tempfile::tempdir().unwrap();
+        let id = SessionId::new("session-deleted").unwrap();
+        record_deleted_session(root.path(), &id, "/project-one").unwrap();
+        // 重复删除只保留一条负向 membership，避免列表随着重试无限增长。
+        record_deleted_session(root.path(), &id, "/project-one").unwrap();
+        assert_eq!(
+            list_deleted_session_ids(root.path(), "/project-one").unwrap(),
+            vec![id.clone()]
+        );
+        assert!(
+            list_deleted_session_ids(root.path(), "/project-two")
+                .unwrap()
+                .is_empty()
+        );
+        // 每次读取都重新解析磁盘记录，覆盖进程重启后的冷恢复路径。
+        assert_eq!(
+            list_deleted_session_ids(root.path(), "/project-one").unwrap(),
+            vec![id.clone()]
+        );
+        remove_deleted_session(root.path(), &id).unwrap();
+        assert!(
+            list_deleted_session_ids(root.path(), "/project-one")
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

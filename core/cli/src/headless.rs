@@ -1413,6 +1413,9 @@ impl HeadlessInner {
                                 self.publish_session_event(&connection_id, &session_id, value);
                             }
                         }
+                        // 模型重试只属于桌面热投影；headless 的 legacy ACP
+                        // 投递仍由 AgentRuntime 的 retry notifier 单独负责。
+                        RuntimeEventPayload::ModelRetryScheduled(_) => {}
                         // 当前 headless 只负责实时增量；权威历史通过 session/load 与
                         // 后续 Runtime replay 接口恢复，不能把 Journal 记录伪装成增量。
                         RuntimeEventPayload::Authoritative(_) => {}

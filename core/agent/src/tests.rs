@@ -8774,3 +8774,489 @@ async fn todo_reminder_skips_empty_list_and_read_only_mode() {
         "只读模式不应提醒: {read_only:?}"
     );
 }
+
+/// 受控工具测试工具：通过 AgentRunner 的真实注册表执行，并可等待取消。
+struct ControlledProbeTool {
+    effect: ToolEffect,
+    starts: Arc<AtomicUsize>,
+    wait_for_cancel: bool,
+}
+
+impl AgentTool for ControlledProbeTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "controlled_probe",
+            "受控工具入口测试工具",
+            json!({
+                "type": "object",
+                "properties": {"value": {"type": "string"}},
+                "required": ["value"],
+                "additionalProperties": false
+            }),
+        )
+    }
+
+    fn effect(&self, _input: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(self.effect)
+    }
+
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::Exclusive
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        None
+    }
+
+    fn execute(&self, context: ToolContext, _input: Value) -> ToolFuture<'_> {
+        let starts = Arc::clone(&self.starts);
+        let wait_for_cancel = self.wait_for_cancel;
+        Box::pin(async move {
+            starts.fetch_add(1, Ordering::SeqCst);
+            if wait_for_cancel {
+                context.cancellation.cancelled().await;
+                return Err(ToolError::permanent("cancelled", "测试工具已收到取消"));
+            }
+            Ok(ToolOutput::text("controlled probe ok"))
+        })
+    }
+}
+
+/// 记录独立受控生命周期，确认它没有借用模型 Round 事件。
+#[derive(Clone, Default)]
+struct RecordingControlledSink {
+    events: Arc<Mutex<Vec<ControlledToolEvent>>>,
+}
+
+struct RecordingControlledReservation {
+    events: Arc<Mutex<Vec<ControlledToolEvent>>>,
+}
+
+impl ControlledToolReservation for RecordingControlledReservation {
+    fn commit(&mut self, event: ControlledToolEvent) -> Result<(), AgentCommitSinkError> {
+        self.events
+            .lock()
+            .expect("受控生命周期测试锁不应中毒")
+            .push(event);
+        Ok(())
+    }
+
+    fn consume(self: Box<Self>) {}
+
+    fn release(self: Box<Self>) {}
+
+    fn retain_indeterminate(self: Box<Self>, event: ControlledToolEvent) {
+        self.events
+            .lock()
+            .expect("受控生命周期测试锁不应中毒")
+            .push(event);
+    }
+}
+
+impl ControlledToolLifecycleSink for RecordingControlledSink {
+    fn preflight(
+        &self,
+        _request: &ControlledToolPreflight,
+    ) -> Result<Box<dyn ControlledToolReservation>, AgentCommitSinkError> {
+        Ok(Box::new(RecordingControlledReservation {
+            events: Arc::clone(&self.events),
+        }))
+    }
+}
+
+/// 专门验证持久化预检拒绝时不会启动真实工具。
+struct RejectingControlledSink;
+
+impl ControlledToolLifecycleSink for RejectingControlledSink {
+    fn preflight(
+        &self,
+        _request: &ControlledToolPreflight,
+    ) -> Result<Box<dyn ControlledToolReservation>, AgentCommitSinkError> {
+        Err(AgentCommitSinkError::rejected("测试预检拒绝"))
+    }
+}
+
+/// 受控工具权限测试端口：记录完整审批身份并返回固定决定。
+#[derive(Clone)]
+struct FixedApprovalGate {
+    decision: Result<ToolApprovalDecision, ToolApprovalError>,
+    requests: Arc<Mutex<Vec<ToolApprovalRequest>>>,
+}
+
+impl ToolApprovalGate for FixedApprovalGate {
+    fn request(
+        &self,
+        request: ToolApprovalRequest,
+        _cancellation: TurnCancellation,
+    ) -> ToolApprovalFuture<'_> {
+        self.requests.lock().unwrap().push(request);
+        let decision = self.decision.clone();
+        Box::pin(async move { decision })
+    }
+}
+
+/// 永不自行完成的审批端口，用于验证 Runner 取消能收敛挂起等待。
+#[derive(Clone, Default)]
+struct HangingApprovalGate {
+    requests: Arc<AtomicUsize>,
+}
+
+impl ToolApprovalGate for HangingApprovalGate {
+    fn request(
+        &self,
+        _request: ToolApprovalRequest,
+        _cancellation: TurnCancellation,
+    ) -> ToolApprovalFuture<'_> {
+        self.requests.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async { futures_util::future::pending().await })
+    }
+}
+
+fn approval_runner(
+    provider: Arc<ScriptedProvider>,
+    starts: Arc<AtomicUsize>,
+    gate: Arc<dyn ToolApprovalGate>,
+) -> AgentRunner {
+    controlled_probe_runner(provider, ToolEffect::ChangesState, starts, false)
+        .with_tool_approval_gate(gate)
+}
+
+/// 状态变更工具必须先得到审批才进入真实工具边界，并携带 workflow 身份。
+#[tokio::test]
+async fn controlled_tool_approval_allows_side_effect_only_after_gate() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(FixedApprovalGate {
+        decision: Ok(ToolApprovalDecision::Approved),
+        requests: Arc::clone(&requests),
+    });
+    let result = approval_runner(provider, Arc::clone(&starts), gate)
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::inactive(),
+            TurnCancellation::new(),
+            Arc::new(RecordingControlledSink::default()),
+        ))
+        .await
+        .expect("审批允许后受控工具应执行");
+
+    assert_eq!(result.status, ToolCompletionStatus::Succeeded);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].operation_id.as_deref(),
+        Some("workflow:run-1/node-1")
+    );
+    assert_eq!(requests[0].effect, ToolEffect::ChangesState);
+}
+
+/// 拒绝、连接关闭和计划模式都必须在真实工具前结束，且计划拒绝优先于审批。
+#[tokio::test]
+async fn controlled_tool_approval_denial_and_plan_guard_never_write() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(FixedApprovalGate {
+        decision: Err(ToolApprovalError::ConnectionClosed),
+        requests: Arc::clone(&requests),
+    });
+    let denied = approval_runner(Arc::clone(&provider), Arc::clone(&starts), gate)
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::inactive(),
+            TurnCancellation::new(),
+            Arc::new(RecordingControlledSink::default()),
+        ))
+        .await
+        .expect("连接关闭应形成拒绝结果");
+    assert_eq!(denied.status, ToolCompletionStatus::Failed);
+    assert!(!denied.execution_started);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    let plan_requests = Arc::new(Mutex::new(Vec::new()));
+    let plan_gate = Arc::new(FixedApprovalGate {
+        decision: Ok(ToolApprovalDecision::Approved),
+        requests: Arc::clone(&plan_requests),
+    });
+    let plan_denied = approval_runner(provider, Arc::clone(&starts), plan_gate)
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::read_only(),
+            TurnCancellation::new(),
+            Arc::new(RecordingControlledSink::default()),
+        ))
+        .await
+        .expect("计划拒绝应形成配对结果");
+    assert_eq!(plan_denied.status, ToolCompletionStatus::Failed);
+    assert!(!plan_denied.execution_started);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+    assert!(plan_requests.lock().unwrap().is_empty());
+}
+
+/// ReadOnly 工具不应误触发审批，Runner 取消也必须释放挂起的审批等待。
+#[tokio::test]
+async fn approval_gate_skips_read_only_and_cancellation_releases_wait() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let read_gate = Arc::new(FixedApprovalGate {
+        decision: Err(ToolApprovalError::Rejected {
+            message: "只读工具不应请求审批".to_owned(),
+        }),
+        requests: Arc::clone(&requests),
+    });
+    let read_runner = controlled_probe_runner(
+        provider.clone(),
+        ToolEffect::ReadOnly,
+        starts.clone(),
+        false,
+    )
+    .with_tool_approval_gate(read_gate);
+    let read_result = read_runner
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::inactive(),
+            TurnCancellation::new(),
+            Arc::new(RecordingControlledSink::default()),
+        ))
+        .await
+        .expect("只读工具应直接执行");
+    assert_eq!(read_result.status, ToolCompletionStatus::Succeeded);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(requests.lock().unwrap().is_empty());
+
+    let hanging = Arc::new(HangingApprovalGate::default());
+    let cancellation = TurnCancellation::new();
+    let hanging_runner = Arc::new(approval_runner(provider, starts.clone(), hanging.clone()));
+    let task = tokio::spawn({
+        let runner = Arc::clone(&hanging_runner);
+        let cancellation = cancellation.clone();
+        async move {
+            runner
+                .execute_controlled_tool(controlled_probe_request(
+                    PlanGuard::inactive(),
+                    cancellation,
+                    Arc::new(RecordingControlledSink::default()),
+                ))
+                .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while hanging.requests.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("审批请求应先挂起");
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("取消应释放挂起审批")
+        .expect("审批任务不应 panic")
+        .expect("取消应形成受控结果");
+    assert_eq!(result.status, ToolCompletionStatus::Cancelled);
+    assert!(!result.execution_started);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+}
+
+/// 普通模型工具也必须在计划守卫之后经过同一个审批端口，拒绝时不调用实现。
+#[tokio::test]
+async fn model_tool_approval_denial_prevents_side_effect() {
+    let recording = Arc::new(RecordingTool::new(
+        "record",
+        ToolEffect::ChangesState,
+        ToolConcurrency::Exclusive,
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::clone(&recording) as Arc<dyn AgentTool>)
+        .expect("测试工具应注册");
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        vec![
+            tool_reply(&[("approval-call", "record", json!({"value": "x"}))]),
+            text_reply("done"),
+        ],
+    ));
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let gate = Arc::new(FixedApprovalGate {
+        decision: Ok(ToolApprovalDecision::Denied {
+            reason: "用户拒绝".to_owned(),
+        }),
+        requests: Arc::clone(&requests),
+    });
+    let result = runner(provider, registry)
+        .with_tool_approval_gate(gate)
+        .run_turn(turn_request(PlanGuard::inactive()))
+        .await;
+    assert!(result.is_success(), "{:?}", result.error);
+    assert_eq!(recording.call_count(), 0);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+    assert_eq!(requests.lock().unwrap()[0].effect, ToolEffect::ChangesState);
+}
+
+fn controlled_probe_runner(
+    provider: Arc<ScriptedProvider>,
+    effect: ToolEffect,
+    starts: Arc<AtomicUsize>,
+    wait_for_cancel: bool,
+) -> AgentRunner {
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ControlledProbeTool {
+            effect,
+            starts,
+            wait_for_cancel,
+        }))
+        .expect("受控测试工具应可注册");
+    AgentRunner::new(provider, registry, RunLimits::default())
+}
+
+fn controlled_probe_request(
+    guard: PlanGuard,
+    cancellation: TurnCancellation,
+    lifecycle: Arc<dyn ControlledToolLifecycleSink>,
+) -> ControlledToolRequest {
+    ControlledToolRequest {
+        identity: ControlledToolIdentity {
+            session_id: session_id("controlled-session"),
+            turn_id: turn_id("controlled-turn"),
+            source_agent_id: agent_id("controlled-agent"),
+            operation_id: "workflow:run-1/node-1".to_owned(),
+        },
+        call: ToolCall::new(
+            "controlled-call-1",
+            "controlled_probe",
+            json!({"value": "probe"}),
+        ),
+        plan_guard: guard,
+        cancellation,
+        lifecycle,
+    }
+}
+
+/// 受控入口执行真实 ToolRegistry 工具，且完整提交独立 Requested/Started/Completed 生命周期。
+#[tokio::test]
+async fn controlled_tool_executes_registry_tool_without_model_round() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = controlled_probe_runner(
+        provider.clone(),
+        ToolEffect::ReadOnly,
+        starts.clone(),
+        false,
+    );
+    let sink = Arc::new(RecordingControlledSink::default());
+    let request =
+        controlled_probe_request(PlanGuard::inactive(), TurnCancellation::new(), sink.clone());
+    let result = runner
+        .execute_controlled_tool(request)
+        .await
+        .expect("受控工具应成功");
+
+    assert_eq!(result.status, ToolCompletionStatus::Succeeded);
+    assert!(!result.result.is_error);
+    assert_eq!(starts.load(Ordering::SeqCst), 1);
+    assert!(provider.requests().unwrap().is_empty());
+    let events = sink.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 3);
+    assert!(matches!(events[0], ControlledToolEvent::Requested { .. }));
+    assert!(matches!(
+        events[1],
+        ControlledToolEvent::ExecutionStarted { .. }
+    ));
+    assert!(matches!(
+        events[2],
+        ControlledToolEvent::Completed {
+            status: ToolCompletionStatus::Succeeded,
+            ..
+        }
+    ));
+}
+
+/// 计划只读守卫在生命周期预检与真实执行前拒绝状态变更。
+#[tokio::test]
+async fn controlled_tool_plan_guard_blocks_state_change_before_execute() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = controlled_probe_runner(provider, ToolEffect::ChangesState, starts.clone(), false);
+    let sink = Arc::new(RecordingControlledSink::default());
+    let result = runner
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::read_only(),
+            TurnCancellation::new(),
+            sink,
+        ))
+        .await
+        .expect("计划拒绝应形成配对工具结果");
+
+    assert_eq!(result.status, ToolCompletionStatus::Failed);
+    assert!(result.result.is_error);
+    assert!(!result.execution_started);
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}
+
+/// Turn 取消必须传播到真实工具，并把 Started 调用收敛为 Cancelled 完成事件。
+#[tokio::test]
+async fn controlled_tool_cancellation_reaches_real_tool() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = Arc::new(controlled_probe_runner(
+        provider,
+        ToolEffect::ReadOnly,
+        starts.clone(),
+        true,
+    ));
+    let cancellation = TurnCancellation::new();
+    let sink = Arc::new(RecordingControlledSink::default());
+    let request =
+        controlled_probe_request(PlanGuard::inactive(), cancellation.clone(), sink.clone());
+    let task = tokio::spawn({
+        let runner = Arc::clone(&runner);
+        async move { runner.execute_controlled_tool(request).await }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while starts.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("测试工具应先进入真实执行");
+    cancellation.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), task)
+        .await
+        .expect("取消后的受控执行应收敛")
+        .expect("受控任务不应 panic");
+
+    assert!(matches!(result, Err(AgentRunError::Cancelled)));
+    let events = sink.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 3);
+    assert!(matches!(
+        events[1],
+        ControlledToolEvent::ExecutionStarted { .. }
+    ));
+    assert!(matches!(
+        events[2],
+        ControlledToolEvent::Completed {
+            status: ToolCompletionStatus::Cancelled,
+            ..
+        }
+    ));
+}
+
+/// 权威生命周期预检失败时，Runner 不得调用真实工具。
+#[tokio::test]
+async fn controlled_tool_preflight_failure_does_not_execute() {
+    let provider = Arc::new(ScriptedProvider::new(ProviderCapabilities::default(), []));
+    let starts = Arc::new(AtomicUsize::new(0));
+    let runner = controlled_probe_runner(provider, ToolEffect::ChangesState, starts.clone(), false);
+    let result = runner
+        .execute_controlled_tool(controlled_probe_request(
+            PlanGuard::inactive(),
+            TurnCancellation::new(),
+            Arc::new(RejectingControlledSink),
+        ))
+        .await;
+
+    assert!(matches!(result, Err(AgentRunError::CommitSink(_))));
+    assert_eq!(starts.load(Ordering::SeqCst), 0);
+}

@@ -126,6 +126,7 @@ fn root_tool_request(
 fn message(index: usize, text: String) -> SessionEvent {
     SessionEvent::MessageAdded {
         message: SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: format!("message-{index}"),
             turn_id: None,
@@ -480,6 +481,7 @@ fn transcript_record_and_segment_limits_are_atomic() {
             segment_index: index,
             expected_transcript_revision: u64::from(index),
             messages: vec![SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: format!("segment-message-{index}"),
                 turn_id: Some(turn_id.clone()),
@@ -508,6 +510,7 @@ fn transcript_record_and_segment_limits_are_atomic() {
             segment_index: 2,
             expected_transcript_revision: 2,
             messages: vec![SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "segment-message-2".to_owned(),
                 turn_id: Some(TurnId::new("turn-main").expect("Turn ID 应有效")),
@@ -611,6 +614,7 @@ fn recursive_state_collection_limits_cover_all_nested_payloads_atomically() {
                 expected_transcript_revision: 0,
                 messages: vec![
                     SessionMessage {
+                        references: Vec::new(),
                         is_meta: false,
                         message_id: "nested-call".to_owned(),
                         turn_id: Some(turn_id.clone()),
@@ -623,6 +627,7 @@ fn recursive_state_collection_limits_cover_all_nested_payloads_atomically() {
                         }],
                     },
                     SessionMessage {
+                        references: Vec::new(),
                         is_meta: false,
                         message_id: "nested-result".to_owned(),
                         turn_id: Some(turn_id.clone()),

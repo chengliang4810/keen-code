@@ -35,6 +35,32 @@ fn agent_message_update(text: &str) -> SessionUpdate {
     SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from(text)))
 }
 
+/// 工作目录扩展必须经过同一严格解码器，不接受客户端夹带消息或凭据字段。
+#[test]
+fn workspace_extension_decodes_exact_input_and_validates_response() {
+    let value = json!({ "jsonrpc": "2.0", "id": "workspace-a", "method": "keencode/session/set_workspace", "params": {
+        "sessionId": "session-a", "expectedCwd": "D:/project", "cwd": "D:/project-tree", "_meta": { "keencode/operationId": "move-a" }
+    }});
+    let raw = serde_json::to_vec(&value).unwrap();
+    let decoded = AcpRequestDecoder::new().decode_raw(&raw).unwrap();
+    assert!(
+        matches!(decoded, AcpIncomingFrame::Request(frame) if matches!(frame.request(), AcpRequest::SetSessionWorkspace(_)))
+    );
+    let mut unknown = value;
+    unknown["params"]["messages"] = json!([]);
+    assert!(
+        AcpRequestDecoder::new()
+            .decode_raw(&serde_json::to_vec(&unknown).unwrap())
+            .is_err()
+    );
+    let response = crate::SessionWorkspaceResponse {
+        session_id: "session-a".into(),
+        project_root: "D:/project-tree".into(),
+    };
+    let (_, value) = encode_typed_result(&response);
+    assert_eq!(value["result"]["projectRoot"], "D:/project-tree");
+}
+
 /// 构造满足完整响应不变量的会话 Goal。
 fn sample_goal(status: GoalStatus) -> GoalRecord {
     GoalRecord {
@@ -739,6 +765,7 @@ fn session_control_response_validation_rejects_duplicate_candidates_and_false_ac
             &SteerSessionResponse {
                 session_id: "session-a".to_owned(),
                 accepted: false,
+                message_id: None,
             }
         ),
         Err(AcpBoundaryError::InvalidSemanticValue)

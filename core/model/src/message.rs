@@ -3,6 +3,39 @@ use serde_json::Value;
 
 use crate::{ModelError, ToolCall, ToolResult};
 
+/// 用户显式选择的资源身份；解析、安装状态和读取权限由宿主校验，模型层不解释资源协议。
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct InputReference {
+    /// 原输入框使用的显示名称。
+    pub name: String,
+    /// 宿主验证后的完整路径或 URI，保留同名资源的命名空间。
+    pub path: String,
+}
+
+impl InputReference {
+    /// 拒绝无界、重复和包含控制字符的身份；这些检查不代表已获得资源访问权限。
+    pub fn validate_all(references: &[Self]) -> Result<(), ModelError> {
+        let mut paths = std::collections::HashSet::new();
+        if references.len() > 32
+            || references.iter().any(|reference| {
+                reference.name.trim().is_empty()
+                    || reference.name.len() > 128
+                    || reference.path.trim().is_empty()
+                    || reference.path.len() > 2048
+                    || reference.name.chars().any(char::is_control)
+                    || reference.path.chars().any(char::is_control)
+                    || !paths.insert(&reference.path)
+            })
+        {
+            return Err(ModelError::InvalidRequest {
+                message: "用户资源引用身份无效或重复".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// 一条消息在对话中的语义角色。
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -230,6 +263,9 @@ pub struct Message {
     /// 内部上下文：参与模型请求和持久化，但不作为用户发言展示。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_meta: bool,
+    /// 与正文分开持久化的用户资源选择；不会改变原正文或赋予额外权限。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<InputReference>,
     /// 消息的语义角色。
     pub role: MessageRole,
     /// 保持原始顺序的内容块。
@@ -243,6 +279,7 @@ impl Message {
             role,
             content,
             is_meta: false,
+            references: Vec::new(),
         }
     }
 
@@ -253,6 +290,12 @@ impl Message {
 
     /// 校验消息至少包含一个内容块且各内容块有效。
     pub fn validate(&self) -> Result<(), ModelError> {
+        InputReference::validate_all(&self.references)?;
+        if !self.references.is_empty() && self.role != MessageRole::User {
+            return Err(ModelError::InvalidRequest {
+                message: "只有用户消息可以携带资源选择".into(),
+            });
+        }
         if self.content.is_empty() {
             return Err(ModelError::InvalidRequest {
                 message: "消息内容不能为空".to_owned(),
@@ -285,5 +328,18 @@ impl Message {
             });
         }
         Ok(())
+    }
+
+    /// 所有协议适配器共用的模型内容投影：完整资源身份以用户级上下文呈现，原消息内容保持不变。
+    pub fn wire_content(&self) -> std::borrow::Cow<'_, [ContentBlock]> {
+        if self.references.is_empty() {
+            return std::borrow::Cow::Borrowed(&self.content);
+        }
+        let mut content = self.content.clone();
+        content.push(ContentBlock::text(format!(
+            "用户在本条消息中显式选择的资源引用（仅资源身份，不授予额外权限）：\n{}",
+            serde_json::to_string(&self.references).expect("字符串资源身份可以序列化")
+        )));
+        std::borrow::Cow::Owned(content)
     }
 }

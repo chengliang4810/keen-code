@@ -10,6 +10,7 @@ mod agent;
 mod cancellation;
 mod collaboration;
 mod context;
+mod controlled_tools;
 mod event;
 mod hook;
 mod ids;
@@ -30,9 +31,9 @@ pub use collaboration::{
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
     CollaborationCapacity, CollaborationCoordinator, CollaborationError, CollaborationEvent,
     CollaborationEventBatch, CollaborationEventBatchId, CollaborationEventKind,
-    CollaborationGlobalTurnLimiter, CollaborationIdGenerator, CollaborationInvocationInput,
-    CollaborationInvocationKey, CollaborationInvocationKind, CollaborationInvocationOutput,
-    CollaborationInvocationReceipt, CollaborationLimitDispatchError,
+    CollaborationGlobalTurnLimiter, CollaborationGlobalTurnPermit, CollaborationIdGenerator,
+    CollaborationInvocationInput, CollaborationInvocationKey, CollaborationInvocationKind,
+    CollaborationInvocationOutput, CollaborationInvocationReceipt, CollaborationLimitDispatchError,
     CollaborationLimitUpdateReport, CollaborationLimits, CollaborationPortError,
     CollaborationStore, CollaborationTransitionCommit, ContextInheritance,
     MAX_AGENT_ASSIGNMENT_BYTES, MailboxActivitySummary, MailboxMessage, MailboxMessageId,
@@ -52,6 +53,11 @@ pub use context::{
     JsonContextTokenEstimator, MICRO_COMPACT_POLICY_VERSION, MicroAppliedThenFullFailure,
     PREDICTIVE_CACHE_SKIP_HEADROOM_RATIO, PREDICTIVE_CACHE_SKIP_HIT_RATE,
     PREDICTIVE_TOOL_RESULT_GROWTH_TOKENS, ProviderContextCompressor, ToolResultProjection,
+};
+pub use controlled_tools::{
+    ControlledToolError, ControlledToolEvent, ControlledToolIdentity, ControlledToolLifecycleSink,
+    ControlledToolPreflight, ControlledToolRequest, ControlledToolReservation,
+    ControlledToolResult, MAX_CONTROLLED_OPERATION_ID_BYTES, NoopControlledToolLifecycleSink,
 };
 pub use event::{
     AgentCommitEvent, AgentCommitEventKind, AgentCommitSink, AgentCommitSinkError,
@@ -90,9 +96,11 @@ pub use state::{
 };
 pub use structured_output::{STRUCTURED_OUTPUT_TOOL_NAME, StructuredOutputMode};
 pub use tool::{
-    AgentTool, DEFAULT_TOOL_TIMEOUT, TOOL_OUTPUT_LIMITS, ToolConcurrency, ToolContext, ToolError,
-    ToolFuture, ToolOutput, ToolOutputArtifactSink, ToolOutputErrorCode, ToolOutputLimits,
-    ToolRegistry, ToolRegistryError, is_canonical_image_media_type, is_canonical_remote_image_url,
+    AgentTool, AllowAllToolApprovalGate, DEFAULT_TOOL_TIMEOUT, TOOL_OUTPUT_LIMITS,
+    ToolApprovalDecision, ToolApprovalError, ToolApprovalFuture, ToolApprovalGate,
+    ToolApprovalRequest, ToolConcurrency, ToolContext, ToolError, ToolFuture, ToolOutput,
+    ToolOutputArtifactSink, ToolOutputErrorCode, ToolOutputLimits, ToolRegistry, ToolRegistryError,
+    is_canonical_image_media_type, is_canonical_remote_image_url,
 };
 pub use turn::{CounterKind, TerminalReason, TurnPhase, TurnState, TurnTransitionError};
 

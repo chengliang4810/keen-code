@@ -25,6 +25,30 @@ use crate::{
     RequestObservation, RequestObservationScope, RequestObservationState, RequestObserver,
 };
 
+/// 三种协议都把用户选择的完整资源身份呈现在用户内容中，原正文和模型层消息不被改写。
+#[test]
+fn all_protocols_encode_user_input_references_without_changing_original_message() {
+    let mut message = Message::text(MessageRole::User, "@proof 原请求");
+    message.references = vec![keencode_model::InputReference {
+        name: "proof".into(),
+        path: "plugin://proof@local".into(),
+    }];
+    let request = ModelRequest::new("test-model", vec![message.clone()]);
+    for protocol in [
+        ProviderProtocol::Messages,
+        ProviderProtocol::ChatCompletions,
+        ProviderProtocol::Responses,
+    ] {
+        let body = Adapter::new(protocol)
+            .encode_request(&request, false)
+            .unwrap();
+        let encoded = body.to_string();
+        assert!(encoded.contains("plugin://proof@local"), "{protocol:?}");
+        assert!(encoded.contains("@proof 原请求"), "{protocol:?}");
+        assert_eq!(request.messages[0], message);
+    }
+}
+
 /// 启动只服务固定响应序列的本地模型目录 HTTP 服务。
 fn spawn_catalog_server(
     responses: Vec<(&'static str, String)>,
@@ -5931,6 +5955,8 @@ async fn traced_buffered_json解析失败仍记录已观察eof() {
     )
     .expect("缓冲 Trace Provider 配置应当有效");
     config.response_mode = crate::WireResponseMode::Buffered;
+    // 单次错误交换的证据测试不提供重试响应；避免默认重试掩盖首次协议错误和 EOF。
+    config.retry.max_attempts = 1;
     let (client, collector) =
         crate::ProviderClient::new_traced(config).expect("缓冲 Trace 客户端应当创建成功");
 
@@ -5961,13 +5987,15 @@ async fn traced_stream_adapter提前失败不记录eof() {
     )
     .to_owned();
     let (base_url, server) = spawn_model_server("text/event-stream", response_body);
-    let config = ProviderConfig::new(
+    let mut config = ProviderConfig::new(
         "trace-stream-adapter-error",
         ProviderProtocol::Responses,
         &base_url,
         ApiKey::new("synthetic-stream-adapter-error-key").expect("合成测试 Key 应当有效"),
     )
     .expect("流式 Trace Provider 配置应当有效");
+    // 本用例只验证首次 Adapter 失败时的 EOF 事实，重试行为由独立重试测试覆盖。
+    config.retry.max_attempts = 1;
     let (client, collector) =
         crate::ProviderClient::new_traced(config).expect("流式 Trace 客户端应当创建成功");
 
@@ -6085,6 +6113,8 @@ async fn traced_buffered_响应大小限制不记录eof() {
     config.response_mode = crate::WireResponseMode::Buffered;
     config.max_event_bytes = 32;
     config.max_response_bytes = 32;
+    // 大小限制后的首次响应证据不能被后续连接失败替换。
+    config.retry.max_attempts = 1;
     let (client, collector) =
         crate::ProviderClient::new_traced(config).expect("缓冲 Trace 客户端应当创建成功");
 

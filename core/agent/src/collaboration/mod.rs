@@ -19,7 +19,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::thread;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{Notify, watch};
 use tokio::time::{Instant, timeout_at};
 use uuid::Uuid;
 
@@ -410,6 +410,9 @@ pub struct AgentProfile {
 /// spawn 提交前从当前项目扩展候选冻结的 Agent 模板非模型配置。
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AgentTemplateSnapshot {
+    /// 省略该可选字段时保持默认注入，避免改变 Agent 的项目指令语义。
+    #[serde(default = "default_inject_agents_md")]
+    pub inject_agents_md: bool,
     /// 已由 Agent catalog 规范化的模板名称。
     pub name: String,
     /// 追加到 KeenCode 基础提示之后的冻结系统说明。
@@ -418,6 +421,11 @@ pub struct AgentTemplateSnapshot {
     pub max_turns: Option<u32>,
     /// 模板额外允许写入的项目内相对目录；Plan 只读守卫仍优先。
     pub allowed_write_dirs: Vec<PathBuf>,
+}
+
+/// 冷恢复时省略该可选字段仍沿用默认的项目指令注入行为。
+fn default_inject_agents_md() -> bool {
+    true
 }
 
 /// 持久化的 Agent 身份、父子关系与独立 Session 定义。
@@ -690,6 +698,24 @@ pub struct UserSteer {
     pub turn_id: TurnId,
     /// 用户追加的完整文本。
     pub content: String,
+    /// 与这条追加正文绑定的资源身份；宿主校验协议和启用状态，协作层只保持身份。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<keencode_model::InputReference>,
+}
+
+impl UserSteer {
+    /// 引用的 JSON 编码也计入队列容量；ack、冷恢复和驱逐必须使用相同计量。
+    fn payload_bytes(&self) -> usize {
+        self.content
+            .len()
+            .saturating_add(if self.references.is_empty() {
+                0
+            } else {
+                serde_json::to_vec(&self.references)
+                    .expect("字符串引用可以序列化")
+                    .len()
+            })
+    }
 }
 
 /// WaitAgent 在不消费正文时返回的 mailbox 活动摘要。
@@ -1272,6 +1298,8 @@ pub enum CollaborationInvocationInput {
         target_agent_id: AgentId,
         /// 未丢失也未摘要的完整用户正文。
         content: String,
+        /// 幂等输入保留准确资源选择，不能仅以正文识别请求。
+        references: Vec<keencode_model::InputReference>,
     },
     /// 为失败或中断的同树 Agent 创建一个新 Turn。
     RetryAgent {
@@ -1417,6 +1445,8 @@ impl CollaborationLimits {
 /// 等待者只在 Turn 入队或容量变化时被驱动，不创建轮询任务。
 pub struct CollaborationGlobalTurnLimiter {
     state: Mutex<GlobalTurnLimiterState>,
+    /// 外部 root actor 等待容量变化；permit 释放和热更新都会唤醒它们。
+    capacity_changed: Notify,
 }
 
 /// 全局 limiter 的小型驻留状态。
@@ -1461,6 +1491,7 @@ impl CollaborationGlobalTurnLimiter {
                 waiters: VecDeque::new(),
                 waiting: HashSet::new(),
             }),
+            capacity_changed: Notify::new(),
         })
     }
 
@@ -1496,6 +1527,48 @@ impl Drop for GlobalTurnPermit {
                 state.in_use -= 1;
             }
         }
+        limiter.capacity_changed.notify_waiters();
+    }
+}
+
+/// 从共享全局 limiter 借用的 root actor 容量；释放时自动归还槽位。
+///
+/// 普通 root Turn 本身不占 Collaboration 容量，工作流 actor 通过该句柄把
+/// 自己纳入同一个全局计数，避免另建一套无法热更新的并发上限。
+#[derive(Debug)]
+pub struct CollaborationGlobalTurnPermit {
+    _inner: Arc<GlobalTurnPermit>,
+}
+
+impl CollaborationGlobalTurnLimiter {
+    /// 尝试为不属于 Coordinator 子 Turn 的 root actor 获取共享槽位。
+    pub fn try_acquire_external(
+        self: &Arc<Self>,
+    ) -> Result<Option<CollaborationGlobalTurnPermit>, CollaborationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_poisoned| CollaborationError::StatePoisoned)?;
+        if state.in_use >= state.limit {
+            return Ok(None);
+        }
+        state.in_use = state
+            .in_use
+            .checked_add(1)
+            .ok_or(CollaborationError::SequenceExhausted)?;
+        Ok(Some(CollaborationGlobalTurnPermit {
+            _inner: Arc::new(GlobalTurnPermit {
+                limiter: Arc::downgrade(self),
+            }),
+        }))
+    }
+
+    /// 准备等待共享容量释放或全局并发配置热更新。
+    ///
+    /// 调用方应先对返回的 `Notified` 调用 `enable`，再重试获取 permit，
+    /// 这样容量恰好在重试前释放时不会丢失唤醒。
+    pub fn capacity_change(&self) -> tokio::sync::futures::Notified<'_> {
+        self.capacity_changed.notified()
     }
 }
 
@@ -1669,6 +1742,8 @@ pub enum CollaborationError {
     InvalidMessageId,
     /// 需要发送或 steer 的文本为空。
     EmptyMessage,
+    /// 用户资源身份为空、无界、重复或含控制字符。
+    InvalidInputReferences,
     /// 子 Agent 职责为空、包含边界空白或控制字符，或超过专用上限。
     InvalidAssignment,
     /// 用户或执行端口提供的文本超过确定性内存边界。
@@ -1834,6 +1909,7 @@ impl fmt::Display for CollaborationError {
             Self::InvalidAgentPath(error) => write!(formatter, "{error}"),
             Self::InvalidMessageId => formatter.write_str("mailbox 消息标识不能为空"),
             Self::EmptyMessage => formatter.write_str("协作消息不能为空"),
+            Self::InvalidInputReferences => formatter.write_str("用户资源引用无效"),
             Self::InvalidAssignment => formatter
                 .write_str("子 Agent 职责必须非空、无首尾空白或控制字符，且不超过 512 UTF-8 字节"),
             Self::TextTooLarge {
@@ -2629,6 +2705,8 @@ impl CollaborationGlobalTurnLimiter {
         }
         global_state.limit = global_turn_limit;
         drop(global_state);
+        // 外部 root actor 不在 Coordinator 等待队列中，限额热更新必须显式唤醒它们。
+        self.capacity_changed.notify_waiters();
         drop(coordinator_states);
 
         // 所有受影响 Coordinator 必须先完成入队，再由一次全局驱动统一收集结果。

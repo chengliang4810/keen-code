@@ -143,7 +143,7 @@ impl CollaborationCoordinator {
             .agent
             .pending_steers
             .iter()
-            .map(|steer| steer.content.len())
+            .map(UserSteer::payload_bytes)
             .sum();
         let initial_triggered_turn_bytes = checkpoint
             .agent
@@ -932,7 +932,7 @@ pub(super) fn agent_entry_from_recovered(agent: &RecoveredAgent) -> AgentEntry {
         steer_bytes: agent
             .pending_steers
             .iter()
-            .map(|steer| steer.content.len())
+            .map(UserSteer::payload_bytes)
             .sum(),
         next_steer_sequence: agent.next_steer_sequence,
         steer_claim: agent

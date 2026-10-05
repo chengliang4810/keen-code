@@ -26,7 +26,7 @@ pub fn list_session_ids(storage_root: impl AsRef<Path>) -> Result<Vec<SessionId>
             .file_name()
             .into_string()
             .map_err(|_| ResourceError::UnsafePath("Session 目录名称必须是 UTF-8".to_owned()))?;
-        if name == "project.json" || name == "session-mutations" {
+        if name == "project.json" || name == "session-mutations" || name == "session-workspaces" {
             continue;
         }
         if file_type.is_symlink() {

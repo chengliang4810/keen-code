@@ -20,6 +20,7 @@ mod project_storage;
 mod reducer;
 mod session_lease;
 mod session_mutation;
+mod session_workspace;
 mod transcript;
 mod types;
 
@@ -57,24 +58,35 @@ pub use session_mutation::{
     SessionEditUserRequest, SessionEditUserResult, SessionForkRequest, SessionForkResult,
     fork_session, prepare_edit_user, recover_session_mutations,
 };
+pub use session_workspace::{
+    SessionWorkspaceRequest, change_session_workspace, recover_session_workspaces,
+};
 pub use transcript::{COMPACTION_SUMMARY_PREFIX, compaction_source_digest_sha256};
 pub use types::{
-    AppliedCompaction, ArtifactMaterialization, ArtifactUse, CompactionRecord,
-    ContextCompressionTrigger, DynamicInputKind, DynamicInputReceipt, GeneratedTitleRecord,
-    MailboxMessage, MailboxState, MessageImageSource, MessagePart, MessageRole, ModelRoundState,
-    OnErrorHookInvocation, PersistedToolResult, PlanState, ProviderProtocolSnapshot,
-    ProviderSnapshot, ReasoningContinuation, ReasoningEffortSnapshot, SessionEvent,
-    SessionEventRecord, SessionMessage, SessionState, SessionStatus, SubAgentState, SubAgentStatus,
-    TerminalRecord, TitleSource, TodoItem, TodoSnapshot, TodoStatus, ToolCompletionStatus,
-    ToolEffect, ToolFileChange, ToolLifecycle, ToolOutcome, ToolRequest, ToolResultPart,
-    ToolResultProjection, TranscriptRecord, TranscriptSegment, TranscriptSegmentReference,
-    TurnState, TurnStatus, TurnStopReason, WorktreeRecord,
+    AppliedCompaction, ArtifactMaterialization, ArtifactUse, AssistantFeedback,
+    AssistantFeedbackRecord, CommandReceipt, CommandReceiptStatus, CompactionRecord,
+    ContextCompressionTrigger, DynamicInputKind, DynamicInputReceipt, DynamicUserInput,
+    FollowupMode, GeneratedTitleRecord, MailboxMessage, MailboxState, MessageImageSource,
+    MessagePart, MessageRole, ModelRoundState, OnErrorHookInvocation, PersistedToolResult,
+    PlanState, ProviderProtocolSnapshot, ProviderSnapshot, ReasoningContinuation,
+    ReasoningEffortSnapshot, SessionEvent, SessionEventRecord, SessionInputCompletion,
+    SessionInputDelivery, SessionInputDispatch, SessionInputKind, SessionInputQueueItem,
+    SessionInputQueueState, SessionMessage, SessionState, SessionStatus, SubAgentState,
+    SubAgentStatus, TerminalRecord, TitleSource, TodoItem, TodoSnapshot, TodoStatus,
+    ToolCompletionStatus, ToolEffect, ToolFileChange, ToolLifecycle, ToolOutcome, ToolRequest,
+    ToolResultPart, ToolResultProjection, TranscriptRecord, TranscriptSegment,
+    TranscriptSegmentReference, TurnState, TurnStatus, TurnStopReason, WorkflowJournalEvent,
+    WorktreeRecord,
 };
-pub use types::{ROOT_AGENT_ID, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION};
+pub use types::{
+    COMMAND_RECEIPT_SCHEMA, MAX_COMMAND_RECEIPT_BYTES, MAX_WORKFLOW_JSON_COLLECTION_ITEMS,
+    ROOT_AGENT_ID, SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION,
+};
 pub use types::{SIDE_EFFECT_UNKNOWN_RESULT_TEXT, side_effect_unknown_result};
 
 pub use project_storage::{
-    ProjectStorage, ensure_project_storage, project_storage_directories, project_storage_for_path,
-    register_project_storage, register_session_location, remove_session_location,
+    ProjectStorage, ensure_project_storage, list_deleted_session_ids, project_storage_directories,
+    project_storage_for_path, record_deleted_session, register_project_storage,
+    register_session_location, remove_deleted_session, remove_session_location,
     session_project_directory, session_project_storage, session_storage_directory,
 };

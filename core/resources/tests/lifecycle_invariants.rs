@@ -185,6 +185,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
         expected_transcript_revision: state.transcript_revision,
         messages: vec![
             SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: format!("tool-call-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
@@ -197,6 +198,7 @@ fn materialize_tool(journal: &SessionJournal, request_id: &RequestId) {
                 }],
             },
             SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: format!("tool-result-{request_id}"),
                 turn_id: Some(lifecycle.request.turn_id.clone()),
@@ -265,6 +267,7 @@ fn session_status_and_turn_messages_follow_authoritative_lifecycle() {
         .expect("Turn 应完成");
     assert_reduction_error(journal.append(SessionEvent::MessageAdded {
         message: SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "late-message".to_owned(),
             turn_id: Some(first_turn),
@@ -524,6 +527,7 @@ fn terminal_turn_references_and_compaction_ranges_are_rejected() {
     }));
     assert_reduction_error(journal.append(SessionEvent::MessageAdded {
         message: SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-late".to_owned(),
             turn_id: Some(turn),
@@ -561,6 +565,7 @@ fn terminal_turn_references_and_compaction_ranges_are_rejected() {
         journal
             .append(SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: format!("compaction-message-{index}"),
                     turn_id: Some(compaction_turn.clone()),
@@ -642,6 +647,7 @@ fn agent_identity_is_registered_scoped_and_revalidated_after_deserialization() {
     let invalid_events = vec![
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "assistant-without-agent".to_owned(),
                 turn_id: Some(turn_id.clone()),
@@ -654,6 +660,7 @@ fn agent_identity_is_registered_scoped_and_revalidated_after_deserialization() {
         },
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "user-with-unknown-agent".to_owned(),
                 turn_id: Some(turn_id.clone()),
@@ -674,6 +681,7 @@ fn agent_identity_is_registered_scoped_and_revalidated_after_deserialization() {
                 segment_index: 0,
                 expected_transcript_revision: 0,
                 messages: vec![SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "unknown-segment-message".to_owned(),
                     turn_id: Some(turn_id.clone()),
@@ -792,6 +800,7 @@ fn agent_identity_is_registered_scoped_and_revalidated_after_deserialization() {
         journal
             .append(SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: message_id.to_owned(),
                     turn_id: message_turn_id,

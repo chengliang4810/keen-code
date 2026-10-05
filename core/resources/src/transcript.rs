@@ -675,6 +675,7 @@ pub(crate) fn validate_compaction_source(
 /// 使用固定角色、标识和前缀构造可重放压缩摘要消息。
 fn summary_message(compaction: &AppliedCompaction) -> SessionMessage {
     SessionMessage {
+        references: Vec::new(),
         is_meta: false,
         message_id: compaction_summary_message_id(compaction),
         turn_id: Some(compaction.turn_id.clone()),

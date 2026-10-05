@@ -114,6 +114,7 @@ fn atomic_batch_commits_turn_and_input_as_one_physical_record() {
         root_turn_started(&turn_id),
         SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-user".to_owned(),
                 turn_id: Some(turn_id.clone()),
@@ -317,6 +318,7 @@ fn invalid_atomic_batch_leaves_journal_byte_identical() {
             root_turn_started(&turn_id),
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "message-empty".to_owned(),
                     turn_id: Some(turn_id.clone()),
@@ -850,6 +852,7 @@ fn child_turn_and_initial_user_input_are_atomic_and_agent_scoped() {
                 },
                 SessionEvent::MessageAdded {
                     message: SessionMessage {
+                        references: Vec::new(),
                         is_meta: false,
                         message_id: "message-child-input".to_owned(),
                         turn_id: Some(child_turn.clone()),
@@ -916,6 +919,7 @@ fn child_turn_and_initial_user_input_are_atomic_and_agent_scoped() {
             },
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "message-child-forged".to_owned(),
                     turn_id: Some(forged_turn.clone()),
@@ -991,6 +995,7 @@ fn turn_scoped_user_inputs_are_isolated_live_and_after_replay() {
     journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-root-input".to_owned(),
                 turn_id: Some(root_turn.clone()),
@@ -1048,6 +1053,7 @@ fn turn_scoped_user_inputs_are_isolated_live_and_after_replay() {
                     },
                     SessionEvent::MessageAdded {
                         message: SessionMessage {
+                            references: Vec::new(),
                             is_meta: false,
                             message_id: message_id.to_owned(),
                             turn_id: Some(turn_id.clone()),
@@ -1065,6 +1071,7 @@ fn turn_scoped_user_inputs_are_isolated_live_and_after_replay() {
     journal
         .append(SessionEvent::MessageAdded {
             message: SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "message-session-shared".to_owned(),
                 turn_id: None,

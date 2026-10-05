@@ -4,10 +4,11 @@ use crate::transcript::{
     compaction_source_digest_sha256, compaction_summary_message_id, validate_compaction_source,
 };
 use crate::{
-    AppliedCompaction, ArtifactUse, DynamicInputReceipt, MailboxState, SESSION_EVENT_SCHEMA,
-    SESSION_EVENT_VERSION, SessionEvent, SessionEventRecord, SessionState, SessionStatus,
-    SubAgentStatus, ToolLifecycle, TranscriptRecord, TranscriptSegmentReference, TurnState,
-    TurnStatus, TurnStopReason,
+    AppliedCompaction, ArtifactUse, CommandReceiptStatus, DynamicInputReceipt, MailboxState,
+    SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventRecord,
+    SessionInputKind, SessionInputQueueState, SessionState, SessionStatus, SubAgentStatus,
+    ToolLifecycle, TranscriptRecord, TranscriptSegmentReference, TurnState, TurnStatus,
+    TurnStopReason,
 };
 
 /// 一个类型化事件不满足当前状态不变量。
@@ -35,6 +36,13 @@ const MAX_SUB_AGENT_RESULT_SUMMARY_BYTES: usize = 64 * 1024;
 const MAX_SUB_AGENT_PATH_NAME_BYTES: usize = 64;
 /// 独立标题结果允许持久化的最大 UTF-8 字节数。
 const MAX_GENERATED_TITLE_BYTES: usize = 512;
+/// 后续输入队列与单项正文的有限容量，防止控制命令把 Journal 变成无界缓存。
+const MAX_INPUT_QUEUE_ITEMS: usize = 256;
+const MAX_INPUT_COMPLETIONS: usize = 512;
+const MAX_INPUT_TEXT_BYTES: usize = 1_048_576;
+const MAX_INPUT_ID_BYTES: usize = 256;
+/// 单个 Session 可保留的命令收据数量，避免 ACK 成为无界 Journal 状态。
+const MAX_COMMAND_RECEIPTS: usize = 2_048;
 
 /// 工具生命周期在单个 Turn、Agent 与模型 Round 内共享的排序作用域。
 type ToolRoundKey = (crate::TurnId, crate::AgentId, u32);
@@ -49,7 +57,9 @@ pub(crate) fn validate_atomic_batch_shape(event: &SessionEvent) -> Result<(), Re
         || events.iter().any(|event| {
             matches!(
                 event,
-                SessionEvent::AtomicBatch { .. } | SessionEvent::SessionCreated { .. }
+                SessionEvent::AtomicBatch { .. }
+                    | SessionEvent::SessionCreated { .. }
+                    | SessionEvent::SessionWorkspaceChanged { .. }
             )
         })
     {
@@ -192,6 +202,52 @@ fn reduce_record_inner(
             if let Some(archived) = archived {
                 state.archived = *archived;
             }
+        }
+        SessionEvent::AssistantFeedbackSet {
+            row_id,
+            entity_id,
+            feedback,
+        } => {
+            if *row_id == 0
+                || entity_id.trim().is_empty()
+                || entity_id.len() > 1_024
+                || entity_id.trim() != entity_id
+            {
+                return Err(ReductionError::new("Assistant 反馈目标身份无效"));
+            }
+            let existing = state
+                .assistant_feedback
+                .iter()
+                .position(|record| record.row_id == *row_id && record.entity_id == *entity_id);
+            match (existing, feedback) {
+                (Some(index), Some(feedback)) => {
+                    state.assistant_feedback[index].feedback = *feedback;
+                }
+                (None, Some(feedback)) => {
+                    state
+                        .assistant_feedback
+                        .push(crate::AssistantFeedbackRecord {
+                            row_id: *row_id,
+                            entity_id: entity_id.clone(),
+                            feedback: *feedback,
+                        })
+                }
+                (Some(index), None) => {
+                    state.assistant_feedback.remove(index);
+                }
+                (None, None) => {}
+            }
+        }
+        SessionEvent::SessionWorkspaceChanged {
+            expected_project_root,
+            project_root,
+        } => {
+            if state.project_root != *expected_project_root || project_root.trim().is_empty() {
+                return Err(ReductionError::new("工作目录切换与当前项目根不一致"));
+            }
+            crate::session_mutation::ensure_mutable_source(state)
+                .map_err(|_| ReductionError::new("有活动工作或关闭的会话不能切换工作目录"))?;
+            state.project_root = project_root.clone();
         }
         SessionEvent::AtomicBatch { events } => {
             validate_atomic_batch_shape(&record.event)?;
@@ -429,8 +485,22 @@ fn reduce_record_inner(
             segment_index,
             kind,
             through_sequence,
+            user_inputs,
         } => {
             if !inside_atomic_batch
+                || (!user_inputs.is_empty() && *kind != crate::DynamicInputKind::UserSteer)
+                || user_inputs.iter().any(|input| {
+                    input.sequence == 0
+                        || input.sequence > *through_sequence
+                        || input.text.trim().is_empty()
+                        || keencode_model::InputReference::validate_all(&input.references).is_err()
+                })
+                || user_inputs
+                    .windows(2)
+                    .any(|inputs| inputs[0].sequence >= inputs[1].sequence)
+                || user_inputs
+                    .last()
+                    .is_some_and(|input| input.sequence != *through_sequence)
                 || *model_round == 0
                 || *through_sequence == 0
                 || !state.turns.get(turn_id).is_some_and(|turn| {
@@ -471,6 +541,7 @@ fn reduce_record_inner(
                 segment_index: *segment_index,
                 kind: *kind,
                 through_sequence: *through_sequence,
+                user_inputs: user_inputs.clone(),
                 transcript_revision: state.transcript_revision,
             });
         }
@@ -991,6 +1062,30 @@ fn reduce_record_inner(
             }
             state.plan = plan.clone();
         }
+        SessionEvent::FollowupModeChanged {
+            operation_id,
+            operation_payload_sha256,
+            mode,
+        } => {
+            if !valid_control_operation_id(operation_id) || !valid_sha256(operation_payload_sha256)
+            {
+                return Err(ReductionError::new("followupMode operationId 无效"));
+            }
+            state.followup_mode = *mode;
+        }
+        SessionEvent::InputQueueChanged {
+            operation_id,
+            operation_payload_sha256,
+            queue,
+        } => {
+            if !valid_control_operation_id(operation_id)
+                || !valid_sha256(operation_payload_sha256)
+                || !valid_input_queue(queue)
+            {
+                return Err(ReductionError::new("后续输入队列字段或顺序无效"));
+            }
+            state.input_queue = queue.clone();
+        }
         SessionEvent::ProviderSnapshotUpdated { provider } => {
             validate_provider_snapshot(provider)?;
             state.provider = Some(provider.clone());
@@ -1034,6 +1129,110 @@ fn reduce_record_inner(
                     .generated_titles
                     .insert(result.operation_id.clone(), result.clone());
             }
+        }
+        SessionEvent::CommandReceiptCommitted { receipt } => {
+            if !receipt.is_valid() {
+                return Err(ReductionError::new("命令收据字段无效"));
+            }
+            let key = receipt.storage_key();
+            let existing = state.command_receipts.get(&key);
+            match existing {
+                None => {
+                    if !matches!(receipt.status, CommandReceiptStatus::Admitted)
+                        || state.command_receipts.len() >= MAX_COMMAND_RECEIPTS
+                    {
+                        return Err(ReductionError::new(
+                            "命令收据必须先 admission，且数量不能超过上限",
+                        ));
+                    }
+                    state.command_receipts.insert(key, receipt.clone());
+                }
+                Some(existing) => {
+                    if !existing.same_identity(receipt) {
+                        return Err(ReductionError::new("命令收据正文与既有身份冲突"));
+                    }
+                    let valid_transition = match (&existing.status, &receipt.status) {
+                        (CommandReceiptStatus::Admitted, CommandReceiptStatus::Admitted) => true,
+                        (CommandReceiptStatus::Admitted, status) if status.is_terminal() => true,
+                        (left, right) => left == right,
+                    };
+                    if !valid_transition {
+                        return Err(ReductionError::new("命令收据状态不能回退或改变"));
+                    }
+                    if existing != receipt {
+                        state.command_receipts.insert(key, receipt.clone());
+                    }
+                }
+            }
+        }
+        SessionEvent::WorkflowEventCommitted { record } => {
+            let valid_identity = |value: &str| {
+                !value.is_empty()
+                    && value.len() <= 256
+                    && value.trim() == value
+                    && !value.chars().any(char::is_control)
+            };
+            if !valid_identity(&record.run_id)
+                || !valid_identity(&record.tool_call_id)
+                || !valid_identity(&record.event_type)
+                || record.sequence == 0
+                || record.artifacts.len() > 256
+                || record
+                    .artifacts
+                    .iter()
+                    .any(|artifact| !valid_artifact_use(artifact))
+                || record
+                    .actor_session_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_identity(id))
+                || record
+                    .launch_input_id
+                    .as_deref()
+                    .is_some_and(|id| !valid_identity(id))
+                || serde_json::to_vec(&record.payload)
+                    .map_or(true, |bytes| bytes.len() > 1024 * 1024)
+            {
+                return Err(ReductionError::new("工作流事件身份、正文或产物引用无效"));
+            }
+            let existing = state.workflow_events.get(&record.run_id);
+            if record.event_type == "actor-bound"
+                && (!state.turns.is_empty()
+                    || record.sequence != 1
+                    || !record
+                        .payload
+                        .get("parentSessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| valid_identity(id) && id != state.session_id.as_str())
+                    || !record
+                        .payload
+                        .get("nodeId")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(valid_identity)
+                    || state
+                        .workflow_events
+                        .values()
+                        .flatten()
+                        .any(|event| event.event_type == "actor-bound"))
+            {
+                return Err(ReductionError::new(
+                    "工作流执行者必须在首轮前绑定唯一父会话与节点",
+                ));
+            }
+            let expected = existing.map_or(1, |events| events.len() as u64 + 1);
+            if record.sequence != expected
+                || existing
+                    .and_then(|events| events.first())
+                    .is_some_and(|first| first.tool_call_id != record.tool_call_id)
+            {
+                return Err(ReductionError::new(
+                    "工作流事件序号不连续或启动关联发生变化",
+                ));
+            }
+            state
+                .workflow_events
+                .entry(record.run_id.clone())
+                .or_default()
+                .push(record.clone());
         }
         SessionEvent::SubAgentSpawned { agent } => {
             if agent.task.trim().is_empty()
@@ -1314,8 +1513,10 @@ fn validate_standalone_sub_agent_turn_event(
                 .is_some_and(|turn| turn.source_agent_id.as_str() != crate::ROOT_AGENT_ID)
         }
         SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionPreferenceSet { .. }
+        | SessionEvent::AssistantFeedbackSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::AtomicBatch { .. }
         | SessionEvent::MessageAdded { .. }
@@ -1336,9 +1537,13 @@ fn validate_standalone_sub_agent_turn_event(
         | SessionEvent::CompactionApplied { .. }
         | SessionEvent::TodoReplaced { .. }
         | SessionEvent::PlanChanged { .. }
+        | SessionEvent::FollowupModeChanged { .. }
+        | SessionEvent::InputQueueChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
+        | SessionEvent::CommandReceiptCommitted { .. }
+        | SessionEvent::WorkflowEventCommitted { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageQueued { .. }
@@ -1497,8 +1702,10 @@ fn validate_atomic_sub_agent_turn_pairing(
                 validate_atomic_sub_agent_terminal_pairing(state, events, turn_id, expected)?;
             }
             SessionEvent::SessionCreated { .. }
+            | SessionEvent::SessionWorkspaceChanged { .. }
             | SessionEvent::SessionRenamed { .. }
             | SessionEvent::SessionPreferenceSet { .. }
+            | SessionEvent::AssistantFeedbackSet { .. }
             | SessionEvent::SessionStatusChanged { .. }
             | SessionEvent::AtomicBatch { .. }
             | SessionEvent::MessageAdded { .. }
@@ -1519,9 +1726,13 @@ fn validate_atomic_sub_agent_turn_pairing(
             | SessionEvent::CompactionApplied { .. }
             | SessionEvent::TodoReplaced { .. }
             | SessionEvent::PlanChanged { .. }
+            | SessionEvent::FollowupModeChanged { .. }
+            | SessionEvent::InputQueueChanged { .. }
             | SessionEvent::ProviderSnapshotUpdated { .. }
             | SessionEvent::TurnProviderSnapshotRecorded { .. }
             | SessionEvent::TitleGenerated { .. }
+            | SessionEvent::CommandReceiptCommitted { .. }
+            | SessionEvent::WorkflowEventCommitted { .. }
             | SessionEvent::SubAgentSpawned { .. }
             | SessionEvent::SubAgentStatusChanged { .. }
             | SessionEvent::MailboxMessageQueued { .. }
@@ -1647,8 +1858,10 @@ fn validate_atomic_model_round_pairing(events: &[SessionEvent]) -> Result<(), Re
             SessionEvent::OnErrorHookQueued { .. }
             | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
             SessionEvent::SessionCreated { .. }
+            | SessionEvent::SessionWorkspaceChanged { .. }
             | SessionEvent::SessionRenamed { .. }
             | SessionEvent::SessionPreferenceSet { .. }
+            | SessionEvent::AssistantFeedbackSet { .. }
             | SessionEvent::SessionStatusChanged { .. }
             | SessionEvent::SessionClosed {}
             | SessionEvent::TurnStarted { .. }
@@ -1668,9 +1881,13 @@ fn validate_atomic_model_round_pairing(events: &[SessionEvent]) -> Result<(), Re
             | SessionEvent::CompactionApplied { .. }
             | SessionEvent::TodoReplaced { .. }
             | SessionEvent::PlanChanged { .. }
+            | SessionEvent::FollowupModeChanged { .. }
+            | SessionEvent::InputQueueChanged { .. }
             | SessionEvent::ProviderSnapshotUpdated { .. }
             | SessionEvent::TurnProviderSnapshotRecorded { .. }
             | SessionEvent::TitleGenerated { .. }
+            | SessionEvent::CommandReceiptCommitted { .. }
+            | SessionEvent::WorkflowEventCommitted { .. }
             | SessionEvent::SubAgentSpawned { .. }
             | SessionEvent::SubAgentStatusChanged { .. }
             | SessionEvent::MailboxMessageQueued { .. }
@@ -2459,6 +2676,85 @@ fn valid_control_operation_id(value: &str) -> bool {
         && !value.chars().any(char::is_control)
 }
 
+/// 校验后续输入队列的有限容量、唯一身份和 admission 顺序。
+fn valid_input_queue(queue: &SessionInputQueueState) -> bool {
+    if queue.items.len() > MAX_INPUT_QUEUE_ITEMS
+        || queue.completions.len() > MAX_INPUT_COMPLETIONS
+        || queue.next_admission_seq == 0
+    {
+        return false;
+    }
+    if queue
+        .pause_reason
+        .as_deref()
+        .is_some_and(|reason| reason.is_empty() || reason.len() > 128)
+    {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut source_command_ids = std::collections::BTreeSet::new();
+    let mut admission_sequences = std::collections::BTreeSet::new();
+    for item in &queue.items {
+        if item.queue_item_id.is_empty()
+            || item.queue_item_id.len() > MAX_INPUT_ID_BYTES
+            || item.source_command_id.is_empty()
+            || item.source_command_id.len() > MAX_INPUT_ID_BYTES
+            || item
+                .client_id
+                .as_deref()
+                .is_some_and(|client| client.is_empty() || client.len() > MAX_INPUT_ID_BYTES)
+            || !ids.insert(&item.queue_item_id)
+            || !source_command_ids.insert(&item.source_command_id)
+            || item.admission_seq == 0
+            || item.admission_seq >= queue.next_admission_seq
+            || !admission_sequences.insert(item.admission_seq)
+            || item.text.len() > MAX_INPUT_TEXT_BYTES
+            || (matches!(
+                item.kind,
+                SessionInputKind::SendText | SessionInputKind::SendGoalCommand
+            ) && item.text.trim().is_empty())
+            || item.attachments.len() > 64
+            || item
+                .mode
+                .as_deref()
+                .is_some_and(|mode| mode.is_empty() || mode.len() > 128)
+            || (matches!(
+                item.dispatch,
+                crate::SessionInputDispatch::Reserved | crate::SessionInputDispatch::Promoting
+            ) != item.promoted_turn_id.is_some())
+        {
+            return false;
+        }
+        if serde_json::to_vec(&item.attachments).map_or(true, |bytes| bytes.len() > 256 * 1024)
+            || item
+                .model_selection
+                .as_ref()
+                .and_then(|value| serde_json::to_vec(value).ok())
+                .is_some_and(|bytes| bytes.len() > 16 * 1024)
+        {
+            return false;
+        }
+    }
+    for completion in &queue.completions {
+        if completion.queue_item_id.is_empty()
+            || completion.queue_item_id.len() > MAX_INPUT_ID_BYTES
+            || completion.source_command_id.is_empty()
+            || completion.source_command_id.len() > MAX_INPUT_ID_BYTES
+            || completion.completion_operation_id.is_empty()
+            || completion.completion_operation_id.len() > MAX_INPUT_ID_BYTES
+            || completion
+                .source_input_payload_sha256
+                .as_deref()
+                .is_some_and(|digest| !valid_sha256(digest))
+            || !ids.insert(&completion.queue_item_id)
+            || !source_command_ids.insert(&completion.source_command_id)
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// 校验事件中的内容寻址引用没有让标识、摘要或媒体类型互相矛盾。
 fn valid_artifact_use(artifact: &ArtifactUse) -> bool {
     artifact.artifact_id.as_str() == artifact.sha256
@@ -2559,6 +2855,8 @@ fn valid_message_part(role: &crate::MessageRole, part: &crate::MessagePart) -> b
 /// 校验一条持久消息共有的标识、角色、模型可见内容和类型化内容形状。
 pub(crate) fn valid_message_shape(message: &crate::SessionMessage) -> bool {
     !message.message_id.trim().is_empty()
+        && keencode_model::InputReference::validate_all(&message.references).is_ok()
+        && (message.references.is_empty() || message.role == crate::MessageRole::User)
         && !message.content.is_empty()
         && message_has_model_visible_content(message)
         && message

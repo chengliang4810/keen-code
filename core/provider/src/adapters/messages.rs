@@ -91,9 +91,10 @@ impl MessagesAdapter {
         let mut messages = Vec::<Value>::new();
 
         for message in request.messages.iter() {
+            let wire_content = message.wire_content();
             match message.role {
                 MessageRole::System | MessageRole::Developer => {
-                    for block in &message.content {
+                    for block in wire_content.iter() {
                         let ContentBlock::Text { text } = block else {
                             return Err(invalid_request("Messages 的系统和开发消息只允许文本内容"));
                         };
@@ -101,8 +102,7 @@ impl MessagesAdapter {
                     }
                 }
                 MessageRole::User => {
-                    let content = message
-                        .content
+                    let content = wire_content
                         .iter()
                         .map(encode_user_block)
                         .collect::<Result<Vec<_>, _>>()?;
@@ -110,7 +110,7 @@ impl MessagesAdapter {
                 }
                 MessageRole::Assistant => {
                     let mut content = Vec::new();
-                    for block in &message.content {
+                    for block in wire_content.iter() {
                         if let Some(encoded) = encode_assistant_block(block)? {
                             content.push(encoded);
                         }
@@ -120,8 +120,7 @@ impl MessagesAdapter {
                     }
                 }
                 MessageRole::Tool => {
-                    let content = message
-                        .content
+                    let content = wire_content
                         .iter()
                         .map(encode_tool_result_block)
                         .collect::<Result<Vec<_>, _>>()?;

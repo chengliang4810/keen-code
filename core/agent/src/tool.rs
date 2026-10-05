@@ -152,6 +152,106 @@ pub struct ToolContext {
     pub cancellation: TurnCancellation,
 }
 
+/// 一个待用户确认的工具调用快照。
+///
+/// 该结构只在 Schema、PreToolUse Hook 和 PlanGuard 都通过后创建。`input` 是
+/// 即将传给工具实现的最终参数；审批方不能修改它，任何修改都必须重新经过
+/// Schema、Hook 与 effect 计算。
+#[derive(Clone, Debug)]
+pub struct ToolApprovalRequest {
+    /// 工具调用所属的根 Session。
+    pub session_id: SessionId,
+    /// 工具调用所属的用户 Turn。
+    pub turn_id: TurnId,
+    /// 发起调用的根 Agent 或单层子 Agent。
+    pub source_agent_id: AgentId,
+    /// 从模型或受控宿主冻结的可信调用标识。
+    pub tool_call_id: ToolCallId,
+    /// 注册表中的精确工具名称。
+    pub tool_name: String,
+    /// Schema 与 Hook 处理后的最终工具输入。
+    pub input: Value,
+    /// 最终 effect；未知或不安全的工具应由实现归类为 `ChangesState`。
+    pub effect: ToolEffect,
+    /// Workflow 等受控调用的宿主操作身份；普通模型调用为 `None`。
+    pub operation_id: Option<String>,
+}
+
+/// 工具审批的最终决定。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolApprovalDecision {
+    /// 用户明确允许本次精确调用。
+    Approved,
+    /// 用户拒绝、连接关闭或审批端发生可恢复错误；工具不得执行。
+    Denied {
+        /// 可展示给模型或控制面的有界原因。
+        reason: String,
+    },
+    /// Turn 取消时的明确收敛结果。
+    Cancelled,
+}
+
+/// 审批端无法继续等待本次调用时的稳定错误。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolApprovalError {
+    /// 承载审批交互的连接或 Session 已关闭。
+    ConnectionClosed,
+    /// 审批端拒绝创建或恢复交互。
+    Rejected {
+        /// 不包含凭据、参数正文或连接细节的有界说明。
+        message: String,
+    },
+}
+
+impl fmt::Display for ToolApprovalError {
+    /// 输出安全的审批错误说明。
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ConnectionClosed => formatter.write_str("审批连接已关闭"),
+            Self::Rejected { message } => formatter.write_str(message),
+        }
+    }
+}
+
+impl Error for ToolApprovalError {}
+
+/// 通过审批端等待工具授权的异步返回值。
+pub type ToolApprovalFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ToolApprovalDecision, ToolApprovalError>> + Send + 'a>>;
+
+/// Provider 中立的工具审批端口。
+///
+/// Runner 在真实工具副作用前调用该端口。实现方必须把请求绑定到完整的
+/// Session、Turn、Agent 和工具调用身份，并在允许、拒绝、取消或连接关闭时
+/// 结束 Future；不能把 AskUserQuestion 的问答结果当成审批结果。
+pub trait ToolApprovalGate: Send + Sync {
+    /// 创建或恢复一次精确工具调用审批等待。
+    fn request(
+        &self,
+        request: ToolApprovalRequest,
+        cancellation: TurnCancellation,
+    ) -> ToolApprovalFuture<'_>;
+}
+
+/// 供不需要交互的纯领域调用方使用的显式自动允许端口。
+///
+/// Desktop Runtime 必须注入真实的 Session 权限 Coordinator；该实现只用于
+/// 单元测试和明确不承载用户副作用的独立 Runner，避免改变既有嵌入式调用方的
+/// 构造兼容性。
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AllowAllToolApprovalGate;
+
+impl ToolApprovalGate for AllowAllToolApprovalGate {
+    /// 对所有请求立即返回允许；真实 Desktop 不应使用此实现。
+    fn request(
+        &self,
+        _request: ToolApprovalRequest,
+        _cancellation: TurnCancellation,
+    ) -> ToolApprovalFuture<'_> {
+        Box::pin(async { Ok(ToolApprovalDecision::Approved) })
+    }
+}
+
 /// 工具成功完成后返回给模型的有序内容。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ToolOutput {

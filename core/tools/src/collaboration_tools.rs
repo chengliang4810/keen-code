@@ -29,7 +29,10 @@ const MAX_TOOL_OUTPUT_BYTES: usize = 64 * 1024;
 /// list_agents 单页最多返回的身份数量。
 pub(super) const MAX_LIST_AGENTS_LIMIT: usize = 32;
 /// 只能由根 Agent 使用、不得冻结进子 Agent Profile 的工具名称。
-const ROOT_ONLY_AGENT_TOOL_NAMES: [&str; 8] = [
+///
+/// Workflow 工具与 spawn/Goal/Plan 一样属于根控制面；子 Agent 的 registry
+/// 会按单层能力故意不注册它们，因此必须在 Profile 冻结前一起移除。
+const ROOT_ONLY_AGENT_TOOL_NAMES: [&str; 13] = [
     "spawn_agent",
     "interrupt_agent",
     "retry_agent",
@@ -38,6 +41,11 @@ const ROOT_ONLY_AGENT_TOOL_NAMES: [&str; 8] = [
     "TodoWrite",
     "Goal",
     "Plan",
+    "CreateWorkflow",
+    "SaveWorkflow",
+    "GetWorkflowRun",
+    "GetWorkflowRunSituation",
+    "GetWorkflowRunRoster",
 ];
 /// 每个子 Agent 在用户或模板任务工具之外固定拥有的通信控制面。
 const CHILD_COMMUNICATION_TOOL_NAMES: [&str; 4] =
@@ -81,7 +89,8 @@ pub struct ResolvedSpawnAgentTemplate {
     pub model: Option<String>,
     /// 模板可选的推理强度覆盖。
     pub reasoning_effort: Option<String>,
-    /// 模板显式工具集合；为空表示继承父 Agent 的冻结工具表。
+    /// 模板普通工具集合的三态配置：`None` 继承父 Agent 的冻结工具表，`Some([])` 禁用普通工具，
+    /// `Some([..])` 仅使用指定集合；三种状态都会在最终装配时保留固定通信工具。
     pub tool_names: Option<Vec<String>>,
     /// 从继承或显式集合中移除的工具名称。
     pub disallowed_tool_names: Vec<String>,
@@ -1268,6 +1277,7 @@ fn normalize_collaboration_error(error: CollaborationError) -> ToolError {
         | CollaborationError::InvalidAgentPath(_)
         | CollaborationError::InvalidMessageId
         | CollaborationError::EmptyMessage
+        | CollaborationError::InvalidInputReferences
         | CollaborationError::InvalidAssignment
         | CollaborationError::TextTooLarge { .. }
         | CollaborationError::InvalidAgentProfile { .. }

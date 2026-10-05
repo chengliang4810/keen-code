@@ -3111,7 +3111,7 @@ fn estimate_message_tokens<'a>(messages: impl IntoIterator<Item = &'a Message>) 
     let mut total = 0_u64;
     for message in messages {
         total = total.saturating_add(PER_MESSAGE_OVERHEAD_TOKENS);
-        for block in &message.content {
+        for block in message.wire_content().iter() {
             total = total.saturating_add(match block {
                 ContentBlock::Text { text } => utf8_text_tokens(text),
                 ContentBlock::Reasoning { reasoning } => match &reasoning.continuation {

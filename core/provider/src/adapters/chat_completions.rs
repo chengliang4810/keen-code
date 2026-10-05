@@ -77,6 +77,7 @@ impl ChatCompletionsAdapter {
         let mut messages = Vec::new();
         let mut tool_images = Vec::new();
         for message in request.messages.iter() {
+            let content = message.wire_content();
             // 先补齐连续的全部工具结果，避免图片消息打断并行工具调用的响应配对。
             if message.role != MessageRole::Tool && !tool_images.is_empty() {
                 messages
@@ -84,13 +85,13 @@ impl ChatCompletionsAdapter {
             }
             match message.role {
                 MessageRole::System | MessageRole::Developer | MessageRole::User => {
-                    messages.push(encode_chat_message(message.role, &message.content)?);
+                    messages.push(encode_chat_message(message.role, &content)?);
                 }
                 MessageRole::Assistant => {
-                    messages.push(encode_assistant_message(&message.content)?);
+                    messages.push(encode_assistant_message(&content)?);
                 }
                 MessageRole::Tool => {
-                    for block in &message.content {
+                    for block in content.iter() {
                         messages.push(encode_tool_message(block, &mut tool_images)?);
                     }
                 }

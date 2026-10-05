@@ -726,9 +726,21 @@ async fn agent_returns_identity_under_capacity_and_rejects_recursive_spawn() {
 async fn spawned_child_profile_removes_root_only_tools_from_snapshot() {
     let fixture = fixture(2, 2);
     let mut child_profile = profile("snapshot-child");
-    child_profile
-        .tool_snapshot
-        .extend(["spawn_agent", "AskUser", "TodoWrite", "Goal", "Plan"].map(str::to_owned));
+    child_profile.tool_snapshot.extend(
+        [
+            "spawn_agent",
+            "AskUser",
+            "TodoWrite",
+            "Goal",
+            "Plan",
+            "CreateWorkflow",
+            "SaveWorkflow",
+            "GetWorkflowRun",
+            "GetWorkflowRunSituation",
+            "GetWorkflowRunRoster",
+        ]
+        .map(str::to_owned),
+    );
     let output = output_json(
         spawn_tool(fixture.coordinator.clone(), child_profile)
             .execute(fixture.root_context(), agent_input("snapshot_child"))
@@ -774,6 +786,7 @@ async fn agent_tool_inherits_parent_turn_plan_guard() {
 async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
     let fixture = fixture(2, 2);
     let template_snapshot = AgentTemplateSnapshot {
+        inject_agents_md: false,
         name: "reviewer".to_owned(),
         system_prompt: "审查实际变更".to_owned(),
         max_turns: Some(4),
@@ -855,6 +868,134 @@ async fn explicit_agent_template_is_frozen_before_spawn_and_survives_restore() {
         .expect("带模板的完整 checkpoint 应可冷恢复");
 }
 
+/// 显式 `Some([])` 必须在真实 spawn 和冷反序列化后都只保留固定通信工具，
+/// 不能把普通工具或根控制面工具误当成继承项重新放回快照。
+#[tokio::test]
+async fn explicit_empty_agent_template_freezes_only_communication_tools_after_restore() {
+    let fixture = fixture(2, 2);
+    let mut inherited_profile = profile("empty-template-child");
+    inherited_profile.tool_snapshot.extend(
+        [
+            "Bash",
+            "spawn_agent",
+            "TodoWrite",
+            "Goal",
+            "Plan",
+            "CreateWorkflow",
+        ]
+        .map(str::to_owned),
+    );
+    let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
+        template: Some(ResolvedSpawnAgentTemplate {
+            snapshot: AgentTemplateSnapshot {
+                inject_agents_md: true,
+                name: "empty-tools".to_owned(),
+                system_prompt: "仅用于空工具集合回归".to_owned(),
+                max_turns: None,
+                allowed_write_dirs: Vec::new(),
+            },
+            model: None,
+            reasoning_effort: None,
+            tool_names: Some(Vec::new()),
+            disallowed_tool_names: Vec::new(),
+        }),
+        fail: false,
+    });
+    let output = output_json(
+        spawn_tool(fixture.coordinator.clone(), inherited_profile)
+            .with_template_resolver(resolver)
+            .execute(
+                fixture.root_context(),
+                json!({
+                    "task_name": "empty_template_tools",
+                    "message": "验证空普通工具集合",
+                    "assignment": "验证模板工具快照冷恢复",
+                    "fork_turns": "none",
+                    "agent": "empty-tools"
+                }),
+            )
+            .await
+            .expect("空普通工具模板应完成真实 spawn"),
+    );
+    let child_agent_id = spawned_agent_id(&fixture, &output);
+    let child_turn_id = spawned_turn_id(&fixture, &output);
+    let launch = fixture.execution.launch(&child_turn_id);
+    let communication_tools = ["list_agents", "send_message", "followup_task", "wait_agent"];
+    assert_eq!(launch.agent.profile.tool_snapshot, communication_tools);
+    for forbidden in [
+        "Read",
+        "Bash",
+        "spawn_agent",
+        "TodoWrite",
+        "Goal",
+        "Plan",
+        "CreateWorkflow",
+    ] {
+        assert!(
+            !launch
+                .agent
+                .profile
+                .tool_snapshot
+                .iter()
+                .any(|tool| tool == forbidden),
+            "Some([]) 不得把普通或根控制面工具 {forbidden} 放入运行快照"
+        );
+    }
+
+    let checkpoint = fixture
+        .coordinator
+        .checkpoint_coordinator()
+        .expect("空工具模板应进入 checkpoint");
+    let checkpoint_definition = checkpoint.roots[0]
+        .known_agents
+        .iter()
+        .find(|definition| definition.agent_id == child_agent_id)
+        .expect("checkpoint 应包含空工具模板的子 Agent 定义");
+    assert_eq!(
+        checkpoint_definition.profile.tool_snapshot,
+        communication_tools
+    );
+
+    let encoded = serde_json::to_vec(&checkpoint).expect("空工具 checkpoint 应可序列化");
+    let recovered: RecoveredCoordinator =
+        serde_json::from_slice(&encoded).expect("空工具 checkpoint 应可反序列化");
+    let restored = CollaborationCoordinator::new(
+        CollaborationLimits::new(2).expect("恢复容量应有效"),
+        fixture.store.clone(),
+        Arc::new(TestExecution::default()),
+        Arc::new(TestIds::default()),
+    );
+    restored
+        .restore_coordinator(recovered)
+        .expect("空工具 checkpoint 应可冷恢复");
+    let restored_checkpoint = restored
+        .checkpoint_coordinator()
+        .expect("冷恢复后应可读取空工具 checkpoint");
+    let restored_definition = restored_checkpoint.roots[0]
+        .known_agents
+        .iter()
+        .find(|definition| definition.agent_id == child_agent_id)
+        .expect("冷恢复 checkpoint 应保留空工具子 Agent");
+    assert_eq!(
+        restored_definition.profile.tool_snapshot, communication_tools,
+        "冷反序列化不得把 Some([]) 改回继承普通工具"
+    );
+}
+
+/// 冷恢复快照省略可选注入开关时必须保持默认项目指令语义。
+#[test]
+fn agent_template_snapshot_omitted_optional_injection_defaults_to_enabled() {
+    let value = json!({
+        "name": "reviewer",
+        "system_prompt": "审查实际变更",
+        "max_turns": null,
+        "allowed_write_dirs": []
+    });
+    let snapshot: AgentTemplateSnapshot =
+        serde_json::from_value(value).expect("省略可选字段的模板快照应按默认值恢复");
+    assert!(snapshot.inject_agents_md);
+}
+
 /// 显式模板即使重选根专用工具，最终冻结的子 Agent Profile 也必须统一移除。
 #[tokio::test]
 async fn explicit_agent_template_cannot_restore_root_only_tools() {
@@ -866,6 +1007,7 @@ async fn explicit_agent_template_cannot_restore_root_only_tools() {
     let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
         template: Some(ResolvedSpawnAgentTemplate {
             snapshot: AgentTemplateSnapshot {
+                inject_agents_md: true,
                 name: "reviewer".to_owned(),
                 system_prompt: "审查实际变更".to_owned(),
                 max_turns: None,
@@ -962,6 +1104,7 @@ async fn explicit_agent_template_model_override_applies_for_all_history() {
     let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
         template: Some(ResolvedSpawnAgentTemplate {
             snapshot: AgentTemplateSnapshot {
+                inject_agents_md: true,
                 name: "other-model".to_owned(),
                 system_prompt: "使用专用模型".to_owned(),
                 max_turns: None,
@@ -1176,6 +1319,7 @@ async fn spawn_agent_model_priority_with_full_history_inheritance() {
     let resolver: Arc<dyn SpawnAgentTemplateResolver> = Arc::new(StaticTemplateResolver {
         template: Some(ResolvedSpawnAgentTemplate {
             snapshot: AgentTemplateSnapshot {
+                inject_agents_md: true,
                 name: "reviewer".to_owned(),
                 system_prompt: "审查实际变更".to_owned(),
                 max_turns: None,

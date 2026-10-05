@@ -49,13 +49,27 @@ pub struct SessionHistoryIndex {
     pub turn_providers: BTreeMap<crate::TurnId, crate::ProviderSnapshot>,
     /// 子 Agent 身份、状态和 Todo 的稀疏定位，不保留事件正文。
     pub context: BTreeMap<String, Vec<u64>>,
+    /// 每个 Turn 终态的物理 Journal sequence 与 AtomicBatch 内顺序。
+    ///
+    /// 这是由已有 Journal 事件索引归约出的定位信息，不是第二份生命周期事实。
+    pub terminal_sequences: BTreeMap<crate::TurnId, (u64, u32)>,
 }
 impl SessionHistoryIndex {
     fn observe(&mut self, sequence: u64, event: &SessionEvent) {
+        let mut terminal_ordinal = 0;
+        self.observe_with_terminal_ordinal(sequence, event, &mut terminal_ordinal);
+    }
+
+    fn observe_with_terminal_ordinal(
+        &mut self,
+        sequence: u64,
+        event: &SessionEvent,
+        terminal_ordinal: &mut u32,
+    ) {
         match event {
             SessionEvent::AtomicBatch { events } => {
                 for event in events {
-                    self.observe(sequence, event);
+                    self.observe_with_terminal_ordinal(sequence, event, terminal_ordinal);
                 }
             }
             SessionEvent::TurnStarted {
@@ -77,6 +91,9 @@ impl SessionHistoryIndex {
                     .push(sequence);
             }
             SessionEvent::TurnCompleted { turn_id } | SessionEvent::TurnStopped { turn_id, .. } => {
+                self.terminal_sequences
+                    .insert(turn_id.clone(), (sequence, *terminal_ordinal));
+                *terminal_ordinal = (*terminal_ordinal).saturating_add(1);
                 if self.context.contains_key(&format!("child-start:{turn_id}")) {
                     self.context
                         .entry(format!("child-end:{turn_id}"))
@@ -179,7 +196,7 @@ pub struct JournalConfig {
     pub max_log_bytes: u64,
     /// 单个 Session 允许的最大事件记录数量。
     pub max_records: u64,
-    /// 任一归约状态集合允许的最大元素数量。
+    /// 普通归约状态集合允许的最大元素数量；工作流 payload 另受专用固定上限约束。
     pub max_state_collection_items: usize,
 }
 
@@ -2979,11 +2996,18 @@ fn validate_non_batch_event_artifacts(
                 validate_artifact_use(session_id, artifact, validator)?;
             }
         }
+        SessionEvent::WorkflowEventCommitted { record } => {
+            for artifact in &record.artifacts {
+                validate_artifact_use(session_id, artifact, validator)?;
+            }
+        }
         SessionEvent::OnErrorHookQueued { .. }
         | SessionEvent::OnErrorHookReceiptCommitted { .. } => {}
         SessionEvent::SessionCreated { .. }
+        | SessionEvent::SessionWorkspaceChanged { .. }
         | SessionEvent::SessionRenamed { .. }
         | SessionEvent::SessionPreferenceSet { .. }
+        | SessionEvent::AssistantFeedbackSet { .. }
         | SessionEvent::SessionStatusChanged { .. }
         | SessionEvent::TurnStarted { .. }
         | SessionEvent::TurnCompleted { .. }
@@ -2994,9 +3018,12 @@ fn validate_non_batch_event_artifacts(
         | SessionEvent::ToolExecutionStarted { .. }
         | SessionEvent::TerminalExited { .. }
         | SessionEvent::TodoReplaced { .. }
+        | SessionEvent::FollowupModeChanged { .. }
+        | SessionEvent::InputQueueChanged { .. }
         | SessionEvent::ProviderSnapshotUpdated { .. }
         | SessionEvent::TurnProviderSnapshotRecorded { .. }
         | SessionEvent::TitleGenerated { .. }
+        | SessionEvent::CommandReceiptCommitted { .. }
         | SessionEvent::SubAgentSpawned { .. }
         | SessionEvent::SubAgentStatusChanged { .. }
         | SessionEvent::MailboxMessageDelivered { .. }
@@ -3191,7 +3218,28 @@ fn validate_state_collections(state: &SessionState, limit: usize) -> Result<(), 
         ("mailbox", state.mailbox.len()),
         ("worktrees", state.worktrees.len()),
         ("generated_titles", state.generated_titles.len()),
+        (
+            "workflow_events",
+            state.workflow_events.values().map(Vec::len).sum(),
+        ),
+        (
+            "workflow_artifacts",
+            state
+                .workflow_events
+                .values()
+                .flatten()
+                .map(|event| event.artifacts.len())
+                .sum(),
+        ),
         ("dynamic_input_receipts", state.dynamic_input_receipts.len()),
+        (
+            "input_queue_items",
+            state
+                .input_queue
+                .items
+                .len()
+                .saturating_add(state.input_queue.completions.len()),
+        ),
         ("on_error_hook_outbox", state.on_error_hook_outbox.len()),
     ];
     for (collection, actual) in collections {
@@ -3276,6 +3324,20 @@ fn validate_state_collections(state: &SessionState, limit: usize) -> Result<(), 
                 limit,
             });
         }
+    }
+    let workflow_json_collection_items = state
+        .workflow_events
+        .values()
+        .flatten()
+        .map(|event| json_collection_items(&event.payload))
+        .try_fold(0_usize, |total, count| total.checked_add(count))
+        .unwrap_or(usize::MAX);
+    if workflow_json_collection_items > crate::MAX_WORKFLOW_JSON_COLLECTION_ITEMS {
+        return Err(ResourceError::StateCollectionLimit {
+            collection: "workflow_json_collection_items",
+            actual: workflow_json_collection_items,
+            limit: crate::MAX_WORKFLOW_JSON_COLLECTION_ITEMS,
+        });
     }
     Ok(())
 }
@@ -3959,7 +4021,45 @@ mod tests {
                 prompt_summary: "question".to_owned(),
             },
         );
-        assert_eq!(journal.history_index().unwrap().root_starts, [130]);
+        append(
+            &journal,
+            "event-root-stop",
+            SessionEvent::TurnStopped {
+                turn_id: crate::TurnId::new("root-turn").unwrap(),
+                reason: crate::TurnStopReason::Failed,
+                message: "first failure".to_owned(),
+            },
+        );
+        append(
+            &journal,
+            "event-second-start",
+            SessionEvent::TurnStarted {
+                turn_id: crate::TurnId::new("second-turn").unwrap(),
+                source_agent_id: crate::AgentId::new("root").unwrap(),
+                root_turn_id: crate::TurnId::new("second-turn").unwrap(),
+                parent_turn_id: None,
+                prompt_summary: "second question".to_owned(),
+            },
+        );
+        append(
+            &journal,
+            "event-second-stop",
+            SessionEvent::TurnStopped {
+                turn_id: crate::TurnId::new("second-turn").unwrap(),
+                reason: crate::TurnStopReason::Failed,
+                message: "second failure".to_owned(),
+            },
+        );
+        let index = journal.history_index().unwrap();
+        assert_eq!(index.root_starts, [130, 132]);
+        assert!(
+            index
+                .terminal_sequences
+                .get(&crate::TurnId::new("root-turn").unwrap())
+                < index
+                    .terminal_sequences
+                    .get(&crate::TurnId::new("second-turn").unwrap())
+        );
         drop(journal);
         let reopened = match SessionJournal::open(
             root.path(),
@@ -3971,7 +4071,16 @@ mod tests {
             SessionOpen::Ready(journal) => journal,
             SessionOpen::Corrupt(_) => panic!("重开不应损坏"),
         };
-        assert_eq!(reopened.history_index().unwrap().root_starts, [130]);
+        let reopened_index = reopened.history_index().unwrap();
+        assert_eq!(reopened_index.root_starts, [130, 132]);
+        assert!(
+            reopened_index
+                .terminal_sequences
+                .get(&crate::TurnId::new("root-turn").unwrap())
+                < reopened_index
+                    .terminal_sequences
+                    .get(&crate::TurnId::new("second-turn").unwrap())
+        );
     }
 
     /// 第 64 条待刷记录必须在 append 返回前完成一次 sync。
@@ -4937,6 +5046,154 @@ mod tests {
             recovery.journal.state().expect("状态应读取").last_sequence,
             1,
             "恢复后有效前缀应保留"
+        );
+    }
+
+    /// 工作流生命周期 payload 不得挤占普通会话 JSON 预算，但仍受独立上限约束。
+    #[test]
+    fn workflow_payload_uses_independent_budget_and_has_hard_cap() {
+        let mut state = SessionState::empty(SessionId::new("workflow-payload-budget").unwrap());
+        let payload = serde_json::Value::Object(
+            (0..crate::MAX_WORKFLOW_JSON_COLLECTION_ITEMS + 1)
+                .map(|index| (format!("field-{index}"), serde_json::Value::Null))
+                .collect(),
+        );
+        state.workflow_events.insert(
+            "workflow-run".to_owned(),
+            vec![crate::WorkflowJournalEvent {
+                run_id: "workflow-run".to_owned(),
+                tool_call_id: "workflow-tool".to_owned(),
+                sequence: 1,
+                event_type: "node-started".to_owned(),
+                payload,
+                artifacts: Vec::new(),
+                actor_session_id: None,
+                launch_input_id: None,
+            }],
+        );
+
+        let error = validate_state_collections(&state, usize::MAX)
+            .expect_err("超过工作流专用 payload 预算必须被拒绝");
+        assert!(matches!(
+            error,
+            ResourceError::StateCollectionLimit {
+                collection: "workflow_json_collection_items",
+                actual,
+                limit: crate::MAX_WORKFLOW_JSON_COLLECTION_ITEMS,
+            } if actual == crate::MAX_WORKFLOW_JSON_COLLECTION_ITEMS + 1
+        ));
+    }
+
+    /// 多条有界工作流事件可以跨越普通 50,000 项预算并冷恢复；超出专用上限时不污染日志。
+    #[test]
+    fn workflow_payload_budget_survives_reopen_and_rejects_without_append() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let session_id = SessionId::new("workflow-payload-reopen").expect("Session ID 应有效");
+        let config = JournalConfig {
+            snapshot_policy: SnapshotPolicy::Disabled,
+            ..JournalConfig::default()
+        };
+        let open = |root: &Path, session_id: SessionId| match SessionJournal::open(
+            root, session_id, config,
+        )
+        .expect("Session 应打开")
+        {
+            SessionOpen::Ready(journal) => journal,
+            SessionOpen::Corrupt(_) => panic!("测试 Journal 不应损坏"),
+        };
+        let append_chunk = |journal: &SessionJournal, index: usize| {
+            let expected_sequence = journal.state().expect("状态应读取").last_sequence;
+            journal
+                .append_idempotent(
+                    SessionEventId::new(format!("workflow-chunk-{index}")).expect("事件 ID 应有效"),
+                    expected_sequence,
+                    SessionEvent::WorkflowEventCommitted {
+                        record: crate::WorkflowJournalEvent {
+                            run_id: "workflow-run".to_owned(),
+                            tool_call_id: "workflow-tool".to_owned(),
+                            sequence: index as u64 + 1,
+                            event_type: "node-settled".to_owned(),
+                            payload: serde_json::Value::Array(vec![serde_json::Value::Null; 4_096]),
+                            artifacts: Vec::new(),
+                            actor_session_id: None,
+                            launch_input_id: None,
+                        },
+                    },
+                )
+                .expect("有界工作流事件应追加");
+        };
+
+        let journal = open(root.path(), session_id.clone());
+        journal
+            .append_idempotent(
+                SessionEventId::new("workflow-session-created").expect("事件 ID 应有效"),
+                0,
+                SessionEvent::SessionCreated {
+                    title: "工作流 payload 预算".to_owned(),
+                    project_root: "D:/workflow-budget".to_owned(),
+                },
+            )
+            .expect("SessionCreated 应追加");
+        for index in 0..13 {
+            append_chunk(&journal, index);
+        }
+        journal.flush().expect("第一段事件应落盘");
+        drop(journal);
+
+        let journal = open(root.path(), session_id.clone());
+        let state = journal.state().expect("冷恢复状态应读取");
+        let recovered_items = state
+            .workflow_events
+            .values()
+            .flatten()
+            .map(|event| json_collection_items(&event.payload))
+            .sum::<usize>();
+        assert_eq!(recovered_items, 13 * 4_096);
+        for index in 13..61 {
+            append_chunk(&journal, index);
+        }
+        let before_rejection = journal.state().expect("超界前状态应读取").last_sequence;
+        let error = journal
+            .append_idempotent(
+                SessionEventId::new("workflow-chunk-over-budget").expect("事件 ID 应有效"),
+                before_rejection,
+                SessionEvent::WorkflowEventCommitted {
+                    record: crate::WorkflowJournalEvent {
+                        run_id: "workflow-run".to_owned(),
+                        tool_call_id: "workflow-tool".to_owned(),
+                        sequence: 62,
+                        event_type: "node-settled".to_owned(),
+                        payload: serde_json::Value::Array(vec![serde_json::Value::Null; 4_096]),
+                        artifacts: Vec::new(),
+                        actor_session_id: None,
+                        launch_input_id: None,
+                    },
+                },
+            )
+            .expect_err("超出工作流专用预算必须拒绝");
+        assert!(matches!(
+            error,
+            ResourceError::StateCollectionLimit {
+                collection: "workflow_json_collection_items",
+                ..
+            }
+        ));
+        assert_eq!(
+            journal.state().expect("拒绝后状态应读取").last_sequence,
+            before_rejection,
+            "拒绝必须不推进 Journal sequence"
+        );
+        journal.flush().expect("剩余事件应落盘");
+        drop(journal);
+
+        let reopened = open(root.path(), session_id);
+        assert_eq!(
+            reopened
+                .state()
+                .expect("最终冷恢复状态应读取")
+                .last_sequence,
+            before_rejection,
+            "超界事件不得出现在冷恢复日志"
         );
     }
 }

@@ -106,6 +106,7 @@ fn run(profile: Profile) -> Result<ResultRow, Box<dyn std::error::Error>> {
         } else {
             SessionEvent::MessageAdded {
                 message: SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: format!("benchmark-message-{index}"),
                     turn_id: None,
