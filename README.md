@@ -34,7 +34,7 @@ KeenCode 面向个人开发者，把项目管理、AI 编码对话、文件修�
 
 当前发布范围仅包含 macOS 和 Windows。
 
-KeenCode 启动后会立即检查 GitHub Releases，并在运行期间每 30 分钟静默复查；也可以在「设置 → 关于」中手动检查。应用只安装通过发布签名校验的更新，下载和安装完成后会自动重启。
+KeenCode 启动时只读取当前更新状态；可在「帮助 → 检查更新」中主动检查 GitHub Releases。发现更新后会后台下载并验签，用户从更新入口确认安装并重启。当前源码没有 30 分钟定时检查器。
 
 > 首次公开测试版本可能尚未配置 Apple 或 Windows 商业代码签名证书，操作系统可能显示来源提示。应用内更新签名与操作系统代码签名是两套独立校验。
 
@@ -57,7 +57,7 @@ keencode session list
 
 ## 本地开发
 
-需要 Node.js 24、pnpm 10.14.0、Rust stable，以及 Tauri 2 对应平台的系统构建工具。
+需要 Node.js 24、pnpm 10.14.0、Rust 1.95+（workspace MSRV；可使用更新的 stable），以及 Tauri 2 对应平台的系统构建工具。
 
 ```bash
 git clone https://github.com/chengliang4810/keen-code.git
@@ -72,7 +72,7 @@ corepack pnpm@10.14.0 dev:desktop
 corepack pnpm@10.14.0 typecheck
 corepack pnpm@10.14.0 test
 corepack pnpm@10.14.0 build
-(cd apps/desktop && cargo test)
+cargo test -p keencode-desktop
 ```
 
 生成本机安装包：
@@ -80,6 +80,29 @@ corepack pnpm@10.14.0 build
 ```bash
 corepack pnpm@10.14.0 build:desktop
 ```
+
+## 项目结构与运行时边界
+
+- `packages/ui/src/` 是业务 UI 根，保留 ZCode 组件的 DOM、CSS、主题令牌和 locale；`apps/ui/` 是 Vite/Tauri 平台适配、构建入口和契约测试，不维护第二套业务界面。
+- `apps/desktop/` 是 Tauri Rust 宿主；Journal、资源持久化、RPC 和 Agent Runtime 由 Rust 持有权威状态，前端只消费可丢弃的投影。
+- `WorkflowDefinitionV1` 是 `core/workflow/` 实现的纯 Rust `serde` JSON 契约，桌面运行时不依赖 Node、Electron 或 JavaScript workflow engine。定义、校验、存储和执行边界见 [WorkflowDefinitionV1 JSON](docs/protocols/workflow-definition-v1.md)。
+- 前端来源是 ZCode 3.14.3 固定提交 `29628c9acdb81b703bbd4080c207a0e7ce5e276e`；保留来源部分按 Apache License 2.0 分发，版权主体为 Z.AI Co., Ltd.。逐文件映射、SHA-256 和许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、[SOURCE-MAPPING.md](third-party/zcode/SOURCE-MAPPING.md) 和 [third-party/zcode/LICENSE](third-party/zcode/LICENSE)。KeenCode 自有代码仍按根目录 MIT License 分发。
+
+## 原生 WebView2 验收
+
+原生验收是显式 opt-in 流程，不属于离线 `pnpm test` 或普通浏览器开发服务器检查。先构建带验收 feature 的桌面程序，再用隔离 provider 配置运行：
+
+```bash
+cargo build -p keencode-desktop --features native-desktop-tests
+node tooling/scripts/native-live-e2e.mjs \
+  --plan <plan.json> \
+  --provider-config <isolated-provider-config.json> \
+  --binary <keencode-desktop.exe> \
+  --output <report-directory> \
+  --port <free-port>
+```
+
+`--binary`、`--output`、`--port` 和 `--request-timeout-ms <1..300000>` 是可选覆盖项；脚本会把本次计划、隔离数据根、Journal 断言和前端/协议故障写入报告，并对 provider 配置中的密钥和地址做脱敏。不要把真实凭据或配置路径写入 README、计划文件或报告。验收计划和通过范围见 [前端验收矩阵](docs/frontend-acceptance-matrix.md)。
 
 ## 发布与版本
 
