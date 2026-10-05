@@ -133,7 +133,10 @@ fn populated_contributor(
         hooks: Vec::new(),
         hook_circuits: HookCircuitStore::new(),
         agents: AgentCatalog::default(),
+        agent_settings: super::super::agent_settings::AgentSettingsState::default(),
         commands: command_catalog,
+        plugin_reference_catalog: Vec::new(),
+        skill_reference_catalog: Vec::new(),
         lsp_runtime: None,
         diagnostics: Vec::new(),
     };
@@ -174,7 +177,10 @@ fn empty_contributor(directory: &TempDir) -> (PathBuf, NativeExtensionContributo
             hooks: Vec::new(),
             hook_circuits: HookCircuitStore::new(),
             agents: AgentCatalog::default(),
+            agent_settings: super::super::agent_settings::AgentSettingsState::default(),
             commands,
+            plugin_reference_catalog: Vec::new(),
+            skill_reference_catalog: Vec::new(),
             lsp_runtime: None,
             diagnostics: Vec::new(),
         },
@@ -185,7 +191,7 @@ fn empty_contributor(directory: &TempDir) -> (PathBuf, NativeExtensionContributo
 #[test]
 fn prompt_catalog_exposes_only_enabled_capabilities_and_metadata() {
     let directory = tempfile::tempdir().expect("应创建隔离目录");
-    let (_, _, _, contributor) = populated_contributor(&directory);
+    let (project, data, _, mut contributor) = populated_contributor(&directory);
     assert!(contributor.prompt_catalog(false, false).is_empty());
     let skills = contributor.prompt_catalog(false, true);
     assert!(skills.contains("review-guide"));
@@ -196,6 +202,43 @@ fn prompt_catalog_exposes_only_enabled_capabilities_and_metadata() {
         !contributor
             .prompt_catalog(true, false)
             .contains("review-guide")
+    );
+    contributor.skills = Arc::new(
+        discover_skills(
+            &SkillDiscoveryConfig::new(data, project).with_disabled_names(["review-guide".into()]),
+        )
+        .unwrap(),
+    );
+    assert!(
+        !contributor
+            .prompt_catalog(false, true)
+            .contains("review-guide")
+    );
+    assert!(contributor.skills.load("review-guide").is_err());
+}
+
+/// Session 查询只能读取候选保存的公开插件身份，修改返回副本不能污染冻结目录。
+#[test]
+fn plugin_reference_catalog_is_an_immutable_public_snapshot() {
+    let directory = tempfile::tempdir().expect("创建插件目录测试目录");
+    let (_, _, _, mut contributor) = populated_contributor(&directory);
+    contributor.plugin_reference_catalog = vec![json!({
+        "pluginId": "review@official",
+        "name": "review",
+        "marketplace": "official",
+        "enabled": true,
+        "conflictingPluginIds": [],
+        "skillQualifiedNames": ["review:guide"],
+        "mcpServerNames": [],
+        "subagentNames": [],
+    })];
+
+    let mut returned = contributor.plugin_reference_catalog();
+    returned[0]["pluginId"] = Value::String("tampered".to_owned());
+
+    assert_eq!(
+        contributor.plugin_reference_catalog()[0]["pluginId"],
+        "review@official"
     );
 }
 

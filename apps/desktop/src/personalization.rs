@@ -69,17 +69,23 @@ fn load_path(path: &Path) -> Result<String> {
     Ok(instructions)
 }
 
-/// 为主 Agent 与子 Agent 装配同一份当前指令；正文只进入请求上下文，不写 Transcript。
+/// 读取 Agent 首次 Turn 要冻结的指令；显式关闭时只跳过项目级文件。
 ///
-/// 按优先级选择一个项目主文件，再追加 CLAUDE.local.md；保留原文，不添加包装。
-pub(crate) fn prompt_context(
+/// 全局 AGENTS.md 是宿主级安全与产品规则，任何 Agent 都必须继承；
+/// `inject_agents_md` 只控制项目 AGENTS/CLAUDE 指令，避免模板关闭后意外
+/// 失去全局权限和 Plan 约束。
+pub(crate) fn prompt_context_for_agent(
     data_root: &Path,
     project_root: &Path,
+    inject_agents_md: bool,
 ) -> Result<(String, Option<String>)> {
     let _guard = CUSTOM_INSTRUCTIONS_IO_LOCK
         .lock()
         .map_err(|_| anyhow::anyhow!("自定义指令读写锁不可用"))?;
     let global = load_path(&data_root.join("AGENTS.md"))?;
+    if !inject_agents_md {
+        return Ok((global, None));
+    }
     let mut project = String::new();
     for name in ["AGENTS.md", "CLAUDE.md", ".claude/AGENTS.md"] {
         let path = project_root.join(name);
@@ -137,8 +143,8 @@ fn save_path(path: &Path, bytes: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CUSTOM_INSTRUCTIONS_CHARS, MAX_PROJECT_INSTRUCTIONS_BYTES, load_path, prompt_context,
-        read_instruction_file, save_path, validate,
+        MAX_CUSTOM_INSTRUCTIONS_CHARS, MAX_PROJECT_INSTRUCTIONS_BYTES, load_path,
+        prompt_context_for_agent, read_instruction_file, save_path, validate,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -181,20 +187,38 @@ mod tests {
         let data = tempfile::tempdir().expect("应创建隔离数据根");
         let project = tempfile::tempdir().expect("应创建测试项目");
         assert_eq!(
-            prompt_context(data.path(), project.path()).unwrap(),
+            prompt_context_for_agent(data.path(), project.path(), true).unwrap(),
             (String::new(), None)
         );
         save_path(&data.path().join("AGENTS.md"), "全局规则甲".as_bytes()).unwrap();
         fs::write(project.path().join("AGENTS.md"), "项目规则乙").unwrap();
-        let (global, first) = prompt_context(data.path(), project.path()).unwrap();
+        let (global, first) = prompt_context_for_agent(data.path(), project.path(), true).unwrap();
         assert_eq!(global, "全局规则甲");
         let first = first.unwrap();
         assert!(first.contains("项目规则乙"));
         assert!(!first.contains("全局规则甲"));
         assert_eq!(first, "项目规则乙");
         save_path(&data.path().join("AGENTS.md"), "全局规则丙".as_bytes()).unwrap();
-        let (global, _) = prompt_context(data.path(), project.path()).unwrap();
+        let (global, _) = prompt_context_for_agent(data.path(), project.path(), true).unwrap();
         assert_eq!(global, "全局规则丙");
+    }
+
+    /// Agent 显式关闭项目注入时仍保留全局规则，不把开关误用于权限或 Plan 约束。
+    #[test]
+    fn agent_prompt_context_can_skip_project_but_keeps_global_instructions() {
+        let data = tempfile::tempdir().expect("应创建隔离数据根");
+        let project = tempfile::tempdir().expect("应创建测试项目");
+        save_path(&data.path().join("AGENTS.md"), "全局安全标记".as_bytes()).unwrap();
+        fs::write(project.path().join("AGENTS.md"), "项目专属标记").unwrap();
+
+        let (global, project_instructions) =
+            prompt_context_for_agent(data.path(), project.path(), false).unwrap();
+        assert_eq!(global, "全局安全标记");
+        assert_eq!(project_instructions, None);
+
+        let (_, project_instructions) =
+            prompt_context_for_agent(data.path(), project.path(), true).unwrap();
+        assert_eq!(project_instructions.as_deref(), Some("项目专属标记"));
     }
 
     #[test]
@@ -210,7 +234,11 @@ mod tests {
         ] {
             fs::write(project.path().join(name), text).unwrap();
         }
-        let read = || prompt_context(data.path(), project.path()).unwrap().1;
+        let read = || {
+            prompt_context_for_agent(data.path(), project.path(), true)
+                .unwrap()
+                .1
+        };
         assert_eq!(read().as_deref(), Some("  agents\n\n\nlocal\n"));
         fs::write(project.path().join("AGENTS.md"), "").unwrap();
         assert_eq!(read().as_deref(), Some("local\n"));
@@ -221,7 +249,7 @@ mod tests {
         fs::remove_file(project.path().join(".claude/AGENTS.md")).unwrap();
         assert_eq!(read().as_deref(), Some("local\n"));
         fs::write(project.path().join("CLAUDE.local.md"), [0xff]).unwrap();
-        assert!(prompt_context(data.path(), project.path()).is_err());
+        assert!(prompt_context_for_agent(data.path(), project.path(), true).is_err());
     }
 
     /// 超大、非 UTF-8 和目录路径必须拒绝，不能当作缺失指令静默运行。

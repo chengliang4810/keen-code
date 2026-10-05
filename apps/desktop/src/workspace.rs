@@ -22,6 +22,8 @@ const MAX_GIT_TEXT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PROJECTS_CONFIG_BYTES: u64 = 8 * 1024 * 1024;
 /// 单次按需展开未跟踪目录最多返回的状态项数量。
 const MAX_UNTRACKED_DIRECTORY_ENTRIES: usize = 2_000;
+/// Windows 命令行有长度上限，按字节预算分批传 Git 路径参数。
+const MAX_GIT_PATH_ARGUMENT_BYTES: usize = if cfg!(windows) { 16 * 1024 } else { 64 * 1024 };
 /// Windows 子进程不创建控制台窗口的进程标志。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -695,6 +697,16 @@ fn create_project_directory(root: &Path, name: &str) -> Result<PathBuf, String> 
 }
 
 /// 返回规范化后的项目列表。
+/// 页面专用查询共享项目文档的锁与稳定 ID，不根据客户端提供的路径扩大查询范围。
+pub(crate) fn project_records(app: &AppHandle) -> Result<Vec<ProjectRecord>, String> {
+    let _guard = projects_lock().lock().map_err(|_| "项目元数据锁已损坏")?;
+    Ok(load_projects_document(app)?
+        .iter()
+        .map(project_record)
+        .collect())
+}
+
+/// 返回规范化后的项目列表。
 #[tauri::command]
 pub fn projects_list(
     app: AppHandle,
@@ -728,10 +740,20 @@ pub fn project_create(
     app: AppHandle,
     path: Option<String>,
     name: String,
+    create_workspace_root_if_missing: Option<bool>,
 ) -> Result<ProjectRecord, String> {
     let name = normalize_project_name(&name)?;
     let (canonical, created) = if let Some(path) = path {
-        (canonical_existing_dir(&path)?, false)
+        let directory = PathBuf::from(&path);
+        // 原页面的独立 Chat workspace 是首次发送时创建的目录；只有显式请求才创建。
+        let created = create_workspace_root_if_missing == Some(true) && !directory.exists();
+        if created {
+            if !directory.is_absolute() {
+                return Err("项目目录必须是绝对路径".to_owned());
+            }
+            fs::create_dir_all(&directory).map_err(|error| format!("创建项目目录失败：{error}"))?;
+        }
+        (canonical_existing_dir(&path)?, created)
     } else {
         let settings = crate::app_settings::get(&app).map_err(|error| error.to_string())?;
         let root = PathBuf::from(settings.project_directory);
@@ -921,6 +943,21 @@ fn selected_file_path_to_absolute(selected: FilePath) -> Result<String, String> 
 /// 打开单目录选择器。
 #[tauri::command]
 pub async fn pick_directory(app: AppHandle) -> Result<Option<String>, String> {
+    #[cfg(feature = "native-desktop-tests")]
+    if std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1"))
+        && let Some(directory) = std::env::var_os("KEENCODE_NATIVE_TEST_DIRECTORY")
+    {
+        // CDP 无法操作系统文件选择器。显式测试构建只替代目录选择结果，后续
+        // 注册、会话、权限、工具和 Journal 仍执行真实生产路径，且限制在隔离根内。
+        let data = crate::storage::root_dir(&app).map_err(|error| error.to_string())?;
+        let isolation = data.parent().ok_or("测试数据目录没有隔离根")?;
+        let root = fs::canonicalize(isolation).map_err(|error| error.to_string())?;
+        let chosen = fs::canonicalize(directory).map_err(|error| error.to_string())?;
+        if !chosen.is_dir() || !chosen.starts_with(&root) || chosen == root {
+            return Err("原生验收选择目录超出隔离根".to_owned());
+        }
+        return Ok(Some(path_to_frontend(&chosen)));
+    }
     app.dialog()
         .file()
         .blocking_pick_folder()
@@ -1203,7 +1240,8 @@ fn registered_project_root_from_document(
 }
 
 /// 返回所有已添加项目的规范化根目录。
-fn registered_project_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
+/// 桌面域服务共用此清单校验项目作用域，避免各自读取配置形成不同授权边界。
+pub(crate) fn registered_project_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
     let _guard = projects_lock()
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
@@ -1230,8 +1268,21 @@ pub(crate) fn registered_project_root(
         .lock()
         .map_err(|_| "项目元数据锁已损坏".to_owned())?;
     let projects = load_projects_document(app)?;
-    registered_project_root_from_document(&projects, &canonical)
-        .ok_or_else(|| format!("项目尚未添加：{}", canonical.display()))
+    if let Some(root) = registered_project_root_from_document(&projects, &canonical) {
+        return Ok(root);
+    }
+    let roots: Vec<_> = projects
+        .iter()
+        .filter_map(|project| fs::canonicalize(&project.path).ok())
+        .collect();
+    drop(_guard);
+    // 原工作树页面使用与主项目同级的 checkout；Git 列表和公共 Git 目录共同证明真实归属。
+    for root in roots {
+        if crate::ui_worktrees::is_linked_worktree(&root, &canonical) {
+            return Ok(canonical);
+        }
+    }
+    Err(format!("项目尚未添加：{}", canonical.display()))
 }
 
 /// 返回无项目 Session 唯一允许使用的规范化应用数据目录。
@@ -1242,6 +1293,41 @@ pub(crate) fn app_data_session_root(app: &AppHandle) -> Result<PathBuf, String> 
         .map_err(|error| format!("无法创建应用数据目录 {}：{error}", data_dir.display()))?;
     fs::canonicalize(&data_dir)
         .map_err(|error| format!("无法访问应用数据目录 {}：{error}", data_dir.display()))
+}
+
+/// 返回不属于项目登记表的唯一对话工作区根。
+///
+/// 对话草稿由 `file.ensureConversationWorkspace` 创建在应用数据目录下；它
+/// 可以承载 Session，但不能因此把应用数据目录的任意子目录视为可执行项目。
+pub(crate) fn conversation_workspace_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let data_dir =
+        crate::storage::root_dir(app).map_err(|error| format!("无法确定应用数据目录：{error}"))?;
+    let conversation = data_dir.join("chat-workspaces").join("conversation");
+    fs::create_dir_all(&conversation)
+        .map_err(|error| format!("无法创建对话工作区 {}：{error}", conversation.display()))?;
+    fs::canonicalize(&conversation)
+        .map_err(|error| format!("无法访问对话工作区 {}：{error}", conversation.display()))
+}
+
+/// 初始对话读取资源目录和真实 Git 状态的受限入口。
+/// 写操作仍必须使用 registered_project_root，不授权未登记目录的修改。
+pub(crate) fn read_only_workspace_root(app: &AppHandle, supplied: &str) -> Result<PathBuf, String> {
+    registered_project_root(app, supplied).or_else(|_| {
+        let conversation = conversation_workspace_root(app)?;
+        conversation_read_root(supplied, &conversation)
+    })
+}
+
+/// 路径别名只改变表示；数据根、兄弟目录和 conversation 子目录均不获授权。
+pub(crate) fn conversation_read_root(
+    supplied: &str,
+    conversation: &Path,
+) -> Result<PathBuf, String> {
+    let canonical = canonical_session_root(supplied)?;
+    if canonical != conversation {
+        return Err("读取工作区尚未登记为项目".to_owned());
+    }
+    Ok(canonical)
 }
 
 /// 规范化持久 Session 的工作目录，供加载前执行精确授权比对。
@@ -1284,7 +1370,7 @@ fn validate_relative_path(relative: &str, allow_empty: bool) -> Result<PathBuf, 
 }
 
 /// 解析并校验项目内已存在路径。
-fn resolve_existing_under_root(
+pub(crate) fn resolve_existing_under_root(
     root: &Path,
     relative: &str,
     allow_root: bool,
@@ -1348,7 +1434,7 @@ fn authorized_roots(app: &AppHandle) -> Result<Vec<PathBuf>, String> {
 }
 
 /// 授权并规范化现有绝对路径。
-fn authorize_existing_absolute(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn authorize_existing_absolute(app: &AppHandle, path: &Path) -> Result<PathBuf, String> {
     let canonical = canonical_existing_path(path)?;
     if authorized_roots(app)?
         .iter()
@@ -1430,18 +1516,52 @@ fn fs_list_dir_blocking(
     let root = registered_project_root(&app, &project_path)?;
     let directory =
         resolve_existing_under_root(&root, relative.as_deref().unwrap_or_default(), true)?;
+    list_directory_under_root(&root, &directory, usize::MAX)
+}
+
+/// 原页面目录选择器按用户输入浏览本机路径；只返回目录项，不授予文件读写权限。
+#[tauri::command]
+pub async fn ui_directory_list(
+    directory: String,
+    relative: Option<String>,
+) -> Result<Vec<FsEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || ui_directory_list_blocking(directory, relative))
+        .await
+        .map_err(|error| format!("目录选择后台任务失败：{error}"))?
+}
+
+/// 多返回一项作为截断哨兵，前端遍历仍只保留 5000 项，避免巨型目录占用无界内存。
+fn ui_directory_list_blocking(
+    directory: String,
+    relative: Option<String>,
+) -> Result<Vec<FsEntry>, String> {
+    if !Path::new(&directory).is_absolute() {
+        return Err("目录选择器需要绝对路径".to_owned());
+    }
+    let root = canonical_session_root(&directory)?;
+    let target = resolve_existing_under_root(&root, relative.as_deref().unwrap_or_default(), true)?;
+    list_directory_under_root(&root, &target, 5001)
+}
+
+/// 项目 Explorer 与只读目录选择器共用路径归属、目录优先排序和条目格式。
+fn list_directory_under_root(
+    root: &Path,
+    directory: &Path,
+    max_entries: usize,
+) -> Result<Vec<FsEntry>, String> {
     if !directory.is_dir() {
         return Err(format!("目标不是目录：{}", directory.display()));
     }
     let mut entries = Vec::new();
-    for item in fs::read_dir(&directory)
+    for item in fs::read_dir(directory)
         .map_err(|error| format!("无法读取目录 {}：{error}", directory.display()))?
+        .take(max_entries)
     {
         let item =
             item.map_err(|error| format!("无法读取目录项 {}：{error}", directory.display()))?;
         let item_path = item.path();
         let canonical = match fs::canonicalize(&item_path) {
-            Ok(path) if path_is_within(&path, &root) => path,
+            Ok(path) if path_is_within(&path, root) => path,
             _ => continue,
         };
         let metadata = match fs::metadata(&canonical) {
@@ -1451,7 +1571,7 @@ fn fs_list_dir_blocking(
         let is_dir = metadata.is_dir();
         entries.push(FsEntry {
             name: item.file_name().to_string_lossy().into_owned(),
-            relative_path: relative_to_frontend(&root, &item_path)?,
+            relative_path: relative_to_frontend(root, &item_path)?,
             is_dir,
             size: if is_dir { 0 } else { metadata.len() },
             ext: if is_dir {
@@ -1744,6 +1864,16 @@ fn preview_classification(path: &Path) -> (&'static str, &'static str, bool) {
 
 /// 读取有上限的文件预览并避免二进制 Base64 膨胀。
 fn read_file_preview(path: &Path, relative_path: String) -> Result<FsReadResult, String> {
+    read_file_preview_with_limit(path, relative_path, MAX_TEXT_PREVIEW_BYTES)
+}
+
+/// 原预览请求可选择更小的读取预算；既有文件接口仍使用原来的 2MiB 上限。
+pub(crate) fn read_file_preview_with_limit(
+    path: &Path,
+    relative_path: String,
+    max_bytes: usize,
+) -> Result<FsReadResult, String> {
+    let max_bytes = max_bytes.min(MAX_TEXT_PREVIEW_BYTES);
     let metadata =
         fs::metadata(path).map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
     if !metadata.is_file() {
@@ -1759,19 +1889,23 @@ fn read_file_preview(path: &Path, relative_path: String) -> Result<FsReadResult,
             File::open(path).map_err(|error| format!("无法打开 {}：{error}", path.display()))?;
         let mut bytes = Vec::with_capacity(
             usize::try_from(metadata.len())
-                .unwrap_or(MAX_TEXT_PREVIEW_BYTES)
-                .min(MAX_TEXT_PREVIEW_BYTES + 1),
+                .unwrap_or(max_bytes)
+                .min(max_bytes + 1),
         );
         Read::by_ref(&mut file)
-            .take((MAX_TEXT_PREVIEW_BYTES + 1) as u64)
+            .take((max_bytes + 1) as u64)
             .read_to_end(&mut bytes)
             .map_err(|error| format!("无法读取 {}：{error}", path.display()))?;
         let looks_text = classified_text
             || (!bytes.iter().take(8192).any(|byte| *byte == 0)
                 && std::str::from_utf8(&bytes).is_ok());
         if looks_text {
-            if bytes.len() > MAX_TEXT_PREVIEW_BYTES {
-                bytes.truncate(MAX_TEXT_PREVIEW_BYTES);
+            if bytes.len() > max_bytes {
+                bytes.truncate(max_bytes);
+                // 不把被预算截开的 UTF-8 字符替换为乱码。
+                while std::str::from_utf8(&bytes).is_err_and(|error| error.error_len().is_none()) {
+                    bytes.pop();
+                }
                 truncated = true;
             }
             text = Some(String::from_utf8_lossy(&bytes).into_owned());
@@ -1850,7 +1984,7 @@ fn write_text_file(
 }
 
 /// 创建不会在 Windows 桌面环境中弹出控制台窗口的 Git 命令。
-fn git_command() -> Command {
+pub(crate) fn git_command() -> Command {
     let mut command = Command::new("git");
     // 禁止交互式凭据提示：无凭据时快速失败，而不是在后台线程里永久等待输入。
     command.env("GIT_TERMINAL_PROMPT", "0");
@@ -1864,7 +1998,7 @@ fn git_command() -> Command {
 }
 
 /// 执行带项目工作目录的 Git 命令。
-fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn run_git(root: &Path, args: &[&str]) -> Result<Output, String> {
     git_command()
         .arg("-C")
         .arg(root)
@@ -1878,7 +2012,7 @@ const GIT_NETWORK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 限时执行带项目工作目录的 Git 命令；超时后杀掉子进程并返回错误。
 /// stdout/stderr 由独立线程排空，避免子进程写满管道缓冲导致的双端卡死。
-fn run_git_with_timeout(root: &Path, args: &[&str]) -> Result<Output, String> {
+pub(crate) fn run_git_with_timeout(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut child = git_command()
         .arg("-C")
         .arg(root)
@@ -2098,7 +2232,17 @@ fn parse_worktree_porcelain(raw: &str) -> Vec<GitWorktreeEntry> {
 
 /// 返回项目关联的 Git worktree 列表。
 #[tauri::command]
-pub fn git_worktrees_list(
+pub async fn git_worktrees_list(
+    app: AppHandle,
+    project_path: String,
+) -> Result<GitWorktreesResult, String> {
+    // 原页面会并发查询项目关联；Git 子进程等待必须离开原生窗口的消息线程。
+    tauri::async_runtime::spawn_blocking(move || git_worktrees_list_inner(app, project_path))
+        .await
+        .map_err(|error| format!("工作树查询任务失败：{error}"))?
+}
+
+fn git_worktrees_list_inner(
     app: AppHandle,
     project_path: String,
 ) -> Result<GitWorktreesResult, String> {
@@ -2424,7 +2568,7 @@ fn parse_numstat(bytes: &[u8]) -> (u64, u64) {
 }
 
 /// 解析 NUL 分隔的 Git porcelain v1 状态。
-fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, String> {
+pub(crate) fn parse_git_status(root: &Path, bytes: &[u8]) -> Result<Vec<GitStatusEntry>, String> {
     let fields: Vec<&[u8]> = bytes
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
@@ -2639,7 +2783,22 @@ pub async fn git_checkout_branch(
     create: bool,
 ) -> Result<GitCheckoutBranchResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        git_checkout_branch_blocking(app, project_path, branch, create)
+        git_checkout_branch_blocking(app, project_path, branch, create, None)
+    })
+    .await
+    .map_err(|error| format!("Git 切换分支后台任务失败：{error}"))?
+}
+
+/// RPC 分支创建可以指定可验证的 Git 起点；旧 Tauri 命令仍沿用当前分支起点。
+pub(crate) async fn git_checkout_branch_from(
+    app: AppHandle,
+    project_path: String,
+    branch: String,
+    create: bool,
+    start_point: Option<String>,
+) -> Result<GitCheckoutBranchResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_checkout_branch_blocking(app, project_path, branch, create, start_point)
     })
     .await
     .map_err(|error| format!("Git 切换分支后台任务失败：{error}"))?
@@ -2650,18 +2809,46 @@ fn git_checkout_branch_blocking(
     project_path: String,
     branch: String,
     create: bool,
+    start_point: Option<String>,
 ) -> Result<GitCheckoutBranchResult, String> {
     let root = registered_project_root(&app, &project_path)?;
     if let Some(reason) = git_repository_reason(&root) {
         return Err(reason);
     }
-    let branch = validate_branch_name(&root, &branch)?;
-    let args = if create {
-        vec!["switch", "-c", &branch]
+    git_checkout_branch_at_root(&root, branch, create, start_point)
+}
+
+fn git_checkout_branch_at_root(
+    root: &Path,
+    branch: String,
+    create: bool,
+    start_point: Option<String>,
+) -> Result<GitCheckoutBranchResult, String> {
+    let branch = validate_branch_name(root, &branch)?;
+    let start_point = validate_start_point(start_point)?;
+    if !create && start_point.is_some() {
+        return Err("切换已有分支不能指定 Git 起点".to_owned());
+    }
+    if let Some(start_point) = start_point.as_deref() {
+        let revision = format!("{start_point}^{{commit}}");
+        let verify = run_git(root, &["rev-parse", "--verify", &revision])?;
+        if !verify.status.success() {
+            return Err(git_failure_reason(&verify));
+        }
+    }
+    let mut command = git_command();
+    command.arg("-C").arg(root).arg("switch");
+    if create {
+        command.arg("-c").arg(&branch);
+        if let Some(start_point) = start_point.as_deref() {
+            command.arg(start_point);
+        }
     } else {
-        vec!["switch", &branch]
-    };
-    let output = run_git(&root, &args)?;
+        command.arg(&branch);
+    }
+    let output = command
+        .output()
+        .map_err(|error| format!("无法执行 git switch：{error}"))?;
     if !output.status.success() {
         return Err(git_failure_reason(&output));
     }
@@ -2698,11 +2885,27 @@ pub async fn git_commit(
     .map_err(|error| format!("Git 提交后台任务失败：{error}"))?
 }
 
-fn git_commit_blocking(
+/// 提交 Source GitActionMenu 明确选择的路径；未选中的 index 项必须保留在工作区。
+pub(crate) async fn git_commit_selected(
     app: AppHandle,
     project_path: String,
     message: String,
     include_unstaged: bool,
+    paths: Vec<String>,
+) -> Result<GitCommitResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_commit_blocking_with_paths(app, project_path, message, include_unstaged, Some(paths))
+    })
+    .await
+    .map_err(|error| format!("Git 提交后台任务失败：{error}"))?
+}
+
+fn git_commit_blocking_with_paths(
+    app: AppHandle,
+    project_path: String,
+    message: String,
+    include_unstaged: bool,
+    paths: Option<Vec<String>>,
 ) -> Result<GitCommitResult, String> {
     let root = registered_project_root(&app, &project_path)?;
     let diagnostics = app.state::<Arc<crate::diagnostics::Diagnostics>>();
@@ -2725,37 +2928,56 @@ fn git_commit_blocking(
     if message.is_empty() {
         return Err("提交消息不能为空".to_owned());
     }
-    if include_unstaged {
-        let add_output = run_git(&root, &["add", "-A"])?;
-        if !add_output.status.success() {
-            return Err(git_failure_reason(&add_output));
-        }
-    }
-    let mut command = git_command();
-    command
-        .arg("-C")
-        .arg(&root)
-        .arg("commit")
-        .arg("-m")
-        .arg(message);
-    let output = command
-        .output()
-        .map_err(|error| format!("无法执行 git commit：{error}"))?;
-    if !output.status.success() {
-        // 审计只记退出码与有界摘要，不携带完整 stdout/stderr：失败的
-        // hook 或远端可能输出用户内容（文件片段、密钥扫描结果等）。
+    let result = git_commit_at_root(&root, message, include_unstaged, paths.as_deref());
+    if let Err(error) = &result {
         diagnostics.log(
             "error",
             "ipc.git_commit",
             format!(
-                "提交失败 exit_code={:?} summary={}",
-                output.status.code(),
-                summarize_git_failure(&output)
+                "提交失败 summary={}",
+                error.chars().take(200).collect::<String>()
             ),
         );
-        return Err(git_failure_reason(&output));
     }
-    let head_output = run_git(&root, &["rev-parse", "--short", "HEAD"])?;
+    if let Ok(result) = &result {
+        diagnostics.log(
+            "info",
+            "ipc.git_commit",
+            format!(
+                "命令完成 commit={} branch={}",
+                result.commit,
+                result.branch.as_deref().unwrap_or("")
+            ),
+        );
+    }
+    result
+}
+
+fn git_commit_at_root(
+    root: &Path,
+    message: &str,
+    include_unstaged: bool,
+    paths: Option<&[String]>,
+) -> Result<GitCommitResult, String> {
+    let output = if let Some(paths) = paths {
+        let selected = normalize_commit_paths(paths)?;
+        if include_unstaged {
+            stage_selected_paths(root, &selected)?;
+        }
+        with_temporary_git_index(root, |temporary_index| {
+            prepare_selected_index(root, temporary_index, &selected)?;
+            run_git_commit_with_index(root, temporary_index, message)
+        })?
+    } else {
+        if include_unstaged {
+            let add_output = run_git(root, &["add", "-A"])?;
+            if !add_output.status.success() {
+                return Err(git_failure_reason(&add_output));
+            }
+        }
+        run_git_commit(root, message)?
+    };
+    let head_output = run_git(root, &["rev-parse", "--short", "HEAD"])?;
     let commit = if head_output.status.success() {
         String::from_utf8_lossy(&head_output.stdout)
             .trim()
@@ -2763,21 +2985,336 @@ fn git_commit_blocking(
     } else {
         return Err(git_failure_reason(&head_output));
     };
-    let branch = git_current_branch(&root);
-    diagnostics.log(
-        "info",
-        "ipc.git_commit",
-        format!(
-            "命令完成 commit={} branch={}",
-            commit,
-            branch.as_deref().unwrap_or("")
-        ),
-    );
     Ok(GitCommitResult {
         commit,
-        branch,
+        branch: git_current_branch(root),
         output: combined_git_output(&output),
     })
+}
+
+fn run_git_commit(root: &Path, message: &str) -> Result<Output, String> {
+    let mut command = git_command();
+    command
+        .arg("-C")
+        .arg(root)
+        .arg("commit")
+        .arg("-m")
+        .arg(message);
+    let output = command
+        .output()
+        .map_err(|error| format!("无法执行 git commit：{error}"))?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    Ok(output)
+}
+
+fn run_git_commit_with_index(root: &Path, index: &Path, message: &str) -> Result<Output, String> {
+    let output = run_git_with_index(root, index, &["commit", "-m", message])?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    Ok(output)
+}
+
+fn run_git_with_index(root: &Path, index: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut command = git_command();
+    command
+        .env("GIT_INDEX_FILE", index)
+        .arg("-C")
+        .arg(root)
+        .args(args);
+    command
+        .output()
+        .map_err(|error| format!("无法执行带临时 index 的 git：{error}"))
+}
+
+fn normalize_commit_paths(paths: &[String]) -> Result<Vec<String>, String> {
+    if paths.is_empty() || paths.len() > 4096 {
+        return Err("Git 提交路径数量无效".to_owned());
+    }
+    let mut normalized = Vec::with_capacity(paths.len());
+    let mut seen = HashSet::new();
+    for raw in paths {
+        if raw.is_empty()
+            || raw.len() > 4096
+            || raw.starts_with('-')
+            || raw.contains('\0')
+            || raw.chars().any(char::is_control)
+        {
+            return Err(format!("Git 提交路径无效：{raw}"));
+        }
+        let path = validated_git_relative(raw)?;
+        let value = path.to_string_lossy().replace('\\', "/");
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    if normalized.is_empty() {
+        return Err("Git 提交路径不能为空".to_owned());
+    }
+    Ok(normalized)
+}
+
+fn stage_selected_paths(root: &Path, paths: &[String]) -> Result<(), String> {
+    each_git_path_chunk(paths, |chunk| {
+        let mut command = git_command();
+        command.arg("-C").arg(root).arg("add").arg("--");
+        for path in chunk {
+            command.arg(path);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("无法执行 git add：{error}"))?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(git_failure_reason(&output))
+        }
+    })
+}
+
+fn git_index_path(root: &Path) -> Result<PathBuf, String> {
+    let output = run_git(root, &["rev-parse", "--git-path", "index"])?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    let raw = String::from_utf8(output.stdout)
+        .map_err(|_| "Git index 路径不是 UTF-8".to_owned())?
+        .trim()
+        .to_owned();
+    if raw.is_empty() {
+        return Err("Git 未返回 index 路径".to_owned());
+    }
+    let path = PathBuf::from(raw);
+    Ok(if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    })
+}
+
+fn with_temporary_git_index<T>(
+    root: &Path,
+    operation: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let index = git_index_path(root)?;
+    let parent = index
+        .parent()
+        .ok_or_else(|| format!("Git index 没有父目录：{}", index.display()))?;
+    fs::create_dir_all(parent).map_err(|error| format!("无法准备临时 index 目录：{error}"))?;
+    let sequence = TEMP_FILE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let temporary = parent.join(format!(".keencode-index-{}-{sequence}", std::process::id()));
+    let created = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("无法创建临时 Git index：{error}"))?;
+    drop(created);
+    let copy_result = if index.is_file() {
+        fs::copy(&index, &temporary)
+            .map(|_| ())
+            .map_err(|error| format!("无法复制 Git index：{error}"))
+    } else {
+        let output = run_git_with_index(root, &temporary, &["read-tree", "--empty"])?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            Err(git_failure_reason(&output))
+        }
+    };
+    if let Err(error) = copy_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    let result = operation(&temporary);
+    let _ = fs::remove_file(temporary.with_extension("lock"));
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+fn git_index_paths(root: &Path) -> Result<Vec<String>, String> {
+    let output = run_git(root, &["ls-files", "-z"])?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec())
+                .map(|value| value.replace('\\', "/"))
+                .map_err(|_| "Git index 包含非 UTF-8 路径，无法按 Source 选择提交".to_owned())
+        })
+        .collect()
+}
+
+fn git_head_paths(root: &Path) -> Result<Vec<String>, String> {
+    let head = run_git(root, &["rev-parse", "--verify", "HEAD"])?;
+    if !head.status.success() {
+        return Ok(Vec::new());
+    }
+    let output = run_git(root, &["ls-tree", "-r", "-z", "--name-only", "HEAD"])?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec())
+                .map(|value| value.replace('\\', "/"))
+                .map_err(|_| "HEAD 包含非 UTF-8 路径，无法按 Source 选择提交".to_owned())
+        })
+        .collect()
+}
+
+/// 从真实 index 的 staged diff 识别重命名，避免选中新路径时恢复旧路径。
+fn git_staged_rename_pairs(root: &Path) -> Result<Vec<(String, String)>, String> {
+    let output = run_git(
+        root,
+        &["diff", "--cached", "--name-status", "-z", "--find-renames"],
+    )?;
+    if !output.status.success() {
+        return Err(git_failure_reason(&output));
+    }
+    let fields = output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|field| !field.is_empty())
+        .collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    let mut index = 0;
+    while index < fields.len() {
+        let status = String::from_utf8(fields[index].to_vec())
+            .map_err(|_| "Git staged 状态包含非 UTF-8 标识".to_owned())?;
+        index += 1;
+        if status.starts_with('R') || status.starts_with('C') {
+            if index + 1 >= fields.len() {
+                return Err("Git staged 重命名记录不完整".to_owned());
+            }
+            let old = String::from_utf8(fields[index].to_vec())
+                .map_err(|_| "Git staged 原路径不是 UTF-8".to_owned())?
+                .replace('\\', "/");
+            let new = String::from_utf8(fields[index + 1].to_vec())
+                .map_err(|_| "Git staged 新路径不是 UTF-8".to_owned())?
+                .replace('\\', "/");
+            pairs.push((old, new));
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(pairs)
+}
+
+fn selected_commit_path(path: &str, selected: &[String], renames: &[(String, String)]) -> bool {
+    let direct = selected.iter().any(|candidate| {
+        path == candidate
+            || path
+                .strip_prefix(candidate)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    });
+    direct
+        || renames.iter().any(|(old, new)| {
+            selected.iter().any(|candidate| {
+                candidate == old
+                    || candidate == new
+                    || candidate
+                        .strip_prefix(old)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                    || candidate
+                        .strip_prefix(new)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            }) && (path == old || path == new)
+        })
+}
+
+fn run_index_paths_command(
+    root: &Path,
+    index: &Path,
+    subcommand: &str,
+    paths: &[String],
+) -> Result<(), String> {
+    each_git_path_chunk(paths, |chunk| {
+        let mut command = git_command();
+        command
+            .env("GIT_INDEX_FILE", index)
+            .arg("-C")
+            .arg(root)
+            .arg(subcommand);
+        if subcommand == "update-index" {
+            command.arg("--force-remove");
+        } else {
+            command.arg("--source=HEAD").arg("--staged");
+        }
+        command.arg("--");
+        for path in chunk {
+            command.arg(path);
+        }
+        let output = command
+            .output()
+            .map_err(|error| format!("无法执行临时 index 操作：{error}"))?;
+        if !output.status.success() {
+            return Err(git_failure_reason(&output));
+        }
+        Ok(())
+    })
+}
+
+fn each_git_path_chunk(
+    paths: &[String],
+    mut operation: impl FnMut(&[String]) -> Result<(), String>,
+) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut start = 0;
+    let mut bytes: usize = 0;
+    for (index, path) in paths.iter().enumerate() {
+        let path_bytes = path.len().saturating_add(8);
+        if index > start && bytes.saturating_add(path_bytes) > MAX_GIT_PATH_ARGUMENT_BYTES {
+            operation(&paths[start..index])?;
+            start = index;
+            bytes = 0;
+        }
+        bytes = bytes.saturating_add(path_bytes);
+    }
+    operation(&paths[start..])
+}
+
+fn prepare_selected_index(
+    root: &Path,
+    temporary: &Path,
+    selected: &[String],
+) -> Result<(), String> {
+    let renames = git_staged_rename_pairs(root)?;
+    let index_paths = git_index_paths(root)?;
+    let remove = index_paths
+        .iter()
+        .filter(|path| !selected_commit_path(path, selected, &renames))
+        .cloned()
+        .collect::<Vec<_>>();
+    run_index_paths_command(root, temporary, "update-index", &remove)?;
+
+    // 先恢复 HEAD 中未选中的路径，覆盖 staged deletion；否则临时 index
+    // 直接复制真实 index 时，未选中的删除会随提交一起进入新 commit。
+    let restore = git_head_paths(root)?
+        .into_iter()
+        .filter(|path| !selected_commit_path(path, selected, &renames))
+        .collect::<Vec<_>>();
+    run_index_paths_command(root, temporary, "restore", &restore)
+}
+
+fn git_commit_blocking(
+    app: AppHandle,
+    project_path: String,
+    message: String,
+    include_unstaged: bool,
+) -> Result<GitCommitResult, String> {
+    git_commit_blocking_with_paths(app, project_path, message, include_unstaged, None)
 }
 
 /// 推送当前分支到已配置的远端。
@@ -2987,6 +3524,24 @@ fn git_show_file_blocking(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 原目录选择不依赖项目注册，但相对子路径仍不能越界，也不能把文件当目录。
+    #[test]
+    fn ui_directory_picker_lists_unregistered_paths_without_traversal() {
+        let fixture = tempfile::tempdir().unwrap();
+        fs::create_dir(fixture.path().join("child")).unwrap();
+        fs::write(fixture.path().join("proof.txt"), b"proof").unwrap();
+        let root = fixture.path().display().to_string();
+        let entries = ui_directory_list_blocking(root.clone(), None).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].is_dir);
+        assert_eq!(entries[0].relative_path, "child");
+        assert_eq!(entries[1].relative_path, "proof.txt");
+        assert_eq!(entries[1].size, 5);
+        assert!(ui_directory_list_blocking(root.clone(), Some("../".into())).is_err());
+        assert!(ui_directory_list_blocking(root, Some("proof.txt".into())).is_err());
+        assert!(ui_directory_list_blocking("relative".into(), None).is_err());
+    }
 
     /// 真实 Git 在 canonical Windows 根目录下创建可用工作树，失败不删除已有分支。
     #[test]
@@ -3320,6 +3875,57 @@ mod tests {
         assert!(validate_branch_name(Path::new("."), "work/").is_err());
     }
 
+    /// 分支创建的起点必须先由 Git 验证，并且实际新分支指向该提交。
+    #[test]
+    fn branch_creation_honors_verified_start_point() {
+        let temporary = tempfile::tempdir().expect("create branch start point fixture");
+        let root = temporary.path();
+        let run = |args: &[&str]| {
+            let output = run_git(root, args).expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            output
+        };
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "Native Fixture"]);
+        run(&["config", "user.email", "native-fixture@example.invalid"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        run(&["add", "base.txt"]);
+        run(&["commit", "-m", "起点一 / Start point one"]);
+        fs::write(root.join("second.txt"), "second\n").unwrap();
+        run(&["add", "second.txt"]);
+        run(&["commit", "-m", "起点二 / Start point two"]);
+        let first_hash =
+            String::from_utf8_lossy(&run_git(root, &["rev-parse", "HEAD~1"]).unwrap().stdout)
+                .trim()
+                .to_owned();
+
+        let result = git_checkout_branch_at_root(
+            root,
+            "from-first".to_owned(),
+            true,
+            Some(first_hash.clone()),
+        )
+        .expect("branch should be created from start point");
+        assert_eq!(result.branch, "from-first");
+        let current = run_git(root, &["rev-parse", "HEAD"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&current.stdout).trim(), first_hash);
+        assert!(
+            git_checkout_branch_at_root(
+                root,
+                "bad-start".to_owned(),
+                true,
+                Some("missing-start-point".to_owned())
+            )
+            .is_err()
+        );
+        let bad_ref = run_git(root, &["show-ref", "--verify", "refs/heads/bad-start"]).unwrap();
+        assert!(!bad_ref.status.success());
+    }
+
     /// 所有 Git 子进程都必须复用 Windows 隐藏窗口命令构造器。
     #[test]
     fn git_processes_use_hidden_window_command_builder() {
@@ -3342,6 +3948,7 @@ mod tests {
         let source = include_str!("workspace.rs");
         for command in [
             "fs_list_dir",
+            "ui_directory_list",
             "fs_read_file",
             "fs_write_file",
             "fs_read_absolute",
@@ -3507,6 +4114,125 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    /// Source 选择提交必须只消费 index 中选中的路径，保留其他 staged 和工作区内容。
+    #[test]
+    fn selected_commit_isolates_index_paths_and_preserves_staged_deletion() {
+        let temporary = tempfile::tempdir().expect("create selected commit fixture");
+        let root = temporary.path();
+        let run = |args: &[&str]| {
+            let output = run_git(root, args).expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "Native Fixture"]);
+        run(&["config", "user.email", "native-fixture@example.invalid"]);
+        fs::write(root.join("selected.txt"), "base\n").unwrap();
+        fs::write(root.join("deleted.txt"), "keep in head\n").unwrap();
+        fs::write(root.join("rename-old.txt"), "rename content\n").unwrap();
+        run(&["add", "--all"]);
+        run(&["commit", "-m", "选择提交基线 / Selected commit baseline"]);
+
+        fs::write(root.join("selected.txt"), "selected staged\n").unwrap();
+        fs::remove_file(root.join("deleted.txt")).unwrap();
+        fs::write(root.join("other-staged.txt"), "other staged\n").unwrap();
+        run(&["mv", "rename-old.txt", "rename-new.txt"]);
+        run(&[
+            "add",
+            "--",
+            "selected.txt",
+            "deleted.txt",
+            "other-staged.txt",
+        ]);
+        fs::write(root.join("selected.txt"), "selected worktree only\n").unwrap();
+        let selected = vec!["selected.txt".to_owned(), "rename-new.txt".to_owned()];
+
+        let result = git_commit_at_root(
+            root,
+            "只提交选择项 / Commit selection",
+            false,
+            Some(&selected),
+        )
+        .expect("selected commit should succeed");
+        assert!(!result.commit.is_empty());
+        let selected_head = run_git(root, &["show", "HEAD:selected.txt"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&selected_head.stdout),
+            "selected staged\n"
+        );
+        let deleted_head = run_git(root, &["cat-file", "-e", "HEAD:deleted.txt"]).unwrap();
+        assert!(deleted_head.status.success());
+        let renamed_head = run_git(root, &["show", "HEAD:rename-new.txt"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&renamed_head.stdout),
+            "rename content\n"
+        );
+        let old_renamed_head = run_git(root, &["cat-file", "-e", "HEAD:rename-old.txt"]).unwrap();
+        assert!(!old_renamed_head.status.success());
+        let other_head = run_git(root, &["cat-file", "-e", "HEAD:other-staged.txt"]).unwrap();
+        assert!(!other_head.status.success());
+        assert_eq!(
+            fs::read_to_string(root.join("selected.txt")).unwrap(),
+            "selected worktree only\n"
+        );
+        let staged = run_git(root, &["diff", "--cached", "--name-status"]).unwrap();
+        let staged_text = String::from_utf8_lossy(&staged.stdout);
+        assert!(staged_text.contains("deleted.txt"));
+        assert!(staged_text.contains("other-staged.txt"));
+    }
+
+    /// include_unstaged 只会把选中的工作区路径加入 index，其他 staged 路径仍待下一次提交。
+    #[test]
+    fn selected_commit_can_stage_only_requested_worktree_paths() {
+        let temporary = tempfile::tempdir().expect("create selected unstaged fixture");
+        let root = temporary.path();
+        let run = |args: &[&str]| {
+            let output = run_git(root, args).expect("run git fixture command");
+            assert!(
+                output.status.success(),
+                "git fixture command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "Native Fixture"]);
+        run(&["config", "user.email", "native-fixture@example.invalid"]);
+        fs::write(root.join("selected.txt"), "base\n").unwrap();
+        fs::write(root.join("other.txt"), "base\n").unwrap();
+        run(&["add", "--all"]);
+        run(&[
+            "commit",
+            "-m",
+            "工作区选择基线 / Worktree selection baseline",
+        ]);
+        fs::write(root.join("selected.txt"), "selected from worktree\n").unwrap();
+        fs::write(root.join("other.txt"), "other staged\n").unwrap();
+        run(&["add", "--", "other.txt"]);
+        let selected = vec!["selected.txt".to_owned()];
+
+        git_commit_at_root(
+            root,
+            "暂存选择项 / Stage selected path",
+            true,
+            Some(&selected),
+        )
+        .expect("selected worktree commit should succeed");
+        let selected_head = run_git(root, &["show", "HEAD:selected.txt"]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&selected_head.stdout),
+            "selected from worktree\n"
+        );
+        let other_head = run_git(root, &["show", "HEAD:other.txt"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&other_head.stdout), "base\n");
+        let staged = run_git(root, &["diff", "--cached", "--name-only"]).unwrap();
+        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "other.txt");
+    }
+
     /// Worktree 名称和过期参数必须拒绝选项注入。
     #[test]
     fn worktree_arguments_reject_option_injection() {
@@ -3527,7 +4253,8 @@ mod tests {
         fs::create_dir_all(&root).expect("create image preview directory");
         let image = root.join("preview.png");
         let text = root.join("preview.txt");
-        let image_bytes = include_bytes!("../../../apps/ui/public/logo.png");
+        // 文件读取测试使用桌面自身的图标，避免依赖可整体替换的前端资源。
+        let image_bytes = include_bytes!("../icons/32x32.png");
         fs::write(&image, image_bytes).expect("write image fixture");
         fs::write(&text, b"not an image").expect("write text fixture");
 

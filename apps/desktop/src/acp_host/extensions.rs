@@ -108,6 +108,7 @@ pub(super) async fn dispatch(
         }
         AcpRequest::RewindCandidates(request) => dispatch_rewind_candidates(host, id, request),
         AcpRequest::RewindSession(request) => dispatch_rewind(host, id, request).await,
+        AcpRequest::SetSessionWorkspace(request) => dispatch_workspace(host, id, request).await,
         AcpRequest::ReplaySession(request) => dispatch_replay(host, id, request).await,
         AcpRequest::CancelBackgroundTask(request) => {
             dispatch_background_cancel(host, id, request).await
@@ -200,14 +201,26 @@ fn dispatch_steer(
     request: keencode_acp::SteerSessionRequest,
 ) -> Result<Value, HostFailure> {
     request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let references = crate::ui_plugins::decode_references(request.meta.as_ref())
+        .map_err(|_| HostFailure::InvalidParams)?;
     let session_id = request.session_id;
     let operation_id = request_operation_id(request.meta.as_ref())?;
     let _session = open_authorized_session(&host.runtime, &host.app, &session_id)
         .map_err(|_| HostFailure::ResourceNotFound)?;
-    host.runtime
-        .steer_root_turn(&session_id, &operation_id, &request.text)
+    let (_, project_root) = authorized_metadata(&host.runtime, &host.app, &session_id)
+        .map_err(|_| HostFailure::ResourceNotFound)?;
+    crate::ui_plugins::validate_for_session(&host.app, &project_root, &request.text, &references)
+        .map_err(|_| HostFailure::InvalidParams)?;
+    let steer = host
+        .runtime
+        .steer_root_turn(&session_id, &operation_id, &request.text, references)
         .map_err(map_runtime_failure)?;
-    let response = SteerSessionResponse::new(session_id);
+    let mut response = SteerSessionResponse::new(session_id);
+    response.message_id = Some(format!(
+        "{}:steer:{}",
+        steer.turn_id.as_str(),
+        steer.sequence
+    ));
     host.result_value(id, &response)
 }
 
@@ -431,6 +444,74 @@ async fn dispatch_rewind(
         through_journal_sequence: snapshot.state.last_sequence,
     };
     host.result_value(id, &response)
+}
+
+/// 切换同仓库的执行目录。先准备 MCP，资源层提交后再恢复投递，不伪造页面 cwd。
+async fn dispatch_workspace(
+    host: &AcpHost,
+    id: schema::RequestId,
+    request: keencode_acp::SetSessionWorkspaceRequest,
+) -> Result<Value, HostFailure> {
+    request.validate().map_err(|_| HostFailure::InvalidParams)?;
+    let _control = host.lock_session_control(&request.session_id).await?;
+    // 工作目录绑定不能在归档清理的引用复核与 Git 删除之间插入。
+    let _git = crate::ui_git_stash::STASH_GATE.lock().await;
+    let operation_id = request_operation_id(request.meta.as_ref())?;
+    let expected = host.authorized_cwd(Path::new(&request.expected_cwd))?;
+    let target = host.authorized_cwd(Path::new(&request.cwd))?;
+    // 双向 Git 身份证明，拒绝把任意已登记的另一个项目混入此会话。
+    if expected != target
+        && !crate::ui_worktrees::is_linked_worktree(&expected, &target)
+        && !crate::ui_worktrees::is_linked_worktree(&target, &expected)
+    {
+        return Err(HostFailure::InvalidParams);
+    }
+    host.ensure_extensions(&target).await?;
+    let context = close_session_for_mutation(&host.runtime, &host.app, &request.session_id)
+        .await
+        .map_err(|_| HostFailure::InvalidParams)?;
+    let prepared = match host
+        .runtime
+        .prepare_workspace_mcp(&request.session_id, &target, &context.session_mcp)
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            restore_session_after_mutation(&host.runtime, &request.session_id, &context)
+                .map_err(internal_failure)?;
+            return Err(map_session_mcp_failure(error));
+        }
+    };
+    let mutation = keencode_resources::SessionWorkspaceRequest {
+        session_id: SessionId::new(request.session_id.clone())
+            .map_err(|_| HostFailure::InvalidParams)?,
+        operation_id,
+        expected_project_root: expected.to_string_lossy().into_owned(),
+        project_root: target.to_string_lossy().into_owned(),
+    };
+    let result = retry_session_mutation(|| {
+        host.runtime
+            .runtime_manager()
+            .change_closed_session_workspace(mutation.clone())
+    })
+    .await;
+    let root = crate::session_commands::restore_session_after_workspace_mutation(
+        &host.runtime,
+        &host.app,
+        &request.session_id,
+        &context,
+        &prepared,
+    )
+    .await
+    .map_err(internal_failure)?;
+    result.map_err(internal_failure)?;
+    host.result_value(
+        id,
+        &keencode_acp::SessionWorkspaceResponse {
+            session_id: request.session_id,
+            project_root: root.to_string_lossy().into_owned(),
+        },
+    )
 }
 
 /// 接通 Runtime 已实现的分页重放，并确保按需建立当前 Session 投递世代。
@@ -2273,6 +2354,7 @@ mod tests {
     #[test]
     fn candidate_preview_is_bounded_and_text_only() {
         let message = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-1".to_owned(),
             turn_id: None,
@@ -2292,6 +2374,7 @@ mod tests {
         );
 
         let image_only = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "message-2".to_owned(),
             turn_id: None,
@@ -2308,6 +2391,7 @@ mod tests {
     fn rewind_candidates_exclude_dynamic_user_segments() {
         let turn_id = TurnId::new("root-turn").unwrap();
         let root_message = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "root-message".to_owned(),
             turn_id: Some(turn_id.clone()),
@@ -2318,6 +2402,7 @@ mod tests {
             }],
         };
         let dynamic_message = SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "dynamic-message".to_owned(),
             turn_id: Some(turn_id.clone()),

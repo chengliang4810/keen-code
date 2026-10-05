@@ -7,7 +7,7 @@
 /// 一次宿主进程及其 WebView2 后代的聚合资源摘要。
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ProcessResourceSample {
-    /// 相邻采样间隔内的进程 CPU 占用百分比；首个样本没有基线时为 `None`。
+    /// 相邻采样间隔内的整机归一化 CPU 百分比；首个样本没有基线时为 `None`。
     pub cpu_percent: Option<f64>,
     /// 所有可读取进程的工作集总量，即 RSS 近似值。
     pub resident_bytes: Option<u64>,
@@ -17,6 +17,32 @@ pub struct ProcessResourceSample {
     pub virtual_bytes: Option<u64>,
     /// 成功读取的宿主/WebView2 进程数量；平台不支持时为 `None`。
     pub process_count: Option<u64>,
+}
+
+/// 整机逻辑处理器数量只查询一次；Windows 按所有 processor group 计数，
+/// 不把进程 affinity/job 限制当作整机总算力。
+pub(crate) fn logical_processor_count() -> usize {
+    static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *COUNT.get_or_init(|| {
+        #[cfg(target_os = "windows")]
+        {
+            // ALL_PROCESSOR_GROUPS 不依赖当前线程所在的 processor group。
+            unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorCount(u16::MAX) }
+                .max(1) as usize
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::thread::available_parallelism().map_or(1, usize::from)
+        }
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn machine_cpu_percent(delta_ticks: u64, elapsed_100ns: f64, processors: usize) -> Option<f64> {
+    if !elapsed_100ns.is_finite() || elapsed_100ns <= 0.0 {
+        return None;
+    }
+    Some((delta_ticks as f64 / elapsed_100ns / processors.max(1) as f64 * 100.0).clamp(0.0, 100.0))
 }
 
 /// 按需读取平台进程资源；不创建常驻线程，生命周期由前端采样控制器决定。
@@ -111,7 +137,11 @@ mod windows {
                 if comparable_processes == 0 {
                     return None;
                 }
-                Some((delta_ticks as f64 / elapsed_100ns * 100.0).max(0.0))
+                super::machine_cpu_percent(
+                    delta_ticks,
+                    elapsed_100ns,
+                    super::logical_processor_count(),
+                )
             });
 
             self.previous_cpu_ticks = current_cpu_ticks;
@@ -302,6 +332,29 @@ mod windows {
 
 #[cfg(target_os = "windows")]
 use windows::PlatformSampler;
+
+#[cfg(test)]
+mod cpu_tests {
+    use super::machine_cpu_percent;
+
+    #[test]
+    fn cpu_is_normalized_by_machine_capacity() {
+        assert_eq!(machine_cpu_percent(10_000_000, 10_000_000.0, 20), Some(5.0));
+        assert_eq!(machine_cpu_percent(1_000_000, 10_000_000.0, 20), Some(0.5));
+        assert_eq!(
+            machine_cpu_percent(200_000_000, 10_000_000.0, 20),
+            Some(100.0)
+        );
+        assert_eq!(machine_cpu_percent(0, 10_000_000.0, 20), Some(0.0));
+    }
+
+    #[test]
+    fn cpu_does_not_report_an_invalid_sample_as_idle() {
+        assert_eq!(machine_cpu_percent(1, 0.0, 20), None);
+        assert_eq!(machine_cpu_percent(1, f64::NAN, 20), None);
+        assert_eq!(machine_cpu_percent(1, f64::INFINITY, 20), None);
+    }
+}
 
 #[cfg(not(target_os = "windows"))]
 #[cfg(test)]

@@ -1,6 +1,6 @@
 //! 桌面 Runtime 的标准 ACP 结构化问答桥。
 
-use crate::agent_runtime::ClientRequestRouter;
+use crate::agent_runtime::{AppRuntimePreferences, ClientRequestRouter};
 use crate::client_request::{
     ClientRequestDisplayGate, ClientRequestDisplayPermit, ClientRequestSink,
 };
@@ -13,20 +13,25 @@ use keencode_acp::{
     AcpClientRequestEncoder, AcpClientRequestFrame, AcpResponseDecoder, ConnectionId,
     ElicitationRouter,
 };
+use keencode_agent::{CollaborationIdGenerator, UuidCollaborationIdGenerator};
 use keencode_tools::{
     UserQuestion, UserQuestionAnswer, UserQuestionError, UserQuestionFuture, UserQuestionHandler,
     UserQuestionRequest, UserQuestionResponse,
 };
 use parking_lot::Mutex;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 use tokio::task::AbortHandle;
+use tokio::time::Duration;
 
-/// 同一进程中为 Elicitation JSON-RPC 标识分配的不复用序号。
-static NEXT_ELICITATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+/// AskUser 自动继续的产品时限；只有 App 偏好开启时才会创建该计时器。
+const ASK_USER_AUTO_RESOLUTION_TOTAL: Duration = Duration::from_secs(5 * 60);
+/// 倒计时对用户可见前保留的静默宽限期；剩余四分钟沿用 UI 的进度动画。
+const ASK_USER_AUTO_RESOLUTION_HIDDEN_GRACE: Duration = Duration::from_secs(60);
+/// 与 shared `ASK_USER_QUESTION_E2E_CLOCK_SCALE_ENV` 同名的 native 测试时钟缩放变量。
+const ASK_USER_QUESTION_E2E_CLOCK_SCALE_ENV: &str = "ZCODE_E2E_ASK_USER_QUESTION_CLOCK_SCALE";
 
 /// 标准 ACP `_meta` 中承载 KeenCode 交互扩展的唯一命名空间。
 const KEENCODE_META_KEY: &str = "_keencode";
@@ -42,8 +47,6 @@ pub enum ElicitationBridgeError {
     SessionMismatch,
     /// 同一 Session 已经存在一个未结束的可见问答。
     SessionBusy,
-    /// 请求标识序号已经耗尽。
-    RequestIdExhausted,
     /// 标准 ACP 请求无法构造或越过资源边界。
     RegistrationRejected,
     /// 当前 Session 的 Client Request 无法送达桌面。
@@ -72,7 +75,6 @@ impl std::fmt::Display for ElicitationBridgeError {
             Self::RuntimeClosed => formatter.write_str("问答 Runtime 已关闭"),
             Self::SessionMismatch => formatter.write_str("问答请求与当前 Session 不匹配"),
             Self::SessionBusy => formatter.write_str("当前 Session 已有待回答问题"),
-            Self::RequestIdExhausted => formatter.write_str("问答请求标识已经耗尽"),
             Self::RegistrationRejected => formatter.write_str("问答请求无法安全登记"),
             Self::DeliveryUnavailable => formatter.write_str("问答请求无法送达桌面"),
             Self::InvalidResponse => formatter.write_str("ACP 问答响应无效"),
@@ -94,6 +96,56 @@ impl ElicitationBridgeError {
     }
 }
 
+/// 一个待决问答在 V4 会话投影中发生变化时发出的轻量路由通知。
+///
+/// 通知不携带问题正文；投影层收到后必须按订阅连接重新读取
+/// [`PendingElicitationView`]，避免广播通道成为第二份 pending 事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ElicitationChange {
+    /// UI 应刷新哪个父 Session；actor 问答使用父 Session 映射。
+    pub(crate) display_session_id: String,
+}
+
+/// ElicitationCoordinator 对受信 Runtime 投影层提供的只读 pending 视图。
+///
+/// `session_id` 保留 actor 的真实归属，`display_session_id` 只表示允许展示的父
+/// Session。调用方仍必须按连接和 actor→parent 路由复核，不能把此结构直接下发前端。
+#[derive(Clone, Debug)]
+pub(crate) struct PendingElicitationView {
+    /// ACP 请求的稳定 interaction ID。
+    pub(crate) request_id: String,
+    /// 真实发起问答的 Session，actor 问答不是父 Session。
+    pub(crate) session_id: String,
+    /// 允许在 V4 中展示问答的父 Session；普通问答为自身 Session。
+    pub(crate) display_session_id: Option<String>,
+    /// 唯一允许回答该请求的连接。
+    pub(crate) connection_id: ConnectionId,
+    /// 原始、已由 core/tools 校验的问题 Schema。
+    pub(crate) questions: Vec<UserQuestion>,
+    /// 问答登记时的墙钟时间，供 V4 `createdAt` 使用。
+    pub(crate) created_at_unix_ms: u64,
+    /// AskUser 工具调用的真实标识，供 UI 行锚定和诊断使用。
+    pub(crate) tool_call_id: String,
+    /// 当前请求的绝对倒计时状态；关闭偏好或用户首次操作后为空/暂停。
+    pub(crate) auto_resolution: Option<PendingElicitationAutoResolution>,
+}
+
+/// V4 `pendingInteraction.autoResolution` 的 Rust 内部值，不作为第二份事实源。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum PendingElicitationAutoResolution {
+    /// 请求仍在静默宽限或可见倒计时阶段。
+    Active {
+        started_at_unix_ms: u64,
+        visible_at_unix_ms: u64,
+        deadline_at_unix_ms: u64,
+    },
+    /// 用户已经通过弹窗、侧栏或导航暂停本次自动继续。
+    Snoozed {
+        started_at_unix_ms: u64,
+        snoozed_at_unix_ms: u64,
+    },
+}
+
 /// 一个待决问答从登记到桌面确认送达之间的阶段。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ElicitationDeliveryStage {
@@ -107,12 +159,24 @@ enum ElicitationDeliveryStage {
 
 /// 单个待决标准 Elicitation 的不可变绑定和一次性等待者。
 struct PendingElicitation {
+    /// ACP 请求的稳定 interaction ID。
+    request_id: String,
     /// 请求唯一允许投递和响应的 ACP 连接。
     connection_id: ConnectionId,
     /// 请求绑定的唯一 Session。
     session_id: String,
+    /// 可选的父 Session；actor 问答的 V4 frame 投影到这里。
+    display_session_id: Option<String>,
     /// 用于把结构化响应还原为工具答案的原始问题定义。
     questions: Vec<UserQuestion>,
+    /// 问答登记时的墙钟时间。
+    created_at_unix_ms: u64,
+    /// 触发本次 AskUser 的真实工具调用标识。
+    tool_call_id: String,
+    /// 仅在 App 偏好开启期间存在的自动继续状态。
+    auto_resolution: Option<PendingElicitationAutoResolution>,
+    /// 到期自动继续任务；响应、断线、暂停或 Runtime 关闭时必须取消。
+    auto_resolution_abort: Option<AbortHandle>,
     /// 当前投递阶段。
     delivery_stage: ElicitationDeliveryStage,
     /// 投递未确认时可取消的异步任务句柄。
@@ -127,6 +191,8 @@ struct PendingElicitation {
 struct ElicitationCoordinatorInner {
     /// 保护待决映射、Session 占用和关闭状态的短临界区。
     state: Mutex<ElicitationState>,
+    /// pending 生命周期通知；载荷只带展示 Session，正文始终从 state 读取。
+    changes: broadcast::Sender<ElicitationChange>,
 }
 
 /// 一个 Runtime 内全部待决结构化问答。
@@ -154,6 +220,8 @@ pub struct ElicitationCoordinator {
     response_decoder: AcpResponseDecoder,
     /// 持有到响应终态的每 Session 展示串行门。
     client_request_gate: Arc<ClientRequestDisplayGate>,
+    /// 与 AgentRuntime 共用的 App 偏好快照，保证设置变更能影响现有 pending。
+    app_runtime_preferences: Arc<std::sync::RwLock<AppRuntimePreferences>>,
 }
 
 impl ElicitationCoordinator {
@@ -164,6 +232,17 @@ impl ElicitationCoordinator {
 
     /// 使用 Runtime 共享展示门创建尚未协商能力的协调器。
     pub(crate) fn with_gate(client_request_gate: Arc<ClientRequestDisplayGate>) -> Self {
+        Self::with_gate_and_preferences(
+            client_request_gate,
+            Arc::new(std::sync::RwLock::new(AppRuntimePreferences::default())),
+        )
+    }
+
+    /// 使用 Runtime 共享展示门和偏好快照创建协调器。
+    pub(crate) fn with_gate_and_preferences(
+        client_request_gate: Arc<ClientRequestDisplayGate>,
+        app_runtime_preferences: Arc<std::sync::RwLock<AppRuntimePreferences>>,
+    ) -> Self {
         Self {
             inner: Arc::new(ElicitationCoordinatorInner {
                 state: Mutex::new(ElicitationState {
@@ -173,10 +252,12 @@ impl ElicitationCoordinator {
                     pending_by_session: HashMap::new(),
                     closed: false,
                 }),
+                changes: broadcast::channel(256).0,
             }),
             request_encoder: AcpClientRequestEncoder::new(),
             response_decoder: AcpResponseDecoder::new(),
             client_request_gate,
+            app_runtime_preferences,
         }
     }
 
@@ -270,6 +351,24 @@ impl ElicitationCoordinator {
     ) -> DesktopQuestionHandler {
         DesktopQuestionHandler {
             session_id,
+            display_session_id: None,
+            connection_id,
+            coordinator: Arc::clone(self),
+            sink,
+        }
+    }
+
+    /// 创建一个保留 actor pending 身份、但把 ACP frame 投影到父 Session 的问答 Handler。
+    pub fn handler_for_connection_projected(
+        self: &Arc<Self>,
+        session_id: keencode_agent::SessionId,
+        display_session_id: String,
+        connection_id: ConnectionId,
+        sink: Arc<dyn ClientRequestSink>,
+    ) -> DesktopQuestionHandler {
+        DesktopQuestionHandler {
+            session_id,
+            display_session_id: Some(display_session_id),
             connection_id,
             coordinator: Arc::clone(self),
             sink,
@@ -284,6 +383,53 @@ impl ElicitationCoordinator {
             .session_connections
             .get(session_id)
             .cloned()
+    }
+
+    /// 订阅 pending 生命周期变化；正文和连接权限仍需通过
+    /// [`Self::pending_views_for_connection`] 重新读取。
+    pub(crate) fn subscribe_changes(&self) -> broadcast::Receiver<ElicitationChange> {
+        self.inner.changes.subscribe()
+    }
+
+    /// 按连接读取当前待决问答的只读视图。
+    ///
+    /// 该方法只供 Runtime 投影层调用；它不接受前端传入的任意 Session 过滤条件，
+    /// 后续必须由 `AgentRuntime` 再按父 Session 和 actor 路由做一次授权过滤。
+    pub(crate) fn pending_views_for_connection(
+        &self,
+        connection_id: &ConnectionId,
+    ) -> Vec<PendingElicitationView> {
+        self.inner
+            .state
+            .lock()
+            .pending
+            .values()
+            .filter(|pending| {
+                &pending.connection_id == connection_id
+                    && matches!(
+                        pending.delivery_stage,
+                        ElicitationDeliveryStage::Emitting | ElicitationDeliveryStage::Delivered
+                    )
+            })
+            .map(|pending| PendingElicitationView {
+                request_id: pending.request_id.clone(),
+                session_id: pending.session_id.clone(),
+                display_session_id: pending.display_session_id.clone(),
+                connection_id: pending.connection_id.clone(),
+                questions: pending.questions.clone(),
+                created_at_unix_ms: pending.created_at_unix_ms,
+                tool_call_id: pending.tool_call_id.clone(),
+                auto_resolution: pending.auto_resolution.clone(),
+            })
+            .collect()
+    }
+
+    /// 向当前会话投影广播一次 pending 变化；广播失败只表示没有订阅者。
+    fn notify_change(&self, display_session_id: Option<&str>, session_id: &str) {
+        let display_session_id = display_session_id.unwrap_or(session_id);
+        let _ = self.inner.changes.send(ElicitationChange {
+            display_session_id: display_session_id.to_owned(),
+        });
     }
 
     /// 返回当前进程尚未收口的问答数量。
@@ -328,6 +474,181 @@ impl ElicitationCoordinator {
     /// 判断字符串 JSON-RPC 标识是否属于一个待决问答。
     pub fn contains_pending(&self, request_id: &str) -> bool {
         self.inner.state.lock().pending.contains_key(request_id)
+    }
+
+    /// 应用 App 偏好到现有和后续 AskUser 请求。
+    ///
+    /// 关闭开关会立即移除现有请求的倒计时；重新开启时从当前时刻为仍在等待的
+    /// 请求重新计时。这样“当前和后续提问会一直等待”不会只对下一次请求生效。
+    pub(crate) fn sync_auto_resolution_preference(&self, enabled: bool) {
+        let now = crate::agent_runtime::unix_time_ms();
+        let mut aborts = Vec::new();
+        let mut notifications = Vec::new();
+        let mut schedule = Vec::new();
+        {
+            let mut state = self.inner.state.lock();
+            if state.closed {
+                return;
+            }
+            for pending in state.pending.values_mut() {
+                if enabled {
+                    if pending.auto_resolution.is_none() {
+                        pending.auto_resolution = Some(active_auto_resolution(now));
+                        schedule.push(pending.request_id.clone());
+                        notifications.push((
+                            pending.display_session_id.clone(),
+                            pending.session_id.clone(),
+                        ));
+                    }
+                } else {
+                    pending.auto_resolution = None;
+                    if let Some(abort) = pending.auto_resolution_abort.take() {
+                        aborts.push(abort);
+                    }
+                    notifications.push((
+                        pending.display_session_id.clone(),
+                        pending.session_id.clone(),
+                    ));
+                }
+            }
+        }
+        for abort in aborts {
+            abort.abort();
+        }
+        for (display_session_id, session_id) in notifications {
+            self.notify_change(display_session_id.as_deref(), &session_id);
+        }
+        for request_id in schedule {
+            // 偏好同步发生在 Tokio Runtime 外时仍保留“等待用户”语义，不能
+            // 因无法启动计时器而把一次合法的 AskUser 登记判成投递失败。
+            let _ = self.schedule_auto_resolution(request_id);
+        }
+    }
+
+    /// 校验连接与 pending 身份后暂停一次 AskUser 自动继续；重复调用幂等成功。
+    pub fn snooze_auto_resolution_from_connection(
+        &self,
+        connection_id: &ConnectionId,
+        request_id: &str,
+    ) -> Result<bool, ElicitationBridgeError> {
+        if request_id.trim().is_empty() {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        let (abort, notify) = {
+            let mut state = self.inner.state.lock();
+            let Some(pending) = state.pending.get_mut(request_id) else {
+                return Err(ElicitationBridgeError::UnknownRequest);
+            };
+            if &pending.connection_id != connection_id {
+                return Err(ElicitationBridgeError::ResponseConnectionMismatch);
+            }
+            let Some(auto_resolution) = pending.auto_resolution.as_mut() else {
+                return Ok(false);
+            };
+            let started_at_unix_ms = match auto_resolution {
+                PendingElicitationAutoResolution::Active {
+                    started_at_unix_ms, ..
+                } => *started_at_unix_ms,
+                PendingElicitationAutoResolution::Snoozed { .. } => return Ok(false),
+            };
+            *auto_resolution = PendingElicitationAutoResolution::Snoozed {
+                started_at_unix_ms,
+                snoozed_at_unix_ms: crate::agent_runtime::unix_time_ms(),
+            };
+            (
+                pending.auto_resolution_abort.take(),
+                Some((
+                    pending.display_session_id.clone(),
+                    pending.session_id.clone(),
+                )),
+            )
+        };
+        if let Some(abort) = abort {
+            abort.abort();
+        }
+        if let Some((display_session_id, session_id)) = notify {
+            self.notify_change(display_session_id.as_deref(), &session_id);
+        }
+        Ok(true)
+    }
+
+    /// 为一个 active pending 建立到期任务；任务只通过协调器移除 pending，不能直接
+    /// 唤醒工具 Future，避免把连接响应和自动继续分成两套收口路径。
+    fn schedule_auto_resolution(&self, request_id: String) -> Result<(), ElicitationBridgeError> {
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|_| ElicitationBridgeError::DeliveryUnavailable)?;
+        let deadline = {
+            let state = self.inner.state.lock();
+            let Some(pending) = state.pending.get(&request_id) else {
+                return Ok(());
+            };
+            let Some(PendingElicitationAutoResolution::Active {
+                deadline_at_unix_ms,
+                ..
+            }) = pending.auto_resolution.as_ref()
+            else {
+                return Ok(());
+            };
+            *deadline_at_unix_ms
+        };
+        let delay =
+            Duration::from_millis(deadline.saturating_sub(crate::agent_runtime::unix_time_ms()));
+        let coordinator = self.clone();
+        let task_request_id = request_id.clone();
+        let task = runtime.spawn(async move {
+            tokio::time::sleep(delay).await;
+            coordinator.auto_resolve(&task_request_id);
+        });
+        let abort = task.abort_handle();
+        let mut state = self.inner.state.lock();
+        let Some(pending) = state.pending.get_mut(&request_id) else {
+            abort.abort();
+            return Ok(());
+        };
+        if !matches!(
+            pending.auto_resolution,
+            Some(PendingElicitationAutoResolution::Active { .. })
+        ) {
+            abort.abort();
+            return Ok(());
+        }
+        if let Some(previous) = pending.auto_resolution_abort.replace(abort) {
+            previous.abort();
+        }
+        Ok(())
+    }
+
+    /// 到期时以每题空答案完成 AskUser；这与用户跳过问题使用同一 core 校验路径。
+    fn auto_resolve(&self, request_id: &str) {
+        let pending = {
+            let mut state = self.inner.state.lock();
+            let Some(pending) = state.pending.get(request_id) else {
+                return;
+            };
+            if !matches!(
+                pending.auto_resolution,
+                Some(PendingElicitationAutoResolution::Active { .. })
+            ) {
+                return;
+            }
+            let Some(pending) = state.pending.remove(request_id) else {
+                return;
+            };
+            state.pending_by_session.remove(&pending.session_id);
+            pending
+        };
+        let answers = pending
+            .questions
+            .iter()
+            .map(|question| UserQuestionAnswer {
+                id: question.id.clone(),
+                values: Vec::new(),
+            })
+            .collect();
+        self.notify_change(pending.display_session_id.as_deref(), &pending.session_id);
+        // 当前任务正在执行，不需要再次 abort 自己；丢弃句柄即可释放它的所有权。
+        let _ = pending.auto_resolution_abort;
+        let _ = pending.waiter.send(Ok(UserQuestionResponse { answers }));
     }
 
     /// 严格解析并 exactly-once 收口一个完整 ACP Elicitation 响应。
@@ -386,11 +707,18 @@ impl ElicitationCoordinator {
             return Err(ElicitationBridgeError::RequestNotDelivered);
         }
         let result = response_to_answers(&pending.questions, response);
-        let Some(pending) = state.pending.remove(&request_id) else {
+        let Some(mut pending) = state.pending.remove(&request_id) else {
             return Err(ElicitationBridgeError::InternalState);
         };
         state.pending_by_session.remove(&pending.session_id);
+        let display_session_id = pending.display_session_id.clone();
+        let pending_session_id = pending.session_id.clone();
+        let auto_resolution_abort = pending.auto_resolution_abort.take();
         drop(state);
+        if let Some(abort) = auto_resolution_abort {
+            abort.abort();
+        }
+        self.notify_change(display_session_id.as_deref(), &pending_session_id);
         match result {
             Ok(response) => pending
                 .waiter
@@ -410,6 +738,48 @@ impl ElicitationCoordinator {
         }
     }
 
+    /// 将 Workflow/Interaction 控制面的答案转换为当前待决问答的 ACP 响应。
+    ///
+    /// 转换只读取该 request 的原始 `pending.questions`，因此单题的
+    /// `optionId/freeText`、多题 `answers` 以及完整 ACP JSON-RPC 回执都必须
+    /// 通过同一份问题 Schema 校验；调用方不允许按猜测拼接 question id 或字段。
+    pub fn respond_workflow_answer_from_connection(
+        &self,
+        connection_id: &ConnectionId,
+        request_id: &str,
+        answer_json: &str,
+    ) -> Result<(), ElicitationBridgeError> {
+        if request_id.trim().is_empty() {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        let answer = serde_json::from_str::<Value>(answer_json)
+            .unwrap_or_else(|_| Value::String(answer_json.to_owned()));
+        let is_complete_rpc = answer.as_object().is_some_and(|object| {
+            object.contains_key("jsonrpc")
+                || (object.contains_key("id") && object.contains_key("result"))
+        });
+        if is_complete_rpc {
+            return self.respond_from_connection(connection_id, answer_json);
+        }
+
+        let result = {
+            let state = self.inner.state.lock();
+            let Some(pending) = state.pending.get(request_id) else {
+                return Err(ElicitationBridgeError::UnknownRequest);
+            };
+            if &pending.connection_id != connection_id {
+                return Err(ElicitationBridgeError::ResponseConnectionMismatch);
+            }
+            workflow_answer_result(&pending.questions, answer)?
+        };
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": result,
+        });
+        self.respond_from_connection(connection_id, &response.to_string())
+    }
+
     /// 关闭 Runtime，取消全部内存问答且不接受迟到响应。
     pub fn shutdown(&self) {
         let mut state = self.inner.state.lock();
@@ -427,7 +797,11 @@ impl ElicitationCoordinator {
         state.pending_by_session.clear();
         drop(state);
         for mut pending in pending {
+            self.notify_change(pending.display_session_id.as_deref(), &pending.session_id);
             if let Some(abort) = pending.dispatch_abort.take() {
+                abort.abort();
+            }
+            if let Some(abort) = pending.auto_resolution_abort.take() {
                 abort.abort();
             }
             let _ = pending.waiter.send(Err(
@@ -458,7 +832,11 @@ impl ElicitationCoordinator {
         }
         drop(state);
         for mut pending in cancelled {
+            self.notify_change(pending.display_session_id.as_deref(), &pending.session_id);
             if let Some(abort) = pending.dispatch_abort.take() {
+                abort.abort();
+            }
+            if let Some(abort) = pending.auto_resolution_abort.take() {
                 abort.abort();
             }
             let _ = pending.waiter.send(Err(
@@ -475,6 +853,18 @@ impl ElicitationCoordinator {
         request: UserQuestionRequest,
         sink: Arc<dyn ClientRequestSink>,
     ) -> Result<RegisteredElicitation, ElicitationBridgeError> {
+        self.register_with_display_session(handler_session_id, connection_id, request, None, sink)
+    }
+
+    /// 登记 pending 的 actor 身份，并可将实际 ACP 请求投影到父 Session。
+    fn register_with_display_session(
+        &self,
+        handler_session_id: &keencode_agent::SessionId,
+        connection_id: &ConnectionId,
+        request: UserQuestionRequest,
+        display_session_id: Option<&str>,
+        sink: Arc<dyn ClientRequestSink>,
+    ) -> Result<RegisteredElicitation, ElicitationBridgeError> {
         if &request.session_id != handler_session_id {
             return Err(ElicitationBridgeError::SessionMismatch);
         }
@@ -486,17 +876,31 @@ impl ElicitationCoordinator {
                 .copied()
                 .ok_or(ElicitationBridgeError::CapabilitiesUnavailable)?
         };
-        let request_id = next_request_id()?;
+        let request_id = next_request_id();
+        let mut display_request = request.clone();
+        if let Some(display_session_id) = display_session_id {
+            display_request.session_id = keencode_agent::SessionId::new(display_session_id)
+                .map_err(|_| ElicitationBridgeError::SessionMismatch)?;
+        }
         let frame = self
             .request_encoder
             .elicitation_request_frame(
                 RequestId::Str(request_id.clone()),
                 &router,
-                create_request(&request),
+                create_request(&display_request),
             )
             .map_err(|_| ElicitationBridgeError::RegistrationRejected)?;
         let (waiter, receiver) = oneshot::channel();
         let session_id = request.session_id.as_str().to_owned();
+        let tool_call_id = request.tool_call_id.as_str().to_owned();
+        let created_at_unix_ms = crate::agent_runtime::unix_time_ms();
+        let auto_resolution_enabled = self
+            .app_runtime_preferences
+            .read()
+            .map(|preferences| preferences.ask_user_question_auto_resolution_enabled)
+            .unwrap_or(false);
+        let auto_resolution =
+            auto_resolution_enabled.then(|| active_auto_resolution(created_at_unix_ms));
         {
             let mut state = self.inner.state.lock();
             if state.closed {
@@ -511,9 +915,15 @@ impl ElicitationCoordinator {
             state.pending.insert(
                 request_id.clone(),
                 PendingElicitation {
+                    request_id: request_id.clone(),
                     connection_id: connection_id.clone(),
                     session_id: session_id.clone(),
+                    display_session_id: display_session_id.map(str::to_owned),
                     questions: request.questions,
+                    created_at_unix_ms,
+                    tool_call_id,
+                    auto_resolution,
+                    auto_resolution_abort: None,
                     delivery_stage: ElicitationDeliveryStage::Dispatching,
                     dispatch_abort: None,
                     display_permit: None,
@@ -521,7 +931,13 @@ impl ElicitationCoordinator {
                 },
             );
         }
-        self.schedule_dispatch(request_id.clone(), session_id, sink, frame)?;
+        let display_gate_session = display_session_id.unwrap_or(&session_id).to_owned();
+        if auto_resolution_enabled {
+            // 计时器与 pending 同时登记；即使连接尚未回执，后续设置/断线仍可
+            // 通过同一 pending 身份取消它，避免悬挂 AskUser Future。
+            let _ = self.schedule_auto_resolution(request_id.clone());
+        }
+        self.schedule_dispatch(request_id.clone(), display_gate_session, sink, frame)?;
         Ok(RegisteredElicitation {
             guard: PendingElicitationGuard {
                 coordinator: self.clone(),
@@ -617,13 +1033,24 @@ impl ElicitationCoordinator {
         pending.dispatch_abort = None;
         if result.is_ok() {
             pending.delivery_stage = ElicitationDeliveryStage::Delivered;
+            let display_session_id = pending.display_session_id.clone();
+            let pending_session_id = pending.session_id.clone();
+            drop(state);
+            self.notify_change(display_session_id.as_deref(), &pending_session_id);
             return;
         }
-        let Some(pending) = state.pending.remove(request_id) else {
+        let Some(mut pending) = state.pending.remove(request_id) else {
             return;
         };
         state.pending_by_session.remove(&pending.session_id);
+        let display_session_id = pending.display_session_id.clone();
+        let pending_session_id = pending.session_id.clone();
+        let auto_resolution_abort = pending.auto_resolution_abort.take();
         drop(state);
+        if let Some(abort) = auto_resolution_abort {
+            abort.abort();
+        }
+        self.notify_change(display_session_id.as_deref(), &pending_session_id);
         let _ = pending.waiter.send(Err(
             ElicitationBridgeError::DeliveryUnavailable.into_user_question_error()
         ));
@@ -636,8 +1063,14 @@ impl ElicitationCoordinator {
             return;
         };
         state.pending_by_session.remove(&pending.session_id);
+        let display_session_id = pending.display_session_id.clone();
+        let pending_session_id = pending.session_id.clone();
         drop(state);
+        self.notify_change(display_session_id.as_deref(), &pending_session_id);
         if let Some(abort) = pending.dispatch_abort.take() {
+            abort.abort();
+        }
+        if let Some(abort) = pending.auto_resolution_abort.take() {
             abort.abort();
         }
         let _ = pending.waiter.send(Err(error.into_user_question_error()));
@@ -672,6 +1105,8 @@ impl ClientRequestRouter for ElicitationCoordinator {
 pub struct DesktopQuestionHandler {
     /// 该 Handler 唯一允许接收的 Session。
     session_id: keencode_agent::SessionId,
+    /// 可选的显示投影 Session；缺省时与 pending Session 相同。
+    display_session_id: Option<String>,
     /// 本轮 Prompt 唯一允许交互的 ACP 连接。
     connection_id: ConnectionId,
     /// 进程内共享的问答协调器。
@@ -683,12 +1118,22 @@ pub struct DesktopQuestionHandler {
 impl UserQuestionHandler for DesktopQuestionHandler {
     /// 同步登记问题并等待一次严格 Client 响应。
     fn ask(&self, request: UserQuestionRequest) -> UserQuestionFuture<'_> {
-        let registration = self.coordinator.register(
-            &self.session_id,
-            &self.connection_id,
-            request,
-            Arc::clone(&self.sink),
-        );
+        let registration = if let Some(display_session_id) = self.display_session_id.as_deref() {
+            self.coordinator.register_with_display_session(
+                &self.session_id,
+                &self.connection_id,
+                request,
+                Some(display_session_id),
+                Arc::clone(&self.sink),
+            )
+        } else {
+            self.coordinator.register(
+                &self.session_id,
+                &self.connection_id,
+                request,
+                Arc::clone(&self.sink),
+            )
+        };
         Box::pin(async move {
             let RegisteredElicitation {
                 mut guard,
@@ -731,14 +1176,40 @@ impl Drop for PendingElicitationGuard {
     }
 }
 
-/// 为当前进程分配一个非零、带类型前缀的字符串请求标识。
-fn next_request_id() -> Result<String, ElicitationBridgeError> {
-    NEXT_ELICITATION_REQUEST_ID
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-            current.checked_add(1)
-        })
-        .map(|previous| format!("elicitation-{}", previous + 1))
-        .map_err(|_| ElicitationBridgeError::RequestIdExhausted)
+/// 为一次问答分配跨冷启动不复用的全局标识。
+fn next_request_id() -> String {
+    let message_id = UuidCollaborationIdGenerator.next_message_id();
+    let suffix = message_id
+        .as_str()
+        .strip_prefix("message-")
+        .unwrap_or_else(|| message_id.as_str());
+    format!("elicitation-{suffix}")
+}
+
+/// 构造一次 AskUser 的绝对倒计时；测试缩放只缩短本地等待，不改变 wire 形状。
+fn active_auto_resolution(now_unix_ms: u64) -> PendingElicitationAutoResolution {
+    let total = scaled_auto_resolution_duration(ASK_USER_AUTO_RESOLUTION_TOTAL);
+    let hidden_grace = scaled_auto_resolution_duration(ASK_USER_AUTO_RESOLUTION_HIDDEN_GRACE)
+        .min(total.saturating_sub(Duration::from_millis(1)));
+    let total_ms = u64::try_from(total.as_millis()).unwrap_or(u64::MAX).max(1);
+    let hidden_ms = u64::try_from(hidden_grace.as_millis()).unwrap_or(0);
+    PendingElicitationAutoResolution::Active {
+        started_at_unix_ms: now_unix_ms,
+        visible_at_unix_ms: now_unix_ms.saturating_add(hidden_ms),
+        deadline_at_unix_ms: now_unix_ms.saturating_add(total_ms),
+    }
+}
+
+/// 读取前端 shared 契约约定的 E2E 时钟缩放；异常值按生产时钟处理。
+fn scaled_auto_resolution_duration(duration: Duration) -> Duration {
+    let scale = std::env::var(ASK_USER_QUESTION_E2E_CLOCK_SCALE_ENV)
+        .ok()
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let Some(scale) = scale else {
+        return duration;
+    };
+    Duration::from_secs_f64((duration.as_secs_f64() / scale).max(0.001))
 }
 
 /// 返回进程内桌面 transport 使用的稳定连接身份。
@@ -851,6 +1322,314 @@ fn response_to_answers(
         return Err(ElicitationBridgeError::InvalidResponse);
     }
     Ok(UserQuestionResponse { answers })
+}
+
+/// 依照待决问题的真实形状，把控制面答案收敛为 ACP `result` 对象。
+fn workflow_answer_result(
+    questions: &[UserQuestion],
+    answer: Value,
+) -> Result<Value, ElicitationBridgeError> {
+    if let Value::String(value) = answer {
+        if questions.len() != 1 || value.trim().is_empty() {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        return Ok(json!({
+            "action": "accept",
+            "content": { questions[0].id.clone(): value },
+        }));
+    }
+
+    let Value::Object(object) = answer else {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    };
+    if let Some(action) = object.get("action").and_then(Value::as_str) {
+        if object.keys().any(|key| key != "action" && key != "content")
+            || (action != "accept" && object.len() != 1)
+        {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        return match action {
+            "decline" | "cancel" => Ok(json!({ "action": action })),
+            "accept" => {
+                let content = object
+                    .get("content")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .ok_or(ElicitationBridgeError::InvalidResponse)?;
+                Ok(json!({
+                    "action": "accept",
+                    "content": workflow_accept_content(questions, &content)?,
+                }))
+            }
+            _ => Err(ElicitationBridgeError::InvalidResponse),
+        };
+    }
+    if let Some(answers) = object.get("answers") {
+        if object.len() != 1 {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        return Ok(json!({
+            "action": "accept",
+            "content": workflow_answers_content(questions, answers)?,
+        }));
+    }
+    if object.contains_key("optionId") || object.contains_key("freeText") {
+        if questions.len() != 1
+            || object
+                .keys()
+                .any(|key| key != "optionId" && key != "freeText")
+            || (object.contains_key("optionId") && object.contains_key("freeText"))
+        {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        let value = object
+            .get("optionId")
+            .or_else(|| object.get("freeText"))
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        return Ok(json!({
+            "action": "accept",
+            "content": { questions[0].id.clone(): value },
+        }));
+    }
+
+    Ok(json!({
+        "action": "accept",
+        "content": workflow_content_from_question_map(questions, &object)?,
+    }))
+}
+
+/// 判断是否为 Source `ElicitationDialog` 生成的 renderer-local 回答字段。
+fn is_source_form_answer_key(key: &str, questions: &[UserQuestion]) -> bool {
+    key == "answers"
+        || (key == "answer" && !questions.iter().any(|question| question.id == key))
+        || key
+            .strip_prefix("answer_")
+            .is_some_and(|index| !index.is_empty() && index.parse::<usize>().is_ok())
+}
+
+/// 将 V4 Source 对话框的文案/位置字段映射为标准 ACP question id。
+///
+/// Source UI 不接触 Rust 的内部问题 id：`answers` 以题目文案为键，
+/// `answer_N` 才是无歧义的顺序值。优先采用 `answer_N`，因为多选的
+/// `answers` 文案值会被 UI 拼接成展示字符串；所有未识别或冲突字段仍拒绝。
+fn workflow_accept_content(
+    questions: &[UserQuestion],
+    object: &serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>, ElicitationBridgeError> {
+    let source_shape = object
+        .keys()
+        .any(|key| is_source_form_answer_key(key, questions));
+    if !source_shape {
+        return workflow_content_from_question_map(questions, object);
+    }
+    if object
+        .keys()
+        .any(|key| questions.iter().any(|question| question.id == *key))
+    {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    }
+    workflow_content_from_source_form(questions, object)
+}
+
+/// 读取 Source 表单的 `answers`、`answer_N` 和单题兼容 `answer` 字段。
+fn workflow_content_from_source_form(
+    questions: &[UserQuestion],
+    object: &serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>, ElicitationBridgeError> {
+    let allowed = object.keys().all(|key| {
+        is_source_form_answer_key(key, questions)
+            && (key != "answer" || questions.len() == 1)
+            && key.strip_prefix("answer_").is_none_or(|index| {
+                index
+                    .parse::<usize>()
+                    .is_ok_and(|value| value < questions.len())
+            })
+    });
+    if !allowed {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    }
+    let answers_summary = object.get("answers").map(|value| {
+        value
+            .as_object()
+            .ok_or(ElicitationBridgeError::InvalidResponse)
+    });
+    let answers_summary = answers_summary.transpose()?;
+
+    let mut content = serde_json::Map::new();
+    for (index, question) in questions.iter().enumerate() {
+        let indexed = object.get(&format!("answer_{index}"));
+        let legacy = (questions.len() == 1)
+            .then(|| object.get("answer"))
+            .flatten();
+        let prompt_value = answers_summary.and_then(|answers| {
+            let matching = questions
+                .iter()
+                .filter(|candidate| candidate.prompt == question.prompt)
+                .count();
+            (matching == 1)
+                .then(|| answers.get(&question.prompt))
+                .flatten()
+        });
+        let value = indexed.or(legacy).or(prompt_value);
+        let Some(value) = value else {
+            continue;
+        };
+        let normalized = source_form_value(question, value)?;
+        if let Some(existing) = content.get(&question.id)
+            && existing != &normalized
+        {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        content.insert(question.id.clone(), normalized);
+    }
+
+    if let Some(answers) = answers_summary {
+        for (prompt, value) in answers {
+            let matches = questions
+                .iter()
+                .filter(|question| question.prompt == *prompt)
+                .count();
+            // Source 的 `answers` 是给旧 renderer 的展示摘要，始终是拼接后的文本；
+            // 多选的无损数组只能来自同一回执中的 `answer_N`。
+            if matches != 1 || !value.is_string() {
+                return Err(ElicitationBridgeError::InvalidResponse);
+            }
+        }
+    }
+    Ok(content)
+}
+
+/// 规范化一个 Source 表单字段，同时保留多选数组而不解析拼接文案。
+fn source_form_value(
+    question: &UserQuestion,
+    value: &Value,
+) -> Result<Value, ElicitationBridgeError> {
+    if question.multi_select {
+        let values = value
+            .as_array()
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        if values
+            .iter()
+            .any(|value| value.as_str().is_none_or(|value| value.trim().is_empty()))
+        {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        return Ok(Value::Array(values.to_vec()));
+    }
+    let value = value
+        .as_str()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(ElicitationBridgeError::InvalidResponse)?;
+    Ok(Value::String(value.to_owned()))
+}
+
+/// 将 AskUser 输出的 `answers:[{id,values}]` 映射为 ACP form content。
+fn workflow_answers_content(
+    questions: &[UserQuestion],
+    value: &Value,
+) -> Result<serde_json::Map<String, Value>, ElicitationBridgeError> {
+    let answers = value
+        .as_array()
+        .ok_or(ElicitationBridgeError::InvalidResponse)?;
+    if answers.len() != questions.len() {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    }
+    let mut content = serde_json::Map::new();
+    for answer in answers {
+        let object = answer
+            .as_object()
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        if object.len() != 2 {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        let question = questions
+            .iter()
+            .find(|question| question.id == id)
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        if content.contains_key(id) {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        let values = object
+            .get("values")
+            .and_then(Value::as_array)
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        let values = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(ToOwned::to_owned)
+                    .ok_or(ElicitationBridgeError::InvalidResponse)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if !question.multi_select && values.len() > 1 {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        if question.multi_select {
+            content.insert(
+                id.to_owned(),
+                Value::Array(values.into_iter().map(Value::String).collect()),
+            );
+        } else if let Some(value) = values.into_iter().next() {
+            content.insert(id.to_owned(), Value::String(value));
+        }
+    }
+    if questions
+        .iter()
+        .any(|question| !content.contains_key(&question.id))
+        && questions.iter().any(|question| {
+            !question.multi_select
+                && answers.iter().any(|answer| {
+                    answer
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == question.id)
+                })
+        })
+    {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    }
+    Ok(content)
+}
+
+/// 直接使用 question id 的 ACP content；未知字段和类型都拒绝，避免猜测。
+fn workflow_content_from_question_map(
+    questions: &[UserQuestion],
+    object: &serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>, ElicitationBridgeError> {
+    if object.len() != questions.len()
+        || object
+            .keys()
+            .any(|key| !questions.iter().any(|question| question.id == *key))
+    {
+        return Err(ElicitationBridgeError::InvalidResponse);
+    }
+    let mut content = serde_json::Map::new();
+    for question in questions {
+        let value = object
+            .get(&question.id)
+            .ok_or(ElicitationBridgeError::InvalidResponse)?;
+        if question.multi_select {
+            if !value.is_array()
+                || value
+                    .as_array()
+                    .is_some_and(|values| values.iter().any(|value| value.as_str().is_none()))
+            {
+                return Err(ElicitationBridgeError::InvalidResponse);
+            }
+        } else if value.as_str().is_none() {
+            return Err(ElicitationBridgeError::InvalidResponse);
+        }
+        content.insert(question.id.clone(), value.clone());
+    }
+    Ok(content)
 }
 
 /// 从一个有界 JSON 视图读取字符串响应 ID；严格 DTO 校验仍由对应路由完成。
@@ -1164,6 +1943,376 @@ mod tests {
         assert_eq!(response.answers[0].values, ["直接实现"]);
         assert_eq!(response.answers[1].values, ["测试", "Clippy"]);
         assert_eq!(coordinator.pending_len(), 0);
+    }
+
+    /// 本地 V4 RPC 不经 WebHost 发送 ACP Client Request；pending 进入 Delivered 后由
+    /// conversation snapshot 展示，`resolveInteraction` 仍须经过同一严格问题 Schema。
+    #[tokio::test]
+    async fn frontend_v4_projection_route_keeps_pending_until_resolve() {
+        let storage = tempfile::tempdir().expect("应创建测试 Runtime 存储目录");
+        let runtime = crate::agent_runtime::AgentRuntime::new_for_control_test(storage.path())
+            .expect("测试 Runtime 应创建");
+        let coordinator = Arc::clone(runtime.elicitation_coordinator());
+        let connection_id = connection("rpc-41");
+        coordinator
+            .negotiate_connection_capabilities(&connection_id, &form_capabilities())
+            .expect("前端连接能力协商应成功");
+        let session = SessionId::new("session-v4-projection").expect("测试 Session 标识有效");
+        coordinator
+            .bind_session_connection(session.as_str(), &connection_id)
+            .expect("测试 Session 应绑定前端连接");
+        let sink = Arc::new(crate::client_request::SessionDeliverySink::for_projection(
+            Arc::downgrade(&runtime),
+            session.as_str().to_owned(),
+            connection_id.clone(),
+        ));
+        let handler =
+            coordinator.handler_for_connection(session.clone(), connection_id.clone(), sink);
+        let answer = handler.ask(request(session.as_str()));
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if !coordinator
+                    .pending_views_for_connection(&connection_id)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("投影型问答应进入可回答 pending");
+        let request_id = coordinator
+            .pending_request_id_for_session(session.as_str())
+            .expect("pending 应保留稳定请求标识");
+        coordinator
+            .respond_workflow_answer_from_connection(
+                &connection_id,
+                &request_id,
+                &json!({
+                    "action": "accept",
+                    "content": {
+                        "answers": {
+                            "选择实现策略": "直接实现",
+                            "选择验证项": "测试, Clippy"
+                        },
+                        "answer_0": "直接实现",
+                        "answer_1": ["测试", "Clippy"]
+                    }
+                })
+                .to_string(),
+            )
+            .expect("Source V4 回执应由 Coordinator 严格解析");
+        let response = answer.await.expect("投影型 AskUser 应收到答案");
+        assert_eq!(response.answers[0].values, ["直接实现"]);
+        assert_eq!(coordinator.pending_len(), 0);
+
+        let unbound_connection = connection("rpc-42");
+        coordinator
+            .negotiate_connection_capabilities(&unbound_connection, &form_capabilities())
+            .expect("未绑定连接也应完成能力协商");
+        let unbound_session = SessionId::new("session-v4-unbound").expect("测试 Session 标识有效");
+        let unbound_sink = Arc::new(crate::client_request::SessionDeliverySink::for_projection(
+            Arc::downgrade(&runtime),
+            unbound_session.as_str().to_owned(),
+            unbound_connection.clone(),
+        ));
+        let unbound_handler = coordinator.handler_for_connection(
+            unbound_session.clone(),
+            unbound_connection,
+            unbound_sink,
+        );
+        let unbound_result = timeout(
+            Duration::from_secs(1),
+            unbound_handler.ask(request(unbound_session.as_str())),
+        )
+        .await
+        .expect("未绑定连接不应悬挂 AskUser");
+        assert!(unbound_result.is_err());
+        assert_eq!(coordinator.pending_len(), 0);
+    }
+
+    /// App 偏好必须控制现有 pending，而不是只影响下一次工具装配。
+    #[tokio::test]
+    async fn runtime_preference_updates_existing_auto_resolution() {
+        let preferences = Arc::new(std::sync::RwLock::new(AppRuntimePreferences::default()));
+        let coordinator = Arc::new(ElicitationCoordinator::with_gate_and_preferences(
+            Arc::new(ClientRequestDisplayGate::new()),
+            preferences.clone(),
+        ));
+        coordinator
+            .negotiate_client_capabilities(&form_capabilities())
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let handler = coordinator.handler(
+            SessionId::new("session-preference").unwrap(),
+            Arc::new(RecordingSink { sender }),
+        );
+        let answer = handler.ask(request("session-preference"));
+        let frame = receiver.recv().await.expect("偏好测试请求应送达");
+        let request_id = frame_request_id(&frame);
+        assert!(matches!(
+            coordinator.pending_views_for_connection(&embedded_desktop_connection())[0]
+                .auto_resolution,
+            Some(PendingElicitationAutoResolution::Active { .. })
+        ));
+
+        *preferences.write().unwrap() = AppRuntimePreferences {
+            ask_user_question_auto_resolution_enabled: false,
+        };
+        coordinator.sync_auto_resolution_preference(false);
+        assert!(
+            coordinator.pending_views_for_connection(&embedded_desktop_connection())[0]
+                .auto_resolution
+                .is_none()
+        );
+
+        *preferences.write().unwrap() = AppRuntimePreferences::default();
+        coordinator.sync_auto_resolution_preference(true);
+        assert!(matches!(
+            coordinator.pending_views_for_connection(&embedded_desktop_connection())[0]
+                .auto_resolution,
+            Some(PendingElicitationAutoResolution::Active { .. })
+        ));
+        coordinator
+            .respond(
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"action": "cancel"}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        assert!(answer.await.is_err());
+    }
+
+    /// 到期自动继续必须通过 core 合法的空答案完成每个问题，不能悬挂工具 Future。
+    #[tokio::test]
+    async fn auto_resolution_finishes_with_empty_answers() {
+        let coordinator = Arc::new(negotiated_coordinator());
+        let (sender, mut receiver) = mpsc::channel(1);
+        let handler = coordinator.handler(
+            SessionId::new("session-auto").unwrap(),
+            Arc::new(RecordingSink { sender }),
+        );
+        let answer = handler.ask(request("session-auto"));
+        let frame = receiver.recv().await.expect("自动继续测试请求应送达");
+        let request_id = frame_request_id(&frame);
+        coordinator.auto_resolve(&request_id);
+        let response = timeout(Duration::from_secs(2), answer)
+            .await
+            .expect("自动继续应唤醒 AskUser")
+            .expect("空答案应通过工具响应校验");
+        assert_eq!(response.answers.len(), 2);
+        assert!(
+            response
+                .answers
+                .iter()
+                .all(|answer| answer.values.is_empty())
+        );
+        assert_eq!(coordinator.pending_len(), 0);
+    }
+
+    /// Workflow 控制面只能按真实 pending Schema 翻译单题兼容答案和多题结果。
+    #[tokio::test]
+    async fn workflow_answer_helper_translates_single_and_multi_answers() {
+        let coordinator = Arc::new(ElicitationCoordinator::new());
+        let target = connection("workflow-answer-target");
+        coordinator
+            .negotiate_connection_capabilities(&target, &form_capabilities())
+            .unwrap();
+        coordinator
+            .bind_session_connection("workflow-parent", &target)
+            .unwrap();
+        coordinator
+            .bind_session_connection("workflow-actor", &target)
+            .unwrap();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let handler = coordinator.handler_for_connection_projected(
+            SessionId::new("workflow-actor").unwrap(),
+            "workflow-parent".to_owned(),
+            target.clone(),
+            Arc::new(RecordingSink { sender }),
+        );
+        let mut changes = coordinator.subscribe_changes();
+
+        let mut single_request = request("workflow-actor");
+        single_request.questions.truncate(1);
+        let single_answer = handler.ask(single_request);
+        let single_frame = receiver.recv().await.unwrap();
+        assert_eq!(
+            changes.recv().await.unwrap().display_session_id,
+            "workflow-parent"
+        );
+        assert_eq!(
+            serde_json::to_value(&single_frame).unwrap()["params"]["sessionId"],
+            "workflow-parent"
+        );
+        let single_id = frame_request_id(&single_frame);
+        let pending_views = coordinator.pending_views_for_connection(&target);
+        assert_eq!(pending_views.len(), 1);
+        assert_eq!(pending_views[0].request_id, single_id);
+        assert_eq!(pending_views[0].session_id, "workflow-actor");
+        assert_eq!(
+            pending_views[0].display_session_id.as_deref(),
+            Some("workflow-parent")
+        );
+        assert_eq!(
+            coordinator
+                .pending_session_id_for_request(&single_id)
+                .as_deref(),
+            Some("workflow-actor")
+        );
+        coordinator
+            .respond_workflow_answer_from_connection(
+                &target,
+                &single_id,
+                r#"{"optionId":"直接实现"}"#,
+            )
+            .expect("单题 optionId 应按原问题 Schema 转换");
+        assert_eq!(single_answer.await.unwrap().answers[0].values, ["直接实现"]);
+
+        let multi_answer = handler.ask(request("workflow-actor"));
+        let multi_id = frame_request_id(&receiver.recv().await.unwrap());
+        coordinator
+            .respond_workflow_answer_from_connection(
+                &target,
+                &multi_id,
+                &json!({
+                    "answers": [
+                        {"id": "strategy", "values": ["直接实现"]},
+                        {"id": "checks", "values": ["测试", "Clippy"]}
+                    ]
+                })
+                .to_string(),
+            )
+            .expect("多题 answers 应按原问题 Schema 转换");
+        let response = multi_answer.await.unwrap();
+        assert_eq!(response.answers[0].values, ["直接实现"]);
+        assert_eq!(response.answers[1].values, ["测试", "Clippy"]);
+    }
+
+    /// Source ElicitationDialog 的真实回执使用题目文案和 answer_N，必须还原到
+    /// Rust 生成的 ACP question id，不能把 renderer-local 字段原样送进 ACP。
+    #[test]
+    fn source_form_answer_content_maps_to_question_ids() {
+        let questions = request("source-answer").questions;
+        let result = workflow_answer_result(
+            &questions,
+            json!({
+                "action": "accept",
+                "content": {
+                    "answers": {
+                        "选择实现策略": "直接实现",
+                        "选择验证项": "测试, Clippy"
+                    },
+                    "answer_0": "直接实现",
+                    "answer_1": ["测试", "Clippy"]
+                }
+            }),
+        )
+        .expect("Source 表单回答应按位置映射");
+        assert_eq!(
+            result,
+            json!({
+                "action": "accept",
+                "content": {
+                    "strategy": "直接实现",
+                    "checks": ["测试", "Clippy"]
+                }
+            })
+        );
+    }
+
+    /// Source 回执的未知字段或多选错误类型必须拒绝，避免用猜测继续模型回合。
+    #[test]
+    fn source_form_answer_content_rejects_unknown_or_ambiguous_values() {
+        let questions = request("source-answer-invalid").questions;
+        assert_eq!(
+            workflow_answer_result(
+                &questions,
+                json!({
+                    "action": "accept",
+                    "content": {
+                        "answers": {},
+                        "answer_0": "直接实现",
+                        "unexpected": "旁路"
+                    }
+                })
+            ),
+            Err(ElicitationBridgeError::InvalidResponse)
+        );
+        assert_eq!(
+            workflow_answer_result(
+                &questions,
+                json!({
+                    "action": "accept",
+                    "content": {
+                        "answers": {},
+                        "answer_0": "直接实现",
+                        "answer_1": "测试, Clippy"
+                    }
+                })
+            ),
+            Err(ElicitationBridgeError::InvalidResponse)
+        );
+    }
+
+    /// UUID v7 交互标识跨 Coordinator/冷启动边界不依赖会重置的进程序号。
+    #[test]
+    fn elicitation_request_ids_are_uuid_backed_and_not_reused() {
+        let first = next_request_id();
+        let second = next_request_id();
+        assert_ne!(first, second);
+        for id in [first, second] {
+            let suffix = id
+                .strip_prefix("elicitation-")
+                .expect("问答 ID 应带类型前缀");
+            assert_eq!(suffix.len(), 36);
+            assert_eq!(suffix.as_bytes()[8], b'-');
+            assert_eq!(suffix.as_bytes()[13], b'-');
+            assert_eq!(suffix.as_bytes()[18], b'-');
+            assert_eq!(suffix.as_bytes()[23], b'-');
+        }
+    }
+
+    /// 两个独立问答 Coordinator 模拟冷实例恢复时，新请求不能复用旧 ID。
+    #[tokio::test]
+    async fn elicitation_request_ids_stay_unique_across_coordinator_instances() {
+        let first_coordinator = Arc::new(negotiated_coordinator());
+        let (first_sender, mut first_receiver) = mpsc::channel(1);
+        let first_handler = first_coordinator.handler(
+            SessionId::new("cold-elicitation-1").unwrap(),
+            Arc::new(RecordingSink {
+                sender: first_sender,
+            }),
+        );
+        let first_wait = first_handler.ask(request("cold-elicitation-1"));
+        let first_id =
+            frame_request_id(&first_receiver.recv().await.expect("首个实例应发出问答请求"));
+        first_coordinator.shutdown();
+        assert!(first_wait.await.is_err());
+
+        let second_coordinator = Arc::new(negotiated_coordinator());
+        let (second_sender, mut second_receiver) = mpsc::channel(1);
+        let second_handler = second_coordinator.handler(
+            SessionId::new("cold-elicitation-2").unwrap(),
+            Arc::new(RecordingSink {
+                sender: second_sender,
+            }),
+        );
+        let second_wait = second_handler.ask(request("cold-elicitation-2"));
+        let second_id = frame_request_id(
+            &second_receiver
+                .recv()
+                .await
+                .expect("恢复实例应发出新的问答请求"),
+        );
+        assert_ne!(first_id, second_id);
+        second_coordinator.shutdown();
+        assert!(second_wait.await.is_err());
     }
 
     /// 同 Session 的其他连接不能抢答，拒绝后原请求仍可由目标连接完成。

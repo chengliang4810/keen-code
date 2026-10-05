@@ -12,6 +12,7 @@ mod client_request;
 mod diagnostics;
 mod elicitation;
 mod extensions;
+mod frontend_rpc;
 mod http_response;
 mod mcp_oauth;
 mod memories;
@@ -22,9 +23,15 @@ mod native_command_tests;
 mod native_mailbox_tests;
 #[cfg(all(test, windows, feature = "native-desktop-tests"))]
 mod native_visual_tests;
+#[cfg(all(test, windows, feature = "native-desktop-tests"))]
+// tauri-winres 生成单个 COFF resource；仅测试 harness 需要把它作为最终链接输入。
+#[link(name = "resource", kind = "static", modifiers = "-bundle")]
+unsafe extern "C" {}
 mod network_proxy;
 mod path_utils;
+mod permissions;
 mod personalization;
+mod platform_file;
 mod plugin_secrets;
 mod plugins;
 mod power_management;
@@ -36,8 +43,27 @@ mod storage;
 mod task_notifications;
 mod terminal;
 mod tray;
+mod ui_attachments;
+mod ui_dev_servers;
+mod ui_editors;
+mod ui_git;
+mod ui_git_actions;
+mod ui_git_stash;
+mod ui_keybindings;
+mod ui_local_preview;
+mod ui_plugins;
+mod ui_presentation;
+mod ui_profile;
+mod ui_project_search;
+mod ui_pull_requests;
+mod ui_skills;
+mod ui_worktree_archive;
+mod ui_worktree_handoff;
+mod ui_worktree_remove;
+mod ui_worktrees;
 mod web_host;
 mod webview_cleanup;
+mod workflows;
 mod workspace;
 
 use crate::agent_runtime::AgentRuntime;
@@ -548,6 +574,26 @@ async fn providers_list(app: AppHandle) -> Result<ProvidersListResult, String> {
     .map_err(|error| error.to_string())?
 }
 
+/// 原模型设置页的目录更新，保留宿主持有的完整供应商配置并热加载运行时。
+#[tauri::command]
+async fn providers_update_models(
+    app: AppHandle,
+    expected: Vec<String>,
+    models: Vec<String>,
+) -> Result<ProvidersListResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let runtime = require_owned_runtime(&app)?;
+        let result =
+            providers::update_models(&app, expected, models).map_err(|error| error.to_string())?;
+        runtime
+            .reload_providers(&app)
+            .map_err(|error| error.to_string())?;
+        Ok(result)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// 新增或更新一个自定义模型供应商。
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
@@ -768,11 +814,67 @@ pub fn run() {
 /// 共享正式桌面装配，原生测试只在独立测试进程中断开受控记录器通道。
 fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
     let builder = tauri::Builder::default()
-        // 必须最先注册:重复启动的桌面进程在进入 setup 与 Host 仲裁之前就被
-        // 终止,并由首个实例把既有主窗口带回前台。
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .manage(ui_local_preview::PreviewGrants::default())
+        .manage(Arc::new(ui_dev_servers::DevServers::default()))
+        .on_window_event(|window, event| {
+            // 系统菜单和原生标题栏也能改变最大化/全屏状态，不能只监听 RPC 命令。
+            if window.label() == "main"
+                && matches!(
+                    event,
+                    tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. }
+                )
+                && let Some(webview) = window.app_handle().get_webview_window("main")
+                && let Err(error) =
+                    frontend_rpc::desktop_controls::emit_window_chrome_state(&webview)
+            {
+                tracing::warn!(%error, "同步原生主窗口状态失败");
+            }
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && let Some(gateway) = window.app_handle().try_state::<frontend_rpc::RpcGateway>()
+                && let Err(error) = gateway.close_window(window.label())
+            {
+                tracing::error!(%error, "关闭窗口 RPC 连接失败");
+            }
+        })
+        .register_asynchronous_uri_scheme_protocol("zcode-media", |context, request, responder| {
+            let app = context.app_handle().clone();
+            let main_webview = context.webview_label() == "main";
+            // 每次请求均复核服务签发的短期预览授权；读取放到阻塞线程避免卡住 WebView。
+            tauri::async_runtime::spawn_blocking(move || {
+                responder.respond(frontend_rpc::media_protocol::protocol_response(
+                    &app,
+                    main_webview,
+                    request,
+                ));
+            });
+        })
+        .register_asynchronous_uri_scheme_protocol(
+            "local-preview",
+            |context, request, responder| {
+                let app = context.app_handle().clone();
+                let main_webview = context.webview_label() == "main";
+                tauri::async_runtime::spawn_blocking(move || {
+                    responder.respond(ui_local_preview::protocol_response(
+                        &app,
+                        main_webview,
+                        request,
+                    ));
+                });
+            },
+        );
+    // 正式应用仍由首个实例接管窗口。显式测试构建中的隔离验收需要同时
+    // 启动不同数据根，不能让第二个测试悄悄激活第一个测试或用户常用窗口。
+    let isolated_native_test = cfg!(feature = "native-desktop-tests")
+        && std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1"))
+        && std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR").is_some();
+    let builder = if isolated_native_test {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             tray::show_main_window(app);
         }))
+    };
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build());
@@ -797,6 +899,12 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
         let elapsed_ms = page_load_boot.elapsed().as_millis();
         match payload.event() {
             tauri::webview::PageLoadEvent::Started => {
+                // 新页面不能继承旧页面的 RPC 身份，显式回收悬空请求与原始服务订阅。
+                if let Some(gateway) = webview.app_handle().try_state::<frontend_rpc::RpcGateway>()
+                    && let Err(error) = gateway.close_window(webview.label())
+                {
+                    diagnostics.log("error", "frontend.rpc", error.to_string());
+                }
                 let load_seq = page_load_started.fetch_add(1, Ordering::Relaxed) + 1;
                 if load_seq == 1 {
                     diagnostics.log(
@@ -973,6 +1081,7 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                     Arc::clone(&agent_runtime),
                     Arc::clone(&host_runtime),
                 )?;
+                app.manage(Arc::clone(&acp_host));
                 let (transport, endpoint) = desktop_host_endpoint(
                     host_runtime.data_root(),
                     host_runtime.data_root_fingerprint(),
@@ -1024,6 +1133,16 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
                 remote_client: Mutex::new(remote_client),
                 shutdown_started: AtomicBool::new(false),
             });
+            // 原 ZCode ChannelClient 的全部服务复用当前唯一 Runtime；页面不能另建宿主。
+            let frontend = Arc::new(frontend_rpc::DesktopHandler::default());
+            app.manage(Arc::clone(&frontend));
+            app.manage(frontend_rpc::RpcGateway::new(frontend));
+            frontend_rpc::session::install_workflow_call(Arc::new(|ctx, method, args| {
+                Box::pin(async move { frontend_rpc::host::workflow_call(ctx, &method, args).await })
+            }))?;
+            frontend_rpc::host::install_workflow_tools(app.handle())?;
+            // 冷启动恢复已有本地调度；没有任务时阻塞等待，不进行定时轮询。
+            frontend_rpc::services::automations::start_scheduler(app.handle());
             // 主窗口与子 WebView 的背景由前端在应用主题和皮肤生效后同步；不要在
             // Rust 启动阶段写入固定深色，否则浅色主题会在透明边缘长期露出黑底。
             // 托盘图标常驻；创建失败不阻断启动，仅记录诊断。
@@ -1037,6 +1156,20 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            frontend_rpc::dispatch::zcode_rpc_open,
+            frontend_rpc::native_actions::window_activate_workspace,
+            frontend_rpc::desktop_controls::desktop_execute_command,
+            frontend_rpc::desktop_controls::desktop_start_window_drag,
+            frontend_rpc::desktop_controls::desktop_window_chrome_state,
+            frontend_rpc::desktop_controls::desktop_zoom_level,
+            frontend_rpc::desktop_controls::desktop_resource_usage_snapshot,
+            frontend_rpc::desktop_controls::desktop_resource_manager_storage_start_scan,
+            frontend_rpc::desktop_controls::desktop_resource_manager_storage_cancel_scan,
+            frontend_rpc::desktop_controls::desktop_resource_manager_storage_get_snapshot,
+            frontend_rpc::desktop_controls::desktop_resource_manager_storage_clean,
+            frontend_rpc::desktop_controls::desktop_resource_manager_storage_reveal_path,
+            frontend_rpc::dispatch::zcode_rpc_send,
+            frontend_rpc::dispatch::zcode_rpc_close,
             settings_get,
             settings_set,
             web_host_start,
@@ -1054,11 +1187,13 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             diagnostics_resource_record,
             diagnostics_trace_record,
             startup_frontend_ready,
+            task_notifications::task_notification_show,
             app_exit::app_confirm_exit,
             app_updates::app_update_info,
             app_updates::app_update_check,
             app_updates::app_update_install,
             providers_list,
+            providers_update_models,
             providers_upsert,
             providers_remove,
             providers_select_model,
@@ -1074,6 +1209,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             analytics::request_records_list,
             analytics::task_cache_usage_get,
             analytics::usage_stats_get,
+            ui_profile::ui_profile_stats,
+            ui_profile::ui_profile_token_stats,
             personalization::custom_instructions_get,
             personalization::custom_instructions_set,
             memories::memories_status,
@@ -1112,6 +1249,34 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             extensions::marketplace_remove,
             extensions::marketplace_update,
             workspace::projects_list,
+            ui_presentation::ui_presentation_get,
+            ui_presentation::ui_workspace_paths,
+            ui_keybindings::ui_keybindings_get,
+            ui_keybindings::ui_keybindings_save,
+            ui_git::ui_git_query,
+            ui_git::ui_git_recent_commits,
+            ui_git::ui_git_mutate,
+            ui_git::ui_git_command,
+            ui_git::ui_git_blame,
+            ui_pull_requests::ui_pull_requests,
+            ui_git_stash::ui_git_stash,
+            ui_git_actions::ui_git_action,
+            ui_git_actions::ui_git_summary,
+            ui_skills::ui_skill_prompt,
+            ui_plugins::ui_plugin_references_validate,
+            ui_worktrees::ui_git_worktree_create,
+            ui_worktree_handoff::ui_git_handoff,
+            ui_worktree_remove::ui_git_worktree_remove,
+            ui_worktree_archive::ui_git_archive_cleanup,
+            ui_worktree_archive::ui_git_archive_recover,
+            ui_worktree_archive::ui_git_archive_records,
+            ui_worktree_handoff::ui_thread_session_stop,
+            ui_attachments::ui_attachment_stage,
+            ui_attachments::ui_attachment_list,
+            ui_attachments::ui_attachment_resolve,
+            ui_attachments::ui_attachment_cancel,
+            ui_presentation::ui_presentation_patch,
+            ui_presentation::ui_presentation_batch,
             workspace::project_validate,
             workspace::project_create,
             workspace::project_default_directory,
@@ -1124,6 +1289,9 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::path_open,
             workspace::url_open,
             workspace::path_reveal,
+            ui_editors::ui_editors_get_installed,
+            ui_editors::ui_editors_get_icon,
+            ui_editors::ui_editors_open,
             workspace::pick_directory,
             workspace::pick_attach_files,
             workspace::pick_text_file,
@@ -1131,11 +1299,24 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             workspace::read_local_image,
             read_tool_image,
             workspace::fs_list_dir,
+            workspace::ui_directory_list,
+            ui_project_search::ui_project_search_content,
+            ui_project_search::ui_project_search_local,
+            ui_dev_servers::ui_dev_server_start,
+            ui_dev_servers::ui_dev_server_stop,
+            ui_dev_servers::ui_dev_server_list,
+            ui_dev_servers::ui_local_servers_list,
+            ui_dev_servers::ui_local_server_stop,
+            ui_local_preview::ui_local_preview_grant,
+            ui_local_preview::ui_local_preview_read,
+            ui_local_preview::ui_resolve_out_of_root,
             workspace::fs_read_file,
             workspace::fs_write_file,
             workspace::fs_read_absolute,
             workspace::fs_write_absolute,
             workspace::fs_open_path,
+            platform_file::platform_file_save_file,
+            platform_file::platform_file_print_page_to_pdf,
             workspace::git_worktrees_list,
             workspace::git_worktree_add,
             workspace::git_worktree_gc,
@@ -1150,6 +1331,8 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             tray::tray_set_badge,
             tray::app_close_window,
             terminal::terminal_create,
+            terminal::terminal_snapshot,
+            terminal::terminal_clear_history,
             terminal::terminal_shells_list,
             terminal::terminal_write,
             terminal::terminal_resize,
@@ -1162,7 +1345,12 @@ fn desktop_builder(startup_started_at: Instant) -> tauri::Builder<tauri::Wry> {
             browser::browser_close,
             browser::browser_navigate,
             browser::browser_reload,
-            browser::browser_history
+            browser::browser_zoom,
+            browser::browser_history,
+            browser::browser_reset,
+            browser::browser_navigation_state,
+            browser::browser_surface_state,
+            browser::screenshot::browser_capture_screenshot
         ])
 }
 

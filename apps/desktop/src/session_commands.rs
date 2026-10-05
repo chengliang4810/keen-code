@@ -1,6 +1,6 @@
 //! 桌面 Session 控制面：直接操作自研 Runtime，并向前端投影标准 ACP 语义。
 
-use crate::agent_runtime::AgentRuntime;
+use crate::agent_runtime::{AgentRuntime, SessionMutationGuard, SessionWorkspaceMutationAdmission};
 use keencode_acp::schema::{SessionMode, SessionModeState};
 use keencode_resources::ResourceError;
 use keencode_runtime::{RuntimeError, RuntimeSession, StoredSessionMetadata};
@@ -74,11 +74,12 @@ fn required_identifier<'a>(value: &'a str, field: &str) -> Result<&'a str, Strin
     Ok(value)
 }
 
-/// 根据当前项目登记表授权持久 Session 的规范项目目录。
+/// 根据项目登记表或唯一内部对话根授权持久 Session 的规范目录。
 pub(crate) fn authorize_stored_root(app: &AppHandle, stored_root: &str) -> Result<PathBuf, String> {
     let canonical = crate::workspace::canonical_session_root(stored_root)?;
     let app_data_root = crate::workspace::app_data_session_root(app)?;
-    if canonical == app_data_root {
+    let conversation_root = crate::workspace::conversation_workspace_root(app)?;
+    if canonical == app_data_root || canonical == conversation_root {
         return Ok(canonical);
     }
     let registered = crate::workspace::registered_project_root(app, stored_root)?;
@@ -106,7 +107,7 @@ pub(crate) fn authorized_metadata(
     Ok((metadata, root))
 }
 
-/// 通过可重建定位索引授权 Session 所属项目，不为授权重复打开权威 Journal。
+/// 依据权威元数据授权执行目录；locator 只定位物理存储，不能作为执行授权。
 pub(crate) fn authorize_stored_session_root(
     runtime: &AgentRuntime,
     app: &AppHandle,
@@ -120,14 +121,11 @@ pub(crate) fn authorize_stored_session_root(
             .ok_or_else(|| format!("Session {session_id} 尚未创建"))?;
         return authorize_stored_root(app, &metadata.project_root);
     }
-    let id = keencode_resources::SessionId::new(session_id.to_owned()).map_err(runtime_error)?;
-    let project = keencode_resources::session_project_storage(runtime.storage_root(), &id)
-        .map_err(runtime_error)?
-        .ok_or_else(|| format!("Session {session_id} 不存在"))?;
-    authorize_stored_root(app, &project.path)
+    let (_, root) = authorized_metadata(runtime, app, session_id)?;
+    Ok(root)
 }
 
-/// 打开一个已经通过当前项目登记表授权的 Session。
+/// 打开一个已经通过项目登记表或唯一内部对话根授权的 Session。
 pub(crate) fn open_authorized_session(
     runtime: &AgentRuntime,
     app: &AppHandle,
@@ -144,9 +142,11 @@ pub(crate) struct ClosedSessionMutationContext {
     /// Session 绑定且已经通过项目登记表授权的规范根目录。
     pub(crate) project_root: PathBuf,
     /// 变更前 Session 是否是桌面当前焦点。
-    was_focused: bool,
+    pub(crate) was_focused: bool,
     /// 临时关闭期间保留且不得重连或从磁盘猜测的 Session MCP 运行态。
-    session_mcp: crate::agent_runtime::SuspendedSessionMcp,
+    pub(crate) session_mcp: crate::agent_runtime::SuspendedSessionMcp,
+    /// 覆盖 Git、workspace Journal 与恢复的 Turn gate；drop 前 root start 只能等待。
+    _mutation_guard: SessionMutationGuard,
 }
 
 /// 投递泵取消后等待最后一个共享句柄释放时允许的最大调度重试次数。
@@ -170,55 +170,95 @@ pub(crate) async fn retry_session_mutation<T>(
     unreachable!("有限重试循环最后一次必须返回结果")
 }
 
-/// 确认 Session 没有活动工作，停止投递并释放资源层独占 lease。
+/// 在 Session Turn gate 内确认没有活动工作，停止投递并释放资源层独占 lease。
+/// 新的 root start 即使先取得 admission，也会在关闭前复查并使本次 mutation 退出。
 pub(crate) async fn close_session_for_mutation(
     runtime: &Arc<AgentRuntime>,
     app: &AppHandle,
     session_id: &str,
 ) -> Result<ClosedSessionMutationContext, String> {
     let (_, project_root) = authorized_metadata(runtime, app, session_id)?;
-    let session = runtime
-        .open_or_create_session(&project_root, Some(session_id), "session-mutation-open")
-        .map_err(runtime_error)?;
-    if runtime
-        .session_has_active_work(session_id)
-        .map_err(runtime_error)?
-    {
-        return Err("运行中的对话不能复制或编辑，请先停止任务".to_owned());
-    }
     let was_focused = runtime
         .focused_session_id()
         .map_err(runtime_error)?
         .as_deref()
         == Some(session_id);
-    drop(session);
-    let session_mcp = runtime
-        .suspend_session_mcp(session_id)
-        .map_err(runtime_error)?;
-    if let Err(error) = runtime.close_session(session_id).await {
-        let _ = runtime.restore_session_mcp(session_id, &project_root, &session_mcp);
-        let restore = runtime
-            .ensure_session_delivery(session_id)
-            .map(|_| ())
-            .map_err(runtime_error);
-        if was_focused {
-            let _ = runtime.focus_session(session_id);
+    // 在同一个 Turn gate 下判定“仍登记”或“已冷关闭”。冷路径不能先 reopen，
+    // 也不能在返回上下文后才取得 gate，否则 root start 可在 Git 事务中重新登记。
+    let Some(admission) = runtime
+        .begin_workspace_mutation(session_id)
+        .await
+        .map_err(runtime_error)?
+    else {
+        return Err("运行中的对话不能复制或编辑，请先停止任务".to_owned());
+    };
+    match admission {
+        SessionWorkspaceMutationAdmission::Closed(mutation_guard) => {
+            let session_mcp = runtime
+                .suspend_session_mcp(session_id)
+                .map_err(runtime_error)?;
+            Ok(ClosedSessionMutationContext {
+                project_root,
+                was_focused,
+                session_mcp,
+                _mutation_guard: mutation_guard,
+            })
         }
-        return match restore {
-            Ok(()) => Err(runtime_error(error)),
-            Err(restore_error) => Err(format!(
-                "关闭 Session 失败：{}；恢复投递也失败：{restore_error}",
-                runtime_error(error)
-            )),
-        };
+        SessionWorkspaceMutationAdmission::Registered(mutation) => {
+            // 已登记路径仍通过 open helper 完成项目根校验；Turn gate 已由 admission
+            // 持有，因此不会重新引入 start/open 与 close 的竞态。
+            let session = runtime
+                .open_or_create_session(&project_root, Some(session_id), "session-mutation-open")
+                .map_err(runtime_error)?;
+            drop(session);
+            let session_mcp = runtime
+                .suspend_session_mcp(session_id)
+                .map_err(runtime_error)?;
+            let mutation_guard = match mutation.close_and_hold().await {
+                Ok(Some(mutation_guard)) => mutation_guard,
+                Ok(None) => {
+                    let _ = runtime.restore_session_mcp(session_id, &project_root, &session_mcp);
+                    let restore = runtime
+                        .ensure_session_delivery(session_id)
+                        .map(|_| ())
+                        .map_err(runtime_error);
+                    if was_focused {
+                        let _ = runtime.focus_session(session_id);
+                    }
+                    return match restore {
+                        Ok(()) => Err("运行中的对话不能复制或编辑，请先停止任务".to_owned()),
+                        Err(restore_error) => Err(format!(
+                            "关闭 Session 被活动任务拒绝；恢复投递也失败：{restore_error}"
+                        )),
+                    };
+                }
+                Err(error) => {
+                    let _ = runtime.restore_session_mcp(session_id, &project_root, &session_mcp);
+                    let restore = runtime
+                        .ensure_session_delivery(session_id)
+                        .map(|_| ())
+                        .map_err(runtime_error);
+                    if was_focused {
+                        let _ = runtime.focus_session(session_id);
+                    }
+                    return match restore {
+                        Ok(()) => Err(runtime_error(error)),
+                        Err(restore_error) => Err(format!(
+                            "关闭 Session 失败：{}；恢复投递也失败：{restore_error}",
+                            runtime_error(error),
+                        )),
+                    };
+                }
+            };
+            // 关闭成功后保留 MCP 所有权，调用方在整个 workspace 事务中恢复。
+            Ok(ClosedSessionMutationContext {
+                project_root,
+                was_focused,
+                session_mcp,
+                _mutation_guard: mutation_guard,
+            })
+        }
     }
-    // 投递泵收到取消后在下一次调度点释放最后一个 RuntimeSession 共享句柄。
-    tokio::task::yield_now().await;
-    Ok(ClosedSessionMutationContext {
-        project_root,
-        was_focused,
-        session_mcp,
-    })
 }
 
 /// 无论资源事务成功或失败，都重新打开源 Session 并恢复投递与原焦点。
@@ -227,8 +267,13 @@ pub(crate) fn restore_session_after_mutation(
     session_id: &str,
     context: &ClosedSessionMutationContext,
 ) -> Result<(), String> {
+    // 先恢复唯一的 MCP 所有权，再打开 Session。这样后续 open/delivery 失败时，
+    // 下一次启动仍能看到真实运行态，不会先创建一个空侧车掩盖恢复失败。
     runtime
-        .open_or_create_session(
+        .restore_session_mcp(session_id, &context.project_root, &context.session_mcp)
+        .map_err(runtime_error)?;
+    runtime
+        .open_or_create_session_for_workspace_mutation(
             &context.project_root,
             Some(session_id),
             "session-mutation-restore",
@@ -237,13 +282,49 @@ pub(crate) fn restore_session_after_mutation(
     runtime
         .ensure_session_delivery(session_id)
         .map_err(runtime_error)?;
-    runtime
-        .restore_session_mcp(session_id, &context.project_root, &context.session_mcp)
-        .map_err(runtime_error)?;
     if context.was_focused {
         runtime.focus_session(session_id).map_err(runtime_error)?;
     }
     Ok(())
+}
+
+/// 事务结果可能不确定，先由权威日志恢复当前目录，再选择新旧 MCP 侧车。
+pub(crate) async fn restore_session_after_workspace_mutation(
+    runtime: &Arc<AgentRuntime>,
+    app: &AppHandle,
+    session_id: &str,
+    context: &ClosedSessionMutationContext,
+    prepared: &crate::agent_runtime::PreparedWorkspaceMcp,
+) -> Result<PathBuf, String> {
+    let (_, root) = authorized_metadata(runtime, app, session_id)?;
+    if root == context.project_root {
+        // 同根回退不应把目标侧车回挂到旧项目；旧侧车才是本次恢复所有权。
+        prepared.discarded();
+        runtime
+            .restore_session_mcp(session_id, &root, &context.session_mcp)
+            .map_err(runtime_error)?;
+    } else {
+        runtime
+            .commit_workspace_mcp(session_id, &context.session_mcp, prepared)
+            .await
+            .map_err(runtime_error)?;
+    }
+    // MCP 发布先于 open/delivery；恢复后续失败时，已发布的真实侧车仍由
+    // Runtime 所有，下一次 open/reconcile 可以继续使用，不会退化为空状态。
+    runtime
+        .open_or_create_session_for_workspace_mutation(
+            &root,
+            Some(session_id),
+            "workspace-mutation-restore",
+        )
+        .map_err(runtime_error)?;
+    runtime
+        .ensure_session_delivery(session_id)
+        .map_err(runtime_error)?;
+    if context.was_focused {
+        runtime.focus_session(session_id).map_err(runtime_error)?;
+    }
+    Ok(root)
 }
 
 /// 创建当前没有桌面焦点时使用的空闲快照。
@@ -285,7 +366,7 @@ pub fn session_disconnect(
 
 #[cfg(test)]
 mod tests {
-    use super::{ULTRA_MODE_CONTRACT_EN, required_identifier};
+    use super::{SessionWorkspaceMutationAdmission, ULTRA_MODE_CONTRACT_EN, required_identifier};
 
     /// Session 标识必须稳定拒绝空值、隐式裁剪和控制字符。
     #[test]
@@ -306,5 +387,30 @@ mod tests {
         assert!(ULTRA_MODE_CONTRACT_EN.contains("absolute path, assignment, and status"));
         assert!(ULTRA_MODE_CONTRACT_EN.contains("target=/root"));
         assert!(ULTRA_MODE_CONTRACT_EN.contains("followup_task must never target /root"));
+    }
+
+    /// 前置 stop 后交接应在线性化 gate 下取得冷 admission，不得为二次 close 重新登记。
+    #[test]
+    fn pre_stopped_session_uses_closed_workspace_admission() {
+        let fixture = tempfile::tempdir().unwrap();
+        let project = fixture.path().join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let runtime =
+            crate::agent_runtime::AgentRuntime::new_for_control_test(fixture.path().join("data"))
+                .unwrap();
+        let session = runtime
+            .open_or_create_session(&project, None, "pre-stopped-handoff")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        tauri::async_runtime::block_on(runtime.close_session(&session_id)).unwrap();
+        let admission =
+            tauri::async_runtime::block_on(runtime.begin_workspace_mutation(&session_id))
+                .unwrap()
+                .expect("停止后的 Session 应取得冷 workspace admission");
+        assert!(matches!(
+            admission,
+            SessionWorkspaceMutationAdmission::Closed(_)
+        ));
     }
 }

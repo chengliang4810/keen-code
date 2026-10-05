@@ -47,6 +47,8 @@ pub(crate) mod benchmark;
 mod extensions;
 mod file_changes;
 mod mcp_oauth;
+mod workspace_handoff;
+mod worktree_archive;
 
 /// 在创建应用级 Registry 时绑定有回执的 ACP OAuth 通知接收器。
 pub(crate) fn mcp_oauth_event_sink(
@@ -523,6 +525,7 @@ async fn run_task_notification_pump(
         };
         let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, false);
         let request = PromptDriveRequest {
+            references: Vec::new(),
             connection_id,
             session_id: session_id.clone(),
             operation_id,
@@ -608,6 +611,7 @@ impl AcpHost {
         self.runtime
             .elicitation_coordinator()
             .disconnect(connection_id);
+        self.runtime.disconnect_permission_connection(connection_id);
         if let Ok(reports) = self.prompt_queue.disconnect_report(connection_id)
             && !reports.is_empty()
         {
@@ -920,6 +924,11 @@ impl AcpHost {
             .ok_or(HostFailure::InvalidParams)?;
         match method {
             OPERATION_ADMIT_METHOD => {
+                // detached CLI 尚未定义资源身份指纹；明确拒绝扩展，不能静默丢弃选择。
+                crate::ui_plugins::reject_unsupported_references(
+                    params.get("_meta").and_then(Value::as_object),
+                )
+                .map_err(|_| HostFailure::InvalidParams)?;
                 let session_id = params
                     .get("sessionId")
                     .and_then(Value::as_str)
@@ -957,6 +966,7 @@ impl AcpHost {
                 let payload_digest = format!("{:x}", Sha256::digest(text.as_bytes()));
                 let status = self
                     .admit_prompt(PromptDriveRequest {
+                        references: Vec::new(),
                         connection_id: connection_id.clone(),
                         session_id,
                         operation_id,
@@ -1139,6 +1149,8 @@ impl AcpHost {
         request: schema::NewSessionRequest,
     ) -> Result<schema::NewSessionResponse, HostFailure> {
         let _control = self.control_gate.lock().await;
+        // checkout 清理与新 Session 绑定共用门，避免引用检查后又创建同目录会话。
+        let _git = crate::ui_git_stash::STASH_GATE.lock().await;
         let mcp_servers = request.mcp_servers.clone();
         let project_root = self.authorized_cwd(&request.cwd)?;
         if !mcp_servers.is_empty() {
@@ -1363,13 +1375,24 @@ impl AcpHost {
     ) -> Result<schema::PromptResponse, HostFailure> {
         let session_id = request.session_id.0.as_ref().to_owned();
         let text = prompt_text(request.prompt)?;
+        let references = crate::ui_plugins::decode_references(request.meta.as_ref())
+            .map_err(|_| HostFailure::InvalidParams)?;
+        if !references.is_empty() && text.starts_with(WORKFLOW_COMMAND_PREFIX) {
+            return Err(HostFailure::InvalidParams);
+        }
         // /workflow 斜杠命令：后续文本是 {"steps":[...]} 或直接字符串数组。
         if let Some(spec) = text.strip_prefix(WORKFLOW_COMMAND_PREFIX) {
             let steps = parse_workflow_steps(spec)?;
             let workflow_id = format!("{:x}", unix_time_ms());
             let journal_dir = workflow_journal_dir(&self.app).map_err(|_| HostFailure::Internal)?;
             let outcomes = self
-                .run_workflow(&session_id, &workflow_id, steps, &journal_dir)
+                .run_workflow(
+                    connection_id,
+                    &session_id,
+                    &workflow_id,
+                    steps,
+                    &journal_dir,
+                )
                 .await?;
             let report = serde_json::json!({
                 "workflowId": workflow_id,
@@ -1403,7 +1426,10 @@ impl AcpHost {
             );
             return Err(HostFailure::Internal);
         }
-        let payload_digest = prompt_payload_digest(&session_id, &turn_id, &text, ultra_mode);
+        crate::ui_plugins::validate_for_session(&self.app, &project_root, &text, &references)
+            .map_err(|_| HostFailure::InvalidParams)?;
+        let payload_digest =
+            prompt_reference_digest(&session_id, &turn_id, &text, ultra_mode, &references);
         let status = self
             .admit_prompt(PromptDriveRequest {
                 connection_id: connection_id.clone(),
@@ -1411,6 +1437,7 @@ impl AcpHost {
                 operation_id: operation_id.clone(),
                 turn_id,
                 text,
+                references,
                 project_root,
                 payload_digest,
                 ultra_mode,
@@ -1516,6 +1543,13 @@ impl AcpHost {
         self.ensure_extensions(&request.project_root)
             .await
             .map_err(|failure| (failure, "extension_setup_failed"))?;
+        crate::ui_plugins::validate_for_session(
+            &self.app,
+            &request.project_root,
+            &request.text,
+            &request.references,
+        )
+        .map_err(|_| (HostFailure::InvalidParams, "input_references_invalid"))?;
         let prompt_start_control = self
             .lock_session_control(&request.session_id)
             .await
@@ -1550,9 +1584,11 @@ impl AcpHost {
                 &request.turn_id,
                 &request.text,
                 RootTurnOptions {
+                    references: request.references.clone(),
                     developer_context,
                     plan_enabled: snapshot.state.plan.enabled,
                     elicitation_connection_id: Some(request.connection_id.clone()),
+                    ..RootTurnOptions::default()
                 },
             )
             .await
@@ -1599,6 +1635,7 @@ impl AcpHost {
     /// Journal 记录跳过（只回放结果），running 视为中断重跑该步。
     pub(crate) async fn run_workflow(
         self: &Arc<Self>,
+        connection_id: &keencode_acp::ConnectionId,
         session_id: &str,
         workflow_id: &str,
         steps: Vec<String>,
@@ -1609,8 +1646,6 @@ impl AcpHost {
         let mut journal = WorkflowJournal::load(journal_dir, workflow_id)
             .unwrap_or_else(|| WorkflowJournal::new(workflow_id, session_id, &steps));
         journal.steps_total = journal.steps.len();
-        let connection_id = keencode_acp::ConnectionId::new(TASK_NOTIFICATION_CONNECTION)
-            .map_err(|_| HostFailure::InvalidParams)?;
         let mut outcomes = Vec::new();
         for (index, prompt) in steps.into_iter().enumerate() {
             if journal
@@ -1637,6 +1672,7 @@ impl AcpHost {
             let payload_digest = prompt_payload_digest(session_id, &turn_id, &prompt, false);
             let admitted = self
                 .admit_prompt(PromptDriveRequest {
+                    references: Vec::new(),
                     connection_id: connection_id.clone(),
                     session_id: session_id.to_owned(),
                     operation_id: operation_id.clone(),
@@ -1890,6 +1926,14 @@ impl AcpHost {
             Err(RuntimeError::SessionNotRegistered) => {}
             Err(_) => return Err(HostFailure::Internal),
         }
+        // 生命周期统计先落盘；删除会话不能回减已发生的用户活动。
+        let profile_root = self.runtime.storage_root().to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::ui_profile::preserve_before_delete(&profile_root)
+        })
+        .await
+        .map_err(internal_failure)?
+        .map_err(internal_failure)?;
         retry_session_mutation(|| self.runtime.runtime_manager().delete(session_id.clone()))
             .await
             .map_err(|error| internal_failure(error))?;
@@ -2007,6 +2051,9 @@ impl AcpHost {
             let current = session
                 .snapshot()
                 .map_err(|error| internal_failure(error))?;
+            self.runtime
+                .set_permission_mode_from_wire(&session_id, Some(mode_id))
+                .map_err(map_runtime_failure)?;
             return Ok(schema::SetSessionModeResponse::new()
                 .meta(Some(snapshot_meta(&self.app, &current, None))));
         }
@@ -2022,6 +2069,9 @@ impl AcpHost {
         session
             .set_plan(&operation_id, plan)
             .map_err(|error| internal_failure(error))?;
+        self.runtime
+            .set_permission_mode_from_wire(&session_id, Some(mode_id))
+            .map_err(map_runtime_failure)?;
         let updated = session
             .snapshot()
             .map_err(|error| internal_failure(error))?;
@@ -2110,6 +2160,10 @@ impl AcpHost {
         }
         let operation_id = operation_id(request.meta.as_ref())?;
         let title = meta_text(request.meta.as_ref(), META_TITLE, 512)?;
+        let through_turn_id = meta_text(request.meta.as_ref(), "keencode/forkThroughTurnId", 128)?
+            .map(keencode_resources::TurnId::new)
+            .transpose()
+            .map_err(|_| HostFailure::InvalidParams)?;
         let source = self
             .runtime
             .open_or_create_session(&source_root, Some(&source_id), "acp-fork")
@@ -2129,6 +2183,7 @@ impl AcpHost {
                 .map_err(|_| HostFailure::InvalidParams)?,
             operation_id,
             title,
+            through_turn_id,
         };
         let fork_result = retry_session_mutation(|| {
             self.runtime
@@ -2283,6 +2338,7 @@ impl AcpHost {
                         RuntimeEventPayload::Authoritative(record) => {
                             authoritative_turn_terminal(&record.event, turn_id)
                         }
+                        RuntimeEventPayload::ModelRetryScheduled(_) => false,
                         RuntimeEventPayload::Control(_) => true,
                         RuntimeEventPayload::Transient(_) => false,
                     };
@@ -2489,6 +2545,8 @@ struct PromptDriveRequest {
     turn_id: String,
     /// 完整 Prompt 正文；不会写入诊断日志。
     text: String,
+    /// 经当前宿主目录验证的用户资源身份，实际启动仍复核。
+    references: Vec<keencode_model::InputReference>,
     /// admission 时已经授权的项目目录。
     project_root: PathBuf,
     /// 请求内容摘要，用于 operationId 冲突判断。
@@ -2710,6 +2768,30 @@ fn prompt_payload_digest(session_id: &str, turn_id: &str, text: &str, ultra_mode
     }
     hasher.update([u8::from(ultra_mode)]);
     format!("{:x}", hasher.finalize())
+}
+
+/// 同一 operationId 不能以相同正文替换市场身份；无引用沿用现有指纹。
+fn prompt_reference_digest(
+    session_id: &str,
+    turn_id: &str,
+    text: &str,
+    ultra_mode: bool,
+    references: &[keencode_model::InputReference],
+) -> String {
+    let digest = prompt_payload_digest(session_id, turn_id, text, ultra_mode);
+    if references.is_empty() {
+        return digest;
+    }
+    format!(
+        "{:x}",
+        Sha256::digest(
+            format!(
+                "{digest}:{}",
+                serde_json::to_string(references).expect("字符串引用可以序列化")
+            )
+            .as_bytes()
+        )
+    )
 }
 
 /// 从保留元数据中读取一个有界字符串。

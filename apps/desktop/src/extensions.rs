@@ -3,6 +3,7 @@ use flate2::read::GzDecoder;
 use keencode_agent::HookWorkerAdmission;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs::{self, File, OpenOptions};
@@ -14,6 +15,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tar::Archive;
 use tauri::{AppHandle, Manager, State};
+use tokio_util::sync::CancellationToken;
 use zip::ZipArchive;
 
 use crate::agent_runtime::RuntimeExtensionDiagnostic;
@@ -46,6 +48,35 @@ const PLUGIN_COMMAND_POLL_INTERVAL_INITIAL: Duration = Duration::from_millis(10)
 const PLUGIN_COMMAND_POLL_INTERVAL_MAX: Duration = Duration::from_millis(200);
 /// 外部工具错误输出的最大保留字节数。
 const MAX_EXTERNAL_ERROR_BYTES: usize = 8 * 1024;
+
+thread_local! {
+    /// 当前 blocking 插件事务的取消令牌；外部 Git/npm 轮询复用同一事务边界。
+    static ACTIVE_PLUGIN_OPERATION_CANCELLATION: RefCell<Option<CancellationToken>> = const { RefCell::new(None) };
+}
+
+/// 在插件 blocking 事务内绑定取消令牌，供子模块的外部命令边界检查。
+pub(crate) fn with_plugin_operation_cancellation<T>(
+    cancellation: CancellationToken,
+    operation: impl FnOnce() -> T,
+) -> T {
+    let previous =
+        ACTIVE_PLUGIN_OPERATION_CANCELLATION.with(|active| active.replace(Some(cancellation)));
+    let result = operation();
+    ACTIVE_PLUGIN_OPERATION_CANCELLATION.with(|active| {
+        active.replace(previous);
+    });
+    result
+}
+
+/// 查询当前 blocking 插件事务是否已经被前端取消。
+pub(crate) fn plugin_operation_cancelled() -> bool {
+    ACTIVE_PLUGIN_OPERATION_CANCELLATION.with(|active| {
+        active
+            .borrow()
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+    })
+}
 /// 串行化扩展配置读写。
 #[derive(Debug, Default)]
 pub struct ExtensionsState {
@@ -108,7 +139,7 @@ impl MarketplaceFetch {
 
 impl ExtensionsState {
     /// 获取扩展配置读写锁。
-    fn lock_io(&self) -> Result<MutexGuard<'_, ()>, String> {
+    pub(crate) fn lock_io(&self) -> Result<MutexGuard<'_, ()>, String> {
         self.io_lock
             .lock()
             .map_err(|_| "扩展配置读写锁已损坏".to_owned())
@@ -155,7 +186,7 @@ impl ExtensionsState {
 }
 
 /// 并行重建所有已知项目的完整扩展候选；重建前先撤销旧 MCP 工具。
-async fn refresh_known_runtime_projects(
+pub(crate) async fn refresh_known_runtime_projects(
     app: &AppHandle,
     runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
 ) -> Result<(), String> {
@@ -459,10 +490,31 @@ fn extension_global_view_root(data_root: &Path) -> PathBuf {
     data_root.join(".keencode-global-view")
 }
 
+/// 将设置页模型覆盖投影到同一份 Agent catalog，避免 Runtime 与 UI 各自解释配置。
+fn agent_model_selection_override(
+    entry: &agent_catalog::AgentCatalogEntry,
+    settings: &agent_settings::AgentSettingsState,
+) -> Option<agent_settings::AgentModelSelectionOverride> {
+    let ids = agent_settings::candidate_ids_for_entry(entry);
+    match entry.source.as_str() {
+        "builtin" => settings.built_in_override(ids.iter().map(String::as_str)),
+        "plugin" => settings.plugin_override(ids.iter().map(String::as_str)),
+        _ => None,
+    }
+}
+
 // 市场来源取得与归档处理体量较大，保持为独立职责模块。
 #[path = "extensions/agent_catalog.rs"]
 mod agent_catalog;
 use agent_catalog::{AgentTools, build_agent_catalog, parse_agent_document, validate_agent_name};
+
+/// 校验服务层即将保存的完整 Agent Markdown，避免各入口复制解析规则。
+pub(crate) fn validate_agent_document(content: &str) -> Result<(), String> {
+    parse_agent_document(content).map(|_| ())
+}
+
+#[path = "extensions/agent_settings.rs"]
+pub(crate) mod agent_settings;
 
 #[path = "extensions/runtime_contributor.rs"]
 mod runtime_contributor;
@@ -486,6 +538,8 @@ pub struct SkillDto {
     pub path: String,
     /// 是否允许用户通过斜杠命令直接调用。
     pub user_invocable: bool,
+    /// 全局名称开关；禁用条目仍列出，但不能显式选择或由运行时加载。
+    pub enabled: bool,
 }
 
 /// Skills 列举结果。
@@ -543,6 +597,8 @@ pub struct AgentDetail {
     pub path: Option<String>,
     /// 模型覆盖（`"{provider_id}::{model}"`）；None 表示跟随会话 provider。
     pub model: Option<String>,
+    /// 是否将项目级 AGENTS/CLAUDE 指令注入该 Agent 的系统提示。
+    pub inject_agents_md: bool,
     /// 推理强度覆盖；None 表示继承父 Agent。
     pub reasoning_effort: Option<String>,
     /// 允许使用的任务工具；None 表示继承主智能体全部任务工具。
@@ -617,10 +673,14 @@ fn is_zero(value: &usize) -> bool {
 pub struct PluginDto {
     /// 插件稳定名称。
     pub name: String,
+    /// 原插件页面使用的清单说明；不读取 userConfig 或敏感配置。
+    pub description: Option<String>,
     /// 插件清单中的版本。
     pub version: Option<String>,
     /// 插件来源市场名称。
     pub marketplace: Option<String>,
+    /// 已验证版本化缓存所属的真实市场目录，供原页面分组，不是远程市场地址。
+    pub marketplace_path: String,
     /// 插件根目录的绝对路径。
     pub path: String,
     /// KeenCode 插件开关状态。
@@ -893,7 +953,8 @@ pub async fn extensions_enable_all_mcp(
 }
 
 /// 列出 KeenCode 用户级与项目级 Skills。
-#[tauri::command]
+// 目录发现与扩展锁可能等待；列表由异步执行器处理，不阻塞原生窗口消息线程。
+#[tauri::command(async)]
 pub fn skills_list(
     project_path: Option<String>,
     app: AppHandle,
@@ -911,11 +972,13 @@ pub fn skills_list(
         .map(|project_root| plugin_runtime_snapshot(&app, project_root))
         .transpose()?
         .unwrap_or_default();
+    let disabled = crate::ui_presentation::disabled_skill_names(&data_root)?;
     let config = runtime_skill_config_from_snapshot(
         data_root.clone(),
         project_context.clone(),
         snapshot.clone(),
-    );
+    )
+    .with_disabled_names(disabled.iter().cloned());
     let catalog = keencode_skills::discover_skills(&config)
         .map_err(|error| format!("无法建立 Skill 目录：{error}"))?;
     let mut paths = BTreeMap::new();
@@ -984,6 +1047,7 @@ pub fn skills_list(
                 source: source.to_owned(),
                 path: path_to_frontend(path),
                 user_invocable: skill.user_invocable,
+                enabled: skill.enabled,
             },
         );
     }
@@ -997,6 +1061,7 @@ pub fn skills_list(
             let description = crate::plugins::plugin_command_description(&plugin.root, &file.path)
                 .unwrap_or_default();
             skills.entry(namespace.clone()).or_insert(SkillDto {
+                enabled: !disabled.contains(&namespace.to_lowercase()),
                 name: namespace,
                 description,
                 source: "plugin".to_owned(),
@@ -1027,26 +1092,28 @@ pub fn agents_list(
         .map(|project_root| plugin_runtime_snapshot(&app, project_root))
         .transpose()?
         .unwrap_or_default();
-    let model_overrides = read_agent_model_overrides(&app)?;
+    let agent_settings = agent_settings::read_agent_settings(&data_root)?;
     let catalog = build_agent_catalog(
         &data_root,
         &project_context,
         &snapshot,
-        &model_overrides,
+        &BTreeMap::new(),
         &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
     )?;
     let agents = catalog
         .entries()
-        .map(|entry| AgentDto {
-            name: entry.name.clone(),
-            description: entry.document.description.clone(),
-            source: entry.source.as_str().to_owned(),
-            path: entry.path.as_ref().map(|path| path_to_frontend(path)),
-            model: entry
-                .document
-                .model
-                .as_deref()
-                .and_then(normalize_model_reference_for_ui),
+        .map(|entry| {
+            let model = agent_model_selection_override(entry, &agent_settings)
+                .map(|selection| selection.model)
+                .or_else(|| entry.document.model.clone())
+                .and_then(|model| normalize_model_reference_for_ui(&model));
+            AgentDto {
+                name: entry.name.clone(),
+                description: entry.document.description.clone(),
+                source: entry.source.as_str().to_owned(),
+                path: entry.path.as_ref().map(|path| path_to_frontend(path)),
+                model,
+            }
         })
         .collect::<Vec<_>>();
     Ok(AgentsListResult { agents })
@@ -1121,12 +1188,12 @@ pub fn agent_detail(
         .map(|project_root| plugin_runtime_snapshot(&app, project_root))
         .transpose()?
         .unwrap_or_default();
-    let overrides = read_agent_model_overrides(&app)?;
+    let agent_settings = agent_settings::read_agent_settings(&data_root)?;
     let catalog = build_agent_catalog(
         &data_root,
         &project_context,
         &snapshot,
-        &overrides,
+        &BTreeMap::new(),
         &plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
     )?;
     let entry = catalog
@@ -1137,18 +1204,22 @@ pub fn agent_detail(
         AgentTools::None => Some(Vec::new()),
         AgentTools::List(list) => Some(list.clone()),
     };
+    let model_override = agent_model_selection_override(entry, &agent_settings);
     Ok(AgentDetail {
         name: entry.name.clone(),
         description: entry.document.description.clone(),
         source: entry.source.as_str().to_owned(),
         path: entry.path.as_ref().map(|path| path_to_frontend(path)),
         // 设置页只展示合法的 `provider_id::model` 引用；非法值不进入模型选项。
-        model: entry
-            .document
-            .model
-            .as_deref()
+        model: model_override
+            .as_ref()
+            .map(|selection| selection.model.as_str())
+            .or(entry.document.model.as_deref())
             .and_then(normalize_model_reference_for_ui),
-        reasoning_effort: entry.document.reasoning_effort.clone(),
+        inject_agents_md: entry.document.inject_agents_md,
+        reasoning_effort: model_override
+            .and_then(|selection| selection.reasoning_effort)
+            .or_else(|| entry.document.reasoning_effort.clone()),
         tools,
         disallowed_tools: entry.document.disallowed_tools.clone(),
         max_turns: entry.document.max_turns,
@@ -1283,9 +1354,8 @@ pub async fn agent_remove(
 ///
 /// 全局定义（`~/.keencode/agents/{name}.md` 存在）：只修改 frontmatter 的
 /// `model:` 键，系统提示、工具等其余内容原样保留。内置定义：写入
-/// `agent-model-overrides.json` 覆盖表，KeenCode 在装配内置定义时套用。
-/// `model` 编码为 `"{provider_id}::{model}"`；None 表示清除覆盖，恢复为
-/// 跟随会话 provider。
+/// 内置定义写入统一的 `agents-state.json`；`model` 编码为
+/// `"{provider_id}::{model}"`；None 表示清除覆盖，恢复为跟随会话 provider。
 #[tauri::command]
 pub async fn agent_update(
     name: String,
@@ -1306,7 +1376,7 @@ pub async fn agent_update(
         .join("agents")
         .join(format!("{name}.md"));
     let update_result = if agent_catalog::is_builtin_agent(&name) {
-        write_agent_model_override(&app, &name.to_ascii_lowercase(), model.as_deref())
+        write_builtin_agent_model_setting(&app, &name, model.as_deref())
     } else {
         match fs::symlink_metadata(&path) {
             // symlink_metadata 对符号链接返回 link 类型：is_file 为 false，落入下方分支。
@@ -1325,6 +1395,41 @@ pub async fn agent_update(
     update_result?;
     drop(_guard);
     refresh_known_runtime_projects(&app, runtime.inner()).await
+}
+
+/// 在唯一 `agents-state.json` 中更新内置 Agent 的结构化模型选择。
+fn write_builtin_agent_model_setting(
+    app: &AppHandle,
+    name: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
+    let data_root = crate::storage::root_dir(app)
+        .map_err(|error| format!("无法确定全局子智能体目录：{error}"))?;
+    let mut state = agent_settings::read_agent_settings_value(&data_root)?
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "Agent 设置必须是对象".to_owned())?;
+    let overrides = state
+        .entry("builtInModelSelectionOverrides".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| "内置模型覆盖必须是对象".to_owned())?;
+    if let Some(model) = model {
+        let (provider_id, model_id) = model
+            .split_once("::")
+            .ok_or_else(|| "模型覆盖格式无效（应为 providerId::modelId）".to_owned())?;
+        let selection = agent_settings::normalize_model_selection_value(&serde_json::json!({
+            "providerId": provider_id,
+            "modelId": model_id,
+        }))?;
+        overrides.insert(
+            name.to_ascii_lowercase(),
+            agent_settings::model_selection_value(&selection),
+        );
+    } else {
+        overrides.remove(&name.to_ascii_lowercase());
+    }
+    agent_settings::write_agent_settings_value(&data_root, &Value::Object(state))
 }
 
 /// 规范化子智能体模型覆盖引用：只允许 `providerId::modelId`。
@@ -1356,170 +1461,6 @@ fn normalize_model_reference(value: &str) -> Result<String, String> {
 /// 设置页只展示合法的 `provider_id::model` 引用。
 fn normalize_model_reference_for_ui(value: &str) -> Option<String> {
     normalize_model_reference(value).ok()
-}
-
-/// 内置子智能体模型覆盖表路径（`~/.keencode/agent-model-overrides.json`）。
-/// 构建当前项目 Agent catalog 时读取该覆盖表并套用。
-fn agent_model_overrides_path(app: &AppHandle) -> Result<PathBuf, String> {
-    crate::storage::root_dir(app)
-        .map(|directory| directory.join("agent-model-overrides.json"))
-        .map_err(|error| format!("无法确定模型覆盖表路径：{error}"))
-}
-
-/// 当前内置子智能体模型覆盖表的固定 schema 名称。
-const AGENT_MODEL_OVERRIDES_SCHEMA: &str = "keencode/agent-model-overrides";
-/// 当前内置子智能体模型覆盖表的唯一格式版本。
-const AGENT_MODEL_OVERRIDES_VERSION: u32 = 1;
-
-/// 内置子智能体模型覆盖表的严格持久化外壳。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct AgentModelOverridesFile {
-    /// 固定 schema 名称。
-    schema: String,
-    /// 固定格式版本。
-    version: u32,
-    /// 当前完整的子智能体模型覆盖映射。
-    #[serde(deserialize_with = "deserialize_unique_string_map")]
-    overrides: BTreeMap<String, String>,
-}
-
-impl AgentModelOverridesFile {
-    /// 为当前模型覆盖映射构造严格持久化文件。
-    fn from_overrides(overrides: &BTreeMap<String, String>) -> Result<Self, String> {
-        validate_agent_model_overrides(overrides)?;
-        Ok(Self {
-            schema: AGENT_MODEL_OVERRIDES_SCHEMA.to_owned(),
-            version: AGENT_MODEL_OVERRIDES_VERSION,
-            overrides: overrides.clone(),
-        })
-    }
-
-    /// 校验文件身份和所有条目，并返回当前模型覆盖映射。
-    fn into_overrides(self) -> Result<BTreeMap<String, String>, String> {
-        if self.schema != AGENT_MODEL_OVERRIDES_SCHEMA
-            || self.version != AGENT_MODEL_OVERRIDES_VERSION
-        {
-            return Err("模型覆盖表 schema 或版本不受支持".to_owned());
-        }
-        validate_agent_model_overrides(&self.overrides)?;
-        Ok(self.overrides)
-    }
-}
-
-/// 反序列化字符串映射并拒绝重复键，避免后出现的 JSON 键静默覆盖先出现的条目。
-fn deserialize_unique_string_map<'de, D>(
-    deserializer: D,
-) -> Result<BTreeMap<String, String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    /// 只接受字符串键和值，并在解析过程中检查重复键。
-    struct UniqueStringMapVisitor;
-
-    impl<'de> serde::de::Visitor<'de> for UniqueStringMapVisitor {
-        type Value = BTreeMap<String, String>;
-
-        /// 返回该字段需要的 JSON 类型说明。
-        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            formatter.write_str("不含重复键的字符串 JSON 对象")
-        }
-
-        /// 读取字符串映射，并在同一对象中发现重复键时失败。
-        fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
-        where
-            M: serde::de::MapAccess<'de>,
-        {
-            let mut values = BTreeMap::new();
-            while let Some((key, value)) = access.next_entry::<String, String>()? {
-                if values.insert(key.clone(), value).is_some() {
-                    return Err(serde::de::Error::custom(format!(
-                        "模型覆盖表包含重复的子智能体键：{key}"
-                    )));
-                }
-            }
-            Ok(values)
-        }
-    }
-
-    deserializer.deserialize_map(UniqueStringMapVisitor)
-}
-
-/// 校验模型覆盖表中的每个键和值，拒绝任何不能由当前运行时解释的条目。
-fn validate_agent_model_overrides(overrides: &BTreeMap<String, String>) -> Result<(), String> {
-    for (agent_id, model) in overrides {
-        let normalized_agent_id = validate_agent_name(agent_id)
-            .map_err(|error| format!("模型覆盖表中的子智能体键无效：{error}"))?;
-        if normalized_agent_id != *agent_id {
-            return Err(format!("模型覆盖表中的子智能体键不是规范格式：{agent_id}"));
-        }
-        let normalized_model = normalize_model_reference(model)
-            .map_err(|error| format!("子智能体 {agent_id} 的模型覆盖无效：{error}"))?;
-        if normalized_model != *model {
-            return Err(format!(
-                "子智能体 {agent_id} 的模型覆盖不是规范格式：{model}"
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// 严格解析当前模型覆盖表，不填充缺失字段、不忽略未知字段、不改写原文。
-fn parse_agent_model_overrides(content: &str) -> Result<BTreeMap<String, String>, String> {
-    let file: AgentModelOverridesFile = serde_json::from_str(content)
-        .map_err(|error| format!("模型覆盖表 JSON 格式无效：{error}"))?;
-    file.into_overrides()
-}
-
-/// 从指定路径严格读取模型覆盖表；只有目标文件不存在时才返回空映射。
-fn read_agent_model_overrides_from_path(path: &Path) -> Result<BTreeMap<String, String>, String> {
-    if !current_regular_file_exists(path, "模型覆盖表")? {
-        return Ok(BTreeMap::new());
-    }
-    let content = read_text_limited(path)?;
-    parse_agent_model_overrides(&content)
-}
-
-/// 读取覆盖表：文件不存在视为空表；存在但损坏、过期或含非法条目时报错。
-fn read_agent_model_overrides(
-    app: &AppHandle,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
-    let path = agent_model_overrides_path(app)?;
-    read_agent_model_overrides_from_path(&path)
-}
-
-/// 写入内置子智能体的模型覆盖；None 表示移除覆盖、恢复定义默认值。
-fn write_agent_model_override(
-    app: &AppHandle,
-    name: &str,
-    model: Option<&str>,
-) -> Result<(), String> {
-    let path = agent_model_overrides_path(app)?;
-    write_agent_model_override_at_path(&path, name, model)
-}
-
-/// 在指定路径严格更新一个内置子智能体的模型覆盖，并以当前 Schema 原子保存。
-fn write_agent_model_override_at_path(
-    path: &Path,
-    name: &str,
-    model: Option<&str>,
-) -> Result<(), String> {
-    let mut overrides = read_agent_model_overrides_from_path(path)?;
-    let name = validate_agent_name(name)?;
-    let model = model.map(normalize_model_reference).transpose()?;
-    match model {
-        Some(value) => {
-            overrides.insert(name.clone(), value);
-        }
-        None => {
-            overrides.remove(&name);
-        }
-    }
-    let file = AgentModelOverridesFile::from_overrides(&overrides)?;
-    let mut content = serde_json::to_vec_pretty(&file)
-        .map_err(|error| format!("无法序列化模型覆盖表：{error}"))?;
-    content.push(b'\n');
-    atomic_write_private(path, &content)
 }
 
 /// 在 YAML frontmatter 中插入、替换或删除顶层 `model:` 键，其余行原样保留。
@@ -1583,7 +1524,8 @@ pub fn inspect_mcp(
 }
 
 /// 列出 KeenCode 管理的本地插件。
-#[tauri::command]
+// 与技能发现一致，静态目录扫描和扩展锁放异步执行器，避免阻塞窗口消息线程。
+#[tauri::command(async)]
 pub fn plugins_list(
     project_path: Option<String>,
     app: AppHandle,
@@ -1591,8 +1533,13 @@ pub fn plugins_list(
 ) -> Result<PluginsListResult, String> {
     let _guard = state.lock_io()?;
     let manager = plugin_manager(&app)?;
-    let installed = manager.load_state().map_err(|error| error.to_string())?;
     resolve_extension_project_root(&app, project_path.as_deref())?;
+    installed_plugin_catalog(&manager)
+}
+
+/// 发现只读取登记、清单和静态组件；不构造运行时快照，不启动 MCP 或解析密钥。
+fn installed_plugin_catalog(manager: &PluginManager) -> Result<PluginsListResult, String> {
+    let installed = manager.load_state().map_err(|error| error.to_string())?;
     let mut plugins = Vec::new();
     for record in installed.plugins {
         let manifest =
@@ -1603,8 +1550,17 @@ pub fn plugins_list(
         let unsupported_hooks = inventory.unsupported_hooks;
         plugins.push(PluginDto {
             name: record.id.to_string(),
+            description: manifest.description,
             version: manifest.version,
             marketplace: record.id.marketplace,
+            // load_state 已校验 <cache>/<market>/<plugin>/<fingerprint> 布局与链接边界。
+            marketplace_path: path_to_frontend(
+                record
+                    .install_path
+                    .parent()
+                    .and_then(Path::parent)
+                    .ok_or("插件缓存缺少市场目录")?,
+            ),
             path: path_to_frontend(&record.install_path),
             enabled: record.enabled,
             provides,
@@ -1816,23 +1772,44 @@ pub async fn plugin_install(
     app: AppHandle,
     runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
+    plugin_install_with_cancellation(source, app, runtime.inner(), None).await
+}
+
+/// 插件服务使用的可取消安装入口；Tauri 命令本身保持原有签名。
+pub(crate) async fn plugin_install_with_cancellation(
+    source: String,
+    app: AppHandle,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> Result<(), String> {
     tracing::info!(target: "ipc.plugin_install", "插件安装命令进入");
     let blocking_app = app.clone();
-    let result =
-        tauri::async_runtime::spawn_blocking(move || plugin_install_blocking(source, blocking_app))
-            .await
-            .map_err(|error| format!("插件安装线程异常：{error}"))?;
+    let blocking_cancellation = cancellation.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        if let Some(cancellation) = blocking_cancellation {
+            with_plugin_operation_cancellation(cancellation, || {
+                plugin_install_blocking(source, blocking_app)
+            })
+        } else {
+            plugin_install_blocking(source, blocking_app)
+        }
+    })
+    .await
+    .map_err(|error| format!("插件安装线程异常：{error}"))?;
     if let Err(error) = result {
         tracing::error!(target: "ipc.plugin_install", %error, "插件安装失败");
         return Err(error);
     }
-    refresh_known_runtime_projects(&app, runtime.inner()).await?;
+    refresh_known_runtime_projects(&app, runtime).await?;
     tracing::info!(target: "ipc.plugin_install", "插件安装命令完成");
     Ok(())
 }
 
 /// 在 Tauri blocking 线程中执行插件安装；远程取得不会阻塞窗口线程。
 fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String> {
+    if plugin_operation_cancelled() {
+        return Err("插件安装已取消".to_owned());
+    }
     let source = source.trim();
     if source.is_empty() {
         return Err("插件来源不能为空".to_owned());
@@ -1889,6 +1866,9 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
             source_root: materialized_root,
         }]
     };
+    if plugin_operation_cancelled() {
+        return Err("插件安装已取消".to_owned());
+    }
     // 来源物化（尤其 Git/npm）可能耗时数分钟，不持有配置锁；否则此期间
     // 任何插件列表或设置命令都会在窗口线程上等待同一把锁。
     let state = app.state::<ExtensionsState>();
@@ -1898,6 +1878,9 @@ fn plugin_install_blocking(source: String, app: AppHandle) -> Result<(), String>
         .plugin_secrets
         .lock()
         .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
+    if plugin_operation_cancelled() {
+        return Err("插件安装已取消".to_owned());
+    }
     manager
         .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
         .map_err(|error| error.to_string())?;
@@ -1915,15 +1898,37 @@ pub async fn plugin_update(
     app: AppHandle,
     runtime: State<'_, std::sync::Arc<crate::agent_runtime::AgentRuntime>>,
 ) -> Result<(), String> {
+    plugin_update_with_cancellation(name, app, runtime.inner(), None).await
+}
+
+/// 插件服务使用的可取消更新入口；Tauri 命令本身保持原有签名。
+pub(crate) async fn plugin_update_with_cancellation(
+    name: Option<String>,
+    app: AppHandle,
+    runtime: &std::sync::Arc<crate::agent_runtime::AgentRuntime>,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> Result<(), String> {
     let blocking_app = app.clone();
-    tauri::async_runtime::spawn_blocking(move || plugin_update_blocking(name, blocking_app))
-        .await
-        .map_err(|error| format!("插件更新线程异常：{error}"))??;
-    refresh_known_runtime_projects(&app, runtime.inner()).await
+    let blocking_cancellation = cancellation.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(cancellation) = blocking_cancellation {
+            with_plugin_operation_cancellation(cancellation, || {
+                plugin_update_blocking(name, blocking_app)
+            })
+        } else {
+            plugin_update_blocking(name, blocking_app)
+        }
+    })
+    .await
+    .map_err(|error| format!("插件更新线程异常：{error}"))??;
+    refresh_known_runtime_projects(&app, runtime).await
 }
 
 /// 在 Tauri blocking 线程中取得远程来源并提交插件更新。
 fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), String> {
+    if plugin_operation_cancelled() {
+        return Err("插件更新已取消".to_owned());
+    }
     let selected = {
         let state = app.state::<ExtensionsState>();
         let _guard = state.lock_io()?;
@@ -1957,6 +1962,9 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
     let mut plan = BTreeMap::<PluginId, MaterializedPlugin>::new();
     let mut plan_order = Vec::new();
     for record in &selected {
+        if plugin_operation_cancelled() {
+            return Err("插件更新已取消".to_owned());
+        }
         let Some(marketplace) = record.id.marketplace.as_deref() else {
             return Err(format!("插件记录 {} 缺少市场命名空间", record.id));
         };
@@ -2011,6 +2019,9 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
         .into_iter()
         .filter_map(|id| plan.remove(&id))
         .collect::<Vec<_>>();
+    if plugin_operation_cancelled() {
+        return Err("插件更新已取消".to_owned());
+    }
     let state = app.state::<ExtensionsState>();
     let _guard = state.lock_io()?;
     let manager = plugin_manager(&app)?;
@@ -2049,6 +2060,9 @@ fn plugin_update_blocking(name: Option<String>, app: AppHandle) -> Result<(), St
             .plugin_secrets
             .lock()
             .map_err(|_| "KeenCode 插件敏感配置锁已损坏".to_owned())?;
+        if plugin_operation_cancelled() {
+            return Err("插件更新已取消".to_owned());
+        }
         manager
             .install_from_directories(materials, UserConfigUpdate::default(), &mut *secrets)
             .map_err(|error| error.to_string())?;
@@ -2429,13 +2443,34 @@ fn marketplace_available_fingerprint(
 /// 添加一个包含 `.claude-plugin/marketplace.json` 的本地目录或清单文件。
 #[tauri::command]
 pub async fn marketplace_add(source: String, app: AppHandle) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || marketplace_add_blocking(source, app))
-        .await
-        .map_err(|error| format!("市场添加线程异常：{error}"))?
+    marketplace_add_with_cancellation(source, app, None).await
+}
+
+/// 插件服务使用的可取消市场添加入口；长时间 Git/npm 取得复用同一 token。
+pub(crate) async fn marketplace_add_with_cancellation(
+    source: String,
+    app: AppHandle,
+    cancellation: Option<tokio_util::sync::CancellationToken>,
+) -> Result<(), String> {
+    let blocking_cancellation = cancellation;
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(cancellation) = blocking_cancellation {
+            with_plugin_operation_cancellation(cancellation, || {
+                marketplace_add_blocking(source, app)
+            })
+        } else {
+            marketplace_add_blocking(source, app)
+        }
+    })
+    .await
+    .map_err(|error| format!("市场添加线程异常：{error}"))?
 }
 
 /// 在 blocking 线程中取得并登记市场；网络/Git/npm 取得不持有扩展配置锁。
 fn marketplace_add_blocking(source: String, app: AppHandle) -> Result<(), String> {
+    if plugin_operation_cancelled() {
+        return Err("插件市场添加已取消".to_owned());
+    }
     let source = source.trim();
     if source.is_empty() {
         return Err("市场来源不能为空".to_owned());
@@ -2449,10 +2484,16 @@ fn marketplace_add_blocking(source: String, app: AppHandle) -> Result<(), String
         catalog,
         mut cleanup,
     } = materialize_marketplace(source, &workspace)?;
+    if plugin_operation_cancelled() {
+        return Err("插件市场添加已取消".to_owned());
+    }
     crate::plugins::validate_marketplace_name(&catalog.name).map_err(|error| error.to_string())?;
     let state = app.state::<ExtensionsState>();
     let _guard = state.lock_io()?;
     let mut store = load_marketplace_store(&app)?;
+    if plugin_operation_cancelled() {
+        return Err("插件市场添加已取消".to_owned());
+    }
     if store.sources.iter().any(|existing| {
         existing.name.eq_ignore_ascii_case(&catalog.name) || Path::new(&existing.path) == root
     }) {
@@ -2554,6 +2595,24 @@ fn hooks_user_config_path(app: &AppHandle) -> Result<PathBuf, String> {
     crate::storage::root_dir(app)
         .map(|directory| directory.join("hooks.json"))
         .map_err(|error| format!("无法确定 KeenCode Hooks 配置目录：{error}"))
+}
+
+/// 原页面按完整名称禁用插件命令，运行候选不得通过短名绕过同一开关。
+fn filter_disabled_plugin_commands(
+    snapshot: &mut PluginRuntimeSnapshot,
+    disabled: &BTreeSet<String>,
+) -> Result<(), String> {
+    for plugin in &mut snapshot.plugins {
+        let namespace = plugin
+            .id
+            .runtime_namespace()
+            .map_err(|error| error.to_string())?;
+        plugin.commands.retain(|file| {
+            !disabled
+                .contains(&plugin_command_namespace(&namespace, &file.relative_path).to_lowercase())
+        });
+    }
+    Ok(())
 }
 
 /// 从启用插件快照提取不递归的精确 Skill 根，避免加载未声明的相邻目录。
@@ -3588,128 +3647,6 @@ fn expand_tilde(raw: &str) -> Result<PathBuf, String> {
         return Ok(home.join(rest));
     }
     Ok(PathBuf::from(raw))
-}
-
-#[cfg(test)]
-mod agent_model_overrides_tests {
-    use super::*;
-
-    /// 当前覆盖表使用固定外壳，并能还原规范的模型映射。
-    #[test]
-    fn current_schema_round_trips() {
-        let overrides = BTreeMap::from([("plan".to_owned(), "openai::gpt-5".to_owned())]);
-        let file = AgentModelOverridesFile::from_overrides(&overrides).expect("当前映射应有效");
-        let content = serde_json::to_string(&file).expect("当前覆盖表应可序列化");
-        let object: Value = serde_json::from_str(&content).expect("序列化结果应是 JSON 对象");
-        assert_eq!(object["schema"], AGENT_MODEL_OVERRIDES_SCHEMA);
-        assert_eq!(object["version"], AGENT_MODEL_OVERRIDES_VERSION);
-        assert_eq!(object["overrides"]["plan"], "openai::gpt-5");
-        assert_eq!(parse_agent_model_overrides(&content).unwrap(), overrides);
-    }
-
-    /// 当前解析必须拒绝未知字段、缺失外壳、旧版本和损坏 JSON。
-    #[test]
-    fn schema_rejects_unknown_missing_legacy_and_corrupt_documents() {
-        let invalid_documents = [
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{},"extra":true}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":1}"#,
-            r#"{"plan":"openai::gpt-5"}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":0,"overrides":{}}"#,
-            "{ invalid json",
-        ];
-        for content in invalid_documents {
-            assert!(
-                parse_agent_model_overrides(content).is_err(),
-                "文档必须被拒绝：{content}"
-            );
-        }
-    }
-
-    /// 当前解析必须拒绝非法条目和重复键，不能静默过滤或选择最后一个值。
-    #[test]
-    fn schema_rejects_invalid_entries_and_duplicate_keys() {
-        let invalid_documents = [
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"bad name":"openai::gpt-5"}}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"gpt-5"}}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{" plan":"openai::gpt-5"}}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":" openai::gpt-5"}}"#,
-            r#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"openai::gpt-5","plan":"openai::gpt-4"}}"#,
-        ];
-        for content in invalid_documents {
-            assert!(
-                parse_agent_model_overrides(content).is_err(),
-                "条目必须被拒绝：{content}"
-            );
-        }
-    }
-
-    /// 只有目标文件不存在时才返回空映射，空文件和损坏文件都必须失败。
-    #[test]
-    fn missing_path_is_empty_but_present_invalid_path_is_error() {
-        let directory = tempfile::tempdir().expect("创建临时目录");
-        let missing = directory.path().join("missing.json");
-        assert!(
-            read_agent_model_overrides_from_path(&missing)
-                .expect("缺失文件应返回空映射")
-                .is_empty()
-        );
-
-        let present = directory.path().join("present.json");
-        fs::write(&present, b"{}").expect("写入空 JSON");
-        assert!(read_agent_model_overrides_from_path(&present).is_err());
-    }
-
-    /// 非普通文件与超限文件必须在解析前失败，并保持原目标不变。
-    #[test]
-    fn non_file_and_oversized_paths_are_rejected_without_replacement() {
-        let directory = tempfile::tempdir().expect("创建临时目录");
-        let non_file = directory.path().join("directory.json");
-        fs::create_dir(&non_file).expect("创建目录目标");
-        assert!(read_agent_model_overrides_from_path(&non_file).is_err());
-        assert!(non_file.is_dir());
-
-        let oversized = directory.path().join("oversized.json");
-        let original = vec![b'x'; MAX_EXTENSION_FILE_BYTES as usize + 1];
-        fs::write(&oversized, &original).expect("写入超限覆盖表");
-        assert!(read_agent_model_overrides_from_path(&oversized).is_err());
-        assert_eq!(fs::read(&oversized).expect("读取原超限文件"), original);
-    }
-
-    /// 严格读取失败时不能用空映射覆盖原始文件字节。
-    #[test]
-    fn failed_update_preserves_original_bytes() {
-        let directory = tempfile::tempdir().expect("创建临时目录");
-        let path = directory.path().join("agent-model-overrides.json");
-        let original = br#"{"schema":"keencode/agent-model-overrides","version":1,"overrides":{"plan":"openai::gpt-5"},"extra":true}"#;
-        fs::write(&path, original).expect("写入非法覆盖表");
-
-        assert!(write_agent_model_override_at_path(&path, "plan", Some("openai::gpt-4")).is_err());
-        assert_eq!(fs::read(&path).expect("读取原始覆盖表"), original);
-    }
-
-    /// 成功更新会写入当前外壳，并仍然支持清除已有覆盖。
-    #[test]
-    fn update_writes_current_schema_and_removes_override() {
-        let directory = tempfile::tempdir().expect("创建临时目录");
-        let path = directory.path().join("agent-model-overrides.json");
-
-        write_agent_model_override_at_path(&path, "plan", Some("openai::gpt-5"))
-            .expect("首次写入应成功");
-        let saved = fs::read_to_string(&path).expect("读取保存结果");
-        assert!(saved.ends_with('\n'));
-        assert!(
-            parse_agent_model_overrides(&saved)
-                .expect("保存结果应符合当前 Schema")
-                .contains_key("plan")
-        );
-
-        write_agent_model_override_at_path(&path, "plan", None).expect("清除覆盖应成功");
-        assert!(
-            parse_agent_model_overrides(&fs::read_to_string(&path).expect("读取清除结果"))
-                .expect("清除结果应符合当前 Schema")
-                .is_empty()
-        );
-    }
 }
 
 #[cfg(test)]

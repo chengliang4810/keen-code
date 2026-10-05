@@ -99,6 +99,7 @@ pub async fn run() -> anyhow::Result<()> {
             .into_iter()
             .collect(),
         reasoning_efforts: Default::default(),
+        disabled_models: Default::default(),
         max_output_tokens: [(model.clone(), max_output_tokens)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();

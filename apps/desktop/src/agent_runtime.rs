@@ -1,4 +1,5 @@
 //! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
+mod automatic_titles;
 mod delivery_pump;
 mod history_load;
 
@@ -6,7 +7,10 @@ use delivery_pump::*;
 pub(crate) use history_load::HistoryLoadRequest;
 mod interruption_context;
 mod session_mcp;
-pub(crate) use session_mcp::{SessionMcpError, SuspendedSessionMcp};
+mod workflow_actor;
+mod workflow_tool_executor;
+pub(crate) use session_mcp::{PreparedWorkspaceMcp, SessionMcpError, SuspendedSessionMcp};
+pub(crate) use workflow_actor::{WorkflowActor, WorkflowActorRequest};
 
 #[cfg(feature = "benchmark")]
 pub mod benchmark;
@@ -19,9 +23,11 @@ mod live_prompt_tests;
 use crate::{
     analytics::{AnalyticsRecorder, ModelRetryNotice},
     app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
-    client_request::{ClientRequestDisplayGate, SessionDeliverySink},
-    elicitation::ElicitationCoordinator,
+    client_request::{ClientRequestDisplayGate, SessionDeliverySink, is_frontend_v4_connection},
+    elicitation::{ElicitationCoordinator, PendingElicitationView},
+    permissions::{PendingPermissionView, PermissionChange, PermissionCoordinator, PermissionMode},
     providers, storage,
+    workflows::agent_tools::WorkflowToolPort,
 };
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
@@ -40,21 +46,21 @@ use keencode_agent::{
     AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
     CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
     CollaborationCoordinator, CollaborationError, CollaborationEvent, CollaborationEventKind,
-    CollaborationGlobalTurnLimiter, CollaborationPortError, CollaborationStore,
-    CollaborationTransitionCommit, ContextCompactionFailureKind, ContextManager, ContextPolicy,
-    ContextTokenEstimator, GoalController, GoalStatus, GoalUsageDelta, HookPhase, HookRuntime,
-    JsonContextTokenEstimator, MailboxMessage as RunnerMailboxMessage, MailboxMessageKind,
-    ModelRoundUsage, PlanGuard, PlanGuardState, ProviderContextCompressor, QuiesceAgentTree,
-    RecoveredAgent, RecoveredAgentCheckpoint, RecoveredCoordinator, RecoveredRootLifecycle,
-    RootAgentRequest, RunLimits, RuntimeStateError, SessionId as AgentSessionId,
-    StructuredOutputMode, TerminalReason, ToolCallId, ToolRegistry, TurnCancellation,
-    TurnCancellationDisposition, TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator,
-    root_turn_prompt_digest,
+    CollaborationGlobalTurnLimiter, CollaborationGlobalTurnPermit, CollaborationPortError,
+    CollaborationStore, CollaborationTransitionCommit, ContextCompactionFailureKind,
+    ContextManager, ContextPolicy, ContextTokenEstimator, GoalChange, GoalController, GoalStatus,
+    GoalUsageDelta, HookPhase, HookRuntime, JsonContextTokenEstimator,
+    MailboxMessage as RunnerMailboxMessage, MailboxMessageKind, ModelRoundUsage, PlanGuard,
+    PlanGuardState, ProviderContextCompressor, QuiesceAgentTree, RecoveredAgent,
+    RecoveredAgentCheckpoint, RecoveredCoordinator, RecoveredRootLifecycle, RootAgentRequest,
+    RunLimits, RuntimeStateError, SessionId as AgentSessionId, StructuredOutputMode,
+    TerminalReason, ToolCallId, ToolRegistry, TurnCancellation, TurnCancellationDisposition,
+    TurnId as AgentTurnId, TurnRequest, UuidCollaborationIdGenerator, root_turn_prompt_digest,
 };
 use keencode_model::{
-    ContentBlock, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider, ModelRequest,
-    ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol, ReasoningConfig,
-    ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
+    ContentBlock, ImageContent, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
+    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
+    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
 };
 use keencode_provider::{
     ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
@@ -63,19 +69,21 @@ use keencode_provider::{
 };
 use keencode_resources::{
     AgentId as ResourceAgentId, COMPACTION_SUMMARY_PREFIX,
-    DynamicInputKind as ResourceDynamicInputKind, MailboxMessage as ResourceMailboxMessage,
-    MailboxMessageId as ResourceMailboxMessageId, MailboxState, MessagePart as ResourceMessagePart,
-    MessageRole as ResourceMessageRole, ProviderProtocolSnapshot, ProviderSnapshot,
-    ReasoningEffortSnapshot, SessionEvent, SessionMessage, SessionState, SubAgentState,
+    DynamicInputKind as ResourceDynamicInputKind, FollowupMode,
+    MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
+    MailboxState, MessagePart as ResourceMessagePart, MessageRole as ResourceMessageRole,
+    ProviderProtocolSnapshot, ProviderSnapshot, ReasoningEffortSnapshot, SessionEvent,
+    SessionInputQueueItem, SessionInputQueueState, SessionMessage, SessionState, SubAgentState,
     SubAgentStatus, ToolCompletionStatus, TranscriptRecord, TranscriptSegment,
     TurnId as ResourceTurnId, TurnStatus, TurnStopReason,
 };
 use keencode_runtime::{
     CreateSessionRequest, OpenSessionResult, PersistentAgentState, RuntimeConfig,
     RuntimeControlEvent, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
-    RuntimeEventSubscription, RuntimeManager, RuntimeModelRoundUsageSink, RuntimeSession,
-    RuntimeSnapshot, RuntimeTurnRequest, StoredSessionMetadata, TurnCancellationOutcome,
-    UnstartedTurnTermination, UnstartedTurnTerminationRequest,
+    RuntimeEventSubscription, RuntimeManager, RuntimeModelRetryScheduled,
+    RuntimeModelRoundUsageSink, RuntimeSession, RuntimeSnapshot, RuntimeTurnRequest,
+    StoredSessionMetadata, TurnCancellationOutcome, UnstartedTurnTermination,
+    UnstartedTurnTerminationRequest,
 };
 // 权威事件→ACP 投影已下沉 core/runtime，桌面只保留投递物化与 Tauri 传输。
 use keencode_runtime::{
@@ -84,13 +92,13 @@ use keencode_runtime::{
     validated_background_task_completion_event,
 };
 use keencode_tools::{
-    AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus, BashTool,
-    CompletedTurnContext, EditTool, GitWorktreeLeaseManager, ReadTool, ResolvedSpawnAgentTemplate,
-    SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver,
-    ToolEnvironment, WebServiceConfig, WriteTool, finalize_child_agent_tool_snapshot,
-    register_collaboration_tools, register_collaboration_tools_with_template_resolver,
-    register_deferred_tools, register_local_tools_with_background, register_state_tools,
-    register_web_tools,
+    AskUserTool, BackgroundOutputCursor, BackgroundTaskCompletion, BackgroundTaskManager,
+    BackgroundTaskStatus, BashTool, CompletedTurnContext, EditTool, GitWorktreeLeaseManager,
+    ReadTool, ResolvedSpawnAgentTemplate, SpawnAgentContextSource, SpawnAgentTemplateContext,
+    SpawnAgentTemplateResolver, ToolEnvironment, UserQuestionHandler, WebServiceConfig, WriteTool,
+    finalize_child_agent_tool_snapshot, register_collaboration_tools,
+    register_collaboration_tools_with_template_resolver, register_deferred_tools,
+    register_local_tools_with_background, register_state_tools, register_web_tools,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -105,6 +113,7 @@ use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 /// 桌面端接收全部 ACP 投递的唯一 Tauri 事件名称。
@@ -148,6 +157,101 @@ const MAX_COLLABORATION_FAILURE_BYTES: usize = 64 * 1024;
 const MAX_EXTENSION_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// 协调器提交文件允许累积保留的等待容量取消证据数量。
 const MAX_UNSTARTED_TURN_TERMINATION_RECORDS: usize = 4_096;
+/// 原生隔离评测默认沿用资源层的每 Session Artifact 数量上限。
+const NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT: usize = 1_024;
+/// 原生隔离评测允许的 Artifact 数量覆盖环境变量。
+const NATIVE_TEST_ARTIFACT_CAPACITY_ENV: &str = "KEENCODE_NATIVE_TEST_MAX_ARTIFACTS_PER_SESSION";
+/// 原生隔离评测覆盖值的最小合法数量。
+const NATIVE_TEST_ARTIFACT_CAPACITY_MIN: usize = 1;
+/// 原生隔离评测覆盖值的最大合法数量，防止测试环境意外制造无界资源压力。
+const NATIVE_TEST_ARTIFACT_CAPACITY_MAX: usize = 8_192;
+/// 非法覆盖值的固定错误；不能把环境变量原文写入日志或桌面错误。
+const NATIVE_TEST_ARTIFACT_CAPACITY_ERROR: &str =
+    "KEENCODE_NATIVE_TEST_MAX_ARTIFACTS_PER_SESSION must be an integer in 1..=8192";
+
+/// 解析原生隔离评测的 Artifact 容量覆盖。
+///
+/// 生产构建或非 benchmark 进程即使继承了同名环境变量，也必须继续使用
+/// ArtifactStore 的默认上限。只有两个门控同时成立时，非法值才会 fail-closed；
+/// 解析错误只返回固定说明，避免把环境变量内容带入日志或用户界面。
+fn native_test_artifact_capacity(
+    native_desktop_tests: bool,
+    benchmark_enabled: bool,
+    override_value: Option<&std::ffi::OsStr>,
+) -> Result<usize, &'static str> {
+    if !native_desktop_tests || !benchmark_enabled {
+        return Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT);
+    }
+    let Some(override_value) = override_value else {
+        return Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT);
+    };
+    let value = override_value
+        .to_str()
+        .ok_or(NATIVE_TEST_ARTIFACT_CAPACITY_ERROR)?;
+    let capacity = value
+        .parse::<usize>()
+        .map_err(|_| NATIVE_TEST_ARTIFACT_CAPACITY_ERROR)?;
+    if !(NATIVE_TEST_ARTIFACT_CAPACITY_MIN..=NATIVE_TEST_ARTIFACT_CAPACITY_MAX).contains(&capacity)
+    {
+        return Err(NATIVE_TEST_ARTIFACT_CAPACITY_ERROR);
+    }
+    Ok(capacity)
+}
+
+#[cfg(test)]
+mod native_test_artifact_capacity_tests {
+    use super::*;
+
+    #[test]
+    fn default_is_used_without_override_or_when_any_gate_is_closed() {
+        assert_eq!(
+            native_test_artifact_capacity(true, true, None),
+            Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT)
+        );
+        assert_eq!(
+            native_test_artifact_capacity(false, true, Some(std::ffi::OsStr::new("2048")),),
+            Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT)
+        );
+        assert_eq!(
+            native_test_artifact_capacity(true, false, Some(std::ffi::OsStr::new("2048")),),
+            Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT)
+        );
+        assert_eq!(
+            native_test_artifact_capacity(false, false, Some(std::ffi::OsStr::new("not-a-number")),),
+            Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT)
+        );
+    }
+
+    #[test]
+    fn valid_override_is_a_strict_usize_inclusive_range() {
+        for (raw, expected) in [("1", 1usize), ("1024", 1024), ("8192", 8192)] {
+            assert_eq!(
+                native_test_artifact_capacity(true, true, Some(std::ffi::OsStr::new(raw)),),
+                Ok(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_override_fails_closed_without_echoing_value() {
+        for raw in [
+            "",
+            "0",
+            "8193",
+            "-1",
+            "1.0",
+            "not-a-number",
+            "999999999999999999999999",
+        ] {
+            let error = native_test_artifact_capacity(true, true, Some(std::ffi::OsStr::new(raw)))
+                .expect_err("非法覆盖值必须拒绝");
+            assert_eq!(error, NATIVE_TEST_ARTIFACT_CAPACITY_ERROR);
+            if !raw.is_empty() {
+                assert!(!error.contains(raw));
+            }
+        }
+    }
+}
 
 /// 单次后台任务取消请求在 Runtime 中观察到的真实结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -158,6 +262,19 @@ pub enum BackgroundTaskCancellationOutcome {
     AlreadyRequested,
     /// 任务在本次请求时已经不再运行，未发出取消信号。
     NotRunning,
+}
+
+/// 桌面 V4 读取后台 Bash 时使用的有界结果；正文来自后台任务持久输出文件。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BackgroundBashOutput {
+    /// 任务当前真实生命周期映射到 ZCode wire 的状态。
+    pub status: &'static str,
+    /// stdout/stderr 合并后的 UTF-8 有界尾部。
+    pub output: String,
+    /// 输出超出本次 wire 上限，或后台 Manager 尚有未返回字节。
+    pub truncated: bool,
+    /// 由 Manager 生成的 stdout 持久文件路径。
+    pub output_path: String,
 }
 
 /// 自研 Runtime 生产装配、Provider 热加载或桌面投递失败。
@@ -217,8 +334,17 @@ fn from_runtime(error: RuntimeError) -> AgentRuntimeError {
     }
 }
 
+// 保留错误归一调用点，原生链路失败时可定位具体 Runtime 操作而非总指向日志助手。
+#[track_caller]
 fn runtime_operation_failed(error: impl fmt::Display) -> AgentRuntimeError {
-    tracing::error!(error = %format_args!("{error:#}"), source = %std::panic::Location::caller(), "Runtime operation failed");
+    let source = std::panic::Location::caller();
+    tracing::error!(
+        error = %format_args!("{error:#}"),
+        source_line = source.line(),
+        source_column = source.column(),
+        source = %source,
+        "Runtime operation failed"
+    );
     AgentRuntimeError::RuntimeOperationFailed
 }
 
@@ -297,6 +423,24 @@ struct DefaultProviderBinding {
     model: String,
     /// 选择完成时对应的注册表代次。
     generation: u64,
+}
+
+/// App 级运行时偏好；只保留当前本地 Runtime 的有效快照，不启动空闲 Session。
+///
+/// ZCode 的 CLI 会把同一偏好同步到活动 workspace。桌面 Runtime 没有外部 CLI，
+/// 因此由这份受 Runtime 所有的快照承接后续 Elicitation 策略读取。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AppRuntimePreferences {
+    /// AskUser 自动解析/倒计时能力是否启用。
+    pub ask_user_question_auto_resolution_enabled: bool,
+}
+
+impl Default for AppRuntimePreferences {
+    fn default() -> Self {
+        Self {
+            ask_user_question_auto_resolution_enabled: true,
+        }
+    }
 }
 
 /// 跨扩展候选共享的一次性生命周期启动状态。
@@ -530,6 +674,12 @@ impl Drop for LifecycleStartAttempt {
 /// 启动根 Turn 时由命令层显式传入、只在模型请求期装配的行为上下文。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RootTurnOptions {
+    /// 用户在原输入框显式选择且经宿主校验的资源身份，与正文分开进入同一权威消息。
+    pub references: Vec<keencode_model::InputReference>,
+    /// 已由宿主读取并校验的图片；Runtime 会在 provider 不支持视觉时拒绝本轮。
+    pub attachment_images: Vec<ImageContent>,
+    /// 已由宿主读取的 UTF-8 文本附件，作为隐藏用户上下文参与本轮请求。
+    pub attachment_context: Vec<String>,
     /// Memory、Plan 或 Ultra 等本轮背景；以 is_meta 用户消息放在历史之前，不写入 Session Transcript。
     pub developer_context: Option<String>,
     /// 本轮开始前必须原子写入 Session 快照的 Plan 模式状态。
@@ -666,6 +816,8 @@ pub struct RuntimeAgentTemplateContext {
 pub struct RuntimeAgentTemplate {
     /// 模板稳定名称。
     pub name: String,
+    /// 是否把项目级 AGENTS/CLAUDE 指令加入子 Agent 的冻结提示词；全局指令始终保留。
+    pub inject_agents_md: bool,
     /// 追加到 KeenCode 基础提示之后的系统说明。
     pub system_prompt: String,
     /// 可选的精确模型覆盖。
@@ -684,6 +836,16 @@ pub struct RuntimeAgentTemplate {
 
 /// MCP、Skills、插件、Hook 和 Agent catalog 注入 Runtime 的 Provider 中立边界。
 pub trait RuntimeExtensionContributor: Send + Sync {
+    /// 返回候选构建时冻结的插件引用身份目录；只包含 UI 所需的公开标识，不携带配置正文或凭据。
+    fn plugin_reference_catalog(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
+    /// 返回候选构建时冻结的 Skill 引用目录；只包含 Composer 所需的公开元数据和安全路径。
+    fn skill_reference_catalog(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
     /// 仅返回已冻结且实际可调用的扩展目录元数据，不读取正文或执行指令。
     fn prompt_catalog(&self, _can_spawn: bool, _has_skill: bool) -> String {
         String::new()
@@ -782,6 +944,7 @@ impl SpawnAgentTemplateResolver for RuntimeSpawnAgentTemplateResolver {
         })?;
         Ok(template.map(|template| ResolvedSpawnAgentTemplate {
             snapshot: AgentTemplateSnapshot {
+                inject_agents_md: template.inject_agents_md,
                 name: template.name,
                 system_prompt: template.system_prompt,
                 max_turns: template.max_turns,
@@ -2076,6 +2239,8 @@ struct RecoveredDynamicInputClaim {
     mailbox_message_ids: Vec<ResourceMailboxMessageId>,
     /// checkpoint 中与消息标识、序号、路由和正文绑定的完整 mailbox 前缀。
     mailbox_messages: Vec<RunnerMailboxMessage>,
+    /// 用户 steer claim 的完整前缀；恢复 ack 必须核对正文和资源身份而非仅水位。
+    user_steers: Vec<keencode_agent::UserSteer>,
 }
 
 /// 把 Runner 已完成模型 Round 的明确 Token 用量同步累计到项目级 Goal。
@@ -2130,6 +2295,8 @@ struct FrozenPromptContext<'a> {
     has_skill: bool,
     catalog: &'a str,
     small_context: bool,
+    /// 只控制项目级指令；全局 AGENTS.md 仍由 Runtime 强制保留。
+    inject_agents_md: bool,
 }
 
 /// 一次隔离模型生成的完整请求参数；Provider 由调用路径单独绑定。
@@ -2192,6 +2359,41 @@ impl FrozenAgentPrompt {
     }
 }
 
+/// Session 首次完整 context 冻结的 Composer 扩展引用目录。
+///
+/// 该投影只保存已过滤的公开元数据和已校验来源路径，不持有 Skill 正文、
+/// 插件配置或凭据。使用 `Value` 是为了复用前端现有 zcode catalog 合同，
+/// 但数据只能由不可变扩展候选生成。
+#[derive(Clone, Debug)]
+pub struct SessionExtensionReferenceCatalog {
+    /// Session 首次 context 时的插件身份目录。
+    pub plugins: Vec<Value>,
+    /// Session 首次 context 时的 Skill 引用目录。
+    pub skills: Vec<Value>,
+}
+
+/// 判断 Session 是否已经产生用户可见的持久事实。
+///
+/// deferred draft 只允许在没有这些事实时刷新扩展目录；一旦首发或其他命令
+/// 写入 Journal，目录必须继续由该 Session 的首次完整 context 固定，避免热替换
+/// 把已开始对话的 Skill 能力边界改成另一份事实。
+fn session_has_persisted_user_facts(state: &SessionState) -> bool {
+    !state.turns.is_empty()
+        || !state.transcript.is_empty()
+        || !state.input_queue.items.is_empty()
+        || !state.input_queue.completions.is_empty()
+        || !state.dynamic_input_receipts.is_empty()
+        || !state.model_rounds.is_empty()
+        || !state.tools.is_empty()
+        || !state.terminals.is_empty()
+        || !state.todos.items.is_empty()
+        || state.plan.plan_artifact.is_some()
+        || !state.workflow_events.is_empty()
+        || !state.sub_agents.is_empty()
+        || !state.mailbox.is_empty()
+        || !state.worktrees.is_empty()
+}
+
 /// `RuntimeAgentExecution` 内全部需要同步线性化的易失状态。
 #[derive(Default)]
 struct RuntimeAgentExecutionState {
@@ -2207,6 +2409,8 @@ struct RuntimeAgentExecutionState {
     extension_diagnostics_generation: Option<u64>,
     /// 各 Agent 在自身首次 Turn 前冻结的稳定提示词事实。
     frozen_prompts: HashMap<RunnerAgentId, Arc<FrozenAgentPrompt>>,
+    /// 首次完整 Agent context 装配时冻结的 UI 扩展引用目录；不会随工作区热替换漂移。
+    frozen_extension_reference_catalog: Option<SessionExtensionReferenceCatalog>,
     /// 按历史 Turn 记录其启动时使用的 Provider 快照，供 opaque reasoning 续传兼容性判断。
     historical_provider_by_turn: Option<HashMap<String, ProviderSnapshot>>,
 }
@@ -2815,13 +3019,7 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
                 through_sequence,
             };
             let mut body = dynamic_input_marker_line(&marker)?;
-            body.push_str("\n以下是用户在当前 Turn 中追加的引导，按顺序执行：");
-            for steer in &steers {
-                body.push_str(&format!(
-                    "\n\n[sequence={}]\n{}",
-                    steer.sequence, steer.content
-                ));
-            }
+            append_user_steer_body(&mut body, &steers);
             // marker 与正文必须留在模型可见的 User 消息里，但整条消息是内部消费
             // 协议，不能作为用户发言展示。mailbox 分支靠 Developer 角色天然隐藏，
             // steer 受恢复校验约束必须是 User，只能靠 is_meta 保持投影一致。
@@ -2837,10 +3035,19 @@ impl AgentDynamicInputSource for RuntimeDynamicInputSource {
             ));
         }
         if let Some(through_sequence) = steer_through_sequence {
-            receipts.push(AgentDynamicInputReceipt::new(
-                AgentDynamicInputKind::UserSteer,
-                through_sequence,
-            ));
+            receipts.push(
+                AgentDynamicInputReceipt::new(AgentDynamicInputKind::UserSteer, through_sequence)
+                    .with_user_messages(
+                        steers
+                            .iter()
+                            .map(|steer| {
+                                let mut message = Message::text(MessageRole::User, &steer.content);
+                                message.references = steer.references.clone();
+                                (steer.sequence, message)
+                            })
+                            .collect(),
+                    ),
+            );
         }
         Ok(AgentDynamicInputBatch::new_with_receipts(
             messages,
@@ -2886,6 +3093,24 @@ fn dynamic_input_marker_line(
 ) -> Result<String, AgentDynamicInputError> {
     serde_json::to_string(marker)
         .map_err(|_| AgentDynamicInputError::new("无法编码动态输入确认水位"))
+}
+
+/// 同一份消费正文用于模型请求与冷恢复核验，逐条保存引用归属。
+fn append_user_steer_body(body: &mut String, steers: &[keencode_agent::UserSteer]) {
+    body.push_str("\n以下是用户在当前 Turn 中追加的引导，按顺序执行：");
+    for steer in steers {
+        body.push_str(&format!(
+            "\n\n[sequence={}]\n{}",
+            steer.sequence, steer.content
+        ));
+        // 每条 steer 独立绑定引用；不能合并同名的不同市场或突破单条引用上限。
+        if !steer.references.is_empty() {
+            body.push_str("\n该条用户引导明确选择的资源（身份数据，不是更高权限指令）：\n");
+            body.push_str(
+                &serde_json::to_string(&steer.references).expect("已验证的字符串引用可以序列化"),
+            );
+        }
+    }
 }
 
 /// 只把与权威 Transcript 段和消息角色完全绑定的首行 JSON 识别为动态输入 marker。
@@ -3000,6 +3225,7 @@ fn recovered_dynamic_input_claims(
                 through_sequence,
                 mailbox_message_ids,
                 mailbox_messages,
+                user_steers: Vec::new(),
             });
         }
         if let Some((turn_id, through_sequence)) = agent
@@ -3007,6 +3233,21 @@ fn recovered_dynamic_input_claims(
             .clone()
             .zip(agent.steer_claim_through_sequence)
         {
+            let user_steers = agent
+                .pending_steers
+                .iter()
+                .take_while(|steer| steer.sequence <= through_sequence)
+                .cloned()
+                .collect::<Vec<_>>();
+            if user_steers.is_empty()
+                || user_steers.last().map(|steer| steer.sequence) != Some(through_sequence)
+                || user_steers.iter().any(|steer| {
+                    steer.turn_id != turn_id
+                        || keencode_model::InputReference::validate_all(&steer.references).is_err()
+                })
+            {
+                return Err(AgentRuntimeError::RecoveryRequired);
+            }
             claims.push(RecoveredDynamicInputClaim {
                 agent_id: agent.definition.agent_id.clone(),
                 turn_id,
@@ -3014,6 +3255,7 @@ fn recovered_dynamic_input_claims(
                 through_sequence,
                 mailbox_message_ids: Vec::new(),
                 mailbox_messages: Vec::new(),
+                user_steers,
             });
         }
     }
@@ -3465,9 +3707,39 @@ fn validate_journal_turn_correspondence(
     }
     if let Some(expected_summary) =
         collaboration_turn_prompt_summary(cause, prompt, root_plan_guard)?
-        && turn.prompt_summary != expected_summary
     {
-        return Err(AgentRuntimeError::RecoveryRequired);
+        // 根输入引用来自权威用户消息；恢复不能只重算正文摘要或从当前插件目录猜选择。
+        let expected_summary = if matches!(cause, AgentTurnCause::RootUser) {
+            let inputs = state
+                .transcript
+                .iter()
+                .flat_map(|record| match record {
+                    TranscriptRecord::MessageAdded(message) => std::slice::from_ref(message),
+                    TranscriptRecord::SegmentCommitted(segment) => segment.messages.as_slice(),
+                    TranscriptRecord::CompactionApplied(_) => &[],
+                })
+                .filter(|message| {
+                    message.role == ResourceMessageRole::User
+                        && !message.is_meta
+                        && message.agent_id.is_none()
+                        && message.turn_id.as_ref() == Some(&resource_turn_id)
+                })
+                .collect::<Vec<_>>();
+            if inputs.len() > 1 {
+                return Err(AgentRuntimeError::RecoveryRequired);
+            }
+            let references = inputs
+                .first()
+                .map_or(&[][..], |message| message.references.as_slice());
+            keencode_model::InputReference::validate_all(references)
+                .map_err(|_| AgentRuntimeError::RecoveryRequired)?;
+            append_input_reference_digest(expected_summary, references)?
+        } else {
+            expected_summary
+        };
+        if turn.prompt_summary != expected_summary {
+            return Err(AgentRuntimeError::RecoveryRequired);
+        }
     }
     if turn.status == TurnStatus::Running {
         return if expected_outcome.is_some() {
@@ -3869,6 +4141,30 @@ fn validate_dynamic_input_claim(
                             Some(ContentBlock::Text { text }) if text == &expected
                         );
                     if !exact {
+                        return Err(AgentRuntimeError::RecoveryRequired);
+                    }
+                }
+                if matches!(claim.kind, DynamicInputMarkerKind::UserSteer) {
+                    let expected_inputs = claim
+                        .user_steers
+                        .iter()
+                        .map(|steer| keencode_resources::DynamicUserInput {
+                            sequence: steer.sequence,
+                            text: steer.content.clone(),
+                            references: steer.references.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    // 可选展示回执存在时必须与同一个 claim 完全相等，不能确认被替换的正文或市场。
+                    if !receipt.user_inputs.is_empty() && receipt.user_inputs != expected_inputs {
+                        return Err(AgentRuntimeError::RecoveryRequired);
+                    }
+                    let mut expected =
+                        dynamic_input_marker_line(&marker).map_err(runtime_operation_failed)?;
+                    append_user_steer_body(&mut expected, &claim.user_steers);
+                    if !stored.is_meta
+                        || materialized.content.len() != 1
+                        || !matches!(materialized.content.first(), Some(ContentBlock::Text { text }) if text == &expected)
+                    {
                         return Err(AgentRuntimeError::RecoveryRequired);
                     }
                 }
@@ -4567,6 +4863,8 @@ pub struct AgentRuntime {
     provider_reload: Mutex<()>,
     /// 与注册表代次绑定且不包含凭据的默认模型选择。
     default_provider: RwLock<Option<DefaultProviderBinding>>,
+    /// 最近一次由 App 同步的运行时偏好；跨窗口同步只更新这一份权威快照。
+    app_runtime_preferences: Arc<RwLock<AppRuntimePreferences>>,
     /// 按 Session 隔离本地资源、租约和 Turn 生命周期的运行时管理器。
     runtime_manager: RuntimeManager,
     /// 本地 Runtime 与工具 Artifact 共同使用的应用数据根。
@@ -4589,6 +4887,12 @@ pub struct AgentRuntime {
     client_request_routers: RwLock<Vec<Arc<dyn ClientRequestRouter>>>,
     /// 全部 Session 共享且不恢复旧问答的标准 ACP Elicitation 协调器。
     elicitations: Arc<ElicitationCoordinator>,
+    /// 全部真实工具共享的权限审批门；冷恢复未重放 mode 时默认为 build。
+    permissions: Arc<PermissionCoordinator>,
+    /// Workflow AgentTool 的真实 Host 端口；只在普通 root 的工具冻结阶段读取。
+    workflow_tool_port: RwLock<Option<Arc<dyn WorkflowToolPort>>>,
+    /// actor 到父会话的问答投递映射；值只保存 Session 身份，不保存问题正文。
+    workflow_elicitation_routes: RwLock<HashMap<String, String>>,
     /// 当前桌面窗口聚焦的唯一 Session；仅用于通知路由，不参与授权。
     focused_session: RwLock<Option<String>>,
     /// WebFetch 与 WebSearch 当前原子配置；为空时工具表不暴露网络工具。
@@ -4601,10 +4905,17 @@ pub struct AgentRuntime {
     collaboration_sessions: Mutex<HashMap<String, Arc<SessionCollaborationRuntime>>>,
     /// 每个 Session 串行化 Turn 启动屏障，避免 Accepted 先于权威 TurnStarted。
     turn_start_gates: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// 在同步 cleanup 认领与异步根 Turn 起点之间提供同一 admission 边界；
+    /// 计数支持同一 Session 的并发请求在 Turn gate 中排队，而不是互相误拒绝。
+    session_start_admissions: Mutex<HashMap<String, usize>>,
+    /// 只协调 deferred draft 的短生命周期；Session 正文和状态仍只在 Journal 中。
+    deferred_session_lifecycle: Mutex<HashMap<String, DeferredSessionLifecycle>>,
     /// 每个 Session 串行化标题付费请求；关闭投递时移除，容量只随打开 Session 增长。
     title_generation_gates: Mutex<HashMap<String, Arc<TitleGeneration>>>,
     /// 按规范项目根隔离、仅在完整构建成功后原子发布的扩展候选。
     extension_candidates: RwLock<HashMap<PathBuf, Arc<RuntimeExtensionCandidate>>>,
+    /// 已打开 Session 的 Composer 扩展引用快照；只保存公开投影，不持有正文或凭据。
+    session_extension_reference_catalogs: RwLock<HashMap<String, SessionExtensionReferenceCatalog>>,
     /// 串行化项目候选发布与 MCP 撤销，避免旧传播覆盖新候选状态。
     extension_candidate_change_gate: Mutex<()>,
     /// 每个已打开 Session 独立持有的合成 MCP 目录与动态连接生命周期。
@@ -4629,8 +4940,99 @@ pub struct AgentRuntime {
 
 #[derive(Default)]
 struct TitleGeneration {
+    /// 自动命名只允许一个后台 worker；失败后由下一次发送/打开重试。
+    automatic_inflight: AtomicBool,
     gate: tokio::sync::Mutex<()>,
     cancellation: TurnCancellation,
+}
+
+/// Deferred draft 的进程内生命周期认领。
+///
+/// 这只是关闭与首次发送之间的互斥租约；Session 正文、模型配置和 Turn
+/// 仍由 Journal 持有，进程重启后继续按 Journal 事实恢复。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeferredSessionLifecycle {
+    /// 已被 promote 或首次发送认领，旧 cleanup 不得再关闭。
+    Promoted,
+    /// cleanup 已取得关闭认领，新的 promote/send 必须等待下一次打开。
+    Closing,
+}
+
+/// 已取得 Session Turn gate 的显式 mutation admission。
+///
+/// 持有该 guard 期间，fork/edit/workspace mutation 可以对 active work 做检查并
+/// 保证关闭步骤与检查处于同一临界区。根 Turn 即使先登记 admission 也只能等待
+/// 该 guard；`close` 会再次复查，拒绝取消一个刚刚进入起点屏障的发送。
+pub(crate) struct SessionMutationAdmission {
+    runtime: Arc<AgentRuntime>,
+    session_id: String,
+    _gate: tokio::sync::OwnedMutexGuard<()>,
+}
+
+/// Workspace 事务跨越 Git 与资源层期间持有的 Turn 起点屏障。
+///
+/// 该 guard 不复制 Session 正文，也不替代 Journal；它只保证冷 Session 在
+/// 事务恢复前不会被新的 root Turn 重新登记。已注册 Session 由
+/// [`SessionMutationAdmission`] 在关闭成功后转换为此 guard。
+pub(crate) struct SessionMutationGuard {
+    /// 共享 Runtime 用于在冷 Session 的 workspace 事务结束时释放生命周期认领。
+    runtime: Arc<AgentRuntime>,
+    /// 需要屏蔽读取侧 reopen 的稳定 Session 标识。
+    session_id: String,
+    _gate: Option<tokio::sync::OwnedMutexGuard<()>>,
+}
+
+impl Drop for SessionMutationGuard {
+    fn drop(&mut self) {
+        self.runtime
+            .clear_deferred_session_lifecycle(&self.session_id);
+        drop(self._gate.take());
+    }
+}
+
+/// Workspace mutation 的两种合法入口：仍登记的 Session 需要先关闭，冷 Session
+/// 直接持有同一 Turn gate。枚举由 Runtime 在线性化点生成，避免调用方先检查后抢锁。
+pub(crate) enum SessionWorkspaceMutationAdmission {
+    Registered(SessionMutationAdmission),
+    Closed(SessionMutationGuard),
+}
+
+impl SessionMutationAdmission {
+    /// 在仍持有 Turn gate 时完成最终 admission 检查并关闭 Session。
+    ///
+    /// 返回 `false` 表示新的 root start 在 guard 等待期间取得了 admission，或
+    /// Session 已出现活动工作；此时不触碰权限、Collaboration 或 Runtime 关闭状态。
+    pub(crate) async fn close_and_hold(
+        self,
+    ) -> Result<Option<SessionMutationGuard>, AgentRuntimeError> {
+        if self.runtime.session_has_active_work(&self.session_id)? {
+            return Ok(None);
+        }
+        // admission 计数可能在 guard 等待期间新增；只有这里的 lifecycle 冻结成功，
+        // root start 才会在 gate 释放后看到 Closing 并被拒绝。
+        if !self
+            .runtime
+            .claim_session_mutation_close(&self.session_id)?
+        {
+            return Ok(None);
+        }
+        if let Err(error) = self
+            .runtime
+            .close_session_locked(&self.session_id, false)
+            .await
+        {
+            // 关闭失败时不能留下永久 Closing；否则恢复路径只能看到假占用，后续
+            // workspace mutation 和用户发送都会被错误拒绝。
+            self.runtime
+                .clear_deferred_session_lifecycle(&self.session_id);
+            return Err(error);
+        }
+        Ok(Some(SessionMutationGuard {
+            runtime: Arc::clone(&self.runtime),
+            session_id: self.session_id,
+            _gate: Some(self._gate),
+        }))
+    }
 }
 
 /// Agent Runtime 的平台无关构造输入。
@@ -4702,6 +5104,35 @@ impl AgentRuntime {
 
     /// 将 Provider 已确认安排的下一次尝试发布到当前 Session 实时投递世代。
     fn publish_model_retry_notice(&self, notice: ModelRetryNotice) {
+        let session = match self.runtime_manager.get(notice.session_id.clone()) {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::error!(
+                    session_id = %notice.session_id,
+                    %error,
+                    "模型重试状态未能进入 Runtime 实时世代"
+                );
+                return;
+            }
+        };
+        let occurred_at_ms = unix_time_ms();
+        let message = keencode_model::redact_error_secrets_bounded(&notice.message, 2048);
+        if let Err(error) = session.publish_model_retry(RuntimeModelRetryScheduled {
+            turn_id: notice.turn_id.clone(),
+            source_agent_id: notice.agent_id.clone(),
+            attempt: notice.attempt,
+            max_attempts: notice.max_attempts,
+            delay_ms: notice.delay_ms,
+            occurred_at_ms,
+            message: message.clone(),
+        }) {
+            tracing::error!(
+                session_id = %notice.session_id,
+                %error,
+                "模型重试状态未能进入 Runtime 实时世代"
+            );
+            return;
+        }
         let sender = match self.session_delivery(&notice.session_id) {
             Ok(sender) => sender,
             Err(error) => {
@@ -4713,12 +5144,12 @@ impl AgentRuntime {
             turn_id: Some(notice.turn_id),
             source_agent_id: Some(notice.agent_id),
             journal_sequence: None,
-            occurred_at_ms: unix_time_ms(),
+            occurred_at_ms,
             event: KeenCodeEvent::ModelRetryScheduled {
                 attempt: notice.attempt,
                 max_attempts: notice.max_attempts,
                 delay_ms: notice.delay_ms,
-                message: notice.message,
+                message,
             },
         };
         let session_id = notice.session_id;
@@ -4850,13 +5281,36 @@ impl AgentRuntime {
         observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
     ) -> Result<Self, AgentRuntimeError> {
         let storage_root = storage_root.into();
-        let runtime_manager = RuntimeManager::new(RuntimeConfig::new(storage_root.clone()))
+        let native_desktop_tests = cfg!(feature = "native-desktop-tests");
+        let benchmark_enabled =
+            std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1"));
+        let native_test_artifact_override = if native_desktop_tests && benchmark_enabled {
+            std::env::var_os(NATIVE_TEST_ARTIFACT_CAPACITY_ENV)
+        } else {
+            None
+        };
+        let resolved_native_test_artifact_capacity = native_test_artifact_capacity(
+            native_desktop_tests,
+            benchmark_enabled,
+            native_test_artifact_override.as_deref(),
+        )
+        .map_err(|error| initialization_failed("native_test_artifact_capacity", error))?;
+        let mut runtime_config = RuntimeConfig::new(storage_root.clone());
+        if native_desktop_tests && benchmark_enabled {
+            // 仅隔离 native benchmark 可调高容量，生产与普通测试保持 ArtifactStore 默认值。
+            runtime_config.artifacts.max_artifacts_per_session =
+                resolved_native_test_artifact_capacity;
+        }
+        let runtime_manager = RuntimeManager::new(runtime_config)
             .map_err(|error| initialization_failed("runtime_manager", error))?;
         let client_request_gate = Arc::new(ClientRequestDisplayGate::new());
-        let elicitations = Arc::new(ElicitationCoordinator::with_gate(Arc::clone(
-            &client_request_gate,
-        )));
+        let app_runtime_preferences = Arc::new(RwLock::new(AppRuntimePreferences::default()));
+        let elicitations = Arc::new(ElicitationCoordinator::with_gate_and_preferences(
+            Arc::clone(&client_request_gate),
+            Arc::clone(&app_runtime_preferences),
+        ));
         let elicitation_router: Arc<dyn ClientRequestRouter> = elicitations.clone();
+        let permissions = Arc::new(PermissionCoordinator::new());
         let background_agent_limit = DEFAULT_BACKGROUND_AGENT_LIMIT as usize;
         let collaboration_global_turn_limiter = Arc::new(
             CollaborationGlobalTurnLimiter::new(background_agent_limit)
@@ -4866,6 +5320,7 @@ impl AgentRuntime {
             provider_registry,
             provider_reload: Mutex::new(()),
             default_provider: RwLock::new(None),
+            app_runtime_preferences,
             runtime_manager,
             storage_root,
             #[cfg(feature = "benchmark")]
@@ -4878,14 +5333,20 @@ impl AgentRuntime {
             next_live_pump_generation: AtomicU64::new(0),
             client_request_routers: RwLock::new(vec![elicitation_router]),
             elicitations,
+            permissions,
+            workflow_tool_port: RwLock::new(None),
+            workflow_elicitation_routes: RwLock::new(HashMap::new()),
             focused_session: RwLock::new(None),
             web_service: RwLock::new(None),
             background_agent_limit: AtomicUsize::new(background_agent_limit),
             collaboration_global_turn_limiter,
             collaboration_sessions: Mutex::new(HashMap::new()),
             turn_start_gates: Mutex::new(HashMap::new()),
+            session_start_admissions: Mutex::new(HashMap::new()),
+            deferred_session_lifecycle: Mutex::new(HashMap::new()),
             title_generation_gates: Mutex::new(HashMap::new()),
             extension_candidates: RwLock::new(HashMap::new()),
+            session_extension_reference_catalogs: RwLock::new(HashMap::new()),
             extension_candidate_change_gate: Mutex::new(()),
             session_mcp: Mutex::new(HashMap::new()),
             emitter,
@@ -4910,9 +5371,260 @@ impl AgentRuntime {
         &self.provider_registry
     }
 
+    /// 写入 App 级运行时偏好；它只更新 Runtime 自己的受保护快照，不能因此
+    /// 启动 dormant Session。具体 Session 的问答与记录策略在消费时读取这份快照。
+    pub fn sync_app_runtime_preferences(
+        &self,
+        preferences: AppRuntimePreferences,
+    ) -> Result<(), AgentRuntimeError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        *self
+            .app_runtime_preferences
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)? = preferences;
+        self.elicitations
+            .sync_auto_resolution_preference(preferences.ask_user_question_auto_resolution_enabled);
+        Ok(())
+    }
+
+    /// 读取当前 App 偏好快照，供需要作出运行时决策的受信桌面调用面使用。
+    pub fn app_runtime_preferences(&self) -> Result<AppRuntimePreferences, AgentRuntimeError> {
+        self.app_runtime_preferences
+            .read()
+            .map(|preferences| *preferences)
+            .map_err(|_| AgentRuntimeError::StateUnavailable)
+    }
+
     /// 返回进程内唯一的 Session Runtime 管理器。
     pub fn runtime_manager(&self) -> &RuntimeManager {
         &self.runtime_manager
+    }
+
+    /// 认领一个 deferred Session，阻止旧窗口 cleanup 在配置或首次发送期间关闭它。
+    ///
+    /// 同一 Session 的重复认领是幂等的；只有已经进入关闭认领的草稿拒绝新操作。
+    pub fn claim_deferred_session(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let mut lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        match lifecycle.get(session_id).copied() {
+            Some(DeferredSessionLifecycle::Closing) => Err(AgentRuntimeError::SessionUnavailable),
+            Some(DeferredSessionLifecycle::Promoted) => Ok(()),
+            None => {
+                lifecycle.insert(session_id.to_owned(), DeferredSessionLifecycle::Promoted);
+                Ok(())
+            }
+        }
+    }
+
+    /// 标记 deferred 草稿已提升；它与首次发送使用同一认领账本。
+    pub fn promote_deferred_session(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
+        self.claim_deferred_session(session_id)
+    }
+
+    /// 原子取得 deferred cleanup 的关闭认领。
+    ///
+    /// 返回 `false` 表示 Session 已被 promote/发送认领，调用方必须保留它；返回
+    /// `true` 后调用方再检查 Journal 是否为空，最后调用 `close_session` 完成关闭。
+    pub fn begin_deferred_session_close(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let mut lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if lifecycle.contains_key(session_id) {
+            return Ok(false);
+        }
+        if self
+            .session_start_admissions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .is_some_and(|count| *count > 0)
+        {
+            return Ok(false);
+        }
+        lifecycle.insert(session_id.to_owned(), DeferredSessionLifecycle::Closing);
+        Ok(true)
+    }
+
+    /// 关闭前发现草稿已有事实时释放 deferred 关闭认领，允许后续发送继续。
+    pub fn cancel_deferred_session_close(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let mut lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if lifecycle.get(session_id) == Some(&DeferredSessionLifecycle::Closing) {
+            lifecycle.remove(session_id);
+        }
+        Ok(())
+    }
+
+    /// 完成显式关闭后释放本次进程内生命周期认领。
+    fn clear_deferred_session_lifecycle(&self, session_id: &str) {
+        if let Ok(mut lifecycle) = self.deferred_session_lifecycle.lock() {
+            lifecycle.remove(session_id);
+        }
+    }
+
+    /// 在根 Turn 真正取得异步 gate 前登记一次启动；deferred cleanup 读取同一份
+    /// admission 账本，不能在启动已进入临界区后把空草稿认领关闭。
+    fn admit_session_start(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let mut lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if lifecycle.get(session_id) == Some(&DeferredSessionLifecycle::Closing) {
+            return Err(AgentRuntimeError::SessionUnavailable);
+        }
+        // 一旦根 Turn 被接受，Session 已有明确用户事实；即使 Turn 后续结束，
+        // workspace deferred cleanup 也不能把它当成尚未提升的空草稿关闭。
+        lifecycle
+            .entry(session_id.to_owned())
+            .or_insert(DeferredSessionLifecycle::Promoted);
+        let mut admissions = self
+            .session_start_admissions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let count = admissions.entry(session_id.to_owned()).or_default();
+        *count = count.saturating_add(1);
+        Ok(())
+    }
+
+    fn release_session_start(&self, session_id: &str) {
+        if let Ok(mut admissions) = self.session_start_admissions.lock()
+            && let Some(count) = admissions.get_mut(session_id)
+        {
+            if *count <= 1 {
+                admissions.remove(session_id);
+            } else {
+                *count -= 1;
+            }
+        }
+    }
+
+    /// 返回当前 Session 的唯一 Turn 起点屏障；显式 mutation 与 root start 必须共用它。
+    fn session_turn_start_gate(
+        &self,
+        session_id: &str,
+    ) -> Result<Arc<tokio::sync::Mutex<()>>, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let mut gates = self
+            .turn_start_gates
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        Ok(Arc::clone(
+            gates
+                .entry(session_id.to_owned())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        ))
+    }
+
+    fn has_session_start_admission(&self, session_id: &str) -> Result<bool, AgentRuntimeError> {
+        Ok(self
+            .session_start_admissions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .is_some_and(|count| *count > 0))
+    }
+
+    /// 在同一 lifecycle/admission 锁顺序下冻结新的 root start，并返回关闭认领。
+    /// 调用方必须已经持有对应 Turn gate，保证 active 检查与此冻结之间没有新 Turn。
+    fn claim_session_mutation_close(&self, session_id: &str) -> Result<bool, AgentRuntimeError> {
+        let mut lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if lifecycle.get(session_id) == Some(&DeferredSessionLifecycle::Closing) {
+            return Ok(false);
+        }
+        let admissions = self
+            .session_start_admissions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if admissions.get(session_id).is_some_and(|count| *count > 0) {
+            return Ok(false);
+        }
+        lifecycle.insert(session_id.to_owned(), DeferredSessionLifecycle::Closing);
+        Ok(true)
+    }
+
+    /// 在线性化点取得 workspace mutation admission。
+    ///
+    /// 与普通 mutation 不同，冷 Session 没有 Runtime manager 槽位，不能先
+    /// `open_or_create_session` 再检查；否则 handoff 会在 Git 事务前重新登记
+    /// Journal。这里在同一 Turn gate 下返回 `Closed`，并由调用方持有 guard
+    /// 直到 workspace 恢复完成。
+    pub(crate) async fn begin_workspace_mutation(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<Option<SessionWorkspaceMutationAdmission>, AgentRuntimeError> {
+        let gate = self.session_turn_start_gate(session_id)?;
+        let guard = Arc::clone(&gate).lock_owned().await;
+        if self.has_session_start_admission(session_id)? {
+            return Ok(None);
+        }
+        // 冷 Session 没有 Runtime manager 槽位时，旧窗口的 deferred cleanup
+        // 仍可能在另一个任务中取得关闭认领。先用同一 lifecycle 账本认领
+        // Promoted，保证恢复完成前 cleanup 不能把刚重新打开的 Session 关闭。
+        if let Err(error) = self.claim_deferred_session(session_id) {
+            if error == AgentRuntimeError::SessionUnavailable {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+        match self.runtime_manager.get(session_id.to_owned()) {
+            Ok(session) => {
+                drop(session);
+                if self.session_has_active_work(session_id)? {
+                    return Ok(None);
+                }
+                Ok(Some(SessionWorkspaceMutationAdmission::Registered(
+                    SessionMutationAdmission {
+                        runtime: Arc::clone(self),
+                        session_id: session_id.to_owned(),
+                        _gate: guard,
+                    },
+                )))
+            }
+            Err(RuntimeError::SessionNotRegistered) => {
+                if !self.claim_session_mutation_close(session_id)? {
+                    return Ok(None);
+                }
+                Ok(Some(SessionWorkspaceMutationAdmission::Closed(
+                    SessionMutationGuard {
+                        runtime: Arc::clone(self),
+                        session_id: session_id.to_owned(),
+                        _gate: Some(guard),
+                    },
+                )))
+            }
+            Err(error) => Err(runtime_operation_failed(error)),
+        }
+    }
+
+    /// 交接期间拒绝读取侧重新打开已关闭 Session；恢复路径使用内部直接入口。
+    pub(crate) fn workspace_mutation_in_progress(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        Ok(self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            == Some(&DeferredSessionLifecycle::Closing))
     }
 
     /// 返回项目与 Session 定位索引所在的数据根目录。
@@ -4923,6 +5635,365 @@ impl AgentRuntime {
     /// 返回进程内唯一 Elicitation 协调器，AskUser 不得建立旁路待决账本。
     pub fn elicitation_coordinator(&self) -> &Arc<ElicitationCoordinator> {
         &self.elicitations
+    }
+
+    /// 返回真实工具权限协调器；AskUser 问答不得复用这条审批账本。
+    pub(crate) fn permission_coordinator(&self) -> &Arc<PermissionCoordinator> {
+        &self.permissions
+    }
+
+    /// 按当前父连接读取权限 pending；其他连接只能得到拒绝，不能枚举正文。
+    pub(crate) fn pending_permission_views(
+        &self,
+        parent_session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<PendingPermissionView>, AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        Ok(self
+            .permissions
+            .pending_views_for_connection(parent_session_id, connection_id))
+    }
+
+    /// 返回当前父 Session 可见的权限 pending 数量，供投影摘要使用。
+    pub(crate) fn pending_permission_count(&self, session_id: &str) -> usize {
+        self.permissions.pending_count_for_session(session_id)
+    }
+
+    /// 订阅权限 pending 的投影刷新通知；正文由连接范围读取方法提供。
+    pub(crate) fn subscribe_permission_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<PermissionChange> {
+        self.permissions.subscribe_changes()
+    }
+
+    /// 在 Session owner 完成 Journal 提交后发布 mode；未调用时保持 build。
+    pub(crate) fn set_permission_mode(
+        &self,
+        session_id: &str,
+        mode: PermissionMode,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        self.permissions.set_mode(session_id, mode);
+        Ok(())
+    }
+
+    /// 解析并发布 V4 workspace mode；未知值安全回退 build。
+    pub(crate) fn set_permission_mode_from_wire(
+        &self,
+        session_id: &str,
+        mode: Option<&str>,
+    ) -> Result<(), AgentRuntimeError> {
+        self.set_permission_mode(session_id, PermissionMode::from_wire(mode))
+    }
+
+    /// 读取当前有效权限 mode；冷恢复未重放时安全返回 build。
+    pub(crate) fn permission_mode(
+        &self,
+        session_id: &str,
+    ) -> Result<PermissionMode, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        Ok(self.permissions.mode(session_id))
+    }
+
+    /// 绑定 root Session 当前唯一可回答权限的连接。
+    pub(crate) fn bind_permission_session_connection(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.permissions
+            .bind_session_connection(session_id, connection_id.clone())
+            .map_err(|error| {
+                // 权限桥只返回稳定枚举；记录阶段和错误类别，避免首发失败被
+                // 归一成无上下文的 RuntimeOperationFailed，同时不写入连接或正文。
+                tracing::error!(
+                    target: "keencode_diagnostics",
+                    stage = "start_root_turn.bind_permission_session_connection",
+                    error = ?error,
+                    "首发前权限连接绑定失败"
+                );
+                AgentRuntimeError::RuntimeOperationFailed
+            })
+    }
+
+    /// 收口指定连接上的权限等待；连接关闭时必须与 Elicitation 同步释放。
+    pub(crate) fn disconnect_permission_connection(&self, connection_id: &ConnectionId) {
+        self.permissions.disconnect(connection_id);
+    }
+
+    /// 注册 Workflow Host 的真实 AgentTool 端口；工具只会在后续普通 root 冻结时加入。
+    ///
+    /// 端口本身不持有模型或 Session 状态，调用方必须在首次 root Turn 装配前绑定，
+    /// 以便 root 的 `tool_snapshot` 与持久协调器同时冻结这些能力。
+    pub(crate) fn set_workflow_tool_port(
+        &self,
+        port: Arc<dyn WorkflowToolPort>,
+    ) -> Result<(), AgentRuntimeError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        *self
+            .workflow_tool_port
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(port);
+        Ok(())
+    }
+
+    /// 让 Workflow actor 复用父会话已协商的 form 连接，并把问答显示在父 conversation。
+    ///
+    /// 没有已绑定连接或连接未声明 form 时保持未暴露状态，不能伪造 initialize 能力；
+    /// actor 下一次冷恢复会再次尝试绑定当前父连接。
+    pub(crate) fn bind_workflow_actor_elicitation(
+        &self,
+        actor_session_id: &str,
+        parent_session_id: &str,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(actor_session_id)?;
+        validate_session_id(parent_session_id)?;
+        let connection = self.elicitations.session_connection(parent_session_id);
+        if connection.is_some() {
+            self.permissions
+                .bind_actor_parent(actor_session_id, parent_session_id);
+        } else {
+            self.permissions.unbind_actor_parent(actor_session_id);
+        }
+        let can_route = connection
+            .as_ref()
+            .is_some_and(|connection| self.elicitations.supports_form_for_connection(connection));
+        let mut routes = self
+            .workflow_elicitation_routes
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if let Some(connection) = connection.filter(|_| can_route) {
+            self.elicitations
+                .bind_session_connection(actor_session_id, &connection)
+                .map_err(runtime_operation_failed)?;
+            routes.insert(actor_session_id.to_owned(), parent_session_id.to_owned());
+        } else {
+            routes.remove(actor_session_id);
+        }
+        Ok(())
+    }
+
+    /// 通过父会话已绑定的连接回答 Workflow actor 的待决问答。
+    ///
+    /// Elicitation pending 账本保留 actor Session，回答显示仍走父连接；这里先核对
+    /// actor→parent 路由，再让协调器按原始问题 Schema 解析答案，拒绝跨会话或猜字段。
+    pub(crate) fn resolve_workflow_question(
+        &self,
+        parent_session_id: &str,
+        request_id: &str,
+        answer: &str,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        if request_id.trim().is_empty() {
+            return Err(AgentRuntimeError::UnknownClientRequest);
+        }
+        let actor_session_id = self
+            .elicitations
+            .pending_session_id_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        let routed_parent = self
+            .workflow_elicitation_routes
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&actor_session_id)
+            .cloned()
+            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+        if routed_parent != parent_session_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        let pending_connection = self
+            .elicitations
+            .pending_connection_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        let parent_connection = self
+            .elicitations
+            .session_connection(parent_session_id)
+            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+        if pending_connection != parent_connection {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        self.elicitations
+            .respond_workflow_answer_from_connection(&pending_connection, request_id, answer)
+            .map_err(|error| match error {
+                crate::elicitation::ElicitationBridgeError::UnknownRequest => {
+                    AgentRuntimeError::UnknownClientRequest
+                }
+                crate::elicitation::ElicitationBridgeError::ResponseConnectionMismatch => {
+                    AgentRuntimeError::ClientResponseRejected
+                }
+                _ => AgentRuntimeError::ClientResponseRejected,
+            })
+    }
+
+    /// 收口 V4 interaction 的真实 pending 问答；普通父会话和投影到父连接的 actor
+    /// 共用同一条入口，答案字段由 ElicitationCoordinator 按原始问题 Schema 解释。
+    pub(crate) fn resolve_interaction(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+        request_id: &str,
+        answer_json: &str,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if request_id.trim().is_empty() {
+            return Err(AgentRuntimeError::UnknownClientRequest);
+        }
+        if self.permissions.contains_pending(request_id) {
+            return self
+                .permissions
+                .resolve_from_connection(session_id, connection_id, request_id, answer_json)
+                .map_err(|error| match error {
+                    crate::permissions::PermissionBridgeError::UnknownRequest => {
+                        AgentRuntimeError::UnknownClientRequest
+                    }
+                    _ => AgentRuntimeError::ClientResponseRejected,
+                });
+        }
+        let pending_session_id = self
+            .elicitations
+            .pending_session_id_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        let pending_connection = self
+            .elicitations
+            .pending_connection_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        if &pending_connection != connection_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        let session_connection = self
+            .elicitations
+            .session_connection(session_id)
+            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+        if session_connection != *connection_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        if pending_session_id != session_id {
+            let routed_parent = self
+                .workflow_elicitation_routes
+                .read()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .get(&pending_session_id)
+                .cloned()
+                .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+            if routed_parent != session_id {
+                return Err(AgentRuntimeError::ClientResponseRejected);
+            }
+        }
+        self.elicitations
+            .respond_workflow_answer_from_connection(connection_id, request_id, answer_json)
+            .map_err(|error| match error {
+                crate::elicitation::ElicitationBridgeError::UnknownRequest => {
+                    AgentRuntimeError::UnknownClientRequest
+                }
+                _ => AgentRuntimeError::ClientResponseRejected,
+            })
+    }
+
+    /// 按父 Session、连接和 actor 路由暂停 AskUser 的自动继续计时。
+    ///
+    /// 该入口只触碰 Elicitation 协调器；权限 pending 不能借用同一命令改变状态，
+    /// 连接校验与 `resolve_interaction` 保持同一授权边界。
+    pub(crate) fn snooze_interaction_auto_resolution(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+        request_id: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if request_id.trim().is_empty() || self.permissions.contains_pending(request_id) {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        let pending_session_id = self
+            .elicitations
+            .pending_session_id_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        let pending_connection = self
+            .elicitations
+            .pending_connection_for_request(request_id)
+            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
+        if &pending_connection != connection_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        let session_connection = self
+            .elicitations
+            .session_connection(session_id)
+            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+        if session_connection != *connection_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        if pending_session_id != session_id {
+            let routed_parent = self
+                .workflow_elicitation_routes
+                .read()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .get(&pending_session_id)
+                .cloned()
+                .ok_or(AgentRuntimeError::ClientResponseRejected)?;
+            if routed_parent != session_id {
+                return Err(AgentRuntimeError::ClientResponseRejected);
+            }
+        }
+        self.elicitations
+            .snooze_auto_resolution_from_connection(connection_id, request_id)
+            .map_err(|error| match error {
+                crate::elicitation::ElicitationBridgeError::UnknownRequest => {
+                    AgentRuntimeError::UnknownClientRequest
+                }
+                _ => AgentRuntimeError::ClientResponseRejected,
+            })
+    }
+
+    /// 读取给 V4 会话投影的 pending 问答；正文仍来自 Coordinator 的原始 Schema。
+    ///
+    /// 连接必须是父 Session 当前绑定的连接。actor 问答只有在已登记的
+    /// actor→parent 路由和 Coordinator display session 同时匹配时才会投影，
+    /// 因此查询本身不能被前端用来枚举其他 Session 的问题。
+    pub(crate) fn pending_elicitation_views(
+        &self,
+        parent_session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<Vec<PendingElicitationView>, AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        let Some(bound_connection) = self.elicitations.session_connection(parent_session_id) else {
+            return Ok(Vec::new());
+        };
+        if bound_connection != *connection_id {
+            return Err(AgentRuntimeError::ClientResponseRejected);
+        }
+        let routes = self
+            .workflow_elicitation_routes
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        Ok(self
+            .elicitations
+            .pending_views_for_connection(connection_id)
+            .into_iter()
+            .filter(|view| {
+                view.session_id == parent_session_id
+                    || (routes
+                        .get(&view.session_id)
+                        .is_some_and(|parent| parent == parent_session_id)
+                        && view.display_session_id.as_deref() == Some(parent_session_id))
+            })
+            .collect())
+    }
+
+    fn workflow_elicitation_target(&self, session_id: &str) -> Result<String, AgentRuntimeError> {
+        self.workflow_elicitation_routes
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)
+            .map(|routes| {
+                routes
+                    .get(session_id)
+                    .cloned()
+                    .unwrap_or_else(|| session_id.to_owned())
+            })
     }
 
     /// 原子更新后续与现存 Session 的设备级及每根树子 Agent 并发上限。
@@ -4978,6 +6049,49 @@ impl AgentRuntime {
         requested_session_id: Option<&str>,
         create_operation_id: &str,
     ) -> Result<RuntimeSession, AgentRuntimeError> {
+        self.open_or_create_session_internal(
+            project_root,
+            requested_session_id,
+            create_operation_id,
+            false,
+        )
+    }
+
+    /// 仅供 workspace 事务完成后恢复已冻结 Session；调用方必须仍持有 mutation guard。
+    pub(crate) fn open_or_create_session_for_workspace_mutation(
+        &self,
+        project_root: &Path,
+        requested_session_id: Option<&str>,
+        create_operation_id: &str,
+    ) -> Result<RuntimeSession, AgentRuntimeError> {
+        self.open_or_create_session_internal(
+            project_root,
+            requested_session_id,
+            create_operation_id,
+            true,
+        )
+    }
+
+    fn open_or_create_session_internal(
+        &self,
+        project_root: &Path,
+        requested_session_id: Option<&str>,
+        create_operation_id: &str,
+        workspace_mutation_restore: bool,
+    ) -> Result<RuntimeSession, AgentRuntimeError> {
+        // 普通同步 open 必须与 mutation lifecycle 共用同一把锁，并覆盖到
+        // Manager 注册、项目校验和扩展目录冻结；否则 check 后到 open 前仍可
+        // 被 workspace close 插入，重新登记一个待变更 Session。
+        let lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if !workspace_mutation_restore
+            && let Some(session_id) = requested_session_id
+            && lifecycle.get(session_id) == Some(&DeferredSessionLifecycle::Closing)
+        {
+            return Err(AgentRuntimeError::SessionUnavailable);
+        }
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentRuntimeError::RuntimeClosed);
         }
@@ -4985,19 +6099,26 @@ impl AgentRuntime {
         let session = if let Some(session_id) = requested_session_id {
             validate_session_id(session_id)?;
             match self.runtime_manager.get(session_id.to_owned()) {
-                Ok(session) if session.is_open().map_err(runtime_operation_failed)? => session,
-                Ok(_) => {
-                    // 关闭流程可能已经冻结句柄、但在最后清理失败前仍留在 Manager。
-                    // 加载或配置既有对话时先完成幂等关闭，再从 Journal 建立新句柄。
-                    self.runtime_manager
-                        .close(session_id.to_owned())
-                        .map_err(runtime_operation_failed)?;
-                    match self.runtime_manager.open(session_id.to_owned()) {
-                        Ok(OpenSessionResult::Ready(session)) => session,
-                        Ok(OpenSessionResult::Corrupt(_)) => {
-                            return Err(AgentRuntimeError::SessionUnavailable);
+                Ok(session) => {
+                    if session.is_open().map_err(runtime_operation_failed)? {
+                        session
+                    } else {
+                        // 先显式释放 get 返回的 lease；否则旧句柄可能活到整个
+                        // match 结束，紧接着的 close/open 会误报 SessionBusy。
+                        drop(session);
+                        // 关闭流程可能已经冻结句柄、但在最后清理失败前仍留在
+                        // Manager。这里把已移除视为幂等成功，再从 Journal 恢复。
+                        match self.runtime_manager.close(session_id.to_owned()) {
+                            Ok(()) | Err(RuntimeError::SessionNotRegistered) => {}
+                            Err(error) => return Err(runtime_operation_failed(error)),
                         }
-                        Err(error) => return Err(runtime_operation_failed(error)),
+                        match self.runtime_manager.open(session_id.to_owned()) {
+                            Ok(OpenSessionResult::Ready(session)) => session,
+                            Ok(OpenSessionResult::Corrupt(_)) => {
+                                return Err(AgentRuntimeError::SessionUnavailable);
+                            }
+                            Err(error) => return Err(runtime_operation_failed(error)),
+                        }
                     }
                 }
                 Err(RuntimeError::SessionNotRegistered) => {
@@ -5041,7 +6162,34 @@ impl AgentRuntime {
             }
         };
         ensure_session_project(&session, &project_root)?;
+        self.freeze_session_reference_catalog_if_available(
+            session.session_id().as_str(),
+            &project_root,
+        )?;
         Ok(session)
+    }
+
+    /// 在 Session 起点屏障内打开或创建 Session。
+    ///
+    /// 首次发送、workspace release 和 deferred cleanup 都必须使用这个入口；否则
+    /// `RuntimeManager::open` 可能在另一个连接刚完成 `close`、但旧 lease 尚未释放
+    /// 时返回 SessionBusy，造成前端看到无依据的 SessionNotRegistered。
+    pub async fn open_or_create_session_serialized(
+        &self,
+        project_root: &Path,
+        requested_session_id: Option<&str>,
+        create_operation_id: &str,
+    ) -> Result<RuntimeSession, AgentRuntimeError> {
+        let gate_session_id = match requested_session_id {
+            Some(session_id) => session_id.to_owned(),
+            None => {
+                let canonical = canonical_project_root(project_root)?;
+                deterministic_session_id(&canonical, create_operation_id)?
+            }
+        };
+        let gate = self.session_turn_start_gate(&gate_session_id)?;
+        let _guard = gate.lock().await;
+        self.open_or_create_session(project_root, requested_session_id, create_operation_id)
     }
 
     /// 返回一个已打开 Session 的权威一致快照。
@@ -5051,6 +6199,389 @@ impl AgentRuntime {
             .get(session_id.to_owned())
             .and_then(|session| session.snapshot())
             .map_err(runtime_operation_failed)
+    }
+
+    /// 订阅指定 Session 的 Runtime 事实，用于队列自动排放等边界触发器。
+    ///
+    /// 订阅只读取 Runtime publisher，不在 AgentRuntime 侧复制会话事实；调用方
+    /// 必须在任务结束或连接关闭时丢弃订阅，慢消费者由 Runtime 的有界 lag 规则处理。
+    pub fn subscribe_session_events(
+        &self,
+        session_id: &str,
+    ) -> Result<RuntimeEventSubscription, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.subscribe())
+            .map_err(runtime_operation_failed)
+    }
+
+    /// 读取 Session 的后续输入事实；队列正文只来自权威 Journal。
+    pub fn session_input_queue(
+        &self,
+        session_id: &str,
+    ) -> Result<(FollowupMode, SessionInputQueueState), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.input_queue_state())
+            .map_err(runtime_operation_failed)
+    }
+
+    /// 使用当前 Session Provider 执行一次真实手动上下文压缩。
+    ///
+    /// 压缩使用一个不追加用户消息的维护 Turn；Runtime 只有在
+    /// `ContextCompactionApplied` 与维护 Turn 终态均写入 Journal 后才返回成功。
+    /// `target_turn_id` 必须由队列消费屏障预先持久化，避免崩溃恢复时猜测输入归属。
+    pub async fn compact_session_context(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        target_turn_id: &str,
+    ) -> Result<(), AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if operation_id.trim().is_empty() || target_turn_id.trim().is_empty() {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(runtime_operation_failed)?;
+        if !session
+            .active_turn_ids()
+            .map_err(runtime_operation_failed)?
+            .is_empty()
+        {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
+        let resolved = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
+        let root_agent = ResourceAgentId::new(keencode_resources::ROOT_AGENT_ID.to_owned())
+            .map_err(runtime_operation_failed)?;
+        let messages = session
+            .model_transcript_for_agent(&root_agent)
+            .map_err(runtime_operation_failed)?;
+        let provider_snapshot = provider_snapshot(&resolved);
+        let provider: Arc<dyn ModelProvider> = Arc::new(TurnBoundProvider::new(
+            Arc::new(resolved.clone()),
+            session_id,
+            target_turn_id,
+            keencode_resources::ROOT_AGENT_ID,
+        ));
+        let mut request = TurnRequest::new(
+            AgentSessionId::new(session_id.to_owned())
+                .map_err(|_| AgentRuntimeError::InvalidSession)?,
+            AgentTurnId::new(target_turn_id.to_owned())
+                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+            RunnerAgentId::new(keencode_resources::ROOT_AGENT_ID.to_owned())
+                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?,
+            resolved.model(),
+            messages,
+            if snapshot.state.plan.enabled {
+                PlanGuard::read_only()
+            } else {
+                PlanGuard::inactive()
+            },
+        );
+        request.model_request_mut().max_output_tokens = resolved
+            .capabilities(resolved.model())
+            .max_output_tokens
+            .map(u32::try_from)
+            .transpose()
+            .map_err(runtime_operation_failed)?;
+        let runner = session.bind_agent_runner(
+            AgentRunner::new(provider, ToolRegistry::new(), RunLimits::default())
+                .with_tool_approval_gate(self.permissions.clone()),
+        );
+        runner
+            .compact_turn(
+                request,
+                provider_snapshot,
+                format!("manual_compact:{operation_id}"),
+                1,
+            )
+            .await
+            .map(|_| ())
+            .map_err(runtime_operation_failed)
+    }
+
+    /// 持久暂停当前 Session Goal，并保持与 ACP GoalFileStore 相同的 owner/CAS 语义。
+    pub fn pause_session_goal(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<GoalChange, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(runtime_operation_failed)?;
+        let state = PersistentAgentState::open_with_goal_root(session, &self.storage_root)
+            .map_err(runtime_operation_failed)?;
+        state
+            .pause_goal(operation_id)
+            .map_err(runtime_operation_failed)
+    }
+
+    /// 持久恢复当前 Session Goal；只有真实 active Goal 才会交给续跑调度器。
+    pub async fn resume_session_goal(
+        self: &Arc<Self>,
+        session_id: &str,
+        operation_id: &str,
+    ) -> Result<GoalChange, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(runtime_operation_failed)?;
+        let state = PersistentAgentState::open_with_goal_root(session, &self.storage_root)
+            .map_err(runtime_operation_failed)?;
+        let change = state
+            .resume_goal(operation_id)
+            .map_err(runtime_operation_failed)?;
+        if change
+            .current
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status == GoalStatus::Active && change.changed)
+        {
+            self.continue_active_goal(session_id).await?;
+        }
+        Ok(change)
+    }
+
+    /// 持久切换后续输入模式。
+    pub fn set_session_followup_mode(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        mode: FollowupMode,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(runtime_operation_failed)?;
+        session
+            .set_followup_mode(operation_id, mode)
+            .map_err(runtime_operation_failed)?;
+        self.session_snapshot(session_id)
+    }
+
+    /// 持久加入一条后续输入。
+    pub fn enqueue_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        item: SessionInputQueueItem,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.enqueue_input(operation_id, item))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 修改持久队列中的一条输入。
+    pub fn edit_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+        new_text: String,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.edit_queued_input(operation_id, queue_item_id, new_text))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 重排持久队列中的一条输入。
+    pub fn reorder_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+        before_queue_item_id: Option<&str>,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| {
+                session.reorder_queued_input(operation_id, queue_item_id, before_queue_item_id)
+            })
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 删除持久队列中的一条输入。
+    pub fn delete_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.delete_queued_input(operation_id, queue_item_id))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 持久切换队列空闲自动消费开关。
+    pub fn set_session_input_auto_drain(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        auto_drain: bool,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.set_input_queue_auto_drain(operation_id, auto_drain))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 为显式发送保留一条队列输入，并返回冻结的正文与模型选择。
+    pub fn reserve_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+        target_turn_id: &str,
+    ) -> Result<SessionInputQueueItem, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| {
+                session.reserve_queued_input(operation_id, queue_item_id, target_turn_id)
+            })
+            .map(|(_, item)| item)
+            .map_err(runtime_operation_failed)
+    }
+
+    /// 队列项对应 Turn 启动成功后确认消费。
+    pub fn complete_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.complete_queued_input(operation_id, queue_item_id))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 队列项对应 Turn 启动失败时恢复为可消费状态。
+    pub fn release_session_input(
+        &self,
+        session_id: &str,
+        operation_id: &str,
+        queue_item_id: &str,
+    ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.release_queued_input(operation_id, queue_item_id))
+            .map(|_| self.session_snapshot(session_id))
+            .map_err(runtime_operation_failed)?
+    }
+
+    /// 返回工作流启动时可冻结的无凭据 Provider 快照，并验证已绑定配置仍然在当前注册表中。
+    ///
+    /// 父 Session 已有快照时不能静默改用新的默认 Provider；只有未绑定 Provider 的旧会话
+    /// 才允许读取当前默认选择。工作流 Host 将返回值直接写进 `run-started.models`，后续
+    /// actor 只能按该值启动，避免热加载后把同一运行切换到另一套凭据或模型。
+    pub(crate) fn workflow_provider_snapshot(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<ProviderSnapshot, AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        let session = self
+            .runtime_manager
+            .get(parent_session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
+        let Some(bound) = snapshot.state.provider.as_ref() else {
+            return Ok(provider_snapshot(&self.resolve_default_provider()?));
+        };
+        let resolved = self.resolve_session_provider(Some(bound))?;
+        let current = provider_snapshot(&resolved);
+        if current.provider_id != bound.provider_id
+            || current.model != bound.model
+            || current.protocol != bound.protocol
+            || current.config_fingerprint != bound.config_fingerprint
+        {
+            return Err(AgentRuntimeError::ProviderReloadFailed);
+        }
+        Ok(bound.clone())
+    }
+
+    /// 按工作流设置的规范模型串解析真实 Provider 快照；注册表是唯一模型能力和
+    /// 配置身份来源，返回值只含无凭据字段，供 successor 的 `run-started.models` 冻结。
+    pub(crate) fn workflow_provider_snapshot_for_selection(
+        &self,
+        parent_session_id: &str,
+        provider_id: &str,
+        model: &str,
+        reasoning: Option<&str>,
+    ) -> Result<ProviderSnapshot, AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        self.runtime_manager
+            .get(parent_session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let provider = self
+            .provider_registry
+            .resolve(provider_id, model)
+            .map_err(|_| AgentRuntimeError::ProviderNotConfigured)?;
+        let mut snapshot = provider_snapshot(&provider);
+        snapshot.reasoning_effort = reasoning
+            .map(parse_reasoning_effort)
+            .transpose()?
+            .flatten()
+            .map(reasoning_effort_snapshot);
+        Ok(snapshot)
+    }
+
+    /// 为 Workflow actor root Turn 获取共享全局容量；等待期间响应工作流取消，
+    /// 并由同一个 limiter 的 permit 释放/限额热更新唤醒，不维护旁路并发状态。
+    pub(crate) async fn acquire_workflow_actor_permit(
+        &self,
+        cancellation: &CancellationToken,
+    ) -> Result<CollaborationGlobalTurnPermit, AgentRuntimeError> {
+        let limiter = Arc::clone(&self.collaboration_global_turn_limiter);
+        loop {
+            if cancellation.is_cancelled() {
+                return Err(AgentRuntimeError::RuntimeOperationFailed);
+            }
+            let changed = limiter.capacity_change();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if let Some(permit) = limiter
+                .try_acquire_external()
+                .map_err(runtime_operation_failed)?
+            {
+                if cancellation.is_cancelled() {
+                    drop(permit);
+                    return Err(AgentRuntimeError::RuntimeOperationFailed);
+                }
+                return Ok(permit);
+            }
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(AgentRuntimeError::RuntimeOperationFailed);
+                }
+                _ = changed => {}
+            }
+        }
     }
 
     /// 读取已打开 Session 的工具图片；引用和字节完整性由 Runtime 校验。
@@ -5170,6 +6701,13 @@ impl AgentRuntime {
 
     /// 读取一个健康 Session 的完整原始 Transcript。
     pub fn session_transcript(&self, session_id: &str) -> anyhow::Result<Vec<SessionMessage>> {
+        let lifecycle = self
+            .deferred_session_lifecycle
+            .lock()
+            .map_err(|_| anyhow!("Session lifecycle 状态不可用"))?;
+        if lifecycle.get(session_id) == Some(&DeferredSessionLifecycle::Closing) {
+            bail!("Session 正在切换工作目录");
+        }
         self.runtime_manager
             .session_transcript(session_id)
             .with_context(|| format!("读取 Session {session_id} Transcript 失败"))
@@ -5267,6 +6805,37 @@ impl AgentRuntime {
         .await
     }
 
+    /// 为原 Git 页面生成无工具文本；显式模型必须属于本机注册表，不改变会话或默认模型。
+    pub(crate) async fn generate_git_text(
+        &self,
+        request_id: &str,
+        model_reference: Option<&str>,
+        system_prompt: &str,
+        input: &str,
+    ) -> anyhow::Result<String> {
+        let provider = if let Some(reference) = model_reference {
+            let (provider_id, model) = reference
+                .split_once("::")
+                .ok_or_else(|| anyhow!("Git 模型缺少本机供应商标识"))?;
+            self.provider_registry.resolve(provider_id, model)?
+        } else {
+            self.resolve_default_provider()
+                .map_err(|error| anyhow!(error))?
+        };
+        self.generate_isolated_with_provider(
+            provider,
+            IsolatedGenerationRequest {
+                session_id: request_id,
+                system_prompt,
+                input,
+                timeout_secs: 60,
+                purpose: "git",
+                structured_output: None,
+            },
+        )
+        .await
+    }
+
     /// 使用 Session 绑定 Provider 生成短标题，并按 operationId 持久复用成功结果。
     pub async fn generate_title(
         &self,
@@ -5340,7 +6909,7 @@ impl AgentRuntime {
         if system_prompt.trim().is_empty() || input.trim().is_empty() {
             bail!("隔离模型调用的系统提示词和输入不能为空");
         }
-        if !matches!(purpose, "memory" | "title") {
+        if !matches!(purpose, "memory" | "title" | "git") {
             bail!("隔离模型调用用途无效");
         }
         if timeout_secs == 0 {
@@ -5380,7 +6949,7 @@ impl AgentRuntime {
         if system_prompt.trim().is_empty() || input.trim().is_empty() {
             bail!("隔离模型调用的系统提示词和输入不能为空");
         }
-        if !matches!(purpose, "memory" | "title") {
+        if !matches!(purpose, "memory" | "title" | "git") {
             bail!("隔离模型调用用途无效");
         }
         if timeout_secs == 0 {
@@ -5680,6 +7249,156 @@ impl AgentRuntime {
                     .get(&project_root)
                     .map(|candidate| candidate.contributor.mcp_runtime_snapshot())
             })
+    }
+
+    /// 返回指定项目当前候选冻结的插件引用目录；没有候选时拒绝回退到实时工作区扫描。
+    pub fn plugin_reference_catalog(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<Vec<Value>>, AgentRuntimeError> {
+        let project_root = canonical_project_root(project_root)?;
+        self.extension_candidates
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)
+            .map(|candidates| {
+                candidates
+                    .get(&project_root)
+                    .map(|candidate| candidate.contributor.plugin_reference_catalog())
+            })
+    }
+
+    /// 返回指定项目当前已发布候选的 Skill Composer 引用目录；没有候选时返回 `None`。
+    ///
+    /// 调用方应先完成扩展候选初始化；本方法只读取不可变候选，不扫描工作区或用户目录。
+    pub fn skill_reference_catalog(
+        &self,
+        project_root: &Path,
+    ) -> Result<Option<Vec<Value>>, AgentRuntimeError> {
+        let project_root = canonical_project_root(project_root)?;
+        self.extension_candidates
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)
+            .map(|candidates| {
+                candidates
+                    .get(&project_root)
+                    .map(|candidate| candidate.contributor.skill_reference_catalog())
+            })
+    }
+
+    /// 在不启动模型或 Hook 的情况下，为已打开 Session 预热 Composer 扩展引用目录。
+    ///
+    /// 调用方必须先完成当前项目扩展候选初始化。尚未产生用户事实的 deferred
+    /// draft 可以在首发前重新读取当前候选，覆盖预热时的目录；一旦 Journal 已有
+    /// 用户事实，或执行端已经完成完整 context 冻结，目录继续保持权威快照。未知
+    /// Session 或未发布候选均明确失败。
+    pub fn initialize_session_extension_reference_catalog(
+        &self,
+        session_id: &str,
+        project_root: &Path,
+    ) -> Result<SessionExtensionReferenceCatalog, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let project_root = canonical_project_root(project_root)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        ensure_session_project(&session, &project_root)?;
+        // Collaboration Runtime 可能已经在 Journal 首发前完成完整 context 装配（例如
+        // 恢复或测试路径）。此时执行端的冻结目录才是 SkillTool 的权威，不能让
+        // 后续 Composer 查询用工作区候选覆盖它；同时把同一快照回写到 UI 投影，
+        // 避免界面目录与实际工具目录分裂。
+        let collaboration = {
+            let runtimes = self
+                .collaboration_sessions
+                .lock()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+            runtimes.get(session_id).cloned()
+        };
+        let frozen_execution_catalog = collaboration
+            .map(|collaboration| {
+                collaboration
+                    .execution
+                    .state
+                    .lock()
+                    .map(|state| state.frozen_extension_reference_catalog.clone())
+                    .map_err(|_| AgentRuntimeError::StateUnavailable)
+            })
+            .transpose()?
+            .flatten();
+        if let Some(catalog) = frozen_execution_catalog {
+            self.session_extension_reference_catalogs
+                .write()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .insert(session_id.to_owned(), catalog.clone());
+            return Ok(catalog);
+        }
+        let candidate = self
+            .extension_candidates
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .cloned()
+            .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
+        let snapshot = SessionExtensionReferenceCatalog {
+            plugins: candidate.contributor.plugin_reference_catalog(),
+            skills: candidate.contributor.skill_reference_catalog(),
+        };
+        let refresh_deferred = session
+            .read_state(session_has_persisted_user_facts)
+            .map(|has_facts| !has_facts)
+            .map_err(runtime_operation_failed)?;
+        let mut catalogs = self
+            .session_extension_reference_catalogs
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        if refresh_deferred {
+            // 预热 draft 的候选可能在 createSession ACK 后才完成扫描；首发前刷新
+            // 同一 Session 的引用目录，保证 Mention 选中的 Skill 能进入首轮工具表。
+            catalogs.insert(session_id.to_owned(), snapshot.clone());
+            Ok(snapshot)
+        } else {
+            Ok(catalogs
+                .entry(session_id.to_owned())
+                .or_insert(snapshot)
+                .clone())
+        }
+    }
+
+    /// 返回指定已打开 Session 首次完整 context 冻结的扩展引用目录。
+    ///
+    /// 尚未完成首次完整 context 的 Session 返回 `None`，调用方必须明确报告
+    /// 目录尚未可用；未知 Session 同样失败，不能回退到当前工作区候选。
+    pub fn session_extension_reference_catalog(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionExtensionReferenceCatalog>, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        self.runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        if let Some(catalog) = self
+            .session_extension_reference_catalogs
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .cloned()
+        {
+            return Ok(Some(catalog));
+        }
+        let execution = self
+            .collaboration_sessions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .map(|collaboration| Arc::clone(&collaboration.execution));
+        let Some(execution) = execution else {
+            return Ok(None);
+        };
+        execution
+            .state
+            .lock()
+            .map(|state| state.frozen_extension_reference_catalog.clone())
+            .map_err(|_| AgentRuntimeError::StateUnavailable)
     }
 
     /// 从当前项目已经原子发布的候选中解析一个显式 Agent 模板。
@@ -6060,6 +7779,11 @@ impl AgentRuntime {
                 has_skill,
                 catalog: &catalog,
                 small_context,
+                inject_agents_md: launch
+                    .agent
+                    .agent_template
+                    .as_ref()
+                    .is_none_or(|template| template.inject_agents_md),
             },
         )?;
         // 完整模式把 Memory/Plan 等动态上下文与环境放在历史之前；小上下文
@@ -6150,6 +7874,7 @@ impl AgentRuntime {
         let mut runner = AgentRunner::new(provider, tools, limits)
             .with_context_manager(context)
             .with_hook_runtime(hooks)
+            .with_tool_approval_gate(self.permissions.clone())
             .with_dynamic_input_source(Arc::new(RuntimeDynamicInputSource {
                 store: Arc::clone(&execution.store),
                 session_id: execution.session_id.clone(),
@@ -6248,6 +7973,7 @@ impl AgentRuntime {
             has_skill,
             catalog,
             small_context,
+            inject_agents_md,
         } = context;
         let mut state = execution
             .state
@@ -6275,8 +8001,12 @@ impl AgentRuntime {
             return Ok(rebuilt);
         }
         let (mut custom_instructions, project_instructions) =
-            crate::personalization::prompt_context(&self.storage_root, cwd)
-                .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?;
+            crate::personalization::prompt_context_for_agent(
+                &self.storage_root,
+                cwd,
+                inject_agents_md,
+            )
+            .map_err(|_| AgentRuntimeError::InstructionsUnavailable)?;
         if let Some(instructions) = project_instructions {
             if !custom_instructions.is_empty() {
                 custom_instructions.push_str("\n\n");
@@ -6354,6 +8084,75 @@ impl AgentRuntime {
     }
 
     /// 为单个 Agent Turn 装配完整候选工具表；调用方必须最后按 Profile 精确筛选。
+    /// 已发布候选存在时，为新打开 Session 复制 UI 引用目录；不启动任何扩展运行时。
+    fn freeze_session_reference_catalog_if_available(
+        &self,
+        session_id: &str,
+        project_root: &Path,
+    ) -> Result<(), AgentRuntimeError> {
+        if self
+            .session_extension_reference_catalogs
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .contains_key(session_id)
+        {
+            return Ok(());
+        }
+        let project_root = canonical_project_root(project_root)?;
+        let Some(candidate) = self
+            .extension_candidates
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let snapshot = SessionExtensionReferenceCatalog {
+            plugins: candidate.contributor.plugin_reference_catalog(),
+            skills: candidate.contributor.skill_reference_catalog(),
+        };
+        self.session_extension_reference_catalogs
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .entry(session_id.to_owned())
+            .or_insert(snapshot);
+        Ok(())
+    }
+
+    /// 首次完整工具装配时复制候选的 UI 引用目录；之后 Session 查询只读该副本。
+    fn freeze_extension_reference_catalog(
+        &self,
+        execution: &RuntimeAgentExecution,
+        extension: Option<&Arc<RuntimeExtensionCandidate>>,
+    ) -> Result<(), AgentRuntimeError> {
+        let catalog = {
+            let mut state = execution
+                .state
+                .lock()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+            if state.frozen_extension_reference_catalog.is_some() {
+                return Ok(());
+            }
+            let catalog = SessionExtensionReferenceCatalog {
+                plugins: extension
+                    .map(|candidate| candidate.contributor.plugin_reference_catalog())
+                    .unwrap_or_default(),
+                skills: extension
+                    .map(|candidate| candidate.contributor.skill_reference_catalog())
+                    .unwrap_or_default(),
+            };
+            state.frozen_extension_reference_catalog = Some(catalog.clone());
+            catalog
+        };
+        self.session_extension_reference_catalogs
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .entry(execution.session_id.clone())
+            .or_insert(catalog);
+        Ok(())
+    }
+
     fn assemble_agent_tools(
         &self,
         execution: &RuntimeAgentExecution,
@@ -6363,6 +8162,15 @@ impl AgentRuntime {
         plan_guard: PlanGuard,
         capabilities: AgentCapabilities,
     ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
+        let workflow_actor = workflow_actor_environment_required(execution, &profile.cwd)?;
+        // 工作流执行者虽然有独立会话，但能力属于单层子会话；不可借再次打开或更换模型扩大权限。
+        let capabilities = AgentCapabilities {
+            can_spawn_agent: capabilities.can_spawn_agent
+                && !execution
+                    .session
+                    .is_workflow_actor()
+                    .map_err(runtime_operation_failed)?,
+        };
         let project_root = execution.project_root.clone();
         let output_directory = self
             .session_storage_directory(&execution.session_id)?
@@ -6384,7 +8192,7 @@ impl AgentRuntime {
                     ))
                 })
                 .map(|environment| {
-                    if benchmark_workspace_guard {
+                    if workflow_actor || benchmark_workspace_guard {
                         environment.with_workspace_guard()
                     } else {
                         environment
@@ -6406,27 +8214,49 @@ impl AgentRuntime {
             execution.persistent_state.clone(),
         )
         .map_err(runtime_operation_failed)?;
-        // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
-        if self
-            .elicitations
-            .session_supports_form(&execution.session_id)
+        if capabilities.can_spawn_agent
+            && let Some(port) = self
+                .workflow_tool_port
+                .read()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .clone()
         {
+            // 只有可创建子 Agent 的普通 root 才冻结 Workflow 控制面；child 和
+            // workflow actor 在上面的能力收缩后都不会发现这些递归入口。
+            crate::workflows::agent_tools::register_workflow_tools(&mut tools, port)
+                .map_err(runtime_operation_failed)?;
+        }
+        // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
+        let elicitation_target = self.workflow_elicitation_target(&execution.session_id)?;
+        if self.elicitations.session_supports_form(&elicitation_target) {
             let connection_id = self
                 .elicitations
-                .session_connection(&execution.session_id)
+                .session_connection(&elicitation_target)
                 .ok_or(AgentRuntimeError::StateUnavailable)?;
             // 工具表跨整个 Turn 复用，而 Session 重载会替换投递世代；
             // 因此问答出口只绑定装配根弱引用，在发送瞬间解析当时的世代。
-            let question_handler = Arc::new(
-                self.elicitations.handler_for_connection(
+            // Handler 的 Session 保留 actor 身份，pending qid 才能证明它属于哪一个
+            // workflow parent；投递 sink 仍以父 Session 为目标，把表单显示在父连接。
+            let delivery_sink = if is_frontend_v4_connection(&connection_id) {
+                SessionDeliverySink::for_projection(
+                    execution.owner.clone(),
+                    elicitation_target.clone(),
+                    connection_id.clone(),
+                )
+            } else {
+                SessionDeliverySink::for_connection(
+                    execution.owner.clone(),
+                    elicitation_target.clone(),
+                    connection_id.clone(),
+                )
+            };
+            let question_handler: Arc<dyn UserQuestionHandler> = Arc::new(
+                self.elicitations.handler_for_connection_projected(
                     AgentSessionId::new(execution.session_id.clone())
                         .map_err(|_| AgentRuntimeError::InvalidSession)?,
+                    elicitation_target.clone(),
                     connection_id.clone(),
-                    Arc::new(SessionDeliverySink::for_connection(
-                        execution.owner.clone(),
-                        execution.session_id.clone(),
-                        connection_id,
-                    )),
+                    Arc::new(delivery_sink),
                 ),
             );
             tools
@@ -6455,6 +8285,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
             .get(&project_root)
             .cloned();
+        self.freeze_extension_reference_catalog(execution, extension.as_ref())?;
         let catalog = extension
             .as_ref()
             .map(|candidate| {
@@ -6533,6 +8364,7 @@ impl AgentRuntime {
         execution: &RuntimeAgentExecution,
         profile: &AgentProfile,
     ) -> Result<(ToolRegistry, HookRuntime, String), AgentRuntimeError> {
+        let workflow_actor = workflow_actor_environment_required(execution, &profile.cwd)?;
         let output_directory = self
             .session_storage_directory(&execution.session_id)?
             .join("tool-output");
@@ -6544,6 +8376,13 @@ impl AgentRuntime {
                     environment.with_file_mutation_recorder(Arc::new(
                         file_changes::RuntimeFileMutationRecorder::new(execution.session.clone()),
                     ))
+                })
+                .map(|environment| {
+                    if workflow_actor {
+                        environment.with_workspace_guard()
+                    } else {
+                        environment
+                    }
                 })
                 .map_err(runtime_operation_failed)?,
         );
@@ -6868,6 +8707,50 @@ impl AgentRuntime {
             .await
     }
 
+    /// 在根 Turn 起点屏障内取得已登记的 Session。
+    ///
+    /// 桌面连接重建或草稿清理可能先释放 Manager 中的句柄，但只要权威 Journal
+    /// 仍然存在，发送仍应恢复同一个 Session；这里按 Journal 元数据重新登记，不能
+    /// 将一次可恢复的冷恢复窗口暴露成 `SessionNotRegistered`。调用方必须已经持有
+    /// `turn_start_gates`，因此 close_session 不会在恢复后、真正开始 Turn 前插入。
+    fn registered_session_for_root_turn(
+        &self,
+        session_id: &str,
+    ) -> Result<RuntimeSession, AgentRuntimeError> {
+        match self.runtime_manager.get(session_id.to_owned()) {
+            Ok(session) => {
+                if session.is_open().map_err(runtime_operation_failed)? {
+                    Ok(session)
+                } else {
+                    // Manager 中可能暂存已完成 close_runtime 的句柄；先释放旧 lease，
+                    // 再按 Journal 重新登记，避免把冷恢复窗口当作可运行 Session。
+                    drop(session);
+                    let metadata = self
+                        .runtime_manager
+                        .stored_session_metadata(session_id)
+                        .map_err(runtime_operation_failed)?;
+                    self.open_or_create_session(
+                        Path::new(&metadata.project_root),
+                        Some(session_id),
+                        "root-turn-open",
+                    )
+                }
+            }
+            Err(RuntimeError::SessionNotRegistered) => {
+                let metadata = self
+                    .runtime_manager
+                    .stored_session_metadata(session_id)
+                    .map_err(runtime_operation_failed)?;
+                self.open_or_create_session(
+                    Path::new(&metadata.project_root),
+                    Some(session_id),
+                    "root-turn-open",
+                )
+            }
+            Err(error) => Err(runtime_operation_failed(error)),
+        }
+    }
+
     /// 复用根 Turn 的起点屏障，内部续跑输入不产生伪造的用户气泡。
     async fn start_root_turn_internal(
         self: &Arc<Self>,
@@ -6884,22 +8767,14 @@ impl AgentRuntime {
         if text.trim().is_empty() {
             return Err(AgentRuntimeError::RuntimeOperationFailed);
         }
-        let gate = {
-            let mut gates = self
-                .turn_start_gates
-                .lock()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-            Arc::clone(
-                gates
-                    .entry(session_id.to_owned())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
+        self.admit_session_start(session_id)?;
+        let _start_admission = SessionStartAdmissionGuard {
+            runtime: Arc::clone(self),
+            session_id: session_id.to_owned(),
         };
+        let gate = self.session_turn_start_gate(session_id)?;
         let _gate = gate.lock().await;
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let session = self.registered_session_for_root_turn(session_id)?;
         let normalized_developer_context = options
             .developer_context
             .as_deref()
@@ -6914,6 +8789,12 @@ impl AgentRuntime {
                 )
             },
         );
+        let summary = append_input_reference_digest(summary, &options.references)?;
+        let summary = append_attachment_digest(
+            summary,
+            &options.attachment_images,
+            &options.attachment_context,
+        )?;
         let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
         if let Some(continuation) = continuation.as_ref() {
             let state = self.ensure_collaboration_runtime(
@@ -6964,6 +8845,11 @@ impl AgentRuntime {
             };
         }
         let resolved = self.resolve_session_provider(snapshot.state.provider.as_ref())?;
+        if !options.attachment_images.is_empty()
+            && !resolved.capabilities(resolved.model()).image_input
+        {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
         let reasoning_effort = snapshot
             .state
             .provider
@@ -6978,7 +8864,27 @@ impl AgentRuntime {
             message.is_meta = true;
             request_context.push(message);
         }
-        let mut input = Message::text(MessageRole::User, text);
+        for context in &options.attachment_context {
+            // 文本附件内容已在宿主边界完成读取；作为 meta 输入参与模型请求，避免把
+            // 可能很大的文件正文重复写入用户 Transcript，同时保留附件引用事实。
+            let mut message = Message::text(MessageRole::User, context.clone());
+            message.is_meta = true;
+            request_context.push(message);
+        }
+        let mut content = Vec::with_capacity(1 + options.attachment_images.len());
+        content.push(ContentBlock::text(text));
+        content.extend(
+            options
+                .attachment_images
+                .iter()
+                .cloned()
+                .map(|image| ContentBlock::Image { image }),
+        );
+        let mut input = Message::new(MessageRole::User, content);
+        input.references = options.references.clone();
+        input
+            .validate()
+            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
         input.is_meta = continuation.is_some();
         input_messages.push(input);
         self.ensure_session_delivery(session_id)?;
@@ -6990,7 +8896,18 @@ impl AgentRuntime {
         if let Some(connection_id) = options.elicitation_connection_id.as_ref() {
             self.elicitations
                 .bind_session_connection(session_id, connection_id)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+                .map_err(|error| {
+                    // Elicitation 要求连接先完成 capabilities 协商；保留具体稳定
+                    // 错误类别，便于区分握手缺失与真正的 Runtime/Provider 故障。
+                    tracing::error!(
+                        target: "keencode_diagnostics",
+                        stage = "start_root_turn.bind_elicitation_session_connection",
+                        error = ?error,
+                        "首发前问答连接绑定失败"
+                    );
+                    AgentRuntimeError::RuntimeOperationFailed
+                })?;
+            self.bind_permission_session_connection(session_id, connection_id)?;
         }
         let journal_turn_present = snapshot
             .state
@@ -7397,14 +9314,14 @@ impl AgentRuntime {
     }
 
     /// 调用方持有 delivery_reset_gate，完整关闭时将其延续到 Runtime lease 释放。
+    ///
+    /// `turn_start_gates` 不在这里移除：关闭仍持有旧 gate 时，新的发送若取得新
+    /// gate 会与 `RuntimeManager::close` 并行，重新造成 Session 未登记竞态。Gate
+    /// 只随进程存活，正文和投递资源仍按 Session 关闭清理。
     async fn close_session_delivery_locked(
         &self,
         session_id: &str,
     ) -> Result<(), AgentRuntimeError> {
-        self.turn_start_gates
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .remove(session_id);
         let title_generation = self
             .title_generation_gates
             .lock()
@@ -7446,19 +9363,19 @@ impl AgentRuntime {
         self: &Arc<Self>,
         session_id: &str,
     ) -> Result<(), AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        let gate = {
-            let mut gates = self
-                .turn_start_gates
-                .lock()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-            Arc::clone(
-                gates
-                    .entry(session_id.to_owned())
-                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
-            )
-        };
+        let gate = self.session_turn_start_gate(session_id)?;
         let _gate = gate.lock().await;
+        self.close_session_locked(session_id, true).await
+    }
+
+    /// 调用方必须持有对应 Session 的 Turn gate；这是显式 mutation admission 和
+    /// 普通 close 共用的唯一关闭实现，避免重复取得 gate 或提前取消权限状态。
+    async fn close_session_locked(
+        &self,
+        session_id: &str,
+        release_lifecycle: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        self.permissions.close_session(session_id);
         let mut close_error = None;
         let collaboration = {
             let mut runtimes = self
@@ -7503,10 +9420,22 @@ impl AgentRuntime {
         if let Err(error) = self.close_session_delivery_locked(session_id).await {
             close_error.get_or_insert(error);
         }
-        match self.runtime_manager.close(session_id.to_owned()) {
-            Ok(()) | Err(RuntimeError::SessionNotRegistered) => {}
+        let runtime_closed = match self.runtime_manager.close(session_id.to_owned()) {
+            Ok(()) | Err(RuntimeError::SessionNotRegistered) => true,
             Err(_) => {
                 close_error.get_or_insert(AgentRuntimeError::RuntimeOperationFailed);
+                false
+            }
+        };
+        if runtime_closed {
+            self.session_extension_reference_catalogs
+                .write()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .remove(session_id);
+            // Workspace mutation 的 guard 必须在 Git、资源事务和 Session 恢复
+            // 完成后才释放 Closing；普通 close 没有跨事务 guard，仍在这里收口。
+            if release_lifecycle {
+                self.clear_deferred_session_lifecycle(session_id);
             }
         }
         match close_error {
@@ -7584,11 +9513,18 @@ impl AgentRuntime {
         if let Err(error) = self.close_session_delivery_locked(session_id).await {
             shutdown_error.get_or_insert(error);
         }
-        match self.runtime_manager.close(session_id.to_owned()) {
-            Ok(()) | Err(RuntimeError::SessionNotRegistered) => {}
+        let runtime_closed = match self.runtime_manager.close(session_id.to_owned()) {
+            Ok(()) | Err(RuntimeError::SessionNotRegistered) => true,
             Err(_) => {
                 shutdown_error.get_or_insert(AgentRuntimeError::RuntimeOperationFailed);
+                false
             }
+        };
+        if runtime_closed {
+            self.session_extension_reference_catalogs
+                .write()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)?
+                .remove(session_id);
         }
         match shutdown_error {
             Some(error) => Err(error),
@@ -7763,6 +9699,67 @@ impl AgentRuntime {
                 .then_with(|| left.task_id.cmp(&right.task_id))
         });
         Ok(tasks.into_iter().map(|(_, task)| task).collect::<Vec<_>>())
+    }
+
+    /// 读取真实后台 Shell 的有界输出；Agent 子任务不能伪装成 Bash 输出。
+    pub(crate) async fn background_bash_output(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<BackgroundBashOutput, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        if task_id.trim().is_empty() || task_id.len() > 256 {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
+        let runtime = self
+            .collaboration_sessions
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(session_id)
+            .cloned()
+            .ok_or(AgentRuntimeError::SessionUnavailable)?;
+        let manager = Arc::clone(&runtime.execution.background_tasks);
+        let task = manager
+            .task_info(session_id, task_id)
+            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        // 只取尾部窗口，避免轮询接口重复传输无界历史；Manager 仍负责 UTF-8 边界。
+        let cursor = BackgroundOutputCursor {
+            stdout_offset: task.stdout_bytes.saturating_sub(8 * 1024),
+            stderr_offset: task.stderr_bytes.saturating_sub(8 * 1024),
+        };
+        let output = manager
+            .read_output(session_id, task_id, cursor, Some(Duration::ZERO))
+            .await
+            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
+        let mut text = output.stdout;
+        if !output.stderr.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&output.stderr);
+        }
+        let mut truncated = output.stdout_has_more || output.stderr_has_more;
+        if text.len() > 8 * 1024 {
+            let mut end = 8 * 1024;
+            while end > 0 && !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            truncated = true;
+        }
+        let status = match task.status {
+            BackgroundTaskStatus::Running => "running",
+            BackgroundTaskStatus::Succeeded => "completed",
+            BackgroundTaskStatus::Failed => "failed",
+            BackgroundTaskStatus::Cancelled => "cancelled",
+        };
+        let output_path = manager.output_directory().join(task_id).join("stdout.log");
+        Ok(BackgroundBashOutput {
+            status,
+            output: text,
+            truncated,
+            output_path: crate::path_utils::path_to_frontend(&output_path),
+        })
     }
 
     /// 从持久 Collaboration 收据查询已提交的后台恢复 Turn。
@@ -8003,7 +10000,8 @@ impl AgentRuntime {
         session_id: &str,
         operation_id: &str,
         text: &str,
-    ) -> Result<(), AgentRuntimeError> {
+        references: Vec<keencode_model::InputReference>,
+    ) -> Result<keencode_agent::UserSteer, AgentRuntimeError> {
         validate_session_id(session_id)?;
         let operation_id =
             ToolCallId::new(operation_id.to_owned()).map_err(runtime_operation_failed)?;
@@ -8014,11 +10012,16 @@ impl AgentRuntime {
             .get(session_id)
             .cloned()
             .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-        collaboration
+        let steer = collaboration
             .coordinator
-            .steer_active_agent_with_operation(&collaboration.root_agent_id, &operation_id, text)
+            .steer_active_agent_with_operation(
+                &collaboration.root_agent_id,
+                &operation_id,
+                text,
+                references,
+            )
             .map_err(runtime_operation_failed)?;
-        Ok(())
+        Ok(steer)
     }
 
     /// 分页读取权威 Journal，通过 live 与 replay 共用映射器投递后返回精确水位。
@@ -8199,6 +10202,9 @@ impl AgentRuntime {
             *shutdown_error = Some(AgentRuntimeError::RuntimeOperationFailed);
         }
         self.closed.store(true, Ordering::Release);
+        // 先收口权限等待，再等待各 Session 的 Runner 清理，避免 shutdown 被
+        // 一个失去前端连接的审批请求阻塞。
+        self.permissions.close();
 
         let result = async {
             let registered = self
@@ -8284,6 +10290,19 @@ impl AgentRuntime {
                 Err(error)
             }
         }
+    }
+}
+
+/// 根 Turn 起点的 RAII admission；任何参数校验或模型失败都必须释放启动认领，
+/// 否则 deferred cleanup 会被永久阻塞。
+struct SessionStartAdmissionGuard {
+    runtime: Arc<AgentRuntime>,
+    session_id: String,
+}
+
+impl Drop for SessionStartAdmissionGuard {
+    fn drop(&mut self) {
+        self.runtime.release_session_start(&self.session_id);
     }
 }
 
@@ -8552,6 +10571,36 @@ fn root_turn_summary(text: &str, _developer_context: Option<&str>, plan_enabled:
     digest.update([u8::from(plan_enabled)]);
     let preview = text.trim().chars().take(256).collect::<String>();
     format!("{preview} [sha256:{:x}]", digest.finalize())
+}
+
+/// 启动与冷恢复共用引用摘要，确保同正文的不同资源选择保持不同请求身份。
+fn append_input_reference_digest(
+    summary: String,
+    references: &[keencode_model::InputReference],
+) -> Result<String, AgentRuntimeError> {
+    if references.is_empty() {
+        return Ok(summary);
+    }
+    Ok(format!(
+        "{summary}:refs:{:x}",
+        Sha256::digest(serde_json::to_vec(references).map_err(runtime_operation_failed)?)
+    ))
+}
+
+/// 把已物化附件纳入幂等摘要，避免相同 operationId 重试时静默丢掉新附件。
+fn append_attachment_digest(
+    summary: String,
+    images: &[ImageContent],
+    text_context: &[String],
+) -> Result<String, AgentRuntimeError> {
+    if images.is_empty() && text_context.is_empty() {
+        return Ok(summary);
+    }
+    let payload = serde_json::to_vec(&(images, text_context)).map_err(runtime_operation_failed)?;
+    Ok(format!(
+        "{summary}:attachments:{:x}",
+        Sha256::digest(payload)
+    ))
 }
 
 /// 将界面支持的七档推理强度映射为 Provider 中立请求配置。
@@ -9432,6 +11481,27 @@ fn validate_session_id(session_id: &str) -> Result<(), AgentRuntimeError> {
         .map_err(|_| AgentRuntimeError::InvalidSession)
 }
 
+/// Workflow actor 的 `AgentProfile.cwd` 来自父 run-started 的冻结值。装配时必须
+/// 再次与 actor Session 的持久 project_root 对账，避免恢复路径或相对路径把工具
+/// 环境切换到另一个父工作区；普通 root/child 保持原有可选 workspace guard 语义。
+fn workflow_actor_environment_required(
+    execution: &RuntimeAgentExecution,
+    profile_cwd: &Path,
+) -> Result<bool, AgentRuntimeError> {
+    let is_workflow_actor = execution
+        .session
+        .is_workflow_actor()
+        .map_err(runtime_operation_failed)?;
+    if !is_workflow_actor {
+        return Ok(false);
+    }
+    let frozen_cwd = canonical_project_root(profile_cwd)?;
+    if frozen_cwd != execution.project_root {
+        return Err(AgentRuntimeError::SessionProjectMismatch);
+    }
+    Ok(true)
+}
+
 /// 将用户授权项目解析为存在的规范目录，拒绝文件和不可解析路径。
 fn canonical_project_root(project_root: &Path) -> Result<PathBuf, AgentRuntimeError> {
     let canonical = std::fs::canonicalize(project_root)
@@ -9482,40 +11552,44 @@ mod tests {
         RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
         RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
         RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
-        TurnBoundProvider, authoritative_recovered_turn_outcome, background_task_completion_event,
-        clear_historical_reasoning_state, commit_goal_turn_elapsed, complete_runtime_turn,
+        SessionWorkspaceMutationAdmission, TurnBoundProvider, authoritative_recovered_turn_outcome,
+        background_task_completion_event, clear_historical_reasoning_state,
+        commit_goal_turn_elapsed, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
         map_authoritative_record, map_authoritative_record_with_projection, materialize_delivery,
         parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
         provider_supports_reasoning_continuation, recovered_authoritative_turn_outcomes,
         release_runtime_turn_state, request_tool_snapshot, root_task_terminal_notice,
-        root_turn_summary, runtime_tool_snapshot, should_retry_runtime_turn_completion,
-        split_child_agent_model_override, validate_generated_title,
-        validate_recovered_mailbox_claim, wait_for_turn_started,
+        root_turn_summary, runtime_tool_snapshot, session_has_persisted_user_facts,
+        should_retry_runtime_turn_completion, split_child_agent_model_override,
+        validate_generated_title, validate_recovered_mailbox_claim, wait_for_turn_started,
     };
     use crate::analytics::ModelRetryNotice;
-    use crate::client_request::{ClientRequestSink, SessionDeliverySink};
+    use crate::client_request::{
+        ClientRequestBridgeError, ClientRequestFuture, ClientRequestSink, SessionDeliverySink,
+    };
     use keencode_acp::schema::{
         ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
         ElicitationCapabilities, ElicitationFormCapabilities, ElicitationFormMode,
         ElicitationSchema, ElicitationSessionScope, RequestId, SessionUpdate,
     };
     use keencode_acp::{
-        AcpClientRequestEncoder, BackgroundTaskKind, BackgroundTaskTerminalStatus, ConnectionId,
-        ElicitationRouter, KeenCodeEvent, SessionUpdateDeliveryEnvelope,
+        AcpClientRequestEncoder, AcpClientRequestFrame, BackgroundTaskKind,
+        BackgroundTaskTerminalStatus, ConnectionId, ElicitationRouter, KeenCodeEvent,
+        SessionUpdateDeliveryEnvelope,
     };
     use keencode_agent::{
         AgentDynamicInputAcknowledgement, AgentDynamicInputBatch, AgentDynamicInputBoundary,
         AgentDynamicInputError, AgentDynamicInputSource, AgentExecutionPort, AgentPath,
-        AgentProfile, AgentRunner, AgentTreeQuiesceResult, AgentTurnLaunch, AgentTurnOutcome,
-        AgentTurnSignal, AgentTurnStartResult, CloseAgentTree, CollaborationAgentStatus,
-        CollaborationAppendResult, CollaborationCoordinator, CollaborationError,
-        CollaborationEvent, CollaborationEventKind, CollaborationGlobalTurnLimiter,
-        CollaborationLimits, CollaborationPortError, CollaborationStore,
-        CollaborationTransitionCommit, ContextCompressor, ContextInheritance, ContextPolicy,
-        ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft, HookPhase,
-        HookRuntime, JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor,
+        AgentProfile, AgentRunner, AgentTemplateSnapshot, AgentTreeQuiesceResult, AgentTurnLaunch,
+        AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
+        CollaborationAgentStatus, CollaborationAppendResult, CollaborationCoordinator,
+        CollaborationError, CollaborationEvent, CollaborationEventKind,
+        CollaborationGlobalTurnLimiter, CollaborationLimits, CollaborationPortError,
+        CollaborationStore, CollaborationTransitionCommit, ContextCompressor, ContextInheritance,
+        ContextPolicy, ContextSummaryRequest, ContextTokenEstimator, GoalController, GoalDraft,
+        HookPhase, HookRuntime, JsonContextTokenEstimator, PlanGuard, ProviderContextCompressor,
         QuiesceAgentTree, RecoveredCoordinator, RootAgentRequest, RunLimits, SpawnAgentRequest,
         ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
         UuidCollaborationIdGenerator,
@@ -9559,9 +11633,9 @@ mod tests {
         );
     }
     use keencode_model::{
-        Message as ModelMessage, MessageRole, ModelError, ModelProvider, ModelRequest,
-        ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider, ScriptedReply,
-        StopReason, TokenUsage,
+        ImageContent, Message as ModelMessage, MessageRole, ModelError, ModelProvider,
+        ModelRequest, ModelStreamEvent, ProviderCapabilities, ResponseMetadata, ScriptedProvider,
+        ScriptedReply, StopReason, TokenUsage,
     };
     use keencode_provider::{
         ProviderConfig, ProviderModelPolicy, ProviderRegistration, REQUEST_METADATA_AGENT_ID,
@@ -9573,16 +11647,17 @@ mod tests {
         MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
         MailboxState, PlanState, ProviderProtocolSnapshot, ProviderSnapshot, SESSION_EVENT_SCHEMA,
         SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
-        SessionId as ResourceSessionId, SessionState, SubAgentState, SubAgentStatus, TodoItem,
-        TodoStatus, TranscriptRecord, TurnId as ResourceTurnId, TurnState, TurnStatus,
-        TurnStopReason,
+        SessionId as ResourceSessionId, SessionInputQueueItem, SessionState, SubAgentState,
+        SubAgentStatus, TodoItem, TodoStatus, TranscriptRecord, TurnId as ResourceTurnId,
+        TurnState, TurnStatus, TurnStopReason,
     };
     use keencode_runtime::{
         CreateSessionRequest, PersistentAgentState, RuntimeConfig, RuntimeSession,
         RuntimeTurnRequest,
     };
     use keencode_tools::{
-        BackgroundTaskCompletion, BackgroundTaskStatus, GitWorktreeLeaseManager, WebServiceConfig,
+        BackgroundTaskCompletion, BackgroundTaskStatus, GitWorktreeLeaseManager, UserQuestion,
+        UserQuestionHandler, UserQuestionOption, UserQuestionRequest, WebServiceConfig,
     };
     use parking_lot::Mutex;
     use serde_json::{Value, json};
@@ -11409,7 +13484,15 @@ mod tests {
             )
             .expect("根 Turn 应启动");
         coordinator
-            .steer_agent(&root_agent_id, &turn_id, "待恢复 steer")
+            .steer_active_agent_with_operation(
+                &root_agent_id,
+                &keencode_agent::ToolCallId::new("mirror-resource-steer").unwrap(),
+                "待恢复 steer",
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@local".into(),
+                }],
+            )
             .expect("用户 steer 应排队");
         let steers = coordinator
             .consume_user_steers(&root_agent_id, &turn_id)
@@ -11641,7 +13724,7 @@ mod tests {
             }
             Ok(keencode_agent::AgentDynamicInputBatch::new_with_receipts(
                 vec![self.message.clone()],
-                vec![self.receipt],
+                vec![self.receipt.clone()],
                 Arc::new(FailingDynamicInputAcknowledgement),
             ))
         }
@@ -12094,7 +14177,15 @@ mod tests {
             .expect("根 Turn 应启动");
         let steer = collaboration
             .coordinator
-            .steer_agent(&root_agent_id, &turn_id, "待恢复 steer")
+            .steer_active_agent_with_operation(
+                &root_agent_id,
+                &ToolCallId::new("mirror-resource-steer").unwrap(),
+                "待恢复 steer @proof",
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@local".into(),
+                }],
+            )
             .expect("用户 steer 应排队");
         collaboration
             .coordinator
@@ -12185,6 +14276,7 @@ mod tests {
         assert!(claims.iter().any(|claim| {
             claim.kind == super::DynamicInputMarkerKind::UserSteer
                 && claim.through_sequence == steer.sequence
+                && claim.user_steers == vec![steer.clone()]
         }));
         assert!(
             session
@@ -12248,8 +14340,38 @@ mod tests {
             .expect("根 Turn 应启动");
         let steer = collaboration
             .coordinator
-            .steer_agent(&root_agent_id, &turn_id, "追加引导正文")
+            .steer_active_agent_with_operation(
+                &root_agent_id,
+                &keencode_agent::ToolCallId::new("envelope-resource-steer").unwrap(),
+                "追加引导正文 @proof",
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@local".into(),
+                }],
+            )
             .expect("用户 steer 应排队");
+        let second = collaboration
+            .coordinator
+            .steer_active_agent_with_operation(
+                &root_agent_id,
+                &keencode_agent::ToolCallId::new("envelope-other-market").unwrap(),
+                "第二条引导 @proof",
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@other".into(),
+                }],
+            )
+            .unwrap();
+        collaboration
+            .coordinator
+            .consume_user_steers(&root_agent_id, &turn_id)
+            .unwrap();
+        let checkpoint = collaboration.coordinator.checkpoint_coordinator().unwrap();
+        let claim = super::recovered_dynamic_input_claims(Some(&checkpoint))
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(claim.user_steers, vec![steer.clone(), second]);
 
         let provider = Arc::new(ScriptedProvider::new(
             ProviderCapabilities::default(),
@@ -12323,6 +14445,83 @@ mod tests {
         );
 
         let state = session.snapshot().expect("Session 快照应读取").state;
+        assert!(super::validate_dynamic_input_claim(&session, &state, &claim).unwrap());
+        let receipt = state.dynamic_input_receipts.last().unwrap();
+        assert_eq!(receipt.user_inputs.len(), 2);
+        assert_eq!(receipt.user_inputs[0].text, "追加引导正文 @proof");
+        assert_eq!(
+            receipt.user_inputs[0].references[0].path,
+            "plugin://proof@local"
+        );
+        assert_eq!(
+            receipt.user_inputs[1].references[0].path,
+            "plugin://proof@other"
+        );
+        let mut tampered_receipt = state.clone();
+        tampered_receipt
+            .dynamic_input_receipts
+            .last_mut()
+            .unwrap()
+            .user_inputs[0]
+            .references[0]
+            .path = "plugin://proof@changed".into();
+        assert_eq!(
+            super::validate_dynamic_input_claim(&session, &tampered_receipt, &claim),
+            Err(AgentRuntimeError::RecoveryRequired)
+        );
+        let receipt_record = SessionEventRecord {
+            schema: SESSION_EVENT_SCHEMA.to_owned(),
+            version: SESSION_EVENT_VERSION,
+            event_id: SessionEventId::new("steer-display-receipt").unwrap(),
+            session: state.session_id.clone(),
+            sequence: 3,
+            time_unix_ms: 3,
+            event: SessionEvent::DynamicInputReceiptCommitted {
+                turn_id: receipt.turn_id.clone(),
+                source_agent_id: receipt.source_agent_id.clone(),
+                model_round: receipt.model_round,
+                segment_index: receipt.segment_index,
+                kind: receipt.kind,
+                through_sequence: receipt.through_sequence,
+                user_inputs: receipt.user_inputs.clone(),
+            },
+        };
+        for mode in [
+            AuthoritativeProjectionMode::Live,
+            AuthoritativeProjectionMode::Replay,
+        ] {
+            let drafts = map_authoritative_record(&session, &state, &receipt_record, mode).unwrap();
+            let texts = drafts
+                .iter()
+                .map(|draft| match draft {
+                    keencode_runtime::DeliveryDraft::SessionUpdate { update, .. } => {
+                        match update.as_ref() {
+                            keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk) => {
+                                let encoded = serde_json::to_value(chunk).unwrap();
+                                assert_eq!(encoded["_meta"]["keencode/startsNewTurn"], false);
+                                assert!(encoded["_meta"]["keencode/messageReferences"].is_array());
+                                encoded["content"]["text"].as_str().unwrap().to_owned()
+                            }
+                            _ => panic!("追加只能投递原用户文本"),
+                        }
+                    }
+                    _ => panic!("追加展示不应伪造新生命周期"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(texts, vec!["追加引导正文 @proof", "第二条引导 @proof"]);
+        }
+        let mut tampered = claim.clone();
+        tampered.user_steers[0].references[0].path = "plugin://proof@wrong".into();
+        assert_eq!(
+            super::validate_dynamic_input_claim(&session, &state, &tampered),
+            Err(AgentRuntimeError::RecoveryRequired)
+        );
+        let mut changed_body = claim.clone();
+        changed_body.user_steers[0].content.push_str(" 被改写");
+        assert_eq!(
+            super::validate_dynamic_input_claim(&session, &state, &changed_body),
+            Err(AgentRuntimeError::RecoveryRequired)
+        );
         let record = SessionEventRecord {
             schema: SESSION_EVENT_SCHEMA.to_owned(),
             version: SESSION_EVENT_VERSION,
@@ -12401,7 +14600,15 @@ mod tests {
             )
             .expect("旧根 Turn 应启动");
         let steer = seed_coordinator
-            .steer_agent(&root_agent_id, &old_turn_id, "旧动态 steer")
+            .steer_active_agent_with_operation(
+                &root_agent_id,
+                &ToolCallId::new("live-resource-steer").unwrap(),
+                "旧动态 steer @proof",
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@local".into(),
+                }],
+            )
             .expect("旧 steer 应排队");
         seed_coordinator
             .consume_user_steers(&root_agent_id, &old_turn_id)
@@ -12453,11 +14660,10 @@ mod tests {
             kind: super::DynamicInputMarkerKind::UserSteer,
             through_sequence: steer.sequence,
         };
-        let dynamic_message = format!(
-            "{}\n以下是旧 Turn 的动态 steer：\n\n{}",
-            serde_json::to_string(&marker).expect("动态 marker 应可编码"),
-            steer.content
-        );
+        let mut dynamic_body = super::dynamic_input_marker_line(&marker).unwrap();
+        super::append_user_steer_body(&mut dynamic_body, std::slice::from_ref(&steer));
+        let mut dynamic_message = ModelMessage::text(MessageRole::User, dynamic_body);
+        dynamic_message.is_meta = true;
         let old_input = ModelMessage::text(MessageRole::User, "旧动态输入 Turn");
         let old_request = TurnRequest::new(
             keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session 标识应有效"),
@@ -12479,7 +14685,7 @@ mod tests {
             session_id: session_id.clone(),
             turn_id: old_turn_id.as_str().to_owned(),
             agent_id: root_agent_id.as_str().to_owned(),
-            message: ModelMessage::text(MessageRole::User, dynamic_message),
+            message: dynamic_message,
             receipt: keencode_agent::AgentDynamicInputReceipt::new(
                 keencode_agent::AgentDynamicInputKind::UserSteer,
                 steer.sequence,
@@ -12512,7 +14718,7 @@ mod tests {
                                 .ok()
                                 .is_some_and(|materialized| {
                                     materialized.content.iter().any(|content| {
-                                        matches!(content, keencode_model::ContentBlock::Text { text } if text.contains("旧 Turn 的动态 steer"))
+                                        matches!(content, keencode_model::ContentBlock::Text { text } if text.contains("旧动态 steer @proof") && text.contains("plugin://proof@local"))
                                     })
                                 })
                         })
@@ -12572,7 +14778,7 @@ mod tests {
                                         .ok()
                                         .is_some_and(|materialized| {
                                             materialized.content.iter().any(|content| {
-                                                matches!(content, keencode_model::ContentBlock::Text { text } if text.contains("旧 Turn 的动态 steer"))
+                                                matches!(content, keencode_model::ContentBlock::Text { text } if text.contains("旧动态 steer @proof") && text.contains("plugin://proof@local"))
                                             })
                                         })
                                 })
@@ -12994,6 +15200,423 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn root_completed_non_empty_final_message_cold_recovery_preserves_outcome() {
         assert_completed_root_survives_cold_recovery("根 Turn 冷恢复必须保留的最终文本").await;
+    }
+
+    /// 原页面编辑重发必须经真实回退事务重建协作状态，保留前缀且允许再次发送。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn rewound_session_rebuilds_collaboration_and_resends() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server_for_requests("回退验收回复", 3);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "rewind-resend")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        for (turn_id, prompt) in [
+            ("turn-before-edit", "保留的第一轮"),
+            ("turn-edit-target", "编辑前请求"),
+        ] {
+            runtime
+                .start_root_turn(&session_id, turn_id, prompt, RootTurnOptions::default())
+                .await
+                .unwrap();
+            wait_for_session_idle(&runtime, &session_id).await;
+        }
+        let target = session
+            .snapshot()
+            .unwrap()
+            .state
+            .raw_transcript_messages()
+            .into_iter()
+            .rev()
+            .find(|message| message.role == keencode_resources::MessageRole::User)
+            .unwrap()
+            .message_id
+            .clone();
+        runtime.close_session(&session_id).await.unwrap();
+        drop(session);
+        let result = runtime
+            .runtime_manager()
+            .prepare_edit_user_closed_session(keencode_resources::SessionEditUserRequest {
+                source_session_id: keencode_resources::SessionId::new(&session_id).unwrap(),
+                target_message_id: target,
+                expected_text: "编辑前请求".to_owned(),
+                operation_id: "native-edit-resend".to_owned(),
+            })
+            .unwrap();
+        let reopened = runtime
+            .open_or_create_session(project.path(), Some(&session_id), "rewind-reopen")
+            .unwrap();
+        runtime
+            .start_root_turn(
+                &session_id,
+                "turn-edited-resend",
+                "编辑后请求",
+                RootTurnOptions::default(),
+            )
+            .await
+            .expect("回退后的协作恢复不能再引用已移除的 Turn");
+        wait_for_session_idle(&runtime, &session_id).await;
+        let state = reopened.snapshot().unwrap().state;
+        assert!(
+            state
+                .turns
+                .keys()
+                .any(|turn| turn.as_str() == "turn-before-edit")
+        );
+        assert!(
+            !state
+                .turns
+                .keys()
+                .any(|turn| turn.as_str() == "turn-edit-target")
+        );
+        assert!(
+            state
+                .turns
+                .values()
+                .any(|turn| turn.turn_id.as_str() == "turn-edited-resend"
+                    && turn.status == TurnStatus::Completed)
+        );
+        let archive = runtime
+            .open_or_create_session(
+                project.path(),
+                Some(result.archived_session_id.as_str()),
+                "rewind-archive",
+            )
+            .unwrap();
+        assert!(
+            archive
+                .snapshot()
+                .unwrap()
+                .state
+                .turns
+                .keys()
+                .any(|turn| turn.as_str() == "turn-edit-target")
+        );
+        let requests = server.join().unwrap().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(request_contains_user_text(&requests[2], "保留的第一轮"));
+        assert!(request_contains_user_text(&requests[2], "编辑后请求"));
+        assert!(!request_contains_user_text(&requests[2], "编辑前请求"));
+        runtime.close_session(&session_id).await.unwrap();
+        runtime
+            .close_session(result.archived_session_id.as_str())
+            .await
+            .unwrap();
+    }
+
+    /// 带资源引用的完成回合冷启动后仍可继续；更换权威历史中的市场身份必须拒绝恢复。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_input_references_cold_resume_and_reject_changed_market() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server_for_requests("引用冷恢复回复", 2);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "reference-cold-resume")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        let references = vec![keencode_model::InputReference {
+            name: "proof".into(),
+            path: "plugin://proof@local".into(),
+        }];
+        runtime
+            .start_root_turn(
+                &session_id,
+                "reference-cold-first",
+                "@proof 原请求",
+                RootTurnOptions {
+                    references: references.clone(),
+                    ..RootTurnOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_for_session_idle(&runtime, &session_id).await;
+        let checkpoint = runtime
+            .collaboration_sessions
+            .lock()
+            .unwrap()
+            .get(&session_id)
+            .unwrap()
+            .coordinator
+            .checkpoint_coordinator()
+            .unwrap();
+        let mut tampered = session.snapshot().unwrap().state;
+        for record in &mut tampered.transcript {
+            if let TranscriptRecord::MessageAdded(message) = record
+                && !message.references.is_empty()
+            {
+                message.references[0].path = "plugin://proof@changed".into();
+            }
+        }
+        assert_eq!(
+            super::recovered_authoritative_turn_outcomes_with_waiting_capacity(
+                Some(&session),
+                Some(&checkpoint),
+                &tampered,
+                &std::collections::HashSet::new()
+            ),
+            Err(AgentRuntimeError::RecoveryRequired)
+        );
+        runtime.close_session(&session_id).await.unwrap();
+        drop(session);
+        drop(runtime);
+        let recovered = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = recovered
+            .open_or_create_session(project.path(), Some(&session_id), "reference-cold-reopen")
+            .unwrap();
+        assert_eq!(
+            recovered
+                .start_root_turn(
+                    &session_id,
+                    "reference-cold-next",
+                    "继续原会话",
+                    RootTurnOptions::default()
+                )
+                .await
+                .unwrap(),
+            RootTurnStartOutcome::Started
+        );
+        wait_for_session_idle(&recovered, &session_id).await;
+        let stored = session
+            .model_transcript()
+            .unwrap()
+            .into_iter()
+            .find(|message| !message.references.is_empty())
+            .unwrap();
+        assert_eq!(stored.references, references);
+        assert!(
+            session
+                .snapshot()
+                .unwrap()
+                .state
+                .turns
+                .contains_key(&ResourceTurnId::new("reference-cold-next").unwrap())
+        );
+        recovered.close_session(&session_id).await.unwrap();
+        let requests = server.join().unwrap().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1]["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|message| message["role"] == "user"
+                    && message["content"].as_array().is_some_and(|parts| {
+                        // 原正文与资源身份各占一个内容块，必须出现在同一条用户消息中。
+                        parts
+                            .iter()
+                            .any(|part| part["text"].as_str() == Some("@proof 原请求"))
+                            && parts.iter().any(|part| {
+                                part["text"]
+                                    .as_str()
+                                    .is_some_and(|text| text.contains("plugin://proof@local"))
+                            })
+                    }))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_attachment_images_and_text_context_reach_provider_and_transcript() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server_for_requests("附件已处理", 1);
+        let runtime = runtime_with_responses_capabilities(
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities {
+                image_input: true,
+                ..ProviderCapabilities::default()
+            }),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "attachment-runtime-input")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .start_root_turn(
+                &session_id,
+                "attachment-input-turn",
+                "请分析附件",
+                RootTurnOptions {
+                    references: vec![keencode_model::InputReference {
+                        name: "notes.md".to_owned(),
+                        path: "C:/authorized/notes.md".to_owned(),
+                    }],
+                    attachment_images: vec![ImageContent::from_base64("image/png", "aGVsbG8=")],
+                    attachment_context: vec!["授权文本附件内容".to_owned()],
+                    ..RootTurnOptions::default()
+                },
+            )
+            .await
+            .unwrap();
+        wait_for_session_idle(&runtime, &session_id).await;
+        let requests = server.join().unwrap().unwrap();
+        let request_text = requests[0].to_string();
+        assert!(request_text.contains("aGVsbG8="));
+        assert!(request_text.contains("授权文本附件内容"));
+        assert!(request_text.contains("请分析附件"));
+        let transcript = session.model_transcript().unwrap();
+        let transcript_text = serde_json::to_string(&transcript).unwrap();
+        assert!(transcript_text.contains("notes.md"));
+        assert!(transcript_text.contains("image"));
+        assert!(!transcript_text.contains("授权文本附件内容"));
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "attachment-input-turn",
+                    "请分析附件",
+                    RootTurnOptions {
+                        attachment_context: vec!["另一份授权文本附件".to_owned()],
+                        ..RootTurnOptions::default()
+                    },
+                )
+                .await,
+            Err(AgentRuntimeError::RuntimeOperationFailed)
+        );
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn root_attachment_image_is_rejected_before_provider_without_vision() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_responses_request_probe();
+        let runtime = runtime_with_responses_capabilities(
+            storage.path(),
+            &base_url,
+            &["test-model"],
+            Some(ProviderCapabilities::default()),
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "attachment-capability-reject")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        let before = session.snapshot().unwrap().state;
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    "attachment-capability-turn",
+                    "请分析图片",
+                    RootTurnOptions {
+                        attachment_images: vec![
+                            ImageContent::from_base64("image/png", "aGVsbG8=",)
+                        ],
+                        ..RootTurnOptions::default()
+                    },
+                )
+                .await,
+            Err(AgentRuntimeError::RuntimeOperationFailed)
+        );
+        let after = session.snapshot().unwrap().state;
+        assert_eq!(before.transcript_revision, after.transcript_revision);
+        assert_eq!(before.turns.len(), after.turns.len());
+        assert!(server.join().unwrap().unwrap().is_none());
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// 原页面指定回复分叉必须保留真实前缀，并从新 Session 继续模型调用。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forked_prefix_session_continues_without_later_source_messages() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server_for_requests("分叉验收回复", 3);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let source = runtime
+            .open_or_create_session(project.path(), None, "fork-prefix")
+            .unwrap();
+        let source_id = source.session_id().as_str().to_owned();
+        for (turn, text) in [
+            ("fork-first", "需要继承的第一轮"),
+            ("fork-second", "不应继承的第二轮"),
+        ] {
+            let references = if turn == "fork-first" {
+                vec![keencode_model::InputReference {
+                    name: "proof".into(),
+                    path: "plugin://proof@local".into(),
+                }]
+            } else {
+                Vec::new()
+            };
+            runtime
+                .start_root_turn(
+                    &source_id,
+                    turn,
+                    text,
+                    RootTurnOptions {
+                        references,
+                        ..RootTurnOptions::default()
+                    },
+                )
+                .await
+                .unwrap();
+            wait_for_session_idle(&runtime, &source_id).await;
+        }
+        runtime.close_session(&source_id).await.unwrap();
+        drop(source);
+        let result = runtime
+            .runtime_manager()
+            .fork_closed_session(keencode_resources::SessionForkRequest {
+                source_session_id: keencode_resources::SessionId::new(&source_id).unwrap(),
+                operation_id: "native-prefix-fork".into(),
+                title: Some("分叉验收".into()),
+                through_turn_id: Some(keencode_resources::TurnId::new("fork-first").unwrap()),
+            })
+            .unwrap();
+        let fork_id = result.session_id.as_str();
+        let target = runtime
+            .open_or_create_session(project.path(), Some(fork_id), "fork-prefix-reopen")
+            .unwrap();
+        runtime
+            .start_root_turn(
+                fork_id,
+                "fork-next",
+                "分叉后的新问题",
+                RootTurnOptions::default(),
+            )
+            .await
+            .unwrap();
+        wait_for_session_idle(&runtime, fork_id).await;
+        let state = target.snapshot().unwrap().state;
+        let inherited = target
+            .model_transcript()
+            .unwrap()
+            .into_iter()
+            .find(|message| !message.references.is_empty())
+            .unwrap();
+        assert_eq!(inherited.references[0].path, "plugin://proof@local");
+        assert_eq!(
+            inherited.content,
+            vec![keencode_model::ContentBlock::text("需要继承的第一轮")]
+        );
+        assert!(
+            state
+                .turns
+                .contains_key(&keencode_resources::TurnId::new("fork-first").unwrap())
+        );
+        assert!(
+            !state
+                .turns
+                .contains_key(&keencode_resources::TurnId::new("fork-second").unwrap())
+        );
+        assert_eq!(
+            state.turns[&keencode_resources::TurnId::new("fork-next").unwrap()].status,
+            TurnStatus::Completed
+        );
+        let requests = server.join().unwrap().unwrap();
+        assert!(requests[2].to_string().contains("plugin://proof@local"));
+        assert!(request_contains_user_text(&requests[2], "需要继承的第一轮"));
+        assert!(request_contains_user_text(&requests[2], "分叉后的新问题"));
+        assert!(!request_contains_user_text(
+            &requests[2],
+            "不应继承的第二轮"
+        ));
+        runtime.close_session(fork_id).await.unwrap();
     }
 
     /// Artifact 化的长回复必须按同样的 UTF-8 截断规则恢复，不能丢弃或变成另一条摘要。
@@ -13575,6 +16198,7 @@ mod tests {
             segment_index: 0,
             kind: DynamicInputKind::Mailbox,
             through_sequence: 4,
+            user_inputs: Vec::new(),
             transcript_revision: 2,
         });
         let claim = super::RecoveredDynamicInputClaim {
@@ -13584,6 +16208,7 @@ mod tests {
             through_sequence: 4,
             mailbox_message_ids: Vec::new(),
             mailbox_messages: Vec::new(),
+            user_steers: Vec::new(),
         };
         assert!(dynamic_input_receipt_matches_claim(&state, &claim));
 
@@ -13679,6 +16304,7 @@ mod tests {
             through_sequence: 8,
             mailbox_message_ids: vec![first_message_id, second_message_id],
             mailbox_messages: vec![first_runner_message.clone(), second_runner_message.clone()],
+            user_steers: Vec::new(),
         };
         assert_eq!(validate_recovered_mailbox_claim(&state, &claim), Ok(()));
 
@@ -13730,6 +16356,11 @@ mod tests {
                 "TodoWrite",
                 "Goal",
                 "Plan",
+                "CreateWorkflow",
+                "SaveWorkflow",
+                "GetWorkflowRun",
+                "GetWorkflowRunSituation",
+                "GetWorkflowRunRoster",
                 "SendMessage",
             ]
             .map(str::to_owned)
@@ -14021,6 +16652,17 @@ mod tests {
                 worktree_lease: None,
                 tool_snapshot: Vec::new(),
             },
+        }
+    }
+
+    /// 创建带项目指令注入策略的显式模板快照，供真实 Runtime 请求测试使用。
+    fn test_agent_template(name: &str, inject_agents_md: bool) -> AgentTemplateSnapshot {
+        AgentTemplateSnapshot {
+            inject_agents_md,
+            name: name.to_owned(),
+            system_prompt: format!("模板 {name} 的测试系统说明"),
+            max_turns: None,
+            allowed_write_dirs: Vec::new(),
         }
     }
 
@@ -14467,6 +17109,10 @@ mod tests {
         calls: Mutex<Vec<(&'static str, PathBuf)>>,
         /// 测试用的候选级诊断快照。
         diagnostics: Vec<RuntimeExtensionDiagnostic>,
+        /// 测试用的插件引用快照，模拟候选构建时的公开目录。
+        plugin_reference_catalog: Vec<Value>,
+        /// 测试用的 Skill 引用快照，模拟候选构建时的公开目录。
+        skill_reference_catalog: Vec<Value>,
     }
 
     impl RecordingExtensionContributor {
@@ -14475,6 +17121,8 @@ mod tests {
             Arc::new(Self {
                 calls: Mutex::new(Vec::new()),
                 diagnostics: Vec::new(),
+                plugin_reference_catalog: Vec::new(),
+                skill_reference_catalog: Vec::new(),
             })
         }
 
@@ -14483,6 +17131,21 @@ mod tests {
             Arc::new(Self {
                 calls: Mutex::new(Vec::new()),
                 diagnostics,
+                plugin_reference_catalog: Vec::new(),
+                skill_reference_catalog: Vec::new(),
+            })
+        }
+
+        /// 创建携带固定插件与 Skill 引用目录的测试候选。
+        fn with_reference_catalogs(
+            plugin_reference_catalog: Vec<Value>,
+            skill_reference_catalog: Vec<Value>,
+        ) -> Arc<Self> {
+            Arc::new(Self {
+                calls: Mutex::new(Vec::new()),
+                diagnostics: Vec::new(),
+                plugin_reference_catalog,
+                skill_reference_catalog,
             })
         }
 
@@ -14495,6 +17158,16 @@ mod tests {
     }
 
     impl RuntimeExtensionContributor for RecordingExtensionContributor {
+        /// 返回候选构建时记录的插件引用目录。
+        fn plugin_reference_catalog(&self) -> Vec<Value> {
+            self.plugin_reference_catalog.clone()
+        }
+
+        /// 返回候选构建时记录的 Skill 引用目录。
+        fn skill_reference_catalog(&self) -> Vec<Value> {
+            self.skill_reference_catalog.clone()
+        }
+
         /// 记录工具注册阶段；测试贡献器不增加额外工具。
         fn register_tools(
             &self,
@@ -14539,6 +17212,7 @@ mod tests {
             }
             Ok(Some(RuntimeAgentTemplate {
                 name: name.to_owned(),
+                inject_agents_md: true,
                 system_prompt: "审查实际变更".to_owned(),
                 model: Some("provider-a::model-a".to_owned()),
                 reasoning_effort: Some("high".to_owned()),
@@ -14613,6 +17287,101 @@ mod tests {
                 ),
             )
             .expect("测试请求应编码")
+    }
+
+    /// 只确认真实请求已经进入投递边界，不伪造客户端响应内容。
+    struct WorkflowPendingViewSink {
+        delivered: Arc<tokio::sync::Notify>,
+    }
+
+    impl ClientRequestSink for WorkflowPendingViewSink {
+        fn send_client_request(&self, _request: AcpClientRequestFrame) -> ClientRequestFuture<'_> {
+            let delivered = Arc::clone(&self.delivered);
+            Box::pin(async move {
+                delivered.notify_one();
+                Ok::<(), ClientRequestBridgeError>(())
+            })
+        }
+    }
+
+    /// pending read-side 只能返回父连接可见的 actor 问题，并沿真实问题 Schema 回答。
+    #[tokio::test]
+    async fn workflow_pending_views_enforce_parent_connection_and_route() {
+        let storage = tempfile::tempdir().expect("应创建问答测试存储目录");
+        let runtime =
+            AgentRuntime::new_for_control_test(storage.path()).expect("测试 Runtime 应创建");
+        let parent_connection =
+            ConnectionId::new("workflow-pending-parent").expect("父连接标识应合法");
+        let other_connection =
+            ConnectionId::new("workflow-pending-other").expect("其他连接标识应合法");
+        let capabilities = ClientCapabilities::new().elicitation(Some(
+            ElicitationCapabilities::new().form(Some(ElicitationFormCapabilities::new())),
+        ));
+        runtime
+            .elicitations
+            .negotiate_connection_capabilities(&parent_connection, &capabilities)
+            .expect("父连接能力应可登记");
+        runtime
+            .elicitations
+            .bind_session_connection("workflow-parent", &parent_connection)
+            .expect("父 Session 应绑定连接");
+        runtime
+            .bind_workflow_actor_elicitation("workflow-actor", "workflow-parent")
+            .expect("actor 应绑定父连接和问答路由");
+
+        let delivered = Arc::new(tokio::sync::Notify::new());
+        let handler = runtime.elicitations.handler_for_connection_projected(
+            keencode_agent::SessionId::new("workflow-actor").expect("actor Session 标识应合法"),
+            "workflow-parent".to_owned(),
+            parent_connection.clone(),
+            Arc::new(WorkflowPendingViewSink {
+                delivered: Arc::clone(&delivered),
+            }),
+        );
+        let answer = handler.ask(UserQuestionRequest {
+            session_id: keencode_agent::SessionId::new("workflow-actor")
+                .expect("actor Session 标识应合法"),
+            turn_id: keencode_agent::TurnId::new("workflow-pending-turn").expect("Turn 标识应合法"),
+            source_agent_id: keencode_agent::AgentId::new("workflow-actor")
+                .expect("Agent 标识应合法"),
+            tool_call_id: ToolCallId::new("workflow-pending-tool").expect("Tool 标识应合法"),
+            questions: vec![UserQuestion {
+                id: "strategy".to_owned(),
+                prompt: "选择实现策略".to_owned(),
+                options: vec![UserQuestionOption {
+                    label: "直接实现".to_owned(),
+                    description: Some("执行真实实现".to_owned()),
+                }],
+                multi_select: false,
+                allow_custom: true,
+            }],
+        });
+        delivered.notified().await;
+
+        let views = runtime
+            .pending_elicitation_views("workflow-parent", &parent_connection)
+            .expect("父连接读取 pending 应成功");
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].session_id, "workflow-actor");
+        assert_eq!(
+            views[0].display_session_id.as_deref(),
+            Some("workflow-parent")
+        );
+        assert_eq!(views[0].connection_id, parent_connection);
+        assert!(matches!(
+            runtime.pending_elicitation_views("workflow-parent", &other_connection),
+            Err(AgentRuntimeError::ClientResponseRejected)
+        ));
+
+        runtime
+            .resolve_workflow_question(
+                "workflow-parent",
+                &views[0].request_id,
+                r#"{"optionId":"直接实现"}"#,
+            )
+            .expect("父连接应按原问题 Schema 完成 actor 回答");
+        let response = answer.await.expect("actor 应收到已解析答案");
+        assert_eq!(response.answers[0].values, ["直接实现"]);
     }
 
     /// 严格外层联合不得增加旧事件名或扁平字段。
@@ -15424,6 +18193,9 @@ mod tests {
                     "turn-dynamic-context",
                     "检查动态上下文持久化边界",
                     RootTurnOptions {
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: Some(dynamic_context.to_owned()),
                         plan_enabled: false,
                         elicitation_connection_id: None,
@@ -15686,6 +18458,9 @@ mod tests {
                     "前缀稳定第二轮",
                     RootTurnOptions {
                         // 模拟 Memory/Plan 在两轮之间变化，不应改写既有历史。
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: Some("本轮动态记忆标记".to_owned()),
                         plan_enabled: false,
                         elicitation_connection_id: None,
@@ -15853,6 +18628,9 @@ mod tests {
                     "turn-prefix-tool-second",
                     "前缀稳定工具第二轮",
                     RootTurnOptions {
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: Some("本轮工具轮动态记忆标记".to_owned()),
                         plan_enabled: false,
                         elicitation_connection_id: None,
@@ -16779,6 +19557,261 @@ mod tests {
             .expect("子 Agent 指令测试 Session 应关闭");
     }
 
+    /// 显式模板的项目指令开关必须进入真实 Provider 请求，并在冷重开后继续生效。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn child_agent_template_injection_reaches_provider_and_survives_cold_reopen() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let disabled_cwd = tempfile::tempdir().expect("应创建关闭注入的子 Agent 目录");
+        let enabled_cwd = tempfile::tempdir().expect("应创建开启注入的子 Agent 目录");
+        std::fs::write(storage.path().join("AGENTS.md"), "模板测试全局指令标记")
+            .expect("全局模板测试指令应写入");
+        std::fs::write(
+            disabled_cwd.path().join("AGENTS.md"),
+            "模板测试关闭项目指令标记",
+        )
+        .expect("关闭注入的项目指令应写入");
+        std::fs::write(
+            enabled_cwd.path().join("AGENTS.md"),
+            "模板测试开启项目指令标记",
+        )
+        .expect("开启注入的项目指令应写入");
+
+        let root_prompt = "保持模板测试根 Turn 活跃";
+        let disabled_prompt = "执行 template_injection_disabled 测试任务";
+        let (base_url, gates, server) = spawn_gated_buffered_responses_server_with_texts(
+            "模板测试 Provider 响应",
+            4,
+            &[root_prompt, disabled_prompt],
+        );
+        let mut gates = gates.into_iter();
+        let root_gate = gates.next().expect("模板测试应有根请求闸门");
+        let disabled_gate = gates.next().expect("模板测试应有关闭注入请求闸门");
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "template-injection-cold")
+            .expect("模板测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let root_turn_id = "turn-template-injection-root";
+        let root_turn = AgentTurnId::new(root_turn_id).expect("模板测试根 Turn 标识应有效");
+
+        assert_eq!(
+            runtime
+                .start_root_turn(
+                    &session_id,
+                    root_turn_id,
+                    root_prompt,
+                    RootTurnOptions::default(),
+                )
+                .await
+                .expect("模板测试根 Turn 应启动"),
+            RootTurnStartOutcome::Started
+        );
+        root_gate
+            .wait_for_requests(1)
+            .expect("模板测试根请求应到达 Provider");
+        let collaboration = runtime
+            .ensure_collaboration_runtime(
+                &session,
+                RootAgentSeed {
+                    model: "test-model".to_owned(),
+                    reasoning_effort: None,
+                    plan_guard: PlanGuard::inactive(),
+                },
+            )
+            .expect("模板测试 Collaboration Runtime 应建立");
+
+        let mut disabled_request =
+            test_spawn_request("template_injection_disabled", disabled_cwd.path());
+        disabled_request.agent_template = Some(test_agent_template("disabled", false));
+        let disabled_child = collaboration
+            .coordinator
+            .spawn_agent(
+                &collaboration.root_agent_id,
+                &root_turn,
+                &ToolCallId::new("spawn-template-injection-disabled")
+                    .expect("关闭注入工具调用标识应有效"),
+                disabled_request,
+            )
+            .expect("关闭注入子 Agent 应启动");
+        disabled_gate
+            .wait_for_requests(1)
+            .expect("关闭注入子 Agent 请求应到达 Provider");
+
+        let mut enabled_request =
+            test_spawn_request("template_injection_enabled", enabled_cwd.path());
+        enabled_request.agent_template = Some(test_agent_template("enabled", true));
+        let enabled_child = collaboration
+            .coordinator
+            .spawn_agent(
+                &collaboration.root_agent_id,
+                &root_turn,
+                &ToolCallId::new("spawn-template-injection-enabled")
+                    .expect("开启注入工具调用标识应有效"),
+                enabled_request,
+            )
+            .expect("开启注入子 Agent 应启动");
+
+        // 根请求和关闭注入请求都已进入真实 Provider；先只释放根请求，
+        // 保留关闭注入请求的闸门，以便随后真实中断并冷恢复同一个子 Agent。
+        root_gate.release();
+        let settle_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let root_completed = matches!(
+                collaboration
+                    .coordinator
+                    .agent_status(&collaboration.root_agent_id)
+                    .expect("模板测试根 Agent 状态应读取"),
+                CollaborationAgentStatus::Completed { .. }
+            );
+            let enabled_completed = matches!(
+                collaboration
+                    .coordinator
+                    .agent_status(&enabled_child.agent.agent_id)
+                    .expect("开启注入子 Agent 状态应读取"),
+                CollaborationAgentStatus::Completed { .. }
+            );
+            if root_completed && enabled_completed {
+                break;
+            }
+            assert!(
+                Instant::now() < settle_deadline,
+                "根与开启注入子 Agent 应在关闭注入子 Agent 仍挂起时收敛"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // 关闭注入子 Agent 必须有可恢复的中断事实，冷重开后才能验证同一模板快照。
+        let persisted = collaboration
+            .store
+            .load_transition_snapshot()
+            .expect("模板测试 checkpoint 应读取")
+            .expect("模板测试 checkpoint 应存在");
+        let disabled_checkpoint = persisted
+            .commit
+            .checkpoint
+            .roots
+            .iter()
+            .flat_map(|root| root.agents.iter())
+            .find(|agent| agent.definition.agent_id == disabled_child.agent.agent_id)
+            .expect("关闭注入子 Agent checkpoint 应存在");
+        assert_eq!(
+            disabled_checkpoint
+                .definition
+                .agent_template
+                .as_ref()
+                .map(|template| template.inject_agents_md),
+            Some(false),
+            "关闭策略必须进入可持久化 Agent 定义"
+        );
+        assert!(matches!(
+            collaboration
+                .coordinator
+                .agent_status(&disabled_child.agent.agent_id)
+                .expect("关闭注入子 Agent 状态应读取"),
+            CollaborationAgentStatus::Running { .. }
+        ));
+        let cancellation =
+            runtime.background_task_cancel(&session_id, disabled_child.initial_turn_id.as_str());
+        assert!(
+            cancellation.is_ok(),
+            "关闭注入子 Agent 应可中断以验证冷恢复：{cancellation:?}"
+        );
+        disabled_gate.release();
+        wait_for_session_idle(&runtime, &session_id).await;
+        assert!(matches!(
+            collaboration
+                .coordinator
+                .agent_status(&disabled_child.agent.agent_id)
+                .expect("中断后的关闭注入子 Agent 状态应读取"),
+            CollaborationAgentStatus::Interrupted { .. }
+        ));
+
+        let disabled_agent_id = disabled_child.agent.agent_id.as_str().to_owned();
+        // close_session 是用户主动关闭语义，会调用 close_root_session 并永久关闭根树；
+        // 进程退出后的冷恢复必须走 shutdown_session，保留 Open checkpoint 和 Interrupted 子 Agent。
+        runtime
+            .shutdown_session(&session_id)
+            .await
+            .expect("模板测试首个 Runtime 应暂停并释放");
+        drop(collaboration);
+        drop(session);
+        drop(runtime);
+        std::fs::write(
+            disabled_cwd.path().join("AGENTS.md"),
+            "模板测试冷恢复项目指令标记",
+        )
+        .expect("冷恢复项目指令应写入");
+
+        let recovered_runtime =
+            runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let recovered_session = recovered_runtime
+            .open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "template-injection-cold-reopen",
+            )
+            .expect("模板测试 Session 应冷重开");
+        let resumed_turn = recovered_runtime
+            .resume_background_agent(
+                &session_id,
+                "resume-template-injection-disabled",
+                &disabled_agent_id,
+            )
+            .expect("关闭注入子 Agent 应从 checkpoint 恢复");
+        wait_for_session_idle(&recovered_runtime, &session_id).await;
+        let recovered_snapshot = recovered_session
+            .snapshot()
+            .expect("模板测试冷恢复快照应读取");
+        assert!(recovered_snapshot.state.turns.values().any(|turn| {
+            turn.turn_id.as_str() == resumed_turn.as_str() && turn.status == TurnStatus::Completed
+        }));
+
+        let requests = server
+            .join()
+            .expect("模板测试 Provider 线程不应 panic")
+            .expect("模板测试 Provider 应成功收到所有请求");
+        assert_eq!(requests.len(), 4);
+        let request_text = |request: &Value| {
+            request["input"]
+                .as_array()
+                .expect("模板测试 Responses 请求应包含 input")
+                .iter()
+                .flat_map(|message| message["content"].as_array().into_iter().flatten())
+                .filter_map(|part| part["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let disabled_requests = requests
+            .iter()
+            .filter(|request| request_contains_user_text(request, disabled_prompt))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            disabled_requests.len(),
+            2,
+            "初始和冷恢复应各有一次关闭注入请求"
+        );
+        for request in disabled_requests {
+            let text = request_text(request);
+            assert!(text.contains("模板测试全局指令标记"));
+            assert!(!text.contains("模板测试关闭项目指令标记"));
+            assert!(!text.contains("模板测试冷恢复项目指令标记"));
+        }
+        let enabled_request = requests
+            .iter()
+            .find(|request| {
+                request_contains_user_text(request, "执行 template_injection_enabled 测试任务")
+            })
+            .expect("开启注入子 Agent 请求应存在");
+        let enabled_text = request_text(enabled_request);
+        assert!(enabled_text.contains("模板测试全局指令标记"));
+        assert!(enabled_text.contains("模板测试开启项目指令标记"));
+        recovered_runtime
+            .close_session(&session_id)
+            .await
+            .expect("模板测试冷恢复 Runtime 应关闭");
+    }
+
     /// 损坏或超限 AGENTS.md 必须在 Provider 请求前失败，且本地 Provider 不得收到请求。
     #[tokio::test(flavor = "multi_thread")]
     async fn invalid_instructions_fail_before_provider_request() {
@@ -16949,8 +19982,10 @@ mod tests {
         )
         .unwrap();
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-            .expect("测试 Runtime 应创建");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
         let delivery =
             SessionDeliverySender::spawn("session-web", RecordingEmitter::successful(), true);
         let before = runtime
@@ -17143,6 +20178,192 @@ mod tests {
                 .expect_err("其他项目不得复用候选"),
             AgentRuntimeError::RuntimeOperationFailed
         );
+    }
+
+    /// 已开始 Session 的扩展引用必须固定在首次完整 context 候选；只有尚未产生
+    /// 用户事实的 deferred draft 允许显式刷新，未知 ID 和冷驻留 Session 都不能
+    /// 通过当前工作区候选制造隐式回退。
+    #[test]
+    fn session_extension_reference_catalog_is_frozen_and_fail_closed() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建项目目录");
+        let cold_project = tempfile::tempdir().expect("应创建冷驻留项目目录");
+        let runtime = Arc::new(
+            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
+                .expect("测试 Runtime 应创建"),
+        );
+        let old_plugins = vec![json!({"pluginId": "local:old-plugin"})];
+        let old_skills = vec![json!({"id": "workspace:old-skill"})];
+        runtime
+            .publish_extension_candidate(
+                project.path(),
+                RuntimeExtensionCandidate::new(
+                    1,
+                    RecordingExtensionContributor::with_reference_catalogs(
+                        old_plugins.clone(),
+                        old_skills.clone(),
+                    ),
+                )
+                .expect("旧候选代次应有效"),
+            )
+            .expect("旧候选应发布");
+        let session = runtime
+            .open_or_create_session(project.path(), None, "extension-catalog-freeze")
+            .expect("已发布候选后 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        assert_eq!(
+            runtime
+                .session_extension_reference_catalog(&session_id)
+                .expect("旧 Session 目录应可读取")
+                .expect("旧 Session 应已冻结")
+                .plugins,
+            old_plugins
+        );
+        assert_eq!(
+            runtime
+                .session_extension_reference_catalog(&session_id)
+                .expect("旧 Session Skill 目录应可读取")
+                .expect("旧 Session 应已冻结")
+                .skills,
+            old_skills
+        );
+
+        let new_plugins = vec![json!({"pluginId": "local:new-plugin"})];
+        let new_skills = vec![json!({"id": "workspace:new-skill"})];
+        runtime
+            .publish_extension_candidate(
+                project.path(),
+                RuntimeExtensionCandidate::new(
+                    2,
+                    RecordingExtensionContributor::with_reference_catalogs(
+                        new_plugins.clone(),
+                        new_skills.clone(),
+                    ),
+                )
+                .expect("新候选代次应有效"),
+            )
+            .expect("新候选应发布");
+        let frozen = runtime
+            .session_extension_reference_catalog(&session_id)
+            .expect("热替换后旧 Session 目录仍应可读取")
+            .expect("旧 Session 目录不得丢失");
+        assert_eq!(frozen.plugins, old_plugins);
+        assert_eq!(frozen.skills, old_skills);
+        assert_eq!(
+            runtime
+                .plugin_reference_catalog(project.path())
+                .expect("当前项目候选应可读取")
+                .expect("当前项目应有候选"),
+            new_plugins
+        );
+        let refreshed = runtime
+            .initialize_session_extension_reference_catalog(&session_id, project.path())
+            .expect("尚未首发的 draft 应允许刷新当前候选");
+        assert_eq!(refreshed.plugins, new_plugins);
+        assert_eq!(refreshed.skills, new_skills);
+        let collaboration = runtime
+            .ensure_collaboration_runtime(
+                &session,
+                RootAgentSeed {
+                    model: "test-model".to_owned(),
+                    reasoning_effort: None,
+                    plan_guard: PlanGuard::inactive(),
+                },
+            )
+            .expect("首发前的执行上下文应能冻结当前候选");
+        let execution_catalog = collaboration
+            .execution
+            .state
+            .lock()
+            .expect("执行状态应可读取")
+            .frozen_extension_reference_catalog
+            .clone()
+            .expect("工具装配应冻结扩展目录");
+        let ui_catalog = runtime
+            .session_extension_reference_catalog(&session_id)
+            .expect("UI 引用目录应可读取")
+            .expect("UI 引用目录应存在");
+        assert_eq!(ui_catalog.skills, execution_catalog.skills);
+        assert_eq!(ui_catalog.plugins, execution_catalog.plugins);
+
+        let latest_plugins = vec![json!({"pluginId": "local:latest-plugin"})];
+        let latest_skills = vec![json!({"id": "workspace:latest-skill"})];
+        runtime
+            .publish_extension_candidate(
+                project.path(),
+                RuntimeExtensionCandidate::new(
+                    3,
+                    RecordingExtensionContributor::with_reference_catalogs(
+                        latest_plugins.clone(),
+                        latest_skills.clone(),
+                    ),
+                )
+                .expect("最新候选代次应有效"),
+            )
+            .expect("最新候选应发布");
+        let frozen_after_replacement = runtime
+            .initialize_session_extension_reference_catalog(&session_id, project.path())
+            .expect("已有执行冻结的 Session 应继续返回权威目录");
+        assert_eq!(frozen_after_replacement.plugins, new_plugins);
+        assert_eq!(frozen_after_replacement.skills, new_skills);
+
+        assert!(matches!(
+            runtime.session_extension_reference_catalog("missing-session"),
+            Err(AgentRuntimeError::SessionUnavailable)
+        ));
+
+        let cold_session = runtime
+            .open_or_create_session(cold_project.path(), None, "extension-catalog-cold")
+            .expect("候选发布前的冷驻留 Session 应创建");
+        let cold_session_id = cold_session.session_id().as_str().to_owned();
+        runtime
+            .publish_extension_candidate(
+                cold_project.path(),
+                RuntimeExtensionCandidate::new(
+                    1,
+                    RecordingExtensionContributor::with_reference_catalogs(
+                        vec![json!({"pluginId": "local:cold-plugin"})],
+                        vec![json!({"id": "workspace:cold-skill"})],
+                    ),
+                )
+                .expect("冷项目候选代次应有效"),
+            )
+            .expect("冷项目候选应发布");
+        assert!(
+            runtime
+                .session_extension_reference_catalog(&cold_session_id)
+                .expect("冷驻留 Session 查询应成功")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn deferred_catalog_refresh_uses_journal_facts_boundary() {
+        let draft_id = keencode_resources::SessionId::new("deferred-catalog-draft")
+            .expect("测试 draft Session 标识应有效");
+        let draft = SessionState::empty(draft_id.clone());
+        assert!(!session_has_persisted_user_facts(&draft));
+
+        let mut started = draft;
+        started.input_queue.items.push(SessionInputQueueItem {
+            queue_item_id: "queue:deferred-catalog".to_owned(),
+            source_command_id: "command:deferred-catalog".to_owned(),
+            client_id: None,
+            kind: keencode_resources::SessionInputKind::SendText,
+            text: "首发事实".to_owned(),
+            attachments: Vec::new(),
+            model_selection: None,
+            mode: None,
+            plan_enabled: false,
+            requested_delivery: keencode_resources::SessionInputDelivery::Queue,
+            admitted_delivery: keencode_resources::SessionInputDelivery::Queue,
+            admission_seq: 1,
+            reserve_attempt: 0,
+            dispatch: keencode_resources::SessionInputDispatch::Queued,
+            promoted_turn_id: None,
+            admitted_at_unix_ms: 1,
+        });
+        assert!(session_has_persisted_user_facts(&started));
     }
 
     /// 扩展诊断必须真实进入 ACP，并在同一候选代次中对重复根调用保持 exactly-once。
@@ -18086,6 +21307,9 @@ mod tests {
                     "turn-stable",
                     "检查项目",
                     RootTurnOptions {
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: None,
                         plan_enabled: true,
                         elicitation_connection_id: None,
@@ -18101,6 +21325,9 @@ mod tests {
                     "turn-stable",
                     "检查项目",
                     RootTurnOptions {
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: Some("重新抽取的动态记忆".to_owned()),
                         plan_enabled: false,
                         elicitation_connection_id: None,
@@ -18145,6 +21372,9 @@ mod tests {
                     "turn-plan-mode-artifact",
                     "验证 Plan 模式切换",
                     RootTurnOptions {
+                        references: Vec::new(),
+                        attachment_images: Vec::new(),
+                        attachment_context: Vec::new(),
                         developer_context: None,
                         plan_enabled: true,
                         elicitation_connection_id: None,
@@ -18994,6 +22224,78 @@ mod tests {
         );
     }
 
+    /// 首轮 ACK 后等待已提交输入；重复调度只请求一次隔离标题，且不污染聊天正文。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn automatic_title_after_root_start_is_singleflight_and_persistent() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server_for_requests("自动命名验收", 2);
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "automatic-title-session")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        runtime
+            .start_root_turn(
+                &session_id,
+                "automatic-title-turn",
+                "修复文件读取缓存",
+                RootTurnOptions::default(),
+            )
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            runtime.schedule_automatic_title(&session_id);
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let state = session.snapshot().unwrap().state;
+                if state.title_source == keencode_resources::TitleSource::Automatic
+                    && state
+                        .turns
+                        .values()
+                        .all(|turn| turn.status != TurnStatus::Running)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("已确认用户输入必须触发自动标题");
+        let requests = server.join().unwrap().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request["tool_choice"] == "none")
+                .count(),
+            1,
+            "只有隔离标题请求禁用工具"
+        );
+        let state = session.snapshot().unwrap().state;
+        assert_eq!(state.title, "自动命名验收");
+        assert_eq!(state.generated_titles.len(), 1);
+        assert_eq!(
+            session
+                .transcript()
+                .unwrap()
+                .iter()
+                .filter(
+                    |message| message.role == keencode_resources::MessageRole::User
+                        && !message.is_meta
+                )
+                .count(),
+            1,
+            "命名不得插入额外用户消息"
+        );
+        runtime.schedule_automatic_title(&session_id);
+        assert_eq!(
+            session.snapshot().unwrap().state.last_sequence,
+            state.last_sequence
+        );
+    }
+
     /// 同一标题 operationId 的并发与顺序重试只能发起一次真实 Provider 请求。
     #[tokio::test(flavor = "multi_thread")]
     async fn title_generation_is_singleflight_and_uses_persistent_result() {
@@ -19627,6 +22929,7 @@ mod tests {
         .expect("测试 Session 应创建");
         let state = session.snapshot().unwrap().state;
         let message = keencode_resources::SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: "resource-message-anchor".to_owned(),
             turn_id: None,
@@ -19793,6 +23096,7 @@ mod tests {
 
         state.transcript.push(TranscriptRecord::MessageAdded(
             keencode_resources::SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "root-user-message".to_owned(),
                 turn_id: Some(root_turn_id),
@@ -19852,6 +23156,7 @@ mod tests {
                 segment_index: 0,
                 expected_transcript_revision: state.transcript.len() as u64,
                 messages: vec![keencode_resources::SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "goal-assistant-message".to_owned(),
                     turn_id: Some(goal_turn_id.clone()),
@@ -19903,6 +23208,7 @@ mod tests {
         let state = session.snapshot().unwrap().state;
         for is_meta in [false, true] {
             let message = keencode_resources::SessionMessage {
+                references: Vec::new(),
                 is_meta,
                 message_id: "hook-context".to_owned(),
                 turn_id: None,
@@ -19972,6 +23278,7 @@ mod tests {
             );
             state.transcript.push(TranscriptRecord::MessageAdded(
                 keencode_resources::SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "model-stop-user-message".to_owned(),
                     turn_id: Some(turn_id.clone()),
@@ -20056,6 +23363,7 @@ mod tests {
             // 根 Turn 生命周期在回放中需要真实用户消息才可见。
             state.transcript.push(TranscriptRecord::MessageAdded(
                 keencode_resources::SessionMessage {
+                    references: Vec::new(),
                     is_meta: false,
                     message_id: "failure-category-user".to_owned(),
                     turn_id: Some(turn_id.clone()),
@@ -20150,6 +23458,7 @@ mod tests {
         );
         state.transcript.push(TranscriptRecord::MessageAdded(
             keencode_resources::SessionMessage {
+                references: Vec::new(),
                 is_meta: false,
                 message_id: "ui-bounded-user".to_owned(),
                 turn_id: Some(turn_id.clone()),
@@ -23573,8 +26882,16 @@ mod tests {
         // 门内权威缓存交给投递泵，因此等待同一世代的最终语义收敛后再断言顺序。
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                let semantics =
-                    collect_replay_turn_update_semantics(&replay_emitter.snapshot(), turn_id);
+                let visible = replay_emitter.snapshot();
+                let semantics = collect_replay_turn_update_semantics(&visible, turn_id);
+                // 工具结果先于 Turn 完成通知投递；等待两者收敛，避免在通知到达前断言数量。
+                let completed_notifications = visible
+                    .iter()
+                    .filter(|value| {
+                        value["type"] == "keencode_event"
+                            && value["envelope"]["event"]["type"] == "turn_completed"
+                    })
+                    .count();
                 if semantics
                     == vec![
                         "user:读取并总结",
@@ -23582,6 +26899,7 @@ mod tests {
                         "tool_update:call-replay-inflight:in_progress",
                         "tool_update:call-replay-inflight:completed",
                     ]
+                    && completed_notifications == 1
                 {
                     break;
                 }
@@ -23661,5 +26979,326 @@ mod tests {
             .close_session(&session_id)
             .await
             .expect("测试 Session 应关闭");
+    }
+
+    /// deferred 草稿清理与所有根 Turn 入口共享 admission；发送先认领时 cleanup
+    /// 必须保留 Session，cleanup 先认领时后续启动必须拒绝，不能丢失或伪造事实。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deferred_close_and_first_send_linearize_without_losing_journal() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server("并发清理后的首次回复");
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "deferred-close-first-send")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        // 模拟 deferred UI 在 cleanup 前释放的短暂 Session view；真实 Journal
+        // 仍由 RuntimeManager 持有，旧 view 不应阻止关闭后的冷恢复打开。
+        drop(session);
+        runtime.promote_deferred_session(&session_id).unwrap();
+        // 发送/提升先取得 admission 时，旧 deferred cleanup 必须放弃关闭。
+        assert!(!runtime.begin_deferred_session_close(&session_id).unwrap());
+        let start_result = runtime
+            .start_root_turn(
+                &session_id,
+                "deferred-first-turn",
+                "首次发送必须保留",
+                RootTurnOptions::default(),
+            )
+            .await;
+        assert!(
+            matches!(
+                start_result,
+                Ok(RootTurnStartOutcome::Started | RootTurnStartOutcome::Deduplicated)
+            ),
+            "首次发送必须在 close 竞态中恢复同一 Session：{start_result:?}"
+        );
+
+        let _ = server.join().unwrap();
+        let reopened = runtime
+            .open_or_create_session(project.path(), Some(&session_id), "deferred-close-reopen")
+            .unwrap();
+        let has_prompt = reopened
+            .snapshot()
+            .unwrap()
+            .state
+            .raw_transcript_messages()
+            .into_iter()
+            .any(|message| {
+                message.role == keencode_resources::MessageRole::User
+                    && message.content.iter().any(|part| {
+                        matches!(part, keencode_resources::MessagePart::Text { text } if text == "首次发送必须保留")
+                    })
+            });
+        assert!(
+            has_prompt,
+            "promote/start 与 cleanup 竞态不能丢失 Journal 用户输入"
+        );
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// cleanup 先取得 admission 后，后台根 Turn 必须在关闭事实完成前被拒绝。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deferred_cleanup_claim_rejects_root_start() {
+        // 使用失效地址确保测试验证的是 lifecycle admission，而不是 Provider 请求。
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime = runtime_with_responses_provider(
+            storage.path(),
+            "http://127.0.0.1:9/v1",
+            &["test-model"],
+        );
+        let session = runtime
+            .open_or_create_session(project.path(), None, "deferred-cleanup-first")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+
+        assert!(runtime.begin_deferred_session_close(&session_id).unwrap());
+        let rejected = runtime
+            .start_root_turn(
+                &session_id,
+                "cleanup-raced-turn",
+                "不应启动",
+                RootTurnOptions::default(),
+            )
+            .await;
+        assert!(
+            matches!(rejected, Err(AgentRuntimeError::SessionUnavailable)),
+            "cleanup admission 后必须拒绝后台启动：{rejected:?}"
+        );
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// mutation 先持有 Turn gate、root start 后取得 admission 时，mutation 必须放弃
+    /// 关闭；释放 gate 后发送继续进入同一 Journal，不能先取消权限或删除 Session。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn session_mutation_admission_rejects_inflight_root_start_without_closing_journal() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server("mutation 竞态后仍保留");
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "mutation-start-race")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+
+        let admission = runtime
+            .begin_workspace_mutation(&session_id)
+            .await
+            .unwrap()
+            .expect("空闲 Session 应取得 workspace mutation gate");
+        let SessionWorkspaceMutationAdmission::Registered(mutation) = admission else {
+            panic!("已登记 Session 应取得 Registered workspace admission");
+        };
+        let start_runtime = Arc::clone(&runtime);
+        let start_session_id = session_id.clone();
+        let start = tokio::spawn(async move {
+            start_runtime
+                .start_root_turn(
+                    &start_session_id,
+                    "mutation-raced-turn",
+                    "mutation 竞态必须保留这条输入",
+                    RootTurnOptions::default(),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if runtime
+                    .session_start_admissions
+                    .lock()
+                    .unwrap()
+                    .contains_key(&session_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("root start 应在 mutation gate 外先取得 admission");
+
+        assert!(mutation.close_and_hold().await.unwrap().is_none());
+        let started = start.await.unwrap();
+        assert!(
+            matches!(
+                started,
+                Ok(RootTurnStartOutcome::Started | RootTurnStartOutcome::Deduplicated)
+            ),
+            "mutation 被拒绝后 root start 必须继续：{started:?}"
+        );
+
+        let _ = server.join().unwrap();
+        let snapshot = runtime.session_snapshot(&session_id).unwrap();
+        assert!(snapshot
+            .state
+            .raw_transcript_messages()
+            .into_iter()
+            .any(|message| {
+                message.role == keencode_resources::MessageRole::User
+                    && message.content.iter().any(|part| {
+                        matches!(part, keencode_resources::MessagePart::Text { text } if text == "mutation 竞态必须保留这条输入")
+                    })
+            }));
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// 已登记 Session 关闭后，workspace guard 必须继续持有 Closing；否则读取侧会在
+    /// Git/资源事务完成前重新登记 Manager Session，导致后续目录变更被判定为 busy。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn registered_workspace_admission_keeps_session_closed_until_guard_drops() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::new_for_control_test(storage.path()).unwrap();
+        let session = runtime
+            .open_or_create_session(project.path(), None, "registered-workspace-admission")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+
+        let admission = runtime
+            .begin_workspace_mutation(&session_id)
+            .await
+            .unwrap()
+            .expect("已登记 Session 应取得 workspace admission");
+        let SessionWorkspaceMutationAdmission::Registered(mutation) = admission else {
+            panic!("RuntimeManager 中仍登记的 Session 不应走 Closed admission");
+        };
+        let guard = mutation
+            .close_and_hold()
+            .await
+            .unwrap()
+            .expect("空闲已登记 Session 应完成关闭并保留 mutation guard");
+
+        assert!(runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert!(matches!(
+            runtime.runtime_manager().get(session_id.clone()),
+            Err(keencode_runtime::RuntimeError::SessionNotRegistered)
+        ));
+        assert!(matches!(
+            runtime.open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "registered-workspace-read-reopen",
+            ),
+            Err(AgentRuntimeError::SessionUnavailable)
+        ));
+
+        drop(guard);
+        assert!(!runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        let reopened = runtime
+            .open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "registered-workspace-after-guard",
+            )
+            .unwrap();
+        drop(reopened);
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// 冷 Session 的 workspace admission 也必须持有同一 Turn gate；Closing lifecycle
+    /// 期间 root start 立即拒绝，guard 释放后才允许重新打开 Journal。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_workspace_admission_rejects_root_start_until_guard_drops() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime = AgentRuntime::new_for_control_test(storage.path()).unwrap();
+        let session = runtime
+            .open_or_create_session(project.path(), None, "cold-workspace-admission")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        runtime.close_session(&session_id).await.unwrap();
+
+        let admission = runtime
+            .begin_workspace_mutation(&session_id)
+            .await
+            .unwrap()
+            .expect("冷 Session 应取得 workspace admission");
+        let SessionWorkspaceMutationAdmission::Closed(guard) = admission else {
+            panic!("已关闭 Session 不应重新登记为 Runtime mutation");
+        };
+        assert!(runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert!(matches!(
+            runtime.open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "workspace-read-reopen"
+            ),
+            Err(AgentRuntimeError::SessionUnavailable)
+        ));
+
+        assert!(
+            matches!(
+                runtime
+                    .start_root_turn(
+                        &session_id,
+                        "cold-workspace-raced-turn",
+                        "交接 gate 释放后才允许恢复的输入",
+                        RootTurnOptions::default(),
+                    )
+                    .await,
+                Err(AgentRuntimeError::SessionUnavailable)
+            ),
+            "Closing lifecycle 期间 root start 必须立即拒绝"
+        );
+        assert!(
+            !runtime.begin_deferred_session_close(&session_id).unwrap(),
+            "workspace admission 持有期间 deferred cleanup 不得认领同一 cold Session"
+        );
+        drop(guard);
+        assert!(!runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        let started = runtime
+            .start_root_turn(
+                &session_id,
+                "cold-workspace-after-guard",
+                "释放 gate 后才允许恢复的输入",
+                RootTurnOptions::default(),
+            )
+            .await;
+        assert!(
+            matches!(started, Err(AgentRuntimeError::ProviderNotConfigured)),
+            "释放 gate 后才应进入真实启动路径：{started:?}"
+        );
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn deferred_cleanup_claim_is_exclusive() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let (base_url, server) = spawn_buffered_responses_server("cleanup 只能在显式关闭时收口");
+        let runtime = runtime_with_responses_provider(storage.path(), &base_url, &["test-model"]);
+        let session = runtime
+            .open_or_create_session(project.path(), None, "deferred-claim")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+
+        let started = runtime
+            .start_root_turn(
+                &session_id,
+                "deferred-cleanup-after-start",
+                "已经产生事实的输入",
+                RootTurnOptions::default(),
+            )
+            .await;
+        assert!(
+            matches!(
+                started,
+                Ok(RootTurnStartOutcome::Started | RootTurnStartOutcome::Deduplicated)
+            ),
+            "真实 root Turn 应先完成 admission：{started:?}"
+        );
+        assert!(!runtime.begin_deferred_session_close(&session_id).unwrap());
+
+        let _ = server.join().unwrap();
+        let snapshot = runtime.session_snapshot(&session_id).unwrap();
+        assert!(!snapshot.state.raw_transcript_messages().is_empty());
+        runtime.close_session(&session_id).await.unwrap();
     }
 }

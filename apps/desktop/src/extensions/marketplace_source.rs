@@ -1538,6 +1538,9 @@ pub(super) fn run_external_with_timeout(
     label: &str,
     timeout: Duration,
 ) -> Result<(), String> {
+    if plugin_operation_cancelled() {
+        return Err(format!("{label}已取消"));
+    }
     let executable = Path::new(command.get_program())
         .file_name()
         .and_then(|name| name.to_str())
@@ -1582,6 +1585,12 @@ pub(super) fn run_external_with_timeout(
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
+            Ok(None) if plugin_operation_cancelled() => {
+                let _ = child.kill();
+                let _ = child.wait();
+                drop(stderr_reader);
+                return Err(format!("{label}已取消"));
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();

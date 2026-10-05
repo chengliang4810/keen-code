@@ -621,7 +621,7 @@ fn error_kind_name(kind: &RequestErrorKind) -> String {
     .to_owned()
 }
 
-fn read_records(app: &AppHandle) -> Result<Vec<RequestRecord>, String> {
+pub(crate) fn read_records(app: &AppHandle) -> Result<Vec<RequestRecord>, String> {
     let path = storage::root_dir(app)
         .map_err(|error| error.to_string())?
         .join(RECORD_FILE);

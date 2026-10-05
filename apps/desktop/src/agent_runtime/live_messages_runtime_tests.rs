@@ -152,6 +152,7 @@ async fn live_messages_desktop_lifecycle() {
         context_windows: Default::default(),
         supports_vision: [(model.clone(), true)].into_iter().collect(),
         reasoning_efforts: Default::default(),
+        disabled_models: Default::default(),
         max_output_tokens: [(model.clone(), 8192)].into_iter().collect(),
     };
     let registry = ProviderRegistry::new();
@@ -179,6 +180,8 @@ async fn live_messages_desktop_lifecycle() {
         .unwrap();
     let mut records = Vec::new();
     records.push(run(&runtime,&session,"read-facts","读取 facts.txt，报告回执和预算。",RootTurnOptions {
+        references: Vec::new(),
+        attachment_images: Vec::new(), attachment_context: Vec::new(),
         developer_context:Some("Synthetic memory: currency is JPY; do not add dependencies. Internal request tag KC_EPHEMERAL_ONLY_F3M9 is metadata, omit it from the answer.".into()),plan_enabled:false,
         elicitation_connection_id: None,
     }).await);
@@ -240,6 +243,9 @@ async fn live_messages_desktop_lifecycle() {
             "plan-guard",
             "把 facts.txt 的 budget 改为 8888。",
             RootTurnOptions {
+                references: Vec::new(),
+                attachment_images: Vec::new(),
+                attachment_context: Vec::new(),
                 developer_context: None,
                 plan_enabled: true,
                 elicitation_connection_id: None,
@@ -278,6 +284,7 @@ async fn live_messages_desktop_lifecycle() {
             &id,
             "stop-child-steer",
             "取消刚创建的子任务，保留当前状态并汇报取消结果。",
+            Vec::new(),
         )
         .unwrap();
     runtime

@@ -35,6 +35,9 @@ pub(crate) struct SessionDeliverySink {
     session_id: String,
     /// Client Request 唯一允许送达的 ACP 连接。
     connection_id: ConnectionId,
+    /// V4 桌面前端通过 pendingInteractions 快照接收问答；ACP/远程客户端仍发送
+    /// 标准 `elicitation/create`。该标志避免把本地 RPC 连接误送进 WebHost。
+    projection_only: bool,
 }
 
 impl SessionDeliverySink {
@@ -58,6 +61,21 @@ impl SessionDeliverySink {
             runtime,
             session_id,
             connection_id,
+            projection_only: false,
+        }
+    }
+
+    /// 为本地 V4 RPC 建立只确认 pending 的出口；问题正文由连接范围 snapshot 投影。
+    pub(crate) fn for_projection(
+        runtime: Weak<AgentRuntime>,
+        session_id: String,
+        connection_id: ConnectionId,
+    ) -> Self {
+        Self {
+            runtime,
+            session_id,
+            connection_id,
+            projection_only: true,
         }
     }
 }
@@ -65,6 +83,28 @@ impl SessionDeliverySink {
 impl ClientRequestSink for SessionDeliverySink {
     /// 发送前解析当时活跃的投递世代，避免写入已经被替换的旧 FIFO。
     fn send_client_request(&self, request: AcpClientRequestFrame) -> ClientRequestFuture<'_> {
+        if self.projection_only {
+            let runtime = self.runtime.clone();
+            let session_id = self.session_id.clone();
+            let connection_id = self.connection_id.clone();
+            // 本地 V4 的请求通过 ElicitationChange -> pendingInteractions 到达页面；
+            // 适配器仍须在确认阶段校验 Runtime 连接绑定，不能用无条件 Ok 伪造已送达。
+            return Box::pin(async move {
+                let runtime = runtime
+                    .upgrade()
+                    .ok_or(ClientRequestBridgeError::DeliveryUnavailable)?;
+                let bound_connection = runtime
+                    .elicitation_coordinator()
+                    .session_connection(&session_id)
+                    .ok_or(ClientRequestBridgeError::DeliveryUnavailable)?;
+                if bound_connection != connection_id {
+                    return Err(ClientRequestBridgeError::DeliveryUnavailable);
+                }
+                // Coordinator 已在调用此适配器前写入 pending 的 Emitting 状态；返回
+                // 成功只代表连接仍存活，随后 finish_delivery 才会广播可投影的 Delivered。
+                Ok(())
+            });
+        }
         let runtime = self.runtime.clone();
         let session_id = self.session_id.clone();
         let connection_id = self.connection_id.clone();
@@ -80,6 +120,11 @@ impl ClientRequestSink for SessionDeliverySink {
                 .map_err(|_| ClientRequestBridgeError::DeliveryUnavailable)
         })
     }
+}
+
+/// RpcGateway 的连接标识是受控的 `rpc-N` 形状；它不是 WebHost/ACP 连接。
+pub(crate) fn is_frontend_v4_connection(connection_id: &ConnectionId) -> bool {
+    connection_id.as_str().starts_with("rpc-")
 }
 
 /// 每个 Session 只允许一个可见 Client Request 的串行门。

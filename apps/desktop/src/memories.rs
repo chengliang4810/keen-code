@@ -1629,6 +1629,7 @@ mod tests {
     /// 构造只用于记忆 Transcript 投影的无 Turn 合成消息。
     fn message(role: MessageRole, content: Vec<MessagePart>) -> SessionMessage {
         SessionMessage {
+            references: Vec::new(),
             is_meta: false,
             message_id: format!("message-{role:?}"),
             turn_id: None,

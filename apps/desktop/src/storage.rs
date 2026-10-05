@@ -285,17 +285,17 @@ pub(crate) fn backup_private_file(source: &Path) -> Result<PathBuf> {
     anyhow::bail!("同一秒内的私有文件备份数量已达到上限")
 }
 
-/// 在 Tauri 启动前从当前进程环境解析 Windows 用户目录。
-#[cfg(target_os = "windows")]
+/// 在 Tauri 启动前从当前进程环境解析用户目录。
 pub(crate) fn root_dir_before_start() -> Result<PathBuf> {
     if let Some(path) = benchmark_root_from_environment() {
         return Ok(path);
     }
-    let user_profile = std::env::var_os("USERPROFILE")
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
-        .context("无法从 USERPROFILE 确定当前用户目录")?;
-    Ok(root_dir_from_home(user_profile))
+        .context("无法从 USERPROFILE/HOME 确定当前用户目录")?;
+    Ok(root_dir_from_home(home))
 }
 
 #[cfg(test)]

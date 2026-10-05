@@ -114,6 +114,12 @@ pub struct AppSettings {
     pub terminal_font_family: String,
     /// Windows 内置终端使用的 Shell。
     pub terminal_shell: TerminalShell,
+    /// 是否让新建 PTY 加载系统终端的登录 profile；关闭时仍保留进程基础环境。
+    pub terminal_inherit_system_profile: bool,
+    /// 用户明确配置的 HTTP/HTTPS 出口代理；None 表示沿用进程/系统代理发现。
+    pub http_proxy: Option<String>,
+    /// 用户明确配置的代理绕过规则；空字符串表示清除绕过规则。
+    pub http_proxy_no_proxy: Option<String>,
     /// 是否根据本机历史对话生成并在后续对话中使用本地记忆。
     pub local_memories: bool,
     /// 是否自动归档超过保留期且未置顶的对话。
@@ -192,6 +198,9 @@ impl AppSettings {
             background_agent_limit: DEFAULT_BACKGROUND_AGENT_LIMIT,
             terminal_font_family: DEFAULT_TERMINAL_FONT_FAMILY.to_owned(),
             terminal_shell: TerminalShell::Auto,
+            terminal_inherit_system_profile: true,
+            http_proxy: None,
+            http_proxy_no_proxy: None,
             local_memories: false,
             auto_archive_conversations: true,
             archive_retention_days: 7,
@@ -226,6 +235,14 @@ impl AppSettings {
             || self.terminal_font_family.chars().any(char::is_control)
         {
             anyhow::bail!("终端字体必须是 1 到 256 个字符的有效字体族列表");
+        }
+        if let Some(proxy) = &self.http_proxy {
+            crate::network_proxy::validate_configured_proxy(proxy)?;
+        }
+        if let Some(no_proxy) = &self.http_proxy_no_proxy
+            && (no_proxy.len() > 8192 || no_proxy.chars().any(char::is_control))
+        {
+            anyhow::bail!("代理绕过规则长度或字符无效");
         }
         if !self.web_service_url.is_empty() {
             WebServiceConfig::new(&self.web_service_url)
@@ -298,6 +315,15 @@ pub struct AppSettingsPatch {
     /// 更新 Windows 内置终端使用的 Shell。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub terminal_shell: Option<TerminalShell>,
+    /// 更新新建 PTY 是否加载系统终端登录 profile。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub terminal_inherit_system_profile: Option<bool>,
+    /// 更新明确的 HTTP/HTTPS 出口代理；空字符串表示直连。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub http_proxy: Option<String>,
+    /// 更新代理绕过规则；空字符串表示不配置绕过规则。
+    #[serde(default, deserialize_with = "deserialize_optional_value")]
+    pub http_proxy_no_proxy: Option<String>,
     /// 更新本地记忆总开关。
     #[serde(default, deserialize_with = "deserialize_optional_value")]
     pub local_memories: Option<bool>,
@@ -486,6 +512,15 @@ pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
     if let Some(value) = patch.terminal_shell {
         settings.terminal_shell = value;
     }
+    if let Some(value) = patch.terminal_inherit_system_profile {
+        settings.terminal_inherit_system_profile = value;
+    }
+    if let Some(value) = patch.http_proxy {
+        settings.http_proxy = Some(value);
+    }
+    if let Some(value) = patch.http_proxy_no_proxy {
+        settings.http_proxy_no_proxy = Some(value);
+    }
     if let Some(value) = patch.local_memories {
         settings.local_memories = value;
     }
@@ -663,8 +698,7 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf> {
 }
 
 /// 读取 WebView 创建前所需的当前设置；缺失文件使用首次启动默认值。
-#[cfg(any(target_os = "windows", test))]
-fn load_before_start(path: &Path) -> Result<AppSettings> {
+pub(crate) fn load_before_start(path: &Path) -> Result<AppSettings> {
     Ok(load_from_path(path).settings)
 }
 

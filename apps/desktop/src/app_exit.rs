@@ -137,6 +137,9 @@ pub async fn prepare_for_exit(app: &AppHandle) -> Result<(), String> {
     if exit_state.is_approved() {
         return Ok(());
     }
+    if let Some(servers) = app.try_state::<Arc<crate::ui_dev_servers::DevServers>>() {
+        servers.shutdown().await?;
+    }
     if let Some(runtime) = app.try_state::<Arc<AgentRuntime>>() {
         runtime
             .shutdown()

@@ -2,6 +2,68 @@
 
 use super::*;
 
+/// 原插件页只读发现无需解析敏感字段；禁用插件仍是已安装条目，错误清单不能伪装成空列表。
+#[test]
+fn installed_plugin_catalog_preserves_identity_and_never_resolves_secrets() {
+    use crate::plugins::{InstalledPlugin, PluginId, PluginState};
+    use std::collections::BTreeSet;
+    let fixture = tempfile::tempdir().unwrap();
+    let manager = PluginManager::new(fixture.path());
+    let mut records = Vec::new();
+    for (market, enabled) in [("local", true), ("other", false)] {
+        let id = PluginId::parse(&format!("proof@{market}")).unwrap();
+        let path = manager
+            .storage
+            .versioned_path(&id, &"a".repeat(64))
+            .unwrap();
+        fs::create_dir_all(path.join(".claude-plugin")).unwrap();
+        fs::create_dir_all(path.join("commands")).unwrap();
+        fs::write(path.join("commands/proof.md"), "# 人工插件命令").unwrap();
+        fs::write(path.join(".claude-plugin/plugin.json"), r#"{"name":"proof","version":"1","description":"本机人工插件","userConfig":{"secret":{"type":"string","sensitive":true,"required":true}}}"#).unwrap();
+        records.push(InstalledPlugin {
+            id,
+            version: "1".into(),
+            install_path: path,
+            enabled,
+            public_user_config: BTreeMap::new(),
+            sensitive_user_config_keys: BTreeSet::from(["secret".into()]),
+            secret_generation: 0,
+        });
+    }
+    manager
+        .save_state(&PluginState {
+            plugins: records.clone(),
+        })
+        .unwrap();
+    let before = fs::read(&manager.storage.state_path).unwrap();
+    let catalog = installed_plugin_catalog(&manager).unwrap();
+    assert_eq!(catalog.plugins.len(), 2);
+    assert_eq!(catalog.plugins[0].name, "proof@local");
+    assert_eq!(
+        catalog.plugins[0].description.as_deref(),
+        Some("本机人工插件")
+    );
+    assert_eq!(catalog.plugins[0].provides.commands, 1);
+    assert!(catalog.plugins[0].enabled);
+    assert!(!catalog.plugins[1].enabled);
+    assert_ne!(
+        catalog.plugins[0].marketplace_path,
+        catalog.plugins[1].marketplace_path
+    );
+    assert_eq!(
+        catalog.plugins[0].marketplace_path,
+        path_to_frontend(records[0].install_path.parent().unwrap().parent().unwrap())
+    );
+    assert_eq!(fs::read(&manager.storage.state_path).unwrap(), before);
+    assert!(!records[0].install_path.join("data").exists());
+    fs::write(
+        records[0].install_path.join(".claude-plugin/plugin.json"),
+        "bad-json",
+    )
+    .unwrap();
+    assert!(installed_plugin_catalog(&manager).is_err());
+}
+
 /// 全局 Agent 模板目录只列出用户可选任务工具，不暴露根专用、固定通信或动态 MCP 工具。
 #[test]
 fn agents_tool_catalog_lists_template_support_tools() {
@@ -925,6 +987,7 @@ fn skill_dto_serializes_only_current_fields() {
         source: "plugin".to_owned(),
         path: "/tmp/demo/SKILL.md".to_owned(),
         user_invocable: true,
+        enabled: true,
     };
 
     assert_eq!(
@@ -934,7 +997,8 @@ fn skill_dto_serializes_only_current_fields() {
             "description": "Demo Skill",
             "source": "plugin",
             "path": "/tmp/demo/SKILL.md",
-            "userInvocable": true
+            "userInvocable": true,
+            "enabled": true
         })
     );
 }
@@ -1747,6 +1811,47 @@ fn runtime_skill_config_uses_exact_non_recursive_plugin_roots() {
             .iter()
             .all(|root| { root.source == keencode_skills::SkillSource::Plugin && !root.recursive })
     );
+}
+
+/// 禁用插件命令后完整名称与公共短名都不可加载，其他命令保持可用。
+#[test]
+fn disabled_plugin_command_is_absent_from_runtime_including_short_alias() {
+    let root = tempfile::tempdir().unwrap();
+    let commands = root.path().join("commands");
+    fs::create_dir_all(&commands).unwrap();
+    let files = ["blocked", "allowed"].map(|name| {
+        let path = commands.join(format!("{name}.md"));
+        fs::write(&path, "synthetic command").unwrap();
+        crate::plugins::ComponentFile {
+            path,
+            relative_path: PathBuf::from(format!("commands/{name}.md")),
+        }
+    });
+    let mut snapshot = PluginRuntimeSnapshot {
+        plugins: vec![crate::plugins::RuntimePlugin {
+            id: PluginId {
+                plugin: "demo".into(),
+                marketplace: Some("local".into()),
+            },
+            root: root.path().to_path_buf(),
+            commands: files.into(),
+            skills: vec![],
+            agents: vec![],
+            hooks: None,
+            hook_environment: BTreeMap::new(),
+            mcp_servers: BTreeMap::new(),
+            lsp_servers: vec![],
+        }],
+    };
+    let disabled = BTreeSet::from(["plugin:local:demo:blocked".to_owned()]);
+    filter_disabled_plugin_commands(&mut snapshot, &disabled).unwrap();
+    let catalog = crate::plugins::PluginCommandCatalog::from_snapshot(&snapshot).unwrap();
+    assert!(catalog.get("plugin:local:demo:blocked").is_none());
+    assert!(catalog.get("local:demo:blocked").is_none());
+    assert!(catalog.get("blocked").is_none());
+    assert!(catalog.get("demo:blocked").is_none());
+    assert!(catalog.get("plugin:local:demo:allowed").is_some());
+    assert!(catalog.get("demo:allowed").is_some());
 }
 
 /// 手工联网验收：实际取得官方市场并加载一个真实插件，默认测试不依赖外网。

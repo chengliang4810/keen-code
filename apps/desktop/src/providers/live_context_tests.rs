@@ -946,6 +946,7 @@ async fn run_live_context_test_inner(
         chat_output_token_field: Default::default(),
         supports_vision: Default::default(),
         reasoning_efforts: Default::default(),
+        disabled_models: Default::default(),
     };
     let fixture = provider_fixture_for_protocol(&selected, &protocol)
         .context("构造当前协议的内存 Provider Fixture 失败")?;
@@ -1310,6 +1311,7 @@ fn provider_fixture_protocol_conversion_is_explicit_and_non_mutating() {
         chat_output_token_field: Default::default(),
         supports_vision: Default::default(),
         reasoning_efforts: Default::default(),
+        disabled_models: Default::default(),
     };
     let converted =
         provider_fixture_for_protocol(&original, "messages").expect("应构造 Messages 内存 Fixture");

@@ -741,6 +741,9 @@ pub(super) async fn run_runtime_event_pump(
         let drafts = match received {
             Ok(delivery) => match delivery.payload {
                 RuntimeEventPayload::Transient(event) => map_transient_event(&event),
+                // retry notifier 已把 legacy 事件直接送入当前投递世代；这里不重复
+                // 映射，避免 V4/legacy 收到两份同一重试提示。
+                RuntimeEventPayload::ModelRetryScheduled(_) => Vec::new(),
                 RuntimeEventPayload::Authoritative(record) => {
                     let session = match runtime.runtime_manager.get(session_id.clone()) {
                         Ok(session) => session,

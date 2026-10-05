@@ -78,6 +78,7 @@ impl AgentRuntime {
                         root_starts,
                         turn_providers,
                         context,
+                        ..
                     } = session.history_index().map_err(runtime_operation_failed)?;
                     let providers_by_turn =
                         Arc::new(turn_providers.into_iter().collect::<HashMap<_, _>>());

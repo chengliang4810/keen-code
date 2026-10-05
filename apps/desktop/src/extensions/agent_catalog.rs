@@ -25,6 +25,8 @@ pub(super) enum AgentTools {
 pub(super) struct ParsedAgentDocument {
     /// 定义中的可选稳定名称。
     pub name: Option<String>,
+    /// 是否把项目级 AGENTS/CLAUDE 指令加入该 Agent 的冻结提示词；省略时默认开启。
+    pub inject_agents_md: bool,
     /// 供目录和模型选择使用的简短说明。
     pub description: String,
     /// 可选的 `provider_id::model_id` 精确模型覆盖。
@@ -165,6 +167,7 @@ fn parse_agent_document_with_models(
             _ => Err("effort 必须是 none、minimal、low、medium、high、xhigh 或 max".to_owned()),
         })
         .transpose()?;
+    let inject_agents_md = optional_bool(&fields, "injectAgentsMd", true)?;
     let tools = match fields.get("tools") {
         None => AgentTools::Inherit,
         Some(value) => {
@@ -201,6 +204,7 @@ fn parse_agent_document_with_models(
     }
     Ok(ParsedAgentDocument {
         name,
+        inject_agents_md,
         description,
         model,
         reasoning_effort,
@@ -215,12 +219,13 @@ fn parse_agent_document_with_models(
 /// 拒绝 KeenCode 唯一 Agent Schema 之外的字段，避免拼写错误被静默忽略。
 fn validate_agent_field_names(fields: &BTreeMap<String, AgentFieldValue>) -> Result<(), String> {
     /// 当前唯一 Agent 前置元数据 Schema 允许的字段。
-    const ALLOWED_FIELDS: [&str; 9] = [
+    const ALLOWED_FIELDS: [&str; 10] = [
         "name",
         "color",
         "description",
         "model",
         "effort",
+        "injectAgentsMd",
         "tools",
         "disallowedTools",
         "maxTurns",
@@ -646,6 +651,22 @@ fn optional_scalar(
     }
 }
 
+/// 读取严格的布尔前置字段；省略值使用默认值。
+fn optional_bool(
+    fields: &BTreeMap<String, AgentFieldValue>,
+    key: &str,
+    default: bool,
+) -> Result<bool, String> {
+    let Some(value) = optional_scalar(fields, key)? else {
+        return Ok(default);
+    };
+    match value.trim() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!("字段 {key} 必须是 true 或 false")),
+    }
+}
+
 /// 读取一个可选字符串列表。
 fn optional_list(
     fields: &BTreeMap<String, AgentFieldValue>,
@@ -747,6 +768,7 @@ mod tests {
 
         assert_eq!(document.name.as_deref(), Some("reviewer"));
         assert_eq!(document.description, "Review changes");
+        assert!(document.inject_agents_md);
         assert_eq!(document.model.as_deref(), Some("provider-a::model-a"));
         assert_eq!(document.reasoning_effort.as_deref(), Some("high"));
         assert_eq!(
@@ -767,6 +789,29 @@ mod tests {
             vec!["reports/generated".to_owned(), "scratch/agent".to_owned()]
         );
         assert_eq!(document.system_prompt, "Inspect the actual changes.");
+    }
+
+    /// 项目指令注入开关只接受严格布尔值，省略时保持默认开启语义。
+    #[test]
+    fn parser_defaults_and_validates_agents_md_injection() {
+        let defaulted = parse_agent_document("---\ndescription: default\n---\nInspect")
+            .expect("省略可选开关应使用默认值");
+        assert!(defaulted.inject_agents_md);
+
+        let disabled =
+            parse_agent_document("---\ndescription: disabled\ninjectAgentsMd: false\n---\nInspect")
+                .expect("显式 false 应可解析");
+        assert!(!disabled.inject_agents_md);
+
+        for content in [
+            "---\ndescription: invalid\ninjectAgentsMd: yes\n---\nInspect",
+            "---\ndescription: invalid\ninjectAgentsMd: []\n---\nInspect",
+        ] {
+            assert!(
+                parse_agent_document(content).is_err(),
+                "非布尔 injectAgentsMd 必须被拒绝"
+            );
+        }
     }
 
     /// 唯一新 Schema 必须拒绝未知字段、历史别名和无引号内联列表。

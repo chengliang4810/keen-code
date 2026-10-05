@@ -7,6 +7,9 @@ use crate::agent_runtime::{
     RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
     RuntimeMcpServerSnapshot, RuntimeToolContext,
 };
+use crate::frontend_rpc::services::{
+    workspace_hook_declaration_digest, workspace_hook_inputs, workspace_hook_trust_snapshot,
+};
 use keencode_agent::{
     AgentHook, AgentRunError, HookCallbackError, HookCircuitStore, HookContextAddition, HookFuture,
     HookLimits, HookPhase, HookRegistry, HookRuntime, HookWorkerAdmission, OnErrorHookContext,
@@ -22,7 +25,7 @@ use keencode_tools::{
     LspDiagnostic, LspRuntime, LspServerConfig, McpDiagnosticCode, McpToolBuildReport,
     McpToolDiagnostic, SkillTool, prepare_mcp_server_tools, register_lsp_tool, run_bounded_command,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -58,6 +61,10 @@ impl ProjectRuntimeCache {
 
 /// 构建期间允许检测外部配置变化并重新开始的最大次数。
 const MAX_STALE_BUILD_RETRIES: usize = 3;
+/// Windows 扩展文件被短暂独占时允许的固定重试次数；其他错误不重试。
+const MAX_EXTENSION_OPEN_RETRIES: usize = 2;
+/// 扩展文件独占冲突的短暂退避，避免把长期占用伪装成成功。
+const EXTENSION_OPEN_RETRY_DELAY: Duration = Duration::from_millis(25);
 /// 单个 Hook 命令允许产生的标准输出或错误输出字节数。
 const MAX_HOOK_OUTPUT_BYTES: usize = 1024 * 1024;
 /// Hook 外层回调在命令累计时限之外保留的固定清理宽限。
@@ -79,8 +86,14 @@ struct PreparedExtensionInputs {
     skills: Arc<keencode_skills::SkillCatalog>,
     /// 当前项目完成优先级归约的 Agent 定义。
     agents: AgentCatalog,
+    /// 设置页的禁用状态与模型覆盖；它参与候选指纹并在 resolve_agent 时应用。
+    agent_settings: super::agent_settings::AgentSettingsState,
     /// 当前项目启用插件的 Slash command 目录。
     commands: Arc<crate::plugins::PluginCommandCatalog>,
+    /// 候选构建时冻结的插件引用身份投影；不得在 Session 查询时重新扫描磁盘。
+    plugin_reference_catalog: Vec<Value>,
+    /// 候选构建时冻结的 Skill Composer 引用投影；不得在 Session 查询时重新扫描磁盘。
+    skill_reference_catalog: Vec<Value>,
     /// 已合并并转换的 MCP Server 配置。
     mcp_servers: Vec<RuntimeMcpServer>,
     /// 插件 MCP 配置转换期间收集的安全诊断。
@@ -124,8 +137,14 @@ struct NativeExtensionContributor {
     hook_circuits: HookCircuitStore,
     /// 已冻结的 Agent 模板目录。
     agents: AgentCatalog,
+    /// 与 Agent 目录同代次的设置投影，禁止在 Session 内重新读取磁盘。
+    agent_settings: super::agent_settings::AgentSettingsState,
     /// 已冻结的插件 Slash command 目录。
     commands: Arc<crate::plugins::PluginCommandCatalog>,
+    /// 与工具候选同代次的插件引用身份投影，不包含配置值和凭据。
+    plugin_reference_catalog: Vec<Value>,
+    /// 与工具候选同代次的 Skill Composer 引用投影，不包含正文或配置值。
+    skill_reference_catalog: Vec<Value>,
     /// 候选释放时自动终止进程树的项目级原生 LSP 生命周期。
     lsp_runtime: Option<Arc<LspRuntime>>,
     /// 候选构建期间收集、在首个根 Turn 中送达 ACP 的安全诊断。
@@ -407,6 +426,16 @@ struct NativeContextHook {
 }
 
 impl RuntimeExtensionContributor for NativeExtensionContributor {
+    /// 返回候选构建时冻结的插件公开身份目录。
+    fn plugin_reference_catalog(&self) -> Vec<Value> {
+        self.plugin_reference_catalog.clone()
+    }
+
+    /// 返回候选构建时已校验路径的 Skill 引用目录。
+    fn skill_reference_catalog(&self) -> Vec<Value> {
+        self.skill_reference_catalog.clone()
+    }
+
     /// 用与工具和模板解析器相同的候选生成有界目录，避免提示词宣传不存在的能力。
     fn prompt_catalog(&self, can_spawn: bool, has_skill: bool) -> String {
         let mut text = String::new();
@@ -415,6 +444,12 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 "Agent",
                 self.agents
                     .entries()
+                    .filter(|entry| {
+                        let ids = super::agent_settings::candidate_ids_for_entry(entry);
+                        !self
+                            .agent_settings
+                            .is_disabled(ids.iter().map(String::as_str))
+                    })
                     .map(|entry| (entry.name.as_str(), entry.document.description.as_str())),
             ));
         }
@@ -424,7 +459,7 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
                 self.skills
                     .entries()
                     .iter()
-                    .filter(|entry| !entry.disable_model_invocation)
+                    .filter(|entry| entry.enabled && !entry.disable_model_invocation)
                     .map(|entry| (entry.name.as_str(), entry.description.as_str())),
             ));
         }
@@ -568,16 +603,41 @@ impl RuntimeExtensionContributor for NativeExtensionContributor {
         let Some(entry) = self.agents.get(name) else {
             return Ok(None);
         };
+        let setting_ids = super::agent_settings::candidate_ids_for_entry(entry);
+        if self
+            .agent_settings
+            .is_disabled(setting_ids.iter().map(String::as_str))
+        {
+            return Ok(None);
+        }
+        let model_override = match entry.source.as_str() {
+            "builtin" => self
+                .agent_settings
+                .built_in_override(setting_ids.iter().map(String::as_str)),
+            "plugin" => self
+                .agent_settings
+                .plugin_override(setting_ids.iter().map(String::as_str)),
+            _ => None,
+        };
         let tool_names = match &entry.document.tools {
             AgentTools::Inherit => None,
             AgentTools::None => Some(Vec::new()),
             AgentTools::List(tools) => Some(tools.clone()),
         };
+        let (model, reasoning_effort) = model_override
+            .map(|selection| (Some(selection.model), selection.reasoning_effort))
+            .unwrap_or_else(|| {
+                (
+                    entry.document.model.clone(),
+                    entry.document.reasoning_effort.clone(),
+                )
+            });
         Ok(Some(RuntimeAgentTemplate {
             name: entry.name.clone(),
+            inject_agents_md: entry.document.inject_agents_md,
             system_prompt: entry.document.system_prompt.clone(),
-            model: entry.document.model.clone(),
-            reasoning_effort: entry.document.reasoning_effort.clone(),
+            model,
+            reasoning_effort,
             tool_names,
             disallowed_tool_names: entry.document.disallowed_tools.clone(),
             max_turns: entry.document.max_turns,
@@ -602,32 +662,79 @@ impl NativeExtensionContributor {
 }
 
 /// 单飞确保指定项目拥有最新完整候选；构建失败时保留旧代次。
+///
+/// 候选构建跨越 Skills、插件、Agent、Hook 和 MCP 多个输入源；阶段日志只保留
+/// 固定 stage/code，不能把这些输入的路径、正文或连接错误写入桌面诊断。
+fn log_extension_candidate_stage_failure(stage: &'static str) {
+    tracing::error!(
+        target: "keencode_diagnostics",
+        stage,
+        error_code = "extensions.stageFailed",
+        "扩展候选阶段失败"
+    );
+}
+
+fn extension_candidate_stage<T>(
+    result: Result<T, String>,
+    stage: &'static str,
+) -> Result<T, String> {
+    result.inspect_err(|_| log_extension_candidate_stage_failure(stage))
+}
+
+/// 将设置状态与冻结的 Agent 条目绑定；匹配只使用当前目录的稳定身份。
+fn agent_settings_fingerprint(
+    base: &str,
+    settings: &super::agent_settings::AgentSettingsState,
+) -> Result<String, String> {
+    let mut digest = Sha256::new();
+    digest.update(base.as_bytes());
+    hash_value(&mut digest, &settings.fingerprint_material())?;
+    Ok(hex_digest(&digest.finalize()))
+}
+
 pub(crate) async fn ensure_runtime_extension_candidate(
     app: &AppHandle,
     project_root: &Path,
     runtime: &Arc<AgentRuntime>,
     force: bool,
 ) -> Result<u64, String> {
-    let project_root = canonical_project_root(project_root)?;
-    let state = app
-        .try_state::<ExtensionsState>()
-        .ok_or_else(|| "扩展状态尚未初始化".to_owned())?;
-    let project_lock = state.project_runtime_lock(&project_root)?;
+    let project_root = extension_candidate_stage(
+        canonical_project_root(project_root),
+        "candidate.canonical_project_root",
+    )?;
+    let state = extension_candidate_stage(
+        app.try_state::<ExtensionsState>()
+            .ok_or_else(|| "扩展状态尚未初始化".to_owned()),
+        "candidate.extensions_state",
+    )?;
+    let project_lock = extension_candidate_stage(
+        state.project_runtime_lock(&project_root),
+        "candidate.project_runtime_lock",
+    )?;
     let mut cache = project_lock.lock().await;
     for attempt in 0..=MAX_STALE_BUILD_RETRIES {
-        let inputs = {
-            let _guard = state.lock_io()?;
-            prepare_extension_inputs(app, &project_root)?
-        };
-        let current_generation = runtime
-            .extension_generation(&project_root)
-            .map_err(|error| format!("读取扩展候选代次失败：{error}"))?;
+        let inputs = extension_candidate_stage(
+            (|| {
+                let _guard = state.lock_io()?;
+                prepare_extension_inputs(app, &project_root)
+            })(),
+            "candidate.prepare_inputs",
+        )?;
+        let current_generation = extension_candidate_stage(
+            runtime
+                .extension_generation(&project_root)
+                .map_err(|error| format!("读取扩展候选代次失败：{error}")),
+            "candidate.read_generation",
+        )?;
         if !force
             && cache.fingerprint.as_deref() == Some(inputs.fingerprint.as_str())
             && cache.generation == current_generation
-            && !runtime
-                .extension_candidate_needs_refresh(&project_root)
-                .map_err(|_| "无法读取扩展候选失效状态".to_owned())?
+            && !extension_candidate_stage(
+                runtime
+                    .extension_candidate_needs_refresh(&project_root)
+                    .map_err(|_| "无法读取扩展候选失效状态".to_owned()),
+                "candidate.read_refresh_state",
+            )?
             && let Some(generation) = current_generation
         {
             return Ok(generation);
@@ -635,26 +742,37 @@ pub(crate) async fn ensure_runtime_extension_candidate(
         let fingerprint = inputs.fingerprint.clone();
         let hook_fingerprint = hook_fingerprint(&inputs.hooks);
         if inputs.mcp_config_invalid {
-            runtime
-                .revoke_mcp_extension_tools()
-                .map_err(|error| format!("撤销无效 MCP 配置对应的旧工具失败：{error}"))?;
+            extension_candidate_stage(
+                runtime
+                    .revoke_mcp_extension_tools()
+                    .map_err(|error| format!("撤销无效 MCP 配置对应的旧工具失败：{error}")),
+                "candidate.revoke_invalid_mcp",
+            )?;
         }
-        let oauth = app
-            .try_state::<Arc<crate::mcp_oauth::McpOAuthRegistry>>()
-            .ok_or_else(|| "MCP OAuth 服务尚未初始化".to_owned())?
-            .inner()
-            .clone();
-        let previous_servers = runtime
-            .mcp_runtime_snapshot(&project_root)
-            .map_err(|_| "无法读取待停用 OAuth 的旧项目快照".to_owned())?
-            .unwrap_or_default();
+        let oauth = extension_candidate_stage(
+            app.try_state::<Arc<crate::mcp_oauth::McpOAuthRegistry>>()
+                .ok_or_else(|| "MCP OAuth 服务尚未初始化".to_owned()),
+            "candidate.oauth_state",
+        )?
+        .inner()
+        .clone();
+        let previous_servers = extension_candidate_stage(
+            runtime
+                .mcp_runtime_snapshot(&project_root)
+                .map_err(|_| "无法读取待停用 OAuth 的旧项目快照".to_owned()),
+            "candidate.read_mcp_snapshot",
+        )?
+        .unwrap_or_default();
         for server_name in removed_oauth_servers(&previous_servers, &inputs.mcp_servers) {
             // 停用只关闭进程内绑定与 pending，不删除用户已保存的凭据；再次启用
             // 必须重新发现并匹配原签发方后才允许恢复这些凭据。
-            oauth
-                .deactivate(&project_root, server_name)
-                .await
-                .map_err(|_| "无法安全停用旧 MCP OAuth 绑定".to_owned())?;
+            extension_candidate_stage(
+                oauth
+                    .deactivate(&project_root, server_name)
+                    .await
+                    .map_err(|_| "无法安全停用旧 MCP OAuth 绑定".to_owned()),
+                "candidate.deactivate_mcp_oauth",
+            )?;
         }
         let hook_circuits = if cache.hook_fingerprint.as_deref() == Some(hook_fingerprint.as_str())
         {
@@ -662,29 +780,46 @@ pub(crate) async fn ensure_runtime_extension_candidate(
         } else {
             cache.hook_circuits.for_changed_hooks()
         };
-        let contributor = build_contributor(inputs, oauth, hook_circuits.clone()).await?;
-        let current_fingerprint = {
-            let _guard = state.lock_io()?;
-            prepare_extension_inputs(app, &project_root)?.fingerprint
-        };
+        let contributor = extension_candidate_stage(
+            build_contributor(inputs, oauth, hook_circuits.clone()).await,
+            "candidate.build_contributor",
+        )?;
+        let current_fingerprint = extension_candidate_stage(
+            (|| {
+                let _guard = state.lock_io()?;
+                Ok::<_, String>(prepare_extension_inputs(app, &project_root)?.fingerprint)
+            })(),
+            "candidate.recheck_inputs",
+        )?;
         if current_fingerprint != fingerprint {
             if attempt == MAX_STALE_BUILD_RETRIES {
+                log_extension_candidate_stage_failure("candidate.inputs_not_stable");
                 return Err("扩展配置持续变化，未发布不一致候选".to_owned());
             }
             continue;
         }
-        let generation = state.reserve_runtime_generation()?;
-        let candidate = RuntimeExtensionCandidate::new(generation, Arc::new(contributor))
-            .map_err(|error| format!("创建扩展候选失败：{error}"))?;
-        let published = runtime
-            .publish_extension_candidate(&project_root, candidate)
-            .map_err(|error| format!("发布扩展候选失败：{error}"))?;
+        let generation = extension_candidate_stage(
+            state.reserve_runtime_generation(),
+            "candidate.reserve_generation",
+        )?;
+        let candidate = extension_candidate_stage(
+            RuntimeExtensionCandidate::new(generation, Arc::new(contributor))
+                .map_err(|error| format!("创建扩展候选失败：{error}")),
+            "candidate.create_candidate",
+        )?;
+        let published = extension_candidate_stage(
+            runtime
+                .publish_extension_candidate(&project_root, candidate)
+                .map_err(|error| format!("发布扩展候选失败：{error}")),
+            "candidate.publish_candidate",
+        )?;
         cache.fingerprint = Some(fingerprint);
         cache.generation = Some(published);
         cache.hook_fingerprint = Some(hook_fingerprint);
         cache.hook_circuits = hook_circuits;
         return Ok(published);
     }
+    log_extension_candidate_stage_failure("candidate.build_not_converged");
     Err("扩展候选构建未收敛".to_owned())
 }
 
@@ -710,73 +845,171 @@ fn prepare_extension_inputs(
     app: &AppHandle,
     project_root: &Path,
 ) -> Result<PreparedExtensionInputs, String> {
-    let data_root =
-        crate::storage::root_dir(app).map_err(|error| format!("无法确定扩展数据目录：{error}"))?;
-    let plugins = plugin_runtime_snapshot(app, project_root)?;
+    let data_root = extension_candidate_stage(
+        crate::storage::root_dir(app).map_err(|error| format!("无法确定扩展数据目录：{error}")),
+        "candidate.inputs.storage_root",
+    )?;
+    let mut plugins = extension_candidate_stage(
+        plugin_runtime_snapshot(app, project_root),
+        "candidate.inputs.plugin_snapshot",
+    )?;
+    let disabled = extension_candidate_stage(
+        crate::ui_presentation::disabled_skill_names(&data_root),
+        "candidate.inputs.disabled_skills",
+    )?;
+    // 插件命令也出现在原技能目录；必须从实际命令工具和指纹输入中移除禁用名称。
+    extension_candidate_stage(
+        filter_disabled_plugin_commands(&mut plugins, &disabled),
+        "candidate.inputs.filter_disabled_commands",
+    )?;
     let lsp_servers = runtime_lsp_servers(&plugins);
     let skill_config = runtime_skill_config_from_snapshot(
         data_root.clone(),
         project_root.to_path_buf(),
         plugins.clone(),
-    );
-    let skills = Arc::new(
+    )
+    .with_disabled_names(disabled);
+    let skills = Arc::new(extension_candidate_stage(
         keencode_skills::discover_skills(&skill_config)
-            .map_err(|error| format!("无法建立 Skill 目录：{error}"))?,
-    );
-    let overrides = read_agent_model_overrides(app)?;
-    let agents = build_agent_catalog(
-        &data_root,
-        project_root,
-        &plugins,
-        &overrides,
-        &super::plugin_compatibility::plugin_model_aliases_get(app.clone())?.mappings(),
+            .map_err(|error| format!("无法建立 Skill 目录：{error}")),
+        "candidate.inputs.skill_discovery",
+    )?);
+    let skill_reference_catalog = extension_candidate_stage(
+        skill_reference_catalog_projection(&skills),
+        "candidate.inputs.skill_reference_projection",
     )?;
-    let commands = Arc::new(
+    let agent_settings = extension_candidate_stage(
+        super::agent_settings::read_agent_settings(&data_root),
+        "candidate.inputs.agent_settings",
+    )?;
+    let overrides = extension_candidate_stage(
+        Ok::<_, String>(BTreeMap::new()),
+        "candidate.inputs.agent_catalog_defaults",
+    )?;
+    let plugin_model_aliases = extension_candidate_stage(
+        super::plugin_compatibility::plugin_model_aliases_get(app.clone()),
+        "candidate.inputs.plugin_model_aliases",
+    )?;
+    let agents = extension_candidate_stage(
+        build_agent_catalog(
+            &data_root,
+            project_root,
+            &plugins,
+            &overrides,
+            &plugin_model_aliases.mappings(),
+        ),
+        "candidate.inputs.agent_catalog",
+    )?;
+    let commands = Arc::new(extension_candidate_stage(
         crate::plugins::PluginCommandCatalog::from_snapshot(&plugins)
-            .map_err(|error| format!("无法建立插件 command 目录：{error}"))?,
-    );
-    let (mut hooks, hook_diagnostics) = parse_plugin_hooks(&plugins);
+            .map_err(|error| format!("无法建立插件 command 目录：{error}")),
+        "candidate.inputs.plugin_commands",
+    )?);
+    let plugin_reference_catalog = extension_candidate_stage(
+        crate::frontend_rpc::services::plugin_reference_catalog_entries(app),
+        "candidate.inputs.plugin_reference_catalog",
+    )?;
+    let (mut hooks, mut hook_diagnostics) = parse_plugin_hooks(&plugins);
     // 用户级 Hook 与插件 Hook 共用同一事件协议；同阶段内按名称排序保证冻结顺序确定。
-    let (user_hooks, user_hook_diagnostics) =
-        parse_user_hooks(&hooks_user_config_path(app)?, project_root);
+    let user_hooks_path = extension_candidate_stage(
+        hooks_user_config_path(app),
+        "candidate.inputs.user_hooks_path",
+    )?;
+    let (user_hooks, user_hook_diagnostics) = parse_user_hooks(&user_hooks_path, project_root);
     hooks.extend(user_hooks);
+    let (workspace_hooks, workspace_hook_diagnostics) = parse_workspace_hooks(app, project_root);
+    hooks.extend(workspace_hooks);
+    hook_diagnostics.extend(workspace_hook_diagnostics);
     hooks.sort_by(|left, right| left.name().cmp(right.name()));
-    let user_path = mcp_user_config_path(app)?;
+    let user_path = extension_candidate_stage(
+        mcp_user_config_path(app),
+        "candidate.inputs.mcp_config_path",
+    )?;
     let user_mcp_input = runtime_mcp_document_input(&user_path);
     let mcp_config_invalid = user_mcp_input.invalid();
     let RuntimeMcpDocumentInput {
         document: mcp_document,
         diagnostic: user_diagnostic,
     } = user_mcp_input;
-    let (mcp_servers, mut diagnostics) =
-        runtime_mcp_servers_from_sources(&mcp_document, plugins.clone(), project_root)?;
+    let (mcp_servers, mut diagnostics) = extension_candidate_stage(
+        runtime_mcp_servers_from_sources(&mcp_document, plugins.clone(), project_root),
+        "candidate.inputs.mcp_servers",
+    )?;
     diagnostics.extend(hook_diagnostics);
     diagnostics.extend(user_hook_diagnostics);
     if let Some(diagnostic) = user_diagnostic {
         diagnostics.push(diagnostic);
     }
-    let fingerprint = extension_fingerprint(
-        project_root,
-        &data_root,
-        &mcp_document,
-        mcp_config_invalid,
-        &plugins,
-        &skills,
-        &agents,
-        &hooks,
+    let fingerprint = extension_candidate_stage(
+        extension_fingerprint(
+            project_root,
+            &data_root,
+            &mcp_document,
+            mcp_config_invalid,
+            &plugins,
+            &skills,
+            &agents,
+            &hooks,
+        ),
+        "candidate.inputs.fingerprint",
+    )?;
+    let fingerprint = extension_candidate_stage(
+        agent_settings_fingerprint(&fingerprint, &agent_settings),
+        "candidate.inputs.agent_settings_fingerprint",
     )?;
     Ok(PreparedExtensionInputs {
         project_root: project_root.to_path_buf(),
         fingerprint,
         skills,
         agents,
+        agent_settings,
         commands,
+        plugin_reference_catalog,
+        skill_reference_catalog,
         mcp_servers,
         diagnostics,
         mcp_config_invalid,
         hooks,
         lsp_servers,
     })
+}
+
+/// 把冻结 Skill 目录转换成 Composer 引用合同；路径由 Skills crate 重新校验后提供。
+fn skill_reference_catalog_projection(
+    skills: &keencode_skills::SkillCatalog,
+) -> Result<Vec<Value>, String> {
+    let mut result = Vec::new();
+    for entry in skills.entries().iter().filter(|entry| entry.enabled) {
+        let path = skills
+            .source_path(&entry.name)
+            .map_err(|error| format!("读取 Skill {} 来源路径失败：{error}", entry.name))?;
+        let (scope, plugin_name) = match entry.source {
+            keencode_skills::SkillSource::Project => ("workspace", None),
+            keencode_skills::SkillSource::Data => ("user", None),
+            keencode_skills::SkillSource::Plugin => {
+                let plugin_name = entry
+                    .name
+                    .split_once(':')
+                    .map(|(plugin, _)| plugin.to_owned())
+                    .filter(|plugin| !plugin.is_empty());
+                ("plugin", plugin_name)
+            }
+        };
+        let mut value = json!({
+            "id": entry.name,
+            "name": entry.name,
+            "description": entry.description,
+            "path": crate::path_utils::path_to_frontend(&path),
+            "scope": scope,
+            "enabled": true,
+        });
+        if let Some(plugin_name) = plugin_name {
+            value["pluginName"] = Value::String(plugin_name);
+        }
+        result.push(value);
+    }
+    result.sort_by(|left, right| left["id"].as_str().cmp(&right["id"].as_str()));
+    Ok(result)
 }
 
 /// 严格读取用户 MCP 文件；损坏时只保留空目录和安全诊断。
@@ -813,16 +1046,20 @@ async fn build_contributor(
     hook_circuits: HookCircuitStore,
 ) -> Result<NativeExtensionContributor, String> {
     let initial_diagnostics = inputs.diagnostics;
-    let (deferred_tools, tool_diagnostics, mcp_servers) =
-        prepare_mcp_tools(inputs.mcp_servers, &inputs.project_root, oauth).await?;
+    let (deferred_tools, tool_diagnostics, mcp_servers) = extension_candidate_stage(
+        prepare_mcp_tools(inputs.mcp_servers, &inputs.project_root, oauth).await,
+        "candidate.build.mcp_tools",
+    )?;
     let mut diagnostics = initial_diagnostics;
     diagnostics.extend(tool_diagnostics);
     let lsp_runtime = if inputs.lsp_servers.is_empty() {
         None
     } else {
-        let (runtime, report) =
+        let (runtime, report) = extension_candidate_stage(
             LspRuntime::new_best_effort(&inputs.project_root, inputs.lsp_servers)
-                .map_err(|error| format!("构建原生 LSP Runtime 失败：{error}"))?;
+                .map_err(|error| format!("构建原生 LSP Runtime 失败：{error}")),
+            "candidate.build.lsp_runtime",
+        )?;
         log_lsp_diagnostics(&report);
         diagnostics.extend(report.diagnostics().iter().map(lsp_runtime_diagnostic));
         if runtime.is_empty() {
@@ -848,7 +1085,10 @@ async fn build_contributor(
         hooks: inputs.hooks,
         hook_circuits,
         agents: inputs.agents,
+        agent_settings: inputs.agent_settings,
         commands: inputs.commands,
+        plugin_reference_catalog: inputs.plugin_reference_catalog,
+        skill_reference_catalog: inputs.skill_reference_catalog,
         lsp_runtime,
         diagnostics,
     })
@@ -1313,6 +1553,183 @@ fn parse_plugin_hooks(
     (hooks, diagnostics)
 }
 
+/// 读取并解析已通过 workspace admission 的项目级 Hook。
+///
+/// `.agents/settings.json` 与 `.claude/settings.json` 由 service 层归一化，
+/// Runtime 只接受当前 bundle 中有对应 trust record 的声明；解析后的 Hook
+/// 仍进入同一个 HookRegistry、熔断器和 worker 容量边界。
+fn parse_workspace_hooks(
+    app: &AppHandle,
+    project_root: &Path,
+) -> (Vec<HookSpec>, Vec<RuntimeExtensionDiagnostic>) {
+    let snapshot = match workspace_hook_trust_snapshot(app, project_root) {
+        Ok(Some(snapshot)) => snapshot,
+        Ok(None) => return (Vec::new(), Vec::new()),
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: project_root.to_string_lossy().into_owned(),
+                    code: "workspace_hooks_config_unreadable".to_owned(),
+                    message: bounded_error_text(&error),
+                    tool: None,
+                }],
+            );
+        }
+    };
+    if snapshot.trust_store_corrupt {
+        return (
+            Vec::new(),
+            vec![RuntimeExtensionDiagnostic {
+                source: "hooks".to_owned(),
+                server: project_root.to_string_lossy().into_owned(),
+                code: "workspace_hooks_trust_store_corrupt".to_owned(),
+                message: "workspace Hook trust store 损坏，已阻止项目 Hook".to_owned(),
+                tool: None,
+            }],
+        );
+    }
+    let inputs = match workspace_hook_inputs(app, project_root) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            return (
+                Vec::new(),
+                vec![RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: project_root.to_string_lossy().into_owned(),
+                    code: "workspace_hooks_config_unreadable".to_owned(),
+                    message: bounded_error_text(&error),
+                    tool: None,
+                }],
+            );
+        }
+    };
+    let mut hooks = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut pending_count = 0usize;
+    for input in &inputs {
+        for hook in &input.hooks {
+            if !hook.get("enabled").and_then(Value::as_bool).unwrap_or(true) {
+                continue;
+            }
+            let declaration_digest =
+                workspace_hook_declaration_digest(project_root, &input.path, hook);
+            if !snapshot
+                .trusted_declaration_digests
+                .contains(&declaration_digest)
+            {
+                pending_count = pending_count.saturating_add(1);
+                continue;
+            }
+            let (event, matcher, value) = match workspace_hook_runtime_value(hook) {
+                Ok(value) => value,
+                Err(error) => {
+                    diagnostics.push(RuntimeExtensionDiagnostic {
+                        source: "hooks".to_owned(),
+                        server: input.path.to_string_lossy().into_owned(),
+                        code: "workspace_hooks_config_invalid".to_owned(),
+                        message: bounded_error_text(&error),
+                        tool: None,
+                    });
+                    continue;
+                }
+            };
+            let Some(phase) = parse_hook_phase(&event) else {
+                diagnostics.push(RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: input.path.to_string_lossy().into_owned(),
+                    code: "workspace_hooks_event_unsupported".to_owned(),
+                    message: format!("项目 Hook 事件 {event} 尚无宿主执行入口"),
+                    tool: None,
+                });
+                continue;
+            };
+            let name = format!(
+                "workspace:{}:{}",
+                workspace_hook_relative_name(project_root, &input.path),
+                declaration_digest
+            );
+            match parse_hook_spec(name, phase, matcher, value, project_root) {
+                Ok(hook) => hooks.push(hook),
+                Err(error) => diagnostics.push(RuntimeExtensionDiagnostic {
+                    source: "hooks".to_owned(),
+                    server: input.path.to_string_lossy().into_owned(),
+                    code: "workspace_hooks_config_invalid".to_owned(),
+                    message: bounded_error_text(&error),
+                    tool: None,
+                }),
+            }
+        }
+    }
+    if pending_count > 0 {
+        diagnostics.push(RuntimeExtensionDiagnostic {
+            source: "hooks".to_owned(),
+            server: project_root.to_string_lossy().into_owned(),
+            code: "workspace_hooks_pending_trust".to_owned(),
+            message: format!("有 {pending_count} 个项目 Hook 尚未获得当前配置摘要的信任"),
+            tool: None,
+        });
+    }
+    (hooks, diagnostics)
+}
+
+fn workspace_hook_relative_name(workspace: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// 把 service 层的 UI Hook 投影为 Runtime 解析器可接受的声明。
+fn workspace_hook_runtime_value(value: &Value) -> Result<(String, Option<String>, Value), String> {
+    let object = value
+        .as_object()
+        .ok_or_else(|| "项目 Hook 必须是对象".to_owned())?;
+    let event = object
+        .get("event")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "项目 Hook 缺少 event".to_owned())?
+        .to_owned();
+    let matcher = object
+        .get("matcher")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let kind = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "项目 Hook 缺少 type".to_owned())?;
+    if !matches!(kind, "command" | "process" | "context") {
+        return Err(format!("项目 Hook 类型 {kind} 尚未接入"));
+    }
+    let mut config = Map::new();
+    config.insert(
+        "type".to_owned(),
+        Value::String(if kind == "process" {
+            "command".to_owned()
+        } else {
+            kind.to_owned()
+        }),
+    );
+    for key in [
+        "command",
+        "args",
+        "async",
+        "shell",
+        "statusMessage",
+        "timeout",
+        "context",
+        "block",
+        "input",
+        "continue",
+    ] {
+        if let Some(item) = object.get(key) {
+            config.insert(key.to_owned(), item.clone());
+        }
+    }
+    Ok((event, matcher, Value::Object(config)))
+}
+
 /// 读取并解析用户级 Hooks 配置（`~/.keencode/hooks.json`）。
 ///
 /// 与插件 Hook 使用同一份 JSON 事件协议与同一套严格解析器，区别只在来源：
@@ -1347,9 +1764,31 @@ fn parse_user_hooks(
     let parsed = (|| -> Result<Vec<HookSpec>, String> {
         let value: Value = serde_json::from_slice(&raw)
             .map_err(|error| format!("用户 Hooks 配置不是有效 JSON：{error}"))?;
-        let Value::Object(events) = value else {
+        let Value::Object(document) = value else {
             return Err("用户 Hooks 配置必须是对象".to_owned());
         };
+        let (events, root_enabled) = if let Some(root) = document.get("hooks") {
+            let Some(root) = root.as_object() else {
+                return Err("用户 Hooks 配置 hooks 必须是对象".to_owned());
+            };
+            let root_enabled = root.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+            let events = root
+                .get("events")
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_else(|| {
+                    root.iter()
+                        .filter(|(key, _)| key.as_str() != "enabled")
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect()
+                });
+            (events, root_enabled)
+        } else {
+            (document, true)
+        };
+        if !root_enabled {
+            return Ok(Vec::new());
+        }
         let mut hooks = Vec::new();
         for (event_name, groups) in &events {
             let Some(phase) = parse_hook_phase(event_name) else {
@@ -1358,7 +1797,23 @@ fn parse_user_hooks(
             let groups = normalize_hook_items(groups.clone());
             for (group_index, group) in groups.into_iter().enumerate() {
                 let (matcher, values) = parse_hook_group(group)?;
-                for (hook_index, value) in normalize_hook_items(values).into_iter().enumerate() {
+                for (hook_index, mut value) in normalize_hook_items(values).into_iter().enumerate()
+                {
+                    if let Value::Object(object) = &mut value {
+                        if object
+                            .get("enabled")
+                            .and_then(Value::as_bool)
+                            .is_some_and(|enabled| !enabled)
+                        {
+                            continue;
+                        }
+                        object.remove("enabled");
+                        object.remove("editable");
+                        object.remove("id");
+                        object.remove("event");
+                        object.remove("location");
+                        object.remove("configuredState");
+                    }
                     let name = format!(
                         "user:{}:{}:{}",
                         hook_phase_name(phase),
@@ -1502,14 +1957,17 @@ fn parse_hook_spec(
                 .ok_or_else(|| "command Hook 缺少 string command".to_owned())?;
             let shell = object
                 .remove("shell")
-                .map(|value| {
-                    value
-                        .as_str()
-                        .filter(|shell| matches!(*shell, "bash" | "powershell"))
-                        .map(ToOwned::to_owned)
-                        .ok_or_else(|| "Hook shell 必须是 bash 或 powershell".to_owned())
+                .map(|value| match value {
+                    // shared 契约中的 true 表示使用宿主默认 Shell；工具层会按平台
+                    // 选择 Bash 或 PowerShell，不把布尔值误当成命令参数。
+                    Value::Bool(true) => Ok(None),
+                    Value::String(shell) if matches!(shell.as_str(), "bash" | "powershell") => {
+                        Ok(Some(shell))
+                    }
+                    _ => Err("Hook shell 必须是 true、bash 或 powershell".to_owned()),
                 })
-                .transpose()?;
+                .transpose()?
+                .flatten();
             let args: Option<Vec<String>> = object
                 .remove("args")
                 .map(serde_json::from_value)
@@ -2757,6 +3215,7 @@ fn extension_fingerprint(
         digest.update([0]);
         digest.update(entry.description.as_bytes());
         digest.update([entry.source.priority()]);
+        digest.update([u8::from(entry.enabled), u8::from(entry.user_invocable)]);
     }
     hash_skill_tree(&mut digest, &data_root.join("skills"))?;
     hash_skill_tree(&mut digest, &project_root.join(".agents").join("skills"))?;
@@ -2782,6 +3241,7 @@ fn hash_agent_entry(digest: &mut Sha256, entry: &AgentCatalogEntry) {
     }
     hash_optional_fingerprint_text(digest, entry.document.name.as_deref());
     hash_fingerprint_text(digest, &entry.document.description);
+    digest.update([u8::from(entry.document.inject_agents_md)]);
     hash_optional_fingerprint_text(digest, entry.document.model.as_deref());
     hash_optional_fingerprint_text(digest, entry.document.reasoning_effort.as_deref());
     match &entry.document.tools {
@@ -2890,8 +3350,12 @@ fn hash_file(digest: &mut Sha256, path: &Path) -> Result<(), String> {
     if metadata.len() > MAX_EXTENSION_FILE_BYTES {
         return Err(format!("扩展文件超过 {MAX_EXTENSION_FILE_BYTES} 字节"));
     }
-    let file = crate::storage::open_readonly_regular_file(path)
-        .map_err(|error| format!("无法打开扩展文件 {}：{error}", path.display()))?;
+    let file = open_extension_file(path).map_err(|error| {
+        format!(
+            "无法打开扩展文件 role={}：{error}",
+            extension_file_role(path),
+        )
+    })?;
     let opened_metadata = file
         .metadata()
         .map_err(|error| format!("无法读取扩展文件 {} 的句柄元数据：{error}", path.display()))?;
@@ -2920,6 +3384,35 @@ fn hash_file(digest: &mut Sha256, path: &Path) -> Result<(), String> {
     digest.update((bytes.len() as u64).to_le_bytes());
     digest.update(bytes);
     Ok(())
+}
+
+/// 仅对 Windows sharing violation 做有界重试；永久锁、权限错误和 no-follow
+/// 错误必须原样失败，避免扩展指纹在不确定输入上继续发布候选。
+fn open_extension_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut attempts = 0;
+    loop {
+        match crate::storage::open_readonly_regular_file(path) {
+            Ok(file) => return Ok(file),
+            Err(error)
+                if cfg!(windows)
+                    && error.raw_os_error() == Some(32)
+                    && attempts < MAX_EXTENSION_OPEN_RETRIES =>
+            {
+                attempts += 1;
+                std::thread::sleep(EXTENSION_OPEN_RETRY_DELAY);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// 诊断只暴露组件类别，不把用户项目路径或文件名写入 MCP 错误。
+fn extension_file_role(path: &Path) -> &'static str {
+    if path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+        "skill"
+    } else {
+        "component"
+    }
 }
 
 /// 将 JSON 以对象键稳定排序后写入指纹。
@@ -3007,6 +3500,98 @@ mod tests {
     use keencode_model::ToolDefinition;
     use keencode_tools::{ExecuteExtraTool, SearchExtraTools};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// 真实 Windows 独占句柄必须让扩展指纹读取有界失败；释放后同一文件应恢复成功。
+    #[cfg(windows)]
+    #[test]
+    fn extension_hash_lock_is_bounded_and_recovers_after_release() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("SKILL.md");
+        std::fs::write(&path, "---\nname: locked\n---\nbody\n").unwrap();
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let mut digest = Sha256::new();
+        let error = hash_file(&mut digest, &path).unwrap_err();
+        assert!(error.contains("无法打开扩展文件"));
+
+        drop(lock);
+        let mut digest = Sha256::new();
+        hash_file(&mut digest, &path).unwrap();
+    }
+
+    /// 开关必须使实际扩展候选失效，不能复用仍可加载技能的旧缓存。
+    #[test]
+    fn skill_toggle_changes_runtime_fingerprint_and_keeps_disabled_catalog_entry() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let directory = root.path().join("skills/proof");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("SKILL.md"),
+            "---\nname: proof\ndescription: fixture\n---\nbody",
+        )
+        .unwrap();
+        let config = runtime_skill_config_from_snapshot(
+            root.path().to_path_buf(),
+            project.clone(),
+            PluginRuntimeSnapshot::default(),
+        );
+        let enabled = keencode_skills::discover_skills(&config).unwrap();
+        let disabled =
+            keencode_skills::discover_skills(&config.with_disabled_names(["proof".into()]))
+                .unwrap();
+        let fingerprint = |skills: &keencode_skills::SkillCatalog| {
+            extension_fingerprint(
+                &project,
+                root.path(),
+                &empty_mcp_document(),
+                false,
+                &PluginRuntimeSnapshot::default(),
+                skills,
+                &AgentCatalog::default(),
+                &[],
+            )
+            .unwrap()
+        };
+        assert_ne!(fingerprint(&enabled), fingerprint(&disabled));
+        assert!(enabled.load("proof").is_ok());
+        assert!(disabled.load("proof").is_err());
+    }
+
+    /// Composer 目录只暴露启用项，并保留 Skills crate 重新校验后的真实 manifest 路径。
+    #[test]
+    fn skill_reference_catalog_projection_uses_real_enabled_entries() {
+        let root = tempfile::tempdir().unwrap();
+        let project = root.path().join("project");
+        let skill = project.join(".agents/skills/proof");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: proof\ndescription: fixture\n---\nbody",
+        )
+        .unwrap();
+        let catalog = keencode_skills::discover_skills(&runtime_skill_config_from_snapshot(
+            root.path().to_path_buf(),
+            project.clone(),
+            PluginRuntimeSnapshot::default(),
+        ))
+        .unwrap();
+        let entries = skill_reference_catalog_projection(&catalog).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["id"], "proof");
+        assert_eq!(entries[0]["scope"], "workspace");
+        assert_eq!(
+            entries[0]["path"],
+            crate::path_utils::path_to_frontend(&fs::canonicalize(skill.join("SKILL.md")).unwrap())
+        );
+        assert_eq!(entries[0]["enabled"], true);
+    }
 
     /// 用完整扩展缓存算法计算单个用户 MCP 输入的测试指纹。
     fn mcp_extension_fingerprint(
@@ -3309,7 +3894,10 @@ mod tests {
                 hooks: Vec::new(),
                 hook_circuits: HookCircuitStore::new(),
                 agents: AgentCatalog::default(),
+                agent_settings: super::agent_settings::AgentSettingsState::default(),
                 commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
+                plugin_reference_catalog: Vec::new(),
+                skill_reference_catalog: Vec::new(),
                 lsp_runtime: None,
                 diagnostics: Vec::new(),
             });
@@ -3395,6 +3983,7 @@ mod tests {
                 description: "检查改动".to_owned(),
                 model: Some("provider::model".to_owned()),
                 reasoning_effort: Some("high".to_owned()),
+                inject_agents_md: true,
                 tools: AgentTools::List(vec!["Read".to_owned()]),
                 disallowed_tools: vec!["Write".to_owned()],
                 max_turns: Some(8),
@@ -3403,6 +3992,10 @@ mod tests {
             },
         };
         let expected = agent_entry_digest(&baseline);
+
+        let mut changed = baseline.clone();
+        changed.document.inject_agents_md = false;
+        assert_ne!(agent_entry_digest(&changed), expected);
 
         let mut changed = baseline.clone();
         changed.document.tools = AgentTools::List(vec!["Read".to_owned(), "Grep".to_owned()]);
@@ -3805,7 +4398,10 @@ mod tests {
             ],
             hook_circuits: HookCircuitStore::new(),
             agents: AgentCatalog::default(),
+            agent_settings: super::agent_settings::AgentSettingsState::default(),
             commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
+            plugin_reference_catalog: Vec::new(),
+            skill_reference_catalog: Vec::new(),
             lsp_runtime: None,
             diagnostics: Vec::new(),
         };
@@ -4071,7 +4667,10 @@ mod tests {
             hooks: Vec::new(),
             hook_circuits: HookCircuitStore::new(),
             agents,
+            agent_settings: super::agent_settings::AgentSettingsState::default(),
             commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
+            plugin_reference_catalog: Vec::new(),
+            skill_reference_catalog: Vec::new(),
             lsp_runtime: None,
             diagnostics: Vec::new(),
         };
@@ -4135,6 +4734,98 @@ mod tests {
                 .expect("未知模板查找不应失败")
                 .is_none()
         );
+    }
+
+    /// 设置页状态必须同时约束 Composer 目录和实际模板解析，并保留显式 none。
+    #[test]
+    fn agent_settings_filter_catalog_and_override_runtime_template() {
+        let directory = tempfile::tempdir().expect("创建 Agent 设置测试目录");
+        let data_root = directory.path().join("data");
+        let project_root = directory.path().join("project");
+        fs::create_dir_all(project_root.join(".agents/agents")).expect("创建项目 Agent 目录");
+        fs::create_dir_all(&data_root).expect("创建数据目录");
+        fs::write(
+            project_root.join(".agents/agents/reviewer.md"),
+            "---\nname: reviewer\ndescription: Review changes\n---\nReview the actual changes.",
+        )
+        .expect("写入项目 Agent 定义");
+        let project_root = fs::canonicalize(project_root).expect("规范项目目录");
+        let data_root = fs::canonicalize(data_root).expect("规范数据目录");
+        let plugins = PluginRuntimeSnapshot::default();
+        let skills = Arc::new(
+            keencode_skills::discover_skills(&runtime_skill_config_from_snapshot(
+                data_root.clone(),
+                project_root.clone(),
+                plugins.clone(),
+            ))
+            .expect("建立空 Skill 目录"),
+        );
+        let agents = build_agent_catalog(
+            &data_root,
+            &project_root,
+            &plugins,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+        )
+        .expect("建立 Agent 目录");
+        let agent_settings = super::agent_settings::AgentSettingsState::from_value(json!({
+            "disabledAgentIds": ["user:workspace:reviewer"],
+            "builtInModelSelectionOverrides": {
+                "code-reviewer": {
+                    "providerId": "provider-settings",
+                    "modelId": "review-model",
+                    "options": {"reasoningLevel": "none"}
+                }
+            }
+        }))
+        .expect("构造严格 Agent 设置");
+        let contributor = NativeExtensionContributor {
+            project_root,
+            skills,
+            deferred_tools: None,
+            mcp_servers: Vec::new(),
+            hooks: Vec::new(),
+            hook_circuits: HookCircuitStore::new(),
+            agents,
+            agent_settings,
+            commands: Arc::new(crate::plugins::PluginCommandCatalog::default()),
+            plugin_reference_catalog: Vec::new(),
+            skill_reference_catalog: Vec::new(),
+            lsp_runtime: None,
+            diagnostics: Vec::new(),
+        };
+        let context = RuntimeAgentTemplateContext {
+            session_id: "session-settings".to_owned(),
+            parent_agent_id: "root".to_owned(),
+            root_turn_id: "turn-settings".to_owned(),
+        };
+
+        assert!(
+            contributor
+                .resolve_agent("reviewer", &context)
+                .expect("禁用 Agent 解析不应报错")
+                .is_none()
+        );
+        let prompt_catalog = contributor.prompt_catalog(true, false);
+        assert!(
+            prompt_catalog
+                .lines()
+                .any(|line| line.starts_with("\"code-reviewer\":"))
+        );
+        assert!(
+            !prompt_catalog
+                .lines()
+                .any(|line| line.starts_with("\"reviewer\":"))
+        );
+        let built_in = contributor
+            .resolve_agent("code-reviewer", &context)
+            .expect("内置覆盖解析不应报错")
+            .expect("内置 Agent 应存在");
+        assert_eq!(
+            built_in.model.as_deref(),
+            Some("provider-settings::review-model")
+        );
+        assert_eq!(built_in.reasoning_effort.as_deref(), Some("none"));
     }
 
     /// Plan 只读守卫必须在进程启动前拒绝命令 Hook。

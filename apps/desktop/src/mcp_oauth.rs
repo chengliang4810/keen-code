@@ -2390,16 +2390,54 @@ mod tests {
     }
 
     /// 收集已脱敏生命周期事件的测试 sink。
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct RecordingEventSink {
         /// 事件序列。
         events: Arc<StdMutex<Vec<McpOAuthEvent>>>,
+        /// 允许测试等待异步 sink 投递完成，避免把状态通知先于事件投递误判成丢事件。
+        notify: Arc<Notify>,
+    }
+
+    impl Default for RecordingEventSink {
+        fn default() -> Self {
+            Self {
+                events: Arc::new(StdMutex::new(Vec::new())),
+                notify: Arc::new(Notify::new()),
+            }
+        }
     }
 
     impl RecordingEventSink {
         /// 返回当前事件快照。
         fn events(&self) -> Vec<McpOAuthEvent> {
             self.events.lock().expect("事件锁未中毒").clone()
+        }
+
+        fn has_failed_event(&self) -> bool {
+            self.events()
+                .iter()
+                .any(|event| matches!(event, McpOAuthEvent::Failed { .. }))
+        }
+
+        /// 等待有限时间确认异步事件 sink 已收到失败终态；不能用固定 sleep 猜测调度顺序。
+        async fn wait_for_failed_event(&self) -> bool {
+            match tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let notified = self.notify.notified();
+                    tokio::pin!(notified);
+                    // 先注册 waiter，再检查快照，避免事件在检查前完成而丢失唤醒。
+                    notified.as_mut().enable();
+                    if self.has_failed_event() {
+                        return true;
+                    }
+                    notified.await;
+                }
+            })
+            .await
+            {
+                Ok(received) => received,
+                Err(_) => self.has_failed_event(),
+            }
         }
     }
 
@@ -2410,12 +2448,18 @@ mod tests {
             event: McpOAuthEvent,
         ) -> ServiceFuture<'a, Result<(), McpOAuthServiceError>> {
             let events = self.events.clone();
+            let notify = self.notify.clone();
             Box::pin(async move {
-                events
+                let result = events
                     .lock()
-                    .map_err(|_| McpOAuthServiceError::EventDelivery)?
-                    .push(event);
-                Ok(())
+                    .map_err(|_| McpOAuthServiceError::EventDelivery)
+                    .map(|mut events| {
+                        events.push(event);
+                    });
+                if result.is_ok() {
+                    notify.notify_waiters();
+                }
+                result
             })
         }
     }
@@ -3209,9 +3253,8 @@ mod tests {
                 "valid-old-access"
             );
             assert!(
-                sink.events()
-                    .iter()
-                    .any(|event| matches!(event, McpOAuthEvent::Failed { .. }))
+                sink.wait_for_failed_event().await,
+                "临时刷新失败必须最终投递 Failed 事件"
             );
         })
         .await

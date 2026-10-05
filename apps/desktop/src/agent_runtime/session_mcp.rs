@@ -21,8 +21,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fmt;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Mutex as AsyncMutex;
 
 /// 单个 Session 可同时保留的标准 MCP Server 上限。
@@ -113,6 +113,8 @@ struct PreparedServerConfig {
     transport: McpTransportKind,
     fingerprint: String,
     config: McpServerConfig,
+    /// 只在内存保留调用方配置，用于目录切换时重建 stdio cwd；不得写入日志或事务。
+    source: schema::McpServer,
 }
 
 /// 单个 Session MCP 客户端的共享关闭闸门。
@@ -180,13 +182,15 @@ impl AgentTool for SessionMcpOwnedTool {
     }
 }
 
-/// 已连接 Server 的安全运行态与工具实现；不保存原始配置正文。
+/// 已连接 Server 的运行态与工具实现；重连配置只留内存，不进入状态响应或日志。
 struct SessionServerBinding {
     name: String,
     transport: McpTransportKind,
     config_fingerprint: String,
     tools: Vec<Arc<dyn AgentTool>>,
     lease: Arc<SessionMcpClientLease>,
+    /// 当前成功绑定的原始配置；与客户端 lease 一起释放，不落盘。
+    source: schema::McpServer,
 }
 
 impl SessionServerBinding {
@@ -246,6 +250,70 @@ pub(crate) struct SuspendedSessionMcp {
     runtime: Mutex<Option<Arc<SessionMcpRuntime>>>,
 }
 
+/// 在权威目录提交前准备好的新 MCP 侧车；只有发布成功后才消费其所有权。
+pub(crate) struct PreparedWorkspaceMcp {
+    runtime: Option<Arc<SessionMcpRuntime>>,
+    owner: Weak<AgentRuntime>,
+    session_id: String,
+    /// 0=pending，1=已发布，2=明确丢弃（同根回退）。
+    disposition: AtomicU8,
+}
+
+impl PreparedWorkspaceMcp {
+    fn published(&self) {
+        self.disposition.store(1, Ordering::Release);
+    }
+
+    pub(crate) fn discarded(&self) {
+        self.disposition.store(2, Ordering::Release);
+    }
+}
+
+impl Drop for PreparedWorkspaceMcp {
+    fn drop(&mut self) {
+        if self.disposition.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let Some(runtime) = self.runtime.as_ref().cloned() else {
+            return;
+        };
+        let Some(owner) = self.owner.upgrade() else {
+            return;
+        };
+        // Git/Journal 事务若回滚到源目录，prepared 目标侧车不能回挂；只有
+        // 权威 Session 元数据已经指向同一目标目录时，下一次 open 才可复用它。
+        let Ok(metadata) = owner
+            .runtime_manager
+            .stored_session_metadata(&self.session_id)
+        else {
+            return;
+        };
+        let Ok(metadata_root) = canonical_project_root(Path::new(&metadata.project_root)) else {
+            return;
+        };
+        if metadata_root != runtime.project_root {
+            return;
+        }
+        let Ok(mut runtimes) = owner.session_mcp.lock() else {
+            return;
+        };
+        match runtimes.get(&self.session_id).cloned() {
+            None => {
+                // 恢复后续 open/delivery 失败时，保留真实目标侧车供下次启动使用。
+                runtimes.insert(self.session_id.clone(), runtime);
+            }
+            Some(existing) => {
+                let can_replace = existing.can_adopt_workspace_runtime().unwrap_or(false);
+                if can_replace {
+                    runtimes.insert(self.session_id.clone(), runtime);
+                    drop(existing);
+                }
+                // 已有非空事实时拒绝覆盖；该事实会阻止下一次 open 退化为空。
+            }
+        }
+    }
+}
+
 impl SessionMcpRuntime {
     fn new(
         session_id: String,
@@ -289,6 +357,24 @@ impl SessionMcpRuntime {
         } else {
             Err(SessionMcpError::ProjectMismatch)
         }
+    }
+
+    /// 判断一个并发创建的同项目 MCP 运行态是否仍是可替换的空占位。
+    ///
+    /// workspace 恢复必须发布已经准备好的真实运行态，不能把空占位误当成
+    /// 成功；一旦占位已经有 Server、失败记录或幂等收据，就交给调用方报冲突，
+    /// 避免覆盖并发操作的事实。
+    fn can_adopt_workspace_runtime(&self) -> Result<bool, SessionMcpError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| SessionMcpError::StateUnavailable)?;
+        Ok(!state.closed
+            && state.current_servers.is_empty()
+            && state.desired_servers.is_empty()
+            && state.failed_servers.is_empty()
+            && state.receipts.is_empty()
+            && state.pending_catalog_transition.is_none())
     }
 
     /// 排队项目 MCP 新快照；旧候选被忽略，冲突候选仍保留等待后续解除。
@@ -1013,13 +1099,144 @@ impl AgentRuntime {
             .session_mcp
             .lock()
             .map_err(|_| SessionMcpError::StateUnavailable)?;
-        if runtimes.contains_key(session_id) {
-            return Err(SessionMcpError::StateUnavailable);
-        }
-        runtimes.insert(session_id.to_owned(), runtime);
+        let displaced = if let Some(existing) = runtimes.get(session_id).cloned() {
+            existing.ensure_project(&project_root)?;
+            if !existing.can_adopt_workspace_runtime()? {
+                return Err(SessionMcpError::StateUnavailable);
+            }
+            runtimes.insert(session_id.to_owned(), runtime);
+            Some(existing)
+        } else {
+            runtimes.insert(session_id.to_owned(), runtime);
+            None
+        };
         // 只有新绑定已经可见后才消费暂停所有权；失败时调用方
         // 仍可移除竞争占位并重试，不会提前关闭原 MCP 连接。
         suspended_runtime.take();
+        drop(runtimes);
+        // 空占位没有已发布连接；丢弃 Arc 即可让其客户端按既有 lease 释放。
+        drop(displaced);
+        Ok(())
+    }
+
+    /// 空闲切换先按新项目候选重连 Session Server；全部成功后才允许改权威 cwd。
+    pub(crate) async fn prepare_workspace_mcp(
+        self: &Arc<Self>,
+        session_id: &str,
+        project_root: &Path,
+        suspended: &SuspendedSessionMcp,
+    ) -> Result<PreparedWorkspaceMcp, SessionMcpError> {
+        let original = suspended
+            .runtime
+            .lock()
+            .map_err(|_| SessionMcpError::StateUnavailable)?
+            .clone();
+        let Some(original) = original else {
+            return Ok(PreparedWorkspaceMcp {
+                runtime: None,
+                owner: Arc::downgrade(self),
+                session_id: session_id.to_owned(),
+                disposition: AtomicU8::new(2),
+            });
+        };
+        let _gate = original.mutation_gate.lock().await;
+        let (servers, failed, receipts, receipt_order) = {
+            let state = original
+                .state
+                .lock()
+                .map_err(|_| SessionMcpError::StateUnavailable)?;
+            if state.closed {
+                return Err(SessionMcpError::Closed);
+            }
+            (
+                state
+                    .desired_servers
+                    .values()
+                    .map(|server| server.source.clone())
+                    .collect::<Vec<_>>(),
+                state.failed_servers.clone(),
+                state.receipts.clone(),
+                state.receipt_order.clone(),
+            )
+        };
+        let project_root =
+            canonical_project_root(project_root).map_err(|_| SessionMcpError::ProjectMismatch)?;
+        let project = {
+            let candidates = self
+                .extension_candidates
+                .read()
+                .map_err(|_| SessionMcpError::StateUnavailable)?;
+            project_snapshot(candidates.get(&project_root))
+        };
+        let replacement = SessionMcpRuntime::new(session_id.to_owned(), project_root, project)?;
+        if !servers.is_empty() {
+            let result = replacement.load("workspace-prepare", servers).await?;
+            if !result.changed {
+                replacement.close().await;
+                return Err(SessionMcpError::StateUnavailable);
+            }
+        }
+        {
+            let mut state = replacement
+                .state
+                .lock()
+                .map_err(|_| SessionMcpError::StateUnavailable)?;
+            state.failed_servers = failed
+                .into_iter()
+                .filter(|(name, _)| !state.desired_project.server_names.contains(name))
+                .collect();
+            state.receipts = receipts;
+            state.receipt_order = receipt_order;
+        }
+        Ok(PreparedWorkspaceMcp {
+            runtime: Some(replacement),
+            owner: Arc::downgrade(self),
+            session_id: session_id.to_owned(),
+            disposition: AtomicU8::new(0),
+        })
+    }
+
+    /// 新 cwd 已经 durable 后发布准备好的侧车，再关闭旧 cwd 的 stdio 连接。
+    pub(crate) async fn commit_workspace_mcp(
+        &self,
+        session_id: &str,
+        suspended: &SuspendedSessionMcp,
+        prepared: &PreparedWorkspaceMcp,
+    ) -> Result<(), SessionMcpError> {
+        let prepared_runtime = prepared.runtime.as_ref().cloned();
+        let mut displaced = None;
+        {
+            let mut runtimes = self
+                .session_mcp
+                .lock()
+                .map_err(|_| SessionMcpError::StateUnavailable)?;
+            if let Some(runtime) = prepared_runtime.as_ref() {
+                if let Some(existing) = runtimes.get(session_id).cloned() {
+                    existing.ensure_project(&runtime.project_root)?;
+                    if !existing.can_adopt_workspace_runtime()? {
+                        return Err(SessionMcpError::StateUnavailable);
+                    }
+                    displaced = runtimes.insert(session_id.to_owned(), Arc::clone(runtime));
+                } else {
+                    runtimes.insert(session_id.to_owned(), Arc::clone(runtime));
+                }
+            } else if let Some(existing) = runtimes.get(session_id).cloned()
+                && !existing.can_adopt_workspace_runtime()?
+            {
+                return Err(SessionMcpError::StateUnavailable);
+            }
+        }
+        // 从这一点起目标侧车已经由 Runtime map 持有；Prepared 的 Drop 不得再次回挂。
+        prepared.published();
+        let original = suspended
+            .runtime
+            .lock()
+            .map_err(|_| SessionMcpError::StateUnavailable)?
+            .take();
+        if let Some(original) = original {
+            original.close().await;
+        }
+        drop(displaced);
         Ok(())
     }
 
@@ -1172,6 +1389,7 @@ fn convert_server_config(
     server: schema::McpServer,
     project_root: &Path,
 ) -> Result<PreparedServerConfig, SessionMcpError> {
+    let source = server.clone();
     let serialized =
         serde_json::to_vec(&server).map_err(|_| SessionMcpError::InvalidConfiguration)?;
     let fingerprint = sha256_hex(&serialized);
@@ -1208,6 +1426,7 @@ fn convert_server_config(
                 transport: McpTransportKind::StreamableHttp,
                 fingerprint,
                 config: McpServerConfig::StreamableHttp(config),
+                source,
             })
         }
         schema::McpServer::Sse(_) => Err(SessionMcpError::InvalidConfiguration),
@@ -1246,6 +1465,7 @@ fn convert_server_config(
                 transport: McpTransportKind::Stdio,
                 fingerprint,
                 config: McpServerConfig::Stdio(config),
+                source,
             })
         }
         _ => Err(SessionMcpError::InvalidConfiguration),
@@ -1305,6 +1525,7 @@ async fn connect_server(
         config_fingerprint: server.fingerprint,
         tools,
         lease,
+        source: server.source,
     }))
 }
 
@@ -1602,6 +1823,10 @@ fn wait_for_release() {
 
 fn main() {
     append_from_env("KEENCODE_SESSION_MCP_TEST_STARTED");
+    if let Ok(path) = std::env::var("KEENCODE_SESSION_MCP_TEST_CWD") {
+        let mut file = OpenOptions::new().create(true).append(true).open(path).unwrap();
+        writeln!(file, "{}", std::env::current_dir().unwrap().display()).unwrap();
+    }
     let tool = std::env::args().nth(1).unwrap_or_else(|| "echo".to_owned());
     let protocol = std::env::var("KEENCODE_SESSION_MCP_TEST_PROTOCOL").unwrap();
     let stdin = io::stdin();
@@ -2587,9 +2812,18 @@ fn extract_id(body: &str) -> Option<&str> {
             .unwrap();
         let suspended = owner.suspend_session_mcp(&session_id).unwrap();
 
-        // 模拟未串行的读路径在临时关闭窗口里创建了竞争侧车。
+        // 模拟未串行的读路径在临时关闭窗口里创建了已经有失败事实的竞争侧车；
+        // 这类运行态不能被 workspace 恢复覆盖，原侧车必须保留给下一次重试。
         owner
             .ensure_session_mcp_runtime(&session_id, &project_root)
+            .unwrap();
+        owner
+            .load_session_mcp(
+                &session_id,
+                "restore-conflict",
+                vec![missing_server("restore-conflict")],
+            )
+            .await
             .unwrap();
         assert_eq!(
             owner.restore_session_mcp(&session_id, &project_root, &suspended),
@@ -2605,6 +2839,116 @@ fn extract_id(body: &str) -> Option<&str> {
             .restore_session_mcp(&session_id, &project_root, &suspended)
             .unwrap();
         assert!(suspended.runtime.lock().unwrap().is_none());
+        owner.close_session(&session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_workspace_commit_keeps_prepared_and_suspended_owners_for_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_root = directory.path().join("old");
+        let new_root = directory.path().join("new");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        let old_root = std::fs::canonicalize(old_root).unwrap();
+        let new_root = std::fs::canonicalize(new_root).unwrap();
+        let owner = AgentRuntime::new_for_control_test(directory.path().join("data")).unwrap();
+        let session = owner
+            .open_or_create_session(&old_root, None, "workspace-commit-retry")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        owner
+            .ensure_session_mcp_runtime(&session_id, &old_root)
+            .unwrap();
+        let suspended = owner.suspend_session_mcp(&session_id).unwrap();
+        owner.close_session(&session_id).await.unwrap();
+        let prepared = owner
+            .prepare_workspace_mcp(&session_id, &new_root, &suspended)
+            .await
+            .unwrap();
+        owner
+            .runtime_manager()
+            .change_closed_session_workspace(keencode_resources::SessionWorkspaceRequest {
+                session_id: keencode_resources::SessionId::new(session_id.clone()).unwrap(),
+                operation_id: "workspace-commit-retry-move".into(),
+                expected_project_root: old_root.to_string_lossy().into_owned(),
+                project_root: new_root.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        owner
+            .open_or_create_session(&new_root, Some(&session_id), "workspace-commit-retry-open")
+            .unwrap();
+        owner
+            .ensure_session_mcp_runtime(&session_id, &new_root)
+            .unwrap();
+        owner
+            .load_session_mcp(
+                &session_id,
+                "workspace-commit-retry-conflict",
+                vec![missing_server("workspace-commit-retry")],
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            owner
+                .commit_workspace_mcp(&session_id, &suspended, &prepared)
+                .await,
+            Err(SessionMcpError::StateUnavailable)
+        );
+        assert!(
+            prepared.runtime.is_some(),
+            "冲突失败不得消费已准备的目标侧车"
+        );
+        assert!(
+            suspended.runtime.lock().unwrap().is_some(),
+            "冲突失败不得消费旧侧车所有权"
+        );
+
+        owner.close_session_mcp(&session_id).await;
+        owner
+            .commit_workspace_mcp(&session_id, &suspended, &prepared)
+            .await
+            .unwrap();
+        assert!(suspended.runtime.lock().unwrap().is_none());
+        owner.close_session(&session_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn dropped_prepared_runtime_is_not_adopted_before_workspace_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let old_root = directory.path().join("old");
+        let new_root = directory.path().join("new");
+        std::fs::create_dir_all(&old_root).unwrap();
+        std::fs::create_dir_all(&new_root).unwrap();
+        let owner = AgentRuntime::new_for_control_test(directory.path().join("data")).unwrap();
+        let session = owner
+            .open_or_create_session(&old_root, None, "workspace-prepare-drop")
+            .unwrap();
+        let session_id = session.session_id().as_str().to_owned();
+        drop(session);
+        owner
+            .ensure_session_mcp_runtime(&session_id, &old_root)
+            .unwrap();
+        let suspended = owner.suspend_session_mcp(&session_id).unwrap();
+        owner.close_session(&session_id).await.unwrap();
+        let prepared = owner
+            .prepare_workspace_mcp(&session_id, &new_root, &suspended)
+            .await
+            .unwrap();
+        let prepared_runtime = prepared.runtime.as_ref().cloned().unwrap();
+        // 模拟 Git/Journal 事务尚未提交就退出；目标侧车不得因 Drop 回挂到旧目录。
+        drop(prepared);
+        owner
+            .open_or_create_session(&old_root, Some(&session_id), "workspace-prepare-drop-open")
+            .unwrap();
+        let reopened = owner
+            .ensure_session_mcp_runtime(&session_id, &old_root)
+            .unwrap();
+        assert!(
+            !Arc::ptr_eq(&prepared_runtime, &reopened),
+            "未提交的目标侧车不得被旧目录 open 采用"
+        );
         owner.close_session(&session_id).await.unwrap();
     }
 
@@ -2657,6 +3001,94 @@ fn extract_id(body: &str) -> Option<&str> {
             "candidate-after-suspend"
         );
         owner.close_session(&session_id).await.unwrap();
+    }
+
+    /// 真实 stdio 进程证明准备阶段保留旧连接，提交后重连 cwd 与幂等收据均保留。
+    #[tokio::test]
+    async fn workspace_mcp_reconnects_at_real_cwd_and_preserves_receipts() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = temp.path().join("old");
+        let new = temp.path().join("new");
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        let old = std::fs::canonicalize(old).unwrap();
+        let new = std::fs::canonicalize(new).unwrap();
+        let owner = AgentRuntime::new_for_control_test(temp.path().join("data")).unwrap();
+        let session = owner
+            .open_or_create_session(&old, None, "workspace-mcp")
+            .unwrap();
+        let id = session.session_id().as_str().to_owned();
+        drop(session);
+        let started = temp.path().join("started");
+        let closed = temp.path().join("closed");
+        let cwd = temp.path().join("cwd");
+        let mut server = stdio_server("local", "echo", &started, &closed);
+        if let schema::McpServer::Stdio(server) = &mut server {
+            server.env.push(schema::EnvVariable::new(
+                "KEENCODE_SESSION_MCP_TEST_CWD",
+                cwd.to_string_lossy().into_owned(),
+            ));
+        }
+        owner
+            .load_session_mcp(&id, "original-load", vec![server.clone()])
+            .await
+            .unwrap();
+        let suspended = owner.suspend_session_mcp(&id).unwrap();
+        owner.close_session(&id).await.unwrap();
+        let prepared = owner
+            .prepare_workspace_mcp(&id, &new, &suspended)
+            .await
+            .unwrap();
+        assert_eq!(file_line_count(&started), 2);
+        assert_eq!(file_line_count(&closed), 0, "准备阶段不能关闭旧连接");
+        owner
+            .runtime_manager()
+            .change_closed_session_workspace(keencode_resources::SessionWorkspaceRequest {
+                session_id: keencode_resources::SessionId::new(id.clone()).unwrap(),
+                operation_id: "move".into(),
+                expected_project_root: old.to_string_lossy().into_owned(),
+                project_root: new.to_string_lossy().into_owned(),
+            })
+            .unwrap();
+        owner
+            .open_or_create_session(&new, Some(&id), "reopen")
+            .unwrap();
+        // 恢复入口可能先被并发 Prompt 绑定创建空占位；提交必须用已准备的
+        // 真实运行态替换它，不能把空目录当成成功。
+        owner.ensure_session_mcp_runtime(&id, &new).unwrap();
+        let prepared_runtime = prepared.runtime.as_ref().cloned().unwrap();
+        owner
+            .commit_workspace_mcp(&id, &suspended, &prepared)
+            .await
+            .unwrap();
+        wait_for_file_lines(&closed, 1).await;
+        drop(prepared);
+        // 模拟恢复后的首次 open/delivery 失败再重试：Session Journal 已关闭，
+        // 但 Runtime map 仍持有已发布侧车，下一次 open 必须复用同一 Arc。
+        owner.runtime_manager().close(&id).unwrap();
+        owner
+            .open_or_create_session(&new, Some(&id), "reopen-after-restore-failure")
+            .unwrap();
+        let reopened_runtime = owner.ensure_session_mcp_runtime(&id, &new).unwrap();
+        assert!(Arc::ptr_eq(&prepared_runtime, &reopened_runtime));
+        let directories = std::fs::read_to_string(&cwd).unwrap();
+        let directories = directories
+            .lines()
+            .map(|path| std::fs::canonicalize(path).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(directories, vec![old.clone(), new.clone()]);
+        let response = owner
+            .load_session_mcp(&id, "original-load", vec![server])
+            .await
+            .unwrap();
+        assert!(response.deduplicated);
+        assert_eq!(file_line_count(&started), 2, "旧操作重试不得再启动 stdio");
+        assert!(
+            owner
+                .open_or_create_session(&old, Some(&id), "wrong-root")
+                .is_err()
+        );
+        owner.shutdown().await.unwrap();
     }
 
     #[tokio::test]

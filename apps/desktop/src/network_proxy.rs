@@ -3,6 +3,9 @@
 use std::{collections::HashSet, env};
 
 const LOOPBACK_BYPASS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+/// reqwest/hyper-util 把 `*` 放进域名匹配器，不能覆盖数值 IP；显式全量绕过时
+/// 同时加入两个全地址网段，保证 IPv4/IPv6 Provider 也真正跳过代理。
+const ALL_IP_BYPASS: [&str; 2] = ["0.0.0.0/0", "::/0"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlatformProxy {
@@ -14,36 +17,111 @@ struct PlatformProxy {
 /// 在 Tauri、异步运行时和其他线程创建前，把系统代理转成通用进程环境。
 /// reqwest、Tauri Updater、Git/npm/MCP 子进程和内置终端随后共享该默认值。
 pub(crate) fn configure_before_start() {
-    if environment_proxy().is_some() {
+    let configured = configured_settings_before_start();
+    if let Some(settings) = configured
+        .as_ref()
+        .filter(|settings| settings.http_proxy.is_some())
+    {
+        apply_configured_proxy(
+            settings.http_proxy.as_deref(),
+            settings.http_proxy_no_proxy.as_deref(),
+        );
         return;
     }
-    // OS 系统代理缺失时（例如只在 git 里配了本地代理而未启用系统代理），回退使用 git
-    // 全局代理，让 reqwest、Tauri Updater 与各子进程和 git 共用同一网络出口。
-    let Some(proxy) = platform_proxy().or_else(git_global_proxy) else {
-        return;
-    };
-    let no_proxy_configured = ["NO_PROXY", "no_proxy"]
-        .into_iter()
-        .any(|key| env::var_os(key).is_some_and(|value| !value.is_empty()));
+    if environment_proxy().is_none() {
+        // OS 系统代理缺失时（例如只在 git 里配了本地代理而未启用系统代理），回退使用 git
+        // 全局代理，让 reqwest、Tauri Updater 与各子进程和 git 共用同一网络出口。
+        if let Some(proxy) = platform_proxy().or_else(git_global_proxy) {
+            let no_proxy_configured = ["NO_PROXY", "no_proxy"]
+                .into_iter()
+                .any(|key| env::var_os(key).is_some_and(|value| !value.is_empty()));
+
+            // SAFETY: main 在 Tauri、异步运行时和其他线程启动前调用本函数。
+            unsafe {
+                if let Some(http) = &proxy.http {
+                    env::set_var("HTTP_PROXY", http);
+                    env::set_var("http_proxy", http);
+                }
+                if let Some(https) = &proxy.https {
+                    env::set_var("HTTPS_PROXY", https);
+                    env::set_var("https_proxy", https);
+                }
+                if proxy.http == proxy.https
+                    && let Some(all) = &proxy.http
+                {
+                    env::set_var("ALL_PROXY", all);
+                    env::set_var("all_proxy", all);
+                }
+                if !no_proxy_configured {
+                    let bypass = no_proxy_value(&proxy.bypass);
+                    env::set_var("NO_PROXY", &bypass);
+                    env::set_var("no_proxy", bypass);
+                }
+            }
+        }
+    }
+
+    // No Proxy 可以单独配置；让它叠加到自动发现的代理上，不能因为没有显式
+    // HTTP_PROXY 就跳过系统/git 代理发现。
+    if let Some(settings) = configured {
+        apply_configured_proxy(None, settings.http_proxy_no_proxy.as_deref());
+    }
+}
+
+/// 读取已持久化的显式网络设置。None 表示用户从未配置过网络覆盖；显式 HTTP_PROXY
+/// 即使为空也表示用户明确要求直连，不能再回退环境代理；No Proxy 则可独立叠加。
+fn configured_settings_before_start() -> Option<crate::app_settings::AppSettings> {
+    let root = crate::storage::root_dir_before_start().ok()?;
+    let path = root.join("settings.json");
+    if !path.is_file() {
+        return None;
+    }
+    let settings = crate::app_settings::load_before_start(&path).ok()?;
+    (settings.http_proxy.is_some() || settings.http_proxy_no_proxy.is_some()).then_some(settings)
+}
+
+/// 应用显式网络设置到当前进程。模型、MCP、命令工具以及后续子进程共享这些环境；
+/// 内置浏览器继续使用其原生系统代理策略，避免把浏览器代理误当成已接通。
+fn apply_configured_proxy(http_proxy: Option<&str>, no_proxy: Option<&str>) {
+    let normalized_proxy = http_proxy
+        .filter(|value| !value.trim().is_empty())
+        .and_then(normalize_proxy);
 
     // SAFETY: main 在 Tauri、异步运行时和其他线程启动前调用本函数。
     unsafe {
-        if let Some(http) = &proxy.http {
-            env::set_var("HTTP_PROXY", http);
-            env::set_var("http_proxy", http);
-        }
-        if let Some(https) = &proxy.https {
-            env::set_var("HTTPS_PROXY", https);
-            env::set_var("https_proxy", https);
-        }
-        if proxy.http == proxy.https
-            && let Some(all) = &proxy.http
-        {
-            env::set_var("ALL_PROXY", all);
-            env::set_var("all_proxy", all);
-        }
-        if !no_proxy_configured {
-            let bypass = no_proxy_value(&proxy.bypass);
+        if http_proxy.is_some() {
+            for key in [
+                "HTTP_PROXY",
+                "HTTPS_PROXY",
+                "ALL_PROXY",
+                "http_proxy",
+                "https_proxy",
+                "all_proxy",
+                "NO_PROXY",
+                "no_proxy",
+            ] {
+                env::remove_var(key);
+            }
+            if let Some(proxy) = normalized_proxy.as_deref() {
+                env::set_var("HTTP_PROXY", proxy);
+                env::set_var("HTTPS_PROXY", proxy);
+                env::set_var("http_proxy", proxy);
+                env::set_var("https_proxy", proxy);
+                env::set_var("ALL_PROXY", proxy);
+                env::set_var("all_proxy", proxy);
+                let bypass = no_proxy
+                    .map(|value| value.split(',').map(str::to_owned).collect::<Vec<_>>())
+                    .unwrap_or_default();
+                let bypass = no_proxy_value(&bypass);
+                if !bypass.is_empty() {
+                    env::set_var("NO_PROXY", &bypass);
+                    env::set_var("no_proxy", bypass);
+                }
+            }
+        } else if let Some(no_proxy) = no_proxy {
+            // 只修改绕过清单，保留系统或 git 自动发现的代理地址。
+            let bypass =
+                no_proxy_value(&no_proxy.split(',').map(str::to_owned).collect::<Vec<_>>());
             env::set_var("NO_PROXY", &bypass);
             env::set_var("no_proxy", bypass);
         }
@@ -63,17 +141,14 @@ fn environment_proxy() -> Option<String> {
     .find_map(|key| env::var(key).ok().and_then(|value| normalize_proxy(&value)))
 }
 
-/// 返回当前进程应当使用的代理地址（`https` 优先），供不会自动读取环境变量的客户端
-/// （如 Tauri 更新器）显式套用；与 `configure_before_start` 的选择顺序保持一致。
+/// 返回启动时已解析的当前进程代理，供不会自动读取环境变量的客户端（如 Tauri 更新器）
+/// 显式套用。启动阶段已把系统/git 代理写入环境，因此这里不再回退读取平台代理，确保
+/// 用户显式保存的直连设置不会被更新器重新覆盖。
 pub(crate) fn effective_proxy() -> Option<String> {
-    environment_proxy().or_else(|| {
-        platform_proxy()
-            .and_then(|proxy| proxy.https.or(proxy.http))
-            .or_else(|| git_global_proxy().and_then(|proxy| proxy.https.or(proxy.http)))
-    })
+    environment_proxy()
 }
 
-fn normalize_proxy(value: &str) -> Option<String> {
+pub(crate) fn normalize_proxy(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
         return None;
@@ -83,6 +158,22 @@ fn normalize_proxy(value: &str) -> Option<String> {
     } else {
         format!("http://{value}")
     })
+}
+
+/// 校验设置页传入的代理地址，避免保存后启动时静默退回其他出口。
+pub(crate) fn validate_configured_proxy(value: &str) -> anyhow::Result<()> {
+    if value.len() > 2048 || value.chars().any(char::is_control) {
+        anyhow::bail!("HTTP 代理地址长度或字符无效");
+    }
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    let normalized = normalize_proxy(value).ok_or_else(|| anyhow::anyhow!("HTTP 代理地址为空"))?;
+    let parsed = url::Url::parse(&normalized).map_err(|error| anyhow::anyhow!(error))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        anyhow::bail!("HTTP 代理必须使用 http 或 https 地址");
+    }
+    Ok(())
 }
 
 /// 读取 git 全局配置的代理，作为操作系统代理缺失时的回退来源。
@@ -126,7 +217,8 @@ fn platform_from_git_config(
 
 fn no_proxy_value(entries: &[String]) -> String {
     let mut seen = HashSet::new();
-    LOOPBACK_BYPASS
+    let wildcard = entries.iter().any(|value| value.trim() == "*");
+    let mut values = LOOPBACK_BYPASS
         .iter()
         .copied()
         .chain(entries.iter().map(String::as_str))
@@ -138,8 +230,15 @@ fn no_proxy_value(entries: &[String]) -> String {
             let normalized = normalize_bypass(value);
             seen.insert(normalized.clone()).then_some(normalized)
         })
-        .collect::<Vec<_>>()
-        .join(",")
+        .collect::<Vec<_>>();
+    if wildcard {
+        for value in ALL_IP_BYPASS {
+            if seen.insert(value.to_owned()) {
+                values.push(value.to_owned());
+            }
+        }
+    }
+    values.join(",")
 }
 
 fn normalize_bypass(value: &str) -> String {
@@ -308,6 +407,14 @@ mod tests {
             ]),
             "localhost,127.0.0.1,::1,.example.com,10.0.0.0/8,156.233.0.0/16"
         );
+    }
+
+    #[test]
+    fn wildcard_bypass_covers_numeric_provider_addresses() {
+        let value = no_proxy_value(&["*".to_owned()]);
+        assert!(value.split(',').any(|entry| entry == "*"));
+        assert!(value.split(',').any(|entry| entry == "0.0.0.0/0"));
+        assert!(value.split(',').any(|entry| entry == "::/0"));
     }
 
     #[test]

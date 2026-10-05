@@ -200,6 +200,7 @@ async fn standard_session_mcp_failures_preserve_cleanup_and_retry_ownership() {
         source_session_id: SessionId::new(source_id).expect("源 ID 应有效"),
         operation_id: "host-fork-mcp-retry".to_owned(),
         title: None,
+        through_turn_id: None,
     };
     let first_fork = runtime
         .runtime_manager()

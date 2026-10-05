@@ -139,6 +139,7 @@ async fn live_messages_agent_scenarios() {
         max_output_tokens: [(model.clone(), 8_192)].into_iter().collect(),
         supports_vision: [(model.clone(), true)].into_iter().collect(),
         reasoning_efforts: Default::default(),
+        disabled_models: Default::default(),
     };
     let registry = ProviderRegistry::new();
     providers::replace_runtime_registry(
