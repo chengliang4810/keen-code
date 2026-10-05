@@ -46,6 +46,9 @@ allow = [
 ]
 
 [sources]
-# 只允许 crates.io 与系统注册表来源，禁止未知 git 依赖。
+# 只允许 crates.io 与系统注册表来源；Git 仅放行下方固定修复源。
 unknown-registry = "deny"
 unknown-git = "deny"
+# Tao Windows 输入重入修复固定官方提交，禁止分支或标签漂移；移除 patch 时同步删去白名单。
+required-git-spec = "rev"
+allow-git = ["https://github.com/tauri-apps/tao"]
