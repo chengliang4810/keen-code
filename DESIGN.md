@@ -1,249 +1,565 @@
-# KeenCode 设计系统
-
-面向编码 Agent 的 UI 设计规范。在本仓库生成或修改任何界面前，先遵守本文件，不要自创视觉规则。
-
-本文件的结构与规范写法参考 ZCode 设计规范（Apache-2.0，经授权作为视觉基线），全部令牌、规则与门禁以本仓库当前实现为准；实现与本文不一致时，以代码和门禁结果为准，并提请修正本文。主题与 Harness 来源细节见 `docs/frontend-harness-theme.md`。
-
-## 最高优先级约束
-
-以下三条由门禁强制执行（`pnpm run check:design-system`、`pnpm run lint:css`，均包含在 `pnpm test` 中），违反任何一条都视为设计系统缺陷，不是风格偏好：
-
-1. **界面字号唯一输入是 `--ui-font-size`**
-   - 界面文字尺寸只能消费 `--text-xs / --text-sm / --text-md / --text-lg / --text-xl`（由 `--ui-font-delta` 派生），或 Tailwind 侧唯一映射 `text-ui-base`（= `--text-md`）。
-   - TSX 中禁止使用 Tailwind 内置字号类（`text-base`、`text-sm`、`text-xs`、`text-lg`）和任意值字号（`text-[13px]`）；更小字号在对应 `styles/app-*.css` 中用 `var(--text-*)` 表达。
-   - 调整界面字号只更新 `--ui-font-size`，绝不修改 `html` 或 `document.documentElement.style.fontSize`；图标、间距、圆角等几何不随字号缩放。
-   - 代码预览、终端等内容的独立字号设置是唯一的内容级例外，其周边控件、标签、头部仍走本刻度。
-2. **颜色只用语义令牌**
-   - 禁止 hex、rgba/hsl 字面量和 hue 类工具类（`bg-gray-100`、`text-slate-600`）；调色板按角色组织，不按色相组织。
-   - 确需新颜色时，先在 `apps/ui/src/styles/tokens.css` 或 `ui-governance.css` 定义令牌，再消费令牌。
-   - 禁止用中性 alpha 叠加（`text-white/60`、`border-black/10`）替代令牌。
-3. **圆角只用 `var(--radius-*)`**
-   - stylelint 规定 `border-radius` 仅允许 `var()`、`0`、`%`；不引入新的 px 圆角字面量，也不用语义不明的裸 `rounded`。
-
-另有一条配套约束：业务代码不写 inline style，动态视觉值通过 CSS 自定义属性传递（design-system-gate DSG003）。
-
-## 产品气质
-
-KeenCode 是本地优先的桌面 AI 编码工具。界面应当沉静、紧凑、操作性强，而非装饰性。
-
-设计目标：
-
-- 长会话、高信息密度下的可读聊天与工具输出
-- 键盘驱动的工作流
-- Tauri 桌面（Windows、macOS、Linux）为验收目标；浏览器 dev server 只用于前端开发
-- light / dark / system 三种主题偏好，默认 dark
-- 国际化（zh、zh-TW、en），容忍文本长度变化
-
-避免：
-
-- 营销式大间距与松散留白
-- 渐变作为默认 UI 语言
-- 大面积品牌色整面填充
-- 背景、卡片、浮层表面层级含混
-
-## 令牌体系分层
-
-令牌集中在 `apps/ui/src/styles/`，四层结构，依赖方向自上而下：
-
-| 层 | 文件 | 内容与规则 |
-| --- | --- | --- |
-| Harness 底座 | `styles/harness/`（base、design-platform、gradient-shadow-text） | `--dsw-*`、`--ds-*` 平台变量，MIT 第三方固定提交。业务代码不直接引用，只经下层别名消费 |
-| Appica 角色层 | `styles/ui-governance.css` | 无前缀 Appica 角色：`--foreground*`、`--background*`、`--border*`、`--primary*`、`--secondary*`、`--error/success/warning/info` 及其 `-subtle/-soft/-muted/-strong/-emphasis/-intense` 变体、`--focus-ring*`、`--tooltip*`，按 `[data-theme="light"]` 与 `[data-theme="dark"]` 双主题给出。对 Appica 组件是唯一权威 |
-| 产品语义别名 | `styles/tokens.css` | `--bg-*`、`--text-*`、`--border-*`、主操作与强调色、几何/字体/动效/布局度量、功能色板。业务样式主要消费层 |
-| 皮肤层 | `styles/theme-colors.css` | `html[data-base-color]`（gray/slate/zinc/neutral/stone）、`html[data-primary-color]`（base/品牌预设/custom）与 `html[data-secondary-color]`（品牌预设/custom）分别控制基础色、主色和次色；默认组合为 gray/base/blue，自定义主色和次色存为规范化六位 hex |
-
-规则：
-
-- 业务样式优先消费产品语义别名；在 Appica 组件定制上下文中使用 Appica 角色层；两层都不要下沉到 `--dsw-*`。
-- `--primary` / `--primary-hover` / `--primary-fg`（主操作，黑白对比体系）与 `--accent` / `--accent-hover` / `--accent-muted` / `--accent-fg`（链接与蓝色强调）是两个语义，不可混用。
-- 状态色 `--danger`、`--danger-muted`、`--success`、`--warning`、`--info` 只用于真实语义状态，不做装饰性增强。
-
-### 产品语义别名速查
-
-- 表面：`--bg-app`（应用底）、`--bg-main`（主工作区）、`--bg-sidebar`（侧栏）、`--bg-elevated`（抬升容器）、`--bg-card`（卡片）、`--bg-input`（输入域）、`--bg-code`（代码底）、`--bg-user-bubble`（用户消息气泡）、`--bg-overlay`（浮层）、`--bg-hover`、`--bg-active`
-- 边框：`--border-subtle`（默认分隔）、`--border-popover`（浮层边框）、`--border-focus`（聚焦边框）
-- 文字：`--text-primary`（主阅读文字）、`--text-secondary`（元数据与说明）、`--text-tertiary`（占位与弱提示）、`--text-caption`（说明性小字）、`--text-inverse`（深色/品牌/状态填充上的文字）
-- 功能色板：`--change-*`（Git 变更视图）、`--kind-*`、`--dir-accent`、`--find-*`（页内搜索高亮）、`--analytics-model-1..8`（模型图表八色）、`--terminal-*`（xterm 运行时读取）、`--effort-*`
-
-### 颜色使用规则
-
-- 页面根用 `--bg-app` / `--bg-main`；侧栏用 `--bg-sidebar`；标准内容卡用 `--bg-card`；浮层用 `--bg-elevated` / `--bg-overlay` 配 `--border-popover`。
-- 通用 hover 用 `--bg-hover`，激活/选中用 `--bg-active`。
-- 优先用文字层级（`--text-primary` → `--text-secondary` → `--text-tertiary`）制造信息密度，而不是先加边框和颜色。
-- 主按钮用 `--primary` + `--primary-fg`；链接与蓝色图标强调用 `--accent` 系。
-- Git 变更、搜索高亮、终端、模型图表等场景使用各自专用色板，不借用通用状态色。
-- 品牌/主色使用克制而有意图；不用品牌色做整页背景。
-- 不要在没有明确分层理由时混用 `--bg-app`、`--bg-card`、`--bg-elevated`。
-
-## 主题模式
-
-- 用户可选 System / Light / Dark，默认 dark（新装即暗色体验）。
-- 权威状态在 `@appica/ui-react` 的 ThemeProvider（`apps/ui/src/main.tsx`，storageKey `keencode.theme`）；dark 同时落在 `<html>` 的 `.dark` class 与 `data-theme` 属性上。
-- 首绘前应用主题防闪：`index.html` 预置 `data-theme="dark"`，`main.tsx` 在渲染前同步。
-- Tauri / macOS 原生窗口外观随主题同步（`apps/ui/src/lib/theme.ts` 的 `applyNativeWindowTheme`）。
-- 皮肤偏好持久化在 localStorage（`keencode.base-color`、`keencode.primary-color`、`keencode.secondary-color`、`keencode.uiFontSize`）。
-- 每个可见改动都必须在 light 与 dark 下验证；涉及主色/基础色选择的界面抽验不同皮肤组合。
-
-## 字体排印
-
-### 字族
-
-- **UI Sans**：`--font-sans`（系统栈 + PingFang SC / Microsoft YaHei 中文 fallback），承载几乎所有界面文字；UI 默认字重 `--font-ui-weight: 430`。
-- **UI Mono**：`--font-mono`（ui-monospace、SFMono-Regular、Menlo、Consolas + 中文 fallback），用于路径、命令、代码、标识符、快捷键、commit 哈希、模型 ID 和终端类数据。聊天作用域另有 `--chat-mono`（`lobe-chat.css` 内定义，同样映射应用字族）。
-
-### UI 字号刻度
-
-`--ui-font-size` 默认 `14px`（设置项范围 12–20px），`--ui-font-delta = --ui-font-size - 14px`：
-
-| 令牌 | 公式 | 默认值 |
-| --- | --- | ---: |
-| `--text-xs` | `12px + delta` | 12px |
-| `--text-sm` | `13px + delta` | 13px |
-| `--text-md` | `14px + delta` | 14px |
-| `--text-lg` | `16px + delta` | 16px |
-| `--text-xl` | `28px + delta` | 28px |
-
-- TSX 中使用 Tailwind 映射 `text-ui-base`（等于 `--text-md`，含行高）；其余档位在 CSS 中用 `var(--text-*)` 消费。
-- 行高令牌：`--leading-tight 1.25`、`--leading-normal 1.5`。
-- Markdown 正文与回合统计等内容字号跟随 `--dsh-content-font-size`，后者同样派生自 `--ui-font-size`。
-- 小于 680px 视口下输入控件强制不小于 16px，防止 iOS 聚焦缩放（`ui-governance.css` 已全局处理）。
-
-### 类型角色
-
-按内容角色选择令牌，而不是按孤立视觉偏好：
-
-| 令牌 | 主要角色 |
-| --- | --- |
-| `--text-xl` | 欢迎页、空态等一级阅读标题（28px 为庆典级，日常界面不用） |
-| `--text-lg` | 二级标题、区块标题 |
-| `--text-md` | 正文、常规按钮、工作区与分区标题等主要 UI 文字 |
-| `--text-sm` | 次要说明、辅助信息、帮助文字、Markdown 行内代码 |
-| `--text-xs` | 徽标、计数器、快捷键标签、极弱元数据 |
-
-- 字号层级与颜色层级是独立决策：次要文字配 `--text-secondary`，弱元数据配 `--text-tertiary`。
-- 标题与标签可以加重字重，但不为此改变语义字号档位。
-- 尊重 i18n 膨胀：布局不得只对短中文/英文标签成立，不得把截断当作组件在翻译下存活的唯一手段。
-- 等宽字体只用于内容本身技术性的地方。
-
-## 间距
-
-- 语义间距档 `--space-1..5` = 4 / 8 / 12 / 16 / 20px；其余用 Tailwind spacing 工具类，不另造间距令牌。
-- 基础节奏是 4px；密集操作 UI 默认保持紧凑。
-- flex 文本布局中需要截断或收缩的位置加 `min-w-0`；嵌套滚动或分栏中需要允许滚动的位置加 `min-h-0`。
-- 内容容器优先 `w-full + max-w-*`（阅读列宽 `--content-max-width: 920px`）；固定宽度只用于菜单、浮层、对话框和稳定侧栏。
-
-## 圆角
-
-阶梯令牌：`--radius-2xs 2.5px`、`--radius-xs 5px`、`--radius-sm 7.5px`、`--radius-md 10px`、`--radius-lg 12.5px`、`--radius-full`。
-
-专用令牌：`--radius-window` / `--radius-composer`（16px）、`--menu-radius`（20px）、`--modal-radius`（15px）、`--radius-settings`（30px）、`--radius-stat`（28px）、平台工作区 `--radius-workspace-win/mac/other`。
-
-规则：
-
-- 圆角一律来自 `var(--radius-*)`；需要新专用圆角时先在 `tokens.css` 定义令牌并注明用途。
-- 嵌套的可见圆角容器就近降一档；同层同级容器使用同档圆角；布局区域、普通包装层和分隔线不计入圆角层级。
-- `--radius-full` 只用于明确的胶囊形或圆形，按钮、标签、计数器、图标按钮不因组件类型自动获得。
-- 拼接为连续形状的相邻表面可以用 `0` 或单侧清除圆角。
-
-## 尺寸
-
-- 布局度量令牌：`--sidebar-width 264px`、`--aside-width 360px`、`--content-max-width 920px`、`--titlebar-height 48px`、`--control-height 36px`。
-- 触控目标（移动端）：`--ui-touch-target` 32 / 44 / 56px。
-- 控件高度优先复用 Appica 尺寸变体；Appica 组件的 `size` 必须显式传值且使用官方变体，默认 `md`（DSG005）。
-- 避免为普通业务 UI 引入任意 `w-[...]`、`h-[...]`。
-
-## 阴影与层级
-
-- 克制用影：`--shadow-composer`（输入区）、`--shadow-composer-context`、`--glass-shadow`（玻璃浮层）、`--shadow-pop`（弹出强调）。
-- 优先用背景对比、边框和圆角分层，其次才靠阴影；浮层（菜单、弹窗）可用 `--shadow-pop`，但仍保持紧凑可控。
-- 背景分层通常比阴影强度更重要。
-
-## 动效
-
-- 时长令牌：`--motion-fast 150ms`、`--motion-enter 200ms`；缓动 `--ease-out`、`--ease-in-out`。
-- 动效快速、低调，用于澄清状态变化，不装饰屏幕；避免长、弹跳、玩闹的动画出现在主工作区。
-- `prefers-reduced-motion` 下全局过渡归零；新增动效不得绕过该兜底。
-
-## 组件
-
-### 组件来源与门禁
-
-- 可见交互控件一律来自 `@appica/ui-react`（子路径逐组件 import，如 `import { Button } from '@appica/ui-react/button'`）或 `apps/ui/src/components/ui/` 下的产品化包装；业务代码禁止新增原生 `button`、`input`、`textarea`、`select`、`dialog`（DSG001）。
-- 豁免仅限：浏览器要求的隐藏控件（如 `components/host/MobileRemoteShell.tsx` 的隐藏 file input）、`contenteditable` 与媒体等无等价组件的宿主；豁免必须在代码注释中说明原因，不另建可见控件样式。
-- `components/ui/` 包装层的职责是锁定产品约定（如 `card.tsx` 锁定 `border-border bg-card text-foreground` 表面、`textarea.tsx` 强制 `inputSize="md"` + `text-ui-base`）；新增包装前先确认没有等价物，缺失时先查 Appica 文档再组合。
-- 图标只用 Tabler Icons，统一经 `components/icons.tsx` 的 `Icon*` 再导出。
-- 合并类名用 `cn()`（`apps/ui/src/lib/utils.ts`，clsx + tailwind-merge）。
-
-### 按钮规则
-
-- 复用 Appica Button 既有变体与尺寸；icon-only 按钮保持方形。
-- 不把每个操作都升为主操作；每个面板内保持清晰的动作层级。
-- React 19 下 `ref` 是普通 prop，不写 `forwardRef`。
-
-### 输入
-
-- 默认 `--bg-input` 表面、`--border-subtle` 边框；聚焦用 `--border-focus` 与 `--focus-ring*`。
-- 输入应安静集成，不默认发光；错误态只用于真实校验问题；不把普通输入样式做成卡片。
-- 复合输入外壳（如主输入区）按容器层级处理，表面与阴影走专用令牌。
-
-### 菜单、浮层、对话框
-
-- 浮层表面用 `--bg-elevated` / `--bg-overlay`，配 `--border-popover` 与 `--shadow-pop`。
-- 菜单行紧凑、高可扫读：行 hover 用 `--bg-hover`，不做整行边框或强填充；选中项优先勾选/单选指示，不做强整行选中底色。
-- 禁止把菜单做成卡片，也不用 `--bg-card` 充当普通菜单内容。
-- 禁用项保持布局与层级，通常只降文字颜色。
-- 浮层精确紧凑，避免松散的大 popover；浮层与触发器保持小而一致的偏移。
-
-### 标签页与选中态
-
-- 未激活标签保持中性；激活用更强的表面对比，不做品牌色填充块。
-- 列表行或标签的选中用 `--bg-active`，hover 用 `--bg-hover`。
-
-## 聊天与开发者 UI
-
-会话渲染主区在 `apps/ui/src/components/lobe-chat/`（`ConversationThread.tsx` 拥有消息渲染、活动时间线与滚动）：
-
-- 用户消息用气泡底 `--chat-bubble`（映射 `--bg-user-bubble`）；助手消息与工具时间线不用气泡底。
-- Markdown 栈为 streamdown + CJK 插件 + KaTeX + mermaid + Shiki；聊天作用域视觉变量集中在 `lobe-chat/lobe-chat.css`，全部映射回应用令牌（`--chat-text` → `--text-primary`、`--chat-code-bg` → `--bg-code` 等）。禁止在聊天作用域引入独立色值或第二套字号体系。
-- 代码块行级高亮用 Shiki，默认不显示文件名与行号；代码、命令、路径、哈希一律等宽。
-- 工具步骤按流序内联渲染；失败用安静的红标（`--danger` 系），不弹强警告块。
-- Git 变更视图用 `--change-*` 专用色板；xterm 终端配色运行时读取 `--terminal-*`。
-- 密集操作面板优先于营销卡片式排版。
-
-## 布局与响应式
-
-- 壳层是 `App.tsx` 的 `.app-shell.platform-* > .workbench`，sidebar / main / aside 三栏；结构类名样式集中在 `styles/app-*.css`，采用 BEM 风格（如 `.composer__row`）。布局框架不计入内容圆角层级。
-- 小于 760px 视口侧栏抽屉化、单列呈现；核心操作在所有断点保留。
-- 断点只用于布局、宽度、可见度和密度变化，不改变组件语义；优先改 `max-width`、`grid`、`flex` 和可见性，而不是更换组件形态。
-
-## 可访问性与国际化
-
-- 键盘导航是一等交互路径；焦点样式走 `--focus-ring*` 既有模式，不新造焦点表现。
-- 状态表达配合可读文字，不只靠颜色区分。
-- light 与 dark 下对比度保持安全；forced-colors 适配有全局兜底，新控件不得绕过。
-- 文案经 `apps/ui/src/i18n`（zh、zh-TW、en，en 为键权威）；删除调用点时同步删除三种语言的键。
-- 有文字标签更实用时，避免纯图标表达含义。
-
-## 实施指引
-
-- 先复用语义令牌与既有组件，再考虑新增。
-- 出现新 UI 需求时，先判断它属于结构、表面、交互还是状态，再据此选令牌。
-- 样式改动必须跑 `pnpm run lint:css` 与 `pnpm run check:design-system`；Appica 新组件使用前先取 `https://appica.dev/llms.txt` 索引并读 `<url>.md` 文档。
-- 拿不准时，选择更安静的 UI 和更强的信息层级。
+# KeenCode Design System
+
+Portable design system for AI-assisted UI work in this repository.
+
+This specification is adapted from the ZCode 3.14.3 source baseline at
+`29628c9acdb81b703bbd4080c207a0e7ce5e276e`. The copied component DOM, CSS
+tokens, typography scale, themes, and locale shape remain the reference. The
+product boundary below records the parts that KeenCode deliberately keeps out
+of the target UI.
+
+This file is meant for coding agents. When generating or editing UI in this repo, follow this file before inventing new visual rules.
+
+## KeenCode Source Boundary
+
+- Product UI source is rooted at `packages/ui/src/`. `apps/ui/` owns the
+  Tauri platform adapter, build entry, and source-contract tests; it does
+  not contain a second set of business views. New UI components use the package path.
+- Shared UI primitives live in `packages/ui/src/components/ui/` and the
+  copied AI display primitives live in `packages/ui/src/components/ai-elements/`.
+- The authoritative token stylesheet is `packages/ui/src/styles.css`. It
+  defines the `--color-*`, `--ui-font-size`, radius, and motion roles used by
+  the original component CSS. Do not introduce a second token vocabulary.
+- Locale entry points follow the copied source shape under
+  `packages/ui/src/i18n/`, with `en-US` as the key shape and `zh-CN` as the
+  shipped Chinese locale. UI strings may be translated; protocol values,
+  IDs, file paths, and user content are not translated.
+- The target keeps the local workspace and conversation UI. Official-account,
+  payment, cloud, bots, SSH, WSL, Docker, and browser-computer-use surfaces
+  are outside this product boundary and must not be reintroduced through UI
+  routes, locales, or design tokens.
+- This file defines visual rules only. The Rust host owns session truth and the
+  frontend renders a disposable projection; protocol and workflow contracts
+  are documented in `docs/protocols/`.
+
+## Highest-priority UI constraint
+
+The dedicated `text-ui-*` scale is a mandatory repository-wide constraint for application interface typography:
+
+- UI components must use `text-ui-xl`, `text-ui-lg`, `text-ui-base`, `text-ui-caption`, `text-ui-sm`, or `text-ui-xs`.
+- Do not introduce Tailwind's built-in `text-base`, `text-sm`, or `text-xs` for application UI.
+- Do not introduce arbitrary UI font sizes such as `text-[13px]` or inline `font-size` values.
+- The only content-level exceptions are code, Diff, and terminal rendering that consume their independent numeric font-size settings. Their surrounding controls, labels, headers, and metadata must still use `text-ui-*`.
+- Mobile Web editable inputs that must prevent iOS focus zoom use the fixed `text-mobile-input-safe` compatibility token (16px). Do not use it as a general UI hierarchy token.
+- Never implement interface font scaling by changing `html` or `document.documentElement.style.fontSize`; update only `--ui-font-size`.
+
+Treat violations of this section as design-system defects, not stylistic preferences.
+
+## Product Character
+
+ZCode is a desktop-first and web-compatible AI workspace. The interface should feel calm, dense, and operational rather than decorative.
+
+Design for:
+
+- long sessions
+- high information density
+- readable chat and tool output
+- keyboard-driven workflows
+- desktop and web parity
+- macOS, Windows, and Linux compatibility
+- internationalization and variable text length
+- light and dark themes, plus Zai variants already supported by the codebase
+
+Avoid:
+
+- oversized marketing-style spacing
+- playful gradients as the default UI language
+- bright full-surface brand fills
+- ambiguous hierarchy between background, card, and popover surfaces
+
+## Theme Modes
+
+User-facing theme choices are:
+
+- System
+- Light Theme, backed by Zai Light
+- Dark Theme, backed by Zai Dark
+
+Default light and dark CSS variables still exist as fallback foundations, but new UI should be validated against Zai Light and Zai Dark as the active light/dark experiences.
+
+## Color Palette
+
+### Core semantic colors
+
+- **Brand**: `--color-brand`
+  Use for key emphasis, important links, active indicators, and brand-accented actions. Never use as a full-page background.
+- **Icon Blue**: `--color-icon-blue`
+  Use for browser-style links and blue icon emphasis that follows the Figma `icon/blue` role. Keep file-type icons on their own descriptor colors.
+- **Accent Surface**: `--color-accent`
+  Use for weak emphasis blocks, selected highlights, and low-intensity branded surfaces.
+- **Background**: `--color-background`
+  Default page and app workspace background.
+- **Background Alt**: `--color-background-alt`
+  Alternate page region background when the layout needs a soft separation.
+- **Header / Panel / Sidebar**: `--color-header`, `--color-panel`, `--color-sidebar`
+  Structural layout surfaces only. Do not reuse as generic card colors.
+- **Surface**: `--color-surface`
+  Low-elevation container surface.
+- **Surface Hover**: `--color-surface-hover`
+  Hover state for low-elevation surfaces.
+- **Card**: `--color-card`
+  Standard content card background.
+- **Card Selected**: `--color-card-selected`
+  Selected or active card background.
+- **Popover**: `--color-popover`
+  Dialog, popover, and floating panel background.
+- **Menu**: `--color-menu`
+  Dropdown and menu surface.
+- **Menu Hover**: `--color-menu-hover`
+  Hover state for menu items.
+- **Input**: `--color-input`
+  Default editable field background.
+- **Input Focused**: `--color-input-focused`
+  Focused editable field background.
+
+### Text colors
+
+- **Text Primary**: `--color-foreground`
+  Main reading text.
+- **Text Secondary**: `--color-foreground-subtle`
+  Metadata, descriptions, supporting labels.
+- **Text Tertiary**: `--color-foreground-subtlest`
+  Placeholders, weak hints, disabled-adjacent copy.
+- **Text Inverse**: `--color-foreground-inverse`
+  Text on dark, branded, or state-colored fills.
+
+### Border colors
+
+- **Border**: `--color-border`
+  Default border and separator.
+- **Border Hover**: `--color-border-hover`
+  Hovered border state.
+- **Card Border**: `--color-card-border`
+- **Popover Border**: `--color-popover-border`
+- **Input Border**: `--color-input-border`
+- **Input Border Hover**: `--color-input-border-hover`
+- **Input Border Focused**: `--color-input-border-focused`
+
+### Semantic feedback colors
+
+- **Success**: `--color-success` with `--color-success-foreground`
+- **Warning**: `--color-warning` with `--color-warning-foreground`
+- **Destructive**: `--color-destructive` with `--color-destructive-foreground`
+- **Idle-time task**: `--color-idle-task` with `--color-idle-task-surface`
+  Use only for idle-time queue and paused tags so they remain visually distinct
+  from the green scheduled-task treatment.
+- **Diff Added**: `--color-diff-added` with `--color-diff-added-foreground`
+- **Diff Removed**: `--color-diff-removed` with `--color-diff-removed-foreground`
+
+Use semantic colors only for actual semantic states. Do not borrow success, warning, or destructive colors just to make a block feel louder.
+
+### Blocking interaction colors
+
+- **Ask Interaction**: `--color-interaction-ask-surface`, `--color-interaction-ask-foreground`, `--color-interaction-ask-fill`
+  Legacy compatibility tokens for `AskUserQuestion`; waiting badges no longer use a separate blue treatment.
+- **Confirmation Interaction**: `--color-interaction-confirmation-surface`, `--color-interaction-confirmation-foreground`
+  Use for all waiting badges, including `AskUserQuestion`, permission, and `ExitPlanMode`.
+
+Waiting badges use one green confirmation treatment so identical waiting copy does not appear as different states. Do not substitute `--color-success` for a waiting confirmation.
+
+### Workflow timeline colors
+
+The dynamic-workflow timeline draws with a feature-scoped token family:
+
+- **Rule**: `--color-workflow-rule`
+  Sub-hairline for repeated furniture. Weaker than `--color-border`; do not use it as a
+  general separator.
+- **Trace / Trace Strong**: `--color-workflow-trace`, `--color-workflow-trace-strong`
+  Rail and arc stroke ramp: not yet taken vs control has passed. The marching segment
+  overlays `--color-warning` dashes; there is no third stroke colour.
+- Station lamps and agent pills use the semantic status colours (`--color-success`,
+  `--color-warning` for running, `--color-destructive`); agent avatars use the fixed nine-color HEX palette,
+  assigned by instance index (name hash fallback), and never encode status.
+- A compile-feedback row (a script that did not compile, so nothing ran) uses a hollow lamp:
+  `--color-warning` while it is the latest draft, `--color-foreground-subtlest` once a newer
+  draft exists. Never `--color-destructive`, which on this feature belongs to a run that errored.
+
+### Overlay and utility colors
+
+- **Toast**: `--color-toast`
+- **Tooltip**: `--color-tooltip`
+- **Tooltip Text**: `--color-tooltip-foreground`
+- **Tooltip Tag**: `--color-tooltip-tag`
+- **Tooltip Tag Text**: `--color-tooltip-tag-foreground`
+- **Tag**: `--color-tag`
+- **Find Highlight**: `--color-find-highlight`, `--color-find-highlight-active`
+  Use only for in-page/text search result highlights. The base token marks all matches; the active token marks the currently selected match.
+- **Hover**: `--color-hover`
+- **Selected**: `--color-selected`
+- **Primary**: `--color-primary`
+- **Primary Foreground**: `--color-primary-foreground`
+- **Secondary**: `--color-secondary`
+
+## Color Usage Rules
+
+- Use semantic tokens, not raw one-off color values.
+- Prefer `bg-background + text-foreground` for page roots.
+- Prefer `bg-card` or `bg-surface` for normal content containers.
+- Prefer `bg-popover` or `bg-menu` for overlays; pair with `border-popover-border` or `border-border`.
+- Prefer `bg-hover` for generic hover and `bg-selected` for selection.
+- Prefer `bg-primary text-primary-foreground` for the default primary button.
+- Prefer text hierarchy to create information density before adding more borders or colors.
+- Keep brand color usage sparse and intentional.
+- Never mix `bg-background`, `bg-card`, and `bg-surface` without a clear layering reason.
+- Never replace semantic tokens with ad hoc values like `text-white/60`, `border-white/10`, or arbitrary neutral alpha fills.
+
+- `DesktopWindowFrame` uses `bg-background-alt` on macOS desktop. Windows, Linux, and Web keep `bg-background-win-alt`; child surface colors remain independent.
+- Linux desktop uses a `16px` outer window-shell radius around the `12px` workspace panels and their `4px` outer inset. Keep the shell radius and compositor clip path equal; maximized windows use `0px`.
+
+## Typography
+
+### Font families
+
+- **UI Sans**: use the app's default `font-sans` stack for almost all interface text.
+- **UI Mono**: use `font-mono` for paths, commands, code, identifiers, shortcuts, commit hashes, model IDs, and terminal-like data.
+
+### UI font tokens
+
+All interface typography must use the dedicated `text-ui-*` scale. The Appearance setting controls `--ui-font-size`, whose default is `14px`:
+
+| Token             | Formula                | Default |
+| ----------------- | ---------------------- | ------: |
+| `text-ui-xl`      | `--ui-font-size + 4px` |    18px |
+| `text-ui-lg`      | `--ui-font-size + 2px` |    16px |
+| `text-ui-base`    | `--ui-font-size`       |    14px |
+| `text-ui-caption` | `--ui-font-size - 1px` |    13px |
+| `text-ui-sm`      | `--ui-font-size - 2px` |    12px |
+| `text-ui-xs`      | `--ui-font-size - 4px` |    10px |
+| `text-ui-2xs`     | `--ui-font-size - 5px` |     9px |
+
+`text-ui-2xs` is a restricted exception below the `text-ui-xs` floor: it is permitted
+only for graph **axis furniture** — timebase tick labels, channel codes, and unit
+suffixes in the workflow timeline — never for content, labels, or metadata.
+Treat any other use as a design-system defect.
+
+`text-mobile-input-safe` is a fixed 16px platform-compatibility token. It is
+reserved for editable controls on mobile Web surfaces where iOS focus zoom must
+be prevented, and therefore does not scale with `--ui-font-size`.
+
+- Changing the interface font size updates only `--ui-font-size`; never mutate the root `html` font size.
+- Icons, spacing, radii, and other `rem`-based geometry must not scale with the interface font setting.
+- Code, Diff, and terminal content retain their independent font-size settings; only their surrounding interface controls use `text-ui-*`.
+- Mobile Web inputs that require the iOS 16px focus-zoom floor use `text-mobile-input-safe`.
+
+### Type roles
+
+The `text-ui-*` scale expresses stable semantic roles. Choose a token by content role rather than by isolated visual preference:
+
+| Token             | Primary roles                                                                                                |
+| ----------------- | ------------------------------------------------------------------------------------------------------------ |
+| `text-ui-xl`      | Markdown `h1` and equivalent first-level reading headings                                                    |
+| `text-ui-lg`      | Markdown `h2` and equivalent second-level reading headings                                                   |
+| `text-ui-base`    | Markdown `h3`-`h6`, body copy, common buttons, workspace and section titles, and other primary UI text       |
+| `text-ui-caption` | Compact supporting copy that must remain one step below body text, such as the New Task feature announcement |
+| `text-ui-sm`      | Secondary copy, supporting information, helper text, Tooltip copy, and Markdown inline code                  |
+| `text-ui-xs`      | Tooltip keyboard shortcuts, badges, compact labels, counters, and very weak metadata                         |
+
+- Markdown `h3`-`h6` share `text-ui-base`; distinguish their hierarchy through weight: `h3`-`h4` use `font-semibold`, `h5` uses `font-medium`, and `h6` uses `font-normal`.
+- Body copy and common controls normally use `text-ui-base font-normal`; titles and labels may strengthen weight without changing their semantic size role.
+- Pair secondary copy with an appropriate semantic color, usually `text-foreground-subtle`. Pair weak metadata with `text-foreground-subtlest`. Font size and color hierarchy are independent decisions.
+- **Tooltip**: titles, plain descriptions, and log content use `text-ui-sm`; keyboard shortcut labels use `text-ui-xs`. Rich content such as Markdown release notes keeps its content typography hierarchy instead of flattening headings and links to the Tooltip copy size.
+- **Code / Command / Path**: use `font-mono`, usually with `text-ui-base`; Markdown inline code uses `text-ui-sm`.
+- When migrating a legacy explicit `13px` UI size without a deliberate compact-caption role, use `text-ui-base`. Use `text-ui-caption` only where the product explicitly requires a stable one-step-below-body caption treatment. Do not collapse either into `text-ui-xs`; `text-ui-xs` is reserved for badge-scale and very weak metadata roles.
+
+### Markdown type scale
+
+Markdown rendered through the shared assistant response uses a reading-oriented hierarchy while the surrounding operational UI remains compact:
+
+- **User and assistant message containers**: `text-ui-base`
+- **Body**: `text-ui-base`
+- **Links**: `text-ui-base`
+- **Inline code**: `font-mono text-ui-sm`
+- **Code block body**: default `14px`, configurable through code preview settings
+- **Code block header**: `text-ui-base`
+- **Tables**: `text-ui-base`
+- **h1**: `text-ui-xl`
+- **h2**: `text-ui-lg`
+- **h3**: `text-ui-base`
+- **h4**: `text-ui-base`
+- **h5**: `text-ui-base`
+- **h6**: `text-ui-base`
+
+### Typography rules
+
+- Keep UI text compact and readable.
+- Prefer `font-medium` for headings and labels; avoid heavy weights unless there is a strong reason.
+- Use monospace only where the content is inherently technical.
+- Use `text-ui-base` as the default compact app text size. Keep `text-ui-base` for workspace titles and stronger title treatments.
+- Respect i18n expansion. Do not hard-code layouts that only work for short English labels.
+- Do not depend on tight truncation as the only way a component survives translation.
+
+## Spacing
+
+Base spacing unit is `4px`.
+
+Recommended rhythm:
+
+- `4px`: tight icon/text spacing
+- `8px`: compact control padding and inline gaps
+- `12px`: dense list items and menu rows
+- `16px`: standard card and panel padding
+- `20px` to `24px`: larger sections or dialog interiors
+
+Spacing rules:
+
+- Keep dense operational UI compact by default.
+- Prefer a small set of repeated gaps and paddings instead of arbitrary values.
+- In flex layouts with text, add `min-w-0` where truncation or shrink is required.
+- In nested scroll or split-panel layouts, add `min-h-0` where scrolling must be allowed.
+- Prefer `w-full + max-w-*` over hard-coded widths when possible.
+
+## Radius
+
+Radius follows the nesting of visible rounded containers, not component importance or layout depth. These rules are the target specification; existing component defaults may still need migration.
+
+### Container hierarchy
+
+- Layout regions, ordinary wrappers, groups, and separators do not count as radius levels.
+- The first rounded container starts at `rounded-xl`, whether inside or outside a layout region.
+- Nested rounded containers step down through `rounded-lg` → `rounded-md` → `rounded-sm`; `rounded-sm` is the minimum.
+- Count the nearest actual rounded container, not intermediate DOM wrappers. Peer containers at the same level use the same radius.
+- Cards, chat bubbles, tool blocks, and ordinary composite input shells follow this hierarchy; size or importance alone does not justify `rounded-2xl`.
+
+### Approved 2xl exceptions
+
+The following explicit exceptions may retain `rounded-2xl`; do not extend them to other components based only on size or importance:
+
+- **Main chat input shell**: the actual `ChatPromptEditor` input shell may use `rounded-2xl`. Its drag overlay matches the shell because it covers the same surface, rather than introducing a nested container.
+- **Conversation status floating panel**: the shared shell may retain `rounded-2xl` across collapsed and expanded presentations.
+- **Toast**: the independent notification shell may retain `rounded-2xl`.
+- **Brand icon backplates**: welcome-screen brand art and plugin-detail icons may retain `rounded-2xl` as part of their icon shape. This is not a general exception for icon buttons or content cards.
+
+The main composer region, including its context-header layout wrapper, is layout and does not count as a radius level. Its existing decorative radius does not force the actual input shell down a level. This classification alone does not prescribe changing the layout wrapper's decorative radius.
+
+These exceptions do not automatically grant `2xl` to nested controls or content containers. Basic controls still use the table below. Dialog shells follow their separate rules.
+
+### Basic controls
+
+Buttons, menu trigger buttons, ordinary Input, Textarea, and Select triggers default to `rounded-lg`. Adjust them according to the nearest rounded parent container:
+
+| Nearest rounded parent          | Control radius |
+| ------------------------------- | -------------- |
+| None, or `rounded-xl` and above | `rounded-lg`   |
+| `rounded-lg`                    | `rounded-md`   |
+| `rounded-md` / `rounded-sm`     | `rounded-sm`   |
+
+Control size and primary/secondary action emphasis do not independently change radius.
+
+### Dialogs
+
+- Dialog shells, including alert and confirmation dialogs, use `rounded-2xl`.
+- Only chat attachment preview, feedback screenshot preview, and CUA screenshot preview dialogs keep `rounded-xl` shells.
+- The dialog shell does not count toward its content hierarchy. The first rounded content container starts again at `rounded-xl`, followed by `rounded-lg` → `rounded-md` → `rounded-sm`.
+- Basic controls inside dialogs follow the control table; a layout wrapper does not introduce an extra level.
+
+### Menus and selection overlays
+
+- Dropdown menus, context menus, Select expanded panels, and similar option/action overlays use `rounded-lg` shells. This includes the main input's `@` / `/` suggestion panel; it does not inherit the main-input exception.
+- Menu items and option hover/selected backgrounds use `rounded-md`.
+- Rounded containers or controls nested inside an option use `rounded-sm`.
+- Each submenu is an independent overlay: its shell restarts at `rounded-lg`, and its options use `rounded-md`.
+- Overlay radius does not inherit the trigger's parent hierarchy. Triggers themselves follow the basic-control table.
+- Other standalone popover containers follow the ordinary container hierarchy, starting at `rounded-xl`.
+
+### Shape exceptions and consistency
+
+- `rounded-full` is reserved exclusively for deliberate pill shapes or circles.
+- Buttons, tags, counters, and icon buttons do not qualify for `rounded-full` merely because of their component type.
+- Do not introduce arbitrary radius values or use the ambiguous bare `rounded` utility.
+- Use `rounded-none` or side-specific radius removal only where joined surfaces must form a continuous shape.
+- Apply the same rules on desktop and mobile Web, across platforms and themes.
+
+## Sizing
+
+### Common size baselines
+
+- **Icon sizes**: `size-3`, `size-3.5`, `size-4`, `size-5`, `size-6`
+- **Control heights**: `h-6`, `h-7`, `h-8`, `h-9`
+- **Square icon buttons**: `size-6`, `size-7`, `size-8`, `size-9`
+
+### Sizing rules
+
+- `size-4` is the default UI icon baseline.
+- Reuse existing button sizes instead of creating new height systems.
+- Prefer fluid widths for content containers.
+- Fixed widths are acceptable for menus, popovers, dialogs, and stable side panels.
+- Avoid arbitrary `w-[...]` and `h-[...]` for ordinary business UI.
+
+## Components
+
+### Buttons
+
+Preferred button system matches `packages/ui/src/components/ui/button.tsx`.
+
+- **Primary**: `bg-primary text-primary-foreground`
+- **Outline**: border-based, neutral surface, subtle hover
+- **Secondary**: `bg-secondary text-foreground`
+- **Ghost**: transparent until hover
+- **Destructive**: semantic destructive fill
+- **Link**: text-only with underline on hover
+
+Preferred sizes:
+
+- `xs`: very compact controls
+- `default`: most action buttons
+- `sm`: compact buttons in dense lists
+- `lg`: higher-emphasis buttons
+- `icon-*`: icon-only actions
+
+Button rules:
+
+- Use existing button variants first.
+- Keep icon-only buttons square.
+- Do not promote every action to primary.
+- Preserve a clear action hierarchy within each panel.
+
+### Inputs
+
+- Default to `bg-input border-input-border text-foreground`
+- Hover with `border-input-border-hover`
+- Focus with `border-input-border-focused` and `bg-input-focused`
+- Normal form fields default to `rounded-lg`, stepping down according to the nearest rounded parent in the Radius rules.
+- Ordinary composite input shells follow the container hierarchy, starting at `rounded-xl`; the main chat input shell is an approved `rounded-2xl` exception.
+
+Input rules:
+
+- Inputs should feel calm and integrated, not glowing by default.
+- Use semantic error state styling only for real validation problems.
+- Do not style ordinary inputs like cards.
+
+### Cards and Panels
+
+- Standard cards use `bg-card border-card-border`; radius follows the container hierarchy, starting at `rounded-xl`.
+- Low-emphasis containers use `bg-surface`
+- Selected cards may use `bg-card-selected`
+- Main content cards usually use `16px` horizontal padding and compact text
+
+Card rules:
+
+- Cards should clearly sit above the page background but below overlays.
+- Keep card surfaces quieter than overlays.
+- Avoid mixing multiple card background styles in the same view unless they encode real hierarchy.
+
+### Menus, Popovers, Dialogs
+
+- Menus use `bg-menu`, compact rows, `rounded-lg`, and `shadow-md`
+- Menus use `border border-popover-border` and typically `p-1`
+- Dropdown menus, context menus, and select popovers should share the same menu surface language
+- Adjacent option rows in dropdown menus, context menus, and select popovers use a fixed `2px` vertical gap (`gap-0.5`) at the shared option-stack layer
+- Popovers and dialogs use `bg-popover` and `border-popover-border`. Ordinary standalone popovers start at `rounded-xl`; dialogs use `rounded-2xl` except the three preview exceptions in the Radius rules.
+- Toasts use `bg-toast`, compact padding, and stronger shadow
+
+Overlay rules:
+
+- Floating UI should feel precise and compact.
+- Interactive overlays such as dropdown menus, context menus, selects, and popovers must render above passive tooltips when both are open. Tooltips must never cover options or controls in an active interactive overlay.
+- Dropdown menu surfaces must keep their overlay shadow from the first open frame through keyboard focus and pointer hover. Global focus-reset rules must not clear the menu shadow while the content root owns focus.
+- Keep menu rows dense and highly scannable.
+- Avoid giant popovers with loose spacing unless the task genuinely needs it.
+- Do not style menus like cards or reuse `bg-card` / `bg-surface` for ordinary menu content.
+- Menu items should read as compact action rows, not miniature buttons.
+- Prefer stable item baselines such as compact height, `rounded-md`, `px-2`, `gap-2`, and `text-ui-base`.
+- Use subtle hover states such as `bg-menu-hover`; avoid strong fills or per-row borders for normal menu items.
+- Disabled items should keep their layout and hierarchy, and usually only drop to a weaker text color.
+- Prefer weak separators and ordering to group actions; avoid building menus as stacked sub-cards.
+- Reuse the same action-list content across dropdown and context-menu entry points when the action set is the same.
+- For selected items, prefer checkmarks, radio indicators, or trailing state markers over strong full-row selection fills.
+- Composite triggers with a primary action and a chevron should use a segmented shell: main action on the left, menu reveal on the right.
+- Select triggers should continue to follow input-style semantics even when their expanded surface matches menu styling.
+- Standard dropdown menus should usually align to the trigger's leading edge unless the trigger sits on the trailing side of a layout.
+- Use end alignment when it helps menus open back toward the main content area or prevents edge crowding.
+- Context menus should prioritize pointer context and appear near the interaction point rather than mimicking button anchoring.
+- Select popovers should preserve a stable relationship with the trigger width and edges whenever practical.
+- Keep menu offset small and consistent so the menu feels attached to its trigger while leaving enough room for border and shadow separation.
+- Increase offset only when needed to avoid border collision, shadow merging, or layout crowding.
+
+### Tabs and Selection States
+
+- Default inactive tabs remain neutral
+- Active tabs use a stronger surface contrast, not brand-fill blocks
+- Use `bg-selected` for selected list rows or tabs when appropriate
+
+### Chat, Tooling, and Developer UI
+
+- Chat bubbles follow the container hierarchy, starting at `rounded-xl`. Main chat input shells may retain `rounded-2xl` under the approved exception.
+- Tool output, terminal-like blocks, paths, hashes, and commands should bias toward monospace
+- Diff UI must use diff-specific semantic colors, not generic success/destructive colors
+- Dense operational panels are preferred over marketing-card styling
+
+## Elevation and Depth
+
+ZCode should use restrained depth. Layer primarily through background contrast, borders, and radius before relying on heavy shadows.
+
+Recommended elevation levels:
+
+- **Base**: no shadow, structure comes from background contrast
+- **Surface**: very subtle border-led separation
+- **Overlay**: `shadow-md` for menus, popovers, dialogs
+- **Attention**: `shadow-lg` only for toast, important floating cards, or rare emphasized panels
+
+Depth rules:
+
+- Do not rely on large soft shadows for ordinary layout.
+- Menus and dialogs can feel elevated, but still compact and controlled.
+- Background layering is usually more important than shadow strength.
+
+## Motion
+
+- Keep transitions fast and low-drama.
+- Favor subtle fade, zoom, and directional slide for overlays.
+- Motion should clarify state change, not decorate the screen.
+- Avoid long, springy, or playful animations in the main workspace.
+
+## Workspace layout
+
+Desktop and wide Web workspace content uses independent conversation, bottom terminal, and Side Pane frames. The conversation frame contains WorkspaceHeader and conversation; the optional terminal has its own frame below it, and Side Pane owns its tab bar. Frames use their own background and border, with 4px resizable gaps matching the macOS outer inset. Resize handles keep a transparent 4px hit area and show a 2px tertiary foreground (`foreground-subtlest/50`) line on hover, focus or drag. The indicator extends along the panel edge, inset by the panel radius at both ends, with rounded ends and no mask. Layout frames do not count toward content radius levels. Small-screen Web layouts retain their single-column and drawer presentation.
+
+## Responsive Behavior
+
+The product is desktop-first, but UI must remain functional on smaller screens.
+
+Rules:
+
+- Start with a stable base layout, then enhance with breakpoints.
+- Use breakpoints mainly for layout, width, visibility, and density changes.
+- Do not change the semantic meaning of components across breakpoints.
+- Prefer changing `max-width`, `grid`, `flex`, and visibility over changing component identity.
+- Preserve primary actions at all breakpoints; do not hide core workflows behind desktop-only affordances.
+
+## Accessibility and Internationalization
+
+- Support keyboard navigation as a first-class interaction path.
+- Preserve visible focus behavior through the repo's established focus styling patterns.
+- Ensure contrast remains safe in light, dark, and Zai modes.
+- Write layouts that tolerate longer translations.
+- Avoid icon-only meaning when a text label is practical.
+- Use semantic status colors together with readable text, never by color alone.
+
+## Implementation Guidance
+
+- Reuse existing semantic Tailwind utilities before adding new tokens.
+- Reuse component primitives in `packages/ui/src/components/ui/` before inventing one-off variants.
+- Match current density and component proportions already established in the repo.
+- If a new UI need appears, first decide whether it belongs to structure, surface, interaction, or state. Then choose tokens accordingly.
+- When in doubt, prefer quieter UI and stronger information hierarchy.
 
 ## Do
 
-- 一致使用语义颜色令牌，保持页面背景、卡片、浮层三种表面的区别
-- 控件紧凑、操作性强，用文字层级表达密度
-- 技术值与命令类内容用等宽
-- light 与 dark 双主题验证，兼顾三个桌面平台
-- 考虑本地化与长标签
+- use semantic color tokens consistently
+- preserve the distinction between page background, card, and overlay surfaces
+- keep controls compact and operational
+- use text hierarchy to express density
+- use monospace for technical values and command-like content
+- support all shipped themes
+- design for desktop, web, and cross-platform rendering constraints
+- account for localization and long labels
 
 ## Don't
 
-- 在普通 UI 中使用裸色值、hue 类或 alpha 叠加
-- 用品牌色填充大面积表面
-- 引入没有稳定系统理由的圆角、阴影、宽高
-- 把语义色当装饰，或让菜单、对话框在应密集时变得松散
-- 制造只在一个主题或一个皮肤组合下正确的组件
-- 在工具密集的屏幕上为视觉新奇牺牲清晰度
+- use raw one-off colors in ordinary UI work
+- fill large surfaces with brand color
+- add arbitrary radii, shadows, widths, or heights without a stable system reason
+- make menus and dialogs airy when they should be dense
+- use semantic error or success colors for non-semantic decoration
+- create components that only look correct in one theme
+- trade clarity for visual novelty in tool-heavy screens

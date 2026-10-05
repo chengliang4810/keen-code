@@ -1,166 +1,85 @@
 # KeenCode Agent 开发指南
 
-本文指导在本仓库中开发 KeenCode 的 Agent。产品内 Agent 的权限、Plan 模式和子 Agent 机制是实现要求，不代表开发本仓库时自动获得额外授权或必须进入 Plan 模式。
+本文是仓库级开发约束。用中文交流，先从当前源码、配置、测试和 Git 状态
+确认事实；保留与任务无关的本地修改，不重置、覆盖或提交其他 Agent 的工作。
 
-## 核心原则
+## 当前基线
 
-- 用中文沟通。先确认用户要的是分析、计划还是实现；分析与评审请求不自动授权修改文件。
-- 行为变更先明确产品规则、状态所有者、接口和验收场景，再实现代码；涉及协议契约或主题对照时，同步更新 `docs/protocols/`、`docs/frontend-harness-theme.md` 等对应文档。
-- 以当前检出的源码、`package.json`、根 `Cargo.toml` 和 CI 为准；遇到文档与实现不一致，核实当前代码、清单和 CI，并明确指出差异，不复制过期说明。
-- 定位问题时，未明确要求修改代码就先调查原因；结合源码、日志和运行时证据，区分已确认原因与待验证假设。
-- 在共同原因处做最小完整修改，不顺手重构无关模块，不增加假设中的扩展点。
-- 保留与任务无关的本地改动，不自行恢复已移除的模块或内部依赖。
+- 前端 UI 以 ZCode 3.14.3 固定提交
+  `29628c9acdb81b703bbd4080c207a0e7ce5e276e` 为来源基线，映射与许可证见
+  `THIRD_PARTY_NOTICES.md`、`third-party/zcode/` 和 `docs/frontend-zcode-source.md`。
+- 产品 UI 根为 `packages/ui/src/`；`apps/ui/` 承载 Tauri 平台适配、构建入口
+  和契约测试，不存放第二套业务界面。React 19、Vite、Tailwind v4 和 pnpm workspace 的实际版本
+  以 `package.json`、各包清单和 lockfile 为准。
+- Rust workspace 由根 `Cargo.toml` 管理。Tauri 桌面宿主、ACP、Agent Loop、
+  Journal 和资源持久化仍由 Rust 持有权威状态；前端是可丢弃的界面投影。
+- 构建可使用 Node.js 24 与 pnpm 10.14.0；桌面运行时不得依赖 Node、Electron
+  或 JavaScript workflow engine。
 
-## 开始任务
+## 开始与编辑
 
-- 先看 `git status --short`，保留已有改动；搜索优先使用 `rg` / `rg --files`。
-- 先读目标模块、调用方、相邻测试和依赖清单，再修改。下表用于定位，不要求每次通读整个仓库。
-- 修改界面前先读 `DESIGN.md`（UI 设计规范）与 `docs/frontend-harness-theme.md`（主题与 Harness 来源）；修改模型协议前先读 `docs/protocols/` 下的对应参考。
+1. 先执行 `git status --short`，再用 `rg`/`rg --files` 定位目标文件、调用方和
+   相邻测试。不要通读无关的大文件或生成输出。
+2. 修改 UI 前阅读 `DESIGN.md` 与 `docs/frontend-zcode-source.md`；修改 RPC、
+   snapshot、Journal 或 workflow 前阅读 `docs/protocols/` 下对应契约。
+3. 保持来源 ZCode 的 DOM、className、CSS token、键盘语义和 locale 结构。只
+   在已确认的产品裁剪、品牌文案和 KeenCode RPC 接线处修改。
+4. 新增或修改的非直观语义、约束和取舍使用简短中文注释；JSON 等格式不写非法
+   注释。优先已有依赖和组件，不为门禁引入伪造包装层。
+5. 只有用户明确要求时才提交或推送；提交信息使用中文为主的中英双语。当前
+   迁移阶段不要创建提交。
 
-## 当前技术栈与入口
+## UI 规则
 
-KeenCode 是本地优先的桌面 AI 编码工具：React 19 + TypeScript + Vite 6 前端，Tauri 2 桌面外壳，进程内自研 Rust Agent 运行时。浏览器开发服务器只用于前端开发，不能代替原生桌面验收。
+- 使用 `packages/ui/src/styles.css` 的 `--color-*` 语义令牌和原有主题角色。
+  业务 TSX/CSS 不写主题色字面量、固定视觉 inline style 或第二套字体缩放。
+- 应用界面文字必须使用 `text-ui-xl`、`text-ui-lg`、`text-ui-base`、
+  `text-ui-caption`、`text-ui-sm`、`text-ui-xs`。代码、Diff、终端内容可有
+  独立数字字体设置，但外围控件仍使用 `text-ui-*`。
+- 通用控件优先复用 `packages/ui/src/components/ui/`；locale 以 `en-US` 键形状
+  和 `zh-CN` 默认中文为准。协议值、ID、路径、模型名和用户内容不翻译。
+- 官方账号、支付、云端、机器人、SSH、WSL、Docker、浏览器计算机控制及其
+  路由、菜单、locale 和依赖都不属于目标产品。
+- 业务代码不能通过“忽略整个第三方目录”规避设计或来源门禁；固定 ZCode 源码的
+  原始例外必须命中 `third-party/zcode/design-baseline.json` 的完整 SHA256 或精确
+  行特征。合法来源还必须在组件级清单中注明路径、版本和许可证。
 
-仓库按职责分三层：`apps/`（`ui/` React 界面、`desktop/` Tauri 桌面宿主 crate 根）、`core/`（共享 Rust 库，含 `cli/` 命令行入口，Cargo 包名仍为 `keencode-*`）、`tooling/`（`provider-live-test/` 与仓库脚本）。全部 Rust 包属于根 `Cargo.toml` 这一个 workspace，共享一份 `Cargo.lock` 与根 `target/`。
+## 协议与状态
 
-| 改动内容 | 优先检查的位置 |
-| --- | --- |
-| 应用装配、顶层路由、跨域协调 | `apps/ui/src/App.tsx`、`apps/ui/src/features/app/` |
-| 会话发送、停止、队列、导航 | `apps/ui/src/hooks/useSessionTurn.ts`、`apps/ui/src/hooks/session-turn/`、`apps/ui/src/hooks/useSessionNavigation.ts` |
-| ACP 客户端、事件、历史与界面投影 | `apps/ui/src/lib/acp/`、`apps/ui/src/hooks/useAcpSessionRuntime.ts`、`apps/ui/src/hooks/acp-runtime/` |
-| 业务视图与聊天渲染 | `apps/ui/src/components/`、`apps/ui/src/components/lobe-chat/` |
-| 通用控件、样式与翻译 | `apps/ui/src/components/ui/`、`apps/ui/src/styles/`、`apps/ui/src/i18n/` |
-| 前端纯规则 | `apps/ui/src/lib/`；测试通常与实现同目录 |
-| UI 设计规范、令牌与设计门禁 | `DESIGN.md`、`apps/ui/src/styles/`、`tooling/scripts/design-system-gate.mjs` |
-| Tauri 命令注册与桌面集成 | `apps/desktop/src/lib.rs` 及同目录业务模块 |
-| 桌面会话接入、历史加载、工具投影 | `apps/desktop/src/agent_runtime.rs`、`apps/desktop/src/agent_runtime/` |
-| ACP 方法、事件与协议契约 | `core/acp/` |
-| Agent Loop、上下文、取消、Plan 守卫、协作 | `core/agent/` |
-| Provider 中立消息、请求、流与错误类型 | `core/model/` |
-| 模型协议适配与供应商接入 | `core/provider/`；协议参考在 `docs/protocols/` |
-| 会话生命周期、发布与恢复 | `core/runtime/` |
-| 会话日志、快照、Artifact、Memory、Goal 持久化 | `core/resources/` |
-| 工具定义与执行 | `core/tools/` |
-| MCP 与 Skills 核心 | `core/mcp/`、`core/skills/` |
-| 插件与扩展桌面接入 | `apps/desktop/src/extensions/`、`apps/desktop/src/plugins/` 及对应 `.rs` 入口 |
-| 产品内系统提示词与子 Agent 模板 | `apps/desktop/prompts/`；先读其中的 `README.md` |
-| 构建、发布、性能与验收 | `package.json`、`.github/workflows/`、`tooling/scripts/`、`docs/benchmark.md` |
+- `ChannelClient` 继续使用 VQL 100-204 的请求、取消、订阅、释放和响应语义。
+  `open`、`send`、`close` 必须有明确的生命周期和幂等释放行为。
+- v4 wire protocol version 为 3，projection snapshot version 为 1。每个窗口
+  使用 window-bound connection；seq 缺口、重复或 connection reset 触发 resync，
+  不用 optimistic overlay 冒充已确认状态。
+- Journal 是会话、消息、工具和 workflow 执行事实源；snapshot 只恢复投影。
+  active barrier 由 Rust host 建立和解除，前端不得凭按钮状态宣布完成。
+- `WorkflowDefinitionV1` 是 Rust `serde` 负责的纯 JSON；actor 只允许单层，
+  ID/版本/引用/环由 Rust 校验。UI 草稿变化不能改变 active revision。
 
-## 架构硬约束
+## 验证
 
-### 前端职责
+从仓库根按改动范围运行：
 
-- `App.tsx` 只做壳层装配、顶层路由和跨业务域协调。单域状态与副作用放对应 hook，纯规则放 `apps/ui/src/lib/`，完整视图放 `apps/ui/src/components/` 或现有业务模块。
-- 不以“之后再拆”为由往 `App.tsx` 增加业务规则、协议解析或持久化流程。拆分只覆盖本次涉及的业务，不引入全局状态框架、万能 Context 或只转发 props 的包装层。
-- Rust 后端持有权威会话状态；前端只生成可丢弃的界面投影。不要在前端建立第二套会话协议或独立持久化事实源。
-
-### Rust 与协议职责
-
-- 桌面后端通过进程内 ACP Session、请求和事件驱动运行时。标准会话语义使用 `session/*`，KeenCode 专有能力使用 `keencode/*`。
-- Agent Loop、工具运行时、Session Store 和 ACP 层保持 Provider 中立，不依赖厂商 SDK 类型，也不按厂商名称分支。
-- Anthropic Messages、OpenAI Chat Completions、OpenAI Responses 的请求、流、工具调用、结构化输出、Usage 和错误归一由各自 Adapter 负责。
-- 修改事件或数据契约时，同时检查 Rust 定义、桌面转发、前端解码与投影、持久化恢复和相关测试；不要只改一端。
-- 文件系统、进程、PTY、Git、密钥和操作系统能力留在 Rust 系统能力边界，界面不直接实现模型协议或工具调度。
-
-### 产品语义
-
-- 会话相互隔离：Goal、Todo、Plan 状态属于单个对话，不能提升为项目共享状态。子 Agent 只支持单层，不加入递归或 DAG 工作流。
-- Plan 开启时只读调研；用户关闭并发起实施后执行，不增加独立计划审批。只读方案与报告放 `~/.keencode` 下按项目划分的沙箱，不写入用户项目。
-- 本地记忆正文和索引放 `~/.keencode/memories`，不增加独立 Memory Sideagent、Ambient Memory 或本地 Embedding。
-- 插件市场、Skills、MCP 是同级入口。模型设置只管理自定义供应商，不实现厂商官方账户、套餐、额度或官方 Key。
-- 用户明确说明已公开发布前，按全新项目维护唯一配置和数据结构，不加入旧字段迁移、历史路径回退、枚举别名或废弃 API 包装。
-- 不扩展为 Web/SaaS、团队管理、外部消息渠道或多层 Agent 编排；不默认打包浏览器内核、外部脚本运行时或模型权重。
-
-## 界面修改
-
-- 遵守 `DESIGN.md`。直接复用当前 `apps/ui/src/`、`apps/ui/public/` 的组件、DOM、CSS、设计令牌和资源，不根据截图重写近似实现。
-- 可见交互控件优先使用 `apps/ui/src/components/ui/` 中对 `@appica/ui-react` 的产品化包装；没有包装时按 Appica 强制规则从子路径引入组件。业务代码不新增原生 `button`、`input`、`textarea`、`select`、`dialog`，也不重复实现已有控件；缺失时先查询当前版本文档，优先组合已有组件或使用正常包依赖，遵守下文的源码来源边界。
-- 原生控件仅限 UI 组件底层、浏览器要求的隐藏控件，以及 `contenteditable`、媒体等无等价组件的宿主；在代码中解释原因，不另建可见控件样式。
-- 使用组件既有变体、尺寸和语义化令牌。业务 `className` 只负责必要布局与产品结构，不覆盖控件颜色、字体、边框、圆角和交互状态。
-- 界面文案经 `apps/ui/src/i18n/`（zh、zh-TW、en，en 为键权威）；删除调用点时同步删除三种语言的键，布局容忍翻译长度变化。
-- 后端或协议调整不得无意改变界面。品牌或文案变化保留原盒模型与层级，并记录有意差异。
-- 可见界面修改在提交说明中记录基线提交或源码快照、运行环境、截图位置、复现命令；在相同状态、视口和 `deviceScaleFactor` 下比较截图与像素差异。
-- 缺失基线先尝试隔离重建；无法重建则记录原因和未验证范围，继续其他验证。历史记录和浏览器截图不能代替本次原生桌面验收。
-
-## 开发与验证命令
-
-命令均从仓库根目录执行。pnpm 固定为 `10.14.0`；当前 CI 使用 Node.js 24、Rust stable，Tauri 还需要所在平台的系统构建依赖。环境要求以清单和 `.github/workflows/ci.yml` 为准。
-
-```sh
+```text
 corepack pnpm@10.14.0 install --frozen-lockfile
-pnpm dev:desktop   # 原生桌面开发
-pnpm dev           # 仅前端开发
-```
-
-以下示例使用 `pnpm`；Windows 使用 `pnpm.cmd`。未安装独立 pnpm 时可替换为 `corepack pnpm@10.14.0`。
-
-| 改动范围 | 必要验证 |
-| --- | --- |
-| 仅文档或 Agent 规则 | 引用路径、命令与结构检查，`git diff --check`；不启动无关构建 |
-| 前端逻辑或组件 | `pnpm run typecheck`，`pnpm exec vitest run --root apps/ui <apps/ui 内测试文件路径>` |
-| 样式或可见界面 | 上述相关检查，加 `pnpm run lint:css`、`pnpm run check:design-system` 与界面基线比较 |
-| 完整前端验证 | `pnpm test`、`pnpm build`；`pnpm test` 包含脚本测试、clean-room 与设计系统门禁检查和 Vitest |
-| 核心 Rust crate | `cargo test -p <包名>` |
-| Tauri 后端 | `cargo test -p keencode-desktop` |
-| 跨 crate 或公共协议 | 检查所有受影响的包；涉及桌面接入时另跑 `cargo test -p keencode-desktop` |
-
-**唯一的 Rust workspace**：根 `Cargo.toml` 统一管理 `core/`、`apps/desktop` 和 `tooling/provider-live-test`，共享一份 `Cargo.lock` 与根 `target/`。前端检查不能代替 Rust 测试；首次构建桌面端或执行 `cargo check` 前需要 `apps/ui/dist` 存在（`pnpm build` 或 `mkdir -p apps/ui/dist`），因为 Tauri 构建脚本在编译期校验打包资源。
-
-Rust 修改还需做格式检查和 lint：
-
-```sh
+pnpm run typecheck
+pnpm test
+pnpm exec vitest run --config vitest.config.ts <test-file>
+pnpm run lint:css
+pnpm run check:design-system
+pnpm run check:clean-room
 cargo fmt --all -- --check
-cargo clippy -p <包名> --all-targets -- -D warnings
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+# native-desktop-tests 只用于原生验收程序构建；普通离线单测不需要该 feature
+cargo build -p keencode-desktop --features native-desktop-tests
+# 原生 WebView2 验收仅在有显式 plan/provider 配置时运行；不是离线 CI 步骤
+node tooling/scripts/native-live-e2e.mjs --plan <plan.json> --provider-config <provider.json>
 ```
 
-完整 CI 的 workspace、all-targets 和 doctest 矩阵见 `.github/workflows/ci.yml`。真实模型测试入口在 `tooling/provider-live-test/`，不要把需要凭据和网络的测试当作离线单测。
+前端浏览器开发服务器只能验证打包和静态交互，不能替代 Tauri 原生窗口。真实
+provider/live 测试保持 opt-in，不纳入离线 CI。每个通过项必须在
+`docs/frontend-acceptance-matrix.md` 记录命令、环境和截图/日志证据；没有证据的
+项目保持 `pending`。
 
-## 日志与诊断
-
-- 前端统一诊断通道是 `apps/ui/src/lib/frontendDiagnostics.ts`：`reportFrontendError` / `reportFrontendCrash` 经 Tauri `diagnostics_*` 命令落盘，`installFrontendErrorHandlers` 兜底全局错误；诊断机制与字段见 `docs/diagnostics.md`。
-- 业务代码不新增 `console.log`；catch 路径的 `console.error` / `console.warn` 带 `[组件名]` 前缀并保持精简，不做高频逐条输出。
-- 不在日志、诊断、示例或提交中写入凭据、真实用户数据和内部服务地址。
-
-## 依赖与参考项目边界
-
-- 允许通过 npm/pnpm、Cargo 正常声明和使用第三方依赖，遵守其许可证；优先复用已有依赖。
-- 经用户明确授权，KeenCode 前端可以直接复用 Apache-2.0 许可的 ZCode UI 组件与 CSS，以 ZCode 作为桌面和 Web 界面的视觉基线；`DESIGN.md` 的规范结构同样参考 ZCode 设计规范并按本仓库令牌体系改写。复用范围不扩展到协议、运行时、提示词、凭据或产品数据。
-- 复制或改编第三方源码时，必须核对许可证，保留必要的版权与许可证文本，并在对应源码附近记录来源和影响范围。不得通过改名、删除声明或放宽门禁隐藏来源。
-- 其他未获明确授权的外部项目仍仅用于参考；需要引入其源码时必须先确认许可与归属要求。
-- `pnpm run check:clean-room` 仅检查部分来源名称与参考描述，不能证明源码原创，也不能把所有关键词命中认定为复制。来源判断需要结合文件内容、引入历史和实际引用。
-
-## 实现与交付标准
-
-- 优先标准库和已有依赖。新增依赖必须说明必要性及对体积、启动、内存和维护的影响；不凭经验宣称性能提升。
-- 无任务时不增加持续轮询；后台进程、监听器、连接按需启动并及时释放。首版目标：安装包不超过 `50 MB`、空闲 CPU 低于 `1%`、首个可交互窗口冷启动不超过 `1.5 秒`。这些是预算，不是已达标结论。
-- 性能结论附环境、步骤和数据；记录空闲、单活跃会话与并发会话增量内存。突破预算前提供实测收益和替代方案。
-- 在外部输入、路径、命令和协议边界做校验；凭据与用户数据不得进入日志、测试夹具或提交。数据默认本地保存；新增遥测或数据共享必须明确说明并可关闭。
-- 关键行为变更增加能保护行为的测试，避免只复述实现。失败时修复原因，不跳过检查、削弱断言或屏蔽诊断来制造通过。
-- 完成前审查 `git diff` 和 `git diff --check`。报告改了什么、验证结果及未验证范围，不把尝试执行当作通过。
-- 仅在用户要求时提交或推送。获准提交后按功能点拆分，提交信息使用中英双语，只暂存本次相关改动；不擅自 amend、重写历史或绕过 hooks。
-
-## Appica UI（强制规则）
-
-Appica UI component index (fetch before using a component you haven't used before):
-https://appica.dev/ui/react/llms.txt
-
-- Tailwind CSS v4 only. Do NOT create a `tailwind.config.js` - v4 config lives in CSS via `@theme`.
-  If the project is on v3, convert unsupported syntax rather than downgrading the components.
-- Scan the library for class names or everything renders unstyled: `@source '../node_modules/@appica/ui-react/dist';`
-  in the stylesheet that imports Tailwind. The path is relative to that stylesheet - count the `../`
-  needed to reach the project root. A bare package name resolves to nothing and fails silently.
-- React 19 is a hard requirement. No `forwardRef` - `ref` is a plain prop.
-- Import from the subpath, one component per import:
-  `import { Button } from '@appica/ui-react/button'`.
-- 尺寸默认统一设置为 `md`
-- Never write hex colors, px radii, or duration literals. Use the role-based tokens:
-  `bg-background-muted`, `text-foreground-intense`, `border-border-strong`, `var(--radius-md)`.
-  Full list: https://appica.dev/ui/docs/react/colors.md
-- Never write hue-based utilities (`bg-gray-100`, `text-slate-600`). The palette is organized by
-  role, not hue.
-- Prefer v4 variant syntax (`*:`, `**:`, `data-*:`, `not-*:`) over `[&_...]` arbitrary selectors.
-- For a link styled as a button, put `buttonVariants(...)` on the `<a>` - never `<Button render={<a/>}>`.
-- Put `className` overrides on the wrapper component, not on the JSX passed to `render`.
-- Do not hand-roll a component that exists in the library. Check the component list first:
-  https://appica.dev/llms.txt
-- Every documentation page is served as clean markdown at `<url>.md` - fetch that, not the HTML.
+完成前检查 `git diff` 与 `git diff --check`，报告实际验证结果和未验证范围。

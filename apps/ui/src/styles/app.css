@@ -1,7 +1,0 @@
-/* 按原始层叠顺序加载拆分后的样式模块，禁止调整导入顺序。 */
-@import "./app-foundation.css";
-@import "./app-conversation.css";
-@import "./app-resource.css";
-@import "./app-features.css";
-@import "./ui-governance.css";
-@import "./settings-shell.css";

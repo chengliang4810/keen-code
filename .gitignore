@@ -69,6 +69,8 @@ __pycache__/
 /.pnpm-store/
 /.github/tauri.release.conf.json
 /out/
+/apps/desktop/out/
+/apps/ui/out/
 
 # KeenCode Agent 生成的临时报告
 .keencode/plans/
@@ -82,6 +84,3 @@ __pycache__/
 /.zcode/
 /result.json
 /vendor/
-
-# Appica UI 编译产物同步目录，供 Tailwind @source 扫描（见 tooling/scripts/sync-appica-scan.mjs）
-/apps/ui/appica-scan/

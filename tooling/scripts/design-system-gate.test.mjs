@@ -1,106 +1,55 @@
-import test from "node:test";
 import assert from "node:assert/strict";
-import { inspectSource } from "./design-system-gate.mjs";
+import test from "node:test";
+import { inspectSource, scanDesignSystem } from "./design-system-gate.mjs";
 
-test("design-system gate rejects visible native controls", () => {
-  const violations = inspectSource("apps/ui/src/components/Example.tsx", "export function Example() { return <button>保存</button>; }");
-  assert.ok(violations.some((item) => item.rule === "DSG001"));
+function rules(file, source) {
+  return inspectSource(file, source).map((item) => item.rule);
+}
+
+test("业务 TSX 拒绝可见原生控件", () => {
+  assert.deepEqual(rules("packages/ui/src/features/example.tsx", "export const View = () => <button>Run</button>;"), ["DSG001"]);
+  assert.deepEqual(rules("features/example.tsx", "export const View = () => <button>Run</button>;"), ["DSG001"]);
 });
 
-test("design-system gate permits hidden file input and custom properties", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    '<input type="file" hidden />\n<div style={{ "--height": "20px" } as CSSProperties} />',
+test("JSX 包装组件与原生控件按大小写区分", () => {
+  assert.deepEqual(rules("features/example.tsx", "export const View = () => <Button><Input /><Select /></Button>;"), []);
+  assert.deepEqual(rules("features/example.tsx", "export const View = () => <Button><input /></Button>;"), ["DSG001"]);
+});
+
+test("隐藏文件输入不触发原生控件规则", () => {
+  assert.deepEqual(rules("features/file.tsx", "export const View = () => <input type=\"hidden\" />;"), []);
+});
+
+test("来源 UI 的 DOM 和动态布局仍需精确来源特征才能放行", () => {
+  assert.deepEqual(
+    rules("packages/ui/src/components/ui/primitive.tsx", "export const View = () => <button style={{ width: size }}>Run</button>;"),
+    ["DSG001", "DSG003"],
   );
-  assert.deepEqual(violations, []);
 });
 
-test("design-system gate reports raw colors and CSS literals", () => {
-  const tsViolations = inspectSource("apps/ui/src/components/Example.tsx", 'const color = "#fff";');
-  const cssViolations = inspectSource("apps/ui/src/components/example.css", ".x { color: #fff; }");
-  assert.ok(tsViolations.some((item) => item.rule === "DSG002"));
-  assert.ok(cssViolations.some((item) => item.rule === "DSG004"));
-});
-
-test("design-system gate honors explicit token and host allowlists", () => {
-  assert.deepEqual(inspectSource("apps/ui/src/styles/tokens.css", ":root { --brand: #fff; }"), []);
-  assert.deepEqual(inspectSource("apps/ui/src/components/TerminalPanel.tsx", 'const theme = { background: "#000" };'), []);
-});
-
-test("design-system gate requires an explicit size for Appica controls", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { NumberField } from "@appica/ui-react/number-field";
-      import { Textarea } from "@appica/ui-react/textarea";
-      <NumberField />;
-      <Textarea />;
-    `,
+test("业务 TSX 拒绝字面主题色和内建字号", () => {
+  const found = rules(
+    "features/example.tsx",
+    "export const View = () => <div className=\"text-sm text-[#fff]\" />;",
   );
-  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 2);
+  assert.deepEqual(found.sort(), ["DSG002", "DSG006"]);
 });
 
-test("design-system gate accepts md for every Appica size", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { Avatar } from "@appica/ui-react/avatar";
-      import { Badge } from "@appica/ui-react/badge";
-      <Avatar size="md" />;
-      <Badge size="md">状态</Badge>;
-    `,
+test("代码和终端内容允许独立内容字号", () => {
+  assert.deepEqual(
+    rules("components/code-block.tsx", "export const Code = () => <pre className=\"text-sm\" />;"),
+    [],
   );
-  assert.deepEqual(violations.filter((item) => item.rule === "DSG005"), []);
 });
 
-test("design-system gate requires explicit size on Appica CopyButton", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/CopyAction.tsx",
-    `import { CopyButton } from "@appica/ui-react/copy-button";
-      export function CopyAction() {
-        return <CopyButton value="text" />;
-      }`,
+test("token stylesheet 的新增颜色和字号也必须通过来源特征检查", () => {
+  assert.deepEqual(rules("packages/ui/src/styles.css", ".surface { color: #fff; font-size: 13px; }"), ["DSG004", "DSG006"]);
+  assert.deepEqual(
+    rules("features/example.css", ".surface { color: #fff; font-size: 13px; }"),
+    ["DSG004", "DSG006"],
   );
-  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 1);
 });
 
-test("design-system gate rejects non-official size literals", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { Badge } from "@appica/ui-react/badge";
-      import { Input } from "@appica/ui-react/input";
-      <Badge size="xl">状态</Badge>;
-      <Input inputSize="huge" />;
-    `,
-  );
-  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 2);
-});
-
-test("design-system gate accepts official icon button sizes as special requirement", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { Button } from "@appica/ui-react/button";
-      <Button size="icon-sm" aria-label="关闭" />;
-    `,
-  );
-  assert.deepEqual(violations.filter((item) => item.rule === "DSG005"), []);
-});
-
-test("design-system gate rejects pixel expressions and non-literal sizes", () => {
-  const violations = inspectSource(
-    "apps/ui/src/components/Example.tsx",
-    `
-      import { Avatar } from "@appica/ui-react/avatar";
-      <Avatar size={24} />;
-    `,
-  );
-  assert.equal(violations.filter((item) => item.rule === "DSG005").length, 1);
-});
-
-test("design-system gate permits typed size forwarding only in product wrappers", () => {
-  const source = 'import { Button as AppicaButton } from "@appica/ui-react/button"; <AppicaButton size={size} />;';
-  assert.deepEqual(inspectSource("apps/ui/src/components/ui/button.tsx", source), []);
-  assert.equal(inspectSource("apps/ui/src/components/Example.tsx", source).filter((item) => item.rule === "DSG005").length, 1);
+test("固定 ZCode UI 源码通过精确基线特征放行", async () => {
+  assert.deepEqual(await scanDesignSystem(["packages/ui/src"]), []);
 });

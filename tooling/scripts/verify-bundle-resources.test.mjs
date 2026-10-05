@@ -141,6 +141,24 @@ test("Tauri 配置携带法律资源与 Web Host 资源", () => {
   const config = readFileSync(join(process.cwd(), "apps/desktop/tauri.conf.json"), "utf8");
   assert.deepEqual(validateBundleConfiguration(JSON.parse(config)), [
     { source: join(process.cwd(), "LICENSE"), target: "LICENSE" },
+    { source: join(process.cwd(), "THIRD_PARTY_NOTICES.md"), target: "THIRD_PARTY_NOTICES.md" },
+    {
+      source: join(process.cwd(), "third-party/zcode/LICENSE"),
+      target: "licenses/zcode/LICENSE",
+    },
+    {
+      source: join(process.cwd(), "third-party/zcode/NOTICE.md"),
+      target: "licenses/zcode/NOTICE.md",
+    },
+    {
+      source: join(process.cwd(), "third-party/upstream"),
+      // 目录映射保留 Tauri 配置的尾斜杠，与 web/ 一致；不能为测试改掉实际资源目标。
+      target: "licenses/upstream/",
+    },
+    {
+      source: join(process.cwd(), "third-party/tao/LICENSE"),
+      target: "licenses/tao/LICENSE",
+    },
     { source: join(process.cwd(), "apps/ui/dist"), target: "web/" },
   ]);
 });

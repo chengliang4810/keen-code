@@ -1,232 +1,181 @@
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import ts from "typescript";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
-const SOURCE_ROOT = path.join(REPO_ROOT, "apps/ui/src");
+export const REPO_ROOT = path.resolve(SCRIPT_DIR, "../..");
 
-const CSS_TOKEN_ALLOWLIST = new Set([
-  "apps/ui/src/styles/tokens.css",
-  "apps/ui/src/styles/code-preview.css",
-  "apps/ui/src/styles/tailwind.css",
-  "apps/ui/src/styles/ui-governance.css",
-  "apps/ui/src/components/lobe-chat/lobe-chat.css",
+/** 迁移期间允许扫描的 UI 根；实际源树收敛后由 packages/ui/src 作为唯一根。 */
+export const SOURCE_ROOTS = ["packages/ui/src", "src", "apps/ui/src"];
+export const SOURCE_ROOT = path.join(REPO_ROOT, "packages/ui/src");
+export const DESIGN_BASELINE_MANIFEST = path.join(
+  REPO_ROOT,
+  "third-party/zcode/design-baseline.json",
+);
+
+/** 语义 token 入口路径供样式工具和来源审查引用；设计门禁仍检查新增内容。 */
+export const CSS_TOKEN_ALLOWLIST = new Set([
+  "packages/ui/src/styles.css",
+  "src/styles.css",
+  "apps/ui/src/index.css",
 ]);
-
-const CSS_DIRECTORY_ALLOWLIST = ["apps/ui/src/styles/harness/"];
-
-const INLINE_STYLE_ALLOWLIST = [
-  "apps/ui/src/components/icons.tsx",
-  "apps/ui/src/components/ImageLightbox.tsx",
-  "apps/ui/src/components/ImageUi.tsx",
-  "apps/ui/src/components/ResourceViewer.tsx",
-  "apps/ui/src/components/TerminalPanel.tsx",
-  "apps/ui/src/components/VideoUi.tsx",
-  "apps/ui/src/components/VirtualList.tsx",
-  "apps/ui/src/components/lobe-chat/ConversationThread.tsx",
-  "apps/ui/src/features/app/MainStage.tsx",
-  "apps/ui/src/features/app/ResourceAside.tsx",
-  "apps/ui/src/features/app/Sidebar.tsx",
-];
-
-const RAW_COLOR_ALLOWLIST = new Set([
-  "apps/ui/src/components/ImageLightbox.tsx",
-  "apps/ui/src/components/TerminalPanel.tsx",
-]);
-
-const COLOR_PATTERN = /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/;
-
-/** 扫描结果使用稳定的规则 ID，便于 CI 和设计审查引用。 */
-export function inspectSource(relativePath, content) {
-  const violations = [];
-  const normalizedPath = relativePath.replaceAll("\\", "/");
-  const extension = path.extname(normalizedPath).toLowerCase();
-  const isTest = /(?:\.test|\.spec)\.[^.]+$/.test(normalizedPath);
-
-  if ((extension === ".tsx" || extension === ".jsx") && !isTest) {
-    inspectNativeControls(normalizedPath, content, violations);
-    inspectInlineStyles(normalizedPath, content, violations);
-    inspectAppicaSizes(normalizedPath, content, violations);
-    if (!RAW_COLOR_ALLOWLIST.has(normalizedPath)) {
-      inspectRawColors(normalizedPath, content, violations, "DSG002");
-    }
-  }
-
-  if (extension === ".css" && !isCssAllowlisted(normalizedPath)) {
-    const withoutComments = content.replace(/\/\*[\s\S]*?\*\//g, "");
-    inspectRawColors(normalizedPath, withoutComments, violations, "DSG004");
-  }
-
-  return violations;
-}
 
 /**
- * Appica 官方尺寸变体清单，来源为各组件官方文档的 props 表（@appica/ui-react 1.1.0）。
- * 尺寸默认一律显式 md；只有特殊要求（如图标按钮的 icon-*）才使用其他官方变体。
- * 像素数值（Avatar/Thumbnail/ColorSwatch 官方允许的 number）不在放行范围内：
- * 本项目禁止用像素表达式模拟尺寸。
+ * 来源组件保留原 DOM，但不按目录跳过门禁。固定 ZCode 源码中的合法原生控件、
+ * inline 布局、颜色和字号由 design-baseline.json 按文件 SHA256/行特征放行；
+ * 同一目录下新增的 KeenCode 代码仍然完整检查。
  */
-const OFFICIAL_SM_MD_LG = ["sm", "md", "lg"];
-const OFFICIAL_BUTTON_SIZES = ["sm", "md", "lg", "icon-sm", "icon-md", "icon-lg"];
-const OFFICIAL_BADGE_SIZES = ["xs", "sm", "md", "lg", "icon-sm", "icon-md", "icon-lg"];
-const OFFICIAL_AVATAR_SIZES = ["2xs", "xs", "sm", "md", "lg", "xl", "2xl"];
-const OFFICIAL_SWATCH_SIZES = ["3xs", "2xs", "xs", "sm", "md", "lg", "xl"];
+export const SOURCE_RULE_ALLOWLIST = Object.freeze([]);
 
-const APPICA_SIZE_RULES = new Map([
-  ["Autocomplete", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Avatar", { prop: "size", allowed: OFFICIAL_AVATAR_SIZES }],
-  ["Badge", { prop: "size", allowed: OFFICIAL_BADGE_SIZES }],
-  ["Button", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
-  ["ButtonGroup", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
-  ["Calendar", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Chip", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["ChipGroup", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["ColorPicker", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["ColorPickerEyeDropper", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
-  ["ColorSwatch", { prop: "size", allowed: OFFICIAL_SWATCH_SIZES }],
-  ["ColorSwatchPicker", { prop: "size", allowed: OFFICIAL_SWATCH_SIZES }],
-  ["Combobox", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["ContextMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["CopyButton", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
-  ["DateField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["DatePicker", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["DropdownMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Input", { prop: "inputSize", allowed: OFFICIAL_SM_MD_LG }],
-  ["Kbd", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["KbdGroup", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Menubar", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Navigation", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["NavigationLink", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["NavigationMenu", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["NumberField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["OTPField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Pagination", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Select", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Switch", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Table", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["Tabs", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["TabsList", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-  ["TabsTrigger", { prop: "size", allowed: OFFICIAL_BUTTON_SIZES }],
-  ["Textarea", { prop: "inputSize", allowed: OFFICIAL_SM_MD_LG }],
-  ["Thumbnail", { prop: "size", allowed: OFFICIAL_AVATAR_SIZES }],
-  ["TimeField", { prop: "size", allowed: OFFICIAL_SM_MD_LG }],
-]);
+/** 内容渲染可以使用独立字号；外围控件仍须使用 text-ui-*。 */
+const TYPOGRAPHY_CONTENT_PATHS = [
+  "/code",
+  "/diff",
+  "/terminal",
+  "code-",
+  "-code.",
+  "diff-",
+  "-diff.",
+  "terminal-",
+  "-terminal.",
+];
 
-/** Appica 尺寸必须显式传入官方变体；默认一律 md，非特殊要求（如图标按钮 icon-*）不变。 */
-function inspectAppicaSizes(relativePath, content, violations) {
-  const sourceFile = ts.createSourceFile(
-    relativePath,
-    content,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TSX,
+const COLOR_PATTERN = /#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/;
+const BUILTIN_TEXT_SCALE_PATTERN = /\btext-(?:2?xs|sm|base|lg|xl|2xl|3xl|4xl|5xl|6xl|7xl|8xl|9xl)\b/;
+const ARBITRARY_TEXT_SCALE_PATTERN = /\btext-\[[^\]]+\]/;
+
+export const DESIGN_RULE_IDS = Object.freeze({
+  nativeControl: "DSG001",
+  rawColor: "DSG002",
+  inlineStyle: "DSG003",
+  cssColor: "DSG004",
+  typographyScale: "DSG006",
+});
+
+function normalizePath(value) {
+  return value.replaceAll("\\", "/").replace(/^\.\//, "");
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function lineFeatureHash(lines, lineNumber) {
+  const index = Math.max(0, lineNumber - 1);
+  const context = lines.slice(Math.max(0, index - 1), index + 2).join("\n");
+  return sha256(context);
+}
+
+function annotateLineFeatures(violations, content) {
+  const lines = content.split(/\r?\n/);
+  return violations.map((violation) => ({
+    ...violation,
+    lineHash: sha256(lines[(violation.line ?? 1) - 1] ?? ""),
+    featureHash: lineFeatureHash(lines, violation.line ?? 1),
+  }));
+}
+
+let designBaseline;
+function loadDesignBaseline() {
+  if (designBaseline !== undefined) return designBaseline;
+  try {
+    designBaseline = JSON.parse(readFileSync(DESIGN_BASELINE_MANIFEST, "utf8"));
+  } catch {
+    designBaseline = null;
+  }
+  return designBaseline;
+}
+
+function isBaselineViolation(relativePath, content, violation) {
+  const manifest = loadDesignBaseline();
+  const entry = manifest?.files?.[relativePath];
+  if (!entry || !entry.rules?.includes(violation.rule)) return false;
+  if (entry.sha256 === sha256(content)) return true;
+  return entry.lineFeatures?.[violation.rule]?.some(
+    (feature) => feature.featureHash === violation.featureHash && feature.lineHash === violation.lineHash,
+  ) ?? false;
+}
+
+function lineNumberAt(content, offset) {
+  return content.slice(0, offset).split(/\r?\n/).length;
+}
+
+function isTestPath(relativePath) {
+  return /(?:\.test|\.spec)\.[^.]+$/.test(relativePath);
+}
+
+function isContentTypographyPath(relativePath) {
+  const lower = `/${relativePath.toLowerCase()}`;
+  return TYPOGRAPHY_CONTENT_PATHS.some((fragment) => lower.includes(fragment));
+}
+
+function isRuleAllowed(relativePath, rule) {
+  return SOURCE_RULE_ALLOWLIST.some(
+    (entry) => relativePath.startsWith(entry.prefix) && entry.rules.includes(rule),
   );
-  const appicaComponents = new Map();
+}
 
-  const collectImports = (node) => {
-    if (
-      ts.isImportDeclaration(node) &&
-      ts.isStringLiteral(node.moduleSpecifier) &&
-      node.moduleSpecifier.text.startsWith("@appica/ui-react/")
-    ) {
-      const bindings = node.importClause?.namedBindings;
-      if (bindings && ts.isNamedImports(bindings)) {
-        for (const element of bindings.elements) {
-          const importedName = element.propertyName?.text ?? element.name.text;
-          const rule = APPICA_SIZE_RULES.get(importedName);
-          if (rule) appicaComponents.set(element.name.text, rule);
-        }
-      }
+function pushViolation(violations, rule, file, line, message) {
+  violations.push({ rule, file, line, message });
+}
+
+/** 扫描单个源文件；输出稳定规则 ID，便于 CI 和验收矩阵引用。 */
+export function inspectSource(relativePath, content) {
+  const normalizedPath = normalizePath(relativePath);
+  const extension = path.extname(normalizedPath).toLowerCase();
+  const violations = [];
+  const isTest = isTestPath(normalizedPath);
+
+  if ((extension === ".tsx" || extension === ".jsx") && !isTest) {
+    if (!isRuleAllowed(normalizedPath, DESIGN_RULE_IDS.nativeControl)) {
+      inspectNativeControls(normalizedPath, content, violations);
     }
-    ts.forEachChild(node, collectImports);
-  };
-  collectImports(sourceFile);
-
-  const inspectNode = (node) => {
-    if (ts.isJsxSelfClosingElement(node) || ts.isJsxElement(node)) {
-      const opening = ts.isJsxSelfClosingElement(node) ? node : node.openingElement;
-      const tagName = opening.tagName.getText(sourceFile);
-      const sizeRule = appicaComponents.get(tagName);
-      if (sizeRule) {
-        let hasSizeAttribute = false;
-        for (const attribute of opening.attributes.properties) {
-          if (!ts.isJsxAttribute(attribute)) continue;
-          const attributeName = attribute.name.text;
-          if (attributeName !== sizeRule.prop) continue;
-          hasSizeAttribute = true;
-
-          const value = attribute.initializer;
-          const literal =
-            value &&
-            ((ts.isStringLiteral(value) && value.text) ||
-              (ts.isJsxExpression(value) &&
-                value.expression &&
-                ts.isStringLiteral(value.expression) &&
-                value.expression.text));
-          if (literal && sizeRule.allowed.includes(literal)) continue;
-          // Product wrappers forward a typed size prop; business call sites still require a literal.
-          if (
-            relativePath.startsWith("apps/ui/src/components/ui/") &&
-            ts.isJsxExpression(value) &&
-            value.expression &&
-            ts.isIdentifier(value.expression) &&
-            value.expression.text === attributeName
-          ) continue;
-
-          const line = sourceFile.getLineAndCharacterOfPosition(attribute.getStart(sourceFile)).line + 1;
-          violations.push({
-            rule: "DSG005",
-            file: relativePath,
-            line,
-            message:
-              `Appica <${tagName}> 的 ${attributeName} 必须是官方变体（${sizeRule.allowed.join("/")}），` +
-              `默认使用 md；当前为 ${literal ? `"${literal}"` : "非字面量"}。`,
-          });
-        }
-
-        if (!hasSizeAttribute) {
-          const line = sourceFile.getLineAndCharacterOfPosition(opening.getStart(sourceFile)).line + 1;
-          violations.push({
-            rule: "DSG005",
-            file: relativePath,
-            line,
-            message: `Appica <${tagName}> 必须显式传入 ${sizeRule.prop}="md"；尺寸默认统一为 md，非特殊要求不变。`,
-          });
-        }
-      }
+    if (!isRuleAllowed(normalizedPath, DESIGN_RULE_IDS.inlineStyle)) {
+      inspectInlineStyles(normalizedPath, content, violations);
     }
-    ts.forEachChild(node, inspectNode);
-  };
-  inspectNode(sourceFile);
+    if (!isContentTypographyPath(normalizedPath)) {
+      inspectTypography(normalizedPath, content, violations);
+    }
+    inspectRawColors(normalizedPath, content, violations, DESIGN_RULE_IDS.rawColor);
+  }
+
+  if (extension === ".css") {
+    const withoutComments = content.replace(/\/\*[\s\S]*?\*\//g, "");
+    inspectRawColors(normalizedPath, withoutComments, violations, DESIGN_RULE_IDS.cssColor);
+    inspectCssTypography(normalizedPath, withoutComments, violations);
+  }
+
+  return annotateLineFeatures(violations, content);
 }
 
 function inspectNativeControls(relativePath, content, violations) {
-  // JSX 原生控件标签必须是小写；大写的 Button/Input 是 React 组件。
-  const nativeControl = /<(button|select|dialog)\b[\s\S]*?>/g;
-  for (const match of content.matchAll(nativeControl)) {
+  // JSX 大写标签是组件引用；大小写敏感才能区分 Button 与原生 button。
+  const visibleControl = /<(button|select|dialog)\b[\s\S]*?>/g;
+  for (const match of content.matchAll(visibleControl)) {
     const tag = match[0];
-    const line = lineNumberAt(content, match.index ?? 0);
-    violations.push({
-      rule: "DSG001",
-      file: relativePath,
-      line,
-      message: `业务 TSX 使用原生可见 <${match[1].toLowerCase()}>，请复用 src/components/ui 或 @appica/ui-react。`,
-    });
-    if (tag.includes("data-design-system-allow")) violations.at(-1).allowed = true;
+    if (tag.includes("data-design-system-allow")) continue;
+    pushViolation(
+      violations,
+      DESIGN_RULE_IDS.nativeControl,
+      relativePath,
+      lineNumberAt(content, match.index ?? 0),
+      `业务 TSX 使用可见原生 <${match[1].toLowerCase()}>；请复用 packages/ui/src/components/ui 中的控件。`,
+    );
   }
 
   const inputs = /<input\b[\s\S]*?>/g;
   for (const match of content.matchAll(inputs)) {
     const tag = match[0];
     if (/\bhidden\b|type\s*=\s*["']hidden["']/i.test(tag)) continue;
-    violations.push({
-      rule: "DSG001",
-      file: relativePath,
-      line: lineNumberAt(content, match.index ?? 0),
-      message: "可见原生 <input> 只允许作为隐藏文件选择宿主；请复用 @appica/ui-react/input。",
-    });
+    pushViolation(
+      violations,
+      DESIGN_RULE_IDS.nativeControl,
+      relativePath,
+      lineNumberAt(content, match.index ?? 0),
+      "可见原生 <input> 只允许作为隐藏文件选择宿主；请复用 UI 控件。",
+    );
   }
 }
 
@@ -234,39 +183,62 @@ function inspectInlineStyles(relativePath, content, violations) {
   const inlineStyle = /style=\{\{([\s\S]*?)\}\s*(?:as\s+CSSProperties)?\}/g;
   for (const match of content.matchAll(inlineStyle)) {
     const body = match[1] ?? "";
-    const propertyNames = [...body.matchAll(/(?:^|,)\s*(?:['"]([^'"]+)['"]|([A-Za-z][\w-]*))\s*:/g)]
-      .map((item) => item[1] ?? item[2] ?? "");
+    const propertyNames = [
+      ...body.matchAll(/(?:^|,)\s*(?:['"]([^'"]+)['"]|([A-Za-z][\w-]*))\s*:/g),
+    ].map((item) => item[1] ?? item[2] ?? "");
     const onlyCustomProperties = propertyNames.length > 0 && propertyNames.every((name) => name.startsWith("--"));
-    if (onlyCustomProperties || INLINE_STYLE_ALLOWLIST.includes(relativePath)) continue;
-    violations.push({
-      rule: "DSG003",
-      file: relativePath,
-      line: lineNumberAt(content, match.index ?? 0),
-      message: "业务 inline style 只能承载动态 CSS custom property；固定视觉值请下沉到 CSS/语义 token。",
-    });
+    if (onlyCustomProperties) continue;
+    pushViolation(
+      violations,
+      DESIGN_RULE_IDS.inlineStyle,
+      relativePath,
+      lineNumberAt(content, match.index ?? 0),
+      "业务 inline style 只能承载动态 CSS custom property；固定视觉值请下沉到语义 CSS token。",
+    );
   }
 }
 
 function inspectRawColors(relativePath, content, violations, rule) {
   for (const [index, lineText] of content.split(/\r?\n/).entries()) {
     if (!COLOR_PATTERN.test(lineText)) continue;
-    violations.push({
+    pushViolation(
+      violations,
       rule,
-      file: relativePath,
-      line: index + 1,
-      message: rule === "DSG004"
-        ? "CSS 业务样式不得直接写主题颜色，请引用语义 token；令牌、皮肤和第三方样式使用显式 allowlist。"
-        : "业务 TSX 不得直接写主题颜色，请使用语义 token 或受控 CSS custom property。",
-    });
+      relativePath,
+      index + 1,
+      rule === DESIGN_RULE_IDS.cssColor
+        ? "业务 CSS 不得直接写主题颜色，请引用 --color-* 语义 token；token 入口使用显式 allowlist。"
+        : "业务 TSX 不得直接写主题颜色，请使用 --color-* 语义 token 或受控 CSS custom property。",
+    );
   }
 }
 
-function isCssAllowlisted(relativePath) {
-  return CSS_TOKEN_ALLOWLIST.has(relativePath) || CSS_DIRECTORY_ALLOWLIST.some((prefix) => relativePath.startsWith(prefix));
+function inspectTypography(relativePath, content, violations) {
+  for (const [index, lineText] of content.split(/\r?\n/).entries()) {
+    if (BUILTIN_TEXT_SCALE_PATTERN.test(lineText) || ARBITRARY_TEXT_SCALE_PATTERN.test(lineText)) {
+      pushViolation(
+        violations,
+        DESIGN_RULE_IDS.typographyScale,
+        relativePath,
+        index + 1,
+        "应用界面必须使用 text-ui-*；代码、Diff、终端内容才可使用独立数字字号。",
+      );
+    }
+  }
 }
 
-function lineNumberAt(content, offset) {
-  return content.slice(0, offset).split(/\r?\n/).length;
+function inspectCssTypography(relativePath, content, violations) {
+  for (const [index, lineText] of content.split(/\r?\n/).entries()) {
+    if (!/\bfont-size\s*:/.test(lineText)) continue;
+    if (/var\(--(?:text-ui|ui-font-size|diffs-|code-)/.test(lineText)) continue;
+    pushViolation(
+      violations,
+      DESIGN_RULE_IDS.typographyScale,
+      relativePath,
+      index + 1,
+      "业务 CSS 字号必须引用 text-ui-* 或受控内容字号 token。",
+    );
+  }
 }
 
 async function listFiles(directory) {
@@ -275,7 +247,7 @@ async function listFiles(directory) {
   for (const entry of entries) {
     const absolute = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      if (["node_modules", "dist", "out"].includes(entry.name)) continue;
+      if (["node_modules", "dist", "out", ".git"].includes(entry.name)) continue;
       files.push(...await listFiles(absolute));
     } else {
       files.push(absolute);
@@ -284,22 +256,35 @@ async function listFiles(directory) {
   return files;
 }
 
-export async function scanDesignSystem(sourceRoot = SOURCE_ROOT) {
+/** 扫描一个或多个 UI 根；不存在的迁移暂存根会被跳过。 */
+export async function scanDesignSystem(sourceRoots = SOURCE_ROOTS) {
+  const roots = Array.isArray(sourceRoots) ? sourceRoots : [sourceRoots];
   const violations = [];
-  for (const file of await listFiles(sourceRoot)) {
-    const extension = path.extname(file).toLowerCase();
-    if (![".css", ".tsx", ".jsx"].includes(extension)) continue;
-    const relative = path.relative(REPO_ROOT, file).replaceAll("\\", "/");
-    const content = await fs.readFile(file, "utf8");
-    violations.push(...inspectSource(relative, content));
+  const visited = new Set();
+  for (const root of roots) {
+    const absoluteRoot = path.isAbsolute(root) ? root : path.join(REPO_ROOT, root);
+    if (!(await fs.stat(absoluteRoot).catch(() => null))) continue;
+    for (const file of await listFiles(absoluteRoot)) {
+      if (visited.has(file)) continue;
+      visited.add(file);
+      const extension = path.extname(file).toLowerCase();
+      if (![".css", ".tsx", ".jsx"].includes(extension)) continue;
+      const relative = normalizePath(path.relative(REPO_ROOT, file));
+      const content = await fs.readFile(file, "utf8");
+      violations.push(
+        ...inspectSource(relative, content).filter(
+          (violation) => !isBaselineViolation(relative, content, violation),
+        ),
+      );
+    }
   }
-  return violations.filter((violation) => !violation.allowed);
+  return violations;
 }
 
 export async function main() {
   const violations = await scanDesignSystem();
   if (violations.length === 0) {
-    console.log("Design-system gate passed: no unapproved native controls, Appica sizes, raw colors, or inline visual styles.");
+    console.log("Design-system gate passed: text-ui scale, semantic tokens, source DOM and inline-style rules are satisfied.");
     return 0;
   }
   for (const violation of violations) {

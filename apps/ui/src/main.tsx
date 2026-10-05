@@ -1,125 +1,99 @@
-import { StrictMode } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "@appica/ui-react/providers/theme-provider";
-import { Toaster, ToastProvider } from "@appica/ui-react/toast";
-import App from "./App";
 import {
-  getInjectedHostTransportAdapter,
-  HostStartupShell,
-  resolveHostMode,
-} from "./components/host";
-import { ErrorBoundary } from "./components/ErrorBoundary";
-import "./styles/tokens.css";
-import "./styles/tailwind.css";
-import "./styles/app.css";
-import "./styles/theme-colors.css";
-import "./styles/setup-wizard.css";
+  AppErrorBoundary,
+  ResourceManagerApp,
+  Root,
+  ZCodeIntlProvider,
+} from "@zcode/ui";
+import "@zcode/ui/styles.css";
+import { connectViaTauri } from "@zcode/client";
 import {
-  applyNativeWindowTheme,
-  applyThemeToDocument,
-  DEFAULT_THEME_PREFERENCE,
-  getSystemTheme,
-  loadThemePreference,
-  resolveTheme,
-  THEME_STORAGE_KEY,
-} from "./lib/theme";
-import {
-  installFrontendErrorHandlers,
-  reportFrontendCrash,
-  reportFrontendError,
-} from "./lib/frontendDiagnostics";
-import { applyUiFontSizeToDocument, loadUiFontSize } from "./lib/uiFontSize";
-import {
-  applyThemeColors,
-  BASE_COLORS,
-  DEFAULT_BASE_COLOR,
-  DEFAULT_PRIMARY_COLOR,
-  DEFAULT_SECONDARY_COLOR,
-  PRIMARY_COLORS,
-  SECONDARY_COLORS,
-  loadBrandColor,
-  loadColor,
-} from "./lib/themeColors";
-import { applyEffortColor, loadEffortColor } from "./lib/effortColor";
-import { startupFrontendReady } from "./lib/api";
+  createTauriPlatform,
+  createTauriResourceManagerBridge,
+  listenResourceManagerOpen,
+} from "./tauriPlatform.js";
+import { installNativeWindowDrag } from "./nativeWindowDrag.js";
 
-const bootHostMode = resolveHostMode();
-const bootHostTransport = getInjectedHostTransportAdapter();
-document.documentElement.dataset.hostMode = bootHostMode;
+function DesktopResourceManagerLayer() {
+  const [open, setOpen] = useState(false);
+  const bridge = useMemo(() => createTauriResourceManagerBridge(), []);
 
-// React 挂载前注册，确保启动阶段与首次渲染异常也会写入统一诊断日志。
-installFrontendErrorHandlers();
+  useEffect(() => listenResourceManagerOpen(() => setOpen(true)), []);
 
-// Apply persisted theme preference (default: Zai dark) before first React paint.
-// 主题的权威状态由 Appica ThemeProvider 接管；这里的首绘前同步只覆盖
-// provider 不负责的 KeenCode 表面（data-theme、meta 与 Tauri 原生外观）。
-const bootPref = loadThemePreference(localStorage);
-const bootTheme = resolveTheme(bootPref, getSystemTheme());
-applyThemeToDocument(bootTheme);
-applyThemeColors(
-  loadColor("keencode.base-color", BASE_COLORS, DEFAULT_BASE_COLOR),
-  loadBrandColor("keencode.primary-color", PRIMARY_COLORS, DEFAULT_PRIMARY_COLOR),
-  loadBrandColor("keencode.secondary-color", SECONDARY_COLORS, DEFAULT_SECONDARY_COLOR),
-);
-// 思考强度色在首次绘制前生效，避免滑块颜色闪回默认紫。
-applyEffortColor(loadEffortColor());
-// 界面字号在首次绘制前生效，避免启动时字号跳变。
-applyUiFontSizeToDocument(loadUiFontSize(localStorage));
-// Native: null = follow OS (required for live system theme); light/dark locks chrome.
-void applyNativeWindowTheme(bootPref === "system" ? null : bootTheme);
+  useEffect(() => {
+    if (!open) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open]);
 
-createRoot(document.getElementById("root")!, {
-  /** 记录逃逸出 React 树并可能导致空白页的异常。 */
-  onUncaughtError: (error, errorInfo) => {
-    reportFrontendCrash(
-      "frontend.react_uncaught",
-      `${error instanceof Error ? error.stack || error.message : String(error)}\ncomponentStack=${errorInfo.componentStack ?? ""}`,
-    );
-  },
-  /** 记录被 Error Boundary 捕获的渲染异常。 */
-  onCaughtError: (error, errorInfo) => {
-    reportFrontendError(
-      "frontend.react_caught",
-      `${error instanceof Error ? error.stack || error.message : String(error)}\ncomponentStack=${errorInfo.componentStack ?? ""}`,
-    );
-  },
-  /** 记录 React 自动恢复但可能引起界面闪空的异常。 */
-  onRecoverableError: (error, errorInfo) => {
-    reportFrontendError(
-      "frontend.react_recoverable",
-      `${error instanceof Error ? error.stack || error.message : String(error)}\ncomponentStack=${errorInfo.componentStack ?? ""}`,
-    );
-  },
-}).render(
-  <StrictMode>
-    {/* 官方主题系统：持有 light/dark/system 权威状态，负责持久化
-     * （同一 keencode.theme 键）、系统跟随、`.dark` 类与防闪脚本。 */}
-    <ThemeProvider
-      storageKey={THEME_STORAGE_KEY}
-      defaultTheme={DEFAULT_THEME_PREFERENCE}
-      enableSystem
-      disableTransitionOnChange
+  if (!open) return null;
+  return (
+    <div
+      className="fixed inset-0 z-[100] bg-background/95 text-foreground shadow-2xl"
+      data-testid="resource-manager-overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Resource manager"
     >
-      <ToastProvider timeout={2000}>
-        <ErrorBoundary scope="应用">
-          <HostStartupShell
-            hostMode={bootHostMode}
-            transport={bootHostTransport}
-          >
-            <App />
-          </HostStartupShell>
-        </ErrorBoundary>
-        <Toaster position="top-center" timeout={2000} />
-      </ToastProvider>
-    </ThemeProvider>
-  </StrictMode>,
-);
-
-// 两帧后 DOM 已完成首次提交与一次实际绘制；失败不影响应用启动。
-if (bootHostMode === "desktop") {
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      void startupFrontendReady().catch(() => {});
-    });
-  });
+      <ResourceManagerApp
+        getSnapshot={bridge.getSnapshot}
+        storage={bridge.storage}
+        onClose={() => setOpen(false)}
+      />
+    </div>
+  );
 }
+
+async function bootstrap(): Promise<void> {
+  const rootElement = document.getElementById("root");
+  if (!rootElement) {
+    throw new Error("缺少应用根节点");
+  }
+
+  const root = createRoot(rootElement);
+  try {
+    const connection = await connectViaTauri();
+    const platform = createTauriPlatform();
+    const disposeNativeWindowDrag = installNativeWindowDrag();
+    platform.notifyRendererReady();
+    root.render(
+      <AppErrorBoundary>
+        <ZCodeIntlProvider
+          settingService={connection.services.settingService}
+          broadcastService={connection.services.broadcastService}
+        >
+          <Root
+            services={connection.services}
+            platform={platform}
+            isDesktop
+            isWindowsDesktop={navigator.userAgent.includes("Windows")}
+            restoreSession
+            allowOpenWorkspace
+            supportsEmbeddedBrowser
+          />
+          <DesktopResourceManagerLayer />
+        </ZCodeIntlProvider>
+      </AppErrorBoundary>,
+    );
+    window.addEventListener("beforeunload", () => {
+      disposeNativeWindowDrag();
+      void connection.protocol.close().catch((error) => {
+        // 卸载阶段无法再把错误交给界面；保留关闭失败的权限/生命周期诊断，
+        // 避免未处理 Promise 掩盖真实的窗口归属问题。
+        console.warn("[frontend.rpc] close during unload failed", error);
+      });
+    }, { once: true });
+  } catch (error) {
+    root.render(
+      <div className="flex h-dvh items-center justify-center bg-background p-6 text-foreground">
+        <p className="text-ui-sm">{error instanceof Error ? error.message : String(error)}</p>
+      </div>,
+    );
+  }
+}
+
+void bootstrap();

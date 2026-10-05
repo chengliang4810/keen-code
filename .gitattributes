@@ -1,0 +1,5 @@
+# 固定前端来源保留原始 LF/CRLF 字节，避免跨平台检出改写来源 SHA。
+# CRLF 的 CR 仅视为行尾；仍检查真实尾空格、EOF 空行和缩进错误。
+packages/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+apps/ui/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+third-party/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

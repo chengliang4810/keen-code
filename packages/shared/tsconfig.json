@@ -1,0 +1,11 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "lib": ["es2025", "dom"],
+    "types": [],
+    "allowJs": false
+  },
+  "include": ["src"]
+}
