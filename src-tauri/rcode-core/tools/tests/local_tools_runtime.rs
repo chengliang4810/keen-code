@@ -1,0 +1,749 @@
+//! 本地工具在隔离临时项目中的端到端执行集成测试。
+
+use std::fs;
+use std::sync::Arc;
+
+use rcode_agent::{
+    AgentId, AgentRunner, AgentTool, PlanGuard, RunLimits, SessionId, ToolCallId, ToolContext,
+    ToolRegistry, TurnCancellation, TurnId, TurnRequest,
+};
+use rcode_model::{
+    ContentBlock, ImageSource, Message, MessageRole, ModelStreamEvent, ProviderCapabilities,
+    ResponseMetadata, ScriptedProvider, ScriptedReply, StopReason, ToolResultContent,
+};
+#[cfg(not(windows))]
+use rcode_tools::BashTool;
+#[cfg(windows)]
+use rcode_tools::PowerShellTool;
+use rcode_tools::{
+    EditTool, GlobTool, GrepTool, ReadTool, ToolEnvironment, WriteTool, register_local_tools,
+};
+use serde_json::json;
+use tempfile::tempdir;
+
+/// 为单次工具调用构造不含用户项目身份的测试上下文。
+fn tool_context(call_id: &str) -> ToolContext {
+    ToolContext {
+        session_id: SessionId::new("session-local-integration").expect("测试 Session ID 有效"),
+        turn_id: TurnId::new("turn-local-integration").expect("测试 Turn ID 有效"),
+        source_agent_id: AgentId::new("agent-local-integration").expect("测试 Agent ID 有效"),
+        tool_call_id: ToolCallId::new(call_id).expect("测试 ToolCall ID 有效"),
+        cancellation: TurnCancellation::new(),
+    }
+}
+
+/// 登录 Shell PATH 覆盖必须传导到命令子进程：探针脚本仅通过覆盖 PATH 可见。
+#[cfg(unix)]
+#[tokio::test]
+async fn path_overlay_reaches_command_children() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::Duration;
+
+    let directory = tempdir().expect("应创建隔离临时目录");
+    let probe = directory.path().join("rcode-overlay-probe");
+    fs::write(&probe, "#!/bin/sh\necho OVERLAY_PROBE_HIT\n").expect("应写入探针脚本");
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o755)).expect("应赋予执行权限");
+
+    let mut entries =
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()).collect::<Vec<_>>();
+    entries.push(directory.path().to_path_buf());
+    let overlay = std::env::join_paths(entries.iter()).expect("应合并覆盖 PATH");
+    assert!(rcode_tools::set_path_overlay(overlay), "覆盖只需写入一次");
+
+    let request = rcode_tools::BoundedCommandRequest::plugin_shell(
+        None,
+        "rcode-overlay-probe",
+        directory.path(),
+        Duration::from_secs(10),
+        4096,
+    )
+    .expect("应构造探针命令");
+    let output = rcode_tools::run_bounded_command(request)
+        .await
+        .expect("探针命令应执行成功");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        stdout.contains("OVERLAY_PROBE_HIT"),
+        "子进程应通过覆盖 PATH 找到探针脚本，实际 stdout：{stdout}"
+    );
+}
+
+/// 提取工具输出中的唯一文本块。
+fn output_text(output: &rcode_agent::ToolOutput) -> &str {
+    let [ToolResultContent::Text { text }] = output.content.as_slice() else {
+        panic!("本地工具集成结果应只包含一个文本块");
+    };
+    text
+}
+
+/// 创建一段最终完成的文本模型响应。
+fn text_reply(text: &str) -> ScriptedReply {
+    ScriptedReply::events([
+        ModelStreamEvent::MessageStart {
+            metadata: ResponseMetadata::default(),
+        },
+        ModelStreamEvent::TextDelta {
+            index: 0,
+            delta: text.to_owned(),
+        },
+        ModelStreamEvent::MessageEnd {
+            stop_reason: StopReason::Completed,
+        },
+    ])
+}
+
+/// 失败命令经过真实 Agent 归一后保留退出码、首尾诊断及可读取的完整原始流。
+#[tokio::test]
+async fn failed_command_diagnostics_survive_agent_normalization() {
+    for bytes in [3499, 4999, 19999] {
+        let directory = tempdir().unwrap();
+        let artifacts = directory.path().join("artifacts");
+        let environment = Arc::new(
+            ToolEnvironment::new(directory.path())
+                .unwrap()
+                .with_artifact_directory(&artifacts)
+                .unwrap(),
+        );
+        #[cfg(windows)]
+        let (tool_name, command) = (
+            "PowerShell",
+            format!(
+                "[Console]::Out.Write('HEAD' + ('x' * {bytes}) + 'TAIL'); [Console]::Error.Write('REAL_ERROR'); exit 7"
+            ),
+        );
+        #[cfg(not(windows))]
+        let (tool_name, command) = (
+            "Bash",
+            format!(
+                "printf HEAD; printf '%0{bytes}d' 0; printf TAIL; printf REAL_ERROR >&2; exit 7"
+            ),
+        );
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                streaming: true,
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            },
+            [
+                tool_reply(&[("fail-command", tool_name, json!({"command":command}))]),
+                text_reply("checked"),
+            ],
+        ));
+        let mut registry = ToolRegistry::new();
+        #[cfg(windows)]
+        registry
+            .register(Arc::new(PowerShellTool::new(environment)))
+            .unwrap();
+        #[cfg(not(windows))]
+        registry
+            .register(Arc::new(BashTool::new(environment)))
+            .unwrap();
+        let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+            .run_turn(TurnRequest::new(
+                SessionId::new("diagnostics-session").unwrap(),
+                TurnId::new("diagnostics-turn").unwrap(),
+                AgentId::new("root").unwrap(),
+                "test-model",
+                vec![Message::text(MessageRole::User, "运行诊断命令")],
+                PlanGuard::inactive(),
+            ))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        let requests = provider.requests().unwrap();
+        let tool_result = requests[1]
+            .messages
+            .iter()
+            .flat_map(|m| &m.content)
+            .find_map(|c| {
+                if let ContentBlock::ToolResult { tool_result } = c {
+                    Some(tool_result)
+                } else {
+                    None
+                }
+            })
+            .expect("下一模型轮应收到命令失败结果");
+        assert!(tool_result.is_error);
+        let text = tool_result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolResultContent::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<String>();
+        assert!(
+            text.contains("command_failed") && text.contains("退出码 7"),
+            "{text}"
+        );
+        assert!(text.contains("HEAD") && text.contains("TAIL") && text.contains("REAL_ERROR"));
+        assert!(!text.contains("invalid_tool_error"));
+        if bytes > 4096 {
+            let report = text
+                .lines()
+                .find_map(|line| line.strip_prefix("stdout 完整输出："))
+                .expect("大失败输出必须可定位原始流");
+            let full = fs::read_to_string(report).expect("模型可见输出路径必须存在");
+            assert!(full.starts_with("HEAD") && full.ends_with("TAIL"));
+            assert_eq!(full.len(), bytes + 8);
+        }
+    }
+}
+
+/// 创建一段包含指定工具调用的模型响应。
+fn tool_reply(calls: &[(&str, &str, serde_json::Value)]) -> ScriptedReply {
+    let mut events = vec![ModelStreamEvent::MessageStart {
+        metadata: ResponseMetadata::default(),
+    }];
+    for (index, (id, name, arguments)) in calls.iter().enumerate() {
+        let index = u32::try_from(index).expect("测试工具调用数量应在 u32 范围内");
+        events.push(ModelStreamEvent::ToolCallStart {
+            index,
+            id: (*id).to_owned(),
+            name: (*name).to_owned(),
+        });
+        events.push(ModelStreamEvent::ToolCallArgumentsDelta {
+            index,
+            id: (*id).to_owned(),
+            delta: arguments.to_string(),
+        });
+        events.push(ModelStreamEvent::ToolCallEnd {
+            index,
+            id: (*id).to_owned(),
+        });
+    }
+    events.push(ModelStreamEvent::MessageEnd {
+        stop_reason: StopReason::ToolUse,
+    });
+    ScriptedReply::events(events)
+}
+
+/// 失败日志经过真实 Shell、错误归一化和下一轮模型请求后仍须可诊断、可补读。
+#[tokio::test]
+async fn failed_shell_diagnostics_survive_agent_normalization() {
+    let cases = [
+        (vec![b'x'; 5_000], Vec::new()),
+        (vec![b'x'; 20_000], Vec::new()),
+        (vec![b'x'; 3_000], vec![b'y'; 3_000]),
+        ("错误诊断".repeat(500).into_bytes(), Vec::new()),
+        (vec![0xff; 1_500], Vec::new()),
+    ];
+    for (out_body, err_body) in cases {
+        let directory = tempdir().unwrap();
+        let artifacts = directory.path().join("artifacts");
+        let stdout = [b"OUT_START\n".as_slice(), &out_body, b"\nOUT_END\n"].concat();
+        let stderr = if err_body.is_empty() {
+            Vec::new()
+        } else {
+            [b"ERR_START\n".as_slice(), &err_body, b"\nERR_END\n"].concat()
+        };
+        fs::write(directory.path().join("stdout.bin"), &stdout).unwrap();
+        fs::write(directory.path().join("stderr.bin"), &stderr).unwrap();
+        let environment = Arc::new(
+            ToolEnvironment::new(directory.path())
+                .unwrap()
+                .with_artifact_directory(&artifacts)
+                .unwrap(),
+        );
+        #[cfg(not(windows))]
+        let (tool, command): (Arc<dyn AgentTool>, &str) = (
+            Arc::new(BashTool::new(environment)),
+            "cat stdout.bin; cat stderr.bin >&2; exit 7",
+        );
+        #[cfg(windows)]
+        let (tool, command): (Arc<dyn AgentTool>, &str) = (
+            Arc::new(PowerShellTool::new(environment)),
+            "$outBytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'stdout.bin')); [Console]::OpenStandardOutput().Write($outBytes, 0, $outBytes.Length); $errBytes = [IO.File]::ReadAllBytes((Join-Path (Get-Location) 'stderr.bin')); [Console]::OpenStandardError().Write($errBytes, 0, $errBytes.Length); exit 7",
+        );
+        let name = tool.definition().name;
+        let provider = Arc::new(ScriptedProvider::new(
+            ProviderCapabilities {
+                tool_calling: true,
+                ..ProviderCapabilities::default()
+            },
+            [
+                tool_reply(&[("failed-command", &name, json!({"command": command}))]),
+                text_reply("已收到诊断"),
+            ],
+        ));
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).unwrap();
+        let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+            .run_turn(TurnRequest::new(
+                SessionId::new("diagnostic-session").unwrap(),
+                TurnId::new("diagnostic-turn").unwrap(),
+                AgentId::new("diagnostic-agent").unwrap(),
+                "test-model",
+                vec![Message::text(MessageRole::User, "运行命令并分析错误")],
+                PlanGuard::inactive(),
+            ))
+            .await;
+        assert!(result.is_success(), "{:?}", result.error);
+        let requests = provider.requests().unwrap();
+        assert_eq!(requests.len(), 2);
+        let ContentBlock::ToolResult { tool_result } = &requests[1].messages[2].content[0] else {
+            panic!("应保留工具结果")
+        };
+        assert!(tool_result.is_error);
+        let ToolResultContent::Text { text } = &tool_result.content[0] else {
+            panic!("应返回诊断文本")
+        };
+        assert!(text.contains("command_failed"), "{text}");
+        assert!(!text.contains("invalid_tool_error"));
+        assert!(
+            text.contains("退出码 7") && text.contains("OUT_START") && text.contains("OUT_END")
+        );
+        if !stderr.is_empty() {
+            assert!(text.contains("ERR_START") && text.contains("ERR_END"));
+        }
+        let files = fs::read_dir(&artifacts)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| {
+                let name = path.file_name().unwrap().to_string_lossy();
+                name.starts_with("rcode-stdout-") || name.starts_with("rcode-stderr-")
+            })
+            .collect::<Vec<_>>();
+        assert!(files.iter().any(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("stdout")
+        }));
+        for path in files {
+            let label = if path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("stdout")
+            {
+                "stdout"
+            } else {
+                "stderr"
+            };
+            let reported = text
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{label} 完整输出：")));
+            let Some(reported) = reported else {
+                assert_eq!(label, "stderr", "stdout 必须给出可补读路径");
+                continue;
+            };
+            assert_eq!(
+                fs::canonicalize(reported).unwrap(),
+                fs::canonicalize(&path).unwrap()
+            );
+            let actual = fs::read(path).unwrap();
+            let expected = if label == "stdout" { &stdout } else { &stderr };
+            if !expected.is_empty() {
+                assert!(
+                    actual
+                        .windows(expected.len())
+                        .any(|part| part == expected.as_slice())
+                );
+            }
+        }
+    }
+}
+
+/// 在同一个隔离临时项目中实际执行文件、搜索、Shell 与 Git 工具。
+#[tokio::test]
+async fn local_tools_execute_complete_workflow_in_isolated_directory() {
+    let directory = tempdir().expect("应创建隔离临时项目");
+    let artifact_directory = directory.path().join("artifacts");
+    let environment = Arc::new(
+        ToolEnvironment::new(directory.path())
+            .expect("临时项目工具环境应有效")
+            .with_artifact_directory(&artifact_directory)
+            .expect("临时项目输出目录应有效"),
+    );
+
+    let mut registry = ToolRegistry::new();
+    register_local_tools(&mut registry, Arc::clone(&environment)).expect("本地工具应注册");
+    let names = registry
+        .definitions()
+        .into_iter()
+        .map(|definition| definition.name)
+        .collect::<Vec<_>>();
+    let expected: Vec<&str> = if cfg!(windows) {
+        vec![
+            "Bash",
+            "Edit",
+            "Glob",
+            "Grep",
+            "PowerShell",
+            "Read",
+            "Write",
+        ]
+    } else {
+        vec!["Bash", "Edit", "Glob", "Grep", "Read", "Write"]
+    };
+    assert_eq!(names, expected);
+
+    let write = WriteTool::new(Arc::clone(&environment));
+    let write_output = write
+        .execute(
+            tool_context("call-write"),
+            json!({
+                "file_path": "src/main.rs",
+                "content": "fn main() { println!(\"before\"); }\n"
+            }),
+        )
+        .await
+        .expect("Write 应创建项目内文件");
+    assert!(output_text(&write_output).contains("原子创建"));
+
+    let read = ReadTool::new(Arc::clone(&environment));
+    let before = read
+        .execute(
+            tool_context("call-read-before"),
+            json!({ "file_path": "src/main.rs" }),
+        )
+        .await
+        .expect("Read 应读取刚写入的文件");
+    assert!(output_text(&before).contains("println!(\"before\")"));
+
+    let edit = EditTool::new(Arc::clone(&environment));
+    let edit_output = edit
+        .execute(
+            tool_context("call-edit"),
+            json!({
+                "file_path": "src/main.rs",
+                "old_string": "before",
+                "new_string": "after"
+            }),
+        )
+        .await
+        .expect("Edit 应替换项目内文本");
+    assert!(output_text(&edit_output).contains("替换"));
+    assert!(
+        fs::read_to_string(directory.path().join("src/main.rs"))
+            .expect("应读取编辑后的文件")
+            .contains("after")
+    );
+
+    let glob = GlobTool::new(Arc::clone(&environment));
+    let glob_output = glob
+        .execute(tool_context("call-glob"), json!({ "pattern": "**/*.rs" }))
+        .await
+        .expect("Glob 应发现项目内源文件");
+    assert!(output_text(&glob_output).contains("src/main.rs"));
+
+    let grep = GrepTool::new(Arc::clone(&environment));
+    let grep_output = grep
+        .execute(
+            tool_context("call-grep"),
+            json!({ "pattern": "after", "glob": "**/*.rs" }),
+        )
+        .await
+        .expect("Grep 应发现编辑后的文本");
+    assert!(output_text(&grep_output).contains("after"));
+
+    #[cfg(windows)]
+    let shell_output = PowerShellTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-powershell"),
+            json!({ "command": "[Console]::Out.Write('shell-ok')" }),
+        )
+        .await
+        .expect("PowerShell 应在项目目录中完成命令");
+    #[cfg(not(windows))]
+    let shell_output = BashTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-bash"),
+            json!({ "command": "printf shell-ok" }),
+        )
+        .await
+        .expect("Bash 应在项目目录中完成命令");
+    assert!(output_text(&shell_output).contains("shell-ok"));
+}
+
+/// 真实 Read 图片结果必须经 Agent Runner 完整进入第二轮 Provider 中立请求。
+#[tokio::test]
+async fn read_inline_png_is_preserved_in_agent_runner_second_request() {
+    // 使用固定的 1x1 合成 PNG，既经过 Read 的签名校验，也便于核对完整 Base64 数据。
+    const SYNTHETIC_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xB5,
+        0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78, 0xDA, 0x63, 0x64,
+        0xF8, 0x0F, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xE3, 0x66, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+    const SYNTHETIC_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
+    let directory = tempdir().expect("应创建隔离临时目录");
+    let image_path = directory.path().join("pixel.png");
+    fs::write(&image_path, SYNTHETIC_PNG).expect("应写入合成 PNG");
+    let environment = Arc::new(ToolEnvironment::new(directory.path()).expect("工具环境应有效"));
+
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities {
+            streaming: true,
+            tool_calling: true,
+            image_input: true,
+            ..ProviderCapabilities::default()
+        },
+        [
+            tool_reply(&[("read-image", "Read", json!({ "file_path": "pixel.png" }))]),
+            text_reply("image-read-complete"),
+        ],
+    ));
+    let mut registry = ToolRegistry::new();
+    registry
+        .register(Arc::new(ReadTool::new(environment)))
+        .expect("真实 Read 工具应注册");
+
+    let request = TurnRequest::new(
+        SessionId::new("session-read-image").expect("图片测试 Session ID 应有效"),
+        TurnId::new("turn-read-image").expect("图片测试 Turn ID 应有效"),
+        AgentId::new("agent-read-image").expect("图片测试 Agent ID 应有效"),
+        "test-model",
+        vec![Message::text(
+            MessageRole::User,
+            "读取 pixel.png 并确认图片内容",
+        )],
+        PlanGuard::inactive(),
+    );
+    let result = AgentRunner::new(provider.clone(), registry, RunLimits::default())
+        .run_turn(request)
+        .await;
+
+    assert!(
+        result.is_success(),
+        "真实 Read 图片 Tool Loop 应正常完成：{:?}",
+        result.error
+    );
+    assert_eq!(result.state.round_count(), 2);
+    assert_eq!(result.state.step_count(), 1);
+    let final_response = result
+        .final_response
+        .as_ref()
+        .expect("正常完成应保留最终模型响应");
+    assert_eq!(final_response.stop_reason, StopReason::Completed);
+    assert_eq!(
+        final_response.content,
+        vec![ContentBlock::text("image-read-complete")]
+    );
+
+    let requests = provider.requests().expect("Provider 请求快照应可读取");
+    assert_eq!(requests.len(), 2, "应捕获首轮 Read 请求和第二轮最终请求");
+    let second_request = &requests[1];
+    assert_eq!(second_request.messages.len(), 3);
+
+    let assistant_message = &second_request.messages[1];
+    assert_eq!(assistant_message.role, MessageRole::Assistant);
+    let [ContentBlock::ToolCall { tool_call }] = assistant_message.content.as_slice() else {
+        panic!("第二轮必须保留首轮的唯一 Read 工具调用");
+    };
+    assert_eq!(tool_call.id, "read-image");
+    assert_eq!(tool_call.name, "Read");
+    assert_eq!(tool_call.arguments, json!({ "file_path": "pixel.png" }));
+
+    let tool_message = &second_request.messages[2];
+    assert_eq!(tool_message.role, MessageRole::Tool);
+    let [ContentBlock::ToolResult { tool_result }] = tool_message.content.as_slice() else {
+        panic!("第二轮必须保留 Read 的工具结果消息");
+    };
+    assert_eq!(
+        tool_result.tool_call_id, tool_call.id,
+        "工具调用与结果 ID 必须配对"
+    );
+    assert!(!tool_result.is_error, "真实 Read 图片结果不应被归一为错误");
+
+    // 顺序必须是 Read 的说明文本在前、图片块在后，不能丢失任一内容块。
+    let [
+        ToolResultContent::Text { text },
+        ToolResultContent::Image { image },
+    ] = tool_result.content.as_slice()
+    else {
+        panic!("Read 图片结果必须保持文本块在前、图片块在后的顺序");
+    };
+    let expected_text = format!(
+        "图片：{}（{} 字节）",
+        fs::canonicalize(&image_path)
+            .expect("Read 结果应使用实际文件的规范路径")
+            .to_string_lossy()
+            .replace('\\', "/"),
+        SYNTHETIC_PNG.len()
+    );
+    assert_eq!(text, &expected_text);
+    let ImageSource::Base64 { media_type, data } = &image.source else {
+        panic!("Read 图片结果必须使用 Base64 内联来源");
+    };
+    assert_eq!(media_type, "image/png");
+    assert_eq!(data, SYNTHETIC_PNG_BASE64, "PNG Base64 必须完整保留");
+}
+
+/// 绝对路径不受项目目录边界限制，并且 Shell 会使用请求给出的外部 cwd。
+#[tokio::test]
+async fn local_tools_execute_absolute_paths_in_sibling_temp_directory() {
+    let project = tempdir().expect("应创建隔离临时项目");
+    let external = tempdir().expect("应创建与项目平级的外部临时目录");
+    let temp_root = fs::canonicalize(std::env::temp_dir()).expect("系统临时根目录应可解析");
+    let project_path = fs::canonicalize(project.path()).expect("项目临时目录应可解析");
+    let external_path = fs::canonicalize(external.path()).expect("外部临时目录应可解析");
+    assert_eq!(
+        project_path.parent(),
+        external_path.parent(),
+        "两个夹具必须位于同一个安全临时目录下"
+    );
+    assert!(
+        project_path.starts_with(&temp_root) && external_path.starts_with(&temp_root),
+        "绝对路径测试必须限制在系统临时目录内"
+    );
+
+    let environment = Arc::new(ToolEnvironment::new(&project_path).expect("项目工具环境应有效"));
+    let external_file = external_path.join("outside.txt");
+    let external_file_text = external_file.to_string_lossy().into_owned();
+
+    WriteTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-absolute-write"),
+            json!({
+                "file_path": external_file_text,
+                "content": "outside-before\n"
+            }),
+        )
+        .await
+        .expect("Write 应能写入项目外的绝对路径");
+    assert_eq!(
+        fs::read_to_string(&external_file).expect("应读取项目外文件"),
+        "outside-before\n"
+    );
+
+    EditTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-absolute-edit"),
+            json!({
+                "file_path": external_file.to_string_lossy(),
+                "old_string": "outside-before",
+                "new_string": "outside-after"
+            }),
+        )
+        .await
+        .expect("Edit 应能修改项目外的绝对路径");
+
+    let read = ReadTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-absolute-read"),
+            json!({ "file_path": external_file.to_string_lossy() }),
+        )
+        .await
+        .expect("Read 应能读取项目外的绝对路径");
+    assert!(output_text(&read).contains("outside-after"));
+
+    #[cfg(windows)]
+    let shell_output = PowerShellTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-absolute-shell-cwd"),
+            json!({
+                "command": "[Environment]::CurrentDirectory",
+                "cwd": external_path.to_string_lossy()
+            }),
+        )
+        .await
+        .expect("PowerShell 应能使用项目外绝对 cwd");
+    #[cfg(not(windows))]
+    let shell_output = BashTool::new(Arc::clone(&environment))
+        .execute(
+            tool_context("call-absolute-shell-cwd"),
+            json!({
+                "command": "pwd -P",
+                "cwd": external_path.to_string_lossy()
+            }),
+        )
+        .await
+        .expect("Bash 应能使用项目外绝对 cwd");
+    let shell_text = output_text(&shell_output);
+    let expected_cwd = external_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace("//?/", "");
+    assert!(
+        shell_text.replace('\\', "/").contains(&expected_cwd),
+        "Shell 报告必须包含实际的项目外绝对 cwd，实际报告：{shell_text}"
+    );
+
+    // 同一条真实 Agent Runner 路径确认项目外绝对路径不被当前工具环境拦截。
+    let runner_file = external_path.join("runner-full-access.txt");
+    let runner_file_text = runner_file.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let runner_shell_name = "PowerShell";
+    #[cfg(not(windows))]
+    let runner_shell_name = "Bash";
+    #[cfg(windows)]
+    let runner_shell_command = "Write-Output full-access-cwd";
+    #[cfg(not(windows))]
+    let runner_shell_command = "printf full-access-cwd";
+
+    let provider = Arc::new(ScriptedProvider::new(
+        ProviderCapabilities::default(),
+        [
+            tool_reply(&[(
+                "full-write",
+                "Write",
+                json!({
+                    "file_path": runner_file_text,
+                    "content": "runner-before\n"
+                }),
+            )]),
+            tool_reply(&[
+                (
+                    "full-edit",
+                    "Edit",
+                    json!({
+                        "file_path": runner_file.to_string_lossy(),
+                        "old_string": "runner-before",
+                        "new_string": "runner-after"
+                    }),
+                ),
+                (
+                    "full-shell",
+                    runner_shell_name,
+                    json!({
+                        "command": runner_shell_command,
+                        "cwd": external_path.to_string_lossy()
+                    }),
+                ),
+            ]),
+            text_reply("full-access-complete"),
+        ],
+    ));
+    let mut runner_registry = ToolRegistry::new();
+    runner_registry
+        .register(Arc::new(ReadTool::new(Arc::clone(&environment))))
+        .expect("Runner Read 工具应注册");
+    runner_registry
+        .register(Arc::new(EditTool::new(Arc::clone(&environment))))
+        .expect("Runner Edit 工具应注册");
+    runner_registry
+        .register(Arc::new(WriteTool::new(Arc::clone(&environment))))
+        .expect("Runner Write 工具应注册");
+    #[cfg(windows)]
+    runner_registry
+        .register(Arc::new(PowerShellTool::new(Arc::clone(&environment))))
+        .expect("Runner PowerShell 工具应注册");
+    #[cfg(not(windows))]
+    runner_registry
+        .register(Arc::new(BashTool::new(Arc::clone(&environment))))
+        .expect("Runner Bash 工具应注册");
+
+    let request = TurnRequest::new(
+        SessionId::new("session-full-access").expect("FullAccess Session ID 应有效"),
+        TurnId::new("turn-full-access").expect("FullAccess Turn ID 应有效"),
+        AgentId::new("agent-full-access").expect("FullAccess Agent ID 应有效"),
+        "test-model",
+        vec![Message::text(MessageRole::User, "验证项目内外完全访问")],
+        PlanGuard::inactive(),
+    );
+    let result = AgentRunner::new(provider, runner_registry, RunLimits::default())
+        .run_turn(request)
+        .await;
+    assert!(
+        result.is_success(),
+        "绝对路径 Runner 不应失败：{:?}",
+        result.error
+    );
+    assert_eq!(
+        fs::read_to_string(&runner_file).expect("绝对路径 Runner 应写入外部文件"),
+        "runner-after\n"
+    );
+}

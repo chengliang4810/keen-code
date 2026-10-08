@@ -1,0 +1,880 @@
+use std::collections::VecDeque;
+use std::error::Error as _;
+
+use futures_util::stream;
+use rcode_model::{
+    ModelError, ModelStream, ModelStreamEvent, REDACTED_SECRET, redact_error_secrets_bounded,
+};
+#[cfg(feature = "io-trace")]
+use rcode_model::{ModelResponse, ProviderProtocol, collect_model_stream};
+use reqwest::Response;
+use reqwest::header::RETRY_AFTER;
+use serde_json::Value;
+
+use crate::adapters::Adapter;
+use crate::config::ApiKey;
+use crate::sse::SseDecoder;
+#[cfg(feature = "io-trace")]
+use crate::trace::WireTraceSink;
+
+/// 进入错误分类与结构化脱敏前允许保留的原始 UTF-8 字节数。
+const MAX_ERROR_INPUT_BYTES: usize = 64 * 1024;
+/// 最终错误展示允许保留的 Unicode 字符数。
+const MAX_ERROR_MESSAGE_CHARS: usize = 1_000;
+
+/// 把成功 HTTP 响应按媒体类型转换为真实增量或缓冲事件流。
+pub(crate) async fn decode_success_response(
+    response: Response,
+    adapter: Adapter,
+    max_event_bytes: usize,
+    max_response_bytes: usize,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
+) -> Result<ModelStream, ModelError> {
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if content_type.contains("text/event-stream") {
+        return Ok(stream_sse(
+            response,
+            adapter,
+            max_event_bytes,
+            max_response_bytes,
+            #[cfg(feature = "io-trace")]
+            trace,
+        ));
+    }
+
+    let body = read_limited(
+        response,
+        max_response_bytes,
+        #[cfg(feature = "io-trace")]
+        trace.as_ref(),
+    )
+    .await?;
+    if looks_like_sse(&body) {
+        let events = decode_buffered_sse(&body, adapter, max_event_bytes)?;
+        return Ok(Box::pin(stream::iter(events.into_iter().map(Ok))));
+    }
+    let value: Value = serde_json::from_slice(&body).map_err(|error| ModelError::Protocol {
+        message: format!("模型 HTTP 响应不是有效 JSON：{error}"),
+    })?;
+    let mut adapter = adapter;
+    let events = adapter.decode_json(value)?;
+    Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+}
+
+/// 读取非成功 HTTP 响应并按状态、错误码和文本归一化。
+pub(crate) async fn decode_error_response(
+    response: Response,
+    api_key: Option<&ApiKey>,
+    max_bytes: usize,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
+) -> ModelError {
+    let status = response.status().as_u16();
+    let retry_after_ms = response
+        .headers()
+        .get(RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .and_then(|seconds| seconds.checked_mul(1000));
+    let body = match read_limited(
+        response,
+        max_bytes,
+        #[cfg(feature = "io-trace")]
+        trace.as_ref(),
+    )
+    .await
+    {
+        Ok(body) => body,
+        Err(error) => return error,
+    };
+    let (message, code) = provider_error_fields(&body);
+    classify_http_error_with_api_key(status, retry_after_ms, message, code.as_deref(), api_key)
+}
+
+/// 按状态、公开错误码和原始受限文本构造 Provider 中立错误。
+pub(crate) fn classify_http_error(
+    status: u16,
+    retry_after_ms: Option<u64>,
+    message: String,
+    code: Option<&str>,
+) -> ModelError {
+    classify_http_error_with_api_key(status, retry_after_ms, message, code, None)
+}
+
+/// 分类只读取原始错误的有界前缀，构造错误前再对展示正文执行凭据脱敏。
+fn classify_http_error_with_api_key(
+    status: u16,
+    retry_after_ms: Option<u64>,
+    message: String,
+    code: Option<&str>,
+    api_key: Option<&ApiKey>,
+) -> ModelError {
+    let classifier_message = bounded_utf8_prefix(&message, MAX_ERROR_INPUT_BYTES);
+    let classifier_code = bounded_utf8_prefix(code.unwrap_or_default(), MAX_ERROR_INPUT_BYTES);
+    let classifier = format!("{classifier_code} {classifier_message}").to_ascii_lowercase();
+    // 公开错误码和 HTTP 状态仍保留在类型字段中，展示文本的结构化脱敏不参与归因。
+    let message = safe_error_message(api_key, &message);
+
+    if classifier.contains("context_length")
+        || classifier.contains("context length")
+        || classifier.contains("context window")
+        || classifier.contains("maximum context")
+        || classifier.contains("max context")
+        || classifier.contains("prompt is too long")
+        || classifier.contains("input is too long")
+        || classifier.contains("too many tokens")
+        || classifier.contains("input")
+            && classifier.contains("token")
+            && (classifier.contains("exceed") || classifier.contains("maximum"))
+        || classifier.contains("input")
+            && classifier.contains("context")
+            && (classifier.contains("exceed")
+                || classifier.contains("maximum")
+                || classifier.contains("too_long")
+                || classifier.contains("too long"))
+        || classifier.contains("上下文") && classifier.contains("超")
+    {
+        return ModelError::ContextLengthExceeded { message };
+    }
+    if classifier.contains("quota_exhausted")
+        || classifier.contains("insufficient_balance")
+        || classifier.contains("insufficient_quota")
+        || classifier.contains("余额不足")
+        || classifier.contains("套餐次数已用尽")
+        || status == 402
+    {
+        return ModelError::QuotaExceeded {
+            message,
+            status_code: Some(status),
+        };
+    }
+    if classifier.contains("invalid_api_key")
+        || classifier.contains("authentication_error")
+        || classifier.contains("unauthorized")
+        || classifier.contains("authentication failed")
+        || classifier.contains("认证失败")
+    {
+        return ModelError::Authentication {
+            message,
+            status_code: Some(status),
+        };
+    }
+    if classifier.contains("permission_denied")
+        || classifier.contains("forbidden")
+        || classifier.contains("not authorized")
+        || classifier.contains("authorization failed")
+        || classifier.contains("无权")
+        || classifier.contains("未授权")
+    {
+        return ModelError::Authorization {
+            message,
+            status_code: Some(status),
+        };
+    }
+    if classifier.contains("rate_limit")
+        || classifier.contains("rate limited")
+        || classifier.contains("too many requests")
+        || classifier.contains("throttled")
+        || classifier.contains("请求过于频繁")
+    {
+        return ModelError::RateLimited {
+            message,
+            retry_after_ms,
+            status_code: Some(status),
+        };
+    }
+    if classifier.contains("model_not_found")
+        || classifier.contains("unsupported_model")
+        || classifier.contains("model") && classifier.contains("not supported")
+        || classifier.contains("模型") && classifier.contains("不支持")
+    {
+        return ModelError::ModelNotFound {
+            message,
+            status_code: Some(status),
+        };
+    }
+    if classifier.contains("service_unavailable")
+        || classifier.contains("server_error")
+        || classifier.contains("temporarily unavailable")
+        || classifier.contains("overloaded")
+        || classifier.contains("服务不可用")
+        || classifier.contains("过载")
+    {
+        return ModelError::ProviderUnavailable {
+            message,
+            status_code: Some(status),
+            retryable: true,
+        };
+    }
+
+    match status {
+        401 => ModelError::Authentication {
+            message,
+            status_code: Some(status),
+        },
+        403 => ModelError::Authorization {
+            message,
+            status_code: Some(status),
+        },
+        404 | 405 => ModelError::ProtocolUnsupported {
+            message,
+            status_code: Some(status),
+        },
+        425 | 429 => ModelError::RateLimited {
+            message,
+            retry_after_ms,
+            status_code: Some(status),
+        },
+        408 => ModelError::ProviderUnavailable {
+            message,
+            status_code: Some(status),
+            retryable: true,
+        },
+        400 | 409 | 422 => {
+            // 输出上限被远端拒绝的 400 是可降级重试的信号：在归层用结构化
+            // 变体标记，Agent Loop 只依赖该变体去上限重试一次；关键词判定
+            // 收敛在 Provider 边界，厂商报错文案不进入中立层做控制流。
+            if classifier.contains("max_tokens")
+                || classifier.contains("max_output_tokens")
+                || classifier.contains("max_completion_tokens")
+            {
+                return ModelError::OutputLimitRejected { message };
+            }
+            ModelError::InvalidRequest { message }
+        }
+        // 500/502/503/504、Anthropic 过载 529 与 Cloudflare 源站瞬时错误
+        // 520、521、522、523、524、527 都表示远端源站或网关当前不可用，
+        // 重试有实际收益；525/526 描述 TLS 握手与证书校验失败，通常不是
+        // 瞬时源站故障，维持不可重试。
+        500 | 502 | 503 | 504 | 520 | 521 | 522 | 523 | 524 | 527 | 529 => {
+            ModelError::ProviderUnavailable {
+                message,
+                status_code: Some(status),
+                retryable: true,
+            }
+        }
+        _ => ModelError::ProviderUnavailable {
+            message,
+            status_code: Some(status),
+            retryable: false,
+        },
+    }
+}
+
+/// 归一化 HTTP 200 正文中携带的 Provider 错误，并仅对已知错误类别升级分类。
+///
+/// 未知或普通 `invalid_request` 错误仍保留协议错误，避免在没有 HTTP 状态码时臆测
+/// 认证、额度或瞬时故障；明确的错误码则沿用同一套 HTTP 分类规则但不伪造状态码。
+pub(crate) fn classify_in_band_provider_error(message: &str, code: Option<&str>) -> ModelError {
+    let classified = classify_http_error(400, None, message.to_owned(), code);
+    match classified {
+        ModelError::ContextLengthExceeded { .. }
+        | ModelError::Authentication { .. }
+        | ModelError::Authorization { .. }
+        | ModelError::QuotaExceeded { .. }
+        | ModelError::ModelNotFound { .. }
+        | ModelError::ProtocolUnsupported { .. }
+        | ModelError::RateLimited { .. }
+        | ModelError::ProviderUnavailable { .. } => without_in_band_status(classified),
+        ModelError::InvalidRequest { message }
+        | ModelError::OutputLimitRejected { message }
+        | ModelError::Protocol { message } => ModelError::Protocol { message },
+        other => other,
+    }
+}
+
+/// 去掉 HTTP 200 错误中虚构的状态码，保留错误类别和重试属性。
+fn without_in_band_status(error: ModelError) -> ModelError {
+    match error {
+        ModelError::Authentication { message, .. } => ModelError::Authentication {
+            message,
+            status_code: None,
+        },
+        ModelError::Authorization { message, .. } => ModelError::Authorization {
+            message,
+            status_code: None,
+        },
+        ModelError::QuotaExceeded { message, .. } => ModelError::QuotaExceeded {
+            message,
+            status_code: None,
+        },
+        ModelError::ModelNotFound { message, .. } => ModelError::ModelNotFound {
+            message,
+            status_code: None,
+        },
+        ModelError::ProtocolUnsupported { message, .. } => ModelError::ProtocolUnsupported {
+            message,
+            status_code: None,
+        },
+        ModelError::RateLimited { message, .. } => ModelError::RateLimited {
+            message,
+            retry_after_ms: None,
+            status_code: None,
+        },
+        ModelError::ProviderUnavailable {
+            message, retryable, ..
+        } => ModelError::ProviderUnavailable {
+            message,
+            status_code: None,
+            retryable,
+        },
+        other => other,
+    }
+}
+
+/// 用已经脱敏并持久化的错误正文重新执行当前 HTTP 错误分类器。
+#[cfg(feature = "io-trace")]
+pub(crate) fn replay_wire_error_response(status: u16, body: &[u8]) -> ModelError {
+    let (message, code) = provider_error_fields(body);
+    classify_http_error(status, None, message, code.as_deref())
+}
+
+/// 把 reqwest 错误转换为不含认证信息的传输错误。
+pub(crate) fn transport_error(error: reqwest::Error, api_key: Option<&ApiKey>) -> ModelError {
+    // 发送阶段失败（对端在响应到达前关闭连接）只携带 request 类别，不满足
+    // timeout/connect/body 判定；此时尚未观察到任何响应字节，静默重试与既有
+    // 传输失败同级，代价至多是一次重复的模型调用。
+    let retryable =
+        error.is_timeout() || error.is_connect() || error.is_body() || error.is_request();
+    let category = if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "request"
+    };
+    let error = error.without_url();
+    let mut message = format!("[{category}] {error}");
+    let mut source = error.source();
+    // 只保留有界原因链；不记录请求头或正文，最终统一去除凭据与控制字符。
+    for _ in 0..8 {
+        let Some(cause) = source else { break };
+        if message.len() >= 1000 {
+            break;
+        }
+        message.push_str(": ");
+        message.extend(
+            cause
+                .to_string()
+                .chars()
+                .take(1000 - message.len().min(1000)),
+        );
+        source = cause.source();
+    }
+    ModelError::Transport {
+        message: safe_error_message(api_key, &message),
+        retryable,
+    }
+}
+
+/// 对任意归一化错误再次执行当前 Provider 凭据脱敏。
+pub(crate) fn redact_model_error(error: ModelError, api_key: Option<&ApiKey>) -> ModelError {
+    match error {
+        ModelError::Authentication {
+            message,
+            status_code,
+        } => ModelError::Authentication {
+            message: safe_error_message(api_key, &message),
+            status_code,
+        },
+        ModelError::Authorization {
+            message,
+            status_code,
+        } => ModelError::Authorization {
+            message: safe_error_message(api_key, &message),
+            status_code,
+        },
+        ModelError::QuotaExceeded {
+            message,
+            status_code,
+        } => ModelError::QuotaExceeded {
+            message: safe_error_message(api_key, &message),
+            status_code,
+        },
+        ModelError::ModelNotFound {
+            message,
+            status_code,
+        } => ModelError::ModelNotFound {
+            message: safe_error_message(api_key, &message),
+            status_code,
+        },
+        ModelError::ProtocolUnsupported {
+            message,
+            status_code,
+        } => ModelError::ProtocolUnsupported {
+            message: safe_error_message(api_key, &message),
+            status_code,
+        },
+        ModelError::RateLimited {
+            message,
+            retry_after_ms,
+            status_code,
+        } => ModelError::RateLimited {
+            message: safe_error_message(api_key, &message),
+            retry_after_ms,
+            status_code,
+        },
+        ModelError::ContextLengthExceeded { message } => ModelError::ContextLengthExceeded {
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::InvalidRequest { message } => ModelError::InvalidRequest {
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::OutputLimitRejected { message } => ModelError::OutputLimitRejected {
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::UnsupportedCapability {
+            capability,
+            message,
+        } => ModelError::UnsupportedCapability {
+            capability,
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::StructuredOutput {
+            enforcement,
+            failure,
+            message,
+        } => ModelError::StructuredOutput {
+            enforcement,
+            failure,
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::ProviderUnavailable {
+            message,
+            status_code,
+            retryable,
+        } => ModelError::ProviderUnavailable {
+            message: safe_error_message(api_key, &message),
+            status_code,
+            retryable,
+        },
+        ModelError::Transport { message, retryable } => ModelError::Transport {
+            message: safe_error_message(api_key, &message),
+            retryable,
+        },
+        ModelError::StreamInterrupted {
+            message,
+            retryable,
+            partial_text,
+        } => ModelError::StreamInterrupted {
+            message: safe_error_message(api_key, &message),
+            retryable,
+            partial_text,
+        },
+        ModelError::Protocol { message } => ModelError::Protocol {
+            message: safe_error_message(api_key, &message),
+        },
+        ModelError::Cancelled { message } => ModelError::Cancelled {
+            message: safe_error_message(api_key, &message),
+        },
+    }
+}
+
+/// SSE 增量读取器的完整可恢复状态。
+struct SseStreamState {
+    response: Response,
+    decoder: SseDecoder,
+    adapter: Adapter,
+    pending: VecDeque<ModelStreamEvent>,
+    deferred_error: Option<ModelError>,
+    wire_bytes: usize,
+    max_response_bytes: usize,
+    /// 仅真实兼容性测试启用的线级响应证据捕获槽位。
+    #[cfg(feature = "io-trace")]
+    trace: Option<WireTraceSink>,
+    eof: bool,
+}
+
+/// 创建随着 HTTP 字节到达而产出模型事件的 SSE 流。
+fn stream_sse(
+    response: Response,
+    adapter: Adapter,
+    max_event_bytes: usize,
+    max_response_bytes: usize,
+    #[cfg(feature = "io-trace")] trace: Option<WireTraceSink>,
+) -> ModelStream {
+    let state = SseStreamState {
+        response,
+        decoder: SseDecoder::new(max_event_bytes),
+        adapter,
+        pending: VecDeque::new(),
+        deferred_error: None,
+        wire_bytes: 0,
+        max_response_bytes,
+        #[cfg(feature = "io-trace")]
+        trace,
+        eof: false,
+    };
+    Box::pin(stream::try_unfold(state, |mut state| async move {
+        loop {
+            if let Some(event) = state.pending.pop_front() {
+                return Ok(Some((event, state)));
+            }
+            if let Some(error) = state.deferred_error.take() {
+                return Err(error);
+            }
+            if state.eof {
+                return Ok(None);
+            }
+            match state.response.chunk().await {
+                Ok(Some(chunk)) => {
+                    state.wire_bytes =
+                        state.wire_bytes.checked_add(chunk.len()).ok_or_else(|| {
+                            ModelError::Protocol {
+                                message: "模型流式响应累计长度溢出".to_owned(),
+                            }
+                        })?;
+                    if state.wire_bytes > state.max_response_bytes {
+                        return Err(ModelError::Protocol {
+                            message: format!(
+                                "模型流式响应超过 {} 字节安全上限",
+                                state.max_response_bytes
+                            ),
+                        });
+                    }
+                    #[cfg(feature = "io-trace")]
+                    if let Some(trace) = &state.trace {
+                        trace.append_response_body(&chunk);
+                    }
+                    let frames = state.decoder.push(&chunk)?;
+                    for frame in frames {
+                        state.adapter.consume_sse(frame, &mut state.pending)?;
+                    }
+                }
+                Ok(None) => {
+                    #[cfg(feature = "io-trace")]
+                    if let Some(trace) = &state.trace {
+                        trace.record_response_body_eof();
+                    }
+                    let frames = state.decoder.finish()?;
+                    for frame in frames {
+                        state.adapter.consume_sse(frame, &mut state.pending)?;
+                    }
+                    if let Err(error) = state.adapter.finish_stream(&mut state.pending) {
+                        state.deferred_error = Some(error);
+                    }
+                    state.eof = true;
+                }
+                Err(error) => {
+                    return Err(transport_error(error, None));
+                }
+            }
+        }
+    }))
+}
+
+/// 把缓冲的 SSE 正文转换为事件序列，用于错误媒体类型的兼容服务。
+fn decode_buffered_sse(
+    body: &[u8],
+    mut adapter: Adapter,
+    max_event_bytes: usize,
+) -> Result<Vec<ModelStreamEvent>, ModelError> {
+    let mut decoder = SseDecoder::new(max_event_bytes);
+    let mut pending = VecDeque::new();
+    for frame in decoder.push(body)? {
+        adapter.consume_sse(frame, &mut pending)?;
+    }
+    for frame in decoder.finish()? {
+        adapter.consume_sse(frame, &mut pending)?;
+    }
+    adapter.finish_stream(&mut pending)?;
+    Ok(pending.into_iter().collect())
+}
+
+/// 使用捕获的 UTF-8 JSON 或 SSE 正文离线重放目标协议 Adapter。
+#[cfg(feature = "io-trace")]
+pub(crate) async fn replay_wire_response(
+    protocol: ProviderProtocol,
+    content_type: &str,
+    body: &[u8],
+    max_event_bytes: usize,
+) -> Result<ModelResponse, ModelError> {
+    let adapter = Adapter::new(protocol);
+    let events = if content_type
+        .to_ascii_lowercase()
+        .contains("text/event-stream")
+        || looks_like_sse(body)
+    {
+        decode_buffered_sse(body, adapter, max_event_bytes)?
+    } else {
+        let value: Value = serde_json::from_slice(body).map_err(|error| ModelError::Protocol {
+            message: format!("离线 Fixture 响应不是有效 JSON：{error}"),
+        })?;
+        let mut adapter = adapter;
+        adapter.decode_json(value)?
+    };
+    let stream: ModelStream = Box::pin(stream::iter(events.into_iter().map(Ok)));
+    collect_model_stream(stream).await
+}
+
+/// 在内存上限内读取完整 HTTP 正文。
+async fn read_limited(
+    mut response: Response,
+    max_bytes: usize,
+    #[cfg(feature = "io-trace")] trace: Option<&WireTraceSink>,
+) -> Result<Vec<u8>, ModelError> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| transport_error(error, None))?
+    {
+        let next_len = body
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| ModelError::Protocol {
+                message: "模型 HTTP 响应长度溢出".to_owned(),
+            })?;
+        if next_len > max_bytes {
+            return Err(ModelError::Protocol {
+                message: format!("模型 HTTP 响应超过 {max_bytes} 字节安全上限"),
+            });
+        }
+        #[cfg(feature = "io-trace")]
+        if let Some(trace) = trace {
+            trace.append_response_body(&chunk);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    #[cfg(feature = "io-trace")]
+    if let Some(trace) = trace {
+        trace.record_response_body_eof();
+    }
+    Ok(body)
+}
+
+/// 判断缓冲正文是否呈现 SSE 字段边界。
+fn looks_like_sse(body: &[u8]) -> bool {
+    let body = body.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(body);
+    body.starts_with(b"data:") || body.starts_with(b"event:") || body.starts_with(b":")
+}
+
+/// 从常见错误 JSON 或纯文本正文提取 message 与 code。
+fn provider_error_fields(body: &[u8]) -> (String, Option<String>) {
+    if let Ok(value) = serde_json::from_slice::<Value>(body) {
+        let error = value.get("error").unwrap_or(&value);
+        let message = error
+            .get("message")
+            .and_then(Value::as_str)
+            .or_else(|| error.get("msg").and_then(Value::as_str))
+            .or_else(|| value.get("message").and_then(Value::as_str))
+            .or_else(|| value.get("msg").and_then(Value::as_str))
+            .unwrap_or("模型服务返回未说明错误")
+            .to_owned();
+        let code = error.get("code").and_then(|code| {
+            code.as_str()
+                .map(ToOwned::to_owned)
+                .or_else(|| Some(code.to_string()))
+        });
+        return (message, code);
+    }
+    (String::from_utf8_lossy(body).into_owned(), None)
+}
+
+/// 移除凭据、控制字符并限制错误文本长度。
+fn safe_error_message(api_key: Option<&ApiKey>, message: &str) -> String {
+    // 先替换完整的 Provider 凭据，再运行按字段边界识别的通用脱敏。
+    // 否则像 `secret,foo` 这样的合法凭据会先被通用规则截成
+    // `secret`，随后精确替换找不到完整值，留下 `,foo`。
+    let redacted = if let Some(api_key) = api_key {
+        let exact = redact_api_key_bounded(api_key, message, MAX_ERROR_INPUT_BYTES);
+        redact_error_secrets_bounded(&exact, MAX_ERROR_INPUT_BYTES)
+    } else {
+        redact_error_secrets_bounded(message, MAX_ERROR_INPUT_BYTES)
+    };
+    let mut safe = redacted
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(MAX_ERROR_MESSAGE_CHARS)
+        .collect::<String>();
+    if safe.trim().is_empty() {
+        safe = "模型服务返回空错误".to_owned();
+    }
+    safe
+}
+
+/// 按原文窗口精确移除 Provider 凭据，并独立限制重建后的输出字节数。
+///
+/// 查找窗口只比原文保留边界多读取一个凭据长度，足以识别从边界前开始、
+/// 在边界后结束的完整凭据。替换不会移动后续原文的扫描边界，因此前面的
+/// 多次长凭据即使显著缩短输出，也不会让窗口末尾留下未识别的凭据前缀。
+fn redact_api_key_bounded(api_key: &ApiKey, input: &str, maximum_bytes: usize) -> String {
+    if maximum_bytes == 0 || input.is_empty() {
+        return String::new();
+    }
+
+    let retained_end = bounded_utf8_prefix(input, maximum_bytes).len();
+    let search_end =
+        bounded_utf8_prefix(input, retained_end.saturating_add(api_key.expose().len())).len();
+    let mut output = String::with_capacity(maximum_bytes.min(retained_end));
+    let mut cursor = 0;
+
+    for (match_start, _) in input[..search_end].match_indices(api_key.expose()) {
+        if match_start >= retained_end {
+            break;
+        }
+
+        let unmatched = &input[cursor..match_start];
+        let remaining = maximum_bytes.saturating_sub(output.len());
+        let bounded = bounded_utf8_prefix(unmatched, remaining);
+        output.push_str(bounded);
+        if bounded.len() != unmatched.len() || REDACTED_SECRET.len() > remaining - bounded.len() {
+            return output;
+        }
+
+        output.push_str(REDACTED_SECRET);
+        cursor = match_start + api_key.expose().len();
+        if cursor >= retained_end {
+            return output;
+        }
+    }
+
+    let remaining = maximum_bytes.saturating_sub(output.len());
+    output.push_str(bounded_utf8_prefix(&input[cursor..retained_end], remaining));
+    output
+}
+
+/// 按 UTF-8 边界借用不可信文本的有界前缀，避免先为超大错误分配副本。
+fn bounded_utf8_prefix(value: &str, maximum_bytes: usize) -> &str {
+    if value.len() <= maximum_bytes {
+        return value;
+    }
+    let mut end = maximum_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use rcode_model::ModelError;
+
+    use super::{
+        ApiKey, MAX_ERROR_INPUT_BYTES, REDACTED_SECRET, classify_http_error,
+        classify_in_band_provider_error, redact_api_key_bounded, safe_error_message,
+    };
+
+    #[test]
+    fn output_limit_rejection_is_structured_for_agent_downgrade() {
+        for message in [
+            "max_tokens is greater than the model's maximum: 200000 > 64000",
+            "max_output_tokens must be at most 64000",
+            "'max_completion_tokens' is too large",
+        ] {
+            match classify_http_error(400, None, message.to_owned(), Some("invalid_request_error"))
+            {
+                ModelError::OutputLimitRejected { .. } => {}
+                other => panic!("输出上限 400 应归一为 OutputLimitRejected，实际为 {other:?}"),
+            }
+        }
+        // 普通无效请求保持 InvalidRequest，不携带降级重试信号。
+        assert!(matches!(
+            classify_http_error(
+                400,
+                None,
+                "temperature must be between 0 and 1".to_owned(),
+                Some("invalid_request_error")
+            ),
+            ModelError::InvalidRequest { .. }
+        ));
+        // 带内（HTTP 200 正文）错误缺状态语义：与 InvalidRequest 一致降级为
+        // Protocol，不触发 Agent 去上限重试。
+        assert!(matches!(
+            classify_in_band_provider_error(
+                "max_tokens is too large",
+                Some("invalid_request_error")
+            ),
+            ModelError::Protocol { .. }
+        ));
+    }
+
+    #[test]
+    fn safe_error_message_redacts_full_api_keys_before_generic_fields() {
+        for key in ["secret,foo", "secret foo", "secret;foo"] {
+            let api_key = ApiKey::new(key).expect("测试凭据应有效");
+            let message = format!("api_key={key} request_id=req-redaction");
+
+            assert_eq!(
+                safe_error_message(Some(&api_key), &message),
+                "api_key=[REDACTED] request_id=req-redaction"
+            );
+        }
+    }
+
+    #[test]
+    fn safe_error_message_redacts_repeated_maximum_length_api_keys() {
+        let key = format!("sk-{}", "x".repeat(16 * 1024 - 3));
+        let api_key = ApiKey::new(key.clone()).expect("最大长度测试凭据应有效");
+        let message = format!("{key},{key};{key} {key},{key}");
+
+        assert_eq!(
+            safe_error_message(Some(&api_key), &message),
+            "[REDACTED],[REDACTED];[REDACTED] [REDACTED]"
+        );
+    }
+
+    #[test]
+    fn bounded_api_key_redaction_recognizes_match_crossing_input_boundary() {
+        let key = format!("secret,{}", "k".repeat(64));
+        let api_key = ApiKey::new(key.clone()).expect("边界测试凭据应有效");
+        let prefix = "p".repeat(MAX_ERROR_INPUT_BYTES - REDACTED_SECRET.len());
+        let message = format!("{prefix}{key} trailing");
+
+        let redacted = redact_api_key_bounded(&api_key, &message, MAX_ERROR_INPUT_BYTES);
+
+        assert_eq!(redacted.len(), MAX_ERROR_INPUT_BYTES);
+        assert!(redacted.ends_with(REDACTED_SECRET));
+        assert!(!redacted.contains(&key));
+    }
+
+    #[test]
+    fn anthropic_overload_529_is_retryable() {
+        // 529 是 Anthropic 的过载状态码，属远端瞬时故障；误判为不可重试会让
+        // 高峰期的一次过载直接终止整个 Turn。
+        let error = classify_http_error(529, None, "overloaded".to_owned(), None);
+        assert!(
+            matches!(
+                error,
+                super::ModelError::ProviderUnavailable {
+                    status_code: Some(529),
+                    retryable: true,
+                    ..
+                }
+            ),
+            "529 必须归类为可重试的 ProviderUnavailable，实际为 {error:?}"
+        );
+    }
+
+    #[test]
+    fn in_band_overloaded_error_is_retryable_without_status() {
+        // Anthropic 也会以 HTTP 200 正文携带 overloaded_error；in-band 路径用
+        // 固定 400 调用分类器，因此关键词层必须识别 overloaded 才能保持可重试。
+        let error = classify_in_band_provider_error("Overloaded", Some("overloaded_error"));
+        assert!(
+            matches!(
+                error,
+                super::ModelError::ProviderUnavailable {
+                    status_code: None,
+                    retryable: true,
+                    ..
+                }
+            ),
+            "in-band overloaded 必须可重试且不伪造状态码，实际为 {error:?}"
+        );
+    }
+}

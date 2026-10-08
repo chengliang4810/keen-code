@@ -1,0 +1,9 @@
+packages:
+  - packages/*
+
+minimumReleaseAge: 4320
+minimumReleaseAgeStrict: true
+allowBuilds:
+  esbuild: true
+  msgpackr-extract: false
+  msw: true

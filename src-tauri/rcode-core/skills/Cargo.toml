@@ -1,0 +1,22 @@
+[package]
+name = "rcode-skills"
+# 首版安全发现与读取契约版本。
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+# 当前 crate 仅随 RCode 发布，不单独上传注册表。
+publish = false
+description = "RCode Skills 的安全发现与按需读取领域层"
+
+[lib]
+name = "rcode_skills"
+path = "src/lib.rs"
+
+[dependencies]
+# 复用依赖图已有的 Shell 单词解析器，正确处理 Skill/command 引号参数。
+shlex = "2"
+
+[dev-dependencies]
+# 为文件边界、冲突和懒加载测试创建自动清理的临时目录。
+tempfile = "3.21.0"

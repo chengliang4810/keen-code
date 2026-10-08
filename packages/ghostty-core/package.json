@@ -1,0 +1,28 @@
+{
+  "name": "@rcode/ghostty-core",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./lib/core.ts",
+    "./protocol": "./lib/protocol.ts",
+    "./adapted": "./lib/adapted/index.ts",
+    "./adapted/ghostty-vt.wasm": "./adapted/ghostty-vt.wasm",
+    "./adapted/ghostty-vt-scalar.wasm": "./adapted/ghostty-vt-scalar.wasm",
+    "./ghostty-vt.wasm": "./ghostty-vt.wasm",
+    "./official": "./lib/official/index.ts",
+    "./official/ghostty-vt.wasm": "./official/ghostty-vt.wasm"
+  },
+  "files": [
+    "lib",
+    "adapted/ghostty-vt.wasm",
+    "adapted/ghostty-vt-scalar.wasm",
+    "adapted/wasm/build.zig",
+    "adapted/wasm/build.zig.zon",
+    "adapted/wasm/src/rcode.zig",
+    "adapted/wasm/src/terminfo_gen.zig",
+    "ghostty-vt.wasm",
+    "official/ghostty-vt.wasm"
+  ]
+}

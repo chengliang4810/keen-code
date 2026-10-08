@@ -1,0 +1,573 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "./fonts.css";
+@import "./code-highlight.css";
+
+@source "../../node_modules/streamdown/dist/index.js";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    /* 主文字共用基准；较小字级只用于辅助说明、徽标和弱元数据。 */
+    --text-ui-xl: calc(var(--ui-font-size) + 4px);
+    --text-ui-lg: calc(var(--ui-font-size) + 2px);
+    --text-ui-base: var(--ui-font-size);
+    --text-ui-caption: calc(var(--ui-font-size) - 1px);
+    --text-ui-sm: calc(var(--ui-font-size) - 2px);
+    --text-ui-xs: calc(var(--ui-font-size) - 4px);
+    --text-xs: calc(var(--ui-font-size) - 2px);
+    --text-sm: var(--ui-font-size);
+    --text-base: calc(var(--ui-font-size) + 2px);
+    --text-lg: calc(var(--ui-font-size) + 4px);
+    --text-xl: calc(var(--ui-font-size) + 6px);
+    --text-2xl: calc(var(--ui-font-size) + 10px);
+    --text-3xl: calc(var(--ui-font-size) + 16px);
+    --text-4xl: calc(var(--ui-font-size) + 22px);
+    --text-5xl: calc(var(--ui-font-size) + 34px);
+    --text-6xl: calc(var(--ui-font-size) + 46px);
+    --text-7xl: calc(var(--ui-font-size) + 58px);
+    --text-8xl: calc(var(--ui-font-size) + 82px);
+    --text-9xl: calc(var(--ui-font-size) + 114px);
+    --font-heading: var(--font-sans);
+    --font-sans: 'Inter Variable', sans-serif;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --color-frame: var(--frame);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* 数字字级兼容代码预览的既有偏移；普通界面文字使用上面的语义字级。 */
+@utility text-ui-* {
+  font-size: calc(var(--ui-font-size) + (--value(number) - 14) * 1px);
+}
+
+/* Baseline tokens mirror the built-in default theme, so the first paint already
+ * matches what `applyTheme` writes a frame later. */
+:root {
+    --background: #ffffff;
+    --foreground: #111111;
+    --card: #f3f3f3;
+    --card-foreground: #111111;
+    --popover: #ffffff;
+    --popover-foreground: #111111;
+    --primary: #111111;
+    --primary-foreground: #ffffff;
+    --secondary: #ededed;
+    --secondary-foreground: #111111;
+    --muted: #ededed;
+    --muted-foreground: #656565;
+    --accent: #e5e5e5;
+    --accent-foreground: #111111;
+    --destructive: #c0392f;
+    --border: rgba(0, 0, 0, 0.09);
+    --input: rgba(0, 0, 0, 0.13);
+    --ring: #8a8a8a;
+    --chart-1: #111111;
+    --chart-2: #4a4a4a;
+    --chart-3: #656565;
+    --chart-4: #8a8a8a;
+    --chart-5: #b4b4b4;
+    --radius: 0.625rem;
+    --sidebar: #fafbfd;
+    --sidebar-foreground: #111111;
+    --sidebar-primary: #111111;
+    --sidebar-primary-foreground: #ffffff;
+    --sidebar-accent: #e5e5e5;
+    --sidebar-accent-foreground: #111111;
+    --sidebar-border: rgba(0, 0, 0, 0.09);
+    --sidebar-ring: #8a8a8a;
+}
+
+.dark {
+    --background: #141414;
+    --foreground: #f7f7f7;
+    --card: #1d1d1d;
+    --card-foreground: #f7f7f7;
+    --popover: #1d1d1d;
+    --popover-foreground: #f7f7f7;
+    --primary: #f7f7f7;
+    --primary-foreground: #141414;
+    --secondary: #2a2a2a;
+    --secondary-foreground: #f7f7f7;
+    --muted: #1d1d1d;
+    --muted-foreground: #a3a3a3;
+    --accent: #2a2a2a;
+    --accent-foreground: #f7f7f7;
+    --destructive: #e35d5d;
+    --border: rgba(255, 255, 255, 0.09);
+    --input: rgba(255, 255, 255, 0.13);
+    --ring: #8a8a8a;
+    --chart-1: #f7f7f7;
+    --chart-2: #b4b4b4;
+    --chart-3: #8a8a8a;
+    --chart-4: #656565;
+    --chart-5: #4a4a4a;
+    --sidebar: #1d1d1d;
+    --sidebar-foreground: #f7f7f7;
+    --sidebar-primary: #f7f7f7;
+    --sidebar-primary-foreground: #141414;
+    --sidebar-accent: #2a2a2a;
+    --sidebar-accent-foreground: #f7f7f7;
+    --sidebar-border: rgba(255, 255, 255, 0.09);
+    --sidebar-ring: #8a8a8a;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    font-size: var(--ui-font-size);
+    margin: 0;
+    overflow: hidden;
+    }
+  html, body, #root {
+    height: 100%;
+    }
+  html {
+    @apply font-sans;
+    }
+}
+
+:root {
+  --terminal-background: var(--background);
+  --terminal-foreground: var(--foreground);
+  --terminal-cursor: var(--foreground);
+  --terminal-cursor-accent: var(--background);
+  --terminal-selection: var(--accent);
+  --terminal-ansi-black: #111111;
+  --terminal-ansi-red: #c0392f;
+  --terminal-ansi-green: #2f7d4f;
+  --terminal-ansi-yellow: #a37413;
+  --terminal-ansi-blue: #2f6bb5;
+  --terminal-ansi-magenta: #8a4fb5;
+  --terminal-ansi-cyan: #227d85;
+  --terminal-ansi-white: #cfcfcf;
+  --terminal-ansi-bright-black: #656565;
+  --terminal-ansi-bright-red: #d94f42;
+  --terminal-ansi-bright-green: #3d9c64;
+  --terminal-ansi-bright-yellow: #bf8a1f;
+  --terminal-ansi-bright-blue: #3f82d4;
+  --terminal-ansi-bright-magenta: #a065cf;
+  --terminal-ansi-bright-cyan: #2b98a2;
+  --terminal-ansi-bright-white: #111111;
+}
+
+/* The default theme short-circuits `applyTheme` (ThemeProvider calls
+ * clearTheme instead), so these vars are the whole palette, not a pre-paint
+ * placeholder. An unscoped ANSI block would put dark colours on a white
+ * terminal for every light-mode user. */
+.dark {
+  --terminal-ansi-black: #3f3f3f;
+  --terminal-ansi-red: #e35d5d;
+  --terminal-ansi-green: #6ec48f;
+  --terminal-ansi-yellow: #e0b34d;
+  --terminal-ansi-blue: #6ea8e8;
+  --terminal-ansi-magenta: #b98ce0;
+  --terminal-ansi-cyan: #5fc6cc;
+  --terminal-ansi-white: #d8d8d8;
+  --terminal-ansi-bright-black: #6e6e6e;
+  --terminal-ansi-bright-red: #f27f7f;
+  --terminal-ansi-bright-green: #85d9a4;
+  --terminal-ansi-bright-yellow: #eec469;
+  --terminal-ansi-bright-blue: #8dbcf2;
+  --terminal-ansi-bright-magenta: #cba5ee;
+  --terminal-ansi-bright-cyan: #7bdbe0;
+  --terminal-ansi-bright-white: #f7f7f7;
+}
+
+:root {
+  --app-zoom: 1;
+  --ui-font-size: 14px;
+  --editor-font-size: 13px;
+}
+
+/* 工作台共用一个卡片外框；窗口背景与卡片背景沿用主题变量，终端画布保持同色。 */
+:root {
+  --frame: color-mix(in oklab, var(--card) 97%, var(--foreground) 3%);
+  --pane-radius: calc(var(--radius) * 1.4);
+  --pane-shadow: none;
+}
+.dark {
+  --pane-shadow: inset 0 1px 0 oklch(1 0 0 / 0.035);
+}
+
+/* 圆角、边框与内阴影只应用于面板组，内部栏目通过可拖动的分隔线衔接。 */
+.rcode-pane {
+  border-radius: var(--pane-radius);
+  border: 1px solid var(--border);
+  background: var(--background);
+  box-shadow: var(--pane-shadow);
+  overflow: hidden;
+}
+
+/* #FAFBFD 仅作为默认浅色主题值，切换或预览主题时共用其侧栏颜色。 */
+.rcode-left-sidebar {
+  background-color: var(--sidebar);
+}
+
+/* 同组设置共用外框，行之间只保留细线；独立使用的设置行保持原有卡片样式。 */
+[data-setting-group] > [data-setting-row] {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0.875rem 0;
+}
+[data-setting-group] > [data-setting-row] + [data-setting-row] {
+  border-top: 1px solid color-mix(in oklab, var(--border) 60%, transparent);
+}
+
+/* Window vibrancy (macOS NSVisualEffectView / Windows Mica). Only the frame
+ * goes translucent: panes keep `--background` so terminal and editor text
+ * stays on a solid, readable surface and the terminal canvas still matches its
+ * container. Redefining `--frame` rather than layering an overlay means
+ * `bg-frame` and the borderless-chrome `#root` both follow automatically. */
+html[data-vibrancy="on"],
+html[data-vibrancy="on"] body {
+  background: transparent;
+}
+html[data-vibrancy="on"] {
+  --frame: color-mix(in oklab, var(--card) 55%, transparent);
+}
+
+html[data-chrome="borderless"] .rcode-bg-surface {
+  border-radius: 12px;
+}
+.zoom-content {
+  zoom: var(--app-zoom);
+}
+.zoom-exempt {
+  zoom: calc(1 / var(--app-zoom));
+}
+
+.rcode-header {
+  height: 1.75rem;
+  padding-top: 0.75rem;
+}
+.rcode-header button {
+  max-height: calc(1rem + 1rem * var(--app-zoom));
+}
+
+/* Custom window chrome (Linux/Windows): the OS gives us a transparent
+ * borderless window, and we paint the rounded corners + border + shadow
+ * ourselves so the app doesn't look naked on GNOME/KDE/Hyprland. */
+html[data-chrome="borderless"],
+html[data-chrome="borderless"] body {
+  background: transparent !important;
+}
+html[data-chrome="borderless"] #root,
+html[data-chrome="borderless"] #settings-root {
+  height: 100%;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--background);
+}
+html[data-chrome="borderless"] #root {
+  background: var(--frame);
+}
+
+
+
+.cm-editor,
+.cm-scroller {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.cm-editor::-webkit-scrollbar,
+.cm-scroller::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+}
+
+body {
+  -webkit-user-select: none;
+  user-select: none;
+}
+input,
+textarea,
+[contenteditable="true"],
+.cm-editor,
+.select-text,
+.select-text * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+.cm-color-swatch {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.35em;
+  border-radius: 3px;
+  border: 1px solid rgba(128, 128, 128, 0.4);
+  vertical-align: middle;
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+.cm-color-swatch-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+
+.no-scrollbar {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.no-scrollbar::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+}
+
+.no-scrollbar-deep,
+.no-scrollbar-deep * {
+  scrollbar-width: none !important;
+  -ms-overflow-style: none !important;
+}
+.no-scrollbar-deep::-webkit-scrollbar,
+.no-scrollbar-deep *::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+  display: none !important;
+}
+
+/* Kill native scrollbars everywhere by default — Linux/Windows ship chunky
+ * Chromium bars that break the chrome, and macOS WKWebView flashes its overlay
+ * scrollbar briefly during layout transitions (AI panel open, pane split,
+ * window resize) which looks like a glitch. Visible scroll affordances are
+ * provided per-region via shadcn <ScrollArea>. */
+html,
+html *,
+html *::before,
+html *::after {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+html *::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+.rcode-code-editor .cm-scroller {
+  margin-right: -4px;
+  scrollbar-width: thin !important;
+  scrollbar-color: color-mix(in srgb, var(--foreground) 18%, transparent)
+    transparent !important;
+}
+.rcode-code-editor .cm-scroller::-webkit-scrollbar {
+  width: 7px !important;
+  height: 7px !important;
+  display: block !important;
+}
+.rcode-code-editor .cm-scroller::-webkit-scrollbar-track,
+.rcode-code-editor .cm-scroller::-webkit-scrollbar-corner {
+  background: transparent;
+}
+.rcode-code-editor .cm-scroller::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 18%, transparent);
+  background-clip: padding-box;
+}
+.rcode-code-editor .cm-scroller::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(
+    in srgb,
+    var(--foreground) 30%,
+    transparent
+  );
+}
+
+/* Motion tokens. Reduced-motion zeroes the durations as a global snap. */
+:root {
+  --dur-fast: 160ms;
+  --dur-base: 240ms;
+  --dur-slow: 320ms;
+  --ease-premium: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes rcode-collapsible-down {
+  from {
+    height: 0;
+    opacity: 0;
+  }
+  to {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+}
+
+@keyframes rcode-collapsible-up {
+  from {
+    height: var(--radix-collapsible-content-height);
+    opacity: 1;
+  }
+  to {
+    height: 0;
+    opacity: 0;
+  }
+}
+
+.rcode-collapsible-content {
+  overflow: hidden;
+}
+.rcode-collapsible-content[data-state="open"] {
+  animation: rcode-collapsible-down var(--dur-base) var(--ease-soft);
+}
+.rcode-collapsible-content[data-state="closed"] {
+  animation: rcode-collapsible-up var(--dur-base) var(--ease-soft);
+}
+
+/* Height auto<->0 reveal without JS measuring: animate the grid track from 0fr
+ * to 1fr. The inner child must be the sole grid row with min-height:0. Used by
+ * the docked AI input bar and the composer voice-status row. */
+.rcode-reveal {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition:
+    grid-template-rows var(--dur-base) var(--ease-premium),
+    opacity var(--dur-base) var(--ease-premium);
+  opacity: 0;
+}
+.rcode-reveal[data-state="open"] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+.rcode-reveal > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+@keyframes rcode-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(-40px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+.rcode-panel-in {
+  animation: rcode-panel-in var(--dur-slow) var(--ease-premium);
+}
+
+@keyframes rcode-tab-in {
+  from {
+    opacity: 0;
+    transform: scale(0.86);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.rcode-tab-in {
+  animation: rcode-tab-in var(--dur-base) var(--ease-premium);
+}
+
+@keyframes rcode-pill-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+.rcode-pill-in {
+  animation: rcode-pill-in var(--dur-base) var(--ease-premium);
+}
+
+/* Text shimmer loop (replaces motion background-position animation). Driven by
+ * --shimmer-duration / --shimmer-spread set inline per instance. */
+@keyframes rcode-shimmer {
+  from {
+    background-position: 100% center;
+  }
+  to {
+    background-position: 0% center;
+  }
+}
+.rcode-shimmer {
+  background-repeat: no-repeat, padding-box;
+  background-size:
+    250% 100%,
+    auto;
+  background-image:
+    linear-gradient(
+      90deg,
+      transparent calc(50% - var(--shimmer-spread)),
+      var(--color-background),
+      transparent calc(50% + var(--shimmer-spread))
+    ),
+    linear-gradient(
+      var(--color-muted-foreground),
+      var(--color-muted-foreground)
+    );
+  animation: rcode-shimmer var(--shimmer-duration, 2s) linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0.01ms;
+    --dur-base: 0.01ms;
+    --dur-slow: 0.01ms;
+  }
+  .rcode-reveal {
+    transition: none;
+  }
+  .rcode-shimmer {
+    animation: none;
+    background-position: 0% center;
+  }
+}

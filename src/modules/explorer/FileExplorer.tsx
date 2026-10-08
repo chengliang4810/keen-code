@@ -1,0 +1,1008 @@
+import { useTranslation } from "@/modules/i18n";
+import { Button } from "@/components/ui/button";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  FileAddIcon,
+  Folder01Icon,
+  FolderAddIcon,
+  Refresh01Icon,
+  Search01Icon,
+} from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { useVirtualizer } from "@tanstack/react-virtual";
+import {
+  forwardRef,
+  memo,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { cn } from "@/lib/utils";
+import { ExplorerSearch, type ExplorerSearchHandle } from "./ExplorerSearch";
+import {
+  EntryRow,
+  PendingRow,
+  StatusRow,
+  type RowActions,
+  type SelectModifiers,
+} from "./TreeRow";
+import { InlineInput } from "./InlineInput";
+import {
+  copyToClipboard,
+  relativePath,
+  revealInFinder,
+} from "./lib/contextActions";
+import { fileIconUrl, folderIconUrl } from "./lib/iconResolver";
+import { COMPACT_CONTENT, COMPACT_ITEM } from "./lib/menuItemClass";
+import { useExplorerDnd } from "./lib/useExplorerDnd";
+import { useExplorerFileDrop } from "./lib/useExplorerFileDrop";
+import { useFileTree } from "./lib/useFileTree";
+import { useGitStatus } from "./lib/useGitStatus";
+import type { GitStatusCode } from "./lib/gitStatusUtils";
+import { useGlobalShortcuts } from "@/modules/shortcuts";
+import { usePreferencesStore } from "@/modules/settings/preferences";
+import type { GitStatusSnapshot } from "@/modules/ai/lib/native";
+import type { TerminalPathDropTarget } from "@/modules/terminal";
+
+export type FileExplorerHandle = {
+  focus: () => void;
+  isFocused: () => boolean;
+  focusSearch: () => void;
+};
+
+type Props = {
+  rootPath: string | null;
+  activeFilePath?: string | null;
+  onOpenFile: (path: string, pin?: boolean) => void;
+  onPathRenamed?: (from: string, to: string) => void;
+  onPathsDeleted?: (paths: string[]) => void;
+  canReplacePath?: (path: string) => boolean;
+  onRevealInTerminal?: (path: string) => void;
+  onOpenInSourceControl?: (path: string) => void;
+  onOpenGitHistory?: (path: string) => void;
+  onAttachToAgent?: (path: string) => void;
+  pathDropTarget?: TerminalPathDropTarget;
+  gitStatus?: GitStatusSnapshot | null;
+};
+
+type Row =
+  | {
+      kind: "entry";
+      key: string;
+      path: string;
+      name: string;
+      isDir: boolean;
+      isExpanded: boolean;
+      depth: number;
+      gitignored: boolean;
+      gitStatusCode: GitStatusCode | null;
+    }
+  | {
+      kind: "rename";
+      key: string;
+      path: string;
+      name: string;
+      isDir: boolean;
+      depth: number;
+      gitignored: boolean;
+      gitStatusCode: GitStatusCode | null;
+    }
+  | { kind: "pending"; key: string; depth: number; pendingKind: "file" | "dir" }
+  | {
+      kind: "status";
+      key: string;
+      depth: number;
+      tone: "muted" | "error";
+      message: string;
+    };
+
+const ROW_HEIGHT = 24;
+const OVERSCAN = 8;
+
+function basename(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length ? parts[parts.length - 1] : path;
+}
+
+function parentOf(path: string, fallback: string): string {
+  const i = path.lastIndexOf("/");
+  return i > 0 ? path.slice(0, i) : fallback;
+}
+
+function buildRows(
+  rootPath: string,
+  tree: ReturnType<typeof useFileTree>,
+  lookup: (path: string) => GitStatusCode | null,
+): { rows: Row[]; entryIndexByPath: Map<string, number> } {
+  const rows: Row[] = [];
+  const entryIndexByPath = new Map<string, number>();
+
+  const walk = (parent: string, depth: number, parentIgnored: boolean) => {
+    const node = tree.nodes[parent];
+    if (!node || node.status !== "loaded") return;
+    for (const entry of node.entries) {
+      const path = tree.joinPath(parent, entry.name);
+      const isDir = entry.kind === "dir";
+      const expanded = isDir && tree.expanded.has(path);
+      const isRenaming = tree.renaming === path;
+      const gitignored = parentIgnored || entry.gitignored;
+      const gitStatusCode = gitignored ? null : lookup(path);
+      if (isRenaming) {
+        rows.push({
+          kind: "rename",
+          key: `rename:${path}`,
+          path,
+          name: entry.name,
+          isDir,
+          depth,
+          gitignored,
+          gitStatusCode,
+        });
+      } else {
+        entryIndexByPath.set(path, rows.length);
+        rows.push({
+          kind: "entry",
+          key: path,
+          path,
+          name: entry.name,
+          isDir,
+          isExpanded: expanded,
+          depth,
+          gitignored,
+          gitStatusCode,
+        });
+      }
+      if (isDir && expanded) {
+        const child = tree.nodes[path];
+        if (tree.pendingCreate?.parentPath === path) {
+          rows.push({
+            kind: "pending",
+            key: `pending:${path}`,
+            depth: depth + 1,
+            pendingKind: tree.pendingCreate.kind,
+          });
+        }
+        if (child?.status === "loading") {
+          rows.push({
+            kind: "status",
+            key: `loading:${path}`,
+            depth: depth + 1,
+            tone: "muted",
+            message: "Loading…",
+          });
+        } else if (child?.status === "error") {
+          rows.push({
+            kind: "status",
+            key: `error:${path}`,
+            depth: depth + 1,
+            tone: "error",
+            message: child.message,
+          });
+        } else if (child?.status === "loaded") {
+          walk(path, depth + 1, gitignored);
+        }
+      }
+    }
+  };
+
+  walk(rootPath, 0, false);
+  return { rows, entryIndexByPath };
+}
+
+export const FileExplorer = memo(
+  forwardRef<FileExplorerHandle, Props>(function FileExplorer(
+    {
+      rootPath,
+      activeFilePath,
+      onOpenFile,
+      onPathRenamed,
+      onPathsDeleted,
+      canReplacePath,
+      onRevealInTerminal,
+      onOpenInSourceControl,
+      onOpenGitHistory,
+      onAttachToAgent,
+      pathDropTarget,
+      gitStatus,
+    },
+    ref,
+  ) {
+    const tr = useTranslation();
+    const tree = useFileTree(rootPath, {
+      onPathRenamed,
+      onPathsDeleted,
+      canReplacePath,
+    });
+    const gitDecorations = usePreferencesStore((s) => s.explorerGitDecorations);
+    const { lookup: lookupGitStatus } = useGitStatus(
+      rootPath,
+      gitDecorations ? gitStatus : null,
+      gitDecorations,
+    );
+    const [selectedPaths, setSelectedPaths] = useState<Set<string>>(
+      () => new Set(),
+    );
+    const [anchorPath, setAnchorPath] = useState<string | null>(null);
+    const selectedPathsRef = useRef(selectedPaths);
+    useLayoutEffect(() => {
+      selectedPathsRef.current = selectedPaths;
+    }, [selectedPaths]);
+    const anchorPathRef = useRef(anchorPath);
+    useLayoutEffect(() => {
+      anchorPathRef.current = anchorPath;
+    }, [anchorPath]);
+    const [isSearchOpen, setIsSearchOpen] = useState(false);
+    const [isSearchActive, setIsSearchActive] = useState(false);
+    const searchRef = useRef<ExplorerSearchHandle>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const scrollRef = useRef<HTMLDivElement>(null);
+
+    const { rows, entryIndexByPath } = useMemo(() => {
+      if (!rootPath)
+        return {
+          rows: [] as Row[],
+          entryIndexByPath: new Map<string, number>(),
+        };
+      return buildRows(rootPath, tree, lookupGitStatus);
+      // `tree` is intentionally omitted: its identity changes every render, but
+      // the listed fields are the only inputs buildRows actually reads.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [
+      rootPath,
+      tree.nodes,
+      tree.expanded,
+      tree.renaming,
+      tree.pendingCreate,
+      lookupGitStatus,
+    ]);
+
+    const rowActions = useMemo<RowActions>(
+      () => ({
+        toggle: tree.toggle,
+        beginRename: tree.beginRename,
+        commitRename: tree.commitRename,
+        cancelRename: tree.cancelRename,
+      }),
+      [tree.toggle, tree.beginRename, tree.commitRename, tree.cancelRename],
+    );
+    const renameInProgress =
+      tree.renaming !== null || tree.pendingCreate !== null;
+
+    const [menuTarget, setMenuTarget] = useState<{
+      path: string;
+      name: string;
+      isDir: boolean;
+    } | null>(null);
+    const [deleteConfirm, setDeleteConfirm] = useState(false);
+    const [menuIsBatch, setMenuIsBatch] = useState(false);
+    // Bumped on every right-click so the menu content remounts and the popper
+    // re-anchors to the new cursor (floating-ui won't reposition on an anchor
+    // change alone, only on scroll/resize).
+    const [menuNonce, setMenuNonce] = useState(0);
+
+    const entryPaths = useMemo<string[]>(() => {
+      const out: string[] = [];
+      for (const row of rows) if (row.kind === "entry") out.push(row.path);
+      return out;
+    }, [rows]);
+    const entryPathsRef = useRef(entryPaths);
+    useLayoutEffect(() => {
+      entryPathsRef.current = entryPaths;
+    }, [entryPaths]);
+
+    const collapseSelectionTo = useCallback((path: string) => {
+      setSelectedPaths(new Set([path]));
+      setAnchorPath(path);
+    }, []);
+
+    const getSelectedPaths = useCallback(() => selectedPathsRef.current, []);
+
+    // Stable identity (reads fresh state off refs) so the memoized EntryRow
+    // doesn't re-render on every selection change.
+    const handleEntrySelect = useCallback(
+      (path: string, modifiers: SelectModifiers) => {
+        if (modifiers.shift) {
+          const paths = entryPathsRef.current;
+          const anchor = anchorPathRef.current ?? path;
+          const anchorIdx = paths.indexOf(anchor);
+          const idx = paths.indexOf(path);
+          if (anchorIdx === -1 || idx === -1) {
+            collapseSelectionTo(path);
+            return;
+          }
+          const [lo, hi] =
+            anchorIdx <= idx ? [anchorIdx, idx] : [idx, anchorIdx];
+          setSelectedPaths(new Set(paths.slice(lo, hi + 1)));
+          if (anchorPathRef.current === null) setAnchorPath(anchor);
+          return;
+        }
+        if (modifiers.mod) {
+          setSelectedPaths((curr) => {
+            const next = new Set(curr);
+            if (next.has(path)) next.delete(path);
+            else next.add(path);
+            return next;
+          });
+          setAnchorPath(path);
+          return;
+        }
+        collapseSelectionTo(path);
+      },
+      [collapseSelectionTo],
+    );
+
+    const isDirAt = useCallback(
+      (path: string): boolean | undefined => {
+        const idx = entryIndexByPath.get(path);
+        const row = idx !== undefined ? rows[idx] : undefined;
+        return row?.kind === "entry" ? row.isDir : undefined;
+      },
+      [entryIndexByPath, rows],
+    );
+    const dnd = useExplorerDnd({
+      rootPath: rootPath ?? "",
+      isDir: isDirAt,
+      onMove: tree.movePaths,
+      getSelectedPaths,
+      collapseSelectionTo,
+      pathDropTarget,
+    });
+
+    const fileDrop = useExplorerFileDrop({
+      rootPath,
+      isDir: isDirAt,
+      onCopied: tree.refresh,
+    });
+
+    const dropTargetDir = dnd.dropTargetDir ?? fileDrop.externalTargetDir;
+    const rootIsDropTarget =
+      dropTargetDir != null && dropTargetDir === rootPath;
+    useEffect(() => {
+      if (!dropTargetDir || dropTargetDir === rootPath) return;
+      if (tree.expanded.has(dropTargetDir)) return;
+      const id = window.setTimeout(() => tree.expand(dropTargetDir), 700);
+      return () => window.clearTimeout(id);
+    }, [dropTargetDir, rootPath, tree.expanded, tree.expand]);
+
+    useEffect(() => {
+      setSelectedPaths((curr) => {
+        let changed = false;
+        const next = new Set(curr);
+        for (const p of curr) {
+          if (!entryIndexByPath.has(p)) {
+            next.delete(p);
+            changed = true;
+          }
+        }
+        return changed ? next : curr;
+      });
+      if (anchorPath && !entryIndexByPath.has(anchorPath)) setAnchorPath(null);
+    }, [entryIndexByPath, anchorPath]);
+
+    const virtualizer = useVirtualizer({
+      count: rows.length,
+      getScrollElement: () => scrollRef.current,
+      estimateSize: () => ROW_HEIGHT,
+      overscan: OVERSCAN,
+      getItemKey: (index) => rows[index]?.key ?? index,
+    });
+
+    const scrollEntryIntoView = useCallback(
+      (path: string) => {
+        const index = entryIndexByPath.get(path);
+        if (index === undefined) return;
+        virtualizer.scrollToIndex(index, { align: "auto" });
+      },
+      [entryIndexByPath, virtualizer],
+    );
+
+    const lastSyncedActivePathRef = useRef<string | null>(null);
+    useEffect(() => {
+      if (
+        !activeFilePath ||
+        activeFilePath === lastSyncedActivePathRef.current
+      ) {
+        return;
+      }
+      if (!entryIndexByPath.has(activeFilePath)) return;
+      lastSyncedActivePathRef.current = activeFilePath;
+      collapseSelectionTo(activeFilePath);
+      requestAnimationFrame(() => scrollEntryIntoView(activeFilePath));
+    }, [
+      activeFilePath,
+      entryIndexByPath,
+      scrollEntryIntoView,
+      collapseSelectionTo,
+    ]);
+
+    useImperativeHandle(
+      ref,
+      () => ({
+        focus: () => {
+          containerRef.current?.focus();
+          if (selectedPathsRef.current.size === 0 && entryPaths.length > 0) {
+            const first = entryPaths[0];
+            collapseSelectionTo(first);
+            requestAnimationFrame(() => scrollEntryIntoView(first));
+          }
+        },
+        isFocused: () => {
+          const c = containerRef.current;
+          if (!c) return false;
+          const active = document.activeElement;
+          return active instanceof Node && c.contains(active);
+        },
+        focusSearch: () => {
+          setIsSearchOpen(true);
+          searchRef.current?.focus();
+        },
+      }),
+      [entryPaths, scrollEntryIntoView, collapseSelectionTo],
+    );
+
+    useGlobalShortcuts({
+      "explorer.search": () => {
+        if (searchRef.current?.isFocused()) {
+          setIsSearchOpen(false);
+          return;
+        }
+        setIsSearchOpen(true);
+        searchRef.current?.focus();
+      },
+    });
+
+    if (!rootPath) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-2 p-6 text-center">
+          <HugeiconsIcon
+            icon={Folder01Icon}
+            size={24}
+            strokeWidth={1.5}
+            className="text-muted-foreground"
+          />
+          <div className="text-ui-sm text-muted-foreground">
+            {tr("No current directory")}
+          </div>
+        </div>
+      );
+    }
+
+    const root = tree.nodes[rootPath];
+    const pendingAtRoot =
+      tree.pendingCreate?.parentPath === rootPath ? tree.pendingCreate : null;
+
+    const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+      if (tree.renaming || tree.pendingCreate || isSearchOpen) return;
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.isContentEditable
+      )
+        return;
+      if (entryPaths.length === 0) return;
+
+      if (e.key === "Escape" && selectedPaths.size > 1) {
+        e.preventDefault();
+        collapseSelectionTo(anchorPath ?? entryPaths[0]);
+        return;
+      }
+
+      const currentIdx = anchorPath ? entryPaths.indexOf(anchorPath) : -1;
+      const move = (next: number) => {
+        const clamped = Math.max(0, Math.min(entryPaths.length - 1, next));
+        const path = entryPaths[clamped];
+        collapseSelectionTo(path);
+        requestAnimationFrame(() => scrollEntryIntoView(path));
+      };
+
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          move(currentIdx < 0 ? 0 : currentIdx + 1);
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          move(currentIdx < 0 ? entryPaths.length - 1 : currentIdx - 1);
+          break;
+        case "ArrowRight": {
+          if (currentIdx < 0) return;
+          e.preventDefault();
+          const path = entryPaths[currentIdx];
+          const idx = entryIndexByPath.get(path);
+          if (idx === undefined) break;
+          const row = rows[idx];
+          if (row.kind !== "entry") break;
+          if (row.isDir) {
+            if (!row.isExpanded) tree.toggle(row.path);
+            else move(currentIdx + 1);
+          }
+          break;
+        }
+        case "ArrowLeft": {
+          if (currentIdx < 0) return;
+          e.preventDefault();
+          const path = entryPaths[currentIdx];
+          const idx = entryIndexByPath.get(path);
+          if (idx === undefined) break;
+          const row = rows[idx];
+          if (row.kind !== "entry") break;
+          if (row.isDir && row.isExpanded) {
+            tree.toggle(row.path);
+          } else {
+            const parent = row.path.slice(0, row.path.lastIndexOf("/"));
+            if (parent && parent !== rootPath) collapseSelectionTo(parent);
+          }
+          break;
+        }
+        case "Enter": {
+          if (currentIdx < 0) return;
+          e.preventDefault();
+          const path = entryPaths[currentIdx];
+          const idx = entryIndexByPath.get(path);
+          if (idx === undefined) break;
+          const row = rows[idx];
+          if (row.kind !== "entry") break;
+          if (row.isDir) tree.toggle(row.path);
+          else onOpenFile(row.path);
+          break;
+        }
+      }
+    };
+
+    const renderRow = (row: Row) => {
+      switch (row.kind) {
+        case "entry":
+        case "rename": {
+          return (
+            <EntryRow
+              path={row.path}
+              name={row.name}
+              isDir={row.isDir}
+              isExpanded={row.kind === "entry" ? row.isExpanded : false}
+              depth={row.depth}
+              actions={rowActions}
+              renameInProgress={renameInProgress}
+              isSelected={selectedPaths.has(row.path)}
+              isRenaming={row.kind === "rename"}
+              isDropTarget={dropTargetDir === row.path}
+              multiSelectActive={selectedPaths.size > 1}
+              onOpenFile={onOpenFile}
+              onSelectPath={handleEntrySelect}
+              gitStatusCode={row.gitStatusCode}
+              gitignored={gitDecorations && row.gitignored}
+            />
+          );
+        }
+        case "pending":
+          return (
+            <PendingRow
+              depth={row.depth}
+              kind={row.pendingKind}
+              onCommit={tree.commitCreate}
+              onCancel={tree.cancelCreate}
+            />
+          );
+        case "status":
+          return (
+            <StatusRow
+              depth={row.depth}
+              message={row.message}
+              tone={row.tone}
+            />
+          );
+      }
+    };
+
+    return (
+      <div
+        ref={containerRef}
+        className="flex h-full flex-col outline-none"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+      >
+        <div className="flex h-8 shrink-0 items-center gap-1 border-b border-border/60 px-2">
+          <span
+            className="flex flex-1 items-center truncate text-ui-base font-medium text-foreground/80"
+            title={rootPath}
+          >
+            <img
+              src={folderIconUrl(basename(rootPath), false)}
+              alt=""
+              height={15}
+              width={15}
+              className="mx-1.5"
+            />
+            {basename(rootPath)}
+          </span>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            onClick={() => setIsSearchOpen((v) => !v)}
+            title={tr("Search files")}
+            aria-label={tr("Search files")}
+          >
+            <HugeiconsIcon icon={Search01Icon} size={13} strokeWidth={2} />
+          </Button>
+
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            onClick={() => tree.beginCreate(rootPath, "file")}
+            title={tr("New file")}
+          >
+            <HugeiconsIcon icon={FileAddIcon} size={13} strokeWidth={2} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            onClick={() => tree.beginCreate(rootPath, "dir")}
+            title={tr("New folder")}
+          >
+            <HugeiconsIcon icon={FolderAddIcon} size={13} strokeWidth={2} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground hover:text-foreground"
+            onClick={() => tree.refresh(rootPath)}
+            title={tr("Refresh")}
+          >
+            <HugeiconsIcon icon={Refresh01Icon} size={12} strokeWidth={2} />
+          </Button>
+        </div>
+
+        <ExplorerSearch
+          ref={searchRef}
+          rootPath={rootPath}
+          onOpenFile={onOpenFile}
+          open={isSearchOpen}
+          onRequestClose={() => setIsSearchOpen(false)}
+          onActiveChange={setIsSearchActive}
+          onRevealInTerminal={onRevealInTerminal}
+          onOpenInSourceControl={onOpenInSourceControl}
+          onOpenGitHistory={onOpenGitHistory}
+          onAttachToAgent={onAttachToAgent}
+        />
+
+        {!isSearchActive ? (
+          <ContextMenu
+            onOpenChange={(open) => {
+              if (!open) setDeleteConfirm(false);
+            }}
+          >
+            <ContextMenuTrigger asChild>
+              <div
+                ref={scrollRef}
+                data-explorer-drop=""
+                className={cn(
+                  "min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable]",
+                  rootIsDropTarget &&
+                    "rounded-sm ring-1 ring-inset ring-primary/50",
+                )}
+                onPointerDown={dnd.onPointerDown}
+                onClickCapture={dnd.onClickCapture}
+                onContextMenuCapture={(e) => {
+                  const el = (e.target as HTMLElement).closest<HTMLElement>(
+                    "[data-fs-path]",
+                  );
+                  const path = el?.getAttribute("data-fs-path") ?? null;
+                  const idx =
+                    path != null ? entryIndexByPath.get(path) : undefined;
+                  const row = idx !== undefined ? rows[idx] : undefined;
+                  if (row && row.kind === "entry") {
+                    const sel = selectedPathsRef.current;
+                    const isBatch = sel.has(row.path) && sel.size > 1;
+                    if (!isBatch) collapseSelectionTo(row.path);
+                    setMenuIsBatch(isBatch);
+                    setMenuTarget({
+                      path: row.path,
+                      name: row.name,
+                      isDir: row.isDir,
+                    });
+                  } else {
+                    setMenuIsBatch(false);
+                    setMenuTarget(null);
+                  }
+                  setDeleteConfirm(false);
+                  setMenuNonce((n) => n + 1);
+                }}
+              >
+                {pendingAtRoot ? (
+                  <div
+                    className="flex h-6 w-full min-w-0 items-center gap-2 px-1.5 text-ui-base"
+                    style={{ paddingLeft: 6 }}
+                  >
+                    <span className="size-3.5 shrink-0" />
+                    <img
+                      src={
+                        pendingAtRoot.kind === "dir"
+                          ? folderIconUrl("", false)
+                          : fileIconUrl("untitled")
+                      }
+                      alt=""
+                      className="size-4 shrink-0 opacity-70"
+                    />
+                    <InlineInput
+                      initial=""
+                      placeholder={
+                        pendingAtRoot.kind === "dir"
+                          ? tr("New folder")
+                          : tr("New file")
+                      }
+                      onCommit={tree.commitCreate}
+                      onCancel={tree.cancelCreate}
+                    />
+                  </div>
+                ) : null}
+                {root?.status === "loading" && (
+                  <div className="px-3 py-2 text-ui-sm text-muted-foreground">
+                    {tr("Loading…")}
+                  </div>
+                )}
+                {root?.status === "error" && (
+                  <div className="px-3 py-2 text-ui-sm text-destructive">
+                    {root.message}
+                  </div>
+                )}
+                {root?.status === "loaded" ? (
+                  <div
+                    style={{
+                      height: virtualizer.getTotalSize(),
+                      position: "relative",
+                      width: "100%",
+                    }}
+                  >
+                    {virtualizer.getVirtualItems().map((virtualRow) => {
+                      const row = rows[virtualRow.index];
+                      if (!row) return null;
+                      return (
+                        <div
+                          key={virtualRow.key}
+                          data-virtual-row-index={virtualRow.index}
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            left: 0,
+                            width: "100%",
+                            height: virtualRow.size,
+                            transform: `translateY(${virtualRow.start}px)`,
+                          }}
+                        >
+                          {renderRow(row)}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+              </div>
+            </ContextMenuTrigger>
+            <ContextMenuContent
+              key={menuNonce}
+              className={COMPACT_CONTENT}
+              onCloseAutoFocus={(e) => {
+                if (tree.renaming || tree.pendingCreate) e.preventDefault();
+              }}
+            >
+              {menuTarget && menuIsBatch ? (
+                <ContextMenuItem
+                  className={COMPACT_ITEM}
+                  variant="destructive"
+                  onSelect={(e) => {
+                    if (deleteConfirm) {
+                      void tree.deletePaths([...selectedPathsRef.current]);
+                    } else {
+                      // Keep the menu open on the first click so the user
+                      // can confirm; let it close normally on the second.
+                      e.preventDefault();
+                      setDeleteConfirm(true);
+                    }
+                  }}
+                >
+                  {deleteConfirm
+                    ? tr("Click again to confirm")
+                    : tr("Delete {value0} items", {
+                        value0: selectedPaths.size,
+                      })}
+                </ContextMenuItem>
+              ) : menuTarget ? (
+                <>
+                  {!menuTarget.isDir && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenFile(menuTarget.path, true)}
+                    >
+                      {tr("Open")}
+                    </ContextMenuItem>
+                  )}
+                  {menuTarget.isDir && onRevealInTerminal && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onRevealInTerminal(menuTarget.path)}
+                    >
+                      {tr("Open in Terminal")}
+                    </ContextMenuItem>
+                  )}
+                  {menuTarget.isDir && onOpenInSourceControl && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenInSourceControl(menuTarget.path)}
+                    >
+                      {tr("Open in Source Control")}
+                    </ContextMenuItem>
+                  )}
+                  {menuTarget.isDir && onOpenGitHistory && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenGitHistory(menuTarget.path)}
+                    >
+                      {tr("Open Git History")}
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void revealInFinder(menuTarget.path)}
+                  >
+                    {tr("Reveal in Finder")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() =>
+                      tree.beginCreate(
+                        menuTarget.isDir
+                          ? menuTarget.path
+                          : parentOf(menuTarget.path, rootPath),
+                        "file",
+                      )
+                    }
+                  >
+                    {tr("New File")}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() =>
+                      tree.beginCreate(
+                        menuTarget.isDir
+                          ? menuTarget.path
+                          : parentOf(menuTarget.path, rootPath),
+                        "dir",
+                      )
+                    }
+                  >
+                    {tr("New Folder")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void copyToClipboard(menuTarget.path)}
+                  >
+                    {tr("Copy Path")}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() =>
+                      void copyToClipboard(
+                        relativePath(rootPath, menuTarget.path),
+                      )
+                    }
+                  >
+                    {tr("Copy Relative Path")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => onAttachToAgent?.(menuTarget.path)}
+                  >
+                    {tr("Attach to Agent")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    variant="destructive"
+                    onSelect={(e) => {
+                      if (deleteConfirm) {
+                        void tree.deletePath(menuTarget.path);
+                      } else {
+                        // Keep the menu open on the first click so the user
+                        // can confirm; let it close normally on the second.
+                        e.preventDefault();
+                        setDeleteConfirm(true);
+                      }
+                    }}
+                  >
+                    {deleteConfirm
+                      ? tr("Click again to confirm")
+                      : tr("Delete")}
+                  </ContextMenuItem>
+                </>
+              ) : (
+                <>
+                  {onRevealInTerminal && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onRevealInTerminal(rootPath)}
+                    >
+                      {tr("Open in Terminal")}
+                    </ContextMenuItem>
+                  )}
+                  {onOpenInSourceControl && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenInSourceControl(rootPath)}
+                    >
+                      {tr("Open in Source Control")}
+                    </ContextMenuItem>
+                  )}
+                  {onOpenGitHistory && (
+                    <ContextMenuItem
+                      className={COMPACT_ITEM}
+                      onSelect={() => onOpenGitHistory(rootPath)}
+                    >
+                      {tr("Open Git History")}
+                    </ContextMenuItem>
+                  )}
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void revealInFinder(rootPath)}
+                  >
+                    {tr("Reveal in Finder")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => tree.beginCreate(rootPath, "file")}
+                  >
+                    {tr("New File")}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => tree.beginCreate(rootPath, "dir")}
+                  >
+                    {tr("New Folder")}
+                  </ContextMenuItem>
+                  <ContextMenuSeparator />
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => void copyToClipboard(rootPath)}
+                  >
+                    {tr("Copy Path")}
+                  </ContextMenuItem>
+                  <ContextMenuItem
+                    className={COMPACT_ITEM}
+                    onSelect={() => tree.refresh(rootPath)}
+                  >
+                    {tr("Refresh")}
+                  </ContextMenuItem>
+                </>
+              )}
+            </ContextMenuContent>
+          </ContextMenu>
+        ) : null}
+
+        {dnd.dragLabel ? (
+          <div
+            ref={dnd.ghostRef}
+            className="pointer-events-none fixed left-0 top-0 z-50 flex items-center gap-1.5 rounded-sm border border-border/70 bg-card/95 px-2 py-1 text-ui-base text-foreground shadow-md"
+          >
+            {dnd.dragLabel}
+          </div>
+        ) : null}
+      </div>
+    );
+  }),
+);

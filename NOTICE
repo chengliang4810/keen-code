@@ -1,0 +1,76 @@
+RCode
+Copyright 2026 RCode contributors
+
+RCode is licensed under the MIT License. See LICENSE for details.
+
+This project is a modified derivative of Terax, Copyright 2026 Crynta,
+licensed under the Apache License, Version 2.0.
+Source: https://github.com/crynta/terax-ai
+Reference revision: 3301de2012efff6b4d550b5732be7c329124561c
+The original copyright notice and Apache license are retained in
+LICENSES/Terax-Apache-2.0.txt.
+
+RCode modifications include the product identity, project and task workspace,
+agent runtime, user storage, extension management, settings, terminal API,
+documentation and tests. Modified source files carry an RCode modification notice.
+
+Third-party source and assets retain their original licenses:
+
+- Ghostty terminal core, revision f426f6f181ba95f45d33f683fb754b6359d9e04f:
+  https://github.com/ghostty-org/ghostty
+  Copyright 2024 Mitchell Hashimoto, Ghostty contributors.
+  License: LICENSES/Ghostty-MIT.txt.
+
+- Restty terminal wrapper, revision 7700b14a7643ba9240818209ef1e0aa90d83ad77:
+  https://github.com/wiedymi/restty
+  Copyright 2026 Wiedy Mi.
+  The adapted source and WASM API use the RCode namespace.
+  License: LICENSES/Terminal-wrapper-MIT.txt.
+
+- Ghostty web bindings:
+  https://github.com/coder/ghostty-web
+  Copyright 2025 Coder.
+  License: LICENSES/Ghostty-web-MIT.txt.
+
+- xterm.js-derived WebGL renderers in src/modules/terminal/ghostty/webgl/:
+  https://github.com/xtermjs/xterm.js
+  Copyright 2017 The xterm.js authors.
+  License: LICENSES/Xterm-js-MIT.txt.
+
+- Pi icon in src/modules/agents/lib/agentIcon.tsx:
+  https://github.com/earendil-works/pi-website
+  Copyright 2026 Earendil Inc. and contributors.
+  License: LICENSES/Pi-icon-MIT.txt.
+
+- File icon assets and manifests:
+  https://github.com/catppuccin/vscode-icons
+  Copyright 2023 Catppuccin and thang-nm.
+  License: LICENSES/File-icons-MIT.txt.
+  File-language mapping references:
+  https://github.com/PKief/vscode-material-icon-theme
+  Copyright 2025 Material Extensions.
+  License: LICENSES/Material-icons-MIT.txt.
+
+- Inter and JetBrains Mono fonts:
+  Licenses: LICENSES/Inter-OFL.txt and LICENSES/JetBrains-Mono-OFL.txt.
+
+- Hugeicons interface icons:
+  Copyright 2025 Hugeicons.
+  License: LICENSES/Hugeicons-MIT.txt.
+
+- Editor theme components:
+  https://github.com/uiwjs/react-codemirror
+  Copyright 2021 uiw.
+  License: LICENSES/Editor-themes-MIT.txt.
+  Palette attribution is retained in LICENSES/Kanagawa-MIT.txt,
+  LICENSES/Catppuccin-theme-MIT.txt, LICENSES/Rose-Pine-MIT.txt,
+  LICENSES/Everforest-MIT.txt, LICENSES/Nord-MIT.txt,
+  LICENSES/Dracula-MIT.txt and LICENSES/Solarized-MIT.txt.
+
+- Notification audio in public/notification.mp3 is retained from the Terax
+  reference revision under the Apache License, Version 2.0.
+  SHA-256: ae0701e41a87972b528f5f5a6a8c576c7bc88ca14528da38ca83d1de7deaccb0.
+
+Package dependencies retain the licenses declared by their respective packages.
+Theme palette names in the interface are presentation labels; they do not
+replace the ownership or license of the underlying source and dependencies.

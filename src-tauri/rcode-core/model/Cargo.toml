@@ -1,0 +1,19 @@
+[package]
+name = "rcode-model"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.95"
+description = "RCode 的 Provider 中立模型领域层"
+
+[dependencies]
+futures-core = "0.3.31"
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+serde_json = "1.0.143"
+thiserror = "2.0.16"
+# 使用依赖图已有的标准百分号解码器与 URL 解析器，避免自行实现编码语义。
+percent-encoding = "2.3.2"
+url = "2.5.7"
+
+[dev-dependencies]
+futures-executor = "0.3.31"

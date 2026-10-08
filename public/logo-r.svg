@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="RCode 字母 R 标志">
+  <defs>
+    <linearGradient id="tile" x1="0.25" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#464646"/>
+      <stop offset="0.48" stop-color="#383838"/>
+      <stop offset="1" stop-color="#292929"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0.12" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#c0c0c0" stop-opacity="0.78"/>
+      <stop offset="0.22" stop-color="#747474" stop-opacity="0.64"/>
+      <stop offset="0.62" stop-color="#333333" stop-opacity="0.36"/>
+      <stop offset="1" stop-color="#676767" stop-opacity="0.65"/>
+    </linearGradient>
+    <linearGradient id="inset" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.17"/>
+      <stop offset="0.28" stop-color="#ffffff" stop-opacity="0.025"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.015"/>
+    </linearGradient>
+    <linearGradient id="silver" x1="0.12" y1="0" x2="0.92" y2="1">
+      <stop offset="0" stop-color="#eeeeee"/>
+      <stop offset="0.46" stop-color="#d8d8d8"/>
+      <stop offset="0.76" stop-color="#bcbcbc"/>
+      <stop offset="1" stop-color="#e3e3e3"/>
+    </linearGradient>
+    <linearGradient id="stem" x1="0.22" y1="0.03" x2="0.86" y2="0.96">
+      <stop offset="0" stop-color="#d7d7d7"/>
+      <stop offset="0.2" stop-color="#eeeeee"/>
+      <stop offset="0.48" stop-color="#d4d4d4"/>
+      <stop offset="0.72" stop-color="#b7b7b7"/>
+      <stop offset="0.93" stop-color="#e2e2e2"/>
+      <stop offset="1" stop-color="#d2d2d2"/>
+    </linearGradient>
+    <linearGradient id="bowl" x1="0.27" y1="0" x2="0.85" y2="0.92">
+      <stop offset="0" stop-color="#e4e4e4"/>
+      <stop offset="0.24" stop-color="#f0f0f0"/>
+      <stop offset="0.53" stop-color="#dddddd"/>
+      <stop offset="0.77" stop-color="#cacaca"/>
+      <stop offset="1" stop-color="#a8a8a8"/>
+    </linearGradient>
+    <linearGradient id="leg" x1="0.2" y1="0" x2="0.78" y2="1">
+      <stop offset="0" stop-color="#929292"/>
+      <stop offset="0.2" stop-color="#b2b2b2"/>
+      <stop offset="0.52" stop-color="#d6d6d6"/>
+      <stop offset="0.83" stop-color="#ededed"/>
+      <stop offset="1" stop-color="#d7d7d7"/>
+    </linearGradient>
+    <linearGradient id="fold" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#747474" stop-opacity="0"/>
+      <stop offset="0.65" stop-color="#6e6e6e" stop-opacity="0.2"/>
+      <stop offset="1" stop-color="#7b7b7b" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-0.12" y="-0.1" width="1.25" height="1.24" color-interpolation-filters="sRGB">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="8"/>
+      <feOffset dy="12"/>
+      <feComponentTransfer>
+        <feFuncA type="linear" slope="0.32"/>
+      </feComponentTransfer>
+      <feMerge>
+        <feMergeNode/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <path id="letter" fill-rule="evenodd" d="M292 194H588C708 194 790 265 790 371C790 461 734 533 638 560L806 782C819 800 806 824 784 824H714C688 824 669 813 654 793L504 586H368V782C368 805 350 824 326 824H292C267 824 248 805 248 780V238C248 213 267 194 292 194ZM368 306V450H588C639 450 672 416 672 371C672 325 638 306 588 306Z"/>
+    <clipPath id="letterClip">
+      <use href="#letter" clip-rule="evenodd"/>
+    </clipPath>
+  </defs>
+  <rect x="3" y="3" width="1018" height="1018" rx="244" fill="url(#tile)" stroke="url(#rim)" stroke-width="3"/>
+  <rect x="9" y="9" width="1006" height="1006" rx="239" fill="none" stroke="url(#inset)" stroke-width="5"/>
+  <g transform="translate(-20 0)">
+    <use href="#letter" fill="url(#silver)" filter="url(#shadow)"/>
+    <g clip-path="url(#letterClip)">
+      <path d="M504 586H588C606 586 624 576 638 560L806 782C819 800 806 824 784 824H714C688 824 669 813 654 793Z" fill="url(#leg)"/>
+      <path d="M419 194H588C708 194 790 265 790 371C790 493 696 586 588 586H368V450H588C639 450 672 416 672 371C672 325 638 306 588 306H368C368 250 382 215 419 194Z" fill="url(#bowl)"/>
+      <path d="M304 194H419C382 216 368 250 368 306V782C368 805 350 824 326 824H292C267 824 248 805 248 780V238C248 213 267 194 292 194Z" fill="url(#stem)"/>
+      <path d="M369 306C369 252 383 218 419 196C397 223 391 257 395 306Z" fill="url(#fold)"/>
+      <path d="M369 304C369 254 382 217 418 196" fill="none" stroke="#ffffff" stroke-opacity="0.55" stroke-width="2.5"/>
+      <path d="M372 452H588C640 452 675 417 675 371" fill="none" stroke="#ffffff" stroke-opacity="0.18" stroke-width="2"/>
+      <path d="M251 778C251 803 269 821 293 821H325" fill="none" stroke="#ffffff" stroke-opacity="0.2" stroke-width="2"/>
+    </g>
+  </g>
+</svg>

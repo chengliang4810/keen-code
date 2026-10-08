@@ -1,0 +1,1058 @@
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use rcode_model::{
+    ContentBlock, ImageSource, MessageRole, ModelError, ModelRequest, ModelStreamEvent,
+    OpaqueReasoningState, ReasoningEffort, ResponseMetadata, StopReason, TokenUsage, ToolChoice,
+    ToolResultContent,
+};
+use serde_json::{Map, Value, json};
+
+use super::wire::{self, invalid_request, protocol_error};
+use crate::sse::SseFrame;
+
+const SIGNATURE_STATE_KIND: &str = "messages-thinking-signature-v1";
+const REDACTED_STATE_KIND: &str = "messages-redacted-thinking-v1";
+
+/// Anthropic Messages 流中已经打开、尚未收到 `content_block_stop` 的内容类型。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ActiveContentBlock {
+    /// 普通文本内容块。
+    Text,
+    /// 可展示推理内容块。
+    Thinking,
+    /// 经过 Provider 加密或隐藏的推理内容块。
+    RedactedThinking,
+    /// 模型发起的工具调用内容块。
+    ToolUse,
+}
+
+/// Anthropic Messages 请求、JSON 响应和 SSE 事件的协议 Adapter。
+pub(crate) struct MessagesAdapter {
+    started: bool,
+    ended: bool,
+    stop_reason: Option<StopReason>,
+    /// 按远端内容块序号记录尚未结束的内容，防止缺失或重复 stop 被静默接受。
+    active_blocks: BTreeMap<u32, ActiveContentBlock>,
+    /// 收到需要整体跳过的内容块序号：未知类型块（如 server_tool_use、
+    /// web_search_tool_result），或缺失 `content_block_start` 的孤立增量块
+    /// （常见于兼容网关丢事件）。按 rig 语义跳过其开始/增量/结束，
+    /// 而不是让已计费的整条流失败。
+    ignored_blocks: BTreeSet<u32>,
+    tool_calls: BTreeMap<u32, String>,
+    thinking_signatures: BTreeMap<u32, String>,
+    /// 本次 SSE 响应是否打开过普通文本内容块。
+    saw_text_block: bool,
+    /// 本次 SSE 响应是否已经产生至少一个有意义的内容事件。
+    saw_meaningful_content: bool,
+    saw_tool_call: bool,
+    /// 是否在线上追加 Anthropic ephemeral 提示缓存断点。
+    pub(super) prompt_caching: bool,
+}
+
+impl MessagesAdapter {
+    /// 创建一次请求专用且没有残留流状态的 Adapter。
+    pub fn new() -> Self {
+        Self {
+            started: false,
+            ended: false,
+            stop_reason: None,
+            active_blocks: BTreeMap::new(),
+            ignored_blocks: BTreeSet::new(),
+            tool_calls: BTreeMap::new(),
+            thinking_signatures: BTreeMap::new(),
+            saw_text_block: false,
+            saw_meaningful_content: false,
+            saw_tool_call: false,
+            prompt_caching: false,
+        }
+    }
+
+    /// 启用后按 Anthropic 提示缓存语义在线上追加 ephemeral 缓存断点。
+    ///
+    /// 仅当 Provider 能力快照声明 `prompt_caching` 时由 Client 打开；
+    /// cache_control 语义只在 Anthropic Messages 协议上有效，其他协议
+    /// Adapter 不消费该开关。
+    ///
+    /// 前提：只有与当前 Provider 链路兼容的 thinking 才会跨 Turn 回传；因此
+    /// 无 thinking 块的 assistant 消息无需补空 thinking 占位。若协议后续要求
+    /// 跨 Turn 回传的 thinking 形态发生变化，需在打标前重新验证该占位语义。
+    pub fn configure_prompt_caching(&mut self, enabled: bool) {
+        self.prompt_caching = enabled;
+    }
+
+    /// 把 Provider 中立请求编码为 Messages API 请求正文。
+    pub fn encode_request(
+        &self,
+        request: &ModelRequest,
+        streaming: bool,
+    ) -> Result<Value, ModelError> {
+        request.validate()?;
+        let mut system = Vec::new();
+        let mut messages = Vec::<Value>::new();
+
+        for message in request.messages.iter() {
+            let wire_content = message.wire_content();
+            match message.role {
+                MessageRole::System | MessageRole::Developer => {
+                    for block in wire_content.iter() {
+                        let ContentBlock::Text { text } = block else {
+                            return Err(invalid_request("Messages 的系统和开发消息只允许文本内容"));
+                        };
+                        system.push(json!({ "type": "text", "text": text }));
+                    }
+                }
+                MessageRole::User => {
+                    let content = wire_content
+                        .iter()
+                        .map(encode_user_block)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    append_message(&mut messages, "user", content);
+                }
+                MessageRole::Assistant => {
+                    let mut content = Vec::new();
+                    for block in wire_content.iter() {
+                        if let Some(encoded) = encode_assistant_block(block)? {
+                            content.push(encoded);
+                        }
+                    }
+                    if !content.is_empty() {
+                        append_message(&mut messages, "assistant", content);
+                    }
+                }
+                MessageRole::Tool => {
+                    let content = wire_content
+                        .iter()
+                        .map(encode_tool_result_block)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    append_message(&mut messages, "user", content);
+                }
+            }
+        }
+
+        if messages.is_empty() {
+            return Err(invalid_request(
+                "Messages 请求至少需要一条用户、工具或 assistant 消息",
+            ));
+        }
+
+        // Anthropic 提示缓存阶梯依赖会话级冻结前缀：请求 = [冻结 System 段…]
+        // + [transcript 历史…] + [末尾动态 is_meta user 消息]，配合工具数组的
+        // 稳定排序，跨轮前缀逐字节一致，断点才能命中。
+        if self.prompt_caching {
+            apply_user_message_cache_ladder(&mut messages);
+        }
+
+        let mut body = Map::new();
+        body.insert("model".to_owned(), Value::String(request.model.clone()));
+        body.insert("messages".to_owned(), Value::Array(messages));
+        body.insert("stream".to_owned(), Value::Bool(streaming));
+        body.insert(
+            // Anthropic 必填该字段。未显式配置时取 8192：覆盖全部 Claude 3.5+
+            // 模型的输出上限，且把与 Chat/Responses（省略字段、按端点默认）的
+            // 截断差距减半；同类宿主的 32000 默认对旧模型会 400，故不采用。
+            "max_tokens".to_owned(),
+            Value::from(request.max_output_tokens.unwrap_or(8192)),
+        );
+        // 缓存前缀顺序为 tools → system → messages：system 非空时末块断点
+        // 的缓存前缀已包含整个 tools 数组，tools 断点只是其严格子集。
+        let system_present = !system.is_empty();
+        if system_present {
+            if self.prompt_caching {
+                // system 是最稳定的前缀，断点固定打在最后一个内容块上。
+                if let Some(last) = system.last_mut() {
+                    add_ephemeral_cache_control(last);
+                }
+            }
+            body.insert("system".to_owned(), Value::Array(system));
+        }
+        if !request.tools.is_empty() {
+            let mut tools = request
+                .tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "name": tool.name,
+                        "description": tool.description,
+                        "input_schema": tool.input_schema,
+                    })
+                })
+                .collect::<Vec<_>>();
+            if self.prompt_caching && !system_present {
+                // 仅 system 为空时 tools 末位才作为缓存前缀兜底断点；
+                // system 非空时必须跳过，否则 system 1 + tools 1 + user
+                // 阶梯最多 3 = 5 个断点，超出 Anthropic 硬上限 4（超限
+                // 直接 400）。跳过不改变缓存前缀语义：system 断点已覆盖
+                // tools + system。
+                if let Some(last) = tools.last_mut() {
+                    add_ephemeral_cache_control(last);
+                }
+            }
+            body.insert("tools".to_owned(), Value::Array(tools));
+            body.insert(
+                "tool_choice".to_owned(),
+                encode_tool_choice(&request.tool_choice, request.parallel_tool_calls),
+            );
+        } else if !matches!(request.tool_choice, ToolChoice::Auto | ToolChoice::None) {
+            return Err(invalid_request("Messages 工具选择要求非空工具列表"));
+        }
+        if let Some(reasoning) = &request.reasoning {
+            let budget = reasoning
+                .max_tokens
+                .unwrap_or_else(|| reasoning_budget(reasoning.effort));
+            let max_tokens = request
+                .max_output_tokens
+                .unwrap_or_else(|| budget.saturating_add(4096));
+            if budget < 1024 {
+                return Err(invalid_request("Messages 推理 Token 预算至少为 1024"));
+            }
+            if budget >= max_tokens {
+                return Err(invalid_request(
+                    "Messages 推理 Token 预算必须小于最大输出 Token",
+                ));
+            }
+            body.insert(
+                "thinking".to_owned(),
+                json!({ "type": "enabled", "budget_tokens": budget }),
+            );
+            // 校验和线上正文使用同一预算，未显式提供上限时也给正常回答保留空间。
+            body.insert("max_tokens".to_owned(), Value::from(max_tokens));
+        }
+        if let Some(structured) = &request.structured_output {
+            // 官方 Messages 结构化输出使用顶层 output_format（beta
+            // structured-outputs-2025-11-13 起，请求侧随结构化输出附加
+            // anthropic-beta 头）。name/strict 可选：仅显式提供时写入，
+            // 避免向严格网关发送 null 字段。
+            let mut format = json!({
+                "type": "json_schema",
+                "name": structured.name,
+                "schema": structured.schema,
+            });
+            if let Some(description) = &structured.description {
+                format["description"] = json!(description);
+            }
+            if structured.strict {
+                format["strict"] = json!(true);
+            }
+            body.insert("output_format".to_owned(), format);
+        }
+        if let Some(temperature) = request.temperature {
+            body.insert("temperature".to_owned(), Value::from(temperature));
+        }
+        if !request.stop_sequences.is_empty() {
+            body.insert(
+                "stop_sequences".to_owned(),
+                Value::Array(
+                    request
+                        .stop_sequences
+                        .iter()
+                        .cloned()
+                        .map(Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        Ok(Value::Object(body))
+    }
+
+    /// 消费一条 Messages SSE 帧并追加 Provider 中立事件。
+    pub fn consume_sse(
+        &mut self,
+        frame: SseFrame,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        if self.ended {
+            // 排空模式：协议终态后到达的尾帧（网关追加的 [DONE]、空保活帧、ping、
+            // 迟到事件）已经无法改变一个完成的响应。裸忽略而不是报协议错误，避免
+            // 「终态后噪声」把已完整生成并计费的响应整条作废；真正的协议违例都
+            // 发生在终态之前，仍由下方逐帧校验拒绝。
+            return Ok(());
+        }
+        if frame.data.is_empty() && frame.event.as_deref() == Some("ping") {
+            return Ok(());
+        }
+        let value: Value = serde_json::from_str(&frame.data)
+            .map_err(|error| protocol_error(format!("Messages SSE data 不是有效 JSON：{error}")))?;
+        let event_type = match frame
+            .event
+            .as_deref()
+            .or_else(|| value.get("type").and_then(Value::as_str))
+        {
+            Some(event_type) => event_type,
+            None if has_explicit_provider_error(&value) => {
+                return Err(classify_provider_error(&value));
+            }
+            None => return Err(protocol_error("Messages SSE 缺少事件类型")),
+        };
+        if let (Some(frame_event_type), Some(data_event_type)) = (
+            frame.event.as_deref(),
+            value.get("type").and_then(Value::as_str),
+        ) && frame_event_type != data_event_type
+        {
+            return Err(protocol_error("Messages SSE event 与 data.type 不一致"));
+        }
+
+        match event_type {
+            "message_start" => self.consume_message_start(&value, output),
+            "content_block_start" => self.consume_content_start(&value, output),
+            "content_block_delta" => self.consume_content_delta(&value, output),
+            "content_block_stop" => self.consume_content_stop(&value, output),
+            "message_delta" => self.consume_message_delta(&value, output),
+            "message_stop" => self.consume_message_stop(output),
+            "ping" => Ok(()),
+            "error" => Err(classify_provider_error(&value)),
+            // 与 Responses 对齐：上游新增事件类型（如服务端工具生命周期）或
+            // 兼容网关注入自定义事件时跳过，不让已计费整条流失败。
+            other => {
+                let _ = other;
+                Ok(())
+            }
+        }
+    }
+
+    /// 把一个非流式 Messages JSON 响应转换为完整事件序列。
+    pub fn decode_json(&mut self, value: Value) -> Result<Vec<ModelStreamEvent>, ModelError> {
+        let response = value
+            .as_object()
+            .ok_or_else(|| protocol_error("Messages 响应必须是 JSON 对象"))?;
+        if response.get("type").and_then(Value::as_str) == Some("error")
+            || response.get("error").is_some_and(|error| !error.is_null())
+        {
+            return Err(classify_provider_error(&value));
+        }
+
+        let metadata = ResponseMetadata {
+            decode_duration_ms: None,
+            response_id: optional_string(response.get("id")),
+            model: optional_string(response.get("model")),
+        };
+        metadata.validate()?;
+        let mut events = vec![ModelStreamEvent::MessageStart { metadata }];
+        self.started = true;
+
+        let content = response
+            .get("content")
+            .and_then(Value::as_array)
+            .ok_or_else(|| protocol_error("Messages 响应缺少 content 数组"))?;
+        let mut saw_text_block = false;
+        let mut saw_meaningful_content = false;
+        for (position, block) in content.iter().enumerate() {
+            let index = u32::try_from(position)
+                .map_err(|_| protocol_error("Messages 内容块数量超过 u32 范围"))?;
+            if block.get("type").and_then(Value::as_str) == Some("text") {
+                saw_text_block = true;
+            }
+            let event_count = events.len();
+            decode_complete_content(index, block, &mut events)?;
+            saw_meaningful_content |= events.len() > event_count;
+        }
+        if saw_text_block && !saw_meaningful_content {
+            return Err(protocol_error("Messages 响应不能只有空文本内容"));
+        }
+        if let Some(usage) = response.get("usage") {
+            events.push(ModelStreamEvent::Usage {
+                usage: decode_usage(usage),
+            });
+        }
+        let stop_reason = map_stop_reason(response.get("stop_reason").and_then(Value::as_str));
+        validate_tool_stop_reason(
+            &stop_reason,
+            content
+                .iter()
+                .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
+        )?;
+        events.push(ModelStreamEvent::MessageEnd { stop_reason });
+        self.ended = true;
+        Ok(events)
+    }
+
+    /// 校验 Messages SSE 流已经通过 `message_stop` 明确结束。
+    pub fn finish_stream(&mut self) -> Result<(), ModelError> {
+        if self.ended {
+            Ok(())
+        } else {
+            Err(protocol_error("Messages SSE 在 message_stop 之前关闭"))
+        }
+    }
+
+    /// 处理 `message_start` 并保存响应元数据及首个 Usage 快照。
+    fn consume_message_start(
+        &mut self,
+        value: &Value,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        if self.started {
+            return Err(protocol_error("Messages SSE 重复 message_start"));
+        }
+        // Bedrock 等网关会发不带 message 体（或全空）的 message_start；
+        // 按 rig 语义视为空开始：合成空元数据的 MessageStart 维持合法的
+        // 流骨架，后续内容块正常拼接（中立层要求内容事件之前先有
+        // MessageStart，仅标记内部状态会让整条流被判协议错误）。
+        let Some(message) = value.get("message").and_then(Value::as_object) else {
+            self.started = true;
+            output.push_back(ModelStreamEvent::MessageStart {
+                metadata: ResponseMetadata::default(),
+            });
+            return Ok(());
+        };
+        let metadata = ResponseMetadata {
+            decode_duration_ms: None,
+            response_id: optional_string(message.get("id")),
+            model: optional_string(message.get("model")),
+        };
+        metadata.validate()?;
+        output.push_back(ModelStreamEvent::MessageStart { metadata });
+        if let Some(usage) = message.get("usage") {
+            output.push_back(ModelStreamEvent::Usage {
+                usage: decode_usage(usage),
+            });
+        }
+        self.started = true;
+        Ok(())
+    }
+
+    /// 处理内容块开始事件及其可能携带的首段数据。
+    fn consume_content_start(
+        &mut self,
+        value: &Value,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        require_started(self.started)?;
+        let index = required_u32(value, "index")?;
+        let block = value
+            .get("content_block")
+            .and_then(Value::as_object)
+            .ok_or_else(|| protocol_error("content_block_start 缺少 content_block"))?;
+        let block_type = required_str_from_map(block, "type")?;
+        self.saw_tool_call |= block_type == "tool_use";
+        let block_kind = match block_type {
+            "text" => ActiveContentBlock::Text,
+            "thinking" => ActiveContentBlock::Thinking,
+            "redacted_thinking" => ActiveContentBlock::RedactedThinking,
+            "tool_use" => ActiveContentBlock::ToolUse,
+            // server_tool_use、web_search_tool_result、document 等服务端块：
+            // 按 rig 语义跳过整个块，不让流失败。
+            other => {
+                let _ = other;
+                self.ignored_blocks.insert(index);
+                return Ok(());
+            }
+        };
+        // 极端乱序流中 start 可能在孤立增量之后才到达：解除忽略并恢复
+        // 该块的正常生命周期，保证后续增量与 stop 走同一条处理路径。
+        self.ignored_blocks.remove(&index);
+        if self.active_blocks.insert(index, block_kind).is_some() {
+            return Err(protocol_error(format!(
+                "Messages 内容块序号 {index} 重复开始"
+            )));
+        }
+        match block_type {
+            "text" => {
+                self.saw_text_block = true;
+                let text = required_str_from_map(block, "text")?;
+                if !text.is_empty() {
+                    self.saw_meaningful_content = true;
+                    output.push_back(ModelStreamEvent::TextDelta {
+                        index,
+                        delta: text.to_owned(),
+                    });
+                }
+            }
+            "thinking" => {
+                if let Some(thinking) = block
+                    .get("thinking")
+                    .and_then(Value::as_str)
+                    .filter(|thinking| !thinking.is_empty())
+                {
+                    self.saw_meaningful_content = true;
+                    output.push_back(ModelStreamEvent::ReasoningDelta {
+                        index,
+                        delta: thinking.to_owned(),
+                    });
+                }
+                if let Some(signature) = block
+                    .get("signature")
+                    .and_then(Value::as_str)
+                    .filter(|signature| !signature.is_empty())
+                {
+                    self.thinking_signatures.insert(index, signature.to_owned());
+                }
+            }
+            "redacted_thinking" => {
+                let data = block
+                    .get("data")
+                    .cloned()
+                    .ok_or_else(|| protocol_error("redacted_thinking 内容块缺少不透明 data"))?;
+                self.saw_meaningful_content = true;
+                output.push_back(ModelStreamEvent::ReasoningContinuation {
+                    index,
+                    continuation: OpaqueReasoningState::new(REDACTED_STATE_KIND, data),
+                });
+            }
+            "tool_use" => {
+                let id = required_str_from_map(block, "id")?.to_owned();
+                let name = required_str_from_map(block, "name")?.to_owned();
+                let input = block
+                    .get("input")
+                    .and_then(Value::as_object)
+                    .ok_or_else(|| protocol_error("流式 tool_use input 必须是对象"))?;
+                self.tool_calls.insert(index, id.clone());
+                self.saw_meaningful_content = true;
+                output.push_back(ModelStreamEvent::ToolCallStart {
+                    index,
+                    id: id.clone(),
+                    name,
+                });
+                if !input.is_empty() {
+                    output.push_back(ModelStreamEvent::ToolCallArgumentsDelta {
+                        index,
+                        id,
+                        delta: serde_json::to_string(input).map_err(|error| {
+                            protocol_error(format!("tool_use input 无法编码：{error}"))
+                        })?,
+                    });
+                }
+            }
+            other => unreachable!("Messages 内容块类型 {other} 已在前置匹配中校验"),
+        }
+        Ok(())
+    }
+
+    /// 处理文本、推理、签名和工具参数增量。
+    fn consume_content_delta(
+        &mut self,
+        value: &Value,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        require_started(self.started)?;
+        let index = required_u32(value, "index")?;
+        let delta = value
+            .get("delta")
+            .and_then(Value::as_object)
+            .ok_or_else(|| protocol_error("content_block_delta 缺少 delta"))?;
+        let delta_type = required_str_from_map(delta, "type")?;
+        if self.ignored_blocks.contains(&index) {
+            return Ok(());
+        }
+        let Some(active_kind) = self.active_blocks.get(&index).copied() else {
+            // 兼容网关偶发丢失 content_block_start（下游已观察到孤立增量
+            // 终止整轮会话的线上故障）：把该序号整体降级为忽略块，后续
+            // 增量与 stop 一并跳过，保持流的其余部分可用。此处的增量无法
+            // 归属到任何已声明内容，静默丢弃优于让已计费的响应作废。
+            self.ignored_blocks.insert(index);
+            return Ok(());
+        };
+        match delta_type {
+            "text_delta" => {
+                if active_kind != ActiveContentBlock::Text {
+                    return Err(index_type_error(index));
+                }
+                let text = required_str_from_map(delta, "text")?;
+                if !text.is_empty() {
+                    self.saw_meaningful_content = true;
+                    output.push_back(ModelStreamEvent::TextDelta {
+                        index,
+                        delta: text.to_owned(),
+                    });
+                }
+            }
+            "thinking_delta" => {
+                if active_kind != ActiveContentBlock::Thinking {
+                    return Err(index_type_error(index));
+                }
+                output.push_back(ModelStreamEvent::ReasoningDelta {
+                    index,
+                    delta: required_str_from_map(delta, "thinking")?.to_owned(),
+                });
+                // 已发出的推理事件仍交给中立层验证，不能因同响应的空文本误判为无内容。
+                self.saw_meaningful_content = true;
+            }
+            "signature_delta" => {
+                if active_kind != ActiveContentBlock::Thinking {
+                    return Err(index_type_error(index));
+                }
+                self.thinking_signatures
+                    .entry(index)
+                    .or_default()
+                    .push_str(required_str_from_map(delta, "signature")?);
+            }
+            "input_json_delta" => {
+                if active_kind != ActiveContentBlock::ToolUse {
+                    return Err(index_type_error(index));
+                }
+                let id = self.tool_calls.get(&index).cloned().ok_or_else(|| {
+                    protocol_error(format!("工具参数增量的内容块 {index} 尚未开始"))
+                })?;
+                output.push_back(ModelStreamEvent::ToolCallArgumentsDelta {
+                    index,
+                    id,
+                    delta: required_str_from_map(delta, "partial_json")?.to_owned(),
+                });
+            }
+            // citations_delta 等未知增量：按 rig 语义跳过，不影响已识别通道。
+            other => {
+                let _ = other;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    /// 完成工具调用或提交完整推理签名。
+    fn consume_content_stop(
+        &mut self,
+        value: &Value,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        require_started(self.started)?;
+        let index = required_u32(value, "index")?;
+        if self.ignored_blocks.remove(&index) {
+            return Ok(());
+        }
+        let block_kind = self
+            .active_blocks
+            .remove(&index)
+            .ok_or_else(|| protocol_error(format!("内容块 {index} 尚未开始或已结束")))?;
+        if let Some(id) = self.tool_calls.remove(&index) {
+            if block_kind != ActiveContentBlock::ToolUse {
+                return Err(index_type_error(index));
+            }
+            output.push_back(ModelStreamEvent::ToolCallEnd { index, id });
+        }
+        if let Some(signature) = self.thinking_signatures.remove(&index) {
+            if block_kind != ActiveContentBlock::Thinking {
+                return Err(index_type_error(index));
+            }
+            output.push_back(ModelStreamEvent::ReasoningContinuation {
+                index,
+                continuation: OpaqueReasoningState::new(
+                    SIGNATURE_STATE_KIND,
+                    Value::String(signature),
+                ),
+            });
+            self.saw_meaningful_content = true;
+        }
+        Ok(())
+    }
+
+    /// 保存结束原因并合并增量 Usage。
+    fn consume_message_delta(
+        &mut self,
+        value: &Value,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        require_started(self.started)?;
+        if let Some(reason) = value
+            .get("delta")
+            .and_then(|delta| delta.get("stop_reason"))
+            .and_then(Value::as_str)
+        {
+            self.stop_reason = Some(map_stop_reason(Some(reason)));
+        }
+        if let Some(usage) = value.get("usage") {
+            output.push_back(ModelStreamEvent::Usage {
+                usage: decode_usage(usage),
+            });
+        }
+        Ok(())
+    }
+
+    /// 生成唯一响应结束事件。
+    fn consume_message_stop(
+        &mut self,
+        output: &mut VecDeque<ModelStreamEvent>,
+    ) -> Result<(), ModelError> {
+        require_started(self.started)?;
+        if !self.active_blocks.is_empty()
+            || !self.tool_calls.is_empty()
+            || !self.thinking_signatures.is_empty()
+        {
+            return Err(protocol_error("Messages message_stop 前仍有未结束内容块"));
+        }
+        if self.saw_text_block && !self.saw_meaningful_content {
+            return Err(protocol_error("Messages 响应不能只有空文本内容"));
+        }
+        let stop_reason = self
+            .stop_reason
+            .take()
+            .unwrap_or_else(|| StopReason::Other {
+                reason: "missing_stop_reason".to_owned(),
+            });
+        validate_tool_stop_reason(&stop_reason, self.saw_tool_call)?;
+        output.push_back(ModelStreamEvent::MessageEnd { stop_reason });
+        self.ended = true;
+        Ok(())
+    }
+}
+
+/// 把相邻同角色消息合并为一个 Messages 消息。
+fn append_message(messages: &mut Vec<Value>, role: &str, content: Vec<Value>) {
+    if let Some(last) = messages.last_mut()
+        && last.get("role").and_then(Value::as_str) == Some(role)
+        && let Some(existing) = last.get_mut("content").and_then(Value::as_array_mut)
+    {
+        existing.extend(content);
+        return;
+    }
+    messages.push(json!({ "role": role, "content": content }));
+}
+
+/// 给一个线格式内容块或工具对象追加 Anthropic ephemeral 缓存断点。
+fn add_ephemeral_cache_control(block: &mut Value) {
+    if let Some(object) = block.as_object_mut() {
+        object.insert("cache_control".to_owned(), json!({ "type": "ephemeral" }));
+    }
+}
+
+/// 判断一个 user 线格式内容块能否作为缓存断点载体。
+///
+/// 只有非空 text 与 tool_result 块承载断点；空文本与图片块不参与。
+fn is_cacheable_user_block(block: &Value) -> bool {
+    match block.get("type").and_then(Value::as_str) {
+        Some("text") => block
+            .get("text")
+            .and_then(Value::as_str)
+            .is_some_and(|text| !text.is_empty()),
+        Some("tool_result") => true,
+        _ => false,
+    }
+}
+
+/// 按提示缓存阶梯给 wire user 消息追加 ephemeral 断点。
+///
+/// targets 取首条、末条 user 消息，user ≥ 3 条时再加倒数第二条；target 自身
+/// 存在可缓存块（非空 text 或 tool_result）时打在最后一个可缓存块上，否则
+/// 向前回退到最近一条含可缓存块且尚未打标的 user 消息。回退遇到已打标的
+/// 消息立即停止，保证同一消息块至多携带一个断点。纯字符串 content 在本
+/// 编码器中总是先转为单 text 块，再参与打标。
+///
+/// 末尾动态 is_meta 消息在线上与普通 user 消息无异（无法也不必区分），作为
+/// "末条 user"参与打标：它的缓存后缀下一轮必然变化、永不命中，但该消息
+/// 本身体积很小，每轮多写的缓存成本可忽略。
+fn apply_user_message_cache_ladder(messages: &mut [Value]) {
+    let user_positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.get("role").and_then(Value::as_str) == Some("user"))
+        .map(|(position, _)| position)
+        .collect();
+    let Some(&last_user) = user_positions.last() else {
+        return;
+    };
+    let mut targets = vec![user_positions[0]];
+    if user_positions.len() >= 3 {
+        targets.push(user_positions[user_positions.len() - 2]);
+    }
+    targets.push(last_user);
+    // 单条 user 时首末重合，去重避免同一消息被处理两次。
+    targets.dedup();
+    for target in targets {
+        let Some(rank) = user_positions
+            .iter()
+            .position(|&position| position == target)
+        else {
+            continue;
+        };
+        // 从 target 向前回退：跳过无可缓存块的 user 消息，遇到已打标消息即停。
+        for &position in user_positions[..=rank].iter().rev() {
+            let Some(content) = messages[position]
+                .get_mut("content")
+                .and_then(Value::as_array_mut)
+            else {
+                continue;
+            };
+            if content
+                .iter()
+                .any(|block| block.get("cache_control").is_some())
+            {
+                break;
+            }
+            let Some(index) = content.iter().rposition(is_cacheable_user_block) else {
+                continue;
+            };
+            add_ephemeral_cache_control(&mut content[index]);
+            break;
+        }
+    }
+}
+
+/// 编码 Messages 用户输入内容块。
+fn encode_user_block(block: &ContentBlock) -> Result<Value, ModelError> {
+    match block {
+        ContentBlock::Text { text } => Ok(json!({ "type": "text", "text": text })),
+        ContentBlock::Image { image } => Ok(encode_image_source(&image.source)),
+        ContentBlock::Reasoning { .. }
+        | ContentBlock::ToolCall { .. }
+        | ContentBlock::ToolResult { .. } => {
+            Err(invalid_request("Messages 用户消息包含不支持的内容块"))
+        }
+    }
+}
+
+/// 编码 Messages assistant 内容块；无法安全续传的纯推理文本不会重放。
+fn encode_assistant_block(block: &ContentBlock) -> Result<Option<Value>, ModelError> {
+    match block {
+        ContentBlock::Text { text } => Ok(Some(json!({ "type": "text", "text": text }))),
+        ContentBlock::ToolCall { tool_call } => Ok(Some(json!({
+            "type": "tool_use",
+            "id": tool_call.id,
+            "name": tool_call.name,
+            "input": tool_call.arguments,
+        }))),
+        ContentBlock::Reasoning { reasoning } => match &reasoning.continuation {
+            Some(state) if state.kind == SIGNATURE_STATE_KIND => {
+                let signature = state
+                    .data
+                    .as_str()
+                    .ok_or_else(|| invalid_request("Messages 推理签名状态必须是字符串"))?;
+                Ok(Some(json!({
+                    "type": "thinking",
+                    "thinking": reasoning.text,
+                    "signature": signature,
+                })))
+            }
+            Some(state) if state.kind == REDACTED_STATE_KIND => Ok(Some(json!({
+                "type": "redacted_thinking",
+                "data": state.data,
+            }))),
+            Some(state) => Err(invalid_request(format!(
+                "Messages 无法解释推理续传状态 {}",
+                state.kind
+            ))),
+            None => Ok(None),
+        },
+        ContentBlock::Image { .. } | ContentBlock::ToolResult { .. } => {
+            Err(invalid_request("Messages assistant 消息包含不支持的内容块"))
+        }
+    }
+}
+
+/// 编码一条 Messages `tool_result` 内容块。
+fn encode_tool_result_block(block: &ContentBlock) -> Result<Value, ModelError> {
+    let ContentBlock::ToolResult { tool_result } = block else {
+        return Err(invalid_request("Messages 工具消息只能包含工具结果"));
+    };
+    let content = tool_result
+        .content
+        .iter()
+        .map(|item| match item {
+            ToolResultContent::Text { text } => json!({ "type": "text", "text": text }),
+            ToolResultContent::Image { image } => encode_image_source(&image.source),
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({
+        "type": "tool_result",
+        "tool_use_id": tool_result.tool_call_id,
+        "content": content,
+        "is_error": tool_result.is_error,
+    }))
+}
+
+/// 编码 Messages 图片来源。
+fn encode_image_source(source: &ImageSource) -> Value {
+    match source {
+        ImageSource::Url { url } => json!({
+            "type": "image",
+            "source": { "type": "url", "url": url },
+        }),
+        ImageSource::Base64 { media_type, data } => json!({
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": media_type,
+                "data": data,
+            },
+        }),
+    }
+}
+
+/// 编码 Messages 工具选择和并行工具约束。
+fn encode_tool_choice(choice: &ToolChoice, parallel: Option<bool>) -> Value {
+    let mut value = match choice {
+        ToolChoice::Auto => json!({ "type": "auto" }),
+        ToolChoice::None => json!({ "type": "none" }),
+        ToolChoice::Required => json!({ "type": "any" }),
+        ToolChoice::Specific { name } => json!({ "type": "tool", "name": name }),
+    };
+    if let Some(disable) = parallel.map(|allowed| !allowed)
+        && let Some(object) = value.as_object_mut()
+    {
+        object.insert("disable_parallel_tool_use".to_owned(), Value::Bool(disable));
+    }
+    value
+}
+
+/// 将 Provider 中立推理强度映射为保守的 Messages Token 预算。
+fn reasoning_budget(effort: Option<ReasoningEffort>) -> u32 {
+    match effort.unwrap_or(ReasoningEffort::Medium) {
+        ReasoningEffort::Minimal => 1024,
+        ReasoningEffort::Low => 2048,
+        ReasoningEffort::Medium => 4096,
+        ReasoningEffort::High => 8192,
+        ReasoningEffort::ExtraHigh => 16384,
+        ReasoningEffort::Maximum => 32768,
+    }
+}
+
+/// 把完整 Messages 内容块转换为中立事件。
+fn decode_complete_content(
+    index: u32,
+    block: &Value,
+    events: &mut Vec<ModelStreamEvent>,
+) -> Result<(), ModelError> {
+    let object = block
+        .as_object()
+        .ok_or_else(|| protocol_error("Messages content 元素必须是对象"))?;
+    match required_str_from_map(object, "type")? {
+        "text" => {
+            let text = required_str_from_map(object, "text")?;
+            if !text.is_empty() {
+                events.push(ModelStreamEvent::TextDelta {
+                    index,
+                    delta: text.to_owned(),
+                });
+            }
+        }
+        "thinking" => {
+            events.push(ModelStreamEvent::ReasoningDelta {
+                index,
+                delta: required_str_from_map(object, "thinking")?.to_owned(),
+            });
+            if let Some(signature) = object.get("signature").and_then(Value::as_str) {
+                events.push(ModelStreamEvent::ReasoningContinuation {
+                    index,
+                    continuation: OpaqueReasoningState::new(
+                        SIGNATURE_STATE_KIND,
+                        Value::String(signature.to_owned()),
+                    ),
+                });
+            }
+        }
+        "redacted_thinking" => {
+            events.push(ModelStreamEvent::ReasoningContinuation {
+                index,
+                continuation: OpaqueReasoningState::new(
+                    REDACTED_STATE_KIND,
+                    object
+                        .get("data")
+                        .cloned()
+                        .ok_or_else(|| protocol_error("redacted_thinking 缺少 data"))?,
+                ),
+            });
+        }
+        "tool_use" => {
+            let id = required_str_from_map(object, "id")?.to_owned();
+            events.push(ModelStreamEvent::ToolCallStart {
+                index,
+                id: id.clone(),
+                name: required_str_from_map(object, "name")?.to_owned(),
+            });
+            events.push(ModelStreamEvent::ToolCallArgumentsDelta {
+                index,
+                id: id.clone(),
+                delta: serde_json::to_string(
+                    object
+                        .get("input")
+                        .ok_or_else(|| protocol_error("tool_use 缺少 input"))?,
+                )
+                .map_err(|error| protocol_error(format!("tool_use input 无法编码：{error}")))?,
+            });
+            events.push(ModelStreamEvent::ToolCallEnd { index, id });
+        }
+        other => {
+            return Err(protocol_error(format!(
+                "Messages 包含未知完整内容块 {other}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Messages 的 input_tokens 不含缓存；统一为包含缓存的输入总量。
+/// 缓存字段在未使用时可以省略，但缺失基础输入不能据此补造输入总量。
+fn decode_usage(value: &Value) -> TokenUsage {
+    let cache_read = value.get("cache_read_input_tokens").and_then(Value::as_u64);
+    let cache_write = value
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+    let input = value
+        .get("input_tokens")
+        .and_then(Value::as_u64)
+        .and_then(|input| input.checked_add(cache_read.unwrap_or(0)))
+        .and_then(|input| input.checked_add(cache_write.unwrap_or(0)));
+    TokenUsage {
+        input_tokens: input,
+        output_tokens: value.get("output_tokens").and_then(Value::as_u64),
+        reasoning_tokens: None,
+        cache_read_tokens: value.get("cache_read_input_tokens").and_then(Value::as_u64),
+        cache_write_tokens: value
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64),
+        total_tokens: None,
+    }
+}
+
+/// pause_turn 是服务端暂停信号，不能据此提交客户端工具副作用。
+fn validate_tool_stop_reason(reason: &StopReason, saw_tool_call: bool) -> Result<(), ModelError> {
+    if saw_tool_call && matches!(reason, StopReason::Other { reason } if reason == "pause_turn") {
+        return Err(protocol_error("Messages 暂停响应不能提交客户端工具调用"));
+    }
+    Ok(())
+}
+
+/// 映射 Messages 结束原因为 Provider 中立枚举。
+fn map_stop_reason(reason: Option<&str>) -> StopReason {
+    match reason {
+        Some("end_turn" | "stop_sequence") => StopReason::Completed,
+        Some("tool_use") => StopReason::ToolUse,
+        Some("max_tokens" | "model_context_window_exceeded") => StopReason::MaxOutputTokens,
+        Some("refusal") => StopReason::ContentFilter,
+        Some(other) => StopReason::Other {
+            reason: other.to_owned(),
+        },
+        None => StopReason::Other {
+            reason: "missing_stop_reason".to_owned(),
+        },
+    }
+}
+
+/// 判断顶层值是否包含 Anthropic 错误事件约定的嵌套错误对象。
+fn has_explicit_provider_error(value: &Value) -> bool {
+    value.get("error").is_some_and(Value::is_object)
+}
+
+/// 仅把具有明确结构或上下文超限语义的 Provider 错误归一为稳定错误类型。
+fn classify_provider_error(value: &Value) -> ModelError {
+    wire::classify_provider_error(value, "Messages Provider 返回未说明错误")
+}
+
+/// 从对象读取必需的字符串字段。
+fn required_str_from_map<'a>(
+    value: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, ModelError> {
+    wire::required_str_from_map(value, field, "Messages")
+}
+
+/// 从顶层对象读取可转换为 u32 的必需整数。
+fn required_u32(value: &Value, field: &str) -> Result<u32, ModelError> {
+    wire::required_u32(value, field, "Messages")
+}
+
+/// 把可选 JSON 字符串复制为拥有所有权的值。
+fn optional_string(value: Option<&Value>) -> Option<String> {
+    value.and_then(Value::as_str).map(ToOwned::to_owned)
+}
+
+/// 要求 SSE 已经收到响应开始事件。
+fn require_started(started: bool) -> Result<(), ModelError> {
+    wire::require_started(started, "Messages 内容事件早于 message_start")
+}
+
+/// 创建内容块序号混用类型时的统一协议错误。
+fn index_type_error(index: u32) -> ModelError {
+    protocol_error(format!("内容块序号 {index} 被用于不同内容类型"))
+}
+
+#[cfg(test)]
+#[path = "messages_tests.rs"]
+mod messages_tests;
