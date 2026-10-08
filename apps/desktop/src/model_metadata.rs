@@ -1,6 +1,6 @@
 //! 模型价格、上下文容量与推理能力的本地目录。
 //!
-//! KeenCode 只维护一份 models.dev 公共目录的本地快照：应用启动时后台检查新鲜度，
+//! KeenCode 只维护一份 models.dev 公共目录的本地快照：首次查询时后台检查新鲜度，
 //! 缺失或超过 24 小时才重新下载并原子替换，任何失败都保留现有快照。查询命令只
 //! 读取本地文件，不在请求路径上访问网络；匹配仅按模型标识进行，不依赖自定义
 //! 供应商名称。中转站常见的 `:free` 等变体后缀只在目录匹配时截断，用户配置的
@@ -16,9 +16,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tauri::AppHandle;
 
 use crate::http_response::{HttpResponseReadError, read_http_response_limited};
+use crate::native_paths::NativePaths;
 
 /// models.dev 公共目录快照的固定下载地址。
 const CATALOG_URL: &str = "https://models.dev/api.json";
@@ -114,7 +114,7 @@ pub struct ModelMetadataSources {
     pub supports_vision: Option<ModelMetadataFieldSource>,
 }
 
-/// 前端与本地文件共享的单模型元数据。
+/// 原生设置与本地文件共享的单模型元数据。
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ModelMetadata {
@@ -152,41 +152,11 @@ impl ModelMetadata {
     }
 }
 
-/// Tauri 命令：按模型标识返回价格、上下文和推理元数据。
-#[tauri::command]
-pub async fn model_metadata_get(
-    model_id: String,
-    app: AppHandle,
-) -> std::result::Result<ModelMetadata, String> {
-    tauri::async_runtime::spawn_blocking(move || get(&app, &model_id))
-        .await
-        .map_err(|error| format!("模型元数据后台任务失败：{error}"))?
-        .map_err(|error| error.to_string())
-}
-
-/// Tauri 命令：一次读取多个模型，共享同一次本地快照解析。
-#[tauri::command]
-pub async fn model_metadata_get_many(
-    model_ids: Vec<String>,
-    app: AppHandle,
-) -> std::result::Result<Vec<ModelMetadata>, String> {
-    tauri::async_runtime::spawn_blocking(move || get_many(&app, &model_ids))
-        .await
-        .map_err(|error| format!("模型元数据后台任务失败：{error}"))?
-        .map_err(|error| error.to_string())
-}
-
-/// 应用装配时调用：后台检查快照新鲜度并按需下载，不阻塞启动。
-pub fn spawn_startup_refresh(app: AppHandle) {
-    tauri::async_runtime::spawn_blocking(move || {
-        if let Ok(path) = catalog_path(&app) {
-            trigger_refresh_if_needed(&path);
-        }
-    });
-}
-
 /// 返回多个模型的本地快照元数据；快照缺失时字段留空，不报错也不等待网络。
-fn get_many(app: &AppHandle, raw_model_ids: &[String]) -> Result<Vec<ModelMetadata>> {
+pub(crate) fn get_many(
+    paths: &NativePaths,
+    raw_model_ids: &[String],
+) -> Result<Vec<ModelMetadata>> {
     if raw_model_ids.is_empty() || raw_model_ids.len() > MAX_QUERY_MODELS {
         anyhow::bail!("模型目录批量查询数量必须为 1 到 {MAX_QUERY_MODELS}");
     }
@@ -194,7 +164,7 @@ fn get_many(app: &AppHandle, raw_model_ids: &[String]) -> Result<Vec<ModelMetada
         .iter()
         .map(|model_id| validate_model_id(model_id))
         .collect::<Result<Vec<_>>>()?;
-    let path = catalog_path(app)?;
+    let path = catalog_path(paths)?;
     let catalog = read_catalog_document(&path);
     // 缺失、损坏或过期都在后台自愈；读取路径永远不等待网络。
     trigger_refresh_if_needed(&path);
@@ -213,14 +183,6 @@ fn get_many(app: &AppHandle, raw_model_ids: &[String]) -> Result<Vec<ModelMetada
         .collect())
 }
 
-/// 单模型查询复用批量读取。
-fn get(app: &AppHandle, model_id: &str) -> Result<ModelMetadata> {
-    get_many(app, &[model_id.to_string()])?
-        .into_iter()
-        .next()
-        .context("模型元数据结果为空")
-}
-
 /// 快照缺失或超过有效期时在后台触发一次下载；进行中的刷新不重复触发。
 fn trigger_refresh_if_needed(path: &Path) {
     if catalog_age_seconds(path).is_some_and(|age| age < CATALOG_TTL_SECONDS) {
@@ -233,7 +195,7 @@ fn trigger_refresh_if_needed(path: &Path) {
         return;
     }
     let refresh_path = path.to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || {
+    tokio::task::spawn_blocking(move || {
         if let Err(error) = refresh_catalog(&refresh_path) {
             tracing::warn!(error = %error, "models.dev 模型目录刷新失败，继续使用现有快照");
         }
@@ -307,8 +269,8 @@ fn validate_catalog_bytes(bytes: &[u8]) -> Result<()> {
 }
 
 /// 返回当前唯一的模型目录快照路径。
-fn catalog_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(crate::storage::root_dir(app)?.join(CATALOG_FILE_NAME))
+fn catalog_path(paths: &NativePaths) -> Result<PathBuf> {
+    Ok(crate::storage::root_dir(paths)?.join(CATALOG_FILE_NAME))
 }
 
 /// 读取本地快照；缺失、非普通文件、超限或损坏都按缺失处理，由后台刷新自愈。

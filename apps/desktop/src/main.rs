@@ -1,8 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    // 在 WebView 创建前应用需要重启生效的浏览器参数。
-    keencode_desktop::configure_before_start();
-    // 启动 KeenCode 的 Tauri 本地后端。
+    // 产品入口仅创建 Rust Runtime 与 GPUI 窗口。
     keencode_desktop::run();
 }

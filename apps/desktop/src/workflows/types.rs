@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
-pub use keencode_resources::{ArtifactUse, WorkflowJournalEvent};
+pub use keencode_resources::{ArtifactUse, ProviderSnapshot, WorkflowJournalEvent};
 #[allow(unused_imports)]
 pub use keencode_workflow::{
     AgentNode, Condition, DriverError, DriverLeafKind, DriverRequest, EffectClass,
@@ -40,12 +40,6 @@ pub fn canonical_hash(definition: &WorkflowDefinition) -> Result<String, Workflo
         .to_owned())
 }
 
-pub fn canonical_json(definition: &WorkflowDefinition) -> Result<Vec<u8>, WorkflowDefinitionError> {
-    validate_definition(definition)?;
-    serde_json::to_vec(definition)
-        .map_err(|error| WorkflowDefinitionError::Serialization(error.to_string()))
-}
-
 pub fn validate_workflow_name(name: &str) -> Result<(), WorkflowDefinitionError> {
     if name.is_empty() || name == "." || name == ".." {
         return Err(WorkflowDefinitionError::InvalidName(name.to_owned()));
@@ -64,7 +58,6 @@ pub fn validate_workflow_name(name: &str) -> Result<(), WorkflowDefinitionError>
 pub enum WorkflowDefinitionError {
     InvalidName(String),
     Validation(keencode_workflow::ValidationError),
-    Serialization(String),
 }
 
 impl fmt::Display for WorkflowDefinitionError {
@@ -72,9 +65,6 @@ impl fmt::Display for WorkflowDefinitionError {
         match self {
             Self::InvalidName(name) => write!(formatter, "invalid workflow name: {name}"),
             Self::Validation(error) => error.fmt(formatter),
-            Self::Serialization(error) => {
-                write!(formatter, "workflow serialization failed: {error}")
-            }
         }
     }
 }
@@ -143,6 +133,34 @@ pub struct WorkflowRunStartRequest {
     pub cwd: PathBuf,
     pub model_selection: Option<Value>,
     pub budgets: Option<Value>,
+}
+
+/// `run-started.models` 的冻结结构；Provider 与 Plan 必须来自同一次启动快照。
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowModelSelection {
+    pub provider: ProviderSnapshot,
+    pub plan_enabled: bool,
+}
+
+impl WorkflowModelSelection {
+    /// 创建可写入 Journal 的无凭据模型事实。
+    pub(crate) fn new(provider: ProviderSnapshot, plan_enabled: bool) -> Self {
+        Self {
+            provider,
+            plan_enabled,
+        }
+    }
+
+    /// 将结构化事实编码成工作流 Journal 使用的 JSON 值。
+    pub(crate) fn into_value(self) -> Value {
+        serde_json::to_value(self).expect("WorkflowModelSelection must be JSON serializable")
+    }
+
+    /// 解析并校验冻结的模型事实；缺少字段或附加字段都必须拒绝。
+    pub(crate) fn parse(value: &Value) -> Result<Self, String> {
+        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

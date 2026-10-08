@@ -1149,7 +1149,7 @@ struct RetryModelStream {
     trace: Option<WireTraceSink>,
     /// 尚未形成终态的请求生命周期。
     lifecycle: Option<RequestLifecycle>,
-    /// 当前尝试的统一事件流。
+    /// 当前尝试的统一事件流；转发 MessageEnd 后置空，避免继续等待 HTTP EOF。
     inner: Option<ModelStream>,
     /// 是否已经观察到协议的 MessageEnd。
     saw_message_end: bool,
@@ -1298,8 +1298,8 @@ impl Stream for RetryModelStream {
                         ModelStreamEvent::MessageEnd { .. } => {
                             this.saw_message_end = true;
                             if let Some(lifecycle) = this.lifecycle.as_mut() {
-                                // Agent Runner 在 MessageEnd 后完成当前 Round，不会为观测器
-                                // 额外轮询一次 EOF；协议 Adapter 已保证终态事件合法。
+                                // Agent Runner 在 MessageEnd 后完成当前 Round；观测器也
+                                // 在这里结束成功生命周期，不依赖传输 EOF。
                                 lifecycle.complete();
                             }
                         }
@@ -1318,7 +1318,14 @@ impl Stream for RetryModelStream {
                     // 序列并触发下游协议错误。静默重试因此只覆盖尚未转发
                     // 任何事件的失败（连接失败、HTTP 状态失败、零事件中断）。
                     this.forwarded_output = true;
-                    this.inner = Some(stream);
+                    if matches!(&event, ModelStreamEvent::MessageEnd { .. }) {
+                        // 协议 Adapter 已在终态前归一化 Usage，终态后的 HTTP
+                        // 传输尾部不再属于模型响应；立即释放响应体，避免直接
+                        // 消费事件流的调用方继续等待远端 EOF。
+                        this.inner = None;
+                    } else {
+                        this.inner = Some(stream);
+                    }
                     return Poll::Ready(Some(Ok(event)));
                 }
                 Poll::Ready(Some(Err(error))) => match this.handle_failure(error, None) {

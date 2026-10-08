@@ -4,49 +4,15 @@ on:
   push:
   pull_request:
 
-# 普通 CI 只需要读取仓库内容，不授予发布或其他写权限。
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  frontend:
-    name: Frontend (Ubuntu)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Enable corepack
-        run: corepack enable
-
-      - uses: actions/setup-node@v4
-        with:
-          # 与本机当前构建基线和项目依赖要求一致的受支持 Node 主版本。
-          node-version: 24
-          cache: pnpm
-
-      - name: Install frontend dependencies
-        run: corepack pnpm@10.14.0 install --frozen-lockfile
-      - name: Verify UI source layout
-        run: |
-          test -d packages/ui/src
-          test -f packages/ui/src/styles.css
-          node --version
-          corepack pnpm@10.14.0 --version
-      - name: Typecheck frontend source projects
-        run: corepack pnpm@10.14.0 run typecheck
-      - name: Test frontend and protocol contracts
-        # 默认入口包含真实 IPC 契约、来源门禁和脚本测试；零测试不能作为迁移通过。
-        run: corepack pnpm@10.14.0 test
-      - name: Build frontend
-        run: corepack pnpm@10.14.0 build
-      - name: Lint CSS
-        run: corepack pnpm@10.14.0 run lint:css
-      - name: Check diff formatting
-        run: git diff --check
-
-  # 依赖供应链审计：只读 Cargo.lock 与清单，不需要编译 Rust 代码。
   supply-chain:
-    name: Cargo deny (Ubuntu)
+    name: Cargo deny
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,37 +21,42 @@ jobs:
         with:
           tool: cargo-deny
 
-      - name: Deny advisories, bans, licenses and sources
+      - name: Audit dependencies
         run: cargo deny --log-level info check advisories bans licenses sources
 
-  # MSRV 回归：根 Cargo.toml 声明 rust-version，仅验证可编译性；
-  # lint 与测试语义由 stable job 覆盖。
   msrv:
-    name: Rust MSRV (1.95)
+    name: Rust MSRV
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tauri Linux native dependencies
+      - name: Install GPUI Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
+            build-essential \
+            clang \
+            cmake \
+            lld \
+            llvm \
+            pkg-config \
+            libasound2-dev \
+            libfontconfig-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+            libsqlite3-dev
 
       - uses: dtolnay/rust-toolchain@1.95
 
-      - name: Cache Rust workspace
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-
-      - name: Ensure frontend dist placeholder
-        run: mkdir -p apps/ui/dist
 
       - name: Check workspace on MSRV
         run: cargo check --workspace --all-targets
@@ -96,7 +67,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Tauri 的系统能力和 portable-pty 必须在三种受支持平台分别验证。
         os:
           - ubuntu-latest
           - macos-latest
@@ -104,38 +74,73 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Tauri Linux native dependencies
+      - name: Install GPUI Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
+            build-essential \
+            clang \
+            cmake \
+            lld \
+            llvm \
+            pkg-config \
+            libasound2-dev \
+            libfontconfig-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
+            libsqlite3-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
 
-      - name: Cache Rust workspace
-        uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2
         with:
-          # 统一 workspace 后，核心 crate 与桌面包共享根 target 目录。
           workspaces: . -> target
 
-      # 桌面构建脚本在编译期校验 tauri.conf.json 的 bundle.resources（apps/ui/dist）。
-      # 该目录是前端构建产物且被 gitignore，纯 Rust 检查只需保证目录存在。
-      - name: Ensure frontend dist placeholder
-        run: mkdir -p apps/ui/dist
-
-      - name: Format workspace
+      - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
+
       - name: Test workspace
         run: cargo test --workspace --all-targets
-      - name: Test workspace doctests
+
+      - name: Test documentation
         run: cargo test --workspace --doc
+
+      - name: Check diff formatting
+        run: git diff --check
+
+  windows-native:
+    name: Windows GPUI native build
+    runs-on: windows-latest
+    needs: rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Build desktop acceptance binary
+        run: cargo build -p keencode-desktop --release
+
+      - name: Build native acceptance runner
+        run: cargo build -p keencode-native-gpui-tests
+
+      - name: Test native acceptance runner
+        run: cargo test -p keencode-native-gpui-tests

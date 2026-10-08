@@ -3,7 +3,8 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use tauri::AppHandle;
+
+use crate::native_paths::NativePaths;
 
 /// 全局自定义指令文件的最大字符数。
 pub const MAX_CUSTOM_INSTRUCTIONS_CHARS: usize = 12_000;
@@ -15,38 +16,21 @@ const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 128 * 1024;
 static CUSTOM_INSTRUCTIONS_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// 读取当前设备唯一的全局用户自定义指令；首次使用时为空。
-pub fn get(app: &AppHandle) -> Result<String> {
+pub fn get(paths: &NativePaths) -> Result<String> {
     let _guard = CUSTOM_INSTRUCTIONS_IO_LOCK
         .lock()
         .expect("自定义指令读写锁已损坏");
-    load_path(&custom_instructions_path(app)?)
+    load_path(&custom_instructions_path(paths)?)
 }
 
 /// 校验并保存当前设备唯一的全局用户自定义指令。
-pub fn set(app: &AppHandle, instructions: String) -> Result<String> {
+pub fn set(paths: &NativePaths, instructions: String) -> Result<String> {
     let _guard = CUSTOM_INSTRUCTIONS_IO_LOCK
         .lock()
         .expect("自定义指令读写锁已损坏");
     validate(&instructions)?;
-    save_path(&custom_instructions_path(app)?, instructions.as_bytes())?;
+    save_path(&custom_instructions_path(paths)?, instructions.as_bytes())?;
     Ok(instructions)
-}
-
-/// 读取当前设备唯一的全局用户自定义指令（IPC 入口）。
-///
-/// 异步命令 + `spawn_blocking`：同步命令在 Tauri v2 中内联运行于主线程，
-/// 读取（可能较大的）指令文件会阻塞窗口事件处理。
-#[tauri::command]
-pub async fn custom_instructions_get(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || get(&app).map_err(|error| error.to_string()))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-/// 校验并保存当前设备唯一的全局用户自定义指令（IPC 入口）。
-#[tauri::command]
-pub fn custom_instructions_set(app: AppHandle, instructions: String) -> Result<String, String> {
-    set(&app, instructions).map_err(|error| error.to_string())
 }
 
 /// 校验全局自定义指令的 Unicode 字符预算。
@@ -58,8 +42,8 @@ fn validate(instructions: &str) -> Result<()> {
 }
 
 /// 返回当前隔离数据根中的唯一全局指令路径。
-fn custom_instructions_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(crate::storage::root_dir(app)?.join("AGENTS.md"))
+fn custom_instructions_path(paths: &NativePaths) -> Result<PathBuf> {
+    Ok(crate::storage::root_dir(paths)?.join("AGENTS.md"))
 }
 
 /// 先按 UTF-8 最大字节数有界读取，再校验全局指令的实际字符数。

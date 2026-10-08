@@ -27,5 +27,5 @@ zeroize = "1.8.1"
 
 [dev-dependencies]
 futures-executor = "0.3.31"
-# 仅为本地异步 Provider 单元测试提供多线程 Tokio Runtime。
-tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread"] }
+# 仅为本地异步 Provider 单元测试提供多线程 Tokio Runtime 与有界超时。
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "time"] }

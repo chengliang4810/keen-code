@@ -1,8 +1,4 @@
-# 固定前端来源保留原始 LF/CRLF 字节，避免跨平台检出改写来源 SHA。
-# CRLF 的 CR 仅视为行尾；仍检查真实尾空格、EOF 空行和缩进错误。
-packages/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-apps/ui/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+# 原生源码统一 LF；Windows 编辑器写入的 CRLF 在 Git 比较时正常归一化。
+* text=auto eol=lf
+# 固定设计参考保留来源字节，避免检出改写上游证据。
 third-party/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-# 原生验收计划和 PowerShell 脚本保留 Windows 行尾，并继续检查真实空白错误。
-tooling/native-live/** -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
-tooling/scripts/*.ps1 -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol

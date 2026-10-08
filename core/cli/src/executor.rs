@@ -2,12 +2,10 @@
 //!
 //! 本模块只组合 ACP 请求、事件等待和稳定 stdout 记录，不把 JSON-RPC request id
 //! 当作 operationId、turnId 或 taskId。`headless` 由独立 CLI Host 装配，Desktop
-//! 仍通过自己的 adapter 持有 Tauri 事件和 Provider 配置。
+//! 其他宿主通过各自的适配层持有事件和 Provider 配置。
 
 use crate::client::{ClientError, HostClient, HostClientConfig, HostEvent};
-use crate::command::{
-    CliCommand, CliOptions, HeadlessOptions, RunCommand, SessionCommand, WebCommand,
-};
+use crate::command::{CliCommand, CliOptions, HeadlessOptions, RunCommand, SessionCommand};
 use crate::{ExitCode, HeadlessHost, default_data_root};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
@@ -26,9 +24,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 // keencode/* 方法名契约统一由 keencode_acp 导出；DETACHED_PROMPT_METHOD
 // 保留 CLI 侧的历史名称作为别名，内部消费者无需改名。
 pub use keencode_acp::OPERATION_ADMIT_METHOD as DETACHED_PROMPT_METHOD;
-pub use keencode_acp::{
-    OPERATION_STATUS_METHOD, WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD,
-};
+pub use keencode_acp::OPERATION_STATUS_METHOD;
 
 static NEXT_OPERATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -230,7 +226,6 @@ pub async fn execute_with_client(
     let execution = match command {
         CliCommand::Run(command) => run_command(client, command, &mut output).await,
         CliCommand::Session(command) => session_command(client, command, &mut output).await,
-        CliCommand::Web(command) => web_command(client, command, &mut output).await,
         CliCommand::Help | CliCommand::Headless(_) => unreachable!("已在 execute_command 处理"),
     };
     match execution {
@@ -326,21 +321,6 @@ async fn session_command(
             Ok(())
         }
     }
-}
-
-async fn web_command(
-    client: &HostClient,
-    command: WebCommand,
-    output: &mut CliExecutionResult,
-) -> Result<(), CliExecutionError> {
-    let (method, params) = match command {
-        WebCommand::Start { port, .. } => (WEB_START_METHOD, json!({"port":port})),
-        WebCommand::Stop { .. } => (WEB_STOP_METHOD, json!({})),
-        WebCommand::Status { .. } => (WEB_STATUS_METHOD, json!({})),
-    };
-    let result = client.request(method, params).await?.result;
-    output.push(json!({"type":"web","method":method,"result":result}));
-    Ok(())
 }
 
 async fn create_session(
@@ -671,11 +651,6 @@ fn command_json(command: &CliCommand) -> bool {
             | SessionCommand::Send { json, .. }
             | SessionCommand::Attach { json, .. }
             | SessionCommand::Stop { json, .. } => *json,
-        },
-        CliCommand::Web(command) => match command {
-            WebCommand::Start { json, .. }
-            | WebCommand::Stop { json }
-            | WebCommand::Status { json } => *json,
         },
         CliCommand::Help => true,
         CliCommand::Headless(options) => options.json,

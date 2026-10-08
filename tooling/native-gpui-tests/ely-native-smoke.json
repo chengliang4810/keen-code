@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "name": "ely-native-smoke",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "actions": [
+    { "type": "focus" },
+    { "type": "assert_window", "title_contains": "KeenCode" },
+    { "type": "wait", "ms": 1500 },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "accessibility", "label": "startup" },
+    { "type": "metrics", "label": "startup" },
+    { "type": "click", "x": 465, "y": 154 },
+    { "type": "wait_for_journal", "event_type": "session_created", "count": 1, "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "click", "x": 1000, "y": 1320 },
+    { "type": "type_text", "text": "请简短回答 native smoke，并保持输出可观察。" },
+    { "type": "key", "key": "enter" },
+    { "type": "wait_for_journal", "event_type": "turn_started", "count": 1, "timeout_ms": 180000 },
+    { "type": "screenshot", "label": "turn-started" },
+    { "type": "metrics", "label": "turn-started" },
+    { "type": "wait_for_journal", "event_type": "turn_completed", "count": 1, "timeout_ms": 180000 },
+    { "type": "screenshot", "label": "turn-completed" },
+    { "type": "accessibility", "label": "turn-completed" },
+    { "type": "metrics", "label": "turn-completed" }
+  ]
+}

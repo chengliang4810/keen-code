@@ -297,7 +297,9 @@ pub fn map_authoritative_event(
             )]
         }
         SessionEvent::CommandReceiptCommitted { .. } => Vec::new(),
-        SessionEvent::SessionPreferenceSet { pinned, archived } => {
+        SessionEvent::SessionPreferenceSet {
+            pinned, archived, ..
+        } => {
             // 偏好变更经 _meta 投影给前端；标题键不参与，键集与既有
             // session_info_update 白名单保持兼容。
             let mut meta = serde_json::Map::new();

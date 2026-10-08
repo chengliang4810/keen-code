@@ -1,0 +1,153 @@
+{
+  "version": 1,
+  "name": "ely-native-hooks-cold-resume",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "requires_reuse_isolation": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "wait", "ms": 1500 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"schema\": \"keencode/native-hooks\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"schema\": \"keencode/native-hooks\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"admittedDigest\": \"",
+      "min_bytes": 1
+    },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "请简短回复 hooks cold resume。" },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "hooks-user-marker.txt",
+      "contains": "USER_HOOK_EXECUTED",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "hooks-project-marker.txt",
+      "contains": "PROJECT_HOOK_EXECUTED",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "hooks-user-marker.txt",
+      "contains": "USER_HOOK_EXECUTED",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "hooks-project-marker.txt",
+      "contains": "PROJECT_HOOK_EXECUTED",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "click_accessibility", "label": "Hooks", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "撤销信任项目 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"scopeKey\": \"user\"",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "删除项目 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    { "type": "click_accessibility", "label": "删除用户 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"hooks\": []",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"hooks\": []",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"entries\": []",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 1
+    },
+    { "type": "close" }
+  ]
+}

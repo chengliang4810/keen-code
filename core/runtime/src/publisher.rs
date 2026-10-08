@@ -115,6 +115,12 @@ pub struct RuntimeEventSubscription {
 }
 
 impl RuntimeEventSubscription {
+    /// 当前 receiver 已观察的水位；原生宿主用它协调 snapshot 与热流尾部，
+    /// 不读取或复制广播缓冲区，也不把实时水位当作 Journal sequence。
+    pub fn last_observed_delivery_sequence(&self) -> u64 {
+        self.last_observed_delivery_sequence
+    }
+
     /// 等待下一条实时事件，落后时先返回显式追赶信号而不伪造事件补发。
     pub async fn recv(&mut self) -> Result<RuntimeEventDelivery, RuntimeEventReceiveError> {
         if self.closed_after_delivery {

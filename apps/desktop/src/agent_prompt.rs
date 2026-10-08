@@ -52,6 +52,7 @@ pub(crate) fn capabilities(can_spawn: bool, has_skill: bool) -> String {
 }
 
 /// 从已冻结的候选生成有界检索目录；名称与说明仅作为数据，不加载扩展正文。
+#[cfg(test)]
 pub(crate) fn catalog<'a>(
     label: &str,
     entries: impl Iterator<Item = (&'a str, &'a str)>,

@@ -2,7 +2,7 @@
 //!
 //! ownership、discovery 和 admission 事实来自 `keencode-runtime`；本模块只把它们
 //! 接到 CLI 的本地 NDJSON server。模型执行复用平台无关的 AgentRunner、Provider
-//! Registry 和 Session Runtime；Desktop 的 Tauri 事件、密钥库和界面投影仍留在
+//! Registry 和 Session Runtime；Desktop 的窗口事件、密钥库和界面投影仍留在
 //! desktop adapter。
 
 use crate::server::{
@@ -10,10 +10,9 @@ use crate::server::{
     LocalHostServer, LocalHostServerConfig, LocalHostServerError, LocalHostServerHandle,
 };
 use keencode_acp::{
-    AcpIncomingFrame, ConnectionId, HostDiscoveryRecord, HostLifecyclePhase, HostOwnerKind,
-    HostTransportKind, KeenCodeEvent, KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams,
-    MAX_HOST_PROMPT_BYTES, OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId,
-    SessionUpdateDeliveryEnvelope, WEB_START_METHOD, WEB_STATUS_METHOD, WEB_STOP_METHOD,
+    ConnectionId, HostDiscoveryRecord, HostLifecyclePhase, HostOwnerKind, HostTransportKind,
+    KeenCodeEvent, KeenCodeEventEnvelope, KeenCodeEventEnvelopeParams, MAX_HOST_PROMPT_BYTES,
+    OPERATION_ADMIT_METHOD, OPERATION_STATUS_METHOD, OperationId, SessionUpdateDeliveryEnvelope,
 };
 use keencode_agent::{
     AgentId, AgentRunner, AgentStreamEvent, AgentStreamEventKind, ContextCompactionFailureKind,
@@ -42,22 +41,16 @@ use keencode_runtime::{
     session_info_from_metadata,
 };
 use keencode_tools::{ToolEnvironment, register_local_tools, register_state_tools};
-use keencode_web::{
-    HostBusinessError, HostBusinessFuture, HostBusinessRouter, HostConnectionContext,
-    HostWsAdapter, WebError, WebHost, WebHostConfig, WebServerOwner, WebToken,
-};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{Mutex as AsyncMutex, broadcast, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, oneshot, watch};
 use zeroize::Zeroizing;
 
 static NEXT_HEADLESS_ID: AtomicU64 = AtomicU64::new(1);
@@ -162,11 +155,6 @@ impl HeadlessHost {
             .wait_for_ctrl_c()
             .await
             .map_err(HeadlessHostError::transport);
-        let web_result = self
-            .backend
-            .shutdown_web()
-            .await
-            .map_err(HeadlessHostError::web);
         let backend_result = self
             .backend
             .shutdown()
@@ -177,7 +165,6 @@ impl HeadlessHost {
             .map(|_| ())
             .map_err(HeadlessHostError::runtime);
         server_result?;
-        web_result?;
         backend_result?;
         shutdown_result
     }
@@ -215,16 +202,6 @@ impl HeadlessHostError {
 
     fn runtime_operation(error: RuntimeError) -> Self {
         Self::io(error.to_string())
-    }
-
-    fn web(error: WebError) -> Self {
-        // Web transport 错误可能包含本地路径；headless CLI 只返回稳定摘要。
-        let message = match error {
-            WebError::Bind(_) => "Web Host 监听失败",
-            WebError::Internal(_) => "Web Host 停止失败",
-            _ => "Web Host 生命周期操作失败",
-        };
-        Self::io(message)
     }
 
     fn provider(_error: HeadlessProviderError) -> Self {
@@ -395,7 +372,6 @@ struct HeadlessInner {
     runtime_manager: Arc<RuntimeManager>,
     provider: Option<HeadlessProvider>,
     state: Arc<Mutex<HeadlessState>>,
-    web_runtime: Arc<AsyncMutex<Option<HeadlessWebRuntime>>>,
     /// 共享 Prompt 队列驱动原语；必须在所有 Clone 间共享同一实例。
     driver: PromptQueueDriver,
 }
@@ -410,7 +386,6 @@ struct HeadlessState {
     operation_results: BTreeMap<OperationId, OperationResult>,
     /// 当前 Session delivery 的单调水位；历史重放和实时事件共用，避免 attach 后序号倒退。
     delivery_sequences: BTreeMap<String, u64>,
-    web: WebState,
 }
 
 #[derive(Clone)]
@@ -466,189 +441,6 @@ impl ExecutionOutcome {
     }
 }
 
-#[derive(Clone, Copy)]
-struct WebState {
-    running: bool,
-    port: u16,
-}
-
-/// Headless Web 的完整 owner；只有保存该结构，HTTP/WS listener 才会持续存在。
-struct HeadlessWebRuntime {
-    host: Arc<WebHost>,
-    owner: WebServerOwner,
-    adapter: Arc<HostWsAdapter>,
-}
-
-/// 把 headless Host Core 接到 Web transport 的业务路由。
-///
-/// `HostWsAdapter` 只负责连接级队列。这里额外桥接 headless 的广播事件，避免
-/// Web 客户端只能收到请求响应而收不到实时 Session delivery。
-struct HeadlessWebBusinessRouter {
-    inner: Arc<HeadlessInner>,
-    adapter: Mutex<Option<Weak<HostWsAdapter>>>,
-    bridges: Mutex<BTreeMap<ConnectionId, JoinHandle<()>>>,
-}
-
-impl HeadlessWebBusinessRouter {
-    fn new(inner: Arc<HeadlessInner>) -> Self {
-        Self {
-            inner,
-            adapter: Mutex::new(None),
-            bridges: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    fn attach_adapter(&self, adapter: &Arc<HostWsAdapter>) {
-        if let Ok(mut current) = self.adapter.lock() {
-            *current = Some(Arc::downgrade(adapter));
-        }
-    }
-
-    fn start_bridge(&self, connection_id: &ConnectionId) -> Result<(), HostBusinessError> {
-        let mut bridges = self.bridges.lock().map_err(|_| HostBusinessError::Router)?;
-        if bridges.contains_key(connection_id) {
-            return Ok(());
-        }
-        let adapter = self
-            .adapter
-            .lock()
-            .map_err(|_| HostBusinessError::Router)?
-            .as_ref()
-            .and_then(Weak::upgrade)
-            .ok_or(HostBusinessError::Router)?;
-        let mut events = self
-            .inner
-            .subscribe(connection_id)
-            .ok_or(HostBusinessError::Router)?;
-        let adapter = Arc::downgrade(&adapter);
-        let bridge_connection_id = connection_id.clone();
-        let task = tokio::spawn(async move {
-            let mut last_journal_sequence = 0;
-            loop {
-                match events.recv().await {
-                    Ok(value) => {
-                        let journal_sequence = value
-                            .pointer("/params/envelope/journalSequence")
-                            .and_then(Value::as_u64);
-                        if let Some(sequence) = journal_sequence {
-                            last_journal_sequence = sequence;
-                        }
-                        let payload = match serde_json::to_vec(&value) {
-                            Ok(payload) => payload,
-                            Err(_) => break,
-                        };
-                        let Some(adapter) = adapter.upgrade() else {
-                            break;
-                        };
-                        if adapter
-                            .publish(
-                                &bridge_connection_id,
-                                journal_sequence.unwrap_or(last_journal_sequence),
-                                payload,
-                            )
-                            .is_err()
-                        {
-                            break;
-                        }
-                    }
-                    // 广播落后时不能伪造缺失的 Journal 序号；客户端仍可通过
-                    // session/load 重新读取权威历史，因此丢弃本次实时桥接并继续。
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-            }
-        });
-        bridges.insert(connection_id.clone(), task);
-        Ok(())
-    }
-
-    fn stop_bridge(&self, connection_id: &ConnectionId) {
-        if let Ok(mut bridges) = self.bridges.lock()
-            && let Some(task) = bridges.remove(connection_id)
-        {
-            task.abort();
-        }
-    }
-}
-
-impl HostBusinessRouter for HeadlessWebBusinessRouter {
-    fn dispatch<'a>(
-        &'a self,
-        context: HostConnectionContext,
-        frame: AcpIncomingFrame,
-    ) -> HostBusinessFuture<'a, Option<Vec<u8>>> {
-        let value = match frame.into_json_rpc_value() {
-            Ok(value) => value,
-            Err(_) => return Box::pin(async { Err(HostBusinessError::InvalidAcp) }),
-        };
-        if let Err(error) = self.start_bridge(&context.connection_id) {
-            return Box::pin(async move { Err(error) });
-        }
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            let response = inner
-                .dispatch_value(context.connection_id, value)
-                .await
-                .map_err(|_| HostBusinessError::Router)?;
-            response
-                .map(|value| serde_json::to_vec(&value).map_err(|_| HostBusinessError::Router))
-                .transpose()
-        })
-    }
-
-    fn dispatch_client_response<'a>(
-        &'a self,
-        context: HostConnectionContext,
-        response: Value,
-    ) -> HostBusinessFuture<'a, Option<Vec<u8>>> {
-        if let Err(error) = self.start_bridge(&context.connection_id) {
-            return Box::pin(async move { Err(error) });
-        }
-        let inner = Arc::clone(&self.inner);
-        Box::pin(async move {
-            inner
-                .dispatch_value(context.connection_id, response)
-                .await
-                .map_err(|_| HostBusinessError::Router)
-                .map(|_| None)
-        })
-    }
-
-    fn disconnect(&self, context: HostConnectionContext) {
-        self.stop_bridge(&context.connection_id);
-        self.inner.disconnected(&context.connection_id);
-    }
-}
-
-/// 查找随 CLI 发布的 Vite production bundle。
-///
-/// 安装包通常把资源放在可执行文件旁的 `web/`，开发/测试运行则使用仓库根的
-/// `dist/`。环境变量优先，便于发行包和 E2E 显式指定资源根，而不会回退到源码目录。
-fn resolve_web_static_root() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(root) = std::env::var("KEENCODE_WEB_STATIC_ROOT")
-        && !root.trim().is_empty()
-    {
-        candidates.push(PathBuf::from(root));
-    }
-    if let Ok(executable) = std::env::current_exe()
-        && let Some(parent) = executable.parent()
-    {
-        candidates.push(parent.join("web"));
-        candidates.push(parent.join("dist"));
-        candidates.push(parent.join(r"..\web"));
-        candidates.push(parent.join(r"..\dist"));
-    }
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dist"));
-    if let Ok(current) = std::env::current_dir() {
-        candidates.push(current.join("dist"));
-        candidates.push(current.join("web"));
-    }
-    candidates
-        .into_iter()
-        .find(|root| root.join("index.html").is_file())
-}
-
 impl HeadlessInner {
     fn new(
         runtime: Arc<HostRuntime>,
@@ -670,12 +462,7 @@ impl HeadlessInner {
                 operations: BTreeMap::new(),
                 operation_results: BTreeMap::new(),
                 delivery_sequences: BTreeMap::new(),
-                web: WebState {
-                    running: false,
-                    port: 32123,
-                },
             })),
-            web_runtime: Arc::new(AsyncMutex::new(None)),
             driver,
         })
     }
@@ -737,9 +524,6 @@ impl HeadlessInner {
             "session/cancel" => self.session_cancel(&params),
             OPERATION_ADMIT_METHOD => self.operation_admit(connection_id, &params).await,
             OPERATION_STATUS_METHOD => self.operation_status(&params),
-            WEB_START_METHOD => self.web_start(&params).await,
-            WEB_STOP_METHOD => self.web_stop().await,
-            WEB_STATUS_METHOD => self.web_status().await,
             _ => Err(HandlerError::new(-32601, "Host 不支持该方法")),
         };
         let Some(id) = id else {
@@ -1413,8 +1197,8 @@ impl HeadlessInner {
                                 self.publish_session_event(&connection_id, &session_id, value);
                             }
                         }
-                        // 模型重试只属于桌面热投影；headless 的 legacy ACP
-                        // 投递仍由 AgentRuntime 的 retry notifier 单独负责。
+                        // 模型重试状态由桌面 Native UI 热投影消费；headless 当前只投递
+                        // Transient 增量，不把非权威 retry 状态编码为 ACP delivery。
                         RuntimeEventPayload::ModelRetryScheduled(_) => {}
                         // 当前 headless 只负责实时增量；权威历史通过 session/load 与
                         // 后续 Runtime replay 接口恢复，不能把 Journal 记录伪装成增量。
@@ -1633,121 +1417,6 @@ impl HeadlessInner {
             .map_err(map_core_error)?;
         serde_json::to_value(status).map_err(|_| HandlerError::internal())
     }
-
-    async fn web_start(&self, params: &Value) -> Result<Value, HandlerError> {
-        let port = params
-            .get("port")
-            .and_then(Value::as_u64)
-            .and_then(|value| u16::try_from(value).ok())
-            .unwrap_or(32123);
-        if port == 0 {
-            return Err(HandlerError::new(-32602, "Web 端口无效"));
-        }
-
-        let mut web_runtime = self.web_runtime.lock().await;
-        if let Some(runtime) = web_runtime.as_ref() {
-            let status = runtime.owner.status();
-            if status.port != port {
-                return Err(HandlerError::new(-32010, "Web Host 已在其他固定端口运行"));
-            }
-            return serde_json::to_value(status).map_err(|_| HandlerError::internal());
-        }
-
-        let token = WebToken::from_env("KEENCODE_WEB_TOKEN")
-            .map_err(|_| HandlerError::new(-32010, "KEENCODE_WEB_TOKEN 配置无效"))?;
-        let static_root = resolve_web_static_root()
-            .ok_or_else(|| HandlerError::new(-32010, "Web 生产静态资源不可用"))?;
-        let upload_root = self.runtime.data_root().join("web-uploads");
-        fs::create_dir_all(&upload_root)
-            .map_err(|_| HandlerError::new(-32010, "Web 目录不可用"))?;
-        let config = WebHostConfig::new(
-            IpAddr::from([127, 0, 0, 1]),
-            port,
-            token,
-            static_root,
-            upload_root,
-        )
-        .map_err(|_| HandlerError::new(-32010, "Web Host 配置无效"))?;
-        let host = Arc::new(
-            WebHost::new(config).map_err(|_| HandlerError::new(-32010, "Web Host 创建失败"))?,
-        );
-        let business = Arc::new(HeadlessWebBusinessRouter::new(Arc::new(self.clone())));
-        let adapter = Arc::new(
-            HostWsAdapter::new_with_resources(
-                Arc::clone(&business) as Arc<dyn HostBusinessRouter>,
-                256,
-                host.state().resource_registry(),
-            )
-            .map_err(|_| HandlerError::new(-32010, "Web ACP 适配器创建失败"))?,
-        );
-        business.attach_adapter(&adapter);
-        let router = host.router_with_business(Arc::clone(&adapter));
-        let owner = WebServerOwner::start(Arc::clone(&host), router)
-            .map_err(|_| HandlerError::new(-32010, "Web Host 监听失败"))?;
-        let status = owner.status();
-        *web_runtime = Some(HeadlessWebRuntime {
-            host,
-            owner,
-            adapter,
-        });
-        let mut state = self.state.lock().map_err(|_| HandlerError::internal())?;
-        state.web = WebState {
-            running: true,
-            port,
-        };
-        serde_json::to_value(status).map_err(|_| HandlerError::internal())
-    }
-
-    async fn web_stop(&self) -> Result<Value, HandlerError> {
-        let runtime = self.web_runtime.lock().await.take();
-        let result = if let Some(mut runtime) = runtime {
-            runtime.adapter.disconnect_all();
-            let result = runtime
-                .owner
-                .stop()
-                .await
-                .map_err(|_| HandlerError::new(-32010, "Web Host 停止失败"));
-            if let Ok(mut state) = self.state.lock() {
-                state.web.running = false;
-                state.web.port = runtime.host.status().port;
-            }
-            result
-        } else {
-            if let Ok(mut state) = self.state.lock() {
-                state.web.running = false;
-            }
-            Ok(())
-        };
-        result?;
-        self.web_status().await
-    }
-
-    async fn web_status(&self) -> Result<Value, HandlerError> {
-        let web_runtime = self.web_runtime.lock().await;
-        if let Some(runtime) = web_runtime.as_ref() {
-            return serde_json::to_value(runtime.host.status())
-                .map_err(|_| HandlerError::internal());
-        }
-        let state = self.state.lock().map_err(|_| HandlerError::internal())?;
-        Ok(web_status(state.web))
-    }
-
-    async fn shutdown_web(&self) -> Result<(), WebError> {
-        let runtime = self.web_runtime.lock().await.take();
-        let Some(mut runtime) = runtime else {
-            if let Ok(mut state) = self.state.lock() {
-                state.web.running = false;
-            }
-            return Ok(());
-        };
-        runtime.adapter.disconnect_all();
-        let result = runtime.owner.stop().await;
-        if let Ok(mut state) = self.state.lock() {
-            state.web.running = false;
-            state.web.port = runtime.host.status().port;
-        }
-        result
-    }
 }
 
 impl HostDispatch for HeadlessInner {
@@ -1797,7 +1466,7 @@ impl HostActivity for HeadlessInner {
         let Ok(state) = self.state.lock() else {
             return true;
         };
-        state.web.running || !state.operations.is_empty()
+        !state.operations.is_empty()
     }
 }
 
@@ -1970,14 +1639,6 @@ fn headless_unix_time_ms() -> u64 {
     .ok()
     .filter(|value| *value > 0)
     .unwrap_or(1)
-}
-
-fn web_status(state: WebState) -> Value {
-    json!({
-        "state": if state.running { "running" } else { "stopped" },
-        "port": state.port,
-        "activeConnections": 0,
-    })
 }
 
 /// 单个 headless 工具调用参数在实时聚合中的内存上限；超出后只保留工具身份，

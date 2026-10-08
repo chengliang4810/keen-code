@@ -7,7 +7,7 @@ version = "0.0.1"
 license = "MIT"
 # 使用 Rust 2024 edition。
 edition = "2024"
-# 由 Tauri 构建脚本生成平台资源。
+# 原生 Windows 图标和版本资源，不嵌入浏览器或前端包。
 build = "build.rs"
 
 [lib]
@@ -17,35 +17,20 @@ name = "keencode_desktop"
 # 避免链接期对全依赖图重复执行 LTO。
 crate-type = ["rlib"]
 
-[[example]]
-name = "keencode-bench"
-required-features = ["benchmark"]
-
-[features]
-benchmark = []
-# 显式启用原生桌面测试并嵌入前端；默认测试和正式构建不包含交互故障夹具。
-native-desktop-tests = ["tauri/custom-protocol"]
-
 [build-dependencies]
-# 生成 Tauri 平台构建信息。
-tauri-build = { version = "2", features = [] }
+# 生成 Windows 原生图标与版本资源。
+winresource = "0.1"
 
 [dependencies]
 # 统一错误上下文。
 anyhow = "1"
 # 按需读取持久文件快照时使用当前依赖图已有的标准 Base64 编解码。
 base64 = "0.22"
-# 将 Windows Shell 返回的真实 HICON 编码为前端 EditorInfo 使用的 PNG data URL。
-png = "0.18.1"
 # 提供本地时区的日期换算，并序列化 usage 与记忆记录中的日期时间。
 chrono = { version = "0.4", features = ["serde"] }
 iana-time-zone = "0.1"
 # 接入 KeenCode 自有 ACP 协议与事件契约。
 keencode-acp = { path = "../../core/acp" }
-# 复用本地 NDJSON Host transport；Desktop 仍持有唯一 Runtime 与业务状态。
-keencode-cli = { path = "../../core/cli" }
-# 接入本机 Web/HTTP/WS transport；Runtime 与业务事实仍由桌面 Host 持有。
-keencode-web = { path = "../../core/web-host" }
 # 接入 KeenCode 自有 Agent 回合执行核心。
 keencode-agent = { path = "../../core/agent" }
 # 接入 KeenCode 自有供应商配置与注册表。
@@ -70,35 +55,41 @@ reqwest = { version = "0.13", default-features = false, features = ["blocking", 
 regex = "1"
 # task-groups.json 的变更事务需要跨桌面进程文件锁，避免冷重启竞态回写旧分组。
 fs2 = "0.4"
+# 使用 Croner 严格解析五字段 cron，并按当前本地时区计算下一次触发时间。
+croner = "=3.0.1"
 # 复用工具运行时已有的 ignore 版本，保证原文件搜索尊重 Git 忽略规则；不引入外部 rg 进程。
 ignore = "0.4"
-# 序列化 Tauri 命令和本地状态。
+# 序列化本地状态与 ACP 参数。
 serde = { version = "1", features = ["derive"] }
 # 读取 Session 状态和 KeenCode 本地配置。
 serde_json = "1"
 # 校验后台下载缓存从 minisign 验签到安装之间未被改写。
+minisign-verify = "0.3"
 sha2 = "0.10"
-# 提供桌面窗口、IPC、事件、系统托盘图标和 macOS Overlay 私有 API 能力。
-tauri = { version = "2", features = ["macos-private-api", "protocol-asset", "tray-icon", "unstable"] }
-# 提供原生文件和目录选择器。
-tauri-plugin-dialog = "2"
-# 发送 macOS 与 Windows 原生任务通知。
-tauri-plugin-notification = "2.3.3"
-# 使用签名清单检查、下载并安装 GitHub Releases 更新。
-tauri-plugin-updater = "2.10.1"
+# 纯 Rust 处理 npm/PyPI 与 HTTP 插件归档；不执行安装脚本或依赖 Node/Python。
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tar = { version = "0.4", default-features = false }
+# UI 与平台共享固定 GPUI 提交；不混用 crates.io 的旧 Entity ABI。
+gpui = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b", default-features = false, features = ["stacker"] }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1a28cff4b409169bac058bca40dfbfeb7621d19b", features = ["font-kit"] }
+# 读取 GPUI 提供的原生窗口句柄，将系统托盘绑定到真实主窗口；复用已有 ABI 版本。
+raw-window-handle = "0.6"
+# 固定 94f34c9f8e98b5f4b3078776a4c197b9021f4cdf 的本地副本补齐控件尺寸、
+# UIA 语义和减少动画的计时器生命周期；来源与补丁见同目录 SOURCE.md。
+ely-gpui-component = { path = "../../third-party/ely-gpui-component" }
+futures = "0.3"
+log = "0.4"
+dirs = "6"
 # 使用同目录唯一临时文件完成 Windows/macOS 都可覆盖既有目标的原子写。
 tempfile = "3"
 # 提供 MCP 初始化状态使用的异步 watch 通道及更新缓存异步读写。
-tokio = { version = "1", features = ["sync", "fs", "rt", "process", "io-util", "time", "macros"] }
+tokio = { version = "1", features = ["sync", "fs", "rt", "rt-multi-thread", "process", "io-util", "time", "macros"] }
 # 与纯 Rust 工作流共享可传播到 Agent、工具和进程的取消令牌。
 tokio-util = { version = "0.7", features = ["rt"] }
 # 复用工具运行时已有版本：后台开发脚本必须在停止/退出时收割整个进程树。
 command-group = { version = "5.0.1", features = ["with-tokio"] }
-# 校验用户输入的模型 API 地址。
-url = "2"
-# 使用 Rust tar/gzip 解包插件来源，避免调用不受控的系统解包命令。
-flate2 = "1"
-tar = "0.4"
+# 校验用户输入的模型 API 地址，并反序列化更新清单中的下载地址。
+url = { version = "2", features = ["serde"] }
 # 读取第三方 MCPB/DXT ZIP 包；禁用未使用的压缩算法以控制体积。
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 # ACP 运行时共享状态。
@@ -108,13 +99,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 # 使用系统 PTY 承载内置终端；不随应用打包 shell 或额外运行时。
 portable-pty = "=0.8.1"
+# 复用 Ely 已锁定的成熟终端网格，正确处理 Unicode 宽度、SGR 属性和备用屏幕。
+alacritty_terminal = "=0.26.0"
 
 # 使用平台电源断言或 Linux systemd inhibitor 阻止空闲睡眠。
 keepawake = "0.6.0"
 # 将插件敏感 userConfig 保存到系统密钥库（Keychain、Credential Manager 或 Secret Service）。
 keyring = "=4.1.6"
-getrandom = "0.3"
-tauri-plugin-single-instance = "2"
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 # 跨平台原生目录通知；使用系统事件后端，替代 250ms 全量扫盘，不使用 PollWatcher。
 notify = "=8.2.0"
@@ -123,13 +114,14 @@ notify = "=8.2.0"
 # 通过 Foundation 的进程内系统信息 API 读取 macOS 版本，避免启动外部进程。
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["alloc", "NSProcessInfo"] }
 
+[target.'cfg(unix)'.dependencies]
+# Linux 使用 XDG/D-Bus、macOS 使用 UserNotifications；通知失败必须返回真实系统错误。
+notify-rust = "=4.17.0"
+
 [target.'cfg(target_os = "windows")'.dependencies]
-# 复用 Tauri 已依赖的同版本 WebView2 绑定，只暴露固定截图调用，不增加浏览器内核。
-webview2-com = "=0.38.2"
-windows-core = "=0.61.2"
 # 从 Windows Internet Settings 读取桌面应用无法从 shell 继承的系统代理。
 winreg = "0.55"
-# 读取宿主与 WebView2 子进程的进程树、CPU 时间和内存计数器；仅 Windows 编译。
+# 读取桌面进程树、CPU 时间和内存计数器；仅 Windows 编译。
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -138,12 +130,13 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
     "Win32_NetworkManagement_IpHelper",
     "Win32_Networking_WinSock",
+    "Win32_Storage_FileSystem",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
 [dev-dependencies]
-# 为 Tauri 集成测试暴露资源层的一次性 Journal 追加故障注入点。
+# 为桌面集成测试暴露资源层的一次性 Journal 追加故障注入点。
 keencode-resources = { path = "../../core/resources", features = ["test-support"] }
 
 # 发布参数位于仓库根 Cargo.toml 的 [profile.release]：profile 只在 workspace 根生效。

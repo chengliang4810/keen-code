@@ -1,0 +1,342 @@
+{
+  "version": 1,
+  "name": "ely-native-subagent",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "metrics",
+      "label": "startup"
+    },
+    {
+      "type": "click",
+      "x": 150,
+      "y": 142
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "请使用普通 spawn_agent 工具创建恰好一个单层子 Agent，不要使用 Workflow、Goal 或其他工作流能力，也不要创建第二个子 Agent。子任务必须严格只调用 Read 工具读取当前项目的 src/facts.txt，禁止 Write、Edit、Bash、spawn_agent、list_agents、send_message、followup_task 和 wait_agent；读取成功后子 Agent 的最终答复必须只包含 SUBAGENT_CHILD_DONE_20261006。父 Agent 创建子 Agent 后必须使用 wait_agent 等待该子 Agent 完成；只有在确认子 Agent 已完成后，父 Agent 的最终答复必须包含唯一完成标志 PARENT_SUBAGENT_DONE_20261006，允许附带说明，之后不得再调用任何工具。"
+    },
+    {
+      "type": "screenshot",
+      "label": "typed"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/source_agent_id": "root"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/request/toolName": "spawn_agent",
+        "/payload/request/effect": "read_only"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "sub_agent_spawned",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/agent/parentAgentId": "root"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "sub_agent_status_changed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/status": "running"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/request/toolName": "Read",
+        "/payload/request/effect": "read_only"
+      },
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "src/facts.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/request/toolName": "wait_agent",
+        "/payload/request/effect": "read_only"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "sub_agent_status_changed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/status": "completed",
+        "/payload/result_summary": "SUBAGENT_CHILD_DONE_20261006"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "transcript_segment_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/segment/sourceAgentId": "root"
+      },
+      "matching_text_contains": {
+        "/payload/segment/messages/0/content/0/text": "PARENT_SUBAGENT_DONE_20261006"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "spawn_agent"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "wait_agent"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Read"
+      },
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "src/facts.txt"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "Write"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "Edit"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "Bash"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "list_agents"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "send_message"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "tool_requested",
+      "count": 0,
+      "matching": {
+        "/payload/request/toolName": "followup_task"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "sub_agent_spawned",
+      "count": 1,
+      "matching": {
+        "/payload/agent/parentAgentId": "root"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "sub_agent_status_changed",
+      "count": 1,
+      "matching": {
+        "/payload/status": "running"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "sub_agent_status_changed",
+      "count": 1,
+      "matching": {
+        "/payload/status": "completed",
+        "/payload/result_summary": "SUBAGENT_CHILD_DONE_20261006"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 2
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 2
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_stopped",
+      "count": 0
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "transcript_segment_committed",
+      "count": 1,
+      "matching": {
+        "/payload/segment/sourceAgentId": "root"
+      },
+      "matching_text_contains": {
+        "/payload/segment/messages/0/content/0/text": "PARENT_SUBAGENT_DONE_20261006"
+      }
+    },
+    {
+      "type": "screenshot",
+      "label": "subagent-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "subagent-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "subagent-completed"
+    }
+  ]
+}

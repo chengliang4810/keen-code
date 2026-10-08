@@ -493,6 +493,58 @@ async fn gateway_read_timeout_is_idle_not_total() {
     }
 }
 
+/// 协议终态已经到达但 HTTP 连接仍保持打开时，完整响应必须立即返回并保留终态前的用量。
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_complete_协议终态后不等待http_eof并保留usage() {
+    let created = json!({
+        "type": "response.created",
+        "response": {"id": "resp-terminal", "model": "test-model", "status": "in_progress"}
+    });
+    let delta = json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": "KC_TERMINAL"
+    });
+    let completed = json!({
+        "type": "response.completed",
+        "response": {
+            "id": "resp-terminal",
+            "model": "test-model",
+            "status": "completed",
+            "output": [],
+            "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10}
+        }
+    });
+    let response_body = format!("data: {created}\n\ndata: {delta}\n\ndata: {completed}\n\n");
+    let (base_url, server) = spawn_persistent_sse_server(response_body);
+    let mut config = ProviderConfig::new_unauthenticated(
+        "terminal-boundary",
+        ProviderProtocol::Responses,
+        base_url,
+    )
+    .expect("终态边界测试配置应有效");
+    config.read_timeout = Duration::from_secs(30);
+    config.stream_idle_timeout_ms = 0;
+    config.retry.max_attempts = 1;
+    let client = crate::ProviderClient::new(config).expect("终态边界测试客户端应创建");
+
+    let result =
+        tokio::time::timeout(Duration::from_secs(1), client.complete(minimal_request())).await;
+    let capture = server
+        .join()
+        .expect("保持连接的本地模型服务线程不应异常退出")
+        .expect("保持连接的本地模型服务应成功捕获请求");
+    let response = result
+        .expect("收到 MessageEnd 后不应等待保持打开的 HTTP 连接")
+        .expect("合法 Responses 终态应形成完整响应");
+
+    assert_eq!(response.content, vec![ContentBlock::text("KC_TERMINAL")]);
+    assert_eq!(response.usage.input_tokens, Some(7));
+    assert_eq!(response.usage.output_tokens, Some(3));
+    assert_eq!(response.usage.total_tokens, Some(10));
+    assert_eq!(capture.body["model"], "test-model");
+}
+
 /// 创建包含一次完整工具回合的统一请求。
 fn tool_history_request() -> ModelRequest {
     let mut request = ModelRequest::new(
@@ -5487,6 +5539,62 @@ fn spawn_model_server_with_headers_and_declared_length(
     (format!("http://{address}/v1"), thread)
 }
 
+/// 启动发送协议终态后继续保持 HTTP 连接的 SSE 服务。
+///
+/// 响应使用未结束的 chunked 正文模拟远端只发终态、不主动关闭连接；服务端
+/// 以有限读超时等待客户端释放连接，避免 fixture 自身在回归失败时永久阻塞。
+fn spawn_persistent_sse_server(
+    response_body: String,
+) -> (String, JoinHandle<Result<ModelRequestCapture, String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("应能绑定保持连接测试端口");
+    listener
+        .set_nonblocking(true)
+        .expect("应能把保持连接测试监听器设为非阻塞");
+    let address = listener.local_addr().expect("应能读取保持连接测试地址");
+    let thread = thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = accept_catalog_request(&listener, deadline)?;
+        let capture = read_model_request(&mut stream)?;
+        let response_head = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "Connection: keep-alive\r\n",
+            "\r\n"
+        );
+        let chunk_head = format!("{:X}\r\n", response_body.len());
+        stream
+            .write_all(response_head.as_bytes())
+            .and_then(|_| stream.write_all(chunk_head.as_bytes()))
+            .and_then(|_| stream.write_all(response_body.as_bytes()))
+            .and_then(|_| stream.write_all(b"\r\n"))
+            .and_then(|_| stream.flush())
+            .map_err(|error| format!("写入保持连接模型响应失败：{error}"))?;
+
+        stream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .map_err(|error| format!("设置保持连接探测超时失败：{error}"))?;
+        let mut probe = [0_u8; 1];
+        match stream.read(&mut probe) {
+            Ok(0) => {}
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::UnexpectedEof
+                ) => {}
+            Err(error) => return Err(format!("等待客户端释放保持连接失败：{error}")),
+        }
+        Ok(capture)
+    });
+    (format!("http://{address}/v1"), thread)
+}
+
 /// 读取一次带精确 Content-Length 的 JSON 模型请求。
 fn read_model_request(stream: &mut TcpStream) -> Result<ModelRequestCapture, String> {
     stream
@@ -5937,7 +6045,8 @@ async fn traced_stream_精确捕获流式请求及响应() {
     );
     assert_eq!(exchange.response_body, response_body.as_bytes());
     assert!(!exchange.response_body_truncated);
-    assert!(exchange.response_body_eof_observed);
+    // MessageEnd 已经是成功边界；收集器提前释放 HTTP 响应体，不再伪造 EOF 证据。
+    assert!(!exchange.response_body_eof_observed);
     assert!(!format!("{exchange:?}").contains(key_text));
 }
 

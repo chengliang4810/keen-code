@@ -1,10 +1,10 @@
 //! 本地模型请求记录与 Token 用量统计。
 //!
 //! 请求事实只来自 Provider 中立模型边界。每个物理 attempt
-//! 无论成功、失败或取消都会经同步记录入口投递到无界本地队列；磁盘 I/O
+//! 无论成功、失败或取消都会经同步记录入口投递到有界本地队列；磁盘 I/O
 //! 在独立线程执行，事件中不包含请求正文、响应正文、headers 或凭据。
 
-use crate::storage;
+use crate::{native_paths::NativePaths, storage};
 use keencode_model::ProviderProtocol;
 use keencode_provider::{
     RequestErrorKind, RequestMode, RequestObservation, RequestObservationScope,
@@ -12,21 +12,24 @@ use keencode_provider::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write},
     path::Path,
     sync::{
         Arc, OnceLock,
-        mpsc::{self, Sender, SyncSender},
+        mpsc::{self, SyncSender},
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
-use tauri::{AppHandle, Manager};
 
 const RECORD_FILE: &str = "model-request-records.jsonl";
 const DEFAULT_PAGE_SIZE: usize = 20;
 const MAX_PAGE_SIZE: usize = 100;
+const OBSERVATION_QUEUE_CAPACITY: usize = 1_024;
+const RECORD_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_RECORD_LINE_BYTES: u64 = 64 * 1024;
+const MAX_RECORDS_PER_SEGMENT: usize = 16_384;
 
 #[derive(Debug)]
 enum AnalyticsEvent {
@@ -75,36 +78,40 @@ pub struct RequestRecord {
     pub provider_request_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelUsageStat {
     pub model: String,
     pub requests: u64,
+    pub unreported_requests: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub total_tokens: u64,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DailyUsageStat {
     pub date: String,
     pub requests: u64,
+    pub unreported_requests: u64,
     pub total_tokens: u64,
     pub model_tokens: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageStats {
     pub total_requests: u64,
+    /// 成功但 Provider 未报告 usage 的请求，不能把它们展示为明确零 Token。
+    pub unreported_requests: u64,
     pub total_tokens: u64,
     pub models: Vec<ModelUsageStat>,
     pub days: Vec<DailyUsageStat>,
 }
 
 /// 请求记录分页结果；筛选和分页都在后端执行。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestRecordsPage {
     pub records: Vec<RequestRecord>,
@@ -117,28 +124,28 @@ pub struct RequestRecordsPage {
 }
 
 /// 请求记录列表的筛选与分页参数。
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RequestRecordsQuery {
     /// 从筛选结果中跳过的记录数量。
-    offset: Option<usize>,
+    pub offset: Option<usize>,
     /// 单页最多返回的记录数量。
-    limit: Option<usize>,
+    pub limit: Option<usize>,
     /// 可选的精确模型标识筛选。
-    model: Option<String>,
+    pub model: Option<String>,
     /// 可选的精确请求状态筛选。
-    status: Option<String>,
+    pub status: Option<String>,
     /// 可选的最早请求时间（Unix 毫秒，包含边界）。
-    from_ms: Option<u64>,
+    pub from_ms: Option<u64>,
     /// 可选的最晚请求时间（Unix 毫秒，包含边界）。
-    to_ms: Option<u64>,
+    pub to_ms: Option<u64>,
 }
 
 /// 一个任务（ACP Session）内主 Agent 成功模型请求的缓存用量汇总。
 ///
 /// 原始 Token 数来自 Provider usage；KeenCode 只负责按任务加权汇总，
 /// 不根据请求文本或前缀推测缓存命中。
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskCacheUsage {
     pub session_id: String,
@@ -155,7 +162,7 @@ pub struct TaskCacheUsage {
 }
 
 pub struct AnalyticsRecorder {
-    sender: Sender<AnalyticsEvent>,
+    sender: SyncSender<AnalyticsEvent>,
     retry_notifier: OnceLock<Arc<dyn Fn(ModelRetryNotice) + Send + Sync>>,
     /// Provider 观测在同一同步边界分流到有界内存存储；不经过磁盘 writer。
     observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
@@ -175,14 +182,20 @@ pub(crate) struct ModelRetryNotice {
 
 impl AnalyticsRecorder {
     /// 创建使用独立写入线程的本地请求记录器。
-    pub fn new(app: &AppHandle) -> anyhow::Result<Self> {
-        let path = storage::root_dir(app)?.join(RECORD_FILE);
+    ///
+    /// 路径由 NativeHost 启动时解析并显式传入，记录器不读取窗口句柄、环境变量
+    /// 或任何前端状态。
+    pub fn new(
+        paths: &NativePaths,
+        observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
+    ) -> anyhow::Result<Self> {
+        let path = storage::root_dir(paths)?.join(RECORD_FILE);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
         // 启动阶段先打开文件，存储不可用时立即失败，不把审计丢失伪装成成功。
         let file = open_record_file(&path)?;
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(OBSERVATION_QUEUE_CAPACITY);
         std::thread::Builder::new()
             .name("keencode-request-history".into())
             .spawn(move || {
@@ -196,7 +209,9 @@ impl AnalyticsRecorder {
                                 continue;
                             }
                             for record in state.observe(*observation) {
-                                if let Err(error) = append_record(&mut writer, &record) {
+                                if let Err(error) = append_record(&mut writer, &record)
+                                    .and_then(|_| rotate_records(&path, &mut writer))
+                                {
                                     // observer 不能把磁盘错误反向注入模型请求；查询屏障会
                                     // 返回同一错误，避免设置页把丢失伪装成“没有记录”。
                                     tracing::error!(%error, "模型请求日志写入失败");
@@ -227,16 +242,14 @@ impl AnalyticsRecorder {
         Ok(Self {
             sender,
             retry_notifier: OnceLock::new(),
-            observability: app
-                .try_state::<Arc<crate::diagnostics::Diagnostics>>()
-                .map(|diagnostics| diagnostics.observability()),
+            observability,
         })
     }
 
     /// 创建写入端已断开的测试记录器，不触碰文件系统。
     #[cfg(test)]
     pub(crate) fn with_disconnected_writer_for_test() -> Self {
-        let (sender, receiver) = mpsc::channel();
+        let (sender, receiver) = mpsc::sync_channel(OBSERVATION_QUEUE_CAPACITY);
         drop(receiver);
         Self {
             sender,
@@ -264,13 +277,13 @@ impl AnalyticsRecorder {
             .send(AnalyticsEvent::Flush(reply))
             .map_err(|_| "模型请求记录 writer 已退出".to_owned())?;
         result
-            .recv()
+            .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "模型请求记录 writer 未返回 flush 结果".to_owned())?
     }
 
     /// 同步接收一条不含模型正文或凭据的 Provider 中立请求观测。
     ///
-    /// 无界队列只承载安全短元数据；不因统计高峰丢弃已完成请求。
+    /// 有界队列满时施加背压，保留实际请求事实；不靠无限内存或静默丢弃维持统计。
     pub(crate) fn record_request(&self, observation: RequestObservation) {
         if observation.scope == RequestObservationScope::Attempt
             && observation.state == RequestObservationState::Failed
@@ -318,7 +331,7 @@ impl AnalyticsRecorder {
         }
     }
 
-    /// 单元测试只验证 Provider 观测分流，不创建 Tauri App 或持久化文件。
+    /// 单元测试只验证 Provider 观测分流，不创建原生窗口或持久化文件。
     #[cfg(test)]
     fn with_observability_for_test(
         observability: Arc<crate::diagnostics::observability::ObservabilityStore>,
@@ -412,6 +425,33 @@ fn append_record(writer: &mut BufWriter<fs::File>, record: &RequestRecord) -> Re
     writer
         .flush()
         .map_err(|error| format!("刷新模型请求记录失败：{error}"))
+}
+
+/// 请求记录只保留当前段与一个前段；Journal 仍保留完整执行事实。
+fn rotate_records(path: &Path, writer: &mut BufWriter<fs::File>) -> Result<(), String> {
+    if writer
+        .get_ref()
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .len()
+        < RECORD_SEGMENT_BYTES
+    {
+        return Ok(());
+    }
+    writer.flush().map_err(|error| error.to_string())?;
+    writer
+        .get_ref()
+        .sync_data()
+        .map_err(|error| error.to_string())?;
+    let backup = path.with_extension("jsonl.1");
+    match fs::remove_file(&backup) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(format!("轮转模型请求记录失败：{error}")),
+    }
+    fs::rename(path, &backup).map_err(|error| format!("轮转模型请求记录失败：{error}"))?;
+    *writer = BufWriter::new(open_record_file(path).map_err(|error| error.to_string())?);
+    Ok(())
 }
 
 #[derive(Default)]
@@ -621,28 +661,57 @@ fn error_kind_name(kind: &RequestErrorKind) -> String {
     .to_owned()
 }
 
-pub(crate) fn read_records(app: &AppHandle) -> Result<Vec<RequestRecord>, String> {
-    let path = storage::root_dir(app)
+pub(crate) fn read_records(paths: &NativePaths) -> Result<Vec<RequestRecord>, String> {
+    let path = storage::root_dir(paths)
         .map_err(|error| error.to_string())?
         .join(RECORD_FILE);
-    read_records_from_path(&path)
+    let mut records = read_records_from_path(&path.with_extension("jsonl.1"))?;
+    records.extend(read_records_from_path(&path)?);
+    Ok(dedupe_records(records))
 }
 
 fn read_records_from_path(path: &Path) -> Result<Vec<RequestRecord>, String> {
-    let file = match fs::File::open(path) {
+    let mut file = match fs::File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(format!("打开模型请求记录失败：{error}")),
     };
-    let mut records = Vec::new();
-    for (index, line) in BufReader::new(file).lines().enumerate() {
-        let line =
-            line.map_err(|error| format!("读取模型请求记录第 {} 行失败：{error}", index + 1))?;
-        let record = serde_json::from_str::<RequestRecord>(&line)
-            .map_err(|error| format!("解析模型请求记录第 {} 行失败：{error}", index + 1))?;
-        records.push(record);
+    let length = file.metadata().map_err(|error| error.to_string())?.len();
+    let start = length.saturating_sub(RECORD_SEGMENT_BYTES);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|error| error.to_string())?;
+    let mut reader = BufReader::new(file);
+    // 读取旧的大文件也只保留末段；首个不完整行不进入统计。
+    if start > 0 {
+        reader
+            .skip_until(b'\n')
+            .map_err(|error| error.to_string())?;
     }
-    Ok(dedupe_records(records))
+    let mut records = VecDeque::new();
+    let mut line = Vec::new();
+    let mut index = 0;
+    loop {
+        line.clear();
+        let read = reader
+            .by_ref()
+            .take(MAX_RECORD_LINE_BYTES + 1)
+            .read_until(b'\n', &mut line)
+            .map_err(|error| format!("读取模型请求记录第 {} 行失败：{error}", index + 1))?;
+        if read == 0 {
+            break;
+        }
+        index += 1;
+        if read as u64 > MAX_RECORD_LINE_BYTES {
+            return Err(format!("模型请求记录第 {index} 行超过大小限制"));
+        }
+        let record = serde_json::from_slice::<RequestRecord>(&line)
+            .map_err(|error| format!("解析模型请求记录第 {index} 行失败：{error}"))?;
+        if records.len() == MAX_RECORDS_PER_SEGMENT {
+            records.pop_front();
+        }
+        records.push_back(record);
+    }
+    Ok(dedupe_records(records.into_iter().collect()))
 }
 
 /// 同一 id 的后写行覆盖前写行，为未来补充终态字段保留原子追加能力。
@@ -684,10 +753,9 @@ fn filter_records(
     records
 }
 
-#[tauri::command]
-pub async fn request_records_list(
-    app: AppHandle,
-    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
+/// 读取模型请求记录；NativeHost 在需要时把该同步操作投递到 blocking executor。
+fn request_records_list(
+    all_records: Vec<RequestRecord>,
     query: RequestRecordsQuery,
 ) -> Result<RequestRecordsPage, String> {
     if query
@@ -697,85 +765,57 @@ pub async fn request_records_list(
     {
         return Err("起始时间不能晚于结束时间".to_owned());
     }
-    let recorder = recorder.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        recorder.flush()?;
-        let all_records = read_records(&app)?;
-        let models = all_records
-            .iter()
-            .map(|record| record.model.clone())
-            .filter(|value| !value.is_empty())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let statuses = all_records
-            .iter()
-            .map(|record| record.status.clone())
-            .filter(|value| !value.is_empty())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .collect();
-        let records = filter_records(
-            all_records,
-            query.model.as_deref(),
-            query.status.as_deref(),
-            query.from_ms,
-            query.to_ms,
-        );
-        let total = records.len();
-        let offset = query.offset.unwrap_or(0).min(total);
-        let limit = query
-            .limit
-            .unwrap_or(DEFAULT_PAGE_SIZE)
-            .clamp(1, MAX_PAGE_SIZE);
-        let page_records = records.into_iter().skip(offset).take(limit).collect();
-        Ok(RequestRecordsPage {
-            records: page_records,
-            total,
-            offset,
-            limit,
-            has_more: offset.saturating_add(limit) < total,
-            models,
-            statuses,
-        })
+    let models = all_records
+        .iter()
+        .map(|record| record.model.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let statuses = all_records
+        .iter()
+        .map(|record| record.status.clone())
+        .filter(|value| !value.is_empty())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let records = filter_records(
+        all_records,
+        query.model.as_deref(),
+        query.status.as_deref(),
+        query.from_ms,
+        query.to_ms,
+    );
+    let total = records.len();
+    let offset = query.offset.unwrap_or(0).min(total);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
+    let page_records = records.into_iter().skip(offset).take(limit).collect();
+    Ok(RequestRecordsPage {
+        records: page_records,
+        total,
+        offset,
+        limit,
+        has_more: offset.saturating_add(limit) < total,
+        models,
+        statuses,
     })
-    .await
-    .map_err(|error| error.to_string())?
 }
 
-#[tauri::command]
-pub async fn task_cache_usage_get(
-    app: AppHandle,
-    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
-    session_id: String,
-) -> Result<TaskCacheUsage, String> {
-    let session_id = session_id.trim().to_owned();
-    if session_id.is_empty() {
-        return Err("任务 ID 不能为空".to_owned());
-    }
-    let recorder = recorder.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        recorder.flush()?;
-        let records = read_records(&app)?;
-        Ok(summarize_task_cache_usage(&records, &session_id))
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
-pub async fn usage_stats_get(
-    app: AppHandle,
-    recorder: tauri::State<'_, std::sync::Arc<AnalyticsRecorder>>,
-) -> Result<UsageStats, String> {
-    let recorder = recorder.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        recorder.flush()?;
-        let records = read_records(&app)?;
-        Ok(summarize_usage(&records))
-    })
-    .await
-    .map_err(|error| error.to_string())?
+/// 一次有界读取同时生成汇总与分页，避免设置窗口重复读入同一份完整记录。
+pub fn usage_stats_get(
+    paths: &NativePaths,
+    recorder: &AnalyticsRecorder,
+    query: RequestRecordsQuery,
+    session_id: Option<&str>,
+) -> Result<(UsageStats, RequestRecordsPage, Option<TaskCacheUsage>), String> {
+    recorder.flush()?;
+    let records = read_records(paths)?;
+    let stats = summarize_usage(&records);
+    let cache = session_id.map(|session_id| summarize_task_cache_usage(&records, session_id));
+    Ok((stats, request_records_list(records, query)?, cache))
 }
 
 /// 按任务汇总主 Agent 的成功模型请求。物理失败、取消、重试失败、标题、
@@ -866,51 +906,58 @@ fn summarize_usage(records: &[RequestRecord]) -> UsageStats {
     let mut days = BTreeMap::<String, DailyUsageStat>::new();
     let mut total_requests = 0u64;
     let mut total_tokens = 0u64;
+    let mut unreported_requests = 0u64;
     for record in records.iter().filter(|record| record.status == "success") {
         total_requests = total_requests.saturating_add(1);
-        let tokens = record.input_tokens.saturating_add(record.output_tokens);
+        let tokens = if record.usage_reported {
+            record.input_tokens.saturating_add(record.output_tokens)
+        } else {
+            unreported_requests = unreported_requests.saturating_add(1);
+            0
+        };
         total_tokens = total_tokens.saturating_add(tokens);
         let model = models
             .entry(record.model.clone())
             .or_insert_with(|| ModelUsageStat {
                 model: record.model.clone(),
                 requests: 0,
+                unreported_requests: 0,
                 input_tokens: 0,
                 output_tokens: 0,
                 total_tokens: 0,
             });
         model.requests = model.requests.saturating_add(1);
-        model.input_tokens = model.input_tokens.saturating_add(record.input_tokens);
-        model.output_tokens = model.output_tokens.saturating_add(record.output_tokens);
+        if record.usage_reported {
+            model.input_tokens = model.input_tokens.saturating_add(record.input_tokens);
+            model.output_tokens = model.output_tokens.saturating_add(record.output_tokens);
+        } else {
+            model.unreported_requests = model.unreported_requests.saturating_add(1);
+        }
         model.total_tokens = model.total_tokens.saturating_add(tokens);
 
         let date = unix_ms_to_date(record.requested_at_ms);
         let day = days.entry(date.clone()).or_insert_with(|| DailyUsageStat {
             date,
             requests: 0,
+            unreported_requests: 0,
             total_tokens: 0,
             model_tokens: BTreeMap::new(),
         });
         day.requests = day.requests.saturating_add(1);
+        if !record.usage_reported {
+            day.unreported_requests = day.unreported_requests.saturating_add(1);
+        }
         day.total_tokens = day.total_tokens.saturating_add(tokens);
         let day_model_tokens = day.model_tokens.entry(record.model.clone()).or_default();
         *day_model_tokens = day_model_tokens.saturating_add(tokens);
     }
     UsageStats {
         total_requests,
+        unreported_requests,
         total_tokens,
         models: models.into_values().collect(),
         days: days.into_values().collect(),
     }
-}
-
-pub(crate) fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
 }
 
 fn unix_ms_to_date(ms: u64) -> String {
@@ -929,12 +976,14 @@ mod tests {
     #[cfg(unix)]
     use super::open_record_file;
     use super::{
-        AnalyticsRecorder, ModelRetryNotice, ObservationWriterState, RequestErrorKind, RequestMode,
+        AnalyticsRecorder, MAX_RECORD_LINE_BYTES, MAX_RECORDS_PER_SEGMENT, ModelRetryNotice,
+        ObservationWriterState, RECORD_SEGMENT_BYTES, RequestErrorKind, RequestMode,
         RequestObservation, RequestObservationScope, RequestObservationState, RequestRecord,
-        dedupe_records, filter_records, protocol_name, read_records_from_path,
-        record_from_observation, summarize_task_cache_usage, summarize_usage,
+        append_record, dedupe_records, filter_records, protocol_name, read_records_from_path,
+        record_from_observation, rotate_records, summarize_task_cache_usage, summarize_usage,
     };
     use keencode_model::{ProviderProtocol, TokenUsage};
+    use std::io::BufWriter;
     use std::sync::{Arc, Mutex};
 
     fn observation(
@@ -1458,6 +1507,88 @@ mod tests {
 
         let error = read_records_from_path(&path).unwrap_err();
         assert!(error.contains("第 1 行"));
+    }
+
+    #[test]
+    fn oversized_record_line_fails_at_the_bounded_reader_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        let mut bytes = vec![b'x'; MAX_RECORD_LINE_BYTES as usize + 1];
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes).unwrap();
+
+        let error = read_records_from_path(&path).unwrap_err();
+        assert!(error.contains("第 1 行超过大小限制"));
+    }
+
+    #[test]
+    fn oversized_old_file_reads_only_tail_skips_partial_line_and_caps_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        let mut bytes = vec![b'x'; RECORD_SEGMENT_BYTES as usize + 4096];
+        bytes.push(b'\n');
+        for index in 0..=MAX_RECORDS_PER_SEGMENT {
+            let row = record(&format!("tail-{index}"), "alpha", "success", index as u64);
+            bytes.extend_from_slice(serde_json::to_string(&row).unwrap().as_bytes());
+            bytes.push(b'\n');
+        }
+        std::fs::write(&path, bytes).unwrap();
+
+        let records = read_records_from_path(&path).unwrap();
+        assert_eq!(records.len(), MAX_RECORDS_PER_SEGMENT);
+        assert_eq!(records.first().unwrap().id, "tail-1");
+        assert_eq!(
+            records.last().unwrap().id,
+            format!("tail-{MAX_RECORDS_PER_SEGMENT}")
+        );
+        assert!(records.iter().all(|row| row.id.starts_with("tail-")));
+    }
+
+    #[test]
+    fn rotation_keeps_latest_segment_and_deduplicates_against_old_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("records.jsonl");
+        let backup = path.with_extension("jsonl.1");
+        let stale_backup = record("stale-backup", "alpha", "success", 1);
+        std::fs::write(
+            &backup,
+            format!("{}\n", serde_json::to_string(&stale_backup).unwrap()),
+        )
+        .unwrap();
+
+        let mut old_segment = Vec::new();
+        let filler = "x".repeat(60_000);
+        for index in 0..300 {
+            let mut row = record(&format!("filler-{index}"), "alpha", "success", index);
+            row.error = Some(filler.clone());
+            old_segment.extend_from_slice(serde_json::to_string(&row).unwrap().as_bytes());
+            old_segment.push(b'\n');
+        }
+        let old_duplicate = record("shared-request", "alpha", "timeout", 10);
+        old_segment.extend_from_slice(serde_json::to_string(&old_duplicate).unwrap().as_bytes());
+        old_segment.push(b'\n');
+        assert!(old_segment.len() as u64 >= RECORD_SEGMENT_BYTES);
+        std::fs::write(&path, old_segment).unwrap();
+
+        let file = super::open_record_file(&path).unwrap();
+        let mut writer = BufWriter::new(file);
+        rotate_records(&path, &mut writer).unwrap();
+
+        let mut latest = record("shared-request", "alpha", "success", 20);
+        latest.output_tokens = 99;
+        append_record(&mut writer, &latest).unwrap();
+        drop(writer);
+
+        let mut records = read_records_from_path(&backup).unwrap();
+        records.extend(read_records_from_path(&path).unwrap());
+        let records = dedupe_records(records);
+        let shared = records
+            .iter()
+            .find(|row| row.id == "shared-request")
+            .unwrap();
+        assert_eq!(shared.status, "success");
+        assert_eq!(shared.output_tokens, 99);
+        assert!(!records.iter().any(|row| row.id == "stale-backup"));
     }
 
     #[cfg(unix)]

@@ -28,8 +28,6 @@ keencode-resources = { path = "../resources" }
 keencode-model = { path = "../model" }
 # Headless 与 Desktop 复用同一套文件、搜索和命令工具实现，避免只向模型暴露空表。
 keencode-tools = { path = "../tools" }
-# Headless Web 控制面复用同一套 HTTP/WS transport，不在 CLI 中复制 Web 协议。
-keencode-web = { path = "../web-host" }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.143"
 sha2 = "0.10.9"

@@ -1,0 +1,330 @@
+{
+  "version": 1,
+  "name": "ely-native-stress-long-message-files",
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件与工作台"
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-workbench-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-workbench-startup"
+    },
+    {
+      "type": "metrics",
+      "label": "stress-workbench-startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "终端"
+    },
+    {
+      "type": "wait",
+      "ms": 700
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新建终端"
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "click_accessibility",
+      "label": "终端输入"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "powershell -NoProfile -Command '$d = Join-Path (Get-Location) \"stress-files\"; [System.IO.Directory]::CreateDirectory($d) | Out-Null; 1..10000 | ForEach-Object { [System.IO.File]::WriteAllText((Join-Path $d (\"stress-{0:D5}.txt\" -f $_)), (\"KEENCODE_STRESS_10000_READY_{0:D5}\" -f $_)) }; [System.IO.File]::WriteAllText((Join-Path $d \"stress-marker.txt\"), \"KEENCODE_STRESS_10000_READY\")'"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_file",
+      "path": "stress-files\\stress-10000.txt",
+      "contains": "KEENCODE_STRESS_10000_READY_10000",
+      "timeout_ms": 150000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "stress-files\\stress-10000.txt",
+      "contains": "KEENCODE_STRESS_10000_READY_10000",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "stress-files\\stress-marker.txt",
+      "contains": "KEENCODE_STRESS_10000_READY",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-files-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-files-created"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件"
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-files-root"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-files-root"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "展开 stress-files"
+    },
+    {
+      "type": "wait",
+      "ms": 2500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "文件列表达到总量上限，展开更多目录以继续查看",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-files-truncated"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-files-truncated"
+    },
+    {
+      "type": "metrics",
+      "label": "stress-files-truncated"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "查询"
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件名或路径关键词"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "stress-10000.txt"
+    },
+    {
+      "type": "wait",
+      "ms": 400
+    },
+    {
+      "type": "click_accessibility",
+      "label": "查询文件"
+    },
+    {
+      "type": "wait",
+      "ms": 2500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "打开 stress-files\\stress-10000.txt",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-file-search-result"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-file-search-result"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "打开 stress-files\\stress-10000.txt"
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-file-open"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-file-open"
+    },
+    {
+      "type": "metrics",
+      "label": "stress-file-open"
+    },
+    {
+      "type": "key",
+      "key": "n",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 15000
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 880
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "repeat",
+      "count": 48,
+      "actions": [
+        {
+          "type": "type_text",
+          "text": "这是 KeenCode 原生桌面长消息压力验收的重复片段。请按原顺序读取全部文本，保留中文、英文、标点和数字边界，最后只回复 KEENCODE_STRESS_RESPONSE_OK，不要调用工具，不要修改项目文件，不要输出解释。以下内容用于验证真实键盘输入、消息编辑布局、消息持久化、Journal 记录和完成态渲染：工作区文件创建、目录展开、搜索结果打开、会话切换、中文字符、ASCII 标识、数字 10000 以及 stress-files/stress-10000.txt 都必须作为普通用户内容处理。"
+        }
+      ]
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-long-message-typed"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-long-message-typed"
+    },
+    {
+      "type": "metrics",
+      "label": "stress-long-message-typed"
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-turn-started"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-turn-started"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "stress-turn-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "stress-turn-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "stress-turn-completed"
+    },
+    {
+      "type": "close"
+    }
+  ],
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true
+}

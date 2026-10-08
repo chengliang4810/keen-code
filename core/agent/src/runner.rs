@@ -2089,6 +2089,7 @@ impl AgentRunner {
                 .ok_or_else(|| AgentRunError::Internal {
                     message: "Round Transcript 段序号溢出".to_owned(),
                 })?;
+        let has_completion = completion.is_some();
         let kind = match completion {
             Some(completion) => AgentCommitEventKind::ModelRoundCommitted {
                 segment_index,
@@ -2100,7 +2101,25 @@ impl AgentRunner {
                 messages: messages.clone(),
             },
         };
-        self.commit_event(request, active.state.round_count(), kind)?;
+        tracing::debug!(
+            target: "keencode_diagnostics",
+            session_id = %request.session_id,
+            turn_id = %request.turn_id,
+            model_round = active.state.round_count(),
+            message_count = messages.len(),
+            has_completion,
+            "Agent Round 消息提交开始"
+        );
+        let commit_result = self.commit_event(request, active.state.round_count(), kind);
+        tracing::debug!(
+            target: "keencode_diagnostics",
+            session_id = %request.session_id,
+            turn_id = %request.turn_id,
+            model_round = active.state.round_count(),
+            success = commit_result.is_ok(),
+            "Agent Round 消息提交返回"
+        );
+        commit_result?;
         active.next_segment_index = next_segment_index;
         active.messages.append(messages);
         Ok(())
@@ -2958,12 +2977,30 @@ impl AgentRunner {
                     &completed_round.response,
                     completed_round.elapsed,
                 )?;
+                tracing::debug!(
+                    target: "keencode_diagnostics",
+                    session_id = %request.session_id,
+                    turn_id = %request.turn_id,
+                    model_round = active.state.round_count(),
+                    call_attempt = completed_round.call_attempt,
+                    "模型 Round 用量提交返回"
+                );
                 // 权威用量提交成功后，用 Provider 报告的真实输入规模锚定
                 // 本轮持久 Transcript 前缀。瞬时目录通知不进入 Transcript，
                 // 因此 message_count 必须来自 model_request；否则下轮会跳过
                 // 第一条新持久消息。通知 token 的保守高估在下次用量后自愈。
                 self.context
                     .note_model_round_usage(&model_request, &completed_round.response.usage);
+                tracing::debug!(
+                    target: "keencode_diagnostics",
+                    session_id = %request.session_id,
+                    turn_id = %request.turn_id,
+                    model_round = active.state.round_count(),
+                    content_blocks = completed_round.response.content.len(),
+                    buffered_events = completed_round.buffered_events.len(),
+                    stop_reason = ?completed_round.response.stop_reason,
+                    "模型 Round 响应进入分类"
+                );
                 if correction_in_flight {
                     // 纠正请求的候选和诊断只存在于私有请求副本中；它不是权威
                     // Transcript 前缀，不能留下会污染后续 Round 估算的用量锚点。
@@ -3100,10 +3137,25 @@ impl AgentRunner {
                 // 先在临时集合中校验调用 ID；结构化候选失败时不得污染当前 Turn
                 // 已提交调用集合，真正进入业务工具路径后才采纳该集合。
                 let mut candidate_seen_tool_call_ids = active.seen_tool_call_ids.clone();
+                tracing::debug!(
+                    target: "keencode_diagnostics",
+                    session_id = %request.session_id,
+                    turn_id = %request.turn_id,
+                    model_round = active.state.round_count(),
+                    "模型工具调用提取开始"
+                );
                 let tool_calls = extract_tool_calls(&response, &mut candidate_seen_tool_call_ids)
                     .map_err(|error| {
                     prefer_limit_summary_error(active.limit_summary.as_ref(), error)
                 })?;
+                tracing::debug!(
+                    target: "keencode_diagnostics",
+                    session_id = %request.session_id,
+                    turn_id = %request.turn_id,
+                    model_round = active.state.round_count(),
+                    tool_call_count = tool_calls.len(),
+                    "模型工具调用提取返回"
+                );
 
                 if let Some(error) = active.limit_summary.take() {
                     let mut committed = vec![Message::new(

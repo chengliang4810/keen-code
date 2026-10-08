@@ -6,17 +6,17 @@ use keencode_provider::{
 };
 use reqwest::blocking::Client;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::AppHandle;
 use url::Url;
 
 use crate::http_response::{HttpResponseReadError, read_http_response_limited};
+use crate::native_paths::NativePaths;
 
 /// 串行化供应商元数据的读写。
 static PROVIDER_IO_LOCK: Mutex<()> = Mutex::new(());
@@ -34,31 +34,22 @@ const PROVIDER_CREDENTIAL_REVISION_DOMAIN: &[u8] =
 const PROVIDER_CONFIG_SCHEMA: &str = "keencode/providers";
 /// 当前供应商配置文件的固定格式版本。
 const PROVIDER_CONFIG_VERSION: u32 = 1;
-/// Facade 新建 Provider 的暂存地址；仅用于通过当前文件 schema，绝不进入 Runtime。
-const FACADE_PLACEHOLDER_BASE_URL: &str = "https://localhost.invalid/v1/responses";
-/// 原生真实请求的临时超时入口；只在隔离 native-desktop-tests 中读取。
-#[cfg(any(test, feature = "native-desktop-tests"))]
+/// 原生真实请求的临时超时入口；只在隔离原生验收进程中读取。
 const NATIVE_PROVIDER_TIMEOUT_ENV: &str = "KEENCODE_NATIVE_PROVIDER_TIMEOUT_MS";
-#[cfg(any(test, feature = "native-desktop-tests"))]
 const NATIVE_PROVIDER_TIMEOUT_MIN_MS: u64 = 1;
-#[cfg(any(test, feature = "native-desktop-tests"))]
 const NATIVE_PROVIDER_TIMEOUT_MAX_MS: u64 = 300_000;
 /// 模型未填写上下文窗口时采用的保守默认值。
 pub(crate) const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 200_000;
-/// 供应商导出文档的固定 schema 名称；导入同时接受完整配置文件 schema。
-const PROVIDER_EXPORT_SCHEMA: &str = "keencode/providers-export";
-
 /// 解析原生验收的请求级硬超时；仅用于真实请求超时注入，不模拟模型响应。
 ///
 /// 参数显式传入而不是在测试中改写进程环境，避免并发测试互相污染。
-#[cfg(any(test, feature = "native-desktop-tests"))]
 fn parse_native_provider_timeout_override(
-    native_desktop_tests: bool,
+    native_acceptance_enabled: bool,
     benchmark_enabled: bool,
     benchmark_data_dir_present: bool,
     raw_timeout_ms: Option<&str>,
 ) -> Result<Option<Duration>> {
-    if !(native_desktop_tests && benchmark_enabled && benchmark_data_dir_present) {
+    if !(native_acceptance_enabled && benchmark_enabled && benchmark_data_dir_present) {
         return Ok(None);
     }
     let Some(raw_timeout_ms) = raw_timeout_ms else {
@@ -77,34 +68,28 @@ fn parse_native_provider_timeout_override(
     Ok(Some(Duration::from_millis(timeout_ms)))
 }
 
-/// 生产构建完全不读取临时超时变量；原生验收必须同时处于三个隔离条件。
+/// 普通启动完全不读取临时超时变量；原生验收必须同时处于三个隔离条件。
 fn native_provider_timeout_override_from_environment() -> Result<Option<Duration>> {
-    #[cfg(not(feature = "native-desktop-tests"))]
-    {
-        Ok(None)
+    let native_acceptance_enabled =
+        std::env::var("KEENCODE_NATIVE_ACCEPTANCE").as_deref() == Ok("1");
+    let benchmark_enabled = std::env::var("KEENCODE_BENCHMARK").as_deref() == Ok("1");
+    let benchmark_data_dir_present = std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR").is_some();
+    if !(native_acceptance_enabled && benchmark_enabled && benchmark_data_dir_present) {
+        return Ok(None);
     }
-
-    #[cfg(feature = "native-desktop-tests")]
-    {
-        let benchmark_enabled = std::env::var("KEENCODE_BENCHMARK").as_deref() == Ok("1");
-        let benchmark_data_dir_present = std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR").is_some();
-        if !(benchmark_enabled && benchmark_data_dir_present) {
-            return Ok(None);
-        }
-        let raw_timeout_ms = std::env::var_os(NATIVE_PROVIDER_TIMEOUT_ENV)
-            .map(|value| {
-                value.to_str().map(str::to_owned).ok_or_else(|| {
-                    anyhow::anyhow!("{NATIVE_PROVIDER_TIMEOUT_ENV} 必须是 UTF-8 的十进制整数")
-                })
+    let raw_timeout_ms = std::env::var_os(NATIVE_PROVIDER_TIMEOUT_ENV)
+        .map(|value| {
+            value.to_str().map(str::to_owned).ok_or_else(|| {
+                anyhow::anyhow!("{NATIVE_PROVIDER_TIMEOUT_ENV} 必须是 UTF-8 的十进制整数")
             })
-            .transpose()?;
-        parse_native_provider_timeout_override(
-            true,
-            benchmark_enabled,
-            benchmark_data_dir_present,
-            raw_timeout_ms.as_deref(),
-        )
-    }
+        })
+        .transpose()?;
+    parse_native_provider_timeout_override(
+        native_acceptance_enabled,
+        benchmark_enabled,
+        benchmark_data_dir_present,
+        raw_timeout_ms.as_deref(),
+    )
 }
 
 /// KeenCode 持久化的自定义供应商记录。
@@ -145,9 +130,6 @@ struct ProviderRecord {
     /// 仍保留在设置视图中、但不得进入 Runtime 注册表的模型。
     #[serde(default)]
     disabled_models: BTreeSet<String>,
-    /// 模型级稀疏配置覆盖，按 source facade 的 ModelConfigObject 保存。
-    #[serde(default)]
-    model_configs: BTreeMap<String, Value>,
 }
 
 /// KeenCode 自有的供应商配置文件结构。
@@ -163,12 +145,6 @@ struct ProviderState {
     /// 当前实际交给 Agent Runtime 的模型标识。
     #[serde(deserialize_with = "deserialize_required_option")]
     active_model_id: Option<String>,
-    /// 对外 Settings/Selection facade 使用的持久递增版本。
-    ///
-    /// 旧配置没有该字段时从零开始；每次成功写入一项变更前递增，避免用
-    /// 哈希摘要充当版本导致前端比较失效或超过 JavaScript 安全整数范围。
-    #[serde(default)]
-    revision: u64,
     /// 已保存的供应商列表。
     providers: Vec<ProviderRecord>,
 }
@@ -214,7 +190,7 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
-/// 返回给前端的自定义供应商。
+/// 返回给设置界面的自定义供应商。
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomProvider {
@@ -228,7 +204,7 @@ pub struct CustomProvider {
     pub name: String,
     /// 请求协议类型。
     pub api_backend: String,
-    /// 已保存的 API Key，供前端显示/隐藏查看；None 表示无认证。
+    /// 已保存的 API Key，供设置界面显示/隐藏查看；None 表示无认证。
     pub api_key: Option<String>,
     /// 每模型手工配置的上下文窗口（token）；空 map 表示全部未配置。
     pub context_windows: BTreeMap<String, u64>,
@@ -238,7 +214,7 @@ pub struct CustomProvider {
     pub supports_vision: BTreeMap<String, bool>,
     /// 每模型显式开放的推理档位；缺项沿用公共模型目录。
     pub reasoning_efforts: BTreeMap<String, Vec<String>>,
-    /// 设置视图中的禁用模型；该字段只供桌面 RPC 与 Runtime 边界使用，
+    /// 设置视图中的禁用模型；该字段只供桌面命令与 Runtime 边界使用，
     /// 旧的 providers 列表 JSON 不暴露它，权威值仍写入 providers.json。
     #[serde(skip)]
     pub disabled_models: BTreeSet<String>,
@@ -304,21 +280,21 @@ pub struct ProviderModelsResult {
 }
 
 /// 返回当前供应商配置列表。
-pub fn list(app: &AppHandle) -> Result<ProvidersListResult> {
+pub fn list(paths: &NativePaths) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
+    let state = load_state(paths)?;
     Ok(render_list(state))
 }
 
 /// 原页面只编辑已存在供应商的模型目录，不接收或重新写入凭据表单。
 /// expected 用于拒绝旧目录覆盖并发更新；模型和供应商都必须使用准确身份。
 pub fn update_models(
-    app: &AppHandle,
+    paths: &NativePaths,
     expected: Vec<String>,
     models: Vec<String>,
 ) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    update_models_at_path(&state_path(app)?, expected, models)
+    update_models_at_path(&state_path(paths)?, expected, models)
 }
 
 /// 持锁调用：先完整校验，再一次原子提交所有供应商的模型变化。
@@ -389,9 +365,6 @@ fn update_models_at_path(
         provider
             .disabled_models
             .retain(|model| provider.models.contains(model));
-        provider
-            .model_configs
-            .retain(|model, _| provider.models.contains(model));
         for model in &provider.models {
             provider
                 .supports_vision
@@ -408,7 +381,6 @@ fn update_models_at_path(
         }
     }
     repair_selection(&mut state);
-    bump_revision(&mut state);
     save_state_to_path(path, &state)?;
     Ok(render_list(state))
 }
@@ -422,11 +394,10 @@ pub(crate) fn replace_runtime_registry(
         .providers
         .iter()
         .filter(|provider| {
-            !is_facade_placeholder_url(&provider.base_url)
-                && provider
-                    .models
-                    .iter()
-                    .any(|model| !provider.disabled_models.contains(model))
+            provider
+                .models
+                .iter()
+                .any(|model| !provider.disabled_models.contains(model))
         })
         .map(runtime_provider_registration)
         .collect::<Result<Vec<_>>>()?;
@@ -572,7 +543,7 @@ fn provider_credential_revision(api_key: Option<&str>) -> String {
 }
 
 /// 新增或更新一个自定义供应商。
-pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListResult> {
+pub fn upsert(paths: &NativePaths, input: ProviderUpsert) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
     let id = validate_provider_id(&input.id)?;
     let base_url = validate_base_url(&input.base_url)?;
@@ -581,7 +552,7 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
     validate_exact_endpoint(&base_url, api_backend)?;
     // 所见即所得：Some 覆盖保存密钥，None 清空该供应商认证。
     let api_key = validate_api_key(input.api_key.as_deref())?;
-    let mut state = load_state(app)?;
+    let mut state = load_state(paths)?;
     let existing_index = state
         .providers
         .iter()
@@ -595,17 +566,6 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
                 .filter(|model| models.contains(*model))
                 .cloned()
                 .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let previous_model_configs = existing_index
-        .and_then(|index| state.providers.get(index))
-        .map(|provider| {
-            provider
-                .model_configs
-                .iter()
-                .filter(|(model, _)| models.contains(*model))
-                .map(|(model, config)| (model.clone(), config.clone()))
-                .collect::<BTreeMap<_, _>>()
         })
         .unwrap_or_default();
     if input.create_only && existing_index.is_some() {
@@ -640,7 +600,6 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         supports_vision,
         reasoning_efforts,
         disabled_models: previous_disabled_models,
-        model_configs: previous_model_configs,
     };
     if let Some(index) = existing_index {
         state.providers[index] = record;
@@ -659,16 +618,15 @@ pub fn upsert(app: &AppHandle, input: ProviderUpsert) -> Result<ProvidersListRes
         state.active_model_id = models.first().cloned();
     }
     repair_selection(&mut state);
-    bump_revision(&mut state);
-    save_state(app, &state)?;
+    save_state(paths, &state)?;
     Ok(render_list(state))
 }
 
 /// 删除一个自定义供应商。
-pub fn remove(app: &AppHandle, provider_id: &str) -> Result<ProvidersListResult> {
+pub fn remove(paths: &NativePaths, provider_id: &str) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
     let id = validate_provider_id(provider_id)?;
-    let mut state = load_state(app)?;
+    let mut state = load_state(paths)?;
     let original_len = state.providers.len();
     state.providers.retain(|provider| provider.id != id);
     if state.providers.len() == original_len {
@@ -682,173 +640,18 @@ pub fn remove(app: &AppHandle, provider_id: &str) -> Result<ProvidersListResult>
             .and_then(|provider| provider.models.first().cloned());
     }
     repair_selection(&mut state);
-    bump_revision(&mut state);
-    save_state(app, &state)?;
+    save_state(paths, &state)?;
     Ok(render_list(state))
-}
-
-/// 供应商导出文档结构；记录结构与持久化配置完全一致，含明文 API Key。
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-struct ProviderExportFile {
-    /// 固定 schema 名称。
-    schema: String,
-    /// 固定格式版本。
-    version: u32,
-    /// 导出的供应商记录。
-    providers: Vec<ProviderRecord>,
-}
-
-/// 供应商导入结果：合并后的完整状态与本次计数。
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProvidersImportResult {
-    /// 合并后的供应商列表。
-    pub providers: Vec<CustomProvider>,
-    /// 当前激活供应商的默认模型。
-    pub default_model: Option<String>,
-    /// 当前激活供应商标识。
-    pub active_provider_id: Option<String>,
-    /// 本次新增的供应商数量。
-    pub added: usize,
-    /// 本次按同标识覆盖的供应商数量。
-    pub updated: usize,
-}
-
-/// 导出单个供应商配置 JSON 文档。
-pub fn export(app: &AppHandle, provider_id: &str) -> Result<String> {
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
-    let id = validate_provider_id(provider_id)?;
-    let record = state
-        .providers
-        .iter()
-        .find(|provider| provider.id == id)
-        .with_context(|| format!("找不到供应商 {id}"))?;
-    let file = ProviderExportFile {
-        schema: PROVIDER_EXPORT_SCHEMA.to_owned(),
-        version: PROVIDER_CONFIG_VERSION,
-        providers: vec![record.clone()],
-    };
-    let bytes = serde_json::to_vec_pretty(&file).context("序列化供应商导出失败")?;
-    String::from_utf8(bytes).context("供应商导出内容不是有效 UTF-8")
-}
-
-/// 解析导入文本：接受导出文档与完整配置文件两种 schema，返回严格校验前的记录。
-fn parse_provider_import(config: &str) -> Result<Vec<ProviderRecord>> {
-    if config.len() as u64 > MAX_PROVIDER_CONFIG_BYTES {
-        anyhow::bail!("供应商导入内容超过 {MAX_PROVIDER_CONFIG_BYTES} 字节");
-    }
-    let value: Value = serde_json::from_str(config).context("供应商导入内容不是有效 JSON")?;
-    let schema = value
-        .get("schema")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if schema != PROVIDER_EXPORT_SCHEMA && schema != PROVIDER_CONFIG_SCHEMA {
-        anyhow::bail!("供应商导入 schema 不受支持：{schema}");
-    }
-    let version = value
-        .get("version")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if version != u64::from(PROVIDER_CONFIG_VERSION) {
-        anyhow::bail!("供应商导入版本不受支持：{version}");
-    }
-    let records: Vec<ProviderRecord> = serde_json::from_value(
-        value
-            .get("providers")
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("供应商导入内容缺少 providers 列表"))?,
-    )
-    .context("供应商导入记录无效")?;
-    if records.is_empty() {
-        anyhow::bail!("供应商导入内容至少需要包含一个供应商");
-    }
-    let mut seen = std::collections::HashSet::new();
-    for record in &records {
-        if !seen.insert(record.id.as_str()) {
-            anyhow::bail!("供应商导入内容包含重复标识：{}", record.id);
-        }
-    }
-    Ok(records)
-}
-
-/// 将导入记录合并进当前状态：同标识覆盖，其余追加；不主动切换当前选中。
-fn merge_provider_import(
-    mut state: ProviderState,
-    records: Vec<ProviderRecord>,
-) -> Result<(ProviderState, usize, usize)> {
-    let mut added = 0usize;
-    let mut updated = 0usize;
-    for record in records {
-        match state
-            .providers
-            .iter()
-            .position(|provider| provider.id == record.id)
-        {
-            Some(index) => {
-                updated += 1;
-                let keeps_current_provider =
-                    state.active_provider_id.as_deref() == Some(record.id.as_str());
-                state.providers[index] = record;
-                // 与表单保存同源：当前激活模型被导入记录移除时回退到该供应商首个模型。
-                if keeps_current_provider
-                    && state.active_model_id.as_ref().is_none_or(|model| {
-                        !state.providers[index]
-                            .models
-                            .iter()
-                            .any(|item| item == model)
-                    })
-                {
-                    state.active_model_id = state.providers[index].models.first().cloned();
-                }
-            }
-            None => {
-                added += 1;
-                let is_first_provider = state.providers.is_empty();
-                state.providers.push(record);
-                // 空状态首次导入与表单保存同源：补齐当前供应商与模型。
-                if is_first_provider {
-                    let provider = state.providers.last().expect("刚追加的供应商记录");
-                    state.active_provider_id = Some(provider.id.clone());
-                    state.active_model_id = provider.models.first().cloned();
-                }
-            }
-        }
-    }
-    repair_selection(&mut state);
-    validate_state(&state)?;
-    Ok((state, added, updated))
-}
-
-/// 导入供应商配置并按标识合并保存；除空状态首次导入与激活模型被移除的回退外，
-/// 不切换当前激活的供应商或模型。
-pub fn import(app: &AppHandle, config: &str) -> Result<ProvidersImportResult> {
-    let records = parse_provider_import(config)?;
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
-    let (state, added, updated) = merge_provider_import(state, records)?;
-    let mut state = state;
-    bump_revision(&mut state);
-    save_state(app, &state)?;
-    let list = render_list(state);
-    Ok(ProvidersImportResult {
-        providers: list.providers,
-        default_model: list.default_model,
-        active_provider_id: list.active_provider_id,
-        added,
-        updated,
-    })
 }
 
 /// 选择指定供应商下的模型并同步运行时配置。
 pub fn select_model(
-    app: &AppHandle,
+    paths: &NativePaths,
     provider_id: &str,
     model_id: &str,
 ) -> Result<ProvidersListResult> {
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let mut state = load_state(app)?;
+    let mut state = load_state(paths)?;
     let provider_id = provider_id.trim();
     let model_id = model_id.trim();
     if provider_id.is_empty() {
@@ -869,8 +672,54 @@ pub fn select_model(
     }
     state.active_provider_id = Some(provider.id.clone());
     state.active_model_id = Some(model_id.to_string());
-    bump_revision(&mut state);
-    save_state(app, &state)?;
+    save_state(paths, &state)?;
+    Ok(render_list(state))
+}
+
+/// 原子更新单个模型的启用状态，并修复受影响的默认选择。
+///
+/// 禁用集合属于 Provider 配置事实源；设置层不能直接改写 providers.json，
+/// 否则会绕过同一把 IO 锁、配置校验和原子写入。
+pub(crate) fn set_model_enabled(
+    paths: &NativePaths,
+    provider_id: &str,
+    model_id: &str,
+    enabled: bool,
+) -> Result<ProvidersListResult> {
+    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
+    let provider_id = validate_provider_id(provider_id)?;
+    let model_id = model_id.trim();
+    if model_id.is_empty() || model_id.chars().any(char::is_control) {
+        anyhow::bail!("模型标识不能为空或包含控制字符");
+    }
+    let mut state = load_state(paths)?;
+    let provider_index = state
+        .providers
+        .iter()
+        .position(|provider| provider.id == provider_id)
+        .with_context(|| format!("找不到供应商 {provider_id}"))?;
+    let is_active = state.active_provider_id.as_deref() == Some(provider_id.as_str())
+        && state.active_model_id.as_deref() == Some(model_id);
+    {
+        let provider = &mut state.providers[provider_index];
+        if !provider.models.iter().any(|model| model == model_id) {
+            anyhow::bail!("供应商 {provider_id} 中找不到模型 {model_id}");
+        }
+        if enabled {
+            provider.disabled_models.remove(model_id);
+        } else {
+            let has_other_enabled_model = provider
+                .models
+                .iter()
+                .any(|model| model != model_id && !provider.disabled_models.contains(model));
+            if is_active && !has_other_enabled_model {
+                anyhow::bail!("供应商 {provider_id} 至少需要保留一个启用模型");
+            }
+            provider.disabled_models.insert(model_id.to_owned());
+        }
+    }
+    repair_selection(&mut state);
+    save_state(paths, &state)?;
     Ok(render_list(state))
 }
 
@@ -890,7 +739,7 @@ pub fn list_models(
 
 /// 校验模型目录请求与已登记供应商完全一致，避免复用密钥到其他地址。
 pub fn validate_model_catalog_scope(
-    app: &AppHandle,
+    paths: &NativePaths,
     provider_id: &str,
     base_url: &str,
     api_backend: &str,
@@ -899,7 +748,7 @@ pub fn validate_model_catalog_scope(
     let api_backend = validate_api_backend(api_backend)?;
     let id = validate_provider_id(provider_id)?;
     let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
+    let state = load_state(paths)?;
     let provider = state
         .providers
         .iter()
@@ -984,7 +833,7 @@ fn request_models(
     Ok(ProviderModelsResult { models })
 }
 
-/// 将持久化状态投影成前端所需结构。
+/// 将持久化状态投影成设置界面所需结构。
 fn render_list(state: ProviderState) -> ProvidersListResult {
     let active_provider_id = state.active_provider_id.clone();
     let default_model = state.active_model_id.clone();
@@ -1010,1168 +859,6 @@ fn render_list(state: ProviderState) -> ProvidersListResult {
         providers,
         default_model,
         active_provider_id,
-    }
-}
-
-/// 把桌面自有的 Provider 状态投影为 ZCode Provider Settings facade 合同。
-///
-/// 这里不引入第二份 Registry：所有字段都从 `ProviderState` 读取，Runtime 仍由
-/// `replace_runtime_registry` 使用同一份状态构建。Builtin/账号事实在桌面 Host
-/// 不存在，因此模板与 builtin 字段保持为空，不伪造官方账户能力。
-pub(crate) fn facade_settings_view(app: &AppHandle) -> Result<Value> {
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
-    Ok(build_facade_settings_view(&state))
-}
-
-/// 投影模型选择候选；只暴露进入 Runtime 的 enabled 模型。
-pub(crate) fn facade_model_selection_view(app: &AppHandle, input: Option<&Value>) -> Result<Value> {
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
-    Ok(build_facade_model_selection_view(&state, input))
-}
-
-pub(crate) fn facade_create_provider(app: &AppHandle, input: &Value) -> Result<Value> {
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let mut state = load_state(app)?;
-    let object = input
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("createPersonalProvider 参数必须为对象"))?;
-    let id = next_facade_provider_id(&state);
-    let name = object
-        .get("providerName")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&id)
-        .to_owned();
-    let initial = object
-        .get("initialConfig")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let mut record = ProviderRecord {
-        id: id.clone(),
-        name,
-        template_id: match object.get("templateId") {
-            None | Some(Value::Null) => None,
-            Some(value) => {
-                Some(validate_template_id(value.as_str().ok_or_else(|| {
-                    anyhow::anyhow!("templateId 必须是字符串或 null")
-                })?)?)
-            }
-        },
-        // 空白创建仍必须能通过当前 providers.json 的严格 schema；用户随后可覆盖地址。
-        base_url: FACADE_PLACEHOLDER_BASE_URL.to_owned(),
-        models: Vec::new(),
-        api_backend: "responses".to_owned(),
-        api_key: None,
-        context_windows: BTreeMap::new(),
-        max_output_tokens: BTreeMap::new(),
-        chat_output_token_field: ChatOutputTokenField::default(),
-        supports_vision: BTreeMap::new(),
-        reasoning_efforts: BTreeMap::new(),
-        disabled_models: BTreeSet::new(),
-        model_configs: BTreeMap::new(),
-    };
-    apply_provider_config(&mut record, &initial)?;
-    if let Some(models) = initial.get("personalModelIds").and_then(Value::as_array) {
-        let models = models
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow::anyhow!("personalModelIds 必须是字符串数组"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let models = normalize_models(models)?;
-        record.models = models.clone();
-        record.supports_vision = models.iter().map(|model| (model.clone(), false)).collect();
-    }
-    if let Some(order) = initial.get("modelOrder").and_then(Value::as_array) {
-        let order = order
-            .iter()
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .ok_or_else(|| anyhow::anyhow!("modelOrder 必须是字符串数组"))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        if order.len() == record.models.len()
-            && order.iter().all(|model| record.models.contains(model))
-        {
-            record.models = order;
-        }
-    }
-    state.providers.push(record);
-    if state.active_provider_id.is_none()
-        && let Some(model) = state
-            .providers
-            .last()
-            .and_then(|provider| provider.models.first())
-    {
-        state.active_provider_id = Some(id.clone());
-        state.active_model_id = Some(model.clone());
-    }
-    repair_selection(&mut state);
-    bump_revision(&mut state);
-    save_state(app, &state)?;
-    Ok(json!({"providerId": id, "view": build_facade_settings_view(&state)}))
-}
-
-pub(crate) fn facade_save_provider_overlay(
-    app: &AppHandle,
-    provider_id: &str,
-    config: &Value,
-    metadata: Option<&Value>,
-) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        apply_provider_config(provider, config)?;
-        if let Some(metadata) = metadata.and_then(Value::as_object) {
-            if let Some(name) = metadata.get("providerName") {
-                provider.name = name
-                    .as_str()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("providerName 必须是非空字符串"))?
-                    .to_owned();
-            }
-            if let Some(template_id) = metadata.get("templateId") {
-                provider.template_id = match template_id {
-                    Value::Null => None,
-                    value => {
-                        Some(validate_template_id(value.as_str().ok_or_else(|| {
-                            anyhow::anyhow!("templateId 必须是字符串或 null")
-                        })?)?)
-                    }
-                };
-            }
-            if let Some(enabled) = metadata.get("enabled").and_then(Value::as_bool) {
-                if enabled {
-                    provider.disabled_models.clear();
-                } else {
-                    provider.disabled_models = provider.models.iter().cloned().collect();
-                }
-            }
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_delete_provider(app: &AppHandle, provider_id: &str) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let id = validate_provider_id(provider_id)?;
-        let before = state.providers.len();
-        state.providers.retain(|provider| provider.id != id);
-        if state.providers.len() == before {
-            anyhow::bail!("找不到供应商 {id}");
-        }
-        repair_selection(state);
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_reorder_providers(app: &AppHandle, provider_ids: &Value) -> Result<Value> {
-    let ids = value_string_array(provider_ids, "providerIds")?;
-    mutate_facade_state(app, |state| {
-        let current = state
-            .providers
-            .iter()
-            .map(|provider| provider.id.clone())
-            .collect::<Vec<_>>();
-        if ids.len() != current.len()
-            || ids.iter().any(|id| !current.contains(id))
-            || current.iter().any(|id| !ids.contains(id))
-        {
-            anyhow::bail!("providerIds 必须是当前供应商的完整排列");
-        }
-        let mut records = state.providers.clone();
-        records.sort_by_key(|provider| {
-            ids.iter()
-                .position(|id| id == &provider.id)
-                .expect("已校验供应商排列")
-        });
-        state.providers = records;
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_reorder_models(
-    app: &AppHandle,
-    provider_id: &str,
-    model_ids: &Value,
-) -> Result<Value> {
-    let ids = value_string_array(model_ids, "modelIds")?;
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        if ids.len() != provider.models.len()
-            || ids.iter().any(|id| !provider.models.contains(id))
-            || provider.models.iter().any(|id| !ids.contains(id))
-        {
-            anyhow::bail!("modelIds 必须是当前供应商模型的完整排列");
-        }
-        provider.models = ids.clone();
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_add_model(
-    app: &AppHandle,
-    provider_id: &str,
-    model_id: &str,
-    config: &Value,
-    _use_recommended_config: Option<bool>,
-) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        let model_id = validate_model_id(model_id)?;
-        if provider.models.iter().any(|model| model == &model_id) {
-            anyhow::bail!("模型 {model_id} 已存在");
-        }
-        provider.models.push(model_id.clone());
-        provider.supports_vision.insert(model_id.clone(), false);
-        apply_model_config(provider, &model_id, config)?;
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_rename_model(
-    app: &AppHandle,
-    provider_id: &str,
-    current_model_id: &str,
-    next_model_id: &str,
-) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        let current = validate_model_id(current_model_id)?;
-        let next = validate_model_id(next_model_id)?;
-        let index = provider
-            .models
-            .iter()
-            .position(|model| model == &current)
-            .with_context(|| format!("找不到模型 {current}"))?;
-        if current != next && provider.models.iter().any(|model| model == &next) {
-            anyhow::bail!("模型 {next} 已存在");
-        }
-        provider.models[index] = next.clone();
-        rename_model_key(&mut provider.context_windows, &current, &next);
-        rename_model_key(&mut provider.max_output_tokens, &current, &next);
-        rename_model_key(&mut provider.supports_vision, &current, &next);
-        rename_model_key(&mut provider.reasoning_efforts, &current, &next);
-        rename_model_key(&mut provider.model_configs, &current, &next);
-        if provider.disabled_models.remove(&current) {
-            provider.disabled_models.insert(next);
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_delete_model(
-    app: &AppHandle,
-    provider_id: &str,
-    model_id: &str,
-) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        let model_id = validate_model_id(model_id)?;
-        let before = provider.models.len();
-        provider.models.retain(|model| model != &model_id);
-        if provider.models.len() == before {
-            anyhow::bail!("找不到模型 {model_id}");
-        }
-        provider.context_windows.remove(&model_id);
-        provider.max_output_tokens.remove(&model_id);
-        provider.supports_vision.remove(&model_id);
-        provider.reasoning_efforts.remove(&model_id);
-        provider.disabled_models.remove(&model_id);
-        provider.model_configs.remove(&model_id);
-        repair_selection(state);
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_save_model_draft(app: &AppHandle, input: &Value) -> Result<Value> {
-    let object = input
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("savePersonalModelDraft 参数必须为对象"))?;
-    let provider_id = required_value_string(object.get("providerId"), "providerId")?;
-    let original = required_value_string(object.get("originalModelId"), "originalModelId")?;
-    let next = required_value_string(object.get("nextModelId"), "nextModelId")?;
-    let expected_revision = object.get("basedOnRevision").and_then(Value::as_u64);
-    let config = object
-        .get("personalConfig")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    mutate_facade_state(app, |state| {
-        if let Some(expected) = expected_revision
-            && facade_revision(state) != expected
-        {
-            anyhow::bail!("Provider Settings revision conflict");
-        }
-        let provider = facade_provider_mut(state, &provider_id)?;
-        let original = validate_model_id(&original)?;
-        let next = validate_model_id(&next)?;
-        let index = provider
-            .models
-            .iter()
-            .position(|model| model == &original)
-            .with_context(|| format!("找不到模型 {original}"))?;
-        if original != next && provider.models.iter().any(|model| model == &next) {
-            anyhow::bail!("模型 {next} 已存在");
-        }
-        provider.models[index] = next.clone();
-        if original != next {
-            rename_model_key(&mut provider.context_windows, &original, &next);
-            rename_model_key(&mut provider.max_output_tokens, &original, &next);
-            rename_model_key(&mut provider.supports_vision, &original, &next);
-            rename_model_key(&mut provider.reasoning_efforts, &original, &next);
-            rename_model_key(&mut provider.model_configs, &original, &next);
-            if provider.disabled_models.remove(&original) {
-                provider.disabled_models.insert(next.clone());
-            }
-        }
-        apply_model_config(provider, &next, &config)?;
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_set_model_enabled(
-    app: &AppHandle,
-    provider_id: &str,
-    model_id: &str,
-    enabled: bool,
-) -> Result<Value> {
-    mutate_facade_state(app, |state| {
-        let provider = facade_provider_mut(state, provider_id)?;
-        let model_id = validate_model_id(model_id)?;
-        if !provider.models.iter().any(|model| model == &model_id) {
-            anyhow::bail!("找不到模型 {model_id}");
-        }
-        if enabled {
-            provider.disabled_models.remove(&model_id);
-        } else {
-            provider.disabled_models.insert(model_id.clone());
-        }
-        if state.active_provider_id.as_deref() == Some(provider_id)
-            && state.active_model_id.as_deref() == Some(model_id.as_str())
-            && !enabled
-        {
-            repair_selection(state);
-        }
-        Ok(())
-    })
-}
-
-pub(crate) fn facade_resolve_model_config(app: &AppHandle, input: &Value) -> Result<Value> {
-    let object = input
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("resolveModelConfig 参数必须为对象"))?;
-    let provider_id = required_value_string(object.get("providerId"), "providerId")?;
-    let model_id = required_value_string(
-        object
-            .get("modelId")
-            .or_else(|| object.get("originalModelId")),
-        "modelId",
-    )?;
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let state = load_state(app)?;
-    let provider = state
-        .providers
-        .iter()
-        .find(|provider| provider.id == provider_id)
-        .with_context(|| format!("找不到供应商 {provider_id}"))?;
-    if !provider.models.iter().any(|model| model == &model_id) {
-        anyhow::bail!("找不到模型 {provider_id}/{model_id}");
-    }
-    let inherited = complete_model_config(provider, &model_id, None, false);
-    let effective = if let Some(personal) = object.get("personalConfig") {
-        validate_model_overlay(personal)?;
-        complete_model_config(provider, &model_id, Some(personal), false)
-    } else {
-        complete_model_config(
-            provider,
-            &model_id,
-            provider.model_configs.get(&model_id),
-            provider.disabled_models.contains(&model_id),
-        )
-    };
-    Ok(json!({"inheritedConfig": inherited, "effectiveConfig": effective, "issues": []}))
-}
-
-/// 变更成功后统一修复默认选择，并通过同一状态生成 Settings view。
-fn mutate_facade_state(
-    app: &AppHandle,
-    mutate: impl FnOnce(&mut ProviderState) -> Result<()>,
-) -> Result<Value> {
-    let _guard = PROVIDER_IO_LOCK.lock().expect("供应商配置读写锁已损坏");
-    let mut state = load_state(app)?;
-    mutate(&mut state)?;
-    repair_selection(&mut state);
-    bump_revision(&mut state);
-    save_state(app, &state)?;
-    Ok(build_facade_settings_view(&state))
-}
-
-fn build_facade_settings_view(state: &ProviderState) -> Value {
-    let providers = state
-        .providers
-        .iter()
-        .map(|provider| {
-            let provider_executable = provider_is_executable(provider);
-            let models = provider
-                .models
-                .iter()
-                .map(|model| {
-                    let disabled = provider.disabled_models.contains(model);
-                    let personal = provider.model_configs.get(model);
-                    let builtin = complete_model_config(provider, model, None, false);
-                    let effective = complete_model_config(
-                        provider,
-                        model,
-                        personal,
-                        disabled,
-                    );
-                    let mut model_view = json!({
-                        "kind": "candidate",
-                        "modelId": model,
-                        "builtin": false,
-                        "effectiveBuiltinConfig": builtin,
-                        "effectiveConfig": effective,
-                        "enabled": !disabled,
-                        "executable": provider_executable && !disabled,
-                        "selectable": provider_executable && !disabled,
-                        "issues": []
-                    });
-                    if let Some(personal) = personal {
-                        // 空 reasoning_efforts 是用户的显式禁用事实；源 facade 的
-                        // strict schema 不接受空 values，因此只在展示层省略该 optionSpec，
-                        // 磁盘记录仍保留空数组以便下一次编辑继续表达禁用。
-                        model_view["personalExactConfig"] =
-                            display_model_overlay(personal);
-                        model_view["useRecommendedConfig"] = Value::Bool(false);
-                    }
-                    model_view
-                })
-                .collect::<Vec<_>>();
-            let effective_config = provider_config_value(provider);
-            let mut provider_view = json!({
-                "providerId": provider.id,
-                "providerName": provider.name,
-                "enabled": provider.models.iter().any(|model| !provider.disabled_models.contains(model)),
-                "executable": provider_executable,
-                "personalConfig": effective_config,
-                "effectiveConfig": effective_config,
-                "issues": provider_issues(provider),
-                "models": models
-            });
-            if let Some(template_id) = provider.template_id.as_deref() {
-                provider_view["templateId"] = Value::String(template_id.to_owned());
-            }
-            provider_view
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "revision": facade_revision(state),
-        "providerTemplates": [],
-        "providerOrder": state.providers.iter().map(|provider| provider.id.clone()).collect::<Vec<_>>(),
-        "providers": providers
-    })
-}
-
-fn build_facade_model_selection_view(state: &ProviderState, input: Option<&Value>) -> Value {
-    let providers = state
-        .providers
-        .iter()
-        .filter(|provider| provider_is_executable(provider))
-        .map(|provider| {
-            let models = provider
-                .models
-                .iter()
-                .filter(|model| !provider.disabled_models.contains(*model))
-                .map(|model| {
-                    json!({
-                        "modelId": model,
-                        "config": complete_model_config(provider, model, provider.model_configs.get(model), false)
-                    })
-                })
-                .collect::<Vec<_>>();
-            let mut provider_view = json!({
-                "providerId": provider.id,
-                "providerName": provider.name,
-                "config": provider_config_value(provider),
-                "models": models
-            });
-            if let Some(template_id) = provider.template_id.as_deref() {
-                provider_view["templateId"] = Value::String(template_id.to_owned());
-            }
-            provider_view
-        })
-        .collect::<Vec<_>>();
-    let preferred = preferred_selection(state, &providers);
-    let mut result = json!({
-        "revision": facade_revision(state),
-        "providers": providers
-    });
-    if let Some(selection) = preferred {
-        result["preferredSelection"] = selection;
-    }
-    if let Some(input) = input.and_then(|value| value.get("selection")) {
-        if input.is_null() {
-            result["effectiveSelection"] = Value::Null;
-            result["selectionIssue"] = Value::String("selection-missing".to_owned());
-        } else if let Some(selection) = input.as_object() {
-            let provider_id = selection.get("providerId").and_then(Value::as_str);
-            let model_id = selection.get("modelId").and_then(Value::as_str);
-            let provider = provider_id.and_then(|id| {
-                providers
-                    .iter()
-                    .find(|provider| provider.get("providerId").and_then(Value::as_str) == Some(id))
-            });
-            let model = provider.and_then(|provider| {
-                model_id.and_then(|id| {
-                    provider
-                        .get("models")
-                        .and_then(Value::as_array)
-                        .and_then(|models| {
-                            models.iter().find(|model| {
-                                model.get("modelId").and_then(Value::as_str) == Some(id)
-                            })
-                        })
-                })
-            });
-            if provider.is_some() && model.is_some() {
-                let reasoning = selection
-                    .get("options")
-                    .and_then(Value::as_object)
-                    .and_then(|options| options.get("reasoningLevel"))
-                    .and_then(Value::as_str);
-                let supported_values = model
-                    .and_then(|model| model.pointer("/config/optionSpecs/reasoningLevel/values"))
-                    .and_then(Value::as_array);
-                let supported = supported_values.map_or_else(
-                    || reasoning.is_none(),
-                    |values| {
-                        reasoning.is_some_and(|reasoning| {
-                            values.iter().any(|value| value.as_str() == Some(reasoning))
-                        })
-                    },
-                );
-                // Source facade 保留可识别的 provider/model 身份；档位缺失或失效
-                // 只删除 options 并报告 issue，等待 UI 重新选择档位。
-                let mut effective = Map::from_iter([
-                    (
-                        "providerId".to_owned(),
-                        Value::String(provider_id.unwrap().to_owned()),
-                    ),
-                    (
-                        "modelId".to_owned(),
-                        Value::String(model_id.unwrap().to_owned()),
-                    ),
-                ]);
-                if supported {
-                    if let Some(options) = selection.get("options") {
-                        effective.insert("options".to_owned(), options.clone());
-                    }
-                    result["effectiveSelection"] = Value::Object(effective);
-                } else {
-                    result["effectiveSelection"] = Value::Object(effective);
-                    let issue = if reasoning.is_none() {
-                        "reasoning-level-missing"
-                    } else {
-                        "reasoning-level-not-supported"
-                    };
-                    result["selectionIssue"] = Value::String(issue.to_owned());
-                }
-            } else {
-                result["effectiveSelection"] = Value::Null;
-                let issue = if provider.is_none() {
-                    "provider-not-found"
-                } else {
-                    "model-not-found"
-                };
-                result["selectionIssue"] = Value::String(issue.to_owned());
-            }
-        }
-    }
-    result
-}
-
-fn preferred_selection(state: &ProviderState, providers: &[Value]) -> Option<Value> {
-    let complete = |provider_id: &str, model_id: &str| {
-        let provider = providers.iter().find(|provider| {
-            provider.get("providerId").and_then(Value::as_str) == Some(provider_id)
-        })?;
-        let model = provider
-            .get("models")
-            .and_then(Value::as_array)?
-            .iter()
-            .find(|model| model.get("modelId").and_then(Value::as_str) == Some(model_id))?;
-        let reasoning = model
-            .pointer("/config/optionSpecs/reasoningLevel/values")
-            .and_then(Value::as_array)
-            .and_then(|values| values.last())
-            .and_then(Value::as_str);
-        // 推理档位是可选能力。用户显式关闭档位后仍必须能选择已配置的模型；
-        // 不能把缺少 reasoningLevel 当作整条模型选择不可用。
-        Some(json!({
-            "providerId": provider_id,
-            "modelId": model_id,
-            "options": reasoning.map_or_else(|| json!({}), |level| json!({"reasoningLevel": level}))
-        }))
-    };
-    if let (Some(provider_id), Some(model_id)) = (
-        state.active_provider_id.as_deref(),
-        state.active_model_id.as_deref(),
-    ) && let Some(selection) = complete(provider_id, model_id)
-    {
-        return Some(selection);
-    }
-    providers.iter().find_map(|provider| {
-        let provider_id = provider.get("providerId")?.as_str()?;
-        let model_id = provider
-            .get("models")?
-            .as_array()?
-            .first()?
-            .get("modelId")?
-            .as_str()?;
-        complete(provider_id, model_id)
-    })
-}
-
-fn provider_config_value(provider: &ProviderRecord) -> Value {
-    let access = match &provider.api_key {
-        Some(api_key) => json!({"type": "api-key", "apiKey": api_key}),
-        None => json!({"type": "api-key"}),
-    };
-    json!({
-        "group": "standard-personal",
-        "access": access,
-        "api": {
-            "type": source_api_type(&provider.api_backend),
-            "baseUrl": provider.base_url
-        },
-        "personalModelIds": provider.models,
-        "modelOrder": provider.models,
-        "visibility": "visible"
-    })
-}
-
-fn source_api_type(api_backend: &str) -> &'static str {
-    match api_backend {
-        "messages" => "anthropic-messages",
-        "chat_completions" => "openai-chat-completions",
-        _ => "openai-responses",
-    }
-}
-
-fn complete_model_config(
-    provider: &ProviderRecord,
-    model: &str,
-    overlay: Option<&Value>,
-    disabled: bool,
-) -> Value {
-    let context_window = provider
-        .context_windows
-        .get(model)
-        .copied()
-        .unwrap_or(DEFAULT_CONTEXT_WINDOW_TOKENS);
-    let vision = provider
-        .supports_vision
-        .get(model)
-        .copied()
-        .unwrap_or(false);
-    let explicit_reasoning = provider.reasoning_efforts.get(model);
-    let efforts = explicit_reasoning.cloned().unwrap_or_else(|| {
-        REASONING_EFFORT_IDS
-            .iter()
-            .map(|id| (*id).to_owned())
-            .collect()
-    });
-    let max_output = provider
-        .max_output_tokens
-        .get(model)
-        .copied()
-        .unwrap_or(128_000);
-    let mut option_specs = json!({
-        "maxOutputTokens": {
-            "max": max_output,
-            "map": "{\"max_output_tokens\": maxOutputTokens}"
-        }
-    });
-    if !explicit_reasoning.is_some_and(Vec::is_empty) {
-        option_specs["reasoningLevel"] = json!({
-            "values": efforts,
-            "map": "{\"reasoning_effort\": reasoningLevel}"
-        });
-    }
-    let mut value = json!({
-        "enabled": !disabled,
-        "properties": {
-            "requiresMfjsToolSchema": false,
-            "contextWindow": context_window,
-            "inputFormat": {
-                "supportsText": true,
-                "supportsImage": vision,
-                "supportsVideo": false,
-                "supportsAudio": false,
-                "supportsPdf": false
-            },
-            "outputFormat": {"supportsText": true},
-            "supportsToolCall": true,
-            "supportsJsonSchemaOutput": true,
-            "supportsNativeWebSearch": false,
-            "supportsMidConversationSystem": true
-        },
-        "optionSpecs": option_specs
-    });
-    if let Some(overlay) = overlay {
-        let display_overlay =
-            display_model_overlay_for_empty_reasoning(overlay, explicit_reasoning);
-        merge_sparse_json(&mut value, &display_overlay);
-    }
-    if disabled {
-        value["enabled"] = Value::Bool(false);
-    }
-    value
-}
-
-/// facade 的 strict model-config schema 不允许 `reasoningLevel.values: []`。
-/// 持久化层仍保存空数组，但跨到前端时省略该 optionSpec，表示模型不开放推理档位。
-fn display_model_overlay(overlay: &Value) -> Value {
-    let mut display = overlay.clone();
-    let Some(option_specs) = display
-        .get_mut("optionSpecs")
-        .and_then(Value::as_object_mut)
-    else {
-        return display;
-    };
-    let is_empty_reasoning = option_specs
-        .get("reasoningLevel")
-        .and_then(Value::as_object)
-        .and_then(|reasoning| reasoning.get("values"))
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty);
-    if is_empty_reasoning {
-        option_specs.remove("reasoningLevel");
-    }
-    display
-}
-
-fn display_model_overlay_for_empty_reasoning(
-    overlay: &Value,
-    explicit_reasoning: Option<&Vec<String>>,
-) -> Value {
-    let mut display = display_model_overlay(overlay);
-    if !explicit_reasoning.is_some_and(Vec::is_empty) {
-        return display;
-    }
-    let Some(option_specs) = display
-        .get_mut("optionSpecs")
-        .and_then(Value::as_object_mut)
-    else {
-        return display;
-    };
-    // ProviderRecord 的显式空数组是权威禁用标记，不能被旧 overlay 中的档位覆盖。
-    option_specs.remove("reasoningLevel");
-    display
-}
-
-fn merge_sparse_json(base: &mut Value, overlay: &Value) {
-    let (Some(base_object), Some(overlay_object)) = (base.as_object_mut(), overlay.as_object())
-    else {
-        *base = overlay.clone();
-        return;
-    };
-    for (key, value) in overlay_object {
-        match base_object.get_mut(key) {
-            Some(existing) if existing.is_object() && value.is_object() => {
-                merge_sparse_json(existing, value)
-            }
-            _ => {
-                base_object.insert(key.clone(), value.clone());
-            }
-        }
-    }
-}
-
-fn provider_is_executable(provider: &ProviderRecord) -> bool {
-    !is_facade_placeholder_url(&provider.base_url)
-        && !provider.models.is_empty()
-        && provider
-            .models
-            .iter()
-            .any(|model| !provider.disabled_models.contains(model))
-        && validate_base_url(&provider.base_url).is_ok()
-        && validate_api_backend(&provider.api_backend).is_ok()
-        && validate_exact_endpoint(&provider.base_url, &provider.api_backend).is_ok()
-}
-
-fn is_facade_placeholder_url(base_url: &str) -> bool {
-    base_url == FACADE_PLACEHOLDER_BASE_URL
-}
-
-fn provider_issues(provider: &ProviderRecord) -> Value {
-    if provider_is_executable(provider) {
-        Value::Array(Vec::new())
-    } else {
-        json!([{
-            "code": "invalid-config",
-            "path": ["providers", provider.id],
-            "message": "Provider 配置尚未进入可执行 Runtime"
-        }])
-    }
-}
-
-fn facade_revision(state: &ProviderState) -> u64 {
-    state.revision
-}
-
-/// 在一次成功的状态变更写入前分配下一个 facade revision。
-fn bump_revision(state: &mut ProviderState) {
-    state.revision = state.revision.saturating_add(1);
-}
-
-fn apply_provider_config(record: &mut ProviderRecord, config: &Value) -> Result<()> {
-    let Some(object) = config.as_object() else {
-        anyhow::bail!("Provider config 必须是对象");
-    };
-    if let Some(api) = object.get("api").and_then(Value::as_object) {
-        if let Some(api_type) = api.get("type").and_then(Value::as_str) {
-            record.api_backend = match api_type {
-                "anthropic-messages" => "messages",
-                "openai-chat-completions" => "chat_completions",
-                "openai-responses" => "responses",
-                other => anyhow::bail!("不支持的 Provider API 类型：{other}"),
-            }
-            .to_owned();
-        }
-        if let Some(base_url) = api.get("baseUrl").and_then(Value::as_str) {
-            record.base_url = base_url.trim().to_owned();
-        }
-    }
-    if let Some(access) = object.get("access").and_then(Value::as_object) {
-        if let Some(access_type) = access.get("type").and_then(Value::as_str)
-            && access_type != "api-key"
-        {
-            anyhow::bail!("桌面 Provider 仅支持 api-key 访问方式");
-        }
-        if let Some(api_key) = access.get("apiKey") {
-            record.api_key = match api_key {
-                Value::Null => None,
-                Value::String(value) => Some(validate_secret(value)?.to_owned()),
-                _ => anyhow::bail!("access.apiKey 必须是字符串或 null"),
-            };
-        }
-    }
-    Ok(())
-}
-
-fn apply_model_config(record: &mut ProviderRecord, model: &str, config: &Value) -> Result<()> {
-    validate_model_overlay(config)?;
-    let object = config
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("Model config 必须是对象"))?;
-    record
-        .model_configs
-        .insert(model.to_owned(), config.clone());
-    if let Some(enabled) = object.get("enabled").and_then(Value::as_bool) {
-        if enabled {
-            record.disabled_models.remove(model);
-        } else {
-            record.disabled_models.insert(model.to_owned());
-        }
-    }
-    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-        if let Some(context) = properties.get("contextWindow").and_then(Value::as_u64) {
-            record.context_windows.insert(model.to_owned(), context);
-        }
-        if let Some(image) = properties
-            .get("inputFormat")
-            .and_then(Value::as_object)
-            .and_then(|format| format.get("supportsImage"))
-            .and_then(Value::as_bool)
-        {
-            record.supports_vision.insert(model.to_owned(), image);
-        }
-    }
-    if let Some(options) = object.get("optionSpecs").and_then(Value::as_object) {
-        if let Some(values) = options
-            .get("reasoningLevel")
-            .and_then(Value::as_object)
-            .and_then(|spec| spec.get("values"))
-            .and_then(Value::as_array)
-        {
-            let efforts = values
-                .iter()
-                .map(|value| value.as_str().map(str::to_owned))
-                .collect::<Option<Vec<_>>>()
-                .ok_or_else(|| anyhow::anyhow!("reasoningLevel.values 必须是字符串数组"))?;
-            record.reasoning_efforts.insert(model.to_owned(), efforts);
-        }
-        if let Some(max) = options
-            .get("maxOutputTokens")
-            .and_then(Value::as_object)
-            .and_then(|spec| spec.get("max"))
-            .and_then(Value::as_u64)
-        {
-            let max = u32::try_from(max).context("maxOutputTokens.max 超过 u32 范围")?;
-            record.max_output_tokens.insert(model.to_owned(), max);
-        }
-    }
-    Ok(())
-}
-
-/// 保存前收窄到 ZCode ModelConfigObject 的稀疏字段集合，避免未知字段进入
-/// Settings View 后被前端 strict schema 拒绝。
-fn validate_model_overlay(config: &Value) -> Result<()> {
-    let object = config
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("Model config 必须是对象"))?;
-    validate_object_keys(object, &["enabled", "properties", "optionSpecs"], "model")?;
-    validate_optional_bool(object, "enabled", "model.enabled")?;
-
-    if let Some(properties) = object.get("properties") {
-        let Some(properties) = properties.as_object() else {
-            if properties.is_null() {
-                return validate_model_option_specs(object);
-            }
-            anyhow::bail!("model.properties 必须是对象或 null");
-        };
-        validate_object_keys(
-            properties,
-            &[
-                "requiresMfjsToolSchema",
-                "contextWindow",
-                "inputFormat",
-                "outputFormat",
-                "supportsToolCall",
-                "supportsJsonSchemaOutput",
-                "supportsNativeWebSearch",
-                "supportsMidConversationSystem",
-            ],
-            "model.properties",
-        )?;
-        for key in [
-            "requiresMfjsToolSchema",
-            "supportsToolCall",
-            "supportsJsonSchemaOutput",
-            "supportsNativeWebSearch",
-            "supportsMidConversationSystem",
-        ] {
-            validate_optional_bool(properties, key, &format!("model.properties.{key}"))?;
-        }
-        validate_optional_positive_u64(
-            properties,
-            "contextWindow",
-            "model.properties.contextWindow",
-        )?;
-        validate_model_format(
-            properties,
-            "inputFormat",
-            &[
-                "supportsText",
-                "supportsImage",
-                "supportsVideo",
-                "supportsAudio",
-                "supportsPdf",
-            ],
-        )?;
-        validate_model_format(properties, "outputFormat", &["supportsText"])?;
-    }
-    validate_model_option_specs(object)
-}
-
-fn validate_model_option_specs(object: &Map<String, Value>) -> Result<()> {
-    let Some(option_specs) = object.get("optionSpecs") else {
-        return Ok(());
-    };
-    let Some(option_specs) = option_specs.as_object() else {
-        if option_specs.is_null() {
-            return Ok(());
-        }
-        anyhow::bail!("model.optionSpecs 必须是对象或 null");
-    };
-    validate_object_keys(
-        option_specs,
-        &["reasoningLevel", "maxOutputTokens"],
-        "model.optionSpecs",
-    )?;
-    if let Some(reasoning) = option_specs.get("reasoningLevel") {
-        let Some(reasoning) = reasoning.as_object() else {
-            if reasoning.is_null() {
-                return Ok(());
-            }
-            anyhow::bail!("model.optionSpecs.reasoningLevel 必须是对象或 null");
-        };
-        validate_object_keys(
-            reasoning,
-            &["values", "map"],
-            "model.optionSpecs.reasoningLevel",
-        )?;
-        if let Some(values) = reasoning.get("values") {
-            let Some(values) = values.as_array() else {
-                if values.is_null() {
-                    return Ok(());
-                }
-                anyhow::bail!("reasoningLevel.values 必须是字符串数组或 null");
-            };
-            let mut seen = BTreeSet::new();
-            for value in values {
-                let value = value
-                    .as_str()
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| anyhow::anyhow!("reasoningLevel.values 必须是非空字符串数组"))?;
-                if !seen.insert(value.to_owned()) {
-                    anyhow::bail!("reasoningLevel.values 不能重复");
-                }
-            }
-        }
-        validate_optional_non_empty_string(reasoning, "map", "reasoningLevel.map")?;
-    }
-    if let Some(max_output) = option_specs.get("maxOutputTokens") {
-        let Some(max_output) = max_output.as_object() else {
-            if max_output.is_null() {
-                return Ok(());
-            }
-            anyhow::bail!("model.optionSpecs.maxOutputTokens 必须是对象或 null");
-        };
-        validate_object_keys(
-            max_output,
-            &["max", "map"],
-            "model.optionSpecs.maxOutputTokens",
-        )?;
-        validate_optional_positive_u64(max_output, "max", "maxOutputTokens.max")?;
-        validate_optional_non_empty_string(max_output, "map", "maxOutputTokens.map")?;
-    }
-    Ok(())
-}
-
-fn validate_model_format(
-    properties: &Map<String, Value>,
-    field: &str,
-    allowed: &[&str],
-) -> Result<()> {
-    let Some(format) = properties.get(field) else {
-        return Ok(());
-    };
-    let Some(format) = format.as_object() else {
-        if format.is_null() {
-            return Ok(());
-        }
-        anyhow::bail!("model.properties.{field} 必须是对象或 null");
-    };
-    validate_object_keys(format, allowed, &format!("model.properties.{field}"))?;
-    for key in allowed {
-        validate_optional_bool(format, key, &format!("model.properties.{field}.{key}"))?;
-    }
-    Ok(())
-}
-
-fn validate_object_keys(object: &Map<String, Value>, allowed: &[&str], path: &str) -> Result<()> {
-    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
-        anyhow::bail!("{path} 包含未知字段 {key}");
-    }
-    Ok(())
-}
-
-fn validate_optional_bool(object: &Map<String, Value>, key: &str, path: &str) -> Result<()> {
-    if let Some(value) = object.get(key)
-        && !value.is_null()
-        && !value.is_boolean()
-    {
-        anyhow::bail!("{path} 必须是布尔值或 null");
-    }
-    Ok(())
-}
-
-fn validate_optional_positive_u64(
-    object: &Map<String, Value>,
-    key: &str,
-    path: &str,
-) -> Result<()> {
-    if let Some(value) = object.get(key) {
-        if value.is_null() {
-            return Ok(());
-        }
-        if value.as_u64().is_none_or(|value| value == 0) {
-            anyhow::bail!("{path} 必须是正整数或 null");
-        }
-    }
-    Ok(())
-}
-
-fn validate_optional_non_empty_string(
-    object: &Map<String, Value>,
-    key: &str,
-    path: &str,
-) -> Result<()> {
-    if let Some(value) = object.get(key)
-        && value.as_str().is_none_or(|value| value.trim().is_empty())
-        && !value.is_null()
-    {
-        anyhow::bail!("{path} 必须是非空字符串或 null");
-    }
-    Ok(())
-}
-
-fn facade_provider_mut<'a>(
-    state: &'a mut ProviderState,
-    provider_id: &str,
-) -> Result<&'a mut ProviderRecord> {
-    let id = validate_provider_id(provider_id)?;
-    state
-        .providers
-        .iter_mut()
-        .find(|provider| provider.id == id)
-        .with_context(|| format!("找不到供应商 {id}"))
-}
-
-fn next_facade_provider_id(state: &ProviderState) -> String {
-    let mut index = 1u32;
-    loop {
-        let candidate = format!("personal-provider-{index}");
-        if !state
-            .providers
-            .iter()
-            .any(|provider| provider.id == candidate)
-        {
-            return candidate;
-        }
-        index = index.saturating_add(1);
-    }
-}
-
-fn required_value_string(value: Option<&Value>, field: &str) -> Result<String> {
-    let value = value
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("{field} 必须是非空字符串"))?;
-    Ok(value.to_owned())
-}
-
-fn value_string_array(value: &Value, field: &str) -> Result<Vec<String>> {
-    value
-        .as_array()
-        .ok_or_else(|| anyhow::anyhow!("{field} 必须是字符串数组"))?
-        .iter()
-        .map(|value| required_value_string(Some(value), field))
-        .collect()
-}
-
-fn validate_model_id(raw: &str) -> Result<String> {
-    let value = raw.trim();
-    if value.is_empty() || value.chars().any(char::is_control) {
-        anyhow::bail!("模型标识不能为空或包含控制字符");
-    }
-    Ok(value.to_owned())
-}
-
-fn rename_model_key<T>(map: &mut BTreeMap<String, T>, current: &str, next: &str) {
-    if let Some(value) = map.remove(current) {
-        map.insert(next.to_owned(), value);
     }
 }
 
@@ -2225,8 +912,8 @@ fn repair_selection(state: &mut ProviderState) {
 }
 
 /// 读取供应商状态文件。
-fn load_state(app: &AppHandle) -> Result<ProviderState> {
-    let path = state_path(app)?;
+fn load_state(paths: &NativePaths) -> Result<ProviderState> {
+    let path = state_path(paths)?;
     load_state_from_path(&path)
 }
 
@@ -2270,7 +957,6 @@ const PROVIDER_FILE_KEYS: &[&str] = &[
     "version",
     "activeProviderId",
     "activeModelId",
-    "revision",
     "providers",
 ];
 
@@ -2288,7 +974,6 @@ const PROVIDER_RECORD_KEYS: &[&str] = &[
     "supportsVision",
     "reasoningEfforts",
     "disabledModels",
-    "modelConfigs",
 ];
 
 /// 找出配置中未知或已移除的字段；只报告字段名，不参与解析。
@@ -2446,38 +1131,6 @@ fn normalize_loaded_state(state: &mut ProviderState) -> Vec<String> {
             ));
         }
 
-        let stale_model_configs: Vec<String> = provider
-            .model_configs
-            .keys()
-            .filter(|model| !models.iter().any(|item| item == *model))
-            .cloned()
-            .collect();
-        for model in &stale_model_configs {
-            provider.model_configs.remove(model);
-        }
-        if !stale_model_configs.is_empty() {
-            warnings.push(format!(
-                "供应商 {} 的模型覆盖指向已删除模型，已忽略：{}",
-                provider.id,
-                stale_model_configs.join(", ")
-            ));
-        }
-        let invalid_model_configs: Vec<String> = provider
-            .model_configs
-            .iter()
-            .filter(|(_, config)| validate_model_overlay(config).is_err())
-            .map(|(model, _)| model.clone())
-            .collect();
-        for model in &invalid_model_configs {
-            provider.model_configs.remove(model);
-        }
-        if !invalid_model_configs.is_empty() {
-            warnings.push(format!(
-                "供应商 {} 的模型覆盖不符合 source schema，已忽略：{}",
-                provider.id,
-                invalid_model_configs.join(", ")
-            ));
-        }
         // 缺失的视觉能力按“不支持”补齐，与运行时读取时的默认值一致，
         // 避免新增模型后整份配置因缺少该字段而无法加载。
         let missing_vision: Vec<String> = models
@@ -2615,11 +1268,6 @@ fn validate_state(state: &ProviderState) -> Result<()> {
         {
             anyhow::bail!("供应商 {} 的禁用模型列表包含未知模型", provider.id);
         }
-        if provider.model_configs.iter().any(|(model, config)| {
-            !provider.models.iter().any(|candidate| candidate == model) || !config.is_object()
-        }) {
-            anyhow::bail!("供应商 {} 的模型覆盖无效", provider.id);
-        }
         if validate_api_backend(&provider.api_backend)? != provider.api_backend {
             anyhow::bail!("供应商 {} 的协议类型不是规范格式", provider.id);
         }
@@ -2723,7 +1371,7 @@ fn validate_supports_vision(
 /// 仅允许运行时可执行的档位，并保持用户指定的排序。
 const REASONING_EFFORT_IDS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
-/// 档位顺序同时决定前端滑块方向，导入数据必须保持从低到高且无重复。
+/// 档位顺序同时决定设置界面的滑块方向，导入数据必须保持从低到高且无重复。
 fn reasoning_efforts_in_order(values: &[String]) -> bool {
     let mut previous = None;
     for value in values {
@@ -2773,8 +1421,8 @@ fn normalize_models(models: Vec<String>) -> Result<Vec<String>> {
 }
 
 /// 原子写入供应商状态文件。
-fn save_state(app: &AppHandle, state: &ProviderState) -> Result<()> {
-    let path = state_path(app)?;
+fn save_state(paths: &NativePaths, state: &ProviderState) -> Result<()> {
+    let path = state_path(paths)?;
     save_state_to_path(&path, state)
 }
 
@@ -2833,8 +1481,8 @@ fn validate_catalog_secret_scope(
 }
 
 /// 返回供应商状态文件路径。
-fn state_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(crate::storage::root_dir(app)?.join("providers.json"))
+fn state_path(paths: &NativePaths) -> Result<PathBuf> {
+    Ok(crate::storage::root_dir(paths)?.join("providers.json"))
 }
 
 /// 校验供应商稳定标识。
@@ -2969,10 +1617,9 @@ mod live_context_tests;
 #[cfg(test)]
 mod tests {
     use super::{
-        ProviderExportFile, ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint,
-        validate_api_key, validate_base_url, validate_catalog_secret_scope,
-        validate_context_windows, validate_exact_endpoint, validate_reasoning_efforts,
-        validate_secret, validate_state,
+        ProviderFile, ProviderRecord, ProviderState, model_catalog_endpoint, validate_api_key,
+        validate_base_url, validate_catalog_secret_scope, validate_context_windows,
+        validate_exact_endpoint, validate_reasoning_efforts, validate_secret, validate_state,
     };
     use std::collections::BTreeMap;
 
@@ -3061,6 +1708,62 @@ mod tests {
             super::update_models_at_path(&path, vec!["provider::old".into()], current).is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    /// 模型启停必须持久化禁用集合，并让 Runtime 注册表立即过滤禁用模型。
+    #[test]
+    fn model_enabled_toggle_persists_and_refreshes_runtime_registry() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = crate::native_paths::NativePaths::from_data_root(directory.path().to_owned());
+        super::save_state(&paths, &models_editor_fixture()).unwrap();
+
+        let disabled = super::set_model_enabled(&paths, "provider", "old", false).unwrap();
+        let provider = &disabled.providers[0];
+        assert!(provider.disabled_models.contains("old"));
+        assert_eq!(disabled.default_model.as_deref(), Some("keep"));
+        let persisted = super::load_state(&paths).unwrap();
+        assert!(persisted.providers[0].disabled_models.contains("old"));
+
+        let registry = super::ProviderRegistry::new();
+        super::replace_runtime_registry(&registry, &disabled).unwrap();
+        assert!(registry.resolve("provider", "old").is_err());
+        assert!(registry.resolve("provider", "keep").is_ok());
+
+        let enabled = super::set_model_enabled(&paths, "provider", "old", true).unwrap();
+        assert!(!enabled.providers[0].disabled_models.contains("old"));
+        super::replace_runtime_registry(&registry, &enabled).unwrap();
+        assert!(registry.resolve("provider", "old").is_ok());
+        assert_eq!(
+            super::load_state(&paths).unwrap().providers[0]
+                .disabled_models
+                .len(),
+            0
+        );
+    }
+
+    /// 非法供应商、模型以及禁用当前唯一模型都必须在写入前失败。
+    #[test]
+    fn model_enabled_toggle_rejects_invalid_or_last_active_model_without_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = crate::native_paths::NativePaths::from_data_root(directory.path().to_owned());
+        super::save_state(&paths, &models_editor_fixture()).unwrap();
+
+        let original = std::fs::read(directory.path().join("providers.json")).unwrap();
+        assert!(super::set_model_enabled(&paths, "missing", "old", false).is_err());
+        assert!(super::set_model_enabled(&paths, "provider", "missing", false).is_err());
+        assert_eq!(
+            std::fs::read(directory.path().join("providers.json")).unwrap(),
+            original
+        );
+
+        super::set_model_enabled(&paths, "provider", "keep", false).unwrap();
+        assert!(super::set_model_enabled(&paths, "provider", "old", false).is_err());
+        let state = super::load_state(&paths).unwrap();
+        assert_eq!(
+            state.providers[0].disabled_models,
+            ["keep".to_owned()].into_iter().collect()
+        );
+        assert_eq!(state.active_model_id.as_deref(), Some("old"));
     }
 
     #[test]
@@ -3465,7 +2168,6 @@ mod tests {
         let state = ProviderState {
             active_provider_id: Some("provider".to_string()),
             active_model_id: Some("missing-model".to_string()),
-            revision: 0,
             providers: vec![ProviderRecord {
                 id: "provider".to_string(),
                 name: "Provider".to_string(),
@@ -3480,7 +2182,6 @@ mod tests {
                 supports_vision: [("test-model".to_string(), false)].into_iter().collect(),
                 reasoning_efforts: Default::default(),
                 disabled_models: Default::default(),
-                model_configs: Default::default(),
             }],
         };
 
@@ -3524,7 +2225,6 @@ mod tests {
             supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
             reasoning_efforts: Default::default(),
             disabled_models: Default::default(),
-            model_configs: Default::default(),
         };
 
         assert!(
@@ -3544,164 +2244,18 @@ mod tests {
                 .is_err()
         );
     }
-
-    /// 构造一个用于导入测试的最小合法供应商记录。
-    fn import_test_record(id: &str) -> ProviderRecord {
-        ProviderRecord {
-            id: id.to_string(),
-            name: format!("Provider {id}"),
-            template_id: None,
-            base_url: "https://api.example.com/v1".to_string(),
-            models: vec!["test-model".to_string()],
-            api_backend: "responses".to_string(),
-            api_key: None,
-            context_windows: BTreeMap::new(),
-            max_output_tokens: BTreeMap::new(),
-            chat_output_token_field: Default::default(),
-            supports_vision: [("test-model".to_string(), true)].into_iter().collect(),
-            reasoning_efforts: Default::default(),
-            disabled_models: Default::default(),
-            model_configs: Default::default(),
-        }
-    }
-
-    /// 导出文档结构必须能原样被导入解析器接受，且拒绝未知 schema 与版本。
-    #[test]
-    fn provider_import_parses_export_document() {
-        let records = vec![
-            import_test_record("provider-a"),
-            import_test_record("provider-b"),
-        ];
-        let file = ProviderExportFile {
-            schema: super::PROVIDER_EXPORT_SCHEMA.to_string(),
-            version: super::PROVIDER_CONFIG_VERSION,
-            providers: records,
-        };
-        let text = serde_json::to_string(&file).expect("序列化导出文档");
-        let parsed = super::parse_provider_import(&text).expect("导出文档应可导入");
-        assert_eq!(parsed.len(), 2);
-        assert_eq!(parsed[0].id, "provider-a");
-
-        let mut unknown_schema = serde_json::to_value(&file).expect("导出文档转 JSON");
-        unknown_schema["schema"] = "unknown/schema".into();
-        assert!(super::parse_provider_import(unknown_schema.to_string().as_str()).is_err());
-
-        let mut unknown_version = serde_json::to_value(&file).expect("导出文档转 JSON");
-        unknown_version["version"] = 99.into();
-        assert!(super::parse_provider_import(unknown_version.to_string().as_str()).is_err());
-    }
-
-    /// 导入同时接受完整配置文件 schema，并拒绝空列表和重复标识。
-    #[test]
-    fn provider_import_accepts_full_config_and_rejects_duplicates() {
-        let state = ProviderState {
-            active_provider_id: Some("provider-a".to_string()),
-            active_model_id: Some("test-model".to_string()),
-            revision: 0,
-            providers: vec![import_test_record("provider-a")],
-        };
-        let file = ProviderFile::from_state(&state);
-        let text = serde_json::to_string(&file).expect("序列化完整配置");
-        let parsed = super::parse_provider_import(&text).expect("完整配置应可导入");
-        assert_eq!(parsed.len(), 1);
-
-        let empty = r#"{"schema":"keencode/providers-export","version":1,"providers":[]}"#;
-        assert!(super::parse_provider_import(empty).is_err());
-
-        let duplicated = r#"{"schema":"keencode/providers-export","version":1,"providers":[
-            {"id":"a","name":"A","baseUrl":"https://api.example.com/v1","models":["m"],
-             "apiBackend":"responses","apiKey":null,"contextWindows":{},
-             "supportsVision":{"m":false}},
-            {"id":"a","name":"A2","baseUrl":"https://api.example.com/v1","models":["m"],
-             "apiBackend":"responses","apiKey":null,"contextWindows":{},
-             "supportsVision":{"m":false}}]}"#;
-        assert!(super::parse_provider_import(duplicated).is_err());
-    }
-
-    /// 合并语义：同标识覆盖、其余追加、不改变当前激活供应商与模型。
-    #[test]
-    fn provider_import_merges_by_id_without_touching_selection() {
-        let mut existing = import_test_record("provider-a");
-        existing.name = "Old Name".to_string();
-        let state = ProviderState {
-            active_provider_id: Some("provider-a".to_string()),
-            active_model_id: Some("test-model".to_string()),
-            revision: 0,
-            providers: vec![existing],
-        };
-        let incoming = vec![
-            import_test_record("provider-a"),
-            import_test_record("provider-b"),
-        ];
-        let (merged, added, updated) =
-            super::merge_provider_import(state, incoming).expect("合并导入记录");
-        assert_eq!((added, updated), (1, 1));
-        assert_eq!(merged.providers.len(), 2);
-        assert_eq!(merged.providers[0].name, "Provider provider-a");
-        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
-        assert_eq!(merged.active_model_id.as_deref(), Some("test-model"));
-    }
-
-    /// 空状态首次导入必须补齐当前供应商与模型，否则保存校验会整体失败。
-    #[test]
-    fn provider_import_into_empty_state_selects_first_provider() {
-        let (merged, added, updated) = super::merge_provider_import(
-            ProviderState::default(),
-            vec![
-                import_test_record("provider-a"),
-                import_test_record("provider-b"),
-            ],
-        )
-        .expect("空状态导入");
-        assert_eq!((added, updated), (2, 0));
-        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
-        assert_eq!(merged.active_model_id.as_deref(), Some("test-model"));
-    }
-
-    /// 覆盖当前供应商时删除了激活模型，必须回退到该供应商的首个模型。
-    #[test]
-    fn provider_import_falls_back_when_active_model_removed() {
-        let mut removed_model = import_test_record("provider-a");
-        removed_model.models = vec!["replacement-model".to_string()];
-        removed_model.supports_vision = [("replacement-model".to_string(), false)]
-            .into_iter()
-            .collect();
-        let state = ProviderState {
-            active_provider_id: Some("provider-a".to_string()),
-            active_model_id: Some("test-model".to_string()),
-            revision: 0,
-            providers: vec![import_test_record("provider-a")],
-        };
-        let (merged, added, updated) =
-            super::merge_provider_import(state, vec![removed_model]).expect("覆盖当前供应商");
-        assert_eq!((added, updated), (0, 1));
-        assert_eq!(merged.active_provider_id.as_deref(), Some("provider-a"));
-        assert_eq!(merged.active_model_id.as_deref(), Some("replacement-model"));
-    }
-
-    /// 合并结果必须通过完整状态校验；携带非法记录的导入整体失败。
-    #[test]
-    fn provider_import_merge_rejects_invalid_records() {
-        let state = ProviderState::default();
-        let mut record = import_test_record("provider-a");
-        record.supports_vision.clear();
-        assert!(super::merge_provider_import(state, vec![record]).is_err());
-    }
 }
 
 #[cfg(test)]
 mod provider_registry_tests {
     use super::{
-        CustomProvider, FACADE_PLACEHOLDER_BASE_URL, MAX_PROVIDER_CONFIG_BYTES, ProviderRecord,
-        ProviderState, ProvidersListResult, build_facade_model_selection_view,
-        build_facade_settings_view, bump_revision, complete_model_config, facade_revision,
+        CustomProvider, MAX_PROVIDER_CONFIG_BYTES, ProviderState, ProvidersListResult,
         load_state_from_path, parse_native_provider_timeout_override, provider_credential_revision,
         replace_runtime_registry, runtime_provider_config, save_state_to_path,
     };
     use keencode_model::{ModelProvider, ProviderProtocol};
     use keencode_provider::ProviderRegistry;
-    use serde_json::Value;
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::BTreeMap;
     use std::fs;
 
     /// 构造一个只包含当前结构字段的 Runtime Provider 测试配置。
@@ -3757,259 +2311,6 @@ mod provider_registry_tests {
         .expect("至少一个启用模型时应注册 Provider");
         assert!(registry.resolve("isolated", "disabled-model").is_err());
         assert!(registry.resolve("isolated", "enabled-model").is_ok());
-    }
-
-    #[test]
-    fn facade_model_config_preserves_explicit_empty_reasoning_and_sparse_overlay() {
-        let mut record = ProviderRecord {
-            id: "facade".to_owned(),
-            name: "Facade".to_owned(),
-            template_id: None,
-            base_url: "https://models.example/v1/responses".to_owned(),
-            models: vec!["model".to_owned()],
-            api_backend: "responses".to_owned(),
-            api_key: None,
-            context_windows: BTreeMap::new(),
-            max_output_tokens: BTreeMap::new(),
-            chat_output_token_field: Default::default(),
-            supports_vision: [("model".to_owned(), false)].into_iter().collect(),
-            reasoning_efforts: [("model".to_owned(), Vec::new())].into_iter().collect(),
-            disabled_models: Default::default(),
-            model_configs: Default::default(),
-        };
-        let inherited = complete_model_config(&record, "model", None, false);
-        assert!(inherited["optionSpecs"].get("reasoningLevel").is_none());
-        let empty_reasoning_overlay = serde_json::json!({
-            "optionSpecs": {
-                "reasoningLevel": {
-                    "values": [],
-                    "map": "{\"reasoning_effort\": reasoningLevel}"
-                }
-            }
-        });
-        let effective_without_reasoning =
-            complete_model_config(&record, "model", Some(&empty_reasoning_overlay), false);
-        assert!(
-            effective_without_reasoning["optionSpecs"]
-                .get("reasoningLevel")
-                .is_none()
-        );
-        let overlay = serde_json::json!({
-            "properties": {"inputFormat": {"supportsImage": true}},
-            "optionSpecs": {"maxOutputTokens": {"max": 4096}}
-        });
-        record
-            .model_configs
-            .insert("model".to_owned(), overlay.clone());
-        let effective = complete_model_config(&record, "model", Some(&overlay), false);
-        assert_eq!(
-            effective["properties"]["inputFormat"]["supportsImage"],
-            true
-        );
-        assert_eq!(effective["optionSpecs"]["maxOutputTokens"]["max"], 4096);
-
-        record
-            .model_configs
-            .insert("model".to_owned(), empty_reasoning_overlay);
-        let settings = build_facade_settings_view(&ProviderState {
-            active_provider_id: None,
-            active_model_id: None,
-            revision: 0,
-            providers: vec![record],
-        });
-        assert!(
-            settings["providers"][0]["models"][0]["personalExactConfig"]["optionSpecs"]
-                .get("reasoningLevel")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn facade_revision_is_persistent_and_monotonic() {
-        let mut state = ProviderState::default();
-        assert_eq!(facade_revision(&state), 0);
-        bump_revision(&mut state);
-        assert_eq!(facade_revision(&state), 1);
-        bump_revision(&mut state);
-        assert_eq!(facade_revision(&state), 2);
-    }
-
-    #[test]
-    fn facade_selection_matches_source_identity_and_reasoning_fallback() {
-        let state = ProviderState {
-            active_provider_id: Some("facade".to_owned()),
-            active_model_id: Some("model".to_owned()),
-            revision: 0,
-            providers: vec![ProviderRecord {
-                id: "facade".to_owned(),
-                name: "Facade".to_owned(),
-                template_id: Some("custom-template".to_owned()),
-                base_url: "https://models.example/v1/responses".to_owned(),
-                models: vec!["model".to_owned()],
-                api_backend: "responses".to_owned(),
-                api_key: None,
-                context_windows: BTreeMap::new(),
-                max_output_tokens: BTreeMap::new(),
-                chat_output_token_field: Default::default(),
-                supports_vision: BTreeMap::new(),
-                reasoning_efforts: Default::default(),
-                disabled_models: Default::default(),
-                model_configs: Default::default(),
-            }],
-        };
-        let settings = build_facade_settings_view(&state);
-        assert_eq!(settings["providers"][0]["templateId"], "custom-template");
-        let view = build_facade_model_selection_view(&state, None);
-        assert_eq!(view["providers"][0]["templateId"], "custom-template");
-        assert_eq!(
-            view["preferredSelection"]["options"]["reasoningLevel"],
-            "max"
-        );
-
-        let missing_reasoning = build_facade_model_selection_view(
-            &state,
-            Some(&serde_json::json!({
-                "selection": {"providerId": "facade", "modelId": "model"}
-            })),
-        );
-        assert_eq!(
-            missing_reasoning["effectiveSelection"],
-            serde_json::json!({"providerId": "facade", "modelId": "model"})
-        );
-        assert_eq!(
-            missing_reasoning["selectionIssue"],
-            "reasoning-level-missing"
-        );
-
-        let mut empty_reasoning_state = state.clone();
-        empty_reasoning_state
-            .providers
-            .first_mut()
-            .expect("fixture provider")
-            .reasoning_efforts
-            .insert("model".to_owned(), Vec::new());
-        let empty_reasoning_view = build_facade_model_selection_view(&empty_reasoning_state, None);
-        assert_eq!(
-            empty_reasoning_view["preferredSelection"],
-            serde_json::json!({
-                "providerId": "facade",
-                "modelId": "model",
-                "options": {}
-            })
-        );
-
-        let unknown_model = build_facade_model_selection_view(
-            &state,
-            Some(&serde_json::json!({
-                "selection": {
-                    "providerId": "facade",
-                    "modelId": "unknown",
-                    "options": {"reasoningLevel": "max"}
-                }
-            })),
-        );
-        assert_eq!(unknown_model["effectiveSelection"], serde_json::Value::Null);
-        assert_eq!(unknown_model["selectionIssue"], "model-not-found");
-    }
-
-    #[test]
-    fn facade_empty_provider_state_has_no_runtime_selection() {
-        let state = ProviderState {
-            active_provider_id: None,
-            active_model_id: None,
-            revision: 0,
-            providers: vec![ProviderRecord {
-                id: "personal-provider-1".to_owned(),
-                name: "New Provider".to_owned(),
-                template_id: None,
-                base_url: FACADE_PLACEHOLDER_BASE_URL.to_owned(),
-                models: Vec::new(),
-                api_backend: "responses".to_owned(),
-                api_key: None,
-                context_windows: BTreeMap::new(),
-                max_output_tokens: BTreeMap::new(),
-                chat_output_token_field: Default::default(),
-                supports_vision: BTreeMap::new(),
-                reasoning_efforts: BTreeMap::new(),
-                disabled_models: BTreeSet::new(),
-                model_configs: BTreeMap::new(),
-            }],
-        };
-        assert!(super::validate_state(&state).is_ok());
-        let view = build_facade_model_selection_view(&state, None);
-        assert_eq!(view["providers"], serde_json::json!([]));
-        assert!(view.get("preferredSelection").is_none());
-    }
-
-    /// 由 Rust facade builder 生成给 workflow/native-live 使用的脱敏契约夹具。
-    ///
-    /// 测试只打印结构化结果；实际文件由测试输出提取，避免手写一份可能漂移的 JSON。
-    #[test]
-    fn provider_facade_contract_fixture_is_rust_generated() {
-        let state = ProviderState {
-            active_provider_id: Some("fixture-provider".to_owned()),
-            active_model_id: Some("fixture-model".to_owned()),
-            revision: 7,
-            providers: vec![ProviderRecord {
-                id: "fixture-provider".to_owned(),
-                name: "Fixture Provider".to_owned(),
-                template_id: Some("custom-fixture".to_owned()),
-                base_url: "https://example.invalid/v1/responses".to_owned(),
-                models: vec!["fixture-model".to_owned(), "disabled-model".to_owned()],
-                api_backend: "responses".to_owned(),
-                api_key: None,
-                context_windows: [("fixture-model".to_owned(), 128_000)]
-                    .into_iter()
-                    .collect(),
-                max_output_tokens: BTreeMap::new(),
-                chat_output_token_field: Default::default(),
-                supports_vision: [("fixture-model".to_owned(), true)].into_iter().collect(),
-                reasoning_efforts: [("fixture-model".to_owned(), Vec::new())]
-                    .into_iter()
-                    .collect(),
-                disabled_models: ["disabled-model".to_owned()].into_iter().collect(),
-                model_configs: [(
-                    "fixture-model".to_owned(),
-                    serde_json::json!({
-                        "properties": {"inputFormat": {"supportsImage": true}},
-                        "optionSpecs": {"maxOutputTokens": {"max": 8192}}
-                    }),
-                )]
-                .into_iter()
-                .collect(),
-            }],
-        };
-        let settings = build_facade_settings_view(&state);
-        let mut event = settings.clone();
-        event["providers"][0]["effectiveConfig"]["access"]["apiKey"] =
-            Value::String("fixture-secret-to-remove".to_owned());
-        crate::frontend_rpc::providers::scrub_provider_credentials(&mut event);
-        assert!(
-            !serde_json::to_string(&event)
-                .expect("序列化脱敏事件")
-                .contains("fixture-secret-to-remove")
-        );
-        let selection = build_facade_model_selection_view(&state, None);
-        // 明确关闭推理档位不会取消默认模型，也不会把合法的无档位选择标为缺失。
-        let expected_selection = serde_json::json!({
-            "providerId": "fixture-provider", "modelId": "fixture-model", "options": {}
-        });
-        assert_eq!(selection["preferredSelection"], expected_selection);
-        let explicit = build_facade_model_selection_view(
-            &state,
-            Some(&serde_json::json!({"selection": expected_selection})),
-        );
-        assert_eq!(explicit["effectiveSelection"], expected_selection);
-        assert!(explicit.get("selectionIssue").is_none());
-        let fixture = serde_json::json!({
-            "settingsGetView": settings,
-            "settingsEvent": event,
-            "modelSelectionGetView": selection,
-        });
-        println!(
-            "PROVIDER_FACADE_CONTRACT_FIXTURE={}",
-            serde_json::to_string(&fixture).expect("序列化 Provider facade 夹具")
-        );
     }
 
     #[test]
@@ -4119,7 +2420,6 @@ mod provider_registry_tests {
         let loaded = super::render_list(ProviderState {
             active_provider_id: Some("gateway".into()),
             active_model_id: Some("model".into()),
-            revision: 0,
             providers: vec![record],
         });
         let config = runtime_provider_config(&loaded.providers[0]).unwrap();

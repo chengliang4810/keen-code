@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::atomic::{
     ATOMIC_TEMP_PREFIX, BoundedRead, atomic_write, ensure_regular_file_or_absent, exclusive_lock,
-    prepare_root, read_file_bounded, secure_child_dir, sync_directory,
+    open_regular_file_nofollow, prepare_root, read_file_bounded, secure_child_dir, sync_directory,
 };
 use crate::{
     ArtifactId, ArtifactMaterialization, ArtifactUse, MessageImageSource, MessagePart,
@@ -21,6 +22,8 @@ const ARTIFACT_METADATA_SCHEMA: &str = "keencode/artifact-metadata";
 const ARTIFACT_METADATA_VERSION: u32 = 1;
 /// 单个 Artifact 元数据文件允许的最大字节数。
 const ARTIFACT_METADATA_MAX_BYTES: u64 = 16 * 1024;
+/// Artifact 预览校验使用的固定读取块大小，避免按内容大小分配内存。
+const ARTIFACT_PREVIEW_READ_CHUNK_BYTES: usize = 16 * 1024;
 
 /// Session 事件提交前对 Artifact 引用执行实际存储核验的可注入边界。
 pub trait ArtifactValidator: Send + Sync {
@@ -556,8 +559,134 @@ impl ArtifactStore {
 
     /// 读取精简引用并按当前有界策略生成 UTF-8 预览。
     pub fn preview_use(&self, reference: &ArtifactUse) -> Result<ArtifactPreview, ResourceError> {
-        let bytes = self.read_use(reference)?;
-        Ok(utf8_preview(&bytes, self.limits.max_preview_bytes))
+        self.preview_use_with_budget(reference, self.limits.max_preview_bytes)
+    }
+
+    /// 读取精简引用并按调用方预算生成 UTF-8 预览。
+    ///
+    /// 预算只允许进一步收紧 Session 的 `max_preview_bytes`。内容采用固定小块流式
+    /// 校验，避免为了生成预览把整个 Artifact 复制进内存。
+    pub fn preview_use_with_budget(
+        &self,
+        reference: &ArtifactUse,
+        budget: usize,
+    ) -> Result<ArtifactPreview, ResourceError> {
+        self.validate_preview_reference(reference)?;
+        let _lock = exclusive_lock(&self.lock_path)?;
+        self.preview_verified_use_locked(reference, budget)
+    }
+
+    /// 在打开内容文件前校验引用中不依赖磁盘状态的身份、MIME 和声明大小。
+    fn validate_preview_reference(&self, reference: &ArtifactUse) -> Result<(), ResourceError> {
+        if reference.artifact_id.as_str() != reference.sha256 {
+            return Err(ResourceError::ArtifactHashMismatch);
+        }
+        let canonical_reference = canonical_media_type(reference.media_type.clone())
+            .map_err(|_| ResourceError::ArtifactMediaTypeMismatch)?;
+        if canonical_reference != reference.media_type {
+            return Err(ResourceError::ArtifactMediaTypeMismatch);
+        }
+        if reference.size_bytes > self.limits.max_artifact_bytes {
+            return Err(ResourceError::ArtifactTooLarge {
+                actual: reference.size_bytes,
+                limit: self.limits.max_artifact_bytes,
+            });
+        }
+        Ok(())
+    }
+
+    /// 在调用方已持有 Artifact 锁时流式校验内容并生成有界预览。
+    fn preview_verified_use_locked(
+        &self,
+        reference: &ArtifactUse,
+        budget: usize,
+    ) -> Result<ArtifactPreview, ResourceError> {
+        self.validate_preview_reference(reference)?;
+
+        let path = self.artifact_path(&reference.artifact_id);
+        let metadata_path = self.metadata_path(&reference.artifact_id);
+        ensure_regular_file_or_absent(&path)?;
+        ensure_regular_file_or_absent(&metadata_path)?;
+
+        let mut file = match open_regular_file_nofollow(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ResourceError::ArtifactNotFound);
+            }
+            Err(error) => return Err(ResourceError::io("read_artifact", error)),
+        };
+        let initial_size = file
+            .metadata()
+            .map_err(|error| ResourceError::io("read_artifact", error))?
+            .len();
+        if initial_size > self.limits.max_artifact_bytes {
+            return Err(ResourceError::ArtifactTooLarge {
+                actual: initial_size,
+                limit: self.limits.max_artifact_bytes,
+            });
+        }
+
+        let preview_budget = budget.min(self.limits.max_preview_bytes);
+        let mut preview_bytes = Vec::with_capacity(preview_budget);
+        let mut hash = Sha256::new();
+        let mut actual_size = 0_u64;
+        let mut utf8 = Utf8StreamValidator::new();
+        let mut chunk = [0_u8; ARTIFACT_PREVIEW_READ_CHUNK_BYTES];
+        loop {
+            let read = file
+                .read(&mut chunk)
+                .map_err(|error| ResourceError::io("read_artifact", error))?;
+            if read == 0 {
+                break;
+            }
+            let read_size = read as u64;
+            actual_size = actual_size.saturating_add(read_size);
+            if actual_size > self.limits.max_artifact_bytes {
+                return Err(ResourceError::ArtifactTooLarge {
+                    actual: actual_size,
+                    limit: self.limits.max_artifact_bytes,
+                });
+            }
+            let bytes = &chunk[..read];
+            hash.update(bytes);
+            utf8.observe(bytes);
+            if preview_bytes.len() < preview_budget {
+                let remaining = preview_budget - preview_bytes.len();
+                preview_bytes.extend_from_slice(&bytes[..remaining.min(bytes.len())]);
+            }
+        }
+
+        if actual_size != reference.size_bytes {
+            return Err(ResourceError::ArtifactSizeMismatch {
+                expected: reference.size_bytes,
+                actual: actual_size,
+            });
+        }
+        let digest = hash.finalize();
+        let mut actual_sha256 = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut actual_sha256, "{byte:02x}").expect("写入 String 不会失败");
+        }
+        if actual_sha256 != reference.sha256 {
+            return Err(ResourceError::ArtifactHashMismatch);
+        }
+
+        let metadata = read_metadata(&metadata_path)?;
+        validate_metadata(
+            &metadata,
+            &reference.artifact_id,
+            &reference.sha256,
+            reference.size_bytes,
+            &reference.media_type,
+        )?;
+
+        let source_is_utf8 = utf8.finish();
+        let mut preview = utf8_preview(&preview_bytes, preview_budget);
+        // 预览本身可能在预算边界落于一个未完成码点内，完整性要以全量流式校验结果为准。
+        preview.source_is_utf8 = source_is_utf8;
+        preview.truncated =
+            preview.truncated || actual_size > u64::try_from(preview_budget).unwrap_or(u64::MAX);
+        Ok(preview)
     }
 
     /// 从经过校验的 ArtifactId 构造固定扩展名路径。
@@ -1431,6 +1560,61 @@ fn utf8_preview(bytes: &[u8], max_bytes: usize) -> ArtifactPreview {
     }
 }
 
+/// 增量判断完整 Artifact 是否为 UTF-8，只保留跨读取块的最多三个尾部字节。
+struct Utf8StreamValidator {
+    /// 上一个块末尾尚未完成的 UTF-8 码点字节。
+    pending: Vec<u8>,
+    /// 是否尚未观察到非法 UTF-8 字节序列。
+    valid: bool,
+}
+
+impl Utf8StreamValidator {
+    /// 创建一个尚未读取内容且默认有效的校验器。
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            valid: true,
+        }
+    }
+
+    /// 消费一个固定读取块，并保留可能跨块的未完成码点。
+    fn observe(&mut self, bytes: &[u8]) {
+        if !self.valid {
+            return;
+        }
+        if self.pending.is_empty() {
+            self.observe_slice(bytes);
+            return;
+        }
+
+        let mut combined = Vec::with_capacity(self.pending.len() + bytes.len());
+        combined.extend_from_slice(&self.pending);
+        combined.extend_from_slice(bytes);
+        self.pending.clear();
+        self.observe_slice(&combined);
+    }
+
+    /// 校验一个连续字节片段，区分非法序列和块尾部的未完成序列。
+    fn observe_slice(&mut self, bytes: &[u8]) {
+        match std::str::from_utf8(bytes) {
+            Ok(_) => {}
+            Err(error) if error.error_len().is_none() => {
+                self.pending
+                    .extend_from_slice(&bytes[error.valid_up_to()..]);
+            }
+            Err(_) => self.valid = false,
+        }
+    }
+
+    /// 完成流校验；文件尾仍有未完成码点时视为非 UTF-8。
+    fn finish(mut self) -> bool {
+        if !self.pending.is_empty() {
+            self.valid = false;
+        }
+        self.valid
+    }
+}
+
 /// 计算小写十六进制 SHA-256。
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
@@ -1710,6 +1894,110 @@ mod tests {
         assert_eq!(preview.text, "ab");
         assert!(preview.truncated);
         assert!(!preview.source_is_utf8);
+    }
+
+    /// 验证预览会重新校验内容摘要和声明大小，而不是只读取前缀。
+    #[test]
+    fn artifact_preview_校验摘要与声明大小() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let store = test_store(root.path(), "preview-integrity", 2);
+        let reference = store
+            .put(b"original", Some("text/plain".to_owned()))
+            .expect("Artifact 应提交");
+
+        atomic_write(
+            &store.artifact_path(&reference.artifact_id),
+            b"tampered",
+            true,
+        )
+        .expect("同尺寸篡改内容应写入");
+        assert!(matches!(
+            store.preview_use(&reference.as_event_use()),
+            Err(ResourceError::ArtifactHashMismatch)
+        ));
+
+        let mut wrong_size = reference.as_event_use();
+        wrong_size.size_bytes += 1;
+        atomic_write(
+            &store.artifact_path(&reference.artifact_id),
+            b"original",
+            true,
+        )
+        .expect("原始内容应恢复");
+        assert!(matches!(
+            store.preview_use(&wrong_size),
+            Err(ResourceError::ArtifactSizeMismatch {
+                expected: 9,
+                actual: 8
+            })
+        ));
+    }
+
+    /// 验证 UTF-8 码点跨固定读取块时仍被识别为完整文本。
+    #[test]
+    fn artifact_preview_跨读取块保持utf8() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let store = test_store(root.path(), "preview-cross-chunk", 2);
+        let mut bytes = vec![b'a'; ARTIFACT_PREVIEW_READ_CHUNK_BYTES - 1];
+        bytes.extend_from_slice("中尾".as_bytes());
+        let reference = store.put(&bytes, None).expect("跨块 Artifact 应提交");
+
+        let preview = store
+            .preview_use(&reference.as_event_use())
+            .expect("跨块 UTF-8 预览应成功");
+        assert_eq!(preview.text, "a".repeat(store.limits.max_preview_bytes));
+        assert!(preview.truncated);
+        assert!(preview.source_is_utf8);
+    }
+
+    /// 验证二进制 Artifact 只返回首个无损 UTF-8 前缀并保留二进制标记。
+    #[test]
+    fn artifact_preview_二进制只返回有效前缀() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let store = test_store(root.path(), "preview-binary", 2);
+        let reference = store
+            .put(b"ab\xfftail", None)
+            .expect("二进制 Artifact 应提交");
+
+        let preview = store
+            .preview_use_with_budget(&reference.as_event_use(), 64)
+            .expect("二进制预览应成功");
+        assert_eq!(preview.text, "ab");
+        assert!(preview.truncated);
+        assert!(!preview.source_is_utf8);
+    }
+
+    /// 验证调用方预算和 Session 预览上限始终取较小值。
+    #[test]
+    fn artifact_preview_预算取调用方与session上限较小值() {
+        let root = tempfile::tempdir().expect("临时目录应创建");
+        let store = ArtifactStore::open(
+            root.path(),
+            SessionId::new("preview-budget").expect("Session ID 应有效"),
+            ArtifactLimits {
+                max_artifact_bytes: 1024,
+                max_artifacts_per_session: 2,
+                max_preview_bytes: 4,
+            },
+        )
+        .expect("ArtifactStore 应打开");
+        let reference = store
+            .put(b"abcdef", Some("text/plain".to_owned()))
+            .expect("Artifact 应提交");
+
+        let session_limited = store
+            .preview_use_with_budget(&reference.as_event_use(), 64)
+            .expect("Session 上限预览应成功");
+        assert_eq!(session_limited.text, "abcd");
+        assert!(session_limited.truncated);
+        assert!(session_limited.source_is_utf8);
+
+        let caller_limited = store
+            .preview_use_with_budget(&reference.as_event_use(), 2)
+            .expect("调用方上限预览应成功");
+        assert_eq!(caller_limited.text, "ab");
+        assert!(caller_limited.truncated);
+        assert!(caller_limited.source_is_utf8);
     }
 
     /// 验证 quoted-string、参数排序和已知 charset 能生成稳定规范 MIME。

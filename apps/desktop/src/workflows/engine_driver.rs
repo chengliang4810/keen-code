@@ -330,6 +330,12 @@ fn validate_frozen_request(
         ));
     }
     let json_or_null = |field: &str| payload.get(field).cloned().unwrap_or(Value::Null);
+    let models = payload.get("models").ok_or_else(|| {
+        WorkflowRuntimeError("workflow run-started is missing frozen models".to_owned())
+    })?;
+    WorkflowModelSelection::parse(models).map_err(|error| {
+        WorkflowRuntimeError(format!("workflow run-started models are invalid: {error}"))
+    })?;
     if json_or_null("models") != request.model_selection.clone().unwrap_or(Value::Null) {
         return Err(WorkflowRuntimeError(
             "workflow model selection does not match the frozen run".to_owned(),

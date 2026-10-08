@@ -1,0 +1,340 @@
+{
+  "version": 1,
+  "name": "ely-native-automation-lifecycle",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    { "type": "wait", "ms": 1500 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "accessibility", "label": "startup" },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "click_accessibility", "label": "自动化", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "screenshot", "label": "automation-empty" },
+    { "type": "accessibility", "label": "automation-empty" },
+    {
+      "type": "click_accessibility",
+      "label": "新建任务名称",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 250 },
+    {
+      "type": "type_text",
+      "text": "ely-native-automation-20261006"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新建任务提示词",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 250 },
+    {
+      "type": "type_text",
+      "text": "请立即调用 AskUser 工具，提出问题 Automation 等待确认，选项严格为 A 和 B，allowCustom=false；调用后保持回合等待用户回答，不要自行回答，也不要调用其他工具。"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新建任务 Cron",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 250 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "wait", "ms": 100 },
+    { "type": "type_text", "text": "0 0 31 12 *" },
+    {
+      "type": "click_accessibility",
+      "label": "创建任务",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "automations.json",
+      "contains": "ely-native-automation-20261006",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/title": "ely-native-automation-20261006",
+        "/prompt": "请立即调用 AskUser 工具，提出问题 Automation 等待确认，选项严格为 A 和 B，allowCustom=false；调用后保持回合等待用户回答，不要自行回答，也不要调用其他工具。",
+        "/cronExpr": "0 0 31 12 *",
+        "/enabled": true,
+        "/lifecycleStatus": "active",
+        "/dispatchStatus": "idle",
+        "/runCount": 0,
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 0,
+        "cancelled": 0,
+        "completed": 0
+      }
+    },
+    { "type": "screenshot", "label": "automation-created" },
+    { "type": "accessibility", "label": "automation-created" },
+    {
+      "type": "click_accessibility",
+      "label": "启用自动化",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/enabled": false,
+        "/lifecycleStatus": "paused",
+        "/dispatchStatus": "idle",
+        "/nextRunAt": null,
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 0,
+        "cancelled": 0,
+        "completed": 0
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用自动化",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/enabled": true,
+        "/lifecycleStatus": "active",
+        "/dispatchStatus": "idle",
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 0,
+        "cancelled": 0,
+        "completed": 0
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "立即运行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/request/toolName": "AskUser"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "automations.json",
+      "contains": "ely-native-automation-20261006",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/prompt": "请立即调用 AskUser 工具，提出问题 Automation 等待确认，选项严格为 A 和 B，allowCustom=false；调用后保持回合等待用户回答，不要自行回答，也不要调用其他工具。",
+        "/enabled": true,
+        "/lifecycleStatus": "active",
+        "/dispatchStatus": "running",
+        "/runCount": 1,
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 1,
+        "cancelled": 0,
+        "completed": 0
+      }
+    },
+    { "type": "screenshot", "label": "automation-askuser-running" },
+    { "type": "accessibility", "label": "automation-askuser-running" },
+    {
+      "type": "click_accessibility",
+      "label": "取消运行",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_stopped",
+      "count": 1,
+      "timeout_ms": 30000,
+      "matching": {
+        "/payload/reason": "cancelled"
+      }
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/enabled": true,
+        "/lifecycleStatus": "active",
+        "/dispatchStatus": "idle",
+        "/runCount": 1,
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 0,
+        "cancelled": 1,
+        "completed": 0
+      }
+    },
+    { "type": "screenshot", "label": "automation-cancelled" },
+    { "type": "accessibility", "label": "automation-cancelled" },
+    {
+      "type": "click_accessibility",
+      "label": "编辑任务提示词",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 250 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "wait", "ms": 100 },
+    {
+      "type": "type_text",
+      "text": "请只回复 ELY_AUTOMATION_COMPLETED_MARKER，不调用工具。"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存任务",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 700 },
+    {
+      "type": "click_accessibility",
+      "label": "立即运行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "message_added",
+      "count": 1,
+      "timeout_ms": 30000,
+      "matching": {
+        "/payload/message/role": "user",
+        "/payload/message/content/0/text": "请只回复 ELY_AUTOMATION_COMPLETED_MARKER，不调用工具。"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_automation_state",
+      "title": "ely-native-automation-20261006",
+      "matching": {
+        "/title": "ely-native-automation-20261006",
+        "/prompt": "请只回复 ELY_AUTOMATION_COMPLETED_MARKER，不调用工具。",
+        "/cronExpr": "0 0 31 12 *",
+        "/enabled": true,
+        "/lifecycleStatus": "active",
+        "/dispatchStatus": "idle",
+        "/runCount": 2,
+        "/lastError": null
+      },
+      "history_outcomes": {
+        "scheduled": 0,
+        "running": 0,
+        "cancelled": 1,
+        "completed": 1
+      }
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "automations.json",
+      "contains": "ELY_AUTOMATION_COMPLETED_MARKER",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "automation-completed" },
+    { "type": "accessibility", "label": "automation-completed" },
+    {
+      "type": "click_accessibility",
+      "label": "删除",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "automations.json",
+      "contains": "\"automations\": []",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "automation-deleted" },
+    { "type": "accessibility", "label": "automation-deleted" },
+    { "type": "close" }
+  ]
+}

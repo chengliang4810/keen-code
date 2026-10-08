@@ -4,8 +4,8 @@
 //! 正式构建使用 `.keencode`，开发构建使用 `.keencode-dev`，不再使用各平台的
 //! 应用配置或应用数据目录。
 
+use crate::native_paths::NativePaths;
 use anyhow::{Context, Result};
-use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::{
     fs,
@@ -13,45 +13,16 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
 };
-use tauri::{AppHandle, Manager};
 
-/// 开发运行时与正式安装版必须隔离，避免两个进程共享会话数据库和运行时状态。
-const KEENCODE_HOME_NAME: &str = if cfg!(debug_assertions) {
-    ".keencode-dev"
-} else {
-    ".keencode"
-};
-
-/// 返回当前用户唯一的 KeenCode 持久化根目录。
-pub(crate) fn root_dir(app: &AppHandle) -> Result<PathBuf> {
-    if let Some(path) = benchmark_root_from_environment() {
-        return Ok(path);
+/// 返回宿主已解析的 KeenCode 私有持久化根目录。
+///
+/// 路径发现只发生在 `NativePaths::discover`，存储层不再从窗口句柄或进程
+/// 全局状态推导目录，避免后台任务写入与宿主不一致的数据根。
+pub(crate) fn root_dir(paths: &NativePaths) -> Result<PathBuf> {
+    if paths.data_root.as_os_str().is_empty() {
+        anyhow::bail!("KeenCode 数据根不能为空");
     }
-    let home = app.path().home_dir().context("无法确定当前用户目录")?;
-    Ok(root_dir_from_home(home))
-}
-
-/// 从显式测试开关和值解析隔离数据目录；普通启动不能仅凭路径变量改变数据根。
-fn benchmark_root_from_values(enabled: Option<&OsStr>, path: Option<OsString>) -> Option<PathBuf> {
-    (enabled == Some(OsStr::new("1")))
-        .then_some(path)
-        .flatten()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-/// 读取进程环境中的桌面基准测试隔离目录。
-fn benchmark_root_from_environment() -> Option<PathBuf> {
-    let enabled = std::env::var_os("KEENCODE_BENCHMARK");
-    benchmark_root_from_values(
-        enabled.as_deref(),
-        std::env::var_os("KEENCODE_BENCHMARK_DATA_DIR"),
-    )
-}
-
-/// 将已经解析的用户主目录转换为 KeenCode 持久化根目录。
-fn root_dir_from_home(home: PathBuf) -> PathBuf {
-    home.join(KEENCODE_HOME_NAME)
+    Ok(paths.data_root.clone())
 }
 
 /// 以只读方式打开普通文件，并在支持的平台上禁止跟随最终符号链接。
@@ -215,6 +186,11 @@ pub(crate) fn atomic_write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 兼容 NativeHost 对二进制私有记录的明确命名；实现复用同一原子替换边界。
+pub(crate) fn atomic_write_private_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_private(path, bytes)
+}
+
 /// 为待替换的私有文件创建不覆盖既有文件的持久备份。
 ///
 /// 目标使用 `create_new` 消除“先检查再复制”的覆盖竞态；文件内容先同步，
@@ -285,62 +261,10 @@ pub(crate) fn backup_private_file(source: &Path) -> Result<PathBuf> {
     anyhow::bail!("同一秒内的私有文件备份数量已达到上限")
 }
 
-/// 在 Tauri 启动前从当前进程环境解析用户目录。
-pub(crate) fn root_dir_before_start() -> Result<PathBuf> {
-    if let Some(path) = benchmark_root_from_environment() {
-        return Ok(path);
-    }
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .context("无法从 USERPROFILE/HOME 确定当前用户目录")?;
-    Ok(root_dir_from_home(home))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        KEENCODE_HOME_NAME, atomic_write_private, backup_private_file, benchmark_root_from_values,
-        root_dir_from_home,
-    };
-    use std::{
-        ffi::{OsStr, OsString},
-        fs,
-        path::PathBuf,
-    };
-
-    /// 开发构建必须与正式构建使用不同的持久化根目录。
-    #[test]
-    fn development_build_uses_isolated_home_name() {
-        assert_eq!(KEENCODE_HOME_NAME, ".keencode-dev");
-        assert_eq!(
-            root_dir_from_home(PathBuf::from("/Users/demo")),
-            PathBuf::from("/Users/demo/.keencode-dev")
-        );
-    }
-
-    /// 启动前和 Tauri 初始化后的数据根必须共享同一显式基准测试隔离规则。
-    #[test]
-    fn benchmark_root_requires_explicit_switch_and_non_empty_path() {
-        let isolated = OsString::from("D:/bench/keencode");
-        assert_eq!(
-            benchmark_root_from_values(Some(OsStr::new("1")), Some(isolated.clone())),
-            Some(PathBuf::from(isolated))
-        );
-        assert_eq!(
-            benchmark_root_from_values(Some(OsStr::new("0")), Some(OsString::from("D:/bench")),),
-            None
-        );
-        assert_eq!(
-            benchmark_root_from_values(Some(OsStr::new("1")), Some(OsString::new())),
-            None
-        );
-        assert_eq!(
-            benchmark_root_from_values(Some(OsStr::new("1")), None),
-            None
-        );
-    }
+    use super::{atomic_write_private, backup_private_file};
+    use std::fs;
 
     /// 连续保存必须直接替换已有目标；Windows 不得因目标存在而失败。
     #[test]

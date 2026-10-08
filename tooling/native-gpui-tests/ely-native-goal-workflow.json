@@ -1,0 +1,358 @@
+{
+  "version": 1,
+  "name": "ely-native-goal-workflow",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "key": "n",
+      "type": "key",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "count": 1,
+      "event_type": "session_created",
+      "type": "wait_for_journal",
+      "timeout_ms": 30000
+    },
+    {
+      "ms": 1000,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "settings-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "settings-startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "智能体与子智能体",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "agents-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "agents-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "当前目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "原生 Goal 验收"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "目标说明",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "验证 Goal、单层 actor 与 Workflow Journal 的真实状态迁移。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-saved"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-saved"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "已保存工作流",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "workflow-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflow-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "工作流名称",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "native_actor_probe"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "WorkflowDefinitionV1 JSON",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "{\"version\":1,\"meta\":{\"name\":\"native_actor_probe\",\"description\":\"Native single actor probe\"},\"inputs\":{},\"body\":[{\"type\":\"agent\",\"node_id\":\"actor\",\"name\":\"单层原生 actor\",\"input\":{\"type\":\"literal\",\"value\":\"只回答 ACTOR_OK\"},\"effect\":\"read_only\"},{\"type\":\"artifact\",\"node_id\":\"report\",\"name\":\"actor report\",\"input\":{\"type\":\"ref\",\"pointer\":\"/nodes/actor/text\"},\"output_type\":\"markdown\",\"effect\":\"write\"}]}"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "screenshot",
+      "label": "workflow-form-bottom"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflow-form-bottom"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存工作流",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 2000
+    },
+    {
+      "type": "screenshot",
+      "label": "workflow-saved"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflow-saved"
+    },
+    {
+      "type": "scroll",
+      "x": 900,
+      "y": 1300,
+      "delta_y": -1200
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "screenshot",
+      "label": "workflow-saved-scrolled"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflow-saved-scrolled"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "执行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "run-started",
+        "/payload/record/payload/models/planEnabled": false
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "actor-started",
+        "/payload/record/payload/nodeId": "actor"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "actor-bound",
+        "/payload/record/payload/nodeId": "actor"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "agent-result",
+        "/payload/record/payload/nodeId": "actor",
+        "/payload/record/payload/status": "completed"
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "允许",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "artifact-permission-pending"
+    },
+    {
+      "type": "accessibility",
+      "label": "artifact-permission-pending"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "允许",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "artifact-committed",
+        "/payload/record/payload/nodeId": "report"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "workflow_event_committed",
+      "count": 1,
+      "timeout_ms": 180000,
+      "matching": {
+        "/payload/record/eventType": "run-settled",
+        "/payload/record/payload/status": "succeeded"
+      }
+    },
+    {
+      "type": "screenshot",
+      "label": "workflow-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflow-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "workflow-completed"
+    }
+  ]
+}

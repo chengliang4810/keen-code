@@ -37,8 +37,6 @@ pub enum CliCommand {
     Run(RunCommand),
     /// 管理已保存 Session。
     Session(SessionCommand),
-    /// 控制 Host 提供的 Web 服务。
-    Web(WebCommand),
     /// 只显示使用说明。
     Help,
     /// 请求启动独立 headless Host；该 Host 复用平台无关 Session Runtime。
@@ -106,29 +104,7 @@ pub enum SessionCommand {
     },
 }
 
-/// Web 子命令。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WebCommand {
-    /// 启动 Web 服务；可选固定端口。
-    Start {
-        /// 可选的固定监听端口。
-        port: Option<u16>,
-        /// 是否使用 NDJSON 输出。
-        json: bool,
-    },
-    /// 停止 Web 服务。
-    Stop {
-        /// 是否使用 NDJSON 输出。
-        json: bool,
-    },
-    /// 查询 Web 服务状态。
-    Status {
-        /// 是否使用 NDJSON 输出。
-        json: bool,
-    },
-}
-
-/// `headless` 入口参数；不携带 Runtime 或 Tauri 类型。
+/// `headless` 入口参数；不携带 Runtime 或 UI 类型。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeadlessOptions {
     /// 是否输出 NDJSON 服务状态。
@@ -190,7 +166,6 @@ where
     let command = match command_name.as_str() {
         "run" => parse_run(positional, global_json, &mut declare_form_capability)?,
         "session" => parse_session(positional, global_json, &mut declare_form_capability)?,
-        "web" => parse_web(positional, global_json)?,
         "headless" => parse_headless(positional, global_json)?,
         "help" => CliCommand::Help,
         other => return Err(CliParseError::new(format!("未知命令: {other}"))),
@@ -339,48 +314,6 @@ fn parse_session(
     Ok(CliCommand::Session(command))
 }
 
-fn parse_web(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliParseError> {
-    let mut args = args.into_iter();
-    let action = args
-        .next()
-        .ok_or_else(|| CliParseError::new("web 缺少子命令"))?;
-    let mut json = global_json;
-    let command = match action.as_str() {
-        "start" => {
-            let mut port = None;
-            while let Some(value) = args.next() {
-                match value.as_str() {
-                    "--json" => json = true,
-                    "--port" => {
-                        let value = required_value(&mut args, "--port")?;
-                        let parsed = value
-                            .parse::<u16>()
-                            .map_err(|_| CliParseError::new("--port 必须是 1..65535"))?;
-                        if parsed == 0 {
-                            return Err(CliParseError::new("--port 必须是 1..65535"));
-                        }
-                        port = Some(parsed);
-                    }
-                    other => {
-                        return Err(CliParseError::new(format!("web start 未知参数: {other}")));
-                    }
-                }
-            }
-            WebCommand::Start { port, json }
-        }
-        "stop" => {
-            parse_json_flag_and_no_extra(&mut args, &mut json, "web stop")?;
-            WebCommand::Stop { json }
-        }
-        "status" => {
-            parse_json_flag_and_no_extra(&mut args, &mut json, "web status")?;
-            WebCommand::Status { json }
-        }
-        other => return Err(CliParseError::new(format!("未知 web 子命令: {other}"))),
-    };
-    Ok(CliCommand::Web(command))
-}
-
 fn parse_headless(args: Vec<String>, global_json: bool) -> Result<CliCommand, CliParseError> {
     let mut json = global_json;
     for value in args {
@@ -436,7 +369,7 @@ where
 
 /// 返回 CLI 使用说明；内容固定，便于脚本检查。
 pub fn usage() -> &'static str {
-    "用法:\n  keencode run [--json] [--detach] [--no-input] [--session ID] [--cwd PATH] [--] PROMPT\n  keencode session list|show|send|attach|stop ...\n  keencode web start|stop|status ...\n  keencode headless [--json]\n\n以连字符开头的 Prompt 必须放在 -- 之后。普通命令在 Host 缺失时会启动同一可执行文件的 headless Host。\n--no-input 不声明表单问答能力：模型不会停下来提问，请求也不会以退出码 6 中断。\n退出码: 0 成功, 1 任务失败, 2 参数错误, 3 Host 不可用, 4 认证失败, 5 取消, 6 需要用户输入\n"
+    "用法:\n  keencode run [--json] [--detach] [--no-input] [--session ID] [--cwd PATH] [--] PROMPT\n  keencode session list|show|send|attach|stop ...\n  keencode headless [--json]\n\n以连字符开头的 Prompt 必须放在 -- 之后。普通命令在 Host 缺失时会启动同一可执行文件的 headless Host。\n--no-input 不声明表单问答能力：模型不会停下来提问，请求也不会以退出码 6 中断。\n退出码: 0 成功, 1 任务失败, 2 参数错误, 3 Host 不可用, 4 认证失败, 5 取消, 6 需要用户输入\n"
 }
 
 #[cfg(test)]

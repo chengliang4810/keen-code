@@ -1,0 +1,265 @@
+{
+  "version": 1,
+  "name": "ely-native-navigation",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "wait", "ms": 1500 },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建任务",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-chat-initial" },
+    { "type": "accessibility", "label": "navigation-chat-initial" },
+    { "type": "metrics", "label": "navigation-chat-initial" },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "type_text",
+      "text": "导航草稿 KEENCODE_NAVIGATION_DRAFT"
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "screenshot", "label": "navigation-chat-draft" },
+    { "type": "accessibility", "label": "navigation-chat-draft" },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 300 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "常规",
+      "timeout_ms": 30000
+    },
+    { "type": "click_accessibility", "label": "常规", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务通知",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-settings-general" },
+    { "type": "accessibility", "label": "navigation-settings-general" },
+    { "type": "metrics", "label": "navigation-settings-general" },
+    { "type": "click_accessibility", "label": "外观", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "界面主题",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-settings-appearance" },
+    { "type": "accessibility", "label": "navigation-settings-appearance" },
+    { "type": "metrics", "label": "navigation-settings-appearance" },
+    { "type": "key", "key": "left", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务通知",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-back-to-general" },
+    { "type": "accessibility", "label": "navigation-back-to-general" },
+    { "type": "key", "key": "left", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建任务",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-back-to-chat" },
+    { "type": "accessibility", "label": "navigation-back-to-chat" },
+    { "type": "click_accessibility", "label": "前进", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务通知",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-forward-to-general" },
+    { "type": "accessibility", "label": "navigation-forward-to-general" },
+    { "type": "key", "key": "right", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "界面主题",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-forward-to-appearance" },
+    { "type": "accessibility", "label": "navigation-forward-to-appearance" },
+    { "type": "key", "key": "left", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务通知",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建任务",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-new-chat-truncates-forward" },
+    { "type": "accessibility", "label": "navigation-new-chat-truncates-forward" },
+    { "type": "key", "key": "right", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建任务",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-forward-after-truncate" },
+    { "type": "accessibility", "label": "navigation-forward-after-truncate" },
+    {
+      "type": "click_accessibility",
+      "label": "文件与工作台",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "展开 src",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-workbench-files" },
+    { "type": "accessibility", "label": "navigation-workbench-files" },
+    {
+      "type": "click_accessibility",
+      "label": "终端",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建终端",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-workbench-terminal" },
+    { "type": "accessibility", "label": "navigation-workbench-terminal" },
+    { "type": "key", "key": "left", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "展开 src",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-workbench-back-to-files" },
+    { "type": "accessibility", "label": "navigation-workbench-back-to-files" },
+    { "type": "key", "key": "right", "modifiers": ["alt"] },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建终端",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-workbench-forward-to-terminal" },
+    { "type": "accessibility", "label": "navigation-workbench-forward-to-terminal" },
+    {
+      "type": "wait_for_accessibility",
+      "label": "返回会话",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "navigation-workbench" },
+    { "type": "accessibility", "label": "navigation-workbench" },
+    { "type": "metrics", "label": "navigation-workbench" },
+    { "type": "click_accessibility", "label": "返回会话", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "wait", "ms": 100 },
+    {
+      "type": "type_text",
+      "text": "请只用一句话回复 KEENCODE_NAVIGATION_OK，不要调用工具。"
+    },
+    { "type": "wait", "ms": 200 },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 1
+    },
+    { "type": "close" }
+  ]
+}

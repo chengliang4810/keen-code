@@ -1,8 +1,8 @@
 //! KeenCode 非交互命令行入口。
 
 use keencode_cli::{
-    CliCommand, CliExecutionError, CliExecutionResult, ExitCode, SessionCommand, WebCommand,
-    execute_command, parse_args, usage,
+    CliCommand, CliExecutionError, CliExecutionResult, ExitCode, SessionCommand, execute_command,
+    parse_args, usage,
 };
 use serde_json::{Value, json};
 use std::env;
@@ -134,11 +134,6 @@ fn emit_human_record(record: &Value) {
             "Session: {}",
             compact_json(record.get("session").unwrap_or(&Value::Null))
         ),
-        "web" => println!(
-            "Web {}: {}",
-            text_field(record, "method"),
-            compact_json(record.get("result").unwrap_or(&Value::Null))
-        ),
         _ => println!("{}", compact_json(record)),
     }
 }
@@ -182,11 +177,6 @@ fn command_json(command: &CliCommand) -> bool {
             | SessionCommand::Send { json, .. }
             | SessionCommand::Attach { json, .. }
             | SessionCommand::Stop { json, .. } => *json,
-        },
-        CliCommand::Web(command) => match command {
-            WebCommand::Start { json, .. }
-            | WebCommand::Stop { json }
-            | WebCommand::Status { json } => *json,
         },
         CliCommand::Help => true,
         CliCommand::Headless(options) => options.json,

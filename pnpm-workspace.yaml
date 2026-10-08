@@ -1,9 +1,0 @@
-packages:
-  - apps/ui
-  - packages/ui
-  - packages/shared
-  - packages/services
-  - packages/provider
-  - packages/model-option-map
-  - packages/client
-  - packages/rpc

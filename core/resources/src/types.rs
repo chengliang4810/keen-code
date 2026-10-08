@@ -44,6 +44,24 @@ pub enum SessionStatus {
     Closed,
 }
 
+/// 会话级副作用审批模式的持久化值。
+///
+/// 该类型位于资源层，避免 Journal 依赖桌面协调器；桌面权限门在恢复后将
+/// 该值映射为自身的 `PermissionMode`。
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionPermissionMode {
+    /// 每次状态变更工具都需要审批。
+    #[default]
+    Build,
+    /// 自动允许文件编辑，其他状态变更仍需审批。
+    Edit,
+    /// 只允许只读工具。
+    Plan,
+    /// 自动允许状态变更工具。
+    Yolo,
+}
+
 /// 一个 Turn 的生命周期状态。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
@@ -1174,6 +1192,12 @@ pub enum SessionEvent {
         pinned: Option<bool>,
         /// 新的归档标记；`None` 表示保持不变。
         archived: Option<bool>,
+        /// 新的权限审批模式；旧事件缺省为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<SessionPermissionMode>,
+        /// 新的视觉输入开关；旧事件缺省为 `None`。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vision_enabled: Option<bool>,
     },
     /// 设置或取消一个 Assistant 展示行的本地反馈。
     ///
@@ -1512,6 +1536,12 @@ pub struct SessionState {
     /// 用户归档标记；由 `SessionPreferenceSet` 维护的权威状态。
     #[serde(default)]
     pub archived: bool,
+    /// 当前会话的权限审批模式；由 Journal 恢复，缺省为安全的 Build。
+    #[serde(default)]
+    pub permission_mode: SessionPermissionMode,
+    /// 当前会话是否允许向 Provider 发送视觉输入。
+    #[serde(default)]
+    pub vision_enabled: bool,
     /// 按 V4 row/entity 身份保存的 Assistant 反馈；旧快照缺省为空。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assistant_feedback: Vec<AssistantFeedbackRecord>,
@@ -1580,6 +1610,8 @@ impl SessionState {
             project_root: String::new(),
             pinned: false,
             archived: false,
+            permission_mode: SessionPermissionMode::default(),
+            vision_enabled: false,
             assistant_feedback: Vec::new(),
             title_source: TitleSource::default(),
             status: SessionStatus::Idle,

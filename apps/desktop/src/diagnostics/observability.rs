@@ -1,4 +1,4 @@
-//! 本地运行时观测状态、直方图和实时事件总线。
+//! 本地运行时观测状态、直方图和有界诊断摘要。
 //!
 //! 该模块只保存脱敏后的摘要，不保存 prompt、模型输出、HTTP header、API Key
 //! 或完整请求正文。所有 duration/TTFT 都由产生观测的一侧用单调时钟计算后再
@@ -9,18 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc::{self, Receiver, SyncSender, TrySendError},
+    Mutex,
+    atomic::{AtomicU64, Ordering},
 };
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// 观测协议当前版本；改变字段语义时必须递增，避免面板误读旧导出。
-pub const OBSERVABILITY_SCHEMA: u32 = 1;
+pub const OBSERVABILITY_SCHEMA: u32 = 2;
 /// 环形缓存的容量上限，保证长时间运行不会由观测本身无限增长。
 pub const MAX_METRIC_POINTS: usize = 2_048;
-#[allow(dead_code)]
 pub const MAX_METRIC_KEYS: usize = 256;
 pub const MAX_HISTOGRAMS: usize = 64;
 pub const MAX_TRACE_SAMPLES: usize = 512;
@@ -28,8 +25,6 @@ pub const MAX_RESOURCE_SAMPLES: usize = 360;
 pub const MAX_STARTUP_PHASES: usize = 64;
 pub const MAX_CRASH_RECORDS: usize = 32;
 pub const MAX_EVENT_RECORDS: usize = 1_024;
-pub const REALTIME_SUBSCRIBER_CAPACITY: usize = 128;
-pub const MAX_REALTIME_SUBSCRIBERS: usize = 8;
 pub const MAX_EXPORT_BYTES: usize = 256 * 1024;
 pub const MAX_OBSERVATION_TEXT_BYTES: usize = 2_000;
 pub const MAX_CRASH_BACKTRACE_BYTES: usize = 8_000;
@@ -52,7 +47,6 @@ pub struct RetentionPolicy {
     pub startup_phases: usize,
     pub crash_records: usize,
     pub event_records: usize,
-    pub realtime_subscriber_capacity: usize,
     pub max_export_bytes: usize,
 }
 
@@ -65,7 +59,6 @@ impl Default for RetentionPolicy {
             startup_phases: MAX_STARTUP_PHASES,
             crash_records: MAX_CRASH_RECORDS,
             event_records: MAX_EVENT_RECORDS,
-            realtime_subscriber_capacity: REALTIME_SUBSCRIBER_CAPACITY,
             max_export_bytes: MAX_EXPORT_BYTES,
         }
     }
@@ -122,13 +115,8 @@ pub struct ResourceSample {
     /// Windows `PrivateUsage` 聚合值；其他平台或读取失败时为 `None`。
     pub private_bytes: Option<u64>,
     pub virtual_bytes: Option<u64>,
-    /// 成功读取的宿主及 WebView2 进程数；不是系统全局进程总数。
+    /// 当前 GPUI NativeHost 进程采样次数；不包含浏览器或其他外部进程。
     pub process_count: Option<u64>,
-    pub frontend_heap_used_bytes: Option<u64>,
-    pub frontend_heap_limit_bytes: Option<u64>,
-    pub dom_nodes: Option<u64>,
-    pub event_loop_lag_ms: Option<f64>,
-    pub long_task_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -173,7 +161,6 @@ pub struct ObservabilitySnapshot {
     pub startup_phases: Vec<StartupPhase>,
     pub crashes: Vec<CrashRecord>,
     pub events: Vec<ObservabilityEvent>,
-    pub dropped_realtime_events: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -248,12 +235,10 @@ struct StoreState {
     events: VecDeque<ObservabilityEvent>,
 }
 
-/// 进程内的本地观测存储和有界实时总线。
+/// 进程内有界观测存储；原生诊断页按需读取，不启动常驻订阅和采样器。
 pub struct ObservabilityStore {
     state: Mutex<StoreState>,
-    subscribers: Mutex<Vec<SyncSender<ObservabilityEvent>>>,
     next_sequence: AtomicU64,
-    dropped_realtime_events: AtomicU64,
     retention: RetentionPolicy,
 }
 
@@ -282,35 +267,13 @@ impl ObservabilityStore {
             startup_phases: retention.startup_phases.min(MAX_STARTUP_PHASES),
             crash_records: retention.crash_records.min(MAX_CRASH_RECORDS),
             event_records: retention.event_records.min(MAX_EVENT_RECORDS),
-            realtime_subscriber_capacity: retention
-                .realtime_subscriber_capacity
-                .min(REALTIME_SUBSCRIBER_CAPACITY),
             max_export_bytes: retention.max_export_bytes.min(MAX_EXPORT_BYTES),
         };
         Self {
             state: Mutex::new(StoreState::default()),
-            subscribers: Mutex::new(Vec::new()),
             next_sequence: AtomicU64::new(1),
-            dropped_realtime_events: AtomicU64::new(0),
             retention,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn retention(&self) -> RetentionPolicy {
-        self.retention
-    }
-
-    /// 订阅只读实时事件；满载时丢弃订阅者队列中的旧事件不会阻塞业务线程。
-    pub fn subscribe(&self) -> Receiver<ObservabilityEvent> {
-        let (sender, receiver) = mpsc::sync_channel(self.retention.realtime_subscriber_capacity);
-        if let Ok(mut subscribers) = self.subscribers.lock() {
-            while subscribers.len() >= MAX_REALTIME_SUBSCRIBERS {
-                subscribers.remove(0);
-            }
-            subscribers.push(sender);
-        }
-        receiver
     }
 
     pub fn increment_counter(&self, name: &str, delta: u64) {
@@ -325,7 +288,6 @@ impl ObservabilityStore {
         self.emit("counter", json!({ "name": name, "delta": delta }));
     }
 
-    #[allow(dead_code)]
     pub fn set_gauge(&self, name: &str, value: f64) {
         if !value.is_finite() {
             return;
@@ -506,7 +468,6 @@ impl ObservabilityStore {
                 .as_ref()
                 .map(|state| state.events.iter().cloned().collect())
                 .unwrap_or_default(),
-            dropped_realtime_events: self.dropped_realtime_events.load(Ordering::Relaxed),
         }
     }
 
@@ -574,39 +535,6 @@ impl ObservabilityStore {
                 self.retention.event_records,
             );
         }
-        let Ok(mut subscribers) = self.subscribers.lock() else {
-            return;
-        };
-        subscribers.retain(|sender| match sender.try_send(event.clone()) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                self.dropped_realtime_events.fetch_add(1, Ordering::Relaxed);
-                true
-            }
-            Err(TrySendError::Disconnected(_)) => false,
-        });
-    }
-
-    /// 以本地产生端的单调时钟开始一段 Trace。
-    #[allow(dead_code)]
-    pub fn start_trace(
-        self: &Arc<Self>,
-        name: &str,
-        parent_span_id: Option<String>,
-        attributes: impl IntoIterator<Item = (String, String)>,
-    ) -> TraceTimer {
-        let sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
-        TraceTimer {
-            store: Arc::clone(self),
-            trace_id: format!("trace-{sequence}"),
-            span_id: format!("span-{sequence}"),
-            parent_span_id,
-            name: safe_name(name),
-            started_at_ms: epoch_ms(),
-            started: Instant::now(),
-            ttft: None,
-            attributes: safe_tags(attributes),
-        }
     }
 }
 
@@ -620,91 +548,6 @@ pub(crate) fn sanitize_crash_record(crash: CrashRecord) -> CrashRecord {
         backtrace: crash
             .backtrace
             .map(|value| sanitize_crash_text(&value, MAX_CRASH_BACKTRACE_BYTES)),
-    }
-}
-
-/// 一段 Trace 的产生端计时器；Drop 不会隐式写入，调用者必须显式 finish。
-#[allow(dead_code)]
-pub struct TraceTimer {
-    store: Arc<ObservabilityStore>,
-    trace_id: String,
-    span_id: String,
-    parent_span_id: Option<String>,
-    name: String,
-    started_at_ms: u64,
-    started: Instant,
-    ttft: Option<u64>,
-    attributes: BTreeMap<String, String>,
-}
-
-#[allow(dead_code)]
-impl TraceTimer {
-    pub fn mark_ttft(&mut self) -> u64 {
-        let value = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        self.ttft.get_or_insert(value);
-        value
-    }
-
-    pub fn finish(self, status: &str) -> TraceSample {
-        let duration_ms = self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
-        let trace = TraceSample {
-            trace_id: self.trace_id,
-            span_id: self.span_id,
-            parent_span_id: self.parent_span_id,
-            name: self.name,
-            started_at_ms: self.started_at_ms,
-            duration_ms: Some(duration_ms),
-            ttft_ms: self.ttft,
-            status: safe_name(status),
-            attributes: self.attributes,
-        };
-        if let Some(ttft) = trace.ttft_ms {
-            self.store.record_ttft(ttft as f64);
-        }
-        self.store.record_trace(trace.clone());
-        trace
-    }
-}
-
-/// 可被桌面运行时接入系统资源读取器的定时采样器。
-#[allow(dead_code)]
-pub struct ResourceSampler {
-    stop: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
-}
-
-#[allow(dead_code)]
-impl ResourceSampler {
-    pub fn start<F>(store: Arc<ObservabilityStore>, interval: Duration, mut sample: F) -> Self
-    where
-        F: FnMut() -> ResourceSample + Send + 'static,
-    {
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_worker = Arc::clone(&stop);
-        let worker = thread::Builder::new()
-            .name("keencode-observability-sampler".to_owned())
-            .spawn(move || {
-                let interval = interval.max(Duration::from_millis(10));
-                while !stop_for_worker.load(Ordering::Acquire) {
-                    store.record_resource_sample(sample());
-                    thread::sleep(interval);
-                }
-            })
-            .ok();
-        Self { stop, worker }
-    }
-
-    pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl Drop for ResourceSampler {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 
@@ -801,6 +644,9 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
         .any(|prefix| !is_uri && token.contains(prefix));
         if is_windows || is_unc || is_unix {
             output.push_str("[PATH]");
+            if let Some(suffix) = path_location_suffix(token) {
+                output.push_str(suffix);
+            }
         } else {
             output.push_str(token);
         }
@@ -816,6 +662,21 @@ pub(crate) fn redact_absolute_paths(value: &str) -> String {
     }
     flush(&mut output, &mut token);
     output
+}
+
+/// 路径 token 末尾的 `:line:column` 是诊断定位信息，脱敏路径时必须保留。
+fn path_location_suffix(value: &str) -> Option<&str> {
+    let column_start = value.rfind(':')?;
+    let column = &value[column_start + 1..];
+    if column.is_empty() || !column.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let line_start = value[..column_start].rfind(':')?;
+    let line = &value[line_start + 1..column_start];
+    if line.is_empty() || !line.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(&value[line_start..])
 }
 
 fn token_contains_http_uri(token: &str) -> bool {
@@ -846,7 +707,7 @@ fn token_contains_http_uri(token: &str) -> bool {
     })
 }
 
-/// Panic Hook 只输出载荷类型和结构化摘要，不把用户传入的 payload 原文写入 Crash。
+/// 返回 panic payload 的稳定类型标签；正文由 `panic_payload_text` 经过统一出口处理。
 pub(crate) fn panic_payload_kind(info: &std::panic::PanicHookInfo<'_>) -> &'static str {
     if info.payload().downcast_ref::<&str>().is_some() {
         "str"
@@ -855,6 +716,43 @@ pub(crate) fn panic_payload_kind(info: &std::panic::PanicHookInfo<'_>) -> &'stat
     } else {
         "opaque"
     }
+}
+
+/// 提取常见的 Rust panic 文本；未知 payload 使用固定占位符，避免把 Debug 输出写入日志。
+pub(crate) fn panic_payload_text<'a>(info: &'a std::panic::PanicHookInfo<'_>) -> &'a str {
+    if let Some(value) = info.payload().downcast_ref::<&str>() {
+        return value;
+    }
+    if let Some(value) = info.payload().downcast_ref::<String>() {
+        return value.as_str();
+    }
+    "<opaque panic payload>"
+}
+
+/// 将 panic 的源码位置转换为脱敏后的单行字段，并保留行列号用于定位。
+pub(crate) fn panic_location_text(info: &std::panic::PanicHookInfo<'_>) -> Option<String> {
+    info.location().map(|location| {
+        let file = sanitize_crash_text(location.file(), MAX_OBSERVATION_TEXT_BYTES);
+        format!("{file}:{}:{}", location.line(), location.column())
+    })
+}
+
+fn format_panic_message_parts(payload_kind: &str, payload: &str, location: Option<&str>) -> String {
+    let payload = sanitize_crash_text(payload, MAX_OBSERVATION_TEXT_BYTES);
+    let location = location
+        .map(|value| sanitize_crash_text(value, MAX_OBSERVATION_TEXT_BYTES))
+        .unwrap_or_else(|| "<unknown>".to_owned());
+    format!("panic payload type={payload_kind} location={location} message={payload}")
+}
+
+/// 构造可直接写入 Crash 和文本日志的 panic 摘要；位置放在正文前，避免超长正文截断定位信息。
+pub(crate) fn format_panic_message(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let location = panic_location_text(info);
+    format_panic_message_parts(
+        panic_payload_kind(info),
+        panic_payload_text(info),
+        location.as_deref(),
+    )
 }
 
 /// Panic 回溯可能包含绝对路径和超长内部细节；文本日志与结构化 Crash 共用同一
@@ -910,9 +808,6 @@ fn sanitize_resource_sample(mut sample: ResourceSample) -> ResourceSample {
     sample.cpu_percent = sample
         .cpu_percent
         .filter(|value| value.is_finite() && *value >= 0.0);
-    sample.event_loop_lag_ms = sample
-        .event_loop_lag_ms
-        .filter(|value| value.is_finite() && *value >= 0.0);
     sample
 }
 
@@ -926,7 +821,6 @@ fn epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::Ordering;
 
     fn resource_sample(index: u64) -> ResourceSample {
         ResourceSample {
@@ -937,11 +831,6 @@ mod tests {
             private_bytes: None,
             virtual_bytes: None,
             process_count: None,
-            frontend_heap_used_bytes: None,
-            frontend_heap_limit_bytes: None,
-            dom_nodes: None,
-            event_loop_lag_ms: Some(1.0),
-            long_task_count: Some(0),
         }
     }
 
@@ -967,7 +856,6 @@ mod tests {
             startup_phases: 2,
             crash_records: 2,
             event_records: 3,
-            realtime_subscriber_capacity: 4,
             max_export_bytes: MAX_EXPORT_BYTES,
         });
         for index in 0..5 {
@@ -991,67 +879,24 @@ mod tests {
             startup_phases: usize::MAX,
             crash_records: usize::MAX,
             event_records: usize::MAX,
-            realtime_subscriber_capacity: usize::MAX,
             max_export_bytes: usize::MAX,
         });
-        assert_eq!(store.retention().metric_points, MAX_METRIC_POINTS);
-        assert_eq!(store.retention().trace_samples, MAX_TRACE_SAMPLES);
-        assert_eq!(store.retention().resource_samples, MAX_RESOURCE_SAMPLES);
-        assert_eq!(store.retention().startup_phases, MAX_STARTUP_PHASES);
-        assert_eq!(store.retention().crash_records, MAX_CRASH_RECORDS);
-        assert_eq!(store.retention().event_records, MAX_EVENT_RECORDS);
+        assert_eq!(store.snapshot().retention.metric_points, MAX_METRIC_POINTS);
+        assert_eq!(store.snapshot().retention.trace_samples, MAX_TRACE_SAMPLES);
         assert_eq!(
-            store.retention().realtime_subscriber_capacity,
-            REALTIME_SUBSCRIBER_CAPACITY
+            store.snapshot().retention.resource_samples,
+            MAX_RESOURCE_SAMPLES
         );
-        assert_eq!(store.retention().max_export_bytes, MAX_EXPORT_BYTES);
-    }
-
-    #[test]
-    fn subscriber_registry_has_a_fixed_upper_bound() {
-        let store = ObservabilityStore::default();
-        let _receivers = (0..MAX_REALTIME_SUBSCRIBERS + 2)
-            .map(|_| store.subscribe())
-            .collect::<Vec<_>>();
         assert_eq!(
-            store.subscribers.lock().unwrap().len(),
-            MAX_REALTIME_SUBSCRIBERS
+            store.snapshot().retention.startup_phases,
+            MAX_STARTUP_PHASES
         );
-    }
-
-    #[test]
-    fn subscriber_is_non_blocking_and_reports_full_queue_drops() {
-        let store = ObservabilityStore::new(RetentionPolicy {
-            realtime_subscriber_capacity: 1,
-            ..RetentionPolicy::default()
-        });
-        let receiver = store.subscribe();
-        store.increment_counter("first", 1);
-        store.increment_counter("second", 1);
-        assert_eq!(receiver.try_recv().unwrap().kind, "counter");
-        assert_eq!(store.dropped_realtime_events.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn trace_timer_records_monotonic_duration_and_ttft_without_wall_clock_math() {
-        let store = Arc::new(ObservabilityStore::default());
-        let mut timer = store.start_trace(
-            "model.request",
-            None,
-            [("secret".to_owned(), "apiKey=hidden".to_owned())],
+        assert_eq!(store.snapshot().retention.crash_records, MAX_CRASH_RECORDS);
+        assert_eq!(store.snapshot().retention.event_records, MAX_EVENT_RECORDS);
+        assert_eq!(
+            store.snapshot().retention.max_export_bytes,
+            MAX_EXPORT_BYTES
         );
-        let ttft = timer.mark_ttft();
-        let trace = timer.finish("ok");
-        assert!(trace.duration_ms.unwrap() >= ttft);
-        assert_eq!(trace.ttft_ms, Some(ttft));
-        assert!(
-            !trace
-                .attributes
-                .values()
-                .any(|value| value.contains("hidden"))
-        );
-        assert_eq!(store.snapshot().traces.len(), 1);
-        assert_eq!(store.snapshot().histograms[0].name, "runtime.ttft_ms");
     }
 
     #[test]
@@ -1089,8 +934,8 @@ mod tests {
 
         store.record_crash(CrashRecord {
             occurred_at_ms: 2,
-            kind: "frontend.window_error".to_owned(),
-            message: "frontend uncaught exception".to_owned(),
+            kind: "native.window_error".to_owned(),
+            message: "native window error".to_owned(),
             backtrace: Some(
                 "Error: render failed\n    at C:\\Users\\name\\project\\App.tsx:10:2\nsource=C:\\Users\\name\\project\\main.tsx"
                     .to_owned(),
@@ -1098,6 +943,40 @@ mod tests {
         });
         let crash = store.snapshot().crashes.last().cloned().unwrap();
         assert!(!crash.backtrace.unwrap().contains("C:\\Users\\name"));
+    }
+
+    #[test]
+    fn panic_message_keeps_diagnostic_context_while_redacting_secrets_and_paths() {
+        let message = format_panic_message_parts(
+            "string",
+            "release12 double lease api_key=secret C:\\Users\\secret\\project\\window.rs",
+            Some("C:\\Users\\secret\\project\\main.rs:123:45"),
+        );
+
+        assert!(message.contains("panic payload type=string"));
+        assert!(message.contains("release12 double lease"));
+        assert!(message.contains("location=[PATH]:123:45"));
+        assert!(message.contains("message="));
+        assert!(!message.contains("api_key=secret"));
+        assert!(!message.contains("C:\\Users\\secret"));
+        assert!(!message.contains("secret\\project"));
+        assert!(message.len() <= MAX_OBSERVATION_TEXT_BYTES * 2 + 128);
+    }
+
+    #[test]
+    fn panic_message_bounds_long_payload_without_losing_location() {
+        let message = format_panic_message_parts(
+            "str",
+            &format!(
+                "release12 double lease {}",
+                "x".repeat(MAX_OBSERVATION_TEXT_BYTES * 2)
+            ),
+            Some("C:\\Users\\secret\\project\\main.rs:7:8"),
+        );
+
+        assert!(message.starts_with("panic payload type=str location=[PATH]:7:8 message="));
+        assert!(message.contains("...(truncated)"));
+        assert!(!message.contains("C:\\Users\\secret"));
     }
 
     #[test]
@@ -1130,18 +1009,5 @@ mod tests {
                 .map(|payload| payload.len() <= MAX_EVENT_PAYLOAD_BYTES)
                 .unwrap_or(false)
         }));
-    }
-
-    #[test]
-    fn resource_sampler_records_samples_and_stops() {
-        let store = Arc::new(ObservabilityStore::default());
-        let observed = Arc::clone(&store);
-        let observed_for_sample = Arc::clone(&observed);
-        let mut sampler = ResourceSampler::start(store, Duration::from_millis(10), move || {
-            resource_sample(observed_for_sample.snapshot().resource_samples.len() as u64)
-        });
-        thread::sleep(Duration::from_millis(25));
-        sampler.stop();
-        assert!(!observed.snapshot().resource_samples.is_empty());
     }
 }

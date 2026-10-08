@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "name": "ely-native-stop-reopen",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "metrics",
+      "label": "startup"
+    },
+    {
+      "type": "focus"
+    },
+    {
+      "type": "wait",
+      "ms": 200
+    },
+    {
+      "type": "click",
+      "x": 150,
+      "y": 142
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click",
+      "x": 1050,
+      "y": 985
+    },
+    {
+      "type": "wait",
+      "ms": 400
+    },
+    {
+      "type": "click",
+      "x": 1050,
+      "y": 1198
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "screenshot",
+      "label": "full-access-selected"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 880
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "请使用 Bash 工具执行 powershell.exe -NoProfile -Command \"Start-Sleep -Seconds 20\"，等待它执行完成后再简短回答，不要提前结束。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "before-stop"
+    },
+    {
+      "type": "accessibility",
+      "label": "before-stop"
+    },
+    {
+      "type": "click",
+      "x": 2375,
+      "y": 1547
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_stopped",
+      "count": 1,
+      "timeout_ms": 60000
+    },
+    {
+      "type": "screenshot",
+      "label": "after-stop"
+    },
+    {
+      "type": "accessibility",
+      "label": "after-stop"
+    },
+    {
+      "type": "metrics",
+      "label": "after-stop"
+    },
+    {
+      "type": "click",
+      "x": 180,
+      "y": 670
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "session-reopened"
+    },
+    {
+      "type": "accessibility",
+      "label": "session-reopened"
+    },
+    {
+      "type": "metrics",
+      "label": "session-reopened"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 1380
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "会话重开后请使用 write 工具创建 out/native-acceptance/stop-reopen-second.txt，文件内容必须精确等于以下标记，不能添加其他字符或换行： KEENCODE_NATIVE_STOP_REOPEN_SECOND_MARKER_20261005，完成后只简短确认。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Write",
+        "/payload/request/arguments/content": "KEENCODE_NATIVE_STOP_REOPEN_SECOND_MARKER_20261005",
+        "/payload/request/effect": "changes_state"
+      },
+      "timeout_ms": 180000,
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "out/native-acceptance/stop-reopen-second.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "out/native-acceptance/stop-reopen-second.txt",
+      "contains": "KEENCODE_NATIVE_STOP_REOPEN_SECOND_MARKER_20261005",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "second-round-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "second-round-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "second-round-completed"
+    }
+  ]
+}

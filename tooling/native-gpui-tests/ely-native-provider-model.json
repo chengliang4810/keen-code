@@ -1,0 +1,429 @@
+{
+  "version": 1,
+  "name": "ely-native-provider-model",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "actions": [
+    { "type": "focus" },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "click_accessibility",
+      "label": "模型与供应商",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "scroll",
+      "x": 2200,
+      "y": 1400,
+      "delta_y": -1920
+    },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "测试模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "测试模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "模型真实生成测试通过",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/hy3",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": ["hy3"],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/hy4-preview",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": ["hy3", "hy4-preview"],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/glm-5.3-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": [
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "供应商 native-live-deepseek 至少需要保留一个启用模型",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": [
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新增模型 key",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "type_text",
+      "text": "ely-disable-acceptance-only"
+    },
+    { "type": "wait", "ms": 150 },
+    {
+      "type": "click_accessibility",
+      "label": "添加模型",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "设为当前：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash",
+          "ely-disable-acceptance-only"
+        ],
+        "/providers/0/disabledModels": [
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设为当前：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash",
+          "ely-disable-acceptance-only"
+        ],
+        "/providers/0/disabledModels": [
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "ely-disable-acceptance-only"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash",
+          "ely-disable-acceptance-only"
+        ],
+        "/providers/0/disabledModels": [
+          "deepseek-v4.1-flash",
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "ely-disable-acceptance-only"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "click_accessibility",
+      "label": "设为当前：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设为当前：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "删除模型：native-live-deepseek/ely-disable-acceptance-only",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": [
+          "glm-5.3-flash",
+          "hy3",
+          "hy4-preview"
+        ],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：native-live-deepseek/deepseek-v4.1-flash",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/hy3",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/hy4-preview",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "click_accessibility",
+      "label": "启用模型：native-live-deepseek/glm-5.3-flash",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "json_pointer_equals": {
+        "/providers/0/models": [
+          "deepseek-v4.1-flash",
+          "hy3",
+          "hy4-preview",
+          "glm-5.3-flash"
+        ],
+        "/providers/0/disabledModels": [],
+        "/activeProviderId": "native-live-deepseek",
+        "/activeModelId": "deepseek-v4.1-flash"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "click_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "type_text",
+      "text": "请简短回复 PROVIDER_MODEL_ACCEPTANCE_OK。"
+    },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 1
+    },
+    { "type": "close" }
+  ]
+}

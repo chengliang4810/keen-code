@@ -1,0 +1,341 @@
+{
+  "version": 1,
+  "name": "ely-native-full",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "metrics",
+      "label": "startup"
+    },
+    {
+      "type": "click",
+      "x": 150,
+      "y": 142
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "session-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "session-created"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "变更前确认",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 400
+    },
+    {
+      "type": "screenshot",
+      "label": "permission-options"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "自动编辑",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "screenshot",
+      "label": "automatic-edit-selected"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 880
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "本轮验收只允许调用 Read 和 Write 两个工具，不要使用 Bash 或其他工具。请先使用 Read 读取 src/facts.txt，然后使用 Write 创建 out/native-acceptance/result.txt。文件内容必须精确等于以下标记，不能添加其他字符或换行： KEENCODE_NATIVE_ACCEPTANCE_MARKER_20261005。Write 成功后直接简短回答，不要再调用任何工具验证文件。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "turn-started"
+    },
+    {
+      "type": "metrics",
+      "label": "turn-started"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Read",
+        "/payload/request/effect": "read_only"
+      },
+      "timeout_ms": 180000,
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "src/facts.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Write",
+        "/payload/request/arguments/content": "KEENCODE_NATIVE_ACCEPTANCE_MARKER_20261005",
+        "/payload/request/effect": "changes_state"
+      },
+      "timeout_ms": 180000,
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "out/native-acceptance/result.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_completed",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "out/native-acceptance/result.txt",
+      "contains": "KEENCODE_NATIVE_ACCEPTANCE_MARKER_20261005",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "turn-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "turn-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "turn-completed"
+    },
+    {
+      "type": "click",
+      "x": 180,
+      "y": 670
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "session-reopened"
+    },
+    {
+      "type": "accessibility",
+      "label": "session-reopened"
+    },
+    {
+      "type": "metrics",
+      "label": "session-reopened"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 1380
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "会话重开后本轮只允许调用一次 Write，不要使用 Bash 或其他工具。请创建 out/native-acceptance/second-result.txt，文件内容必须精确等于以下标记，不能添加其他字符或换行： KEENCODE_NATIVE_ACCEPTANCE_SECOND_MARKER_20261005。Write 成功后直接简短确认，不要再调用任何工具。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Write",
+        "/payload/request/arguments/content": "KEENCODE_NATIVE_ACCEPTANCE_SECOND_MARKER_20261005",
+        "/payload/request/effect": "changes_state"
+      },
+      "timeout_ms": 180000,
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "out/native-acceptance/second-result.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 3,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "out/native-acceptance/second-result.txt",
+      "contains": "KEENCODE_NATIVE_ACCEPTANCE_SECOND_MARKER_20261005",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_completed",
+      "count": 3,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "reopened-send-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "reopened-send-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "reopened-send-completed"
+    },
+    {
+      "type": "click",
+      "x": 150,
+      "y": 142
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 2,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "second-session-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "second-session-created"
+    },
+    {
+      "type": "metrics",
+      "label": "second-session-created"
+    }
+  ]
+}

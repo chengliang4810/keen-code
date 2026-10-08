@@ -1,0 +1,552 @@
+{
+  "version": 1,
+  "name": "ely-native-goal-lifecycle",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "key",
+      "key": "n",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click",
+      "x": 1050,
+      "y": 985
+    },
+    {
+      "type": "wait",
+      "ms": 400
+    },
+    {
+      "type": "click",
+      "x": 1050,
+      "y": 1198
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "screenshot",
+      "label": "full-access-selected"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "settings-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "settings-startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "智能体与子智能体",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "agents-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "agents-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "当前目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "Goal 生命周期运行验收"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "目标说明",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "验证 Goal 生命周期。请使用 Bash 工具执行 powershell.exe -NoProfile -Command \"Start-Sleep -Seconds 20\"，等待命令完成后再简短回答，不要提前结束。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-created"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "active",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "运行目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "运行目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-running-before-pause"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-running-before-pause"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "暂停目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_stopped",
+      "count": 1,
+      "timeout_ms": 60000,
+      "matching": {
+        "/payload/reason": "cancelled"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_stopped",
+      "count": 1,
+      "matching": {
+        "/payload/reason": "cancelled"
+      }
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "恢复目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-paused"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-paused"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "paused",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "恢复目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 2
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "取消本次运行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-running-after-resume"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-running-after-resume"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "active",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "取消本次运行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_stopped",
+      "count": 2,
+      "timeout_ms": 60000,
+      "matching": {
+        "/payload/reason": "cancelled"
+      }
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_stopped",
+      "count": 2,
+      "matching": {
+        "/payload/reason": "cancelled"
+      }
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "active",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "标记完成",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-cancelled"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-cancelled"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "完成证据（必填）",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "暂停、恢复和取消运行均已由本轮 Journal 事实验证。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "标记完成",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "清除目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-completed"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "completed",
+        "/goal/completion_evidence": "暂停、恢复和取消运行均已由本轮 Journal 事实验证。",
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "清除目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-cleared"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-cleared"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal": null
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "当前目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "Goal 阻塞终态验收"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "目标说明",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "验证阻塞 Goal 的 CAS 终态和清除流程。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-blocking-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-blocking-created"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "active",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": null
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "阻塞原因（必填）",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "外部依赖未就绪，保留阻塞状态供后续恢复。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "标记阻塞",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "清除目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-blocked"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-blocked"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal/status": "blocked",
+        "/goal/completion_evidence": null,
+        "/goal/blocked_reason": "外部依赖未就绪，保留阻塞状态供后续恢复。"
+      }
+    },
+    {
+      "type": "click_accessibility",
+      "label": "清除目标",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "goal-lifecycle-complete"
+    },
+    {
+      "type": "accessibility",
+      "label": "goal-lifecycle-complete"
+    },
+    {
+      "type": "assert_goal_state",
+      "matching": {
+        "/goal": null
+      }
+    },
+    {
+      "type": "metrics",
+      "label": "goal-lifecycle-complete"
+    }
+  ]
+}

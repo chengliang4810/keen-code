@@ -1,6 +1,6 @@
 //! 桌面 WorkflowHost：定义文件、父会话 Journal、纯 Rust 引擎和 RPC 查询的装配边界。
 //!
-//! 运行事实全部来自 `WorkflowJournalPort`。本模块只保留取消 token 之外的瞬时调度句柄，
+//! 运行事实全部来自 `WorkflowJournalPort`。本模块只保留取消 token 与进程内执行句柄，
 //! 不写 run JSON 日志，也不把内存投影当成恢复来源。
 
 pub mod agent_tools;
@@ -31,11 +31,13 @@ pub use types::*;
 use keencode_workflow::{EffectClass, InputSpec, InputType, Node, WorkflowLimits, hash_inputs};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::task::JoinHandle;
+use tokio::time;
 
 // Host 会随父 Session 的弱缓存生命周期重建；计数器必须跨 Host 共享，避免同一毫秒
 // 的新 Host 又从 ordinal=1 开始，生成与旧 Journal 冲突的 run ID。
@@ -80,8 +82,8 @@ impl std::fmt::Display for WorkflowHostError {
             Self::NotResumable(value) => write!(formatter, "workflow run cannot resume: {value}"),
             Self::FrozenRun(value) => write!(formatter, "workflow frozen run is invalid: {value}"),
             Self::LaunchConflict(value) => write!(formatter, "workflow launch conflict: {value}"),
-            Self::SettingsRejected { detail, .. } => {
-                write!(formatter, "workflow settings rejected: {detail}")
+            Self::SettingsRejected { reason, detail } => {
+                write!(formatter, "workflow settings rejected ({reason}): {detail}")
             }
             Self::PayloadTooLarge(bytes) => write!(
                 formatter,
@@ -159,6 +161,9 @@ pub struct WorkflowHost {
     store: WorkflowStore,
     journal: Arc<dyn WorkflowJournalPort>,
     driver: Arc<dyn WorkflowExecutionDriver>,
+    // 进程退出时先取消这些执行，再等待句柄收口，避免 WorkflowHost 被释放后仍有
+    // detached 任务访问父 Session 或 Journal。
+    execution_tasks: Mutex<HashMap<String, JoinHandle<()>>>,
 }
 
 /// 创建 run 时一次性携带的冻结输入；把这些字段集中在一个值里，避免调用方漏传
@@ -203,7 +208,67 @@ impl WorkflowHost {
             store: WorkflowStore::with_project_storage(data_root, project_storage),
             journal,
             driver,
+            execution_tasks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 取消并等待当前 Host 派生的执行任务。
+    ///
+    /// 真实 Driver 会把取消令牌传入 WorkflowExecutor；超时后再 abort 句柄，
+    /// 防止退出流程无限等待一个失去外部响应的叶节点。
+    pub(crate) async fn shutdown(&self, deadline: time::Instant) {
+        let run_ids = match self.execution_tasks.lock() {
+            Ok(tasks) => tasks.keys().cloned().collect::<Vec<_>>(),
+            Err(_) => {
+                tracing::warn!("Workflow 执行句柄锁不可用，跳过取消请求");
+                Vec::new()
+            }
+        };
+        let driver = Arc::clone(&self.driver);
+        let cancellations = run_ids.into_iter().map(|run_id| {
+            let driver = Arc::clone(&driver);
+            async move { (run_id.clone(), driver.cancel(run_id).await) }
+        });
+        match time::timeout(
+            remaining_until(deadline),
+            futures::future::join_all(cancellations),
+        )
+        .await
+        {
+            Ok(results) => {
+                for (run_id, result) in results {
+                    if let Err(error) = result {
+                        tracing::debug!(run_id, %error, "Workflow 关闭时取消请求未提交");
+                    }
+                }
+            }
+            Err(_) => tracing::warn!("Workflow 关闭取消请求达到共同 deadline"),
+        }
+
+        let mut tasks = match self.execution_tasks.lock() {
+            Ok(mut tasks) => std::mem::take(&mut *tasks),
+            Err(_) => {
+                tracing::warn!("Workflow 执行句柄锁不可用，无法等待任务收口");
+                return;
+            }
+        };
+        // timeout 只取消对 join_all future 的等待；先保存 AbortHandle，超时后继续
+        // await 同一个 future，避免 join_all 已消费的完成句柄被二次 await。
+        let abort_handles = tasks
+            .values()
+            .map(JoinHandle::abort_handle)
+            .collect::<Vec<_>>();
+        let mut wait = futures::future::join_all(tasks.values_mut());
+        if time::timeout(remaining_until(deadline), &mut wait)
+            .await
+            .is_err()
+        {
+            tracing::warn!("Workflow 关闭等待达到共同 deadline，终止执行句柄");
+            for handle in abort_handles {
+                handle.abort();
+            }
+            let _ = wait.await;
+        }
     }
 
     /// 启动新 run；`run-started` 先写 Journal，成功后才调用真实引擎。
@@ -555,9 +620,17 @@ impl WorkflowHost {
         let input_hash = hash_inputs(&resolved_inputs)
             .map_err(|error| WorkflowHostError::InvalidInputs(error.to_string()))?;
         let canonical = compiled.definition_hash().to_owned();
+        let model_selection = model_selection.ok_or_else(|| {
+            WorkflowHostError::FrozenRun("workflow run-started is missing frozen models".to_owned())
+        })?;
+        WorkflowModelSelection::parse(&model_selection).map_err(|error| {
+            WorkflowHostError::FrozenRun(format!(
+                "workflow run-started models are invalid: {error}"
+            ))
+        })?;
         let launch_input_id =
             launch_input_id.and_then(|value| (!value.trim().is_empty()).then_some(value));
-        let model_hash = workflow_value_digest(model_selection.as_ref());
+        let model_hash = workflow_value_digest(Some(&model_selection));
         let budgets_hash = workflow_value_digest(budgets.as_ref());
 
         // `list_runs` intentionally serves a bounded UI history. Durable idempotency must
@@ -638,7 +711,7 @@ impl WorkflowHost {
             launch_input_id: launch_input_id.clone(),
             inputs: resolved_inputs,
             cwd,
-            model_selection,
+            model_selection: Some(model_selection),
             budgets,
             predecessor_run_id,
         };
@@ -785,17 +858,30 @@ impl WorkflowHost {
         // RuntimeSession 的 WorkflowEventCommitted 已经是动态事件唯一来源；
         // 引擎通知只需消费掉适配器的提交回执，不再维护第二套 Host 监听器。
         let sink: Arc<dyn WorkflowProgressSink> = Arc::new(JournalProgressSink);
-        tokio::spawn(async move {
-            let run_id = request.run_id.clone();
+        let run_id = request.run_id.clone();
+        let task_run_id = run_id.clone();
+        let task = tokio::spawn(async move {
             let result = if resume {
                 host.driver.resume(request, sink).await
             } else {
                 host.driver.start(request, sink).await
             };
             if let Err(error) = result {
-                let _ = host.settle_driver_error(&run_id, error);
+                let _ = host.settle_driver_error(&task_run_id, error);
             }
         });
+        match self.execution_tasks.lock() {
+            Ok(mut tasks) => {
+                // 已完成句柄只保留到下一次派发，避免长时间运行的桌面进程积累
+                // 无意义的 JoinHandle；正在执行的句柄仍由 shutdown 统一回收。
+                tasks.retain(|_, task| !task.is_finished());
+                tasks.insert(run_id, task);
+            }
+            Err(_) => {
+                task.abort();
+                tracing::error!("Workflow 执行句柄锁不可用，已终止未受管任务");
+            }
+        }
     }
 
     fn settle_driver_error(
@@ -898,17 +984,6 @@ fn project_graph(body: &[Node]) -> (Vec<WorkflowGraphNode>, Vec<WorkflowGraphEdg
             })
             .collect(),
     )
-}
-
-/// 将已校验的定义图提供给会话行投影。
-///
-/// `CreateWorkflow` 的 Source 详情页从工具行的 `display.causalityGraph` 取图，
-/// 而不是调用独立的 graph RPC。这里复用同一份 Rust 图投影，避免会话行再维护
-/// 一套节点/边归约规则；调用方仍负责将结果限制到 Source display 的字段边界。
-pub(crate) fn project_graph_for_display(
-    definition: &WorkflowDefinition,
-) -> (Vec<WorkflowGraphNode>, Vec<WorkflowGraphEdge>) {
-    project_graph(&definition.body)
 }
 
 fn project_graph_body(
@@ -1019,6 +1094,10 @@ fn frozen_from_events(
     let input_hash = required_str(payload, "inputHash")?.to_owned();
     let parent_session_id = required_str(payload, "parentSessionId")?.to_owned();
     let cwd = PathBuf::from(required_str(payload, "cwd")?);
+    let model_selection = required(payload, "models")?;
+    WorkflowModelSelection::parse(&model_selection).map_err(|error| {
+        WorkflowHostError::FrozenRun(format!("workflow run-started models are invalid: {error}"))
+    })?;
     Ok(FrozenWorkflowRun {
         definition,
         canonical_hash,
@@ -1028,10 +1107,7 @@ fn frozen_from_events(
         tool_call_id: event.tool_call_id.clone(),
         launch_input_id: event.launch_input_id.clone(),
         cwd,
-        model_selection: payload
-            .get("models")
-            .cloned()
-            .filter(|value| !value.is_null()),
+        model_selection: Some(model_selection),
         budgets: payload
             .get("budgets")
             .cloned()
@@ -1262,11 +1338,20 @@ fn unix_time_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+fn remaining_until(deadline: time::Instant) -> Duration {
+    let now = time::Instant::now();
+    if deadline > now {
+        deadline - now
+    } else {
+        Duration::ZERO
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     #[test]
     fn amendable_predecessor_status_is_rechecked_at_successor_boundary() {
@@ -1631,6 +1716,147 @@ mod tests {
         }
     }
 
+    struct StuckDriver {
+        cancels: AtomicUsize,
+    }
+
+    impl StuckDriver {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                cancels: AtomicUsize::new(0),
+            })
+        }
+    }
+
+    impl WorkflowExecutionDriver for StuckDriver {
+        fn preflight(
+            &self,
+            _request: &WorkflowExecutionRequest,
+            _mode: WorkflowPreflightMode,
+        ) -> Result<(), WorkflowRuntimeError> {
+            Ok(())
+        }
+
+        fn prepare(&self, _run_id: &str) -> Result<(), WorkflowRuntimeError> {
+            Ok(())
+        }
+
+        fn start(
+            &self,
+            _request: WorkflowExecutionRequest,
+            _sink: Arc<dyn WorkflowProgressSink>,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn cancel(&self, _run_id: String) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            self.cancels.fetch_add(1, Ordering::SeqCst);
+            Box::pin(std::future::pending())
+        }
+
+        fn resume(
+            &self,
+            _request: WorkflowExecutionRequest,
+            _sink: Arc<dyn WorkflowProgressSink>,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn resolve_question(
+            &self,
+            _qid: String,
+            _answer: String,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    struct MixedDriver {
+        starts: AtomicUsize,
+        cancels: AtomicUsize,
+        pending_dropped: Arc<AtomicBool>,
+    }
+
+    impl MixedDriver {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                starts: AtomicUsize::new(0),
+                cancels: AtomicUsize::new(0),
+                pending_dropped: Arc::new(AtomicBool::new(false)),
+            })
+        }
+    }
+
+    struct DropPending {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl std::future::Future for DropPending {
+        type Output = Result<(), WorkflowRuntimeError>;
+
+        fn poll(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Self::Output> {
+            std::task::Poll::Pending
+        }
+    }
+
+    impl Drop for DropPending {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl WorkflowExecutionDriver for MixedDriver {
+        fn preflight(
+            &self,
+            _request: &WorkflowExecutionRequest,
+            _mode: WorkflowPreflightMode,
+        ) -> Result<(), WorkflowRuntimeError> {
+            Ok(())
+        }
+
+        fn prepare(&self, _run_id: &str) -> Result<(), WorkflowRuntimeError> {
+            Ok(())
+        }
+
+        fn start(
+            &self,
+            _request: WorkflowExecutionRequest,
+            _sink: Arc<dyn WorkflowProgressSink>,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            if self.starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Box::pin(async { Ok(()) })
+            } else {
+                Box::pin(DropPending {
+                    dropped: Arc::clone(&self.pending_dropped),
+                })
+            }
+        }
+
+        fn cancel(&self, _run_id: String) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            self.cancels.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn resume(
+            &self,
+            _request: WorkflowExecutionRequest,
+            _sink: Arc<dyn WorkflowProgressSink>,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            Box::pin(std::future::pending())
+        }
+
+        fn resolve_question(
+            &self,
+            _qid: String,
+            _answer: String,
+        ) -> WorkflowFuture<Result<(), WorkflowRuntimeError>> {
+            Box::pin(std::future::pending())
+        }
+    }
+
     fn test_definition(name: &str) -> WorkflowDefinition {
         WorkflowDefinition {
             version: WORKFLOW_VERSION,
@@ -1668,7 +1894,21 @@ mod tests {
         definition
     }
 
-    fn start_request(model_selection: Value) -> WorkflowRunStartRequest {
+    fn test_model_selection(provider_id: &str, plan_enabled: bool) -> Value {
+        json!({
+            "provider": {
+                "providerId": provider_id,
+                "model": "test-model",
+                "contextWindow": 128000,
+                "protocol": "open_ai_responses",
+                "configFingerprint": "test-config",
+                "reasoningEffort": null,
+            },
+            "planEnabled": plan_enabled,
+        })
+    }
+
+    fn start_request(provider_id: &str) -> WorkflowRunStartRequest {
         WorkflowRunStartRequest {
             name: "inspect".to_owned(),
             scope: WorkflowScope::Project,
@@ -1678,7 +1918,7 @@ mod tests {
             launch_input_id: Some("command-1".to_owned()),
             inputs: json!({}),
             cwd: PathBuf::from("/workspace"),
-            model_selection: Some(model_selection),
+            model_selection: Some(test_model_selection(provider_id, false)),
             budgets: Some(json!({"maxNodes": 4})),
         }
     }
@@ -1721,7 +1961,7 @@ mod tests {
         let (host, _data_root, _project) =
             test_host_with_definition(journal.clone(), driver.clone(), tool_definition("read"));
 
-        let mut request = start_request(json!({"provider": "test"}));
+        let mut request = start_request("test");
         request.name = "read".to_owned();
         let error = host
             .start(request)
@@ -1737,13 +1977,174 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn run_started_freezes_provider_and_plan_in_one_structured_value() {
+        for plan_enabled in [false, true] {
+            let journal = Arc::new(MemoryWorkflowJournal::default());
+            let driver = CountingDriver::new();
+            let (host, _data_root, _project) = test_host(journal.clone(), driver);
+            let mut request = start_request("test");
+            request.model_selection = Some(test_model_selection("test", plan_enabled));
+
+            let result = host
+                .start(request)
+                .expect("structured model facts should start");
+            let events = journal
+                .all_events(&result.run_id)
+                .expect("run events should be readable");
+            let started = events
+                .iter()
+                .find(|event| event.event_type == "run-started")
+                .expect("run-started should be persisted");
+            let models = started
+                .payload
+                .get("models")
+                .expect("run-started should contain models");
+            let frozen =
+                WorkflowModelSelection::parse(models).expect("models should be structured");
+            assert_eq!(frozen.provider.provider_id, "test");
+            assert_eq!(frozen.plan_enabled, plan_enabled);
+            assert_eq!(frozen, WorkflowModelSelection::parse(models).unwrap());
+            assert_eq!(
+                frozen_from_events(&result.run_id, &events)
+                    .unwrap()
+                    .model_selection,
+                Some(models.clone())
+            );
+        }
+    }
+
+    #[test]
+    fn start_rejects_missing_frozen_plan_before_writing_journal() {
+        let journal = Arc::new(MemoryWorkflowJournal::default());
+        let driver = CountingDriver::new();
+        let (host, _data_root, _project) = test_host(journal.clone(), driver);
+        let mut request = start_request("test");
+        let mut incomplete = test_model_selection("test", false);
+        incomplete
+            .as_object_mut()
+            .expect("test models should be an object")
+            .remove("planEnabled");
+        request.model_selection = Some(incomplete);
+
+        let error = host
+            .start(request)
+            .expect_err("incomplete model facts must be rejected");
+        assert!(matches!(error, WorkflowHostError::FrozenRun(message)
+            if message.contains("models are invalid")));
+        assert!(journal.events.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_cancels_and_joins_spawned_workflow_tasks() {
+        let journal = Arc::new(MemoryWorkflowJournal::default());
+        let driver = CountingDriver::new();
+        let (host, _data_root, _project) = test_host(journal, driver.clone());
+        host.start(start_request("test"))
+            .expect("workflow should be accepted");
+
+        host.shutdown(time::Instant::now() + Duration::from_millis(20))
+            .await;
+
+        assert_eq!(driver.cancels.load(Ordering::SeqCst), 1);
+        assert!(
+            host.execution_tasks
+                .lock()
+                .expect("execution task lock should remain usable")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_sends_all_cancellations_before_short_common_deadline() {
+        let journal = Arc::new(MemoryWorkflowJournal::default());
+        let driver = StuckDriver::new();
+        let data_root = tempfile::tempdir().expect("test data root");
+        let project = tempfile::tempdir().expect("test project root");
+        let store = WorkflowStore::with_project_storage(data_root.path(), project.path());
+        store
+            .save(
+                WorkflowScope::Project,
+                Some(project.path()),
+                &test_definition("inspect"),
+            )
+            .expect("test definition should save");
+        let host = WorkflowHost::new_with_project_storage(
+            data_root.path(),
+            project.path(),
+            journal,
+            driver.clone(),
+        );
+        let mut first = start_request("test");
+        first.launch_input_id = Some("shutdown-first".to_owned());
+        let mut second = start_request("test");
+        second.launch_input_id = Some("shutdown-second".to_owned());
+        host.start(first).expect("first workflow should start");
+        host.start(second).expect("second workflow should start");
+
+        host.shutdown(time::Instant::now() + Duration::from_millis(20))
+            .await;
+
+        assert_eq!(driver.cancels.load(Ordering::SeqCst), 2);
+        assert!(
+            host.execution_tasks
+                .lock()
+                .expect("execution task lock should remain usable")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_reaps_completed_and_pending_workflow_tasks_after_deadline() {
+        let journal = Arc::new(MemoryWorkflowJournal::default());
+        let driver = MixedDriver::new();
+        let data_root = tempfile::tempdir().expect("test data root");
+        let project = tempfile::tempdir().expect("test project root");
+        let store = WorkflowStore::with_project_storage(data_root.path(), project.path());
+        store
+            .save(
+                WorkflowScope::Project,
+                Some(project.path()),
+                &test_definition("inspect"),
+            )
+            .expect("test definition should save");
+        let host = WorkflowHost::new_with_project_storage(
+            data_root.path(),
+            project.path(),
+            journal,
+            driver.clone(),
+        );
+        let mut first = start_request("test");
+        first.launch_input_id = Some("mixed-first".to_owned());
+        let mut second = start_request("test");
+        second.launch_input_id = Some("mixed-second".to_owned());
+        host.start(first).expect("first workflow should start");
+        host.start(second).expect("second workflow should start");
+        for _ in 0..4 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(driver.starts.load(Ordering::SeqCst), 2);
+
+        host.shutdown(time::Instant::now() + Duration::from_millis(20))
+            .await;
+
+        assert_eq!(driver.cancels.load(Ordering::SeqCst), 2);
+        assert!(driver.pending_dropped.load(Ordering::SeqCst));
+        assert!(
+            host.execution_tasks
+                .lock()
+                .expect("execution task lock should remain usable")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn successor_launch_conflict_is_rejected_before_predecessor_cancel() {
         let journal = Arc::new(MemoryWorkflowJournal::default());
         let driver = CountingDriver::new();
         let (host, _data_root, _project) = test_host(journal.clone(), driver.clone());
         let definition = test_definition("inspect");
         let inputs = json!({});
-        let model = json!({"provider": "old"});
+        let model = test_model_selection("old", false);
         let budgets = json!({"maxNodes": 4});
         let started = WorkflowJournalEvent {
             run_id: "predecessor".to_owned(),
@@ -1784,7 +2185,7 @@ mod tests {
                 launch_input_id: Some("settings-command".to_owned()),
                 inputs: json!({}),
                 cwd: PathBuf::from("/workspace"),
-                model_selection: Some(json!({"provider": "new"})),
+                model_selection: Some(test_model_selection("new", false)),
                 budgets: Some(json!({"maxNodes": 4})),
                 subagent_model: None,
             })
@@ -1801,7 +2202,7 @@ mod tests {
         let (host, _data_root, _project) = test_host(journal.clone(), driver.clone());
         let definition = test_definition("inspect");
         let inputs = json!({});
-        let model = json!({"provider": "old"});
+        let model = test_model_selection("old", false);
         let budgets = json!({"maxNodes": 4});
         journal
             .commit_event(
@@ -1844,7 +2245,7 @@ mod tests {
                 launch_input_id: Some("new-command".to_owned()),
                 inputs: json!({}),
                 cwd: PathBuf::from("/workspace"),
-                model_selection: Some(json!({"provider": "new"})),
+                model_selection: Some(test_model_selection("new", false)),
                 budgets: Some(json!({"maxNodes": 4})),
                 subagent_model: None,
             })
@@ -1891,10 +2292,10 @@ mod tests {
         let driver = CountingDriver::new();
         let (host, _data_root, _project) = test_host(journal.clone(), driver.clone());
         let first = host
-            .start(start_request(json!({"provider": "test"})))
+            .start(start_request("test"))
             .expect("first launch should succeed");
         let second = host
-            .start(start_request(json!({"provider": "test"})))
+            .start(start_request("test"))
             .expect("same launch should reuse");
         assert_eq!(first, second);
         assert_eq!(driver.prepares.load(Ordering::Relaxed), 1);
@@ -1909,7 +2310,7 @@ mod tests {
         let driver = CountingDriver::new();
         let (host, data_root, project) = test_host(journal.clone(), driver.clone());
         let first = host
-            .start(start_request(json!({"provider": "test"})))
+            .start(start_request("test"))
             .expect("first launch should succeed");
         drop(host);
         let rebuilt = WorkflowHost::new_with_project_storage(
@@ -1919,11 +2320,11 @@ mod tests {
             driver.clone(),
         );
         let reused = rebuilt
-            .start(start_request(json!({"provider": "test"})))
+            .start(start_request("test"))
             .expect("cold host should reuse Journal run");
         assert_eq!(reused, first);
         let conflict = rebuilt
-            .start(start_request(json!({"provider": "other"})))
+            .start(start_request("other"))
             .expect_err("changed frozen model must conflict");
         assert!(
             matches!(conflict, WorkflowHostError::LaunchConflict(message) if message.contains("model selection digest differs"))
@@ -1938,7 +2339,7 @@ mod tests {
         let (host, _data_root, _project) = test_host(journal.clone(), driver.clone());
         let left_host = Arc::clone(&host);
         let right_host = Arc::clone(&host);
-        let left_request = start_request(json!({"provider": "test"}));
+        let left_request = start_request("test");
         let right_request = left_request.clone();
         let (left, right) = std::thread::scope(|scope| {
             let left = scope.spawn(move || left_host.start(left_request));

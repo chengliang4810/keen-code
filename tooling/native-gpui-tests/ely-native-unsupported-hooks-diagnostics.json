@@ -1,0 +1,137 @@
+{
+  "version": 1,
+  "name": "ely-native-unsupported-hooks-diagnostics",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-settings-reference-1/native-run"
+  },
+  "actions": [
+    {"type": "focus"},
+    {"type": "resize_client", "width": 2560, "height": 1640},
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {"type": "wait", "ms": 1500},
+    {"type": "click_accessibility", "label": "设置", "timeout_ms": 30000},
+    {"type": "wait", "ms": 150},
+    {"type": "wait", "ms": 1000},
+    {"type": "click_accessibility", "label": "插件", "timeout_ms": 30000},
+    {"type": "wait", "ms": 150},
+    {"type": "wait", "ms": 1000},
+    {
+      "type": "wait_for_accessibility",
+      "label": "插件目录或 marketplace.json#插件名",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "插件目录或 marketplace.json#插件名",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "type_text",
+      "text": "D:\\projects\\keen-code\\tooling\\native-gpui-tests\\fixtures\\ely-native-unsupported-hooks"
+    },
+    {"type": "click_accessibility", "label": "安装", "timeout_ms": 30000},
+    {"type": "wait", "ms": 150},
+    {"type": "wait", "ms": 1500},
+    {
+      "type": "wait_for_accessibility",
+      "label": "ely-native-unsupported-hooks",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Hook 事件：FileChanged",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "未支持 · 原因：当前 Native 执行入口未实现",
+      "timeout_ms": 30000
+    },
+    {"type": "screenshot", "label": "plugins-unsupported-hook"},
+    {"type": "accessibility", "label": "plugins-unsupported-hook"},
+    {"type": "metrics", "label": "plugins-unsupported-hook"},
+    {"type": "click_accessibility", "label": "诊断", "timeout_ms": 30000},
+    {"type": "wait", "ms": 150},
+    {"type": "wait", "ms": 1000},
+    {
+      "type": "wait_for_accessibility",
+      "label": "插件 Hook 诊断",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "插件 ely-native-unsupported-hooks@local · 声明存在但当前不会执行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "原因：当前 Native 执行入口未实现",
+      "timeout_ms": 30000
+    },
+    {"type": "screenshot", "label": "diagnostics-unsupported-hook"},
+    {"type": "accessibility", "label": "diagnostics-unsupported-hook"},
+    {"type": "metrics", "label": "diagnostics-unsupported-hook"},
+    {"type": "key", "key": "n", "modifiers": ["ctrl"]},
+    {"type": "wait", "ms": 500},
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {"type": "click", "x": 1000, "y": 880},
+    {"type": "wait", "ms": 100},
+    {"type": "type_text", "text": "只回复字符串 unsupported hook fixture ok。不要调用工具。"},
+    {"type": "wait", "ms": 800},
+    {"type": "key", "key": "enter"},
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 120000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "ely-hook-supported.txt",
+      "contains": "ELY_SUPPORTED_HOOK",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "ely-hook-supported.txt",
+      "contains": "ELY_SUPPORTED_HOOK",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file_absent",
+      "scope": "project",
+      "path": "ely-hook-unsupported.txt"
+    },
+    {"type": "screenshot", "label": "supported-hook-executed"},
+    {"type": "accessibility", "label": "supported-hook-executed"}
+  ]
+}

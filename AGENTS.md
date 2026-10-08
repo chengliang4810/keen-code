@@ -1,85 +1,82 @@
 # KeenCode Agent 开发指南
 
-本文是仓库级开发约束。用中文交流，先从当前源码、配置、测试和 Git 状态
-确认事实；保留与任务无关的本地修改，不重置、覆盖或提交其他 Agent 的工作。
+本文是仓库级开发约束。用中文交流，先从当前源码、配置、测试和 Git 状态确认事实；
+保留与任务无关的本地修改，不重置、覆盖或提交其他 Agent 的工作。
 
 ## 当前基线
 
-- 前端 UI 以 ZCode 3.14.3 固定提交
-  `29628c9acdb81b703bbd4080c207a0e7ce5e276e` 为来源基线，映射与许可证见
-  `THIRD_PARTY_NOTICES.md`、`third-party/zcode/` 和 `docs/frontend-zcode-source.md`。
-- 产品 UI 根为 `packages/ui/src/`；`apps/ui/` 承载 Tauri 平台适配、构建入口
-  和契约测试，不存放第二套业务界面。React 19、Vite、Tailwind v4 和 pnpm workspace 的实际版本
-  以 `package.json`、各包清单和 lockfile 为准。
-- Rust workspace 由根 `Cargo.toml` 管理。Tauri 桌面宿主、ACP、Agent Loop、
-  Journal 和资源持久化仍由 Rust 持有权威状态；前端是可丢弃的界面投影。
-- 构建可使用 Node.js 24 与 pnpm 10.14.0；桌面运行时不得依赖 Node、Electron
-  或 JavaScript workflow engine。
+- 根 `Cargo.toml` 管理唯一的 Rust workspace。业务核心位于 `core/`，桌面应用位于
+  `apps/desktop/`，Windows 原生验收器位于 `tooling/native-gpui-tests/`。
+- 桌面界面由 GPUI 原生绘制，界面实现位于 `apps/desktop/src/native_ui/`。GPUI 固定在
+  `1a28cff4b409169bac058bca40dfbfeb7621d19b`，Ely GPUI Components 固定在
+  `94f34c9f8e98b5f4b3078776a4c197b9021f4cdf`；不要混用未锁定的版本。
+- ZCode 3.14.3 提交
+  `29628c9acdb81b703bbd4080c207a0e7ce5e276e` 定义固定像素基线，约束视觉、密度、交互和
+  信息层级。当前产品不复制其界面源码；来源事实和 Apache-2.0 归属见
+  `THIRD_PARTY_NOTICES.md`、`docs/frontend-zcode-source.md` 与 `third-party/zcode/`。
+- `NativeHost`、Agent Loop、Journal、资源持久化和工作流执行器由 Rust 持有权威状态；
+  GPUI 组件只保存当前投影、输入草稿和短生命周期的交互状态。
+- workspace MSRV 是 Rust 1.95；开发和发布均使用 Cargo，不需要额外的脚本运行时。
 
 ## 开始与编辑
 
-1. 先执行 `git status --short`，再用 `rg`/`rg --files` 定位目标文件、调用方和
-   相邻测试。不要通读无关的大文件或生成输出。
-2. 修改 UI 前阅读 `DESIGN.md` 与 `docs/frontend-zcode-source.md`；修改 RPC、
-   snapshot、Journal 或 workflow 前阅读 `docs/protocols/` 下对应契约。
-3. 保持来源 ZCode 的 DOM、className、CSS token、键盘语义和 locale 结构。只
-   在已确认的产品裁剪、品牌文案和 KeenCode RPC 接线处修改。
-4. 新增或修改的非直观语义、约束和取舍使用简短中文注释；JSON 等格式不写非法
-   注释。优先已有依赖和组件，不为门禁引入伪造包装层。
-5. 只有用户明确要求时才提交或推送；提交信息使用中文为主的中英双语。当前
-   迁移阶段不要创建提交。
+1. 先执行 `git status --short`，再用 `rg` 或 `rg --files` 定位目标文件、调用方和相邻
+   测试。不要通读无关的大文件或生成输出。
+2. 修改界面前阅读 `DESIGN.md`、`docs/frontend-zcode-source.md` 和相邻的
+   `apps/desktop/src/native_ui/` 实现；修改 Journal、快照或工作流前阅读
+   `docs/protocols/` 下对应契约。
+3. 优先复用 `ely-gpui-component` 和现有 GPUI 组件，保持现有命名、焦点语义、键盘行为、
+   主题角色和信息密度。业务状态必须通过类型化 Rust 服务或宿主回执更新。
+4. 新增或修改的非直观语义、边界和取舍使用简短中文注释；JSON 等格式不写非法注释。
+   不为门禁引入伪造包装层或重复的状态源。
+5. 只有用户明确要求时才提交或推送；当前迁移阶段不要创建提交。
 
-## UI 规则
+## 原生界面规则
 
-- 使用 `packages/ui/src/styles.css` 的 `--color-*` 语义令牌和原有主题角色。
-  业务 TSX/CSS 不写主题色字面量、固定视觉 inline style 或第二套字体缩放。
-- 应用界面文字必须使用 `text-ui-xl`、`text-ui-lg`、`text-ui-base`、
-  `text-ui-caption`、`text-ui-sm`、`text-ui-xs`。代码、Diff、终端内容可有
-  独立数字字体设置，但外围控件仍使用 `text-ui-*`。
-- 通用控件优先复用 `packages/ui/src/components/ui/`；locale 以 `en-US` 键形状
-  和 `zh-CN` 默认中文为准。协议值、ID、路径、模型名和用户内容不翻译。
-- 官方账号、支付、云端、机器人、SSH、WSL、Docker、浏览器计算机控制及其
-  路由、菜单、locale 和依赖都不属于目标产品。
-- 业务代码不能通过“忽略整个第三方目录”规避设计或来源门禁；固定 ZCode 源码的
-  原始例外必须命中 `third-party/zcode/design-baseline.json` 的完整 SHA256 或精确
-  行特征。合法来源还必须在组件级清单中注明路径、版本和许可证。
+- 颜色来自 Ely `Theme` 的语义调色板，例如 `bg`、`surface`、`sunken`、`border`、
+  `fg`、`fg_muted`、`accent`、`success`、`warning` 和 `danger`。界面代码不写无语义的
+  固定颜色来替代主题角色。
+- 文字使用 `Theme::text_size(TextSize::...)`，代码、路径、命令、标识符和终端内容使用
+  主题提供的等宽字体。不要为单个控件另造字号体系。
+- 侧栏、聊天、输入区、设置和工作台保持紧凑、可扫描、可键盘操作的桌面工作台结构。
+  不用装饰性大块面板、无意义的渐变或重复的浮层包裹信息。
+- 每个有状态的动作都应有明确的加载、错误、禁用和回执状态。失败时显示脱敏诊断，
+  不能用本地乐观状态冒充 Journal 已确认的结果。
+- 官方账号、支付、云端消息、机器人、SSH、WSL、Docker 和计算机控制入口不属于目标
+  产品；不要通过菜单、设置、资源或文案重新引入这些范围。
 
 ## 协议与状态
 
-- `ChannelClient` 继续使用 VQL 100-204 的请求、取消、订阅、释放和响应语义。
-  `open`、`send`、`close` 必须有明确的生命周期和幂等释放行为。
-- v4 wire protocol version 为 3，projection snapshot version 为 1。每个窗口
-  使用 window-bound connection；seq 缺口、重复或 connection reset 触发 resync，
-  不用 optimistic overlay 冒充已确认状态。
-- Journal 是会话、消息、工具和 workflow 执行事实源；snapshot 只恢复投影。
-  active barrier 由 Rust host 建立和解除，前端不得凭按钮状态宣布完成。
-- `WorkflowDefinitionV1` 是 Rust `serde` 负责的纯 JSON；actor 只允许单层，
-  ID/版本/引用/环由 Rust 校验。UI 草稿变化不能改变 active revision。
+- Journal 是会话、消息、工具和工作流执行事实源；快照只用于恢复投影。顺序缺口、重复
+  事件或宿主重置时，丢弃受影响的局部投影并重新读取权威状态。
+- active barrier 由 Rust host 建立和解除，界面不得凭按钮状态宣布执行完成。成功、取消、
+  失败和需要用户输入都必须来自宿主事实或回执。
+- `WorkflowDefinitionV1` 是 Rust `serde` 负责校验和持久化的纯 JSON 数据。ID、版本、
+  引用和环由 Rust 检查；草稿变化不能改变正在执行的 revision。
+- 草稿、侧栏分组和本地缓存使用有界大小、原子写入和跨进程锁；冷恢复必须绕过可能过期
+  的进程内缓存。敏感配置只通过既有密钥存储和脱敏诊断流转。
 
 ## 验证
 
 从仓库根按改动范围运行：
 
 ```text
-corepack pnpm@10.14.0 install --frozen-lockfile
-pnpm run typecheck
-pnpm test
-pnpm exec vitest run --config vitest.config.ts <test-file>
-pnpm run lint:css
-pnpm run check:design-system
-pnpm run check:clean-room
 cargo fmt --all -- --check
+cargo check --workspace --all-targets
 cargo test --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
-# native-desktop-tests 只用于原生验收程序构建；普通离线单测不需要该 feature
-cargo build -p keencode-desktop --features native-desktop-tests
-# 原生 WebView2 验收仅在有显式 plan/provider 配置时运行；不是离线 CI 步骤
-node tooling/scripts/native-live-e2e.mjs --plan <plan.json> --provider-config <provider.json>
+cargo deny check advisories bans licenses sources
+cargo build -p keencode-desktop --release
+cargo build -p keencode-native-gpui-tests
 ```
 
-前端浏览器开发服务器只能验证打包和静态交互，不能替代 Tauri 原生窗口。真实
-provider/live 测试保持 opt-in，不纳入离线 CI。每个通过项必须在
-`docs/frontend-acceptance-matrix.md` 记录命令、环境和截图/日志证据；没有证据的
-项目保持 `pending`。
+Windows 原生验收器只在有显式计划和隔离 Provider 配置时运行：
+
+```text
+cargo run -p keencode-native-gpui-tests -- --binary target/release/keencode-desktop.exe --plan tooling/native-gpui-tests/ely-native-smoke.json --output out/ely-native/run-current
+```
+
+真实 Provider、性能和人工窗口操作是 opt-in 验收。没有当前命令、环境和报告证据的项目
+保持 `pending`，不能把源码存在或离线单测通过写成完整功能验收通过。
 
 完成前检查 `git diff` 与 `git diff --check`，报告实际验证结果和未验证范围。

@@ -1,369 +1,170 @@
-//! 平台进程资源采样适配器。
+//! NativeHost 进程资源采样。
 //!
-//! Windows 通过 ToolHelp 枚举当前宿主进程下的 WebView2 后代，再用进程句柄读取
-//! 工作集（RSS）、PrivateUsage、PagefileUsage 和累计 CPU 时间。其他平台不猜测
-//! 兼容 API，明确返回 `None`，由面板显示为“未报告”。
+//! 采样对象只有当前 GPUI Rust 进程；不会枚举、聚合或读取 WebView、JavaScript
+//! 运行时和其他子进程。CPU 与内存数字来自 `sysinfo` 的进程 API，UI 只把它们
+//! 当作诊断摘要，不能据此推断系统总体资源使用。
 
-/// 一次宿主进程及其 WebView2 后代的聚合资源摘要。
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+/// 一次当前 GPUI 进程的资源摘要。
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessResourceSample {
-    /// 相邻采样间隔内的整机归一化 CPU 百分比；首个样本没有基线时为 `None`。
+    /// 当前进程在最近一次 sysinfo 刷新间隔内的 CPU 百分比。
     pub cpu_percent: Option<f64>,
-    /// 所有可读取进程的工作集总量，即 RSS 近似值。
+    /// 当前进程工作集（RSS）近似值。
     pub resident_bytes: Option<u64>,
-    /// 所有可读取进程的 PrivateUsage 总量。
+    /// 当前进程的私有提交量；sysinfo 不提供该平台字段时为 `None`。
     pub private_bytes: Option<u64>,
-    /// 所有可读取进程的 PagefileUsage 总量，即 Windows 提交内存近似值。
+    /// 当前进程的私有工作集；sysinfo 不提供该平台字段时为 `None`。
+    pub private_resident_bytes: Option<u64>,
+    /// 当前进程提交/虚拟内存近似值。
     pub virtual_bytes: Option<u64>,
-    /// 成功读取的宿主/WebView2 进程数量；平台不支持时为 `None`。
+    /// 成功读取的 NativeHost 进程数量，成功时固定为 1。
     pub process_count: Option<u64>,
 }
 
-/// 整机逻辑处理器数量只查询一次；Windows 按所有 processor group 计数，
-/// 不把进程 affinity/job 限制当作整机总算力。
+/// 逻辑处理器数量只查询一次，用于把 sysinfo 的每核 CPU 值归一到整机百分比。
 pub(crate) fn logical_processor_count() -> usize {
     static COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *COUNT.get_or_init(|| {
-        #[cfg(target_os = "windows")]
-        {
-            // ALL_PROCESSOR_GROUPS 不依赖当前线程所在的 processor group。
-            unsafe { windows_sys::Win32::System::Threading::GetActiveProcessorCount(u16::MAX) }
-                .max(1) as usize
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            std::thread::available_parallelism().map_or(1, usize::from)
-        }
-    })
+    *COUNT.get_or_init(|| std::thread::available_parallelism().map_or(1, usize::from))
 }
 
-#[cfg(any(target_os = "windows", test))]
-fn machine_cpu_percent(delta_ticks: u64, elapsed_100ns: f64, processors: usize) -> Option<f64> {
-    if !elapsed_100ns.is_finite() || elapsed_100ns <= 0.0 {
-        return None;
-    }
-    Some((delta_ticks as f64 / elapsed_100ns / processors.max(1) as f64 * 100.0).clamp(0.0, 100.0))
-}
-
-/// 按需读取平台进程资源；不创建常驻线程，生命周期由前端采样控制器决定。
-#[derive(Default)]
+/// 按需读取平台进程资源；不创建常驻采样线程，生命周期由宿主诊断调用方控制。
 pub struct ProcessResourceSampler {
     platform: PlatformSampler,
 }
 
+impl Default for ProcessResourceSampler {
+    fn default() -> Self {
+        Self {
+            platform: PlatformSampler::new(),
+        }
+    }
+}
+
 impl ProcessResourceSampler {
-    /// 读取一份新的聚合资源摘要。
+    /// 读取一份当前 GPUI Rust 进程的资源摘要。
     pub fn sample(&mut self) -> ProcessResourceSample {
         self.platform.sample()
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-#[derive(Default)]
-struct PlatformSampler;
+struct PlatformSampler {
+    system: sysinfo::System,
+    pid: sysinfo::Pid,
+    cpu_sampled_at: Option<std::time::Instant>,
+}
 
-#[cfg(not(target_os = "windows"))]
 impl PlatformSampler {
-    fn sample(&mut self) -> ProcessResourceSample {
-        ProcessResourceSample::default()
-    }
-}
-
-#[cfg(target_os = "windows")]
-mod windows {
-    use super::ProcessResourceSample;
-    use std::collections::HashMap;
-    use std::mem::size_of;
-    use std::time::Instant;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
-        TH32CS_SNAPPROCESS,
-    };
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
-    };
-    use windows_sys::Win32::System::Threading::{
-        GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_VM_READ,
-    };
-
-    #[derive(Default)]
-    pub(super) struct PlatformSampler {
-        previous_cpu_ticks: HashMap<u32, u64>,
-        previous_at: Option<Instant>,
-    }
-
-    impl PlatformSampler {
-        pub(super) fn sample(&mut self) -> ProcessResourceSample {
-            let now = Instant::now();
-            let process_ids = tracked_process_ids();
-            let mut current_cpu_ticks = HashMap::new();
-            let mut resident_bytes = None;
-            let mut private_bytes = None;
-            let mut virtual_bytes = None;
-            let mut process_count = 0u64;
-
-            for process_id in process_ids {
-                let Some(usage) = query_process(process_id) else {
-                    continue;
-                };
-                process_count = process_count.saturating_add(1);
-                if let Some(cpu_ticks) = usage.cpu_ticks {
-                    current_cpu_ticks.insert(process_id, cpu_ticks);
-                }
-                add_bytes(&mut resident_bytes, usage.resident_bytes);
-                add_bytes(&mut private_bytes, usage.private_bytes);
-                add_bytes(&mut virtual_bytes, usage.virtual_bytes);
-            }
-
-            let cpu_percent = self.previous_at.and_then(|previous_at| {
-                if current_cpu_ticks.is_empty() || self.previous_cpu_ticks.is_empty() {
-                    return None;
-                }
-                let elapsed_100ns = now.duration_since(previous_at).as_secs_f64() * 10_000_000.0;
-                if elapsed_100ns <= 0.0 {
-                    return None;
-                }
-                let mut comparable_processes = 0u64;
-                let delta_ticks = current_cpu_ticks
-                    .iter()
-                    .fold(0u64, |total, (pid, current)| {
-                        let Some(previous) = self.previous_cpu_ticks.get(pid).copied() else {
-                            return total;
-                        };
-                        comparable_processes = comparable_processes.saturating_add(1);
-                        total.saturating_add(current.saturating_sub(previous))
-                    });
-                if comparable_processes == 0 {
-                    return None;
-                }
-                super::machine_cpu_percent(
-                    delta_ticks,
-                    elapsed_100ns,
-                    super::logical_processor_count(),
-                )
-            });
-
-            self.previous_cpu_ticks = current_cpu_ticks;
-            self.previous_at = Some(now);
-            ProcessResourceSample {
-                cpu_percent,
-                resident_bytes,
-                private_bytes,
-                virtual_bytes,
-                process_count: (process_count > 0).then_some(process_count),
-            }
-        }
-    }
-
-    #[derive(Default)]
-    struct ProcessEntry {
-        process_id: u32,
-        parent_process_id: u32,
-        executable: String,
-    }
-
-    struct ProcessUsage {
-        cpu_ticks: Option<u64>,
-        resident_bytes: Option<u64>,
-        private_bytes: Option<u64>,
-        virtual_bytes: Option<u64>,
-    }
-
-    fn tracked_process_ids() -> Vec<u32> {
-        let root_process_id = std::process::id();
-        let entries = enumerate_processes();
-        let parents = entries
-            .iter()
-            .map(|entry| (entry.process_id, entry.parent_process_id))
-            .collect::<HashMap<_, _>>();
-        let mut process_ids = Vec::with_capacity(entries.len().min(32));
-        process_ids.push(root_process_id);
-        for entry in entries {
-            if entry.process_id == root_process_id
-                || !entry.executable.eq_ignore_ascii_case("msedgewebview2.exe")
-                || !is_descendant(entry.process_id, root_process_id, &parents)
-            {
-                continue;
-            }
-            process_ids.push(entry.process_id);
-        }
-        process_ids.sort_unstable();
-        process_ids.dedup();
-        process_ids
-    }
-
-    fn enumerate_processes() -> Vec<ProcessEntry> {
-        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
-        if snapshot == INVALID_HANDLE_VALUE || snapshot.is_null() {
-            return Vec::new();
-        }
-        let mut entries = Vec::new();
-        let mut entry = PROCESSENTRY32W {
-            dwSize: size_of::<PROCESSENTRY32W>() as u32,
-            ..Default::default()
-        };
-        let mut has_entry = unsafe { Process32FirstW(snapshot, &mut entry) != 0 };
-        while has_entry {
-            entries.push(ProcessEntry {
-                process_id: entry.th32ProcessID,
-                parent_process_id: entry.th32ParentProcessID,
-                executable: String::from_utf16_lossy(
-                    &entry.szExeFile[..entry
-                        .szExeFile
-                        .iter()
-                        .position(|value| *value == 0)
-                        .unwrap_or(entry.szExeFile.len())],
+    fn new() -> Self {
+        Self {
+            system: sysinfo::System::new_with_specifics(
+                sysinfo::RefreshKind::nothing().with_processes(
+                    sysinfo::ProcessRefreshKind::nothing()
+                        .with_cpu()
+                        .with_memory(),
                 ),
-            });
-            has_entry = unsafe { Process32NextW(snapshot, &mut entry) != 0 };
-        }
-        unsafe {
-            CloseHandle(snapshot);
-        }
-        entries
-    }
-
-    fn is_descendant(process_id: u32, root_process_id: u32, parents: &HashMap<u32, u32>) -> bool {
-        let mut current = process_id;
-        for _ in 0..64 {
-            if current == root_process_id {
-                return true;
-            }
-            let Some(parent) = parents.get(&current).copied() else {
-                return false;
-            };
-            if parent == current || parent == 0 {
-                return false;
-            }
-            current = parent;
-        }
-        false
-    }
-
-    fn query_process(process_id: u32) -> Option<ProcessUsage> {
-        let handle = unsafe {
-            OpenProcess(
-                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ,
-                0,
-                process_id,
-            )
-        };
-        if handle.is_null() {
-            return None;
-        }
-
-        let mut creation_time = FILETIME::default();
-        let mut exit_time = FILETIME::default();
-        let mut kernel_time = FILETIME::default();
-        let mut user_time = FILETIME::default();
-        let has_cpu = unsafe {
-            GetProcessTimes(
-                handle,
-                &mut creation_time,
-                &mut exit_time,
-                &mut kernel_time,
-                &mut user_time,
-            ) != 0
-        };
-
-        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
-            cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-            ..Default::default()
-        };
-        let has_memory = unsafe {
-            GetProcessMemoryInfo(
-                handle,
-                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX)
-                    .cast::<PROCESS_MEMORY_COUNTERS>(),
-                size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
-            ) != 0
-        };
-        unsafe {
-            CloseHandle(handle);
-        }
-
-        if !has_cpu && !has_memory {
-            return None;
-        }
-        Some(ProcessUsage {
-            cpu_ticks: has_cpu
-                .then(|| filetime_value(kernel_time).saturating_add(filetime_value(user_time))),
-            resident_bytes: has_memory.then_some(counters.WorkingSetSize as u64),
-            private_bytes: has_memory.then_some(counters.PrivateUsage as u64),
-            virtual_bytes: has_memory.then_some(counters.PagefileUsage as u64),
-        })
-    }
-
-    fn filetime_value(value: FILETIME) -> u64 {
-        (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime)
-    }
-
-    fn add_bytes(target: &mut Option<u64>, value: Option<u64>) {
-        let Some(value) = value else {
-            return;
-        };
-        *target = Some(target.unwrap_or_default().saturating_add(value));
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::PlatformSampler;
-
-        #[test]
-        fn current_process_memory_is_readable() {
-            let mut sampler = PlatformSampler::default();
-            let first = sampler.sample();
-            assert!(first.process_count.unwrap_or_default() >= 1);
-            assert!(first.resident_bytes.is_some());
-            assert!(first.private_bytes.is_some());
-            assert!(first.virtual_bytes.is_some());
-        }
-
-        #[test]
-        fn cpu_sample_requires_a_baseline() {
-            let mut sampler = PlatformSampler::default();
-            assert!(sampler.sample().cpu_percent.is_none());
-            std::thread::sleep(std::time::Duration::from_millis(2));
-            assert!(sampler.sample().cpu_percent.is_some());
+            ),
+            pid: sysinfo::Pid::from_u32(std::process::id()),
+            cpu_sampled_at: None,
         }
     }
-}
 
-#[cfg(target_os = "windows")]
-use windows::PlatformSampler;
-
-#[cfg(test)]
-mod cpu_tests {
-    use super::machine_cpu_percent;
-
-    #[test]
-    fn cpu_is_normalized_by_machine_capacity() {
-        assert_eq!(machine_cpu_percent(10_000_000, 10_000_000.0, 20), Some(5.0));
-        assert_eq!(machine_cpu_percent(1_000_000, 10_000_000.0, 20), Some(0.5));
-        assert_eq!(
-            machine_cpu_percent(200_000_000, 10_000_000.0, 20),
-            Some(100.0)
+    fn sample(&mut self) -> ProcessResourceSample {
+        let sampled_at = std::time::Instant::now();
+        let cpu_interval_valid = self.cpu_sampled_at.is_some_and(|previous| {
+            sampled_at.duration_since(previous) >= sysinfo::MINIMUM_CPU_UPDATE_INTERVAL
+        });
+        let refreshed = self.system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[self.pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing()
+                .with_cpu()
+                .with_memory(),
         );
-        assert_eq!(machine_cpu_percent(0, 10_000_000.0, 20), Some(0.0));
-    }
+        if refreshed == 0 {
+            return ProcessResourceSample::default();
+        }
+        if self.cpu_sampled_at.is_none() || cpu_interval_valid {
+            self.cpu_sampled_at = Some(sampled_at);
+        }
+        let Some(process) = self.system.process(self.pid) else {
+            return ProcessResourceSample::default();
+        };
 
-    #[test]
-    fn cpu_does_not_report_an_invalid_sample_as_idle() {
-        assert_eq!(machine_cpu_percent(1, 0.0, 20), None);
-        assert_eq!(machine_cpu_percent(1, f64::NAN, 20), None);
-        assert_eq!(machine_cpu_percent(1, f64::INFINITY, 20), None);
+        // sysinfo 的 process CPU 以单个逻辑核为 100%；按整机容量归一，
+        // 避免多核机器把一个进程报告为大于 100%。
+        let usage = f64::from(process.cpu_usage());
+        let cpu_percent = (cpu_interval_valid && usage.is_finite())
+            .then(|| (usage / logical_processor_count() as f64 * 100.0).clamp(0.0, 100.0));
+        let sample = ProcessResourceSample {
+            cpu_percent,
+            resident_bytes: Some(process.memory()),
+            private_bytes: None,
+            private_resident_bytes: None,
+            virtual_bytes: Some(process.virtual_memory()),
+            process_count: Some(1),
+        };
+        #[cfg(target_os = "windows")]
+        let sample = {
+            let mut sample = sample;
+            use windows_sys::Win32::System::ProcessStatus::{
+                GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+            };
+            use windows_sys::Win32::System::Threading::GetCurrentProcess;
+            let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+                cb: size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+                ..Default::default()
+            };
+            // 当前进程的伪句柄不需要 CloseHandle；失败时保持 None，不以虚拟内存冒充私有提交量。
+            if unsafe {
+                GetProcessMemoryInfo(
+                    GetCurrentProcess(),
+                    &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS,
+                    size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+                )
+            } != 0
+            {
+                sample.private_bytes = Some(counters.PrivateUsage as u64);
+                sample.resident_bytes = Some(counters.WorkingSetSize as u64);
+            }
+            sample
+        };
+        sample
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 #[cfg(test)]
 mod tests {
-    use super::{ProcessResourceSample, ProcessResourceSampler};
+    use super::{ProcessResourceSample, ProcessResourceSampler, logical_processor_count};
 
     #[test]
-    fn unsupported_platform_reports_unknown_values() {
+    fn current_process_memory_is_native_only() {
         let mut sampler = ProcessResourceSampler::default();
-        assert_eq!(sampler.sample(), ProcessResourceSample::default());
+        let sample = sampler.sample();
+        assert_eq!(sample.process_count, Some(1));
+        assert!(sample.resident_bytes.is_some());
+        assert!(sample.virtual_bytes.is_some());
+        #[cfg(target_os = "windows")]
+        assert!(sample.private_bytes.is_some_and(|bytes| bytes > 0));
+        #[cfg(not(target_os = "windows"))]
+        assert!(sample.private_bytes.is_none());
+        assert!(sample.private_resident_bytes.is_none());
+    }
+
+    #[test]
+    fn sampler_does_not_report_uninitialized_cpu_as_system_idle() {
+        let sample = ProcessResourceSample::default();
+        assert!(sample.cpu_percent.is_none());
+        assert!(logical_processor_count() >= 1);
+    }
+
+    #[test]
+    fn cpu_value_is_bounded_when_sysinfo_reports_multiple_cores() {
+        let mut sampler = ProcessResourceSampler::default();
+        let sample = sampler.sample();
+        assert!(
+            sample
+                .cpu_percent
+                .is_none_or(|value| (0.0..=100.0).contains(&value))
+        );
     }
 }

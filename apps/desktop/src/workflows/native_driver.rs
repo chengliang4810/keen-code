@@ -1,6 +1,7 @@
 //! 生产 WorkflowDriver：把 Agent 叶节点接到真实桌面 AgentRuntime。
 
 use crate::agent_runtime::{AgentRuntime, WorkflowActor, WorkflowActorRequest};
+use crate::workflows::WorkflowModelSelection;
 use crate::workflows::workspace_gate::acquire_workspace_write_gate;
 use keencode_agent::{
     AgentId, SessionId, ToolApprovalDecision, ToolApprovalGate, ToolApprovalRequest, ToolCallId,
@@ -440,15 +441,16 @@ fn run_binding(parent: &RuntimeSession, run_id: &str) -> Result<WorkflowRunBindi
             "工作流启动事实的父会话或 toolCallId 无效",
         ));
     }
-    let plan_enabled = started
+    let models = started
         .payload
         .get("models")
-        .and_then(Value::as_object)
-        .and_then(|models| models.get("planEnabled"))
-        .and_then(Value::as_bool)
-        .ok_or_else(|| {
-            DriverError::new("workflow_journal", "工作流启动事实缺少冻结 planEnabled")
-        })?;
+        .ok_or_else(|| DriverError::new("workflow_journal", "工作流启动事实缺少冻结 models"))?;
+    let model_selection = WorkflowModelSelection::parse(models).map_err(|error| {
+        DriverError::new(
+            "workflow_journal",
+            format!("工作流启动事实的 models 无效：{error}"),
+        )
+    })?;
     let cwd = started
         .payload
         .get("cwd")
@@ -459,7 +461,7 @@ fn run_binding(parent: &RuntimeSession, run_id: &str) -> Result<WorkflowRunBindi
     Ok(WorkflowRunBinding {
         tool_call_id: started.tool_call_id.clone(),
         launch_input_id: started.launch_input_id.clone(),
-        plan_enabled,
+        plan_enabled: model_selection.plan_enabled,
         cwd,
     })
 }

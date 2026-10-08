@@ -1,10 +1,10 @@
 # 非交互 CLI 与外部编排
 
-本文说明如何用 KeenCode 的命令行入口驱动它跑任务，把调度交给外部系统（系统 cron、CI、Git hook、Makefile）。KeenCode 进程内不实现调度器：它只在被调用时运行，用完即退出。
+本文说明如何用 KeenCode 的命令行入口驱动一次任务，把 CLI 的外部触发交给系统 cron、CI、Git hook 或 Makefile。CLI 命令按本次调用执行并退出；桌面 NativeHost 的本地 Automation 与定时调度由独立的原生服务负责，不属于 CLI 命令生命周期。
 
 ## 为什么用外部编排
 
-- **不引入常驻轮询**。KeenCode 的定位是本地优先的交互工具，进程内做定时任务必然需要一个常驻调度器与持续唤醒。
+- **CLI 调用边界清楚**。单次命令不在 CLI 进程内引入常驻轮询；需要本地 Automation 或定时执行时使用桌面 NativeHost 的调度服务。
 - **调度语义交给更擅长的一方**。系统 cron 有日志轮转与失败通知，GitHub Actions 有 secrets、矩阵与缓存，Git hook 有天然的触发时机。自己实现一套只会更差。
 - **失败可见**。命令行入口有稳定的退出码，外部系统能直接据此判断成败并决定是否告警。
 
@@ -13,7 +13,6 @@
 ```
 keencode run [--json] [--detach] [--no-input] [--session ID] [--cwd PATH] [--] PROMPT
 keencode session list|show|send|attach|stop ...
-keencode web start|stop|status ...
 keencode headless [--json]
 ```
 
@@ -70,7 +69,6 @@ keencode run --json --cwd /path/to/repo -- "重构这个模块，方案不确定
 | `cancel_requested` | 收到 Ctrl+C 并已发出取消 | `sessionId`、`operationId` 或 `turnId` |
 | `session_list` / `session` | `session list` / `show` | `sessions` / `session` |
 | `session_loaded` | `session attach` 载入历史 | `sessionId`、`result` |
-| `web` | `web start|stop|status` | `method`、`result` |
 | `event` | 会话实时事件 | `method`、`id`、`params` |
 | `error` | 失败终态 | `code`、`message` |
 | `help` | `--help` | `usage` |

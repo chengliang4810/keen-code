@@ -1,20 +1,8 @@
-//! 真实 Messages 模型经过桌面装配、ACP 投递、MCP 和持久化的隔离验证。
+//! 真实 Messages 模型经过桌面装配、Runtime Publisher、MCP 和持久化的隔离验证。
 
 use super::*;
+use crate::providers;
 use crate::providers::{CustomProvider, ProvidersListResult};
-
-#[derive(Default)]
-struct LiveEmitter(Mutex<Vec<Value>>);
-
-impl DeliveryEmitter for LiveEmitter {
-    fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-        self.0
-            .lock()
-            .unwrap()
-            .push(serde_json::to_value(delivery).unwrap());
-        Ok(())
-    }
-}
 
 struct LiveExtensions(Arc<keencode_tools::DeferredToolCatalog>);
 
@@ -22,8 +10,8 @@ impl RuntimeExtensionContributor for LiveExtensions {
     fn register_tools(&self, _: &mut ToolRegistry, _: &RuntimeToolContext) -> Result<(), String> {
         Ok(())
     }
-    fn mcp_tool_implementations(&self) -> Vec<Arc<dyn AgentTool>> {
-        self.0.implementations()
+    fn mcp_tool_catalog(&self) -> Option<Arc<keencode_tools::DeferredToolCatalog>> {
+        Some(Arc::clone(&self.0))
     }
     fn build_hook_runtime(&self, _: &RuntimeToolContext) -> Result<HookRuntime, String> {
         Ok(HookRuntime::default())
@@ -57,7 +45,6 @@ async fn wait_for_script(
     runtime: &Arc<AgentRuntime>,
     session: &RuntimeSession,
     marker: &Path,
-    emitter: &LiveEmitter,
     evidence: &Path,
 ) {
     let started = Instant::now();
@@ -76,11 +63,6 @@ async fn wait_for_script(
                     "state": session.snapshot().unwrap().state,
                 }))
                 .unwrap(),
-            )
-            .unwrap();
-            std::fs::write(
-                evidence.join("acp-deliveries.json"),
-                serde_json::to_vec_pretty(&*emitter.0.lock().unwrap()).unwrap(),
             )
             .unwrap();
             runtime.shutdown().await.unwrap();
@@ -168,9 +150,10 @@ async fn live_messages_desktop_lifecycle() {
         .unwrap()
     };
     install(&registry, provider.clone());
-    let emitter = Arc::new(LiveEmitter::default());
-    let runtime =
-        Arc::new(AgentRuntime::new_with_registry(&storage, emitter.clone(), registry).unwrap());
+    let runtime = Arc::new(
+        AgentRuntime::new_with_registry(&storage, registry, tokio::runtime::Handle::current())
+            .unwrap(),
+    );
     let session = runtime
         .open_or_create_session(&root, None, "live-messages-runtime")
         .unwrap();
@@ -265,14 +248,7 @@ async fn live_messages_desktop_lifecycle() {
         )
         .await
         .unwrap();
-    wait_for_script(
-        &runtime,
-        &session,
-        &root.join("child-started"),
-        &emitter,
-        &evidence,
-    )
-    .await;
+    wait_for_script(&runtime, &session, &root.join("child-started"), &evidence).await;
     let child_task = runtime
         .background_tasks_list(&id)
         .unwrap()
@@ -288,7 +264,7 @@ async fn live_messages_desktop_lifecycle() {
         )
         .unwrap();
     runtime
-        .background_task_cancel(&id, &child_task.task_id)
+        .background_task_cancel_outcome(&id, &child_task.task_id)
         .unwrap();
     wait_idle(&runtime, &session).await;
     let child_cancelled = session.snapshot().unwrap().state.turns
@@ -306,14 +282,7 @@ async fn live_messages_desktop_lifecycle() {
         )
         .await
         .unwrap();
-    wait_for_script(
-        &runtime,
-        &session,
-        &root.join("slow-started"),
-        &emitter,
-        &evidence,
-    )
-    .await;
+    wait_for_script(&runtime, &session, &root.join("slow-started"), &evidence).await;
     runtime.cancel_turn(&id, "cancel-running-command").unwrap();
     wait_idle(&runtime, &session).await;
     let cancelled = session.snapshot().unwrap().state.turns
@@ -376,8 +345,10 @@ async fn live_messages_desktop_lifecycle() {
 
     let registry = ProviderRegistry::new();
     install(&registry, provider);
-    let cold =
-        Arc::new(AgentRuntime::new_with_registry(&storage, emitter.clone(), registry).unwrap());
+    let cold = Arc::new(
+        AgentRuntime::new_with_registry(&storage, registry, tokio::runtime::Handle::current())
+            .unwrap(),
+    );
     let session = cold
         .open_or_create_session(&root, Some(&id), "cold-open")
         .unwrap();
@@ -404,21 +375,15 @@ async fn live_messages_desktop_lifecycle() {
         .find(|m| m.role == MessageRole::Assistant)
         .map(|m| serde_json::to_string(m).unwrap())
         .unwrap_or_default();
-    cold.replay_session(&id, None, 1000).await.unwrap();
     cold.shutdown().await.unwrap();
     let mut assertions = json!({"single_child_reused":same_child,"child_cancelled":child_cancelled,"child_command_never_finished":!root.join("child-finished").exists(),"plan_unchanged":plan_unchanged,"cancelled":cancelled,"cancelled_command_never_finished":!root.join("slow-finished").exists(),"config_refreshed_next_turn":config_refreshed,"request_context_not_persisted":request_context_not_persisted,"cold_transcript_equal":cold_equal,"recall_contains_facts":after.contains("7319") && after.contains("JPY")});
     if mcp_command.is_some() {
         assertions["mcp_discovered_and_executed"] = tools_seen.into();
     }
-    let report = json!({"scope":"real desktop runtime and ACP serialization; no native WebView claim","mcp_enabled":mcp_command.is_some(),"records":records,"assertions":assertions});
+    let report = json!({"scope":"real desktop Runtime Publisher; no native WebView claim","mcp_enabled":mcp_command.is_some(),"records":records,"assertions":assertions});
     std::fs::write(
         evidence.join("runtime-report.json"),
         serde_json::to_vec_pretty(&report).unwrap(),
-    )
-    .unwrap();
-    std::fs::write(
-        evidence.join("acp-deliveries.json"),
-        serde_json::to_vec_pretty(&*emitter.0.lock().unwrap()).unwrap(),
     )
     .unwrap();
     assert!(

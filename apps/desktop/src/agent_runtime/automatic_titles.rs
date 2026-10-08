@@ -1,6 +1,7 @@
 //! 基于首条真实用户消息的后台命名；标题结果与变更均复用 Runtime Journal。
 use super::*;
 use keencode_resources::TitleSource;
+use keencode_runtime::RuntimeEventReceiveError;
 
 struct AutomaticTitleLease(Arc<TitleGeneration>);
 
@@ -8,6 +9,15 @@ impl Drop for AutomaticTitleLease {
     fn drop(&mut self) {
         self.0.automatic_inflight.store(false, Ordering::Release);
     }
+}
+
+const AUTOMATIC_TITLE_INPUT_LIMIT: usize = 4000;
+
+struct AutomaticTitleProjection {
+    input: Option<(String, String)>,
+    expected_title: String,
+    expected_source: TitleSource,
+    has_running_turn: bool,
 }
 
 /// 固定首条根会话用户消息与有界正文，避免后续输入或子 Agent 内部任务改变标题主题。
@@ -31,17 +41,7 @@ fn automatic_title_input(state: &SessionState) -> Option<(String, String)> {
             {
                 continue;
             }
-            let text = message
-                .content
-                .iter()
-                .filter_map(|part| match part {
-                    ResourceMessagePart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let text = text.trim().chars().take(4000).collect::<String>();
-            if !text.is_empty() {
+            if let Some(text) = bounded_trimmed_message_text(message) {
                 return Some((
                     format!("auto-title-{}", title_input_sha256(&message.message_id)),
                     text,
@@ -50,6 +50,107 @@ fn automatic_title_input(state: &SessionState) -> Option<(String, String)> {
         }
     }
     None
+}
+
+/// 在 Journal 读锁内提取自动标题所需的小投影，避免克隆完整 SessionState。
+fn automatic_title_projection(state: &SessionState) -> Option<AutomaticTitleProjection> {
+    if !automatic_title_eligible(state) {
+        return None;
+    }
+    Some(AutomaticTitleProjection {
+        input: automatic_title_input(state),
+        expected_title: state.title.clone(),
+        expected_source: state.title_source,
+        has_running_turn: state
+            .turns
+            .values()
+            .any(|turn| turn.status == TurnStatus::Running),
+    })
+}
+
+/// 流式截取全局 trim 后的前 4000 个字符，保留 Text 段之间的换行但不拼接完整正文。
+fn bounded_trimmed_message_text(message: &SessionMessage) -> Option<String> {
+    let mut output = String::with_capacity(AUTOMATIC_TITLE_INPUT_LIMIT);
+    let mut pending_whitespace = String::new();
+    let mut output_chars = 0;
+    let mut pending_whitespace_chars = 0;
+    let mut started = false;
+    let mut has_text_part = false;
+
+    for part in &message.content {
+        let ResourceMessagePart::Text { text } = part else {
+            continue;
+        };
+        if has_text_part
+            && append_bounded_title_char(
+                '\n',
+                &mut output,
+                &mut pending_whitespace,
+                &mut output_chars,
+                &mut pending_whitespace_chars,
+                &mut started,
+            )
+        {
+            break;
+        }
+        has_text_part = true;
+        for character in text.chars() {
+            if append_bounded_title_char(
+                character,
+                &mut output,
+                &mut pending_whitespace,
+                &mut output_chars,
+                &mut pending_whitespace_chars,
+                &mut started,
+            ) {
+                return Some(output);
+            }
+        }
+    }
+
+    (!output.is_empty()).then_some(output)
+}
+
+/// 返回 true 表示已经形成不可再被末尾 trim 改变的 4000 字符结果。
+fn append_bounded_title_char(
+    character: char,
+    output: &mut String,
+    pending_whitespace: &mut String,
+    output_chars: &mut usize,
+    pending_whitespace_chars: &mut usize,
+    started: &mut bool,
+) -> bool {
+    if !*started {
+        if character.is_whitespace() {
+            return false;
+        }
+        *started = true;
+        output.push(character);
+        *output_chars += 1;
+        return *output_chars == AUTOMATIC_TITLE_INPUT_LIMIT;
+    }
+
+    if character.is_whitespace() {
+        if *output_chars + *pending_whitespace_chars < AUTOMATIC_TITLE_INPUT_LIMIT {
+            pending_whitespace.push(character);
+            *pending_whitespace_chars += 1;
+        }
+        return false;
+    }
+
+    if *pending_whitespace_chars > 0 {
+        output.push_str(pending_whitespace);
+        *output_chars += *pending_whitespace_chars;
+        pending_whitespace.clear();
+        *pending_whitespace_chars = 0;
+        if *output_chars == AUTOMATIC_TITLE_INPUT_LIMIT {
+            return true;
+        }
+    }
+
+    output.push(character);
+    *output_chars += 1;
+    *output_chars == AUTOMATIC_TITLE_INPUT_LIMIT
 }
 
 fn automatic_title_eligible(state: &SessionState) -> bool {
@@ -66,27 +167,21 @@ impl AgentRuntime {
         let Ok(session) = self.runtime_manager.get(session_id.to_owned()) else {
             return;
         };
-        // 先订阅再读快照；start_root_turn 的 ACK 可能早于首条用户消息提交。
+        // 先订阅再读权威状态；start_root_turn 的 ACK 可能早于首条用户消息提交。
         // 此等待不依赖窗口订阅的寿命，切换会话不会漏掉随后确认的输入。
         let Ok(mut events) = session.subscribe() else {
             return;
         };
-        let Ok(snapshot) = session.snapshot() else {
+        let Ok(Some(initial)) = session.read_state(automatic_title_projection) else {
             return;
         };
-        let mut input = automatic_title_input(&snapshot.state);
-        if !automatic_title_eligible(&snapshot.state)
-            || (input.is_none()
-                && !snapshot
-                    .state
-                    .turns
-                    .values()
-                    .any(|turn| turn.status == TurnStatus::Running))
-        {
+        if initial.input.is_none() && !initial.has_running_turn {
             return;
         }
-        let expected_title = snapshot.state.title;
-        let expected_source = snapshot.state.title_source;
+        let mut input = initial.input;
+        let mut has_running_turn = initial.has_running_turn;
+        let expected_title = initial.expected_title;
+        let expected_source = initial.expected_source;
         let gate = {
             let Ok(mut gates) = self.title_generation_gates.lock() else {
                 return;
@@ -107,10 +202,12 @@ impl AgentRuntime {
         let lease = AutomaticTitleLease(gate);
         let runtime = Arc::clone(self);
         let session_id = session_id.to_owned();
-        tokio::spawn(async move {
+        self.executor_handle.spawn(async move {
             let _lease = lease;
             let result = async {
-                while input.is_none() {
+                // 根 Turn 完成前不发起隔离标题请求，避免与主请求争用 Provider
+                // 连接和本地测试/离线服务的顺序；已提交正文仍由 Journal 提供。
+                while input.is_none() || has_running_turn {
                     let delivery = tokio::select! {
                         biased;
                         _ = _lease.0.cancellation.cancelled() => return Ok(()),
@@ -133,17 +230,15 @@ impl AgentRuntime {
                         Err(RuntimeEventReceiveError::Closed) => return Ok(()),
                         Ok(_) | Err(RuntimeEventReceiveError::Lagged(_)) => {}
                     }
-                    let state = session.snapshot().map_err(runtime_operation_failed)?.state;
-                    if !automatic_title_eligible(&state) {
+                    let Some(projection) = session
+                        .read_state(automatic_title_projection)
+                        .map_err(runtime_operation_failed)?
+                    else {
                         return Ok(());
-                    }
-                    input = automatic_title_input(&state);
-                    if input.is_none()
-                        && !state
-                            .turns
-                            .values()
-                            .any(|turn| turn.status == TurnStatus::Running)
-                    {
+                    };
+                    input = projection.input;
+                    has_running_turn = projection.has_running_turn;
+                    if input.is_none() && !has_running_turn {
                         return Ok(());
                     }
                 }

@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "name": "ely-native-idle-performance",
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "width": 2560,
+      "height": 1640,
+      "type": "resize_client"
+    },
+    {
+      "type": "wait",
+      "ms": 700
+    },
+    {
+      "client_height": 1640,
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "dpi": 192,
+      "type": "assert_window"
+    },
+    {
+      "key": "n",
+      "modifiers": [
+        "ctrl"
+      ],
+      "type": "key"
+    },
+    {
+      "timeout_ms": 15000,
+      "count": 1,
+      "event_type": "session_created",
+      "type": "wait_for_journal"
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "x": 1000,
+      "y": 880,
+      "type": "click"
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "type_text",
+      "text": "只回复字符串"
+    },
+    {
+      "type": "key",
+      "key": "enter",
+      "modifiers": [
+        "shift"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "native smoke ok。不要调用工具。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 0
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "label": "typed",
+      "type": "screenshot"
+    },
+    {
+      "key": "enter",
+      "type": "key"
+    },
+    {
+      "timeout_ms": 30000,
+      "count": 1,
+      "event_type": "turn_started",
+      "type": "wait_for_journal"
+    },
+    {
+      "label": "started",
+      "type": "screenshot"
+    },
+    {
+      "timeout_ms": 180000,
+      "count": 1,
+      "event_type": "turn_completed",
+      "type": "wait_for_journal"
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "label": "completed",
+      "type": "screenshot"
+    },
+    {
+      "label": "completed",
+      "type": "metrics"
+    },
+    {
+      "type": "repeat",
+      "count": 40,
+      "actions": [
+        {
+          "type": "wait",
+          "ms": 1500
+        },
+        {
+          "type": "metrics",
+          "label": "idle-60s-sample"
+        }
+      ]
+    }
+  ],
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true
+}

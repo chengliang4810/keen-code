@@ -1,14 +1,13 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use keencode_tools::WebServiceConfig;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use tauri::{AppHandle, Manager};
 
+use crate::native_paths::NativePaths;
 use crate::path_utils::{path_text_to_frontend, path_to_frontend};
-use crate::web_host::WebHostSettings;
 
 /// 应用更新安装包的下载源偏好。
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -74,8 +73,12 @@ static SETTINGS_IO_LOCK: Mutex<()> = Mutex::new(());
 
 pub const DEFAULT_BACKGROUND_AGENT_LIMIT: u16 = 10;
 pub const MAX_BACKGROUND_AGENT_LIMIT: u16 = 999;
-pub const DEFAULT_TERMINAL_FONT_FAMILY: &str =
-    "ui-monospace, \"SFMono-Regular\", Menlo, Monaco, Consolas, monospace";
+/// GPUI 终端设置只保存一个实际字体族名称；中文 fallback 由字体构造层负责。
+pub const DEFAULT_TERMINAL_FONT_FAMILY: &str = if cfg!(target_os = "windows") {
+    "Consolas"
+} else {
+    "JetBrains Mono"
+};
 /// 当前应用设置文件的固定 schema 名称。
 const APP_SETTINGS_SCHEMA: &str = "keencode/app-settings";
 /// 当前应用设置文件的固定格式版本。
@@ -92,8 +95,6 @@ pub struct AppSettings {
     pub interface_language: InterfaceLanguage,
     /// 应用更新安装包的下载源偏好。
     pub app_update_download_source: AppUpdateDownloadSource,
-    /// Windows WebView2 是否启用硬件加速。
-    pub chrome_hardware_acceleration: bool,
     /// 侧栏中由用户折叠的项目标识。
     pub sidebar_collapsed_project_ids: Vec<String>,
     /// 未手动选择现有目录时，新项目的默认父目录。
@@ -110,7 +111,7 @@ pub struct AppSettings {
     pub close_to_tray: bool,
     /// 所有对话共享的设备级后台 Agent 并发上限。
     pub background_agent_limit: u16,
-    /// 内置终端使用的 CSS 字体族列表。
+    /// 内置终端使用的单一真实 GPUI 字体族名称。
     pub terminal_font_family: String,
     /// Windows 内置终端使用的 Shell。
     pub terminal_shell: TerminalShell,
@@ -128,8 +129,105 @@ pub struct AppSettings {
     pub archive_retention_days: u16,
     /// WebFetch 与 WebSearch 使用的兼容服务基础 URL；为空时使用内置服务。
     pub web_service_url: String,
-    /// 本机 Web Host 的非秘密配置；长期 Token 只保存在系统凭据库。
-    pub web_host: WebHostSettings,
+}
+
+/// 设置页对应用设置文件的一次字段级更新。
+///
+/// `None` 表示保持现值；代理字段使用嵌套 `Option` 区分“保持不变”和“明确清空”。
+/// 该补丁不包含界面语言、思考显示或归档字段：当前 Native UI 没有对应的完整
+/// 消费链，不能把记忆提示词语言伪装成全局界面语言，也不能保存一个没有消费者的开关。
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreferencesPatch {
+    pub(crate) app_update_download_source: Option<AppUpdateDownloadSource>,
+    pub(crate) project_directory: Option<String>,
+    pub(crate) task_notifications: Option<bool>,
+    pub(crate) notification_sound: Option<bool>,
+    pub(crate) keep_computer_awake: Option<bool>,
+    pub(crate) close_to_tray: Option<bool>,
+    pub(crate) background_agent_limit: Option<u16>,
+    pub(crate) http_proxy: Option<Option<String>>,
+    pub(crate) http_proxy_no_proxy: Option<Option<String>>,
+    pub(crate) local_memories: Option<bool>,
+    /// 常规页已有的终端字段也通过同一个文件级补丁提交，避免一次 UI 操作
+    /// 在读取和写入之间覆盖另一项刚刚保存的设置。
+    pub(crate) terminal_shell: Option<TerminalShell>,
+    pub(crate) terminal_font_family: Option<String>,
+    pub(crate) terminal_inherit_system_profile: Option<bool>,
+}
+
+impl PreferencesPatch {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.app_update_download_source.is_none()
+            && self.project_directory.is_none()
+            && self.task_notifications.is_none()
+            && self.notification_sound.is_none()
+            && self.keep_computer_awake.is_none()
+            && self.close_to_tray.is_none()
+            && self.background_agent_limit.is_none()
+            && self.http_proxy.is_none()
+            && self.http_proxy_no_proxy.is_none()
+            && self.local_memories.is_none()
+            && self.terminal_shell.is_none()
+            && self.terminal_font_family.is_none()
+            && self.terminal_inherit_system_profile.is_none()
+    }
+
+    fn apply_to(&self, settings: &mut AppSettings) {
+        if let Some(value) = self.app_update_download_source {
+            settings.app_update_download_source = value;
+        }
+        if let Some(value) = &self.project_directory {
+            settings.project_directory = if value.trim().is_empty() {
+                String::new()
+            } else {
+                path_text_to_frontend(value.trim())
+            };
+        }
+        if let Some(value) = self.task_notifications {
+            settings.task_notifications = value;
+        }
+        if let Some(value) = self.notification_sound {
+            settings.notification_sound = value;
+        }
+        if let Some(value) = self.keep_computer_awake {
+            settings.keep_computer_awake = value;
+        }
+        if let Some(value) = self.close_to_tray {
+            settings.close_to_tray = value;
+        }
+        if let Some(value) = self.background_agent_limit {
+            settings.background_agent_limit = value;
+        }
+        if let Some(value) = &self.http_proxy {
+            settings.http_proxy = value
+                .as_ref()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+        }
+        if let Some(value) = &self.http_proxy_no_proxy {
+            settings.http_proxy_no_proxy = value
+                .as_ref()
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty());
+        }
+        if let Some(value) = self.local_memories {
+            settings.local_memories = value;
+        }
+        if let Some(value) = self.terminal_shell {
+            settings.terminal_shell = value;
+        }
+        if let Some(value) = &self.terminal_font_family {
+            settings.terminal_font_family = if value.trim().is_empty() {
+                DEFAULT_TERMINAL_FONT_FAMILY.to_owned()
+            } else {
+                value.trim().to_owned()
+            };
+        }
+        if let Some(value) = self.terminal_inherit_system_profile {
+            settings.terminal_inherit_system_profile = value;
+        }
+    }
 }
 
 impl Default for AppSettings {
@@ -139,7 +237,7 @@ impl Default for AppSettings {
 }
 
 /// 已读取并校验的当前应用设置。
-pub struct SettingsLoad {
+struct SettingsLoad {
     /// 解析成功时的完整设置；原文件损坏、schema 不支持或值非法时为首次启动默认值。
     pub settings: AppSettings,
     /// 非致命诊断：被忽略的未知或已移除字段说明。
@@ -176,9 +274,27 @@ impl AppSettingsFile {
         if self.schema != APP_SETTINGS_SCHEMA || self.version != APP_SETTINGS_VERSION {
             anyhow::bail!("应用设置 schema 或版本不受支持");
         }
-        self.settings.validate()?;
-        Ok(self.settings)
+        let settings = self.settings;
+        settings.validate()?;
+        Ok(settings)
     }
+}
+
+fn is_generic_font_family(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "inherit"
+            | "initial"
+            | "unset"
+            | "ui-monospace"
+            | "monospace"
+            | "system-ui"
+            | "-apple-system"
+            | "sans-serif"
+            | "serif"
+            | "cursive"
+            | "fantasy"
+    )
 }
 
 impl AppSettings {
@@ -187,7 +303,6 @@ impl AppSettings {
         Self {
             interface_language: InterfaceLanguage::SimplifiedChinese,
             app_update_download_source: AppUpdateDownloadSource::Auto,
-            chrome_hardware_acceleration: true,
             sidebar_collapsed_project_ids: Vec::new(),
             project_directory: String::new(),
             task_notifications: true,
@@ -205,7 +320,6 @@ impl AppSettings {
             auto_archive_conversations: true,
             archive_retention_days: 7,
             web_service_url: String::new(),
-            web_host: WebHostSettings::default(),
         }
     }
 
@@ -232,9 +346,11 @@ impl AppSettings {
         if self.terminal_font_family.is_empty()
             || self.terminal_font_family.len() > 256
             || self.terminal_font_family.trim() != self.terminal_font_family
+            || self.terminal_font_family.contains(',')
+            || is_generic_font_family(&self.terminal_font_family)
             || self.terminal_font_family.chars().any(char::is_control)
         {
-            anyhow::bail!("终端字体必须是 1 到 256 个字符的有效字体族列表");
+            anyhow::bail!("终端字体必须是 1 到 256 个字符的真实字体族名");
         }
         if let Some(proxy) = &self.http_proxy {
             crate::network_proxy::validate_configured_proxy(proxy)?;
@@ -248,9 +364,6 @@ impl AppSettings {
             WebServiceConfig::new(&self.web_service_url)
                 .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))?;
         }
-        self.web_host
-            .validate()
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         let mut project_ids = HashSet::new();
         for project_id in &self.sidebar_collapsed_project_ids {
             let mut characters = project_id.chars();
@@ -272,138 +385,6 @@ impl AppSettings {
     }
 }
 
-/// 应用设置局部更新；只允许修改当前界面实际暴露的字段。
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct AppSettingsPatch {
-    /// 更新界面语言。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub interface_language: Option<InterfaceLanguage>,
-    /// 更新应用安装包下载源偏好。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub app_update_download_source: Option<AppUpdateDownloadSource>,
-    /// 更新 Windows WebView2 硬件加速开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub chrome_hardware_acceleration: Option<bool>,
-    /// 更新侧栏折叠项目标识。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub sidebar_collapsed_project_ids: Option<Vec<String>>,
-    /// 更新新项目的默认父目录。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub project_directory: Option<String>,
-    /// 更新任务桌面通知开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub task_notifications: Option<bool>,
-    /// 更新思考过程内容块显示开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub show_thinking_process: Option<bool>,
-    /// 更新任务通知声音开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub notification_sound: Option<bool>,
-    /// 更新阻止空闲睡眠开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub keep_computer_awake: Option<bool>,
-    /// 更新关闭主窗口时隐藏到系统托盘还是退出应用。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub close_to_tray: Option<bool>,
-    /// 更新所有对话共享的设备级后台 Agent 并发上限。
-    #[serde(default, deserialize_with = "deserialize_background_agent_limit")]
-    pub background_agent_limit: Option<u16>,
-    /// 更新内置终端字体族列表。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub terminal_font_family: Option<String>,
-    /// 更新 Windows 内置终端使用的 Shell。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub terminal_shell: Option<TerminalShell>,
-    /// 更新新建 PTY 是否加载系统终端登录 profile。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub terminal_inherit_system_profile: Option<bool>,
-    /// 更新明确的 HTTP/HTTPS 出口代理；空字符串表示直连。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub http_proxy: Option<String>,
-    /// 更新代理绕过规则；空字符串表示不配置绕过规则。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub http_proxy_no_proxy: Option<String>,
-    /// 更新本地记忆总开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub local_memories: Option<bool>,
-    /// 更新自动归档开关。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub auto_archive_conversations: Option<bool>,
-    /// 更新自动归档保留天数。
-    #[serde(default, deserialize_with = "deserialize_archive_retention_days")]
-    pub archive_retention_days: Option<u16>,
-    /// 更新 WebFetch 与 WebSearch 的兼容服务基础 URL；空字符串表示禁用。
-    #[serde(default, deserialize_with = "deserialize_web_service_url")]
-    pub web_service_url: Option<String>,
-    /// 更新本机 Web Host 的非秘密配置；Token 不属于设置补丁。
-    #[serde(default, deserialize_with = "deserialize_optional_value")]
-    pub web_host: Option<WebHostSettings>,
-}
-
-/// 将缺失补丁字段解析为空，同时拒绝调用方显式传入 null。
-fn deserialize_optional_value<'de, D, T>(
-    deserializer: D,
-) -> std::result::Result<Option<T>, D::Error>
-where
-    D: Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
-
-fn deserialize_archive_retention_days<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<u16>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = u16::deserialize(deserializer)?;
-    if !(1..=365).contains(&value) {
-        return Err(serde::de::Error::custom("归档保留天数必须在 1 到 365 之间"));
-    }
-    Ok(Some(value))
-}
-
-fn deserialize_background_agent_limit<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<u16>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = u16::deserialize(deserializer)?;
-    if !(1..=MAX_BACKGROUND_AGENT_LIMIT).contains(&value) {
-        return Err(serde::de::Error::custom(format!(
-            "后台 Agent 并发数量必须在 1 到 {MAX_BACKGROUND_AGENT_LIMIT} 之间"
-        )));
-    }
-    Ok(Some(value))
-}
-
-/// 校验并规范化网络工具补丁；空字符串明确表示关闭网络工具。
-fn deserialize_web_service_url<'de, D>(
-    deserializer: D,
-) -> std::result::Result<Option<String>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    let value = String::deserialize(deserializer)?;
-    normalize_web_service_url(&value)
-        .map(Some)
-        .map_err(|error| serde::de::Error::custom(error.to_string()))
-}
-
-/// 按网络工具共享的严格配置校验基础 URL，并返回去除首尾空白的持久值。
-fn normalize_web_service_url(value: &str) -> Result<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(String::new());
-    }
-    WebServiceConfig::new(value)
-        .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))?;
-    Ok(value.to_owned())
-}
-
 /// 未覆盖服务地址时使用应用内置的 Tavily 兼容服务。
 const DEFAULT_WEB_SERVICE_URL: &str = "https://tavily.claude-code-best.win";
 
@@ -419,141 +400,50 @@ pub(crate) fn web_service_config(value: &str) -> Result<Option<WebServiceConfig>
     .map_err(|error| anyhow::anyhow!("兼容服务基础 URL 无效：{error}"))
 }
 
-impl AppSettings {
-    /// 返回当前设置对应的网络工具配置；未配置时使用内置服务。
-    pub(crate) fn web_service_config(&self) -> Result<Option<WebServiceConfig>> {
-        web_service_config(&self.web_service_url)
-    }
-
-    /// 返回带宿主运行时资源根的 Web Host 配置，不把运行时路径写入普通设置文件。
-    pub(crate) fn web_host_settings(&self, app: &AppHandle) -> Result<WebHostSettings> {
-        self.web_host
-            .with_runtime_defaults(app)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))
-    }
-}
-
-impl AppSettingsPatch {
-    /// 返回补丁中的网络工具热更新；未提供字段时保持现有运行时配置。
-    pub(crate) fn web_service_config_update(&self) -> Result<Option<Option<WebServiceConfig>>> {
-        self.web_service_url
-            .as_deref()
-            .map(web_service_config)
-            .transpose()
-    }
-}
-
 /// 返回当前完整应用设置。
-pub fn get(app: &AppHandle) -> Result<AppSettings> {
+pub fn get(paths: &NativePaths) -> Result<AppSettings> {
     let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
-    let mut settings = load_unlocked(app).settings;
-    apply_runtime_defaults(app, &mut settings)?;
+    let loaded = load_unlocked(paths);
+    report_load_diagnostics(&loaded);
+    let mut settings = loaded.settings;
+    apply_runtime_defaults(paths, &mut settings)?;
     Ok(settings)
 }
 
-/// 启动时读取当前设置；任何解析失败都回退首次启动默认值并继续启动，
-/// 原文件保持原样。缺失字段回退默认值；未知或已移除字段忽略并记录警告。
-pub fn load_for_startup(app: &AppHandle) -> Result<SettingsLoad> {
+/// 在同一把设置锁内读取、应用、校验并原子写入字段级偏好补丁。
+///
+/// 返回值是已展开运行时默认目录的冷启动快照；文件中仍保留空目录表示“使用
+/// 平台默认目录”，因此清空项目目录不会把平台路径永久复制进设置文件。
+pub(crate) fn update_preferences(
+    paths: &NativePaths,
+    patch: PreferencesPatch,
+) -> Result<AppSettings> {
     let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
-    let mut loaded = load_unlocked(app);
-    apply_runtime_defaults(app, &mut loaded.settings)?;
-    Ok(loaded)
-}
-
-/// 应用并保存一个严格类型的设置补丁。
-pub fn set(app: &AppHandle, patch: AppSettingsPatch) -> Result<AppSettings> {
-    let _guard = SETTINGS_IO_LOCK.lock().expect("应用设置读写锁已损坏");
-    let path = settings_path(app)?;
-    let loaded = load_unlocked(app);
-    if let Some(load_error) = &loaded.load_error {
+    let loaded = load_unlocked(paths);
+    if let Some(load_error) = loaded.load_error {
         anyhow::bail!("应用设置文件无法解析，已保留原文件且未保存本次修改：{load_error}");
     }
     let mut settings = loaded.settings;
-    apply_runtime_defaults(app, &mut settings)?;
-    if let Some(value) = patch.interface_language {
-        settings.interface_language = value;
-    }
-    if let Some(value) = patch.app_update_download_source {
-        settings.app_update_download_source = value;
-    }
-    if let Some(value) = patch.chrome_hardware_acceleration {
-        settings.chrome_hardware_acceleration = value;
-    }
-    if let Some(value) = patch.sidebar_collapsed_project_ids {
-        settings.sidebar_collapsed_project_ids = value;
-    }
-    if let Some(value) = patch.project_directory {
-        if value.is_empty() {
-            anyhow::bail!("默认项目保存位置不能为空");
-        }
-        settings.project_directory = path_text_to_frontend(&value);
-    }
-    if let Some(value) = patch.task_notifications {
-        settings.task_notifications = value;
-    }
-    if let Some(value) = patch.show_thinking_process {
-        settings.show_thinking_process = value;
-    }
-    if let Some(value) = patch.notification_sound {
-        settings.notification_sound = value;
-    }
-    if let Some(value) = patch.keep_computer_awake {
-        settings.keep_computer_awake = value;
-    }
-    if let Some(value) = patch.close_to_tray {
-        settings.close_to_tray = value;
-    }
-    if let Some(value) = patch.background_agent_limit {
-        settings.background_agent_limit = value;
-    }
-    if let Some(value) = patch.terminal_font_family {
-        settings.terminal_font_family = value;
-    }
-    if let Some(value) = patch.terminal_shell {
-        settings.terminal_shell = value;
-    }
-    if let Some(value) = patch.terminal_inherit_system_profile {
-        settings.terminal_inherit_system_profile = value;
-    }
-    if let Some(value) = patch.http_proxy {
-        settings.http_proxy = Some(value);
-    }
-    if let Some(value) = patch.http_proxy_no_proxy {
-        settings.http_proxy_no_proxy = Some(value);
-    }
-    if let Some(value) = patch.local_memories {
-        settings.local_memories = value;
-    }
-    if let Some(value) = patch.auto_archive_conversations {
-        settings.auto_archive_conversations = value;
-    }
-    if let Some(value) = patch.archive_retention_days {
-        settings.archive_retention_days = value;
-    }
-    if let Some(value) = patch.web_service_url {
-        settings.web_service_url = normalize_web_service_url(&value)?;
-    }
-    if let Some(value) = patch.web_host {
-        settings.web_host = value;
-    }
+    patch.apply_to(&mut settings);
     settings.validate()?;
+    let path = settings_path(paths)?;
     save_to_path(&path, &settings)?;
+    apply_runtime_defaults(paths, &mut settings)?;
     Ok(settings)
 }
 
 /// 返回操作系统文档目录下的 KeenCode 默认项目父目录。
-pub(crate) fn default_project_directory(app: &AppHandle) -> Result<PathBuf> {
-    Ok(app
-        .path()
-        .document_dir()
-        .context("无法确定当前用户的文档目录")?
-        .join("KeenCode"))
+pub(crate) fn default_project_directory(paths: &NativePaths) -> Result<PathBuf> {
+    if paths.documents_dir.as_os_str().is_empty() {
+        anyhow::bail!("无法确定当前用户的文档目录");
+    }
+    Ok(paths.documents_dir.join("KeenCode"))
 }
 
 /// 首次读取设置时把平台相关默认值解析成前端可展示的绝对路径。
-fn apply_runtime_defaults(app: &AppHandle, settings: &mut AppSettings) -> Result<()> {
+fn apply_runtime_defaults(paths: &NativePaths, settings: &mut AppSettings) -> Result<()> {
     if settings.project_directory.is_empty() {
-        settings.project_directory = path_to_frontend(&default_project_directory(app)?);
+        settings.project_directory = path_to_frontend(&default_project_directory(paths)?);
     } else {
         settings.project_directory = path_text_to_frontend(&settings.project_directory);
     }
@@ -562,8 +452,8 @@ fn apply_runtime_defaults(app: &AppHandle, settings: &mut AppSettings) -> Result
 
 /// 读取当前设置文件；缺失文件或无法解析时回退首次启动默认值，
 /// 根因记录在 [`SettingsLoad::load_error`]，原文件保持原样。
-fn load_unlocked(app: &AppHandle) -> SettingsLoad {
-    let path = match settings_path(app) {
+fn load_unlocked(paths: &NativePaths) -> SettingsLoad {
+    let path = match settings_path(paths) {
         Ok(path) => path,
         Err(error) => {
             return SettingsLoad {
@@ -683,72 +573,47 @@ fn unknown_field_warnings(value: &serde_json::Value) -> Vec<String> {
     }
 }
 
-/// 将完整设置保存到指定路径；独立入口用于验证重复原子覆盖。
+/// 将已通过校验的完整设置写入唯一的应用设置文件。
 fn save_to_path(path: &Path, settings: &AppSettings) -> Result<()> {
     settings.validate()?;
     let file = AppSettingsFile::from_settings(settings);
-    let bytes = serde_json::to_vec_pretty(&file).context("序列化应用设置失败")?;
+    let bytes = serde_json::to_vec_pretty(&file)
+        .map_err(|error| anyhow::anyhow!("序列化应用设置失败：{error}"))?;
     crate::storage::atomic_write_private(path, &bytes)
-        .with_context(|| format!("保存应用设置失败：{}", path.display()))
+        .map_err(|error| anyhow::anyhow!("保存应用设置失败：{}：{error}", path.display()))
 }
 
 /// 返回应用设置文件路径。
-fn settings_path(app: &AppHandle) -> Result<PathBuf> {
-    Ok(crate::storage::root_dir(app)?.join("settings.json"))
+fn settings_path(paths: &NativePaths) -> Result<PathBuf> {
+    Ok(crate::storage::root_dir(paths)?.join("settings.json"))
 }
 
-/// 读取 WebView 创建前所需的当前设置；缺失文件使用首次启动默认值。
+/// 读取原生宿主启动所需的当前设置；缺失文件使用首次启动默认值。
 pub(crate) fn load_before_start(path: &Path) -> Result<AppSettings> {
-    Ok(load_from_path(path).settings)
+    let loaded = load_from_path(path);
+    report_load_diagnostics(&loaded);
+    Ok(loaded.settings)
 }
 
-/// 在 Windows WebView2 创建前应用硬件加速偏好。
-#[cfg(target_os = "windows")]
-pub fn configure_hardware_acceleration_before_start() {
-    fn configure() -> Result<()> {
-        let path = crate::storage::root_dir_before_start()?.join("settings.json");
-        let settings = load_before_start(&path)?;
-        if settings.chrome_hardware_acceleration {
-            return Ok(());
-        }
-        let mut arguments = match std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS") {
-            Ok(value) => value,
-            Err(std::env::VarError::NotPresent) => String::new(),
-            Err(std::env::VarError::NotUnicode(_)) => {
-                anyhow::bail!("WebView2 启动参数不是有效的 Unicode 文本")
-            }
-        };
-        if !arguments
-            .split_whitespace()
-            .any(|item| item == "--disable-gpu")
-        {
-            if !arguments.is_empty() {
-                arguments.push(' ');
-            }
-            arguments.push_str("--disable-gpu");
-            // SAFETY: 仅在 Tauri 和其他线程启动前修改进程环境。
-            unsafe {
-                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", arguments);
-            }
-        }
-        Ok(())
+/// 读取阶段的诊断不阻断启动，但必须进入原生日志，避免损坏配置被静默吞掉。
+fn report_load_diagnostics(loaded: &SettingsLoad) {
+    for warning in &loaded.warnings {
+        tracing::warn!(warning, "应用设置包含被忽略的字段");
     }
-
-    configure().unwrap_or_else(|error| panic!("预读 Windows 应用设置失败：{error:#}"));
+    if let Some(error) = &loaded.load_error {
+        tracing::warn!(error, "应用设置读取失败，已回退默认值");
+    }
 }
-
-/// 非 Windows 平台不需要 WebView2 启动参数。
-#[cfg(not(target_os = "windows"))]
-pub fn configure_hardware_acceleration_before_start() {}
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AppSettings, AppSettingsFile, AppSettingsPatch, AppUpdateDownloadSource,
-        DEFAULT_BACKGROUND_AGENT_LIMIT, DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_WEB_SERVICE_URL,
-        InterfaceLanguage, MAX_BACKGROUND_AGENT_LIMIT, TerminalShell, load_before_start,
-        load_from_content, load_from_path, save_to_path, web_service_config,
+        AppSettings, AppSettingsFile, AppUpdateDownloadSource, DEFAULT_BACKGROUND_AGENT_LIMIT,
+        DEFAULT_TERMINAL_FONT_FAMILY, DEFAULT_WEB_SERVICE_URL, InterfaceLanguage, PreferencesPatch,
+        TerminalShell, load_before_start, load_from_content, load_from_path, update_preferences,
+        web_service_config,
     };
+    use crate::native_paths::NativePaths;
     use std::fs;
 
     /// 当前设置文件必须包含固定 schema/version；缺失字段回退默认值，
@@ -835,6 +700,62 @@ mod tests {
         assert!(invalid_terminal_font.validate().is_err());
     }
 
+    #[test]
+    fn preferences_patch_is_field_atomic_and_survives_cold_reload() {
+        let directory = tempfile::tempdir().expect("创建临时目录");
+        let paths = NativePaths::from_data_root(directory.path().to_owned());
+        let project_directory = directory.path().to_string_lossy().into_owned();
+
+        update_preferences(
+            &paths,
+            PreferencesPatch {
+                app_update_download_source: Some(AppUpdateDownloadSource::ChinaMirror),
+                project_directory: Some(project_directory),
+                task_notifications: Some(false),
+                notification_sound: Some(false),
+                keep_computer_awake: Some(false),
+                close_to_tray: Some(false),
+                background_agent_limit: Some(3),
+                http_proxy: Some(Some("http://127.0.0.1:7890".to_owned())),
+                http_proxy_no_proxy: Some(Some("localhost,127.0.0.1".to_owned())),
+                local_memories: Some(true),
+                ..PreferencesPatch::default()
+            },
+        )
+        .expect("偏好补丁应写入");
+
+        let cold = super::get(&paths).expect("冷启动读取偏好");
+        assert_eq!(
+            cold.app_update_download_source,
+            AppUpdateDownloadSource::ChinaMirror
+        );
+        assert!(!cold.task_notifications);
+        assert!(!cold.notification_sound);
+        assert!(!cold.keep_computer_awake);
+        assert!(!cold.close_to_tray);
+        assert_eq!(cold.background_agent_limit, 3);
+        assert_eq!(cold.http_proxy.as_deref(), Some("http://127.0.0.1:7890"));
+        assert_eq!(
+            cold.http_proxy_no_proxy.as_deref(),
+            Some("localhost,127.0.0.1")
+        );
+        assert!(cold.local_memories);
+
+        update_preferences(
+            &paths,
+            PreferencesPatch {
+                task_notifications: Some(true),
+                ..PreferencesPatch::default()
+            },
+        )
+        .expect("单字段补丁应写入");
+        let merged = super::get(&paths).expect("读取合并后的偏好");
+        assert!(merged.task_notifications);
+        assert!(!merged.notification_sound);
+        assert_eq!(merged.background_agent_limit, 3);
+        assert!(merged.local_memories);
+    }
+
     /// 已存在但损坏的设置必须回退默认设置继续可用，并且不得覆盖或修复原文件。
     #[test]
     fn invalid_settings_fall_back_to_defaults_without_replacement() {
@@ -888,24 +809,6 @@ mod tests {
         assert_eq!(fs::read_to_string(target).unwrap(), "{broken target");
     }
 
-    /// 活跃保存路径必须能连续覆盖同一文件（Windows 回归）。
-    #[test]
-    fn settings_save_replaces_existing_file_repeatedly() {
-        let directory = tempfile::tempdir().expect("创建临时目录");
-        let path = directory.path().join("settings.json");
-        let mut settings = AppSettings::initial();
-
-        save_to_path(&path, &settings).expect("首次保存设置");
-        save_to_path(&path, &settings).expect("第二次应覆盖已有设置");
-        settings.keep_computer_awake = true;
-        save_to_path(&path, &settings).expect("第三次仍应覆盖已有设置");
-
-        let saved: AppSettingsFile =
-            serde_json::from_slice(&fs::read(&path).expect("读取保存结果")).unwrap();
-        assert!(saved.settings.keep_computer_awake);
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);
-    }
-
     #[test]
     fn update_download_sources_use_the_frontend_contract_values() {
         assert_eq!(
@@ -939,43 +842,6 @@ mod tests {
         assert!(serde_json::from_str::<AppSettings>(r#"{"interfaceLanguage":"fr"}"#).is_err());
     }
 
-    /// 补丁允许字段缺失，但拒绝 null、未知字段和错误类型。
-    #[test]
-    fn settings_patch_rejects_ambiguous_values() {
-        assert!(serde_json::from_str::<AppSettingsPatch>("{}").is_ok());
-        assert!(
-            serde_json::from_str::<AppSettingsPatch>(r#"{"chromeHardwareAcceleration": false}"#)
-                .is_ok()
-        );
-        for invalid in [
-            r#"{"interfaceLanguage": null}"#,
-            r#"{"chromeHardwareAcceleration": null}"#,
-            r#"{"sidebarCollapsedProjectIds": null}"#,
-            r#"{"projectDirectory": null}"#,
-            r#"{"taskNotifications": null}"#,
-            r#"{"showThinkingProcess": null}"#,
-            r#"{"notificationSound": "true"}"#,
-            r#"{"keepComputerAwake": null}"#,
-            r#"{"backgroundAgentLimit": 0}"#,
-            r#"{"backgroundAgentLimit": 1000}"#,
-            r#"{"terminalFontFamily": null}"#,
-            r#"{"terminalShell": "wsl"}"#,
-            r#"{"localMemories": null}"#,
-            r#"{"autoArchiveConversations": null}"#,
-            r#"{"archiveRetentionDays": 0}"#,
-            r#"{"webServiceUrl": null}"#,
-            r#"{"oldSetting": true}"#,
-        ] {
-            assert!(serde_json::from_str::<AppSettingsPatch>(invalid).is_err());
-        }
-        assert!(
-            serde_json::from_str::<AppSettingsPatch>(&format!(
-                r#"{{"backgroundAgentLimit": {MAX_BACKGROUND_AGENT_LIMIT}}}"#
-            ))
-            .is_ok()
-        );
-    }
-
     /// 兼容服务 URL 使用当前唯一设置结构往返，并复用工具层规范化配置。
     #[test]
     fn web_service_url_round_trips_and_builds_config() {
@@ -990,9 +856,7 @@ mod tests {
             "http://127.0.0.1:3456/compat"
         );
         assert_eq!(
-            loaded
-                .settings
-                .web_service_config()
+            web_service_config(&loaded.settings.web_service_url)
                 .expect("兼容服务配置应可创建")
                 .expect("非空 URL 应启用网络工具")
                 .base_url()
@@ -1016,11 +880,6 @@ mod tests {
                 ..AppSettings::initial()
             };
             assert!(invalid.validate().is_err(), "应拒绝 URL：{value}");
-            let patch = format!(r#"{{"webServiceUrl":{value:?}}}"#);
-            assert!(
-                serde_json::from_str::<AppSettingsPatch>(&patch).is_err(),
-                "补丁应拒绝 URL：{value}"
-            );
         }
     }
 
@@ -1034,47 +893,31 @@ mod tests {
                 format!("{DEFAULT_WEB_SERVICE_URL}/")
             );
         }
-        let patch = serde_json::from_str::<AppSettingsPatch>(r#"{"webServiceUrl":""}"#).unwrap();
-        let config = patch.web_service_config_update().unwrap().unwrap().unwrap();
+        let config = web_service_config("").unwrap().unwrap();
         assert_eq!(
-            config.base_url(),
-            AppSettings::initial()
-                .web_service_config()
-                .unwrap()
-                .unwrap()
-                .base_url()
-        );
-        assert!(
-            serde_json::from_str::<AppSettingsPatch>("{}")
-                .unwrap()
-                .web_service_config_update()
-                .unwrap()
-                .is_none()
+            config.base_url().as_str(),
+            format!("{DEFAULT_WEB_SERVICE_URL}/")
         );
     }
 
-    /// WebView 创建前的读取不阻断启动：缺失文件使用首次启动默认值，
-    /// 损坏文件回退默认值。
+    /// 原生宿主的预读不阻断启动：缺失文件使用首次启动默认值，损坏文件回退默认值。
     #[test]
     fn before_start_settings_fall_back_to_defaults() {
         let directory = tempfile::tempdir().expect("创建测试目录");
         let path = directory.path().join("settings.json");
 
         let initial = load_before_start(&path).expect("缺失文件应使用首次启动设置");
-        assert!(initial.chrome_hardware_acceleration);
         assert!(!initial.local_memories, "本地记忆必须默认关闭");
 
         fs::write(&path, "{broken").expect("写入损坏设置");
         let fallback = load_before_start(&path).expect("损坏文件应回退默认设置");
-        assert!(fallback.chrome_hardware_acceleration);
         assert!(!fallback.local_memories, "本地记忆必须默认关闭");
 
-        let mut settings = AppSettings::initial();
-        settings.chrome_hardware_acceleration = false;
+        let settings = AppSettings::initial();
         let valid =
             serde_json::to_vec(&AppSettingsFile::from_settings(&settings)).expect("写入当前设置");
         fs::write(&path, valid).expect("写入当前设置");
         let settings = load_before_start(&path).expect("读取当前设置");
-        assert!(!settings.chrome_hardware_acceleration);
+        assert!(!settings.local_memories);
     }
 }

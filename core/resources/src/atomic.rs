@@ -104,7 +104,7 @@ pub(crate) enum BoundedRead {
 ///
 /// 资源层读取的文件都先经 `ensure_regular_file_or_absent` 拒绝链接，这里的
 /// no-follow 标志负责关闭“检查后、打开前”被替换成链接的竞态。
-fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
+pub(crate) fn open_regular_file_nofollow(path: &Path) -> std::io::Result<File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;

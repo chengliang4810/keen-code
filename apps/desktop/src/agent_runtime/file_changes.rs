@@ -13,14 +13,15 @@ use keencode_tools::{FileMutationRecorder, PreparedFileMutation};
 use super::{AgentRuntime, AgentRuntimeError};
 
 /// 绑定单个 Session 的真实文件变更记录器。
-pub(super) struct RuntimeFileMutationRecorder {
+pub(crate) struct RuntimeFileMutationRecorder {
     /// 唯一权威 Session；不另建文件历史存储。
     session: RuntimeSession,
 }
 
 impl RuntimeFileMutationRecorder {
     /// 在生产工具环境中绑定当前 Session。
-    pub(super) fn new(session: RuntimeSession) -> Self {
+    /// Native Host 回归测试也必须复用这个真实记录入口，不另造 mock 记录器。
+    pub(crate) fn new(session: RuntimeSession) -> Self {
         Self { session }
     }
 }

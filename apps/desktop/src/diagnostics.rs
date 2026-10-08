@@ -17,8 +17,9 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use serde_json::Value;
-use tauri::AppHandle;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+use crate::native_paths::NativePaths;
 
 pub mod observability;
 pub mod process_resources;
@@ -30,6 +31,11 @@ const LOG_RETENTION_BYTES: u64 = 256 * 1024 * 1024;
 const LOG_RETENTION_DAYS: u64 = 7;
 const CRASH_SPOOL_MAX_BYTES: u64 = 128 * 1024;
 const CRASH_SPOOL_MAX_RECORDS: usize = observability::MAX_CRASH_RECORDS;
+
+/// Windows GUI 初始化后可能失去标准错误句柄；兜底输出失败不能再次触发 panic。
+pub(crate) fn write_stderr_best_effort(message: std::fmt::Arguments<'_>) {
+    let _ = writeln!(std::io::stderr().lock(), "{message}");
+}
 
 enum LogCommand {
     Line(String),
@@ -59,10 +65,14 @@ pub struct Diagnostics {
 }
 
 impl Diagnostics {
-    /// 根据当前用户的 KeenCode 统一目录创建诊断日志。
-    pub fn init(app: &AppHandle, startup_started_at: Instant) -> Arc<Self> {
-        let data_dir = crate::storage::root_dir(app).unwrap_or_else(|error| {
-            eprintln!("[keencode] 无法获取用户持久化目录，诊断日志回退临时目录: {error}");
+    /// 根据 NativeHost 已解析的统一目录创建诊断日志。
+    ///
+    /// 诊断层不自行读取环境变量或窗口句柄，避免后台线程和宿主写入不同数据根。
+    pub fn init(paths: &NativePaths, startup_started_at: Instant) -> Arc<Self> {
+        let data_dir = crate::storage::root_dir(paths).unwrap_or_else(|error| {
+            write_stderr_best_effort(format_args!(
+                "[keencode] 无法获取用户持久化目录，诊断日志回退临时目录: {error}"
+            ));
             std::env::temp_dir().join("keencode-desktop-data")
         });
         let log_dir = data_dir.join("logs");
@@ -70,13 +80,18 @@ impl Diagnostics {
         let file = match open_log_file(&log_dir, &path) {
             Ok(file) => file,
             Err(error) => {
-                eprintln!("[keencode] 无法打开诊断日志 {}: {error}", path.display());
+                write_stderr_best_effort(format_args!(
+                    "[keencode] 无法打开诊断日志 {}: {error}",
+                    path.display()
+                ));
                 let fallback_dir = std::env::temp_dir().join("keencode-desktop-logs");
                 let fallback_path = fallback_dir.join("keencode-desktop.log");
                 match open_log_file(&fallback_dir, &fallback_path) {
                     Ok(file) => return Self::from_file(fallback_path, file, startup_started_at),
                     Err(fallback_error) => {
-                        eprintln!("[keencode] 临时诊断日志也无法打开: {fallback_error}");
+                        write_stderr_best_effort(format_args!(
+                            "[keencode] 临时诊断日志也无法打开: {fallback_error}"
+                        ));
                         let fallback_path = std::env::temp_dir().join("keencode-desktop.log");
                         let file = OpenOptions::new()
                             .create(true)
@@ -115,69 +130,25 @@ impl Diagnostics {
         })
     }
 
-    /// 为不启动 Tauri 窗口的开发评测进程创建独立诊断日志。
-    #[cfg(feature = "benchmark")]
-    pub(crate) fn init_benchmark(
-        path: PathBuf,
-        startup_started_at: Instant,
-    ) -> std::io::Result<Arc<Self>> {
-        let log_dir = path.parent().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "日志路径缺少父目录")
-        })?;
-        let file = open_log_file(log_dir, &path)?;
-        Ok(Self::from_file(path, file, startup_started_at))
-    }
-
     /// 接管后台 tracing 和 Rust panic；所有写入复用同一脱敏、限长出口。
     pub fn install(self: &Arc<Self>) {
         if let Err(error) = self.subscriber(false).try_init() {
             self.error("diagnostics.install", error.to_string());
         }
         let sink = Arc::clone(self);
-        let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             let backtrace = observability::sanitize_panic_backtrace(
                 &std::backtrace::Backtrace::force_capture().to_string(),
             );
-            let payload_kind = observability::panic_payload_kind(info);
+            let message = observability::format_panic_message(info);
             sink.record_crash(observability::CrashRecord {
                 occurred_at_ms: observability::now_epoch_ms(),
                 kind: "panic".to_owned(),
-                message: format!("panic payload type={payload_kind}"),
+                message: message.clone(),
                 backtrace: Some(backtrace.clone()),
             });
-            sink.error(
-                "runtime.panic",
-                format!("panic payload type={payload_kind}\n{backtrace}"),
-            );
-            previous(info);
-        }));
-    }
-
-    /// 评测进程保留全部 tracing 级别，仍统一经过脱敏与单条长度限制。
-    #[cfg(feature = "benchmark")]
-    pub(crate) fn install_benchmark(self: &Arc<Self>) {
-        if let Err(error) = self.subscriber(true).try_init() {
-            self.error("diagnostics.install", error.to_string());
-        }
-        let sink = Arc::clone(self);
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            let backtrace = observability::sanitize_panic_backtrace(
-                &std::backtrace::Backtrace::force_capture().to_string(),
-            );
-            let payload_kind = observability::panic_payload_kind(info);
-            sink.record_crash(observability::CrashRecord {
-                occurred_at_ms: observability::now_epoch_ms(),
-                kind: "panic".to_owned(),
-                message: format!("panic payload type={payload_kind}"),
-                backtrace: Some(backtrace.clone()),
-            });
-            sink.error(
-                "runtime.panic",
-                format!("panic payload type={payload_kind}\n{backtrace}"),
-            );
-            previous(info);
+            sink.error("runtime.panic", format!("{message}\n{backtrace}"));
+            // 默认 hook 会再次输出原始 payload；GUI 诊断仅保留上面的脱敏摘要。
         }));
     }
 
@@ -220,13 +191,13 @@ impl Diagnostics {
             format!("phase={phase} elapsed_ms={elapsed_ms}"),
         );
         if std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1")) {
-            eprintln!(
+            write_stderr_best_effort(format_args!(
                 "{}",
                 serde_json::json!({
                     "event": phase,
                     "elapsedMs": elapsed_ms,
                 })
-            );
+            ));
         }
     }
 
@@ -250,7 +221,7 @@ impl Diagnostics {
         append_crash_spool(&self.crash_spool, &crash);
     }
 
-    /// 读取一次当前宿主及 WebView2 子进程资源摘要；失败字段保持 `None`。
+    /// 读取一次当前 GPUI NativeHost 进程资源摘要；失败字段保持 `None`。
     pub fn process_resource_sample(&self) -> process_resources::ProcessResourceSample {
         self.process_resources
             .lock()
@@ -286,15 +257,18 @@ impl Diagnostics {
                     .increment_counter("diagnostics.dropped_logs", 1);
                 // 诊断路径不可反向阻塞模型或 UI；仅保留 error 的 stderr 兜底。
                 if level.eq_ignore_ascii_case("error") {
-                    eprintln!(
+                    write_stderr_best_effort(format_args!(
                         "[keencode] 诊断日志队列已满，错误摘要被丢弃: {}",
                         self.path.display()
-                    );
+                    ));
                 }
             }
             Err(TrySendError::Disconnected(_)) => {
                 if level.eq_ignore_ascii_case("error") {
-                    eprintln!("[keencode] 诊断日志线程已退出: {}", self.path.display());
+                    write_stderr_best_effort(format_args!(
+                        "[keencode] 诊断日志线程已退出: {}",
+                        self.path.display()
+                    ));
                 }
             }
         }
@@ -365,7 +339,7 @@ fn run_log_writer(path: PathBuf, mut file: std::fs::File, receiver: Receiver<Log
                     rotate_if_needed(&mut file, &path).and_then(|_| file.write_all(line.as_bytes()))
                 {
                     let message = format!("写入诊断日志失败 {}: {error}", path.display());
-                    eprintln!("[keencode] {message}");
+                    write_stderr_best_effort(format_args!("[keencode] {message}"));
                     writer_error = Some(message);
                 }
             }

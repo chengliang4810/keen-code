@@ -25,4 +25,7 @@
 - 追加前后的回复投影按权威事件顺序分段，分段 ID 保持稳定；整轮开始时间与耗时仍来自宿主。最后一条追加可以作为编辑目标，回退语义仍是归档并删除整个根 Turn。宿主核对最新输入的稳定标识与完整正文，拒绝旧起点、旧追加和正文篡改；中断恢复使用同一锚点，归档保留准确引用。旧空回执不猜测缺失正文。
 - 当前不支持携带插件引用的 detached operation admission 或 `/workflow` 请求，明确拒绝，不能静默丢弃资源身份。原 PluginLibrary 入口缺失和其他未接入能力不由该扩展伪装实现。
 
-主要回归保护位于 `apps/ui/src/keencode/pluginReferences.test.ts`、`apps/desktop/src/ui_plugins/tests.rs`，以及 model/provider/runtime 的引用编码、Journal 冷恢复、live/replay 和桌面分叉测试。
+主要回归保护位于 `core/model/src/tests.rs`、`core/provider/src/tests.rs`、
+`core/runtime/src/tests.rs`、`core/agent/src/collaboration_tests.rs` 和
+`apps/desktop/src/agent_runtime.rs` 中的内联测试，覆盖引用编码、Journal 冷恢复、
+live/replay 和桌面分叉。

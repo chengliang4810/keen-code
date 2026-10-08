@@ -215,12 +215,6 @@ fn workflow_tool_environment(
                 .with_file_mutation_recorder(Arc::new(WorkflowFileMutationRecorder::new(state)))
         })
         .map_err(|error| DriverError::new("workflow_tool_environment", error.to_string()))?;
-    #[cfg(feature = "benchmark")]
-    let environment = if runtime.benchmark_workspace_guard {
-        environment.with_workspace_guard()
-    } else {
-        environment
-    };
     Ok(Arc::new(environment))
 }
 

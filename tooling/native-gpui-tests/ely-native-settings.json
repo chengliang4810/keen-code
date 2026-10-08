@@ -1,0 +1,485 @@
+{
+  "version": 1,
+  "name": "ely-native-settings-dark",
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "chat-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "chat-startup"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"appearance\": \"dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "README.md",
+      "contains": "Ely native acceptance isolated project",
+      "min_bytes": 1
+    },
+    {
+      "type": "key",
+      "key": "n",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 15000
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 880
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "type_text",
+      "text": "只回复字符串 settings ok。不要调用工具。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 120000
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "click",
+      "x": 120,
+      "y": 1575
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "general-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "general-page"
+    },
+    {
+      "type": "metrics",
+      "label": "general-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "外观",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "界面主题",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "界面主题",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "深色",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"appearance\": \"dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "appearance-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "appearance-page"
+    },
+    {
+      "type": "metrics",
+      "label": "appearance-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "模型与供应商",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "providers-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "providers-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "插件",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "plugins-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "plugins-page"
+    },
+    {
+      "type": "metrics",
+      "label": "plugins-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "MCP",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "mcp-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "mcp-page"
+    },
+    {
+      "type": "metrics",
+      "label": "mcp-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "技能",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "skills-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "skills-page"
+    },
+    {
+      "type": "metrics",
+      "label": "skills-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "记忆",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "memory-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "memory-page"
+    },
+    {
+      "type": "metrics",
+      "label": "memory-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "Agent 模板",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "agent-templates-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "agent-templates-page"
+    },
+    {
+      "type": "metrics",
+      "label": "agent-templates-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "自动化",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "automations-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "automations-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "已保存工作流",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "workflows-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "workflows-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "智能体与子智能体",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1100
+    },
+    {
+      "type": "screenshot",
+      "label": "agents-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "agents-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "用量",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "usage-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "usage-page"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "诊断",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 100
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "diagnostics-page"
+    },
+    {
+      "type": "accessibility",
+      "label": "diagnostics-page"
+    },
+    {
+      "type": "metrics",
+      "label": "diagnostics-page"
+    }
+  ],
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true
+}

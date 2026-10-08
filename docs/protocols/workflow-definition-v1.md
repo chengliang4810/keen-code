@@ -1,7 +1,7 @@
 # WorkflowDefinitionV1 JSON
 
-实现权威为 `core/workflow/src/lib.rs`；桌面装配在 `apps/desktop/src/workflows/`
-与 `apps/desktop/src/frontend_rpc/workflows.rs`。定义是声明式 JSON，执行不依赖
+实现权威为 `core/workflow/src/lib.rs`；桌面装配在 `apps/desktop/src/workflows/`。
+定义是声明式 JSON，执行不依赖
 Node、JavaScript 引擎或字符串表达式。ZCode 的原工作流界面只消费展示投影。
 
 ## 定义示例

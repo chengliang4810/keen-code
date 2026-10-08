@@ -93,7 +93,7 @@ pub struct HostClientConfig {
     /// 是否在 initialize 中声明表单问答能力。
     ///
     /// 声明后 Host 会为本次连接注册 AskUser 工具，模型可以停下来向人提问，
-    /// 非交互请求此时以退出码 6（需要用户输入）返回，等待 Desktop/Web 或
+    /// 非交互请求此时以退出码 6（需要用户输入）返回，等待 Desktop 或
     /// `session attach` 接管续答。关闭后 Host 不注册该工具，模型只能依据
     /// 已有上下文自行决策，请求不会因等待输入而中断。
     pub declare_form_capability: bool,
@@ -135,7 +135,7 @@ impl HostEvent {
     /// 将 Host 主动消息恢复为完整 JSON-RPC 请求或通知。
     ///
     /// `HostClient` 的 reader 会把 method、params 和原始 request id 分开保存，
-    /// 便于 CLI/Tauri 分别处理事件和 Client Request。桥接层需要把消息转发到
+    /// 便于 CLI/原生 Host 适配层分别处理事件和 Client Request。桥接层需要把消息转发到
     /// 另一个 ACP 事件总线时，应使用此方法保留数字 request id，不能只拼接
     /// `id` 的字符串投影。
     pub fn to_json_rpc(&self) -> Value {
@@ -170,9 +170,6 @@ struct SharedClient {
     root_fingerprint: String,
     owner_kind: String,
     require_host_identity: bool,
-    /// `connect` 已完成的远端 initialize 结果；Tauri Client 分支复用该响应，
-    /// 避免向既有 Host 重复发送不同客户端身份的握手。
-    initialized_result: Mutex<Option<Value>>,
     /// 连接终止原因；只用于唤醒上层桥接重连，不会触发远端 operation 取消。
     connection_closed: watch::Sender<Option<ClientError>>,
     /// 重新读取同一数据根 discovery 所需的配置快照。
@@ -220,7 +217,6 @@ impl HostClient {
                 crate::discovery::HostOwnerKind::Headless => "headless".to_owned(),
             },
             require_host_identity: config.require_host_identity,
-            initialized_result: Mutex::new(None),
             connection_closed,
             config: config.clone(),
         });
@@ -314,8 +310,8 @@ impl HostClient {
 
     /// 转发一条完整 JSON-RPC 输入帧且不设置 Client 层超时。
     ///
-    /// Tauri 的 `acp_dispatch` 需要用此入口处理 `session/prompt` 等模型回合：
-    /// 请求可以跨越多个 Provider 轮次，取消则通过同一 HostClient 的另一条
+    /// 原生 Host 适配层需要用此入口处理 `session/prompt` 等模型回合：请求可以
+    /// 跨越多个 Provider 轮次，取消则通过同一 HostClient 的另一条
     /// 并发 `session/cancel` 通知到达。控制面仍应使用 [`Self::dispatch_message`]
     /// 的有限超时，避免错误 Host 永久占用调用方。
     pub async fn dispatch_message_without_timeout(
@@ -339,30 +335,6 @@ impl HostClient {
             ));
         }
         if let Some(method) = object.get("method").and_then(Value::as_str) {
-            // 连接建立时已经完成一次远端握手。Tauri 前端仍会通过同一个
-            // `acp_dispatch` 命令发送 initialize；在本地返回缓存结果，避免
-            // 把不同的客户端身份再次发送到严格拒绝重复握手的既有 Host。
-            if method == "initialize"
-                && let Some(id) = object.get("id").cloned()
-            {
-                if !valid_rpc_id(&id) || id.is_null() {
-                    return Err(ClientError::Protocol(
-                        "JSON-RPC request id 类型无效".to_owned(),
-                    ));
-                }
-                let result = self
-                    .shared
-                    .initialized_result
-                    .lock()
-                    .await
-                    .clone()
-                    .ok_or_else(|| ClientError::Protocol("Host initialize 尚未完成".to_owned()))?;
-                return Ok(Some(json!({
-                    "jsonrpc":"2.0",
-                    "id":id,
-                    "result":result,
-                })));
-            }
             let params = object.get("params").cloned().unwrap_or_else(|| json!({}));
             if let Some(id) = object.get("id") {
                 if !valid_rpc_id(id) || id.is_null() {
@@ -571,7 +543,6 @@ impl HostClient {
                 return Err(ClientError::Protocol("Host owner 类型不匹配".to_owned()));
             }
         }
-        *self.shared.initialized_result.lock().await = Some(result);
         Ok(())
     }
 
@@ -776,17 +747,33 @@ mod tests {
                 let initialize = reader.next().await.unwrap().unwrap().value;
                 assert_eq!(initialize["method"], "initialize");
                 writer
-                .send(&crate::transport::NdjsonFrame::new(json!({
-                    "jsonrpc":"2.0",
-                    "id":initialize["id"],
-                    "result":{"protocolVersion":1,"_meta":{
-                        "keencode/host/dataRootFingerprint":server_record.data_root_fingerprint,
-                        "keencode/host/ownerKind":"headless"
-                    }}
-                })).unwrap())
-                .await
-                .unwrap();
+                    .send(&crate::transport::NdjsonFrame::new(json!({
+                        "jsonrpc":"2.0",
+                        "id":initialize["id"],
+                        "result":{"protocolVersion":1,"_meta":{
+                            "keencode/host/dataRootFingerprint":server_record.data_root_fingerprint,
+                            "keencode/host/ownerKind":"headless"
+                        }}
+                    })).unwrap())
+                    .await
+                    .unwrap();
+                let forwarded_initialize = reader.next().await.unwrap().unwrap().value;
+                assert_eq!(forwarded_initialize["method"], "initialize");
+                assert_eq!(forwarded_initialize["id"], 7);
+                assert_eq!(forwarded_initialize["params"]["protocolVersion"], 1);
+                writer
+                    .send(
+                        &crate::transport::NdjsonFrame::new(json!({
+                            "jsonrpc":"2.0",
+                            "id":7,
+                            "result":{"protocolVersion":1}
+                        }))
+                        .unwrap(),
+                    )
+                    .await
+                    .unwrap();
                 let request = reader.next().await.unwrap().unwrap().value;
+                assert_eq!(request["method"], "session/list");
                 writer
                     .send(&crate::transport::NdjsonFrame::new(json!({
                         "jsonrpc":"2.0","method":"acp://delivery","params":{"type":"session_update"}

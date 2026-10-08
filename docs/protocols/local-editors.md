@@ -1,43 +1,69 @@
-# 本地编辑器平台契约
+# Native GPUI 本地编辑器契约
 
-`IPlatformService.getInstalledEditors()`、`getApplicationIcon()` 和
-`openInEditor()` 在 Tauri 中由 `apps/desktop/src/ui_editors.rs` 提供。Rust 是唯一
-的发现与启动边界，前端只消费 `EditorInfo { id, name, iconDataUrl }`，不执行命令，
-也不把用户传入的 executable 当作编辑器身份。
+本文描述当前原生工作台的系统编辑器发现与打开边界。生产入口是
+`NativeWorkbench.editors: EditorService`，由 `NativeWorkbenchPanel` 直接调用；没有
+Tauri command、`IPlatformService`、`getApplicationIcon` 或前端启动器。
 
-## 发现
+实现锚点：`apps/desktop/src/native_ui/workbench/editors.rs`、
+`apps/desktop/src/native_ui/workbench/panel.rs`、
+`apps/desktop/src/native_ui/workbench.rs` 和
+`apps/desktop/src/native_host/launch.rs`。
 
-- Windows 始终按系统位置发现 `explorer`，并从已知安装目录或 `PATH` 发现
-  `vscode`、`vscode-insiders`、`cursor`、`zed`。
-- macOS 始终按 `/usr/bin/open` 提供 `finder`，并从 `/Applications` 或用户
-  `Applications` 目录发现相同的本地编辑器。
-- 其他 Unix 仅从 `PATH` 发现上述编辑器，不伪造 Finder/Explorer。
-- 图标优先使用 Windows Shell 的真实 HICON；系统 API 不可用时返回稳定的
-  editorId 回退 SVG data URL，不能影响发现或启动结果。
-- `getApplicationIcon` 的 macOS bundle ID 只映射到已发现的本地编辑器；Windows
-  executable locator 也必须 canonicalize 后命中同一发现结果。
+## Typed service API
 
-## 启动与授权
+`EditorService::discover()` 返回 `Vec<EditorInfo>`，每项字段为：
 
-`openInEditor` 只接受已发现的 editorId 和已登记 workspace 根内的现有绝对路径。
-Rust 先 canonicalize 并检查 `pathKind`，再使用参数数组启动进程；文件名中的 `&`、
-引号或空格不会被交给 shell。Windows Explorer 文件使用单个 `/select,<path>` 参数，
-目录直接传路径；macOS Finder 使用 `open -R` 或 `open`。
+```text
+EditorInfo {
+  id,
+  name,
+  executable,
+  is_file_manager,
+}
+```
 
-远程 `remoteTarget`、未知 editorId、相对路径和 workspace 根外路径均明确拒绝。正常
-产品启动使用编辑器的标准用户配置；native-live 计划只验证隔离项目与参数边界，
-不会向真实编辑器注入任意 executable 或覆盖用户编辑器配置。
+`EditorService::open(editor_id, path)` 先 canonicalize 并确认目标存在，再从本次
+`discover()` 结果中按稳定 `editor_id` 选择可执行文件，最后通过参数数组启动进程，
+返回：
 
-## 依赖与本机证据
+```text
+OpenEditorResult { editor_id, path }
+```
 
-Windows HICON 不是 PNG 字节，当前依赖图中没有可直接写 PNG data URL 的桌面自有
-编码器，因此保留 `png = 0.18.1` 是实现真实 Windows 图标所需的最小直接依赖；
-`cargo tree -p keencode-desktop --edges normal -i png@0.18.1` 实测只显示
-`png v0.18.1 -> keencode-desktop`。本机 Cargo registry 中该版本源文件为 40 个、
-合计 565,549 bytes；这是源码缓存大小，不等同于最终产品体积。最终 release 二进制
-增量由 product-size 构建单独测量，当前没有用估算替代该结果。
+未知或未安装的 editor ID、不可访问目标和启动失败都返回 `Err(String)`。Shell 不参与
+参数解析；Windows 使用隐藏 console flag，文件管理器选中文件时传单个
+`/select,<path>` 参数，目录直接传路径。macOS Finder 使用 `open -R` 选择文件或
+`open` 打开目录。
 
-2026-10-03 Windows 实际候选扫描结果保存在
-`tooling/native-live/native-editor-discovery-evidence.json`：本机仅发现
-`explorer`，VS Code、VS Code Insiders、Cursor、Zed 的已知安装路径和 PATH 均为空。
-因此当前 native-live 计划只启动真实 Explorer，不冒充不存在的 IDE 验收。
+## 发现规则
+
+- Windows 始终尝试系统 `explorer.exe`；VS Code、Cursor 和 Zed 从已知安装路径或
+  `PATH` 发现。
+- macOS 始终提供 `/usr/bin/open` 作为 Finder；VS Code、Cursor 和 Zed 从
+  `/Applications` 或用户 `Applications` 目录发现。
+- 其他 Unix 只从 `PATH` 发现 VS Code、Cursor 和 Zed，不伪造 Finder/Explorer。
+- 当前 `EditorInfo` 暴露的是可执行路径，不生成 icon data URL。图标或品牌展示若要
+  增加，必须先扩展真实 Rust 类型和 GPUI 投影，不能恢复旧前端 icon API。
+
+工作台的 `open_external_editor` 只从当前项目快照选择已发现的 editor，并把路径交给
+上述 service；service 自身负责 canonicalize、存在性和 editor identity 校验，面板负责
+把操作放入 blocking 任务、检查项目 generation 并显示成功/失败状态。它不会把任意
+用户输入的 executable 当作身份，也不接受 remote target。
+
+## 历史：Tauri 编辑器 API（已退役）
+
+旧材料中的 `IPlatformService.getInstalledEditors()`、`getApplicationIcon()`、
+`openInEditor()`、`EditorInfo { id, name, iconDataUrl }` 以及 remote target 拒绝规则
+属于 Tauri/Source 适配层的历史接口。它们不描述当前 `EditorService` 的 Rust 结构，
+不能作为新增 GPUI API 或验收入口。旧的本机发现证据仍可用于解释历史验收，但新证据
+应记录 `EditorService::discover/open` 和 `NativeWorkbenchPanel` 的真实调用链。
+
+### 历史验收证据（状态保留）
+
+旧记录中的依赖和本机候选结论仍保留为历史证据：Windows HICON 不是 PNG 字节；当时
+保留 `png = 0.18.1`，并以 `cargo tree -p keencode-desktop --edges normal -i
+png@0.18.1` 核对过直接依赖。2026-10-03 的 Windows 候选扫描记录在
+`tooling/native-live/native-editor-discovery-evidence.json`，当时仅发现 `explorer`，
+VS Code、VS Code Insiders、Cursor、Zed 的已知安装路径和 PATH 均为空；旧 native-live
+计划因此只启动真实 Explorer，没有冒充不存在的 IDE。上述结论不改变当前
+`EditorService` 的 typed 字段，也不代表本轮重新执行了本机验收。

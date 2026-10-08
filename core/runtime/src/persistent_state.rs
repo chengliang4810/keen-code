@@ -97,6 +97,63 @@ impl PersistentAgentState {
         }
     }
 
+    /// 按调用方观察到的 revision 原子迁移 Goal 终态；revision 变化时返回
+    /// `None`，避免设置页在前置读取后覆盖其他操作。
+    pub fn transition_goal_if_revision(
+        &self,
+        operation_id: &str,
+        expected_revision: u64,
+        goal_id: &str,
+        transition: GoalTransition,
+    ) -> Result<Option<GoalChange>, RuntimeStateError> {
+        let transition = transition.normalized()?;
+        let operation = ("goal_transition_v1", goal_id, &transition);
+        let document = self.read_goal()?;
+        if let Some(change) = deduplicated_goal_change(
+            document.as_ref(),
+            operation_id,
+            &operation,
+            GoalChangeKind::Transitioned,
+        )? {
+            return Ok(Some(change));
+        }
+        if document.as_ref().map_or(0, |document| document.revision) != expected_revision {
+            return Ok(None);
+        }
+        let retired_goal_ids = document
+            .as_ref()
+            .map_or_else(Vec::new, |document| document.retired_goal_ids.clone());
+        let mut goal = document
+            .as_ref()
+            .and_then(|document| document.goal.clone())
+            .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+        if goal.id != goal_id || goal.owner_session_id != self.session.session_id().as_str() {
+            return Ok(None);
+        }
+        if goal.status.is_terminal() {
+            return Err(RuntimeStateError::Terminal { entity: "Goal" });
+        }
+        goal.status = resource_goal_status(transition.status);
+        goal.blocked_reason = transition.blocked_reason.clone();
+        goal.completion_evidence = transition.completion_evidence.clone();
+        goal.updated_at_unix_ms = unix_time_ms()?.max(goal.updated_at_unix_ms);
+        match self.save_goal(
+            operation_id,
+            &operation,
+            expected_revision,
+            Some(goal),
+            retired_goal_ids,
+        ) {
+            Ok(outcome) => Ok(Some(goal_change_from_outcome(
+                GoalChangeKind::Transitioned,
+                outcome,
+                true,
+            ))),
+            Err(ResourceError::RevisionConflict { .. }) => Ok(None),
+            Err(error) => Err(state_resource_error(error)),
+        }
+    }
+
     /// 从 Session 自身的应用数据根与权威项目根创建生产状态控制器。
     pub fn open(session: RuntimeSession) -> Result<Self, RuntimeError> {
         let storage_root = session
@@ -214,12 +271,30 @@ impl PersistentAgentState {
         self.set_goal_paused(operation_id, true)
     }
 
+    /// 按调用方观察到的 revision 原子暂停 Goal；冲突时不重试到更新后的版本。
+    pub fn pause_goal_if_revision(
+        &self,
+        operation_id: &str,
+        expected_revision: u64,
+    ) -> Result<Option<keencode_agent::GoalChange>, RuntimeStateError> {
+        self.set_goal_paused_if_revision(operation_id, true, expected_revision)
+    }
+
     /// 恢复当前 Session 的 Goal，并返回可供宿主决定是否续跑的真实变化。
     pub fn resume_goal(
         &self,
         operation_id: &str,
     ) -> Result<keencode_agent::GoalChange, RuntimeStateError> {
         self.set_goal_paused(operation_id, false)
+    }
+
+    /// 按调用方观察到的 revision 原子恢复 Goal；冲突时不重试到更新后的版本。
+    pub fn resume_goal_if_revision(
+        &self,
+        operation_id: &str,
+        expected_revision: u64,
+    ) -> Result<Option<keencode_agent::GoalChange>, RuntimeStateError> {
+        self.set_goal_paused_if_revision(operation_id, false, expected_revision)
     }
 
     /// Goal pause/resume 不是 Agent 工具的终态迁移，单独复用同一份 CAS 文档事务。
@@ -288,6 +363,117 @@ impl PersistentAgentState {
             }
         }
         Err(document_contention("Goal pause/resume"))
+    }
+
+    fn set_goal_paused_if_revision(
+        &self,
+        operation_id: &str,
+        paused: bool,
+        expected_revision: u64,
+    ) -> Result<Option<keencode_agent::GoalChange>, RuntimeStateError> {
+        let target = if paused {
+            ResourceGoalStatus::Paused
+        } else {
+            ResourceGoalStatus::Active
+        };
+        let operation = (
+            "goal_pause_resume_v1",
+            self.session.session_id().as_str(),
+            target,
+        );
+        let document = self.read_goal()?;
+        if let Some(change) = deduplicated_goal_change(
+            document.as_ref(),
+            operation_id,
+            &operation,
+            GoalChangeKind::Transitioned,
+        )? {
+            return Ok(Some(change));
+        }
+        if document.as_ref().map_or(0, |document| document.revision) != expected_revision {
+            return Ok(None);
+        }
+        let retired_goal_ids = document
+            .as_ref()
+            .map_or_else(Vec::new, |document| document.retired_goal_ids.clone());
+        let mut goal = document
+            .as_ref()
+            .and_then(|document| document.goal.clone())
+            .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+        if goal.owner_session_id != self.session.session_id().as_str() {
+            return Ok(None);
+        }
+        if goal.status.is_terminal() {
+            return Err(RuntimeStateError::Terminal { entity: "Goal" });
+        }
+        let changed = goal.status != target;
+        if changed {
+            goal.status = target;
+            goal.updated_at_unix_ms = unix_time_ms()?.max(goal.updated_at_unix_ms);
+        }
+        match self.save_goal(
+            operation_id,
+            &operation,
+            expected_revision,
+            Some(goal),
+            retired_goal_ids,
+        ) {
+            Ok(outcome) => Ok(Some(goal_change_from_outcome(
+                GoalChangeKind::Transitioned,
+                outcome,
+                changed,
+            ))),
+            Err(ResourceError::RevisionConflict { .. }) => Ok(None),
+            Err(error) => Err(state_resource_error(error)),
+        }
+    }
+
+    /// 按调用方观察到的 revision 原子清除终态 Goal；冲突时不重试到更新后的版本。
+    pub fn clear_goal_if_revision(
+        &self,
+        operation_id: &str,
+        expected_revision: u64,
+    ) -> Result<Option<keencode_agent::GoalChange>, RuntimeStateError> {
+        let operation = "goal_clear_v1";
+        let document = self.read_goal()?;
+        if let Some(change) = deduplicated_goal_change(
+            document.as_ref(),
+            operation_id,
+            &operation,
+            GoalChangeKind::Cleared,
+        )? {
+            return Ok(Some(change));
+        }
+        if document.as_ref().map_or(0, |document| document.revision) != expected_revision {
+            return Ok(None);
+        }
+        let retired_goal_ids = document
+            .as_ref()
+            .map_or_else(Vec::new, |document| document.retired_goal_ids.clone());
+        let goal = document
+            .as_ref()
+            .and_then(|document| document.goal.as_ref())
+            .ok_or(RuntimeStateError::NotFound { entity: "Goal" })?;
+        if !goal.status.is_terminal() {
+            return Err(RuntimeStateError::invalid(
+                "活跃 Goal 必须先完成或阻塞，不能直接清除",
+            ));
+        }
+        match self.save_goal(
+            operation_id,
+            &operation,
+            expected_revision,
+            None,
+            retired_goal_ids,
+        ) {
+            Ok(outcome) => Ok(Some(goal_change_from_outcome(
+                GoalChangeKind::Cleared,
+                outcome,
+                true,
+            ))),
+            Err(ResourceError::RevisionConflict { .. }) => Ok(None),
+            Err(error) => Err(state_resource_error(error)),
+        }
     }
 }
 

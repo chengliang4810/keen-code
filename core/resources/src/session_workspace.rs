@@ -359,6 +359,8 @@ mod tests {
             SessionEvent::SessionPreferenceSet {
                 pinned: Some(true),
                 archived: None,
+                permission_mode: None,
+                vision_enabled: None,
             },
         );
         append(

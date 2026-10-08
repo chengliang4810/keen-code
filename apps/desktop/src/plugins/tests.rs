@@ -122,6 +122,7 @@ fn transactional_plugin_fixture() -> (tempfile::TempDir, PluginManager, PluginId
                     "second".to_owned(),
                 ]),
                 secret_generation: 0,
+                source: None,
             }],
         })
         .unwrap();
@@ -278,33 +279,6 @@ fn secret_keys_encode_dotted_components_without_collision() {
     let key = storage.secret_key(&left, "token").unwrap();
     assert!(key.len() <= 128);
     assert!(key.starts_with("keencode.plugin.v1."));
-}
-
-/// 验证市场 source 的 GitHub 形式被转换为可审查 Git 计划。
-#[test]
-fn parses_marketplace_source() {
-    let source: MarketplaceSource =
-            serde_json::from_str(r#"{"source":"github","repo":"acme/plugins","ref":"v1","path":"repo/.claude-plugin/marketplace.json","sparsePaths":["repo/.claude-plugin","repo/plugins"]}"#)
-                .unwrap();
-    assert!(matches!(
-        source,
-        MarketplaceSource::Github {
-            path: Some(_),
-            sparse_paths,
-            ..
-        } if sparse_paths.len() == 2
-    ));
-    let source: MarketplaceSource =
-        serde_json::from_str(r#"{"source":"github","repo":"acme/plugins","ref":"v1"}"#).unwrap();
-    assert_eq!(
-        source.fetch_plan(&EmptyMarketplaceSettings).unwrap(),
-        SourceFetchPlan::Git {
-            url: "https://github.com/acme/plugins.git".to_owned(),
-            reference: Some("v1".to_owned()),
-            sha: None,
-            subdir: None,
-        }
-    );
 }
 
 /// KeenCode marketplace schema 允许暂时没有插件条目的市场清单。
@@ -523,48 +497,6 @@ fn merges_mcpb_user_config_into_plugin_manifest() {
     assert!(manifest.user_config.get("token").unwrap().sensitive);
     assert_eq!(manifest.user_config.get("port").unwrap().min, Some(1.0));
     let _ = fs::remove_dir_all(root);
-}
-
-/// pip 来源生成结构化计划，版本使用 pip 的 `==` 语法而非 npm 的 `@`。
-#[test]
-fn pip_source_has_a_parameterized_fetch_plan() {
-    let source: PluginSource =
-        serde_json::from_str(r#"{"source":"pip","package":"acme-plugin","version":"1.2.3"}"#)
-            .unwrap();
-    assert_eq!(
-        source.fetch_plan(Path::new("/tmp")).unwrap(),
-        SourceFetchPlan::Pip {
-            package_spec: "acme-plugin==1.2.3".to_owned(),
-            registry: None,
-        }
-    );
-}
-
-/// npm/pip source 的私有 registry 必须进入结构化取得计划，不能在解析时丢失。
-#[test]
-fn preserves_package_registry_in_fetch_plans() {
-    let npm: PluginSource = serde_json::from_str(
-            r#"{"source":"npm","package":"@acme/plugin","version":"1.0.0","registry":"https://npm.acme.test/"}"#,
-        )
-        .unwrap();
-    assert_eq!(
-        npm.fetch_plan(Path::new("/tmp")).unwrap(),
-        SourceFetchPlan::Npm {
-            package_spec: "@acme/plugin@1.0.0".to_owned(),
-            registry: Some("https://npm.acme.test/".to_owned()),
-        }
-    );
-    let pip: PluginSource = serde_json::from_str(
-        r#"{"source":"pip","package":"acme-plugin","registry":"https://pypi.acme.test/simple"}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        pip.fetch_plan(Path::new("/tmp")).unwrap(),
-        SourceFetchPlan::Pip {
-            package_spec: "acme-plugin".to_owned(),
-            registry: Some("https://pypi.acme.test/simple".to_owned()),
-        }
-    );
 }
 
 /// 变量只能使用字母、数字和下划线，且缺失值为硬错误。
@@ -1346,10 +1278,12 @@ fn batch_install_prevalidates_all_manifests_before_writing() {
                 MaterializedPlugin {
                     id: PluginId::parse("first@official").unwrap(),
                     source_root: first,
+                    source: None,
                 },
                 MaterializedPlugin {
                     id: PluginId::parse("second@official").unwrap(),
                     source_root: second,
+                    source: None,
                 },
             ],
             UserConfigUpdate::default(),
@@ -1395,10 +1329,12 @@ fn batch_install_is_sorted_and_idempotent() {
             MaterializedPlugin {
                 id: PluginId::parse("zeta@official").unwrap(),
                 source_root: zeta.clone(),
+                source: None,
             },
             MaterializedPlugin {
                 id: PluginId::parse("alpha@official").unwrap(),
                 source_root: alpha.clone(),
+                source: None,
             },
         ]
     };
@@ -1456,14 +1392,26 @@ fn same_version_content_change_refreshes_cache() {
     fs::write(source.join("payload.txt"), b"before").unwrap();
 
     let manager = PluginManager::new(&root);
+    let source_path = fs::canonicalize(&source).unwrap();
     let materialized = || MaterializedPlugin {
         id: PluginId::parse("demo@official").unwrap(),
         source_root: source.clone(),
+        source: Some(PluginInstallSource::Local {
+            path: source_path.clone(),
+        }),
     };
     let mut secrets = InMemorySecretStore::default();
     manager
         .install_from_directory(materialized(), UserConfigUpdate::default(), &mut secrets)
         .unwrap();
+    assert_eq!(
+        manager
+            .install_source(&PluginId::parse("demo@official").unwrap())
+            .unwrap(),
+        PluginInstallSource::Local {
+            path: source_path.clone()
+        }
+    );
     let old_path = manager.load_state().unwrap().plugins[0]
         .install_path
         .clone();
@@ -1516,6 +1464,7 @@ fn reinstall_preserves_secret_generation_and_reconciles_sensitive_fields() {
             MaterializedPlugin {
                 id: id.clone(),
                 source_root: source.clone(),
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1561,6 +1510,7 @@ fn reinstall_preserves_secret_generation_and_reconciles_sensitive_fields() {
             MaterializedPlugin {
                 id: id.clone(),
                 source_root: source,
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1629,6 +1579,7 @@ fn failed_batch_install_preserves_existing_state_and_cache() {
             MaterializedPlugin {
                 id: existing_id.clone(),
                 source_root: existing,
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1645,10 +1596,12 @@ fn failed_batch_install_preserves_existing_state_and_cache() {
                 MaterializedPlugin {
                     id: existing_id.clone(),
                     source_root: root.join("sources/existing"),
+                    source: None,
                 },
                 MaterializedPlugin {
                     id: PluginId::parse("invalid@official").unwrap(),
                     source_root: invalid,
+                    source: None,
                 },
             ],
             UserConfigUpdate::default(),
@@ -1691,6 +1644,7 @@ fn install_rejects_internal_directory_symlink_cycle() {
             MaterializedPlugin {
                 id: PluginId::parse("demo@official").unwrap(),
                 source_root: source,
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1724,6 +1678,7 @@ fn install_materializes_internal_file_symlink() {
             MaterializedPlugin {
                 id: PluginId::parse("demo@official").unwrap(),
                 source_root: source,
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1847,6 +1802,7 @@ fn cache_parent_symlink_is_rejected_before_copy() {
             MaterializedPlugin {
                 id: PluginId::parse("demo@official").unwrap(),
                 source_root: source,
+                source: None,
             },
             UserConfigUpdate::default(),
             &mut secrets,
@@ -1874,6 +1830,7 @@ fn load_state_rejects_install_path_outside_cache_without_replacement() {
             public_user_config: BTreeMap::new(),
             sensitive_user_config_keys: BTreeSet::new(),
             secret_generation: 0,
+            source: None,
         }],
     };
     let original = serde_json::to_vec(&PluginStateFile::from_state(&state)).unwrap();
@@ -2379,6 +2336,7 @@ fn market_identity_can_differ_from_original_manifest() {
             vec![MaterializedPlugin {
                 id: id.clone(),
                 source_root: source.clone(),
+                source: None,
             }],
             UserConfigUpdate::default(),
             &mut InMemorySecretStore::default(),
@@ -2393,4 +2351,102 @@ fn market_identity_can_differ_from_original_manifest() {
             .name,
         "upstream-name"
     );
+}
+
+/// 安装状态必须保留可重新物化的 marketplace 来源，不能把版本化缓存目录当作来源。
+#[test]
+fn persists_marketplace_source_for_future_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    let source_root = dir.path().join("source");
+    fs::create_dir_all(source_root.join(PLUGIN_MANIFEST).parent().unwrap()).unwrap();
+    fs::write(
+        source_root.join(PLUGIN_MANIFEST),
+        br#"{"name":"demo","version":"1"}"#,
+    )
+    .unwrap();
+    let manager = PluginManager::new(dir.path().join("data"));
+    let id = PluginId::parse("demo@official").unwrap();
+    let source = PluginInstallSource::Marketplace {
+        source: "https://plugins.example/marketplace.json".to_owned(),
+    };
+    manager
+        .install_from_directories(
+            vec![MaterializedPlugin {
+                id: id.clone(),
+                source_root,
+                source: Some(source.clone()),
+            }],
+            UserConfigUpdate::default(),
+            &mut InMemorySecretStore::default(),
+        )
+        .unwrap();
+
+    assert_eq!(manager.install_source(&id).unwrap(), source);
+    let state = manager.load_state().unwrap();
+    assert!(matches!(
+        state.plugins[0].source.as_ref(),
+        Some(PluginInstallSource::Marketplace { source })
+            if source == "https://plugins.example/marketplace.json"
+    ));
+}
+
+/// 更新必须从 marketplace 来源重新物化，来源目录内容变化时得到新的安装缓存。
+#[test]
+fn marketplace_refresh_re_materializes_changed_plugin_content() {
+    let dir = tempfile::tempdir().unwrap();
+    let marketplace_root = dir.path().join("marketplace");
+    let plugin_root = marketplace_root.join("plugins/demo");
+    fs::create_dir_all(marketplace_root.join(".claude-plugin")).unwrap();
+    fs::create_dir_all(plugin_root.join(".claude-plugin")).unwrap();
+    fs::write(
+        marketplace_root.join(MARKETPLACE_MANIFEST),
+        br#"{"name":"official","plugins":[{"name":"demo","source":"./plugins/demo"}]}"#,
+    )
+    .unwrap();
+    fs::write(
+        plugin_root.join(PLUGIN_MANIFEST),
+        br#"{"name":"demo","version":"1"}"#,
+    )
+    .unwrap();
+    fs::write(plugin_root.join("payload.txt"), b"before").unwrap();
+
+    let cache_root = dir.path().join("market-cache");
+    let source = marketplace_root.to_string_lossy().into_owned();
+    let first_market = materialize_marketplace_source(&source, &cache_root).unwrap();
+    let first_plan =
+        resolve_marketplace_plugin_install_plan(&first_market, None, &cache_root).unwrap();
+    let manager = PluginManager::new(dir.path().join("data"));
+    manager
+        .install_from_directories(
+            first_plan,
+            UserConfigUpdate::default(),
+            &mut InMemorySecretStore::default(),
+        )
+        .unwrap();
+    let old_path = manager.load_state().unwrap().plugins[0]
+        .install_path
+        .clone();
+
+    fs::write(
+        plugin_root.join(PLUGIN_MANIFEST),
+        br#"{"name":"demo","version":"2"}"#,
+    )
+    .unwrap();
+    fs::write(plugin_root.join("payload.txt"), b"after").unwrap();
+    let refreshed_market = refresh_marketplace_source(&source, &cache_root).unwrap();
+    let refreshed_plan =
+        resolve_marketplace_plugin_install_plan(&refreshed_market, None, &cache_root).unwrap();
+    manager
+        .install_from_directories(
+            refreshed_plan,
+            UserConfigUpdate::default(),
+            &mut InMemorySecretStore::default(),
+        )
+        .unwrap();
+    let new_path = manager.load_state().unwrap().plugins[0]
+        .install_path
+        .clone();
+    assert_ne!(new_path, old_path);
+    assert!(!old_path.exists());
+    assert_eq!(fs::read(new_path.join("payload.txt")).unwrap(), b"after");
 }

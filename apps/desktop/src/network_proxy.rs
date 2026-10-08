@@ -2,6 +2,8 @@
 
 use std::{collections::HashSet, env};
 
+use crate::native_paths::NativePaths;
+
 const LOOPBACK_BYPASS: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
 /// reqwest/hyper-util 把 `*` 放进域名匹配器，不能覆盖数值 IP；显式全量绕过时
 /// 同时加入两个全地址网段，保证 IPv4/IPv6 Provider 也真正跳过代理。
@@ -14,10 +16,10 @@ struct PlatformProxy {
     bypass: Vec<String>,
 }
 
-/// 在 Tauri、异步运行时和其他线程创建前，把系统代理转成通用进程环境。
-/// reqwest、Tauri Updater、Git/npm/MCP 子进程和内置终端随后共享该默认值。
-pub(crate) fn configure_before_start() {
-    let configured = configured_settings_before_start();
+/// 在异步运行时和其他线程创建前，把系统代理转成通用进程环境。
+/// reqwest、更新器、Git/MCP 子进程和内置终端随后共享该默认值。
+pub(crate) fn configure_before_start(paths: &NativePaths) {
+    let configured = configured_settings_before_start(paths);
     if let Some(settings) = configured
         .as_ref()
         .filter(|settings| settings.http_proxy.is_some())
@@ -30,13 +32,13 @@ pub(crate) fn configure_before_start() {
     }
     if environment_proxy().is_none() {
         // OS 系统代理缺失时（例如只在 git 里配了本地代理而未启用系统代理），回退使用 git
-        // 全局代理，让 reqwest、Tauri Updater 与各子进程和 git 共用同一网络出口。
+        // 全局代理，让 reqwest、原生更新器与各子进程和 git 共用同一网络出口。
         if let Some(proxy) = platform_proxy().or_else(git_global_proxy) {
             let no_proxy_configured = ["NO_PROXY", "no_proxy"]
                 .into_iter()
                 .any(|key| env::var_os(key).is_some_and(|value| !value.is_empty()));
 
-            // SAFETY: main 在 Tauri、异步运行时和其他线程启动前调用本函数。
+            // SAFETY: main 在 GPUI、异步运行时和其他线程启动前调用本函数。
             unsafe {
                 if let Some(http) = &proxy.http {
                     env::set_var("HTTP_PROXY", http);
@@ -70,8 +72,10 @@ pub(crate) fn configure_before_start() {
 
 /// 读取已持久化的显式网络设置。None 表示用户从未配置过网络覆盖；显式 HTTP_PROXY
 /// 即使为空也表示用户明确要求直连，不能再回退环境代理；No Proxy 则可独立叠加。
-fn configured_settings_before_start() -> Option<crate::app_settings::AppSettings> {
-    let root = crate::storage::root_dir_before_start().ok()?;
+fn configured_settings_before_start(
+    paths: &NativePaths,
+) -> Option<crate::app_settings::AppSettings> {
+    let root = crate::storage::root_dir(paths).ok()?;
     let path = root.join("settings.json");
     if !path.is_file() {
         return None;
@@ -81,13 +85,13 @@ fn configured_settings_before_start() -> Option<crate::app_settings::AppSettings
 }
 
 /// 应用显式网络设置到当前进程。模型、MCP、命令工具以及后续子进程共享这些环境；
-/// 内置浏览器继续使用其原生系统代理策略，避免把浏览器代理误当成已接通。
+/// 原生窗口组件继续使用其平台代理策略，避免把独立 UI 代理误当成已接通。
 fn apply_configured_proxy(http_proxy: Option<&str>, no_proxy: Option<&str>) {
     let normalized_proxy = http_proxy
         .filter(|value| !value.trim().is_empty())
         .and_then(normalize_proxy);
 
-    // SAFETY: main 在 Tauri、异步运行时和其他线程启动前调用本函数。
+    // SAFETY: main 在 GPUI、异步运行时和其他线程启动前调用本函数。
     unsafe {
         if http_proxy.is_some() {
             for key in [
@@ -141,13 +145,6 @@ fn environment_proxy() -> Option<String> {
     .find_map(|key| env::var(key).ok().and_then(|value| normalize_proxy(&value)))
 }
 
-/// 返回启动时已解析的当前进程代理，供不会自动读取环境变量的客户端（如 Tauri 更新器）
-/// 显式套用。启动阶段已把系统/git 代理写入环境，因此这里不再回退读取平台代理，确保
-/// 用户显式保存的直连设置不会被更新器重新覆盖。
-pub(crate) fn effective_proxy() -> Option<String> {
-    environment_proxy()
-}
-
 pub(crate) fn normalize_proxy(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
@@ -179,7 +176,7 @@ pub(crate) fn validate_configured_proxy(value: &str) -> anyhow::Result<()> {
 /// 读取 git 全局配置的代理，作为操作系统代理缺失时的回退来源。
 ///
 /// 常见于只在 git 里配了本地代理（如 Clash 的 HTTP 端口）、却没有启用系统代理的开发机：
-/// 此时市场克隆的 git 子进程能走代理，reqwest 与 Tauri Updater 却因没有环境变量而直连失败。
+/// 此时市场克隆的 git 子进程能走代理，reqwest 与原生更新器却因没有环境变量而直连失败。
 /// 复用同一份 git 代理，让全部网络出口保持一致。
 fn git_global_proxy() -> Option<PlatformProxy> {
     let read = |key: &str| -> Option<String> {

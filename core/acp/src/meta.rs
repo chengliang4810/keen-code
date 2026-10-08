@@ -35,9 +35,3 @@ pub const META_SESSION_RUNNING: &str = "keencode/running";
 pub const OPERATION_ADMIT_METHOD: &str = "keencode/operation/admit";
 /// 跨连接查询 Prompt operation 状态的方法。
 pub const OPERATION_STATUS_METHOD: &str = "keencode/operation/status";
-/// Web 控制面启动方法；Web server 仍由 Host 所有权和配置决定。
-pub const WEB_START_METHOD: &str = "keencode/web/start";
-/// Web 控制面停止方法。
-pub const WEB_STOP_METHOD: &str = "keencode/web/stop";
-/// Web 控制面状态查询方法。
-pub const WEB_STATUS_METHOD: &str = "keencode/web/status";

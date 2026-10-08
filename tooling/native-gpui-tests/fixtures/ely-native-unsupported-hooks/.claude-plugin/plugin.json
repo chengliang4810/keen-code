@@ -1,0 +1,39 @@
+{
+  "name": "ely-native-unsupported-hooks",
+  "version": "1.0.0",
+  "description": "隔离 Native 设置诊断验收插件",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd",
+            "args": [
+              "/D",
+              "/S",
+              "/C",
+              "echo ELY_SUPPORTED_HOOK>>\"%CLAUDE_PROJECT_DIR%\\ely-hook-supported.txt\""
+            ]
+          }
+        ]
+      }
+    ],
+    "FileChanged": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cmd",
+            "args": [
+              "/D",
+              "/S",
+              "/C",
+              "echo ELY_UNSUPPORTED_HOOK>>\"%CLAUDE_PROJECT_DIR%\\ely-hook-unsupported.txt\""
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

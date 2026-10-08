@@ -2,12 +2,12 @@
 
 use keencode_resources::TurnStopReason;
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, Webview};
-use tauri_plugin_notification::NotificationExt;
+
+use crate::{agent_runtime::AgentRuntime, native_paths::NativePaths};
 
 const MAX_NOTIFICATION_TEXT_BYTES: usize = 16 * 1024;
 
-/// Renderer 请求系统通知时使用的严格载荷；状态与 zcode shared contract 保持同名。
+/// Native UI 请求系统通知时使用的严格载荷；状态与当前 shared contract 保持同名。
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TaskNotificationPayload {
@@ -60,12 +60,6 @@ fn should_send_notification(has_focused_window: bool) -> bool {
 }
 
 /// 判断 KeenCode 当前是否有获得焦点的窗口。
-fn has_focused_window(app: &AppHandle) -> bool {
-    app.webview_windows()
-        .values()
-        .any(|window| window.is_focused().unwrap_or(false))
-}
-
 fn validate_text(
     field: &str,
     value: &str,
@@ -110,7 +104,7 @@ fn session_connection(
     runtime
         .elicitation_coordinator()
         .session_connection(task_id)
-        .ok_or_else(|| "通知任务没有当前主 WebView 连接".to_owned())
+        .ok_or_else(|| "通知任务没有当前 Native UI 连接".to_owned())
 }
 
 fn validate_pending_notification(
@@ -153,32 +147,38 @@ fn validate_terminal_notification(
     runtime: &crate::agent_runtime::AgentRuntime,
     payload: &TaskNotificationPayload,
 ) -> Result<(), String> {
-    let snapshot = runtime
-        .session_snapshot(&payload.task_id)
+    // 通知只需要根 Turn 的两个终态字段；使用小投影避免为一次校验复制完整
+    // SessionState、Journal 计数和消息正文。
+    let session = runtime
+        .runtime_manager()
+        .get(payload.task_id.clone())
         .map_err(|error| error.to_string())?;
-    let latest_root_turn = snapshot
-        .state
-        .turns
-        .values()
-        .filter(|turn| turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID)
-        .max_by_key(|turn| {
-            (
-                turn.completed_at_unix_ms.unwrap_or(0),
-                turn.started_at_unix_ms,
-            )
-        });
+    let latest_root_turn = session
+        .read_state(|state| {
+            state
+                .turns
+                .values()
+                .filter(|turn| turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID)
+                .max_by_key(|turn| {
+                    (
+                        turn.completed_at_unix_ms.unwrap_or(0),
+                        turn.started_at_unix_ms,
+                    )
+                })
+                .map(|turn| (turn.status.clone(), turn.stop_reason))
+        })
+        .map_err(|error| error.to_string())?;
     let Some(turn) = latest_root_turn else {
         return Err("任务没有可验证的根 Turn 终态".to_owned());
     };
     let expected_status = match payload.status {
         TaskNotificationStatus::Completed => {
-            matches!(turn.status, keencode_resources::TurnStatus::Completed)
-                && turn.stop_reason.is_none()
+            matches!(turn.0, keencode_resources::TurnStatus::Completed) && turn.1.is_none()
         }
         TaskNotificationStatus::Failed => {
-            matches!(turn.status, keencode_resources::TurnStatus::Failed)
+            matches!(turn.0, keencode_resources::TurnStatus::Failed)
                 && matches!(
-                    turn.stop_reason,
+                    turn.1,
                     Some(
                         TurnStopReason::Failed
                             | TurnStopReason::LimitReached
@@ -200,57 +200,58 @@ fn validate_terminal_notification(
 }
 
 fn ensure_task_exists(
-    app: &AppHandle,
-    runtime: &crate::agent_runtime::AgentRuntime,
+    paths: &NativePaths,
+    runtime: &AgentRuntime,
     task_id: &str,
 ) -> Result<(), String> {
-    crate::session_commands::authorized_metadata(runtime, app, task_id).map(|_| ())
+    crate::session_commands::authorized_metadata(runtime, paths, task_id).map(|_| ())
 }
 
-/// Renderer 任务通知的唯一宿主入口。
+/// NativeHost 通知适配器；Windows 实现应在这里调用 WinRT Toast，
+/// macOS 实现应调用 UserNotifications，域逻辑不依赖任何桌面框架。
+pub trait NativeNotificationHost: Send + Sync {
+    fn paths(&self) -> &NativePaths;
+    fn runtime(&self) -> &AgentRuntime;
+    fn task_notifications_enabled(&self) -> bool;
+    fn notification_sound_enabled(&self) -> bool;
+    fn has_focused_window(&self) -> bool;
+    fn show_notification(&self, title: &str, body: &str, sound: bool) -> Result<(), String>;
+}
+
+/// NativeHost 任务通知的唯一入口。
 ///
-/// 仅主 WebView 可以请求；交互通知必须命中当前连接上的真实 pending 账本，
+/// 交互通知必须命中当前连接上的真实 pending 账本，
 /// 终态与反馈通知必须命中已登记的 Session。系统通知插件不提供统一点击回调，
-/// 因而这里只发送通知，不伪造 `task-notification-click` 事件。
-#[tauri::command(rename_all = "camelCase")]
-pub fn task_notification_show(
-    app: AppHandle,
-    webview: Webview,
+/// 因而这里只发送原生通知，不伪造点击事件。
+pub fn task_notification_show<H: NativeNotificationHost>(
+    host: &H,
     payload: TaskNotificationPayload,
 ) -> Result<(), String> {
-    if webview.label() != "main" {
-        return Err("任务通知只能由主 WebView 发送".to_owned());
-    }
     validate_payload(&payload)?;
-    let runtime = crate::require_owned_runtime(&app)?;
+    let runtime = host.runtime();
     match payload.status {
         TaskNotificationStatus::PermissionRequest | TaskNotificationStatus::ElicitationRequest => {
-            validate_pending_notification(&runtime, &payload)?;
+            validate_pending_notification(runtime, &payload)?;
         }
         TaskNotificationStatus::Completed | TaskNotificationStatus::Failed => {
-            validate_terminal_notification(&runtime, &payload)?;
+            validate_terminal_notification(runtime, &payload)?;
             // 根 Runtime 的 terminal pump 已经按 stop reason 发送原生通知；
-            // renderer 终态只作一致性校验，避免同一 Turn 弹出两次。
+            // Native UI 终态只作一致性校验，避免同一 Turn 弹出两次。
             return Ok(());
         }
         TaskNotificationStatus::FeedbackUpdate => {
-            ensure_task_exists(&app, &runtime, &payload.task_id)?;
+            ensure_task_exists(host.paths(), runtime, &payload.task_id)?;
         }
     }
 
-    let settings = crate::app_settings::get(&app).map_err(|error| error.to_string())?;
-    if !settings.task_notifications || has_focused_window(&app) {
+    if !host.task_notifications_enabled() || host.has_focused_window() {
         return Ok(());
     }
-    let mut builder = app
-        .notification()
-        .builder()
-        .title(payload.title)
-        .body(payload.body);
-    if settings.notification_sound {
-        builder = builder.sound("default");
-    }
-    builder.show().map_err(|error| error.to_string())
+    host.show_notification(
+        &payload.title,
+        &payload.body,
+        host.notification_sound_enabled(),
+    )
 }
 
 /// 根据桌面设置发送根任务终态通知。
@@ -259,9 +260,9 @@ pub struct TaskNotifications {}
 
 impl TaskNotifications {
     /// 在根任务形成唯一权威终态后发送完成或失败通知；主动取消保持静默。
-    pub fn notify_terminal(
+    pub fn notify_terminal<H: NativeNotificationHost>(
         &self,
-        app: &AppHandle,
+        host: &H,
         task_title: Option<&str>,
         stop_reason: Option<TurnStopReason>,
     ) {
@@ -277,25 +278,18 @@ impl TaskNotifications {
         let body = task_title
             .filter(|value| !value.trim().is_empty())
             .unwrap_or("KeenCode 任务");
-        self.send(app, title, body);
+        self.send(host, title, body);
     }
 
     /// 根据当前设置发送一条系统通知。
-    fn send(&self, app: &AppHandle, title: &str, body: &str) {
-        let Ok(settings) = crate::app_settings::get(app) else {
-            return;
-        };
-        if !settings.task_notifications {
+    fn send<H: NativeNotificationHost>(&self, host: &H, title: &str, body: &str) {
+        if !host.task_notifications_enabled() {
             return;
         }
-        if !should_send_notification(has_focused_window(app)) {
+        if !should_send_notification(host.has_focused_window()) {
             return;
         }
-        let mut builder = app.notification().builder().title(title).body(body);
-        if settings.notification_sound {
-            builder = builder.sound("default");
-        }
-        if let Err(error) = builder.show() {
+        if let Err(error) = host.show_notification(title, body, host.notification_sound_enabled()) {
             tracing::error!(%error, "发送任务通知失败");
         }
     }

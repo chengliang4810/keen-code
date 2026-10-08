@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "name": "ely-native-visual-workspace",
+  "requires_real_provider": false,
+  "requires_journal": false,
+  "requires_network_trace": false,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-draft-reference-8/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "click", "x": 2400, "y": 1450 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "metrics", "label": "startup" },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 15000
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "screenshot", "label": "empty-session" },
+    { "type": "metrics", "label": "empty-session" },
+    { "type": "accessibility", "label": "empty-session" }
+  ]
+}

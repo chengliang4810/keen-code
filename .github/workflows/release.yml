@@ -1,149 +1,206 @@
-name: Release
+name: Release Artifacts
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "确认发布：必须设为 true"
+        required: true
+        type: boolean
+        default: false
+      tag:
+        description: "已存在的版本 tag，例如 v0.0.1"
+        required: true
+        type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-artifacts-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  verify:
+  prepare:
+    name: Resolve release tag
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
+      pub_date: ${{ steps.resolve.outputs.pub_date }}
+      publish: ${{ steps.resolve.outputs.publish }}
+    steps:
+      - name: Validate release trigger
+        id: resolve
+        shell: bash
+        env:
+          DISPATCH_PUBLISH: ${{ inputs.publish }}
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
+            tag="$GITHUB_REF_NAME"
+            publish=true
+          elif [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            if [[ "$DISPATCH_PUBLISH" != "true" ]]; then
+              echo "workflow_dispatch 必须显式将 publish 设置为 true。" >&2
+              exit 1
+            fi
+            tag="$DISPATCH_TAG"
+            publish=true
+          else
+            echo "不支持的发布触发方式：$GITHUB_EVENT_NAME" >&2
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "发布 tag 必须是 vX.Y.Z 格式：$tag" >&2
+            exit 1
+          fi
+          version="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.${BASH_REMATCH[3]}"
+          pub_date="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          {
+            echo "tag=$tag"
+            echo "version=$version"
+            echo "pub_date=$pub_date"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+
+  verify:
+    name: Verify Rust workspace
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Enable corepack
-        run: corepack enable
-
-      - uses: actions/setup-node@v4
         with:
-          # 与 ci.yml、README 的 Node 主版本保持一致。
-          node-version: 24
-          cache: pnpm
+          ref: ${{ needs.prepare.outputs.tag }}
 
-      - run: corepack pnpm@10.14.0 install --frozen-lockfile
-      # 后续检查分别验证核心 workspace 和 Tauri 桌面 crate。
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-      # Tauri 2 的 Linux target 会编译 GTK、WebKitGTK 和 Ayatana AppIndicator。
-      # patchelf 也一并固定，避免后续 Linux bundle 或构建脚本缺少原生工具。
-      - name: 安装 Tauri Linux 原生依赖
+      - name: Install GPUI Linux build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y \
-            libwebkit2gtk-4.1-dev \
-            libxdo-dev \
+            build-essential \
+            clang \
+            cmake \
+            lld \
+            llvm \
+            pkg-config \
+            libasound2-dev \
+            libfontconfig-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
             libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            patchelf
-      - name: CSS lint
-        run: corepack pnpm@10.14.0 lint:css
-      - run: corepack pnpm@10.14.0 typecheck
-      - run: corepack pnpm@10.14.0 test
-      - run: corepack pnpm@10.14.0 build
+            libsqlite3-dev
 
-      - name: Rust workspace format
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Verify release tag matches desktop Cargo version
+        shell: bash
+        env:
+          KEENCODE_RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          cargo_version="$(cargo metadata --no-deps --format-version 1 | jq -r --arg name 'keencode-desktop' '[.packages[] | select(.name == $name) | .version] | if length == 1 then .[0] else empty end')"
+          if [[ -z "$cargo_version" || "$cargo_version" != "$KEENCODE_RELEASE_VERSION" ]]; then
+            echo "发布 tag 版本 $KEENCODE_RELEASE_VERSION 与 keencode-desktop Cargo 版本 $cargo_version 不一致。" >&2
+            exit 1
+          fi
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check formatting
         run: cargo fmt --all -- --check
-      - name: Rust workspace check
+
+      - name: Check workspace
         run: cargo check --workspace --all-targets
-      - name: Rust workspace tests
-        run: cargo test --workspace --all-targets
-      - name: Rust workspace clippy
+
+      - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # 统一 workspace 后 --workspace 已覆盖桌面 crate；此处只补验基准特性。
-      - name: Benchmark feature checks
-        run: |
-          cargo test -p keencode-desktop --features benchmark agent_runtime::benchmark --lib
-          cargo clippy -p keencode-desktop --features benchmark --example keencode-bench -- -D warnings
+      - name: Test workspace
+        run: cargo test --workspace --all-targets
 
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.version.outputs.tag }}
-      app_version: ${{ steps.version.outputs.app_version }}
-      release_id: ${{ steps.release.outputs.release_id }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Compute immutable release versions
-        id: version
-        env:
-          KEENCODE_COMMIT_SHA: ${{ github.sha }}
-        run: node tooling/scripts/release-version.mjs
-
-      - name: Verify updater signing secret
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-        run: test -n "$TAURI_SIGNING_PRIVATE_KEY"
-
-      # 在矩阵启动前创建唯一草稿，避免并行任务生成同名 Release 并拆散安装包。
-      - name: Prepare one release for every platform
-        id: release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_NAME: ${{ steps.version.outputs.release_name }}
-        run: |
-          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
-            cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
-          本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
-
-          应用内更新使用签名清单和签名安装包进行校验。
-          NOTES
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "$RELEASE_NAME" \
-              --notes-file "$RUNNER_TEMP/release-notes.md" \
-              --generate-notes --draft
-          fi
-          release_id="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
-          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+      - name: Audit dependencies
+        run: cargo deny --log-level info check advisories bans licenses sources
 
   build:
+    name: Build ${{ matrix.label }}
     needs:
-      - verify
       - prepare
+      - verify
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
         include:
-          - platform: macos-latest
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            label: linux-x86_64
+          - os: macos-latest
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
-            asset_label: arm64
-          - platform: macos-latest
+            label: darwin-aarch64
+          - os: macos-15-intel
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
-            asset_label: x64
-          - platform: windows-latest
-            target: ""
-            args: ""
-            asset_label: windows_x64
-    runs-on: ${{ matrix.platform }}
+            label: darwin-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+    env:
+      KEENCODE_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Enable corepack
-        run: corepack enable
-
-      - uses: actions/setup-node@v4
         with:
-          # 与 ci.yml、README 的 Node 主版本保持一致。
-          node-version: 24
-          cache: pnpm
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install GPUI Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            clang \
+            cmake \
+            lld \
+            llvm \
+            pkg-config \
+            libasound2-dev \
+            libfontconfig-dev \
+            libfreetype6-dev \
+            libvulkan1 \
+            libvulkan-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxkbcommon-x11-dev \
+            libzstd-dev \
+            libssl-dev \
+            libsqlite3-dev
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -151,140 +208,210 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: .
+          workspaces: . -> target
 
-      - run: corepack pnpm@10.14.0 install --frozen-lockfile
+      - name: Build desktop updater binary
+        run: cargo build --release --package keencode-desktop --target ${{ matrix.target }}
 
-      - name: Write release-only Tauri config
-        shell: bash
-        run: >-
-          node tooling/scripts/release-version.mjs --write-tauri-config
-          .github/tauri.release.conf.json
-          "${{ needs.prepare.outputs.app_version }}"
-
-      - name: Build and upload signed installers
-        uses: tauri-apps/tauri-action@v1
+      - name: Stage bare updater binary
+        shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-          KEENCODE_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        with:
-          projectPath: apps/desktop
-          releaseId: ${{ needs.prepare.outputs.release_id }}
-          releaseBody: |
-            本版本由 main 分支自动构建，包含 Windows x64、macOS Apple Silicon 与 macOS Intel 安装包。
-
-            应用内更新使用签名清单和签名安装包进行校验。
-          uploadUpdaterJson: true
-          updaterJsonPreferNsis: true
-          releaseAssetNamePattern: KeenCode_${{ needs.prepare.outputs.tag }}_${{ matrix.asset_label }}[ext]
-          args: ${{ matrix.args }} --config ../../.github/tauri.release.conf.json
-
-      # Tauri 构建完成后确认安装包资源目录仍携带完整许可证和第三方 NOTICE。
-      - name: 校验安装包许可证资源
-        run: node tooling/scripts/verify-bundle-resources.mjs --target target
-
-      # 记录每个平台实际生成的文件包摘要，供发布审计和后续下载校验使用。
-      - name: 生成安装包 SHA-256 与大小报告
-        shell: bash
-        env:
-          ASSET_LABEL: ${{ matrix.asset_label }}
-          BUNDLE_REPORT_PATH: ${{ runner.temp }}/keencode-bundle-${{ matrix.asset_label }}.json
+          BUILD_TARGET: ${{ matrix.target }}
+          ARTIFACT_LABEL: ${{ matrix.label }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          node --input-type=module <<'NODE'
-          import { appendFileSync, lstatSync, statSync, writeFileSync } from "node:fs";
-          import { relative, resolve } from "node:path";
-          import { findBundleArtifacts, sha256File } from "./tooling/scripts/verify-bundle-resources.mjs";
+          $releaseDirectory = Join-Path "target" $env:BUILD_TARGET
+          $releaseDirectory = Join-Path $releaseDirectory "release"
+          $artifactDirectory = Join-Path $env:RUNNER_TEMP "keencode-release"
+          New-Item -ItemType Directory -Path $artifactDirectory -Force | Out-Null
 
-          const targetRoot = resolve("target");
-          const artifacts = findBundleArtifacts(targetRoot).filter(({ path }) => {
-            // .app 是未压缩的目录 bundle；Release 上传的是其中的归档或磁盘映像。
-            return lstatSync(path).isFile();
-          });
-          if (artifacts.length === 0) {
-            throw new Error(`未在 ${targetRoot} 找到可报告的安装包文件`);
+          $suffix = if ($env:RUNNER_OS -eq "Windows") { ".exe" } else { "" }
+          $binaryName = "keencode-desktop" + $suffix
+          $source = Join-Path $releaseDirectory $binaryName
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "构建产物缺失：$source"
           }
 
-          const reportArtifacts = artifacts.map(({ kind, path }) => ({
-            type: kind,
-            path,
-            sha256: sha256File(path),
-            bytes: statSync(path).size,
-          }));
-          const totalBytes = reportArtifacts.reduce((sum, artifact) => sum + artifact.bytes, 0);
-          const report = {
-            platform: process.env.RUNNER_OS,
-            assetLabel: process.env.ASSET_LABEL,
-            targetRoot,
-            artifacts: reportArtifacts,
-            totalBytes,
-          };
-          const reportPath = resolve(process.env.BUNDLE_REPORT_PATH);
-          writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
+          $assetName = "KeenCode_{0}_{1}{2}" -f $env:RELEASE_TAG, $env:ARTIFACT_LABEL, $suffix
+          Copy-Item -LiteralPath $source -Destination (Join-Path $artifactDirectory $assetName)
+          Write-Output "已暂存裸更新二进制：$assetName"
 
-          const markdownRows = reportArtifacts.map((artifact) => {
-            const displayPath = relative(process.cwd(), artifact.path).replaceAll("\\", "/");
-            return `| ${artifact.type} | \`${displayPath}\` | \`${artifact.sha256}\` | ${artifact.bytes} |`;
-          });
-          const summary = [
-            `## 安装包摘要（${process.env.ASSET_LABEL}）`,
-            "",
-            "| 类型 | 路径 | SHA-256 | 字节数 |",
-            "| --- | --- | --- | ---: |",
-            ...markdownRows,
-            "",
-            `总大小：${totalBytes} 字节（${(totalBytes / 1024 / 1024).toFixed(2)} MiB）`,
-            "",
-          ].join("\n");
-          appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
-          console.log(JSON.stringify(report, null, 2));
-          NODE
-
-      - name: 上传安装包摘要报告
+      - name: Upload bare updater binary
         uses: actions/upload-artifact@v4
         with:
-          name: keencode-bundle-report-${{ matrix.asset_label }}
-          path: ${{ runner.temp }}/keencode-bundle-${{ matrix.asset_label }}.json
+          name: release-${{ matrix.label }}
+          path: ${{ runner.temp }}/keencode-release
           if-no-files-found: error
+          retention-days: 14
 
-  publish:
+  sign:
+    name: Sign updater binaries
     needs:
       - prepare
       - build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      KEENCODE_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      KEENCODE_VERSION: ${{ needs.prepare.outputs.version }}
+      MINISIGN_PRIVATE_KEY: ${{ secrets.MINISIGN_PRIVATE_KEY }}
+    steps:
+      - name: Install fixed minisign CLI
+        run: cargo install minisign --version 0.10.0 --locked
+
+      - name: Download bare updater binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: ${{ runner.temp }}/keencode-release-inputs
+          merge-multiple: false
+
+      - name: Sign binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${MINISIGN_PRIVATE_KEY//[[:space:]]/}" ]]; then
+            echo "MINISIGN_PRIVATE_KEY secret 为空，拒绝继续发布。" >&2
+            exit 1
+          fi
+
+          key_path="$RUNNER_TEMP/minisign-private.key"
+          input_dir="$RUNNER_TEMP/keencode-release-inputs"
+          signed_dir="$RUNNER_TEMP/keencode-release-signed"
+          mkdir -p "$signed_dir"
+          trap 'rm -f "$key_path"' EXIT
+          printf '%s\n' "$MINISIGN_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+
+          labels=(
+            "windows-x86_64"
+            "darwin-aarch64"
+            "darwin-x86_64"
+            "linux-x86_64"
+          )
+          for label in "${labels[@]}"; do
+            suffix=""
+            if [[ "$label" == "windows-x86_64" ]]; then
+              suffix=".exe"
+            fi
+            asset_name="KeenCode_${KEENCODE_RELEASE_TAG}_${label}${suffix}"
+            source_path="$(find "$input_dir" -type f -name "$asset_name" -print -quit)"
+            if [[ -z "$source_path" ]]; then
+              echo "找不到待签名二进制：$asset_name" >&2
+              exit 1
+            fi
+            cp -- "$source_path" "$signed_dir/$asset_name"
+            minisign -S -s "$key_path" -m "$signed_dir/$asset_name" \
+              -x "$signed_dir/$asset_name.minisig"
+          done
+
+          find "$signed_dir" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Upload signed updater binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-signed
+          path: ${{ runner.temp }}/keencode-release-signed
+          if-no-files-found: error
+          retention-days: 14
+
+  manifest:
+    name: Generate update manifest
+    needs:
+      - prepare
+      - sign
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
-      - name: Validate and annotate updater manifest
+      - name: Download signed updater binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-signed
+          path: ${{ runner.temp }}/keencode-release-signed
+
+      - name: Generate latest.json with Rust
+        shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          KEENCODE_RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          KEENCODE_VERSION: ${{ needs.prepare.outputs.version }}
+          KEENCODE_PUB_DATE: ${{ needs.prepare.outputs.pub_date }}
+        run: |
+          set -euo pipefail
+          asset_dir="$RUNNER_TEMP/keencode-release-signed"
+          cargo run --locked --release --package keencode-release -- \
+            --version "$KEENCODE_VERSION" \
+            --release "$KEENCODE_RELEASE_TAG" \
+            --notes "KeenCode $KEENCODE_RELEASE_TAG" \
+            --pub-date "$KEENCODE_PUB_DATE" \
+            --repository "$GITHUB_REPOSITORY" \
+            --asset-dir "$asset_dir" \
+            --output "$asset_dir/latest.json" \
+            --artifact "windows-x86_64=KeenCode_${KEENCODE_RELEASE_TAG}_windows-x86_64.exe" \
+            --artifact "darwin-aarch64=KeenCode_${KEENCODE_RELEASE_TAG}_darwin-aarch64" \
+            --artifact "darwin-x86_64=KeenCode_${KEENCODE_RELEASE_TAG}_darwin-x86_64" \
+            --artifact "linux-x86_64=KeenCode_${KEENCODE_RELEASE_TAG}_linux-x86_64"
+
+      - name: Upload update manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/keencode-release-signed/latest.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish GitHub release
+    needs:
+      - prepare
+      - sign
+      - manifest
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download signed updater binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-signed
+          path: ${{ runner.temp }}/keencode-release-signed
+
+      - name: Download update manifest
+        uses: actions/download-artifact@v4
+        with:
+          name: release-manifest
+          path: ${{ runner.temp }}/keencode-release-manifest
+
+      - name: Create or update GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          manifest_dir="$RUNNER_TEMP/keencode-updater"
-          mkdir -p "$manifest_dir"
-          gh release download "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --pattern latest.json \
-            --dir "$manifest_dir"
-          manifest="$manifest_dir/latest.json"
-          assets="$manifest_dir/release-assets.json"
-          gh release view "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --json assets > "$assets"
-          node tooling/scripts/release-version.mjs \
-            --finalize-updater-manifest \
-            "$manifest" "$RELEASE_TAG" "$assets" "$GITHUB_REPOSITORY"
-          gh release upload "$RELEASE_TAG" "$manifest" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          set -euo pipefail
+          signed_dir="$RUNNER_TEMP/keencode-release-signed"
+          manifest_path="$RUNNER_TEMP/keencode-release-manifest/latest.json"
+          shopt -s nullglob
+          assets=("$signed_dir"/*)
+          assets+=("$manifest_path")
+          if [[ ${#assets[@]} -ne 9 ]]; then
+            echo "发布资产数量不符合预期：${#assets[@]}，需要 8 个二进制/签名文件和 latest.json。" >&2
+            exit 1
+          fi
 
-      - name: Publish only after every platform succeeds
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
-        run: >-
-          gh release edit "$RELEASE_TAG"
-          --repo "$GITHUB_REPOSITORY"
-          --draft=false
-          --latest
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --verify-tag \
+              --title "KeenCode $RELEASE_TAG" \
+              --generate-notes \
+              "${assets[@]}"
+          fi

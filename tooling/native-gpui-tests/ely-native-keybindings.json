@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "name": "ely-native-keybindings",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "wait", "ms": 1500 },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "accessibility", "label": "startup" },
+    { "type": "metrics", "label": "startup" },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"appearance\": \"dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "README.md",
+      "contains": "Ely native acceptance isolated project",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "键盘", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "发送消息快捷键",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "新建会话快捷键",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "搜索快捷键",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "退出快捷键",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "keyboard-initial" },
+    { "type": "accessibility", "label": "keyboard-initial" },
+    { "type": "metrics", "label": "keyboard-initial" },
+    {
+      "type": "click_accessibility",
+      "label": "新建会话快捷键",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 150 },
+    { "type": "key", "key": "n", "modifiers": ["ctrl", "shift"] },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "click_accessibility",
+      "label": "发送消息快捷键",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 150 },
+    { "type": "key", "key": "enter", "modifiers": ["ctrl"] },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "assert_journal_count",
+      "event_type": "session_created",
+      "count": 0
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"schema\": \"keencode/native-keybindings\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"version\": 1",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"composerSubmit\": \"ctrl-enter\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"newChat\": \"ctrl-shift-n\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"search\": \"secondary-k\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-keybindings.json",
+      "contains": "\"quit\": \"secondary-q\"",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "keyboard-saved" },
+    { "type": "accessibility", "label": "keyboard-saved" },
+    { "type": "metrics", "label": "keyboard-saved" },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    { "type": "key", "key": "n", "modifiers": ["ctrl", "shift"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "shortcut-new-session" },
+    { "type": "accessibility", "label": "shortcut-new-session" },
+    {
+      "type": "click_accessibility",
+      "label": "任务输入",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "type_text",
+      "text": "请只回复 KEENCODE_NATIVE_KEYBINDING_LIVE_OK，不要调用工具。"
+    },
+    { "type": "wait", "ms": 800 },
+    { "type": "key", "key": "enter", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    { "type": "screenshot", "label": "shortcut-turn-started" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 1
+    },
+    { "type": "screenshot", "label": "shortcut-turn-completed" },
+    { "type": "accessibility", "label": "shortcut-turn-completed" },
+    { "type": "metrics", "label": "shortcut-turn-completed" }
+  ]
+}

@@ -1338,8 +1338,8 @@ impl_validated_response_payload!(
 
 /// 一个已经严格解码的标准 ACP 或当前 KeenCode Session 扩展请求。
 pub enum AcpRequest {
-    /// 标准 `initialize` 请求。
-    Initialize(InitializeRequest),
+    /// 标准 `initialize` 请求；能力树单独分配，避免放大每个请求的栈内存。
+    Initialize(Box<InitializeRequest>),
     /// 标准 `authenticate` 请求。
     Authenticate(AuthenticateRequest),
     /// 标准 `session/new` 请求。

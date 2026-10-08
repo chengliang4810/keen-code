@@ -1,0 +1,271 @@
+{
+  "version": 1,
+  "name": "ely-native-code-settings",
+  "requires_real_provider": false,
+  "requires_journal": false,
+  "requires_network_trace": false,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-settings-reference-2/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "wait", "ms": 1500 },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "accessibility", "label": "startup" },
+    { "type": "metrics", "label": "startup" },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontFamily\": \"Consolas\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontSizePx\": 12",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"showLineNumbers\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"wrapLongLines\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"lightTheme\": \"github-light\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"darkTheme\": \"github-dark\"",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "外观", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "浅色代码主题",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "深色代码主题",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "显示行号",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "长行自动换行",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "代码字号",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "code-settings-initial" },
+    { "type": "accessibility", "label": "code-settings-initial" },
+    { "type": "metrics", "label": "code-settings-initial" },
+    {
+      "type": "click_accessibility",
+      "label": "浅色代码主题",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 150 },
+    {
+      "type": "click_accessibility",
+      "label": "GitHub Dark",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"lightTheme\": \"github-dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "代码字号",
+      "timeout_ms": 30000
+    },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "16" },
+    { "type": "key", "key": "enter" },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontSizePx\": 16",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "显示行号",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "accessibility",
+      "label": "code-settings-after-show-line-numbers-click"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"showLineNumbers\": false",
+      "min_bytes": 1
+    },
+    { "type": "key", "key": "space" },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "accessibility",
+      "label": "code-settings-after-show-line-numbers-space"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "json_pointer_equals": { "/code/showLineNumbers": true },
+      "min_bytes": 1
+    },
+    { "type": "key", "key": "enter" },
+    { "type": "wait", "ms": 500 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "json_pointer_equals": { "/code/showLineNumbers": false },
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "长行自动换行",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"wrapLongLines\": true",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "code-settings-applied" },
+    { "type": "accessibility", "label": "code-settings-applied" },
+    { "type": "metrics", "label": "code-settings-applied" },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "外观", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "代码字号",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "code-settings-reopened" },
+    { "type": "accessibility", "label": "code-settings-reopened" },
+    { "type": "metrics", "label": "code-settings-reopened" },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"lightTheme\": \"github-dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontSizePx\": 16",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"showLineNumbers\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"wrapLongLines\": true",
+      "min_bytes": 1
+    },
+    { "type": "close" }
+  ]
+}

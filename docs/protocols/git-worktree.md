@@ -1,46 +1,62 @@
-# 本地 Git Worktree 协议
+# Native GPUI Git Worktree 契约
 
-KeenCode 的工作树入口只面向本地、已登记的 Git 项目。renderer 通过
-`IPlatformService` 调用 Tauri 命令，Rust 负责 canonical path、仓库身份、Session 归属、
-Journal 回执和物理 checkout 校验；前端不保存工作树事实，也不执行 Git/Node 进程。
+本文描述当前原生工作台的 Git linked worktree 服务。生产入口是
+`NativeWorkbenchPanel` 持有的 `NativeWorktrees`，由 `NativeHost` 在 GPUI 启动时注入；
+没有 Tauri command、`IPlatformService`、VQL 消息或前端 worktree store。
 
-## 查询与创建
+实现锚点：`apps/desktop/src/native_ui/workbench/worktrees.rs`、
+`apps/desktop/src/native_ui/workbench/panel.rs`、
+`apps/desktop/src/native_ui/workbench.rs` 和
+`apps/desktop/src/native_host/launch.rs`。
 
-`listGitWorktrees(projectPath)` 映射 `git_worktrees_list({ projectPath })`，返回
-`{ available, worktrees, reason? }`。每个条目包含 `path`、`head`、`branch`、`detached`、
-`isMain`、`locked` 和 `prunable`。
+## Service API
 
-`createGitWorktree(input)` 映射 `ui_git_worktree_create({ input })`。输入严格使用
-`cwd`、`ref`、`path?`、`newBranch?`、`copyChangesFrom?`、`progressId?` 和
-`checkoutBranch`。成功返回 `worktree.path/ref/branch`，Rust 会写入 managed checkout
-身份标记，后续归档清理只接受该标记。
+`NativeWorktrees` 直接使用 `Result<T, String>` 返回结果。`NativeWorkbenchPanel` 将
+调用放入 blocking 任务，检查当前 workspace generation，成功后重新读取工作台快照；
+失败只更新错误投影，不修改本地伪状态。
 
-KeenCode 新增的 `packages/ui/src/ComposerWorktreeMenu.tsx` 位于 workspace Composer
-的 Git 上下文旁，并复用固定 Source 的 Dropdown/Input/Dialog 控件和 DOM 语义；活动会话
-时同一菜单也出现在 Composer 输入区，避免 handoff 只能在草稿态显示。`workspacePath`
-切换必须经过 Root 的 workspace 选择链，不能由 renderer 直接改当前会话目录。
+| 方法 | 输入 | 成功结果 |
+| --- | --- | --- |
+| `list(root)` | 当前项目根 | `Vec<WorktreeEntry>` |
+| `create(WorktreeRequest)` | root、reference、可选目标路径/新分支/复制来源、`checkout_branch` | `WorktreeResult` |
+| `remove(root, target, force)` | 当前仓库根、linked worktree、强制标记 | `()` |
+| `handoff(source, target, target_branch?)` | 同一仓库的源/目标工作树和可选分支 | 目标 `PathBuf` |
+| `archive(root, target, session_id)` | 受管工作树和非空会话标识 | 归档 receipt `PathBuf` |
 
-## Session 交接
+`WorktreeEntry` 包含 `path`、`head`、`branch`、`detached`、`is_main`、`locked` 和
+`prunable`。创建结果包含 `path`、原始 `reference`、可选 `branch` 和
+`copied_changes`。这些 Rust 结构是当前 typed service 契约；面板显示的中文状态文本
+不是稳定协议值。
 
-`handoffGitWorkspace(input)` 映射 `ui_git_handoff({ input })`，输入字段采用 Rust 的
-camelCase `commandId/threadId/cwd/targetMode` 及工作树 branch/ref 字段。交接前 UI 先
-调用必需的 `stopGitWorkspaceSession(sessionId)` 关闭执行资源，Rust 随后把同一 Session
-的权威 project root 改到目标 checkout 并返回 `associatedWorktreePath` 等回执。已有工作树
-条目只有在携带匹配的 Session association proof 时才可直接交接；当前菜单无法证明该关联
-时只提供 Rust 创建并绑定新工作树的 handoff。UI 重新注册目标 workspace 后按原 Session
-ID 选择会话。
+## 边界与失败语义
 
-## 归档与移除
+- 已存在的 root、source 和待操作目标先 canonicalize；创建目标使用 canonicalize 后的
+  父目录，并拒绝符号链接或 reparse point，创建完成后再 canonicalize 实际工作树。
+  引用、分支名和目标路径有独立校验。
+- 创建前解析 commit，目标已存在时直接拒绝；新分支只在本次创建成功时允许回滚。
+  创建完成后写入受控 managed 标记，再按请求复制本地修改；复制失败会保留已创建
+  工作树并报告路径。
+- 普通移除会拒绝未提交或 ignored 文件；`force` 只由面板的明确操作传入。主工作树、
+  非 linked worktree、路径越界或仍不满足 Git 校验的目标均拒绝。
+- `handoff` 要求源和目标属于同一 Git common root。源有修改时使用受控 stash；切换
+  或恢复失败会保留 stash 并返回可诊断错误，不把目录状态伪装为完成。
+- `archive` 先写入 `native-worktree-archive/<hash(session_id)>.json` receipt，再尝试
+  移除 checkout。移除失败时 receipt 保留，调用方不能据成功 toast 推断目录已删除。
 
-归档先调用 `stopGitWorkspaceSession(sessionId)`，再使用 `archiveTaskWithReceipt` 取得同一次
-`SessionPreferenceSet` 的 `operationId` 和 `journalSequence`，最后调用
-`archiveGitWorktree({ cwd, path, threadId, operationId, journalSequence })`。Rust 会再次
-校验 Journal、Session 状态、managed 身份和 checkout 内容，任何回执不匹配都保留目录。
+工作台写操作在同一面板内串行；切换项目或关闭面板后，旧任务结果不会覆盖新根目录。
+面板没有跨窗口共享的工作树缓存，Host 仍持有服务和后台资源的生命周期。
 
-普通移除调用 `removeGitWorktree({ cwd, path, force: false, reclaimTemporaryBranch:
-false })`。缺失目录的 prunable 条目不从菜单发起普通移除；Rust 仍拒绝主 checkout、非
-关联目录、仍被 Session/终端引用或包含未提交/忽略文件的目标。恢复记录仅通过
-`listGitWorktreeArchiveRecords` 和
-`recoverGitWorktree(sessionId)` 读取，不由 renderer 重建。`reclaimTemporaryBranch` 作为
-现有 Source 字段保留，但不再支持旧的临时分支自动回收；传入 `true` 会在任何 Git 或
-文件系统操作前明确拒绝并保留工作树与分支。
+## 历史：Tauri/Source 名称（已退役）
+
+旧文档中的 `IPlatformService`、`listGitWorktrees`、`createGitWorktree`、
+`handoffGitWorkspace`、`archiveGitWorktree`、`removeGitWorktree`、
+`ui_git_worktree_create` 和 `archiveTaskWithReceipt` 不是当前实现的调用入口。它们只
+保留在历史 diff 或旧验收材料中；新代码应直接引用上面的 `NativeWorktrees` 方法，
+需要会话动作回执时使用 `NativeHostApi::dispatch` 的 `NativeActionReceipt`，不要重新
+建立旧桥接层。
+
+旧 Source 菜单曾记录 `packages/ui/src/ComposerWorktreeMenu.tsx`、
+`ui_git_handoff`、`stopGitWorkspaceSession`、Session association proof、
+`archiveTaskWithReceipt` 和 `recoverGitWorktree` 等流程；这些名称与流程只保留用于
+迁移审查和旧验收报告的定位。当前 GPUI 面板没有该菜单或桥接回执，不能据此宣称已有
+Session 交接、Journal 对账或恢复 UI 验收。

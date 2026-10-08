@@ -1,4 +1,4 @@
-//! KeenCode 插件公开数据模型、来源计划与存储布局。
+//! KeenCode 插件公开数据模型与存储布局。
 
 use super::*;
 use std::fmt;
@@ -522,64 +522,6 @@ pub struct VersionRequirement(
     pub String,
 );
 
-/// KeenCode 市场来源，包括 URL/GitHub/Git/npm/file/directory/settings。
-#[derive(Clone, Debug, Serialize)]
-pub enum MarketplaceSource {
-    /// HTTP(S) 市场清单 URL。
-    Url {
-        /// 市场清单地址。
-        url: String,
-        /// 请求市场清单时附加的 HTTP 头；敏感值只在当前调用中使用。
-        headers: BTreeMap<String, String>,
-    },
-    /// GitHub 仓库和可选 ref。
-    Github {
-        /// GitHub 仓库的 `owner/repo` 标识。
-        repo: String,
-        /// 可选 branch、tag 或 commit。
-        reference: Option<String>,
-        /// 仓库内 marketplace.json 的路径；默认 `.claude-plugin/marketplace.json`。
-        path: Option<String>,
-        /// Git sparse-checkout 的目录列表。
-        sparse_paths: Vec<String>,
-    },
-    /// 通用 Git URL 和可选 ref。
-    Git {
-        /// Git 仓库地址。
-        url: String,
-        /// 可选 branch、tag 或 commit。
-        reference: Option<String>,
-        /// 仓库内 marketplace.json 的路径；默认 `.claude-plugin/marketplace.json`。
-        path: Option<String>,
-        /// Git sparse-checkout 的目录列表。
-        sparse_paths: Vec<String>,
-    },
-    /// npm 包名与可选版本。
-    Npm {
-        /// npm 包名。
-        package: String,
-        /// 可选版本或版本范围。
-        version: Option<String>,
-        /// 可选的私有 npm registry URL。
-        registry: Option<String>,
-    },
-    /// 本地市场清单文件。
-    File {
-        /// 本地 marketplace.json 路径。
-        path: String,
-    },
-    /// 本地市场根目录。
-    Directory {
-        /// 包含标准市场清单的本地目录。
-        path: String,
-    },
-    /// 从应用 settings 中取具名市场来源。
-    Settings {
-        /// 交给受控设置解析器读取的键名。
-        key: String,
-    },
-}
-
 /// 插件来源，包括相对路径/npm/url/github/git-subdir/pip。
 #[derive(Clone, Debug, Serialize)]
 pub enum PluginSource {
@@ -637,14 +579,52 @@ pub enum PluginSource {
     },
 }
 
-impl<'de> Deserialize<'de> for MarketplaceSource {
-    /// 解析字符串简写和 `source` 判别对象。
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        parse_marketplace_source(Value::deserialize(deserializer)?)
-            .map_err(serde::de::Error::custom)
+/// 已安装插件的可重取来源；不把版本化缓存目录当作更新来源。
+///
+/// `Local.path` 保存用户明确选择的本地插件目录，`Marketplace.source` 保存
+/// 可再次物化的 marketplace 输入。来源属于公开状态，调用方不得把认证密钥
+/// 或其它敏感值放进 marketplace 输入。
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", tag = "kind")]
+pub enum PluginInstallSource {
+    /// 从原始本地插件目录重新读取并计算内容指纹。
+    Local {
+        /// 安装时解析后的绝对插件目录。
+        path: PathBuf,
+    },
+    /// 从 marketplace 输入重新物化插件和依赖。
+    Marketplace {
+        /// URL、GitHub/Git/npm 简写或本地 marketplace 路径。
+        source: String,
+    },
+}
+
+impl PluginInstallSource {
+    /// 校验来源可以安全地进入公开插件状态；本地路径允许暂时不存在，
+    /// 这样用户移动来源后仍能看到插件并收到明确的更新失败，而不是丢失安装记录。
+    pub fn validate(&self) -> Result<()> {
+        match self {
+            Self::Local { path } => {
+                if !path.is_absolute()
+                    || path
+                        .components()
+                        .any(|component| matches!(component, Component::ParentDir))
+                    || path.to_string_lossy().chars().any(char::is_control)
+                {
+                    return Err(PluginError::Invalid(
+                        "插件本地更新来源必须是安全绝对路径".to_owned(),
+                    ));
+                }
+            }
+            Self::Marketplace { source } => {
+                if source.trim().is_empty() || source.chars().any(char::is_control) {
+                    return Err(PluginError::Invalid(
+                        "插件 marketplace 更新来源不能为空或包含控制字符".to_owned(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -655,202 +635,6 @@ impl<'de> Deserialize<'de> for PluginSource {
         D: Deserializer<'de>,
     {
         parse_plugin_source(Value::deserialize(deserializer)?).map_err(serde::de::Error::custom)
-    }
-}
-
-/// 系统能力层应执行的来源取得计划；本模块只生成计划，不绕过审查自行执行。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SourceFetchPlan {
-    /// 使用 HTTP GET 下载 URL。
-    Http {
-        /// 经过协议校验的 HTTP(S) 地址。
-        url: String,
-    },
-    /// 克隆 Git 仓库；`subdir` 为克隆后要取出的目录。
-    Git {
-        /// Git 可访问的仓库 URL。
-        url: String,
-        /// 可选 Git ref。
-        reference: Option<String>,
-        /// 可选的固定 40 位提交 SHA。
-        sha: Option<String>,
-        /// 仓库内相对目标目录。
-        subdir: Option<PathBuf>,
-    },
-    /// 使用 npm pack 获得包归档。
-    Npm {
-        /// npm 包规范。
-        package_spec: String,
-        /// 可选的私有 registry URL。
-        registry: Option<String>,
-    },
-    /// 使用 pip 安装或下载获得 Python 包；不得拼接为 shell 文本执行。
-    Pip {
-        /// pip 包规范。
-        package_spec: String,
-        /// 可选的私有 PyPI registry URL。
-        registry: Option<String>,
-    },
-    /// 已受访问范围授权的本地文件。
-    File {
-        /// 调用方应读取的本地文件路径。
-        path: PathBuf,
-    },
-    /// 已受访问范围授权的本地目录。
-    Directory {
-        /// 调用方应读取的本地目录路径。
-        path: PathBuf,
-    },
-}
-
-/// 市场来源和 settings 键之间的安全解析器。
-pub trait MarketplaceSettings {
-    /// 返回 settings 中的市场来源；调用方负责决定哪些设置键可用。
-    fn marketplace_source(&self, key: &str) -> Option<MarketplaceSource>;
-}
-
-impl MarketplaceSource {
-    /// 将市场来源转换为需审查的取得计划。
-    pub fn fetch_plan(&self, settings: &dyn MarketplaceSettings) -> Result<SourceFetchPlan> {
-        validate_marketplace_source(self)?;
-        match self {
-            Self::Url { url, .. } => Ok(SourceFetchPlan::Http {
-                url: validated_http_url(url, "市场 URL")?,
-            }),
-            Self::Github {
-                repo, reference, ..
-            } => Ok(SourceFetchPlan::Git {
-                url: github_git_url(repo)?,
-                reference: reference.clone(),
-                sha: None,
-                subdir: None,
-            }),
-            Self::Git { url, reference, .. } => Ok(SourceFetchPlan::Git {
-                url: non_empty(url, "Git URL")?.to_owned(),
-                reference: reference.clone(),
-                sha: None,
-                subdir: None,
-            }),
-            Self::Npm {
-                package,
-                version,
-                registry,
-            } => Ok(SourceFetchPlan::Npm {
-                package_spec: package_spec(package, version.as_deref())?,
-                registry: validate_optional_registry(registry.as_deref())?,
-            }),
-            Self::File { path } => Ok(SourceFetchPlan::File {
-                path: PathBuf::from(non_empty(path, "市场文件路径")?),
-            }),
-            Self::Directory { path } => Ok(SourceFetchPlan::Directory {
-                path: PathBuf::from(non_empty(path, "市场目录路径")?),
-            }),
-            Self::Settings { key } => settings
-                .marketplace_source(non_empty(key, "settings 市场键")?)
-                .ok_or_else(|| PluginError::Invalid(format!("settings 中不存在市场来源：{key}")))?
-                .fetch_plan(settings),
-        }
-    }
-}
-
-/// 校验 marketplace source 的扩展字段，避免 Git 路径或 HTTP 头逃逸安全边界。
-fn validate_marketplace_source(source: &MarketplaceSource) -> Result<()> {
-    match source {
-        MarketplaceSource::Url { url, headers } => {
-            validated_http_url(url, "市场 URL")?;
-            for (name, value) in headers {
-                if name.trim().is_empty()
-                    || value.trim().is_empty()
-                    || name.bytes().any(|byte| byte == b'\r' || byte == b'\n')
-                    || value.bytes().any(|byte| byte == b'\r' || byte == b'\n')
-                {
-                    return Err(PluginError::Invalid(
-                        "市场 headers 不能包含空值或换行符".to_owned(),
-                    ));
-                }
-            }
-        }
-        MarketplaceSource::Github {
-            path, sparse_paths, ..
-        }
-        | MarketplaceSource::Git {
-            path, sparse_paths, ..
-        } => {
-            if let Some(path) = path {
-                safe_relative_path(path, "市场 marketplace.json 路径")?;
-                if !path.ends_with(".json") {
-                    return Err(PluginError::Invalid(
-                        "市场 marketplace.json 路径必须以 .json 结尾".to_owned(),
-                    ));
-                }
-            }
-            for sparse_path in sparse_paths {
-                safe_relative_path(sparse_path, "市场 sparsePaths")?;
-            }
-        }
-        MarketplaceSource::Npm { .. }
-        | MarketplaceSource::File { .. }
-        | MarketplaceSource::Directory { .. }
-        | MarketplaceSource::Settings { .. } => {}
-    }
-    Ok(())
-}
-
-impl PluginSource {
-    /// 将插件来源转换为需审查的取得计划；pip 仍由外层系统能力执行。
-    pub fn fetch_plan(&self, marketplace_root: &Path) -> Result<SourceFetchPlan> {
-        match self {
-            Self::Relative { path } => Ok(SourceFetchPlan::Directory {
-                path: safe_relative_join(marketplace_root, path, "插件相对路径")?,
-            }),
-            Self::Npm {
-                package,
-                version,
-                registry,
-            } => Ok(SourceFetchPlan::Npm {
-                package_spec: package_spec(package, version.as_deref())?,
-                registry: validate_optional_registry(registry.as_deref())?,
-            }),
-            Self::Url {
-                url,
-                reference,
-                sha,
-            } => Ok(SourceFetchPlan::Git {
-                url: non_empty(url, "插件 Git URL")?.to_owned(),
-                reference: reference.clone(),
-                sha: sha.clone(),
-                subdir: None,
-            }),
-            Self::Github {
-                repo,
-                reference,
-                sha,
-            } => Ok(SourceFetchPlan::Git {
-                url: github_git_url(repo)?,
-                reference: reference.clone(),
-                sha: sha.clone(),
-                subdir: None,
-            }),
-            Self::GitSubdir {
-                url,
-                path,
-                reference,
-                sha,
-            } => Ok(SourceFetchPlan::Git {
-                url: non_empty(url, "Git URL")?.to_owned(),
-                reference: reference.clone(),
-                sha: sha.clone(),
-                subdir: Some(safe_relative_path(path, "Git 子目录")?),
-            }),
-            Self::Pip {
-                package,
-                version,
-                registry,
-            } => Ok(SourceFetchPlan::Pip {
-                package_spec: pip_package_spec(package, version.as_deref())?,
-                registry: validate_optional_registry(registry.as_deref())?,
-            }),
-        }
     }
 }
 

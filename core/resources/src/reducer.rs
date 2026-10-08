@@ -195,12 +195,23 @@ fn reduce_record_inner(
                 state.title_source = *source;
             }
         }
-        SessionEvent::SessionPreferenceSet { pinned, archived } => {
+        SessionEvent::SessionPreferenceSet {
+            pinned,
+            archived,
+            permission_mode,
+            vision_enabled,
+        } => {
             if let Some(pinned) = pinned {
                 state.pinned = *pinned;
             }
             if let Some(archived) = archived {
                 state.archived = *archived;
+            }
+            if let Some(permission_mode) = permission_mode {
+                state.permission_mode = *permission_mode;
+            }
+            if let Some(vision_enabled) = vision_enabled {
+                state.vision_enabled = *vision_enabled;
             }
         }
         SessionEvent::AssistantFeedbackSet {

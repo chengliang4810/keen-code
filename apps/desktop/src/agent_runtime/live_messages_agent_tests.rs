@@ -1,6 +1,7 @@
 //! 合成项目上的自然任务边界、编码、工具分页及 Skill 真实回归。
 
 use super::*;
+use crate::providers;
 use crate::providers::{CustomProvider, ProvidersListResult};
 use keencode_tools::{BashTool, GlobTool, GrepTool, SkillTool, WriteTool};
 

@@ -1,7 +1,8 @@
 use keencode_resources::{
     AgentId, CommandReceiptStatus, FollowupMode, MailboxMessage, MailboxMessageId, MailboxState,
     PlanState, SessionEvent, SessionEventId, SessionInputDelivery, SessionInputDispatch,
-    SessionInputKind, SessionInputQueueItem, SubAgentState, SubAgentStatus, TitleSource, TurnId,
+    SessionInputKind, SessionInputQueueItem, SessionPermissionMode, SubAgentState, SubAgentStatus,
+    TitleSource, TurnId,
 };
 use tempfile::TempDir;
 
@@ -160,6 +161,35 @@ fn manual_rename_survives_runtime_cold_recovery() {
     let snapshot = reopened.snapshot().expect("冷恢复快照应读取");
     assert_eq!(snapshot.state.title, "冷恢复手动标题");
     assert_eq!(snapshot.state.title_source, TitleSource::Manual);
+}
+
+/// 权限模式和视觉输入开关由 Session Journal 持久化，冷恢复不得依赖 Host 缓存。
+#[test]
+fn session_execution_preferences_survive_cold_recovery() {
+    let root = TempDir::new().expect("偏好测试根目录应创建");
+    let session_id = "control-execution-preferences-cold";
+    let session = create_session(&root, session_id);
+    let updated = session
+        .set_permission_mode("permission-mode-operation", SessionPermissionMode::Yolo)
+        .expect("权限模式应写入 Journal");
+    assert_eq!(updated.permission_mode, SessionPermissionMode::Yolo);
+    let updated = session
+        .set_vision_enabled("vision-operation", true)
+        .expect("视觉输入开关应写入 Journal");
+    assert!(updated.vision_enabled);
+    drop(session);
+
+    let reopened = match RuntimeSession::open_session(RuntimeConfig::new(root.path()), session_id)
+        .expect("偏好 Session 应重新打开")
+    {
+        OpenSessionResult::Ready(session) => session,
+        OpenSessionResult::Corrupt(report) => {
+            panic!("偏好 Journal 不应损坏：{report:?}")
+        }
+    };
+    let state = reopened.snapshot().expect("偏好冷恢复快照应读取").state;
+    assert_eq!(state.permission_mode, SessionPermissionMode::Yolo);
+    assert!(state.vision_enabled);
 }
 
 /// 自动标题和稳定操作身份都由 Journal 冷恢复；竞争结果只允许首次提交。

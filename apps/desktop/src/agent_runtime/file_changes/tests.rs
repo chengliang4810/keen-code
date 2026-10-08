@@ -2,8 +2,8 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use keencode_acp::{FILE_CHANGE_META_KEY, FileChangeSide, ReadFileChangeRequest};
 use keencode_agent::{
@@ -15,47 +15,17 @@ use keencode_model::{
     ScriptedProvider, ScriptedReply, StopReason, ToolDefinition,
 };
 use keencode_resources::{
-    MessagePart, RequestId, SessionEvent, SessionEventRecord, SessionState, ToolFileChange,
+    RequestId, SessionEvent, SessionEventRecord, SessionState, ToolFileChange,
 };
 use keencode_runtime::{CreateSessionRequest, OpenSessionResult, RuntimeSession};
 use keencode_tools::{EditTool, FileMutationRecorder, ToolEnvironment, WriteTool};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-use super::super::{
-    AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, DeliveryEmitter,
-    map_authoritative_record, materialize_delivery,
-};
+use super::super::{AgentRuntime, AgentRuntimeError};
 use super::{RuntimeFileMutationRecorder, change_content, read_file_change_page};
 
-/// 记录生产投递器实际接受的 ACP 载荷。
-#[derive(Default)]
-struct RecordingEmitter {
-    /// 已按接受顺序保存的桌面事件 JSON。
-    values: Mutex<Vec<Value>>,
-}
-
-impl RecordingEmitter {
-    /// 返回当前已接受桌面事件的快照。
-    fn snapshot(&self) -> Vec<Value> {
-        self.values.lock().expect("桌面投递记录锁不应中毒").clone()
-    }
-}
-
-impl DeliveryEmitter for RecordingEmitter {
-    /// 将生产投递器收到的严格 ACP 联合编码为测试可检查的 JSON。
-    fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-        let value =
-            serde_json::to_value(delivery).map_err(|_| AgentRuntimeError::DesktopEmitFailed)?;
-        self.values
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .push(value);
-        Ok(())
-    }
-}
-
-/// 一个真正登记到 RuntimeManager、附带桌面投递泵和临时项目目录的生产测试夹具。
+/// 一个真正登记到 RuntimeManager、附带临时项目目录的生产测试夹具。
 struct DesktopFixture {
     /// 保存 Runtime Journal、Artifact 和 Session lease 的临时根目录。
     _storage: TempDir,
@@ -65,23 +35,15 @@ struct DesktopFixture {
     runtime: Arc<AgentRuntime>,
     /// 当前唯一 Session 的共享 Runtime 句柄。
     session: RuntimeSession,
-    /// 当前桌面投递器的可观察记录。
-    emitter: Arc<RecordingEmitter>,
 }
 
 impl DesktopFixture {
-    /// 创建 Session、登记真实文件记录器并启动 ACP 事件投递泵。
+    /// 创建 Session 并登记真实文件记录器。
     fn new(session_id: &str) -> Self {
         let storage = TempDir::new().expect("Runtime 存储目录应创建");
         let project = TempDir::new().expect("项目目录应创建");
-        let emitter = Arc::new(RecordingEmitter::default());
-        let runtime = Arc::new(
-            AgentRuntime::new(
-                storage.path(),
-                Arc::clone(&emitter) as Arc<dyn DeliveryEmitter>,
-            )
-            .expect("测试 Agent Runtime 应创建"),
-        );
+        let runtime =
+            Arc::new(AgentRuntime::new(storage.path()).expect("测试 Agent Runtime 应创建"));
         let session = runtime
             .runtime_manager()
             .create(CreateSessionRequest {
@@ -90,15 +52,11 @@ impl DesktopFixture {
                 project_root: project.path().to_string_lossy().into_owned(),
             })
             .expect("测试 Session 应登记");
-        runtime
-            .ensure_session_delivery(session_id)
-            .expect("真实 Session ACP 投递泵应启动");
         Self {
             _storage: storage,
             project,
             runtime,
             session,
-            emitter,
         }
     }
 
@@ -276,55 +234,6 @@ fn journal_records(session: &RuntimeSession) -> Vec<SessionEventRecord> {
     records
 }
 
-/// 在冷恢复 Journal 中定位包含指定模型工具调用的完整 Transcript 段。
-fn transcript_record_for_tool_call<'a>(
-    records: &'a [SessionEventRecord],
-    tool_call_id: &str,
-) -> &'a SessionEventRecord {
-    records
-        .iter()
-        .find(|record| match &record.event {
-            SessionEvent::TranscriptSegmentCommitted { segment } => segment
-                .messages
-                .iter()
-                .flat_map(|message| message.content.iter())
-                .any(|part| match part {
-                    MessagePart::ToolCall {
-                        tool_call_id: known,
-                        ..
-                    }
-                    | MessagePart::ToolResult {
-                        tool_call_id: known,
-                        ..
-                    } => known == tool_call_id,
-                    _ => false,
-                }),
-            SessionEvent::AtomicBatch { events } => events.iter().any(|event| {
-                matches!(
-                    event,
-                    SessionEvent::TranscriptSegmentCommitted { segment }
-                        if segment
-                            .messages
-                            .iter()
-                            .flat_map(|message| message.content.iter())
-                            .any(|part| match part {
-                                MessagePart::ToolCall {
-                                    tool_call_id: known,
-                                    ..
-                                }
-                                | MessagePart::ToolResult {
-                                    tool_call_id: known,
-                                    ..
-                                } => known == tool_call_id,
-                                _ => false,
-                            })
-                )
-            }),
-            _ => false,
-        })
-        .expect("目标模型工具调用应有完整 Transcript 段")
-}
-
 /// 在普通事件或 AtomicBatch 中查找目标文件生命周期阶段。
 fn phase_for_event(event: &SessionEvent, request_id: &RequestId) -> Option<&'static str> {
     match event {
@@ -437,35 +346,6 @@ fn typed_nodes(value: &Value, kind: &str) -> Vec<Value> {
     nodes
 }
 
-/// 将一批 ACP 投影草稿编码为可检查的标准桌面载荷。
-fn materialize_drafts(session_id: &str, drafts: Vec<super::super::DeliveryDraft>) -> Vec<Value> {
-    drafts
-        .into_iter()
-        .enumerate()
-        .map(|(index, draft)| {
-            serde_json::to_value(
-                materialize_delivery(session_id, (index + 1) as u64, draft)
-                    .expect("重放草稿应可物化为 ACP 载荷"),
-            )
-            .expect("ACP 载荷应可编码")
-        })
-        .collect()
-}
-
-/// 断言 ACP 内容中存在指定的标准 Diff。
-fn assert_has_diff(values: &[Value], old_text: Option<&str>, new_text: &str) {
-    let diffs = values
-        .iter()
-        .flat_map(|value| typed_nodes(value, "diff"))
-        .collect::<Vec<_>>();
-    if !diffs.iter().any(|diff| {
-        diff.get("newText").and_then(Value::as_str) == Some(new_text)
-            && diff.get("oldText").and_then(Value::as_str) == old_text
-    }) {
-        panic!("ACP 载荷应包含精确的标准 Diff：{new_text}");
-    }
-}
-
 /// 断言 ACP 内容使用 ResourceLink，并核对命名空间元数据中的快照状态。
 fn assert_has_file_change_link(values: &[Value], applied: bool) {
     let links = values
@@ -485,29 +365,9 @@ fn assert_has_file_change_link(values: &[Value], applied: bool) {
     }));
 }
 
-/// 等待异步桌面投递泵真正处理到一个匹配的 Diff。
-async fn wait_for_diff(emitter: &RecordingEmitter, new_text: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let values = emitter.snapshot();
-        let diffs = values
-            .iter()
-            .flat_map(|value| typed_nodes(value, "diff"))
-            .collect::<Vec<_>>();
-        if diffs
-            .iter()
-            .any(|diff| diff.get("newText").and_then(Value::as_str) == Some(new_text))
-        {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("桌面投递泵未在有限时间内发送目标 Diff");
-}
-
-/// 真实 Write/Edit 应保存 BOM、CRLF 与缺失文件语义，并在关闭重开后保持标准 ACP Diff。
+/// 真实 Write/Edit 应保存 BOM、CRLF 与缺失文件语义，并在关闭重开后保持 Journal 事实。
 #[tokio::test]
-async fn real_write_edit_lifecycle_and_replay_diff() {
+async fn real_write_edit_lifecycle_and_reopen_snapshots() {
     let fixture = DesktopFixture::new("desktop-file-change-replay");
     let path = fixture.project.path().join("notes.txt");
     let before_text = "\u{feff}BEFORE_SNAPSHOT_ONLY\r\n";
@@ -610,31 +470,21 @@ async fn real_write_edit_lifecycle_and_replay_diff() {
     );
 
     let expected_records = records.clone();
-    wait_for_diff(&fixture.emitter, after_text).await;
     let DesktopFixture {
         _storage: storage,
         project,
         runtime,
         session,
-        emitter,
     } = fixture;
     runtime
         .shutdown()
         .await
         .expect("关闭 RuntimeManager 应成功");
-    let live_values = emitter.snapshot();
-    assert_has_diff(&live_values, Some(before_text), after_text);
     drop(session);
     drop(runtime);
 
-    let replay_emitter = Arc::new(RecordingEmitter::default());
-    let replay_runtime = Arc::new(
-        AgentRuntime::new(
-            storage.path(),
-            Arc::clone(&replay_emitter) as Arc<dyn DeliveryEmitter>,
-        )
-        .expect("冷恢复 Agent Runtime 应创建"),
-    );
+    let replay_runtime =
+        Arc::new(AgentRuntime::new(storage.path()).expect("冷恢复 Agent Runtime 应创建"));
     let start = std::time::Instant::now();
     let reopened = loop {
         match replay_runtime
@@ -665,17 +515,6 @@ async fn real_write_edit_lifecycle_and_replay_diff() {
     );
     assert_file_lifecycle_order(&reopened_records, &write_id);
     assert_file_lifecycle_order(&reopened_records, &edit_id);
-    let reopened_state = reopened.snapshot().expect("冷恢复状态应读取").state;
-    let transcript_record = transcript_record_for_tool_call(&reopened_records, "call-edit");
-    let replay_drafts = map_authoritative_record(
-        &reopened,
-        &reopened_state,
-        transcript_record,
-        AuthoritativeProjectionMode::Replay,
-    )
-    .expect("冷恢复工具 Transcript 应可映射");
-    let replay_values = materialize_drafts(reopened.session_id().as_str(), replay_drafts);
-    assert_has_diff(&replay_values, Some(before_text), after_text);
     assert_eq!(
         read_snapshot_pages(
             &replay_runtime,

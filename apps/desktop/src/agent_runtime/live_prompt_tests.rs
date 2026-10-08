@@ -1,6 +1,7 @@
 //! 显式运行的提示词冒烟测试；仅发送合成材料，不改写配置文件。
 
 use super::*;
+use crate::providers;
 use crate::providers::{CustomProvider, ProvidersListResult};
 use keencode_agent::{
     AgentCommitEvent, AgentCommitSink, AgentToolRoundPreflight, AgentToolRoundPreflightError,

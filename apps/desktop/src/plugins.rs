@@ -1,9 +1,8 @@
 //! KeenCode 插件清单、市场与运行时投影。
 //!
 //! 本模块只处理 KeenCode 的插件市场/插件清单、可审计的来源解析以及运行时投影；
-//! 不依赖 Tauri，也不直接执行网络、Git、npm 或 pip 命令。调用方可以把
-//! [`SourceFetchPlan`] 交给受审计的系统能力层执行，再调用本模块安装和加载。
-//! 这样 extensions 与 Agent Runtime 可以复用完全相同的解析、依赖和变量规则。
+//! 不依赖 Tauri，也不直接执行网络、Git、npm 或 pip 命令。这样 Native 设置与
+//! Agent Runtime 可以复用完全相同的解析、依赖和变量规则。
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
@@ -20,9 +19,12 @@ use crate::http_response::{HttpResponseReadError, read_http_response_limited};
 use crate::path_utils::path_to_frontend;
 
 mod command;
+mod marketplace;
 mod model;
-pub use command::{
-    PluginCommandCatalog, PluginCommandTool, plugin_command_description, plugin_command_namespace,
+pub use command::{PluginCommandCatalog, PluginCommandTool, plugin_command_description};
+pub(crate) use marketplace::{
+    materialize_marketplace_source, refresh_marketplace_source,
+    resolve_marketplace_plugin_install_plan,
 };
 pub use model::*;
 
@@ -156,7 +158,13 @@ fn validate_ancestor_chain(path: &Path, label: &str) -> Result<()> {
     let mut current = PathBuf::new();
     for component in path.components() {
         match component {
-            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+            Component::Prefix(_) => {
+                current.push(component.as_os_str());
+                // Windows verbatim 盘符前缀本身（\\?\D:）还不是可查询的路径，
+                // 必须追加 RootDir 后检查；普通 C: 查询还会依赖驱动器当前目录。
+                continue;
+            }
+            Component::RootDir | Component::Normal(_) => {
                 current.push(component.as_os_str());
             }
             Component::CurDir => continue,
@@ -269,6 +277,9 @@ pub struct InstalledPlugin {
     pub sensitive_user_config_keys: BTreeSet<String>,
     /// 当前插件敏感配置所在的安全存储代际；只作为公开指针，不是敏感值。
     pub secret_generation: u64,
+    /// 可再次取得插件内容的原始来源；旧状态没有该字段时插件仍可运行，但不可更新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<PluginInstallSource>,
 }
 
 /// 非敏感状态文件内容。
@@ -357,6 +368,8 @@ pub struct MaterializedPlugin {
     pub id: PluginId,
     /// 来源下载、解包或检出后得到的插件根目录。
     pub source_root: PathBuf,
+    /// 取得该目录时使用的可持久来源；测试或旧调用方缺失时不会伪造更新来源。
+    pub source: Option<PluginInstallSource>,
 }
 
 /// 对公开状态和安全存储执行的一次用户配置更新。
@@ -531,6 +544,20 @@ impl PluginManager {
         Ok(state)
     }
 
+    /// 查询已安装插件的可重取来源；旧状态没有来源时明确返回更新不可用。
+    pub fn install_source(&self, id: &PluginId) -> Result<PluginInstallSource> {
+        let id = require_marketplace_id(id)?;
+        let state = self.load_state()?;
+        let installed = state
+            .plugins
+            .iter()
+            .find(|plugin| plugin_ids_equal_ascii_case(&plugin.id, &id))
+            .ok_or_else(|| PluginError::Invalid(format!("没有安装插件：{id}")))?;
+        installed.source.clone().ok_or_else(|| {
+            PluginError::Invalid(format!("插件 {id} 没有可重取的安装来源，无法执行更新"))
+        })
+    }
+
     /// 原子写入公开状态，确保敏感值不进入 state.json。
     pub fn save_state(&self, state: &PluginState) -> Result<()> {
         self.storage.ensure_directories()?;
@@ -553,8 +580,9 @@ impl PluginManager {
     }
 
     /// 复制验证过的插件目录到内容指纹缓存；用户配置需通过单独配置接口保存。
-    #[cfg(test)]
-    fn install_from_directory(
+    ///
+    /// Native 设置域使用此入口安装本地插件目录，测试也复用同一条事务路径。
+    pub(crate) fn install_from_directory(
         &self,
         materialized: MaterializedPlugin,
         config: UserConfigUpdate,
@@ -595,6 +623,8 @@ impl PluginManager {
             source_root: PathBuf,
             /// 内容寻址后的最终缓存目录。
             destination: PathBuf,
+            /// 供下一次更新重新取得内容的来源。
+            source: Option<PluginInstallSource>,
         }
 
         let mut prepared = Vec::with_capacity(materialized.len());
@@ -612,6 +642,10 @@ impl PluginManager {
                 )));
             }
             let source_root = canonical_plugin_root(&materialized.source_root)?;
+            let source = materialized
+                .source
+                .map(|source| normalize_install_source(source, &source_root))
+                .transpose()?;
             let manifest = if source_root.join(PLUGIN_MANIFEST).try_exists()? {
                 load_plugin_manifest(&source_root)?
             } else {
@@ -628,6 +662,7 @@ impl PluginManager {
                 manifest,
                 source_root,
                 destination,
+                source,
             });
         }
 
@@ -671,6 +706,9 @@ impl PluginManager {
             let previous = index.map(|index| next_state.plugins.remove(index));
             let previous_secret_generation =
                 previous.as_ref().map_or(0, |item| item.secret_generation);
+            let source = installation
+                .source
+                .or_else(|| previous.as_ref().and_then(|item| item.source.clone()));
             let (public_user_config, sensitive_user_config_keys) = match self.apply_user_config(
                 &installation.id,
                 &installation.manifest,
@@ -751,6 +789,7 @@ impl PluginManager {
                 public_user_config,
                 sensitive_user_config_keys,
                 secret_generation: previous_secret_generation,
+                source,
             });
         }
         next_state
@@ -1915,57 +1954,6 @@ fn read_limited(path: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// 解析市场 source 的完整 JSON 表示。
-fn parse_marketplace_source(value: Value) -> Result<MarketplaceSource> {
-    if let Value::String(value) = value {
-        return Ok(MarketplaceSource::Directory { path: value });
-    }
-    let object = value
-        .as_object()
-        .ok_or_else(|| PluginError::Invalid("市场 source 必须是路径字符串或对象".to_owned()))?;
-    let source = object_string(object, "source")?;
-    match source.as_str() {
-        "url" => Ok(MarketplaceSource::Url {
-            url: object_string(object, "url")?,
-            headers: optional_string_map(object, "headers")?,
-        }),
-        "github" => Ok(MarketplaceSource::Github {
-            repo: object_string(object, "repo")?,
-            reference: optional_string(object, "ref")?,
-            path: optional_string(object, "path")?,
-            sparse_paths: optional_string_array(object, "sparsePaths")?,
-        }),
-        "git" => Ok(MarketplaceSource::Git {
-            url: object_string(object, "url")?,
-            reference: optional_string(object, "ref")?,
-            path: optional_string(object, "path")?,
-            sparse_paths: optional_string_array(object, "sparsePaths")?,
-        }),
-        "npm" => Ok(MarketplaceSource::Npm {
-            package: object_string(object, "package")?,
-            version: optional_string(object, "version")?,
-            registry: optional_string(object, "registry")?,
-        }),
-        "file" => Ok(MarketplaceSource::File {
-            path: object_string(object, "path")?,
-        }),
-        "directory" => Ok(MarketplaceSource::Directory {
-            path: object_string(object, "path")?,
-        }),
-        "settings" => Ok(MarketplaceSource::Settings {
-            key: object
-                .get("key")
-                .or_else(|| object.get("path"))
-                .and_then(Value::as_str)
-                .ok_or_else(|| PluginError::Invalid("settings 市场来源缺少 key".to_owned()))?
-                .to_owned(),
-        }),
-        other => Err(PluginError::Invalid(format!(
-            "不支持的市场 source：{other}"
-        ))),
-    }
-}
-
 /// 解析插件 source 的完整 JSON 表示。
 fn parse_plugin_source(value: Value) -> Result<PluginSource> {
     if let Value::String(value) = value {
@@ -2126,54 +2114,6 @@ fn optional_string(object: &Map<String, Value>, key: &str) -> Result<Option<Stri
             "source {key} 必须是非空字符串"
         ))),
     }
-}
-
-/// 从 JSON 对象取可选的字符串数组字段，并拒绝空项、非字符串和路径穿越项。
-fn optional_string_array(object: &Map<String, Value>, key: &str) -> Result<Vec<String>> {
-    let Some(value) = object.get(key) else {
-        return Ok(Vec::new());
-    };
-    let Value::Array(values) = value else {
-        return Err(PluginError::Invalid(format!(
-            "source {key} 必须是字符串数组"
-        )));
-    };
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .ok_or_else(|| PluginError::Invalid(format!("source {key} 必须是非空字符串数组")))
-        })
-        .collect()
-}
-
-/// 从 JSON 对象取可选的 HTTP 头映射，避免把非字符串值传给网络层。
-fn optional_string_map(object: &Map<String, Value>, key: &str) -> Result<BTreeMap<String, String>> {
-    let Some(value) = object.get(key) else {
-        return Ok(BTreeMap::new());
-    };
-    let Value::Object(values) = value else {
-        return Err(PluginError::Invalid(format!(
-            "source {key} 必须是字符串对象"
-        )));
-    };
-    let mut output = BTreeMap::new();
-    for (name, value) in values {
-        let value = value
-            .as_str()
-            .ok_or_else(|| PluginError::Invalid(format!("source {key}.{name} 必须是字符串")))?;
-        if name.trim().is_empty() || value.trim().is_empty() {
-            return Err(PluginError::Invalid(format!(
-                "source {key} 的名称和值不能为空"
-            )));
-        }
-        output.insert(name.clone(), value.to_owned());
-    }
-    Ok(output)
 }
 
 /// 将 dependencies 的对象、字符串数组或对象数组归一为 map。
@@ -3732,6 +3672,9 @@ fn validate_state(storage: &PluginStorage, state: &PluginState) -> Result<()> {
     };
     for plugin in &state.plugins {
         let id = require_marketplace_id(&plugin.id)?;
+        if let Some(source) = &plugin.source {
+            source.validate()?;
+        }
         let key = format!(
             "{}@{}",
             marketplace_name_key(id.marketplace.as_deref().unwrap_or_default()),
@@ -3817,6 +3760,31 @@ fn require_marketplace_id(id: &PluginId) -> Result<PluginId> {
     PluginId::from_components(&id.plugin, Some(marketplace))
 }
 
+/// 将一次安装携带的来源规范化后再写入状态；本地来源必须与本次物化目录一致，
+/// 防止调用方把缓存目录或另一份插件目录登记成更新来源。
+fn normalize_install_source(
+    source: PluginInstallSource,
+    source_root: &Path,
+) -> Result<PluginInstallSource> {
+    match source {
+        PluginInstallSource::Local { path } => {
+            let path = canonical_plugin_root(&path)?;
+            if path != source_root {
+                return Err(PluginError::Invalid(
+                    "插件本地更新来源必须与本次安装目录一致".to_owned(),
+                ));
+            }
+            Ok(PluginInstallSource::Local { path })
+        }
+        PluginInstallSource::Marketplace { source } => {
+            let source = source.trim().to_owned();
+            let source = PluginInstallSource::Marketplace { source };
+            source.validate()?;
+            Ok(source)
+        }
+    }
+}
+
 /// 按标识符规范使用 ASCII 不区分大小写语义比较两个完整插件 ID。
 fn plugin_ids_equal_ascii_case(left: &PluginId, right: &PluginId) -> bool {
     left.marketplace
@@ -3837,18 +3805,6 @@ fn safe_cache_component(value: &str, label: &str) -> Result<String> {
 /// 小写，避免同一逻辑插件因清单或调用方大小写变化分裂目录和密钥。
 fn stable_cache_component(value: &str, label: &str) -> Result<String> {
     Ok(safe_cache_component(value, label)?.to_ascii_lowercase())
-}
-
-/// 空 settings 实现，只用于本地清单验证；settings 来源必须由调用方显式解析。
-#[cfg(test)]
-struct EmptyMarketplaceSettings;
-
-#[cfg(test)]
-impl MarketplaceSettings for EmptyMarketplaceSettings {
-    /// 验证期间不允许隐式从环境或文件读取 settings。
-    fn marketplace_source(&self, _key: &str) -> Option<MarketplaceSource> {
-        None
-    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "name": "ely-native-cold-resume",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "requires_reuse_isolation": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "cold-resume-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "cold-resume-startup"
+    },
+    {
+      "type": "metrics",
+      "label": "cold-resume-startup"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"appearance\": \"dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "README.md",
+      "contains": "Ely native acceptance isolated project",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "src/facts.txt",
+      "contains": "read-write-bash acceptance fixture",
+      "min_bytes": 1
+    },
+    {
+      "type": "click",
+      "x": 180,
+      "y": 750
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "cold-resume-session"
+    },
+    {
+      "type": "accessibility",
+      "label": "cold-resume-session"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 1380
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "冷恢复后请使用 write 工具创建 out/native-acceptance/cold-resume-result.txt，文件内容必须精确等于以下标记，不能添加其他字符或换行： KEENCODE_NATIVE_COLD_RESUME_MARKER_20261005，完成后只简短确认。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "matching": {
+        "/payload/request/toolName": "Write",
+        "/payload/request/arguments/content": "KEENCODE_NATIVE_COLD_RESUME_MARKER_20261005",
+        "/payload/request/effect": "changes_state"
+      },
+      "timeout_ms": 180000,
+      "matching_project_paths": {
+        "/payload/request/arguments/file_path": "out/native-acceptance/cold-resume-result.txt"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "out/native-acceptance/cold-resume-result.txt",
+      "contains": "KEENCODE_NATIVE_COLD_RESUME_MARKER_20261005",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "cold-resume-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "cold-resume-completed"
+    },
+    {
+      "type": "metrics",
+      "label": "cold-resume-completed"
+    }
+  ]
+}

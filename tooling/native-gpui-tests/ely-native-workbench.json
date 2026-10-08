@@ -1,0 +1,618 @@
+{
+  "version": 1,
+  "name": "ely-native-workbench",
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件与工作台"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "screenshot",
+      "label": "workbench-startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "workbench-startup"
+    },
+    {
+      "type": "metrics",
+      "label": "workbench-startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "终端"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 700
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新建终端"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "screenshot",
+      "label": "terminal-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "terminal-created"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "终端输入"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "type_text",
+      "text": "powershell -NoProfile -Command \"git init; git config user.email native@example.invalid; git config user.name NativeAcceptance; Set-Content -LiteralPath terminal-marker.txt -Value KEENCODE_NATIVE_PTY_MARKER_20261005; git add .; git commit -m '原生验收 / Native acceptance'\""
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "ms": 1000,
+      "type": "wait"
+    },
+    {
+      "label": "terminal-command-entered",
+      "type": "screenshot"
+    },
+    {
+      "label": "terminal-command-entered",
+      "type": "accessibility"
+    },
+    {
+      "type": "wait_for_file",
+      "path": "terminal-marker.txt",
+      "contains": "KEENCODE_NATIVE_PTY_MARKER_20261005",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "terminal-marker.txt",
+      "contains": "KEENCODE_NATIVE_PTY_MARKER_20261005",
+      "min_bytes": 1
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "terminal-command-completed"
+    },
+    {
+      "type": "accessibility",
+      "label": "terminal-command-completed"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "files-pane"
+    },
+    {
+      "type": "accessibility",
+      "label": "files-pane"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "展开 src"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "打开 src\\facts.txt"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "screenshot",
+      "label": "editor-open"
+    },
+    {
+      "type": "accessibility",
+      "label": "editor-open"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件编辑器"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "KEENCODE_NATIVE_EDITOR_MARKER_20261005\n"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存 UTF-8 文件"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait_for_file",
+      "path": "src/facts.txt",
+      "contains": "KEENCODE_NATIVE_EDITOR_MARKER_20261005",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "src/facts.txt",
+      "contains": "KEENCODE_NATIVE_EDITOR_MARKER_20261005",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "editor-saved"
+    },
+    {
+      "type": "accessibility",
+      "label": "editor-saved"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "Diff"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "相对文件路径，留空显示全部 Diff",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "相对文件路径，留空显示全部 Diff"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "src/facts.txt"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "加载 Diff"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Diff 已加载",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "diff-loaded-src-facts"
+    },
+    {
+      "type": "accessibility",
+      "label": "diff-loaded-src-facts"
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "评论文件相对路径",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "评论文件相对路径"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "src/facts.txt"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "行号"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "1"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "评论内容"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "KEENCODE_NATIVE_REVIEW_MARKER_20261005"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "旧侧（未勾选为新侧）"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "添加评论"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "review 标注已保存",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "diff-review-saved"
+    },
+    {
+      "type": "accessibility",
+      "label": "diff-review-saved"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "查询"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "ms": 1000,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "文件名或路径关键词"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "type_text",
+      "text": "facts.txt"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "查询文件"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "ms": 1000,
+      "type": "wait"
+    },
+    {
+      "type": "screenshot",
+      "label": "search-file-results"
+    },
+    {
+      "type": "accessibility",
+      "label": "search-file-results"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "打开 src\\facts.txt"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "ms": 1200,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "Git"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "git-pane"
+    },
+    {
+      "type": "accessibility",
+      "label": "git-pane"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "暂存 src/facts.txt"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "ms": 1000,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "提交信息（必填）"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "type_text",
+      "text": "原生工作台验收 / Native workbench acceptance"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "提交"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "assert_git",
+      "require_clean": true,
+      "commit_message_contains": "原生工作台验收 / Native workbench acceptance",
+      "worktree_count": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "git-committed"
+    },
+    {
+      "type": "accessibility",
+      "label": "git-committed"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "工作树"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "worktrees-pane"
+    },
+    {
+      "type": "accessibility",
+      "label": "worktrees-pane"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "引用，例如 HEAD 或分支名"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "type_text",
+      "text": "HEAD"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新分支名（可选）"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "type_text",
+      "text": "native-acceptance-worktree"
+    },
+    {
+      "ms": 500,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "创建工作树"
+    },
+    {
+      "ms": 150,
+      "type": "wait"
+    },
+    {
+      "type": "wait",
+      "ms": 3000
+    },
+    {
+      "type": "assert_git",
+      "worktree_count": 2,
+      "worktree_branch_contains": "native-acceptance-worktree"
+    },
+    {
+      "type": "screenshot",
+      "label": "worktree-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "worktree-created"
+    },
+    {
+      "type": "metrics",
+      "label": "worktree-created"
+    }
+  ]
+}

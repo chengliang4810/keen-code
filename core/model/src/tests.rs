@@ -877,7 +877,7 @@ fn scripted_provider_propagates_mid_stream_error() {
 }
 
 #[test]
-fn collector_rejects_events_after_end() {
+fn collector_returns_on_end_without_polling_late_events() {
     let provider = ScriptedProvider::new(
         ProviderCapabilities::default(),
         [ScriptedReply::events([
@@ -892,10 +892,10 @@ fn collector_rejects_events_after_end() {
         ])],
     );
 
-    assert!(matches!(
-        block_on(provider.complete(user_request())),
-        Err(ModelError::Protocol { .. })
-    ));
+    let response =
+        block_on(provider.complete(user_request())).expect("收到合法终态后不应继续轮询迟到事件");
+    assert!(response.content.is_empty());
+    assert_eq!(response.stop_reason, StopReason::Completed);
 }
 
 #[test]

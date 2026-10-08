@@ -1,0 +1,361 @@
+{
+  "version": 1,
+  "name": "ely-native-font-settings-release26",
+  "requires_real_provider": false,
+  "requires_journal": false,
+  "requires_network_trace": false,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-settings-reference-1/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "外观",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "字体族",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "11-20",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "应用",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "font-settings-initial"
+    },
+    {
+      "type": "accessibility",
+      "label": "font-settings-initial"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "字体族"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "Consolas"
+    },
+    {
+      "type": "wait",
+      "ms": 300
+    },
+    {
+      "type": "screenshot",
+      "label": "font-family-typed"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "应用"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontFamily\": \"Consolas\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "11-20",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "16"
+    },
+    {
+      "type": "wait",
+      "ms": 300
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontSizePx\": 16",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "font-family-applied"
+    },
+    {
+      "type": "accessibility",
+      "label": "font-family-applied"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "外观",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "字体族",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "11-20",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "应用",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "font-settings-reopened"
+    },
+    {
+      "type": "accessibility",
+      "label": "font-settings-reopened"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "字体族"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "key",
+      "key": "backspace"
+    },
+    {
+      "type": "wait",
+      "ms": 300
+    },
+    {
+      "type": "screenshot",
+      "label": "font-family-cleared"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "click_accessibility",
+      "label": "应用"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"fontFamily\": \"系统默认\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "font-default-applied"
+    },
+    {
+      "type": "accessibility",
+      "label": "font-default-applied"
+    },
+    {
+      "type": "close"
+    }
+  ]
+}

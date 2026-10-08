@@ -1,6 +1,6 @@
 use std::path::Path;
 
-/// 将本机路径转换为前端统一使用的斜杠路径，并隐藏 Windows 扩展长度前缀。
+/// 将本机路径转换为界面契约统一使用的斜杠路径，并隐藏 Windows 扩展长度前缀。
 pub(crate) fn path_to_frontend(path: &Path) -> String {
     path_text_to_frontend(&path.to_string_lossy())
 }

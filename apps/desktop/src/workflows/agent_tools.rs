@@ -73,7 +73,8 @@ pub type WorkflowToolFuture =
 /// 由桌面应用装配的真实 WorkflowHost 调用边界。
 ///
 /// 实现必须完成身份绑定、父会话归属、工作区授权和 actor 禁止检查，然后
-/// 调用 [`crate::frontend_rpc::host::workflow_call`] 或等价的生产 Host 路径。
+/// 调用 [`crate::native_services::NativeServices`] 按父 Session 缓存的
+/// [`crate::workflows::WorkflowHost`] 生产路径。
 /// 不得使用内存 fake、第二份 run 日志或绕过 AgentRuntime 的权限入口。
 pub trait WorkflowToolPort: Send + Sync {
     /// 执行一个已经由 AgentRunner 放行的工作流控制调用。

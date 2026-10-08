@@ -69,6 +69,11 @@ impl PluginCommandCatalog {
         self.commands.is_empty()
     }
 
+    /// 返回当前冻结目录中的命令条目，供 Native 设置页展示实际可调用的目录。
+    pub fn entries(&self) -> impl Iterator<Item = &PluginCommandEntry> {
+        self.commands.values()
+    }
+
     /// 按稳定名称查找插件 command；查找对 ASCII 大小写不敏感。
     pub fn get(&self, name: &str) -> Option<&PluginCommandEntry> {
         let key = name.to_ascii_lowercase();

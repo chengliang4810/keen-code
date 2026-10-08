@@ -1054,7 +1054,7 @@ impl KeenCodeEvent {
                 decode_duration_ms,
             } => {
                 validate_identifier(observation_id, MAX_EVENT_IDENTIFIER_BYTES)?;
-                // WebView 以 JS number 聚合，边界不允许悄悄丢失整数精度。
+                // ACP JSON 客户端可能使用双精度数值，wire 边界不能悄悄丢失整数精度。
                 if [
                     input_tokens,
                     output_tokens,

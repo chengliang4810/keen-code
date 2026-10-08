@@ -1,55 +1,41 @@
-//! 自研 Agent Runtime 的桌面生产装配根与唯一 ACP 投递泵。
+//! 自研 Agent Runtime 的桌面生产装配根。
 mod automatic_titles;
-mod delivery_pump;
-mod history_load;
-
-use delivery_pump::*;
-pub(crate) use history_load::HistoryLoadRequest;
+mod file_changes;
 mod interruption_context;
-mod session_mcp;
 mod workflow_actor;
 mod workflow_tool_executor;
-pub(crate) use session_mcp::{PreparedWorkspaceMcp, SessionMcpError, SuspendedSessionMcp};
+#[cfg(test)]
+pub(crate) use file_changes::RuntimeFileMutationRecorder;
 pub(crate) use workflow_actor::{WorkflowActor, WorkflowActorRequest};
 
-#[cfg(feature = "benchmark")]
-pub mod benchmark;
-mod file_changes;
-#[cfg(test)]
-use keencode_resources::SessionEventRecord;
 #[cfg(test)]
 mod live_prompt_tests;
 
 use crate::{
     analytics::{AnalyticsRecorder, ModelRetryNotice},
     app_settings::DEFAULT_BACKGROUND_AGENT_LIMIT,
-    client_request::{ClientRequestDisplayGate, SessionDeliverySink, is_frontend_v4_connection},
+    client_request::ClientRequestDisplayGate,
     elicitation::{ElicitationCoordinator, PendingElicitationView},
-    permissions::{PendingPermissionView, PermissionChange, PermissionCoordinator, PermissionMode},
-    providers, storage,
+    memories::MemoryService,
+    permissions::{PendingPermissionView, PermissionCoordinator, PermissionMode},
+    storage,
     workflows::agent_tools::WorkflowToolPort,
 };
 use anyhow::{Context, anyhow, bail};
 use chrono::{SecondsFormat, TimeZone, Utc};
-use keencode_acp::{
-    AcpClientRequestFrame, BackgroundTaskInfo, BackgroundTaskKind, BackgroundTaskTerminalStatus,
-    CompactionFailureKind, ConnectionId, KeenCodeEvent, KeenCodeEventEnvelope,
-    KeenCodeEventEnvelopeParams, MAX_REPLAY_EVENTS, ReplaySessionResponse, SessionSequence,
-    SessionUpdateDeliveryEnvelope,
-};
+use keencode_acp::{BackgroundTaskInfo, BackgroundTaskKind, ConnectionId};
 use keencode_agent::{
     AgentCapabilities, AgentCommitSinkError, AgentDepth, AgentDynamicInputAcknowledgement,
     AgentDynamicInputBatch, AgentDynamicInputBoundary, AgentDynamicInputError,
     AgentDynamicInputKind, AgentDynamicInputReceipt, AgentDynamicInputSource, AgentExecutionPort,
-    AgentId as RunnerAgentId, AgentProfile, AgentRunError, AgentRunner, AgentStreamEvent,
-    AgentStreamEventKind, AgentTemplateSnapshot, AgentTool, AgentTreeQuiesceResult, AgentTurnCause,
-    AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal, AgentTurnStartResult, CloseAgentTree,
-    CollaborationAgentStatus, CollaborationAgentSummary, CollaborationAppendResult,
-    CollaborationCoordinator, CollaborationError, CollaborationEvent, CollaborationEventKind,
-    CollaborationGlobalTurnLimiter, CollaborationGlobalTurnPermit, CollaborationPortError,
-    CollaborationStore, CollaborationTransitionCommit, ContextCompactionFailureKind,
-    ContextManager, ContextPolicy, ContextTokenEstimator, GoalChange, GoalController, GoalStatus,
-    GoalUsageDelta, HookPhase, HookRuntime, JsonContextTokenEstimator,
+    AgentId as RunnerAgentId, AgentProfile, AgentRunError, AgentRunner, AgentTemplateSnapshot,
+    AgentTreeQuiesceResult, AgentTurnCause, AgentTurnLaunch, AgentTurnOutcome, AgentTurnSignal,
+    AgentTurnStartResult, CloseAgentTree, CollaborationAgentStatus, CollaborationAgentSummary,
+    CollaborationAppendResult, CollaborationCoordinator, CollaborationError, CollaborationEvent,
+    CollaborationEventKind, CollaborationGlobalTurnLimiter, CollaborationGlobalTurnPermit,
+    CollaborationPortError, CollaborationStore, CollaborationTransitionCommit, ContextManager,
+    ContextPolicy, ContextTokenEstimator, GoalChange, GoalController, GoalDraft, GoalPatch,
+    GoalStatus, GoalTransition, GoalUsageDelta, HookPhase, HookRuntime, JsonContextTokenEstimator,
     MailboxMessage as RunnerMailboxMessage, MailboxMessageKind, ModelRoundUsage, PlanGuard,
     PlanGuardState, ProviderContextCompressor, QuiesceAgentTree, RecoveredAgent,
     RecoveredAgentCheckpoint, RecoveredCoordinator, RecoveredRootLifecycle, RootAgentRequest,
@@ -59,13 +45,13 @@ use keencode_agent::{
 };
 use keencode_model::{
     ContentBlock, ImageContent, Message, MessageRole, ModelFuture, ModelMessages, ModelProvider,
-    ModelRequest, ModelStream, ModelStreamEvent, ProviderCapabilities, ProviderProtocol,
-    ReasoningConfig, ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
+    ModelRequest, ModelStream, ProviderCapabilities, ProviderProtocol, ReasoningConfig,
+    ReasoningEffort, StructuredOutputConfig, ToolChoice, last_non_empty_text,
 };
 use keencode_provider::{
-    ProviderRegistry, ProviderRegistrySnapshot, REQUEST_METADATA_AGENT_ID,
-    REQUEST_METADATA_PROMPT_CACHE_KEY, REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID,
-    REQUEST_METADATA_TURN_ID, ResolvedProvider,
+    ProviderRegistry, REQUEST_METADATA_AGENT_ID, REQUEST_METADATA_PROMPT_CACHE_KEY,
+    REQUEST_METADATA_PURPOSE, REQUEST_METADATA_SESSION_ID, REQUEST_METADATA_TURN_ID,
+    ResolvedProvider,
 };
 use keencode_resources::{
     AgentId as ResourceAgentId, COMPACTION_SUMMARY_PREFIX,
@@ -73,29 +59,22 @@ use keencode_resources::{
     MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
     MailboxState, MessagePart as ResourceMessagePart, MessageRole as ResourceMessageRole,
     ProviderProtocolSnapshot, ProviderSnapshot, ReasoningEffortSnapshot, SessionEvent,
-    SessionInputQueueItem, SessionInputQueueState, SessionMessage, SessionState, SubAgentState,
-    SubAgentStatus, ToolCompletionStatus, TranscriptRecord, TranscriptSegment,
-    TurnId as ResourceTurnId, TurnStatus, TurnStopReason,
+    SessionInputQueueItem, SessionInputQueueState, SessionMessage, SessionPermissionMode,
+    SessionState, SubAgentState, SubAgentStatus, TranscriptRecord, TranscriptSegment,
+    TurnId as ResourceTurnId, TurnStatus,
 };
 use keencode_runtime::{
-    CreateSessionRequest, OpenSessionResult, PersistentAgentState, RuntimeConfig,
-    RuntimeControlEvent, RuntimeError, RuntimeEventPayload, RuntimeEventReceiveError,
-    RuntimeEventSubscription, RuntimeManager, RuntimeModelRetryScheduled,
+    CreateSessionRequest, OpenSessionResult, PersistentAgentState, RuntimeConfig, RuntimeError,
+    RuntimeEventPayload, RuntimeEventSubscription, RuntimeManager, RuntimeModelRetryScheduled,
     RuntimeModelRoundUsageSink, RuntimeSession, RuntimeSnapshot, RuntimeTurnRequest,
     StoredSessionMetadata, TurnCancellationOutcome, UnstartedTurnTermination,
     UnstartedTurnTerminationRequest,
 };
-// 权威事件→ACP 投影已下沉 core/runtime，桌面只保留投递物化与 Tauri 传输。
-use keencode_runtime::{
-    AuthoritativeProjectionMode, DeliveryDraft, ProviderProjection,
-    map_authoritative_record_with_projection, tool_request,
-    validated_background_task_completion_event,
-};
 use keencode_tools::{
-    AskUserTool, BackgroundOutputCursor, BackgroundTaskCompletion, BackgroundTaskManager,
-    BackgroundTaskStatus, BashTool, CompletedTurnContext, EditTool, GitWorktreeLeaseManager,
-    ReadTool, ResolvedSpawnAgentTemplate, SpawnAgentContextSource, SpawnAgentTemplateContext,
-    SpawnAgentTemplateResolver, ToolEnvironment, UserQuestionHandler, WebServiceConfig, WriteTool,
+    AskUserTool, BackgroundTaskCompletion, BackgroundTaskManager, BackgroundTaskStatus, BashTool,
+    CompletedTurnContext, EditTool, GitWorktreeLeaseManager, ReadTool, ResolvedSpawnAgentTemplate,
+    SpawnAgentContextSource, SpawnAgentTemplateContext, SpawnAgentTemplateResolver,
+    ToolEnvironment, UserQuestionHandler, WebServiceConfig, WriteTool,
     finalize_child_agent_tool_snapshot, register_collaboration_tools,
     register_collaboration_tools_with_template_resolver, register_deferred_tools,
     register_local_tools_with_background, register_state_tools, register_web_tools,
@@ -103,29 +82,18 @@ use keencode_tools::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::{Mutex as AsyncMutex, mpsc, oneshot};
+use tokio::sync::{Mutex as AsyncMutex, oneshot};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-/// 桌面端接收全部 ACP 投递的唯一 Tauri 事件名称。
-pub const ACP_DELIVERY_EVENT: &str = "acp://delivery";
-/// 每个 Session 投递泵允许排队的最大命令数量。
-const DELIVERY_QUEUE_CAPACITY: usize = 256;
-/// 投递队列满时等待一个可用槽位的生产时限。
-const DELIVERY_QUEUE_RESERVE_TIMEOUT: Duration = Duration::from_secs(2);
-/// 命令入队后等待同步投递边界确认的最大时限。
-const DELIVERY_ACK_TIMEOUT: Duration = Duration::from_secs(30);
-/// 等待投递泵处理关闭命令的最大时限。
-const DELIVERY_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// 独立标题请求的硬超时，避免单飞锁被异常端点永久占用。
 const TITLE_GENERATION_TIMEOUT_SECS: u64 = 60;
 /// 自动标题允许的最大 Unicode 标量数量；与前端展示上限保持一致。
@@ -157,9 +125,9 @@ const MAX_COLLABORATION_FAILURE_BYTES: usize = 64 * 1024;
 const MAX_EXTENSION_DIAGNOSTIC_BYTES: usize = 4 * 1024;
 /// 协调器提交文件允许累积保留的等待容量取消证据数量。
 const MAX_UNSTARTED_TURN_TERMINATION_RECORDS: usize = 4_096;
-/// 原生隔离评测默认沿用资源层的每 Session Artifact 数量上限。
+/// 原生隔离验收默认沿用资源层的每 Session Artifact 数量上限。
 const NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT: usize = 1_024;
-/// 原生隔离评测允许的 Artifact 数量覆盖环境变量。
+/// 原生隔离验收允许的 Artifact 数量覆盖环境变量。
 const NATIVE_TEST_ARTIFACT_CAPACITY_ENV: &str = "KEENCODE_NATIVE_TEST_MAX_ARTIFACTS_PER_SESSION";
 /// 原生隔离评测覆盖值的最小合法数量。
 const NATIVE_TEST_ARTIFACT_CAPACITY_MIN: usize = 1;
@@ -169,17 +137,17 @@ const NATIVE_TEST_ARTIFACT_CAPACITY_MAX: usize = 8_192;
 const NATIVE_TEST_ARTIFACT_CAPACITY_ERROR: &str =
     "KEENCODE_NATIVE_TEST_MAX_ARTIFACTS_PER_SESSION must be an integer in 1..=8192";
 
-/// 解析原生隔离评测的 Artifact 容量覆盖。
+/// 解析原生隔离验收的 Artifact 容量覆盖。
 ///
 /// 生产构建或非 benchmark 进程即使继承了同名环境变量，也必须继续使用
 /// ArtifactStore 的默认上限。只有两个门控同时成立时，非法值才会 fail-closed；
 /// 解析错误只返回固定说明，避免把环境变量内容带入日志或用户界面。
 fn native_test_artifact_capacity(
-    native_desktop_tests: bool,
+    native_acceptance_enabled: bool,
     benchmark_enabled: bool,
     override_value: Option<&std::ffi::OsStr>,
 ) -> Result<usize, &'static str> {
-    if !native_desktop_tests || !benchmark_enabled {
+    if !native_acceptance_enabled || !benchmark_enabled {
         return Ok(NATIVE_TEST_ARTIFACT_CAPACITY_DEFAULT);
     }
     let Some(override_value) = override_value else {
@@ -264,44 +232,15 @@ pub enum BackgroundTaskCancellationOutcome {
     NotRunning,
 }
 
-/// 桌面 V4 读取后台 Bash 时使用的有界结果；正文来自后台任务持久输出文件。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BackgroundBashOutput {
-    /// 任务当前真实生命周期映射到 ZCode wire 的状态。
-    pub status: &'static str,
-    /// stdout/stderr 合并后的 UTF-8 有界尾部。
-    pub output: String,
-    /// 输出超出本次 wire 上限，或后台 Manager 尚有未返回字节。
-    pub truncated: bool,
-    /// 由 Manager 生成的 stdout 持久文件路径。
-    pub output_path: String,
-}
-
-/// 自研 Runtime 生产装配、Provider 热加载或桌面投递失败。
+/// 自研 Runtime 生产装配或 Provider 热加载失败。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AgentRuntimeError {
     /// 无法创建本地 Runtime 或读取当前配置。
     InitializationFailed,
     /// Session 标识不满足当前资源层约束。
     InvalidSession,
-    /// Session 尚未建立桌面投递世代。
-    SessionDeliveryMissing,
     /// Runtime 已永久关闭。
     RuntimeClosed,
-    /// Session 投递泵已经关闭。
-    DeliveryClosed,
-    /// 当前投递世代先前发生发送错误，禁止继续伪造连续序号。
-    DeliveryPoisoned,
-    /// 投递队列未能在有界时限内取得槽位，命令没有入队。
-    DeliveryQueueTimeout,
-    /// 命令已经入队但回执超时或通道提前关闭，实际投递结果未知。
-    DeliveryOutcomeUnknown,
-    /// 关闭命令未能在有界时限内确认，旧投递世代仍可能在运行。
-    DeliveryShutdownUnknown,
-    /// Session 投递序号已经耗尽。
-    DeliverySequenceExhausted,
-    /// Tauri 无法向桌面窗口发送当前投递。
-    DesktopEmitFailed,
     /// Provider 配置不能原子替换到当前注册表。
     ProviderReloadFailed,
     /// 当前配置没有同时选择可解析的 Provider 与模型。
@@ -324,14 +263,6 @@ pub enum AgentRuntimeError {
     ClientResponseRejected,
     /// Runtime 内部共享状态不可用。
     StateUnavailable,
-}
-
-#[track_caller]
-fn from_runtime(error: RuntimeError) -> AgentRuntimeError {
-    match error {
-        RuntimeError::ProjectionInconsistent => AgentRuntimeError::RuntimeOperationFailed,
-        other => runtime_operation_failed(other),
-    }
 }
 
 // 保留错误归一调用点，原生链路失败时可定位具体 Runtime 操作而非总指向日志助手。
@@ -382,21 +313,7 @@ impl fmt::Display for AgentRuntimeError {
         match self {
             Self::InitializationFailed => formatter.write_str("Agent Runtime 初始化失败"),
             Self::InvalidSession => formatter.write_str("Session 标识无效"),
-            Self::SessionDeliveryMissing => formatter.write_str("Session 投递尚未建立"),
             Self::RuntimeClosed => formatter.write_str("Agent Runtime 已关闭"),
-            Self::DeliveryClosed => formatter.write_str("Session 投递泵已关闭"),
-            Self::DeliveryPoisoned => formatter.write_str("Session 投递世代已停止"),
-            Self::DeliveryQueueTimeout => {
-                formatter.write_str("Session 投递队列已满，未能在时限内入队")
-            }
-            Self::DeliveryOutcomeUnknown => {
-                formatter.write_str("Session 投递结果未知，当前世代已冻结")
-            }
-            Self::DeliveryShutdownUnknown => {
-                formatter.write_str("Session 投递泵关闭结果未知，禁止建立新世代")
-            }
-            Self::DeliverySequenceExhausted => formatter.write_str("Session 投递序号已耗尽"),
-            Self::DesktopEmitFailed => formatter.write_str("桌面事件投递失败"),
             Self::ProviderReloadFailed => formatter.write_str("Provider 热加载失败"),
             Self::ProviderNotConfigured => formatter.write_str("当前没有可用的默认模型"),
             Self::SessionUnavailable => formatter.write_str("Session 不存在或不可恢复"),
@@ -453,8 +370,6 @@ pub(crate) struct LifecycleStartState {
     started: Arc<Mutex<HashSet<(String, HookPhase)>>>,
     active: Arc<Mutex<HashMap<(String, HookPhase), LifecycleStartRecord>>>,
     next_token: Arc<AtomicU64>,
-    #[cfg(test)]
-    completed_callbacks: Arc<AtomicUsize>,
 }
 
 #[derive(Clone)]
@@ -471,32 +386,12 @@ impl LifecycleStartState {
             started: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(Mutex::new(HashMap::new())),
             next_token: Arc::new(AtomicU64::new(1)),
-            #[cfg(test)]
-            completed_callbacks: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)] // 部分原生测试目标会单独编译库测试夹具，不会同时编译其调用模块。
-    pub(crate) fn with_started(started: Arc<Mutex<HashSet<(String, HookPhase)>>>) -> Self {
-        Self {
-            started,
-            active: Arc::new(Mutex::new(HashMap::new())),
-            next_token: Arc::new(AtomicU64::new(1)),
-            #[cfg(test)]
-            completed_callbacks: Arc::new(AtomicUsize::new(0)),
         }
     }
 
     #[cfg(test)]
     pub(crate) fn started(&self) -> Arc<Mutex<HashSet<(String, HookPhase)>>> {
         Arc::clone(&self.started)
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)] // 仅供生命周期并发测试读取回调计数。
-    pub(crate) fn callback_completion_count(&self) -> usize {
-        self.completed_callbacks.load(Ordering::SeqCst)
     }
 
     pub(crate) fn reserve(&self, key: (String, HookPhase), turn_id: String) -> bool {
@@ -550,8 +445,6 @@ impl LifecycleStartState {
     }
 
     fn callback_completed(&self, key: &(String, HookPhase), turn_id: &str, token: u64) -> bool {
-        #[cfg(test)]
-        self.completed_callbacks.fetch_add(1, Ordering::SeqCst);
         let mut active = self
             .active
             .lock()
@@ -684,7 +577,7 @@ pub struct RootTurnOptions {
     pub developer_context: Option<String>,
     /// 本轮开始前必须原子写入 Session 快照的 Plan 模式状态。
     pub plan_enabled: bool,
-    /// 本轮交互式 Client Request 唯一允许送达的 ACP 连接。
+    /// 本轮 typed 问答唯一允许响应的 Native 连接。
     pub elicitation_connection_id: Option<ConnectionId>,
 }
 
@@ -768,18 +661,6 @@ pub struct RuntimeMcpServerSnapshot {
 }
 
 impl RuntimeToolContext {
-    /// 仅供 crate 内测试安全构造隔离上下文，不开放生产装配入口或字段。
-    #[cfg(test)]
-    pub(crate) fn for_extension_test(project_root: PathBuf, plan_guard: PlanGuard) -> Self {
-        Self {
-            agent_type: "general-purpose".to_owned(),
-            lifecycle_start_state: LifecycleStartState::new(),
-            session_id: "extension-chain-session".to_owned(),
-            project_root,
-            plan_guard,
-        }
-    }
-
     pub(crate) fn lifecycle_start_state(&self) -> LifecycleStartState {
         self.lifecycle_start_state.clone()
     }
@@ -877,11 +758,12 @@ pub trait RuntimeExtensionContributor: Send + Sync {
         Vec::new()
     }
 
-    /// 返回项目候选中已经冻结的 MCP 工具实现快照。
+    /// 返回项目候选中已经冻结的 MCP 延迟目录。
     ///
-    /// Session 必须把该快照复制进自己的合成目录，不得共享贡献器的可变目录。
-    fn mcp_tool_implementations(&self) -> Vec<Arc<dyn AgentTool>> {
-        Vec::new()
+    /// 候选持有目录和连接的完整生命周期；每个 Turn 只注册同一候选代次的
+    /// 搜索/执行包装器，不重新连接 Server 或从 Session 配置猜测运行态。
+    fn mcp_tool_catalog(&self) -> Option<Arc<keencode_tools::DeferredToolCatalog>> {
+        None
     }
 
     /// 返回当前项目候选占用的 MCP Server 名称，用于拒绝 Session 同名覆盖。
@@ -2176,8 +2058,9 @@ struct PreparedRootTurn {
     request_context: Vec<Message>,
     /// Runtime TurnStarted 使用的稳定用户输入摘要。
     summary: String,
-    /// 供命令层同时观察“尚未形成起点即失败”的一次性完成通知。
-    completion: oneshot::Sender<Result<(), ()>>,
+    /// 供命令层同时观察“尚未形成起点即失败”的一次性完成通知；错误必须保留
+    /// 稳定的 Runtime 枚举，避免命令层只能看到无上下文的“根回合准备失败”。
+    completion: oneshot::Sender<Result<(), AgentRuntimeError>>,
 }
 
 /// 首次注册固定根 Agent 时从当前 Session Turn 冻结的基础配置。
@@ -2441,11 +2324,32 @@ fn retain_live_frozen_prompts(
     });
 }
 
+/// `RuntimeAgentExecution` 的 Session 级装配依赖；集中资源接线，避免构造函数参数顺序
+/// 成为资源接线的隐含契约。
+struct RuntimeAgentExecutionContext {
+    /// 回到桌面装配根以读取热替换 Provider、扩展、Web 和宿主边界。
+    owner: Weak<AgentRuntime>,
+    /// 全部根与子 Turn 共用的权威 Runtime Session。
+    session: RuntimeSession,
+    /// Session 创建时绑定的规范项目根。
+    project_root: PathBuf,
+    /// Todo、Goal 与 Plan 的唯一生产持久控制器。
+    persistent_state: Arc<PersistentAgentState>,
+    /// 跨 Turn 共享且关闭时必须完整回收的后台进程管理器。
+    background_tasks: Arc<BackgroundTaskManager>,
+    /// Native Host 装配的共享 Tokio 执行器；同步清理线程只借用此 Handle 驱动关闭。
+    executor_handle: tokio::runtime::Handle,
+    /// 只接受不透明 lease 的 Session 独占 Git Worktree 管理器。
+    worktrees: Arc<GitWorktreeLeaseManager>,
+    /// 与协调器原子提交共享的持久补偿账本，启动前必须完成其 Journal 对账。
+    store: Arc<SessionCollaborationStore>,
+}
+
 /// Session 级 V2 执行端：真正创建 Runner 任务并管理取消、静止与系统清理。
 struct RuntimeAgentExecution {
     /// 与协调器原子提交共享的持久补偿账本，启动前必须完成其 Journal 对账。
     store: Arc<SessionCollaborationStore>,
-    /// 回到桌面装配根以读取热替换 Provider、扩展、Web 和投递边界。
+    /// 回到桌面装配根以读取热替换 Provider、扩展、Web 和宿主边界。
     owner: Weak<AgentRuntime>,
     /// 全部根与子 Turn 共用的权威 Runtime Session。
     session: RuntimeSession,
@@ -2457,6 +2361,8 @@ struct RuntimeAgentExecution {
     persistent_state: Arc<PersistentAgentState>,
     /// 跨 Turn 共享且关闭时必须完整回收的后台进程管理器。
     background_tasks: Arc<BackgroundTaskManager>,
+    /// Native Host 装配的共享 Tokio 执行器；同步清理线程只借用此 Handle 驱动关闭。
+    executor_handle: tokio::runtime::Handle,
     /// 只接受不透明 lease 的 Session 独占 Git Worktree 管理器。
     worktrees: Arc<GitWorktreeLeaseManager>,
     /// 反向弱绑定避免 Coordinator 与执行端形成强引用环。
@@ -2468,6 +2374,87 @@ struct RuntimeAgentExecution {
     lifecycle_start_state: LifecycleStartState,
     /// 全树静止等待托管 Turn 数量归零的条件变量。
     idle: Arc<Condvar>,
+}
+
+/// Runner 内的 Goal 工具仍复用同一个持久控制器；该委托只负责把实际变化转成
+/// Runtime 通知，设置页随后从 GoalFileStore 读取完整快照，不缓存工具返回正文。
+struct RuntimeGoalController {
+    state: Arc<PersistentAgentState>,
+    owner: Weak<AgentRuntime>,
+    session_id: String,
+}
+
+impl RuntimeGoalController {
+    fn publish(&self, change: &GoalChange) {
+        if !change.changed {
+            return;
+        }
+        let Some(owner) = self.owner.upgrade() else {
+            return;
+        };
+        owner.publish_goal_changed(
+            &self.session_id,
+            change.current.goal.as_ref().map(|goal| goal.id.clone()),
+            change.current.revision,
+            change
+                .current
+                .goal
+                .as_ref()
+                .map(|goal| goal_status_name(goal.status).to_owned()),
+        );
+    }
+}
+
+impl GoalController for RuntimeGoalController {
+    fn goal_snapshot(&self) -> Result<keencode_agent::GoalSnapshot, RuntimeStateError> {
+        self.state.goal_snapshot()
+    }
+
+    fn create_goal(
+        &self,
+        operation_id: &str,
+        draft: GoalDraft,
+    ) -> Result<GoalChange, RuntimeStateError> {
+        let change = self.state.create_goal(operation_id, draft)?;
+        self.publish(&change);
+        Ok(change)
+    }
+
+    fn update_goal(
+        &self,
+        operation_id: &str,
+        patch: GoalPatch,
+    ) -> Result<GoalChange, RuntimeStateError> {
+        let change = self.state.update_goal(operation_id, patch)?;
+        self.publish(&change);
+        Ok(change)
+    }
+
+    fn transition_goal(
+        &self,
+        operation_id: &str,
+        transition: GoalTransition,
+    ) -> Result<GoalChange, RuntimeStateError> {
+        let change = self.state.transition_goal(operation_id, transition)?;
+        self.publish(&change);
+        Ok(change)
+    }
+
+    fn clear_goal(&self, operation_id: &str) -> Result<GoalChange, RuntimeStateError> {
+        let change = self.state.clear_goal(operation_id)?;
+        self.publish(&change);
+        Ok(change)
+    }
+
+    fn record_goal_usage(
+        &self,
+        operation_id: &str,
+        delta: GoalUsageDelta,
+    ) -> Result<GoalChange, RuntimeStateError> {
+        let change = self.state.record_goal_usage(operation_id, delta)?;
+        self.publish(&change);
+        Ok(change)
+    }
 }
 
 /// 一个根 Session 的完整 Collaboration v2 生产装配。
@@ -2485,7 +2472,7 @@ struct SessionCollaborationRuntime {
 }
 
 impl SessionCollaborationRuntime {
-    /// 幂等停止后台 Shell 完成事件泵，避免 Session 关闭后继续触碰桌面投递。
+    /// 幂等停止后台 Shell 完成事件泵，避免 Session 关闭后继续发布任务终态。
     fn stop_background_completion_pump(&self) -> Result<(), AgentRuntimeError> {
         if let Some(cancel) = self
             .background_completion_cancel
@@ -2548,25 +2535,18 @@ struct RuntimeDynamicInputAcknowledgement {
 
 impl RuntimeAgentExecution {
     /// 创建尚未反向绑定 Coordinator 的 Session 执行端。
-    fn new(
-        owner: Weak<AgentRuntime>,
-        session: RuntimeSession,
-        project_root: PathBuf,
-        persistent_state: Arc<PersistentAgentState>,
-        background_tasks: Arc<BackgroundTaskManager>,
-        worktrees: Arc<GitWorktreeLeaseManager>,
-        store: Arc<SessionCollaborationStore>,
-    ) -> Self {
-        let session_id = session.session_id().as_str().to_owned();
+    fn new(context: RuntimeAgentExecutionContext) -> Self {
+        let session_id = context.session.session_id().as_str().to_owned();
         Self {
-            store,
-            owner,
-            session,
+            store: context.store,
+            owner: context.owner,
+            session: context.session,
             session_id,
-            project_root,
-            persistent_state,
-            background_tasks,
-            worktrees,
+            project_root: context.project_root,
+            persistent_state: context.persistent_state,
+            background_tasks: context.background_tasks,
+            executor_handle: context.executor_handle,
+            worktrees: context.worktrees,
             coordinator: OnceLock::new(),
             state: Arc::new(Mutex::new(RuntimeAgentExecutionState::default())),
             accepting_work: AtomicBool::new(true),
@@ -2643,7 +2623,7 @@ impl RuntimeAgentExecution {
         input_messages: Vec<Message>,
         request_context: Vec<Message>,
         summary: String,
-    ) -> Result<oneshot::Receiver<Result<(), ()>>, AgentRuntimeError> {
+    ) -> Result<oneshot::Receiver<Result<(), AgentRuntimeError>>, AgentRuntimeError> {
         let (completion, receiver) = oneshot::channel();
         if !self.accepting_work.load(Ordering::Acquire) {
             return Err(AgentRuntimeError::RuntimeClosed);
@@ -2705,7 +2685,9 @@ impl RuntimeAgentExecution {
             prepared
         };
         for prepared in prepared {
-            let _ = prepared.completion.send(Err(()));
+            let _ = prepared
+                .completion
+                .send(Err(AgentRuntimeError::RuntimeClosed));
         }
         Ok(())
     }
@@ -2731,8 +2713,11 @@ impl RuntimeAgentExecution {
             }
         }
         drop(state);
-        shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(runtime_operation_failed)
+        shutdown_background_tasks_blocking(
+            Arc::clone(&self.background_tasks),
+            self.executor_handle.clone(),
+        )
+        .map_err(runtime_operation_failed)
     }
 
     /// 判断命令层准备、Runner 执行或后台 Shell 是否仍持有活动工作。
@@ -2772,10 +2757,15 @@ impl RuntimeAgentExecution {
             prepared
         };
         for prepared in prepared {
-            let _ = prepared.completion.send(Err(()));
+            let _ = prepared
+                .completion
+                .send(Err(AgentRuntimeError::RuntimeClosed));
         }
-        shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))
-            .map_err(runtime_operation_failed)
+        shutdown_background_tasks_blocking(
+            Arc::clone(&self.background_tasks),
+            self.executor_handle.clone(),
+        )
+        .map_err(runtime_operation_failed)
     }
 
     /// 为指定扩展候选登记一次性日志，避免每个子 Agent 重复记录。
@@ -4332,7 +4322,9 @@ impl AgentExecutionPort for RuntimeAgentExecution {
         };
         let Some(owner) = self.owner.upgrade() else {
             if let Some(prepared) = prepared_root.take() {
-                let _ = prepared.completion.send(Err(()));
+                let _ = prepared
+                    .completion
+                    .send(Err(AgentRuntimeError::RuntimeOperationFailed));
             }
             return AgentTurnStartResult::PermanentRejectedBeforeSideEffect {
                 error: CollaborationPortError::new("Agent Runtime 已关闭"),
@@ -4343,7 +4335,7 @@ impl AgentExecutionPort for RuntimeAgentExecution {
             Ok(built) => built,
             Err(error) => {
                 if let Some(prepared) = prepared_root.take() {
-                    let _ = prepared.completion.send(Err(()));
+                    let _ = prepared.completion.send(Err(error));
                 }
                 return AgentTurnStartResult::PermanentRejectedBeforeSideEffect {
                     // Runtime 错误只有稳定说明，不包含文件正文、路径或 Provider 凭据。
@@ -4357,7 +4349,9 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                 Ok(state) => state,
                 Err(_) => {
                     if let Some(prepared) = prepared_root.take() {
-                        let _ = prepared.completion.send(Err(()));
+                        let _ = prepared
+                            .completion
+                            .send(Err(AgentRuntimeError::StateUnavailable));
                     }
                     return AgentTurnStartResult::PermanentRejectedBeforeSideEffect {
                         error: CollaborationPortError::new("Agent 执行端状态不可用"),
@@ -4366,7 +4360,9 @@ impl AgentExecutionPort for RuntimeAgentExecution {
             };
             if !self.accepting_work.load(Ordering::Acquire) {
                 if let Some(prepared) = prepared_root.take() {
-                    let _ = prepared.completion.send(Err(()));
+                    let _ = prepared
+                        .completion
+                        .send(Err(AgentRuntimeError::RuntimeClosed));
                 }
                 return AgentTurnStartResult::PermanentRejectedBeforeSideEffect {
                     error: CollaborationPortError::new("Agent 执行端已进入关闭阶段"),
@@ -4407,7 +4403,7 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                     self.idle.notify_all();
                 }
                 if let Some(completion) = completion {
-                    let _ = completion.send(Err(()));
+                    let _ = completion.send(Err(AgentRuntimeError::RuntimeOperationFailed));
                 }
                 return AgentTurnStartResult::PermanentRejectedBeforeSideEffect { error };
             }
@@ -4417,7 +4413,7 @@ impl AgentExecutionPort for RuntimeAgentExecution {
         let agent_id = launch.agent.agent_id.clone();
         let turn_id = launch.turn_id.clone();
         let cancellation = launch.cancellation.clone();
-        tauri::async_runtime::spawn(async move {
+        self.executor_handle.spawn(async move {
             let result = runner.run_turn(request).await;
             let pending_dynamic_input_acknowledgement = match result.as_ref() {
                 Ok(result) => match result.error.as_ref() {
@@ -4467,7 +4463,10 @@ impl AgentExecutionPort for RuntimeAgentExecution {
                     }
                 }
             };
-            let command_result = result.as_ref().map(|_| ()).map_err(|_| ());
+            let command_result = result
+                .as_ref()
+                .map(|_| ())
+                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed);
             let outcome = runtime_turn_outcome(result);
             if let Ok(mut state) = execution_state.lock()
                 && let Some(turn) = state.running_turns.get_mut(&turn_id)
@@ -4618,7 +4617,10 @@ impl AgentExecutionPort for RuntimeAgentExecution {
 
     /// 在专用系统线程中等待异步后台进程回收，再按受管 lease 清理 Worktree。
     fn close_tree(&self, request: CloseAgentTree) -> Result<(), CollaborationPortError> {
-        shutdown_background_tasks_blocking(Arc::clone(&self.background_tasks))?;
+        shutdown_background_tasks_blocking(
+            Arc::clone(&self.background_tasks),
+            self.executor_handle.clone(),
+        )?;
         self.worktrees
             .release_many(&request.worktree_leases)
             .map(|_| ())
@@ -4798,34 +4800,31 @@ fn bounded_extension_diagnostic(value: &str) -> String {
     format!("{}{suffix}", &sanitized[..boundary])
 }
 
-/// 在 Tokio worker 之外执行异步后台任务关闭，避免同步端口嵌套 block_on。
+/// 在专用同步线程借用共享 Tokio 执行器关闭后台任务，避免同步端口嵌套 block_on。
+///
+/// `BackgroundTaskManager::shutdown` 会等待每个子进程树进入终态；调用方仍需
+/// 保留这条阻塞边界，不能在同步 Collaboration 端口中直接 poll 或丢弃 future。
 fn shutdown_background_tasks_blocking(
     manager: Arc<BackgroundTaskManager>,
+    executor_handle: tokio::runtime::Handle,
 ) -> Result<(), CollaborationPortError> {
-    std::thread::Builder::new()
+    let join_handle = std::thread::Builder::new()
         .name("keencode-agent-background-shutdown".to_owned())
-        .spawn(move || tauri::async_runtime::block_on(manager.shutdown()))
-        .map_err(|_| CollaborationPortError::new("无法创建后台任务关闭线程"))?
+        .spawn(move || {
+            executor_handle
+                .block_on(manager.shutdown())
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })
+        .map_err(|_| CollaborationPortError::new("无法创建后台任务关闭线程"))?;
+
+    let result = join_handle
         .join()
-        .map_err(|_| CollaborationPortError::new("后台任务关闭线程异常退出"))?
-        .map(|_| ())
-        .map_err(|_| CollaborationPortError::new("后台任务关闭失败"))
+        .map_err(|_| CollaborationPortError::new("后台任务关闭线程异常退出"))?;
+    result.map_err(CollaborationPortError::new)
 }
 
 impl Error for AgentRuntimeError {}
-
-/// 一个能声明待决请求并严格处理完整 JSON-RPC 响应的路由。
-pub trait ClientRequestRouter: Send + Sync {
-    /// 判断请求标识是否属于当前路由的待决账本。
-    fn contains_pending(&self, request_id: &str) -> bool;
-
-    /// 校验来源连接后严格处理响应，错误说明不得包含敏感载荷。
-    fn respond_from_connection(
-        &self,
-        connection_id: &ConnectionId,
-        response_json: &str,
-    ) -> Result<(), String>;
-}
 
 /// 自研 Runtime 的进程内唯一桌面装配根。
 /// 跨层转发的任务终态通知：后台 Shell 与子代理共用同一注入通道。
@@ -4856,6 +4855,69 @@ pub enum TaskNoticeKind {
     Agent,
 }
 
+/// 将后台任务的 Unix 毫秒启动时间格式化为 UTC RFC 3339 毫秒文本。
+fn background_task_started_at(unix_ms: u64) -> Result<String, AgentRuntimeError> {
+    let unix_ms = i64::try_from(unix_ms).map_err(runtime_operation_failed)?;
+    Utc.timestamp_millis_opt(unix_ms)
+        .single()
+        .map(|time| time.to_rfc3339_opts(SecondsFormat::Millis, true))
+        .ok_or(AgentRuntimeError::RuntimeOperationFailed)
+}
+
+/// 将单调时钟持续时间转换为不会溢出的前端毫秒数。
+fn duration_milliseconds(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// 将 Agent Goal 状态转换为稳定的小写名称。
+fn goal_status_name(status: GoalStatus) -> &'static str {
+    match status {
+        GoalStatus::Active => "active",
+        GoalStatus::Paused => "paused",
+        GoalStatus::Completed => "completed",
+        GoalStatus::Blocked => "blocked",
+    }
+}
+
+/// 将后台 Shell 的终态送入独立任务通知中继；它不再依赖 ACP UI 投递世代。
+async fn run_background_task_completion_pump(
+    runtime: Weak<AgentRuntime>,
+    session_id: String,
+    mut completions: tokio::sync::broadcast::Receiver<BackgroundTaskCompletion>,
+    mut cancelled: oneshot::Receiver<()>,
+) {
+    loop {
+        let completion = tokio::select! {
+            _ = &mut cancelled => break,
+            result = completions.recv() => match result {
+                Ok(completion) => completion,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+        };
+        if completion.session_id != session_id {
+            continue;
+        }
+        if completion.status == BackgroundTaskStatus::Failed {
+            tracing::error!(session_id, task_id = %completion.task_id, "background shell failed");
+        }
+        let Some(runtime) = runtime.upgrade() else {
+            break;
+        };
+        // 上层 Host 通知泵把终态格式化为 task-notification 并注入主对话；
+        // 没有订阅者时广播通道会按既有语义静默丢弃。
+        let _ = runtime.task_notification_tx.send(TaskTerminalNotice {
+            session_id: session_id.clone(),
+            task_id: completion.task_id.clone(),
+            kind: TaskNoticeKind::Shell,
+            status_text: completion.status.as_str(),
+            duration_ms: completion.duration_ms,
+            summary: Some(completion.summary.clone()).filter(|summary| !summary.is_empty()),
+            agent_id: None,
+        });
+    }
+}
+
 pub struct AgentRuntime {
     /// 三种厂商协议共享的原子热替换 Provider 注册表。
     provider_registry: ProviderRegistry,
@@ -4869,23 +4931,11 @@ pub struct AgentRuntime {
     runtime_manager: RuntimeManager,
     /// 本地 Runtime 与工具 Artifact 共同使用的应用数据根。
     storage_root: PathBuf,
-    /// 仅评测根 Agent 使用；子 Agent 沿用已冻结的父工具快照。
-    #[cfg(feature = "benchmark")]
-    benchmark_tool_allowlist: Option<Vec<String>>,
-    /// 仅评测使用：工作区白名单守卫，开启后文件与命令路径限定在工作目录内。
-    #[cfg(feature = "benchmark")]
-    benchmark_workspace_guard: bool,
-    /// 每个已连接 Session 当前唯一的桌面投递世代。
-    deliveries: Mutex<HashMap<String, SessionDeliverySender>>,
-    /// 每个 Session 串行化投递世代替换和关闭，避免旧泵仍在运行时发布新泵。
-    delivery_reset_gates: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
-    /// 每个 Session 当前唯一 Runtime 订阅泵及其显式停止通道。
-    live_pumps: Mutex<HashMap<String, (u64, oneshot::Sender<()>)>>,
-    /// 为订阅泵分配不复用的进程内世代，防止旧泵清理新泵状态。
-    next_live_pump_generation: AtomicU64,
-    /// Elicitation 等 Agent 到 Client 请求的可注入路由。
-    client_request_routers: RwLock<Vec<Arc<dyn ClientRequestRouter>>>,
-    /// 全部 Session 共享且不恢复旧问答的标准 ACP Elicitation 协调器。
+    /// 原生宿主装配的本地记忆服务；记忆只作为 root request-only 上下文进入模型。
+    memory_service: RwLock<Option<Arc<MemoryService>>>,
+    /// 应用设置快照中的本地记忆开关，不因请求参数或 Session 状态自行改变。
+    local_memories_enabled: AtomicBool,
+    /// 全部 Session 共享且不恢复旧问答的 Native typed Elicitation 协调器。
     elicitations: Arc<ElicitationCoordinator>,
     /// 全部真实工具共享的权限审批门；冷恢复未重放 mode 时默认为 build。
     permissions: Arc<PermissionCoordinator>,
@@ -4893,9 +4943,11 @@ pub struct AgentRuntime {
     workflow_tool_port: RwLock<Option<Arc<dyn WorkflowToolPort>>>,
     /// actor 到父会话的问答投递映射；值只保存 Session 身份，不保存问题正文。
     workflow_elicitation_routes: RwLock<HashMap<String, String>>,
-    /// 当前桌面窗口聚焦的唯一 Session；仅用于通知路由，不参与授权。
-    focused_session: RwLock<Option<String>>,
-    /// WebFetch 与 WebSearch 当前原子配置；为空时工具表不暴露网络工具。
+    /// 当前桌面窗口焦点及其变化通知；设置页直接从同一份 watch 状态读取和订阅。
+    focus_change_tx: tokio::sync::watch::Sender<Option<String>>,
+    /// Goal 文件不属于 Session Journal；用独立的进程内通知让设置页及时重读其事实源。
+    goal_change_tx: tokio::sync::broadcast::Sender<GoalChangeNotice>,
+    /// WebFetch/WebSearch 的检索网关配置；这是 Agent 工具能力，不属于 UI Web 宿主。
     web_service: RwLock<Option<WebServiceConfig>>,
     /// 当前后台 Agent 设置；同时作为设备级和每根树的子 Agent 上限。
     background_agent_limit: AtomicUsize,
@@ -4910,24 +4962,20 @@ pub struct AgentRuntime {
     session_start_admissions: Mutex<HashMap<String, usize>>,
     /// 只协调 deferred draft 的短生命周期；Session 正文和状态仍只在 Journal 中。
     deferred_session_lifecycle: Mutex<HashMap<String, DeferredSessionLifecycle>>,
-    /// 每个 Session 串行化标题付费请求；关闭投递时移除，容量只随打开 Session 增长。
+    /// 每个 Session 串行化标题付费请求；关闭 Session 时移除，容量只随打开 Session 增长。
     title_generation_gates: Mutex<HashMap<String, Arc<TitleGeneration>>>,
     /// 按规范项目根隔离、仅在完整构建成功后原子发布的扩展候选。
     extension_candidates: RwLock<HashMap<PathBuf, Arc<RuntimeExtensionCandidate>>>,
+    /// 设置域写入扩展资源后递增的项目级刷新 epoch；epoch 只影响下一次候选构建，
+    /// 不会撤换当前仍可能被活动 Turn 使用的候选。
+    extension_candidate_refresh_epochs: Mutex<HashMap<PathBuf, u64>>,
+    /// 每个项目最近一次成功发布候选所确认的刷新 epoch。
+    extension_candidate_published_epochs: Mutex<HashMap<PathBuf, u64>>,
     /// 已打开 Session 的 Composer 扩展引用快照；只保存公开投影，不持有正文或凭据。
     session_extension_reference_catalogs: RwLock<HashMap<String, SessionExtensionReferenceCatalog>>,
     /// 串行化项目候选发布与 MCP 撤销，避免旧传播覆盖新候选状态。
     extension_candidate_change_gate: Mutex<()>,
-    /// 每个已打开 Session 独立持有的合成 MCP 目录与动态连接生命周期。
-    session_mcp: Mutex<HashMap<String, Arc<session_mcp::SessionMcpRuntime>>>,
-    /// Tauri 或测试环境提供的同步可靠投递边界。
-    emitter: Arc<dyn DeliveryEmitter>,
-    /// 进程内脱敏观测出口；测试/headless 装配可以省略，但生产桌面必须共享
-    /// Diagnostics 的同一实例，保证 Agent、工具和 Host 事件落在同一快照。
-    observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
-    /// 当前 Runtime 创建的投递世代使用的时间边界；生产装配固定使用有界生产配置。
-    delivery_timeouts: DeliveryTimeouts,
-    /// 关闭后禁止建立新投递世代或热加载配置。
+    /// 关闭后禁止建立新 Session 或热加载配置。
     closed: AtomicBool,
     /// 串行化进程退出，并保留首次失败结果，避免失败后重复调用伪造成功。
     shutdown_error: Mutex<Option<AgentRuntimeError>>,
@@ -4936,6 +4984,14 @@ pub struct AgentRuntime {
     /// 全局后台任务完成中继：把每个 Session 泵捕获的终态（后台 Shell 与
     /// 子代理）转发给上层（AcpHost 通知泵），用于把任务完成注入主对话。
     task_notification_tx: tokio::sync::broadcast::Sender<TaskTerminalNotice>,
+    /// Native Host 装配的共享 Tokio 执行器；所有 Session completion pump 均提交到这里。
+    executor_handle: tokio::runtime::Handle,
+}
+
+/// Goal 持久化变化的最小运行时通知；正文和状态仍由 GoalFileStore 提供。
+#[derive(Clone, Debug)]
+pub(crate) struct GoalChangeNotice {
+    pub(crate) session_id: String,
 }
 
 #[derive(Default)]
@@ -5037,58 +5093,65 @@ impl SessionMutationAdmission {
 
 /// Agent Runtime 的平台无关构造输入。
 ///
-/// `AppHandle`、Tauri 事件和 Provider 配置读取留在桌面 adapter；headless Host
-/// 只需要提供自己的持久化根、投递器和已装配的 Provider 注册表即可复用同一 Runtime。
+/// Native Host 只需要提供持久化根和已装配的 Provider 注册表即可复用同一 Runtime；
+/// 路径解析、事件边界和配置读取均由宿主装配层负责。
 pub(crate) struct AgentRuntimeBuildConfig {
     /// Runtime 使用的本地数据根目录。
     pub(crate) storage_root: PathBuf,
-    /// Session 实时事件投递边界；实现可以是 Tauri、IPC 或测试 sink。
-    pub(crate) emitter: Arc<dyn DeliveryEmitter>,
     /// 当前 Host 代次使用的 Provider 注册表。
     pub(crate) provider_registry: ProviderRegistry,
     /// 可选的请求观测记录器；headless 没有桌面 Analytics 时可以省略。
     pub(crate) analytics: Option<Arc<AnalyticsRecorder>>,
-    /// 可选的结构化观测存储；headless/test 装配不建立桌面 Diagnostics。
-    pub(crate) observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
+    /// 启动时使用的默认 Provider/模型；None 表示尚未配置可调用模型。
+    pub(crate) default_provider: Option<(String, String)>,
+    /// Native Host 创建的唯一 MemoryService；headless/test 装配可以省略。
+    pub(crate) memory_service: Option<Arc<MemoryService>>,
+    /// 启动时读取的应用级本地记忆开关。
+    pub(crate) local_memories_enabled: bool,
+    /// Native Host 的共享 Tokio 执行器句柄；Runtime 不为单个 Session 创建执行器。
+    pub(crate) executor_handle: tokio::runtime::Handle,
+}
+
+#[cfg(test)]
+fn test_executor_handle() -> tokio::runtime::Handle {
+    // 所有测试构造器统一复用进程级多线程执行器。同步 Collaboration 端口可能
+    // 在专用线程中借用 Handle::block_on；不能把 current-thread 测试执行器的
+    // 唯一 worker 同时阻塞在 close_tree 的 join 上。
+    static TEST_EXECUTOR: OnceLock<Arc<tokio::runtime::Runtime>> = OnceLock::new();
+    TEST_EXECUTOR
+        .get_or_init(|| {
+            Arc::new(
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .build()
+                    .expect("测试共享 Tokio 执行器应创建"),
+            )
+        })
+        .handle()
+        .clone()
 }
 
 impl AgentRuntime {
-    /// 从当前 KeenCode 数据根和 Provider 配置创建生产装配根。
-    pub fn build(app: &AppHandle) -> Result<Arc<Self>, AgentRuntimeError> {
-        let storage_root = storage::root_dir(app)
-            .map_err(|error| initialization_failed("storage_root_dir", error))?;
-        let emitter: Arc<dyn DeliveryEmitter> = Arc::new(TauriDeliveryEmitter { app: app.clone() });
-        let analytics = Arc::new(
-            AnalyticsRecorder::new(app)
-                .map_err(|error| initialization_failed("analytics_recorder", error))?,
-        );
-        app.manage(Arc::clone(&analytics));
-        let registry = ProviderRegistry::with_request_observer(analytics.clone());
-        let runtime = Self::build_with_config(AgentRuntimeBuildConfig {
-            storage_root,
-            emitter,
-            provider_registry: registry,
-            analytics: Some(analytics),
-            observability: app
-                .try_state::<Arc<crate::diagnostics::Diagnostics>>()
-                .map(|diagnostics| diagnostics.observability()),
-        })?;
-        runtime
-            .reload_providers(app)
-            .map_err(|error| initialization_failed("reload_providers", error))?;
-        Ok(runtime)
-    }
-
-    /// 使用平台无关输入创建 Runtime；不会读取 Tauri 状态或启动外部服务。
-    pub(crate) fn build_with_config(
+    /// 使用 Native Host 已完成的依赖装配创建 Runtime；此入口不读取进程全局状态，
+    /// 因而同样适用于桌面窗口、独立 ACP Host 和离线测试。
+    pub(crate) fn build_native(
         config: AgentRuntimeBuildConfig,
     ) -> Result<Arc<Self>, AgentRuntimeError> {
-        let runtime = Arc::new(Self::new_with_registry_and_observability(
+        let runtime = Arc::new(Self::new_with_registry(
             config.storage_root,
-            config.emitter,
             config.provider_registry,
-            config.observability,
+            config.executor_handle,
         )?);
+        if let Some(memory_service) = config.memory_service {
+            *runtime
+                .memory_service
+                .write()
+                .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(memory_service);
+        }
+        runtime
+            .local_memories_enabled
+            .store(config.local_memories_enabled, Ordering::Release);
         if let Some(analytics) = config.analytics {
             let weak_runtime = Arc::downgrade(&runtime);
             analytics
@@ -5099,10 +5162,13 @@ impl AgentRuntime {
                 }))
                 .map_err(|error| initialization_failed("model_retry_notifier", error))?;
         }
+        if let Some((provider_id, model)) = config.default_provider {
+            runtime.set_default_provider_selection(&provider_id, &model)?;
+        }
         Ok(runtime)
     }
 
-    /// 将 Provider 已确认安排的下一次尝试发布到当前 Session 实时投递世代。
+    /// 将 Provider 已确认安排的下一次尝试发布到 Runtime Publisher。
     fn publish_model_retry_notice(&self, notice: ModelRetryNotice) {
         let session = match self.runtime_manager.get(notice.session_id.clone()) {
             Ok(session) => session,
@@ -5131,42 +5197,8 @@ impl AgentRuntime {
                 %error,
                 "模型重试状态未能进入 Runtime 实时世代"
             );
-            return;
         }
-        let sender = match self.session_delivery(&notice.session_id) {
-            Ok(sender) => sender,
-            Err(error) => {
-                tracing::error!(session_id = %notice.session_id, %error, "模型重试状态投递失败");
-                return;
-            }
-        };
-        let draft = DeliveryDraft::KeenCodeEvent {
-            turn_id: Some(notice.turn_id),
-            source_agent_id: Some(notice.agent_id),
-            journal_sequence: None,
-            occurred_at_ms,
-            event: KeenCodeEvent::ModelRetryScheduled {
-                attempt: notice.attempt,
-                max_attempts: notice.max_attempts,
-                delay_ms: notice.delay_ms,
-                message,
-            },
-        };
-        let session_id = notice.session_id;
-        tauri::async_runtime::spawn(async move {
-            if let Err(error) = sender.send_live_batch(vec![draft], None).await {
-                tracing::error!(%session_id, %error, "模型重试状态投递失败");
-            }
-        });
-    }
-
-    /// 使用明确存储根和投递器创建尚未连接 Session 的装配根。
-    #[cfg(test)]
-    fn new(
-        storage_root: impl Into<std::path::PathBuf>,
-        emitter: Arc<dyn DeliveryEmitter>,
-    ) -> Result<Self, AgentRuntimeError> {
-        Self::new_with_registry(storage_root, emitter, ProviderRegistry::new())
+        // Native Host 已订阅同一个 Publisher；这里仅追加瞬态 Runtime 事实。
     }
 
     /// 创建不向桌面发送事件的控制面测试 Runtime。
@@ -5174,130 +5206,48 @@ impl AgentRuntime {
     pub(crate) fn new_for_control_test(
         storage_root: impl Into<std::path::PathBuf>,
     ) -> Result<Arc<Self>, AgentRuntimeError> {
-        Self::new(storage_root, Arc::new(ControlTestDeliveryEmitter)).map(Arc::new)
-    }
-
-    /// 创建绑定本地 Buffered Responses Provider 的控制面测试 Runtime。
-    #[cfg(test)]
-    pub(crate) fn new_for_control_test_with_responses_provider(
-        storage_root: impl Into<std::path::PathBuf>,
-        base_url: &str,
-        model: &str,
-    ) -> Result<Arc<Self>, AgentRuntimeError> {
-        let registry = ProviderRegistry::new();
-        let mut config = keencode_provider::ProviderConfig::new_unauthenticated(
-            "provider-control-test",
-            ProviderProtocol::Responses,
-            base_url,
-        )
-        .map_err(runtime_operation_failed)?;
-        config.response_mode = keencode_provider::WireResponseMode::Buffered;
-        config.default_capabilities = ProviderCapabilities {
-            tool_calling: true,
-            ..ProviderCapabilities::default()
-        };
-        let snapshot = registry
-            .replace_all([keencode_provider::ProviderRegistration::new(
-                config,
-                "Control test provider",
-                "control-test-revision",
-                keencode_provider::ProviderModelPolicy::Enumerated {
-                    models: vec![model.to_owned()],
-                },
-            )
-            .map_err(runtime_operation_failed)?])
-            .map_err(runtime_operation_failed)?;
-        let runtime = Arc::new(Self::new_with_registry(
+        Self::new_with_registry(
             storage_root,
-            Arc::new(ControlTestDeliveryEmitter),
-            registry,
-        )?);
-        *runtime
-            .default_provider
-            .write()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(DefaultProviderBinding {
-            provider_id: "provider-control-test".to_owned(),
-            model: model.to_owned(),
-            generation: snapshot.generation,
-        });
-        Ok(runtime)
+            ProviderRegistry::new(),
+            test_executor_handle(),
+        )
+        .map(Arc::new)
     }
 
-    /// 使用明确 Provider 注册表创建测试或生产装配根。
-    #[allow(dead_code)]
+    /// 创建不绑定桌面传输的 Runtime 单元测试实例。
+    #[cfg(test)]
+    fn new(storage_root: impl Into<std::path::PathBuf>) -> Result<Self, AgentRuntimeError> {
+        Self::new_with_registry(
+            storage_root,
+            ProviderRegistry::new(),
+            test_executor_handle(),
+        )
+    }
+
+    /// 使用明确 Provider 注册表创建无桌面传输的 Runtime 装配根。
     fn new_with_registry(
         storage_root: impl Into<std::path::PathBuf>,
-        emitter: Arc<dyn DeliveryEmitter>,
         provider_registry: ProviderRegistry,
-    ) -> Result<Self, AgentRuntimeError> {
-        Self::new_with_registry_and_delivery_timeouts(
-            storage_root,
-            emitter,
-            provider_registry,
-            DeliveryTimeouts::production(),
-            None,
-        )
-    }
-
-    /// 使用明确 Provider 注册表和结构化观测出口创建 Runtime；生产装配通过
-    /// [`AgentRuntime::build`] 注入 Diagnostics，测试默认保持无观测副作用。
-    fn new_with_registry_and_observability(
-        storage_root: impl Into<std::path::PathBuf>,
-        emitter: Arc<dyn DeliveryEmitter>,
-        provider_registry: ProviderRegistry,
-        observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
-    ) -> Result<Self, AgentRuntimeError> {
-        Self::new_with_registry_and_delivery_timeouts(
-            storage_root,
-            emitter,
-            provider_registry,
-            DeliveryTimeouts::production(),
-            observability,
-        )
-    }
-
-    /// 使用指定投递时间边界创建 Runtime；仅测试需要缩短等待时使用。
-    #[cfg(test)]
-    fn new_with_delivery_timeouts(
-        storage_root: impl Into<std::path::PathBuf>,
-        emitter: Arc<dyn DeliveryEmitter>,
-        delivery_timeouts: DeliveryTimeouts,
-    ) -> Result<Self, AgentRuntimeError> {
-        Self::new_with_registry_and_delivery_timeouts(
-            storage_root,
-            emitter,
-            ProviderRegistry::new(),
-            delivery_timeouts,
-            None,
-        )
-    }
-
-    /// 使用明确 Provider 注册表和投递时间边界创建 Runtime 的内部装配函数。
-    fn new_with_registry_and_delivery_timeouts(
-        storage_root: impl Into<std::path::PathBuf>,
-        emitter: Arc<dyn DeliveryEmitter>,
-        provider_registry: ProviderRegistry,
-        delivery_timeouts: DeliveryTimeouts,
-        observability: Option<Arc<crate::diagnostics::observability::ObservabilityStore>>,
+        executor_handle: tokio::runtime::Handle,
     ) -> Result<Self, AgentRuntimeError> {
         let storage_root = storage_root.into();
-        let native_desktop_tests = cfg!(feature = "native-desktop-tests");
+        let native_acceptance_enabled =
+            std::env::var("KEENCODE_NATIVE_ACCEPTANCE").as_deref() == Ok("1");
         let benchmark_enabled =
             std::env::var_os("KEENCODE_BENCHMARK").as_deref() == Some(std::ffi::OsStr::new("1"));
-        let native_test_artifact_override = if native_desktop_tests && benchmark_enabled {
+        let native_test_artifact_override = if native_acceptance_enabled && benchmark_enabled {
             std::env::var_os(NATIVE_TEST_ARTIFACT_CAPACITY_ENV)
         } else {
             None
         };
         let resolved_native_test_artifact_capacity = native_test_artifact_capacity(
-            native_desktop_tests,
+            native_acceptance_enabled,
             benchmark_enabled,
             native_test_artifact_override.as_deref(),
         )
         .map_err(|error| initialization_failed("native_test_artifact_capacity", error))?;
         let mut runtime_config = RuntimeConfig::new(storage_root.clone());
-        if native_desktop_tests && benchmark_enabled {
-            // 仅隔离 native benchmark 可调高容量，生产与普通测试保持 ArtifactStore 默认值。
+        if native_acceptance_enabled && benchmark_enabled {
             runtime_config.artifacts.max_artifacts_per_session =
                 resolved_native_test_artifact_capacity;
         }
@@ -5309,13 +5259,13 @@ impl AgentRuntime {
             Arc::clone(&client_request_gate),
             Arc::clone(&app_runtime_preferences),
         ));
-        let elicitation_router: Arc<dyn ClientRequestRouter> = elicitations.clone();
         let permissions = Arc::new(PermissionCoordinator::new());
         let background_agent_limit = DEFAULT_BACKGROUND_AGENT_LIMIT as usize;
         let collaboration_global_turn_limiter = Arc::new(
             CollaborationGlobalTurnLimiter::new(background_agent_limit)
                 .map_err(runtime_operation_failed)?,
         );
+        let (focus_change_tx, _) = tokio::sync::watch::channel::<Option<String>>(None);
         Ok(Self {
             provider_registry,
             provider_reload: Mutex::new(()),
@@ -5323,20 +5273,14 @@ impl AgentRuntime {
             app_runtime_preferences,
             runtime_manager,
             storage_root,
-            #[cfg(feature = "benchmark")]
-            benchmark_tool_allowlist: None,
-            #[cfg(feature = "benchmark")]
-            benchmark_workspace_guard: false,
-            deliveries: Mutex::new(HashMap::new()),
-            delivery_reset_gates: Mutex::new(HashMap::new()),
-            live_pumps: Mutex::new(HashMap::new()),
-            next_live_pump_generation: AtomicU64::new(0),
-            client_request_routers: RwLock::new(vec![elicitation_router]),
+            memory_service: RwLock::new(None),
+            local_memories_enabled: AtomicBool::new(false),
             elicitations,
             permissions,
             workflow_tool_port: RwLock::new(None),
             workflow_elicitation_routes: RwLock::new(HashMap::new()),
-            focused_session: RwLock::new(None),
+            focus_change_tx,
+            goal_change_tx: tokio::sync::broadcast::channel(64).0,
             web_service: RwLock::new(None),
             background_agent_limit: AtomicUsize::new(background_agent_limit),
             collaboration_global_turn_limiter,
@@ -5346,16 +5290,15 @@ impl AgentRuntime {
             deferred_session_lifecycle: Mutex::new(HashMap::new()),
             title_generation_gates: Mutex::new(HashMap::new()),
             extension_candidates: RwLock::new(HashMap::new()),
+            extension_candidate_refresh_epochs: Mutex::new(HashMap::new()),
+            extension_candidate_published_epochs: Mutex::new(HashMap::new()),
             session_extension_reference_catalogs: RwLock::new(HashMap::new()),
             extension_candidate_change_gate: Mutex::new(()),
-            session_mcp: Mutex::new(HashMap::new()),
-            emitter,
-            observability,
-            delivery_timeouts,
             closed: AtomicBool::new(false),
             shutdown_error: Mutex::new(None),
             shutdown_gate: AsyncMutex::new(()),
             task_notification_tx: tokio::sync::broadcast::channel(256).0,
+            executor_handle,
         })
     }
 
@@ -5364,6 +5307,23 @@ impl AgentRuntime {
         &self,
     ) -> tokio::sync::broadcast::Receiver<TaskTerminalNotice> {
         self.task_notification_tx.subscribe()
+    }
+
+    /// 订阅 Goal 文件变化；设置页等投影只据此触发重读，不缓存 Goal 正文。
+    pub(crate) fn subscribe_goal_changes(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<GoalChangeNotice> {
+        self.goal_change_tx.subscribe()
+    }
+
+    /// 订阅桌面窗口焦点变化；设置页用它切换当前 Session 的实时事件流。
+    pub(crate) fn subscribe_focus_changes(&self) -> tokio::sync::watch::Receiver<Option<String>> {
+        self.focus_change_tx.subscribe()
+    }
+
+    /// Runtime 正在收口时让后台投影观察者退出，避免保留执行器任务。
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
     }
 
     /// 返回三种厂商协议共享的 Provider 注册表。
@@ -5613,23 +5573,25 @@ impl AgentRuntime {
         }
     }
 
-    /// 交接期间拒绝读取侧重新打开已关闭 Session；恢复路径使用内部直接入口。
-    pub(crate) fn workspace_mutation_in_progress(
-        &self,
-        session_id: &str,
-    ) -> Result<bool, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        Ok(self
-            .deferred_session_lifecycle
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            == Some(&DeferredSessionLifecycle::Closing))
-    }
-
     /// 返回项目与 Session 定位索引所在的数据根目录。
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
+    }
+
+    /// 注册 Native Host 的真实 Workflow AgentTool 端口；工具只会在后续普通
+    /// root Turn 冻结时加入，已冻结的工具表不会被运行中途修改。
+    pub(crate) fn set_workflow_tool_port(
+        &self,
+        port: Arc<dyn WorkflowToolPort>,
+    ) -> Result<(), AgentRuntimeError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        *self
+            .workflow_tool_port
+            .write()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(port);
+        Ok(())
     }
 
     /// 返回进程内唯一 Elicitation 协调器，AskUser 不得建立旁路待决账本。
@@ -5639,6 +5601,11 @@ impl AgentRuntime {
 
     /// 返回真实工具权限协调器；AskUser 问答不得复用这条审批账本。
     pub(crate) fn permission_coordinator(&self) -> &Arc<PermissionCoordinator> {
+        &self.permissions
+    }
+
+    /// 返回 Native Host 使用的权限协调器；其状态仍由 Runtime 唯一持有。
+    pub(crate) fn permissions(&self) -> &Arc<PermissionCoordinator> {
         &self.permissions
     }
 
@@ -5654,48 +5621,46 @@ impl AgentRuntime {
             .pending_views_for_connection(parent_session_id, connection_id))
     }
 
-    /// 返回当前父 Session 可见的权限 pending 数量，供投影摘要使用。
-    pub(crate) fn pending_permission_count(&self, session_id: &str) -> usize {
-        self.permissions.pending_count_for_session(session_id)
-    }
-
-    /// 订阅权限 pending 的投影刷新通知；正文由连接范围读取方法提供。
-    pub(crate) fn subscribe_permission_changes(
-        &self,
-    ) -> tokio::sync::broadcast::Receiver<PermissionChange> {
-        self.permissions.subscribe_changes()
-    }
-
-    /// 在 Session owner 完成 Journal 提交后发布 mode；未调用时保持 build。
-    pub(crate) fn set_permission_mode(
+    /// 按稳定 operationId 将权限模式写入 Session Journal，并同步内存审批门。
+    pub(crate) fn set_permission_mode_with_operation(
         &self,
         session_id: &str,
+        operation_id: &str,
         mode: PermissionMode,
-    ) -> Result<(), AgentRuntimeError> {
+    ) -> Result<SessionState, AgentRuntimeError> {
         validate_session_id(session_id)?;
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentRuntimeError::RuntimeClosed);
         }
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        let state = session
+            .set_permission_mode(operation_id, resource_permission_mode(mode))
+            .map_err(runtime_operation_failed)?;
         self.permissions.set_mode(session_id, mode);
-        Ok(())
+        Ok(state)
     }
 
-    /// 解析并发布 V4 workspace mode；未知值安全回退 build。
-    pub(crate) fn set_permission_mode_from_wire(
+    /// 按稳定 operationId 将视觉输入开关写入 Session Journal。
+    pub(crate) fn set_vision_enabled_with_operation(
         &self,
         session_id: &str,
-        mode: Option<&str>,
-    ) -> Result<(), AgentRuntimeError> {
-        self.set_permission_mode(session_id, PermissionMode::from_wire(mode))
-    }
-
-    /// 读取当前有效权限 mode；冷恢复未重放时安全返回 build。
-    pub(crate) fn permission_mode(
-        &self,
-        session_id: &str,
-    ) -> Result<PermissionMode, AgentRuntimeError> {
+        operation_id: &str,
+        enabled: bool,
+    ) -> Result<SessionState, AgentRuntimeError> {
         validate_session_id(session_id)?;
-        Ok(self.permissions.mode(session_id))
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+        session
+            .set_vision_enabled(operation_id, enabled)
+            .map_err(runtime_operation_failed)
     }
 
     /// 绑定 root Session 当前唯一可回答权限的连接。
@@ -5720,33 +5685,14 @@ impl AgentRuntime {
             })
     }
 
-    /// 收口指定连接上的权限等待；连接关闭时必须与 Elicitation 同步释放。
+    /// 原生连接关闭时收口其全部权限等待，避免审批 Future 脱离 Host 后悬挂。
     pub(crate) fn disconnect_permission_connection(&self, connection_id: &ConnectionId) {
         self.permissions.disconnect(connection_id);
     }
 
-    /// 注册 Workflow Host 的真实 AgentTool 端口；工具只会在后续普通 root 冻结时加入。
+    /// 让 Workflow actor 复用父会话已绑定的 Native typed 连接，并把问答显示在父 conversation。
     ///
-    /// 端口本身不持有模型或 Session 状态，调用方必须在首次 root Turn 装配前绑定，
-    /// 以便 root 的 `tool_snapshot` 与持久协调器同时冻结这些能力。
-    pub(crate) fn set_workflow_tool_port(
-        &self,
-        port: Arc<dyn WorkflowToolPort>,
-    ) -> Result<(), AgentRuntimeError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        *self
-            .workflow_tool_port
-            .write()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(port);
-        Ok(())
-    }
-
-    /// 让 Workflow actor 复用父会话已协商的 form 连接，并把问答显示在父 conversation。
-    ///
-    /// 没有已绑定连接或连接未声明 form 时保持未暴露状态，不能伪造 initialize 能力；
-    /// actor 下一次冷恢复会再次尝试绑定当前父连接。
+    /// 没有已绑定连接时保持未暴露状态；actor 下一次冷恢复会再次尝试绑定当前父连接。
     pub(crate) fn bind_workflow_actor_elicitation(
         &self,
         actor_session_id: &str,
@@ -5770,7 +5716,7 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
         if let Some(connection) = connection.filter(|_| can_route) {
             self.elicitations
-                .bind_session_connection(actor_session_id, &connection)
+                .bind_native_session(actor_session_id, &connection)
                 .map_err(runtime_operation_failed)?;
             routes.insert(actor_session_id.to_owned(), parent_session_id.to_owned());
         } else {
@@ -5831,125 +5777,7 @@ impl AgentRuntime {
             })
     }
 
-    /// 收口 V4 interaction 的真实 pending 问答；普通父会话和投影到父连接的 actor
-    /// 共用同一条入口，答案字段由 ElicitationCoordinator 按原始问题 Schema 解释。
-    pub(crate) fn resolve_interaction(
-        &self,
-        session_id: &str,
-        connection_id: &ConnectionId,
-        request_id: &str,
-        answer_json: &str,
-    ) -> Result<(), AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if request_id.trim().is_empty() {
-            return Err(AgentRuntimeError::UnknownClientRequest);
-        }
-        if self.permissions.contains_pending(request_id) {
-            return self
-                .permissions
-                .resolve_from_connection(session_id, connection_id, request_id, answer_json)
-                .map_err(|error| match error {
-                    crate::permissions::PermissionBridgeError::UnknownRequest => {
-                        AgentRuntimeError::UnknownClientRequest
-                    }
-                    _ => AgentRuntimeError::ClientResponseRejected,
-                });
-        }
-        let pending_session_id = self
-            .elicitations
-            .pending_session_id_for_request(request_id)
-            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
-        let pending_connection = self
-            .elicitations
-            .pending_connection_for_request(request_id)
-            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
-        if &pending_connection != connection_id {
-            return Err(AgentRuntimeError::ClientResponseRejected);
-        }
-        let session_connection = self
-            .elicitations
-            .session_connection(session_id)
-            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
-        if session_connection != *connection_id {
-            return Err(AgentRuntimeError::ClientResponseRejected);
-        }
-        if pending_session_id != session_id {
-            let routed_parent = self
-                .workflow_elicitation_routes
-                .read()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                .get(&pending_session_id)
-                .cloned()
-                .ok_or(AgentRuntimeError::ClientResponseRejected)?;
-            if routed_parent != session_id {
-                return Err(AgentRuntimeError::ClientResponseRejected);
-            }
-        }
-        self.elicitations
-            .respond_workflow_answer_from_connection(connection_id, request_id, answer_json)
-            .map_err(|error| match error {
-                crate::elicitation::ElicitationBridgeError::UnknownRequest => {
-                    AgentRuntimeError::UnknownClientRequest
-                }
-                _ => AgentRuntimeError::ClientResponseRejected,
-            })
-    }
-
-    /// 按父 Session、连接和 actor 路由暂停 AskUser 的自动继续计时。
-    ///
-    /// 该入口只触碰 Elicitation 协调器；权限 pending 不能借用同一命令改变状态，
-    /// 连接校验与 `resolve_interaction` 保持同一授权边界。
-    pub(crate) fn snooze_interaction_auto_resolution(
-        &self,
-        session_id: &str,
-        connection_id: &ConnectionId,
-        request_id: &str,
-    ) -> Result<bool, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if request_id.trim().is_empty() || self.permissions.contains_pending(request_id) {
-            return Err(AgentRuntimeError::ClientResponseRejected);
-        }
-        let pending_session_id = self
-            .elicitations
-            .pending_session_id_for_request(request_id)
-            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
-        let pending_connection = self
-            .elicitations
-            .pending_connection_for_request(request_id)
-            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
-        if &pending_connection != connection_id {
-            return Err(AgentRuntimeError::ClientResponseRejected);
-        }
-        let session_connection = self
-            .elicitations
-            .session_connection(session_id)
-            .ok_or(AgentRuntimeError::ClientResponseRejected)?;
-        if session_connection != *connection_id {
-            return Err(AgentRuntimeError::ClientResponseRejected);
-        }
-        if pending_session_id != session_id {
-            let routed_parent = self
-                .workflow_elicitation_routes
-                .read()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                .get(&pending_session_id)
-                .cloned()
-                .ok_or(AgentRuntimeError::ClientResponseRejected)?;
-            if routed_parent != session_id {
-                return Err(AgentRuntimeError::ClientResponseRejected);
-            }
-        }
-        self.elicitations
-            .snooze_auto_resolution_from_connection(connection_id, request_id)
-            .map_err(|error| match error {
-                crate::elicitation::ElicitationBridgeError::UnknownRequest => {
-                    AgentRuntimeError::UnknownClientRequest
-                }
-                _ => AgentRuntimeError::ClientResponseRejected,
-            })
-    }
-
-    /// 读取给 V4 会话投影的 pending 问答；正文仍来自 Coordinator 的原始 Schema。
+    /// 读取当前连接可见的 pending 问答；正文仍来自 Coordinator 的原始 Schema。
     ///
     /// 连接必须是父 Session 当前绑定的连接。actor 问答只有在已登记的
     /// actor→parent 路由和 Coordinator display session 同时匹配时才会投影，
@@ -6037,6 +5865,22 @@ impl AgentRuntime {
         if report.dispatch_in_progress() {
             tracing::debug!("后台 Agent 限额已提交；已有全局派发轮次继续处理等待队列");
         }
+        Ok(())
+    }
+
+    /// 原子切换后续请求是否把本地记忆上下文加入模型输入。
+    ///
+    /// 设置页的开关必须更新 Runtime，而不能只启动记忆提取调度器；否则新的
+    /// Prompt 仍会读取启动时冻结的旧值。
+    pub(crate) fn set_local_memories_enabled(
+        &self,
+        enabled: bool,
+    ) -> Result<(), AgentRuntimeError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
+        self.local_memories_enabled
+            .store(enabled, Ordering::Release);
         Ok(())
     }
 
@@ -6162,6 +6006,15 @@ impl AgentRuntime {
             }
         };
         ensure_session_project(&session, &project_root)?;
+        // 权限门只保存当前进程的等待者和连接；每次打开都从 Journal 恢复 mode，
+        // 避免冷启动把持久的 Yolo/Edit/Plan 意外降级为默认 Build。
+        let persisted_permission_mode = session
+            .read_state(|state| state.permission_mode)
+            .map_err(runtime_operation_failed)?;
+        self.permissions.set_mode(
+            session.session_id().as_str(),
+            desktop_permission_mode(persisted_permission_mode),
+        );
         self.freeze_session_reference_catalog_if_available(
             session.session_id().as_str(),
             &project_root,
@@ -6310,24 +6163,7 @@ impl AgentRuntime {
         &self,
         session_id: &str,
         operation_id: &str,
-    ) -> Result<GoalChange, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(runtime_operation_failed)?;
-        let state = PersistentAgentState::open_with_goal_root(session, &self.storage_root)
-            .map_err(runtime_operation_failed)?;
-        state
-            .pause_goal(operation_id)
-            .map_err(runtime_operation_failed)
-    }
-
-    /// 持久恢复当前 Session Goal；只有真实 active Goal 才会交给续跑调度器。
-    pub async fn resume_session_goal(
-        self: &Arc<Self>,
-        session_id: &str,
-        operation_id: &str,
+        expected_revision: u64,
     ) -> Result<GoalChange, AgentRuntimeError> {
         validate_session_id(session_id)?;
         let session = self
@@ -6337,13 +6173,82 @@ impl AgentRuntime {
         let state = PersistentAgentState::open_with_goal_root(session, &self.storage_root)
             .map_err(runtime_operation_failed)?;
         let change = state
-            .resume_goal(operation_id)
+            .pause_goal_if_revision(operation_id, expected_revision)
+            .map_err(runtime_operation_failed)?
+            .ok_or_else(|| {
+                runtime_operation_failed(RuntimeStateError::Conflict {
+                    message: "Goal 修订已变化，请重新加载".to_owned(),
+                })
+            })?;
+        self.publish_goal_changed(
+            session_id,
+            change.current.goal.as_ref().map(|goal| goal.id.clone()),
+            change.current.revision,
+            change
+                .current
+                .goal
+                .as_ref()
+                .map(|goal| goal_status_name(goal.status).to_owned()),
+        );
+        // 先持久化 Paused，再从同一 Journal 快照取得当前根 Turn 并请求取消；
+        // 取消令牌会让 Turn 收口路径跳过 continue_active_goal。
+        let active_root_turn_id = self
+            .runtime_manager
+            .get(session_id.to_owned())
+            .and_then(|session| session.snapshot())
+            .map_err(runtime_operation_failed)?
+            .state
+            .turns
+            .values()
+            .find(|turn| {
+                turn.source_agent_id.as_str() == keencode_resources::ROOT_AGENT_ID
+                    && turn.root_turn_id == turn.turn_id
+                    && turn.status == TurnStatus::Running
+            })
+            .map(|turn| turn.turn_id.as_str().to_owned());
+        if let Some(turn_id) = active_root_turn_id {
+            self.cancel_turn(session_id, &turn_id)?;
+        }
+        Ok(change)
+    }
+
+    /// 持久恢复当前 Session Goal；只有真实 active Goal 才会交给续跑调度器。
+    pub async fn resume_session_goal(
+        self: &Arc<Self>,
+        session_id: &str,
+        operation_id: &str,
+        expected_revision: u64,
+    ) -> Result<GoalChange, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let session = self
+            .runtime_manager
+            .get(session_id.to_owned())
             .map_err(runtime_operation_failed)?;
+        let state = PersistentAgentState::open_with_goal_root(session, &self.storage_root)
+            .map_err(runtime_operation_failed)?;
+        let change = state
+            .resume_goal_if_revision(operation_id, expected_revision)
+            .map_err(runtime_operation_failed)?
+            .ok_or_else(|| {
+                runtime_operation_failed(RuntimeStateError::Conflict {
+                    message: "Goal 修订已变化，请重新加载".to_owned(),
+                })
+            })?;
+        self.publish_goal_changed(
+            session_id,
+            change.current.goal.as_ref().map(|goal| goal.id.clone()),
+            change.current.revision,
+            change
+                .current
+                .goal
+                .as_ref()
+                .map(|goal| goal_status_name(goal.status).to_owned()),
+        );
         if change
             .current
             .goal
             .as_ref()
-            .is_some_and(|goal| goal.status == GoalStatus::Active && change.changed)
+            .is_some_and(|goal| goal.status == GoalStatus::Active)
         {
             self.continue_active_goal(session_id).await?;
         }
@@ -6370,17 +6275,20 @@ impl AgentRuntime {
 
     /// 持久加入一条后续输入。
     pub fn enqueue_session_input(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
         operation_id: &str,
         item: SessionInputQueueItem,
     ) -> Result<RuntimeSnapshot, AgentRuntimeError> {
         validate_session_id(session_id)?;
-        self.runtime_manager
+        let snapshot = self
+            .runtime_manager
             .get(session_id.to_owned())
             .and_then(|session| session.enqueue_input(operation_id, item))
             .map(|_| self.session_snapshot(session_id))
-            .map_err(runtime_operation_failed)?
+            .map_err(runtime_operation_failed)?;
+        self.schedule_automatic_title(session_id);
+        snapshot
     }
 
     /// 修改持久队列中的一条输入。
@@ -6510,7 +6418,23 @@ impl AgentRuntime {
             .get(parent_session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
-        let Some(bound) = snapshot.state.provider.as_ref() else {
+        self.workflow_provider_snapshot_for_bound(
+            parent_session_id,
+            snapshot.state.provider.as_ref(),
+        )
+    }
+
+    /// 按已取得的 Session Provider 绑定解析并校验当前注册表，不重新读取 Session。
+    ///
+    /// 设置页工作流启动会把此方法与同一份 Session 快照中的 cwd、Plan 状态一起使用，
+    /// 确保 `run-started.models` 的 Provider 与其它启动事实来自同一个状态边界。
+    pub(crate) fn workflow_provider_snapshot_for_bound(
+        &self,
+        parent_session_id: &str,
+        bound: Option<&ProviderSnapshot>,
+    ) -> Result<ProviderSnapshot, AgentRuntimeError> {
+        validate_session_id(parent_session_id)?;
+        let Some(bound) = bound else {
             return Ok(provider_snapshot(&self.resolve_default_provider()?));
         };
         let resolved = self.resolve_session_provider(Some(bound))?;
@@ -6605,33 +6529,42 @@ impl AgentRuntime {
         self.runtime_manager
             .get(session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        *self
-            .focused_session
-            .write()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)? = Some(session_id.to_owned());
+        self.focus_change_tx.send_if_modified(|focused| {
+            if focused.as_deref() == Some(session_id) {
+                return false;
+            }
+            *focused = Some(session_id.to_owned());
+            true
+        });
         Ok(())
     }
 
     /// 清除桌面通知焦点，不关闭 Session 或取消 Turn。
     pub fn clear_focus(&self) {
-        if let Ok(mut focused) = self.focused_session.write() {
+        self.focus_change_tx.send_if_modified(|focused| {
+            if focused.is_none() {
+                return false;
+            }
             *focused = None;
-        }
+            true
+        });
     }
 
     /// 返回当前桌面通知焦点的 Session 标识。
     pub fn focused_session_id(&self) -> Result<Option<String>, AgentRuntimeError> {
-        self.focused_session
-            .read()
-            .map(|focused| focused.clone())
-            .map_err(|_| AgentRuntimeError::StateUnavailable)
+        Ok(self.focus_change_tx.borrow().clone())
     }
 
     /// 从磁盘当前唯一配置原子热替换全部 Provider。
-    pub fn reload_providers(
+    /// 用宿主已经解析好的 Provider 注册表代次更新默认选择。
+    ///
+    /// Provider 文件读取与凭据解密属于 `NativeHost` 配置边界，Runtime 只接受
+    /// 已验证的 registry 和选择，避免把任何桌面句柄带入执行层。
+    pub fn set_default_provider_selection(
         &self,
-        app: &AppHandle,
-    ) -> Result<ProviderRegistrySnapshot, AgentRuntimeError> {
+        provider_id: &str,
+        model: &str,
+    ) -> Result<(), AgentRuntimeError> {
         if self.closed.load(Ordering::Acquire) {
             return Err(AgentRuntimeError::RuntimeClosed);
         }
@@ -6639,34 +6572,20 @@ impl AgentRuntime {
             .provider_reload
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        let current = providers::list(app).map_err(provider_reload_failed)?;
-        let snapshot = providers::replace_runtime_registry(&self.provider_registry, &current)
+        let resolved = self
+            .provider_registry
+            .resolve(provider_id, model)
             .map_err(provider_reload_failed)?;
-        let binding = match (&current.active_provider_id, &current.default_model) {
-            (Some(provider_id), Some(model)) => {
-                let resolved = self
-                    .provider_registry
-                    .resolve(provider_id, model)
-                    .map_err(provider_reload_failed)?;
-                if resolved.generation() != snapshot.generation {
-                    return Err(AgentRuntimeError::ProviderReloadFailed);
-                }
-                Some(DefaultProviderBinding {
-                    provider_id: provider_id.clone(),
-                    model: model.clone(),
-                    generation: snapshot.generation,
-                })
-            }
-            (None, None) => None,
-            (Some(_), None) | (None, Some(_)) => {
-                return Err(AgentRuntimeError::ProviderReloadFailed);
-            }
-        };
+        let binding = Some(DefaultProviderBinding {
+            provider_id: provider_id.to_owned(),
+            model: model.to_owned(),
+            generation: resolved.generation(),
+        });
         *self
             .default_provider
             .write()
             .map_err(|_| AgentRuntimeError::StateUnavailable)? = binding;
-        Ok(snapshot)
+        Ok(())
     }
 
     /// 判断当前默认 Provider 与模型能否在同一注册表代次中解析。
@@ -6769,20 +6688,17 @@ impl AgentRuntime {
         revision: u64,
         status: Option<String>,
     ) {
-        let Ok(delivery) = self.session_delivery(source_session_id) else {
-            return;
-        };
-        let _ = delivery.send_batch_detached(vec![DeliveryDraft::KeenCodeEvent {
-            turn_id: None,
-            source_agent_id: None,
-            journal_sequence: None,
-            occurred_at_ms: unix_time_ms(),
-            event: KeenCodeEvent::GoalChanged {
-                goal_id,
-                revision,
-                status,
-            },
-        }]);
+        // Goal 文件由 PersistentAgentState 持久化；Native UI 在需要时从同一事实源读取。
+        tracing::debug!(
+            session_id = source_session_id,
+            goal_id = ?goal_id,
+            revision,
+            status = ?status,
+            "Goal 状态已持久化"
+        );
+        let _ = self.goal_change_tx.send(GoalChangeNotice {
+            session_id: source_session_id.to_owned(),
+        });
     }
 
     /// 用当前默认 Provider 执行按指定 Schema 严格校验的无工具记忆模型调用。
@@ -6805,37 +6721,6 @@ impl AgentRuntime {
         .await
     }
 
-    /// 为原 Git 页面生成无工具文本；显式模型必须属于本机注册表，不改变会话或默认模型。
-    pub(crate) async fn generate_git_text(
-        &self,
-        request_id: &str,
-        model_reference: Option<&str>,
-        system_prompt: &str,
-        input: &str,
-    ) -> anyhow::Result<String> {
-        let provider = if let Some(reference) = model_reference {
-            let (provider_id, model) = reference
-                .split_once("::")
-                .ok_or_else(|| anyhow!("Git 模型缺少本机供应商标识"))?;
-            self.provider_registry.resolve(provider_id, model)?
-        } else {
-            self.resolve_default_provider()
-                .map_err(|error| anyhow!(error))?
-        };
-        self.generate_isolated_with_provider(
-            provider,
-            IsolatedGenerationRequest {
-                session_id: request_id,
-                system_prompt,
-                input,
-                timeout_secs: 60,
-                purpose: "git",
-                structured_output: None,
-            },
-        )
-        .await
-    }
-
     /// 使用 Session 绑定 Provider 生成短标题，并按 operationId 持久复用成功结果。
     pub async fn generate_title(
         &self,
@@ -6850,8 +6735,6 @@ impl AgentRuntime {
         }
         let input_sha256 = title_input_sha256(input);
         let gate = {
-            let reset_gate = self.delivery_reset_gate(session_id)?;
-            let _reset_guard = reset_gate.lock().await;
             let mut gates = self
                 .title_generation_gates
                 .lock()
@@ -6909,7 +6792,7 @@ impl AgentRuntime {
         if system_prompt.trim().is_empty() || input.trim().is_empty() {
             bail!("隔离模型调用的系统提示词和输入不能为空");
         }
-        if !matches!(purpose, "memory" | "title" | "git") {
+        if !matches!(purpose, "memory" | "title") {
             bail!("隔离模型调用用途无效");
         }
         if timeout_secs == 0 {
@@ -6949,7 +6832,7 @@ impl AgentRuntime {
         if system_prompt.trim().is_empty() || input.trim().is_empty() {
             bail!("隔离模型调用的系统提示词和输入不能为空");
         }
-        if !matches!(purpose, "memory" | "title" | "git") {
+        if !matches!(purpose, "memory" | "title") {
             bail!("隔离模型调用用途无效");
         }
         if timeout_secs == 0 {
@@ -7109,11 +6992,16 @@ impl AgentRuntime {
         )
     }
 
-    /// 原子替换 WebFetch 与 WebSearch 的服务配置；为空时后续 Turn 不注册网络工具。
-    pub fn set_web_service_config(
+    /// 原子更新 WebFetch/WebSearch 的检索网关配置；空值会让下一轮不注册网络工具。
+    ///
+    /// 该配置服务于 Agent 的编程检索工具，不能与已移除的 HTML/WebView UI 宿主混同。
+    pub(crate) fn set_web_service_config(
         &self,
         config: Option<WebServiceConfig>,
     ) -> Result<(), AgentRuntimeError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(AgentRuntimeError::RuntimeClosed);
+        }
         *self
             .web_service
             .write()
@@ -7127,11 +7015,52 @@ impl AgentRuntime {
         project_root: &Path,
         candidate: RuntimeExtensionCandidate,
     ) -> Result<u64, AgentRuntimeError> {
+        let refresh_epoch = self.extension_candidate_refresh_epoch(project_root)?;
+        self.publish_extension_candidate_at_epoch(project_root, candidate, refresh_epoch)
+    }
+
+    /// 返回项目当前的资源刷新 epoch，供候选构建在读取输入前建立一致性边界。
+    pub(crate) fn extension_candidate_refresh_epoch(
+        &self,
+        project_root: &Path,
+    ) -> Result<u64, AgentRuntimeError> {
         let project_root = canonical_project_root(project_root)?;
         let _change_gate = self
             .extension_candidate_change_gate
             .lock()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let epoch = self
+            .extension_candidate_refresh_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .copied()
+            .unwrap_or(0);
+        Ok(epoch)
+    }
+
+    /// 仅在构建输入期间没有发生资源写入时发布候选。
+    pub(crate) fn publish_extension_candidate_at_epoch(
+        &self,
+        project_root: &Path,
+        candidate: RuntimeExtensionCandidate,
+        refresh_epoch: u64,
+    ) -> Result<u64, AgentRuntimeError> {
+        let project_root = canonical_project_root(project_root)?;
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let current_refresh_epoch = self
+            .extension_candidate_refresh_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .copied()
+            .unwrap_or(0);
+        if current_refresh_epoch != refresh_epoch {
+            return Err(AgentRuntimeError::RuntimeOperationFailed);
+        }
         let generation = candidate.generation();
         let mut current = self
             .extension_candidates
@@ -7146,8 +7075,35 @@ impl AgentRuntime {
         let candidate = Arc::new(candidate);
         current.insert(project_root.clone(), Arc::clone(&candidate));
         drop(current);
-        self.queue_project_mcp_snapshot_for_sessions(&project_root);
+        self.extension_candidate_published_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .insert(project_root, refresh_epoch);
         Ok(generation)
+    }
+
+    /// 标记一个项目的扩展候选需要重建；当前候选继续服务已开始的 Turn。
+    ///
+    /// 设置域写入插件、MCP、Skill 或 Agent 模板后调用此入口。候选构建仍由
+    /// NativeHost 串行完成，只有完整构建成功并发布后才会清除标记。
+    pub(crate) fn invalidate_extension_candidate(
+        &self,
+        project_root: &Path,
+    ) -> Result<(), AgentRuntimeError> {
+        let project_root = canonical_project_root(project_root)?;
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let mut epochs = self
+            .extension_candidate_refresh_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let epoch = epochs.entry(project_root).or_default();
+        *epoch = epoch
+            .checked_add(1)
+            .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
+        Ok(())
     }
 
     /// 同步撤销全部项目候选中的 MCP 工具，供配置失效或变更时 fail-closed 使用。
@@ -7160,16 +7116,15 @@ impl AgentRuntime {
             .extension_candidates
             .read()
             .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .iter()
-            .map(|(project_root, candidate)| (project_root.clone(), Arc::clone(candidate)))
+            .values()
+            .map(Arc::clone)
             .collect::<Vec<_>>();
-        for (project_root, candidate) in candidates {
+        for candidate in candidates {
             candidate
                 .contributor
                 .revoke_mcp_tools()
                 .map_err(runtime_operation_failed)?;
             candidate.mcp_revoked.store(true, Ordering::Release);
-            self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
         Ok(())
     }
@@ -7196,7 +7151,6 @@ impl AgentRuntime {
                 .revoke_mcp_tools()
                 .map_err(runtime_operation_failed)?;
             candidate.mcp_revoked.store(true, Ordering::Release);
-            self.queue_project_mcp_snapshot_for_sessions(&project_root);
         }
         Ok(())
     }
@@ -7207,6 +7161,27 @@ impl AgentRuntime {
         project_root: &Path,
     ) -> Result<bool, AgentRuntimeError> {
         let project_root = canonical_project_root(project_root)?;
+        let _change_gate = self
+            .extension_candidate_change_gate
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
+        let latest_refresh_epoch = self
+            .extension_candidate_refresh_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .copied()
+            .unwrap_or(0);
+        let published_epoch = self
+            .extension_candidate_published_epochs
+            .lock()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .get(&project_root)
+            .copied()
+            .unwrap_or(0);
+        if latest_refresh_epoch != published_epoch {
+            return Ok(true);
+        }
         self.extension_candidates
             .read()
             .map(|candidates| {
@@ -7483,15 +7458,16 @@ impl AgentRuntime {
             &session_id,
         )?);
         store.bind_runtime_session(session)?;
-        let execution = Arc::new(RuntimeAgentExecution::new(
-            Arc::downgrade(self),
-            session.clone(),
-            project_root.clone(),
-            Arc::clone(&persistent_state),
-            Arc::clone(&background_tasks),
-            Arc::clone(&worktrees),
-            Arc::clone(&store),
-        ));
+        let execution = Arc::new(RuntimeAgentExecution::new(RuntimeAgentExecutionContext {
+            owner: Arc::downgrade(self),
+            session: session.clone(),
+            project_root: project_root.clone(),
+            persistent_state: Arc::clone(&persistent_state),
+            background_tasks: Arc::clone(&background_tasks),
+            executor_handle: self.executor_handle.clone(),
+            worktrees: Arc::clone(&worktrees),
+            store: Arc::clone(&store),
+        }));
         let turn_limit = self.background_agent_limit.load(Ordering::Acquire);
         let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
             Arc::clone(&self.collaboration_global_turn_limiter),
@@ -7604,12 +7580,13 @@ impl AgentRuntime {
             background_completion_cancel: Mutex::new(Some(background_completion_cancel)),
         });
         runtimes.insert(session_id.clone(), Arc::clone(&runtime));
-        tauri::async_runtime::spawn(run_background_task_completion_pump(
-            Arc::downgrade(self),
-            session_id,
-            completion_events,
-            background_completion_cancelled,
-        ));
+        self.executor_handle
+            .spawn(run_background_task_completion_pump(
+                Arc::downgrade(self),
+                session_id,
+                completion_events,
+                background_completion_cancelled,
+            ));
         Ok(runtime)
     }
 
@@ -7881,14 +7858,13 @@ impl AgentRuntime {
                 coordinator,
                 session: execution.session.clone(),
             }));
-        if !small_context {
-            let (_, tool_catalog_updates) =
-                self.session_mcp_bindings(&execution.session_id, &execution.project_root)?;
-            runner = runner.with_tool_catalog_update_source(tool_catalog_updates);
-        }
         if is_root {
             runner = runner
-                .with_goal_controller(execution.persistent_state.clone())
+                .with_goal_controller(Arc::new(RuntimeGoalController {
+                    state: execution.persistent_state.clone(),
+                    owner: execution.owner.clone(),
+                    session_id: execution.session_id.clone(),
+                }))
                 .with_external_goal_continuation()
                 .with_todo_controller(execution.persistent_state.clone());
         }
@@ -8177,10 +8153,6 @@ impl AgentRuntime {
             .join("tool-output");
         // 首个会话构建环境前有界等待后台 PATH 捕获收尾；超时不阻塞会话创建。
         crate::shell_env::wait_for_capture_applied(Duration::from_secs(4));
-        #[cfg(feature = "benchmark")]
-        let benchmark_workspace_guard = self.benchmark_workspace_guard;
-        #[cfg(not(feature = "benchmark"))]
-        let benchmark_workspace_guard = false;
         let environment = Arc::new(
             ToolEnvironment::new(&profile.cwd)
                 .and_then(|environment| {
@@ -8192,7 +8164,7 @@ impl AgentRuntime {
                     ))
                 })
                 .map(|environment| {
-                    if workflow_actor || benchmark_workspace_guard {
+                    if workflow_actor {
                         environment.with_workspace_guard()
                     } else {
                         environment
@@ -8214,6 +8186,15 @@ impl AgentRuntime {
             execution.persistent_state.clone(),
         )
         .map_err(runtime_operation_failed)?;
+        if let Some(web_service) = self
+            .web_service
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .clone()
+        {
+            register_web_tools(&mut tools, environment.clone(), web_service)
+                .map_err(runtime_operation_failed)?;
+        }
         if capabilities.can_spawn_agent
             && let Some(port) = self
                 .workflow_tool_port
@@ -8226,50 +8207,31 @@ impl AgentRuntime {
             crate::workflows::agent_tools::register_workflow_tools(&mut tools, port)
                 .map_err(runtime_operation_failed)?;
         }
-        // 只有 Client 在 initialize 中声明 form 能力，运行时才暴露交互问答工具。
+        // 只有 Native Host typed 连接完成绑定时才暴露问答工具；问题正文和答案均由
+        // ElicitationCoordinator 的 pending 账本承载，装配阶段不创建桌面 transport。
         let elicitation_target = self.workflow_elicitation_target(&execution.session_id)?;
         if self.elicitations.session_supports_form(&elicitation_target) {
             let connection_id = self
                 .elicitations
                 .session_connection(&elicitation_target)
                 .ok_or(AgentRuntimeError::StateUnavailable)?;
-            // 工具表跨整个 Turn 复用，而 Session 重载会替换投递世代；
-            // 因此问答出口只绑定装配根弱引用，在发送瞬间解析当时的世代。
-            // Handler 的 Session 保留 actor 身份，pending qid 才能证明它属于哪一个
-            // workflow parent；投递 sink 仍以父 Session 为目标，把表单显示在父连接。
-            let delivery_sink = if is_frontend_v4_connection(&connection_id) {
-                SessionDeliverySink::for_projection(
-                    execution.owner.clone(),
-                    elicitation_target.clone(),
-                    connection_id.clone(),
-                )
-            } else {
-                SessionDeliverySink::for_connection(
-                    execution.owner.clone(),
-                    elicitation_target.clone(),
-                    connection_id.clone(),
-                )
-            };
-            let question_handler: Arc<dyn UserQuestionHandler> = Arc::new(
-                self.elicitations.handler_for_connection_projected(
-                    AgentSessionId::new(execution.session_id.clone())
-                        .map_err(|_| AgentRuntimeError::InvalidSession)?,
-                    elicitation_target.clone(),
-                    connection_id.clone(),
-                    Arc::new(delivery_sink),
-                ),
-            );
+            let agent_session_id = AgentSessionId::new(execution.session_id.clone())
+                .map_err(|_| AgentRuntimeError::InvalidSession)?;
+            let question_handler: Arc<dyn UserQuestionHandler> =
+                if elicitation_target == execution.session_id {
+                    Arc::new(
+                        self.elicitations
+                            .handler_native(agent_session_id, connection_id),
+                    )
+                } else {
+                    Arc::new(self.elicitations.handler_native_projected(
+                        agent_session_id,
+                        Some(elicitation_target.clone()),
+                        connection_id,
+                    ))
+                };
             tools
                 .register(Arc::new(AskUserTool::new(question_handler)))
-                .map_err(runtime_operation_failed)?;
-        }
-        if let Some(web_service) = self
-            .web_service
-            .read()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .clone()
-        {
-            register_web_tools(&mut tools, environment.clone(), web_service)
                 .map_err(runtime_operation_failed)?;
         }
         let tool_context = RuntimeToolContext {
@@ -8315,9 +8277,13 @@ impl AgentRuntime {
         } else {
             HookRuntime::empty()
         };
-        let (deferred_catalog, _) =
-            self.session_mcp_bindings(&execution.session_id, &project_root)?;
-        register_deferred_tools(&mut tools, deferred_catalog).map_err(runtime_operation_failed)?;
+        if let Some(deferred_catalog) = extension
+            .as_ref()
+            .and_then(|candidate| candidate.contributor.mcp_tool_catalog())
+        {
+            register_deferred_tools(&mut tools, deferred_catalog)
+                .map_err(runtime_operation_failed)?;
+        }
         let context_source: Arc<dyn SpawnAgentContextSource> =
             Arc::new(RuntimeSpawnAgentContextSource {
                 session: execution.session.clone(),
@@ -8344,17 +8310,6 @@ impl AgentRuntime {
             )
             .map_err(runtime_operation_failed)?;
         }
-        #[cfg(feature = "benchmark")]
-        let tools = if capabilities.can_spawn_agent {
-            match &self.benchmark_tool_allowlist {
-                Some(names) => tools
-                    .select_exact(names)
-                    .map_err(runtime_operation_failed)?,
-                None => tools,
-            }
-        } else {
-            tools
-        };
         Ok((tools, hooks, catalog))
     }
 
@@ -8394,72 +8349,6 @@ impl AgentRuntime {
             .and_then(|_| tools.register(Arc::new(BashTool::new(environment))))
             .map_err(runtime_operation_failed)?;
         Ok((tools, HookRuntime::empty(), String::new()))
-    }
-
-    /// 测试专用：不创建协作 Session，只冻结本地、Web 与扩展候选工具。
-    #[cfg(test)]
-    pub(crate) fn freeze_turn_tools(
-        &self,
-        session_id: &str,
-        project_root: &Path,
-        plan_guard: PlanGuard,
-        _delivery: &SessionDeliverySender,
-    ) -> Result<(ToolRegistry, HookRuntime), AgentRuntimeError> {
-        let project_root = canonical_project_root(project_root)?;
-        let output_directory = self
-            .session_storage_directory(session_id)?
-            .join("tool-output");
-        let environment = Arc::new(
-            ToolEnvironment::new(&project_root)
-                .and_then(|environment| {
-                    environment.with_artifact_directory(output_directory.clone())
-                })
-                .map_err(runtime_operation_failed)?,
-        );
-        let mut tools = ToolRegistry::new();
-        keencode_tools::register_local_tools(&mut tools, Arc::clone(&environment))
-            .map_err(runtime_operation_failed)?;
-        if let Some(web_service) = self
-            .web_service
-            .read()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .clone()
-        {
-            register_web_tools(&mut tools, environment, web_service)
-                .map_err(runtime_operation_failed)?;
-        }
-        let context = RuntimeToolContext {
-            agent_type: "general-purpose".to_owned(),
-            lifecycle_start_state: LifecycleStartState::new(),
-            session_id: session_id.to_owned(),
-            project_root: project_root.clone(),
-            plan_guard,
-        };
-        let extension = self
-            .extension_candidates
-            .read()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(&project_root)
-            .cloned();
-        let hooks = if let Some(candidate) = extension {
-            candidate
-                .contributor
-                .prepare_lsp_runtime(&context)
-                .map_err(runtime_operation_failed)?;
-            candidate
-                .contributor
-                .register_tools(&mut tools, &context)
-                .map_err(runtime_operation_failed)?;
-            candidate
-                .contributor
-                .build_hook_runtime(&context)
-                .map_err(runtime_operation_failed)?
-        } else {
-            HookRuntime::empty()
-        };
-        let (deferred_catalog, _) = self.session_mcp_bindings(session_id, &project_root)?;
-        register_deferred_tools(&mut tools, deferred_catalog).map_err(runtime_operation_failed)?;
-        Ok((tools, hooks))
     }
 
     /// 只在前一根 Turn 的终态收敛后继续同一 Session 的活跃 Goal。
@@ -8703,8 +8592,13 @@ impl AgentRuntime {
         text: &str,
         options: RootTurnOptions,
     ) -> Result<RootTurnStartOutcome, AgentRuntimeError> {
-        self.start_root_turn_internal(session_id, turn_id, text, options, None)
-            .await
+        let outcome = self
+            .start_root_turn_internal(session_id, turn_id, text, options, None)
+            .await?;
+        if outcome == RootTurnStartOutcome::Started {
+            self.schedule_automatic_title(session_id);
+        }
+        Ok(outcome)
     }
 
     /// 在根 Turn 起点屏障内取得已登记的 Session。
@@ -8857,6 +8751,22 @@ impl AgentRuntime {
             .and_then(|provider| provider.reasoning_effort);
         let mut input_messages = Vec::new();
         let mut request_context = Vec::new();
+        let memory_service = self
+            .memory_service
+            .read()
+            .map_err(|_| AgentRuntimeError::StateUnavailable)?
+            .clone();
+        if let Some(memory_service) = memory_service
+            && let Some(context) = memory_service
+                .prompt_context(self.local_memories_enabled.load(Ordering::Acquire))
+                .map_err(runtime_operation_failed)?
+        {
+            // 本地记忆只属于当前请求；不能写入权威 Transcript，也不能改变
+            // Session 的用户输入摘要或重放事实。
+            let mut message = Message::text(MessageRole::User, context);
+            message.is_meta = true;
+            request_context.push(message);
+        }
         if let Some(context) = normalized_developer_context {
             // Memory/Plan/Ultra 保留原有用户级权限，放在真实对话历史之前；
             // is_meta 用户消息不进入权威 Transcript，与既有 request-only 语义一致。
@@ -8887,7 +8797,6 @@ impl AgentRuntime {
             .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
         input.is_meta = continuation.is_some();
         input_messages.push(input);
-        self.ensure_session_delivery(session_id)?;
         let plan = if options.plan_enabled {
             PlanGuard::read_only()
         } else {
@@ -8895,10 +8804,10 @@ impl AgentRuntime {
         };
         if let Some(connection_id) = options.elicitation_connection_id.as_ref() {
             self.elicitations
-                .bind_session_connection(session_id, connection_id)
+                .bind_native_session(session_id, connection_id)
                 .map_err(|error| {
-                    // Elicitation 要求连接先完成 capabilities 协商；保留具体稳定
-                    // 错误类别，便于区分握手缺失与真正的 Runtime/Provider 故障。
+                    // 原生 typed 连接由 bind_native_session 登记；问答不再建立独立
+                    // 的 ACP initialize 或 Client Request 投递路径。
                     tracing::error!(
                         target: "keencode_diagnostics",
                         stage = "start_root_turn.bind_elicitation_session_connection",
@@ -9005,7 +8914,7 @@ impl AgentRuntime {
             started = &mut wait_for_started => started?,
             completed = completed_receiver => {
                 match completed {
-                    Ok(Err(())) => return Err(runtime_operation_failed("根回合准备失败")),
+                    Ok(Err(error)) => return Err(error),
                     Err(error) => return Err(runtime_operation_failed(error)),
                     Ok(Ok(())) => {
                         tokio::time::timeout(Duration::from_secs(1), &mut wait_for_started)
@@ -9129,199 +9038,8 @@ impl AgentRuntime {
         Ok(())
     }
 
-    /// 为一个已由 Runtime 打开或创建的 Session 建立首个桌面投递世代。
-    pub fn attach_session_delivery(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        let mut deliveries = self
-            .deliveries
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        if let Some(delivery) = deliveries.get(session_id) {
-            return Ok(delivery.clone());
-        }
-        let delivery = SessionDeliverySender::spawn_with_config(
-            session_id,
-            Arc::clone(&self.emitter),
-            false,
-            DELIVERY_QUEUE_CAPACITY,
-            self.delivery_timeouts,
-        );
-        deliveries.insert(session_id.to_owned(), delivery.clone());
-        Ok(delivery)
-    }
-
-    /// 幂等确保一个已打开 Session 具有唯一桌面投递 FIFO。
-    pub fn ensure_session_delivery(
-        self: &Arc<Self>,
-        session_id: &str,
-    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        let delivery = self.attach_session_delivery(session_id)?;
-        let mut pumps = self
-            .live_pumps
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        if pumps.contains_key(session_id) {
-            return Ok(delivery);
-        }
-        let subscription = session.subscribe().map_err(runtime_operation_failed)?;
-        // 先订阅再读取可重建索引：两者之间追加的事件至少存在于订阅中，
-        // 而索引失败会直接拒绝建立实时泵，不会伪装成空 Provider 历史。
-        let provider_projection = provider_projection_from_history(&session)?;
-        let generation = self
-            .next_live_pump_generation
-            .fetch_add(1, Ordering::AcqRel)
-            .checked_add(1)
-            .ok_or(AgentRuntimeError::StateUnavailable)?;
-        let (cancel, cancelled) = oneshot::channel();
-        pumps.insert(session_id.to_owned(), (generation, cancel));
-        tauri::async_runtime::spawn(run_runtime_event_pump(
-            Arc::downgrade(self),
-            session_id.to_owned(),
-            generation,
-            subscription,
-            cancelled,
-            provider_projection,
-        ));
-        Ok(delivery)
-    }
-
-    /// 重新打开 Session 时替换已知失败的投递世代；结果未知时继续拒绝，避免重复投递。
-    pub async fn ensure_healthy_session_delivery(
-        self: &Arc<Self>,
-        session_id: &str,
-    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        self.runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        let reset_gate = self.delivery_reset_gate(session_id)?;
-        {
-            let _reset_guard = reset_gate.lock().await;
-            let current = self
-                .deliveries
-                .lock()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                .get(session_id)
-                .cloned();
-            if let Some(current) = current {
-                match current.lifecycle.rejection() {
-                    None => {}
-                    Some(AgentRuntimeError::DeliveryPoisoned) => {
-                        current.shutdown().await?;
-                        let replacement = SessionDeliverySender::spawn_with_config(
-                            session_id,
-                            Arc::clone(&self.emitter),
-                            true,
-                            DELIVERY_QUEUE_CAPACITY,
-                            self.delivery_timeouts,
-                        );
-                        self.deliveries
-                            .lock()
-                            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                            .insert(session_id.to_owned(), replacement);
-                    }
-                    Some(error) => return Err(error),
-                }
-            }
-        }
-        self.ensure_session_delivery(session_id)
-    }
-
-    /// 返回一个已建立 Session 的当前桌面投递世代。
-    pub fn session_delivery(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        self.deliveries
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            .cloned()
-            .ok_or(AgentRuntimeError::SessionDeliveryMissing)
-    }
-
-    /// 返回当前 Session 的投递世代门；所有替换和关闭都必须在同一门内完成。
-    fn delivery_reset_gate(
-        &self,
-        session_id: &str,
-    ) -> Result<Arc<AsyncMutex<()>>, AgentRuntimeError> {
-        let mut gates = self
-            .delivery_reset_gates
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        Ok(Arc::clone(
-            gates
-                .entry(session_id.to_owned())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(()))),
-        ))
-    }
-
-    /// 替换 Session 当前投递世代，使下一条标准更新从序号一重新开始。
-    pub async fn reset_session_delivery(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionDeliverySender, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        let reset_gate = self.delivery_reset_gate(session_id)?;
-        let _reset_guard = reset_gate.lock().await;
-        let previous = self
-            .deliveries
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            .cloned();
-        if let Some(previous) = previous {
-            // 旧 pump 关闭超时或结果未知时，必须保留旧世代并阻止新世代发布。
-            previous.shutdown().await?;
-        }
-        let delivery = SessionDeliverySender::spawn_with_config(
-            session_id,
-            Arc::clone(&self.emitter),
-            true,
-            DELIVERY_QUEUE_CAPACITY,
-            self.delivery_timeouts,
-        );
-        self.deliveries
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .insert(session_id.to_owned(), delivery.clone());
-        Ok(delivery)
-    }
-
-    /// 关闭并移除一个 Session 的桌面投递世代；Session Runtime 仍可继续存在。
-    pub async fn close_session_delivery(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        let reset_gate = self.delivery_reset_gate(session_id)?;
-        let _reset_guard = reset_gate.lock().await;
-        self.close_session_delivery_locked(session_id).await
-    }
-
-    /// 调用方持有 delivery_reset_gate，完整关闭时将其延续到 Runtime lease 释放。
-    ///
-    /// `turn_start_gates` 不在这里移除：关闭仍持有旧 gate 时，新的发送若取得新
-    /// gate 会与 `RuntimeManager::close` 并行，重新造成 Session 未登记竞态。Gate
-    /// 只随进程存活，正文和投递资源仍按 Session 关闭清理。
-    async fn close_session_delivery_locked(
-        &self,
-        session_id: &str,
-    ) -> Result<(), AgentRuntimeError> {
+    /// 关闭 Session 级标题请求并清理焦点；这些状态属于 Runtime 生命周期。
+    async fn close_session_runtime_state(&self, session_id: &str) -> Result<(), AgentRuntimeError> {
         let title_generation = self
             .title_generation_gates
             .lock()
@@ -9332,19 +9050,6 @@ impl AgentRuntime {
             // 等待模型 future 退出及 Session 句柄释放，不能靠调度重试等待网络超时。
             let _title_guard = title_generation.gate.lock().await;
         }
-        if let Some((_, cancel)) = self
-            .live_pumps
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .remove(session_id)
-        {
-            let _ = cancel.send(());
-        }
-        let delivery = self
-            .deliveries
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .remove(session_id);
         if self
             .focused_session_id()?
             .as_deref()
@@ -9352,13 +9057,10 @@ impl AgentRuntime {
         {
             self.clear_focus();
         }
-        if let Some(delivery) = delivery {
-            delivery.shutdown().await?;
-        }
         Ok(())
     }
 
-    /// 按 Collaboration、后台资源、实时投递、Runtime Session 的所有权顺序关闭一个 Session。
+    /// 按 Collaboration、后台资源和 Runtime Session 的所有权顺序关闭一个 Session。
     pub async fn close_session(
         self: &Arc<Self>,
         session_id: &str,
@@ -9368,6 +9070,80 @@ impl AgentRuntime {
         self.close_session_locked(session_id, true).await
     }
 
+    /// 在不取消任何活动工作的前提下释放空闲 Session 的进程内资源。
+    ///
+    /// 释放与 root Turn 共用同一 admission 和起点屏障：先冻结新的发送，再确认
+    /// Runtime、后续输入队列和权限等待均为空，最后复用统一清理路径关闭 MCP、
+    /// Agent Runner、实时订阅和 Session lease。返回 `false` 表示 Session 仍在
+    /// 使用中，调用方应保留当前 UI 观测；此路径绝不替活动树发出取消。
+    pub(crate) async fn release_idle_session(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        validate_session_id(session_id)?;
+        let gate = self.session_turn_start_gate(session_id)?;
+        let _gate = gate.lock().await;
+
+        // 认领 Closing 与 start_root_turn 使用同一 lifecycle/admission 锁顺序；
+        // 已登记或随后到达的 root start 都不能越过本次 idle 判定。
+        if !self.claim_session_mutation_close(session_id)? {
+            return Ok(false);
+        }
+
+        let idle = (|| -> Result<bool, AgentRuntimeError> {
+            let session = self
+                .runtime_manager
+                .get(session_id.to_owned())
+                .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
+            if self.session_has_active_work(session_id)? {
+                return Ok(false);
+            }
+            let (_, input_queue) = session
+                .input_queue_state()
+                .map_err(runtime_operation_failed)?;
+            if !input_queue.items.is_empty() {
+                return Ok(false);
+            }
+            if self.permissions.pending_count_for_session(session_id) != 0 {
+                return Ok(false);
+            }
+            if self
+                .elicitations
+                .pending_request_id_for_session(session_id)
+                .is_some()
+            {
+                return Ok(false);
+            }
+            Ok(true)
+        })();
+
+        match idle {
+            Ok(true) => match self.close_session_locked(session_id, true).await {
+                Ok(()) => Ok(true),
+                Err(error) => {
+                    self.clear_deferred_session_lifecycle(session_id);
+                    Err(error)
+                }
+            },
+            Ok(false) => {
+                self.clear_deferred_session_lifecycle(session_id);
+                Ok(false)
+            }
+            Err(error) => {
+                self.clear_deferred_session_lifecycle(session_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Native Host 的明确入口；空闲回收与普通 Session 释放共用同一 admission 边界。
+    pub(crate) async fn release_idle_native_session(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<bool, AgentRuntimeError> {
+        self.release_idle_session(session_id).await
+    }
+
     /// 调用方必须持有对应 Session 的 Turn gate；这是显式 mutation admission 和
     /// 普通 close 共用的唯一关闭实现，避免重复取得 gate 或提前取消权限状态。
     async fn close_session_locked(
@@ -9375,8 +9151,9 @@ impl AgentRuntime {
         session_id: &str,
         release_lifecycle: bool,
     ) -> Result<(), AgentRuntimeError> {
+        self.elicitations.close_session(session_id);
         self.permissions.close_session(session_id);
-        let mut close_error = None;
+        let mut close_error = self.close_session_runtime_state(session_id).await.err();
         let collaboration = {
             let mut runtimes = self
                 .collaboration_sessions
@@ -9414,12 +9191,6 @@ impl AgentRuntime {
             collaboration
         };
         drop(collaboration);
-        self.close_session_mcp(session_id).await;
-        let reset_gate = self.delivery_reset_gate(session_id)?;
-        let _reset_guard = reset_gate.lock().await;
-        if let Err(error) = self.close_session_delivery_locked(session_id).await {
-            close_error.get_or_insert(error);
-        }
         let runtime_closed = match self.runtime_manager.close(session_id.to_owned()) {
             Ok(()) | Err(RuntimeError::SessionNotRegistered) => true,
             Err(_) => {
@@ -9447,6 +9218,7 @@ impl AgentRuntime {
     /// 应用退出时暂停一个 Session，保留 Collaboration 身份和待消费事实，不清理 Worktree。
     async fn shutdown_session(self: &Arc<Self>, session_id: &str) -> Result<(), AgentRuntimeError> {
         validate_session_id(session_id)?;
+        self.elicitations.close_session(session_id);
         let gate = {
             let mut gates = self
                 .turn_start_gates
@@ -9482,10 +9254,9 @@ impl AgentRuntime {
             // Condvar 等待和后台进程回收都必须离开异步 worker；被取消的 Runner
             // 仍需被调度才能释放执行槽，不能在当前 poll 中同步等待其回传。
             let execution = Arc::clone(&collaboration.execution);
-            let quiesced =
-                tauri::async_runtime::spawn_blocking(move || execution.finish_shutdown())
-                    .await
-                    .unwrap_or(Err(AgentRuntimeError::RuntimeOperationFailed));
+            let quiesced = tokio::task::spawn_blocking(move || execution.finish_shutdown())
+                .await
+                .unwrap_or(Err(AgentRuntimeError::RuntimeOperationFailed));
             if let Err(error) = quiesced {
                 shutdown_error.get_or_insert(error);
             }
@@ -9507,10 +9278,7 @@ impl AgentRuntime {
             }
             drop(collaboration);
         }
-        self.close_session_mcp(session_id).await;
-        let reset_gate = self.delivery_reset_gate(session_id)?;
-        let _reset_guard = reset_gate.lock().await;
-        if let Err(error) = self.close_session_delivery_locked(session_id).await {
+        if let Err(error) = self.close_session_runtime_state(session_id).await {
             shutdown_error.get_or_insert(error);
         }
         let runtime_closed = match self.runtime_manager.close(session_id.to_owned()) {
@@ -9701,120 +9469,6 @@ impl AgentRuntime {
         Ok(tasks.into_iter().map(|(_, task)| task).collect::<Vec<_>>())
     }
 
-    /// 读取真实后台 Shell 的有界输出；Agent 子任务不能伪装成 Bash 输出。
-    pub(crate) async fn background_bash_output(
-        &self,
-        session_id: &str,
-        task_id: &str,
-    ) -> Result<BackgroundBashOutput, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if task_id.trim().is_empty() || task_id.len() > 256 {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        let runtime = self
-            .collaboration_sessions
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            .cloned()
-            .ok_or(AgentRuntimeError::SessionUnavailable)?;
-        let manager = Arc::clone(&runtime.execution.background_tasks);
-        let task = manager
-            .task_info(session_id, task_id)
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        // 只取尾部窗口，避免轮询接口重复传输无界历史；Manager 仍负责 UTF-8 边界。
-        let cursor = BackgroundOutputCursor {
-            stdout_offset: task.stdout_bytes.saturating_sub(8 * 1024),
-            stderr_offset: task.stderr_bytes.saturating_sub(8 * 1024),
-        };
-        let output = manager
-            .read_output(session_id, task_id, cursor, Some(Duration::ZERO))
-            .await
-            .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-        let mut text = output.stdout;
-        if !output.stderr.is_empty() {
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(&output.stderr);
-        }
-        let mut truncated = output.stdout_has_more || output.stderr_has_more;
-        if text.len() > 8 * 1024 {
-            let mut end = 8 * 1024;
-            while end > 0 && !text.is_char_boundary(end) {
-                end -= 1;
-            }
-            text.truncate(end);
-            truncated = true;
-        }
-        let status = match task.status {
-            BackgroundTaskStatus::Running => "running",
-            BackgroundTaskStatus::Succeeded => "completed",
-            BackgroundTaskStatus::Failed => "failed",
-            BackgroundTaskStatus::Cancelled => "cancelled",
-        };
-        let output_path = manager.output_directory().join(task_id).join("stdout.log");
-        Ok(BackgroundBashOutput {
-            status,
-            output: text,
-            truncated,
-            output_path: crate::path_utils::path_to_frontend(&output_path),
-        })
-    }
-
-    /// 从持久 Collaboration 收据查询已提交的后台恢复 Turn。
-    ///
-    /// 冷启动必须先恢复完整 Coordinator、对账关闭 outbox，并建立 Session 投递泵；
-    /// 未命中时由调用方完成扩展初始化后再提交恢复。
-    pub(crate) fn replay_background_resume_receipt(
-        self: &Arc<Self>,
-        session_id: &str,
-        operation_id: &str,
-        child_thread_id: &str,
-    ) -> Result<Option<AgentTurnId>, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        self.ensure_session_delivery(session_id)?;
-        let target_agent_id = RunnerAgentId::new(child_thread_id.to_owned())
-            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
-        let operation_id = ToolCallId::new(operation_id.to_owned())
-            .map_err(|_| AgentRuntimeError::InvalidResumeTarget)?;
-        let existing_collaboration = self
-            .collaboration_sessions
-            .lock()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .get(session_id)
-            .cloned();
-        let collaboration = if let Some(collaboration) = existing_collaboration {
-            collaboration
-        } else {
-            let Some(transition) = SessionCollaborationStore::new(&self.storage_root, session_id)?
-                .load_transition_snapshot()
-                .map_err(runtime_operation_failed)?
-            else {
-                return Ok(None);
-            };
-            let seed = recovered_root_agent_seed(&transition.commit.checkpoint)
-                .ok_or(AgentRuntimeError::InvalidResumeTarget)?;
-            self.ensure_collaboration_runtime(&session, seed)?
-        };
-        reconcile_live_dynamic_input_acknowledgements(&session, &collaboration.coordinator)?;
-        collaboration
-            .coordinator
-            .replay_root_resume_receipt(
-                &collaboration.root_agent_id,
-                &operation_id,
-                &target_agent_id,
-            )
-            .map_err(map_resume_collaboration_error)
-    }
-
     /// 由根 Session 授权恢复一个失败或中断的单层子 Agent，并返回新 Turn 标识。
     ///
     /// `child_thread_id` 始终按 Agent 身份解析；后台列表中的 `task_id` 是 Turn
@@ -9839,7 +9493,6 @@ impl AgentRuntime {
             .get(session_id.to_owned())
             .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
         let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
-        self.ensure_session_delivery(session_id)?;
         let existing_collaboration = self
             .collaboration_sessions
             .lock()
@@ -9984,16 +9637,6 @@ impl AgentRuntime {
             })
     }
 
-    /// 精确取消一个后台 Shell 或单层子 Agent，保持旧 Tauri 命令的无返回值契约。
-    pub fn background_task_cancel(
-        &self,
-        session_id: &str,
-        task_id: &str,
-    ) -> Result<(), AgentRuntimeError> {
-        self.background_task_cancel_outcome(session_id, task_id)
-            .map(|_| ())
-    }
-
     /// 以客户端稳定 operationId 向当前根 Turn 注入一次可恢复且跨重试去重的用户 steer。
     pub fn steer_root_turn(
         &self,
@@ -10024,164 +9667,7 @@ impl AgentRuntime {
         Ok(steer)
     }
 
-    /// 分页读取权威 Journal，通过 live 与 replay 共用映射器投递后返回精确水位。
-    pub async fn replay_session(
-        self: &Arc<Self>,
-        session_id: &str,
-        after: Option<u64>,
-        limit: usize,
-    ) -> Result<ReplaySessionResponse, AgentRuntimeError> {
-        validate_session_id(session_id)?;
-        let session = self
-            .runtime_manager
-            .get(session_id.to_owned())
-            .map_err(|_| AgentRuntimeError::SessionUnavailable)?;
-        if limit == 0 || limit > MAX_REPLAY_EVENTS as usize {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        let start_after = after.unwrap_or(0);
-        let delivery = if after.is_none() {
-            // 新的完整恢复必须先让旧 pump 完整停止，再发布从序号一开始的新世代。
-            self.reset_session_delivery(session_id).await?
-        } else {
-            self.session_delivery(session_id)?
-        };
-        // 同一 delivery 世代的连续分页复用完整 Turn Provider 索引。
-        let mut replay_cursor = delivery.replay_cursor.lock().await;
-        let mut next_cursor = replay_cursor.clone();
-        let continuous = next_cursor.frozen_state.is_some()
-            && next_cursor.through_sequence.is_some()
-            && next_cursor.next_after == start_after;
-        if !continuous {
-            let snapshot = session.snapshot().map_err(runtime_operation_failed)?;
-            let provider_projection = provider_projection_from_history(&session)?;
-            next_cursor.next_after = start_after;
-            next_cursor.providers_by_turn = provider_projection.into_indexed();
-            next_cursor.through_sequence = Some(snapshot.state.last_sequence);
-            next_cursor.frozen_state = Some(Arc::new(snapshot.state));
-        }
-        // 工具是否已被 Transcript 消费必须与固定水位使用同一快照，不能读取下一页
-        // 期间的新终态，否则会隐藏本页孤立工具或提前泄露水位之后的结果。
-        let frozen_state = next_cursor
-            .frozen_state
-            .as_ref()
-            .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-        let page = session
-            .replay(
-                (start_after != 0).then_some(start_after),
-                MAX_REPLAY_EVENTS as usize,
-            )
-            .map_err(runtime_operation_failed)?;
-        let through_journal_sequence = next_cursor
-            .through_sequence
-            .unwrap_or(page.through_sequence);
-        if through_journal_sequence < start_after {
-            return Err(AgentRuntimeError::RuntimeOperationFailed);
-        }
-        next_cursor.through_sequence = Some(through_journal_sequence);
-        let mut drafts = Vec::new();
-        let mut next_after = start_after;
-        let mut historical_provider =
-            ProviderProjection::from_indexed(std::mem::take(&mut next_cursor.providers_by_turn));
-        for record in page.records {
-            if record.sequence > through_journal_sequence {
-                break;
-            }
-            // 只为当前物理记录保留可回滚增量；容量拒绝时不推进 Provider 与游标。
-            let mapped = map_authoritative_record_with_projection(
-                &session,
-                frozen_state,
-                &record,
-                AuthoritativeProjectionMode::Replay,
-                &mut historical_provider,
-                None,
-            )
-            .map_err(from_runtime)?;
-            if mapped.drafts.len() > MAX_REPLAY_EVENTS as usize {
-                mapped.rollback(&mut historical_provider);
-                return Err(AgentRuntimeError::RuntimeOperationFailed);
-            }
-            if !mapped.drafts.is_empty() && drafts.len().saturating_add(mapped.drafts.len()) > limit
-            {
-                mapped.rollback(&mut historical_provider);
-                if next_after == start_after {
-                    return Err(AgentRuntimeError::RuntimeOperationFailed);
-                }
-                break;
-            }
-            drafts.extend(mapped.commit());
-            next_after = record.sequence;
-            // 达到投影上限后仍继续消费零投影物理记录，使 Provider 快照、事件水位等
-            // 不可见事实不会被卡在上一页；下一条会产生投影的记录会在上面的容量检查处
-            // 保留给下一页，并且不会提交该记录携带的临时 Provider 状态。
-        }
-        next_cursor.next_after = next_after;
-        next_cursor.providers_by_turn = historical_provider.into_indexed();
-        let replayed_events = u32::try_from(drafts.len()).map_err(runtime_operation_failed)?;
-        let has_more = next_after < through_journal_sequence;
-        let through_delivery_sequence = delivery
-            .send_replay_batch(drafts, through_journal_sequence, !has_more)
-            .await?;
-        let response = ReplaySessionResponse {
-            session_id: session_id.to_owned(),
-            start_after,
-            next_after,
-            through_journal_sequence,
-            through_delivery_sequence,
-            replayed_events,
-            has_more,
-        };
-        response.validate().map_err(runtime_operation_failed)?;
-        if !response.has_more {
-            // 完整恢复结束后释放整份 Transcript 快照，不给空闲 Session 留第二份正文。
-            next_cursor.frozen_state = None;
-        }
-        *replay_cursor = next_cursor;
-        Ok(response)
-    }
-
-    /// 登记一个 Elicitation 或未来标准 Client Request 路由。
-    pub fn register_client_request_router(
-        &self,
-        router: Arc<dyn ClientRequestRouter>,
-    ) -> Result<(), AgentRuntimeError> {
-        if self.closed.load(Ordering::Acquire) {
-            return Err(AgentRuntimeError::RuntimeClosed);
-        }
-        self.client_request_routers
-            .write()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?
-            .push(router);
-        Ok(())
-    }
-
-    /// 按完整字符串 JSON-RPC ID 把响应交给唯一匹配的严格路由。
-    /// 按完整请求标识与来源连接把响应交给唯一匹配的严格路由。
-    pub fn route_client_response_from_connection(
-        &self,
-        connection_id: &ConnectionId,
-        request_id: &str,
-        response_json: &str,
-    ) -> Result<(), AgentRuntimeError> {
-        let routers = self
-            .client_request_routers
-            .read()
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        let mut matches = routers
-            .iter()
-            .filter(|router| router.contains_pending(request_id));
-        let router = matches
-            .next()
-            .ok_or(AgentRuntimeError::UnknownClientRequest)?;
-        if matches.next().is_some() {
-            return Err(AgentRuntimeError::StateUnavailable);
-        }
-        router
-            .respond_from_connection(connection_id, response_json)
-            .map_err(|_| AgentRuntimeError::ClientResponseRejected)
-    }
-
-    /// 幂等按 Collaboration、后台资源、投递与 Runtime 的所有权顺序关闭全部 Session。
+    /// 幂等按 Collaboration、后台资源与 Runtime 的所有权顺序关闭全部 Session。
     pub async fn shutdown(self: &Arc<Self>) -> Result<(), AgentRuntimeError> {
         let _shutdown_guard = self.shutdown_gate.lock().await;
         if self.closed.load(Ordering::Acquire) {
@@ -10202,6 +9688,8 @@ impl AgentRuntime {
             *shutdown_error = Some(AgentRuntimeError::RuntimeOperationFailed);
         }
         self.closed.store(true, Ordering::Release);
+        // 唤醒仅等待 Runtime 通知的设置桥接任务，使其在 Runtime 关闭后及时退出。
+        self.focus_change_tx.send_replace(None);
         // 先收口权限等待，再等待各 Session 的 Runner 清理，避免 shutdown 被
         // 一个失去前端连接的审批请求阻塞。
         self.permissions.close();
@@ -10222,20 +9710,6 @@ impl AgentRuntime {
                     .keys()
                     .cloned(),
             );
-            session_ids.extend(
-                self.deliveries
-                    .lock()
-                    .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                    .keys()
-                    .cloned(),
-            );
-            session_ids.extend(
-                self.session_mcp
-                    .lock()
-                    .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                    .keys()
-                    .cloned(),
-            );
             let mut session_ids = session_ids.into_iter().collect::<Vec<_>>();
             session_ids.sort();
             let mut first_error = None;
@@ -10250,26 +9724,6 @@ impl AgentRuntime {
                 return Err(error);
             }
             self.elicitations.shutdown();
-            let live_pumps = self
-                .live_pumps
-                .lock()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                .drain()
-                .map(|(_, (_, cancel))| cancel)
-                .collect::<Vec<_>>();
-            for cancel in live_pumps {
-                let _ = cancel.send(());
-            }
-            let deliveries = self
-                .deliveries
-                .lock()
-                .map_err(|_| AgentRuntimeError::StateUnavailable)?
-                .drain()
-                .map(|(_, delivery)| delivery)
-                .collect::<Vec<_>>();
-            for delivery in deliveries {
-                delivery.shutdown().await?;
-            }
             Ok(())
         }
         .await;
@@ -10321,19 +9775,6 @@ fn historical_provider_snapshots_by_turn(
         .into_iter()
         .map(|(turn_id, provider)| (turn_id.as_str().to_owned(), provider))
         .collect())
-}
-
-/// 从可重建历史索引创建完整 Turn Provider 投影；索引读取失败必须向上传播。
-fn provider_projection_from_history(
-    session: &RuntimeSession,
-) -> Result<ProviderProjection, AgentRuntimeError> {
-    let providers = session
-        .history_index()
-        .map_err(runtime_operation_failed)?
-        .turn_providers
-        .into_iter()
-        .collect();
-    Ok(ProviderProjection::from_indexed(Arc::new(providers)))
 }
 
 /// 判断历史 Provider 是否仍可安全回放其中的 opaque reasoning 续传。
@@ -10741,567 +10182,6 @@ fn provider_snapshot(provider: &ResolvedProvider) -> ProviderSnapshot {
     }
 }
 
-/// 一次连续 replay 分页共享的历史 Provider 游标。
-///
-/// `next_after` 只在物理 Journal 记录真正被当前页接受后推进；`through_sequence` 在一次完整恢复中
-/// 固定，避免实时追加的事件改变已经发给 Client 的分页边界。
-#[derive(Clone, Debug, Default)]
-struct ReplayProviderCursor {
-    /// 已被当前恢复页接受的最后一个物理 Journal sequence。
-    next_after: u64,
-    /// 当前固定 Journal 窗口内全部 Turn 的历史 Provider 快照。
-    providers_by_turn: Arc<HashMap<ResourceTurnId, ProviderSnapshot>>,
-    /// 当前完整 replay 固定的 Journal 水位；尚未开始时为空。
-    through_sequence: Option<u64>,
-    /// 与固定水位一致的状态；连续分页共享，尾页确认投递后立即释放。
-    frozen_state: Option<Arc<SessionState>>,
-}
-
-/// 当前投递世代的健康和停止状态；发送端与 pump 共享，避免回执超时后继续盲发。
-struct DeliveryLifecycle {
-    /// 0 表示健康，1 表示已知失败，2/3 表示某个已入队命令或关闭结果未知。
-    health: AtomicU8,
-    /// pump 已经退出的可观察状态。
-    stopped: AtomicBool,
-    /// 供需要观察停止状态的边界复用的通知器。
-    stopped_notify: tokio::sync::Notify,
-}
-
-/// 投递世代健康状态常量：没有失败。
-const DELIVERY_HEALTHY: u8 = 0;
-/// 投递世代健康状态常量：同步 emit 已明确失败。
-const DELIVERY_FAILED: u8 = 1;
-/// 投递世代健康状态常量：已入队命令的实际结果未知。
-const DELIVERY_OUTCOME_UNKNOWN: u8 = 2;
-/// 投递世代健康状态常量：关闭命令的实际结果未知。
-const DELIVERY_SHUTDOWN_UNKNOWN: u8 = 3;
-
-impl DeliveryLifecycle {
-    /// 创建一个尚未发生失败且 pump 尚未停止的投递状态。
-    fn new() -> Self {
-        Self {
-            health: AtomicU8::new(DELIVERY_HEALTHY),
-            stopped: AtomicBool::new(false),
-            stopped_notify: tokio::sync::Notify::new(),
-        }
-    }
-
-    /// 返回当前已知的拒绝原因；未知结果会阻止任何后续数据命令。
-    fn rejection(&self) -> Option<AgentRuntimeError> {
-        match self.health.load(Ordering::Acquire) {
-            DELIVERY_FAILED => Some(AgentRuntimeError::DeliveryPoisoned),
-            DELIVERY_OUTCOME_UNKNOWN => Some(AgentRuntimeError::DeliveryOutcomeUnknown),
-            DELIVERY_SHUTDOWN_UNKNOWN => Some(AgentRuntimeError::DeliveryShutdownUnknown),
-            _ => None,
-        }
-    }
-
-    /// 记录一个已知的 emit/映射失败，但不覆盖更严重的未知结果。
-    fn mark_failed(&self) {
-        let _ = self.health.compare_exchange(
-            DELIVERY_HEALTHY,
-            DELIVERY_FAILED,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    /// 记录入队命令回执未知，并永久冻结当前世代。
-    fn mark_outcome_unknown(&self) {
-        let _ = self.health.compare_exchange(
-            DELIVERY_HEALTHY,
-            DELIVERY_OUTCOME_UNKNOWN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    /// 记录关闭结果未知，并永久冻结当前世代。
-    fn mark_shutdown_unknown(&self) {
-        let _ = self.health.compare_exchange(
-            DELIVERY_HEALTHY,
-            DELIVERY_SHUTDOWN_UNKNOWN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-
-    /// 关闭已知失败的 pump 时仍可安全确认；未知结果则必须阻止新世代。
-    fn shutdown_error(&self) -> Option<AgentRuntimeError> {
-        match self.health.load(Ordering::Acquire) {
-            DELIVERY_OUTCOME_UNKNOWN => Some(AgentRuntimeError::DeliveryOutcomeUnknown),
-            DELIVERY_SHUTDOWN_UNKNOWN => Some(AgentRuntimeError::DeliveryShutdownUnknown),
-            _ => None,
-        }
-    }
-
-    /// 标记 pump 已经退出，并唤醒等待旧世代收敛的边界。
-    fn mark_stopped(&self) {
-        self.stopped.store(true, Ordering::Release);
-        self.stopped_notify.notify_waiters();
-    }
-}
-
-/// Session 投递命令的可替换时间边界；生产和确定性测试共用同一实现。
-#[derive(Clone, Copy, Debug)]
-struct DeliveryTimeouts {
-    /// 等待 mpsc 槽位的最大时间。
-    queue_reserve: Duration,
-    /// 入队后等待 emit 回执的最大时间。
-    acknowledgement: Duration,
-    /// 关闭命令等待 pump 收敛的最大时间。
-    shutdown: Duration,
-}
-
-impl DeliveryTimeouts {
-    /// 返回生产环境采用的明确有界时间。
-    const fn production() -> Self {
-        Self {
-            queue_reserve: DELIVERY_QUEUE_RESERVE_TIMEOUT,
-            acknowledgement: DELIVERY_ACK_TIMEOUT,
-            shutdown: DELIVERY_SHUTDOWN_TIMEOUT,
-        }
-    }
-
-    /// 返回测试使用的短时间边界，避免依赖脆弱的 sleep 竞态。
-    #[cfg(test)]
-    const fn test() -> Self {
-        Self {
-            queue_reserve: Duration::from_millis(20),
-            acknowledgement: Duration::from_millis(40),
-            shutdown: Duration::from_millis(40),
-        }
-    }
-}
-
-/// 一个绑定单一 Session 当前投递世代的可克隆发送句柄。
-#[derive(Clone)]
-pub struct SessionDeliverySender {
-    /// 当前世代接收命令的有界 FIFO。
-    commands: mpsc::Sender<DeliveryCommand>,
-    /// 共享的失败状态；回执超时后所有生产者立即停止入队。
-    lifecycle: Arc<DeliveryLifecycle>,
-    /// 当前世代用于连续 replay 分页的 Provider 游标门。
-    replay_cursor: Arc<AsyncMutex<ReplayProviderCursor>>,
-    history_backfill: Arc<AsyncMutex<Option<history_load::HistoryBackfill>>>,
-    /// 当前发送端使用的队列、回执和关闭时间边界。
-    timeouts: DeliveryTimeouts,
-}
-
-impl SessionDeliverySender {
-    /// 建立持有独立 SessionSequence 的单消费者投递任务。
-    #[cfg(test)]
-    fn spawn(session_id: &str, emitter: Arc<dyn DeliveryEmitter>, recovering: bool) -> Self {
-        Self::spawn_with_config(
-            session_id,
-            emitter,
-            recovering,
-            DELIVERY_QUEUE_CAPACITY,
-            DeliveryTimeouts::production(),
-        )
-    }
-
-    /// 使用指定队列容量和时间边界建立投递任务；测试通过该边界验证真实超时语义。
-    fn spawn_with_config(
-        session_id: &str,
-        emitter: Arc<dyn DeliveryEmitter>,
-        recovering: bool,
-        queue_capacity: usize,
-        timeouts: DeliveryTimeouts,
-    ) -> Self {
-        let (commands, receiver) = mpsc::channel(queue_capacity.max(1));
-        let session_id = session_id.to_owned();
-        let lifecycle = Arc::new(DeliveryLifecycle::new());
-        let replay_cursor = Arc::new(AsyncMutex::new(ReplayProviderCursor::default()));
-        tauri::async_runtime::spawn(run_delivery_pump(
-            session_id,
-            emitter,
-            receiver,
-            recovering,
-            Arc::clone(&lifecycle),
-        ));
-        Self {
-            commands,
-            lifecycle,
-            replay_cursor,
-            history_backfill: Arc::new(AsyncMutex::new(None)),
-            timeouts,
-        }
-    }
-
-    /// 将一个完整标准 ACP Client Request 放入 Session 共享 FIFO。
-    #[cfg(test)]
-    pub async fn send_client_request(
-        &self,
-        request: AcpClientRequestFrame,
-    ) -> Result<(), AgentRuntimeError> {
-        let connection_id = ConnectionId::new("embedded-desktop")
-            .map_err(|_| AgentRuntimeError::StateUnavailable)?;
-        self.send_client_request_to(connection_id, request).await
-    }
-
-    /// 将 Client Request 只投递给指定 ACP 连接。
-    pub async fn send_client_request_to(
-        &self,
-        connection_id: ConnectionId,
-        request: AcpClientRequestFrame,
-    ) -> Result<(), AgentRuntimeError> {
-        self.send_command(|acknowledged| DeliveryCommand::EmitClientRequest {
-            connection_id,
-            request: Box::new(request),
-            acknowledged,
-        })
-        .await
-    }
-
-    /// 将一个不可被其他生产者插入的标准更新或生命周期事件批次放入 FIFO。
-    pub async fn send_batch(&self, drafts: Vec<DeliveryDraft>) -> Result<(), AgentRuntimeError> {
-        if drafts.is_empty() {
-            return Ok(());
-        }
-        self.send_command(|acknowledged| DeliveryCommand::EmitBatch {
-            drafts,
-            terminal_notice: None,
-            acknowledged,
-        })
-        .await
-    }
-
-    /// 将一个实时权威批次放入 FIFO，并携带仅可由实时根 Turn 产生的终态通知元数据。
-    async fn send_live_batch(
-        &self,
-        drafts: Vec<DeliveryDraft>,
-        terminal_notice: Option<RootTaskTerminalNotice>,
-    ) -> Result<(), AgentRuntimeError> {
-        if drafts.is_empty() {
-            return Ok(());
-        }
-        self.send_command(|acknowledged| DeliveryCommand::EmitBatch {
-            drafts,
-            terminal_notice,
-            acknowledged,
-        })
-        .await
-    }
-
-    /// 从同步持久回调把非空批次无等待放入 FIFO；队列拥塞时调用方可退化为后续刷新。
-    fn send_batch_detached(&self, drafts: Vec<DeliveryDraft>) -> Result<(), AgentRuntimeError> {
-        if drafts.is_empty() {
-            return Ok(());
-        }
-        if let Some(error) = self.lifecycle.rejection() {
-            return Err(error);
-        }
-        let (acknowledged, _completed) = oneshot::channel();
-        self.commands
-            .try_send(DeliveryCommand::EmitBatch {
-                drafts,
-                terminal_notice: None,
-                acknowledged,
-            })
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Closed(_) => AgentRuntimeError::DeliveryClosed,
-                mpsc::error::TrySendError::Full(_) => AgentRuntimeError::DeliveryQueueTimeout,
-            })
-    }
-
-    /// 在恢复门内按 Journal 顺序投递一页，并在末页原子释放门后缓存的 live 事件。
-    async fn send_replay_batch(
-        &self,
-        drafts: Vec<DeliveryDraft>,
-        through_sequence: u64,
-        final_page: bool,
-    ) -> Result<u64, AgentRuntimeError> {
-        self.send_command(|acknowledged| DeliveryCommand::EmitReplayBatch {
-            drafts,
-            through_sequence,
-            final_page,
-            acknowledged,
-        })
-        .await
-    }
-
-    /// 幂等停止当前投递世代并等待泵确认已经处理完先前命令。
-    pub async fn shutdown(&self) -> Result<(), AgentRuntimeError> {
-        if let Some(error) = self.lifecycle.shutdown_error() {
-            return Err(error);
-        }
-        if self.lifecycle.stopped.load(Ordering::Acquire) || self.commands.is_closed() {
-            return Ok(());
-        }
-        let (acknowledged, completed) = oneshot::channel();
-        match tokio::time::timeout(
-            self.timeouts.shutdown,
-            self.commands
-                .send(DeliveryCommand::Shutdown { acknowledged }),
-        )
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(_)) if self.lifecycle.health.load(Ordering::Acquire) == DELIVERY_FAILED => {
-                return Ok(());
-            }
-            Ok(Err(_)) => {
-                self.lifecycle.mark_shutdown_unknown();
-                return Err(AgentRuntimeError::DeliveryShutdownUnknown);
-            }
-            Err(_) => {
-                self.lifecycle.mark_shutdown_unknown();
-                return Err(AgentRuntimeError::DeliveryShutdownUnknown);
-            }
-        }
-        match tokio::time::timeout(self.timeouts.shutdown, completed).await {
-            Ok(Ok(result)) => {
-                if let Some(error) = self.lifecycle.shutdown_error() {
-                    Err(error)
-                } else {
-                    result
-                }
-            }
-            Ok(Err(_)) | Err(_) => {
-                self.lifecycle.mark_shutdown_unknown();
-                Err(AgentRuntimeError::DeliveryShutdownUnknown)
-            }
-        }
-    }
-
-    /// 发送一条带 oneshot 回执的泵命令并等待 pump 接受。
-    ///
-    /// 实时增量批次的回执表示「已被 pump 攒批缓冲接受」；实际投递最多延迟
-    /// 一个 flush 窗口，投递失败会冻结当前投递世代，后续命令据此停止。
-    async fn send_command<T>(
-        &self,
-        command: impl FnOnce(oneshot::Sender<Result<T, AgentRuntimeError>>) -> DeliveryCommand,
-    ) -> Result<T, AgentRuntimeError> {
-        if let Some(error) = self.lifecycle.rejection() {
-            return Err(error);
-        }
-        let (acknowledged, completed) = oneshot::channel();
-        let permit = match tokio::time::timeout(
-            self.timeouts.queue_reserve,
-            self.commands.reserve(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => permit,
-            Ok(Err(_)) => return Err(AgentRuntimeError::DeliveryClosed),
-            Err(_) => return Err(AgentRuntimeError::DeliveryQueueTimeout),
-        };
-        if let Some(error) = self.lifecycle.rejection() {
-            return Err(error);
-        }
-        permit.send(command(acknowledged));
-        match tokio::time::timeout(self.timeouts.acknowledgement, completed).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) | Err(_) => {
-                self.lifecycle.mark_outcome_unknown();
-                Err(AgentRuntimeError::DeliveryOutcomeUnknown)
-            }
-        }
-    }
-}
-
-/// 恢复门内缓存的实时批次及其终态通知元数据；历史重放永远不携带通知。
-struct BufferedLiveBatch {
-    /// 尚未越过恢复门的实时投影草稿。
-    drafts: Vec<DeliveryDraft>,
-    /// 仅根 Turn 终态批次可能携带的桌面通知信息。
-    terminal_notice: Option<RootTaskTerminalNotice>,
-}
-
-/// 每个 Session 唯一消费者接受的三种串行命令。
-enum DeliveryCommand {
-    /// 原子物理事件映射出的一个或多个桌面投递。
-    EmitBatch {
-        /// 不允许被其他生产者插入的有序草稿。
-        drafts: Vec<DeliveryDraft>,
-        /// 仅实时根 Turn 终态批次携带的通知信息；普通和历史投影为空。
-        terminal_notice: Option<RootTaskTerminalNotice>,
-        /// pump 接受批次后的回执；攒批投递失败由投递世代冻结兜底。
-        acknowledged: oneshot::Sender<Result<(), AgentRuntimeError>>,
-    },
-    /// 与普通事件共享 FIFO 的完整 Client Request。
-    EmitClientRequest {
-        /// 仅供内部 emitter 选择 transport 连接，不进入桌面事件 JSON。
-        connection_id: ConnectionId,
-        /// 标准 ACP JSON-RPC 2.0 请求。
-        request: Box<AcpClientRequestFrame>,
-        /// 请求实际 emit 完成后的回执。
-        acknowledged: oneshot::Sender<Result<(), AgentRuntimeError>>,
-    },
-    /// 恢复门内直接发送的一页权威历史。
-    EmitReplayBatch {
-        /// 本页按 Journal 顺序映射出的投递草稿。
-        drafts: Vec<DeliveryDraft>,
-        /// 本轮分页开始时冻结的权威 Journal 水位。
-        through_sequence: u64,
-        /// 是否为本轮恢复的最后一页。
-        final_page: bool,
-        /// 本页历史投递完成后的实际桌面投递水位回执。
-        acknowledged: oneshot::Sender<Result<u64, AgentRuntimeError>>,
-    },
-    /// 处理完此前命令后关闭当前投递世代。
-    Shutdown {
-        /// 泵停止前发送的幂等回执。
-        acknowledged: oneshot::Sender<Result<(), AgentRuntimeError>>,
-    },
-}
-
-/// Tauri 唯一事件载荷的严格外层联合。
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum AcpDelivery {
-    /// 标准 ACP Session 更新。
-    SessionUpdate {
-        /// 带 Session 身份和当前投递序号的标准信封。
-        envelope: SessionUpdateDeliveryEnvelope,
-    },
-    /// KeenCode 生命周期扩展事件。
-    #[serde(rename = "keencode_event")]
-    KeenCodeEvent {
-        /// 带独立 Journal/投递序号的扩展信封。
-        envelope: KeenCodeEventEnvelope,
-    },
-    /// Agent 向 Client 发起的标准 JSON-RPC 请求。
-    ClientRequest {
-        /// 仅供进程内 emitter 定向投递，序列化时不得暴露。
-        #[serde(skip)]
-        connection_id: ConnectionId,
-        /// 完整且未拆散的标准请求帧。
-        request: AcpClientRequestFrame,
-    },
-}
-
-/// 对 Tauri 和测试记录器隐藏具体发送机制的同步投递边界。
-pub(crate) trait DeliveryEmitter: Send + Sync {
-    /// 只有事件被目标边界接受后才能返回成功。
-    fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError>;
-
-    /// 把一批投递合并为单次桌面边界调用，避免流式增量逐条跨越 IPC。
-    /// 默认退化为逐条 `emit`；生产投递器覆写为一次批量事件。
-    fn emit_all(&self, deliveries: &[AcpDelivery]) -> Result<(), AgentRuntimeError> {
-        for delivery in deliveries {
-            self.emit(delivery)?;
-        }
-        Ok(())
-    }
-
-    /// 在实时根 Turn 终态已经成功投递后触发桌面通知；测试投递器默认保持静默。
-    fn notify_task_terminal(
-        &self,
-        _task_title: Option<&str>,
-        _stop_reason: Option<TurnStopReason>,
-    ) {
-    }
-}
-
-/// Host 控制面单元测试不需要建立桌面事件接收端。
-#[cfg(test)]
-struct ControlTestDeliveryEmitter;
-
-#[cfg(test)]
-impl DeliveryEmitter for ControlTestDeliveryEmitter {
-    fn emit(&self, _delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-        Ok(())
-    }
-}
-
-/// 把严格联合发送到当前 Tauri 应用的生产投递器。
-struct TauriDeliveryEmitter {
-    /// 绑定当前桌面进程的 Tauri 句柄。
-    app: AppHandle,
-}
-
-impl DeliveryEmitter for TauriDeliveryEmitter {
-    /// 同步调用 Tauri emit，失败时让当前 Session 世代永久停止。
-    fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-        // IPC Client 不能监听 Tauri event；先把同一份已编码 delivery 发布到
-        // ACP Host bridge。Bridge 只负责有界 fan-out，不复制 Runtime 事实。
-        if let Ok(payload) = serde_json::to_value(delivery) {
-            let target = match delivery {
-                AcpDelivery::ClientRequest { connection_id, .. } => Some(connection_id),
-                _ => None,
-            };
-            crate::acp_host::publish_delivery(payload, target);
-        }
-        if let AcpDelivery::ClientRequest {
-            connection_id,
-            request,
-        } = delivery
-        {
-            if connection_id.as_str() == "embedded-desktop" {
-                return self
-                    .app
-                    .emit(ACP_DELIVERY_EVENT, std::slice::from_ref(delivery))
-                    .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
-            }
-            let session_id = client_request_session_id(request)
-                .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
-            let payload = serde_json::to_vec(delivery)
-                .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-            let web_host = self
-                .app
-                .try_state::<Arc<crate::web_host::WebHostManager>>()
-                .ok_or(AgentRuntimeError::DesktopEmitFailed)?;
-            return web_host
-                .publish_connection_event(connection_id, &session_id, payload)
-                .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
-        }
-        let result = self
-            .app
-            .emit(ACP_DELIVERY_EVENT, std::slice::from_ref(delivery))
-            .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
-        if result.is_ok()
-            && let Some((session_id, journal_sequence, payload)) = web_delivery_parts(delivery)
-            && let Some(web_host) = self.app.try_state::<Arc<crate::web_host::WebHostManager>>()
-            && let Err(error) =
-                web_host.publish_session_event(&session_id, journal_sequence, payload)
-        {
-            // Web 浏览器是可选的旁路消费者；慢连接应收到 gap，而不能反向令
-            // 桌面 Runtime 的权威投递世代失败。
-            tracing::warn!(%error, session_id, "Web Host 事件旁路投递失败");
-        }
-        result
-    }
-
-    /// 批量投递：ACP Host bridge 与 Web 旁路保持逐条语义，Tauri 事件合并为
-    /// 单次跨进程调用；这是流式 CPU 占用治理的关键路径，负载来自每次
-    /// `evaluateJavaScript` 注入的固定成本而非 payload 体积。
-    fn emit_all(&self, deliveries: &[AcpDelivery]) -> Result<(), AgentRuntimeError> {
-        for delivery in deliveries {
-            if let Ok(payload) = serde_json::to_value(delivery) {
-                crate::acp_host::publish_delivery(payload, None);
-            }
-        }
-        let result = self
-            .app
-            .emit(ACP_DELIVERY_EVENT, deliveries)
-            .map_err(|_| AgentRuntimeError::DesktopEmitFailed);
-        if result.is_ok() {
-            for delivery in deliveries {
-                if let Some((session_id, journal_sequence, payload)) = web_delivery_parts(delivery)
-                    && let Some(web_host) =
-                        self.app.try_state::<Arc<crate::web_host::WebHostManager>>()
-                    && let Err(error) =
-                        web_host.publish_session_event(&session_id, journal_sequence, payload)
-                {
-                    // Web 浏览器是可选的旁路消费者；慢连接应收到 gap，而不能
-                    // 反向令桌面 Runtime 的权威投递世代失败。
-                    tracing::warn!(%error, session_id, "Web Host 事件旁路投递失败");
-                }
-            }
-        }
-        result
-    }
-
-    /// 使用当前应用设置发送一次原生根任务终态通知。
-    fn notify_task_terminal(&self, task_title: Option<&str>, stop_reason: Option<TurnStopReason>) {
-        self.app
-            .state::<Arc<crate::task_notifications::TaskNotifications>>()
-            .notify_terminal(&self.app, task_title, stop_reason);
-    }
-}
-
 /// 返回非零 UTC Unix 毫秒时间，系统时钟异常时使用一作为稳定下界。
 pub(crate) fn unix_time_ms() -> u64 {
     std::time::SystemTime::now()
@@ -11474,7 +10354,27 @@ fn request_tool_snapshot(
     runtime_tool_snapshot(profile, is_root)
 }
 
-/// 校验桌面投递只接受资源层合法 Session 标识。
+/// 将桌面权限协调器模式映射为资源层 Journal 值，保持 Core 不依赖桌面模块。
+fn resource_permission_mode(mode: PermissionMode) -> SessionPermissionMode {
+    match mode {
+        PermissionMode::Build => SessionPermissionMode::Build,
+        PermissionMode::Edit => SessionPermissionMode::Edit,
+        PermissionMode::Plan => SessionPermissionMode::Plan,
+        PermissionMode::Yolo => SessionPermissionMode::Yolo,
+    }
+}
+
+/// 将资源层冷恢复的 Journal 值映射回桌面权限门。
+fn desktop_permission_mode(mode: SessionPermissionMode) -> PermissionMode {
+    match mode {
+        SessionPermissionMode::Build => PermissionMode::Build,
+        SessionPermissionMode::Edit => PermissionMode::Edit,
+        SessionPermissionMode::Plan => PermissionMode::Plan,
+        SessionPermissionMode::Yolo => PermissionMode::Yolo,
+    }
+}
+
+/// 校验宿主操作只接受资源层合法 Session 标识。
 fn validate_session_id(session_id: &str) -> Result<(), AgentRuntimeError> {
     keencode_resources::SessionId::new(session_id.to_owned())
         .map(|_| ())
@@ -11545,40 +10445,25 @@ fn ensure_session_project(
 #[cfg(test)]
 mod tests {
     use super::{
-        AcpDelivery, AgentRuntime, AgentRuntimeError, AuthoritativeProjectionMode, ContextManager,
-        DeliveryDraft, DeliveryEmitter, DeliveryTimeouts, GENERATED_TITLE_MAX_CHARS,
-        LifecycleStartState, ProviderProjection, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
-        RecoveredRootLifecycle, RootAgentSeed, RootTaskTerminalNotice, RootTurnOptions,
-        RootTurnStartOutcome, RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
+        AgentRuntime, AgentRuntimeError, ContextManager, DeferredSessionLifecycle,
+        GENERATED_TITLE_MAX_CHARS, LifecycleStartState, RUNTIME_TURN_COMPLETION_MAX_ATTEMPTS,
+        RecoveredRootLifecycle, RootAgentSeed, RootTurnOptions, RootTurnStartOutcome,
+        RunnerAgentId, RuntimeAgentTemplate, RuntimeAgentTemplateContext,
         RuntimeExtensionCandidate, RuntimeExtensionContributor, RuntimeExtensionDiagnostic,
-        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore, SessionDeliverySender,
+        RuntimeGoalUsageSink, RuntimeToolContext, SessionCollaborationStore,
         SessionWorkspaceMutationAdmission, TurnBoundProvider, authoritative_recovered_turn_outcome,
-        background_task_completion_event, clear_historical_reasoning_state,
-        commit_goal_turn_elapsed, complete_runtime_turn,
+        clear_historical_reasoning_state, commit_goal_turn_elapsed, complete_runtime_turn,
         coordinator_has_pending_dynamic_input_claim, dynamic_input_receipt_matches_claim,
         extension_diagnostic_message, is_retryable_runtime_turn_completion_error,
-        map_authoritative_record, map_authoritative_record_with_projection, materialize_delivery,
         parse_reasoning_effort, prompt_cache_key_for_endpoint, provider_snapshot,
         provider_supports_reasoning_continuation, recovered_authoritative_turn_outcomes,
-        release_runtime_turn_state, request_tool_snapshot, root_task_terminal_notice,
-        root_turn_summary, runtime_tool_snapshot, session_has_persisted_user_facts,
+        release_runtime_turn_state, request_tool_snapshot, root_turn_summary,
+        runtime_tool_snapshot, session_has_persisted_user_facts,
         should_retry_runtime_turn_completion, split_child_agent_model_override,
-        validate_generated_title, validate_recovered_mailbox_claim, wait_for_turn_started,
+        test_executor_handle, validate_generated_title, validate_recovered_mailbox_claim,
+        wait_for_turn_started,
     };
-    use crate::analytics::ModelRetryNotice;
-    use crate::client_request::{
-        ClientRequestBridgeError, ClientRequestFuture, ClientRequestSink, SessionDeliverySink,
-    };
-    use keencode_acp::schema::{
-        ClientCapabilities, ContentBlock, ContentChunk, CreateElicitationRequest,
-        ElicitationCapabilities, ElicitationFormCapabilities, ElicitationFormMode,
-        ElicitationSchema, ElicitationSessionScope, RequestId, SessionUpdate,
-    };
-    use keencode_acp::{
-        AcpClientRequestEncoder, AcpClientRequestFrame, BackgroundTaskKind,
-        BackgroundTaskTerminalStatus, ConnectionId, ElicitationRouter, KeenCodeEvent,
-        SessionUpdateDeliveryEnvelope,
-    };
+    use keencode_acp::{BackgroundTaskKind, ConnectionId};
     use keencode_agent::{
         AgentDynamicInputAcknowledgement, AgentDynamicInputBatch, AgentDynamicInputBoundary,
         AgentDynamicInputError, AgentDynamicInputSource, AgentExecutionPort, AgentPath,
@@ -11594,8 +10479,6 @@ mod tests {
         ToolCallId, ToolRegistry, TurnCancellation, TurnId as AgentTurnId, TurnRequest,
         UuidCollaborationIdGenerator,
     };
-    use keencode_runtime::MAX_UI_ERROR_MESSAGE_BYTES;
-
     /// 取消后旧 worker 的迟到成功不能提交，也不能清掉重载候选的新租约。
     #[test]
     fn lifecycle_start_state_rejects_late_completion_after_reload() {
@@ -11645,19 +10528,18 @@ mod tests {
     use keencode_resources::{
         AgentId as ResourceAgentId, DynamicInputKind, DynamicInputReceipt,
         MailboxMessage as ResourceMailboxMessage, MailboxMessageId as ResourceMailboxMessageId,
-        MailboxState, PlanState, ProviderProtocolSnapshot, ProviderSnapshot, SESSION_EVENT_SCHEMA,
-        SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
+        MailboxState, PlanState, ProviderProtocolSnapshot, ProviderSnapshot, SessionEvent,
         SessionId as ResourceSessionId, SessionInputQueueItem, SessionState, SubAgentState,
-        SubAgentStatus, TodoItem, TodoStatus, TranscriptRecord, TurnId as ResourceTurnId,
-        TurnState, TurnStatus, TurnStopReason,
+        SubAgentStatus, TitleSource, TranscriptRecord, TurnId as ResourceTurnId, TurnState,
+        TurnStatus, TurnStopReason,
     };
     use keencode_runtime::{
         CreateSessionRequest, PersistentAgentState, RuntimeConfig, RuntimeSession,
         RuntimeTurnRequest,
     };
     use keencode_tools::{
-        BackgroundTaskCompletion, BackgroundTaskStatus, GitWorktreeLeaseManager, UserQuestion,
-        UserQuestionHandler, UserQuestionOption, UserQuestionRequest, WebServiceConfig,
+        GitWorktreeLeaseManager, UserQuestion, UserQuestionHandler, UserQuestionOption,
+        UserQuestionRequest,
     };
     use parking_lot::Mutex;
     use serde_json::{Value, json};
@@ -11666,7 +10548,7 @@ mod tests {
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
     use std::sync::{
-        Arc, Condvar, Mutex as StdMutex,
+        Arc, Mutex as StdMutex,
         atomic::{AtomicBool, Ordering},
     };
     use std::thread::{self, JoinHandle};
@@ -11692,240 +10574,6 @@ mod tests {
         assert!(message.len() <= 4 * 1024);
     }
 
-    /// 记录每次 emit/notify，并可在指定调用序号模拟同步失败。
-    #[derive(Clone, Debug, PartialEq, Eq)]
-    enum EmitterCall {
-        /// 一次桌面投影调用及其完整载荷。
-        Emit(Value),
-        /// 一次根任务终态通知调用。
-        Notify {
-            /// 通知使用的任务标题。
-            task_title: Option<String>,
-            /// 通知使用的结构化停止原因。
-            stop_reason: Option<TurnStopReason>,
-        },
-    }
-
-    struct RecordingEmitter {
-        /// 已按实际 emit 顺序接受的 JSON 值。
-        deliveries: Mutex<Vec<Value>>,
-        /// 按实际调用顺序记录 emit 与终态通知。
-        calls: Mutex<Vec<EmitterCall>>,
-        /// 从一开始计数的可选失败调用序号。
-        fail_at: Option<usize>,
-    }
-
-    impl RecordingEmitter {
-        /// 创建永不失败的记录器。
-        fn successful() -> Arc<Self> {
-            Arc::new(Self {
-                deliveries: Mutex::new(Vec::new()),
-                calls: Mutex::new(Vec::new()),
-                fail_at: None,
-            })
-        }
-
-        /// 创建在指定调用处失败的记录器。
-        fn failing_at(fail_at: usize) -> Arc<Self> {
-            Arc::new(Self {
-                deliveries: Mutex::new(Vec::new()),
-                calls: Mutex::new(Vec::new()),
-                fail_at: Some(fail_at),
-            })
-        }
-
-        /// 返回当前完整发送顺序的副本。
-        fn snapshot(&self) -> Vec<Value> {
-            self.deliveries.lock().clone()
-        }
-
-        /// 返回 emit 与终态通知的完整调用顺序。
-        fn calls_snapshot(&self) -> Vec<EmitterCall> {
-            self.calls.lock().clone()
-        }
-    }
-
-    impl DeliveryEmitter for RecordingEmitter {
-        /// 先记录尝试，再在配置序号上返回发送失败。
-        fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-            let value =
-                serde_json::to_value(delivery).map_err(|_| AgentRuntimeError::DesktopEmitFailed)?;
-            let mut deliveries = self.deliveries.lock();
-            deliveries.push(value.clone());
-            self.calls.lock().push(EmitterCall::Emit(value));
-            if self.fail_at == Some(deliveries.len()) {
-                return Err(AgentRuntimeError::DesktopEmitFailed);
-            }
-            Ok(())
-        }
-
-        /// 记录终态通知调用，不模拟原生通知系统本身。
-        fn notify_task_terminal(
-            &self,
-            task_title: Option<&str>,
-            stop_reason: Option<TurnStopReason>,
-        ) {
-            self.calls.lock().push(EmitterCall::Notify {
-                task_title: task_title.map(str::to_owned),
-                stop_reason,
-            });
-        }
-    }
-
-    /// 可由测试线程释放的同步投递闸门，用于覆盖 emit 长时间阻塞的边界。
-    #[derive(Clone)]
-    struct BlockingEmitter {
-        /// 已进入 emit 的调用次数及其等待通知。
-        calls: Arc<(StdMutex<usize>, Condvar)>,
-        /// 已经从 emit 返回的调用次数及其等待通知。
-        completed: Arc<(StdMutex<usize>, Condvar)>,
-        /// 控制被阻塞调用继续返回的共享闸门。
-        release: Arc<(StdMutex<bool>, Condvar)>,
-        /// 被同步阻塞的最大调用序号；测试只阻塞前 N 次调用。
-        block_through: usize,
-        /// 已由 emit 接收的桌面载荷，用于验证回执未知时事件仍可能完成。
-        deliveries: Arc<Mutex<Vec<Value>>>,
-    }
-
-    impl BlockingEmitter {
-        /// 创建阻塞所有调用的测试投递器。
-        fn blocking_all() -> Arc<Self> {
-            Arc::new(Self {
-                calls: Arc::new((StdMutex::new(0), Condvar::new())),
-                completed: Arc::new((StdMutex::new(0), Condvar::new())),
-                release: Arc::new((StdMutex::new(false), Condvar::new())),
-                block_through: usize::MAX,
-                deliveries: Arc::new(Mutex::new(Vec::new())),
-            })
-        }
-
-        /// 等待指定数量的 emit 调用真实进入同步投递边界。
-        fn wait_for_calls(&self, expected: usize) {
-            let (calls, signal) = &*self.calls;
-            let mut calls = calls.lock().expect("阻塞投递调用状态应可用");
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while *calls < expected {
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .expect("等待阻塞投递调用不应超时");
-                let (next, timeout) = signal
-                    .wait_timeout(calls, remaining)
-                    .expect("阻塞投递调用状态应可用");
-                calls = next;
-                assert!(!timeout.timed_out() || *calls >= expected);
-            }
-        }
-
-        /// 等待指定数量的 emit 调用已经返回。
-        fn wait_for_completed(&self, expected: usize) {
-            let (completed, signal) = &*self.completed;
-            let mut completed = completed.lock().expect("阻塞投递完成状态应可用");
-            let deadline = Instant::now() + Duration::from_secs(1);
-            while *completed < expected {
-                let remaining = deadline
-                    .checked_duration_since(Instant::now())
-                    .expect("等待阻塞投递完成不应超时");
-                let (next, timeout) = signal
-                    .wait_timeout(completed, remaining)
-                    .expect("阻塞投递完成状态应可用");
-                completed = next;
-                assert!(!timeout.timed_out() || *completed >= expected);
-            }
-        }
-
-        /// 释放全部仍在 emit 中等待的调用。
-        fn release(&self) {
-            let (released, signal) = &*self.release;
-            let mut released = released.lock().expect("阻塞投递闸门状态应可用");
-            *released = true;
-            signal.notify_all();
-        }
-
-        /// 返回已经进入 emit 的桌面载荷副本。
-        fn deliveries(&self) -> Vec<Value> {
-            self.deliveries.lock().clone()
-        }
-    }
-
-    impl DeliveryEmitter for BlockingEmitter {
-        /// 记录调用后按测试闸门同步阻塞，模拟不可被异步取消的桌面边界。
-        fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-            let value =
-                serde_json::to_value(delivery).map_err(|_| AgentRuntimeError::DesktopEmitFailed)?;
-            let call_number = {
-                let (calls, signal) = &*self.calls;
-                let mut calls = calls.lock().expect("阻塞投递调用状态应可用");
-                *calls = calls.saturating_add(1);
-                signal.notify_all();
-                *calls
-            };
-            self.deliveries.lock().push(value);
-            if call_number <= self.block_through {
-                let (released, signal) = &*self.release;
-                let mut released = released.lock().expect("阻塞投递闸门状态应可用");
-                while !*released {
-                    released = signal.wait(released).expect("阻塞投递闸门状态应可用");
-                }
-            }
-            let (completed, signal) = &*self.completed;
-            let mut completed = completed.lock().expect("阻塞投递完成状态应可用");
-            *completed = completed.saturating_add(1);
-            signal.notify_all();
-            Ok(())
-        }
-    }
-
-    /// 构造一个绑定 Turn 的标准文本增量草稿。
-    fn text_draft(text: &str) -> DeliveryDraft {
-        DeliveryDraft::SessionUpdate {
-            turn_id: Some("turn-a".to_owned()),
-            source_agent_id: Some("agent-root".to_owned()),
-            occurred_at_ms: 1,
-            journal_sequence: None,
-            update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(text),
-            ))),
-        }
-    }
-
-    /// 独立 Turn 的文本草稿：同一攒批窗口内也不会被相邻同流增量合并。
-    fn unmerged_text_draft(turn: &str, text: &str) -> DeliveryDraft {
-        DeliveryDraft::SessionUpdate {
-            turn_id: Some(turn.to_owned()),
-            source_agent_id: Some("agent-root".to_owned()),
-            occurred_at_ms: 1,
-            journal_sequence: None,
-            update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(text),
-            ))),
-        }
-    }
-
-    /// 生命周期屏障草稿：到达泵即同步清空攒批缓冲并零延迟投递，
-    /// 用于在断言前确定性地完成缓冲增量投递。
-    fn stream_barrier_draft() -> DeliveryDraft {
-        DeliveryDraft::KeenCodeEvent {
-            turn_id: Some("turn-a".to_owned()),
-            source_agent_id: Some("agent-root".to_owned()),
-            journal_sequence: None,
-            occurred_at_ms: 2,
-            event: KeenCodeEvent::ModelFirstStreamObserved,
-        }
-    }
-
-    /// 构造带权威 Journal 序号的文本草稿，用于恢复门排序验证。
-    fn journal_text_draft(text: &str, journal_sequence: u64) -> DeliveryDraft {
-        DeliveryDraft::SessionUpdate {
-            turn_id: Some("turn-a".to_owned()),
-            source_agent_id: Some("agent-root".to_owned()),
-            occurred_at_ms: journal_sequence,
-            journal_sequence: Some(journal_sequence),
-            update: Box::new(SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                ContentBlock::from(text),
-            ))),
-        }
-    }
-
     /// 创建一个只返回固定文本并正常结束的模型脚本。
     fn completed_reply(text: &str) -> ScriptedReply {
         ScriptedReply::events([
@@ -11940,6 +10588,13 @@ mod tests {
                 stop_reason: StopReason::Completed,
             },
         ])
+    }
+
+    /// 仅验证普通根 Turn 的测试不应让后台自动标题额外消耗一次 Provider 响应。
+    fn mark_session_title_manual(session: &RuntimeSession) {
+        session
+            .rename("test-manual-title", "测试会话", Some(TitleSource::Manual))
+            .expect("测试 Session 标题应可显式固定");
     }
 
     /// 按生产装配规则构造会话冻结的稳定前缀：System 规则、能力说明与指令拼接。
@@ -12033,60 +10688,6 @@ mod tests {
             )
             .await
             .expect("测试模型 Round 应完成");
-    }
-
-    /// 写入带显式 Turn Provider 快照的模型 Round，供冷恢复与分页投影测试使用。
-    async fn persist_usage_root_turn_with_provider_snapshot(
-        session: &RuntimeSession,
-        turn_id: &str,
-        model: &str,
-        prompt: &str,
-        used: u64,
-        provider_snapshot: ProviderSnapshot,
-    ) {
-        let provider = Arc::new(ScriptedProvider::new(
-            ProviderCapabilities {
-                max_context_tokens: provider_snapshot.context_window,
-                ..ProviderCapabilities::default()
-            },
-            [completed_reply_with_usage(
-                "完成",
-                TokenUsage {
-                    input_tokens: Some(used.saturating_sub(1)),
-                    output_tokens: Some(1),
-                    reasoning_tokens: None,
-                    cache_read_tokens: None,
-                    cache_write_tokens: None,
-                    total_tokens: Some(used),
-                },
-            )],
-        ));
-        let input = ModelMessage::text(MessageRole::User, prompt);
-        let request = TurnRequest::new(
-            keencode_agent::SessionId::new(session.session_id().as_str())
-                .expect("测试 Session 标识应有效"),
-            keencode_agent::TurnId::new(turn_id).expect("测试 Turn 标识应有效"),
-            keencode_agent::AgentId::new("root").expect("测试根 Agent 标识应有效"),
-            model,
-            vec![input.clone()],
-            PlanGuard::inactive(),
-        );
-        session
-            .bind_agent_runner(AgentRunner::new(
-                provider,
-                ToolRegistry::new(),
-                RunLimits::default(),
-            ))
-            .run_turn(
-                RuntimeTurnRequest::root(
-                    request,
-                    vec![input],
-                    root_turn_summary(prompt, None, false),
-                )
-                .with_provider_snapshot(provider_snapshot),
-            )
-            .await
-            .expect("带 Provider 快照的测试模型 Round 应完成");
     }
 
     /// 启动只接受一次请求的本地 Responses 服务，并返回捕获的 JSON 请求正文。
@@ -12531,8 +11132,113 @@ mod tests {
             !runtime
                 .session_has_active_work(session_id)
                 .expect("测试 Session 最终活动状态应读取"),
-            "测试 Runtime 应在有限时限内收敛"
+            "测试 Runtime 应在有限时限内收敛；{}",
+            session_active_work_diagnostics(runtime, session_id)
         );
+    }
+
+    /// 失败诊断只读取各层活动账本，帮助区分 Runner、Journal、后台任务和容量残留。
+    fn session_active_work_diagnostics(runtime: &Arc<AgentRuntime>, session_id: &str) -> String {
+        let Ok(session) = runtime.runtime_manager.get(session_id.to_owned()) else {
+            return "session=unavailable".to_owned();
+        };
+        let active_turn_ids = session
+            .active_turn_ids()
+            .map(|turns| format!("runtime_active_turns={turns:?}"))
+            .unwrap_or_else(|error| format!("runtime_active_turns=error:{error}"));
+        let journal = match session.snapshot() {
+            Ok(snapshot) => format!(
+                "journal_running_turns={} journal_pending_tools={} journal_open_terminals={} journal_active_sub_agents={} journal_unreleased_worktrees={}",
+                snapshot
+                    .state
+                    .turns
+                    .values()
+                    .filter(|turn| turn.status == TurnStatus::Running)
+                    .count(),
+                snapshot
+                    .state
+                    .tools
+                    .values()
+                    .filter(|tool| tool.outcome.is_none())
+                    .count(),
+                snapshot
+                    .state
+                    .terminals
+                    .values()
+                    .filter(|terminal| !terminal.exited)
+                    .count(),
+                snapshot
+                    .state
+                    .sub_agents
+                    .values()
+                    .filter(|agent| {
+                        matches!(
+                            agent.status,
+                            SubAgentStatus::Pending
+                                | SubAgentStatus::Running
+                                | SubAgentStatus::Waiting
+                        )
+                    })
+                    .count(),
+                snapshot
+                    .state
+                    .worktrees
+                    .values()
+                    .filter(|worktree| !worktree.released)
+                    .count(),
+            ),
+            Err(error) => format!("journal=error:{error}"),
+        };
+        let collaboration = runtime
+            .collaboration_sessions
+            .lock()
+            .ok()
+            .and_then(|runtimes| runtimes.get(session_id).cloned());
+        let collaboration = match collaboration {
+            Some(collaboration) => {
+                let execution = collaboration
+                    .execution
+                    .state
+                    .lock()
+                    .map(|state| {
+                        format!(
+                            "execution_running_turns={} execution_prepared_root_turns={} execution_running_ids={:?}",
+                            state.running_turns.len(),
+                            state.prepared_root_turns.len(),
+                            state.running_turns.keys().collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_else(|_| "execution_state=poisoned".to_owned());
+                let background = collaboration
+                    .execution
+                    .background_tasks
+                    .list_running()
+                    .map(|tasks| {
+                        format!(
+                            "background_running_tasks={} background_task_ids={:?}",
+                            tasks.len(),
+                            tasks
+                                .iter()
+                                .map(|task| task.task_id.as_str())
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                    .unwrap_or_else(|error| format!("background=error:{error}"));
+                let capacity = collaboration
+                    .coordinator
+                    .capacity()
+                    .map(|capacity| {
+                        format!(
+                            "coordinator_global_in_use={}/{} coordinator_roots={:?}",
+                            capacity.global_in_use, capacity.global_limit, capacity.roots,
+                        )
+                    })
+                    .unwrap_or_else(|error| format!("coordinator_capacity=error:{error}"));
+                format!("{execution} {background} {capacity}")
+            }
+            None => "collaboration=absent".to_owned(),
+        };
+        format!("{active_turn_ids} {journal} {collaboration}")
     }
 
     /// 判断本地 Responses 请求是否包含指定的用户文本，用于区分根与子 Agent 请求。
@@ -12656,7 +11362,14 @@ mod tests {
         .expect("测试 Provider 配置应有效");
         config.response_mode = WireResponseMode::Buffered;
         if let Some(capabilities) = capabilities {
-            config.default_capabilities = capabilities;
+            // 生产装配会为已登记模型写入精确能力覆盖；测试夹具必须保持同一优先级，
+            // 否则 Runtime 的模型能力读取会错误地退回默认快照。
+            config.default_capabilities = capabilities.clone();
+            config.model_capabilities.extend(
+                models
+                    .iter()
+                    .map(|model| ((*model).to_owned(), capabilities.clone())),
+            );
         }
         let snapshot = registry
             .replace_all([ProviderRegistration::new(
@@ -12670,7 +11383,7 @@ mod tests {
             .expect("测试 Provider 注册项应有效")])
             .expect("测试 Provider 注册表应替换");
         let runtime = Arc::new(
-            AgentRuntime::new_with_registry(storage_root, RecordingEmitter::successful(), registry)
+            AgentRuntime::new_with_registry(storage_root, registry, test_executor_handle())
                 .expect("测试 Runtime 应创建"),
         );
         *runtime
@@ -12716,12 +11429,9 @@ mod tests {
                 .expect("Session Provider 应解析"),
         );
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let runtime = AgentRuntime::new_with_registry(
-            storage.path(),
-            RecordingEmitter::successful(),
-            registry,
-        )
-        .expect("测试 Runtime 应创建");
+        let runtime =
+            AgentRuntime::new_with_registry(storage.path(), registry, test_executor_handle())
+                .expect("测试 Runtime 应创建");
 
         let inherited = runtime
             .resolve_child_agent_provider(Some(&session_provider), "model-a")
@@ -12774,12 +11484,9 @@ mod tests {
                 .expect("Session Provider 应解析"),
         );
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let runtime = AgentRuntime::new_with_registry(
-            storage.path(),
-            RecordingEmitter::successful(),
-            registry,
-        )
-        .expect("测试 Runtime 应创建");
+        let runtime =
+            AgentRuntime::new_with_registry(storage.path(), registry, test_executor_handle())
+                .expect("测试 Runtime 应创建");
 
         let missing = runtime
             .resolve_child_agent_provider(Some(&session_provider), "provider-b::model-missing")
@@ -12824,246 +11531,6 @@ mod tests {
     }
 
     /// 桌面通知只提取根用户 Turn 的实时终态，并保留结构化失败原因。
-    #[test]
-    fn task_terminal_notice_ignores_child_turns_and_handles_atomic_batches() {
-        let session_id = ResourceSessionId::new("session-task-notification").unwrap();
-        let mut state = SessionState::empty(session_id);
-        state.title = "通知测试任务".to_owned();
-        let root_turn_id = ResourceTurnId::new("turn-root").unwrap();
-        state.turns.insert(
-            root_turn_id.clone(),
-            TurnState {
-                turn_id: root_turn_id.clone(),
-                source_agent_id: ResourceAgentId::new(keencode_resources::ROOT_AGENT_ID).unwrap(),
-                root_turn_id: root_turn_id.clone(),
-                parent_turn_id: None,
-                prompt_summary: "根任务".to_owned(),
-                started_at_unix_ms: 1,
-                completed_at_unix_ms: Some(2),
-                status: TurnStatus::Completed,
-                stop_reason: None,
-                outcome_message: None,
-            },
-        );
-        assert_eq!(
-            root_task_terminal_notice(
-                &state,
-                &SessionEvent::TurnCompleted {
-                    turn_id: root_turn_id.clone(),
-                },
-            ),
-            Some(RootTaskTerminalNotice {
-                task_title: "通知测试任务".to_owned(),
-                stop_reason: None,
-            })
-        );
-
-        let child_turn_id = ResourceTurnId::new("turn-child").unwrap();
-        state.turns.insert(
-            child_turn_id.clone(),
-            TurnState {
-                turn_id: child_turn_id.clone(),
-                source_agent_id: ResourceAgentId::new("agent-child").unwrap(),
-                root_turn_id: root_turn_id.clone(),
-                parent_turn_id: Some(root_turn_id.clone()),
-                prompt_summary: "子任务".to_owned(),
-                started_at_unix_ms: 1,
-                completed_at_unix_ms: Some(2),
-                status: TurnStatus::Completed,
-                stop_reason: None,
-                outcome_message: None,
-            },
-        );
-        assert_eq!(
-            root_task_terminal_notice(
-                &state,
-                &SessionEvent::TurnCompleted {
-                    turn_id: child_turn_id.clone(),
-                },
-            ),
-            None
-        );
-
-        let notice = root_task_terminal_notice(
-            &state,
-            &SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::TurnCompleted {
-                        turn_id: child_turn_id,
-                    },
-                    SessionEvent::TurnStopped {
-                        turn_id: root_turn_id,
-                        reason: TurnStopReason::ContextBlocked,
-                        message: "上下文无法继续".to_owned(),
-                    },
-                ],
-            },
-        )
-        .expect("原子批次中的根 Turn 终态应产生通知");
-        assert_eq!(notice.stop_reason, Some(TurnStopReason::ContextBlocked));
-    }
-
-    /// 实时根 Turn 必须先完成桌面 emit 才通知；取消、空投影和失败投递均保持静默。
-    #[tokio::test]
-    async fn live_terminal_notification_follows_projection_and_filters_non_notifiable_cases() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        sender
-            .send_live_batch(
-                vec![text_draft("completed")],
-                Some(RootTaskTerminalNotice {
-                    task_title: "完成任务".to_owned(),
-                    stop_reason: None,
-                }),
-            )
-            .await
-            .expect("成功的实时根 Turn 应完成投递");
-        // 屏障草稿同步 flush 缓冲：投影投递先于终态通知完成。
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-        let calls = emitter.calls_snapshot();
-        assert_eq!(calls.len(), 3);
-        assert!(matches!(
-            &calls[0],
-            EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "completed"
-        ));
-        assert_eq!(
-            calls[1],
-            EmitterCall::Notify {
-                task_title: Some("完成任务".to_owned()),
-                stop_reason: None,
-            }
-        );
-
-        sender
-            .send_live_batch(
-                vec![text_draft("cancelled")],
-                Some(RootTaskTerminalNotice {
-                    task_title: "取消任务".to_owned(),
-                    stop_reason: Some(TurnStopReason::Cancelled),
-                }),
-            )
-            .await
-            .expect("取消的实时根 Turn 仍应完成桌面投递");
-        sender
-            .send_live_batch(
-                Vec::new(),
-                Some(RootTaskTerminalNotice {
-                    task_title: "空投影".to_owned(),
-                    stop_reason: None,
-                }),
-            )
-            .await
-            .expect("空投影应作为无操作成功");
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-        let calls = emitter.calls_snapshot();
-        // 取消投递先于通知语义保持；取消与空投影通知保持静默。
-        assert_eq!(calls.len(), 5);
-        assert!(
-            matches!(&calls[3], EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "cancelled")
-        );
-        assert_eq!(
-            calls
-                .iter()
-                .filter(|call| matches!(call, EmitterCall::Notify { .. }))
-                .count(),
-            1
-        );
-        sender.shutdown().await.expect("成功投递器应关闭");
-
-        let failing = RecordingEmitter::failing_at(1);
-        let failing_sender = SessionDeliverySender::spawn("session-b", failing.clone(), false);
-        assert_eq!(
-            failing_sender
-                .send_live_batch(
-                    vec![stream_barrier_draft()],
-                    Some(RootTaskTerminalNotice {
-                        task_title: "失败任务".to_owned(),
-                        stop_reason: Some(TurnStopReason::Failed),
-                    }),
-                )
-                .await,
-            Err(AgentRuntimeError::DesktopEmitFailed)
-        );
-        assert_eq!(failing.calls_snapshot().len(), 1);
-        assert!(matches!(&failing.calls_snapshot()[0], EmitterCall::Emit(_)));
-        failing_sender
-            .shutdown()
-            .await
-            .expect("失败投递器仍应可关闭");
-
-        let replay_failing = RecordingEmitter::failing_at(1);
-        let replay_failing_sender = SessionDeliverySender::spawn("session-c", replay_failing, true);
-        assert_eq!(
-            replay_failing_sender
-                .send_replay_batch(vec![journal_text_draft("failed replay", 1)], 1, true)
-                .await,
-            Err(AgentRuntimeError::DesktopEmitFailed)
-        );
-        replay_failing_sender
-            .shutdown()
-            .await
-            .expect("历史投递失败后仍应可关闭投递器");
-    }
-
-    /// 历史重放不通知，恢复门只在较新的实时根投影真正释放后通知一次。
-    #[tokio::test]
-    async fn recovery_delays_live_terminal_notification_until_release() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), true);
-        sender
-            .send_live_batch(
-                vec![journal_text_draft("stale-live", 1)],
-                Some(RootTaskTerminalNotice {
-                    task_title: "过期任务".to_owned(),
-                    stop_reason: None,
-                }),
-            )
-            .await
-            .expect("恢复期间的旧实时事件应缓存");
-        sender
-            .send_live_batch(
-                vec![journal_text_draft("new-live", 2)],
-                Some(RootTaskTerminalNotice {
-                    task_title: "新任务".to_owned(),
-                    stop_reason: Some(TurnStopReason::Failed),
-                }),
-            )
-            .await
-            .expect("恢复期间的新实时事件应缓存");
-        assert!(emitter.calls_snapshot().is_empty());
-
-        let history_delivery_sequence = sender
-            .send_replay_batch(vec![journal_text_draft("historical", 1)], 1, true)
-            .await
-            .expect("历史末页应先投递再释放实时缓存");
-        assert_eq!(history_delivery_sequence, 1);
-        let calls = emitter.calls_snapshot();
-        assert_eq!(calls.len(), 3);
-        assert!(matches!(
-            &calls[0],
-            EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "historical"
-        ));
-        assert!(matches!(
-            &calls[1],
-            EmitterCall::Emit(value) if value["envelope"]["update"]["content"]["text"] == "new-live"
-        ));
-        assert_eq!(
-            calls[2],
-            EmitterCall::Notify {
-                task_title: Some("新任务".to_owned()),
-                stop_reason: Some(TurnStopReason::Failed),
-            }
-        );
-        sender.shutdown().await.expect("恢复投递器应关闭");
-    }
-
-    /// Runtime Journal 的失败与子 Agent 完成终态必须无损转换为 Collaboration 恢复结果。
     #[test]
     fn authoritative_runtime_turn_outcomes_preserve_terminal_semantics() {
         let session_id = ResourceSessionId::new("session-authoritative-outcome").unwrap();
@@ -13146,10 +11613,7 @@ mod tests {
     async fn cancelling_checkpoint_normalizes_completed_journal_turn_to_interrupted() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "cancelling-journal-race")
             .expect("测试 Session 应创建");
@@ -13815,10 +12279,7 @@ mod tests {
     async fn mailbox_arriving_after_final_candidate_waits_for_next_user_turn() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "mailbox-final-candidate")
             .expect("测试 Session 应创建");
@@ -14144,10 +12605,7 @@ mod tests {
     async fn runtime_dynamic_input_mirror_failure_releases_turn_and_preserves_claim() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "dynamic-input-mirror-failure")
             .expect("测试 Session 应创建");
@@ -14317,10 +12775,7 @@ mod tests {
     async fn user_steer_envelope_stays_meta_and_out_of_conversation_projection() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "steer-envelope-meta")
             .expect("测试 Session 应创建");
@@ -14469,47 +12924,6 @@ mod tests {
             super::validate_dynamic_input_claim(&session, &tampered_receipt, &claim),
             Err(AgentRuntimeError::RecoveryRequired)
         );
-        let receipt_record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("steer-display-receipt").unwrap(),
-            session: state.session_id.clone(),
-            sequence: 3,
-            time_unix_ms: 3,
-            event: SessionEvent::DynamicInputReceiptCommitted {
-                turn_id: receipt.turn_id.clone(),
-                source_agent_id: receipt.source_agent_id.clone(),
-                model_round: receipt.model_round,
-                segment_index: receipt.segment_index,
-                kind: receipt.kind,
-                through_sequence: receipt.through_sequence,
-                user_inputs: receipt.user_inputs.clone(),
-            },
-        };
-        for mode in [
-            AuthoritativeProjectionMode::Live,
-            AuthoritativeProjectionMode::Replay,
-        ] {
-            let drafts = map_authoritative_record(&session, &state, &receipt_record, mode).unwrap();
-            let texts = drafts
-                .iter()
-                .map(|draft| match draft {
-                    keencode_runtime::DeliveryDraft::SessionUpdate { update, .. } => {
-                        match update.as_ref() {
-                            keencode_acp::schema::SessionUpdate::UserMessageChunk(chunk) => {
-                                let encoded = serde_json::to_value(chunk).unwrap();
-                                assert_eq!(encoded["_meta"]["keencode/startsNewTurn"], false);
-                                assert!(encoded["_meta"]["keencode/messageReferences"].is_array());
-                                encoded["content"]["text"].as_str().unwrap().to_owned()
-                            }
-                            _ => panic!("追加只能投递原用户文本"),
-                        }
-                    }
-                    _ => panic!("追加展示不应伪造新生命周期"),
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(texts, vec!["追加引导正文 @proof", "第二条引导 @proof"]);
-        }
         let mut tampered = claim.clone();
         tampered.user_steers[0].references[0].path = "plugin://proof@wrong".into();
         assert_eq!(
@@ -14522,28 +12936,6 @@ mod tests {
             super::validate_dynamic_input_claim(&session, &state, &changed_body),
             Err(AgentRuntimeError::RecoveryRequired)
         );
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("steer-envelope-meta").expect("EventId 应有效"),
-            session: state.session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::MessageAdded {
-                message: stored.clone(),
-            },
-        };
-        for mode in [
-            AuthoritativeProjectionMode::Live,
-            AuthoritativeProjectionMode::Replay,
-        ] {
-            assert!(
-                map_authoritative_record(&session, &state, &record, mode)
-                    .expect("steer 信封应可投影")
-                    .is_empty(),
-                "steer 信封不得出现在对话界面投影中（{mode:?}）"
-            );
-        }
     }
 
     /// 后续根 Turn 启动前必须在 live Coordinator 中完成动态 claim 对账，避免重复消费。
@@ -14811,10 +13203,7 @@ mod tests {
     fn production_collaboration_store_accepts_normal_running_interruption() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "normal-interruption-operation")
             .expect("测试 Session 应创建");
@@ -14878,10 +13267,7 @@ mod tests {
     fn production_collaboration_store_accepts_normal_child_running_interruption() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "normal-child-interruption-operation")
             .expect("测试 Session 应创建");
@@ -14964,10 +13350,7 @@ mod tests {
     async fn collaboration_failure_redaction_survives_persistence_and_cold_recovery() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "failure-redaction-persistence")
             .expect("测试 Session 应创建");
@@ -15213,6 +13596,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "rewind-resend")
             .unwrap();
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         for (turn_id, prompt) in [
             ("turn-before-edit", "保留的第一轮"),
             ("turn-edit-target", "编辑前请求"),
@@ -15317,6 +13701,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "reference-cold-resume")
             .unwrap();
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         let references = vec![keencode_model::InputReference {
             name: "proof".into(),
             path: "plugin://proof@local".into(),
@@ -15436,6 +13821,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "attachment-runtime-input")
             .unwrap();
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         runtime
             .start_root_turn(
                 &session_id,
@@ -15531,6 +13917,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "fork-prefix")
             .unwrap();
         let source_id = source.session_id().as_str().to_owned();
+        mark_session_title_manual(&source);
         for (turn, text) in [
             ("fork-first", "需要继承的第一轮"),
             ("fork-second", "不应继承的第二轮"),
@@ -15636,6 +14023,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "root-completed-cold-recovery")
             .expect("首个 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         let first_turn_id = "turn-root-completed-cold-recovery";
 
         assert_eq!(
@@ -15879,6 +14267,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "runtime-interruption-notice")
             .expect("中断恢复测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         let first_turn_id = "turn-interruption-notice-first";
         assert_eq!(
             runtime
@@ -16099,7 +14488,7 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         let cancellation =
-            runtime.background_task_cancel(&session_id, child.initial_turn_id.as_str());
+            runtime.background_task_cancel_outcome(&session_id, child.initial_turn_id.as_str());
         // 子 Agent 请求已经到达闸门后才取消，确保覆盖真实 Provider 等待路径。
         child_gate.release();
         assert!(
@@ -16486,13 +14875,16 @@ mod tests {
         let persistent_state =
             Arc::new(PersistentAgentState::open(session.clone()).expect("测试持久状态应创建"));
         let execution = Arc::new(super::RuntimeAgentExecution::new(
-            Arc::downgrade(runtime),
-            session.clone(),
-            project_root.to_path_buf(),
-            persistent_state,
-            background_tasks.clone(),
-            worktrees,
-            Arc::clone(&store),
+            super::RuntimeAgentExecutionContext {
+                owner: Arc::downgrade(runtime),
+                session: session.clone(),
+                project_root: project_root.to_path_buf(),
+                persistent_state,
+                background_tasks: background_tasks.clone(),
+                executor_handle: runtime.executor_handle.clone(),
+                worktrees,
+                store: Arc::clone(&store),
+            },
         ));
         let coordinator = Arc::new(CollaborationCoordinator::new_with_global_turn_limiter(
             limiter,
@@ -16672,21 +15064,13 @@ mod tests {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let first_project = tempfile::tempdir().expect("应创建第一项目目录");
         let second_project = tempfile::tempdir().expect("应创建第二项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let first_session = runtime
             .open_or_create_session(first_project.path(), None, "shared-limit-first")
             .expect("第一 Session 应创建");
         let second_session = runtime
             .open_or_create_session(second_project.path(), None, "shared-limit-second")
             .expect("第二 Session 应创建");
-        for session in [&first_session, &second_session] {
-            runtime
-                .ensure_session_delivery(session.session_id().as_str())
-                .expect("Session 投递应建立");
-        }
         let seed = || RootAgentSeed {
             model: "test-model".to_owned(),
             reasoning_effort: None,
@@ -16734,21 +15118,13 @@ mod tests {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let first_project = tempfile::tempdir().expect("应创建第一项目目录");
         let second_project = tempfile::tempdir().expect("应创建第二项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let first_session = runtime
             .open_or_create_session(first_project.path(), None, "atomic-limit-first")
             .expect("第一 Session 应创建");
         let second_session = runtime
             .open_or_create_session(second_project.path(), None, "atomic-limit-second")
             .expect("第二 Session 应创建");
-        for session in [&first_session, &second_session] {
-            runtime
-                .ensure_session_delivery(session.session_id().as_str())
-                .expect("测试 Session 投递应建立");
-        }
         let seed = || RootAgentSeed {
             model: "test-model".to_owned(),
             reasoning_effort: None,
@@ -16819,16 +15195,10 @@ mod tests {
     async fn background_agent_limit_update_races_new_session_without_stale_limit() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "limit-race-session")
             .expect("测试 Session 应创建");
-        runtime
-            .ensure_session_delivery(session.session_id().as_str())
-            .expect("Session 投递应建立");
         let barrier = Arc::new(std::sync::Barrier::new(3));
         let setter_runtime = Arc::clone(&runtime);
         let setter_barrier = Arc::clone(&barrier);
@@ -16875,17 +15245,11 @@ mod tests {
     async fn recovered_root_uses_current_background_agent_limit() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "recovered-limit-session")
             .expect("测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("Session 投递应建立");
         let store = Arc::new(
             SessionCollaborationStore::new(storage.path(), &session_id)
                 .expect("恢复测试 Store 应创建"),
@@ -17006,10 +15370,7 @@ mod tests {
     ) {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "waiting-capacity-batch")
             .expect("测试 Session 应创建");
@@ -17121,16 +15482,6 @@ mod tests {
             Arc::new(Self {
                 calls: Mutex::new(Vec::new()),
                 diagnostics: Vec::new(),
-                plugin_reference_catalog: Vec::new(),
-                skill_reference_catalog: Vec::new(),
-            })
-        }
-
-        /// 创建带候选级诊断的记录贡献器。
-        fn with_diagnostics(diagnostics: Vec<RuntimeExtensionDiagnostic>) -> Arc<Self> {
-            Arc::new(Self {
-                calls: Mutex::new(Vec::new()),
-                diagnostics,
                 plugin_reference_catalog: Vec::new(),
                 skill_reference_catalog: Vec::new(),
             })
@@ -17268,42 +15619,6 @@ mod tests {
             .expect("测试根 Turn 应完成");
     }
 
-    /// 构造一个完整标准 Elicitation Client Request。
-    fn client_request() -> keencode_acp::AcpClientRequestFrame {
-        let capabilities = ClientCapabilities::new().elicitation(Some(
-            ElicitationCapabilities::new().form(Some(ElicitationFormCapabilities::new())),
-        ));
-        let router = ElicitationRouter::from_client_capabilities(&capabilities);
-        AcpClientRequestEncoder::new()
-            .elicitation_request_frame(
-                RequestId::Str("elicitation-runtime-test".to_owned()),
-                &router,
-                CreateElicitationRequest::new(
-                    ElicitationFormMode::new(
-                        ElicitationSessionScope::new("session-a"),
-                        ElicitationSchema::new(),
-                    ),
-                    "请选择执行方式",
-                ),
-            )
-            .expect("测试请求应编码")
-    }
-
-    /// 只确认真实请求已经进入投递边界，不伪造客户端响应内容。
-    struct WorkflowPendingViewSink {
-        delivered: Arc<tokio::sync::Notify>,
-    }
-
-    impl ClientRequestSink for WorkflowPendingViewSink {
-        fn send_client_request(&self, _request: AcpClientRequestFrame) -> ClientRequestFuture<'_> {
-            let delivered = Arc::clone(&self.delivered);
-            Box::pin(async move {
-                delivered.notify_one();
-                Ok::<(), ClientRequestBridgeError>(())
-            })
-        }
-    }
-
     /// pending read-side 只能返回父连接可见的 actor 问题，并沿真实问题 Schema 回答。
     #[tokio::test]
     async fn workflow_pending_views_enforce_parent_connection_and_route() {
@@ -17314,31 +15629,20 @@ mod tests {
             ConnectionId::new("workflow-pending-parent").expect("父连接标识应合法");
         let other_connection =
             ConnectionId::new("workflow-pending-other").expect("其他连接标识应合法");
-        let capabilities = ClientCapabilities::new().elicitation(Some(
-            ElicitationCapabilities::new().form(Some(ElicitationFormCapabilities::new())),
-        ));
         runtime
             .elicitations
-            .negotiate_connection_capabilities(&parent_connection, &capabilities)
-            .expect("父连接能力应可登记");
-        runtime
-            .elicitations
-            .bind_session_connection("workflow-parent", &parent_connection)
+            .bind_native_session("workflow-parent", &parent_connection)
             .expect("父 Session 应绑定连接");
         runtime
             .bind_workflow_actor_elicitation("workflow-actor", "workflow-parent")
             .expect("actor 应绑定父连接和问答路由");
 
-        let delivered = Arc::new(tokio::sync::Notify::new());
-        let handler = runtime.elicitations.handler_for_connection_projected(
+        let handler = runtime.elicitations.handler_native_projected(
             keencode_agent::SessionId::new("workflow-actor").expect("actor Session 标识应合法"),
-            "workflow-parent".to_owned(),
+            Some("workflow-parent".to_owned()),
             parent_connection.clone(),
-            Arc::new(WorkflowPendingViewSink {
-                delivered: Arc::clone(&delivered),
-            }),
         );
-        let answer = handler.ask(UserQuestionRequest {
+        let question = UserQuestionRequest {
             session_id: keencode_agent::SessionId::new("workflow-actor")
                 .expect("actor Session 标识应合法"),
             turn_id: keencode_agent::TurnId::new("workflow-pending-turn").expect("Turn 标识应合法"),
@@ -17355,8 +15659,22 @@ mod tests {
                 multi_select: false,
                 allow_custom: true,
             }],
-        });
-        delivered.notified().await;
+        };
+        let answer = tokio::spawn(async move { handler.ask(question).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !runtime
+                    .pending_elicitation_views("workflow-parent", &parent_connection)
+                    .expect("父连接读取 pending 应成功")
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Native typed pending 应及时登记");
 
         let views = runtime
             .pending_elicitation_views("workflow-parent", &parent_connection)
@@ -17367,7 +15685,12 @@ mod tests {
             views[0].display_session_id.as_deref(),
             Some("workflow-parent")
         );
-        assert_eq!(views[0].connection_id, parent_connection);
+        assert_eq!(
+            runtime
+                .elicitations
+                .pending_connection_for_request(&views[0].request_id),
+            Some(parent_connection.clone())
+        );
         assert!(matches!(
             runtime.pending_elicitation_views("workflow-parent", &other_connection),
             Err(AgentRuntimeError::ClientResponseRejected)
@@ -17380,277 +15703,14 @@ mod tests {
                 r#"{"optionId":"直接实现"}"#,
             )
             .expect("父连接应按原问题 Schema 完成 actor 回答");
-        let response = answer.await.expect("actor 应收到已解析答案");
+        let response = answer
+            .await
+            .expect("actor AskUser 任务应完成")
+            .expect("actor 应收到已解析答案");
         assert_eq!(response.answers[0].values, ["直接实现"]);
     }
 
     /// 严格外层联合不得增加旧事件名或扁平字段。
-    #[tokio::test]
-    async fn outer_union_uses_only_current_delivery_shapes() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        sender
-            .send_batch(vec![text_draft("hello")])
-            .await
-            .expect("标准更新应发送");
-        sender
-            .send_batch(vec![DeliveryDraft::KeenCodeEvent {
-                turn_id: Some("turn-a".to_owned()),
-                source_agent_id: Some("agent-root".to_owned()),
-                journal_sequence: None,
-                occurred_at_ms: 2,
-                event: KeenCodeEvent::ModelFirstStreamObserved,
-            }])
-            .await
-            .expect("临时事件应发送");
-        sender
-            .send_client_request(client_request())
-            .await
-            .expect("Client Request 应发送");
-        let values = emitter.snapshot();
-        assert_eq!(values[0]["type"], "session_update");
-        assert!(values[0].get("envelope").is_some());
-        assert_eq!(values[1]["type"], "keencode_event");
-        assert!(values[1].get("envelope").is_some());
-        assert_eq!(values[2]["type"], "client_request");
-        assert_eq!(values[2]["request"]["jsonrpc"], "2.0");
-        assert!(values[2].get("connection_id").is_none());
-        assert!(values[2].get("connectionId").is_none());
-    }
-
-    /// Session FIFO 必须把 Client Request 的内部目标连接原样交给 emitter。
-    #[tokio::test]
-    async fn client_request_delivery_preserves_internal_connection_target() {
-        struct TargetEmitter {
-            connections: Mutex<Vec<ConnectionId>>,
-        }
-
-        impl DeliveryEmitter for TargetEmitter {
-            fn emit(&self, delivery: &AcpDelivery) -> Result<(), AgentRuntimeError> {
-                let AcpDelivery::ClientRequest { connection_id, .. } = delivery else {
-                    return Err(AgentRuntimeError::RuntimeOperationFailed);
-                };
-                self.connections.lock().push(connection_id.clone());
-                let value = serde_json::to_value(delivery)
-                    .map_err(|_| AgentRuntimeError::RuntimeOperationFailed)?;
-                assert!(value.get("connection_id").is_none());
-                assert!(value.get("connectionId").is_none());
-                Ok(())
-            }
-        }
-
-        let emitter = Arc::new(TargetEmitter {
-            connections: Mutex::new(Vec::new()),
-        });
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        let target = ConnectionId::new("web-target-connection").unwrap();
-        sender
-            .send_client_request_to(target.clone(), client_request())
-            .await
-            .expect("Client Request 应定向送达");
-        assert_eq!(emitter.connections.lock().as_slice(), &[target]);
-    }
-
-    #[tokio::test]
-    async fn provider_retry_notice_reaches_session_delivery() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "retry-notice")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("测试投递应建立");
-
-        runtime.publish_model_retry_notice(ModelRetryNotice {
-            session_id,
-            turn_id: "turn-retry".to_owned(),
-            agent_id: "root".to_owned(),
-            attempt: 2,
-            max_attempts: 10,
-            delay_ms: 750,
-            message: "模型传输超时".to_owned(),
-        });
-
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if emitter.snapshot().iter().any(|delivery| {
-                    delivery["envelope"]["event"]["type"] == "model_retry_scheduled"
-                        && delivery["envelope"]["event"]["attempt"] == 2
-                        && delivery["envelope"]["event"]["delayMs"] == 750
-                }) {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("重试状态应送达桌面投递器");
-    }
-
-    /// 不同 Session 必须各自从一开始分配投递序号。
-    #[tokio::test]
-    async fn sessions_allocate_isolated_sequences() {
-        let emitter = RecordingEmitter::successful();
-        let first = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        let second = SessionDeliverySender::spawn("session-b", emitter.clone(), false);
-        first
-            .send_batch(vec![text_draft("a")])
-            .await
-            .expect("首个 Session 应发送");
-        second
-            .send_batch(vec![text_draft("b")])
-            .await
-            .expect("第二个 Session 应发送");
-        // 屏障草稿触发各自攒批缓冲的同步 flush，使序号断言观察到实际投递。
-        first
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("首个 Session 屏障应发送");
-        second
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("第二个 Session 屏障应发送");
-        let values = emitter.snapshot();
-        assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[2]["envelope"]["deliverySequence"], 1);
-    }
-
-    /// 单 Session 批次内序号严格递增且回执晚于最后一次 emit。
-    #[tokio::test]
-    async fn batch_is_monotonic_atomic_and_acknowledged_after_last_emit() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        sender
-            .send_batch(vec![
-                unmerged_text_draft("turn-a", "one"),
-                unmerged_text_draft("turn-b", "two"),
-            ])
-            .await
-            .expect("完整批次应发送");
-        // 屏障草稿同步 flush 缓冲：屏障 ack 返回时全部投递已完成。
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-        let values = emitter.snapshot();
-        assert_eq!(values.len(), 3);
-        assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
-        assert_eq!(values[0]["envelope"]["update"]["content"]["text"], "one");
-        assert_eq!(values[1]["envelope"]["update"]["content"]["text"], "two");
-        assert_eq!(values[2]["type"], "keencode_event");
-    }
-
-    /// 两个并发生产者也不能把单条更新插入另一个生产者的原子批次。
-    #[tokio::test]
-    async fn concurrent_producer_cannot_interleave_atomic_batch() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        let batch_sender = sender.clone();
-        let batch = tokio::spawn(async move {
-            batch_sender
-                .send_batch(vec![
-                    unmerged_text_draft("turn-b1", "batch-one"),
-                    unmerged_text_draft("turn-b2", "batch-two"),
-                ])
-                .await
-        });
-        let single_sender = sender.clone();
-        let single = tokio::spawn(async move {
-            single_sender
-                .send_batch(vec![unmerged_text_draft("turn-s", "single")])
-                .await
-        });
-        batch
-            .await
-            .expect("批次任务不应 panic")
-            .expect("批次应发送");
-        single
-            .await
-            .expect("单条任务不应 panic")
-            .expect("单条应发送");
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-
-        let texts = emitter
-            .snapshot()
-            .into_iter()
-            .filter(|value| value["type"] == "session_update")
-            .map(|value| {
-                value["envelope"]["update"]["content"]["text"]
-                    .as_str()
-                    .expect("测试文本应存在")
-                    .to_owned()
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            texts == ["batch-one", "batch-two", "single"]
-                || texts == ["single", "batch-one", "batch-two"]
-        );
-    }
-
-    /// Client Request 与普通更新必须共享同一个 Session FIFO。
-    #[tokio::test]
-    async fn client_request_and_updates_share_fifo() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        sender
-            .send_batch(vec![text_draft("before")])
-            .await
-            .expect("前置更新应发送");
-        sender
-            .send_client_request(client_request())
-            .await
-            .expect("请求应发送");
-        sender
-            .send_batch(vec![text_draft("after")])
-            .await
-            .expect("后置更新应发送");
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-        let values = emitter.snapshot();
-        assert_eq!(values[0]["type"], "session_update");
-        assert_eq!(values[1]["type"], "client_request");
-        assert_eq!(values[2]["type"], "session_update");
-        assert_eq!(values[2]["envelope"]["deliverySequence"], 2);
-    }
-
-    /// emit 失败后当前世代必须拒绝全部后续投递。
-    #[tokio::test]
-    async fn emit_failure_poison_stops_later_delivery() {
-        let emitter = RecordingEmitter::failing_at(2);
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), false);
-        // 独立 Turn 草稿不会被攒批合并；纯增量批次入缓冲即确认。
-        sender
-            .send_batch(vec![
-                unmerged_text_draft("turn-a", "one"),
-                unmerged_text_draft("turn-b", "two"),
-            ])
-            .await
-            .expect("缓冲入队应成功");
-        // 屏障 flush 触发实际投递：第二个桌面投递失败并传播原始错误。
-        assert_eq!(
-            sender.send_batch(vec![stream_barrier_draft()]).await,
-            Err(AgentRuntimeError::DesktopEmitFailed)
-        );
-        assert_eq!(
-            sender.send_batch(vec![text_draft("three")]).await,
-            Err(AgentRuntimeError::DeliveryPoisoned)
-        );
-        assert_eq!(emitter.snapshot().len(), 2);
-    }
-
-    /// 普通请求和压缩请求都必须覆盖调用方伪造的四个保留观测字段。
     #[tokio::test]
     async fn turn_bound_provider_overrides_identity_for_agent_and_compression_requests() {
         let scripted = Arc::new(ScriptedProvider::new(
@@ -18299,10 +16359,6 @@ mod tests {
         assert!(!transcript_json.contains("You are an interactive software engineering agent."));
         assert!(!transcript_json.contains("Current mode:"));
         assert!(transcript_json.contains("检查动态上下文持久化边界"));
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("动态上下文测试投递应关闭");
     }
 
     /// 指令在会话首次 Turn 前冻结：中途修改 AGENTS.md 不影响本会话，新会话才取新值。
@@ -18321,6 +16377,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "frozen-instructions-first")
             .expect("指令冻结测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
 
         assert_eq!(
             runtime
@@ -18358,6 +16415,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "frozen-instructions-second")
             .expect("指令冻结测试新 Session 应创建");
         let next_session_id = next_session.session_id().as_str().to_owned();
+        mark_session_title_manual(&next_session);
         assert_ne!(session_id, next_session_id);
         assert_eq!(
             runtime
@@ -18414,14 +16472,6 @@ mod tests {
         }
         assert!(transcript_json.contains("第一轮读取旧指令"));
         assert!(transcript_json.contains("第二轮沿用冻结指令"));
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("两轮指令测试投递应关闭");
-        runtime
-            .close_session_delivery(&next_session_id)
-            .await
-            .expect("新会话指令测试投递应关闭");
     }
 
     /// 同一 Session 连续三轮：冻结规则与历史不改写，动态背景放在真实输入之前。
@@ -18436,6 +16486,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "prefix-stable-operation")
             .expect("前缀稳定测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
 
         assert_eq!(
             runtime
@@ -18548,10 +16599,6 @@ mod tests {
         assert_eq!(env_text(second), env_text(third));
         // 动态上下文不入 Transcript：第三轮请求历史中不得再出现第二轮记忆正文。
         assert!(!items_json(third).join("\n").contains("本轮动态记忆标记"));
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("前缀稳定测试投递应关闭");
     }
 
     /// 工具轮与跨 Turn 的历史前缀逐字节稳定：第 1 轮带 reasoning 与工具调用、
@@ -18607,6 +16654,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "prefix-stable-tool-operation")
             .expect("前缀稳定工具测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
 
         assert_eq!(
             runtime
@@ -18685,10 +16733,6 @@ mod tests {
                 .contains("第一轮工具轮完成"),
             "第 2 轮请求历史应包含第 1 轮最终 assistant 消息"
         );
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("前缀稳定工具测试投递应关闭");
     }
 
     /// 子 Agent 在自身首次 Turn 前用自己的 cwd 冻结环境；根与子的环境互不串扰。
@@ -19004,8 +17048,7 @@ mod tests {
     async fn unstarted_failed_pending_receipt_survives_cold_reopen() {
         let storage = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let runtime =
-            Arc::new(AgentRuntime::new(storage.path(), RecordingEmitter::successful()).unwrap());
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).unwrap());
         let session = runtime
             .open_or_create_session(project.path(), None, "unstarted-pending-cold")
             .unwrap();
@@ -19086,8 +17129,7 @@ mod tests {
         drop(session);
         runtime.runtime_manager.close(session_id.clone()).unwrap();
         drop(runtime);
-        let recovered =
-            Arc::new(AgentRuntime::new(storage.path(), RecordingEmitter::successful()).unwrap());
+        let recovered = Arc::new(AgentRuntime::new(storage.path()).unwrap());
         let reopened = recovered
             .open_or_create_session(project.path(), Some(&session_id), "unused")
             .unwrap();
@@ -19187,6 +17229,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "unstarted-continue")
             .expect("Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         runtime
             .start_root_turn(
                 &session_id,
@@ -19592,6 +17635,7 @@ mod tests {
             .open_or_create_session(project.path(), None, "template-injection-cold")
             .expect("模板测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
+        mark_session_title_manual(&session);
         let root_turn_id = "turn-template-injection-root";
         let root_turn = AgentTurnId::new(root_turn_id).expect("模板测试根 Turn 标识应有效");
 
@@ -19711,8 +17755,8 @@ mod tests {
                 .expect("关闭注入子 Agent 状态应读取"),
             CollaborationAgentStatus::Running { .. }
         ));
-        let cancellation =
-            runtime.background_task_cancel(&session_id, disabled_child.initial_turn_id.as_str());
+        let cancellation = runtime
+            .background_task_cancel_outcome(&session_id, disabled_child.initial_turn_id.as_str());
         assert!(
             cancellation.is_ok(),
             "关闭注入子 Agent 应可中断以验证冷恢复：{cancellation:?}"
@@ -19855,10 +17899,6 @@ mod tests {
                     .is_none(),
                 "{label} 不得收到模型请求"
             );
-            runtime
-                .close_session_delivery(session.session_id().as_str())
-                .await
-                .expect("损坏指令测试投递应关闭");
         }
     }
 
@@ -19867,10 +17907,7 @@ mod tests {
     fn session_creation_is_idempotent_and_focus_can_be_cleared() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let first = runtime
             .open_or_create_session(project.path(), None, "create-operation-a")
             .expect("首次创建应成功");
@@ -19969,82 +18006,6 @@ mod tests {
         );
     }
 
-    /// Web 服务配置只影响后续冻结工具表，关闭后不得继续暴露网络工具。
-    #[test]
-    fn web_service_hot_update_changes_new_turn_tool_snapshot() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let directory =
-            keencode_resources::ensure_project_storage(storage.path(), "/test-project").unwrap();
-        keencode_resources::register_session_location(
-            storage.path(),
-            &ResourceSessionId::new("session-web").unwrap(),
-            &directory,
-        )
-        .unwrap();
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
-        let delivery =
-            SessionDeliverySender::spawn("session-web", RecordingEmitter::successful(), true);
-        let before = runtime
-            .freeze_turn_tools(
-                "session-web",
-                project.path(),
-                PlanGuard::inactive(),
-                &delivery,
-            )
-            .expect("本地工具应冻结")
-            .0
-            .definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(!before.iter().any(|name| name == "WebFetch"));
-        assert!(!before.iter().any(|name| name == "WebSearch"));
-
-        runtime
-            .set_web_service_config(Some(
-                WebServiceConfig::new("https://example.com/").expect("测试网址应有效"),
-            ))
-            .expect("Web 配置应发布");
-        let enabled = runtime
-            .freeze_turn_tools(
-                "session-web",
-                project.path(),
-                PlanGuard::inactive(),
-                &delivery,
-            )
-            .expect("网络工具应冻结")
-            .0
-            .definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(enabled.iter().any(|name| name == "WebFetch"));
-        assert!(enabled.iter().any(|name| name == "WebSearch"));
-
-        runtime
-            .set_web_service_config(None)
-            .expect("Web 配置应关闭");
-        let disabled = runtime
-            .freeze_turn_tools(
-                "session-web",
-                project.path(),
-                PlanGuard::inactive(),
-                &delivery,
-            )
-            .expect("关闭后本地工具应冻结")
-            .0
-            .definitions()
-            .into_iter()
-            .map(|definition| definition.name)
-            .collect::<Vec<_>>();
-        assert!(!disabled.iter().any(|name| name == "WebFetch"));
-        assert!(!disabled.iter().any(|name| name == "WebSearch"));
-    }
-
     /// 项目撤销必须路由到唯一候选并使缓存失效，其他项目和无候选路径互不影响。
     #[test]
     fn project_mcp_revocation_invalidates_only_the_selected_runtime_candidate() {
@@ -20052,8 +18013,7 @@ mod tests {
         let project_a = tempfile::tempdir().expect("应创建项目 A");
         let project_b = tempfile::tempdir().expect("应创建项目 B");
         let project_c = tempfile::tempdir().expect("应创建未发布候选的项目 C");
-        let runtime = AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-            .expect("测试 Runtime 应创建");
+        let runtime = AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建");
         let first = RecordingExtensionContributor::new();
         let second = RecordingExtensionContributor::new();
         for (project, contributor) in [
@@ -20140,14 +18100,77 @@ mod tests {
         );
     }
 
+    /// 资源写入只登记项目级刷新；活动候选保持原代次，下一次发布成功后才清除标记。
+    #[test]
+    fn extension_candidate_invalidation_preserves_active_generation_until_republish() {
+        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
+        let project = tempfile::tempdir().expect("应创建候选项目目录");
+        let runtime = AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建");
+        let current = RecordingExtensionContributor::new();
+        runtime
+            .publish_extension_candidate(
+                project.path(),
+                RuntimeExtensionCandidate::new(1, current).expect("候选代次应有效"),
+            )
+            .expect("初始候选应发布");
+
+        let build_epoch = runtime
+            .extension_candidate_refresh_epoch(project.path())
+            .expect("初始刷新 epoch 应可读取");
+        runtime
+            .invalidate_extension_candidate(project.path())
+            .expect("项目候选应登记刷新");
+        assert_eq!(
+            runtime.extension_generation(project.path()).unwrap(),
+            Some(1),
+            "失效登记不能立即替换活动候选"
+        );
+        assert!(
+            runtime
+                .extension_candidate_needs_refresh(project.path())
+                .unwrap()
+        );
+        assert_eq!(
+            runtime.publish_extension_candidate_at_epoch(
+                project.path(),
+                RuntimeExtensionCandidate::new(2, RecordingExtensionContributor::new())
+                    .expect("过时候选代次应有效"),
+                build_epoch,
+            ),
+            Err(AgentRuntimeError::RuntimeOperationFailed),
+            "构建期间发生资源写入时不得发布旧候选"
+        );
+        assert_eq!(
+            runtime.extension_generation(project.path()).unwrap(),
+            Some(1),
+            "拒绝过时候选后仍应保留活动候选"
+        );
+
+        runtime
+            .publish_extension_candidate(
+                project.path(),
+                RuntimeExtensionCandidate::new(2, RecordingExtensionContributor::new())
+                    .expect("替代候选代次应有效"),
+            )
+            .expect("替代候选应发布");
+        assert_eq!(
+            runtime.extension_generation(project.path()).unwrap(),
+            Some(2)
+        );
+        assert!(
+            !runtime
+                .extension_candidate_needs_refresh(project.path())
+                .unwrap()
+        );
+    }
+
     /// Agent 模板只允许从同一规范项目已经发布的候选中解析。
     #[test]
     fn extension_agent_resolution_is_project_scoped_and_strict() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建候选项目目录");
         let other_project = tempfile::tempdir().expect("应创建隔离项目目录");
-        let runtime = AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-            .expect("测试 Runtime 应创建");
+        let runtime = AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建");
         let contributor = RecordingExtensionContributor::new();
         runtime
             .publish_extension_candidate(
@@ -20188,10 +18211,7 @@ mod tests {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
         let cold_project = tempfile::tempdir().expect("应创建冷驻留项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let old_plugins = vec![json!({"pluginId": "local:old-plugin"})];
         let old_skills = vec![json!({"id": "workspace:old-skill"})];
         runtime
@@ -20366,918 +18386,12 @@ mod tests {
         assert!(session_has_persisted_user_facts(&started));
     }
 
-    /// 扩展诊断必须真实进入 ACP，并在同一候选代次中对重复根调用保持 exactly-once。
-    #[tokio::test]
-    async fn extension_diagnostics_do_not_emit_root_acp_notifications() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "extension-diagnostic-operation")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .attach_session_delivery(&session_id)
-            .expect("Session 投递应建立");
-        let diagnostic = RuntimeExtensionDiagnostic {
-            source: "mcp".to_owned(),
-            server: "plugin:local:demo:docs".to_owned(),
-            code: "mcp_config_invalid".to_owned(),
-            message: "配置无效，已跳过该 Server".to_owned(),
-            tool: None,
-        };
-        runtime
-            .publish_extension_candidate(
-                project.path(),
-                RuntimeExtensionCandidate::new(
-                    1,
-                    RecordingExtensionContributor::with_diagnostics(vec![diagnostic.clone()]),
-                )
-                .expect("候选代次应有效"),
-            )
-            .expect("扩展候选应发布");
-        let collaboration = runtime
-            .ensure_collaboration_runtime(
-                &session,
-                RootAgentSeed {
-                    model: "test-model".to_owned(),
-                    reasoning_effort: None,
-                    plan_guard: PlanGuard::inactive(),
-                },
-            )
-            .expect("Collaboration Runtime 应建立");
-        let root_agent = keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效");
-
-        runtime.log_extension_diagnostics(&collaboration.execution, &root_agent);
-        runtime.log_extension_diagnostics(&collaboration.execution, &root_agent);
-
-        assert!(emitter.snapshot().is_empty());
-
-        runtime
-            .close_session(&session_id)
-            .await
-            .expect("测试 Session 应关闭");
-    }
-
-    /// 同一项目的不同 Session 必须只收到各自的 GoalChanged，不能共享 Goal 投影。
-    #[tokio::test]
-    async fn goal_changed_is_scoped_to_source_session() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let source = runtime
-            .open_or_create_session(project.path(), None, "goal-source-session")
-            .expect("来源 Session 应创建");
-        let other = runtime
-            .open_or_create_session(project.path(), None, "goal-other-session")
-            .expect("同项目的另一个 Session 应创建");
-        assert_ne!(source.session_id(), other.session_id());
-        let source_session_id = source.session_id().as_str().to_owned();
-        let other_session_id = other.session_id().as_str().to_owned();
-        runtime
-            .attach_session_delivery(&source_session_id)
-            .expect("来源 Session 投递应建立");
-        runtime
-            .attach_session_delivery(&other_session_id)
-            .expect("另一个 Session 投递应建立");
-
-        runtime.publish_goal_changed(
-            &source_session_id,
-            Some("goal-source".to_owned()),
-            7,
-            Some("active".to_owned()),
-        );
-        let deliveries = tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let deliveries = emitter.snapshot();
-                if !deliveries.is_empty() {
-                    break deliveries;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("GoalChanged 应在有界时间内投递");
-        assert_eq!(deliveries.len(), 1, "另一个 Session 不得收到 GoalChanged");
-        assert_eq!(deliveries[0]["type"], "keencode_event");
-        assert_eq!(deliveries[0]["envelope"]["sessionId"], source_session_id);
-        assert_eq!(deliveries[0]["envelope"]["event"]["type"], "goal_changed");
-        assert_eq!(deliveries[0]["envelope"]["event"]["goalId"], "goal-source");
-        assert_eq!(deliveries[0]["envelope"]["event"]["revision"], 7);
-
-        runtime
-            .close_session(&source_session_id)
-            .await
-            .expect("来源 Session 应关闭");
-        runtime
-            .close_session(&other_session_id)
-            .await
-            .expect("另一个 Session 应关闭");
-    }
-
     /// 恢复期间 live 事件必须缓存，末页后只释放冻结水位之后的事件。
-    #[tokio::test]
-    async fn recovery_gate_emits_replay_before_newer_buffered_live_events() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter.clone(), true);
-        sender
-            .send_batch(vec![
-                journal_text_draft("stale-live", 1),
-                journal_text_draft("new-live", 2),
-            ])
-            .await
-            .expect("恢复期间 live 事件应缓存");
-        assert!(emitter.snapshot().is_empty());
-
-        let history_delivery_sequence = sender
-            .send_replay_batch(vec![journal_text_draft("replayed", 1)], 1, true)
-            .await
-            .expect("末页应释放恢复门");
-        assert_eq!(history_delivery_sequence, 1);
-        let values = emitter.snapshot();
-        assert_eq!(values.len(), 2);
-        assert_eq!(
-            values[0]["envelope"]["update"]["content"]["text"],
-            "replayed"
-        );
-        assert_eq!(
-            values[1]["envelope"]["update"]["content"]["text"],
-            "new-live"
-        );
-        assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
-    }
-
-    /// 同步 emit 阻塞时队列满必须在有界时间内返回明确的入队超时。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delivery_queue_reserve_timeout_does_not_enqueue_or_poison_sender() {
-        let emitter = BlockingEmitter::blocking_all();
-        let sender = SessionDeliverySender::spawn_with_config(
-            "session-delivery-queue-timeout",
-            emitter.clone(),
-            false,
-            1,
-            DeliveryTimeouts {
-                queue_reserve: Duration::from_millis(20),
-                acknowledgement: Duration::from_secs(1),
-                shutdown: Duration::from_millis(200),
-            },
-        );
-        let first = tokio::spawn({
-            let sender = sender.clone();
-            // 屏障草稿立即投递并阻塞泵，为队列占满场景建立前提。
-            async move { sender.send_batch(vec![stream_barrier_draft()]).await }
-        });
-        emitter.wait_for_calls(1);
-
-        let second = tokio::spawn({
-            let sender = sender.clone();
-            async move { sender.send_batch(vec![text_draft("second")]).await }
-        });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while sender.commands.capacity() != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("第二条命令应在泵阻塞期间占满队列");
-
-        assert_eq!(
-            sender.send_batch(vec![text_draft("third")]).await,
-            Err(AgentRuntimeError::DeliveryQueueTimeout)
-        );
-        assert_eq!(sender.lifecycle.rejection(), None);
-
-        emitter.release();
-        assert_eq!(first.await.expect("首个发送任务不应 panic"), Ok(()));
-        assert_eq!(second.await.expect("第二个发送任务不应 panic"), Ok(()));
-        // 末尾屏障同步 flush second 的缓冲增量：屏障 + 增量 + 屏障 = 3。
-        sender
-            .send_batch(vec![stream_barrier_draft()])
-            .await
-            .expect("屏障应投出缓冲增量");
-        assert_eq!(emitter.deliveries().len(), 3);
-        sender.shutdown().await.expect("队列恢复后应可关闭投递泵");
-    }
-
-    /// emit 已接受事件但回执超时后，当前世代必须冻结并保留实际结果未知语义。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn delivery_ack_timeout_poisoned_sender_keeps_late_emit_unknown() {
-        let emitter = BlockingEmitter::blocking_all();
-        let mut timeouts = DeliveryTimeouts::test();
-        timeouts.acknowledgement = Duration::from_millis(20);
-        timeouts.shutdown = Duration::from_millis(40);
-        let sender = SessionDeliverySender::spawn_with_config(
-            "session-delivery-ack-timeout",
-            emitter.clone(),
-            true,
-            2,
-            timeouts,
-        );
-        let first = tokio::spawn({
-            let sender = sender.clone();
-            async move {
-                sender
-                    .send_replay_batch(vec![journal_text_draft("late", 1)], 1, true)
-                    .await
-            }
-        });
-        emitter.wait_for_calls(1);
-        assert_eq!(
-            first.await.expect("超时发送任务不应 panic"),
-            Err(AgentRuntimeError::DeliveryOutcomeUnknown)
-        );
-        assert_eq!(
-            sender
-                .send_replay_batch(vec![journal_text_draft("after-timeout", 1)], 1, true)
-                .await,
-            Err(AgentRuntimeError::DeliveryOutcomeUnknown)
-        );
-
-        emitter.release();
-        emitter.wait_for_completed(1);
-        assert_eq!(emitter.deliveries().len(), 1);
-        drop(sender);
-    }
-
-    /// 旧世代关闭结果未知时 reset 不得发布可重新编号的新投递世代。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn reset_delivery_does_not_publish_generation_after_shutdown_timeout() {
-        let directory = tempfile::tempdir().expect("应创建测试目录");
-        let emitter = BlockingEmitter::blocking_all();
-        let runtime = Arc::new(
-            AgentRuntime::new_with_delivery_timeouts(
-                directory.path(),
-                emitter.clone(),
-                DeliveryTimeouts {
-                    queue_reserve: Duration::from_millis(20),
-                    acknowledgement: Duration::from_secs(1),
-                    shutdown: Duration::from_millis(20),
-                },
-            )
-            .expect("测试 Runtime 应创建"),
-        );
-        let old = runtime
-            .attach_session_delivery("session-reset-timeout")
-            .expect("旧投递世代应建立");
-        let sending = tokio::spawn({
-            let old = old.clone();
-            async move { old.send_batch(vec![text_draft("blocked")]).await }
-        });
-        emitter.wait_for_calls(1);
-
-        assert!(matches!(
-            runtime
-                .reset_session_delivery("session-reset-timeout")
-                .await,
-            Err(AgentRuntimeError::DeliveryShutdownUnknown)
-        ));
-        let current = runtime
-            .session_delivery("session-reset-timeout")
-            .expect("关闭未知时旧投递世代应保留");
-        assert!(current.commands.same_channel(&old.commands));
-        assert_eq!(
-            current.send_batch(vec![text_draft("must-not-send")]).await,
-            Err(AgentRuntimeError::DeliveryShutdownUnknown)
-        );
-
-        emitter.release();
-        assert_eq!(sending.await.expect("阻塞发送任务不应 panic"), Ok(()));
-        drop(current);
-        drop(old);
-        drop(runtime);
-    }
-
-    /// 首页只投递最近轮次，旧页不改变实时泵；所有页合并后与完整重放一致。
-    #[tokio::test]
-    async fn load_history_pages_keep_recent_turn_and_live_delivery_separate() {
-        use super::HistoryLoadRequest;
-        let storage = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(AgentRuntime::new(storage.path(), emitter.clone()).unwrap());
-        let session = runtime
-            .open_or_create_session(project.path(), None, "paged-load")
-            .unwrap();
-        for index in 0..5 {
-            let text = format!("question-{index}");
-            persist_completed_root_turn(
-                &session,
-                &format!("turn-page-{index}"),
-                &text,
-                &root_turn_summary(&text, None, false),
-            )
-            .await;
-        }
-        let id = session.session_id().as_str();
-        let started = std::time::Instant::now();
-        let first = runtime
-            .load_history_page(
-                id,
-                HistoryLoadRequest {
-                    limit: 1,
-                    cursor: None,
-                },
-            )
-            .await
-            .unwrap();
-        let first_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let first_count = first.replay.as_ref().unwrap().replayed_events;
-        let initial_deliveries = emitter.snapshot();
-        let initial_users = initial_deliveries
-            .iter()
-            .filter(|value| value["envelope"]["update"]["sessionUpdate"] == "user_message_chunk")
-            .collect::<Vec<_>>();
-        assert_eq!(initial_users.len(), 1);
-        assert_eq!(
-            initial_users[0]["envelope"]["update"]["content"]["text"],
-            "question-4"
-        );
-        assert!(first.has_more);
-        assert!(first.deliveries.is_empty());
-        assert!(first.replay.as_ref().unwrap().start_after > 0);
-        let sender = runtime.session_delivery(id).unwrap();
-        let cursor = first.next_cursor.unwrap();
-        assert!(
-            runtime
-                .load_history_page(
-                    id,
-                    HistoryLoadRequest {
-                        limit: 2,
-                        cursor: Some("invalid".into())
-                    }
-                )
-                .await
-                .is_err()
-        );
-        let second = runtime
-            .load_history_page(
-                id,
-                HistoryLoadRequest {
-                    limit: 2,
-                    cursor: Some(cursor.clone()),
-                },
-            )
-            .await
-            .unwrap();
-        assert!(second.has_more);
-        assert!(second.replay.is_none());
-        assert!(!second.deliveries.is_empty());
-        assert!(
-            sender
-                .commands
-                .same_channel(&runtime.session_delivery(id).unwrap().commands)
-        );
-        assert!(
-            runtime
-                .load_history_page(
-                    id,
-                    HistoryLoadRequest {
-                        limit: 2,
-                        cursor: Some(cursor)
-                    }
-                )
-                .await
-                .is_err()
-        );
-        let last = runtime
-            .load_history_page(
-                id,
-                HistoryLoadRequest {
-                    limit: 2,
-                    cursor: second.next_cursor,
-                },
-            )
-            .await
-            .unwrap();
-        assert!(!last.has_more);
-        assert!(last.next_cursor.is_none());
-        assert!(sender.history_backfill.lock().await.is_none());
-        let mut turns = Vec::new();
-        for value in last.deliveries.iter().chain(second.deliveries.iter()) {
-            if value["envelope"]["event"]["type"] == "turn_started" {
-                turns.push(value["envelope"]["turnId"].as_str().unwrap().to_owned());
-            }
-        }
-        assert_eq!(
-            turns,
-            ["turn-page-0", "turn-page-1", "turn-page-2", "turn-page-3"]
-        );
-        let started = std::time::Instant::now();
-        let full = runtime
-            .load_history_page(
-                id,
-                HistoryLoadRequest {
-                    limit: -1,
-                    cursor: None,
-                },
-            )
-            .await
-            .unwrap();
-        eprintln!(
-            "history-window-sample first_events={} full_events={} first_ms={:.3} full_ms={:.3}",
-            first_count,
-            full.replay.as_ref().unwrap().replayed_events,
-            first_ms,
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-        assert!(first_count < full.replay.as_ref().unwrap().replayed_events);
-        assert!(!full.has_more);
-        assert_eq!(full.replay.unwrap().start_after, 0);
-    }
-
-    /// 最新根轮次页必须恢复在更旧页启动、跨页完成的子 Agent Turn Provider。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn history_page_restores_cross_root_child_turn_providers() {
-        use super::HistoryLoadRequest;
-
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let project = tempfile::tempdir().expect("应创建测试项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "history-cross-root-provider")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        let old_root_turn_id = "history-provider-old-root";
-        persist_completed_root_turn(
-            &session,
-            old_root_turn_id,
-            "启动后台子 Agent",
-            "启动后台子 Agent",
-        )
-        .await;
-
-        let different_model_provider = ProviderSnapshot {
-            provider_id: "provider-child-different".to_owned(),
-            model: "child-model".to_owned(),
-            context_window: Some(24_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-child-different".to_owned(),
-            reasoning_effort: None,
-        };
-        let same_model_provider = ProviderSnapshot {
-            provider_id: "provider-child-same-model".to_owned(),
-            model: "shared-model".to_owned(),
-            context_window: Some(32_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-child-same-model".to_owned(),
-            reasoning_effort: None,
-        };
-        let current_provider = ProviderSnapshot {
-            provider_id: "provider-current-root".to_owned(),
-            model: "shared-model".to_owned(),
-            context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-current-root".to_owned(),
-            reasoning_effort: None,
-        };
-
-        let start_child = |turn_id: &str,
-                           agent_id: &str,
-                           used: u64,
-                           provider_snapshot: ProviderSnapshot,
-                           entered: Arc<AtomicBool>,
-                           gate: Arc<tokio::sync::Notify>| {
-            let child_session = session.clone();
-            let turn_id = turn_id.to_owned();
-            let agent_id = agent_id.to_owned();
-            let root_turn_id = old_root_turn_id.to_owned();
-            tokio::spawn(async move {
-                let model = provider_snapshot.model.clone();
-                let capabilities = ProviderCapabilities {
-                    max_context_tokens: provider_snapshot.context_window,
-                    ..ProviderCapabilities::default()
-                };
-                let provider = Arc::new(GateProvider {
-                    inner: Arc::new(ScriptedProvider::new(
-                        capabilities,
-                        [completed_reply_with_usage(
-                            "子 Agent 完成",
-                            TokenUsage {
-                                input_tokens: Some(used.saturating_sub(1)),
-                                output_tokens: Some(1),
-                                reasoning_tokens: None,
-                                cache_read_tokens: None,
-                                cache_write_tokens: None,
-                                total_tokens: Some(used),
-                            },
-                        )],
-                    )),
-                    entered,
-                    gate,
-                });
-                let input = ModelMessage::text(MessageRole::User, "执行跨页子任务");
-                let request = TurnRequest::new(
-                    keencode_agent::SessionId::new(child_session.session_id().as_str())
-                        .expect("Agent Session 标识应有效"),
-                    keencode_agent::TurnId::new(turn_id.clone()).expect("子 Turn 标识应有效"),
-                    keencode_agent::AgentId::new(agent_id.clone()).expect("子 Agent 标识应有效"),
-                    model,
-                    vec![input.clone()],
-                    PlanGuard::inactive(),
-                );
-                child_session
-                    .bind_agent_runner(AgentRunner::new(
-                        provider,
-                        ToolRegistry::new(),
-                        RunLimits::default(),
-                    ))
-                    .run_turn(
-                        RuntimeTurnRequest::initial_child(
-                            request,
-                            vec![input],
-                            root_turn_id.clone(),
-                            root_turn_id,
-                            "执行跨页子任务",
-                            SubAgentState {
-                                agent_id: ResourceAgentId::new(agent_id.clone())
-                                    .expect("资源子 Agent 标识应有效"),
-                                parent_agent_id: ResourceAgentId::new("root")
-                                    .expect("根 Agent 标识应有效"),
-                                agent_path: format!("/root/{agent_id}"),
-                                task: "执行跨页子任务".to_owned(),
-                                status: SubAgentStatus::Pending,
-                                current_turn_id: None,
-                                result_summary: None,
-                            },
-                        )
-                        .with_provider_snapshot(provider_snapshot),
-                    )
-                    .await
-            })
-        };
-
-        let different_entered = Arc::new(AtomicBool::new(false));
-        let different_gate = Arc::new(tokio::sync::Notify::new());
-        let different_task = start_child(
-            "history-provider-child-different",
-            "history_provider_child_different",
-            17,
-            different_model_provider,
-            Arc::clone(&different_entered),
-            Arc::clone(&different_gate),
-        );
-        let same_entered = Arc::new(AtomicBool::new(false));
-        let same_gate = Arc::new(tokio::sync::Notify::new());
-        let same_task = start_child(
-            "history-provider-child-same",
-            "history_provider_child_same",
-            19,
-            same_model_provider,
-            Arc::clone(&same_entered),
-            Arc::clone(&same_gate),
-        );
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !different_entered.load(Ordering::SeqCst) || !same_entered.load(Ordering::SeqCst) {
-            assert!(
-                Instant::now() < deadline,
-                "两个子 Turn 必须在新根轮次前写入 Provider 快照"
-            );
-            tokio::task::yield_now().await;
-        }
-
-        session
-            .set_provider_snapshot("history-current-provider", current_provider.clone())
-            .expect("当前 Session Provider 应更新");
-        persist_usage_root_turn_with_provider_snapshot(
-            &session,
-            "history-provider-new-root",
-            "shared-model",
-            "更新的根轮次",
-            23,
-            current_provider,
-        )
-        .await;
-
-        different_gate.notify_one();
-        same_gate.notify_one();
-        assert!(
-            different_task
-                .await
-                .expect("不同模型子 Turn 任务不应 panic")
-                .expect("不同模型子 Turn 应完成")
-                .is_success()
-        );
-        assert!(
-            same_task
-                .await
-                .expect("同模型子 Turn 任务不应 panic")
-                .expect("同模型子 Turn 应完成")
-                .is_success()
-        );
-
-        let child_start_sequences = session
-            .history_index()
-            .expect("历史索引应读取")
-            .context
-            .into_iter()
-            .filter(|(key, _)| key.starts_with("child-start:history-provider-child-"))
-            .flat_map(|(_, sequences)| sequences)
-            .collect::<Vec<_>>();
-        assert_eq!(child_start_sequences.len(), 2);
-
-        let page = runtime
-            .load_history_page(
-                &session_id,
-                HistoryLoadRequest {
-                    limit: 1,
-                    cursor: None,
-                },
-            )
-            .await
-            .expect("最新根轮次页应加载");
-        let start_after = page.replay.as_ref().expect("首页应进入投递泵").start_after;
-        assert!(page.has_more);
-        assert!(
-            child_start_sequences
-                .iter()
-                .all(|sequence| *sequence <= start_after),
-            "子 Turn 必须确实启动于当前历史页之前"
-        );
-
-        let usage_by_turn = emitter
-            .snapshot()
-            .into_iter()
-            .filter_map(|value| {
-                if value["type"] != "session_update"
-                    || value["envelope"]["update"]["sessionUpdate"] != "usage_update"
-                {
-                    return None;
-                }
-                Some((
-                    value["envelope"]["turnId"].as_str()?.to_owned(),
-                    (
-                        value["envelope"]["update"]["used"].as_u64()?,
-                        value["envelope"]["update"]["size"].as_u64()?,
-                    ),
-                ))
-            })
-            .collect::<HashMap<_, _>>();
-        assert_eq!(
-            usage_by_turn.get("history-provider-child-different"),
-            Some(&(17, 24_000)),
-            "不同模型的跨页子 Turn 不得因当前默认模型而丢失用量"
-        );
-        assert_eq!(
-            usage_by_turn.get("history-provider-child-same"),
-            Some(&(19, 32_000)),
-            "同模型的跨页子 Turn 必须使用自己的上下文窗口"
-        );
-    }
-
-    /// 连续 replay 分页必须提交零投影物理记录的游标，但 Session 默认 Provider 不得进入 Turn 索引。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn replay_advances_physical_cursor_through_zero_projection_records() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let project = tempfile::tempdir().expect("应创建测试项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "replay-zero-projection")
-            .expect("测试 Session 应创建");
-        let provider = ProviderSnapshot {
-            provider_id: "provider-zero-projection".to_owned(),
-            model: "model-zero-projection".to_owned(),
-            context_window: Some(64_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-zero-projection".to_owned(),
-            reasoning_effort: None,
-        };
-        session
-            .set_provider_snapshot("replay-zero-provider", provider)
-            .expect("Provider 快照应提交");
-        let provider_sequence = session
-            .snapshot()
-            .expect("Provider 序号应读取")
-            .state
-            .last_sequence;
-        session
-            .rename("replay-zero-rename", "重放后的标题", None)
-            .expect("尾部投影事件应提交");
-        let tail_sequence = session
-            .snapshot()
-            .expect("尾部序号应读取")
-            .state
-            .last_sequence;
-
-        let first = runtime
-            .replay_session(session.session_id().as_str(), None, 1)
-            .await
-            .expect("首个 replay 分页应成功");
-        assert_eq!(first.replayed_events, 1);
-        assert_eq!(first.through_delivery_sequence, 1);
-        assert_eq!(first.next_after, provider_sequence);
-        assert_eq!(first.through_journal_sequence, tail_sequence);
-        assert!(first.has_more);
-        let delivery = runtime
-            .session_delivery(session.session_id().as_str())
-            .expect("当前 replay 投递应存在");
-        {
-            let cursor = delivery.replay_cursor.lock().await;
-            assert_eq!(cursor.next_after, provider_sequence);
-            assert!(cursor.providers_by_turn.is_empty());
-            assert_eq!(cursor.through_sequence, Some(tail_sequence));
-            assert_eq!(
-                cursor.frozen_state.as_ref().unwrap().last_sequence,
-                tail_sequence,
-            );
-        }
-
-        // 第一页发出后追加的状态不能改变第二页的历史快照和固定水位。
-        session
-            .rename("replay-zero-after-waterline", "水位之后的新标题", None)
-            .expect("分页之间的实时记录应能提交");
-        let last = runtime
-            .replay_session(session.session_id().as_str(), Some(first.next_after), 1)
-            .await
-            .expect("连续 replay 尾页应成功");
-        assert_eq!(last.next_after, tail_sequence);
-        assert_eq!(last.through_journal_sequence, tail_sequence);
-        assert_eq!(last.through_delivery_sequence, 2);
-        assert!(!last.has_more);
-        assert!(delivery.replay_cursor.lock().await.frozen_state.is_none());
-        runtime
-            .close_session_delivery(session.session_id().as_str())
-            .await
-            .expect("测试 replay 投递应关闭");
-    }
-
-    /// 非连续 after 必须从权威索引重建完整 Turn Provider，而不是沿用当前分页缓存。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn replay_non_contiguous_after_rebuilds_provider_cursor() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let project = tempfile::tempdir().expect("应创建测试项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime =
-            Arc::new(AgentRuntime::new(storage.path(), emitter).expect("测试 Runtime 应创建"));
-        let session = runtime
-            .open_or_create_session(project.path(), None, "replay-non-contiguous")
-            .expect("测试 Session 应创建");
-        let provider_a = ProviderSnapshot {
-            provider_id: "provider-replay-a".to_owned(),
-            model: "model-replay-a".to_owned(),
-            context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-replay-a".to_owned(),
-            reasoning_effort: None,
-        };
-        let provider_b = ProviderSnapshot {
-            provider_id: "provider-replay-b".to_owned(),
-            model: "model-replay-b".to_owned(),
-            context_window: Some(32_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-replay-b".to_owned(),
-            reasoning_effort: None,
-        };
-        persist_usage_root_turn_with_provider_snapshot(
-            &session,
-            "replay-provider-turn-a",
-            "model-replay-a",
-            "Provider A",
-            11,
-            provider_a.clone(),
-        )
-        .await;
-        let provider_a_sequence = session
-            .snapshot()
-            .expect("Provider A Turn 序号应读取")
-            .state
-            .last_sequence;
-        persist_usage_root_turn_with_provider_snapshot(
-            &session,
-            "replay-provider-turn-b",
-            "model-replay-b",
-            "Provider B",
-            13,
-            provider_b.clone(),
-        )
-        .await;
-
-        let first = runtime
-            .replay_session(session.session_id().as_str(), None, 1)
-            .await
-            .expect("首个 replay 分页应成功");
-        assert!(first.has_more);
-        let delivery = runtime
-            .session_delivery(session.session_id().as_str())
-            .expect("当前 replay 投递应存在");
-        let stale_turn =
-            ResourceTurnId::new("replay-provider-stale-turn").expect("伪造 Turn 标识应有效");
-        delivery.replay_cursor.lock().await.providers_by_turn =
-            Arc::new(HashMap::from([(stale_turn.clone(), provider_b.clone())]));
-
-        let jumped = runtime
-            .replay_session(
-                session.session_id().as_str(),
-                Some(provider_a_sequence),
-                1_000,
-            )
-            .await
-            .expect("非连续 replay 分页应成功");
-        assert!(!jumped.has_more);
-        let providers = Arc::clone(&delivery.replay_cursor.lock().await.providers_by_turn);
-        assert_eq!(
-            providers.get(&ResourceTurnId::new("replay-provider-turn-a").unwrap()),
-            Some(&provider_a)
-        );
-        assert_eq!(
-            providers.get(&ResourceTurnId::new("replay-provider-turn-b").unwrap()),
-            Some(&provider_b)
-        );
-        assert!(!providers.contains_key(&stale_turn));
-        runtime
-            .close_session_delivery(session.session_id().as_str())
-            .await
-            .expect("测试 replay 投递应关闭");
-    }
-
-    /// 重复 ensure 必须复用唯一投递 FIFO 和唯一 Runtime 订阅泵。
-    #[tokio::test]
-    async fn ensure_session_delivery_is_idempotent() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "delivery-operation")
-            .expect("测试 Session 应创建");
-        let first = runtime
-            .ensure_session_delivery(session.session_id().as_str())
-            .expect("首次 ensure 应建立投递");
-        let second = runtime
-            .ensure_session_delivery(session.session_id().as_str())
-            .expect("重复 ensure 应复用投递");
-        assert!(first.commands.same_channel(&second.commands));
-        assert_eq!(
-            runtime.live_pumps.lock().expect("订阅泵状态应读取").len(),
-            1
-        );
-        runtime
-            .close_session_delivery(session.session_id().as_str())
-            .await
-            .expect("投递应关闭");
-    }
-
-    /// 已知 emit 失败可在下一次打开时换代，不能永久复用已停止的发送端。
-    #[tokio::test]
-    async fn ensure_healthy_session_delivery_replaces_poisoned_generation() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::failing_at(1);
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "delivery-reopen-operation")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str();
-        let poisoned = runtime
-            .ensure_session_delivery(session_id)
-            .expect("首次 ensure 应建立投递");
-        // 屏障草稿绕过攒批立即投递：首个桌面投递按预期失败。
-        assert_eq!(
-            poisoned.send_batch(vec![stream_barrier_draft()]).await,
-            Err(AgentRuntimeError::DesktopEmitFailed)
-        );
-
-        let replacement = runtime
-            .ensure_healthy_session_delivery(session_id)
-            .await
-            .expect("重新打开应替换已知失败世代");
-        assert!(!replacement.commands.same_channel(&poisoned.commands));
-        replacement
-            .send_replay_batch(vec![journal_text_draft("replayed", 1)], 1, true)
-            .await
-            .expect("新世代应恢复投递");
-        assert_eq!(emitter.snapshot().len(), 2);
-        runtime
-            .close_session_delivery(session_id)
-            .await
-            .expect("替换后的投递应关闭");
-    }
-
-    /// 权威 TurnStarted 屏障必须可观察，且相同 Turn 输入只能返回去重结果。
     #[tokio::test]
     async fn turn_started_barrier_and_root_turn_retry_are_deterministic() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "turn-operation")
             .expect("测试 Session 应创建");
@@ -21344,10 +18458,7 @@ mod tests {
     async fn root_plan_mode_toggle_preserves_final_plan_artifact() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "plan-mode-artifact-operation")
             .expect("测试 Session 应创建");
@@ -21492,6 +18603,7 @@ mod tests {
         let session = runtime
             .open_or_create_session(project.path(), None, "switch-session")
             .unwrap();
+        mark_session_title_manual(&session);
         let id = session.session_id().as_str();
         runtime
             .start_root_turn(id, "old-turn", "old request", RootTurnOptions::default())
@@ -21758,12 +18870,8 @@ mod tests {
             .expect("Provider 注册表应替换")
             .generation;
         let runtime = Arc::new(
-            AgentRuntime::new_with_registry(
-                storage.path(),
-                RecordingEmitter::successful(),
-                registry,
-            )
-            .expect("Runtime 应创建"),
+            AgentRuntime::new_with_registry(storage.path(), registry, test_executor_handle())
+                .expect("Runtime 应创建"),
         );
         *runtime
             .default_provider
@@ -21876,16 +18984,20 @@ mod tests {
         drop(runtime);
 
         let recovered_runtime = Arc::new(
-            AgentRuntime::new_with_registry(storage.path(), RecordingEmitter::successful(), {
-                let registry = keencode_provider::ProviderRegistry::new();
-                registry
-                    .replace_all([
-                        registration("provider-a", "model-a", "revision-a"),
-                        registration("provider-b", "model-b", "revision-b"),
-                    ])
-                    .expect("冷恢复 Provider 注册表应替换");
-                registry
-            })
+            AgentRuntime::new_with_registry(
+                storage.path(),
+                {
+                    let registry = keencode_provider::ProviderRegistry::new();
+                    registry
+                        .replace_all([
+                            registration("provider-a", "model-a", "revision-a"),
+                            registration("provider-b", "model-b", "revision-b"),
+                        ])
+                        .expect("冷恢复 Provider 注册表应替换");
+                    registry
+                },
+                test_executor_handle(),
+            )
             .expect("冷恢复 Runtime 应创建"),
         );
         let recovered = recovered_runtime
@@ -22353,9 +19465,9 @@ mod tests {
             1
         );
         runtime
-            .close_session_delivery(&session_id)
+            .close_session(&session_id)
             .await
-            .expect("关闭 Session 投递应同时释放标题锁");
+            .expect("关闭 Session 应释放标题锁");
         assert!(
             runtime
                 .title_generation_gates
@@ -22855,887 +19967,18 @@ mod tests {
         let request = finish_responses_server(server);
         assert_eq!(request["reasoning"]["effort"], "high");
         assert_eq!(request["reasoning"]["summary"], "auto");
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("推理测试投递应关闭");
-    }
-
-    /// 后台 Shell 终态必须成为 Session 级瞬态事件，且可疑摘要不得进入桌面边界。
-    #[test]
-    fn background_completion_is_session_scoped_and_redacts_suspicious_summary() {
-        let completed = background_task_completion_event(&BackgroundTaskCompletion {
-            session_id: "session-a".to_owned(),
-            task_id: "background-1".to_owned(),
-            status: BackgroundTaskStatus::Succeeded,
-            duration_ms: 25,
-            summary: "运行检查".to_owned(),
-        })
-        .expect("合法后台终态应映射");
-        assert_eq!(
-            completed,
-            KeenCodeEvent::BackgroundTaskCompleted {
-                task_id: "background-1".to_owned(),
-                task_kind: BackgroundTaskKind::Shell,
-                agent_id: None,
-                status: BackgroundTaskTerminalStatus::Succeeded,
-                duration_ms: 25,
-                summary: Some("运行检查".to_owned()),
-            }
-        );
-
-        let redacted = background_task_completion_event(&BackgroundTaskCompletion {
-            session_id: "session-a".to_owned(),
-            task_id: "background-2".to_owned(),
-            status: BackgroundTaskStatus::Failed,
-            duration_ms: 30,
-            summary: "authorization: secret".to_owned(),
-        })
-        .expect("可疑摘要应被省略而不是毒化投递");
-        assert!(matches!(
-            redacted,
-            KeenCodeEvent::BackgroundTaskCompleted {
-                task_kind: BackgroundTaskKind::Shell,
-                agent_id: None,
-                status: BackgroundTaskTerminalStatus::Failed,
-                summary: None,
-                ..
-            }
-        ));
-        assert!(
-            background_task_completion_event(&BackgroundTaskCompletion {
-                session_id: "session-a".to_owned(),
-                task_id: "background-3".to_owned(),
-                status: BackgroundTaskStatus::Running,
-                duration_ms: 1,
-                summary: String::new(),
-            })
-            .is_none()
-        );
-    }
-
-    /// 编辑锚点必须通过官方 ContentChunk 的命名空间 meta 投递，而不是伪造顶级字段。
-    #[test]
-    fn persisted_message_identity_uses_standard_metadata_slot() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "message-anchor-projection".to_owned(),
-                title: "消息锚点".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let state = session.snapshot().unwrap().state;
-        let message = keencode_resources::SessionMessage {
-            references: Vec::new(),
-            is_meta: false,
-            message_id: "resource-message-anchor".to_owned(),
-            turn_id: None,
-            agent_id: None,
-            role: keencode_resources::MessageRole::User,
-            content: vec![keencode_resources::MessagePart::Text {
-                text: "同一条用户消息".to_owned(),
-            }],
-        };
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("message-anchor-event").unwrap(),
-            session: state.session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::MessageAdded { message },
-        };
-        for mode in [
-            AuthoritativeProjectionMode::Live,
-            AuthoritativeProjectionMode::Replay,
-        ] {
-            let drafts = map_authoritative_record(&session, &state, &record, mode).unwrap();
-            assert_eq!(drafts.len(), 1);
-            let value = serde_json::to_value(
-                materialize_delivery(
-                    session.session_id().as_str(),
-                    1,
-                    drafts.into_iter().next().unwrap(),
-                )
-                .unwrap(),
-            )
-            .unwrap();
-            let update = &value["envelope"]["update"];
-            assert_eq!(
-                update["_meta"]["keencode/messageId"],
-                "resource-message-anchor"
-            );
-            assert!(update.get("messageId").is_none());
-        }
     }
 
     /// rewind 后仅为控制面引用保留的根 Turn 骨架不得在冷回放中生成空对话。
-    #[test]
-    fn replay_hides_root_turn_without_authoritative_user_message() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "rewound-root-skeleton".to_owned(),
-                title: "编辑重发骨架".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let mut state = session.snapshot().expect("Session 快照应读取").state;
-        let root_turn_id = ResourceTurnId::new("turn-rewound-root").expect("根 TurnId 应有效");
-        let child_turn_id = ResourceTurnId::new("turn-rewound-child").expect("子 TurnId 应有效");
-        let root_agent_id =
-            ResourceAgentId::new(keencode_resources::ROOT_AGENT_ID).expect("根 AgentId 应有效");
-        let child_agent_id = ResourceAgentId::new("child-agent").expect("子 AgentId 应有效");
-        state.turns.insert(
-            root_turn_id.clone(),
-            TurnState {
-                turn_id: root_turn_id.clone(),
-                source_agent_id: root_agent_id.clone(),
-                root_turn_id: root_turn_id.clone(),
-                parent_turn_id: None,
-                prompt_summary: "已编辑的旧问题".to_owned(),
-                started_at_unix_ms: 2,
-                completed_at_unix_ms: Some(4),
-                status: TurnStatus::Completed,
-                stop_reason: None,
-                outcome_message: None,
-            },
-        );
-        state.turns.insert(
-            child_turn_id.clone(),
-            TurnState {
-                turn_id: child_turn_id.clone(),
-                source_agent_id: child_agent_id.clone(),
-                root_turn_id: root_turn_id.clone(),
-                parent_turn_id: Some(root_turn_id.clone()),
-                prompt_summary: "保留子 Agent 生命周期".to_owned(),
-                started_at_unix_ms: 3,
-                completed_at_unix_ms: Some(4),
-                status: TurnStatus::Completed,
-                stop_reason: None,
-                outcome_message: None,
-            },
-        );
-
-        let root_events = [
-            SessionEvent::TurnStarted {
-                turn_id: root_turn_id.clone(),
-                source_agent_id: root_agent_id.clone(),
-                root_turn_id: root_turn_id.clone(),
-                parent_turn_id: None,
-                prompt_summary: "已编辑的旧问题".to_owned(),
-            },
-            SessionEvent::TurnCompleted {
-                turn_id: root_turn_id.clone(),
-            },
-        ];
-        for (index, event) in root_events.iter().enumerate() {
-            let record = SessionEventRecord {
-                schema: SESSION_EVENT_SCHEMA.to_owned(),
-                version: SESSION_EVENT_VERSION,
-                event_id: SessionEventId::new(format!("rewound-root-{index}"))
-                    .expect("EventId 应有效"),
-                session: state.session_id.clone(),
-                sequence: u64::try_from(index).unwrap_or(0).saturating_add(2),
-                time_unix_ms: 2,
-                event: event.clone(),
-            };
-            assert!(
-                map_authoritative_record(
-                    &session,
-                    &state,
-                    &record,
-                    AuthoritativeProjectionMode::Replay,
-                )
-                .expect("根骨架 replay 应可映射")
-                .is_empty(),
-                "没有真实用户消息的根 Turn 生命周期不得投影"
-            );
-            assert_eq!(
-                map_authoritative_record(
-                    &session,
-                    &state,
-                    &record,
-                    AuthoritativeProjectionMode::Live,
-                )
-                .expect("live 根 Turn 应可映射")
-                .len(),
-                1,
-                "实时 Turn 生命周期不受 rewind 回放过滤影响"
-            );
-        }
-
-        let child_record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("rewound-child-completed").expect("EventId 应有效"),
-            session: state.session_id.clone(),
-            sequence: 4,
-            time_unix_ms: 4,
-            event: SessionEvent::TurnCompleted {
-                turn_id: child_turn_id,
-            },
-        };
-        assert_eq!(
-            map_authoritative_record(
-                &session,
-                &state,
-                &child_record,
-                AuthoritativeProjectionMode::Replay,
-            )
-            .expect("子 Agent 终态 replay 应可映射")
-            .len(),
-            1,
-            "子 Agent 生命周期必须继续投影"
-        );
-
-        state.transcript.push(TranscriptRecord::MessageAdded(
-            keencode_resources::SessionMessage {
-                references: Vec::new(),
-                is_meta: false,
-                message_id: "root-user-message".to_owned(),
-                turn_id: Some(root_turn_id),
-                agent_id: None,
-                role: keencode_resources::MessageRole::User,
-                content: vec![keencode_resources::MessagePart::Text {
-                    text: "仍存在的真实问题".to_owned(),
-                }],
-            },
-        ));
-        let visible_root_record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("visible-root-completed").expect("EventId 应有效"),
-            session: state.session_id.clone(),
-            sequence: 5,
-            time_unix_ms: 5,
-            event: SessionEvent::TurnCompleted {
-                turn_id: ResourceTurnId::new("turn-rewound-root").expect("根 TurnId 应有效"),
-            },
-        };
-        assert_eq!(
-            map_authoritative_record(
-                &session,
-                &state,
-                &visible_root_record,
-                AuthoritativeProjectionMode::Replay,
-            )
-            .expect("带真实用户消息的根 Turn replay 应可映射")
-            .len(),
-            1
-        );
-
-        let goal_turn_id =
-            ResourceTurnId::new("turn-goal-goal-1-1-1000-1").expect("Goal TurnId 应有效");
-        state.turns.insert(
-            goal_turn_id.clone(),
-            TurnState {
-                turn_id: goal_turn_id.clone(),
-                source_agent_id: root_agent_id,
-                root_turn_id: goal_turn_id.clone(),
-                parent_turn_id: None,
-                prompt_summary: "自动续跑".to_owned(),
-                started_at_unix_ms: 6,
-                completed_at_unix_ms: Some(7),
-                status: TurnStatus::Completed,
-                stop_reason: None,
-                outcome_message: None,
-            },
-        );
-        state.transcript.push(TranscriptRecord::SegmentCommitted(
-            keencode_resources::TranscriptSegment {
-                turn_id: goal_turn_id.clone(),
-                source_agent_id: ResourceAgentId::new(keencode_resources::ROOT_AGENT_ID)
-                    .expect("根 AgentId 应有效"),
-                model_round: 1,
-                segment_index: 0,
-                expected_transcript_revision: state.transcript.len() as u64,
-                messages: vec![keencode_resources::SessionMessage {
-                    references: Vec::new(),
-                    is_meta: false,
-                    message_id: "goal-assistant-message".to_owned(),
-                    turn_id: Some(goal_turn_id.clone()),
-                    agent_id: None,
-                    role: keencode_resources::MessageRole::Assistant,
-                    content: vec![keencode_resources::MessagePart::Text {
-                        text: "第二轮完成".to_owned(),
-                    }],
-                }],
-            },
-        ));
-        let goal_record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("goal-resume-completed").expect("EventId 应有效"),
-            session: state.session_id.clone(),
-            sequence: 6,
-            time_unix_ms: 7,
-            event: SessionEvent::TurnCompleted {
-                turn_id: goal_turn_id,
-            },
-        };
-        assert_eq!(
-            map_authoritative_record(
-                &session,
-                &state,
-                &goal_record,
-                AuthoritativeProjectionMode::Replay
-            )
-            .expect("Goal 自动续跑轮次应恢复")
-            .len(),
-            1,
-        );
-    }
-
-    /// 同样的正文由用户输入时可见，由 Hook 追加时在实时和回放中都不可见。
-    #[test]
-    fn hook_meta_context_is_hidden_in_live_and_replay() {
-        let storage = tempfile::tempdir().unwrap();
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "hook-meta-projection".to_owned(),
-                title: "Hook".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .unwrap();
-        let state = session.snapshot().unwrap().state;
-        for is_meta in [false, true] {
-            let message = keencode_resources::SessionMessage {
-                references: Vec::new(),
-                is_meta,
-                message_id: "hook-context".to_owned(),
-                turn_id: None,
-                agent_id: None,
-                role: keencode_resources::MessageRole::User,
-                content: vec![keencode_resources::MessagePart::Text {
-                    text: "以下内容由 KeenCode Runtime Hook 追加".to_owned(),
-                }],
-            };
-            let record = SessionEventRecord {
-                schema: SESSION_EVENT_SCHEMA.to_owned(),
-                version: SESSION_EVENT_VERSION,
-                event_id: SessionEventId::new("hook-context-event").unwrap(),
-                session: state.session_id.clone(),
-                sequence: 2,
-                time_unix_ms: 2,
-                event: SessionEvent::MessageAdded { message },
-            };
-            for mode in [
-                AuthoritativeProjectionMode::Live,
-                AuthoritativeProjectionMode::Replay,
-            ] {
-                let drafts = map_authoritative_record(&session, &state, &record, mode).unwrap();
-                assert_eq!(drafts.len(), usize::from(!is_meta));
-            }
-        }
-    }
-
-    /// 模型拒答和输出上限必须在实时和历史投影中保持模型失败，不伪装成内部错误。
-    #[test]
-    fn model_stop_projection_preserves_failure_category() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "model-stop-projection".to_owned(),
-                title: "模型停止投影".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        for reason in [
-            TurnStopReason::ModelOutputLimit,
-            TurnStopReason::ModelRefusal,
-        ] {
-            let message = concat!(
-                "模型没有完整完成 request_id=req-acp-turn ",
-                "Authorization: Bearer acp-turn-secret ",
-                "details={\"apiKey\":\"nested-acp-turn-secret\"}"
-            );
-            let turn_id = ResourceTurnId::new("model-stop-turn").unwrap();
-            let mut state = session.snapshot().unwrap().state;
-            state.turns.insert(
-                turn_id.clone(),
-                TurnState {
-                    turn_id: turn_id.clone(),
-                    source_agent_id: ResourceAgentId::new("root").unwrap(),
-                    root_turn_id: turn_id.clone(),
-                    parent_turn_id: None,
-                    prompt_summary: "验证模型停止".to_owned(),
-                    started_at_unix_ms: 1,
-                    completed_at_unix_ms: Some(2),
-                    status: TurnStatus::Failed,
-                    stop_reason: Some(reason),
-                    outcome_message: Some(message.to_owned()),
-                },
-            );
-            state.transcript.push(TranscriptRecord::MessageAdded(
-                keencode_resources::SessionMessage {
-                    references: Vec::new(),
-                    is_meta: false,
-                    message_id: "model-stop-user-message".to_owned(),
-                    turn_id: Some(turn_id.clone()),
-                    agent_id: None,
-                    role: keencode_resources::MessageRole::User,
-                    content: vec![keencode_resources::MessagePart::Text {
-                        text: "验证模型停止".to_owned(),
-                    }],
-                },
-            ));
-            let record = SessionEventRecord {
-                schema: SESSION_EVENT_SCHEMA.to_owned(),
-                version: SESSION_EVENT_VERSION,
-                event_id: SessionEventId::new("model-stop-event").unwrap(),
-                session: state.session_id.clone(),
-                sequence: 2,
-                time_unix_ms: 2,
-                event: SessionEvent::TurnStopped {
-                    turn_id,
-                    reason,
-                    message: message.to_owned(),
-                },
-            };
-            for mode in [
-                AuthoritativeProjectionMode::Live,
-                AuthoritativeProjectionMode::Replay,
-            ] {
-                let drafts = map_authoritative_record(&session, &state, &record, mode)
-                    .expect("模型终态应投影");
-                assert_eq!(drafts.len(), 1);
-                let delivery = materialize_delivery(
-                    session.session_id().as_str(),
-                    1,
-                    drafts.into_iter().next().unwrap(),
-                )
-                .expect("投递应编码");
-                let json = serde_json::to_value(delivery).expect("投递应序列化");
-                let event = &json["envelope"]["event"];
-                assert_eq!(event["type"], "turn_failed");
-                assert_eq!(event["failureKind"], "model");
-                let safe = event["message"].as_str().expect("失败说明应为文本");
-                assert!(safe.contains("模型没有完整完成"));
-                assert!(safe.contains("request_id=req-acp-turn"));
-                assert!(safe.contains("Authorization: Bearer [REDACTED]"));
-                assert!(!safe.contains("acp-turn-secret"));
-                assert!(!safe.contains("nested-acp-turn-secret"));
-            }
-        }
-    }
-
-    /// Provider 边界失败必须保留模型分类；缺失或未知分类保守归为内部错误。
-    #[test]
-    fn turn_stopped_projection_derives_failure_category_from_on_error_outbox() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "failure-category-projection".to_owned(),
-                title: "失败分类投影".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        for (category, expected) in [("server_error", "model"), ("unknown", "internal")] {
-            let turn_id = ResourceTurnId::new("failure-category-turn").unwrap();
-            let mut state = session.snapshot().expect("Session 快照应读取").state;
-            state.turns.insert(
-                turn_id.clone(),
-                TurnState {
-                    turn_id: turn_id.clone(),
-                    source_agent_id: ResourceAgentId::new("root").unwrap(),
-                    root_turn_id: turn_id.clone(),
-                    parent_turn_id: None,
-                    prompt_summary: "验证失败分类".to_owned(),
-                    started_at_unix_ms: 1,
-                    completed_at_unix_ms: Some(2),
-                    status: TurnStatus::Failed,
-                    stop_reason: Some(TurnStopReason::Failed),
-                    outcome_message: Some("模型调用失败".to_owned()),
-                },
-            );
-            // 根 Turn 生命周期在回放中需要真实用户消息才可见。
-            state.transcript.push(TranscriptRecord::MessageAdded(
-                keencode_resources::SessionMessage {
-                    references: Vec::new(),
-                    is_meta: false,
-                    message_id: "failure-category-user".to_owned(),
-                    turn_id: Some(turn_id.clone()),
-                    agent_id: None,
-                    role: keencode_resources::MessageRole::User,
-                    content: vec![keencode_resources::MessagePart::Text {
-                        text: "验证失败分类".to_owned(),
-                    }],
-                },
-            ));
-            let message = "模型调用失败：模型响应协议错误：模型流式响应超过上限";
-            let record = SessionEventRecord {
-                schema: SESSION_EVENT_SCHEMA.to_owned(),
-                version: SESSION_EVENT_VERSION,
-                event_id: SessionEventId::new("failure-category-event").unwrap(),
-                session: state.session_id.clone(),
-                sequence: 2,
-                time_unix_ms: 2,
-                event: SessionEvent::AtomicBatch {
-                    events: vec![
-                        SessionEvent::TurnStopped {
-                            turn_id: turn_id.clone(),
-                            reason: TurnStopReason::Failed,
-                            message: message.to_owned(),
-                        },
-                        SessionEvent::OnErrorHookQueued {
-                            invocation: keencode_resources::OnErrorHookInvocation {
-                                invocation_id: "failure-category-invocation".to_owned(),
-                                turn_id: turn_id.clone(),
-                                source_agent_id: ResourceAgentId::new("root").unwrap(),
-                                terminal_reason: TurnStopReason::Failed,
-                                error_category: category.to_owned(),
-                                error_message: message.to_owned(),
-                            },
-                        },
-                    ],
-                },
-            };
-            for mode in [
-                AuthoritativeProjectionMode::Live,
-                AuthoritativeProjectionMode::Replay,
-            ] {
-                let drafts = map_authoritative_record(&session, &state, &record, mode)
-                    .expect("失败终态应投影");
-                // OnError outbox 只提供分类，不额外产生 UI 事件。
-                assert_eq!(drafts.len(), 1);
-                let delivery = materialize_delivery(
-                    session.session_id().as_str(),
-                    1,
-                    drafts.into_iter().next().unwrap(),
-                )
-                .expect("投递应编码");
-                let json = serde_json::to_value(delivery).expect("投递应序列化");
-                assert_eq!(
-                    json["envelope"]["event"]["failureKind"], expected,
-                    "category={category} mode={mode:?}"
-                );
-            }
-        }
-    }
-
-    /// Journal 终态进入 ACP/UI 前仍必须覆盖跨 4 KiB 投影边界的 URL userinfo。
-    #[test]
-    fn ui_terminal_projection_redacts_url_userinfo_before_delivery_limit() {
-        let storage = tempfile::tempdir().expect("测试目录应创建");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "ui-bounded-redaction".to_owned(),
-                title: "UI 脱敏边界".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let mut state = session.snapshot().expect("Session 快照应读取").state;
-        let turn_id = ResourceTurnId::new("ui-bounded-turn").expect("Turn ID 应有效");
-        let root_agent_id = ResourceAgentId::new("root").expect("根 Agent ID 应有效");
-        state.turns.insert(
-            turn_id.clone(),
-            TurnState {
-                turn_id: turn_id.clone(),
-                source_agent_id: root_agent_id.clone(),
-                root_turn_id: turn_id.clone(),
-                parent_turn_id: None,
-                prompt_summary: "验证 UI 错误边界".to_owned(),
-                started_at_unix_ms: 1,
-                completed_at_unix_ms: Some(2),
-                status: TurnStatus::Failed,
-                stop_reason: Some(TurnStopReason::Failed),
-                outcome_message: None,
-            },
-        );
-        state.transcript.push(TranscriptRecord::MessageAdded(
-            keencode_resources::SessionMessage {
-                references: Vec::new(),
-                is_meta: false,
-                message_id: "ui-bounded-user".to_owned(),
-                turn_id: Some(turn_id.clone()),
-                agent_id: None,
-                role: keencode_resources::MessageRole::User,
-                content: vec![keencode_resources::MessagePart::Text {
-                    text: "验证 UI 错误边界".to_owned(),
-                }],
-            },
-        ));
-        let url = "https://username:password@example.invalid/v1?api_key=query-secret";
-        let cut = url.find("password").unwrap() + 4;
-        let message = format!(
-            "{} {url} request_id=req-ui-boundary",
-            "x".repeat(MAX_UI_ERROR_MESSAGE_BYTES - cut - 1)
-        );
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("ui-bounded-event").expect("Event ID 应有效"),
-            session: state.session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::TurnStopped {
-                turn_id,
-                reason: TurnStopReason::Failed,
-                message,
-            },
-        };
-        for mode in [
-            AuthoritativeProjectionMode::Live,
-            AuthoritativeProjectionMode::Replay,
-        ] {
-            let draft = map_authoritative_record(&session, &state, &record, mode)
-                .expect("UI 失败终态应可投影")
-                .into_iter()
-                .next()
-                .expect("UI 失败终态应生成草稿");
-            let delivery = materialize_delivery(session.session_id().as_str(), 1, draft)
-                .expect("UI 失败终态应通过 ACP 边界");
-            let value = serde_json::to_value(delivery).expect("UI 投递应序列化");
-            let safe = value["envelope"]["event"]["message"]
-                .as_str()
-                .expect("UI 失败说明应为文本");
-            assert!(safe.len() <= MAX_UI_ERROR_MESSAGE_BYTES);
-            assert!(!safe.contains("username"));
-            assert!(!safe.contains("password"));
-            assert!(!safe.contains("query-secret"));
-        }
-    }
-
-    /// 子 Agent 各种终态必须投影为无 Journal 游标的 Session 级完成通知。
-    #[test]
-    fn background_agent_completion_is_safe_and_live_replay_stable() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "agent-completion-projection".to_owned(),
-                title: "子 Agent 完成投影".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id = ResourceSessionId::new(session.session_id().as_str().to_owned())
-            .expect("资源层 Session 标识应有效");
-        let root_turn_id =
-            ResourceTurnId::new("turn-agent-completion-root").expect("根 Turn 标识应有效");
-        let cases = [
-            (
-                SubAgentStatus::Completed,
-                TurnStatus::Completed,
-                None,
-                BackgroundTaskTerminalStatus::Succeeded,
-                Some("完成摘要"),
-            ),
-            (
-                SubAgentStatus::Failed,
-                TurnStatus::Failed,
-                Some(TurnStopReason::Failed),
-                BackgroundTaskTerminalStatus::Failed,
-                Some("authorization: secret"),
-            ),
-            (
-                SubAgentStatus::Interrupted,
-                TurnStatus::Cancelled,
-                Some(TurnStopReason::Cancelled),
-                BackgroundTaskTerminalStatus::Cancelled,
-                None,
-            ),
-            (
-                SubAgentStatus::Stopped,
-                TurnStatus::Cancelled,
-                Some(TurnStopReason::Cancelled),
-                BackgroundTaskTerminalStatus::Cancelled,
-                Some("已停止"),
-            ),
-        ];
-
-        for (index, (agent_status, turn_status, stop_reason, expected, summary)) in
-            cases.into_iter().enumerate()
-        {
-            let agent_id = ResourceAgentId::new(format!("agent-completion-{index}"))
-                .expect("子 Agent 标识应有效");
-            let turn_id = ResourceTurnId::new(format!("turn-agent-completion-{index}"))
-                .expect("子 Turn 标识应有效");
-            let mut state = SessionState::empty(session_id.clone());
-            state.turns.insert(
-                turn_id.clone(),
-                TurnState {
-                    turn_id: turn_id.clone(),
-                    source_agent_id: agent_id.clone(),
-                    root_turn_id: root_turn_id.clone(),
-                    parent_turn_id: Some(root_turn_id.clone()),
-                    prompt_summary: "执行子任务".to_owned(),
-                    started_at_unix_ms: 1_000,
-                    completed_at_unix_ms: Some(1_250),
-                    status: turn_status,
-                    stop_reason,
-                    outcome_message: None,
-                },
-            );
-            let record = SessionEventRecord {
-                schema: SESSION_EVENT_SCHEMA.to_owned(),
-                version: SESSION_EVENT_VERSION,
-                event_id: SessionEventId::new(format!("agent-completion-event-{index}"))
-                    .expect("事件标识应有效"),
-                session: session_id.clone(),
-                sequence: u64::try_from(index).expect("索引应转换").saturating_add(2),
-                time_unix_ms: 1_300,
-                event: SessionEvent::SubAgentStatusChanged {
-                    agent_id: agent_id.clone(),
-                    turn_id: Some(turn_id.clone()),
-                    status: agent_status,
-                    result_summary: summary.map(str::to_owned),
-                },
-            };
-            let live = map_authoritative_record(
-                &session,
-                &state,
-                &record,
-                AuthoritativeProjectionMode::Live,
-            )
-            .expect("live 子 Agent 终态应投影");
-            let replay = map_authoritative_record(
-                &session,
-                &state,
-                &record,
-                AuthoritativeProjectionMode::Replay,
-            )
-            .expect("replay 子 Agent 终态应投影");
-            assert_eq!(live.len(), 2);
-            assert_eq!(replay.len(), 2);
-            let live = live
-                .into_iter()
-                .enumerate()
-                .map(|(offset, draft)| {
-                    serde_json::to_value(
-                        materialize_delivery(
-                            session.session_id().as_str(),
-                            u64::try_from(offset).expect("偏移应转换").saturating_add(1),
-                            draft,
-                        )
-                        .expect("live 完成信封应构造"),
-                    )
-                    .expect("live 完成信封应序列化")
-                })
-                .collect::<Vec<_>>();
-            let replay = replay
-                .into_iter()
-                .enumerate()
-                .map(|(offset, draft)| {
-                    serde_json::to_value(
-                        materialize_delivery(
-                            session.session_id().as_str(),
-                            u64::try_from(offset).expect("偏移应转换").saturating_add(1),
-                            draft,
-                        )
-                        .expect("replay 完成信封应构造"),
-                    )
-                    .expect("replay 完成信封应序列化")
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(live, replay);
-            let completion = &live[1]["envelope"];
-            assert!(completion.get("journalSequence").is_none());
-            assert!(completion.get("turnId").is_none());
-            assert!(completion.get("sourceAgentId").is_none());
-            assert_eq!(completion["event"]["taskId"], turn_id.as_str());
-            assert_eq!(completion["event"]["agentId"], agent_id.as_str());
-            assert_eq!(completion["event"]["durationMs"], 250);
-            assert_eq!(
-                completion["event"]["status"],
-                serde_json::to_value(expected).expect("终态应序列化")
-            );
-            if index == 1 {
-                assert!(completion["event"].get("summary").is_none());
-            }
-        }
-    }
-
-    /// Todo 权威替换必须生成无伪造 Turn/Agent 身份的 Session 级 ACP Plan。
-    #[test]
-    fn todo_replacement_projects_as_session_scoped_plan() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-            .expect("测试 Runtime 应创建");
-        let session = runtime
-            .open_or_create_session(project.path(), None, "todo-projection-operation")
-            .expect("测试 Session 应创建");
-        let session_id = ResourceSessionId::new(session.session_id().as_str().to_owned())
-            .expect("Session 标识应有效");
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("todo-projection-event").expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::TodoReplaced {
-                items: vec![
-                    TodoItem {
-                        content: "检查实现".to_owned(),
-                        status: TodoStatus::InProgress,
-                        active_form: "正在检查实现".to_owned(),
-                    },
-                    TodoItem {
-                        content: "运行验证".to_owned(),
-                        status: TodoStatus::Pending,
-                        active_form: "正在运行验证".to_owned(),
-                    },
-                ],
-                operation_payload_sha256: "0".repeat(64),
-                revision: 1,
-            },
-        };
-        let drafts = map_authoritative_record(
-            &session,
-            &SessionState::empty(session_id),
-            &record,
-            AuthoritativeProjectionMode::Live,
-        )
-        .expect("Todo 应投影");
-        assert_eq!(drafts.len(), 1);
-        let delivery = materialize_delivery(
-            session.session_id().as_str(),
-            1,
-            drafts.into_iter().next().expect("应存在 Plan 草稿"),
-        )
-        .expect("Session 级 Plan 信封应通过校验");
-        let value = serde_json::to_value(delivery).expect("Plan 投递应序列化");
-        let envelope = &value["envelope"];
-        assert!(envelope.get("turnId").is_none());
-        assert!(envelope.get("sourceAgentId").is_none());
-        assert_eq!(envelope["update"]["sessionUpdate"], "plan");
-        assert_eq!(envelope["update"]["entries"][0]["status"], "in_progress");
-        assert_eq!(envelope["update"]["entries"][1]["status"], "pending");
-        assert_eq!(envelope["update"]["_meta"]["_keencode"]["todoRevision"], 1);
-    }
-
-    /// 完整关闭必须先拆除 Collaboration 与完成泵，并在句柄释放后允许重开同一 Session。
     #[tokio::test]
-    async fn close_session_releases_collaboration_runtime_and_delivery() {
+    async fn close_session_releases_collaboration_runtime() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "close-session-operation")
             .expect("测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("Session 投递应建立");
         let collaboration = runtime
             .ensure_collaboration_runtime(
                 &session,
@@ -23787,7 +20030,6 @@ mod tests {
                 .get(&session_id)
                 .is_none()
         );
-        assert!(runtime.session_delivery(&session_id).is_err());
         assert!(runtime.runtime_manager().get(session_id.clone()).is_err());
         assert!(
             collaboration
@@ -23814,17 +20056,11 @@ mod tests {
     async fn background_agent_limit_update_serializes_with_session_close() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "close-limit-race-operation")
             .expect("测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("测试 Session 投递应建立");
         let collaboration = runtime
             .ensure_collaboration_runtime(
                 &session,
@@ -23904,22 +20140,16 @@ mod tests {
         );
     }
 
-    /// 协调器关闭因 Store 冻结失败时，仍必须清理完成泵、投递和 Runtime 注册。
+    /// 协调器关闭因 Store 冻结失败时，仍必须清理完成泵和 Runtime 注册。
     #[tokio::test]
     async fn close_session_cleans_resources_after_collaboration_recovery_failure() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "close-recovery-operation")
             .expect("测试 Session 应创建");
         let session_id = session.session_id().as_str().to_owned();
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("Session 投递应建立");
         let collaboration = runtime
             .ensure_collaboration_runtime(
                 &session,
@@ -23971,7 +20201,6 @@ mod tests {
                 .get(&session_id)
                 .is_none()
         );
-        assert!(runtime.session_delivery(&session_id).is_err());
         assert!(runtime.runtime_manager().get(session_id).is_err());
         let state = collaboration
             .execution
@@ -23995,179 +20224,15 @@ mod tests {
         );
     }
 
-    /// Session load 替换世代后首条更新必须重新从一开始。
-    #[tokio::test]
-    async fn reset_delivery_starts_new_generation_at_one() {
-        let directory = tempfile::tempdir().expect("应创建测试目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime =
-            AgentRuntime::new(directory.path(), emitter.clone()).expect("测试 Runtime 应创建");
-        let first = runtime
-            .attach_session_delivery("session-a")
-            .expect("首个世代应建立");
-        first
-            .send_batch(vec![
-                unmerged_text_draft("turn-a", "one"),
-                unmerged_text_draft("turn-b", "two"),
-            ])
-            .await
-            .expect("首个世代应发送");
-        let second = runtime
-            .reset_session_delivery("session-a")
-            .await
-            .expect("新世代应建立");
-        second
-            .send_replay_batch(vec![text_draft("replayed")], 0, true)
-            .await
-            .expect("新世代应发送");
-        let values = emitter.snapshot();
-        assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
-        assert_eq!(values[2]["envelope"]["deliverySequence"], 1);
-    }
-
-    /// 会话重载替换投递世代后，装配期问答出口必须在发送瞬间解析新世代而不是已关闭的旧 FIFO。
-    #[tokio::test]
-    async fn client_request_sink_resolves_current_generation_at_send_time() {
-        let directory = tempfile::tempdir().expect("应创建测试目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(directory.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        // 模拟 Turn 装配期冻结的问答出口：创建时尚未建立任何投递世代。
-        let sink = SessionDeliverySink::new(Arc::downgrade(&runtime), "session-a".to_owned());
-        let stale = runtime
-            .attach_session_delivery("session-a")
-            .expect("首个世代应建立");
-        runtime
-            .reset_session_delivery("session-a")
-            .await
-            .expect("Session 重载应替换投递世代");
-
-        // 装配期捕获的世代句柄在重载后必须失效，这正是本次修复要绕开的旧行为。
-        // 旧世代的关闭与 pump 退出之间存在极短竞态，因此只用有界观察确认它不再成功投递。
-        let stale_send = tokio::time::timeout(
-            Duration::from_secs(1),
-            stale.send_client_request(client_request()),
-        )
-        .await;
-        assert!(
-            !matches!(stale_send, Ok(Ok(()))),
-            "已被替换的旧世代不得再接受问答投递"
-        );
-        sink.send_client_request(client_request())
-            .await
-            .expect("问答出口应投递到当时活跃的世代");
-        let values = emitter.snapshot();
-        let last = values.last().expect("问答出口必须产生一次投递");
-        assert_eq!(last["type"], "client_request");
-        assert_eq!(last["request"]["jsonrpc"], "2.0");
-    }
-
-    /// 装配根已回收时问答出口不得再触碰任何投递世代。
-    #[tokio::test]
-    async fn client_request_sink_reports_unavailable_without_runtime() {
-        let directory = tempfile::tempdir().expect("应创建测试目录");
-        let emitter = RecordingEmitter::successful();
-        let sink = {
-            let runtime = Arc::new(
-                AgentRuntime::new(directory.path(), emitter).expect("测试 Runtime 应创建"),
-            );
-            runtime
-                .attach_session_delivery("session-a")
-                .expect("首个世代应建立");
-            SessionDeliverySink::new(Arc::downgrade(&runtime), "session-a".to_owned())
-        };
-        assert!(
-            sink.send_client_request(client_request()).await.is_err(),
-            "装配根已回收时问答必须报告不可投递"
-        );
-    }
-
-    /// Lag 信号后的旧世代在途事件不得污染新世代 replay，恢复门还必须保留较新的 live。
-    #[tokio::test]
-    async fn lag_recovery_resets_generation_and_releases_buffered_live_in_order() {
-        let directory = tempfile::tempdir().expect("应创建测试目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime =
-            AgentRuntime::new(directory.path(), emitter.clone()).expect("测试 Runtime 应创建");
-        let old_generation = runtime
-            .attach_session_delivery("session-a")
-            .expect("旧投递世代应建立");
-        old_generation
-            .send_batch(vec![DeliveryDraft::KeenCodeEvent {
-                turn_id: None,
-                source_agent_id: None,
-                journal_sequence: None,
-                occurred_at_ms: 1,
-                event: KeenCodeEvent::RecoveryStateChanged {
-                    state: keencode_acp::RecoveryState::Replaying,
-                },
-            }])
-            .await
-            .expect("Lag 恢复信号应发送");
-        old_generation
-            .send_batch(vec![journal_text_draft("old-in-flight", 1)])
-            .await
-            .expect("首次 replay 前的旧世代在途事件应可完成");
-
-        let recovery_generation = runtime
-            .reset_session_delivery("session-a")
-            .await
-            .expect("首次 replay 应建立恢复世代");
-        recovery_generation
-            .send_batch(vec![journal_text_draft("new-live", 2)])
-            .await
-            .expect("新世代 live 应进入恢复缓存");
-        recovery_generation
-            .send_replay_batch(vec![journal_text_draft("replayed", 1)], 1, true)
-            .await
-            .expect("末页应先 replay 再释放较新的 live");
-
-        let values = emitter.snapshot();
-        assert_eq!(values.len(), 4);
-        assert_eq!(values[0]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[1]["envelope"]["deliverySequence"], 2);
-        assert_eq!(values[2]["envelope"]["deliverySequence"], 1);
-        assert_eq!(values[3]["envelope"]["deliverySequence"], 2);
-        assert_eq!(
-            values[2]["envelope"]["update"]["content"]["text"],
-            "replayed"
-        );
-        assert_eq!(
-            values[3]["envelope"]["update"]["content"]["text"],
-            "new-live"
-        );
-    }
-
-    /// 重复 shutdown 不得失败或恢复接受新投递。
-    #[tokio::test]
-    async fn shutdown_is_idempotent() {
-        let emitter = RecordingEmitter::successful();
-        let sender = SessionDeliverySender::spawn("session-a", emitter, false);
-        sender.shutdown().await.expect("首次关闭应成功");
-        sender.shutdown().await.expect("重复关闭应成功");
-        assert_eq!(
-            sender.send_batch(vec![text_draft("late")]).await,
-            Err(AgentRuntimeError::DeliveryClosed)
-        );
-    }
-
     /// 停机取消后的执行回收必须仍能在调用 shutdown 的同一个 Tokio worker 上推进。
     #[tokio::test(flavor = "current_thread")]
     async fn shutdown_yields_to_cancelled_runner_cleanup_on_same_worker() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "shutdown-same-worker")
             .expect("测试 Session 应创建");
-        runtime
-            .attach_session_delivery(session.session_id().as_str())
-            .expect("测试 Session 投递应建立");
         let collaboration = runtime
             .ensure_collaboration_runtime(
                 &session,
@@ -24241,788 +20306,7 @@ mod tests {
         );
     }
 
-    /// shutdown Future 在清理中途被取消后，后续调用不得把未完成清理报告为成功。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelled_shutdown_remains_failed_closed_on_retry() {
-        let directory = tempfile::tempdir().expect("应创建测试存储目录");
-        let emitter = BlockingEmitter::blocking_all();
-        let runtime = Arc::new(
-            AgentRuntime::new_with_delivery_timeouts(
-                directory.path(),
-                emitter.clone(),
-                DeliveryTimeouts {
-                    queue_reserve: Duration::from_millis(20),
-                    acknowledgement: Duration::from_secs(1),
-                    shutdown: Duration::from_secs(1),
-                },
-            )
-            .expect("测试 Runtime 应创建"),
-        );
-        let delivery = runtime
-            .attach_session_delivery("shutdown-cancelled")
-            .expect("投递世代应建立");
-        let sending = tokio::spawn({
-            let delivery = delivery.clone();
-            async move { delivery.send_batch(vec![text_draft("阻塞关闭")]).await }
-        });
-        emitter.wait_for_calls(1);
-
-        let shutdown = tokio::spawn({
-            let runtime = runtime.clone();
-            async move { runtime.shutdown().await }
-        });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !runtime.closed.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("shutdown 应先公开关闭状态");
-        shutdown.abort();
-        assert!(
-            shutdown
-                .await
-                .expect_err("取消的 shutdown 任务应返回取消")
-                .is_cancelled()
-        );
-
-        assert_eq!(
-            runtime.shutdown().await,
-            Err(AgentRuntimeError::RuntimeOperationFailed),
-            "取消的清理不能在重入时伪装成功"
-        );
-
-        emitter.release();
-        assert_eq!(sending.await.expect("阻塞投递任务不应 panic"), Ok(()));
-        drop(delivery);
-        drop(runtime);
-    }
-
     /// 标准信封自身仍必须保留严格 Session/Turn/Agent 身份。
-    #[test]
-    fn generated_standard_envelope_remains_strict() {
-        let envelope = SessionUpdateDeliveryEnvelope::new(
-            "session-a",
-            Some("turn-a".to_owned()),
-            Some("agent-root".to_owned()),
-            1,
-            1,
-            SessionUpdate::AgentMessageChunk(ContentChunk::new(ContentBlock::from("hello"))),
-        )
-        .expect("测试信封应有效");
-        assert_eq!(envelope.delivery_sequence(), 1);
-        assert_eq!(envelope.turn_id(), Some("turn-a"));
-    }
-
-    /// 模型 Round 用量只有在上下文窗口和完整 Token 统计都明确时才投影。
-    #[test]
-    fn model_round_usage_projection_is_known_only_and_replay_stable() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "runtime-usage-projection".to_owned(),
-                title: "用量投影测试".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id =
-            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
-        let turn_id = ResourceTurnId::new("turn-usage-projection").expect("Turn 标识应有效");
-        let source_agent_id = ResourceAgentId::new("root").expect("来源 Agent 标识应有效");
-        let mut state = SessionState::empty(session_id.clone());
-        let provider = ProviderSnapshot {
-            provider_id: "provider-a".to_owned(),
-            model: "test-model".to_owned(),
-            context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint".to_owned(),
-            reasoning_effort: None,
-        };
-        // 即使 Session 默认 Provider 看似匹配，缺失 Turn 快照也必须保持未知。
-        state.provider = Some(provider.clone());
-        let make_record = |usage: TokenUsage| SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("usage-projection-event").expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence: 7,
-            time_unix_ms: 7,
-            event: SessionEvent::ModelRoundCompleted {
-                turn_id: turn_id.clone(),
-                source_agent_id: source_agent_id.clone(),
-                model_round: 1,
-                requested_model: "test-model".to_owned(),
-                metadata: ResponseMetadata {
-                    decode_duration_ms: Some(1000),
-                    ..ResponseMetadata::default()
-                },
-                usage,
-                stop_reason: StopReason::Completed,
-            },
-        };
-        let map_with_provider = |record: &SessionEventRecord,
-                                 mode: AuthoritativeProjectionMode,
-                                 provider: ProviderSnapshot| {
-            let mut projection = ProviderProjection::from_indexed(Arc::new(HashMap::from([(
-                turn_id.clone(),
-                provider,
-            )])));
-            map_authoritative_record_with_projection(
-                &session,
-                &state,
-                record,
-                mode,
-                &mut projection,
-                None,
-            )
-            .map(|mapped| mapped.commit())
-        };
-
-        let total_record = make_record(TokenUsage {
-            input_tokens: Some(90),
-            output_tokens: Some(20),
-            reasoning_tokens: Some(3),
-            cache_read_tokens: None,
-            cache_write_tokens: None,
-            total_tokens: Some(100),
-        });
-        let missing_turn_provider = map_authoritative_record(
-            &session,
-            &state,
-            &total_record,
-            AuthoritativeProjectionMode::Live,
-        )
-        .expect("缺失 Turn Provider 时应保留原始用量事件");
-        assert!(missing_turn_provider.iter().all(|draft| matches!(
-            draft,
-            DeliveryDraft::KeenCodeEvent {
-                event: KeenCodeEvent::ModelUsageReported { .. },
-                ..
-            }
-        )));
-        let live = map_with_provider(
-            &total_record,
-            AuthoritativeProjectionMode::Live,
-            provider.clone(),
-        )
-        .expect("已知总用量应投影");
-        let replay = map_with_provider(
-            &total_record,
-            AuthoritativeProjectionMode::Replay,
-            provider.clone(),
-        )
-        .expect("已知总用量应重放");
-        assert_eq!(live.len(), 2);
-        assert_eq!(replay.len(), 2);
-        // 上下文占用之外的第二项必须保留完整请求用量，且两种投影完全一致。
-        let usage_event = |drafts: &[DeliveryDraft]| match &drafts[1] {
-            DeliveryDraft::KeenCodeEvent {
-                event,
-                journal_sequence,
-                ..
-            } => {
-                assert_eq!(*journal_sequence, Some(7));
-                serde_json::to_value(event).unwrap()
-            }
-            _ => panic!("第二项应为模型用量事件"),
-        };
-        let usage_value = usage_event(&live);
-        assert_eq!(usage_value, usage_event(&replay));
-        assert_eq!(usage_value["type"], "model_usage_reported");
-        assert_eq!(usage_value["inputTokens"], 90);
-        assert_eq!(usage_value["outputTokens"], 20);
-        assert_eq!(usage_value["totalTokens"], 100);
-        assert_eq!(usage_value["reasoningTokens"], 3);
-        assert_eq!(usage_value["decodeDurationMs"], 1000);
-        let live_value = serde_json::to_value(
-            materialize_delivery(
-                session.session_id().as_str(),
-                1,
-                live.into_iter().next().expect("live 应有用量更新"),
-            )
-            .expect("live 用量信封应构造"),
-        )
-        .expect("live 用量信封应序列化");
-        let replay_value = serde_json::to_value(
-            materialize_delivery(
-                session.session_id().as_str(),
-                1,
-                replay.into_iter().next().expect("replay 应有用量更新"),
-            )
-            .expect("replay 用量信封应构造"),
-        )
-        .expect("replay 用量信封应序列化");
-        assert_eq!(live_value, replay_value);
-        assert_eq!(
-            live_value["envelope"]["update"]["sessionUpdate"],
-            "usage_update"
-        );
-        assert_eq!(live_value["envelope"]["update"]["used"], 100);
-        assert_eq!(live_value["envelope"]["update"]["size"], 128_000);
-
-        let summed = map_with_provider(
-            &make_record(TokenUsage {
-                input_tokens: Some(11),
-                output_tokens: Some(7),
-                ..TokenUsage::unknown()
-            }),
-            AuthoritativeProjectionMode::Live,
-            provider.clone(),
-        )
-        .expect("输入和输出均明确时应投影");
-        assert_eq!(summed.len(), 2);
-        let summed_value = serde_json::to_value(
-            materialize_delivery(
-                session.session_id().as_str(),
-                1,
-                summed.into_iter().next().expect("求和用量应存在"),
-            )
-            .expect("求和用量信封应构造"),
-        )
-        .expect("求和用量信封应序列化");
-        assert_eq!(summed_value["envelope"]["update"]["used"], 18);
-
-        assert!(
-            map_with_provider(
-                &make_record(TokenUsage::unknown()),
-                AuthoritativeProjectionMode::Live,
-                provider.clone(),
-            )
-            .expect("未知用量不应造成投影错误")
-            .iter()
-            .all(|draft| matches!(
-                draft,
-                DeliveryDraft::KeenCodeEvent {
-                    event: KeenCodeEvent::ModelUsageReported { .. },
-                    ..
-                }
-            ))
-        );
-        let mut no_context_provider = provider;
-        no_context_provider.context_window = None;
-        assert!(
-            map_with_provider(
-                &total_record,
-                AuthoritativeProjectionMode::Replay,
-                no_context_provider,
-            )
-            .expect("未知上下文窗口不应造成投影错误")
-            .iter()
-            .all(|draft| matches!(
-                draft,
-                DeliveryDraft::KeenCodeEvent {
-                    event: KeenCodeEvent::ModelUsageReported { .. },
-                    ..
-                }
-            ))
-        );
-    }
-
-    /// Turn Provider 快照必须跨物理 Journal 记录保持，并在并发 Turn 交错时按 Turn 取用量窗口。
-    #[test]
-    fn provider_projection_keeps_interleaved_turn_identities() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "runtime-provider-projection-interleaved".to_owned(),
-                title: "Provider 投影交错测试".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id =
-            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
-        let state = SessionState::empty(session_id.clone());
-        let turn_a = ResourceTurnId::new("turn-provider-a").expect("Turn A 标识应有效");
-        let turn_b = ResourceTurnId::new("turn-provider-b").expect("Turn B 标识应有效");
-        let root = ResourceAgentId::new("root").expect("根 Agent 标识应有效");
-        let provider_a = ProviderSnapshot {
-            provider_id: "provider-a".to_owned(),
-            model: "model-a".to_owned(),
-            context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-a".to_owned(),
-            reasoning_effort: None,
-        };
-        let provider_b = ProviderSnapshot {
-            provider_id: "provider-b".to_owned(),
-            model: "model-b".to_owned(),
-            context_window: Some(32_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-b".to_owned(),
-            reasoning_effort: None,
-        };
-        let record = |sequence: u64, event: SessionEvent| SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new(format!("provider-projection-{sequence}"))
-                .expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence,
-            time_unix_ms: sequence,
-            event,
-        };
-        let started = |turn_id: ResourceTurnId| SessionEvent::TurnStarted {
-            turn_id,
-            source_agent_id: root.clone(),
-            root_turn_id: ResourceTurnId::new("root-turn-provider-projection")
-                .expect("根 Turn 标识应有效"),
-            parent_turn_id: None,
-            prompt_summary: "Provider 投影测试".to_owned(),
-        };
-        let provider_event = |turn_id: ResourceTurnId, provider: ProviderSnapshot| {
-            SessionEvent::TurnProviderSnapshotRecorded {
-                turn_id,
-                source_agent_id: root.clone(),
-                provider,
-            }
-        };
-        let round = |sequence: u64, turn_id: ResourceTurnId, model: &str| {
-            record(
-                sequence,
-                SessionEvent::ModelRoundCompleted {
-                    turn_id,
-                    source_agent_id: root.clone(),
-                    model_round: 1,
-                    requested_model: model.to_owned(),
-                    metadata: ResponseMetadata::default(),
-                    usage: TokenUsage {
-                        total_tokens: Some(10),
-                        ..TokenUsage::unknown()
-                    },
-                    stop_reason: StopReason::Completed,
-                },
-            )
-        };
-        let mut projection = ProviderProjection::default();
-        for (sequence, event) in [
-            (1, started(turn_a.clone())),
-            (2, provider_event(turn_a.clone(), provider_a.clone())),
-            (3, started(turn_b.clone())),
-            (4, provider_event(turn_b.clone(), provider_b.clone())),
-        ] {
-            let _ = map_authoritative_record_with_projection(
-                &session,
-                &state,
-                &record(sequence, event),
-                AuthoritativeProjectionMode::Replay,
-                &mut projection,
-                None,
-            )
-            .expect("Turn Provider 事件应可投影")
-            .commit();
-        }
-
-        let context_window = |drafts: &[DeliveryDraft]| {
-            drafts.iter().find_map(|draft| match draft {
-                DeliveryDraft::SessionUpdate { update, .. }
-                    if matches!(update.as_ref(), SessionUpdate::UsageUpdate(_)) =>
-                {
-                    serde_json::to_value(update)
-                        .ok()
-                        .and_then(|value| value.get("size").and_then(Value::as_u64))
-                }
-                _ => None,
-            })
-        };
-        let a_first = map_authoritative_record_with_projection(
-            &session,
-            &state,
-            &round(5, turn_a.clone(), "model-a"),
-            AuthoritativeProjectionMode::Replay,
-            &mut projection,
-            None,
-        )
-        .expect("Turn A 首轮应可投影")
-        .commit();
-        assert_eq!(context_window(&a_first), Some(128_000));
-        let b_round = map_authoritative_record_with_projection(
-            &session,
-            &state,
-            &round(6, turn_b.clone(), "model-b"),
-            AuthoritativeProjectionMode::Replay,
-            &mut projection,
-            None,
-        )
-        .expect("Turn B 轮次应可投影")
-        .commit();
-        assert_eq!(context_window(&b_round), Some(32_000));
-        let a_second = map_authoritative_record_with_projection(
-            &session,
-            &state,
-            &round(7, turn_a, "model-a"),
-            AuthoritativeProjectionMode::Replay,
-            &mut projection,
-            None,
-        )
-        .expect("Turn A 后续轮次应可投影")
-        .commit();
-        assert_eq!(context_window(&a_second), Some(128_000));
-    }
-
-    /// 同一原子批次中的 Turn Provider 快照必须让 live 与 replay 产生相同用量投影。
-    #[test]
-    fn live_and_replay_project_turn_provider_snapshot_identically() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "runtime-provider-live-replay".to_owned(),
-                title: "Provider live/replay 一致性".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id = ResourceSessionId::new(session.session_id().as_str().to_owned())
-            .expect("Session 标识应有效");
-        let turn_id = ResourceTurnId::new("turn-provider-live-replay").expect("Turn 标识应有效");
-        let root_agent = ResourceAgentId::new("root").expect("根 Agent 标识应有效");
-        let provider = ProviderSnapshot {
-            provider_id: "provider-live-replay".to_owned(),
-            model: "model-live-replay".to_owned(),
-            context_window: Some(64_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-live-replay".to_owned(),
-            reasoning_effort: None,
-        };
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("provider-live-replay-event").expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::TurnStarted {
-                        turn_id: turn_id.clone(),
-                        source_agent_id: root_agent.clone(),
-                        root_turn_id: turn_id.clone(),
-                        parent_turn_id: None,
-                        prompt_summary: "比较 live 与 replay".to_owned(),
-                    },
-                    SessionEvent::TurnProviderSnapshotRecorded {
-                        turn_id: turn_id.clone(),
-                        source_agent_id: root_agent.clone(),
-                        provider,
-                    },
-                    SessionEvent::ModelRoundCompleted {
-                        turn_id,
-                        source_agent_id: root_agent,
-                        model_round: 1,
-                        requested_model: "model-live-replay".to_owned(),
-                        metadata: ResponseMetadata::default(),
-                        usage: TokenUsage {
-                            total_tokens: Some(27),
-                            ..TokenUsage::unknown()
-                        },
-                        stop_reason: StopReason::Completed,
-                    },
-                ],
-            },
-        };
-        let state = SessionState::empty(session_id);
-        let project = |mode| {
-            map_authoritative_record(&session, &state, &record, mode)
-                .expect("Provider 快照批次应可投影")
-                .into_iter()
-                .enumerate()
-                .map(|(index, draft)| {
-                    materialize_delivery(
-                        session.session_id().as_str(),
-                        u64::try_from(index)
-                            .expect("投影序号应可转换")
-                            .saturating_add(1),
-                        draft,
-                    )
-                    .and_then(|delivery| {
-                        serde_json::to_value(delivery)
-                            .map_err(|_| AgentRuntimeError::DeliveryPoisoned)
-                    })
-                    .expect("Provider 投影应可物化")
-                })
-                .collect::<Vec<_>>()
-        };
-
-        assert_eq!(
-            project(AuthoritativeProjectionMode::Live),
-            project(AuthoritativeProjectionMode::Replay),
-            "同一 Turn Provider 快照下 live/replay 投影必须一致"
-        );
-    }
-
-    /// 权威记录投影失败必须只撤销当条 Provider 增量，不污染后续 live/replay 状态。
-    #[test]
-    fn provider_projection_rolls_back_failed_record_increment() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "provider-projection-rollback".to_owned(),
-                title: "Provider 回滚".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id =
-            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
-        let turn_id =
-            ResourceTurnId::new("provider-projection-failed-turn").expect("Turn 标识应有效");
-        let agent_id =
-            ResourceAgentId::new("provider_projection_failed_agent").expect("Agent 标识应有效");
-        let provider = ProviderSnapshot {
-            provider_id: "provider-failed-record".to_owned(),
-            model: "model-failed-record".to_owned(),
-            context_window: Some(64_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-failed-record".to_owned(),
-            reasoning_effort: None,
-        };
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("provider-projection-failed-record")
-                .expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::AtomicBatch {
-                events: vec![
-                    SessionEvent::TurnProviderSnapshotRecorded {
-                        turn_id: turn_id.clone(),
-                        source_agent_id: agent_id.clone(),
-                        provider,
-                    },
-                    SessionEvent::SubAgentStatusChanged {
-                        agent_id,
-                        turn_id: Some(turn_id.clone()),
-                        status: SubAgentStatus::Completed,
-                        result_summary: Some("不应成功".to_owned()),
-                    },
-                ],
-            },
-        };
-        let mut projection = ProviderProjection::default();
-        assert!(
-            map_authoritative_record_with_projection(
-                &session,
-                &SessionState::empty(session_id),
-                &record,
-                AuthoritativeProjectionMode::Live,
-                &mut projection,
-                None,
-            )
-            .is_err()
-        );
-        assert!(
-            projection.for_turn(&turn_id).is_none(),
-            "同一记录后续映射失败时必须撤销已观察的 Provider"
-        );
-    }
-
-    /// 大历史投影处理单条新 Turn 时只保留一条可回滚增量，不复制索引基线。
-    #[test]
-    fn provider_projection_updates_large_history_without_cloning_baseline() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let session = RuntimeSession::create_session(
-            RuntimeConfig::new(storage.path()),
-            CreateSessionRequest {
-                session_id: "provider-projection-large-history".to_owned(),
-                title: "Provider 大历史".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let session_id =
-            ResourceSessionId::new(session.session_id().as_str()).expect("资源 Session 标识应有效");
-        let baseline_provider = ProviderSnapshot {
-            provider_id: "provider-baseline".to_owned(),
-            model: "model-baseline".to_owned(),
-            context_window: Some(128_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-baseline".to_owned(),
-            reasoning_effort: None,
-        };
-        let indexed = Arc::new(
-            (0..4_096)
-                .map(|index| {
-                    (
-                        ResourceTurnId::new(format!("provider-baseline-turn-{index}"))
-                            .expect("基线 Turn 标识应有效"),
-                        baseline_provider.clone(),
-                    )
-                })
-                .collect::<HashMap<_, _>>(),
-        );
-        let mut projection = ProviderProjection::from_indexed(Arc::clone(&indexed));
-        let new_turn =
-            ResourceTurnId::new("provider-projection-new-turn").expect("新 Turn 标识应有效");
-        let record = SessionEventRecord {
-            schema: SESSION_EVENT_SCHEMA.to_owned(),
-            version: SESSION_EVENT_VERSION,
-            event_id: SessionEventId::new("provider-projection-new-record")
-                .expect("事件标识应有效"),
-            session: session_id.clone(),
-            sequence: 2,
-            time_unix_ms: 2,
-            event: SessionEvent::TurnProviderSnapshotRecorded {
-                turn_id: new_turn.clone(),
-                source_agent_id: ResourceAgentId::new("root").expect("根 Agent 标识应有效"),
-                provider: ProviderSnapshot {
-                    provider_id: "provider-new".to_owned(),
-                    model: "model-new".to_owned(),
-                    context_window: Some(32_000),
-                    protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-                    config_fingerprint: "fingerprint-new".to_owned(),
-                    reasoning_effort: None,
-                },
-            },
-        };
-        let mapped = map_authoritative_record_with_projection(
-            &session,
-            &SessionState::empty(session_id),
-            &record,
-            AuthoritativeProjectionMode::Live,
-            &mut projection,
-            None,
-        )
-        .expect("新 Turn Provider 应增量投影");
-        assert!(Arc::ptr_eq(&projection.indexed, &indexed));
-        assert_eq!(projection.observed.len(), 1);
-        assert_eq!(
-            mapped.provider_delta.inserted.as_slice(),
-            std::slice::from_ref(&new_turn)
-        );
-        mapped.rollback(&mut projection);
-        assert!(projection.for_turn(&new_turn).is_none());
-        assert!(Arc::ptr_eq(&projection.indexed, &indexed));
-
-        let committed = map_authoritative_record_with_projection(
-            &session,
-            &SessionState::empty(
-                ResourceSessionId::new(session.session_id().as_str())
-                    .expect("资源 Session 标识应有效"),
-            ),
-            &record,
-            AuthoritativeProjectionMode::Replay,
-            &mut projection,
-            None,
-        )
-        .expect("回滚后同一 Turn Provider 应可重新投影");
-        assert!(committed.commit().is_empty());
-        assert!(projection.for_turn(&new_turn).is_some());
-    }
-
-    /// 实时泵的 Provider 历史索引损坏时必须返回错误，不得降级为空投影。
-    #[test]
-    fn provider_projection_history_index_failure_is_not_defaulted() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let session_id = "provider-projection-corrupt-history";
-        let mut config = RuntimeConfig::new(storage.path());
-        config.journal.durability = keencode_resources::Durability::Flush;
-        let session = RuntimeSession::create_session(
-            config,
-            CreateSessionRequest {
-                session_id: session_id.to_owned(),
-                title: "Provider 损坏历史".to_owned(),
-                project_root: storage.path().display().to_string(),
-            },
-        )
-        .expect("测试 Session 应创建");
-        let mut log = std::fs::OpenOptions::new()
-            .append(true)
-            .open(storage.path().join(session_id).join("events.jsonl"))
-            .expect("事件日志应打开");
-        writeln!(log, "{{")
-            .and_then(|()| log.flush())
-            .expect("损坏尾记录应写入");
-
-        assert!(matches!(
-            super::provider_projection_from_history(&session),
-            Err(AgentRuntimeError::RuntimeOperationFailed)
-        ));
-    }
-
-    /// 分页 replay 必须跨物理记录保留显式 Turn Provider，并正确处理不同 Turn 交错的用量。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn replay_uses_explicit_turn_provider_snapshots_across_records() {
-        let storage = tempfile::tempdir().expect("应创建测试存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "replay-explicit-provider-operation")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        let provider_a = ProviderSnapshot {
-            provider_id: "provider-explicit-a".to_owned(),
-            model: "model-explicit-a".to_owned(),
-            context_window: Some(96_000),
-            protocol: ProviderProtocolSnapshot::OpenAiResponses,
-            config_fingerprint: "fingerprint-explicit-a".to_owned(),
-            reasoning_effort: None,
-        };
-        let provider_b = ProviderSnapshot {
-            provider_id: "provider-explicit-b".to_owned(),
-            model: "model-explicit-b".to_owned(),
-            context_window: Some(24_000),
-            protocol: ProviderProtocolSnapshot::OpenAiChatCompletions,
-            config_fingerprint: "fingerprint-explicit-b".to_owned(),
-            reasoning_effort: None,
-        };
-        persist_usage_root_turn_with_provider_snapshot(
-            &session,
-            "replay-explicit-turn-a",
-            "model-explicit-a",
-            "显式 Provider A",
-            17,
-            provider_a,
-        )
-        .await;
-        persist_usage_root_turn_with_provider_snapshot(
-            &session,
-            "replay-explicit-turn-b",
-            "model-explicit-b",
-            "显式 Provider B",
-            19,
-            provider_b,
-        )
-        .await;
-
-        runtime
-            .replay_session(&session_id, None, 1_000)
-            .await
-            .expect("显式 Provider 历史应可 replay");
-        let usage = emitter
-            .snapshot()
-            .into_iter()
-            .filter_map(|value| {
-                (value["type"] == "session_update"
-                    && value["envelope"]["update"]["sessionUpdate"] == "usage_update")
-                    .then(|| {
-                        (
-                            value["envelope"]["update"]["used"].as_u64(),
-                            value["envelope"]["update"]["size"].as_u64(),
-                        )
-                    })
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            usage,
-            vec![(Some(17), Some(96_000)), (Some(19), Some(24_000))]
-        );
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("测试 replay 投递应关闭");
-    }
-
-    /// 用量身份在长 ID/大轮次下仍有界，全部身份维度与字段边界都参与去重。
     #[test]
     fn goal_usage_identity_is_bounded_and_unambiguous() {
         use super::goal_usage_operation_id;
@@ -25271,7 +20555,7 @@ mod tests {
             keencode_resources::test_support::AppendFault::Flush,
         );
         assert_eq!(
-            runtime.background_task_cancel(&session_id, first.turn_id.as_str()),
+            runtime.background_task_cancel_outcome(&session_id, first.turn_id.as_str()),
             Err(AgentRuntimeError::RecoveryRequired)
         );
         let after_failure = collaboration
@@ -25298,7 +20582,7 @@ mod tests {
 
         keencode_resources::test_support::clear_append_fault();
         runtime
-            .background_task_cancel(&session_id, first.turn_id.as_str())
+            .background_task_cancel_outcome(&session_id, first.turn_id.as_str())
             .expect("相同 WaitingCapacity 证据应可重试对账");
         let after_retry = collaboration
             .store
@@ -25329,7 +20613,7 @@ mod tests {
         );
 
         runtime
-            .background_task_cancel(&session_id, second.turn_id.as_str())
+            .background_task_cancel_outcome(&session_id, second.turn_id.as_str())
             .expect("剩余 pending 证据也应可对账");
         assert!(
             collaboration
@@ -25357,7 +20641,7 @@ mod tests {
             keencode_resources::test_support::AppendFault::Flush,
         );
         assert_eq!(
-            runtime.background_task_cancel(&session_id, first.turn_id.as_str()),
+            runtime.background_task_cancel_outcome(&session_id, first.turn_id.as_str()),
             Err(AgentRuntimeError::RecoveryRequired)
         );
         keencode_resources::test_support::clear_append_fault();
@@ -25410,7 +20694,7 @@ mod tests {
             keencode_resources::test_support::AppendFault::Flush,
         );
         assert_eq!(
-            runtime.background_task_cancel(&session_id, first.turn_id.as_str()),
+            runtime.background_task_cancel_outcome(&session_id, first.turn_id.as_str()),
             Err(AgentRuntimeError::RecoveryRequired)
         );
         keencode_resources::test_support::clear_append_fault();
@@ -25441,10 +20725,8 @@ mod tests {
             .expect("旧 Runtime Session 应关闭");
         drop(runtime);
 
-        let recovered_runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("冷恢复 Runtime 应创建"),
-        );
+        let recovered_runtime =
+            Arc::new(AgentRuntime::new(storage.path()).expect("冷恢复 Runtime 应创建"));
         let reopened = recovered_runtime
             .open_or_create_session(project.path(), Some(&session_id), "unused")
             .expect("冷恢复 Session 应打开");
@@ -25689,10 +20971,7 @@ mod tests {
     async fn waiting_capacity_cancel_pending_record_survives_cold_recovery() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "waiting-capacity-cold-recovery")
             .expect("测试 Session 应创建");
@@ -25804,10 +21083,8 @@ mod tests {
             .expect("旧 Runtime Session 应关闭");
         drop(runtime);
 
-        let recovered_runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("冷恢复 Runtime 应创建"),
-        );
+        let recovered_runtime =
+            Arc::new(AgentRuntime::new(storage.path()).expect("冷恢复 Runtime 应创建"));
         let reopened = recovered_runtime
             .open_or_create_session(project.path(), Some(&session_id), "unused")
             .expect("冷恢复 Session 应打开");
@@ -25871,10 +21148,7 @@ mod tests {
     async fn background_agent_tasks_project_and_cancel_by_exact_turn() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "background-agent-operation")
             .expect("测试 Session 应创建");
@@ -25981,7 +21255,7 @@ mod tests {
         );
 
         runtime
-            .background_task_cancel(
+            .background_task_cancel_outcome(
                 session.session_id().as_str(),
                 second_child.initial_turn_id.as_str(),
             )
@@ -25995,7 +21269,7 @@ mod tests {
                 if turn_id == &second_child.initial_turn_id
         ));
         runtime
-            .background_task_cancel(
+            .background_task_cancel_outcome(
                 session.session_id().as_str(),
                 first_child.initial_turn_id.as_str(),
             )
@@ -26015,10 +21289,7 @@ mod tests {
     fn background_task_cancel_outcome_concurrent_running_child_is_idempotent() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "cancel-outcome-concurrent")
             .expect("测试 Session 应创建");
@@ -26111,10 +21382,7 @@ mod tests {
     fn background_task_cancel_outcome_completed_child_is_not_running() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "cancel-outcome-completed")
             .expect("测试 Session 应创建");
@@ -26173,10 +21441,7 @@ mod tests {
     async fn background_task_cancel_outcome_waiting_capacity_duplicate_is_not_requested() {
         let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
         let project = tempfile::tempdir().expect("应创建项目目录");
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
         let session = runtime
             .open_or_create_session(project.path(), None, "cancel-outcome-waiting")
             .expect("测试 Session 应创建");
@@ -26285,705 +21550,6 @@ mod tests {
 
     /// 冷恢复必须按 Transcript 的 reasoning、工具、reasoning、正文顺序投影，且工具生命周期只能出现一次。
     #[tokio::test]
-    async fn cold_replay_preserves_reasoning_tool_reasoning_text_order_without_duplicates() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        std::fs::write(project.path().join("replay-input.txt"), "冷恢复测试文件")
-            .expect("测试输入文件应写入");
-
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), RecordingEmitter::successful())
-                .expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "cold-replay-order")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        let turn_id = "turn-cold-replay-order";
-        let input = ModelMessage::text(MessageRole::User, "读取文件并总结");
-        let first_reply = ScriptedReply::events([
-            ModelStreamEvent::MessageStart {
-                metadata: ResponseMetadata::default(),
-            },
-            ModelStreamEvent::ReasoningDelta {
-                index: 0,
-                delta: "thought1".to_owned(),
-            },
-            ModelStreamEvent::ToolCallStart {
-                index: 1,
-                id: "call-replay".to_owned(),
-                name: "Read".to_owned(),
-            },
-            ModelStreamEvent::ToolCallArgumentsDelta {
-                index: 1,
-                id: "call-replay".to_owned(),
-                delta: json!({"file_path": "replay-input.txt"}).to_string(),
-            },
-            ModelStreamEvent::ToolCallEnd {
-                index: 1,
-                id: "call-replay".to_owned(),
-            },
-            ModelStreamEvent::MessageEnd {
-                stop_reason: StopReason::ToolUse,
-            },
-        ]);
-        let second_reply = ScriptedReply::events([
-            ModelStreamEvent::MessageStart {
-                metadata: ResponseMetadata::default(),
-            },
-            ModelStreamEvent::ReasoningDelta {
-                index: 0,
-                delta: "thought2".to_owned(),
-            },
-            ModelStreamEvent::TextDelta {
-                index: 1,
-                delta: "text".to_owned(),
-            },
-            ModelStreamEvent::MessageEnd {
-                stop_reason: StopReason::Completed,
-            },
-        ]);
-        let provider = Arc::new(ScriptedProvider::new(
-            ProviderCapabilities {
-                streaming: true,
-                tool_calling: true,
-                ..ProviderCapabilities::default()
-            },
-            [first_reply, second_reply],
-        ));
-        let provider_for_assertions = provider.clone();
-        let environment = Arc::new(
-            keencode_tools::ToolEnvironment::new(project.path()).expect("测试工具环境应创建"),
-        );
-        let mut tools = ToolRegistry::new();
-        tools
-            .register(Arc::new(keencode_tools::ReadTool::new(environment)))
-            .expect("Read 工具应注册");
-        let request = TurnRequest::new(
-            keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session 标识应有效"),
-            keencode_agent::TurnId::new(turn_id).expect("Agent Turn 标识应有效"),
-            keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效"),
-            "test-model",
-            vec![input.clone()],
-            PlanGuard::inactive(),
-        );
-        let runner =
-            session.bind_agent_runner(AgentRunner::new(provider, tools, RunLimits::default()));
-        let result = runner
-            .run_turn(RuntimeTurnRequest::root(
-                request,
-                vec![input],
-                "冷恢复顺序测试",
-            ))
-            .await
-            .expect("测试 Turn 应完成");
-        assert!(result.is_success(), "合成工具轮次应成功：{result:?}");
-        assert_eq!(result.state.round_count(), 2);
-        assert_eq!(result.state.step_count(), 1);
-        assert_eq!(
-            result.state.terminal_reason(),
-            Some(keencode_agent::TerminalReason::Completed)
-        );
-        assert_eq!(
-            provider_for_assertions
-                .requests()
-                .expect("Provider 请求应读取")
-                .len(),
-            2
-        );
-        drop(runner);
-
-        // 关闭旧 Manager 持有的 Session，释放 lease 后再打开同一 Session，确保下面是真实冷恢复。
-        runtime
-            .runtime_manager
-            .close(session_id.clone())
-            .expect("旧 Runtime Session 应关闭");
-        drop(session);
-        drop(runtime);
-
-        let replay_emitter = RecordingEmitter::successful();
-        let recovered_runtime = Arc::new(
-            AgentRuntime::new(storage.path(), replay_emitter.clone())
-                .expect("冷恢复 Runtime 应创建"),
-        );
-        let reopened = recovered_runtime
-            .open_or_create_session(project.path(), Some(&session_id), "unused")
-            .expect("冷恢复 Session 应打开");
-        let cold_snapshot = reopened.snapshot().expect("冷恢复快照应读取");
-        let resource_turn_id = ResourceTurnId::new(turn_id).expect("资源 Turn 标识应有效");
-        let cold_turn = cold_snapshot
-            .state
-            .turns
-            .get(&resource_turn_id)
-            .expect("冷恢复 Turn 应存在");
-        assert_eq!(cold_turn.status, TurnStatus::Completed);
-        assert_eq!(cold_turn.source_agent_id.as_str(), "root");
-
-        recovered_runtime
-            .replay_session(&session_id, None, keencode_acp::MAX_REPLAY_EVENTS as usize)
-            .await
-            .expect("冷恢复 replay 应完成");
-        let replayed = replay_emitter.snapshot();
-        let turn_updates = replayed
-            .iter()
-            .filter(|value| {
-                value["type"] == "session_update"
-                    && value["envelope"]["turnId"] == turn_id
-                    && value["envelope"]["sourceAgentId"] == "root"
-            })
-            .collect::<Vec<_>>();
-        let semantic_order = turn_updates
-            .iter()
-            .map(|value| {
-                let update = &value["envelope"]["update"];
-                match update["sessionUpdate"].as_str() {
-                    Some("user_message_chunk") => format!(
-                        "user:{}",
-                        update["content"]["text"]
-                            .as_str()
-                            .expect("用户更新必须携带原始输入"),
-                    ),
-                    Some("agent_thought_chunk") => {
-                        format!(
-                            "thought:{}",
-                            update["content"]["text"]
-                                .as_str()
-                                .expect("推理更新必须携带文本")
-                        )
-                    }
-                    Some("agent_message_chunk") => {
-                        format!(
-                            "text:{}",
-                            update["content"]["text"]
-                                .as_str()
-                                .expect("正文更新必须携带文本")
-                        )
-                    }
-                    Some("tool_call") => {
-                        format!(
-                            "tool:{}",
-                            update["toolCallId"]
-                                .as_str()
-                                .expect("工具调用更新必须携带调用标识")
-                        )
-                    }
-                    Some("tool_call_update") => format!(
-                        "tool_update:{}:{}",
-                        update["toolCallId"]
-                            .as_str()
-                            .expect("工具结果更新必须携带调用标识"),
-                        update["status"].as_str().expect("工具结果更新必须携带状态")
-                    ),
-                    other => panic!("不应出现其他 Turn ACP 更新：{other:?}; value={value}"),
-                }
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            semantic_order,
-            vec![
-                "user:读取文件并总结",
-                "thought:thought1",
-                "tool:call-replay",
-                "tool_update:call-replay:in_progress",
-                "tool_update:call-replay:completed",
-                "thought:thought2",
-                "text:text",
-            ]
-        );
-        let tool_result_update = turn_updates
-            .iter()
-            .find(|value| value["envelope"]["update"]["status"] == "completed")
-            .expect("重放必须有工具终态");
-        assert_eq!(
-            tool_result_update["envelope"]["update"]["_meta"]["keencode/toolOutcome"],
-            "succeeded"
-        );
-        assert_eq!(
-            tool_result_update["envelope"]["update"]["rawOutput"]["content"][0]["type"],
-            "text"
-        );
-        assert_eq!(
-            turn_updates
-                .iter()
-                .filter(|value| value["envelope"]["update"]["sessionUpdate"] == "tool_call")
-                .count(),
-            1
-        );
-        assert_eq!(
-            turn_updates
-                .iter()
-                .filter(|value| {
-                    value["envelope"]["update"]["sessionUpdate"] == "tool_call_update"
-                        && value["envelope"]["update"]["status"] == "in_progress"
-                })
-                .count(),
-            1
-        );
-        assert_eq!(
-            turn_updates
-                .iter()
-                .filter(|value| {
-                    value["envelope"]["update"]["sessionUpdate"] == "tool_call_update"
-                        && value["envelope"]["update"]["status"] == "completed"
-                })
-                .count(),
-            1
-        );
-
-        let completed_events = replayed
-            .iter()
-            .filter(|value| {
-                value["type"] == "keencode_event"
-                    && value["envelope"]["event"]["type"] == "turn_completed"
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(completed_events.len(), 1);
-        assert_eq!(completed_events[0]["envelope"]["turnId"], turn_id);
-        assert_eq!(completed_events[0]["envelope"]["sourceAgentId"], "root");
-    }
-
-    /// 在工具执行起点后暂停只读工具，验证 replay 水位固定且实时完成事件只在恢复门释放后跟随。
-    struct BlockingReplayReadTool {
-        /// 工具已进入执行体的通知；执行起点事件在此之前已经持久化。
-        started: Arc<tokio::sync::Notify>,
-        /// 允许工具返回成功结果的通知。
-        release: Arc<tokio::sync::Notify>,
-    }
-
-    impl BlockingReplayReadTool {
-        /// 创建由外部测试控制完成时机的只读工具。
-        fn new(started: Arc<tokio::sync::Notify>, release: Arc<tokio::sync::Notify>) -> Self {
-            Self { started, release }
-        }
-    }
-
-    impl keencode_agent::AgentTool for BlockingReplayReadTool {
-        /// 暴露与 Read 相同输入形状的测试工具定义。
-        fn definition(&self) -> keencode_model::ToolDefinition {
-            keencode_model::ToolDefinition::new(
-                "Read",
-                "暂停后返回固定文本的测试只读工具",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": { "type": "string", "minLength": 1 }
-                    },
-                    "required": ["file_path"],
-                    "additionalProperties": false
-                }),
-            )
-        }
-
-        /// 测试工具始终声明只读影响，允许 Runtime 持久化执行起点。
-        fn effect(
-            &self,
-            _input: &Value,
-        ) -> Result<keencode_agent::ToolEffect, keencode_agent::ToolError> {
-            Ok(keencode_agent::ToolEffect::ReadOnly)
-        }
-
-        /// 使用独占模式让测试只保留一个明确的在途执行。
-        fn concurrency(&self) -> keencode_agent::ToolConcurrency {
-            keencode_agent::ToolConcurrency::Exclusive
-        }
-
-        /// 通知执行起点后等待释放或 Turn 取消，再返回固定只读结果。
-        fn execute(
-            &self,
-            context: keencode_agent::ToolContext,
-            _input: Value,
-        ) -> keencode_agent::ToolFuture<'_> {
-            let started = self.started.clone();
-            let release = self.release.clone();
-            Box::pin(async move {
-                started.notify_one();
-                tokio::select! {
-                    _ = release.notified() => Ok(keencode_agent::ToolOutput::text("blocked-read")),
-                    _ = context.cancellation.cancelled() => Err(keencode_agent::ToolError::permanent(
-                        "turn_cancelled",
-                        "阻塞读取测试被取消",
-                    )),
-                }
-            })
-        }
-    }
-
-    /// 提取指定 Turn 的标准 Session 更新语义，忽略 Session 级更新和生命周期扩展事件。
-    fn collect_replay_turn_update_semantics(values: &[Value], turn_id: &str) -> Vec<String> {
-        values
-            .iter()
-            .filter_map(|value| {
-                let envelope = &value["envelope"];
-                if value["type"] != "session_update"
-                    || envelope["turnId"] != turn_id
-                    || envelope["sourceAgentId"] != "root"
-                {
-                    return None;
-                }
-                let update = &envelope["update"];
-                match update["sessionUpdate"].as_str() {
-                    Some("user_message_chunk") => Some(format!(
-                        "user:{}",
-                        update["content"]["text"]
-                            .as_str()
-                            .expect("用户更新必须携带原始输入"),
-                    )),
-                    Some("agent_thought_chunk") => Some(format!(
-                        "thought:{}",
-                        update["content"]["text"]
-                            .as_str()
-                            .expect("推理更新必须携带文本"),
-                    )),
-                    Some("agent_message_chunk") => Some(format!(
-                        "text:{}",
-                        update["content"]["text"]
-                            .as_str()
-                            .expect("正文更新必须携带文本"),
-                    )),
-                    Some("tool_call") => Some(format!(
-                        "tool:{}",
-                        update["toolCallId"]
-                            .as_str()
-                            .expect("工具调用更新必须携带调用标识"),
-                    )),
-                    Some("tool_call_update") => Some(format!(
-                        "tool_update:{}:{}",
-                        update["toolCallId"]
-                            .as_str()
-                            .expect("工具结果更新必须携带调用标识"),
-                        update["status"].as_str().expect("工具结果更新必须携带状态"),
-                    )),
-                    Some(other) => panic!("不应出现其他 Turn ACP 更新：{other}; value={value}"),
-                    None => panic!("Turn ACP 更新缺少 sessionUpdate：{value}"),
-                }
-            })
-            .collect()
-    }
-
-    /// 在真实在途工具期间分页 replay，随后验证旧水位、实时缓冲和新的完整恢复各自边界。
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn replay_paging_freezes_inflight_tool_waterline_before_completion() {
-        let storage = tempfile::tempdir().expect("应创建 Runtime 存储目录");
-        let project = tempfile::tempdir().expect("应创建项目目录");
-        let replay_emitter = RecordingEmitter::successful();
-        let runtime = Arc::new(
-            AgentRuntime::new(storage.path(), replay_emitter.clone()).expect("测试 Runtime 应创建"),
-        );
-        let session = runtime
-            .open_or_create_session(project.path(), None, "replay-inflight-page")
-            .expect("测试 Session 应创建");
-        let session_id = session.session_id().as_str().to_owned();
-        let turn_id = "turn-replay-inflight-page";
-        let started = Arc::new(tokio::sync::Notify::new());
-        let release = Arc::new(tokio::sync::Notify::new());
-        let mut tools = ToolRegistry::new();
-        tools
-            .register(Arc::new(BlockingReplayReadTool::new(
-                started.clone(),
-                release.clone(),
-            )))
-            .expect("阻塞 Read 工具应注册");
-
-        let provider = Arc::new(ScriptedProvider::new(
-            ProviderCapabilities {
-                streaming: true,
-                tool_calling: true,
-                ..ProviderCapabilities::default()
-            },
-            [
-                ScriptedReply::events([
-                    ModelStreamEvent::MessageStart {
-                        metadata: ResponseMetadata::default(),
-                    },
-                    ModelStreamEvent::ReasoningDelta {
-                        index: 0,
-                        delta: "thought1".to_owned(),
-                    },
-                    ModelStreamEvent::ToolCallStart {
-                        index: 1,
-                        id: "call-replay-inflight".to_owned(),
-                        name: "Read".to_owned(),
-                    },
-                    ModelStreamEvent::ToolCallArgumentsDelta {
-                        index: 1,
-                        id: "call-replay-inflight".to_owned(),
-                        delta: json!({"file_path": "replay-input.txt"}).to_string(),
-                    },
-                    ModelStreamEvent::ToolCallEnd {
-                        index: 1,
-                        id: "call-replay-inflight".to_owned(),
-                    },
-                    ModelStreamEvent::MessageEnd {
-                        stop_reason: StopReason::ToolUse,
-                    },
-                ]),
-                ScriptedReply::events([
-                    ModelStreamEvent::MessageStart {
-                        metadata: ResponseMetadata::default(),
-                    },
-                    ModelStreamEvent::ReasoningDelta {
-                        index: 0,
-                        delta: "thought2".to_owned(),
-                    },
-                    ModelStreamEvent::TextDelta {
-                        index: 1,
-                        delta: "text".to_owned(),
-                    },
-                    ModelStreamEvent::MessageEnd {
-                        stop_reason: StopReason::Completed,
-                    },
-                ]),
-            ],
-        ));
-        let provider_for_assertions = provider.clone();
-        let input = ModelMessage::text(MessageRole::User, "读取并总结");
-        let request = TurnRequest::new(
-            keencode_agent::SessionId::new(session_id.clone()).expect("Agent Session 标识应有效"),
-            keencode_agent::TurnId::new(turn_id).expect("Agent Turn 标识应有效"),
-            keencode_agent::AgentId::new("root").expect("根 Agent 标识应有效"),
-            "test-model",
-            vec![input.clone()],
-            PlanGuard::inactive(),
-        );
-        let runner =
-            session.bind_agent_runner(AgentRunner::new(provider, tools, RunLimits::default()));
-        let turn_task = tokio::spawn(async move {
-            runner
-                .run_turn(RuntimeTurnRequest::root(
-                    request,
-                    vec![input],
-                    "在途 replay 分页",
-                ))
-                .await
-        });
-        tokio::time::timeout(Duration::from_secs(2), started.notified())
-            .await
-            .expect("阻塞工具应在测试窗口内进入执行体");
-
-        let blocked = session.snapshot().expect("在途工具快照应读取");
-        let through = blocked.state.last_sequence;
-        let blocked_lifecycle = blocked
-            .state
-            .tools
-            .values()
-            .find(|lifecycle| lifecycle.request.model_tool_call_id == "call-replay-inflight")
-            .expect("在途工具生命周期应存在");
-        assert!(blocked_lifecycle.execution_started);
-        assert!(blocked_lifecycle.outcome.is_none());
-        assert!(blocked_lifecycle.transcript_segment.is_none());
-
-        let first_page = runtime
-            .replay_session(&session_id, None, 2)
-            .await
-            .expect("在途工具首个 replay 分页应成功");
-        assert_eq!(first_page.through_journal_sequence, through);
-        assert_eq!(first_page.next_after, 1);
-        assert_eq!(first_page.replayed_events, 1);
-        assert!(first_page.has_more);
-        let delivery = runtime
-            .session_delivery(&session_id)
-            .expect("首个 replay 后投递世代应存在");
-        {
-            let cursor = delivery.replay_cursor.lock().await;
-            assert_eq!(cursor.through_sequence, Some(through));
-            let frozen = cursor
-                .frozen_state
-                .as_ref()
-                .expect("首个 replay 应保存冻结状态");
-            let frozen_lifecycle = frozen
-                .tools
-                .values()
-                .find(|lifecycle| lifecycle.request.model_tool_call_id == "call-replay-inflight")
-                .expect("冻结状态应保留在途工具");
-            assert!(frozen_lifecycle.execution_started);
-            assert!(frozen_lifecycle.outcome.is_none());
-            assert!(frozen_lifecycle.transcript_segment.is_none());
-        }
-
-        // 首页建立恢复门后再启动实时泵，释放工具产生的权威更新必须先进入门内缓存。
-        runtime
-            .ensure_session_delivery(&session_id)
-            .expect("恢复中的 Session 应建立实时泵");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if runtime
-                    .live_pumps
-                    .lock()
-                    .expect("实时泵状态应读取")
-                    .contains_key(&session_id)
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("实时泵应在测试窗口内启动");
-
-        release.notify_one();
-        let result = tokio::time::timeout(Duration::from_secs(5), turn_task)
-            .await
-            .expect("完整 Turn 应在测试窗口内结束")
-            .expect("Turn 任务不应 panic")
-            .expect("Runtime Turn 应完成");
-        assert!(result.is_success(), "在途分页 Turn 应成功：{result:?}");
-        assert_eq!(result.state.round_count(), 2);
-        assert_eq!(result.state.step_count(), 1);
-        assert_eq!(
-            provider_for_assertions
-                .requests()
-                .expect("Provider 请求应读取")
-                .len(),
-            2
-        );
-        let completed = session.snapshot().expect("完成后的 Session 快照应读取");
-        assert!(completed.state.last_sequence > through);
-        let completed_lifecycle = completed
-            .state
-            .tools
-            .values()
-            .find(|lifecycle| lifecycle.request.model_tool_call_id == "call-replay-inflight")
-            .expect("完成后的工具生命周期应存在");
-        assert!(completed_lifecycle.outcome.is_some());
-        assert!(completed_lifecycle.transcript_segment.is_some());
-
-        // 旧恢复世代逐页继续消费固定水位；末页前实时事件仍不得越过恢复门投影。
-        let mut after = first_page.next_after;
-        let (before_final, final_page) = loop {
-            let before = replay_emitter.snapshot();
-            let page = runtime
-                .replay_session(&session_id, Some(after), 2)
-                .await
-                .expect("连续 replay 分页应成功");
-            assert_eq!(page.through_journal_sequence, through);
-            if page.has_more {
-                assert!(page.next_after > after);
-                let visible = replay_emitter.snapshot();
-                let semantics = collect_replay_turn_update_semantics(&visible, turn_id);
-                assert!(!semantics.iter().any(|item| {
-                    item == "thought:thought2"
-                        || item == "text:text"
-                        || item == "tool_update:call-replay-inflight:completed"
-                }));
-                after = page.next_after;
-            } else {
-                break (before, page);
-            }
-        };
-        assert_eq!(
-            collect_replay_turn_update_semantics(&before_final, turn_id),
-            vec!["user:读取并总结"]
-        );
-        assert_eq!(final_page.next_after, through);
-        assert_eq!(final_page.replayed_events, 2);
-        assert!(!final_page.has_more);
-
-        // 末页回执只代表恢复门已释放；此前已完成 Turn 的 live pump 仍可能尚未把
-        // 门内权威缓存交给投递泵，因此等待同一世代的最终语义收敛后再断言顺序。
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let visible = replay_emitter.snapshot();
-                let semantics = collect_replay_turn_update_semantics(&visible, turn_id);
-                // 工具结果先于 Turn 完成通知投递；等待两者收敛，避免在通知到达前断言数量。
-                let completed_notifications = visible
-                    .iter()
-                    .filter(|value| {
-                        value["type"] == "keencode_event"
-                            && value["envelope"]["event"]["type"] == "turn_completed"
-                    })
-                    .count();
-                if semantics
-                    == vec![
-                        "user:读取并总结",
-                        "tool:call-replay-inflight",
-                        "tool_update:call-replay-inflight:in_progress",
-                        "tool_update:call-replay-inflight:completed",
-                    ]
-                    && completed_notifications == 1
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("旧 replay 世代应在测试窗口内释放全部实时事件");
-        let old_generation = replay_emitter.snapshot();
-        assert_eq!(
-            collect_replay_turn_update_semantics(&old_generation, turn_id),
-            vec![
-                "user:读取并总结",
-                "tool:call-replay-inflight",
-                "tool_update:call-replay-inflight:in_progress",
-                "tool_update:call-replay-inflight:completed",
-            ]
-        );
-        assert_eq!(
-            old_generation
-                .iter()
-                .filter(|value| {
-                    value["type"] == "keencode_event"
-                        && value["envelope"]["event"]["type"] == "turn_completed"
-                })
-                .count(),
-            1
-        );
-
-        // 新的完整 replay 重新从最终 Session 状态建立恢复门，必须恢复完整 Transcript 语义顺序。
-        runtime
-            .close_session_delivery(&session_id)
-            .await
-            .expect("旧 replay 投递世代应关闭");
-        let full_start = replay_emitter.snapshot().len();
-        let full_page = runtime
-            .replay_session(&session_id, None, keencode_acp::MAX_REPLAY_EVENTS as usize)
-            .await
-            .expect("新的完整 replay 应成功");
-        assert!(!full_page.has_more);
-        let full_values = replay_emitter.snapshot();
-        let full_values = &full_values[full_start..];
-        assert_eq!(
-            collect_replay_turn_update_semantics(full_values, turn_id),
-            vec![
-                "user:读取并总结",
-                "thought:thought1",
-                "tool:call-replay-inflight",
-                "tool_update:call-replay-inflight:in_progress",
-                "tool_update:call-replay-inflight:completed",
-                "thought:thought2",
-                "text:text",
-            ]
-        );
-        assert_eq!(
-            full_values
-                .iter()
-                .filter(|value| {
-                    value["type"] == "session_update"
-                        && value["envelope"]["turnId"] == turn_id
-                        && value["envelope"]["update"]["sessionUpdate"] == "tool_call"
-                })
-                .count(),
-            1
-        );
-        assert_eq!(
-            full_values
-                .iter()
-                .filter(|value| {
-                    value["type"] == "keencode_event"
-                        && value["envelope"]["event"]["type"] == "turn_completed"
-                })
-                .count(),
-            1
-        );
-        runtime
-            .close_session(&session_id)
-            .await
-            .expect("测试 Session 应关闭");
-    }
-
-    /// deferred 草稿清理与所有根 Turn 入口共享 admission；发送先认领时 cleanup
-    /// 必须保留 Session，cleanup 先认领时后续启动必须拒绝，不能丢失或伪造事实。
-    #[tokio::test(flavor = "multi_thread")]
     async fn deferred_close_and_first_send_linearize_without_losing_journal() {
         let storage = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -27173,7 +21739,14 @@ mod tests {
             .unwrap()
             .expect("空闲已登记 Session 应完成关闭并保留 mutation guard");
 
-        assert!(runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert_eq!(
+            runtime
+                .deferred_session_lifecycle
+                .lock()
+                .unwrap()
+                .get(&session_id),
+            Some(&DeferredSessionLifecycle::Closing)
+        );
         assert!(matches!(
             runtime.runtime_manager().get(session_id.clone()),
             Err(keencode_runtime::RuntimeError::SessionNotRegistered)
@@ -27188,7 +21761,14 @@ mod tests {
         ));
 
         drop(guard);
-        assert!(!runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert!(
+            runtime
+                .deferred_session_lifecycle
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .is_none()
+        );
         let reopened = runtime
             .open_or_create_session(
                 project.path(),
@@ -27222,7 +21802,14 @@ mod tests {
         let SessionWorkspaceMutationAdmission::Closed(guard) = admission else {
             panic!("已关闭 Session 不应重新登记为 Runtime mutation");
         };
-        assert!(runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert_eq!(
+            runtime
+                .deferred_session_lifecycle
+                .lock()
+                .unwrap()
+                .get(&session_id),
+            Some(&DeferredSessionLifecycle::Closing)
+        );
         assert!(matches!(
             runtime.open_or_create_session(
                 project.path(),
@@ -27251,7 +21838,14 @@ mod tests {
             "workspace admission 持有期间 deferred cleanup 不得认领同一 cold Session"
         );
         drop(guard);
-        assert!(!runtime.workspace_mutation_in_progress(&session_id).unwrap());
+        assert!(
+            runtime
+                .deferred_session_lifecycle
+                .lock()
+                .unwrap()
+                .get(&session_id)
+                .is_none()
+        );
         let started = runtime
             .start_root_turn(
                 &session_id,
@@ -27299,6 +21893,128 @@ mod tests {
         let _ = server.join().unwrap();
         let snapshot = runtime.session_snapshot(&session_id).unwrap();
         assert!(!snapshot.state.raw_transcript_messages().is_empty());
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// 活动子 Agent 占用协作容量时，idle release 必须保留整棵 Agent 树并且不发取消。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn release_idle_session_keeps_active_collaboration_runtime() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
+        let session = runtime
+            .open_or_create_session(project.path(), None, "release-idle-active")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        let collaboration = install_test_collaboration_runtime(&runtime, &session, project.path());
+        let root_turn = AgentTurnId::new("release-idle-active-root").expect("根 Turn 标识应有效");
+        collaboration
+            .coordinator
+            .begin_root_turn_with_id(
+                &collaboration.root_agent_id,
+                root_turn.clone(),
+                "保留活动协作树",
+                PlanGuard::inactive(),
+            )
+            .expect("根 Turn 应启动");
+        let child = collaboration
+            .coordinator
+            .spawn_agent(
+                &collaboration.root_agent_id,
+                &root_turn,
+                &ToolCallId::new("release-idle-active-child").expect("spawn 标识应有效"),
+                test_spawn_request("release_idle_active", project.path()),
+            )
+            .expect("子 Agent 应启动");
+
+        assert!(
+            !runtime
+                .release_idle_session(&session_id)
+                .await
+                .expect("活动 Session 的 idle release 应返回")
+        );
+        assert!(runtime.runtime_manager().get(session_id.clone()).is_ok());
+        assert!(matches!(
+            collaboration
+                .coordinator
+                .agent_status(&child.agent.agent_id)
+                .expect("子 Agent 状态应读取"),
+            CollaborationAgentStatus::Running { .. }
+        ));
+
+        collaboration
+            .coordinator
+            .complete_turn(
+                &child.agent.agent_id,
+                &child.initial_turn_id,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .expect("子 Agent 应完成");
+        collaboration
+            .coordinator
+            .complete_turn(
+                &collaboration.root_agent_id,
+                &root_turn,
+                AgentTurnOutcome::Completed {
+                    final_message: None,
+                },
+            )
+            .expect("根 Turn 应完成");
+        drop(session);
+        runtime.close_session(&session_id).await.unwrap();
+    }
+
+    /// 空闲 Session 释放后必须撤销进程内 lease，并能从同一 Journal 冷恢复。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn release_idle_session_releases_and_cold_reopens_session() {
+        let storage = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let runtime = Arc::new(AgentRuntime::new(storage.path()).expect("测试 Runtime 应创建"));
+        let session = runtime
+            .open_or_create_session(project.path(), None, "release-idle-cold-reopen")
+            .expect("测试 Session 应创建");
+        let session_id = session.session_id().as_str().to_owned();
+        persist_completed_root_turn(
+            &session,
+            "release-idle-persisted-turn",
+            "释放后仍可恢复的输入",
+            "释放后仍可恢复的输入",
+        )
+        .await;
+        drop(session);
+
+        assert!(
+            runtime
+                .release_idle_session(&session_id)
+                .await
+                .expect("空闲 Session 应释放成功")
+        );
+        assert!(matches!(
+            runtime.runtime_manager().get(session_id.clone()),
+            Err(keencode_runtime::RuntimeError::SessionNotRegistered)
+        ));
+
+        let reopened = runtime
+            .open_or_create_session(
+                project.path(),
+                Some(&session_id),
+                "release-idle-cold-reopen-after-release",
+            )
+            .expect("释放后的 Session 应可冷恢复");
+        assert!(reopened
+            .snapshot()
+            .expect("冷恢复快照应读取")
+            .state
+            .raw_transcript_messages()
+            .into_iter()
+            .any(|message| {
+                message.content.iter().any(|part| {
+                    matches!(part, keencode_resources::MessagePart::Text { text } if text == "释放后仍可恢复的输入")
+                })
+            }));
+        drop(reopened);
         runtime.close_session(&session_id).await.unwrap();
     }
 }

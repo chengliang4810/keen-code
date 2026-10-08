@@ -1,0 +1,487 @@
+{
+  "version": 1,
+  "name": "ely-native-general-preferences",
+  "requires_real_provider": false,
+  "requires_journal": false,
+  "requires_network_trace": false,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-settings-reference-2/native-run"
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "resize_client", "width": 2560, "height": 1640 },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    { "type": "wait", "ms": 1500 },
+    { "type": "screenshot", "label": "startup" },
+    { "type": "accessibility", "label": "startup" },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"appearance\": \"dark\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"version\": 2",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-general-settings.json",
+      "contains": "\"code\": {",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "click_accessibility", "label": "常规", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "scroll", "x": 2200, "y": 500, "delta_y": 1920 },
+    { "type": "wait", "ms": 500 },
+    { "type": "wait_for_accessibility", "label": "任务通知", "timeout_ms": 30000 },
+    { "type": "wait_for_accessibility", "label": "通知提示音", "timeout_ms": 30000 },
+    { "type": "wait_for_accessibility", "label": "关闭时驻留托盘", "timeout_ms": 30000 },
+    { "type": "wait_for_accessibility", "label": "保持电脑唤醒", "timeout_ms": 30000 },
+    { "type": "wait_for_accessibility", "label": "本地记忆", "timeout_ms": 30000 },
+    { "type": "screenshot", "label": "general-initial" },
+    { "type": "accessibility", "label": "general-initial" },
+
+    { "type": "click_accessibility", "label": "任务通知", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"taskNotifications\": false",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "通知提示音", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"notificationSound\": false",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "保持电脑唤醒", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"keepComputerAwake\": false",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "关闭时驻留托盘", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": true",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "本地记忆", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"localMemories\": true",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "general-switches-saved" },
+    { "type": "accessibility", "label": "general-switches-saved" },
+
+    { "type": "scroll", "x": 2200, "y": 1400, "delta_y": -480 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "默认项目目录",
+      "timeout_ms": 30000
+    },
+    { "type": "wait_for_accessibility", "label": "更新下载源", "timeout_ms": 30000 },
+    { "type": "wait_for_accessibility", "label": "HTTP 代理", "timeout_ms": 30000 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "HTTP 代理绕过规则",
+      "timeout_ms": 30000
+    },
+    { "type": "screenshot", "label": "general-preferences-form" },
+    { "type": "accessibility", "label": "general-preferences-form" },
+
+    { "type": "click_accessibility", "label": "后台 Agent 并发上限", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "42" },
+    {
+      "type": "click_accessibility",
+      "label": "保存后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"backgroundAgentLimit\": 42",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "后台 Agent 并发上限", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "1000" },
+    {
+      "type": "click_accessibility",
+      "label": "保存后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"backgroundAgentLimit\": 42",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "general-limit-validation-rejected" },
+    { "type": "accessibility", "label": "general-limit-validation-rejected" },
+
+    { "type": "click_accessibility", "label": "后台 Agent 并发上限", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "42" },
+    {
+      "type": "click_accessibility",
+      "label": "保存后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "默认项目目录", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "C:\\KeenCode-General-Acceptance" },
+    {
+      "type": "click_accessibility",
+      "label": "保存默认项目目录",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"projectDirectory\": \"C:",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "KeenCode-General-Acceptance",
+      "min_bytes": 1
+    },
+
+    { "type": "click_accessibility", "label": "更新下载源", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "国内镜像", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"appUpdateDownloadSource\": \"chinaMirror\"",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "general-project-and-update-saved" },
+    { "type": "accessibility", "label": "general-project-and-update-saved" },
+
+    { "type": "click_accessibility", "label": "HTTP 代理", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "http://127.0.0.1:9" },
+    { "type": "click_accessibility", "label": "HTTP 代理绕过规则", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "localhost,127.0.0.1" },
+    { "type": "click_accessibility", "label": "保存 HTTP 代理", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxy\": \"http://127.0.0.1:9\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxyNoProxy\": \"localhost,127.0.0.1\"",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "HTTP 代理", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "file://invalid-proxy" },
+    { "type": "click_accessibility", "label": "保存 HTTP 代理", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxy\": \"http://127.0.0.1:9\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxyNoProxy\": \"localhost,127.0.0.1\"",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "general-proxy-validation-rejected" },
+    { "type": "accessibility", "label": "general-proxy-validation-rejected" },
+    { "type": "click_accessibility", "label": "HTTP 代理", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "key", "key": "backspace" },
+    { "type": "click_accessibility", "label": "HTTP 代理绕过规则", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "key", "key": "backspace" },
+    { "type": "click_accessibility", "label": "保存 HTTP 代理", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxy\": null",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxyNoProxy\": null",
+      "min_bytes": 1
+    },
+
+    { "type": "click_accessibility", "label": "返回工作区", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "click_accessibility", "label": "常规", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    { "type": "scroll", "x": 2200, "y": 500, "delta_y": 1920 },
+    { "type": "wait", "ms": 500 },
+    { "type": "screenshot", "label": "general-reopened" },
+    { "type": "accessibility", "label": "general-reopened" },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"taskNotifications\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"notificationSound\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"keepComputerAwake\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"localMemories\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"appUpdateDownloadSource\": \"chinaMirror\"",
+      "min_bytes": 1
+    },
+
+    { "type": "click_accessibility", "label": "任务通知", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "通知提示音", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "保持电脑唤醒", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "关闭时驻留托盘", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "本地记忆", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1200 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"taskNotifications\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"notificationSound\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"keepComputerAwake\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"closeToTray\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"localMemories\": false",
+      "min_bytes": 1
+    },
+    { "type": "scroll", "x": 2200, "y": 1400, "delta_y": -480 },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "默认项目目录",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "更新下载源",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "HTTP 代理",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "HTTP 代理绕过规则",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "type_text", "text": "10" },
+    {
+      "type": "click_accessibility",
+      "label": "保存后台 Agent 并发上限",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"backgroundAgentLimit\": 10",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "默认项目目录", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "key", "key": "backspace" },
+    {
+      "type": "click_accessibility",
+      "label": "保存默认项目目录",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"projectDirectory\": \"\"",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "更新下载源", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "自动选择", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 1000 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"appUpdateDownloadSource\": \"auto\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxy\": null",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "settings.json",
+      "contains": "\"httpProxyNoProxy\": null",
+      "min_bytes": 1
+    },
+    { "type": "screenshot", "label": "general-final-restored" },
+    { "type": "accessibility", "label": "general-final-restored" },
+    { "type": "click_accessibility", "label": "返回工作区", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "close" }
+  ]
+}

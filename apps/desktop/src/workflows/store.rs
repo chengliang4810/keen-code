@@ -8,7 +8,6 @@ use super::types::{
     WorkflowDefinitionError, WorkflowDefinitionMeta, WorkflowGetResult, WorkflowListResult,
     WorkflowScope, canonical_hash, validate_definition, validate_workflow_name,
 };
-use keencode_workflow::InputSpec;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -264,35 +263,6 @@ impl WorkflowStore {
         }
     }
 
-    pub fn update_meta(
-        &self,
-        scope: WorkflowScope,
-        project_storage: Option<&Path>,
-        name: &str,
-        description: Option<String>,
-        when_to_use: Option<String>,
-        args: Option<std::collections::BTreeMap<String, InputSpec>>,
-    ) -> Result<WorkflowDefinitionMeta, WorkflowStoreError> {
-        let path = self.path(scope, project_storage, name)?;
-        let mut definition = match read_definition(&path) {
-            Ok(definition) => definition,
-            Err(WorkflowStoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
-                return Err(WorkflowStoreError::NotFound(name.to_owned()));
-            }
-            Err(error) => return Err(error),
-        };
-        validate_definition(&definition)?;
-        definition.meta.description = description;
-        definition.meta.when_to_use = when_to_use;
-        if let Some(args) = args {
-            definition.inputs = args;
-        }
-        validate_definition(&definition)?;
-        let bytes = serde_json::to_vec_pretty(&definition)?;
-        atomic_write(&path, &bytes)?;
-        self.meta(scope, path, &definition)
-    }
-
     pub fn delete(
         &self,
         scope: WorkflowScope,
@@ -307,14 +277,25 @@ impl WorkflowStore {
         Ok(path)
     }
 
-    /// 目前只允许 global -> project，且不覆盖目标项目的同名定义。
-    pub fn move_global_to_project(
+    /// 在全局与当前授权项目之间移动定义，不覆盖目标作用域中的同名文件。
+    ///
+    /// 移动保留原 JSON，因此定义的 meta、输入声明和节点结构不会因为切换作用域
+    /// 被重新序列化或丢失；调用方仍需在移动前校验当前 revision。
+    pub fn move_between_scopes(
         &self,
-        project_storage: &Path,
+        from_scope: WorkflowScope,
+        from_project_storage: Option<&Path>,
+        to_scope: WorkflowScope,
+        to_project_storage: Option<&Path>,
         name: &str,
     ) -> Result<(PathBuf, PathBuf), WorkflowStoreError> {
-        let from = self.path(WorkflowScope::Global, None, name)?;
-        let to = self.path(WorkflowScope::Project, Some(project_storage), name)?;
+        if from_scope == to_scope {
+            return Err(WorkflowStoreError::InvalidTarget(
+                "workflow source and target scopes must differ".to_owned(),
+            ));
+        }
+        let from = self.path(from_scope, from_project_storage, name)?;
+        let to = self.path(to_scope, to_project_storage, name)?;
         if !from.is_file() {
             return Err(WorkflowStoreError::NotFound(name.to_owned()));
         }
@@ -462,8 +443,60 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            store.move_global_to_project(project.path(), "shared"),
+            store.move_between_scopes(
+                WorkflowScope::Global,
+                None,
+                WorkflowScope::Project,
+                Some(project.path()),
+                "shared",
+            ),
             Err(WorkflowStoreError::TargetExists(_))
+        ));
+    }
+
+    #[test]
+    fn move_project_to_global_preserves_definition_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::new(root.path());
+        store
+            .save(
+                WorkflowScope::Project,
+                Some(project.path()),
+                &definition("local"),
+            )
+            .unwrap();
+        let source = store
+            .path(WorkflowScope::Project, Some(project.path()), "local")
+            .unwrap();
+        let expected = fs::read(&source).unwrap();
+        store
+            .move_between_scopes(
+                WorkflowScope::Project,
+                Some(project.path()),
+                WorkflowScope::Global,
+                None,
+                "local",
+            )
+            .unwrap();
+        let target = store.path(WorkflowScope::Global, None, "local").unwrap();
+        assert_eq!(fs::read(target).unwrap(), expected);
+        assert!(!source.exists());
+    }
+
+    #[test]
+    fn move_rejects_same_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let store = WorkflowStore::new(root.path());
+        assert!(matches!(
+            store.move_between_scopes(
+                WorkflowScope::Global,
+                None,
+                WorkflowScope::Global,
+                None,
+                "same",
+            ),
+            Err(WorkflowStoreError::InvalidTarget(_))
         ));
     }
 }

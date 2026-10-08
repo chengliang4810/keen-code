@@ -43,10 +43,9 @@ impl RuntimeWorkflowJournal {
         session: RuntimeSession,
         actor_transcript_reader: Arc<dyn WorkflowActorTranscriptReader>,
     ) -> Self {
-        Self {
-            session,
-            actor_transcript_reader: Some(actor_transcript_reader),
-        }
+        let mut journal = Self::new(session);
+        journal.actor_transcript_reader = Some(actor_transcript_reader);
+        journal
     }
 
     fn events_for(&self, run_id: &str) -> Result<Vec<WorkflowJournalEvent>, WorkflowJournalError> {
@@ -481,7 +480,7 @@ impl WorkflowJournalPort for RuntimeWorkflowJournal {
                     .unwrap_or_else(|| u32::try_from(event.sequence).unwrap_or(u32::MAX)),
                 kind: kind.to_owned(),
                 op: op.clone(),
-                args: frontend_workspace_args(
+                args: workspace_args(
                     op.as_deref(),
                     payload.get("args").and_then(Value::as_array).cloned(),
                 ),
@@ -883,7 +882,7 @@ struct ActorWorkspaceCall {
 
 /// 只规范化已知工具的路径参数；pattern、命令和 Journal 原始 arguments 保持不变。
 /// `path_text_to_frontend` 同时处理普通盘符、UNC 和 Windows verbatim 前缀。
-fn frontend_workspace_args(op: Option<&str>, args: Option<Vec<Value>>) -> Option<Vec<Value>> {
+fn workspace_args(op: Option<&str>, args: Option<Vec<Value>>) -> Option<Vec<Value>> {
     let mut args = args?;
     let Some(path_index) = (match op {
         Some(value)
@@ -1581,7 +1580,7 @@ mod tests {
 
     #[test]
     fn workspace_projection_normalizes_known_paths_without_rewriting_other_arguments() {
-        let read_args = frontend_workspace_args(
+        let read_args = workspace_args(
             Some("Read"),
             Some(vec![
                 json!(r"\\?\D:\project\evidence.txt"),
@@ -1592,7 +1591,7 @@ mod tests {
         assert_eq!(read_args[0], json!("D:/project/evidence.txt"));
         assert_eq!(read_args[1], json!(r"pattern\with\slashes"));
 
-        let grep_args = frontend_workspace_args(
+        let grep_args = workspace_args(
             Some("grep"),
             Some(vec![
                 json!(r"literal\pattern"),
@@ -1603,12 +1602,11 @@ mod tests {
         assert_eq!(grep_args[0], json!(r"literal\pattern"));
         assert_eq!(grep_args[1], json!("//server/share/project/evidence.txt"));
 
-        let run_args =
-            frontend_workspace_args(Some("run"), Some(vec![json!(r"\\?\D:\project\script.cmd")]))
-                .expect("run 应保留参数数组");
+        let run_args = workspace_args(Some("run"), Some(vec![json!(r"\\?\D:\project\script.cmd")]))
+            .expect("run 应保留参数数组");
         assert_eq!(run_args[0], json!(r"\\?\D:\project\script.cmd"));
 
-        let unknown_args = frontend_workspace_args(
+        let unknown_args = workspace_args(
             Some("future-op"),
             Some(vec![json!(r"\\?\D:\project\opaque-value")]),
         )

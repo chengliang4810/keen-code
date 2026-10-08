@@ -1,31 +1,28 @@
-# cargo-deny 供应链审计配置；CI 的 supply-chain job 执行：
+# cargo-deny 供应链审计配置；CI 执行：
 #   cargo deny check advisories bans licenses sources
-# 策略从宽起步：漏洞与来路不明的来源硬失败，重复版本仅警告，
-# 许可证白名单按 Cargo.lock 实际出现的宽松许可证维护。
+# 依赖来源和许可证以当前 Cargo.lock 为准；固定 Git revision 是必要条件。
 
 [advisories]
-# 已撤回（yanked）的依赖版本一律拒绝。
 yanked = "deny"
-# 传递依赖的维护状态公告，上游未提供替代版本前暂时豁免：
-# - proc-macro-error：经 syn 1 / thiserror 1 / tauri-macros 间接引入。
-# - serial：portable-pty 唯一依赖，无替代版本。
-# - quick-xml：plist 1.8 钉住 ^0.38，修复版 0.41 需 plist 上游先动；
-#   该路径只在构建期解析本地 Tauri 配置/图标，不处理不可信输入。
-# - unic-* 系列：经 tauri-utils 的 urlpattern 间接引入，等待上游更新。
+# 这些条目来自当前锁文件中的未维护或暂时无法升级的传递依赖。每次锁文件更新都应
+# 重新检查它们是否仍然可达，并在上游提供替代版本后删除对应例外。
 ignore = [
-  "RUSTSEC-2024-0370", # proc-macro-error unmaintained
-  "RUSTSEC-2017-0008", # serial unmaintained
-  "RUSTSEC-2026-0194", # quick-xml quadratic runtime（构建期专用）
-  "RUSTSEC-2026-0195", # quick-xml NsReader DoS（构建期专用）
-  "RUSTSEC-2025-0081", # unic-char-property unmaintained
-  "RUSTSEC-2025-0075", # unic-char-range unmaintained
-  "RUSTSEC-2025-0080", # unic-common unmaintained
-  "RUSTSEC-2025-0100", # unic-ucd-ident unmaintained
-  "RUSTSEC-2025-0098", # unic-ucd-version unmaintained
+  # Windows 生产 PTY 路径：serial 0.4.0 <- portable-pty 0.8.1；当前 advisory 无安全升级。
+  "RUSTSEC-2017-0008",
+  # 全目标图的 Linux 无障碍路径：quick-xml 0.38.4 <- zbus_xml <- atspi/accesskit_unix
+  # <- gpui_linux；Windows MSVC 生产图不包含该链，待上游兼容 quick-xml >= 0.41.0。
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+  # Windows 生产图的 GPUI 图形路径：paste 1.0.15 <- pulp <- exr <- image；当前 advisory 无安全升级。
+  "RUSTSEC-2024-0436",
+  # Windows 生产图的 GPUI 字体路径：ttf-parser 0.25.1 <- fontdb/usvg <- gpui_windows；待上游迁移。
+  "RUSTSEC-2026-0192",
+  # Windows 生产图的 GPUI 字体路径：rustybuzz 0.20.1 <- usvg <- gpui_windows；待上游迁移。
+  "RUSTSEC-2026-0206",
 ]
 
 [bans]
-# 628 个 crate 的依赖图难免出现重复版本：先警告观察，收敛后再收紧。
+# GPUI 及其跨平台依赖会带来少量并行版本；先记录告警，按上游兼容版本逐步收敛。
 multiple-versions = "warn"
 
 [licenses]
@@ -40,15 +37,19 @@ allow = [
   "Zlib",
   "MPL-2.0",
   "Unicode-3.0",
-  "Unicode-DFS-2016",
   "CC0-1.0",
   "CDLA-Permissive-2.0",
+  "bzip2-1.0.6",
 ]
 
 [sources]
-# 只允许 crates.io 与系统注册表来源；Git 仅放行下方固定修复源。
 unknown-registry = "deny"
 unknown-git = "deny"
-# Tao Windows 输入重入修复固定官方提交，禁止分支或标签漂移；移除 patch 时同步删去白名单。
 required-git-spec = "rev"
-allow-git = ["https://github.com/tauri-apps/tao"]
+
+# 直接和传递 Git 依赖均必须落在固定来源；revision 由 Cargo.lock 记录。
+allow-git = [
+  "https://github.com/zed-industries/zed",
+  "https://github.com/zed-industries/font-kit",
+  "https://github.com/zed-industries/wasm_thread",
+]

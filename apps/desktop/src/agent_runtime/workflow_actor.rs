@@ -7,6 +7,7 @@
 //! 嵌套 foreach 的不同调用落到同一个 actor Session。
 
 use super::{AgentRuntime, AgentRuntimeError, RootTurnOptions, runtime_operation_failed};
+use crate::workflows::WorkflowModelSelection;
 use keencode_model::{MessageRole, last_non_empty_text};
 use keencode_resources::{ProviderSnapshot, SessionEvent, TurnStatus, WorkflowJournalEvent};
 use keencode_runtime::{
@@ -245,26 +246,13 @@ impl WorkflowActor {
             .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
         let models = payload
             .get("models")
-            .cloned()
-            .filter(|value| !value.is_null())
             .ok_or(AgentRuntimeError::ProviderNotConfigured)
             .and_then(|value| {
-                value
-                    .as_object()
-                    .cloned()
-                    .ok_or(AgentRuntimeError::ProviderNotConfigured)
+                WorkflowModelSelection::parse(value)
+                    .map_err(|_| AgentRuntimeError::ProviderNotConfigured)
             })?;
-        let provider = models
-            .get("provider")
-            .cloned()
-            .ok_or(AgentRuntimeError::ProviderNotConfigured)
-            .and_then(|value| {
-                serde_json::from_value(value).map_err(|_| AgentRuntimeError::ProviderNotConfigured)
-            })?;
-        let plan_enabled = models
-            .get("planEnabled")
-            .and_then(Value::as_bool)
-            .ok_or(AgentRuntimeError::RuntimeOperationFailed)?;
+        let provider = models.provider;
+        let plan_enabled = models.plan_enabled;
         Ok(FrozenActorRun {
             run_id: run_id.to_owned(),
             parent_session_id: self.parent.session_id().as_str().to_owned(),

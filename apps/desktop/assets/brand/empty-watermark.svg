@@ -1,0 +1,13 @@
+<!-- KeenCode 自有图标的线框版本；保留原图的双括号与中心切口，空态只绘制渐隐描边。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="320" viewBox="0 0 400 320" fill="none">
+  <defs>
+    <linearGradient id="fade" x1="200" y1="0" x2="200" y2="320" gradientUnits="userSpaceOnUse">
+      <stop stop-color="white" stop-opacity="0.18" />
+      <stop offset="0.7" stop-color="white" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+  <g stroke="url(#fade)" stroke-width="1">
+    <path d="M193.75 15H175L55 147.5Q43.75 160 55 172.5L175 305H193.75V220.625C131.25 220.625 131.25 99.375 193.75 99.375Z" />
+    <path d="M206.25 15H225L345 147.5Q356.25 160 345 172.5L225 305H206.25V220.625C268.75 220.625 268.75 99.375 206.25 99.375Z" />
+  </g>
+</svg>

@@ -77,19 +77,20 @@ use keencode_model::{
     last_non_empty_text, redact_error_secrets_bounded,
 };
 use keencode_resources::{
-    ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactRef, ArtifactStore, ArtifactUse,
-    AssistantFeedback, COMMAND_RECEIPT_SCHEMA, CommandReceipt, CommandReceiptStatus,
-    CompactionRecord, ContextCompressionTrigger, DynamicInputKind, FollowupMode,
-    GeneratedTitleRecord, IdempotentAppendOutcome, JournalConfig, MAX_REPLAY_PAGE_RECORDS,
-    MAX_WORKFLOW_JSON_COLLECTION_ITEMS, MailboxMessage, MailboxMessageId, MessageImageSource,
-    MessagePart, MessageRole, OnErrorHookInvocation, PersistedToolResult, PlanState,
-    ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId, ResourceError,
+    ArtifactId, ArtifactLimits, ArtifactMaterialization, ArtifactPreview, ArtifactRef,
+    ArtifactStore, ArtifactUse, AssistantFeedback, COMMAND_RECEIPT_SCHEMA, CommandReceipt,
+    CommandReceiptStatus, CompactionRecord, ContextCompressionTrigger, DynamicInputKind,
+    FollowupMode, GeneratedTitleRecord, IdempotentAppendOutcome, JournalConfig,
+    MAX_REPLAY_PAGE_RECORDS, MAX_WORKFLOW_JSON_COLLECTION_ITEMS, MailboxMessage, MailboxMessageId,
+    MessageImageSource, MessagePart, MessageRole, OnErrorHookInvocation, PersistedToolResult,
+    PlanState, ProviderSnapshot, ReadOnlySessionReport, ReplayPage, RequestId, ResourceError,
     SESSION_EVENT_SCHEMA, SESSION_EVENT_VERSION, SessionEvent, SessionEventId, SessionEventRecord,
     SessionId, SessionInputCompletion, SessionInputDispatch, SessionInputKind,
     SessionInputQueueItem, SessionInputQueueState, SessionJournal, SessionLease,
-    SessionLeaseAcquire, SessionMessage, SessionOpen, SessionState, SubAgentState, SubAgentStatus,
-    TitleSource, ToolCompletionStatus, ToolEffect, ToolOutcome, ToolResultPart, TranscriptSegment,
-    TurnId, TurnStatus, TurnStopReason, reduce_record, side_effect_unknown_result,
+    SessionLeaseAcquire, SessionMessage, SessionOpen, SessionPermissionMode, SessionState,
+    SubAgentState, SubAgentStatus, TitleSource, ToolCompletionStatus, ToolEffect, ToolOutcome,
+    ToolResultPart, TranscriptSegment, TurnId, TurnStatus, TurnStopReason, reduce_record,
+    side_effect_unknown_result,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1249,6 +1250,21 @@ impl RuntimeSession {
             .map_err(Into::into)
     }
 
+    /// 读取当前 Session 的精简 Artifact 引用并返回有界 UTF-8 预览。
+    ///
+    /// `ArtifactStore` 会在读取前核对当前 Session 的存储边界、SHA-256 和字节长度；
+    /// 调用方预算只能收紧 `RuntimeConfig` 的 `max_preview_bytes`，不能扩大它。
+    pub fn preview_artifact(
+        &self,
+        reference: &ArtifactUse,
+        budget: usize,
+    ) -> Result<ArtifactPreview, RuntimeError> {
+        self.inner
+            .artifacts
+            .preview_use_with_budget(reference, budget)
+            .map_err(Into::into)
+    }
+
     /// 工作流宿主只通过父会话的控制提交出口写事实，重试使用稳定 operationId 去重。
     pub fn commit_workflow_event(
         &self,
@@ -1667,7 +1683,48 @@ impl RuntimeSession {
     ) -> Result<SessionState, RuntimeError> {
         self.commit_control_event(
             operation_id,
-            SessionEvent::SessionPreferenceSet { pinned, archived },
+            SessionEvent::SessionPreferenceSet {
+                pinned,
+                archived,
+                permission_mode: None,
+                vision_enabled: None,
+            },
+        )
+    }
+
+    /// 持久切换会话权限审批模式，并返回提交后的权威状态。
+    pub fn set_permission_mode(
+        &self,
+        operation_id: &str,
+        permission_mode: SessionPermissionMode,
+    ) -> Result<SessionState, RuntimeError> {
+        self.commit_control_event_in_domain(
+            "session-preferences",
+            operation_id,
+            SessionEvent::SessionPreferenceSet {
+                pinned: None,
+                archived: None,
+                permission_mode: Some(permission_mode),
+                vision_enabled: None,
+            },
+        )
+    }
+
+    /// 持久切换会话视觉输入开关，并返回提交后的权威状态。
+    pub fn set_vision_enabled(
+        &self,
+        operation_id: &str,
+        vision_enabled: bool,
+    ) -> Result<SessionState, RuntimeError> {
+        self.commit_control_event_in_domain(
+            "session-preferences",
+            operation_id,
+            SessionEvent::SessionPreferenceSet {
+                pinned: None,
+                archived: None,
+                permission_mode: None,
+                vision_enabled: Some(vision_enabled),
+            },
         )
     }
 
@@ -4409,7 +4466,21 @@ fn commit_agent_event(
     inner: &Arc<RuntimeSessionInner>,
     event: &AgentCommitEvent,
 ) -> Result<(), AgentCommitSinkError> {
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        "Runtime Agent 事件提交开始"
+    );
     let mut control = inner.control.lock().map_err(|_| commit_indeterminate())?;
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        "Runtime Agent 事件已取得 control 锁"
+    );
     if event.session_id().as_str() != inner.artifacts.session_id().as_str() {
         return Err(commit_rejected());
     }
@@ -4438,6 +4509,14 @@ fn commit_agent_event(
         Err(_) if reconciling => return Err(commit_indeterminate()),
         Err(_) => return Err(commit_rejected()),
     };
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        journal_sequence = state.last_sequence,
+        "Runtime Agent 事件已读取 Journal 状态"
+    );
     let previous = control.mappings.get(&event_key);
     let mapping_known = previous.is_some();
     let hints = previous.map_or_else(MappingHints::default, |record| MappingHints {
@@ -4474,6 +4553,14 @@ fn commit_agent_event(
             event_state_items,
         )?;
     }
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        mapping_known,
+        "Runtime Agent 事件已通过容量检查"
+    );
 
     let mut commit_probe = ArtifactProbe::default();
     let mapped_result = map_agent_event(
@@ -4524,6 +4611,13 @@ fn commit_agent_event(
             compaction_digest: mapping_compaction_digest(event, &state),
         });
 
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        "Runtime Agent 事件准备追加 Journal"
+    );
     let appended_record =
         match inner
             .journal
@@ -4564,6 +4658,14 @@ fn commit_agent_event(
                 return Err(commit_rejected());
             }
         };
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        appended = appended_record.is_some(),
+        "Runtime Agent 事件 Journal 追加返回"
+    );
     if state_change_execution_started && appended_record.is_some() && inner.journal.flush().is_err()
     {
         // ToolExecutionStarted 已写入但尚不能证明 durable。冻结相同事件供
@@ -4592,6 +4694,13 @@ fn commit_agent_event(
         refresh_recovery_required(&mut control);
         return Err(commit_indeterminate());
     }
+    tracing::debug!(
+        target: "keencode_diagnostics",
+        session_id = %event.session_id(),
+        turn_id = %event.turn_id(),
+        model_round = event.model_round(),
+        "Runtime Agent 事件提交完成"
+    );
     if let AgentCommitEventKind::ToolCompleted { tool_call_id, .. } = event.kind()
         && let Some(round_key) = round_key.as_ref()
         && let Ok(request_id) = request_id_for_key(round_key, tool_call_id.as_str())

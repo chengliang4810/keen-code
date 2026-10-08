@@ -1,0 +1,571 @@
+{
+  "version": 1,
+  "name": "ely-native-provider-settings",
+  "requires_real_provider": false,
+  "requires_journal": false,
+  "requires_network_trace": false,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-settings-reference-1/native-run"
+  },
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "模型与供应商"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-settings-initial"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-settings-initial"
+    },
+    {
+      "type": "scroll",
+      "x": 2200,
+      "y": 1400,
+      "delta_y": -1920
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "provider-id",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "provider-id"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "dummy-provider-20261006"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "供应商名称"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "Dummy Provider"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "https://api.example.com/v1"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "https://example.invalid/v1"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "chat_completions",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "API Key（可选）"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "dummy-key-20261006"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "模型 key，例如 gpt-4o"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "dummy-model-v1"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-create-form-filled"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-create-form-filled"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "添加供应商"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Dummy Provider",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "添加模型",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：dummy-provider-20261006/dummy-model-v1",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-created"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-created"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"schema\": \"keencode/providers\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"version\": 1",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"id\": \"dummy-provider-20261006\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"name\": \"Dummy Provider\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "example.invalid/v1",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"apiBackend\": \"chat_completions\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "dummy-model-v1",
+      "min_bytes": 1
+    },
+    {
+      "type": "scroll",
+      "x": 2200,
+      "y": 500,
+      "delta_y": 1920
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "click_accessibility",
+      "label": "新增模型 key"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "dummy-model-v2"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "添加模型"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "设为当前：dummy-provider-20261006/dummy-model-v2",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "dummy-model-v2",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-model-added"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-model-added"
+    },
+    {
+      "type": "scroll",
+      "x": 2200,
+      "y": 500,
+      "delta_y": 1920
+    },
+    {
+      "type": "wait",
+      "ms": 500
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "编辑供应商名称：dummy-provider-20261006",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "编辑供应商名称：dummy-provider-20261006"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "key",
+      "key": "a",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "type_text",
+      "text": "Dummy Provider Edited"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "编辑协议：dummy-provider-20261006"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Messages",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "Messages"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存供应商"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Dummy Provider Edited",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"name\": \"Dummy Provider Edited\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"apiBackend\": \"messages\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "dummy-model-v1",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "dummy-model-v2",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-edited-messages"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-edited-messages"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "编辑协议：dummy-provider-20261006"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Chat Completions",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "Chat Completions"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click_accessibility",
+      "label": "保存供应商"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1200
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"apiBackend\": \"chat_completions\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-edited-final"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-edited-final"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "返回工作区"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "设置"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "模型与供应商"
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Dummy Provider Edited",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "当前模型：dummy-provider-20261006/dummy-model-v1",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "设为当前：dummy-provider-20261006/dummy-model-v2",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "screenshot",
+      "label": "provider-settings-reopened"
+    },
+    {
+      "type": "accessibility",
+      "label": "provider-settings-reopened"
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"name\": \"Dummy Provider Edited\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "providers.json",
+      "contains": "\"apiBackend\": \"chat_completions\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "close"
+    }
+  ]
+}

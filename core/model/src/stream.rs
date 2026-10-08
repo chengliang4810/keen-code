@@ -122,10 +122,6 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
 
     while let Some(item) = poll_fn(|context| stream.as_mut().poll_next(context)).await {
         let event = item?;
-        if ended {
-            return Err(protocol_error("响应结束后仍收到事件"));
-        }
-
         match event {
             ModelStreamEvent::MessageStart {
                 metadata: response_metadata,
@@ -302,6 +298,10 @@ pub async fn collect_model_stream(mut stream: ModelStream) -> Result<ModelRespon
                 require_started(started)?;
                 ended = true;
                 stop_reason = Some(reason);
+                // 三种协议 Adapter 都在 MessageEnd 前发出最终 Usage；收到合法终态后
+                // 立即组装响应，不再等待协议之外的 HTTP EOF。终态前 EOF 仍在循环
+                // 结束后按 StreamInterrupted 处理。
+                break;
             }
         }
     }

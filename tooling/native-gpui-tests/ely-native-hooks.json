@@ -1,0 +1,381 @@
+{
+  "version": 1,
+  "name": "ely-native-hooks",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "actions": [
+    { "type": "focus" },
+    { "type": "wait", "ms": 1500 },
+    { "type": "key", "key": "n", "modifiers": ["ctrl"] },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 500 },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "click_accessibility", "label": "Hooks", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "wait_for_accessibility",
+      "label": "Hook 作用域",
+      "timeout_ms": 30000
+    },
+    { "type": "click_accessibility", "label": "Hook 事件", "timeout_ms": 30000 },
+    {
+      "type": "click_accessibility",
+      "label": "UserPromptSubmit",
+      "timeout_ms": 30000
+    },
+    { "type": "click_accessibility", "label": "可执行命令", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "type_text",
+      "text": "Set-Content -LiteralPath \"$env:CLAUDE_PROJECT_DIR\\hooks-user-marker.txt\" -Value 'USER_HOOK_EXECUTED'"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "bash 或 powershell",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "powershell" },
+    { "type": "click_accessibility", "label": "保存", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"schema\": \"keencode/native-hooks\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"shell\": \"powershell\"",
+      "json_pointer_equals": {
+        "/hooks/0/handler/command": "Set-Content -LiteralPath \"$env:CLAUDE_PROJECT_DIR\\hooks-user-marker.txt\" -Value 'USER_HOOK_EXECUTED'",
+        "/hooks/0/handler/shell": "powershell"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"phase\": \"user_prompt_submit\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "信任用户 Hook",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "信任用户 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"scopeKey\": \"user\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用用户 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"enabled\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用用户 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "native-hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "新建", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 150 },
+    { "type": "click_accessibility", "label": "Hook 作用域", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "项目", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "Hook 事件", "timeout_ms": 30000 },
+    {
+      "type": "click_accessibility",
+      "label": "UserPromptSubmit",
+      "timeout_ms": 30000
+    },
+    { "type": "click_accessibility", "label": "可执行命令", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    {
+      "type": "type_text",
+      "text": "Set-Content -LiteralPath \"$env:CLAUDE_PROJECT_DIR\\hooks-project-marker.txt\" -Value 'PROJECT_HOOK_EXECUTED'"
+    },
+    { "type": "click_accessibility", "label": "bash 或 powershell", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "powershell" },
+    { "type": "click_accessibility", "label": "保存", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"schema\": \"keencode/native-hooks\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"shell\": \"powershell\"",
+      "json_pointer_equals": {
+        "/hooks/0/handler/command": "Set-Content -LiteralPath \"$env:CLAUDE_PROJECT_DIR\\hooks-project-marker.txt\" -Value 'PROJECT_HOOK_EXECUTED'",
+        "/hooks/0/handler/shell": "powershell"
+      },
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"phase\": \"user_prompt_submit\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "信任项目 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"schema\": \"keencode/native-hook-trust\"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"admittedDigest\": \"",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用项目 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"enabled\": false",
+      "min_bytes": 1
+    },
+    {
+      "type": "click_accessibility",
+      "label": "启用项目 Hook",
+      "timeout_ms": 30000
+    },
+    { "type": "wait", "ms": 600 },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "\"enabled\": true",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "返回工作区", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "请简短回复 hooks acceptance first。" },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "hooks-user-marker.txt",
+      "contains": "USER_HOOK_EXECUTED",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "hooks-project-marker.txt",
+      "contains": "PROJECT_HOOK_EXECUTED",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "hooks-user-marker.txt",
+      "contains": "USER_HOOK_EXECUTED",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": "hooks-project-marker.txt",
+      "contains": "PROJECT_HOOK_EXECUTED",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "click_accessibility", "label": "Hooks", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "编辑项目 Hook", "timeout_ms": 30000 },
+    { "type": "click_accessibility", "label": "可执行命令", "timeout_ms": 30000 },
+    { "type": "key", "key": "a", "modifiers": ["ctrl"] },
+    { "type": "wait", "ms": 100 },
+    {
+      "type": "type_text",
+      "text": "Set-Content -LiteralPath \"$env:CLAUDE_PROJECT_DIR\\hooks-project-changed-marker.txt\" -Value 'PROJECT_HOOK_CHANGED_SHOULD_NOT_RUN'"
+    },
+    { "type": "click_accessibility", "label": "保存", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    {
+      "type": "assert_file",
+      "scope": "project",
+      "path": ".keencode/hooks.json",
+      "contains": "hooks-project-changed-marker.txt",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "返回工作区", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "请简短回复 hooks acceptance changed。" },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_file_absent",
+      "scope": "project",
+      "path": "hooks-project-changed-marker.txt"
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "click_accessibility", "label": "Hooks", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "信任项目 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    { "type": "click_accessibility", "label": "撤销信任项目 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"scopeKey\": \"user\"",
+      "min_bytes": 1
+    },
+    { "type": "click_accessibility", "label": "返回工作区", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "任务输入", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "type_text", "text": "请简短回复 hooks acceptance revoked。" },
+    { "type": "key", "key": "enter" },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 3,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 3,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "assert_file_absent",
+      "scope": "project",
+      "path": "hooks-project-changed-marker.txt"
+    },
+    { "type": "click_accessibility", "label": "设置", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 200 },
+    { "type": "click_accessibility", "label": "Hooks", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 800 },
+    { "type": "click_accessibility", "label": "信任项目 Hook", "timeout_ms": 30000 },
+    { "type": "wait", "ms": 700 },
+    {
+      "type": "assert_file",
+      "scope": "data",
+      "path": "hooks-trust.json",
+      "contains": "\"admittedDigest\": \"",
+      "min_bytes": 1
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_started",
+      "count": 3
+    },
+    {
+      "type": "assert_journal_count",
+      "event_type": "turn_completed",
+      "count": 3
+    },
+    { "type": "close" }
+  ]
+}

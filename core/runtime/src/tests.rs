@@ -1253,6 +1253,59 @@ fn create_and_open_reclaim_complete_unreferenced_artifacts() {
     );
 }
 
+/// 预览入口必须重新核对内容身份与 Session 归属，并且预算只能收紧配置上限。
+#[test]
+fn preview_artifact_enforces_identity_session_and_budget() {
+    let root = TempDir::new().expect("临时目录应创建");
+    let mut runtime_config = config(&root);
+    runtime_config.artifacts.max_preview_bytes = 8;
+    let session = RuntimeSession::create_session(
+        runtime_config.clone(),
+        CreateSessionRequest {
+            session_id: "runtime-artifact-preview".to_owned(),
+            title: "Artifact 预览".to_owned(),
+            project_root: root.path().display().to_string(),
+        },
+    )
+    .expect("预览 Session 应创建");
+    let artifact = session
+        .put_artifact(b"0123456789abcdef", Some("text/plain".to_owned()))
+        .expect("测试 Artifact 应写入")
+        .as_event_use();
+
+    let preview = session
+        .preview_artifact(&artifact, 64)
+        .expect("超过配置的预算应仍按配置上限预览");
+    assert_eq!(preview.text, "01234567");
+    assert!(preview.truncated);
+    assert!(preview.source_is_utf8);
+
+    let tight = session
+        .preview_artifact(&artifact, 3)
+        .expect("调用方可以进一步收紧预览预算");
+    assert_eq!(tight.text, "012");
+    assert!(tight.truncated);
+
+    let mut wrong_size = artifact.clone();
+    wrong_size.size_bytes += 1;
+    assert!(session.preview_artifact(&wrong_size, 8).is_err());
+
+    let mut wrong_hash = artifact.clone();
+    wrong_hash.sha256 = "0".repeat(64);
+    assert!(session.preview_artifact(&wrong_hash, 8).is_err());
+
+    let other = RuntimeSession::create_session(
+        runtime_config,
+        CreateSessionRequest {
+            session_id: "runtime-artifact-preview-other".to_owned(),
+            title: "其他 Session".to_owned(),
+            project_root: root.path().display().to_string(),
+        },
+    )
+    .expect("其他 Session 应创建");
+    assert!(other.preview_artifact(&artifact, 8).is_err());
+}
+
 /// 验证 Runtime 绑定入口真实驱动 Provider 中立 Agent Loop，并提交 Turn 起止与最终消息。
 #[tokio::test]
 async fn bound_agent_runner_commits_complete_turn_lifecycle() {

@@ -1,146 +1,107 @@
-<p align="center">
-  <img src="public/logo.png" width="96" height="96" alt="KeenCode logo" />
-</p>
-
 # KeenCode
 
-一款轻量、本地优先的开源桌面 AI 编码工具。
-
-[![CI](https://github.com/chengliang4810/keen-code/actions/workflows/ci.yml/badge.svg)](https://github.com/chengliang4810/keen-code/actions/workflows/ci.yml)
-[![Release](https://github.com/chengliang4810/keen-code/actions/workflows/release.yml/badge.svg)](https://github.com/chengliang4810/keen-code/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-
-KeenCode 面向个人开发者，把项目管理、AI 编码对话、文件修改、终端命令、Diff、Git 操作和扩展管理放进一个专注的桌面工作台。应用与工作区状态均运行在本机，不依赖必须部署的配套 Web 服务。
+KeenCode 是面向个人开发者的纯 Rust AI 编程工作台。GPUI 负责原生窗口和绘制，Rust
+Host 持有项目、会话、Agent、工具、Journal、资源和工作流的权威状态。
 
 ## 主要能力
 
-- 打开和管理本地代码项目。
-- 在同一项目中创建多个对话，并让不同对话并行运行。
-- 搜索、读取和修改文件，查看可审查的差异。
-- 执行终端命令并保留完整过程与结果。
-- 查看基础 Git 状态、Diff，并辅助提交与推送。
-- 配置自定义模型供应商，不绑定单一厂商。
-- 使用项目级 Goal、会话级 Todo 与单层子智能体。
-- 通过插件市场、Skills 和 MCP 扩展本地工作流。
-- 默认把项目、会话、配置和执行记录保存在当前设备。
-
-## 下载与安装
-
-从 [GitHub Releases](https://github.com/chengliang4810/keen-code/releases/latest) 下载最新版本：
-
-- macOS Apple Silicon：选择名称中包含 `darwin` 与 `aarch64` 的 DMG。
-- macOS Intel：选择名称中包含 `darwin` 与 `x64` 的 DMG。
-- Windows 64 位：推荐下载名称中包含 `windows`、`x64` 与 `setup.exe` 的安装包。
-
-当前发布范围仅包含 macOS 和 Windows。
-
-KeenCode 启动时只读取当前更新状态；可在「帮助 → 检查更新」中主动检查 GitHub Releases。发现更新后会后台下载并验签，用户从更新入口确认安装并重启。当前源码没有 30 分钟定时检查器。
-
-> 首次公开测试版本可能尚未配置 Apple 或 Windows 商业代码签名证书，操作系统可能显示来源提示。应用内更新签名与操作系统代码签名是两套独立校验。
+- 打开和管理本地代码项目、会话、工作树和分组。
+- 与用户配置的模型供应商进行流式对话，执行受控的文件、终端和 Git 操作。
+- 查看消息、工具结果、Diff、历史、资源、Memory、Goal、Automation 和工作流状态。
+- 使用 Skills、MCP、插件和单层子 Agent 扩展本地工作流。
+- 在本机保存项目、会话、配置、草稿和执行记录；敏感值通过系统密钥存储保护。
+- 通过 `keencode` 提供非交互命令行入口，适合终端、CI 和外部调度器。
 
 ## 使用前配置
 
-首次使用时，在「设置 → 模型设置」中添加自己的模型供应商、API 地址、密钥和模型。密钥只保存在 KeenCode 本机应用配置中。
+首次启动后，在原生设置页添加模型供应商、API 地址、密钥和模型。密钥只保存在本机，
+应用不会替用户配置云端中转服务。
+
+## 本地开发
+
+需要 Rust 1.95 或更新的 stable，以及目标平台的标准 Rust 构建工具。克隆后直接使用
+Cargo：
+
+```bash
+git clone https://github.com/chengliang4810/keen-code.git
+cd keen-code
+cargo run -p keencode-desktop
+```
+
+常用检查：
+
+```bash
+cargo fmt --all -- --check
+cargo check --workspace --all-targets
+cargo test --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo deny check advisories bans licenses sources
+```
+
+构建发布版：
+
+```bash
+cargo build --release --workspace
+```
+
+## 项目结构与运行时边界
+
+- `core/` 包含 ACP、Agent、Model、Provider、MCP、资源、Runtime、Tools 和 Workflow 等
+  可复用 Rust crate。
+- `apps/desktop/src/native_ui/` 是 GPUI 原生界面；`apps/desktop/src/native_host/` 负责
+  窗口内宿主、投影、事件和动作装配。
+- `NativeHost` 是界面与领域服务的类型化边界。界面保存短生命周期的投影和草稿，Journal
+  与 Rust 服务保存事实。
+- `WorkflowDefinitionV1` 是 `core/workflow/` 提供的 Rust `serde` JSON 契约，定义、校验、
+  存储和执行边界见 [WorkflowDefinitionV1 JSON](docs/protocols/workflow-definition-v1.md)。
+- ZCode 3.14.3 固定提交
+  `29628c9acdb81b703bbd4080c207a0e7ce5e276e` 作为布局、样式和交互的固定验收基线；GPUI 与 Ely 的固定
+  来源、许可证和当前边界见 [第三方声明](THIRD_PARTY_NOTICES.md) 与
+  [ZCode 设计参考](docs/frontend-zcode-source.md)。
+
+## 原生验收
+
+Windows 原生验收器通过真实桌面窗口、输入、截图和可访问性树验证 GPUI 应用。先构建
+release Host 和验收器：
+
+```bash
+cargo build -p keencode-desktop --release
+cargo build -p keencode-native-gpui-tests
+```
+
+再用隔离数据根和显式计划运行：
+
+```bash
+cargo run -p keencode-native-gpui-tests -- --binary target/release/keencode-desktop.exe --plan tooling/native-gpui-tests/ely-native-smoke.json --output out/ely-native/run-current
+```
+
+需要真实模型的计划还必须显式提供隔离 Provider 配置和 `--real-provider`。不要把凭据、
+配置值或未脱敏报告写入仓库。没有当前窗口报告的范围保持 `pending`。
 
 ## 命令行与外部编排
-
-除桌面应用外，KeenCode 提供非交互命令行入口 `keencode`，可在终端、CI 或脚本中运行一次性任务：
 
 ```sh
 keencode run --json --no-input --cwd /path/to/repo -- "检查依赖并升级有安全问题的包"
 keencode session list
 ```
 
-它以 NDJSON 输出事件流，并提供稳定的退出码（`0` 成功、`1` 任务失败、`2` 参数错误、`3` Host 不可用、`4` 认证失败、`5` 取消、`6` 需要用户输入）。定时与流水线调度交给系统 cron、GitHub Actions 或 Git hook，KeenCode 本身不运行常驻调度器。`--no-input` 让模型不提问而自行决策，适合无人值守场景。
+CLI 输出 NDJSON 事件并提供稳定退出码；定时和流水线调度交给系统 cron、GitHub Actions
+或 Git hook。命令、字段、退出码和编排示例见
+[CLI 与外部编排](docs/cli-and-external-orchestration.zh-CN.md)。
 
-完整命令参考、事件字段、退出码契约与 cron / CI / Git hook 配方见 [docs/cli-and-external-orchestration.zh-CN.md](docs/cli-and-external-orchestration.zh-CN.md)。
+## 发布产物
 
-## 本地开发
-
-需要 Node.js 24、pnpm 10.14.0、Rust 1.95+（workspace MSRV；可使用更新的 stable），以及 Tauri 2 对应平台的系统构建工具。
-
-```bash
-git clone https://github.com/chengliang4810/keen-code.git
-cd keen-code
-corepack pnpm@10.14.0 install --frozen-lockfile
-corepack pnpm@10.14.0 dev:desktop
-```
-
-常用检查：
-
-```bash
-corepack pnpm@10.14.0 typecheck
-corepack pnpm@10.14.0 test
-corepack pnpm@10.14.0 build
-cargo test -p keencode-desktop
-```
-
-生成本机安装包：
-
-```bash
-corepack pnpm@10.14.0 build:desktop
-```
-
-## 项目结构与运行时边界
-
-- `packages/ui/src/` 是业务 UI 根，保留 ZCode 组件的 DOM、CSS、主题令牌和 locale；`apps/ui/` 是 Vite/Tauri 平台适配、构建入口和契约测试，不维护第二套业务界面。
-- `apps/desktop/` 是 Tauri Rust 宿主；Journal、资源持久化、RPC 和 Agent Runtime 由 Rust 持有权威状态，前端只消费可丢弃的投影。
-- `WorkflowDefinitionV1` 是 `core/workflow/` 实现的纯 Rust `serde` JSON 契约，桌面运行时不依赖 Node、Electron 或 JavaScript workflow engine。定义、校验、存储和执行边界见 [WorkflowDefinitionV1 JSON](docs/protocols/workflow-definition-v1.md)。
-- 前端来源是 ZCode 3.14.3 固定提交 `29628c9acdb81b703bbd4080c207a0e7ce5e276e`；保留来源部分按 Apache License 2.0 分发，版权主体为 Z.AI Co., Ltd.。逐文件映射、SHA-256 和许可证见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)、[SOURCE-MAPPING.md](third-party/zcode/SOURCE-MAPPING.md) 和 [third-party/zcode/LICENSE](third-party/zcode/LICENSE)。KeenCode 自有代码仍按根目录 MIT License 分发。
-
-## 原生 WebView2 验收
-
-原生验收是显式 opt-in 流程，不属于离线 `pnpm test` 或普通浏览器开发服务器检查。先构建带验收 feature 的桌面程序，再用隔离 provider 配置运行：
-
-```bash
-cargo build -p keencode-desktop --features native-desktop-tests
-node tooling/scripts/native-live-e2e.mjs \
-  --plan <plan.json> \
-  --provider-config <isolated-provider-config.json> \
-  --binary <keencode-desktop.exe> \
-  --output <report-directory> \
-  --port <free-port>
-```
-
-`--binary`、`--output`、`--port` 和 `--request-timeout-ms <1..300000>` 是可选覆盖项；脚本会把本次计划、隔离数据根、Journal 断言和前端/协议故障写入报告，并对 provider 配置中的密钥和地址做脱敏。不要把真实凭据或配置路径写入 README、计划文件或报告。验收计划和通过范围见 [前端验收矩阵](docs/frontend-acceptance-matrix.md)。
-
-## 发布与版本
-
-每次推送到 `main`，GitHub Actions 会先运行前端检查，再原生构建以下安装包：
-
-- macOS Apple Silicon
-- macOS Intel
-- Windows x64
-
-全部平台成功后才会公开 Release，并生成应用内更新所需的 `latest.json` 与签名产物。
-
-对外 Release 标签采用日期与提交短哈希：
-
-```text
-vYYYYMMDD-abcdef0
-```
-
-例如：`v20260730-49ad19b`。安装包内部使用可排序的三段数字版本，以满足更新比较以及 macOS、Windows 原生版本字段要求；界面始终展示对外 Release 标签。
-
-发布流程见 [.github/workflows/release.yml](.github/workflows/release.yml)，版本规则见 [tooling/scripts/release-version.mjs](tooling/scripts/release-version.mjs)。
+`.github/workflows/release.yml` 在 `main` 推送或手工触发时运行完整 Rust workspace 检查，
+按目标平台构建桌面应用、CLI 和验收工具，并为每个可执行文件生成 SHA-256 清单。产物作为
+GitHub Actions artifact 保存，不创建外部 Release，不生成安装更新清单，也不使用签名密钥。
 
 ## 数据与隐私
 
-- 项目文件、会话状态、扩展配置和工具记录默认保存在本机。
-- KeenCode 不提供必须经过的云端中转服务。
+- 项目文件、会话状态、配置、扩展和工具记录默认保存在本机。
 - 只有用户配置的模型服务、MCP Server、插件来源或任务主动访问的地址会产生网络请求。
-- 项目不默认启用遥测或上传用户代码。
-
-## Benchmark 入口
-
-`keencode-bench` 仅供基准测试和 harness 适配器使用，不随默认桌面构建编译。构建时必须显式开启 `benchmark` feature：
-
-```bash
-cargo build --manifest-path apps/desktop/Cargo.toml --example keencode-bench --features benchmark
-```
-
-产物位于 `target/debug/examples/keencode-bench`。该入口通过标准输入读取 JSON 请求，协议定义见 [`apps/desktop/src/agent_runtime/benchmark.rs`](apps/desktop/src/agent_runtime/benchmark.rs)。
+- 项目默认不启用遥测，也不会主动上传用户代码。
 
 ## 许可证
 
-KeenCode 自有代码采用 [MIT License](LICENSE)。第三方依赖继续遵循各自许可证，根许可证不对第三方代码重新授权。
+KeenCode 自有代码采用 [MIT License](LICENSE)。第三方依赖继续遵循各自许可证，根许可证
+不对第三方代码重新授权。

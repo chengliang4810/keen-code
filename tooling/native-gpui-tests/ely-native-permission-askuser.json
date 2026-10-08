@@ -1,0 +1,264 @@
+{
+  "version": 1,
+  "name": "ely-native-permission-askuser",
+  "requires_real_provider": true,
+  "requires_journal": true,
+  "requires_network_trace": true,
+  "actions": [
+    {
+      "type": "focus"
+    },
+    {
+      "type": "resize_client",
+      "width": 2560,
+      "height": 1640
+    },
+    {
+      "type": "wait",
+      "ms": 1500
+    },
+    {
+      "type": "assert_window",
+      "title_contains": "KeenCode",
+      "client_width": 2560,
+      "client_height": 1640,
+      "dpi": 192
+    },
+    {
+      "type": "screenshot",
+      "label": "startup"
+    },
+    {
+      "type": "accessibility",
+      "label": "startup"
+    },
+    {
+      "type": "key",
+      "key": "n",
+      "modifiers": [
+        "ctrl"
+      ]
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "session_created",
+      "count": 1,
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 1000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "变更前确认",
+      "timeout_ms": 30000
+    },
+    {
+      "ms": 250,
+      "type": "wait"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "自动编辑",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 880
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "请仅调用一次 Bash 工具执行 printf 'KEENCODE_PERMISSION_MARKER_20261005' > permission-marker.txt；不要再次调用 Bash，也不要读取、列出或验证该文件，文件断言由验收 runner 完成；执行成功后立即简短回答。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "matching": {
+        "/payload/message/role": "user",
+        "/payload/message/content/0/text": "请仅调用一次 Bash 工具执行 printf 'KEENCODE_PERMISSION_MARKER_20261005' > permission-marker.txt；不要再次调用 Bash，也不要读取、列出或验证该文件，文件断言由验收 runner 完成；执行成功后立即简短回答。"
+      },
+      "timeout_ms": 30000,
+      "count": 1,
+      "event_type": "message_added",
+      "type": "wait_for_journal"
+    },
+    {
+      "type": "wait_for_accessibility",
+      "label": "允许",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "permission-pending"
+    },
+    {
+      "type": "accessibility",
+      "label": "permission-pending"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "允许",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 1,
+      "timeout_ms": 60000,
+      "matching": {
+        "/payload/request/toolName": "Bash",
+        "/payload/request/effect": "changes_state"
+      }
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_execution_started",
+      "count": 1,
+      "timeout_ms": 60000
+    },
+    {
+      "type": "wait_for_file",
+      "path": "permission-marker.txt",
+      "contains": "KEENCODE_PERMISSION_MARKER_20261005",
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 1,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "permission-resolved"
+    },
+    {
+      "type": "accessibility",
+      "label": "permission-resolved"
+    },
+    {
+      "type": "click",
+      "x": 1000,
+      "y": 1380
+    },
+    {
+      "type": "wait",
+      "ms": 150
+    },
+    {
+      "type": "type_text",
+      "text": "请只调用一次 ask_user 工具询问我选择原生验收选项。问题必须设置 multiSelect: true，选项标签严格且仅为 A 和 B，不要添加其他选项或自定义输入；收到我的回答后立即简短结束，不要再次调用 ask_user 或其他工具。"
+    },
+    {
+      "type": "wait",
+      "ms": 800
+    },
+    {
+      "type": "key",
+      "key": "enter"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_started",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "matching": {
+        "/payload/message/role": "user",
+        "/payload/message/content/0/text": "请只调用一次 ask_user 工具询问我选择原生验收选项。问题必须设置 multiSelect: true，选项标签严格且仅为 A 和 B，不要添加其他选项或自定义输入；收到我的回答后立即简短结束，不要再次调用 ask_user 或其他工具。"
+      },
+      "timeout_ms": 30000,
+      "count": 1,
+      "event_type": "message_added",
+      "type": "wait_for_journal"
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "tool_requested",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "askuser-pending"
+    },
+    {
+      "type": "accessibility",
+      "label": "askuser-pending"
+    },
+    {
+      "type": "click_accessibility",
+      "label": "A",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "click_accessibility",
+      "label": "提交",
+      "timeout_ms": 30000
+    },
+    {
+      "type": "wait_for_journal",
+      "event_type": "turn_completed",
+      "count": 2,
+      "timeout_ms": 180000
+    },
+    {
+      "type": "screenshot",
+      "label": "askuser-resolved"
+    },
+    {
+      "type": "accessibility",
+      "label": "askuser-resolved"
+    },
+    {
+      "type": "metrics",
+      "label": "askuser-resolved"
+    }
+  ],
+  "native_general_settings": {
+    "appearance": "dark",
+    "fontFamily": "系统默认",
+    "fontSizePx": 14,
+    "density": "compact",
+    "reducedMotion": true
+  },
+  "visual": {
+    "logicalWidth": 1280,
+    "logicalHeight": 820,
+    "physicalClientWidth": 2560,
+    "physicalClientHeight": 1640,
+    "dpi": 192,
+    "deviceScaleFactor": 2,
+    "theme": "dark",
+    "sourceBaseline": "out/ely-native/zcode-windows-reference-6/native-run"
+  }
+}

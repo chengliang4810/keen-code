@@ -12,11 +12,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use tauri::{AppHandle, State};
+use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
 
 use crate::agent_runtime::AgentRuntime;
 use crate::app_settings::InterfaceLanguage;
+use crate::native_paths::NativePaths;
 
 /// 当前本地记忆状态文件的固定 schema 名称。
 const MEMORY_STATE_SCHEMA: &str = "keencode/memory-state";
@@ -334,10 +335,26 @@ struct ConsolidationResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryStatus {
-    enabled: bool,
-    root: String,
-    memory_count: usize,
-    running: bool,
+    pub enabled: bool,
+    pub root: String,
+    pub memory_count: usize,
+    pub running: bool,
+}
+
+/// Settings Resource Memory 使用的普通 Markdown 文件元数据。
+#[derive(Clone, Debug)]
+pub struct MemoryFileInfo {
+    pub file_name: String,
+    pub size: u64,
+    pub updated_at_ms: i64,
+}
+
+/// Settings Resource Memory 读取后的普通 Markdown 文件正文。
+#[derive(Clone, Debug)]
+pub struct MemoryFileContent {
+    pub file_name: String,
+    pub content: String,
+    pub updated_at_ms: i64,
 }
 
 /// 正在运行期间排队的整合请求；generation 用来区分取消前后的请求。
@@ -370,8 +387,8 @@ pub struct MemoryService {
 }
 
 impl MemoryService {
-    pub fn new(app: &AppHandle) -> Result<Arc<Self>> {
-        let root = crate::storage::root_dir(app)?.join("memories");
+    pub fn new(paths: &NativePaths) -> Result<Arc<Self>> {
+        let root = crate::storage::root_dir(paths)?.join("memories");
         fs::create_dir_all(root.join("rollout_summaries"))
             .with_context(|| format!("创建本地记忆目录失败：{}", root.display()))?;
         let (cancellation, _receiver) = watch::channel(0_u64);
@@ -506,7 +523,7 @@ impl MemoryService {
         let service = Arc::clone(self);
         let runtime_for_retry = Arc::clone(&runtime);
         let mut cancellation = self.cancellation.subscribe();
-        tauri::async_runtime::spawn(async move {
+        tokio::spawn(async move {
             if let Err(error) = service
                 .run_pipeline(
                     runtime,
@@ -1217,56 +1234,148 @@ fn select_output_ids(state: &MemoryState, now: DateTime<Utc>) -> Vec<String> {
         .collect()
 }
 
-#[tauri::command]
-pub fn memories_status(
-    app: AppHandle,
-    memories: State<'_, Arc<MemoryService>>,
-) -> Result<MemoryStatus, String> {
-    let enabled = crate::app_settings::get(&app)
-        .map_err(|error| error.to_string())?
-        .local_memories;
-    let count = memories
-        .load_state()
-        .map_err(|error| error.to_string())?
-        .outputs
-        .len();
-    Ok(MemoryStatus {
-        enabled,
-        root: memories.root().display().to_string(),
-        memory_count: count,
-        running: memories.running.load(Ordering::Acquire),
-    })
+impl MemoryService {
+    /// 返回当前记忆服务的持久化状态，启用开关由宿主配置服务传入。
+    pub fn status(&self, enabled: bool) -> Result<MemoryStatus> {
+        let count = self.load_state()?.outputs.len();
+        Ok(MemoryStatus {
+            enabled,
+            root: self.root.display().to_string(),
+            memory_count: count,
+            running: self.running.load(Ordering::Acquire),
+        })
+    }
+
+    /// 列出记忆根目录下可由设置页维护的 Markdown 文件。
+    pub fn list_files(&self) -> Result<Vec<MemoryFileInfo>> {
+        let _guard = self.storage_lock.lock().expect("记忆存储锁已损坏");
+        let entries = match fs::read_dir(&self.root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut files = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || path.extension().and_then(|value| value.to_str()) != Some("md")
+            {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            if validate_memory_file_name(file_name).is_err() {
+                continue;
+            }
+            files.push(MemoryFileInfo {
+                file_name: file_name.to_owned(),
+                size: metadata.len(),
+                updated_at_ms: file_modified_at_ms(&metadata),
+            });
+        }
+        files.sort_by(|left, right| left.file_name.cmp(&right.file_name));
+        Ok(files)
+    }
+
+    /// 读取设置页指定的 Markdown 文件；缺失文件由调用方看到明确错误。
+    pub fn read_file(&self, file_name: &str) -> Result<MemoryFileContent> {
+        validate_memory_file_name(file_name)?;
+        let _guard = self.storage_lock.lock().expect("记忆存储锁已损坏");
+        let path = self.root.join(file_name);
+        let bytes =
+            crate::storage::read_private_bytes_bounded(&path, MAX_MEMORY_MD_BYTES, "本地记忆文件")?
+                .ok_or_else(|| anyhow::anyhow!("本地记忆文件不存在：{}", path.display()))?;
+        let metadata = fs::symlink_metadata(&path)?;
+        let content = String::from_utf8(bytes)
+            .with_context(|| format!("本地记忆文件不是 UTF-8：{}", path.display()))?;
+        Ok(MemoryFileContent {
+            file_name: file_name.to_owned(),
+            content,
+            updated_at_ms: file_modified_at_ms(&metadata),
+        })
+    }
+
+    /// 删除设置页指定的 Markdown 文件，并取消可能覆盖用户编辑的旧流水线。
+    pub fn delete_file(&self, file_name: &str) -> Result<()> {
+        validate_memory_file_name(file_name)?;
+        self.cancel_pipeline();
+        let _guard = self.storage_lock.lock().expect("记忆存储锁已损坏");
+        let path = self.root.join(file_name);
+        let metadata = fs::symlink_metadata(&path)
+            .with_context(|| format!("检查待删除本地记忆文件失败：{}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!("待删除本地记忆路径不是普通文件：{}", path.display());
+        }
+        fs::remove_file(&path).with_context(|| format!("删除本地记忆文件失败：{}", path.display()))
+    }
+
+    /// 保存设置页指定的 Markdown 文件，并取消可能覆盖用户编辑的旧流水线。
+    pub fn write_file(&self, file_name: &str, content: &str) -> Result<MemoryFileContent> {
+        validate_memory_file_name(file_name)?;
+        validate_text_size(
+            "本地记忆文件",
+            content,
+            MAX_MEMORY_MD_CHARS,
+            MAX_MEMORY_MD_BYTES,
+        )?;
+        let generation = self.cancel_pipeline();
+        let _guard = self.storage_lock.lock().expect("记忆存储锁已损坏");
+        let path = self.root.join(file_name);
+        self.commit_files_locked(
+            vec![(path.clone(), content.as_bytes().to_vec())],
+            Vec::new(),
+            Some(generation),
+        )?;
+        let metadata = fs::symlink_metadata(&path)?;
+        Ok(MemoryFileContent {
+            file_name: file_name.to_owned(),
+            content: content.to_owned(),
+            updated_at_ms: file_modified_at_ms(&metadata),
+        })
+    }
+
+    /// 清空当前记忆并取消所有仍在运行的生成任务。
+    pub fn reset(&self) -> Result<()> {
+        self.clear()
+    }
+
+    /// 读取长期记忆正文；文件尚不存在时为空。
+    pub fn get(&self) -> Result<String> {
+        self.read_memory_file()
+    }
+
+    /// 保存用户编辑的长期记忆正文。
+    pub fn set(&self, content: &str) -> Result<String> {
+        self.write_memory_file(content)
+    }
 }
 
-#[tauri::command]
-pub fn memories_reset(memories: State<'_, Arc<MemoryService>>) -> Result<(), String> {
-    memories.clear().map_err(|error| error.to_string())
+fn validate_memory_file_name(file_name: &str) -> Result<()> {
+    if file_name.is_empty()
+        || file_name.len() > 256
+        || file_name.trim() != file_name
+        || file_name == "."
+        || file_name == ".."
+        || file_name.contains(['/', '\\', ':'])
+        || file_name.chars().any(char::is_control)
+        || !file_name.ends_with(".md")
+    {
+        anyhow::bail!("本地记忆文件名无效");
+    }
+    Ok(())
 }
 
-/// 读取长期记忆正文；文件尚不存在时为空。
-///
-/// 异步命令 + `spawn_blocking`：记忆正文可能较大，同步读取会阻塞主线程。
-#[tauri::command]
-pub async fn memories_get(memories: State<'_, Arc<MemoryService>>) -> Result<String, String> {
-    let memories = Arc::clone(memories.inner());
-    tauri::async_runtime::spawn_blocking(move || {
-        memories
-            .read_memory_file()
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-/// 保存用户编辑的长期记忆正文。
-#[tauri::command]
-pub fn memories_set(
-    memories: State<'_, Arc<MemoryService>>,
-    content: String,
-) -> Result<String, String> {
-    memories
-        .write_memory_file(&content)
-        .map_err(|error| error.to_string())
+fn file_modified_at_ms(metadata: &fs::Metadata) -> i64 {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| i64::try_from(value.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
 
 /// 把新 Session Store 的用户与助手文本投影为记忆提取输入。
@@ -1460,7 +1569,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    /// 构造不依赖 Tauri 运行时的记忆服务测试实例。
+    /// 构造独立于原生窗口的记忆服务测试实例。
     fn memory_service_for_test(root: &Path) -> MemoryService {
         let (cancellation, _receiver) = watch::channel(0_u64);
         MemoryService {
@@ -1581,9 +1690,11 @@ mod tests {
         F: FnOnce(String, String) -> Fut,
         Fut: Future<Output = Result<String>>,
     {
-        tauri::async_runtime::block_on(
-            service.consolidate_with_generator(state, language, generation, generate),
-        )
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("测试运行时应可创建")
+            .block_on(service.consolidate_with_generator(state, language, generation, generate))
     }
 
     /// 递归快照测试目录中的文件集合与字节，验证失败事务没有任何落盘副作用。

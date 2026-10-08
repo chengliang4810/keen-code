@@ -13,7 +13,7 @@ use keencode_agent::{
 };
 use parking_lot::Mutex;
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, oneshot};
 
@@ -32,16 +32,6 @@ pub(crate) enum PermissionMode {
 }
 
 impl PermissionMode {
-    /// 解析 V4 mode 字符串；未知或缺失值安全退回 build。
-    pub(crate) fn from_wire(value: Option<&str>) -> Self {
-        match value {
-            Some("edit") => Self::Edit,
-            Some("plan") => Self::Plan,
-            Some("yolo") => Self::Yolo,
-            _ => Self::Build,
-        }
-    }
-
     /// 返回本模式是否允许本次调用跳过交互。
     fn allows_without_prompt(self, tool_name: &str) -> bool {
         match self {
@@ -59,7 +49,7 @@ pub(crate) struct PermissionChange {
     pub(crate) display_session_id: String,
 }
 
-/// 可供 V4 projection 读取的权限 pending 只读视图。
+/// 可供连接范围读取的权限 pending 只读视图。
 #[derive(Clone, Debug)]
 pub(crate) struct PendingPermissionView {
     /// 交互稳定 ID。
@@ -70,8 +60,6 @@ pub(crate) struct PendingPermissionView {
     pub(crate) display_session_id: String,
     /// 唯一允许回答的连接。
     pub(crate) connection_id: ConnectionId,
-    /// 工具调用稳定 ID。
-    pub(crate) tool_call_id: String,
     /// 工具名称。
     pub(crate) tool_name: String,
     /// 给用户展示的摘要。
@@ -80,51 +68,6 @@ pub(crate) struct PendingPermissionView {
     pub(crate) detail: Value,
     /// 登记时间。
     pub(crate) created_at_unix_ms: u64,
-}
-
-impl PendingPermissionView {
-    /// 转为 shared V4 `pendingInteraction` 原始 permission 形状。
-    pub(crate) fn to_v4_value(&self) -> Value {
-        let allow_once = json!({
-            "optionId": "allowOnce",
-            "label": "允许一次",
-            "kind": "allowOnce",
-            "response": {"decision": "allow"},
-        });
-        let allow_always = json!({
-            "optionId": "allowAlways",
-            "label": "始终允许",
-            "kind": "allowAlways",
-            "response": {
-                "decision": "allow",
-                "permissionUpdates": [{
-                    "type": "addRules",
-                    "behavior": "allow",
-                    "rules": [{"toolName": self.tool_name}],
-                }],
-            },
-        });
-        let deny = json!({
-            "optionId": "deny",
-            "label": "拒绝",
-            "kind": "deny",
-            "response": {"decision": "deny"},
-        });
-        json!({
-            "interactionId": self.interaction_id,
-            "kind": "permission",
-            "anchorRowId": Value::Null,
-            "createdAt": self.created_at_unix_ms,
-            "payload": {
-                "kind": "permission",
-                "toolCallId": self.tool_call_id,
-                "toolName": self.tool_name,
-                "summary": self.summary,
-                "detail": self.detail,
-                "options": [allow_once, allow_always, deny],
-            },
-        })
-    }
 }
 
 /// 权限桥接错误；错误文本不包含工具参数或连接细节。
@@ -138,8 +81,6 @@ pub(crate) enum PermissionBridgeError {
     ResponseConnectionMismatch,
     /// 回答 Session 不是允许展示的父 Session。
     ResponseSessionMismatch,
-    /// 回答 JSON 或 option 不符合严格边界。
-    InvalidResponse,
 }
 
 impl std::fmt::Display for PermissionBridgeError {
@@ -150,7 +91,6 @@ impl std::fmt::Display for PermissionBridgeError {
             Self::UnknownRequest => formatter.write_str("权限请求不存在或已经结束"),
             Self::ResponseConnectionMismatch => formatter.write_str("权限响应来自非目标连接"),
             Self::ResponseSessionMismatch => formatter.write_str("权限响应 Session 不匹配"),
-            Self::InvalidResponse => formatter.write_str("权限响应无效"),
         }
     }
 }
@@ -165,8 +105,6 @@ struct PendingPermission {
 struct PermissionState {
     closed: bool,
     modes: HashMap<String, PermissionMode>,
-    /// 当前进程内由 allowAlways 建立的工具规则；冷恢复不从投影恢复，默认重新询问。
-    always_allowed_tools: HashMap<String, HashSet<String>>,
     session_connections: HashMap<String, ConnectionId>,
     actor_parents: HashMap<String, String>,
     /// Actor 首次绑定时冻结父 Session mode；同一工作流节点的后续等待不随父窗口切换漂移。
@@ -199,7 +137,6 @@ impl PermissionCoordinator {
                 state: Mutex::new(PermissionState {
                     closed: false,
                     modes: HashMap::new(),
-                    always_allowed_tools: HashMap::new(),
                     session_connections: HashMap::new(),
                     actor_parents: HashMap::new(),
                     actor_modes: HashMap::new(),
@@ -259,6 +196,18 @@ impl PermissionCoordinator {
         Ok(())
     }
 
+    /// 绑定 Native Host 当前唯一可回答权限的进程内连接。
+    ///
+    /// Native Host 使用稳定的 `ConnectionId`，仍沿用同一连接所有权检查，避免
+    /// 原生窗口绕过权限 pending 的连接隔离规则。
+    pub(crate) fn bind_native_session(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Result<(), PermissionBridgeError> {
+        self.bind_session_connection(session_id, connection_id.clone())
+    }
+
     /// 注册单层 actor 到父 Session 的权限投影关系。
     pub(crate) fn bind_actor_parent(&self, actor_session_id: &str, parent_session_id: &str) {
         let mut state = self.inner.state.lock();
@@ -291,20 +240,14 @@ impl PermissionCoordinator {
             .insert(session_id.to_owned(), mode);
     }
 
-    /// 返回当前 mode；冷恢复尚未重放配置时安全退回 build。
-    pub(crate) fn mode(&self, session_id: &str) -> PermissionMode {
-        self.inner
-            .state
-            .lock()
-            .modes
-            .get(session_id)
-            .copied()
-            .unwrap_or_default()
-    }
-
     /// 订阅权限 pending 的轻量变化通知。
     pub(crate) fn subscribe_changes(&self) -> broadcast::Receiver<PermissionChange> {
         self.inner.changes.subscribe()
+    }
+
+    /// 订阅 Native Host 的权限 pending 生命周期变化。
+    pub(crate) fn subscribe_pending(&self) -> broadcast::Receiver<PermissionChange> {
+        self.subscribe_changes()
     }
 
     /// 按连接和父 Session 读取权限 pending；不会枚举其他 Session。
@@ -334,6 +277,15 @@ impl PermissionCoordinator {
         views
     }
 
+    /// 读取 Native Host 当前连接和 Session 可见的权限 pending。
+    pub(crate) fn pending_for_native_session(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+    ) -> Vec<PendingPermissionView> {
+        self.pending_views_for_connection(session_id, connection_id)
+    }
+
     /// 返回当前 Session 的权限 pending 数量。
     pub(crate) fn pending_count_for_session(&self, session_id: &str) -> usize {
         self.inner
@@ -345,55 +297,65 @@ impl PermissionCoordinator {
             .count()
     }
 
-    /// 判断请求是否属于权限账本，供 V4 interaction 入口避免误交给 AskUser。
-    pub(crate) fn contains_pending(&self, interaction_id: &str) -> bool {
-        self.inner.state.lock().pending.contains_key(interaction_id)
+    /// 返回当前 pending 的展示 Session；通知泵丢帧恢复时只扫描真实待决项。
+    pub(crate) fn pending_display_session_ids(&self) -> Vec<String> {
+        let mut session_ids = self
+            .inner
+            .state
+            .lock()
+            .pending
+            .values()
+            .map(|pending| pending.view.display_session_id.clone())
+            .collect::<Vec<_>>();
+        session_ids.sort_unstable();
+        session_ids.dedup();
+        session_ids
     }
 
-    /// 严格校验父 Session、连接和 permission option 后收口请求。
-    pub(crate) fn resolve_from_connection(
+    /// Native Host 的 typed 权限回执；`true` 允许本次工具，`false` 拒绝本次工具。
+    ///
+    /// 原生按钮不需要拼接 ACP JSON-RPC。每次回执仍会校验 Session、连接和请求
+    /// 三者的精确绑定，并沿用同一个 exactly-once pending 收口路径。
+    pub(crate) fn respond_native(
         &self,
         session_id: &str,
         connection_id: &ConnectionId,
         interaction_id: &str,
-        answer_json: &str,
+        approved: bool,
     ) -> Result<(), PermissionBridgeError> {
-        let answer: Value = serde_json::from_str(answer_json)
-            .map_err(|_| PermissionBridgeError::InvalidResponse)?;
-        let object = answer
-            .as_object()
-            .ok_or(PermissionBridgeError::InvalidResponse)?;
-        let decision = parse_permission_decision(object)?;
-        let remember = decision == ToolApprovalDecision::Approved
-            && object.get("optionId").and_then(Value::as_str) == Some("allowAlways");
-        let pending = {
-            let state = self.inner.state.lock();
-            if state.session_connections.get(session_id) != Some(connection_id) {
-                return Err(PermissionBridgeError::ResponseConnectionMismatch);
+        let pending = self.pending_for_response(session_id, connection_id, interaction_id)?;
+        let decision = if approved {
+            ToolApprovalDecision::Approved
+        } else {
+            ToolApprovalDecision::Denied {
+                reason: "用户拒绝工具权限".to_owned(),
             }
-            let pending = state
-                .pending
-                .get(interaction_id)
-                .ok_or(PermissionBridgeError::UnknownRequest)?;
-            if pending.view.connection_id != *connection_id {
-                return Err(PermissionBridgeError::ResponseConnectionMismatch);
-            }
-            if pending.view.display_session_id != session_id {
-                return Err(PermissionBridgeError::ResponseSessionMismatch);
-            }
-            pending.view.clone()
         };
-        if remember {
-            self.inner
-                .state
-                .lock()
-                .always_allowed_tools
-                .entry(pending.display_session_id.clone())
-                .or_default()
-                .insert(pending.tool_name.clone());
-        }
         self.resolve_pending(&pending.interaction_id, decision);
         Ok(())
+    }
+
+    fn pending_for_response(
+        &self,
+        session_id: &str,
+        connection_id: &ConnectionId,
+        interaction_id: &str,
+    ) -> Result<PendingPermissionView, PermissionBridgeError> {
+        let state = self.inner.state.lock();
+        if state.session_connections.get(session_id) != Some(connection_id) {
+            return Err(PermissionBridgeError::ResponseConnectionMismatch);
+        }
+        let pending = state
+            .pending
+            .get(interaction_id)
+            .ok_or(PermissionBridgeError::UnknownRequest)?;
+        if pending.view.connection_id != *connection_id {
+            return Err(PermissionBridgeError::ResponseConnectionMismatch);
+        }
+        if pending.view.display_session_id != session_id {
+            return Err(PermissionBridgeError::ResponseSessionMismatch);
+        }
+        Ok(pending.view.clone())
     }
 
     /// 连接关闭时拒绝其全部 pending，并清理连接绑定。
@@ -466,7 +428,6 @@ impl PermissionCoordinator {
         let (pending, displays) = {
             let mut state = self.inner.state.lock();
             state.modes.remove(session_id);
-            state.always_allowed_tools.remove(session_id);
             state.session_connections.remove(session_id);
             let actor_ids = state
                 .actor_parents
@@ -553,7 +514,7 @@ impl ToolApprovalGate for PermissionCoordinator {
             return Box::pin(async { Ok(ToolApprovalDecision::Cancelled) });
         }
 
-        let (closed, mode, remembered, display_session_id, connection_id) = {
+        let (closed, mode, display_session_id, connection_id) = {
             let state = self.inner.state.lock();
             let parent_session_id = state.actor_parents.get(request.session_id.as_str());
             let display_session_id = parent_session_id
@@ -564,26 +525,13 @@ impl ToolApprovalGate for PermissionCoordinator {
                 .and_then(|_| state.actor_modes.get(request.session_id.as_str()).copied())
                 .or_else(|| state.modes.get(&display_session_id).copied())
                 .unwrap_or_default();
-            let remembered = state
-                .always_allowed_tools
-                .get(&display_session_id)
-                .is_some_and(|tools| tools.contains(&request.tool_name));
             let connection_id = state.session_connections.get(&display_session_id).cloned();
-            (
-                state.closed,
-                mode,
-                remembered,
-                display_session_id,
-                connection_id,
-            )
+            (state.closed, mode, display_session_id, connection_id)
         };
         if closed {
             return Box::pin(async { Err(ToolApprovalError::ConnectionClosed) });
         }
-        if remembered
-            || mode == PermissionMode::Yolo
-            || mode.allows_without_prompt(&request.tool_name)
-        {
+        if mode == PermissionMode::Yolo || mode.allows_without_prompt(&request.tool_name) {
             return Box::pin(async { Ok(ToolApprovalDecision::Approved) });
         }
         if mode == PermissionMode::Plan {
@@ -605,7 +553,6 @@ impl ToolApprovalGate for PermissionCoordinator {
             session_id: request.session_id.as_str().to_owned(),
             display_session_id: display_session_id.clone(),
             connection_id,
-            tool_call_id: request.tool_call_id.as_str().to_owned(),
             tool_name: request.tool_name.clone(),
             summary: format!("允许工具 {} 修改工作区或外部状态？", request.tool_name),
             detail: json!({
@@ -658,42 +605,6 @@ impl Drop for PendingPermissionGuard {
         if self.active {
             self.coordinator.cancel_pending(&self.interaction_id);
         }
-    }
-}
-
-fn parse_permission_decision(
-    answer: &serde_json::Map<String, Value>,
-) -> Result<ToolApprovalDecision, PermissionBridgeError> {
-    let action = answer.get("action").and_then(Value::as_str);
-    let option_id = answer.get("optionId").and_then(Value::as_str);
-    let action_kind = action
-        .map(|value| match value {
-            "accept" => Ok("allow"),
-            "decline" => Ok("deny"),
-            "cancel" => Ok("cancel"),
-            _ => Err(PermissionBridgeError::InvalidResponse),
-        })
-        .transpose()?;
-    let option_kind = option_id
-        .map(|value| match value {
-            "allowOnce" | "allowAlways" => Ok("allow"),
-            "deny" => Ok("deny"),
-            _ => Err(PermissionBridgeError::InvalidResponse),
-        })
-        .transpose()?;
-    if let (Some(action_kind), Some(option_kind)) = (action_kind, option_kind)
-        && action_kind != option_kind
-    {
-        // action 与 optionId 同时存在时必须表示同一决定，禁止冲突字段走优先级旁路。
-        return Err(PermissionBridgeError::InvalidResponse);
-    }
-    match action_kind.or(option_kind) {
-        Some("allow") => Ok(ToolApprovalDecision::Approved),
-        Some("cancel") => Ok(ToolApprovalDecision::Cancelled),
-        Some("deny") => Ok(ToolApprovalDecision::Denied {
-            reason: "用户拒绝工具权限".to_owned(),
-        }),
-        _ => Err(PermissionBridgeError::InvalidResponse),
     }
 }
 
@@ -829,28 +740,33 @@ mod tests {
         assert_eq!(views.len(), 1);
         let id = views[0].interaction_id.clone();
         assert_eq!(
-            coordinator.resolve_from_connection(
-                "session-1",
-                &wrong_connection,
-                &id,
-                r#"{"optionId":"allowOnce"}"#,
-            ),
+            coordinator.respond_native("session-1", &wrong_connection, &id, true),
             Err(PermissionBridgeError::ResponseConnectionMismatch)
         );
-        assert_eq!(
-            coordinator.resolve_from_connection(
-                "session-1",
-                &connection,
-                &id,
-                r#"{"action":"decline","optionId":"allowOnce"}"#,
-            ),
-            Err(PermissionBridgeError::InvalidResponse)
-        );
         coordinator
-            .resolve_from_connection("session-1", &connection, &id, r#"{"optionId":"allowOnce"}"#)
+            .respond_native("session-1", &connection, &id, true)
             .unwrap();
         assert_eq!(future.await.unwrap(), ToolApprovalDecision::Approved);
         assert_eq!(coordinator.pending_count_for_session("session-1"), 0);
+    }
+
+    /// Native Host 的 typed 回执不依赖 JSON-RPC，仍必须经过连接和 Session 校验。
+    #[tokio::test]
+    async fn native_binding_and_typed_response_round_trip() {
+        let coordinator = PermissionCoordinator::new();
+        let connection = ConnectionId::new("native-permission-test").unwrap();
+        coordinator
+            .bind_native_session("native-session", &connection)
+            .unwrap();
+        let future = coordinator.request(request("native-session"), TurnCancellation::new());
+        let view = coordinator
+            .pending_for_native_session("native-session", &connection)
+            .pop()
+            .expect("Native Host 应能读取权限 pending");
+        coordinator
+            .respond_native("native-session", &connection, &view.interaction_id, true)
+            .expect("Native Host typed 回执应完成");
+        assert_eq!(future.await.unwrap(), ToolApprovalDecision::Approved);
     }
 
     #[tokio::test]
@@ -926,46 +842,6 @@ mod tests {
         coordinator.close();
         assert!(matches!(
             pending.await,
-            Ok(ToolApprovalDecision::Denied { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn allow_always_remembers_only_the_approved_tool() {
-        let coordinator = PermissionCoordinator::new();
-        let connection = ConnectionId::new("connection-always").unwrap();
-        coordinator
-            .bind_session_connection("session-always", connection.clone())
-            .unwrap();
-        let first = coordinator.request(request("session-always"), TurnCancellation::new());
-        let view = coordinator
-            .pending_views_for_connection("session-always", &connection)
-            .pop()
-            .unwrap();
-        coordinator
-            .resolve_from_connection(
-                "session-always",
-                &connection,
-                &view.interaction_id,
-                r#"{"optionId":"allowAlways"}"#,
-            )
-            .unwrap();
-        assert_eq!(first.await.unwrap(), ToolApprovalDecision::Approved);
-        assert_eq!(
-            coordinator
-                .request(request("session-always"), TurnCancellation::new())
-                .await
-                .unwrap(),
-            ToolApprovalDecision::Approved
-        );
-
-        let mut other_tool = request("session-always");
-        other_tool.tool_name = "Write".to_owned();
-        let other = coordinator.request(other_tool, TurnCancellation::new());
-        assert_eq!(coordinator.pending_count_for_session("session-always"), 1);
-        coordinator.close();
-        assert!(matches!(
-            other.await,
             Ok(ToolApprovalDecision::Denied { .. })
         ));
     }

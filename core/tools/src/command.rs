@@ -355,13 +355,9 @@ impl BoundedCommandRequest {
         let script = script.into();
         #[cfg(windows)]
         {
-            let mut request = Self::new("cmd.exe", cwd, timeout, max_output_bytes).with_args(vec![
-                "/D".into(),
-                "/S".into(),
-                "/C".into(),
-            ]);
-            request.windows_shell_script = Some(script);
-            request
+            let request = Self::new("cmd.exe", cwd, timeout, max_output_bytes)
+                .with_args(vec!["/D".into(), "/S".into()]);
+            request.with_windows_cmd_script(script)
         }
         #[cfg(not(windows))]
         {
@@ -428,6 +424,25 @@ impl BoundedCommandRequest {
         {
             self.windows_shell_script = None;
         }
+        self
+    }
+
+    /// 在已保留的 CMD 前置参数后追加 `/C` 和未经 CRT 转义的原始脚本尾部。
+    ///
+    /// 调用方必须先确认程序确实是 `cmd`/`cmd.exe`，并从普通参数中移除唯一
+    /// 的 `/C` 与脚本参数；此方法也会清除前置参数中已有的 `/C`，再确保只
+    /// 加入一个 `/C`。
+    /// 后续调用 [`Self::with_args`] 会清除该原始尾部，以免普通参数意外继承
+    /// Shell 拼接语义。
+    #[cfg(windows)]
+    pub fn with_windows_cmd_script(mut self, script: impl Into<OsString>) -> Self {
+        self.args.retain(|argument| {
+            !argument
+                .to_str()
+                .is_some_and(|value| value.eq_ignore_ascii_case("/C"))
+        });
+        self.args.push(OsString::from("/C"));
+        self.windows_shell_script = Some(script.into());
         self
     }
 
