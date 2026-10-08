@@ -1,0 +1,22 @@
+[package]
+name = "rcode-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dirs = "7"
+rcode-control-protocol = { path = "../rcode-control-protocol" }
+rcode-agent = { path = "../rcode-agent" }
+rcode-model = { path = "../rcode-model" }
+rcode-provider = { path = "../rcode-provider" }
+rcode-tools = { path = "../rcode-tools" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

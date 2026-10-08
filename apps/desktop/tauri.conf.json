@@ -1,0 +1,180 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RCode",
+  "version": "0.9.0-beta",
+  "identifier": "app.rcode.workbench",
+  "build": {
+    "beforeDevCommand": {
+      "script": "pnpm build:cli:dev && pnpm dev",
+      "cwd": "../.."
+    },
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": {
+      "script": "pnpm build:cli && pnpm build",
+      "cwd": "../.."
+    },
+    "frontendDist": "dist",
+    "removeUnusedCommands": true
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "title": "RCode",
+        "create": false,
+        "width": 960,
+        "height": 651,
+        "minWidth": 960,
+        "minHeight": 651,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "visible": false,
+        "transparent": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: https://asset.localhost blob:; media-src 'self' asset: https://asset.localhost blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost https: http://localhost:* http://127.0.0.1:*; frame-src 'self' http: https: asset: https://asset.localhost; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'",
+      "assetProtocol": {
+        "enable": true,
+        "scope": [
+          "**"
+        ]
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": [
+      "binaries/rcode-cli"
+    ],
+    "targets": "all",
+    "createUpdaterArtifacts": false,
+    "license": "MIT",
+    "resources": [
+      "../../LICENSE",
+      "../../NOTICE",
+      "../../LICENSES/**/*"
+    ],
+    "publisher": "RCode",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "entitlements": "./entitlements.plist"
+    },
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0"
+        ]
+      },
+      "rpm": {
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": [
+          "English"
+        ],
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "./installer-hooks.nsh"
+      }
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "Rust and Result agent development workbench",
+    "longDescription": "RCode - an agent development workbench with projects, independent tasks, native Rust agents, files, Git, terminals, editors and previews.",
+    "fileAssociations": [
+      {
+        "name": "RCode Document",
+        "role": "Editor",
+        "mimeType": "text/plain",
+        "ext": [
+          "json",
+          "jsonc",
+          "txt",
+          "log",
+          "csv",
+          "tsv",
+          "md",
+          "markdown",
+          "mdx",
+          "js",
+          "mjs",
+          "cjs",
+          "jsx",
+          "ts",
+          "tsx",
+          "mts",
+          "cts",
+          "java",
+          "kt",
+          "kts",
+          "gradle",
+          "py",
+          "rb",
+          "php",
+          "go",
+          "rs",
+          "swift",
+          "dart",
+          "lua",
+          "c",
+          "h",
+          "cpp",
+          "cc",
+          "hpp",
+          "hh",
+          "cs",
+          "html",
+          "htm",
+          "css",
+          "scss",
+          "sass",
+          "less",
+          "vue",
+          "svelte",
+          "xml",
+          "yaml",
+          "yml",
+          "toml",
+          "ini",
+          "cfg",
+          "conf",
+          "properties",
+          "sh",
+          "bash",
+          "zsh",
+          "sql",
+          "graphql",
+          "proto"
+        ]
+      }
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
+  }
+}

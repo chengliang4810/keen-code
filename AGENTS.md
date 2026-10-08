@@ -1,288 +1,107 @@
-# AGENTS.md
+# RCode Agent 开发指南
 
-RCode builds main-conversation instructions from the current role (including its complete operating prompt), then `~/.rcode/AGENTS.md`, then the workspace-root `AGENTS.md`. Global instructions are edited as a file, not stored in preferences.
+本文件规定在本仓库开发时的工作边界、源码入口和验证要求。产品内 Agent 的权限、Plan 和子 Agent 机制不构成开发仓库的额外授权。详细模块说明见 [开发架构参考](docs/development-reference.md)，终端实现与诊断见 [终端专项文档](docs/terminal.md)。只读取本次任务涉及的参考章节。
 
-## Project
+## 协作与修改边界
 
-**RCode**: Rust and Result. An open-source Agent development workbench organized as projects containing independent tasks. The central Agent conversation is the default workspace; files, Git, terminals, editors and previews live in the right-hand development tools panel. Tauri 2 + Rust (`portable-pty`) backend, React 19 + TypeScript + libghostty-vt WASM terminal. The three primary model protocols execute through the Rust Agent core; AI SDK v6 supplies the chat projection and the Google / WSL fallback.
+- 用中文沟通，结论先行，说明结果、验证和未验证范围，省略非必要过程说明。
+- 根据请求区分调查、评审、计划和实现。调查或评审不自动授权修改；未受阻的模糊任务采用合理假设继续。
+- 开始前检查 `git status --short`，保留无关改动。没有用户授权，不覆盖、删除本地文件，不提交或推送。
+- 搜索优先使用 `rg` / `rg --files`。先读目标模块、调用方、相邻测试和依赖清单，再修改。
+- 以当前源码、`package.json`、`apps/desktop/package.json`、根目录 `Cargo.toml`、`apps/desktop/Cargo.toml` 和配置为准；文档有差异时核实并同步修正。
+- 在共同原因处做最小完整修改，职责清晰，不顺手重构，不新增缺少实际需求的抽象、配置或依赖。
+- 先评估已有依赖与成熟方案，查阅文档和类型后再决定是否自行实现。新增依赖说明必要性及体积、启动、内存和维护影响。
+- 不以向后兼容为目标。已废弃的字段、代码路径和接口直接移除，不增加历史路径、旧数据迁移或废弃 API 包装。
+- 仅在用户要求时提交或推送。按功能点分别提交，提交信息使用中英双语，只暂存本次相关路径或片段，不擅自 amend、重写历史或绕过 hooks。
 
-- Bundle id: `app.rcode.workbench`
-- Package manager: **pnpm**
-- Platforms: macOS, Linux, Windows
-- Frontend checks: `pnpm lint`, `pnpm check-types`, `pnpm test`
-- Rust checks: `cd src-tauri && cargo clippy --workspace --all-targets --locked -- -D warnings`, `cd src-tauri && cargo nextest run --workspace --locked` (local fallback: `cargo test --workspace --locked`)
+## 当前项目与开发命令
 
-## Quality bar
+RCode 是围绕项目和独立任务组织的本地 Agent 开发工作台。中央为会话，右侧提供文件、Git、终端、编辑器和预览。当前使用 React 19、TypeScript、Vite、Tailwind v4、Tauri 2、Rust、portable-pty 和 libghostty-vt WASM，源码包含 macOS、Linux、Windows 支持。应用标识为 `app.rcode.workbench`。
 
-Production-grade or it does not ship. Every change is judged against all of these, not just "it works":
+- 使用 `package.json` 固定的 pnpm，当前为 `11.9.0`；Node.js 至少为 22，Rust 至少为 1.95，并安装所在平台的 Tauri 构建依赖。
+- 开发仓库仅使用 pnpm，不使用 npm、npx 或 yarn。
+- Rust workspace 位于根目录 `Cargo.toml`，锁文件为根目录 `Cargo.lock`；从仓库根目录执行 Cargo 命令。
 
-- **Correctness**: edge cases, failure modes, concurrent access. No "works for now".
-- **Performance**: keep the product lightweight with a high-performance terminal. Inherited bundle measurements do not establish the RCode release size. For every change ask: how much RAM it costs, whether it adds IPC round-trips or redundant requests, whether it triggers extra re-renders or wasted work, whether it pulls a heavy dependency. Unused features consume zero resources.
-- **Security**: no critical security holes. Validate at every boundary (IPC, fs, network, AI tool surface). The secret-path deny-list applies on both read and write and is never bypassed.
-- **UI/UX**: polished, professional, premium. Every state and detail considered.
-- **Architecture**: new or changed logic lives in pure, dependency-light functions (functional core); tauri commands and React components stay thin (imperative shell). Keeps it testable without a later rewrite.
+```sh
+pnpm install --frozen-lockfile
+pnpm tauri dev
+```
 
-Verify before claiming done:
+`pnpm dev` 只启动前端。`pnpm tauri dev` 先构建开发 CLI sidecar，再启动前端和原生宿主；浏览器验收不能代替原生桌面验收。
 
-- Frontend: `pnpm lint`, `pnpm check-types`, `pnpm test`
-- Rust: `cd src-tauri && cargo clippy --workspace --all-targets --locked -- -D warnings`, `cd src-tauri && cargo nextest run --workspace --locked` (or `cargo test --workspace --locked`)
+## 源码入口
 
-A change to a core subsystem (terminal/shell spawn, workspace auth, git, fs, IPC or AI tool surface) needs a test that locks the invariant.
+| 范围 | 优先检查 |
+| --- | --- |
+| 启动、界面装配、开发工具布局 | `apps/desktop/ui/main.tsx`、`apps/desktop/ui/app/` |
+| 会话状态、历史和 Chat 实例 | `apps/desktop/ui/modules/ai/store/chatStore.ts`、`apps/desktop/ui/modules/ai/store/chatRuntime.ts`、`apps/desktop/ui/modules/ai/lib/sessions.ts` |
+| 协议选择、运行传输和消息投影 | `apps/desktop/ui/modules/ai/lib/transport.ts`、`apps/desktop/ui/modules/ai/lib/nativeProtocol.ts`、`apps/desktop/ui/modules/ai/lib/nativeTransport.ts` |
+| 共享 Agent Runtime、审批和运行控制 | `crates/rcode-runtime/` |
+| 桌面 Agent IPC、指令和扩展接入 | `apps/desktop/src/modules/agent_core/` |
+| Provider 中立模型、协议适配、Agent Loop 和工具 | `crates/rcode-agent/`、`crates/rcode-provider/`、`crates/rcode-tools/` |
+| Tauri 命令、文件、Git、进程和系统能力 | `apps/desktop/src/lib.rs`、`apps/desktop/src/modules/` |
+| 终端模型、渲染和 PTY | `apps/desktop/ui/modules/terminal/`、`packages/ghostty-core/`、`apps/desktop/src/modules/pty/`；先读终端专项文档 |
+| 编辑器、LSP、文件树和标签页 | `apps/desktop/ui/modules/editor/`、`apps/desktop/ui/modules/lsp/`、`apps/desktop/ui/modules/explorer/`、`apps/desktop/ui/modules/tabs/` |
+| 设置、主题、翻译和通用控件 | `apps/desktop/ui/settings/`、`apps/desktop/ui/modules/settings/`、`apps/desktop/ui/modules/theme/`、`apps/desktop/ui/modules/i18n/`、`apps/desktop/ui/components/ui/` |
+| 样式与组件生成配置 | `apps/desktop/ui/styles/globals.css`、`apps/desktop/components.json` |
+| 固定存储路径、密钥和界面投影 | `crates/rcode-runtime/src/storage.rs`、`apps/desktop/src/modules/secrets.rs`、`apps/desktop/ui/lib/storage.ts`、`apps/desktop/ui/lib/uiState.ts` |
+| CLI、打包、资源和预算检查 | `scripts/`、`apps/cli/`、`apps/desktop/tauri.conf.json`、`config/` |
 
-## Terminal migration status
+## 架构与状态约束
 
-libghostty-vt is the only terminal model. WebGPU is the default renderer and
-RCode WebGL is the compatibility fallback. Each leaf owns one persistent model;
-presentation resources are shared, bounded, and released for hidden leaves.
-Native cell, grapheme and hyperlink presentation buffers allocate on first use
-and return to the WASM allocator when presentation is reclaimed. Hidden parsing
-does not rebuild them. Short visibility pauses retain uploaded cell data.
-Unchanged frames do not acquire presentation textures or draw; cursor-only
-updates retain cell buffers. WebGL background and decoration geometry uses
-row range uploads while rectangle counts are stable; structural changes rebuild
-the compact stream. Scrollbar synchronization reads no DOM on unchanged frames.
-Blink timers stop in unfocused windows, and native
-cursor hiding stops cursor timers. Selection damages only its old and new rows;
-streaming search invalidations coalesce instead of rebuilding per output chunk.
-WebGL surface and renderer code load only when selected, needed for fallback,
-or explicitly requested by diagnostics. Delayed imports cannot install into a
-closed, restarted, or replaced session.
-xterm, its addons, CSS, snapshots, session pool, and dormant byte ring are removed.
-Unsupported graphics produce a visible error with retry instead of changing models.
+- 共享 Rust Runtime 与工具库不得依赖 Tauri 或前端。CLI 可以独立运行 Agent；Desktop 负责桌面 IPC、系统集成、界面工具与扩展接线。Rust 持有文件系统、进程、PTY、Git、密钥和网络代理能力；Webview 经注册的 Tauri 命令访问。所有外部输入、IPC、路径和网络边界均须校验，读写都不得绕过工作区和敏感路径限制。
+- `apps/desktop/ui/app/App.tsx` 只负责装配与跨域协调。业务逻辑放对应模块，纯规则保持依赖少、可测试，Tauri 命令和 React 组件保持轻量。
+- Agent core、工具和会话语义保持 Provider 中立。当前本地 Chat Completions、Responses、Messages 使用 Rust `rcode-agent::AgentRunner`；Google 和 WSL 使用现有 AI SDK v6 路径，不把两条路径的能力混为一谈。
+- 修改事件或数据契约时同时检查 Rust 定义、桌面转发、前端解码与投影、持久化恢复和测试。
+- 产品内主会话指令依次为当前角色的完整指令、`~/.rcode/AGENTS.md`、工作区根目录 `AGENTS.md`。全局指令通过文件编辑，不保存到偏好设置。
+- 任务目录由 `getTaskWorkspace(sessionId)` 确定，文件工具和原生请求使用该目录。切换开发工具标签页不能改写任务根；终端内容仅在需要时读取。
+- 会话元数据和消息经 `@/lib/storage` 保存到 `~/.rcode/sessions/conversations.json`。`useAiBootstrap` 触发初始化，历史消息按需加载；`chatRuntime.ts` 的 `getOrCreateChat(sessionId)` 复用有界缓存。API Key 在请求时读取，更换 Key 不清空 Chat 缓存。
+- 消息持久化由 `AgentRunBridge` 交给防抖写入，空闲、出错和卸载时刷新尾部消息。原生已提交消息保留 `data-rcode-messages`，崩溃后不自动重放中断的工具调用。
+- 独立对话及草稿使用 `~/.rcode/chat/default`，不自动初始化 Git。草稿首次发送后保留开发工具归属，切换项目时保留仍有工具的原草稿 ID。
+- 原生子 Agent 独立会话、可取消、强制只读，工具仅允许 `Read`、`Glob`、`Grep`、`list_directory`，不注册递归委派，也不接入父 Agent 的扩展工具。
 
-Command blocks use parser-time Ghostty tracked pins, including endpoint columns,
-so command ranges survive reflow and exclude following prompts and commands.
-The native marker ring is capped at 2,048 pins; JavaScript history is capped at
-1,000 blocks and 512 KiB of estimated UTF-16 command/cwd text. Block implementation
-and UI load only for block sessions, and hidden/occluded block presentation stops.
-Block search yields after 128 rows or four milliseconds, retains at most 500
-matches, and cancels obsolete queries. Block copy, search, sticky headers, navigation, Ask AI, rerun, shared shell input,
-and selection all use the same persistent Ghostty model.
-Block chrome commits with its matching renderer frame; command-editor focus does
-not lower active-pane cadence. Divider padding is presentation-only and does not
-change copied command boundaries. Scrollbars preserve native fractional positions
-and ignore delayed programmatic scroll events. Hidden output does no surface DOM
-or search-mask work until presentation resumes.
+## 工具审批与密钥
 
-Terminal clipboard shortcuts use the native text clipboard plugin on all desktop
-platforms. Context clicks expose the selected text through the input element to
-restore the webview's native text menu; no persistent DOM scrollback is maintained.
-Unclaimed macOS Command shortcuts reach the native menu after explicit clipboard,
-block-editor, and readline bindings, including when Kitty keyboard mode is active.
-The block prompt retains an enabled terminal input proxy for native menus and
-routes editing keys, composed text and paste back to its command editor.
-Character drags retain a native selection pin from pointerdown, including before
-the first pointermove. Unmoved clicks and lost captures discard provisional pins.
-Key encoding supplies the base character required by Kitty keyboard mode; plain
-keys and key releases also use Ghostty encoding when the application requests it.
-Terminal text uses the configured font, an installed Nerd Font when detected,
-or bundled JetBrains Mono. Private-use prompt symbols require an installed font
-that supplies them; RCode does not ship a separate symbol font. Native color
-emoji remain on the system fallback path. Rerun requires the complete command
-submitted through RCode; truncated shell labels are never executed.
-Primary-screen full erase, scrollback erase, and terminal reset invalidate block
-pins at parse time and clear block chrome, selection, and search. Commands after
-an erase in the same output chunk retain their new pins. Alternate-screen erases
-preserve primary block history. Block scrollbar status dots are removed along
-with their timers and history scans.
+- 原生 `Write`、`Edit`、`MultiEdit` 在 Rust 审批后直接原子写入，未接入逐块确认。AI SDK 的差异审阅界面不代表所有原生写入前都有差异标签页。
+- 原生权限语义：`ask` 逐工具审批状态变更；`edit` 自动批准 `Write`、`Edit`、`MultiEdit` 和 `create_directory`；`full-access` 自动批准状态变更工具。工作区、敏感路径校验和只读 `PlanGuard` 在所有模式下继续生效。
+- 前端会话默认归一为 `edit`；原生请求未设置权限时默认 `ask`。不要混淆默认值或削弱非法输入校验。`rcode:` 审批 ID 必须经 `agent_core_approve` 回复。
+- 原生 Plan 模式禁止状态变更，工具注册表与执行时的守卫都须保持该约束。前台命令显式传入 cwd，后台进程走有界桥接并及时释放。
+- macOS 密钥保存在 Keychain，Windows 保存在 Credential Manager，通过 Rust `keyring` 访问。Linux 当前使用 `~/.rcode/credentials/secrets.json` 的明文 JSON 后端，文件权限为 `0600`；不得将其描述为加密存储。
+- 前端统一通过 `secrets_*` 命令访问密钥。不得另存到偏好设置、会话、日志、`localStorage` 或其他业务文件，也不得在示例、测试夹具和提交中写入真实凭据或用户数据。
+- RCode 私有文件路径统一由 Rust `crates/rcode-runtime/src/storage.rs` 定义，前端使用 `@/lib/storage`，同步读取使用已水合的 `@/lib/uiState`。不新增 AppData、localStorage、IndexedDB 持久化或旧路径迁移；项目文件、外部 Agent 配置和系统凭据库保持各自所有权。
 
-The shared command bar activates after shell integration confirms prompt input.
-Bare shells keep direct terminal input. Bash before 4.4 reports
-`OSC 133;B;rcode_blocks=0` and keeps its native prompt because it lacks PS0.
+## 界面与终端修改
 
-Settings offer Automatic or WebGL for new terminals, plus opt-in screen reader
-output. Accessible text is limited to 256 rows / 64 KiB and refreshes at most four
-times per second while visible. Ordinary URL detection runs on pointer demand;
-OSC 8 links take precedence. OSC 52 side effects retain one in-flight write and
-only the latest pending value across the window.
+- 复用现有组件和设计结构。shadcn/ui 基元位于 `apps/desktop/ui/components/ui/`，AI Elements 位于 `apps/desktop/ui/components/ai-elements/`；升级使用现有生成配置并审查差异，业务组合放对应模块，不手工修改生成的基元。
+- Tailwind v4 的 `@theme` 位于 `apps/desktop/ui/styles/globals.css`，`apps/desktop/components.json` 的 CSS 路径必须与该入口一致，不创建 `tailwind.config.*`。组合类名使用 `cn()`。
+- 展示文本使用 `useTranslation()`，使语言切换正确更新 React Compiler 缓存。前端跨模块引用使用 `@/`，遵循现有主题令牌和变体。
+- `AiComposerProvider` 保持无条件挂载，避免加载密钥时改变父元素类型、重挂整棵树和重复创建 PTY。切换工具标签页保留会话组件，隐藏时释放或暂停展示资源。
+- 每个终端叶节点只持有一个持久 Ghostty 模型和 PTY；WebGPU / WebGL 切换不替换模型、选择区、搜索或历史。保留输出背压、最终解析确认、隐藏资源回收和平台进程清理约束。
+- LSP 按需启用；没有根标记不启动会话，保持会话数量、空闲回收和崩溃退避的边界。编辑器保存保留 EOL 并检测外部修改，不静默覆盖冲突。
+- 跨平台路径在边界归一为正斜杠，解析时接受两种分隔符。平台 Shell 初始化放对应 cfg 分支，终端 Enter 发送 CR。用户目录通过 `dirs` 获取。
+- 注释仅解释必要的原因，保持简短。代码、注释、提交和文档不使用破折号或装饰性 emoji；终端本身的 Unicode 展示能力不受此写作规则限制。
+- 不把历史包体或内存数据当作当前实测结果。避免空闲轮询和无上限缓存，性能结论附环境、步骤和数据。
+- 涉及可见界面或原生集成时，在相同状态和尺寸下验证原生窗口；记录截图与未验证的平台范围。自动化通过不能替代平台和长期运行验收。
 
-The adapted Ghostty revision is pinned in `packages/ghostty-core/adapted/wasm/build.zig.zon`.
-Both SIMD and scalar artifacts are shipped; the loader fetches only the variant
-the webview supports. Scalar validation explicitly disables SIMD instructions
-and types. This avoids changing OS minimums solely for the WASM SIMD requirement;
-actual older WKWebView and WebKitGTK compatibility still needs platform tests.
+## 验证与交付
 
-PTY output retains a 2 MiB pending plus in-flight byte limit and two-message
-window. Acknowledgments are cumulative parsed-byte offsets validated against
-native chunk boundaries, so duplicates and retries cannot grant extra credit.
-Parser failures stop delivery visibly without acknowledging unconsumed bytes.
-Exit waits for the reader drain and final parsing acknowledgments. Unix readers
-sleep on PTY readiness plus an explicit shutdown signal without a polling timer.
-After shell exit they consume ready output, bounded to 2 MiB / 30 seconds, rather
-than wait indefinitely for an inherited slave descriptor to close. Exceeding this
-drain bound reports a reader failure and exit status -1. After shell exit,
-30 seconds without acknowledgment progress closes a stalled queue with a logged
-delivery failure and exit status -1. The deadline is armed before ConPTY close
-and thread joins; it does not run during live-shell backpressure. Close wakes blocked
-queue workers and the Unix reader; Windows keeps draining the pipe while ConPTY closes.
+| 改动范围 | 必要验证 |
+| --- | --- |
+| 文档或 Agent 规则 | 引用路径、命令、结构和源码一致性检查，`git diff --check` |
+| 组件生成配置等元数据 | 解析配置，核实引用文件和实际入口；不为无运行时变化启动完整构建 |
+| 前端逻辑或组件 | `pnpm lint`、`pnpm check-types`、`pnpm test`，核心行为增加保护不变量的测试 |
+| 前端打包、资源或依赖 | 上述检查加 `pnpm build`；影响包体时执行对应预算检查 |
+| Rust 核心或桌面宿主 | 从仓库根目录执行格式、clippy 和受影响包的测试；跨包改动检查 workspace |
+| 终端、Shell、授权、Git、文件或 AI 工具边界 | 对应行为测试和真实场景验证；终端另核对专项文档 |
 
-Enable release diagnostics with `window.__rcodeSetTerminalDiagnostics(true)`
-and reload. `window.__rcodeTerm()` reads frontend counters;
-`await window.__rcodeTermSnapshot()` adds native queue counters and explicitly
-labeled host RSS. Host RSS
-excludes WebContent and GPU processes and is not total application memory.
+Rust 全 workspace 检查：
 
-Ghostty presentation uses shared native macOS occlusion/sleep and DOM visibility
-tracking. It pauses immediately, retains presentation for two seconds during
-short desktop transitions, and then reclaims hidden-window GPU resources.
-Sleep requests immediate reclamation; hidden tabs still release their leases
-immediately. Per-pane pacing prevents focused output from raising background
-pane cadence. WebGPU permits at most two outstanding frame submissions.
-User wheel, drag, and keyboard interaction gives only its pane 150 ms of focused
-cadence, including in an unfocused visible window. It starts no idle timer or
-frame loop. Reclaimed WebGPU canvases shrink to 1x1 while retaining their target
-geometry for the next presentation transaction.
-`window.__rcodeTermTrace()` explicitly starts a bounded ten-minute resource trace;
-it is never started automatically. `pnpm soak:ghostty` exercises real WASM models
-without launching the application. `pnpm profile:ghostty` compares allocation
-and parsing workloads in a fresh process per artifact and optional baseline.
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+```
 
-Automated checks alone do not
-establish production readiness, platform parity, or multi-day resource stability.
+已安装 nextest 时可用 `cargo nextest run --workspace --locked` 运行测试；仍须按改动范围覆盖相关 doctest。打包使用 `pnpm tauri build`，由配置先构建 CLI sidecar 和前端。自动更新及 updater 产物保持禁用，直到具备 RCode 自有且已验证的发布地址和签名密钥；不复用其他应用的更新身份。
 
-## Conventions
-
-React display text uses
-`useTranslation()` so language changes invalidate React Compiler caches.
-
-- **Comments**: default to none, the code should explain itself. If genuinely needed, 1-2 lines on *why*, never *what*. No AI-generic filler.
-- **No em-dash** anywhere: code, comments, commits, docs.
-- **No emojis** anywhere.
-- **Imports**: always `@/...` on the frontend, never relative across modules.
-- **pnpm only**, never npm/npx/yarn.
-
-## User storage
-
-RCode-owned user persistence lives under `~/.rcode`. Rust `modules/storage.rs` owns fixed paths; frontend stores use `@/lib/storage`, and synchronous UI reads use the hydrated `@/lib/uiState` projection. Custom roles are `agents/<id>.md`; user skills are `skills/<name>/SKILL.md`. Do not add AppData, localStorage or IndexedDB persistence, legacy path fallback, or automatic data migration. OS credential stores, project-owned files, and external Agent configuration retain their ownership boundaries.
-
-## Architecture
-
-### Two-process model
-
-**Rust (`src-tauri/`)** owns all OS access. The webview never touches the FS, processes, or shells directly - everything goes through `invoke()` calls to commands registered in `src-tauri/src/lib.rs`:
-
-- `pty::pty_*` - long-lived interactive PTY sessions (portable-pty ↔ Ghostty), managed by `PtyState` (`RwLock<HashMap<id, Session>>`). Output streams via a Tauri `Channel<PtyEvent>`.
-- `fs::tree::*` (`fs_read_dir`, `list_subdirs`), `fs::file::*` (`fs_read_file`, `fs_write_file`, `fs_stat`, `fs_canonicalize`), `fs::mutate::*` (`fs_create_file`, `fs_create_dir`, `fs_rename`, `fs_move`, `fs_delete`, `fs_delete_batch`): file explorer + editor IO.
-- `fs::search::*` (`fs_search`, `fs_list_files`), `fs::grep::*` (`fs_grep`, `fs_glob`): fuzzy file finder + content search (powered by `ignore` + `grep-*` crates).
-- `git::commands::*`: full source-control surface (`git_status`, `git_diff`, `git_diff_content`, `git_stage`, `git_unstage`, `git_discard`, `git_commit`, `git_fetch`, `git_pull_ff_only`, `git_push`, `git_log`, `git_show_commit`, `git_commit_files`, `git_commit_file_diff`, `git_panel_snapshot`, `git_resolve_repo`, `git_remote_url`). All gated through the workspace authorization registry.
-- `shell::shell_run_command`: one-shot subshell exec used by AI tools. Distinct from PTY sessions; not the user's interactive terminal. On Windows via PowerShell (`-NoProfile -Command`), on Unix via `$SHELL -lc`. Shared helper `build_oneshot_command`.
-- `shell::shell_session_*`: persistent agent shell with state across calls. `shell::shell_bg_*` (`spawn`, `logs`, `kill`, `list`): long-running background processes (dev servers etc.) with bounded ring-buffer log capture.
-- `workspace::*`: `workspace_authorize` / `workspace_current_dir` (the spawn/git/AI cwd authorization registry) plus the WSL bridge (`wsl_list_distros`, `wsl_default_distro`, `wsl_home`).
-- `lsp::*` (`lsp_detect`, `lsp_host_pid`, `lsp_resolve_root`, `lsp_spawn`, `lsp_send`, `lsp_kill`): language server process host. Dumb JSON-RPC pipe: Content-Length framing + process lifecycle in Rust (`lsp/framing.rs`, pure + tested), protocol intelligence on the frontend. Spawn cwd gated through the workspace registry; binaries resolve via the captured login-shell env (`lsp/env.rs`, GUI apps get a bare PATH on macOS); root detection walks up to markers but never to or above `$HOME`. Servers run in their own process group on Unix and are group-killed (cargo check / proc-macro children die with the server); Windows children get a `proc::job::ProcessJob` (kill-on-close, shared with pty). All sessions killed on `RunEvent::Exit`.
-- `net::*` (`ai_http_request`, `ai_http_stream`, `lm_ping`): AI HTTP proxy with SSRF guard; keeps provider calls and local-model pings off the webview.
-- `secrets::secrets_*`: OS keychain via the `keyring` crate. Service constant `rcode-ai`. Linux uses a file-based fallback gated behind `#[cfg(target_os = "linux")]`.
-- `open_settings_window`: compatibility command that opens the Settings overlay in the main window (optional `tab` arg deep-links a section); never creates a second webview.
-- `vibrancy::window_*`: native window backdrop (`window_backdrop_kind`, `window_set_backdrop`). macOS gets `NSVisualEffectMaterial::UnderWindowBackground`, Windows 11 gets Mica (gated on build >= 22000 via `RtlGetVersion`, since `apply_mica` fails on Windows 10), Linux reports `none` because blur there belongs to the compositor. The `window-vibrancy` crate is a macOS/Windows-only dependency so Linux builds never pull it.
-
-### PTY shell integration
-
-PTY shells are bootstrapped via injected init scripts in `src-tauri/src/modules/pty/scripts/`:
-
-- **Unix** (`zshenv.zsh`, `zprofile.zsh`, `zlogin.zsh`, `zshrc.zsh`, `bashrc.bash`) for zsh/bash, plus `init.fish` installed to `~/.rcode/cache/shell-integration/fish/init.fish` for fish. Emit OSC 7 (cwd) and OSC 133 A/B/C/D (prompt boundaries + exit code) so the host can track cwd and detect command boundaries without re-parsing the prompt. Fish 4.0+ writes its own OSC 133 prompt markers; RCode sets `fish_features=no-mark-prompt` and re-asserts its own prompt via `-C` to avoid doubling.
-- **Windows** (`profile.ps1`) - passed via `pwsh -NoLogo -NoExit -ExecutionPolicy Bypass -File <path>`. Wraps the user's existing `prompt` function (after their `$PROFILE` runs) to emit OSC 7 + OSC 133 A/B/D. Shell priority: `pwsh.exe` (PS 7+) → `powershell.exe` (PS 5.1) → `cmd.exe` (no integration). cwd is normalized to backslashes before being passed to ConPTY (`CreateProcessW` misbehaves with forward-slash cwd).
-
-`pty/shell_init.rs` is split into `#[cfg(unix)]` / `#[cfg(windows)]` modules - keep new platform-specific code in the right cfg arm.
-
-ConPTY on Windows requires `CONPTY_LIFECYCLE_LOCK` (Mutex) around `openpty + spawn_command` in `session.rs`. Concurrent spawns leave one of the resulting PTYs with a stalled output pipe. Don't remove the lock without verifying first-tab stability under fast tab spam.
-
-Each ConPTY child is also assigned to a per-session **Job Object** with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` (`pty/job.rs`). When the Job HANDLE drops - clean shutdown, panic, or even SIGKILL'd RCode process - the kernel kills every descendant of the shell (e.g. `npm run dev` spawned from inside pwsh). Without this Windows orphans the entire process subtree because `TerminateProcess` only kills the immediate child. macOS/Linux rely on `Drop for Session → killer.kill()`; on dev-`Ctrl-C` of `cargo run` destructors don't fire and orphans are possible there too - acceptable for now since dev only.
-
-`AiComposerProvider` is mounted unconditionally at the App.tsx root: a conditional wrapper would change the parent element type when keys load, remounting the entire tree (and re-spawning every PTY) the moment `getAllKeys()` resolves. Production happened to dodge this because keychain reads can land in the same paint frame; dev didn't. Keep the unconditional wrap.
-
-### Frontend (`src/`)
-
-Single-window React app. Path alias `@/*` → `src/*`. Tabs are a tagged union (`kind`: `terminal` | `editor` | `preview` | `markdown` | `ai-diff` | `git-diff` | `git-history` | `git-commit-file`) and **not** unmounted on switch - they're hidden via `invisible pointer-events-none` so PTYs and dev servers keep streaming in the background.
-
-`App.tsx` wires modules together - keep it a coordinator. New features go inside the appropriate `modules/<area>/`.
-
-### Module layout (`src/modules/`)
-
-Each module is self-contained, exports a thin barrel via `index.ts`, and owns its hooks under `lib/`.
-
-- **terminal/** - `TerminalStack` keeps live leaves mounted. `useGhosttyTerminalSession` owns one persistent model and PTY per leaf; GPU/WebGL surfaces lease shared presentation resources independently. `terminalSessionApi.ts` exposes renderer-neutral product actions. OSC 7 paths and OSC 52 payloads are validated by pure parsers; Ghostty supplies OSC 133 events and native command anchors to the lazy block controller. WebGPU can fail over to WebGL without replacing the model, PTY, selection, search, or block history. Hidden models keep parsing through bounded PTY transport while presentation is released. There is no snapshot replay or second terminal parser. Theme colors come from the central theme engine.
-- **editor/** - CodeMirror 6 stack (`EditorStack` mirrors `TerminalStack`). `extensions.ts` configures language modes; supports vim mode. Buffers live in LF space and the original EOL (`lib/eol.ts`, majority-vote detection) is restored on save; indent unit/tab size are detected per file (`lib/indent.ts`) via a per-pane compartment. Saves are conflict-checked against the disk mtime returned by `fs_read_file`/`fs_write_file` (mismatch → warning toast with explicit Overwrite, never silent last-writer-wins); external format-on-save only applies the disk read-back if the doc is unchanged since the save snapshot. Files over 10 MB offer "Open anyway" (hard cap 50 MB, `force` arg); above 4 MB syntax highlighting and LSP stay off. Cmd-F routes to CodeMirror's own search panel (find/replace/regex) when an editor tab is active, Ctrl-G opens go-to-line; both panels styled in `chromeTheme.ts`. Format-on-save formatters live in `lib/externalFormat.ts` (`FORMATTERS` registry: biome, prettier, ruff, rustfmt, gofmt, clang-format, shfmt, zig fmt, plus a custom `{file}` command template); `resolveFormatter` applies per-language overrides (`editorFormatterByLang`) over the global default, and a global external default only runs on languages its tool understands. Diff panes resolve the language before mounting CodeMirror: a late compartment reconfigure leaves the merge view's deleted-chunk widgets unhighlighted. AI inline completion (`lib/autocomplete/`) sends the buffer's indent unit with the request and normalizes unambiguous tab/space mismatches in responses (`normalizeIndent.ts`); automatic triggering follows `autocompleteTrigger`; manual completion shortcuts are removed from both the global registry and CodeMirror. Completion-list navigation remains available, and Tab accepts an open completion popup before the ghost. Multi-line ghosts render first-line-inline plus a block widget below the line (never inline `<br>`s); a closers-only line-suffix (cursor inside `fn(|)`) is hidden and re-appended after the block so the preview equals the accept result, and a line-suffix with real code caps the ghost to one line (`capToLineSuffix`). Suggestions echoing the recent prefix are dropped, multi-line suggestions and closing brackets never start on a line that ends with `;`, and closer-only lines are reindented from the previous line (`trimSuggestion`/`reindentClosers`, all tested). Markdown editing is GFM (`markdownLanguage` base) with fenced-code highlighting resolved through the shared lazy language registry, Cmd/Ctrl+Click URLs, and clickable task checkboxes (`markdownExtras.ts`, all inside the lazy markdown chunk; the eager-budget test enforces this). Dotenv files (`.env`, `.env.*`, and `*.env`) use the lazy shell grammar. Editor theme is decoupled from the app theme: the `editorTheme` pref is `"auto" | EditorThemeId` (default `"auto"`), resolved at render time by `useEditorThemeExt` via `resolveEditorThemeId`. In `auto` the editor follows the active app theme's `editorTheme[mode]` pairing (live, never stale); an explicit pick overrides. Theme ids + labels live in `settings/store.ts` (`EDITOR_THEMES`/`EDITOR_THEME_LABELS`); the matching extensions in `editor/lib/themes.ts` (`EDITOR_THEME_EXT`). Prebuilt `@uiw` themes plus locally-built ones in `editor/lib/cmThemes.ts` (Kanagawa wave/lotus/dragon, Everforest, Dracula, Solarized, Catppuccin, Rosé Pine) via `createTheme` (no extra deps). The three CM surfaces (`EditorPane`, `AiDiffPane`, `GitDiffPane`) all read the theme through `useEditorThemeExt`.
-  Editor code size is stored separately as `editorFontSize` and does not affect `terminalFontSize`.
-- **explorer/** - file tree with Material/Catppuccin icons (`iconResolver.ts`), fuzzy search, keyboard nav, inline rename, context actions. Backslash-aware `basename`.
-- **preview/** - auto-detected dev-server preview tab (status-bar pill suggests opening when a localhost URL is detected).
-- **tabs/** - `useTabs` is the source of truth for tab list + active id. `useWorkspaceCwd` derives explorer root + inherited cwd for new tabs from active tab. `basename` splits on both `/` and `\`.
-- **header/** - top bar with left sidebar controls and persistent Settings / right sidebar buttons. Settings opens the existing main-window overlay. Draft conversations can open real development tools; their tools retain the same session ownership after the first message. Command palette and notification buttons are removed. Find in current tab opens the editor's own search panel. `WindowControls` rendered when `USE_CUSTOM_WINDOW_CONTROLS` is true (Linux + Windows; macOS uses native traffic lights).
-- **statusbar/** - bottom bar, `CwdBreadcrumb` (handles Unix paths, Windows drive letters, and home `~` segments via `pathUtils.segmentsFromCwd`), AI tools indicator.
-- **shortcuts/** - keymap registry (`shortcuts.ts`) + `useGlobalShortcuts`. Handlers live in `App.tsx` and are passed in by id (`tab.new`, `settings.open`, etc.). `metaKey || ctrlKey` for cross-platform Cmd/Ctrl.
-- **settings/** - settings store (`store.ts` via `tauri-plugin-store`), preferences hook, and main-window Settings overlay state. Settings UI loads lazily and keeps the underlying conversation mounted.
-- **sidebar/** - activity bar + collapsible side panels (explorer, source control, git history).
-- **source-control/** - git status / stage / commit panel and diff workflow.
-- **git-history/** - commit graph rail, refs, per-commit file diffs.
-- **lsp/** - opt-in language server support, zero cost until enabled (no process, no PATH check, nothing in the eager bundle beyond a 14.5 kB shell). Statusbar pill offers Enable (binary found) or Install (with copyable command) per language; activation persists as `lspActivation` in the settings store (`enabled`/`dismissed`/unset). `sessionManager.ts` keys sessions by (server, workspace root), refcounts open docs, idle-kills after 3 min, and crash-backoffs (cooldown before respawn; 3 in 5 min → give up + toast with the server's stderr tail). Resource invariants: **no root marker → no session** (a dirname fallback once spawned a server per directory and burned GBs), hard cap of 4 sessions per server, lean per-preset `initializationOptions` (rust-analyzer: `cachePriming` off + bounded `lru`; tsls: `maxTsServerMemory`). Client is `codemirror-languageserver` behind a lazy import, subclassed (`lib/client.ts`) to add didClose/didSave/shutdown, `textDocument/references` (Shift-F12; multi-result definitions and references share the `locationsPanel.ts` picker) and the publishDiagnostics capability the lib forgets (tsls sends no diagnostics without it); `lib/transport.ts` bridges to the Rust pipe and answers server-to-client requests the lib ignores. `vscode-languageserver-protocol` is aliased to a 4-enum shim in vite.config.ts (~117 kB saved). Presets: typescript, rust-analyzer, pyright, ruff, gopls and more; custom stdio servers via Settings. Several presets can claim one language (pyright and ruff both take `py`): `serverForLanguage` prefers the enabled candidate, so enabling ruff while pyright is unset or dismissed routes Python to ruff. WSL workspaces excluded for now.
-- **markdown/** - markdown preview renderer (backs the `markdown` tab kind).
-- **workspace/** - workspace environment switching (Local + WSL distros).
-- **theme/** - custom theme engine (no `next-themes`). `ThemeProvider` + `applyTheme` write CSS variables; built-in presets in `themes/` (rcode-default - colours live in `globals.css` since ThemeProvider clears rather than applies for that id - xcode, claude, kanagawa, kanagawa-dragon, tokyo-night, catppuccin, rose-pine, everforest, nord, gruvbox, dracula, solarized, tide, sage, caffeine), each optionally declaring an `editorTheme` pairing consumed by `resolveEditorThemeId` (see editor/). User themes via `customThemes.ts` + `validateTheme.ts`, optional background image via `bgImageStore.ts` + `SurfaceLayer`.
-- **updater/** - auto-updater UI built on `tauri-plugin-updater`.
-- **agents/** - agent launching, notifications, and management for both the built-in RCode agent and terminal coding agents (Claude Code, Codex, Gemini CLI, Pi, OpenCode, Grok). The header launcher (`components/AgentLauncherPanel.tsx` + `lib/launcher.ts`) persists per-agent start commands in preferences and atomically builds balanced one-to-four-pane tabs. Shared store (`store/agentStore.ts`: terminal `sessions` + `localAgent` + `notifications`) and a shared router (`lib/route.ts`: suppress when focused-and-visible, OS-notify when unfocused, in-app Sonner toast when focused-but-hidden) drive system notifications and in-app toasts. Toasts use Sonner (`components/ui/sonner.tsx`) themed via the central engine; `lib/agentIcon.tsx` renders the per-agent brand mark. Terminal detection is Rust-side (`pty/agent_detect.rs`) on the PTY reader's byte filter, armed on `OSC 133;C;<cmd>` or self-armed by the marker, emitting `rcode:agent-signal` transitions (`started`/`working`/`attention`/`finished`/`exited`) driven only by OSC sequences (never raw output, so a repainting TUI never flaps) - zero cost when no agent runs. Hook-backed terminal agents converge on the same `OSC 777` marker the detector reads, installed via `agent_enable_hooks(agent)` / `agent_hooks_status(agent)` in `modules/agent.rs` (data-driven `AgentSpec` for JSON-hook agents plus a RCode-owned Pi extension; atomic writes, foreign configuration preserved, idempotent; gated on `RCODE_TERMINAL`). OpenCode and Grok use OSC 133 process-lifecycle detection but do not install attention hooks. Delivery differs because only Claude's hook protocol can return terminal bytes in the hook *response*: **Claude** (`~/.claude/settings.json`, `UserPromptSubmit`/`Notification`/`Stop`) returns the marker via the `terminalSequence` field (legacy 3-field `notify;RCode;<event>`). **Codex** (`~/.codex/hooks.json`, `UserPromptSubmit`/`PermissionRequest`/`Stop`) and **Gemini** (`~/.gemini/settings.json`, `BeforeAgent`/`Notification`/`AfterAgent`, `matcher:"*"`) can't, so the hook *command* emits the 4-field `notify;RCode;<agent>;<event>` marker itself (`printf > /dev/tty` on Unix, or `rcode __rcode_notify` writing to `CONOUT$` after `AttachConsole` on Windows) and prints `{}` as a JSON stdout no-op (Codex's `Stop` and Gemini both reject empty/non-JSON stdout). **Pi** (`~/.pi/agent/extensions/rcode-notifications.ts`) uses `agent_start`/`agent_settled` extension events and writes its named marker directly to stdout. The agent-named marker lets a self-arm name the right agent when no preexec fired (bash/tmux/Windows). The RCode agent path is `ai/components/LocalAgentNotificationsBridge.tsx`, mapping `chatStore.agentMeta` (`awaiting-approval`→attention, busy→idle→finished, `error`) into the same router.
-- **command-palette/** - modal command palette (`CommandPalette.tsx`, `commands.ts`) for actions and navigation.
-- **spaces/** - workspace spaces/projects (name, root, env, color, per-space tab persistence) via `useSpaces` and `SpaceSwitcher`.
-- **ai/** - see below.
-
-Independent conversations, including unsent drafts, use the local `~/.rcode/chat/default` directory for files, terminals, Git and Agent tools. `workspace_default_chat_dir` creates and authorizes this fixed path without initializing a repository. Draft tools retain their task ownership when the first message arrives; a draft with open tools must be preserved under its old ID when changing project.
-
-### AI subsystem (`src/modules/ai/`)
-
-BYOK. Cloud providers via `@ai-sdk/*`: **OpenAI, Anthropic, Google, xAI, Cerebras, Groq, DeepSeek, Mistral, OpenRouter**, plus **OpenAI-compatible** for any custom base URL. Local / offline providers (key-optional, model id supplied at runtime): **LM Studio, MLX, Ollama**. Provider list in `config.ts` (`PROVIDERS`); model registry includes `DEFAULT_MODEL_ID` + `DEFAULT_AUTOCOMPLETE_MODEL`.
-
-- **Key storage**: OS keychain via `keyring` (Rust). Frontend reads/writes through `secrets_*` commands. Service `KEYRING_SERVICE = "rcode-ai"`. Never persist keys to disk, settings store, or `localStorage`.
-- **Agent** (`lib/transport.ts`, `lib/nativeTransport.ts`, `src-tauri/src/modules/agent_core`): local Chat Completions, Responses and Messages use `rcode-agent::AgentRunner`, with 24 model rounds and 256 tool calls. Protocol selection is explicit in `lib/nativeProtocol.ts`. Google and WSL keep `lib/agent.ts` / AI SDK v6. Preserve `Chat<UIMessage>` semantics and the single-session run lease.
-- **Sub-agents** (`agents/registry.ts`, `lib/nativeTransport.ts`): named sub-agents invoked via `run_subagent`. Native children have their own session and cancellation and run through a read-only PlanGuard, including any loaded skills, plugin commands, and MCP tools. Do not register recursive delegation on children.
-- **Sessions** (`lib/sessions.ts` + `store/chatStore.ts`): conversations are organized into named sessions, persisted via `tauri-plugin-store` at `~/.rcode/sessions/conversations.json` (list + `activeId` + per-session `messages:<id>` keys). `chatStore.ts` keeps a module-scoped `Map<sessionId, Chat<UIMessage>>`; `getOrCreateChat(apiKey, sessionId)` lazily constructs a `Chat`, seeded with messages from a hydration map populated by `hydrateSessions()` (called once from `App.tsx`). `AgentRunBridge` mirrors active-session messages to disk on every change and auto-derives titles from the first user message. Switching the API key wipes the chat map; sessions persist.
-- **Composer** (`lib/composer.tsx`): React context providing shared input state (text and attachments) for both the docked `AiInputBar` and any other surface. Attachments include image, text-file, and `selection` kinds - selections come from `useChatStore.attachSelection(text, source)` (drained into chips, not pasted into the textarea) and are wrapped as `<selection source="terminal|editor">…</selection>` blocks at submit. Composer derives `isBusy` from `agentMeta.status` so it can mount safely before sessions hydrate. Its toolbar orders attachment, permission, role, model and circular send controls; voice recording is not mounted. Conversation permissions offer Auto approval and Full access, defaulting to Auto approval for workspace edits; command approval and safety checks remain enforced according to that policy.
-- **Live context bridge**: `App.tsx` calls `setLive({ getCwd, getTerminalContext, … })` so tools can read the *currently active* terminal's cwd + last 300 lines of buffer. Lazy by design - don't pre-snapshot.
-- **Tools**: native `Read`, `Write`, `Edit`, `MultiEdit`, `Glob`, `Grep`, `Bash` / `PowerShell` use `rcode-tools`. Foreground commands are supervised processes with explicit cwd; background processes and UI-only tools use a bounded broker. State changes pause at the Rust approval gate. IDs prefixed `rcode:` must call `agent_core_approve`, never SDK auto-send. Files and search entries apply both workspace and sensitive-path rules. SDK fallback retains its original tools and approval flow.
-- **Edit diffs**: AI-proposed edits open in a side-by-side diff tab (`ai-diff` tab kind); user accepts/rejects per hunk before the write tool actually runs.
-- **Extensions**: project skills are discovered from `.agents/skills`; the native `Skill` tool loads their content. Local plugin installation/configuration and MCP settings live in `settings/sections/ExtensionsSection.tsx`. Enabled plugin commands, skills and MCP servers enter the native registry. Hooks, plugin agent templates, plugin LSP and OAuth UI remain unconnected. Custom commands use `~/.rcode/commands/<name>.md` or `<project>/.rcode/commands/<name>.md`, with project precedence. Settings provide CRUD, enable switches and explicit external command copying. The composer discovers commands lazily and loads their prompts on submit through the authorized native API; command prompts retain normal tool approval and PlanGuard boundaries.
-
-Native committed messages are persisted as `data-rcode-messages`; interrupted tool calls are not automatically resumed after a crash.
-
-### UI conventions
-
-- **shadcn/ui** is configured (`components.json`, style `radix-luma`, base `mist`, icon lib **hugeicons**). Primitives in `src/components/ui/` - don't hand-edit; re-run `pnpm dlx shadcn add` to upgrade.
-- **AI Elements** live in `src/components/ai-elements/` from the `@ai-elements` registry in `components.json`. Same rule: regenerate, don't hand-patch - composition wrappers belong in `modules/ai/components/`.
-- **Tailwind v4** - no `tailwind.config.*`, config is in `src/App.css` via `@theme`. Use `cn()` from `@/lib/utils`.
-- Resizable layout: `react-resizable-panels`.
-- **Window vibrancy**: the `windowVibrancy` pref drives `WindowVibrancyBridge` (main window only - `window_set_backdrop` targets its caller). `html[data-vibrancy="on"]` makes `<html>`/`<body>` transparent and redefines `--frame` with alpha, so only the chrome frosts; panes keep `--background` so terminal text stays on a solid surface and the terminal canvas still matches its container. The opaque colour the pre-paint script parks on `<html>` would cover the backdrop, so `applyVibrancy` clears it while the effect is on; there is deliberately no localStorage fast path, since pre-declaring the effect would show a see-through window on any launch where the native call has not landed yet. Repeat applications are deduped, and only Mica is rebuilt on a light/dark flip (NSVisualEffectView adapts on its own).
-- **Floating panes**: header and status bar are window chrome painted on `--frame` (derived from `--card`, so no theme declares it); the sidebar and the tab surface are `.rcode-pane` cards on `--background` - same tone as the terminal canvas. Panes meet the chrome flush and are inset only horizontally, because the header centers its content and any vertical gutter would stack onto that padding and read as asymmetric. `.rcode-pane` carries no drop shadow: `react-resizable-panels` clips panel content at the panel box, so a shadow would only render on the gutter sides.
-- Path imports: always `@/…`, never relative across modules.
-- Cross-platform paths: anywhere a path may originate from OSC 7, the explorer, or the OS, normalize separators with `.split(/[\\/]/)` rather than `.split("/")`.
-- Canonical path form on the frontend is **forward-slash**. `homeDir()` returns backslashes on Windows; convert at the boundary (App.tsx setHome). OSC 7 already arrives as forward-slash. Equal canonical strings keep `useFileTree` from wiping its tree and flashing the explorer when `tab.cwd` first arrives.
-
-### Window styling
-
-- macOS: `titleBarStyle: Overlay` + `hiddenTitle: true` in `tauri.conf.json` (native traffic lights via overlay). `transparent: true` + `macOSPrivateApi: true` in `tauri.conf.json` are what `NSVisualEffectView` requires; that also means the macOS build uses a private API and is not App Store eligible.
-- Linux: `decorations: false` + `transparent: true` from `tauri.linux.conf.json`; re-asserted post-realize for GNOME/Mutter CSD.
-- Windows: same as Linux via `tauri.windows.conf.json`. React renders custom `WindowControls`.
-
-### Tauri capabilities
-
-`src-tauri/capabilities/default.json` is the allowlist for plugin APIs available to the webview. New plugins (dialog, autostart, updater, window-state, store, opener, os, log are wired in `lib.rs`) typically need:
-1. `Cargo.toml` dependency
-2. `.plugin(...)` call in `lib.rs` `run()`
-3. capability entry in `default.json`
-
-### Cross-platform conventions
-
-- HOME / cache dirs: use the `dirs` crate (`dirs::home_dir()`, `dirs::cache_dir()`), never raw `$HOME` / `%USERPROFILE%`.
-- Shell init scripts: gate Unix-only logic behind `#[cfg(unix)]`; Windows arm in `pty::shell_init::windows`.
-- Terminal input: send `\r` (CR) for Enter, not `\n` (LF) - PowerShell on Windows requires CR.
-
-### Bundle config
-
-- `bundle.targets: "all"` plus per-platform sections in `tauri.conf.json`:
-  - **macOS**: `minimumSystemVersion: 13.0`.
-  - **Linux**: deb depends `libwebkit2gtk-4.1-0`, `libgtk-3-0`; rpm `webkit2gtk4.1`, `gtk3`; AppImage bundles its media framework.
-  - **Windows**: NSIS installer in `currentUser` mode (no admin required), WebView2 via `downloadBootstrapper`. Installing a missing WebView2 runtime requires internet access; there is no bundled offline runtime. Packaged and offline-install validation remains in the release-readiness gates.
-- Auto-updater checks and updater artifact generation are disabled until RCode has its own verified release URL and signing key. Never reuse an inherited application's update identity.
-- Repository documentation and test-only reference WASM cores are not packaged; the frontend includes only the adapted SIMD and scalar cores.
-
-### Known gotchas
-
-- **React 19 strict mode** double-mounts `useEffect` in dev → terminals spawn twice on first render. The first PTY is cleaned up almost immediately. The `CONPTY_LIFECYCLE_LOCK` mutex serializes this; don't be alarmed by `pty opened id=1` followed by `pty closed id=1` in dev logs.
-- **Windows PowerShell process lifecycle**: `killer.kill()` from `portable-pty` only kills the immediate child. Descendants (e.g. `npm run dev` started inside pwsh) survive unless something else takes them down. The Job Object in `pty/job.rs` handles this for the RCode-process-death case; an explicit `pty_close` from JS also kills only the immediate child + relies on the Job to take the rest. Don't disable the Job without a replacement.
-- **Tab `cwd` storage**: comes from OSC 7 with forward slashes (after `parseOsc7` strips `/C:` → `C:`). Anything that consumes `tab.cwd` and passes it to a Rust fs command on Windows must normalize separators or accept both forms - `apply_common` in `pty::shell_init` handles this for PTY spawn; other call sites must do their own.
-
+复制或改编第三方源码前核对许可证和归属要求，保留必要声明及来源，不通过改名隐藏来源。完成前检查 `git diff`、`git diff --check`，报告实际通过的验证、失败和未验证范围，不把尝试执行视为通过。

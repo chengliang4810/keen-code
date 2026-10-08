@@ -4,7 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const tauriDir = join(root, "src-tauri");
+const tauriDir = join(root, "apps/desktop");
 const release = process.argv.includes("--release");
 
 function run(command, args, { capture = false } = {}) {
@@ -54,7 +54,7 @@ const cargoArgs = [
   "build",
   "--locked",
   "--manifest-path",
-  join(tauriDir, "Cargo.toml"),
+  join(root, "Cargo.toml"),
   "--package",
   "rcode-cli",
   "--bin",
@@ -69,7 +69,7 @@ run("cargo", cargoArgs);
 const extension = target.includes("windows") ? ".exe" : "";
 const profile = release ? "release" : "debug";
 const source = join(
-  tauriDir,
+  root,
   "target",
   target,
   profile,

@@ -7,11 +7,11 @@
   },
   "files": {
     "includes": [
-      "src/**/*.ts",
-      "src/**/*.tsx",
+      "apps/desktop/ui/**/*.ts",
+      "apps/desktop/ui/**/*.tsx",
       "packages/ghostty-core/lib/official/**/*.ts",
-      "!src/components/ui/**",
-      "!src/components/ai-elements/**"
+      "!apps/desktop/ui/components/ui/**",
+      "!apps/desktop/ui/components/ai-elements/**"
     ]
   },
   "formatter": {

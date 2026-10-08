@@ -1,0 +1,24 @@
+[workspace]
+members = ["apps/cli", "apps/desktop", "crates/*"]
+default-members = ["apps/cli", "apps/desktop"]
+resolver = "2"
+
+[workspace.package]
+version = "0.9.0-beta"
+edition = "2021"
+license = "MIT"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = "s"
+panic = "abort"
+strip = true
+
+# rust-lang/rust#110536: stripping proc-macro dylibs breaks the dlopen rustc does
+# at compile time on macOS, reported as a bogus E0463. Never shipped, so nothing to strip.
+[profile.release.build-override]
+strip = false

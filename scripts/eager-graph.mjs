@@ -6,14 +6,14 @@
 // the eager graph and the first local file that pulls each.
 //
 // CLI:  node scripts/eager-graph.mjs [entry] [comma,separated,watchlist]
-// Used as a library by src/app/eager-budget.test.ts to lock the startup budget.
+// Used as a library by apps/desktop/ui/app/eager-budget.test.ts to lock the startup budget.
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { staticValueSpecifiers } from "./built-eager-graph.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const srcAlias = join(root, "src");
+const srcAlias = join(root, "apps/desktop/ui");
 
 export const DEFAULT_WATCH = [
   "@ai-sdk",
@@ -80,7 +80,7 @@ export function traceEager(entry, watch = DEFAULT_WATCH) {
 
 const isCli = process.argv[1] === fileURLToPath(import.meta.url);
 if (isCli) {
-  const entry = process.argv[2] || "src/main.tsx";
+  const entry = process.argv[2] || "apps/desktop/ui/main.tsx";
   const watch = process.argv[3] ? process.argv[3].split(",") : DEFAULT_WATCH;
   const { moduleCount, hits } = traceEager(entry, watch);
   console.log(`\nEager graph from ${entry}: ${moduleCount} local modules\n`);

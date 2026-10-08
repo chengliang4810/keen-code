@@ -32,12 +32,13 @@ Third-party source and assets retain their original licenses:
   Copyright 2025 Coder.
   License: LICENSES/Ghostty-web-MIT.txt.
 
-- xterm.js-derived WebGL renderers in src/modules/terminal/ghostty/webgl/:
+- xterm.js-derived WebGL renderers in
+  apps/desktop/ui/modules/terminal/ghostty/webgl/:
   https://github.com/xtermjs/xterm.js
   Copyright 2017 The xterm.js authors.
   License: LICENSES/Xterm-js-MIT.txt.
 
-- Pi icon in src/modules/agents/lib/agentIcon.tsx:
+- Pi icon in apps/desktop/ui/modules/agents/lib/agentIcon.tsx:
   https://github.com/earendil-works/pi-website
   Copyright 2026 Earendil Inc. and contributors.
   License: LICENSES/Pi-icon-MIT.txt.
@@ -67,8 +68,8 @@ Third-party source and assets retain their original licenses:
   LICENSES/Everforest-MIT.txt, LICENSES/Nord-MIT.txt,
   LICENSES/Dracula-MIT.txt and LICENSES/Solarized-MIT.txt.
 
-- Notification audio in public/notification.mp3 is retained from the Terax
-  reference revision under the Apache License, Version 2.0.
+- Notification audio in apps/desktop/public/notification.mp3 is retained from
+  the Terax reference revision under the Apache License, Version 2.0.
   SHA-256: ae0701e41a87972b528f5f5a6a8c576c7bc88ca14528da38ca83d1de7deaccb0.
 
 Package dependencies retain the licenses declared by their respective packages.

@@ -2,7 +2,7 @@ import { fileURLToPath } from "node:url";
 import { builtHeavyHits, traceBuiltEager } from "./built-eager-graph.mjs";
 
 const directory =
-  process.argv[2] ?? fileURLToPath(new URL("../dist/", import.meta.url));
+  process.argv[2] ?? fileURLToPath(new URL("../apps/desktop/dist/", import.meta.url));
 const startup = traceBuiltEager(directory);
 const heavyStacks = builtHeavyHits(directory, startup.files);
 console.log(
