@@ -1,3 +1,4 @@
+mod business;
 mod control;
 mod events;
 mod model;
@@ -5,12 +6,15 @@ pub mod network;
 mod permissions;
 pub mod security;
 pub mod storage;
+mod subagent;
 mod workspace_tools;
 
+pub use business::{BusinessToolOptions, ShellTarget, BUSINESS_TOOL_NAMES};
 pub use control::{AgentRuntime, RunLease};
 pub use events::EventBridge;
 pub use model::ModelConfig;
 pub use permissions::PermissionMode;
+pub use subagent::{builtin_subagents, ResolvedSubagent, SubagentTemplate};
 pub use workspace_tools::register_workspace_tools;
 
 use rcode_agent::{
@@ -131,3 +135,6 @@ impl AgentRuntime {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod business_tests;

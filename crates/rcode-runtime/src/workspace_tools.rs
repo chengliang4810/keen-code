@@ -1,13 +1,14 @@
 use super::security::check_file_path;
 use rcode_agent::{
-    AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolRegistry,
+    AgentTool, ToolConcurrency, ToolContext, ToolEffect, ToolError, ToolFuture, ToolOutput,
+    ToolRegistry,
 };
 use rcode_model::ToolDefinition;
 use rcode_tools::{
     BashTool, EditTool, GlobTool, GrepTool, MultiEditTool, PowerShellTool, ReadTool,
     ToolEnvironment, WriteTool,
 };
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,6 +17,62 @@ use std::{
 struct WorkspaceTool {
     inner: Arc<dyn AgentTool>,
     root: PathBuf,
+}
+
+struct ListDirectoryTool {
+    root: PathBuf,
+}
+
+impl AgentTool for ListDirectoryTool {
+    fn concurrency(&self) -> ToolConcurrency {
+        ToolConcurrency::ParallelReadOnly
+    }
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition::new(
+            "list_directory",
+            "List up to 512 entries inside the task workspace.",
+            json!({"type":"object","properties":{"path":{"type":"string"}},"additionalProperties":false}),
+        )
+    }
+    fn effect(&self, _: &Value) -> Result<ToolEffect, ToolError> {
+        Ok(ToolEffect::ReadOnly)
+    }
+    fn execute(&self, context: ToolContext, input: Value) -> ToolFuture<'_> {
+        Box::pin(async move {
+            let path = check_file_path(
+                &self.root,
+                input.get("path").and_then(Value::as_str).unwrap_or("."),
+            )
+            .map_err(|e| ToolError::permanent("path_denied", e))?;
+            let mut reader = tokio::fs::read_dir(path)
+                .await
+                .map_err(|e| ToolError::permanent("read_directory", e.to_string()))?;
+            let mut entries = Vec::new();
+            let mut truncated = false;
+            while let Some(entry) = reader
+                .next_entry()
+                .await
+                .map_err(|e| ToolError::permanent("read_directory", e.to_string()))?
+            {
+                if context.cancellation.is_cancelled() {
+                    return Err(ToolError::permanent("cancelled", "目录读取已取消"));
+                }
+                if entries.len() == 512 {
+                    truncated = true;
+                    break;
+                }
+                let kind = entry
+                    .file_type()
+                    .await
+                    .map_err(|e| ToolError::permanent("read_directory", e.to_string()))?;
+                entries.push(json!({"name":entry.file_name().to_string_lossy(),"is_directory":kind.is_dir(),"is_symlink":kind.is_symlink()}));
+            }
+            entries.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            Ok(ToolOutput::text(
+                json!({"entries":entries,"truncated":truncated}).to_string(),
+            ))
+        })
+    }
 }
 
 impl AgentTool for WorkspaceTool {
@@ -62,6 +119,7 @@ pub fn register_workspace_tools(
         Arc::new(ReadTool::new(env.clone())),
         Arc::new(GlobTool::new(env.clone())),
         Arc::new(GrepTool::new(env.clone())),
+        Arc::new(ListDirectoryTool { root: root.into() }),
     ];
     if !plan_mode {
         local.extend([
@@ -104,7 +162,7 @@ mod tests {
                 .into_iter()
                 .map(|definition| definition.name)
                 .collect::<Vec<_>>(),
-            ["Glob", "Grep", "Read"]
+            ["Glob", "Grep", "Read", "list_directory"]
         );
         for inner in [
             Arc::new(BashTool::new(env.clone())) as Arc<dyn AgentTool>,

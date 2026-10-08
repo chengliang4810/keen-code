@@ -62,32 +62,6 @@ fn assert_exited(pid: u32) {
     assert!(!process_alive(pid), "owned descendant {pid} survived");
 }
 
-#[cfg(windows)]
-fn windows_children(parent: u32) -> Vec<u32> {
-    use std::mem::{size_of, zeroed};
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-        TH32CS_SNAPPROCESS,
-    };
-    unsafe {
-        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-        assert_ne!(snapshot, INVALID_HANDLE_VALUE);
-        let mut process: PROCESSENTRY32W = zeroed();
-        process.dwSize = size_of::<PROCESSENTRY32W>() as u32;
-        let mut present = Process32FirstW(snapshot, &mut process) != 0;
-        let mut output = Vec::new();
-        while present {
-            if process.th32ParentProcessID == parent {
-                output.push(process.th32ProcessID);
-            }
-            present = Process32NextW(snapshot, &mut process) != 0;
-        }
-        CloseHandle(snapshot);
-        output
-    }
-}
-
 #[test]
 fn timeout_finishes_with_live_pipe_descendant_and_kills_tree() {
     let directory = tempfile::tempdir().unwrap();
@@ -106,12 +80,13 @@ fn timeout_finishes_with_live_pipe_descendant_and_kills_tree() {
 fn cancellation_cleans_running_descendants_but_not_independent_background() {
     let directory = tempfile::tempdir().unwrap();
     let background_pid_file = directory.path().join("background.pid");
-    let background = background::spawn(
-        long_descendant_command(&background_pid_file),
+    let mut command = build_oneshot_command(
+        &long_descendant_command(&background_pid_file),
+        &WorkspaceEnv::Local,
         None,
-        WorkspaceEnv::Local,
     )
     .unwrap();
+    let background = ProcessTree::spawn(&mut command, &CancellationToken::new()).unwrap();
     let background_pid = wait_for_pid(&background_pid_file);
     let foreground_pid_file = directory.path().join("foreground.pid");
     let foreground = long_descendant_command(&foreground_pid_file);
@@ -133,9 +108,9 @@ fn cancellation_cleans_running_descendants_but_not_independent_background() {
     assert!(started.elapsed() < Duration::from_secs(3));
     assert_exited(foreground_pid);
     assert!(process_alive(background_pid));
-    background.kill();
+    background.terminate();
     assert_exited(background_pid);
-    assert!(background.info(1).exited);
+    let _ = background.child().wait();
 }
 
 #[test]
@@ -160,40 +135,6 @@ fn pre_cancelled_command_does_not_create_file() {
     )
     .is_err());
     assert!(!file.exists());
-}
-
-#[test]
-fn dropping_background_owner_stops_descendants_without_worker_arc_cycle() {
-    let directory = tempfile::tempdir().unwrap();
-    let pid_file = directory.path().join("child.pid");
-    let background = background::spawn(
-        long_descendant_command(&pid_file),
-        None,
-        WorkspaceEnv::Local,
-    )
-    .unwrap();
-    let child = wait_for_pid(&pid_file);
-    #[cfg(windows)]
-    let grandchildren = {
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            let children = windows_children(child);
-            if !children.is_empty() {
-                break children;
-            }
-            assert!(Instant::now() < deadline);
-            thread::sleep(PROCESS_POLL);
-        }
-    };
-    assert_eq!(Arc::strong_count(&background), 1);
-    let weak = Arc::downgrade(&background);
-    drop(background);
-    assert!(weak.upgrade().is_none());
-    assert_exited(child);
-    #[cfg(windows)]
-    for grandchild in grandchildren {
-        assert_exited(grandchild);
-    }
 }
 
 #[test]
@@ -238,50 +179,4 @@ fn session_retains_cwd_and_close_cancels_queued_call() {
     session.close();
     assert!(worker.join().unwrap().is_err());
     drop(execution);
-}
-
-#[cfg(windows)]
-#[test]
-#[ignore = "requires RCODE_TEST_WSL_DISTRO naming an authorized installed WSL distribution"]
-fn wsl_stop_ends_remote_descendant_and_returns_within_deadline() {
-    let distro = std::env::var("RCODE_TEST_WSL_DISTRO").expect("authorized WSL distro");
-    crate::modules::workspace::validate_wsl_distro_name(&distro).unwrap();
-    let workspace = WorkspaceEnv::Wsl { distro };
-    let process = background::spawn(
-        "sleep 60 & printf 'RCODE_OWNED_PID=%s\\n' \"$!\"; wait".into(),
-        None,
-        workspace.clone(),
-    )
-    .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let pid = loop {
-        let logs = process.read_logs(0);
-        if let Some((_, suffix)) = logs.bytes.split_once("RCODE_OWNED_PID=") {
-            let digits: String = suffix.chars().take_while(char::is_ascii_digit).collect();
-            if let Ok(pid) = digits.parse::<u32>() {
-                break pid;
-            }
-        }
-        assert!(
-            !logs.exited,
-            "remote command failed before creating its child: {}",
-            logs.bytes
-        );
-        assert!(
-            Instant::now() < deadline,
-            "remote descendant PID unavailable"
-        );
-        thread::sleep(PROCESS_POLL);
-    };
-    let started = Instant::now();
-    process.kill();
-    assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(process.info(1).exited);
-    let command = format!("case \"$(ps -o stat= -p {pid})\" in ''|Z*) exit 0;; *) exit 1;; esac");
-    let output = run_blocking_inner(command, None, workspace, Duration::from_secs(5)).unwrap();
-    assert_eq!(
-        output.exit_code,
-        Some(0),
-        "remote descendant remained alive"
-    );
 }

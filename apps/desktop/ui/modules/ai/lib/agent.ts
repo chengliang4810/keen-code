@@ -405,7 +405,10 @@ export type RunAgentOptions = {
   abortSignal?: AbortSignal;
 };
 
-export async function runAgentStream(opts: RunAgentOptions) {
+export async function runAgentStream(
+  opts: RunAgentOptions,
+  businessTools: import("ai").ToolSet = {},
+) {
   const { useSubagentsStore } = await import(
     "@/modules/ai/store/subagentsStore"
   );
@@ -472,11 +475,14 @@ export async function runAgentStream(opts: RunAgentOptions) {
     messages: prompt.messages,
     maxOutputTokens: customConfig?.maxOutputTokens,
     allowSystemInMessages: false,
-    tools: applyToolPermissions(
-      buildTools(opts.toolContext, opts),
-      opts.permissionMode,
-      !!opts.planMode,
-    ),
+    tools: {
+      ...applyToolPermissions(
+        buildTools(opts.toolContext, opts),
+        opts.permissionMode,
+        !!opts.planMode,
+      ),
+      ...businessTools,
+    },
     stopWhen: stepCountIs(MAX_AGENT_STEPS),
     abortSignal: opts.abortSignal,
     onStepFinish: (step) => {

@@ -1,3 +1,4 @@
+import { invoke } from "@tauri-apps/api/core";
 import { selectedReasoningLevel } from "@/modules/ai/lib/reasoning";
 import {
   effectiveCustomModel,
@@ -240,6 +241,9 @@ const pendingPersist = new Map<
 let hydrationFlight: Promise<void> | null = null;
 
 function releaseSessionTools(id: string): void {
+  void invoke("agent_core_release_session", { sessionId: id }).catch((error) =>
+    console.error("[rcode] runtime cleanup failed", error),
+  );
   void import("@/modules/ai/tools/shell")
     .then(({ releaseSessionShells }) => releaseSessionShells(id))
     .catch((error) =>

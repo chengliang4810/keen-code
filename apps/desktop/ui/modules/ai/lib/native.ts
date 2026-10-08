@@ -313,37 +313,6 @@ export const native = {
     invoke<void>("shell_session_close", { id }),
   shellSessionCancel: (id: number, callId: string) =>
     invoke<void>("shell_session_cancel", { id, callId }),
-  shellBgSpawn: (command: string, cwd?: string | null) =>
-    invoke<number>("shell_bg_spawn", {
-      command,
-      cwd: cwd ?? null,
-      workspace: currentWorkspaceEnv(),
-    }),
-  shellBgLogs: (handle: number, sinceOffset?: number, maxBytes?: number) =>
-    invoke<{
-      bytes: string;
-      next_offset: number;
-      dropped: number;
-      exited: boolean;
-      exit_code: number | null;
-      has_more: boolean;
-    }>("shell_bg_logs", {
-      handle,
-      sinceOffset: sinceOffset ?? null,
-      maxBytes: maxBytes ?? null,
-    }),
-  shellBgKill: (handle: number) => invoke<void>("shell_bg_kill", { handle }),
-  shellBgList: () =>
-    invoke<
-      {
-        handle: number;
-        command: string;
-        cwd: string | null;
-        started_at_ms: number;
-        exited: boolean;
-        exit_code: number | null;
-      }[]
-    >("shell_bg_list"),
   gitResolveRepo: (cwd: string) =>
     invoke<GitRepoInfo | null>("git_resolve_repo", {
       cwd,

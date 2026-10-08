@@ -11,32 +11,20 @@ const CLIENT_TOOLS: &[&str] = &[
     "memory_read",
     "memory_write",
     "memory_delete",
-    "list_directory",
     "create_directory",
-    "bash_background",
-    "bash_logs",
-    "bash_list",
-    "bash_kill",
     "suggest_command",
     "get_terminal_output",
     "open_preview",
-    "todo_write",
-    "run_subagent",
     "spawn_coding_agent",
     "send_to_agent",
     "read_agent_output",
 ];
 const CLIENT_READ_ONLY: &[&str] = &[
     "memory_read",
-    "list_directory",
-    "bash_logs",
-    "bash_list",
     "get_terminal_output",
     "read_agent_output",
     "suggest_command",
-    "todo_write",
     "open_preview",
-    "run_subagent",
 ];
 
 pub(super) fn validate_client_tools(tools: &[ToolDefinition]) -> Result<(), String> {
@@ -139,7 +127,7 @@ mod tests {
             "shell",
             schema.clone()
         )])
-        .is_ok());
+        .is_err());
         assert!(validate_client_tools(&[ToolDefinition::new(
             "bash_run",
             "legacy shell",

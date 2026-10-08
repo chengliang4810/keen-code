@@ -1,3 +1,4 @@
+pub(crate) mod business;
 mod client_tools;
 pub(crate) mod commands;
 pub(crate) mod control;
@@ -49,7 +50,10 @@ pub struct NativeAgentRequest {
     permission_mode: PermissionMode,
     #[serde(default)]
     pub client_tools: Vec<rcode_model::ToolDefinition>,
-    pub subagent_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub todos: Vec<rcode_agent::TodoItem>,
+    #[serde(default)]
+    pub subagents: Vec<business::NativeSubagent>,
     // 本地服务与用户明确配置的端点允许局域网；内置云端地址始终禁用。
     pub allow_private_network: bool,
 }
@@ -75,13 +79,12 @@ fn validate_request(request: &NativeAgentRequest) -> Result<(), String> {
     TurnId::new(&request.run_id).map_err(|e| e.to_string())?;
     validate_network_endpoint(&request.base_url)?;
     tools::validate_client_tools(&request.client_tools)?;
-    if let Some(names) = &request.subagent_tools {
-        tools::validate_subagent_tools(names, request.plan_mode, &request.client_tools)?;
-        if request.cwd.is_none() {
-            return Err("子智能体需要任务目录".into());
-        }
-    }
-    if let Some(account) = &request.secret_account {
+    business::validate_subagents(&request.subagents)?;
+    validate_secret_account(request.secret_account.as_deref())
+}
+
+fn validate_secret_account(account: Option<&str>) -> Result<(), String> {
+    if let Some(account) = account {
         let static_account = [
             "openai",
             "anthropic",
@@ -94,7 +97,7 @@ fn validate_request(request: &NativeAgentRequest) -> Result<(), String> {
             "openai-compatible",
         ]
         .iter()
-        .any(|id| account == &format!("{id}-api-key"));
+        .any(|id| account == format!("{id}-api-key"));
         let custom_account = account
             .strip_prefix("compat-")
             .and_then(|s| s.strip_suffix("-api-key"))

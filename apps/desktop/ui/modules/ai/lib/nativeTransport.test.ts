@@ -8,10 +8,7 @@ import { EMPTY_PROVIDER_KEYS } from "@/modules/ai/lib/keyring";
 import { BUILTIN_AGENTS } from "@/modules/ai/lib/agents";
 import { DEFAULT_AGENT_INSTRUCTIONS } from "@/modules/ai/lib/agentInstructions";
 import type { ToolContext } from "@/modules/ai/tools/context";
-import {
-  EMPTY_SUBAGENT_CONFIG,
-  configuredSubagents,
-} from "@/modules/ai/agents/config";
+import { EMPTY_SUBAGENT_CONFIG } from "@/modules/ai/agents/config";
 import {
   conversationTool,
   conversationWorkState,
@@ -58,197 +55,141 @@ const model = {
   allowPrivateNetwork: true,
 };
 
+vi.mock("@/modules/ai/lib/businessTools", () => ({
+  businessConfiguration: async () => ({ todos: [], subagents: [] }),
+  projectRuntimeTodos: vi.fn(),
+}));
 beforeEach(() => vi.mocked(invoke).mockReset());
 
 describe("native transport IPC lifecycle", () => {
-  it("bounds oversized client results before IPC and preserves log pagination", async () => {
+  it("bounds oversized project memory results before IPC", async () => {
     let onEvent!: { onmessage: (event: NativeAgentEvent) => void };
     let submitted: unknown;
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "agent_core_start")
         onEvent = (args as { onEvent: typeof onEvent }).onEvent;
-      if (command === "shell_bg_logs") {
-        expect(args).toMatchObject({ maxBytes: 64 * 1024, sinceOffset: 0 });
-        return {
-          bytes: "\u0000界".repeat(300_000),
-          next_offset: 1_200_000,
-          has_more: true,
-          dropped: 0,
-        };
-      }
+      if (command === "agent_memory_read")
+        return { content: "界".repeat(600_000) };
       if (command === "agent_core_tool_result") {
         submitted = (args as { result: unknown }).result;
         onEvent.onmessage({ type: "end" });
       }
-      return undefined;
     });
     const stream = await runNativeAgentStream(
-      { keys: EMPTY_PROVIDER_KEYS, toolContext: context, uiMessages: [] },
+      {
+        keys: EMPTY_PROVIDER_KEYS,
+        uiMessages: [],
+        toolContext: context,
+        memory: { id: "fixture", index: "" },
+      },
       model,
     );
     onEvent.onmessage({
       type: "client_tool",
-      id: "rcode:run:large-logs",
-      name: "bash_logs",
-      input: { handle: 7, since_offset: 0 },
+      id: "memory",
+      name: "memory_read",
+      input: {},
     });
     const reader = stream.getReader();
     while (!(await reader.read()).done) {}
-    expect(submitted).toMatchObject({
-      truncated: true,
-      warning: expect.stringContaining("incomplete"),
-    });
     expect(serializedResultBytes(submitted)).toBeLessThanOrEqual(
       CLIENT_TOOL_RESULT_MAX_BYTES,
     );
-    expect(invoke).not.toHaveBeenCalledWith("agent_core_cancel", expect.anything());
+    expect(submitted).toMatchObject({ truncated: true });
   });
 
-  it("returns a small explicit error when submitting a tool result is rejected", async () => {
-    let onEvent!: { onmessage: (event: NativeAgentEvent) => void };
-    const results: unknown[] = [];
-    vi.mocked(invoke).mockImplementation(async (command, args) => {
-      if (command === "agent_core_start")
-        onEvent = (args as { onEvent: typeof onEvent }).onEvent;
-      if (command === "shell_bg_logs")
-        return { bytes: "log", next_offset: 3, has_more: false, dropped: 0 };
-      if (command === "agent_core_tool_result") {
-        results.push((args as { result: unknown }).result);
-        if (results.length === 1) throw new Error("IPC rejected result");
-        onEvent.onmessage({ type: "end" });
+  it.each([false, true])(
+    "handles rejected tool results with closed=%s",
+    async (closed) => {
+      let onEvent!: { onmessage: (event: NativeAgentEvent) => void };
+      const results: unknown[] = [];
+      vi.mocked(invoke).mockImplementation(async (command, args) => {
+        if (command === "agent_core_start")
+          onEvent = (args as { onEvent: typeof onEvent }).onEvent;
+        if (command === "agent_core_tool_result") {
+          results.push((args as { result: unknown }).result);
+          if (closed || results.length === 1)
+            throw new Error("receiver closed");
+          onEvent.onmessage({ type: "end" });
+        }
+      });
+      const stream = await runNativeAgentStream(
+        { keys: EMPTY_PROVIDER_KEYS, toolContext: context, uiMessages: [] },
+        model,
+      );
+      onEvent.onmessage({
+        type: "client_tool",
+        id: "terminal",
+        name: "get_terminal_output",
+        input: {},
+      });
+      const reader = stream.getReader();
+      const chunks = [];
+      for (;;) {
+        const next = await reader.read();
+        if (next.done) break;
+        chunks.push(next.value);
       }
-      return undefined;
-    });
-    const stream = await runNativeAgentStream(
-      { keys: EMPTY_PROVIDER_KEYS, toolContext: context, uiMessages: [] },
-      model,
-    );
-    onEvent.onmessage({
-      type: "client_tool",
-      id: "rcode:run:logs",
-      name: "bash_logs",
-      input: { handle: 7 },
-    });
-    const reader = stream.getReader();
-    while (!(await reader.read()).done) {}
-    expect(results).toHaveLength(2);
-    expect(results[1]).toEqual({ error: "IPC rejected result" });
-    expect(serializedResultBytes(results[1])).toBeLessThan(4096);
-    expect(invoke).not.toHaveBeenCalledWith("agent_core_cancel", expect.anything());
-  });
+      expect(results).toHaveLength(2);
+      expect(results[1]).toEqual({ error: "receiver closed" });
+      if (closed) {
+        expect(invoke).toHaveBeenCalledWith(
+          "agent_core_cancel",
+          expect.anything(),
+        );
+        expect(chunks).toContainEqual({
+          type: "error",
+          errorText: "receiver closed",
+        });
+      } else
+        expect(invoke).not.toHaveBeenCalledWith(
+          "agent_core_cancel",
+          expect.anything(),
+        );
+    },
+  );
 
-  it("cancels the run and exposes the reason when neither result submission succeeds", async () => {
-    let onEvent!: { onmessage: (event: NativeAgentEvent) => void };
-    let attempts = 0;
-    vi.mocked(invoke).mockImplementation(async (command, args) => {
-      if (command === "agent_core_start")
-        onEvent = (args as { onEvent: typeof onEvent }).onEvent;
-      if (command === "shell_bg_logs")
-        return { bytes: "log", next_offset: 3, has_more: false, dropped: 0 };
-      if (command === "agent_core_tool_result") {
-        attempts++;
-        throw new Error("receiver closed");
-      }
-      return undefined;
-    });
-    const stream = await runNativeAgentStream(
-      { keys: EMPTY_PROVIDER_KEYS, toolContext: context, uiMessages: [] },
-      model,
-    );
-    onEvent.onmessage({
-      type: "client_tool",
-      id: "rcode:run:closed",
-      name: "bash_logs",
-      input: { handle: 7 },
-    });
-    const chunks = [];
-    const reader = stream.getReader();
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) break;
-      chunks.push(chunk.value);
-    }
-    expect(attempts).toBe(2);
-    expect(invoke).toHaveBeenCalledWith("agent_core_cancel", expect.anything());
-    expect(chunks).toContainEqual({
-      type: "error",
-      errorText: "receiver closed",
-    });
-  });
-
-  it("freezes a custom child's prompt and exact tools without exposing delegation or shell", async () => {
-    const child = {
-      ...configuredSubagents(EMPTY_SUBAGENT_CONFIG)[0],
-      id: "custom-test",
-      builtIn: false,
-      systemPrompt: "CUSTOM_RULE",
-      tools: ["grep"],
-      injectAgentsMd: true,
-    };
+  it("keeps business tools off the client callback list and sends permissions", async () => {
+    let request!: Record<string, unknown>;
     vi.mocked(invoke).mockImplementation(async (command, args) => {
       if (command === "agent_core_start") {
-        const { request, onEvent } = args as {
-          request: Record<string, unknown>;
+        const call = args as {
+          request: typeof request;
           onEvent: { onmessage: (event: NativeAgentEvent) => void };
         };
-        expect(request).toMatchObject({
-          planMode: true,
-          permissionMode: "ask",
-          subagentTools: ["Grep"],
-          clientTools: [],
-          system: "CUSTOM_RULE\n\nGLOBAL_RULE\n\nPROJECT_RULE",
-        });
-        onEvent.onmessage({ type: "end" });
+        request = call.request;
+        call.onEvent.onmessage({ type: "end" });
       }
-      return undefined;
     });
     await runNativeAgentStream(
       {
         keys: EMPTY_PROVIDER_KEYS,
         toolContext: context,
         uiMessages: [],
-        memory: { id: "scope", index: "PRIVATE_MEMORY" },
-        globalInstructions: "GLOBAL_RULE",
-        projectInstructions: "PROJECT_RULE",
-      },
-      model,
-      child,
-    );
-  });
-  it("passes selected permissions over IPC and keeps child runs read-only", async () => {
-    const requests: Record<string, unknown>[] = [];
-    vi.mocked(invoke).mockImplementation(async (command, args) => {
-      if (command === "agent_core_start") {
-        const { request, onEvent } = args as {
-          request: Record<string, unknown>;
-          onEvent: { onmessage: (event: NativeAgentEvent) => void };
-        };
-        requests.push(request);
-        onEvent.onmessage({ type: "end" });
-      }
-      return undefined;
-    });
-    const opts = {
-      keys: EMPTY_PROVIDER_KEYS,
-      toolContext: context,
-      uiMessages: [],
-      permissionMode: "full-access" as const,
-      planMode: true,
-    };
-    await runNativeAgentStream(opts, model);
-    await runNativeAgentStream({ ...opts, planMode: false }, model, "explore");
-    expect(requests[0]).toEqual(
-      expect.objectContaining({
         permissionMode: "full-access",
         planMode: true,
-      }),
+      },
+      model,
     );
-    expect(requests[1]).toEqual(
-      expect.objectContaining({ permissionMode: "ask", planMode: true }),
+    expect(request).toMatchObject({
+      permissionMode: "full-access",
+      planMode: true,
+      todos: [],
+      subagents: [],
+    });
+    const names = (request.clientTools as { name: string }[]).map(
+      (tool) => tool.name,
     );
-    expect(
-      (requests[1].clientTools as { name: string }[]).map((tool) => tool.name),
-    ).toEqual(["list_directory"]);
+    for (const name of [
+      "list_directory",
+      "todo_write",
+      "run_subagent",
+      "bash_background",
+      "bash_logs",
+      "bash_list",
+      "bash_kill",
+    ])
+      expect(names).not.toContain(name);
   });
   it("sends the complete role, then global rules, then project rules to Rust", async () => {
     vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -478,7 +419,7 @@ describe("native transport IPC lifecycle", () => {
       (tool) => tool.name,
     );
     expect(names).not.toContain("bash_run");
-    expect(names).toContain("bash_background");
+    expect(names).not.toContain("bash_background");
     await stream.cancel();
   });
   it("native approvals resume the existing runner without calling SDK auto-send", async () => {

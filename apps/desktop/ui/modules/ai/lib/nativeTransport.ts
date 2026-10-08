@@ -1,3 +1,7 @@
+import {
+  businessConfiguration,
+  projectRuntimeTodos,
+} from "@/modules/ai/lib/businessTools";
 import { memoryPrompt } from "@/modules/ai/lib/memory";
 import { buildMemoryTools } from "@/modules/ai/tools/memory";
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -11,56 +15,24 @@ import {
   type NativeAgentEvent,
 } from "@/modules/ai/lib/nativeStream";
 import { buildFsTools } from "@/modules/ai/tools/fs";
-import { buildShellTools } from "@/modules/ai/tools/shell";
-import { buildSubagentTools } from "@/modules/ai/tools/subagent";
 import { buildTerminalTools } from "@/modules/ai/tools/terminal";
-import { buildTodoTools } from "@/modules/ai/tools/todo";
 import { buildManagedAgentTools } from "@/modules/ai/tools/agent";
-import type { BuiltinSubagentType } from "@/modules/ai/agents/registry";
-import {
-  configuredSubagents,
-  EMPTY_SUBAGENT_CONFIG,
-  subagentSystem,
-  type ConfiguredSubagent,
-} from "@/modules/ai/agents/config";
-import { useSubagentsStore } from "@/modules/ai/store/subagentsStore";
 import { boundClientToolResult } from "@/modules/ai/lib/clientToolResult";
 
 export async function runNativeAgentStream(
   opts: RunAgentOptions,
   model: NativeModelConfig,
-  child?: ConfiguredSubagent | BuiltinSubagentType,
 ): Promise<ReadableStream<UIMessageChunk>> {
-  const childDef =
-    typeof child === "string"
-      ? configuredSubagents(EMPTY_SUBAGENT_CONFIG).find(
-          (agent) => agent.id === child,
-        )
-      : child;
-  if (child && !childDef) throw new Error("未知子智能体");
-  if (!childDef) await useSubagentsStore.getState().hydrate();
+  const business = await businessConfiguration(opts);
   const sessionId = opts.toolContext.getSessionId();
   if (!sessionId) throw new Error("没有活动对话");
   const fs = buildFsTools(opts.toolContext);
-  const { bash_run: _legacyForeground, ...shellTools } = buildShellTools(
-    opts.toolContext,
-  );
-  // 前台 Shell 由 Rust 监督进程树；界面工具及跨轮后台进程保留既有入口。
   const tools = {
-    ...(!childDef ? buildMemoryTools(opts.memory) : {}),
-    list_directory: fs.list_directory,
+    ...buildMemoryTools(opts.memory),
     create_directory: fs.create_directory,
-    ...shellTools,
-    ...(!childDef ? buildSubagentTools(opts.toolContext, opts) : {}),
     ...buildTerminalTools(opts.toolContext),
-    ...buildTodoTools(opts.toolContext),
     ...buildManagedAgentTools(opts.toolContext),
   } as unknown as Record<string, Tool<unknown, unknown>>;
-  if (childDef) {
-    for (const name of Object.keys(tools))
-      if (name !== "list_directory" || !childDef.tools.includes(name))
-        delete tools[name];
-  }
   const clientTools = Object.entries(tools).map(([name, tool]) => ({
     name,
     description: tool.description ?? name,
@@ -73,7 +45,10 @@ export async function runNativeAgentStream(
     }),
   }));
   const runId = crypto.randomUUID();
-  const mapper = createNativeEventMapper(opts);
+  const mapper = createNativeEventMapper({
+    ...opts,
+    onTodos: projectRuntimeTodos,
+  });
   // ReadableStream 构造时同步调用 start，IPC 事件在控制器赋值之后才会送达。
   let controller!: ReadableStreamDefaultController<UIMessageChunk>;
   let closed = false;
@@ -137,7 +112,8 @@ export async function runNativeAgentStream(
           });
         } catch (error) {
           if (closed) return;
-          const message = error instanceof Error ? error.message : String(error);
+          const message =
+            error instanceof Error ? error.message : String(error);
           try {
             await invoke("agent_core_tool_result", {
               requestId: event.id,
@@ -170,32 +146,18 @@ export async function runNativeAgentStream(
         sessionId,
         ...model,
         cwd: opts.toolContext.getWorkspaceRoot() ?? opts.toolContext.getCwd(),
-        system: childDef
-          ? subagentSystem(
-              childDef,
-              opts.globalInstructions,
-              opts.projectInstructions,
-            )
-          : buildStableSystem(
-              opts.agentPersona ?? null,
-              opts.globalInstructions,
-              opts.projectInstructions ?? null,
-              memoryPrompt(opts.memory) +
-                "\n\nUse native Read, Write, Edit, MultiEdit, Glob and Grep for files. Their file_path/path parameters stay inside the task workspace. Use PowerShell on Windows or Bash on Unix for foreground commands. Each command runs in a supervised process; pass cwd explicitly instead of relying on a previous cd. Use bash_background for long-running processes. Other registered tools retain their documented names.",
-            ),
-        messages: opts.uiMessages,
-        planMode: !!childDef || !!opts.planMode,
-        permissionMode: childDef ? "ask" : (opts.permissionMode ?? "ask"),
-        clientTools,
-        subagentTools: childDef?.tools.map(
-          (name) =>
-            ({
-              read_file: "Read",
-              glob: "Glob",
-              grep: "Grep",
-              list_directory: "list_directory",
-            })[name as "read_file" | "glob" | "grep" | "list_directory"],
+        system: buildStableSystem(
+          opts.agentPersona ?? null,
+          opts.globalInstructions,
+          opts.projectInstructions ?? null,
+          memoryPrompt(opts.memory) +
+            "\n\nUse native Read, Write, Edit, MultiEdit, Glob and Grep for files. Their file_path/path parameters stay inside the task workspace. Use PowerShell on Windows or Bash on Unix for foreground commands. Each command runs in a supervised process; pass cwd explicitly instead of relying on a previous cd. Use bash_background for long-running processes. Other registered tools retain their documented names.",
         ),
+        messages: opts.uiMessages,
+        planMode: !!opts.planMode,
+        permissionMode: opts.permissionMode ?? "ask",
+        clientTools,
+        ...business,
       },
       onEvent,
     });

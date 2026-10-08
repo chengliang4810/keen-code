@@ -32,7 +32,7 @@ export type ConversationWork = {
   state: ConversationWorkState;
   detail?: string;
   durationMs?: number;
-  handle?: number;
+  handle?: string;
 };
 
 export type ConversationFile = {
@@ -68,10 +68,6 @@ const NAMES: Record<string, string> = {
   Grep: "grep",
   run_command: "bash_run",
   shell_session_run: "bash_run",
-  shell_bg_spawn: "bash_background",
-  shell_bg_logs: "bash_logs",
-  shell_bg_kill: "bash_kill",
-  shell_bg_list: "bash_list",
 };
 
 function record(value: unknown): Record<string, unknown> {
@@ -219,7 +215,7 @@ export function buildConversationStatus(
   const files = new Map<string, ConversationFile>();
   const terminals = new Map<string, ConversationWork>();
   const agents = new Map<string, ConversationWork>();
-  const backgroundByHandle = new Map<number, ConversationWork>();
+  const backgroundByHandle = new Map<string, ConversationWork>();
   for (const message of messages) {
     if (message.role !== "assistant") continue;
     for (const part of message.parts) {
@@ -256,7 +252,7 @@ export function buildConversationStatus(
         const title = text(tool.input.command) ?? text(tool.output.command);
         if (!title) continue;
         const handle =
-          typeof tool.output.handle === "number"
+          typeof tool.output.handle === "string"
             ? tool.output.handle
             : undefined;
         const work: ConversationWork = {
@@ -301,7 +297,7 @@ export function buildConversationStatus(
       // 后台启动工具完成表示进程已启动；只有日志、目录或停止结果能确认退出。
       if (tool.state === "output-available" && !tool.output.error) {
         if (tool.name === "bash_logs" || tool.name === "bash_kill") {
-          const work = backgroundByHandle.get(Number(tool.input.handle));
+          const work = backgroundByHandle.get(String(tool.input.handle));
           if (work) {
             if (tool.name === "bash_kill") work.state = "cancelled";
             else if (tool.output.exited === true) {
@@ -319,7 +315,7 @@ export function buildConversationStatus(
         ) {
           for (const process of tool.output.processes) {
             const value = record(process);
-            const work = backgroundByHandle.get(Number(value.handle));
+            const work = backgroundByHandle.get(String(value.handle));
             if (work && value.exited === true)
               work.state =
                 typeof value.exit_code === "number" && value.exit_code !== 0

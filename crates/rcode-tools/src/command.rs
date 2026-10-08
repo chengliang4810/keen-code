@@ -304,22 +304,22 @@ struct ShellInput {
 #[derive(Clone, Debug)]
 pub struct BoundedCommandRequest {
     /// 不经过 Shell 拆词的可执行程序。
-    program: OsString,
+    pub(crate) program: OsString,
     /// 不经过二次拼接的参数列表。
-    args: Vec<OsString>,
+    pub(crate) args: Vec<OsString>,
     /// 仅显式 Windows Shell 请求使用的原始 CMD 脚本；普通程序始终走独立参数。
     #[cfg(windows)]
-    windows_shell_script: Option<OsString>,
+    pub(crate) windows_shell_script: Option<OsString>,
     /// 已由调用方选定的工作目录。
-    cwd: PathBuf,
+    pub(crate) cwd: PathBuf,
     /// 从成功启动开始计算的硬超时。
-    timeout: Duration,
+    pub(crate) timeout: Duration,
     /// 标准输出与标准错误各自允许的最大字节数。
     max_output_bytes: usize,
     /// 启动后一次性写入并关闭的标准输入。
-    stdin: Vec<u8>,
+    pub(crate) stdin: Vec<u8>,
     /// 仅对当前子进程树生效的环境变量覆盖。
-    environment: Vec<(OsString, OsString)>,
+    pub(crate) environment: Vec<(OsString, OsString)>,
 }
 
 impl BoundedCommandRequest {
@@ -556,11 +556,31 @@ pub(crate) struct ProcessGroupGuard {
     pub(crate) child: AsyncGroupChild,
     /// `true` 表示异常 Drop 时仍需发送最后一次强制终止。
     pub(crate) armed: bool,
+    #[cfg(windows)]
+    wsl: Option<crate::wsl::WslProcessTree>,
+}
+
+impl ProcessGroupGuard {
+    #[cfg(windows)]
+    async fn stop_wsl_tree(&mut self) -> Result<(), ToolError> {
+        if let Some(wsl) = self.wsl.clone() {
+            let result = tokio::task::spawn_blocking(move || wsl.terminate())
+                .await
+                .map_err(|e| ToolError::permanent("wsl_cleanup_failed", e.to_string()))?;
+            result.map_err(|e| ToolError::permanent("wsl_cleanup_failed", e))?;
+            self.wsl = None;
+        }
+        Ok(())
+    }
 }
 
 impl Drop for ProcessGroupGuard {
     /// 最后防线只发起终止；正常路径会在 Drop 前完成等待或退出确认。
     fn drop(&mut self) {
+        #[cfg(windows)]
+        if let Some(wsl) = &self.wsl {
+            let _ = wsl.terminate();
+        }
         if self.armed {
             let _ = self.child.start_kill();
         }
@@ -958,7 +978,9 @@ pub async fn run_bounded_command(
 }
 
 /// 在启动前校验通用有界命令的资源上限与工作目录。
-fn validate_bounded_command(request: &BoundedCommandRequest) -> Result<(), BoundedCommandError> {
+pub(crate) fn validate_bounded_command(
+    request: &BoundedCommandRequest,
+) -> Result<(), BoundedCommandError> {
     if request.program.is_empty() {
         return Err(BoundedCommandError::new(
             "invalid_command_program",
@@ -1199,13 +1221,18 @@ pub(crate) fn spawn_group(program: &OsString, spec: &ProcessSpec) -> io::Result<
 
 /// 将已配置的 Tokio Command 放入跨平台进程组并启动。
 fn spawn_group_command(mut command: Command) -> io::Result<ProcessGroupGuard> {
+    #[cfg(windows)]
+    let wsl = crate::wsl::WslProcessTree::from_command(command.as_std());
     let mut group = command.group();
     group.kill_on_drop(true);
     #[cfg(windows)]
     group.creation_flags(0x0800_0000);
-    group
-        .spawn()
-        .map(|child| ProcessGroupGuard { child, armed: true })
+    group.spawn().map(|child| ProcessGroupGuard {
+        child,
+        armed: true,
+        #[cfg(windows)]
+        wsl,
+    })
 }
 
 /// 监督已启动进程的退出、取消、超时和两个输出管道。
@@ -1263,11 +1290,15 @@ pub(crate) async fn monitor_process(
 ) -> Result<ProcessTermination, ToolError> {
     loop {
         if cancellation.is_cancelled() {
+            #[cfg(windows)]
+            guard.stop_wsl_tree().await?;
             terminate_and_wait(&mut guard.child).await?;
             guard.armed = false;
             return Ok(ProcessTermination::Cancelled);
         }
         if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            #[cfg(windows)]
+            guard.stop_wsl_tree().await?;
             terminate_and_wait(&mut guard.child).await?;
             guard.armed = false;
             return Ok(ProcessTermination::TimedOut);
@@ -1275,6 +1306,8 @@ pub(crate) async fn monitor_process(
         // 退出状态属于主进程，进程组只在后续 terminate_and_wait 中负责清理。
         match guard.child.inner().try_wait() {
             Ok(Some(status)) => {
+                #[cfg(windows)]
+                guard.stop_wsl_tree().await?;
                 terminate_and_wait(&mut guard.child).await?;
                 guard.armed = false;
                 return Ok(ProcessTermination::Exited(status));

@@ -17,7 +17,7 @@ pub(super) struct ProcessTree {
     #[cfg(windows)]
     job: crate::modules::proc::job::ProcessJob,
     #[cfg(windows)]
-    wsl: Option<WslTree>,
+    wsl: Option<rcode_tools::WslProcessTree>,
 }
 
 impl ProcessTree {
@@ -54,7 +54,7 @@ impl ProcessTree {
             #[cfg(windows)]
             job,
             #[cfg(windows)]
-            wsl: WslTree::from_command(command),
+            wsl: rcode_tools::WslProcessTree::from_command(command),
         });
         if cancellation.is_cancelled() {
             tree.terminate();
@@ -97,63 +97,6 @@ impl ProcessTree {
 
     pub(super) fn try_wait(&self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
-    }
-}
-
-#[cfg(windows)]
-struct WslTree {
-    distro: String,
-    token: String,
-}
-
-#[cfg(windows)]
-impl WslTree {
-    fn from_command(command: &Command) -> Option<Self> {
-        let environment: std::collections::HashMap<_, _> = command.get_envs().collect();
-        Some(Self {
-            distro: environment
-                .get(std::ffi::OsStr::new("RCODE_WSL_TREE_DISTRO"))?
-                .as_ref()?
-                .to_str()?
-                .into(),
-            token: environment
-                .get(std::ffi::OsStr::new("RCODE_WSL_TREE_TOKEN"))?
-                .as_ref()?
-                .to_str()?
-                .into(),
-        })
-    }
-
-    fn terminate(&self) -> Result<(), String> {
-        crate::modules::workspace::validate_wsl_distro_name(&self.distro)?;
-        if self.token.len() != 32 || !self.token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("invalid WSL supervision token".into());
-        }
-        let script = format!("for entry in /proc/[0-9]*/environ; do if grep -zFxq 'RCODE_SHELL_TOKEN={}' \"$entry\" 2>/dev/null; then pid=${{entry#/proc/}}; pid=${{pid%/environ}}; /bin/kill -KILL -- -\"$pid\" 2>/dev/null; /bin/kill -KILL \"$pid\" 2>/dev/null; fi; done; exit 0", self.token);
-        let mut command = Command::new("wsl.exe");
-        command.args(["-d", &self.distro, "--exec", "sh", "-c", &script]);
-        command
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        let cleanup =
-            ProcessTree::spawn(&mut command, &tokio_util::sync::CancellationToken::new())?;
-        let deadline = Instant::now() + DRAIN_TIMEOUT;
-        loop {
-            if let Some(status) = cleanup.try_wait().map_err(|error| error.to_string())? {
-                cleanup.terminate();
-                return if status.success() {
-                    Ok(())
-                } else {
-                    Err("WSL tree cleanup failed".into())
-                };
-            }
-            if Instant::now() >= deadline {
-                cleanup.terminate();
-                return Err("WSL tree cleanup deadline exceeded".into());
-            }
-            thread::sleep(PROCESS_POLL);
-        }
     }
 }
 

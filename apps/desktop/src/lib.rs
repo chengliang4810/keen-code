@@ -191,6 +191,7 @@ pub fn run() {
         .manage(shell::ShellState::default())
         .manage(secrets::SecretsState::default())
         .manage(modules::agent_core::AgentRuntime::default())
+        .manage(modules::agent_core::business::BusinessBridgeState::default())
         .manage(fs::watch::FsWatchState::default())
         .manage(history::HistoryState::default())
         .manage(lsp::LspState::default())
@@ -276,10 +277,6 @@ pub fn run() {
             shell::shell_session_run,
             shell::shell_session_cancel,
             shell::shell_session_close,
-            shell::shell_bg_spawn,
-            shell::shell_bg_logs,
-            shell::shell_bg_kill,
-            shell::shell_bg_list,
             workspace::wsl_list_distros,
             workspace::wsl_default_distro,
             workspace::wsl_home,
@@ -303,6 +300,10 @@ pub fn run() {
             agent::agent_enable_hooks,
             agent::agent_hooks_status,
             modules::agent_core::agent_core_start,
+            modules::agent_core::business::agent_business_start,
+            modules::agent_core::business::agent_business_execute,
+            modules::agent_core::business::agent_business_finish,
+            modules::agent_core::business::agent_core_release_session,
             modules::agent_core::control::agent_core_cancel,
             modules::agent_core::control::agent_core_approve,
             modules::agent_core::control::agent_core_tool_result,
@@ -361,7 +362,13 @@ pub fn run() {
                 // Servers exit on stdin EOF, but destructors are not guaranteed
                 // on process exit; kill explicitly.
                 tauri::RunEvent::Exit => {
-                    app.state::<modules::agent_core::AgentRuntime>().shutdown();
+                    let runtime = app.state::<modules::agent_core::AgentRuntime>();
+                    runtime.shutdown();
+                    if let Err(error) =
+                        tauri::async_runtime::block_on(runtime.shutdown_background())
+                    {
+                        log::error!("background cleanup failed: {error}");
+                    }
                     app.state::<shell::ShellState>().shutdown();
                     #[cfg(target_os = "macos")]
                     modules::window_presentation::macos::uninstall();

@@ -1,3 +1,4 @@
+import type { RuntimeTodo } from "@/modules/ai/lib/todos";
 import type { UIMessageChunk } from "ai";
 import type { AgentUsageDelta } from "@/modules/ai/lib/agent";
 
@@ -44,6 +45,7 @@ export type NativeAgentEvent =
     }
   | { type: "transcript"; id: string; messages: unknown[] }
   | { type: "usage"; usage: Usage }
+  | { type: "todos"; sessionId: string; todos: RuntimeTodo[]; revision: number }
   | { type: "compact" }
   | { type: "diagnostic"; message: string }
   | { type: "client_tool"; id: string; name: string; input: unknown }
@@ -69,6 +71,7 @@ function displayInput(input: unknown): unknown {
 }
 
 export function createNativeEventMapper(callbacks: {
+  onTodos?: (sessionId: string, todos: RuntimeTodo[]) => void;
   onStep?: (step: string | null) => void;
   onUsage?: (usage: AgentUsageDelta) => void;
   onCompact?: (info: { droppedCount: number }) => void;
@@ -179,6 +182,9 @@ export function createNativeEventMapper(callbacks: {
           lastInputTokens: event.usage.inputTokens ?? 0,
           lastCachedTokens: event.usage.cacheReadTokens ?? 0,
         });
+        break;
+      case "todos":
+        callbacks.onTodos?.(event.sessionId, event.todos);
         break;
       case "compact":
         callbacks.onCompact?.({ droppedCount: 0 });

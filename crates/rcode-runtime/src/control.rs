@@ -20,6 +20,8 @@ pub(crate) struct RunRegistry {
     pub(crate) tool_responses: HashMap<String, oneshot::Sender<serde_json::Value>>,
     pub(crate) environments:
         HashMap<(String, std::path::PathBuf), Arc<rcode_tools::ToolEnvironment>>,
+    pub(crate) todos: HashMap<String, Arc<rcode_agent::InMemoryRuntimeState>>,
+    pub(crate) background: Option<Arc<rcode_tools::BackgroundTaskManager>>,
 }
 
 impl AgentRuntime {
@@ -75,6 +77,10 @@ impl AgentRuntime {
             }
             registry.approvals.clear();
             registry.tool_responses.clear();
+            if let Some(background) = &registry.background {
+                background.stop_accepting_tasks();
+                let _ = background.cancel_all();
+            }
         }
     }
 

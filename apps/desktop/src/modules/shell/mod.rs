@@ -1,16 +1,14 @@
-pub mod background;
 mod calls;
 #[cfg(test)]
 mod lifecycle_tests;
 mod process;
-pub mod ringbuffer;
 pub mod session;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,7 +19,6 @@ use tokio_util::sync::CancellationToken;
 use crate::modules::workspace::validate_wsl_distro_name;
 use crate::modules::workspace::{authorize_spawn_cwd, WorkspaceEnv, WorkspaceRegistry};
 
-use background::{BackgroundLogResponse, BackgroundProcInfo, BackgroundRegistry};
 use process::{read_pipe, DrainControl, ProcessTree, DRAIN_TIMEOUT, PROCESS_POLL};
 use session::{SessionRunOutput, ShellSession};
 
@@ -199,9 +196,7 @@ fn capture_pipe(pipe: impl process::OutputPipe, drain: Arc<DrainControl>) -> Cap
 
 pub struct ShellState {
     sessions: RwLock<HashMap<u32, Arc<ShellSession>>>,
-    bg: Mutex<BackgroundRegistry>,
     next_session_id: AtomicU32,
-    next_bg_id: AtomicU32,
     cancellation: CancellationToken,
 }
 
@@ -209,9 +204,7 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             sessions: RwLock::new(HashMap::new()),
-            bg: Mutex::new(BackgroundRegistry::default()),
             next_session_id: AtomicU32::new(1),
-            next_bg_id: AtomicU32::new(1),
             cancellation: CancellationToken::new(),
         }
     }
@@ -224,7 +217,6 @@ impl ShellState {
         for session in sessions.values() {
             session.close();
         }
-        self.bg.lock().unwrap().shutdown();
     }
 }
 
@@ -323,48 +315,6 @@ pub fn shell_session_close(state: tauri::State<ShellState>, id: u32) -> Result<(
         session.close();
     }
     Ok(())
-}
-
-#[tauri::command]
-pub fn shell_bg_spawn(
-    state: tauri::State<ShellState>,
-    registry: tauri::State<WorkspaceRegistry>,
-    command: String,
-    cwd: Option<String>,
-    workspace: Option<WorkspaceEnv>,
-) -> Result<u32, String> {
-    let workspace = WorkspaceEnv::from_option(workspace);
-    authorize_spawn_cwd(&registry, cwd.as_deref(), &workspace)?;
-    let id = state.next_bg_id.fetch_add(1, Ordering::Relaxed);
-    state
-        .bg
-        .lock()
-        .unwrap()
-        .spawn(id, command, cwd, workspace)?;
-    Ok(id)
-}
-
-#[tauri::command]
-pub fn shell_bg_logs(
-    state: tauri::State<ShellState>,
-    handle: u32,
-    since_offset: Option<u64>,
-    max_bytes: Option<usize>,
-) -> Result<BackgroundLogResponse, String> {
-    let process = state.bg.lock().unwrap().get(handle)?;
-    Ok(process.read_logs_page(since_offset.unwrap_or(0), max_bytes))
-}
-
-#[tauri::command]
-pub fn shell_bg_kill(state: tauri::State<ShellState>, handle: u32) -> Result<(), String> {
-    let process = state.bg.lock().unwrap().get(handle)?;
-    process.kill();
-    Ok(())
-}
-
-#[tauri::command]
-pub fn shell_bg_list(state: tauri::State<ShellState>) -> Result<Vec<BackgroundProcInfo>, String> {
-    state.bg.lock().unwrap().list()
 }
 
 pub(crate) fn build_oneshot_command(

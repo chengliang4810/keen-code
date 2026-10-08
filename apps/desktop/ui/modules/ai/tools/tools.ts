@@ -4,9 +4,7 @@ import { buildEditTools } from "./edit";
 import { buildFsTools } from "./fs";
 import { buildSearchTools } from "./search";
 import { buildShellTools } from "./shell";
-import { buildSubagentTools } from "./subagent";
 import { buildTerminalTools } from "./terminal";
-import { buildTodoTools } from "./todo";
 
 export { resolvePath, type ToolContext } from "./context";
 
@@ -20,9 +18,7 @@ export function buildTools(
     ...buildEditTools(ctx),
     ...buildSearchTools(ctx),
     ...buildShellTools(ctx),
-    ...buildSubagentTools(ctx, options),
     ...buildTerminalTools(ctx),
-    ...buildTodoTools(ctx),
     ...buildManagedAgentTools(ctx),
   } as const;
 }

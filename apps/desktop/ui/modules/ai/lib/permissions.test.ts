@@ -39,8 +39,6 @@ describe("SDK permission policy", () => {
       "multi_edit",
       "create_directory",
       "bash_run",
-      "bash_background",
-      "bash_kill",
       "spawn_coding_agent",
       "send_to_agent",
     ] as const)
@@ -62,8 +60,6 @@ describe("SDK permission policy", () => {
     }
     for (const name of [
       "bash_run",
-      "bash_background",
-      "bash_kill",
       "spawn_coding_agent",
       "send_to_agent",
     ] as const)
@@ -91,13 +87,11 @@ describe("SDK permission policy", () => {
       "multi_edit",
       "create_directory",
       "bash_run",
-      "bash_background",
-      "bash_kill",
       "spawn_coding_agent",
       "send_to_agent",
     ])
       expect(plan).not.toHaveProperty(name);
     expect(plan.read_file.execute).toBe(originals.read_file.execute);
-    expect(plan.run_subagent).toBeDefined();
+    expect(plan).not.toHaveProperty("run_subagent");
   });
 });

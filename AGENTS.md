@@ -51,14 +51,15 @@ pnpm tauri dev
 
 - 共享 Rust Runtime 与工具库不得依赖 Tauri 或前端。CLI 可以独立运行 Agent；Desktop 负责桌面 IPC、系统集成、界面工具与扩展接线。Rust 持有文件系统、进程、PTY、Git、密钥和网络代理能力；Webview 经注册的 Tauri 命令访问。所有外部输入、IPC、路径和网络边界均须校验，读写都不得绕过工作区和敏感路径限制。
 - `apps/desktop/ui/app/App.tsx` 只负责装配与跨域协调。业务逻辑放对应模块，纯规则保持依赖少、可测试，Tauri 命令和 React 组件保持轻量。
-- Agent core、工具和会话语义保持 Provider 中立。当前本地 Chat Completions、Responses、Messages 使用 Rust `rcode-agent::AgentRunner`。内置 Google 模型接入已移除；WSL 保留现有 AI SDK v6 主循环，不把两条路径的能力混为一谈。
+- Agent core、工具和会话语义保持 Provider 中立。当前本地 Chat Completions、Responses、Messages 使用 Rust `rcode-agent::AgentRunner`。内置 Google 模型接入已移除；WSL 保留 AI SDK v6 主循环，其 Todo、子 Agent 和后台 Shell 经薄 IPC 适配调用同一 Rust 实现。
 - 修改事件或数据契约时同时检查 Rust 定义、桌面转发、前端解码与投影、持久化恢复和测试。
 - 产品内主会话指令依次为当前角色的完整指令、`~/.rcode/AGENTS.md`、工作区根目录 `AGENTS.md`。全局指令通过文件编辑，不保存到偏好设置。
 - 任务目录由 `getTaskWorkspace(sessionId)` 确定，文件工具和原生请求使用该目录。切换开发工具标签页不能改写任务根；终端内容仅在需要时读取。
 - 会话元数据和消息经 `@/lib/storage` 保存到 `~/.rcode/sessions/conversations.json`。`useAiBootstrap` 触发初始化，历史消息按需加载；`chatRuntime.ts` 的 `getOrCreateChat(sessionId)` 复用有界缓存。API Key 在请求时读取，更换 Key 不清空 Chat 缓存。
 - 消息持久化由 `AgentRunBridge` 交给防抖写入，空闲、出错和卸载时刷新尾部消息。原生已提交消息保留 `data-rcode-messages`，崩溃后不自动重放中断的工具调用。
 - 独立对话及草稿使用 `~/.rcode/chat/default`，不自动初始化 Git。草稿首次发送后保留开发工具归属，切换项目时保留仍有工具的原草稿 ID。
-- 原生子 Agent 独立会话、可取消、强制只读，工具仅允许 `Read`、`Glob`、`Grep`、`list_directory`，不注册递归委派，也不接入父 Agent 的扩展工具。
+- Todo、子 Agent、后台 Shell 统一在 `crates/rcode-runtime` 装配，CLI 和 Desktop 都注册同一工具；前端只投影 Todo 事件并保存展示数据。普通轮次取消保留显式后台任务，删除会话和应用退出清理所属进程树。
+- 共享子 Agent 独立会话、可取消、强制只读，工具仅允许 `Read`、`Glob`、`Grep`、`list_directory`，不注册递归委派，也不接入父 Agent 的扩展工具。
 
 ## 工具审批与密钥
 

@@ -9,14 +9,15 @@ export function serializedResultBytes(value: unknown): number {
 export function boundClientToolResult(value: unknown): unknown {
   const serialized = JSON.stringify(value ?? null) ?? "null";
   const originalBytes = encoder.encode(serialized).byteLength;
-  if (originalBytes <= CLIENT_TOOL_RESULT_MAX_BYTES) return JSON.parse(serialized);
+  if (originalBytes <= CLIENT_TOOL_RESULT_MAX_BYTES)
+    return JSON.parse(serialized);
 
   const preview = (length: number) => ({
     truncated: true,
     original_bytes: originalBytes,
     result_preview: serialized.slice(0, length),
     warning:
-      "The serialized tool result exceeded 1 MiB. This preview is incomplete. Request fewer entries or lines; for bash_logs, continue with next_offset and has_more.",
+      "The serialized tool result exceeded 1 MiB. This preview is incomplete. Request fewer entries or lines.",
   });
   let lower = 0;
   let upper = Math.min(serialized.length, CLIENT_TOOL_RESULT_MAX_BYTES);

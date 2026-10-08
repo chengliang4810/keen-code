@@ -143,11 +143,22 @@ export function createContextAwareTransport(deps: Deps) {
       );
       return runNativeAgentStream(runOptions, nativeModel);
     }
-    const result = await runAgentStream(runOptions);
-    return result.toUIMessageStream({
-      originalMessages: options.messages,
-      onError: formatAiError,
-    });
+    const { prepareBusinessBridge } = await import(
+      "@/modules/ai/lib/businessTools"
+    );
+    const business = await prepareBusinessBridge(runOptions);
+    try {
+      const result = await runAgentStream(runOptions, business.tools);
+      return business.wrap(
+        result.toUIMessageStream({
+          originalMessages: options.messages,
+          onError: formatAiError,
+        }),
+      );
+    } catch (error) {
+      await business.dispose();
+      throw error;
+    }
   };
 
   return {

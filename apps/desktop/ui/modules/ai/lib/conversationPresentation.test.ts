@@ -174,7 +174,7 @@ describe("conversation status facts", () => {
       "launch",
       "output-available",
       { command: "pnpm dev" },
-      { handle: 7, ok: true },
+      { handle: "task-fixture", ok: true },
     );
     const start = message("a1", "assistant", [launch]);
     expect(buildConversationStatus([start]).terminals[0].state).toBe("running");
@@ -183,7 +183,7 @@ describe("conversation status facts", () => {
         "bash_logs",
         "logs",
         "output-available",
-        { handle: 7 },
+        { handle: "task-fixture" },
         { bytes: "failed", exited: true, exit_code: 1 },
       ),
     ]);

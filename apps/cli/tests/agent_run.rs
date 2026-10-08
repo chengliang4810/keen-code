@@ -91,11 +91,30 @@ fn run(
     let root = root.canonicalize().unwrap();
     fs::write(root.join("AGENTS.md"), "workspace fixture instructions").unwrap();
     fs::write(root.join(".env.fixture"), "synthetic private content").unwrap();
-    let arguments = json!({"file_path":root.join(target), "content":"CLI 独立写入成功\n"});
+    let background = target == "business-background";
+    #[cfg(unix)]
+    let command = "printf cli-background; sleep 60";
+    #[cfg(windows)]
+    let command = "Write-Output cli-background; Start-Sleep 60";
+    let (tool, arguments) = match target {
+        "business-todo" => (
+            "todo_write",
+            json!({"todos":[{"content":"CLI shared todo","status":"in_progress","active_form":"tracking"}]}),
+        ),
+        "business-subagent" => (
+            "run_subagent",
+            json!({"type":"explore","prompt":"Read-only fixture research"}),
+        ),
+        "business-background" => ("bash_background", json!({"command":command})),
+        _ => (
+            "Write",
+            json!({"file_path":root.join(target), "content":"CLI 独立写入成功\n"}),
+        ),
+    };
     let first_response = sse(
         json!({"role":"assistant", "tool_calls":[{
             "index":0, "id":"fixture-write", "type":"function",
-            "function":{"name":"Write", "arguments":arguments.to_string()}
+            "function":{"name":tool, "arguments":arguments.to_string()}
         }]}),
         "tool_calls",
     );
@@ -116,6 +135,25 @@ fn run(
             }
             stream.set_write_timeout(Some(Duration::from_secs(3)))?;
             requests.push(read_request(&mut stream)?);
+            let background_response = if background && round == 1 {
+                let message = requests.last().unwrap()["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|m| m["role"] == "tool")
+                    .unwrap();
+                let started: Value =
+                    serde_json::from_str(message["content"].as_str().unwrap()).unwrap();
+                sse(
+                    json!({"role":"assistant","tool_calls":[
+                        {"index":0,"id":"fixture-logs","type":"function","function":{"name":"bash_logs","arguments":json!({"handle":started["handle"]}).to_string()}},
+                        {"index":1,"id":"fixture-kill","type":"function","function":{"name":"bash_kill","arguments":json!({"handle":started["handle"]}).to_string()}}
+                    ]}),
+                    "tool_calls",
+                )
+            } else {
+                final_response.clone()
+            };
             let (status, content_type, body): (&str, &str, &str) = if fail_provider {
                 (
                     "401 Unauthorized",
@@ -129,7 +167,7 @@ fn run(
                     if round == 0 {
                         &first_response
                     } else {
-                        &final_response
+                        &background_response
                     },
                 )
             };
@@ -250,10 +288,19 @@ fn plan_excludes_mutations_even_with_full_access() {
     let result = run("result.txt", "full-access", true, true, false);
     assert!(!result.workspace().join("result.txt").exists());
     let tools = result.requests[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 3);
+    assert_eq!(tools.len(), 8);
     assert!(tools.iter().all(|tool| matches!(
         tool["function"]["name"].as_str(),
-        Some("Read" | "Glob" | "Grep")
+        Some(
+            "Read"
+                | "Glob"
+                | "Grep"
+                | "list_directory"
+                | "todo_write"
+                | "run_subagent"
+                | "bash_logs"
+                | "bash_list"
+        )
     )));
     assert_eq!(result.tool_result()["isError"], true);
 }
@@ -377,4 +424,62 @@ fn interrupt_cancels_an_open_model_stream_and_exits_promptly() {
         .iter()
         .any(|event| event["type"] == "finish" && event["cancelled"] == true));
     assert_eq!(events.last().unwrap()["type"], "end");
+}
+
+#[test]
+fn standalone_runs_shared_todo_subagent_and_background_tools() {
+    for target in ["business-todo", "business-subagent", "business-background"] {
+        let result = run(target, "full-access", false, true, false);
+        assert!(
+            result.status.success(),
+            "{} {}",
+            result.stdout,
+            result.stderr
+        );
+        assert_eq!(result.tool_result()["isError"], false);
+        let tools = result.requests[0]["tools"].as_array().unwrap();
+        for name in [
+            "todo_write",
+            "run_subagent",
+            "bash_background",
+            "bash_logs",
+            "bash_list",
+            "bash_kill",
+        ] {
+            assert!(
+                tools.iter().any(|t| t["function"]["name"] == name),
+                "{name}"
+            );
+        }
+        match target {
+            "business-todo" => assert!(result
+                .events()
+                .iter()
+                .any(|e| e["type"] == "todos" && e["todos"][0]["content"] == "CLI shared todo")),
+            "business-subagent" => {
+                assert_eq!(result.requests.len(), 3);
+                let tools = result.requests[1]["tools"].as_array().unwrap();
+                assert_eq!(tools.len(), 4);
+                assert!(tools.iter().all(|t| matches!(
+                    t["function"]["name"].as_str(),
+                    Some("Read" | "Glob" | "Grep" | "list_directory")
+                )));
+                assert!(result
+                    .tool_result()
+                    .to_string()
+                    .contains("CLI_FIXTURE_DONE"));
+            }
+            _ => {
+                assert_eq!(result.requests.len(), 3);
+                assert_eq!(
+                    result
+                        .events()
+                        .iter()
+                        .filter(|e| e["type"] == "tool_result")
+                        .count(),
+                    3
+                );
+            }
+        }
+    }
 }

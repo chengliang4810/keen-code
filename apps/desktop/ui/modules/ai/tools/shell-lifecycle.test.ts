@@ -8,12 +8,10 @@ const ports = vi.hoisted(() => ({
   shellSessionRun: vi.fn(),
   shellSessionCancel: vi.fn(),
   shellSessionClose: vi.fn(),
-  shellBgSpawn: vi.fn(),
-  shellBgLogs: vi.fn(),
-  shellBgList: vi.fn(),
-  shellBgKill: vi.fn(),
 }));
-const workspace = vi.hoisted(() => ({ env: { kind: "local" } as WorkspaceEnv }));
+const workspace = vi.hoisted(() => ({
+  env: { kind: "local" } as WorkspaceEnv,
+}));
 vi.mock("@/modules/ai/lib/native", () => ({ native: ports }));
 vi.mock("@/modules/ai/lib/security", () => ({
   checkShellCommand: () => ({ ok: true }),
@@ -76,7 +74,6 @@ beforeEach(() => {
   ports.shellSessionRun.mockResolvedValue(output);
   ports.shellSessionCancel.mockResolvedValue(undefined);
   ports.shellSessionClose.mockResolvedValue(undefined);
-  ports.shellBgSpawn.mockResolvedValue(9);
 });
 
 afterEach(async () => {
@@ -85,19 +82,22 @@ afterEach(async () => {
 });
 
 describe("SDK shell cancellation and ownership", () => {
-  it.each(["bash_run", "bash_background"] as const)(
+  it.each(["bash_run"] as const)(
     "pre-cancellation prevents %s from opening or spawning",
     async (name) => {
       const abort = new AbortController();
       abort.abort();
-      const result = await execute(name, { command: "echo result" }, {
-        ...options,
-        abortSignal: abort.signal,
-      });
+      const result = await execute(
+        name,
+        { command: "echo result" },
+        {
+          ...options,
+          abortSignal: abort.signal,
+        },
+      );
       expect(result.error).toContain("cancelled");
       expect(ports.shellSessionOpen).not.toHaveBeenCalled();
       expect(ports.shellSessionRun).not.toHaveBeenCalled();
-      expect(ports.shellBgSpawn).not.toHaveBeenCalled();
     },
   );
 
@@ -105,10 +105,14 @@ describe("SDK shell cancellation and ownership", () => {
     const opening = deferred<number>();
     ports.shellSessionOpen.mockReturnValue(opening.promise);
     const abort = new AbortController();
-    const running = execute("bash_run", { command: "echo result" }, {
-      ...options,
-      abortSignal: abort.signal,
-    });
+    const running = execute(
+      "bash_run",
+      { command: "echo result" },
+      {
+        ...options,
+        abortSignal: abort.signal,
+      },
+    );
     abort.abort();
     opening.resolve(1);
     expect((await running).error).toContain("cancelled");
@@ -119,42 +123,38 @@ describe("SDK shell cancellation and ownership", () => {
     const completed = deferred<typeof output>();
     ports.shellSessionRun.mockReturnValue(completed.promise);
     const abort = new AbortController();
-    const running = execute("bash_run", { command: "echo result" }, {
-      ...options,
-      abortSignal: abort.signal,
-    });
-    await vi.waitFor(() => expect(ports.shellSessionRun).toHaveBeenCalledOnce());
+    const running = execute(
+      "bash_run",
+      { command: "echo result" },
+      {
+        ...options,
+        abortSignal: abort.signal,
+      },
+    );
+    await vi.waitFor(() =>
+      expect(ports.shellSessionRun).toHaveBeenCalledOnce(),
+    );
     const callId = ports.shellSessionRun.mock.calls[0][4];
     abort.abort();
     expect(ports.shellSessionCancel).toHaveBeenCalledExactlyOnceWith(1, callId);
     completed.resolve(output);
     expect((await running).error).toContain("cancelled");
-    expect(ports.shellBgKill).not.toHaveBeenCalled();
     expect(ports.shellSessionClose).not.toHaveBeenCalled();
   });
 
   it("removes the abort listener after a completed call", async () => {
     const abort = new AbortController();
-    expect(await execute("bash_run", { command: "echo result" }, {
-      ...options,
-      abortSignal: abort.signal,
-    })).toMatchObject({ stdout: "result", exit_code: 0 });
+    expect(
+      await execute(
+        "bash_run",
+        { command: "echo result" },
+        {
+          ...options,
+          abortSignal: abort.signal,
+        },
+      ),
+    ).toMatchObject({ stdout: "result", exit_code: 0 });
     abort.abort();
-    expect(ports.shellSessionCancel).not.toHaveBeenCalled();
-  });
-
-  it("keeps explicitly spawned background processes across turn cancellation", async () => {
-    const spawned = deferred<number>();
-    ports.shellBgSpawn.mockReturnValue(spawned.promise);
-    const abort = new AbortController();
-    const running = execute("bash_background", { command: "dev-server" }, {
-      ...options,
-      abortSignal: abort.signal,
-    });
-    abort.abort();
-    spawned.resolve(9);
-    expect(await running).toMatchObject({ handle: 9, ok: true });
-    expect(ports.shellBgKill).not.toHaveBeenCalled();
     expect(ports.shellSessionCancel).not.toHaveBeenCalled();
   });
 });
@@ -229,16 +229,5 @@ describe("SDK shell cache lifecycle", () => {
     await releaseSessionShells("session");
     expect(ports.shellSessionClose).toHaveBeenCalledWith(1);
     expect(ports.shellSessionClose).toHaveBeenCalledWith(2);
-  });
-});
-
-describe("SDK log pagination", () => {
-  it("preserves page offsets and supports the existing incremental read", async () => {
-    const page = { bytes: "日志", next_offset: 6, has_more: true, dropped: 0 };
-    ports.shellBgLogs.mockResolvedValue(page);
-    expect(await execute("bash_logs", { handle: 9, since_offset: 0 })).toEqual(page);
-    expect(ports.shellBgLogs).toHaveBeenCalledWith(9, 0, 64 * 1024);
-    await execute("bash_logs", { handle: 9, since_offset: 6, max_bytes: 32 });
-    expect(ports.shellBgLogs).toHaveBeenCalledWith(9, 6, 32);
   });
 });

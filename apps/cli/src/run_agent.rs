@@ -4,7 +4,8 @@ use rcode_agent::{
 use rcode_model::{Message, MessageRole, ProviderProtocol};
 use rcode_provider::ApiKey;
 use rcode_runtime::{
-    register_workspace_tools, AgentRuntime, EventBridge, ModelConfig, PermissionMode,
+    builtin_subagents, register_workspace_tools, AgentRuntime, BusinessToolOptions, EventBridge,
+    ModelConfig, PermissionMode, ResolvedSubagent, ShellTarget,
 };
 use serde_json::Value;
 use std::{
@@ -214,6 +215,26 @@ async fn execute(options: RunOptions, json: bool) -> Result<(), String> {
     let environment = runtime.environment(&session_id, &root, None)?;
     let mut tools = ToolRegistry::new();
     register_workspace_tools(&mut tools, environment, &root, options.plan)?;
+    runtime.register_business_tools(
+        &mut tools,
+        BusinessToolOptions {
+            session_id: session_id.clone(),
+            root: root.clone(),
+            output_directory: rcode_runtime::storage::directory("outputs/background")?,
+            shell_target: ShellTarget::Local,
+            initial_todos: vec![],
+            subagents: builtin_subagents()
+                .into_iter()
+                .map(|template| ResolvedSubagent {
+                    template,
+                    model: model.model.clone(),
+                    provider: provider.clone(),
+                })
+                .collect(),
+            events: events.clone(),
+            plan_mode: options.plan,
+        },
+    )?;
     let system = system_instructions(&root)?;
     let request = TurnRequest::new(
         SessionId::new(&session_id).map_err(|error| error.to_string())?,
@@ -240,9 +261,11 @@ async fn execute(options: RunOptions, json: bool) -> Result<(), String> {
             options.permission,
         )
         .await;
-    interrupt.abort();
-    let result = result?;
     let cancelled = lease.cancellation.is_cancelled();
+    interrupt.abort();
+    runtime.shutdown();
+    runtime.shutdown_background().await?;
+    let result = result?;
     let hit_step_cap = result.state.terminal_reason() == Some(TerminalReason::LimitReached);
     let error = if cancelled {
         Some("Agent run cancelled".to_owned())

@@ -24,8 +24,8 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::command::{
-    ProcessGroupGuard, ProcessSpec, ProcessTermination, monitor_process, spawn_error, spawn_group,
-    terminate_and_wait,
+    BoundedCommandRequest, ProcessGroupGuard, ProcessSpec, ProcessTermination, monitor_process,
+    spawn_error, spawn_group, terminate_and_wait,
 };
 use crate::environment::invalid_input;
 
@@ -40,6 +40,7 @@ const COMPLETION_EVENT_CAPACITY: usize = 256;
 
 /// 模型可提交的后台任务标识最大 UTF-8 字节数。
 const MAX_BACKGROUND_TASK_ID_BYTES: usize = 256;
+const MAX_BACKGROUND_STREAM_BYTES: u64 = 4 * 1024 * 1024;
 
 /// 防止任意二进制损失解码膨胀后超过 Agent 单文本块硬上限的原始字节预算。
 const MAX_SAFE_BACKGROUND_OUTPUT_CHUNK_BYTES: usize = 128 * 1024;
@@ -109,6 +110,8 @@ pub struct BackgroundTaskInfo {
     pub stdout_bytes: u64,
     /// 已经持久写入且可从 stderr 安全增量读取的字节数。
     pub stderr_bytes: u64,
+    /// 达到每个输出流 4 MiB 上限后丢弃的字节数。
+    pub discarded_bytes: u64,
     /// 是否已经向仍在运行的进程树发出停止信号。
     pub stop_requested: bool,
 }
@@ -285,6 +288,7 @@ struct BackgroundTaskState {
     stdout_bytes: u64,
     /// stderr 已完成落盘且不会截断潜在有效 UTF-8 标量的公开字节数。
     stderr_bytes: u64,
+    discarded_bytes: u64,
     /// 是否已经发出停止信号。
     stop_requested: bool,
     /// `TaskOutput` 工具跨调用共享的隐式游标。
@@ -292,6 +296,40 @@ struct BackgroundTaskState {
 }
 
 impl BackgroundTaskManager {
+    /// 启动宿主已授权的 Shell 命令，复用工具的进程树监督和后台输出管理。
+    pub async fn start_command(
+        &self,
+        session_id: &str,
+        summary: String,
+        request: BoundedCommandRequest,
+        timeout: Option<Duration>,
+    ) -> Result<BackgroundTaskInfo, ToolError> {
+        crate::command::validate_bounded_command(&request)
+            .map_err(|error| ToolError::permanent(error.code(), error.message()))?;
+        #[cfg(windows)]
+        if request.windows_shell_script.is_some() {
+            return Err(ToolError::permanent(
+                "invalid_input",
+                "后台命令不接受 Windows raw script",
+            ));
+        }
+        if !request.stdin.is_empty() {
+            return Err(ToolError::permanent(
+                "invalid_input",
+                "后台命令不接受标准输入或 Windows raw script",
+            ));
+        }
+        let spec = ProcessSpec {
+            label: "Shell",
+            programs: vec![request.program],
+            args: request.args,
+            cwd: request.cwd,
+            timeout: request.timeout,
+            max_timeout_ms: 3_600_000,
+            environment: request.environment,
+        };
+        self.start_process(session_id, summary, spec, timeout).await
+    }
     /// 创建输出目录固定的任务 Manager；过大的增量预算会收紧到安全硬上限。
     pub fn new(
         output_directory: impl AsRef<Path>,
@@ -361,6 +399,18 @@ impl BackgroundTaskManager {
     ) -> Result<BackgroundTaskInfo, BackgroundTaskError> {
         let task = self.task(task_id)?;
         ensure_task_session(&task, session_id)?;
+        task.info()
+    }
+
+    /// 请求停止指定会话的任务，等待其进程树和输出捕获完成清理。
+    pub async fn cancel_and_wait(
+        &self,
+        session_id: &str,
+        task_id: &str,
+    ) -> Result<BackgroundTaskInfo, BackgroundTaskError> {
+        self.cancel(session_id, task_id)?;
+        let task = self.task(task_id)?;
+        wait_for_terminal(&task).await?;
         task.info()
     }
 
@@ -517,6 +567,28 @@ impl BackgroundTaskManager {
                 "后台任务 Manager 已关闭，不能启动新任务",
             ));
         }
+        let tasks = self.list().map_err(BackgroundTaskError::into_tool_error)?;
+        if tasks
+            .iter()
+            .filter(|task| !task.status.is_terminal())
+            .count()
+            >= 16
+        {
+            return Err(ToolError::permanent(
+                "background_capacity",
+                "后台运行任务达到 16 项上限",
+            ));
+        }
+        let mut finished: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.status.is_terminal())
+            .collect();
+        finished.sort_by_key(|task| task.started_at_unix_ms);
+        for task in finished.iter().take(finished.len().saturating_sub(15)) {
+            self.remove_finished(&task.session_id, &task.task_id)
+                .await
+                .map_err(BackgroundTaskError::into_tool_error)?;
+        }
         let (task_id, task_directory) = self.create_task_directory().await?;
         let stdout_path = task_directory.join("stdout.log");
         let stderr_path = task_directory.join("stderr.log");
@@ -620,6 +692,7 @@ impl BackgroundTaskManager {
                 terminal_duration_ms: None,
                 stdout_bytes: 0,
                 stderr_bytes: 0,
+                discarded_bytes: 0,
                 stop_requested: false,
                 tool_cursor: BackgroundOutputCursor::default(),
             }),
@@ -816,6 +889,7 @@ impl BackgroundTaskRecord {
             exit_code: state.exit_code,
             stdout_bytes: state.stdout_bytes,
             stderr_bytes: state.stderr_bytes,
+            discarded_bytes: state.discarded_bytes,
             stop_requested: state.stop_requested,
         })
     }
@@ -1026,12 +1100,20 @@ where
         if read == 0 {
             break;
         }
-        file.write_all(&chunk[..read]).await?;
+        let kept = read.min(MAX_BACKGROUND_STREAM_BYTES.saturating_sub(total) as usize);
+        if kept < read {
+            let mut state = lock_task_state_io(&task)?;
+            state.discarded_bytes = state.discarded_bytes.saturating_add((read - kept) as u64);
+        }
+        if kept == 0 {
+            continue;
+        }
+        file.write_all(&chunk[..kept]).await?;
         // Tokio File 的 write_all 可能只提交异步写任务就返回；必须先等待该任务
         // 完成，再发布字节游标，否则 Windows 读取端会看到已发布长度但读到 EOF。
         file.flush().await?;
-        total = total.saturating_add(u64::try_from(read).unwrap_or(u64::MAX));
-        retain_utf8_tail(&mut utf8_tail, &chunk[..read]);
+        total = total.saturating_add(kept as u64);
+        retain_utf8_tail(&mut utf8_tail, &chunk[..kept]);
         let pending = incomplete_utf8_suffix_len(&utf8_tail);
         let published = total.saturating_sub(u64::try_from(pending).unwrap_or(u64::MAX));
         if publish_stream_bytes(&task, stream, published)? {
@@ -1136,11 +1218,16 @@ async fn supervise_background_task(
 }
 
 /// 把一个输出捕获任务的 Join 和 IO 错误合并为安全文本。
-async fn join_capture(task: JoinHandle<io::Result<u64>>, label: &str) -> Result<u64, String> {
-    match task.await {
-        Ok(Ok(bytes)) => Ok(bytes),
-        Ok(Err(error)) => Err(format!("{label} 输出持久化失败：{error}")),
-        Err(error) => Err(format!("{label} 输出捕获任务异常结束：{error}")),
+async fn join_capture(mut task: JoinHandle<io::Result<u64>>, label: &str) -> Result<u64, String> {
+    match tokio::time::timeout(Duration::from_secs(3), &mut task).await {
+        Ok(Ok(Ok(bytes))) => Ok(bytes),
+        Ok(Ok(Err(error))) => Err(format!("{label} 输出持久化失败：{error}")),
+        Ok(Err(error)) => Err(format!("{label} 输出捕获任务异常结束：{error}")),
+        Err(_) => {
+            task.abort();
+            let _ = task.await;
+            Err(format!("{label} 输出清理超时"))
+        }
     }
 }
 
@@ -1459,6 +1546,12 @@ fn render_task_output(output: &BackgroundTaskOutput) -> String {
         output.next_cursor.stdout_offset,
         output.next_cursor.stderr_offset
     );
+    if output.task.discarded_bytes > 0 {
+        text.push_str(&format!(
+            "\n输出达到容量上限，已丢弃 {} 字节",
+            output.task.discarded_bytes
+        ));
+    }
     append_output_stream(&mut text, "stdout", &output.stdout, output.stdout_has_more);
     append_output_stream(&mut text, "stderr", &output.stderr, output.stderr_has_more);
     text

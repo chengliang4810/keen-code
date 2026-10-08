@@ -1,6 +1,8 @@
 use rcode_model::{ProviderProtocol, ReasoningCapability};
 use rcode_provider::{ApiKey, ProviderClient, ProviderConfig, ReasoningBody};
 
+#[derive(Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelConfig {
     pub provider_id: String,
     pub protocol: ProviderProtocol,
@@ -8,6 +10,7 @@ pub struct ModelConfig {
     pub model: String,
     pub context_limit: u64,
     pub max_output_tokens: Option<u32>,
+    #[serde(default = "default_image_input")]
     pub image_input: bool,
     pub reasoning_body: Option<ReasoningBody>,
     pub allow_private_network: bool,
@@ -63,4 +66,8 @@ impl ModelConfig {
             .map(|provider| provider.with_http_client(http))
             .map_err(|error| error.to_string())
     }
+}
+
+fn default_image_input() -> bool {
+    true
 }

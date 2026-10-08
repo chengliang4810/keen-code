@@ -20,14 +20,10 @@ const READ_ONLY_TOOLS = new Set([
   "list_directory",
   "grep",
   "glob",
-  "bash_logs",
-  "bash_list",
   "get_terminal_output",
   "read_agent_output",
   "suggest_command",
-  "todo_write",
   "open_preview",
-  "run_subagent",
 ]);
 
 export function applyToolPermissions<T extends ToolSet>(

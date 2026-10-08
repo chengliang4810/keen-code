@@ -22,6 +22,9 @@ mod skill;
 mod state_tools;
 mod web;
 mod worktree;
+mod wsl;
+
+pub use wsl::WslProcessTree;
 
 pub use background::{
     BackgroundCancelReport, BackgroundOutputCursor, BackgroundShutdownReport,
