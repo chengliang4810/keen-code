@@ -1,0 +1,21 @@
+diff --git a/plugins/terminal/internal/pty/pty_darwin.go b/plugins/terminal/internal/pty/pty_darwin.go
+index 4bc9059..cc09717 100644
+--- a/plugins/terminal/internal/pty/pty_darwin.go
++++ b/plugins/terminal/internal/pty/pty_darwin.go
+@@ -16,10 +16,15 @@ const (
+ )
+ 
+ func openMaster() (*os.File, string, error) {
+-	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
++	// Keep the Darwin PTY master blocking. os.OpenFile tries to enroll the
++	// not-yet-granted device in kqueue and can leave reads returning EAGAIN;
++	// the terminal reader treats that as an ended connection and hangs up
++	// the child. NewFile preserves the descriptor's original blocking mode.
++	fd, err := syscall.Open("/dev/ptmx", syscall.O_RDWR|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+ 	if err != nil {
+ 		return nil, "", fmt.Errorf("pty: %w", err)
+ 	}
++	master := os.NewFile(uintptr(fd), "/dev/ptmx")
+ 	var name [128]byte
+ 	for _, step := range []struct {
+ 		req uintptr

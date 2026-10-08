@@ -1,0 +1,39 @@
+diff --git a/internal/darwin/surface.go b/internal/darwin/surface.go
+index bbb62c0..68ef39b 100644
+--- a/internal/darwin/surface.go
++++ b/internal/darwin/surface.go
+@@ -510,6 +510,10 @@ func (b *Backend) surfaceOf(view id) *surface {
+ }
+ 
+ func registerSurfaceClass() {
++	// AppKit may install a KVO subclass while resizing. Resolve super from
++	// the class defining the override, not the object's dynamic class.
++	var setFrameSizeSuper func(*objcSuper, objc.SEL, NSSize)
++	purego.RegisterFunc(&setFrameSizeSuper, msgSendSuperAddr)
+ 	b := func() *Backend { return theBackend }
+ 	mouse := func(kind platform.SurfaceEventKind, button int) func(id, objc.SEL, id) {
+ 		return func(self id, _ objc.SEL, ev id) {
+@@ -630,7 +634,8 @@ func registerSurfaceClass() {
+ 			}
+ 		}),
+ 		method("setFrameSize:", func(self id, cmd objc.SEL, size NSSize) {
+-			objc.ID(self).SendSuper(cmd, size)
++			sup := &objcSuper{receiver: self, superClass: class("NSView")}
++			setFrameSizeSuper(sup, cmd, size)
+ 			if s := b().surfaceOf(self); s != nil {
+ 				s.send(platform.SurfaceEvent{Kind: platform.SurfaceResize})
+ 				send(self, "setNeedsDisplay:", 1)
+@@ -701,7 +706,12 @@ func registerSurfaceClass() {
+ 				return
+ 			}
+ 			mods := eventMods(ev)
+-			s.send(platform.SurfaceEvent{Kind: platform.KeyPressed, Key: eventKey(ev), Mods: mods, Repeat: sendBool(ev, "isARepeat")})
++			// While marked text exists, Enter, arrows and deletion belong to
++			// the input method. Forwarding them also edits the field before
++			// insertText: commits the composition (Enter inserts a newline).
++			if !s.input.Active || s.marked == "" || mods&(platform.ModSuper|platform.ModCtrl) != 0 {
++				s.send(platform.SurfaceEvent{Kind: platform.KeyPressed, Key: eventKey(ev), Mods: mods, Repeat: sendBool(ev, "isARepeat")})
++			}
+ 			// Input methods see the key while a text input has the focus;
+ 			// they answer with insertText: or setMarkedText:.
+ 			if s.input.Active && mods&(platform.ModSuper|platform.ModCtrl) == 0 {
