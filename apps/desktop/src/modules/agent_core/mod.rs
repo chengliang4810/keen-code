@@ -85,7 +85,6 @@ fn validate_request(request: &NativeAgentRequest) -> Result<(), String> {
         let static_account = [
             "openai",
             "anthropic",
-            "google",
             "xai",
             "cerebras",
             "groq",

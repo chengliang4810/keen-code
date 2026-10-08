@@ -51,7 +51,7 @@ pnpm tauri dev
 
 - 共享 Rust Runtime 与工具库不得依赖 Tauri 或前端。CLI 可以独立运行 Agent；Desktop 负责桌面 IPC、系统集成、界面工具与扩展接线。Rust 持有文件系统、进程、PTY、Git、密钥和网络代理能力；Webview 经注册的 Tauri 命令访问。所有外部输入、IPC、路径和网络边界均须校验，读写都不得绕过工作区和敏感路径限制。
 - `apps/desktop/ui/app/App.tsx` 只负责装配与跨域协调。业务逻辑放对应模块，纯规则保持依赖少、可测试，Tauri 命令和 React 组件保持轻量。
-- Agent core、工具和会话语义保持 Provider 中立。当前本地 Chat Completions、Responses、Messages 使用 Rust `rcode-agent::AgentRunner`；Google 和 WSL 使用现有 AI SDK v6 路径，不把两条路径的能力混为一谈。
+- Agent core、工具和会话语义保持 Provider 中立。当前本地 Chat Completions、Responses、Messages 使用 Rust `rcode-agent::AgentRunner`。内置 Google 模型接入已移除；WSL 保留现有 AI SDK v6 主循环，不把两条路径的能力混为一谈。
 - 修改事件或数据契约时同时检查 Rust 定义、桌面转发、前端解码与投影、持久化恢复和测试。
 - 产品内主会话指令依次为当前角色的完整指令、`~/.rcode/AGENTS.md`、工作区根目录 `AGENTS.md`。全局指令通过文件编辑，不保存到偏好设置。
 - 任务目录由 `getTaskWorkspace(sessionId)` 确定，文件工具和原生请求使用该目录。切换开发工具标签页不能改写任务根；终端内容仅在需要时读取。

@@ -203,7 +203,6 @@ export default defineConfig(
                   // Each AI provider SDK in its own chunk so unused providers
                   // don't bloat the initial load (lazy-imported in agent.ts).
                   if (id.includes("@ai-sdk/anthropic")) return "ai-anthropic";
-                  if (id.includes("@ai-sdk/google")) return "ai-google";
                   if (id.includes("@ai-sdk/openai-compatible"))
                     return "ai-openai-compat";
                   if (id.includes("@ai-sdk/openai")) return "ai-openai";

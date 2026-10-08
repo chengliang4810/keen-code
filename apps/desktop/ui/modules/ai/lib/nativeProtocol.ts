@@ -50,7 +50,6 @@ export function resolveNativeModel(
   const modelId = opts.modelId ?? DEFAULT_MODEL_ID;
   const endpoints = opts.customEndpoints ?? [];
   const info = resolveModel(modelId, endpoints);
-  if (info.provider === "google") return null;
   if (isCompatModelId(modelId)) {
     const id = endpointIdFromCompatModel(modelId);
     const resolved = resolveEndpointModel(modelId, endpoints);

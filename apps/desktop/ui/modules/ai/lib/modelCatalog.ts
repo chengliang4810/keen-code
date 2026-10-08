@@ -29,7 +29,6 @@ export type ModelCatalogIndex = {
 const DEFAULT_APIS: Readonly<Record<string, string>> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
-  google: "https://generativelanguage.googleapis.com/v1beta",
   xai: "https://api.x.ai/v1",
   groq: "https://api.groq.com/openai/v1",
   cerebras: "https://api.cerebras.ai/v1",

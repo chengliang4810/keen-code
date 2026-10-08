@@ -8,7 +8,6 @@ import {
   DeepseekIcon,
   FlashIcon,
   GlobeIcon,
-  GoogleGeminiIcon,
   Grok02Icon,
   MistralIcon,
   PlugIcon,
@@ -19,7 +18,6 @@ import { HugeiconsIcon } from "@hugeicons/react";
 const ICON_BY_PROVIDER = {
   openai: ChatGptIcon,
   anthropic: ClaudeIcon,
-  google: GoogleGeminiIcon,
   xai: Grok02Icon,
   cerebras: CpuIcon,
   groq: FlashIcon,

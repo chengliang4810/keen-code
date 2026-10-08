@@ -126,11 +126,6 @@ export async function buildLanguageModel(
       built = createAnthropic({ apiKey: key })(resolvedModelId);
       break;
     }
-    case "google": {
-      const { createGoogleGenerativeAI } = await import("@ai-sdk/google");
-      built = createGoogleGenerativeAI({ apiKey: key })(resolvedModelId);
-      break;
-    }
     case "xai": {
       const { createXai } = await import("@ai-sdk/xai");
       built = createXai({ apiKey: key })(resolvedModelId);
@@ -476,12 +471,6 @@ export async function runAgentStream(opts: RunAgentOptions) {
     system: prompt.system,
     messages: prompt.messages,
     maxOutputTokens: customConfig?.maxOutputTokens,
-    providerOptions:
-      provider === "google" && opts.reasoningLevel
-        ? {
-            google: { thinkingConfig: { thinkingLevel: opts.reasoningLevel } },
-          }
-        : undefined,
     allowSystemInMessages: false,
     tools: applyToolPermissions(
       buildTools(opts.toolContext, opts),

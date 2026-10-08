@@ -11,7 +11,6 @@ export const KEYRING_SERVICE = "rcode-ai";
 export type ProviderId =
   | "openai"
   | "anthropic"
-  | "google"
   | "xai"
   | "cerebras"
   | "groq"
@@ -47,13 +46,6 @@ export const PROVIDERS: readonly ProviderInfo[] = [
     keyringAccount: "anthropic-api-key",
     keyPrefix: "sk-ant-",
     consoleUrl: "https://console.anthropic.com/settings/keys",
-  },
-  {
-    id: "google",
-    label: "Google",
-    keyringAccount: "google-api-key",
-    keyPrefix: null,
-    consoleUrl: "https://aistudio.google.com/apikey",
   },
   {
     id: "xai",
@@ -445,50 +437,6 @@ export const MODELS = [
     tags: ["vision", "reasoning", "tools", "coding"],
   },
 
-  // ── Google ────────────────────────────────────────────────────────────────
-  {
-    id: "gemini-3.5-flash",
-    provider: "google",
-    label: "Gemini 3.5 Flash",
-    capabilities: { intelligence: 4, speed: 5, cost: 4 },
-    tags: ["vision", "tools", "coding"],
-  },
-  {
-    id: "gemini-3.1-flash-lite",
-    provider: "google",
-    label: "Gemini 3.1 Flash-Lite",
-    capabilities: { intelligence: 3, speed: 5, cost: 5 },
-    tags: ["vision", "tools"],
-  },
-  {
-    id: "gemini-3.1-pro-preview",
-    provider: "google",
-    label: "Gemini 3.1 Pro",
-    capabilities: { intelligence: 5, speed: 3, cost: 2 },
-    tags: ["vision", "reasoning", "tools", "coding"],
-  },
-  {
-    id: "gemini-3-flash-preview",
-    provider: "google",
-    label: "Gemini 3 Flash",
-    capabilities: { intelligence: 4, speed: 5, cost: 4 },
-    tags: ["vision", "tools"],
-  },
-  {
-    id: "gemini-2.5-pro",
-    provider: "google",
-    label: "Gemini 2.5 Pro",
-    capabilities: { intelligence: 4, speed: 3, cost: 3 },
-    tags: ["vision", "tools", "coding"],
-  },
-  {
-    id: "gemini-2.5-flash",
-    provider: "google",
-    label: "Gemini 2.5 Flash",
-    capabilities: { intelligence: 3, speed: 5, cost: 5 },
-    tags: ["vision", "tools"],
-  },
-
   // ── xAI ───────────────────────────────────────────────────────────────────
   {
     id: "grok-4.5",
@@ -789,12 +737,6 @@ export const MODEL_CONTEXT_LIMITS: Record<string, number> = {
   "claude-sonnet-4-6": 1_000_000,
   "claude-haiku-4-5": 200_000,
   "claude-opus-4-6": 1_000_000,
-  "gemini-3.5-flash": 1_000_000,
-  "gemini-3.1-flash-lite": 1_000_000,
-  "gemini-3.1-pro-preview": 1_000_000,
-  "gemini-3-flash-preview": 1_000_000,
-  "gemini-2.5-pro": 1_000_000,
-  "gemini-2.5-flash": 1_000_000,
   "grok-4.5": 500_000,
   "grok-4.20-reasoning": 2_000_000,
   "grok-4.20-non-reasoning": 2_000_000,
@@ -856,12 +798,6 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "claude-opus-4-6": { input: 15, output: 75, cacheRead: 1.5 },
   "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3 },
   "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1 },
-  "gemini-3.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
-  "gemini-3.1-flash-lite": { input: 0.075, output: 0.3, cacheRead: 0.015 },
-  "gemini-3.1-pro-preview": { input: 1.25, output: 10, cacheRead: 0.31 },
-  "gemini-3-flash-preview": { input: 0.3, output: 2.5, cacheRead: 0.075 },
-  "gemini-2.5-pro": { input: 1.25, output: 10, cacheRead: 0.31 },
-  "gemini-2.5-flash": { input: 0.3, output: 2.5, cacheRead: 0.075 },
   "grok-4.5": { input: 2, output: 6, cacheRead: 0.5 },
   "grok-4.20-reasoning": { input: 3, output: 15 },
   "grok-4.20-non-reasoning": { input: 1, output: 5 },
@@ -925,7 +861,6 @@ export const DEFAULT_AUTOCOMPLETE_MODEL: Partial<Record<ProviderId, string>> = {
   lmstudio: "qwen2.5-coder-7b-instruct",
   openai: "gpt-5.4-nano",
   anthropic: "claude-haiku-4-5",
-  google: "gemini-2.5-flash",
   xai: "grok-4.3",
   deepseek: "deepseek-v4-flash",
   openrouter: "openai/gpt-5.4-mini",
